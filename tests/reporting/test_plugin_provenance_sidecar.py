@@ -429,3 +429,96 @@ def test_validate_plugin_path_refreshes_the_run_report(monkeypatch: pytest.Monke
     assert result.metadata["skip_reason"].startswith("INCOMPLETE:")
     html = (run_dir / "report.html").read_text(encoding="utf-8")
     assert element_text(html, "tier3-plugin-incomplete") is not None
+
+
+def test_evaluate_plugin_summary_prints_component_coverage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The run summary is printed after the provenance exists, so it shows coverage like ``validate`` does."""
+    plugin_dir = tmp_path / "demo-plugin"
+    plugin_dir.mkdir()
+    run_dir = tmp_path / "results" / "demo-plugin" / "20260101_000000"
+    record = provenance(partial=False)
+    succeeded = {"execution_status": "succeeded"}
+
+    def evaluate(_self, _options, **_kwargs) -> dict:
+        write_run_dir(run_dir)
+        return {
+            "run_dir": str(run_dir),
+            "execution_status": "succeeded",
+            "skill_name": "demo-plugin",
+            "run_config": {"eval_target": {"kind": "plugin"}},
+            "agents": {
+                "codex": {
+                    "with_skill": {"accuracy": 0.9},
+                    "without_skill": {"accuracy": 0.5},
+                    "execution_status": "succeeded",
+                    "conditions": {"with_skill": succeeded, "without_skill": succeeded},
+                }
+            },
+        }
+
+    monkeypatch.setattr(
+        "skillevaluator.tier3.plugin_eval.prepare_plugin_eval_package",
+        lambda *_a, **_k: _prepared_package(tmp_path, record),
+    )
+    monkeypatch.setattr(EvaluationService, "evaluate", evaluate)
+    monkeypatch.setattr(EvaluationService, "failure_reason", staticmethod(lambda _result: None))
+    monkeypatch.setattr("skillevaluator.tier3.harbor.report.display_findings_report", lambda *_a, **_k: set())
+
+    outcome = CliRunner().invoke(
+        cli_module.cli,
+        ["tier3", "evaluate-plugin", str(plugin_dir), "--lift-mode", "effectiveness", "--progress", "off"],
+    )
+
+    plain = " ".join(outcome.output.split())
+    assert outcome.exit_code == 0, outcome.output
+    assert "Component coverage:" in plain
+
+
+_FAILED_RUN = "Tier 3 plugin evaluation did not complete: every with-plugin trial failed (HTTP 401 from the model API)"
+
+
+@pytest.mark.parametrize(
+    ("extra", "title", "reason"),
+    [
+        ({"execution_incomplete": _FAILED_RUN}, "Evaluation INCOMPLETE - the run did not complete", _FAILED_RUN),
+        (
+            {"native_load_unverified": {"codex": "codex: the harness did not load the plugin in any of 2 trial(s)"}},
+            "Evaluation INCOMPLETE - native plugin load not confirmed",
+            "codex: the harness did not load the plugin in any of 2 trial(s)",
+        ),
+    ],
+    ids=["execution-incomplete", "load-unverified"],
+)
+def test_an_incomplete_run_with_nothing_deferred_does_not_blame_unresolved_dependencies(
+    tmp_path: Path, extra: dict, title: str, reason: str
+) -> None:
+    from skillevaluator.reporting import HTMLReporter
+
+    record = {**provenance(partial=False), **extra, "partial": True}
+    plugin_dir, run_dir = _run(tmp_path, sidecar=record)
+
+    result = agent_eval_result_from_directory(plugin_dir, run_dir, use_llm_judge=False)
+
+    assert result is not None
+    conclusion = result.metadata["agent_eval"]["conclusions"][0]
+    assert conclusion["title"] == title
+    assert reason in conclusion["message"]
+    assert "unresolved" not in conclusion["title"]
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    hint = element_text(html, "tier3-plugin-completeness") or ""
+    assert "INCOMPLETE" in hint and reason in hint
+    assert "could not be resolved at Tier 3" not in hint
+
+
+def test_an_incomplete_run_with_deferred_components_still_names_them(tmp_path: Path) -> None:
+    from skillevaluator.reporting import HTMLReporter
+
+    record = {**provenance(partial=True), "execution_incomplete": _FAILED_RUN}
+    plugin_dir, run_dir = _run(tmp_path, sidecar=record)
+
+    result = agent_eval_result_from_directory(plugin_dir, run_dir, use_llm_judge=False)
+
+    assert result is not None
+    assert result.metadata["agent_eval"]["conclusions"][0]["title"] == "Evaluation INCOMPLETE - unresolved dependencies"
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    assert "could not be resolved at Tier 3" in (element_text(html, "tier3-plugin-completeness") or "")

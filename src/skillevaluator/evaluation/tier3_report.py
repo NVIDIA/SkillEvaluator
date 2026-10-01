@@ -522,6 +522,14 @@ def _incomplete_skip_reason(provenance: dict[str, Any]) -> str:
 
     if sidecar_reason := sidecar_error_reason(provenance):
         return f"INCOMPLETE: {sidecar_reason}"
+    # A plugin run that did not complete, or whose native plugin load was never
+    # confirmed in any with-plugin trial, keeps its evidence but is INCOMPLETE.
+    notes = [str(provenance.get("execution_incomplete") or "").strip()]
+    unverified = provenance.get("native_load_unverified")
+    if isinstance(unverified, dict):
+        notes.extend(str(reason) for reason in unverified.values())
+    if notes := [note for note in notes if note]:
+        return "INCOMPLETE: " + "; ".join(notes)
     counts = (
         ("unresolved skill ref(s)", len(provenance.get("unresolved_skill_refs") or [])),
         ("unresolved rule ref(s)", len(provenance.get("unresolved_rule_refs") or [])),
@@ -1221,7 +1229,10 @@ def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _Repo
 
 
 def _serialized_payload_size(payload: dict[str, Any]) -> int:
-    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+    # Plugin text (a manifest name in the provenance sidecar) can carry a lone
+    # surrogate, which strict UTF-8 cannot encode; it still has a size.
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return len(serialized.encode("utf-8", "surrogatepass"))
 
 
 def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
@@ -1322,6 +1333,8 @@ def _build_agent(
         with_scores = {}
     if not baseline_quality_available:
         without_scores = {}
+        # A lift needs a usable baseline arm; an engine lift from a failed arm is not one.
+        lift_data = {}
 
     evaluators = _build_evaluators(metrics, with_scores, without_scores, lift_data)
     dimensions = _build_dimensions(
@@ -1497,11 +1510,9 @@ def _build_evaluators(
         lift = _lift_value(metric, lift_data)
         if lift is None and bl is not None:
             lift = round(ws - bl, 4)
-        evaluators[metric] = {
-            "with_skill": ws,
-            "baseline": bl,
-            "lift": lift if lift is not None else 0.0,
-        }
+        # ``lift`` stays None when there is no baseline to compare with: a 0.0
+        # would read as "measured, no change" in every report.
+        evaluators[metric] = {"with_skill": ws, "baseline": bl, "lift": lift}
     return evaluators
 
 
@@ -2638,6 +2649,26 @@ def _plugin_incompleteness_conclusion(plugin_provenance: dict[str, Any]) -> dict
         count = len(plugin_provenance.get(key) or [])
         if count:
             unresolved.append(f"{count} {label}")
+    if not unresolved:
+        # Nothing was deferred: the run is INCOMPLETE because it did not complete or a native load was unconfirmed.
+        from skillevaluator.reporting.plugin_sections import text
+
+        execution = text(plugin_provenance.get("execution_incomplete"))
+        unverified_map = plugin_provenance.get("native_load_unverified")
+        unverified = (
+            [text(reason) for reason in (unverified_map or {}).values()] if isinstance(unverified_map, dict) else []
+        )
+        details = [note for note in (execution, *unverified) if note]
+        if details:
+            title = "the run did not complete" if execution else "native plugin load not confirmed"
+            return {
+                "severity": "fail",
+                "title": f"Evaluation INCOMPLETE - {title}",
+                "message": (
+                    f"This plugin run is INCOMPLETE: {'; '.join(details)}. No declared component was deferred, "
+                    "but the score is not a full evaluation and must not be read as a pass."
+                ),
+            }
     unresolved_text = ", ".join(unresolved) or "required components"
     resolved_skills = len(plugin_provenance.get("evaluated_member_skills") or [])
     resolved_rules = len(plugin_provenance.get("staged_rules") or [])
@@ -3308,6 +3339,13 @@ def _attach_plugin_report_fields(payload: dict[str, Any], agents: dict[str, dict
     best = agent_payloads.get(payload.get("best_agent"))
     if isinstance(best, dict) and isinstance(best.get("plugin_signals_summary"), dict):
         payload.setdefault("plugin_signals_summary", best["plugin_signals_summary"])
+    # Per-arm canary exfiltration results (the verifier already scored each leak).
+    for name, agent_payload in agent_payloads.items():
+        canary = (agents.get(name) or {}).get("canary_summary")
+        if isinstance(agent_payload, dict) and isinstance(canary, dict) and canary:
+            agent_payload.setdefault("canary_summary", _bounded_report_copy(canary))
+    if isinstance(best, dict) and isinstance(best.get("canary_summary"), dict):
+        payload.setdefault("canary_summary", best["canary_summary"])
 
 
 def _run_truth_metadata(

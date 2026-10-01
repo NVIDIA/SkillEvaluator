@@ -367,3 +367,32 @@ def test_plugin_package_rejects_malformed_plugin_signal_fields_before_running(tm
     bad = {**CASE, "tool_arguments": [{"tool": "mcp__github__x", "schema": {"items": {}}}]}
     with pytest.raises(ValueError, match=r"Invalid plugin signal fields.*unsupported JSON-Schema keyword"):
         prepare_plugin_eval_package(_plugin_with_dataset(tmp_path, bad), stage_root=tmp_path / "stage")
+
+
+def test_collector_credits_a_renamed_opencode_agent_to_the_declared_agent(tmp_path: Path) -> None:
+    # OpenCode stages a plugin agent named "build" as "<plugin>-build"; the runner reads
+    # that alias from the package and the collector maps the call back.
+    package = tmp_path / "demo-plugin-eval"
+    env_dir = package / "evals" / "environment"
+    env_dir.mkdir(parents=True)
+    (env_dir / "plugin_runtime_components.json").write_text(
+        json.dumps({"subagents": ["build"], "commands": [], "subagent_aliases": {"demo-kit-build": "build"}}),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    context = runner._plugin_signals_context(
+        skill_path=package,
+        evaluator_skill_path=package,
+        workspace_skills=[tmp_path / "skills" / "alpha"],
+        run_dir=run_dir,
+        baseline_has_members=False,
+    )
+    assert context.subagent_aliases == {"demo-kit-build": "build"}
+    task = _agent_step(4, "c4", "task", {"subagent_type": "demo-kit-build", "prompt": "build it"}, "Built.")
+    jobs_dir = _jobs(tmp_path, trajectory=_trajectory(task))
+
+    _collect(tmp_path, jobs_dir, "plugin", plugin_signals=context)
+
+    coverage = _trial_reward(tmp_path, "plugin", "with-skill")["plugin_signals"]["activation_coverage"]
+    assert "subagent:build" in coverage["exercised"]

@@ -170,7 +170,7 @@ def test_markdown_tier3_plugin_blocks_state_what_was_not_evaluated(tmp_path: Pat
     assert "INCOMPLETE: 1 unresolved skill ref, 1 provider-only MCP server" in markdown
     assert "**2 components not staged** of 4 component(s); 2 staged." in markdown
     assert "| mcp | docs | Unavailable | provider-only MCP server |" in markdown
-    assert "**Lift mode:** requested `both`, effective `effectiveness`" in markdown
+    assert "**Lift mode:** requested <code>both</code>, effective <code>effectiveness</code>" in markdown
     assert "**INCONCLUSIVE:** No cross-component case completed." in markdown
     assert "Effectiveness lift: +0.30 [-0.02, +0.55] (95% CI), precision low — ⚠️ CI includes zero" in markdown
 
@@ -442,10 +442,11 @@ def test_html_tier3_statistics_render_ci_reliability_cost_and_context(tmp_path: 
     assert "Advisory · Report-only" in statistics
     assert "Effectiveness lift +0.30 [-0.02, +0.55] 95% CI precision: low CI includes zero 4" in statistics
     assert "includes zero: this run cannot distinguish that lift from no effect" in statistics
-    assert "Plugin 75% 50% 3 4 12,000 0.62" in statistics
-    assert "Baseline (no plugin) 50% 25% 3 4 n/a 0.41" in statistics
-    # USD per success is only shown when a run recorded it.
-    assert "USD / success" not in statistics
+    assert "Baseline (no plugin) 50% 25% 3 4 n/a n/a 0.41" in statistics
+    # Tokens without USD read "not priced", not a blank column or $0.
+    assert "USD / success" in statistics
+    assert "Plugin 75% 50% 3 4 12,000 not priced 0.62" in statistics
+    assert "not priced: the run recorded tokens but no USD cost" in statistics
     assert "pass^k: a case passes only when all k attempts pass." in statistics
     context = element_text(html, "tier3-plugin-context-measured") or ""
     assert "+1,450 tokens per first turn across 4 paired trial(s)" in context
@@ -656,3 +657,70 @@ def test_engine_result_display_is_unchanged_for_skill_runs() -> None:
 
     assert "Plugin signals" not in output
     assert "Lift Uncertainty" not in output
+
+
+# Saved by a run without a sum-of-parts arm (default effectiveness lift or --skip-baseline) before
+# ``complete`` became None for such runs; newer runs save ``complete: None``.
+_NO_SUM_OF_PARTS_COMPLETENESS = {
+    "with_plugin": {
+        "execution_status": "succeeded",
+        "execution_errors": [],
+        "expected_attempts": 2,
+        "scored_attempts": 2,
+    },
+    "sum_of_parts": {"execution_status": "skipped", "execution_errors": []},
+    "complete": False,
+    "missing_cases": [],
+    "failed_arms": [],
+    "attempt_shortfall": [],
+}
+
+
+@pytest.mark.parametrize("complete", [False, None], ids=["saved-before", "saved-now"])
+def test_a_run_without_a_sum_of_parts_arm_reports_no_integration_completeness_issue(
+    tmp_path: Path, complete: bool | None
+) -> None:
+    result = _tier3_result(tmp_path)
+    payload = result.metadata["agent_eval"]
+    completeness = {**deepcopy(_NO_SUM_OF_PARTS_COMPLETENESS), "complete": complete}
+    payload["integration_completeness"] = deepcopy(completeness)
+    payload["agents"]["codex"]["integration_completeness"] = deepcopy(completeness)
+    payload["lift_mode_requested"] = payload["lift_mode_effective"] = "effectiveness"
+
+    cli = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+
+    for rendered in (cli, html, markdown):
+        assert "completeness issues" not in rendered.lower()
+    assert "Effectiveness lift" in (element_text(html, "tier3-plugin-statistics") or "")
+
+
+def test_a_sum_of_parts_arm_that_ran_without_comparable_cases_is_still_an_issue(tmp_path: Path) -> None:
+    result = _tier3_result(tmp_path)
+    payload = result.metadata["agent_eval"]
+    completeness = {**deepcopy(_NO_SUM_OF_PARTS_COMPLETENESS), "sum_of_parts": {"execution_status": "succeeded"}}
+    payload["agents"]["codex"]["integration_completeness"] = completeness
+
+    cli = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+
+    assert "Integration completeness issues: the compared arms did not score the same cases" in cli
+
+
+def test_html_activation_coverage_reads_the_per_component_rate_the_arm_summary_saves(tmp_path: Path) -> None:
+    result = _tier3_result(tmp_path, statistics=False)
+    summary = result.metadata["agent_eval"]["agents"]["codex"]["plugin_signals_summary"]["with_skill"]
+    # summarize_plugin_signals saves one rate per declared component, not a single number.
+    summary["activation_coverage"] = {
+        "declared": ["skill:codename-lookup", "skill:release-note", "mcp:acme"],
+        "exercised": ["skill:release-note", "mcp:acme"],
+        "unverified": ["skill:codename-lookup"],
+        "unavailable": [],
+        "exercise_rate": {"skill:codename-lookup": 0.0, "skill:release-note": 0.5, "mcp:acme": 1.0},
+    }
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+
+    signals = element_text(html, "tier3-plugin-signals") or ""
+    assert "Activation coverage 67% exercised declared 3, exercised 2, unverified 1, unavailable 0" in signals
+    assert "n/a exercised" not in signals

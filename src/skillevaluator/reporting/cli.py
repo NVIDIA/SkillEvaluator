@@ -44,7 +44,13 @@ from skillevaluator.reporting.harbor_viewer import (
     normalize_harbor_viewer_for_display,
     safe_url,
 )
-from skillevaluator.reporting.plugin_sections import NOT_CONFIGURED, tier3_plugin_view
+from skillevaluator.reporting.plugin_sections import (
+    NOT_CONFIGURED,
+    format_score,
+    number,
+    static_risk_view,
+    tier3_plugin_view,
+)
 from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
@@ -62,6 +68,62 @@ def _related_paths(finding: Finding) -> list[str]:
         if isinstance(value, str) and value and value not in paths:
             paths.append(value)
     return paths
+
+
+def print_plugin_tier1_static(risk: dict, console: Console) -> None:
+    """Print compact Tier 1 plugin static-risk lines: privileges, hooks, CVE audit, parity, endpoints."""
+    privileges = risk.get("privileges")
+    if privileges:
+        console.print(
+            f"[bold]Plugin privileges:[/bold] {privileges['agents']} subagent(s), {privileges['commands']} command(s); "
+            f"{privileges['flagged']} flagged"
+        )
+        for row in [row for row in privileges["rows"] if row["risky"]][:10]:
+            console.print(
+                f"  - {escape_markup(row['type'])} {escape_markup(row['name'])}: {escape_markup(', '.join(row['flags']))}"
+            )
+    hooks = risk.get("hooks")
+    if hooks:
+        console.print(f"[bold]Plugin hooks:[/bold] {hooks['total']} handler(s); {hooks['flagged']} flagged")
+        for row in [row for row in hooks["rows"] if row["flagged"]][:10]:
+            # Escape the brackets with the plugin-controlled matcher: "[/x]" is a
+            # closing tag and "[mcp__memory__.*]" a style tag to Rich markup.
+            matcher = escape_markup(f"[{row['matcher']}]")
+            console.print(
+                f"  - {escape_markup(row['event'])} {matcher} {escape_markup(row['handler_type'])}: "
+                f"{escape_markup(', '.join(row['flags']))}"
+            )
+    cve = risk.get("cve")
+    if cve:
+        parts = [
+            f"{row['ecosystem']} {row['status_label']} ({row['audited']} audited, {row['unverified']} unverified, "
+            f"{row['severity_label']})"
+            for row in cve["rows"]
+        ]
+        console.print(f"[bold]Dependency CVE audit:[/bold] {escape_markup('; '.join(parts))}")
+    parity = risk.get("parity")
+    if parity:
+        if parity["status"] == "compared":
+            console.print(
+                f"[bold]claude plugin validate --strict:[/bold] {escape_markup(parity['claude_verdict'])} "
+                f"({parity['error_count']} errors, {parity['warning_count']} warnings); SkillEvaluator "
+                f"{escape_markup(parity['skillevaluator_verdict'])} ({escape_markup(parity['agreement'])})"
+            )
+        else:
+            console.print(
+                f"[bold]claude plugin validate parity:[/bold] {escape_markup(parity['status_label'])}: "
+                f"{escape_markup(parity['reason'])}"
+            )
+    endpoints = risk.get("endpoints")
+    if endpoints:
+        counts = ", ".join(f"{row['status']}={row['count']}" for row in endpoints["counts"]) or "none"
+        redirects = endpoints.get("redirects_flagged")
+        flagged = f"; {redirects} flagged redirect(s)" if redirects else ""
+        console.print(
+            f"[bold]Endpoint DNS/redirect checks:[/bold] {endpoints['total']} endpoint(s) ({escape_markup(counts)})"
+            f"{flagged}"
+        )
+    console.print()
 
 
 def print_plugin_tier3(view: dict, console: Console) -> None:
@@ -99,6 +161,15 @@ def print_plugin_tier3(view: dict, console: Console) -> None:
         activation = coverage.get("activation")
         if activation:
             console.print(f"    [dim]Observed activation (advisory): {esc(activation['summary'])}[/dim]")
+    plugin_load = view.get("plugin_load")
+    if plugin_load:
+        console.print(f"  [bold]Plugin loading:[/bold] requested {esc(plugin_load['requested'])}")
+        for row in plugin_load["agents"]:
+            census = f"; load census: {row['census_summary']}" if row["census"] else ""
+            console.print(
+                f"    [dim]- {esc(row['agent'])}: {esc(row['mode'])} ({esc(row['adapter'])}); "
+                f"native: {esc(', '.join(row['native']) or 'none')}{esc(census)}[/dim]"
+            )
     integration = view.get("integration")
     modes = (integration or {}).get("modes") or view.get("lift_modes")
     if modes:
@@ -173,7 +244,45 @@ def print_plugin_tier3(view: dict, console: Console) -> None:
                 details.append(f"activation {len(activation['exercised'])}/{len(activation['declared'])} exercised")
             for detail in details:
                 console.print(f"      [dim]- {esc(detail)}[/dim]", soft_wrap=True)
+    print_plugin_runtime_evidence(view, console)
     console.print()
+
+
+def print_plugin_runtime_evidence(view: dict, console: Console) -> None:
+    """Print the canary, hook census, and MCP proof blocks of a Tier 3 plugin view."""
+    esc = escape_markup
+    canary = view.get("canary")
+    if canary:
+        for entry in canary["entries"]:
+            style = {"fail": "bold red", "ok": "green"}.get(entry["verdict_class"], "yellow")
+            console.print(
+                f"  [bold]Canary exfiltration ({esc(entry['scope'])}):[/bold] [{style}]{esc(entry['verdict'])}[/{style}]"
+            )
+            for row in entry["rows"]:
+                console.print(
+                    f"    [dim]{esc(row['arm_label'])}: {row['leaked']} of {esc(str(row['trials']))} trial(s) leaked,"
+                    f" decoy planted in {esc(str(row['planted']))} (sinks: {esc(row['sinks'])})[/dim]"
+                )
+    hook_census = view.get("hook_census")
+    if hook_census:
+        console.print("  [bold]Hook census[/bold] [dim](advisory)[/dim]")
+        for entry in hook_census["entries"]:
+            console.print(
+                f"    [bold]{esc(entry['scope'])} · {esc(entry['arm_label'])}[/bold]: {esc(entry['summary'])}"
+            )
+            for row in entry["rows"][:10]:
+                console.print(
+                    f"      [dim]- {esc(row['hook_id'])} ({esc(row['event'])}): {row['runs']} run(s), "
+                    f"{row['failures']} failure(s)[/dim]"
+                )
+    mcp_proof = view.get("mcp_proof")
+    if mcp_proof:
+        console.print(f"  [bold]MCP proof:[/bold] {esc(mcp_proof['headline'])} [dim](advisory)[/dim]")
+        for row in mcp_proof["rows"]:
+            console.print(
+                f"    [dim]- {esc(row['server'])}: {esc(row['status_label'])} — {esc(row['detail'])}[/dim]",
+                soft_wrap=True,
+            )
 
 
 def _print_plugin_statistics_scope(scope: dict, console: Console, *, show_label: bool) -> None:
@@ -205,7 +314,7 @@ def _print_plugin_statistics_scope(scope: dict, console: Console, *, show_label:
             table.add_column("k", justify="right")
         if scope["has_tokens"]:
             table.add_column("Tokens/success", justify="right")
-        if scope["has_usd"]:
+        if scope["show_usd"]:
             table.add_column("USD/success", justify="right")
         if scope["has_efficiency"]:
             table.add_column("Token eff.", justify="right")
@@ -215,12 +324,14 @@ def _print_plugin_statistics_scope(scope: dict, console: Console, *, show_label:
                 row.extend([arm["pass_at_k"], arm["pass_hat_k"], arm["k"]])
             if scope["has_tokens"]:
                 row.append(arm["tokens_per_success"])
-            if scope["has_usd"]:
+            if scope["show_usd"]:
                 row.append(arm["usd_per_success"])
             if scope["has_efficiency"]:
                 row.append(arm["token_efficiency"])
             table.add_row(*row)
         console.print(table)
+        if scope["usd_note"]:
+            console.print(f"  [dim]{esc(scope['usd_note'])}[/dim]", soft_wrap=True)
     measured = scope["context_measured"]
     if measured:
         if measured["measured"]:
@@ -312,6 +423,10 @@ class CLIReporter(ReporterBase):
         # Print summary table
         self._print_summary_table(results, console)
         console.print()
+        plugin_block = self._plugin_block_from_results(results)
+        static_risk = static_risk_view(plugin_block) if plugin_block is not None else None
+        if static_risk is not None:
+            print_plugin_tier1_static(static_risk, console)
 
         # Print detailed results for failures
         failed = [r for r in results if not passes_required_gate(r)]
@@ -337,6 +452,22 @@ class CLIReporter(ReporterBase):
             )
             for result in non_blocking:
                 self.render_result(result, console)
+
+        # A passing AGENT_EVAL is advisory, so it has no details above. A plugin
+        # run still prints its compact Tier 3 block: the verdict can be FAIL
+        # while the result passes, and loading, canary, census and Integration
+        # are only shown here.
+        detailed = {id(result) for result in [*failed, *non_blocking]}
+        for result in results:
+            if id(result) in detailed:
+                continue
+            agent_eval = result.metadata.get("agent_eval") if result.metadata else None
+            plugin_view = tier3_plugin_view(agent_eval) if isinstance(agent_eval, dict) else None
+            if plugin_view is None:
+                continue
+            console.print(f"\n[bold]{escape_markup(f'[{result.validator_name}]')}[/bold] Tier 3 plugin evaluation")
+            self._print_agent_eval_verdict(agent_eval, console)
+            print_plugin_tier3(plugin_view, console)
 
         # Print overall status
         advisory_skips = [result for result in results if self._is_advisory_agent_eval_skip(result)]
@@ -505,6 +636,21 @@ class CLIReporter(ReporterBase):
     @staticmethod
     def _print_agent_eval_tables(agent_eval: dict, console: Console) -> None:
         """Print Tier 3 agent evaluation results."""
+        CLIReporter._print_agent_eval_verdict(agent_eval, console)
+
+        evaluators = agent_eval.get("evaluators", {})
+        if evaluators:
+            CLIReporter._print_evaluator_table(evaluators, console)
+
+        plugin_view = tier3_plugin_view(agent_eval)
+        if plugin_view is not None:
+            print_plugin_tier3(plugin_view, console)
+
+        CLIReporter._print_agent_eval_insights(agent_eval, console)
+
+    @staticmethod
+    def _print_agent_eval_verdict(agent_eval: dict, console: Console) -> None:
+        """Print the Tier 3 verdict line, runtime, and Harbor links."""
         verdict = agent_eval.get("verdict", "unknown")
         composite = agent_eval.get("composite_lift")
         runtime = agent_eval.get("runtime_seconds", 0.0)
@@ -530,7 +676,9 @@ class CLIReporter(ReporterBase):
                 )
         console.print()
 
-        evaluators = agent_eval.get("evaluators", {})
+    @staticmethod
+    def _print_evaluator_table(evaluators: dict, console: Console) -> None:
+        """Print the per-evaluator with-skill, baseline, and lift table."""
         if evaluators:
             table = Table(
                 title="Evaluator Scores (Skill Lift)",
@@ -543,24 +691,23 @@ class CLIReporter(ReporterBase):
             table.add_column("Lift", justify="right")
 
             for name, scores in evaluators.items():
-                ws = scores.get("with_skill", 0.0)
-                bl = scores.get("baseline", 0.0)
-                lift = scores.get("lift", 0.0)
-                lc = "green" if lift > 0.01 else ("red" if lift < -0.01 else "dim")
+                scores = scores if isinstance(scores, dict) else {}
+                lift = number(scores.get("lift"))
+                # A missing lift (no baseline score) is neutral, not a regression or a gain.
+                lc = "dim" if lift is None else ("green" if lift > 0.01 else ("red" if lift < -0.01 else "dim"))
                 table.add_row(
                     escape_markup(str(name).replace("_", " ").title()),
-                    f"{ws:.2f}",
-                    f"{bl:.2f}",
-                    f"[{lc}]{lift:+.2f}[/{lc}]",
+                    format_score(scores.get("with_skill"), ".2f"),
+                    format_score(scores.get("baseline"), ".2f"),
+                    f"[{lc}]{format_score(lift, '+.2f')}[/{lc}]",
                 )
 
             console.print(table)
             console.print()
 
-        plugin_view = tier3_plugin_view(agent_eval)
-        if plugin_view is not None:
-            print_plugin_tier3(plugin_view, console)
-
+    @staticmethod
+    def _print_agent_eval_insights(agent_eval: dict, console: Console) -> None:
+        """Print Tier 3 recommendations and LLM-as-Judge insights."""
         recommendations = agent_eval.get("recommendations") or []
         if recommendations:
             printed = False

@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
+import stat
 import time
 from collections.abc import Callable
 from pathlib import Path
 
+import click
 from rich.console import Console
 
 from skillevaluator.constants import (
@@ -67,9 +69,13 @@ DEFAULT_CHECKS = (
 # The dependency CVE audit is also available through the standalone
 # ``dependency-audit`` command; the version check above runs by default.
 OPTIONAL_CHECKS = ("dependency",)
+# Opt-in, plugin-only checks. They are not part of the skill workflows' "all
+# checks" lineup: ``claude-validate`` runs ``claude plugin validate --strict``
+# for a parity comparison when the Claude Code CLI is installed.
+PLUGIN_OPTIONAL_CHECKS = ("claude-validate",)
 # Every canonical check name ``run_validation`` understands after alias
 # resolution (the default run plus the opt-in checks).
-RECOGNIZED_CHECKS = frozenset(DEFAULT_CHECKS) | frozenset(OPTIONAL_CHECKS)
+RECOGNIZED_CHECKS = frozenset(DEFAULT_CHECKS) | frozenset(OPTIONAL_CHECKS) | frozenset(PLUGIN_OPTIONAL_CHECKS)
 # Whole-content checks. For a plugin they scan the entire plugin tree exactly
 # once: each bundled skill, then root-owned content with the bundled-skill
 # subtrees excluded (see ``validators.plugin_tree``).
@@ -104,6 +110,9 @@ def _enabled_checks(checks: str | None) -> set[str]:
         "dependency-audit": "dependency",
         "licence": "license",
         "license-check": "license",
+        "parity": "claude-validate",
+        "plugin-validate": "claude-validate",
+        "claude-plugin-validate": "claude-validate",
     }
     enabled = set()
     for raw in checks.split(","):
@@ -117,19 +126,22 @@ def _schema_validator_for(
     content_type: str | None,
     policy: ValidationPolicy | None,
     repo_root: Path | None = None,
+    *,
+    resolve_endpoints: bool = False,
 ):
     """Return the schema validator matching the (forced or detected) content type.
 
     Rules, workflows, and plugins use their dedicated schema validators; skill
     and unknown content fall back to the skill :class:`SchemaValidator` (the
-    historical default). *repo_root* only affects plugin dependency resolution.
+    historical default). *repo_root* only affects plugin dependency resolution,
+    and *resolve_endpoints* enables the plugin's opt-in DNS/redirect checks.
     """
     if content_type == CONTENT_TYPE_RULES:
         return RulesSchemaValidator()
     if content_type == CONTENT_TYPE_WORKFLOWS:
         return WorkflowsSchemaValidator()
     if content_type == CONTENT_TYPE_PLUGIN:
-        return PluginSchemaValidator(policy=policy, repo_root=repo_root)
+        return PluginSchemaValidator(policy=policy, repo_root=repo_root, resolve_endpoints=resolve_endpoints)
     return SchemaValidator(policy=policy)
 
 
@@ -140,7 +152,7 @@ def enabled_check_lineup(checks: str | None) -> list[str]:
     matches what ``run_validation`` was actually asked to do.
     """
     enabled = _enabled_checks(checks)
-    ordered = [check for check in (*DEFAULT_CHECKS, *OPTIONAL_CHECKS) if check in enabled]
+    ordered = [check for check in (*DEFAULT_CHECKS, *OPTIONAL_CHECKS, *PLUGIN_OPTIONAL_CHECKS) if check in enabled]
     return ordered + sorted(enabled - set(ordered))
 
 
@@ -208,6 +220,7 @@ def run_validation(
     continue_on_failure: bool = False,
     on_check: Callable[[str], None] | None = None,
     repo_root: Path | None = None,
+    resolve_endpoints: bool = False,
 ) -> list[ValidationResult]:
     """Run selected Tier 1 validators and return structured results.
 
@@ -236,10 +249,16 @@ def run_validation(
 
     *repo_root* (``--repo-root``) optionally names the repository root used to
     resolve a bundle-reference plugin's same-repository skill/rule refs.
+
+    *resolve_endpoints* (``--resolve-endpoints``) opts a plugin's schema check
+    into DNS and single-HEAD redirect checks of its MCP and HTTP hook URLs.
     """
     enabled = _enabled_checks(checks)
     results: list[ValidationResult] = []
     bundled_skill_dirs: list[Path] = []
+    # Skill folders the whole-tree scans validate as their own units: the bundled
+    # skills plus any skill a client loads from a folder the tree walk prunes.
+    tree_skill_dirs: list[Path] = []
     if content_type == CONTENT_TYPE_PLUGIN:
         from skillevaluator.cli_core import resolve_plugin_path
         from skillevaluator.utils.helpers import find_bundled_plugin_skills, verify_plugin_tree
@@ -251,7 +270,9 @@ def run_validation(
             bundled_skill_dirs = find_bundled_plugin_skills(target_path)
         except ValueError as exc:
             if "schema" in enabled:
-                validator = PluginSchemaValidator(policy=policy, repo_root=repo_root)
+                validator = PluginSchemaValidator(
+                    policy=policy, repo_root=repo_root, resolve_endpoints=resolve_endpoints
+                )
                 return [_as_result(validator.name, validator.description, validator.validate, target_path)]
             security_result = ValidationResult(
                 validator_name="Plugin Bundle Security",
@@ -275,6 +296,7 @@ def run_validation(
             # no-follow verification before any of them runs.
             try:
                 verify_plugin_tree(target_path)
+                tree_skill_dirs = [*bundled_skill_dirs, *_verified_skill_dirs_outside_tree_walk(target_path)]
             except ValueError as exc:
                 return _with_component_attribution(
                     _unsafe_plugin_tree_results(
@@ -295,8 +317,18 @@ def run_validation(
     skill_target = target_path / "skills" if content_type == CONTENT_TYPE_PLUGIN else target_path
 
     def _schema_results() -> list[ValidationResult]:
-        v = _schema_validator_for(content_type, policy, repo_root)
+        v = _schema_validator_for(content_type, policy, repo_root, resolve_endpoints=resolve_endpoints)
         return [_as_result(v.name, v.description, v.validate, target_path)]
+
+    def _claude_validate_results() -> list[ValidationResult]:
+        from skillevaluator.validators.claude_plugin_validate import (
+            ClaudePluginValidateParity,
+            skillevaluator_manifest_verdict,
+        )
+
+        verdict = skillevaluator_manifest_verdict(results, PluginSchemaValidator().name)
+        v = ClaudePluginValidateParity()
+        return [v.validate(target_path, skillevaluator_verdict=verdict)]
 
     def _security_results() -> list[ValidationResult]:
         v = SecurityValidator(use_llm=use_llm, verify_llm=llm_verify)
@@ -333,7 +365,7 @@ def run_validation(
         return [_as_result(v.name, v.description, v.validate, target_path)]
 
     def _dependency_results() -> list[ValidationResult]:
-        v = DependencySecurityValidator()
+        v = DependencySecurityValidator(policy=policy, resolve_endpoints=resolve_endpoints)
         return [_as_result(v.name, v.description, v.validate, target_path)]
 
     # (check name, builder, applies-to-this-content-type). Version, quality
@@ -353,6 +385,7 @@ def run_validation(
         ("unicode", _unicode_results, True),
         ("quality", _quality_results, skill_like),
         ("lint", _lint_results, skill_like),
+        ("claude-validate", _claude_validate_results, content_type == CONTENT_TYPE_PLUGIN),
     )
     active = [
         (check_name, builder) for check_name, builder, applicable in steps if check_name in enabled and applicable
@@ -365,7 +398,7 @@ def run_validation(
                 progress_console.print(f"[{step_number}/{len(active)}] {check_name} ...", markup=False, highlight=False)
             started = time.monotonic()
             if content_type == CONTENT_TYPE_PLUGIN and check_name in PLUGIN_TREE_CHECKS:
-                with plugin_tree_scope(target_path, bundled_skill_dirs):
+                with plugin_tree_scope(target_path, tree_skill_dirs):
                     step_results = builder()
             else:
                 step_results = builder()
@@ -440,6 +473,37 @@ def _is_dedup_result(result: ValidationResult) -> bool:
     return is_tier2_validator_name(result.validator_name)
 
 
+def _verified_skill_dirs_outside_tree_walk(plugin_root: Path) -> list[Path]:
+    """Skill folders a client loads that the whole-tree walk prunes, verified like the tree.
+
+    Whole-tree scans prune ``evals/``, ``results/``, and ``versions/`` outside
+    the first level of ``skills/``, but a declared skills folder can still load
+    a skill from one (``my-skills/evals/``, or a declared ``./evals/``). Each
+    such folder is scanned as its own skill unit. :func:`verify_plugin_tree`
+    prunes those names too, so every path part and the folder's own tree are
+    verified here without following links; a problem raises ``ValueError``
+    and the run fails closed like any unsafe plugin tree.
+    """
+    from skillevaluator.plugin_components import client_skill_dirs_outside_tree_scans
+    from skillevaluator.utils.helpers import verify_plugin_tree
+    from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
+
+    verified: list[Path] = []
+    for relative in client_skill_dirs_outside_tree_scans(plugin_root):
+        current = plugin_root
+        for part in relative.parts:
+            current = current / part
+            try:
+                metadata = current.lstat()
+            except OSError as exc:
+                raise ValueError(f"Cannot inspect plugin skill folder safely: {relative}: {exc}") from exc
+            if stat_is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError(f"Plugin skill folder is not a regular directory: {relative}")
+        verify_plugin_tree(current)
+        verified.append(plugin_root.joinpath(*relative.parts))
+    return verified
+
+
 def _derive_html_tabs(results: list[ValidationResult]) -> list[dict[str, str]]:
     """Build the HTML navigation tabs from the tiers present in *results*.
 
@@ -457,6 +521,15 @@ def _derive_html_tabs(results: list[ValidationResult]) -> list[dict[str, str]]:
     return tabs
 
 
+class ReportsNotWrittenError(click.ClickException):
+    """One or more requested reports failed; :func:`emit_reports` raises it after writing the others."""
+
+    def __init__(self, formats: list[str]) -> None:
+        self.formats = tuple(formats)
+        noun = "report was" if len(self.formats) == 1 else "reports were"
+        super().__init__(f"the {', '.join(self.formats)} {noun} not written (see the error above)")
+
+
 def emit_reports(
     results: list[ValidationResult],
     *,
@@ -472,6 +545,11 @@ def emit_reports(
 ) -> bool:
     """Render reports and return whether every result passed.
 
+    A report that fails to render does not stop the others: its error is
+    printed, the remaining reports are written, and then
+    :class:`ReportsNotWrittenError` is raised so the command exits non-zero
+    instead of passing without the file it was asked to write.
+
     When *policy* is provided, finding severities are remapped per the active
     profile (and pass/fail recomputed) before rendering, and the active profile
     is stamped onto each result's metadata for reporters.
@@ -481,10 +559,29 @@ def emit_reports(
     correct content noun. HTML navigation tabs are derived from the tiers
     present in *results*, matching SkillEvaluator's combined report.
     """
+    from rich.text import Text
+
+    from skillevaluator.reporting.base import UnsafeReportPathError
+    from skillevaluator.utils.rich_markup import strip_terminal_controls
+
     if policy is not None:
         apply_policy(results, policy)
+    # One reporter's bug must not cost the user the other reports (a CI job that
+    # uploads SARIF still gets it when the Markdown renderer fails). A failed
+    # report is printed to stderr and raised once the others are written. An
+    # unsafe output path still aborts at once: every report shares that directory.
+    failed_formats: list[str] = []
+
+    def _report_not_written(fmt: str, exc: Exception) -> None:
+        failed_formats.append(fmt)
+        detail = strip_terminal_controls(f"{type(exc).__name__}: {exc}")
+        progress_console.print(Text(f"Error: the {fmt} report was not written ({detail}).", style="bold red"))
+
     if "cli" in report_formats:
-        CLIReporter(console=console).print_all(results)
+        try:
+            CLIReporter(console=console).print_all(results)
+        except Exception as exc:  # isolate one reporter's failure
+            _report_not_written("cli", exc)
 
     html_tabs = _derive_html_tabs(results)
     for fmt in report_formats:
@@ -501,8 +598,16 @@ def emit_reports(
         else:
             reporter = reporter_cls()
         output_path = output_dir / f"{basename}{reporter.get_file_extension()}"
-        reporter.save(results, output_path)
+        try:
+            reporter.save(results, output_path)
+        except UnsafeReportPathError:
+            raise
+        except Exception as exc:  # isolate one reporter's failure
+            _report_not_written(fmt, exc)
+            continue
         if announce_paths:
             console.print(f"[dim]{fmt} report:[/dim] [cyan]{escape_markup(str(output_path))}[/cyan]")
 
+    if failed_formats:
+        raise ReportsNotWrittenError(failed_formats)
     return all(result.passed for result in results)

@@ -8,16 +8,22 @@ import re
 import stat
 import subprocess
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
     PLUGIN_TREE_MAX_DISCOVERED_PATHS,
     PLUGIN_TREE_PRUNED_DIRS,
+    SCAN_ARTIFACT_DIRS,
     SCAN_EXCLUDED_DIRS,
     SKILL_MANIFEST_VARIANTS,
 )
-from skillevaluator.utils.secure_fs import SecureFile, discover_secure_files, stat_is_link_or_reparse
+from skillevaluator.utils.secure_fs import (
+    MAX_SECURE_DIRECTORY_DEPTH,
+    SecureFile,
+    discover_secure_files,
+    stat_is_link_or_reparse,
+)
 
 
 def make_timestamped_basename(prefix: str, suffix: str = "") -> str:
@@ -83,20 +89,127 @@ def _discover_skill_manifests(root_path: Path) -> list[SecureFile]:
     return [selected[directory] for directory in sorted(selected)]
 
 
-def find_bundled_plugin_skill_manifests(plugin_root: Path) -> list[SecureFile]:
-    """Return retained manifest identities for live ``<plugin_root>/skills`` entries."""
-    skills_root = plugin_root / "skills"
+def _plugin_skills_root(plugin_root: Path, skills_dir: str = "skills") -> Path | None:
+    """Return ``<plugin_root>/<skills_dir>`` when it is a real directory; raise on a link.
+
+    ``skills_dir`` is a plugin-root-relative POSIX path (``skills`` or a
+    declared folder such as ``my-skills``). Every component is checked without
+    following links.
+    """
+    skills_root = plugin_root
+    for part in PurePosixPath(skills_dir).parts:
+        skills_root = skills_root / part
+        try:
+            metadata = skills_root.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ValueError(f"Cannot inspect plugin skills safely: {exc}") from exc
+        if stat_is_link_or_reparse(metadata):
+            raise ValueError(f"Plugin skills folder is a symlink, junction, or reparse point: {skills_dir}")
+        if not stat.S_ISDIR(metadata.st_mode):
+            return None
+    return skills_root
+
+
+def find_bundled_plugin_skill_manifests(plugin_root: Path, skills_dir: str = "skills") -> list[SecureFile]:
+    """Return retained manifest identities for the skills in a plugin skills folder.
+
+    ``skills_dir`` is the plugin-root-relative skills folder: ``skills`` (the
+    default) or a folder a manifest declares, such as ``my-skills``. The
+    scan-exclusion names (``evals``, ``results``, ``versions``, and their
+    dotted forms) mark a skill's own evaluation output and snapshots, so they
+    are skipped inside a skill. A folder with one of those names directly
+    under the skills folder is not inside a skill: clients load
+    ``skills/evals/`` and ``skills/versions/v2/`` like any other skill folder,
+    so it is searched too. The returned identities are all relative to the
+    skills folder.
+    """
+    skills_root = _plugin_skills_root(plugin_root, skills_dir)
+    if skills_root is None:
+        return []
+    manifests = _discover_skill_manifests(skills_root)
+    for name in sorted(SCAN_ARTIFACT_DIRS):
+        child = skills_root / name
+        try:
+            metadata = child.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError(f"Cannot inspect bundled plugin skills safely: {exc}") from exc
+        if stat_is_link_or_reparse(metadata):
+            raise ValueError(f"Plugin skills folder is a symlink, junction, or reparse point: {skills_dir}/{name}")
+        if not stat.S_ISDIR(metadata.st_mode):
+            continue
+        manifests.extend(
+            SecureFile(skills_root, child / found.relative_path, Path(name) / found.relative_path, found.metadata)
+            for found in _discover_skill_manifests(child)
+        )
+    return sorted(manifests, key=lambda manifest: manifest.relative_path.parent)
+
+
+def find_unscanned_plugin_skill_manifests(plugin_root: Path, skills_dir: str = "skills") -> list[PurePosixPath]:
+    """Return plugin-root-relative ``SKILL.md`` paths that bundled-skill discovery skips.
+
+    These sit in a scan-excluded folder (``evals``, ``results``, ``versions``,
+    or a dotted form) inside the skills folder ``skills_dir`` (``skills`` or a
+    declared one), below the first level. Tier 1 does not scan them, but a
+    client that searches a skills folder recursively (Codex) loads them. The
+    walk reads names only, never follows links, and is bounded like discovery.
+    """
     try:
-        metadata = skills_root.lstat()
-    except FileNotFoundError:
+        skills_root = _plugin_skills_root(plugin_root, skills_dir)
+    except ValueError:
+        return []  # reported by bundled-skill discovery
+    if skills_root is None:
         return []
-    except OSError as exc:
-        raise ValueError(f"Cannot inspect bundled plugin skills safely: {exc}") from exc
-    if stat_is_link_or_reparse(metadata):
-        raise ValueError("Plugin skills root is a symlink, junction, or reparse point")
-    if not stat.S_ISDIR(metadata.st_mode):
-        return []
-    return _discover_skill_manifests(skills_root)
+    base = PurePosixPath(skills_dir)
+    found: list[PurePosixPath] = []
+    budget = CONTENT_DEDUP_MAX_DISCOVERED_PATHS
+    # (directory, path relative to the skills folder, inside a skipped folder)
+    pending: list[tuple[Path, PurePosixPath, bool]] = [(skills_root, PurePosixPath(), False)]
+    while pending and budget > 0:
+        directory, relative, skipped = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in entries:
+            budget -= 1
+            if budget <= 0:
+                break
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                continue
+            child = relative / entry.name
+            if not is_dir:
+                if skipped and entry.name in SKILL_MANIFEST_VARIANTS:
+                    found.append(base / child)
+                continue
+            if entry.name in SCAN_EXCLUDED_DIRS and entry.name not in SCAN_ARTIFACT_DIRS:
+                continue  # VCS, virtualenv, package, and bytecode caches
+            if len(child.parts) < MAX_SECURE_DIRECTORY_DEPTH:
+                artifact = entry.name in SCAN_ARTIFACT_DIRS and len(child.parts) > 1
+                pending.append((Path(entry.path), child, skipped or artifact))
+    return sorted(found)
+
+
+def find_skill_manifest_in(skill_dir: Path) -> SecureFile | None:
+    """Return the manifest identity of one skill folder (``SKILL.md`` first), or ``None``.
+
+    Only the folder's own entries are listed, without following links; a link
+    or special entry there raises :class:`ValueError`.
+    """
+    manifests = discover_secure_files(
+        skill_dir,
+        selected=lambda relative: len(relative.parts) == 1 and relative.name in SKILL_MANIFEST_VARIANTS,
+        max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
+        max_depth=1,
+    )
+    priority = {name: index for index, name in enumerate(SKILL_MANIFEST_VARIANTS)}
+    return min(manifests, key=lambda manifest: priority[manifest.relative_path.name], default=None)
 
 
 def find_bundled_plugin_skills(plugin_root: Path) -> list[Path]:

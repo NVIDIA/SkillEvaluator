@@ -267,6 +267,35 @@ class TestValidatorBase:
         assert names == ["skill-a", "skill-b"], f"_find_all_skills must skip .versions snapshots, got {names}"
         assert all(".versions" not in skill.parts for skill in skills)
 
+    def test_find_all_skills_ignores_excluded_names_above_the_root(self, tmp_path):
+        """A skills tree that lives under a folder named results, versions, or evals is still searched."""
+        for parent in ("results", ".versions", "evals"):
+            root = tmp_path / parent / "my-plugin" / "skills"
+            (root / "skill-a").mkdir(parents=True)
+            (root / "skill-a" / "SKILL.md").write_text("---\nname: skill-a\n---")
+            (root / "skill-a" / "evals" / "run1").mkdir(parents=True)
+            (root / "skill-a" / "evals" / "run1" / "SKILL.md").write_text("---\nname: snapshot\n---")
+
+            skills = ConcreteValidator()._find_all_skills(root.absolute())
+
+            assert [skill.name for skill in skills] == ["skill-a"], parent
+
+    def test_find_all_skills_treats_first_level_artifact_names_in_a_skills_folder_as_skills(self, tmp_path):
+        """Clients load skills/evals/ and skills/versions/v2/ like any other skill folder."""
+        root = tmp_path / "plugin" / "skills"
+        for rel in ("a", "evals", "versions/v2", "a/evals/run1"):
+            (root / rel).mkdir(parents=True, exist_ok=True)
+            (root / rel / "SKILL.md").write_text("---\nname: x\n---")
+
+        found = sorted(skill.relative_to(root).as_posix() for skill in ConcreteValidator()._find_all_skills(root))
+
+        assert found == ["a", "evals", "versions/v2"]
+        # Elsewhere a first-level evals/ folder is still evaluation output.
+        other = tmp_path / "project"
+        (other / "evals").mkdir(parents=True)
+        (other / "evals" / "SKILL.md").write_text("---\nname: x\n---")
+        assert ConcreteValidator()._find_all_skills(other) == []
+
     def test_validate_folder_or_skill_single(self, tmp_path):
         """Test template method with single skill."""
         skill_dir = tmp_path / "test-skill"

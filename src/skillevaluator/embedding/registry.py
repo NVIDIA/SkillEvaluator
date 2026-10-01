@@ -34,9 +34,7 @@ from skillevaluator.constants import (
     CONTENT_TYPE_WORKFLOWS,
     PLUGIN_CATALOG_MAX_MEMBER_CHARS,
     PLUGIN_CATALOG_MAX_MEMBERS,
-    PLUGIN_CONTAINED_MANIFEST_DIR,
-    PLUGIN_CONTAINED_MANIFEST_FILE,
-    PLUGIN_MANIFEST_FILES,
+    PLUGIN_MANIFEST_RELATIVE_PATHS,
     SIMILARITY_CRITICAL_THRESHOLD,
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
@@ -128,9 +126,7 @@ _CATALOG_PLUGIN_FIELDS = frozenset(
 MAX_CATALOG_PLUGIN_MEMBERS = PLUGIN_CATALOG_MAX_MEMBERS
 MAX_CATALOG_PLUGIN_MEMBER_CHARS = PLUGIN_CATALOG_MAX_MEMBER_CHARS
 MAX_CATALOG_MEMBER_NAMES = 262_144
-_PLUGIN_CATALOG_MANIFESTS = frozenset(
-    {*PLUGIN_MANIFEST_FILES, f"{PLUGIN_CONTAINED_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}"}
-)
+_PLUGIN_CATALOG_MANIFESTS = frozenset(PLUGIN_MANIFEST_RELATIVE_PATHS)
 
 
 @dataclass
@@ -508,7 +504,9 @@ class EmbeddingRegistry:
             batch = texts[start : start + batch_size]
             vectors = [self._client.embed_chunked(batch[0])] if self._full_body else self._client.embed(batch)
             if len(vectors) != len(batch):
-                raise ValueError(f"Embedding provider returned {len(vectors)} vectors for {len(batch)} entries in batch")
+                raise ValueError(
+                    f"Embedding provider returned {len(vectors)} vectors for {len(batch)} entries in batch"
+                )
             for vector in vectors:
                 vector_dimension = _validate_vector(vector, vector_dimension)
                 validated_vectors.append(vector)

@@ -656,6 +656,19 @@
           "param_type": "option"
         },
         {
+          "choices": [
+            "wrapper",
+            "native",
+            "auto"
+          ],
+          "default": "wrapper",
+          "name": "plugin_load",
+          "opts": [
+            "--plugin-load"
+          ],
+          "param_type": "option"
+        },
+        {
           "name": "n_attempts",
           "opts": [
             "--n-attempts"
@@ -753,6 +766,25 @@
           ],
           "param_type": "option",
           "type": "boolean"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "probe_mcp",
+          "opts": [
+            "--probe-mcp"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "multiple": true,
+          "name": "probe_mcp_env",
+          "opts": [
+            "--probe-mcp-env"
+          ],
+          "param_type": "option",
+          "type": "text"
         },
         {
           "choices": [
@@ -2736,6 +2768,19 @@
               "param_type": "option"
             },
             {
+              "choices": [
+                "wrapper",
+                "native",
+                "auto"
+              ],
+              "default": "wrapper",
+              "name": "plugin_load",
+              "opts": [
+                "--plugin-load"
+              ],
+              "param_type": "option"
+            },
+            {
               "name": "n_attempts",
               "opts": [
                 "--n-attempts"
@@ -2833,6 +2878,25 @@
               ],
               "param_type": "option",
               "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "probe_mcp",
+              "opts": [
+                "--probe-mcp"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "multiple": true,
+              "name": "probe_mcp_env",
+              "opts": [
+                "--probe-mcp-env"
+              ],
+              "param_type": "option",
+              "type": "text"
             },
             {
               "choices": [
@@ -3580,6 +3644,16 @@
           "type": "directory"
         },
         {
+          "default": "False",
+          "is_flag": true,
+          "name": "resolve_endpoints",
+          "opts": [
+            "--resolve-endpoints"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
           "default": "True",
           "is_flag": true,
           "name": "dedup",
@@ -3689,6 +3763,38 @@
           "name": "lift_mode",
           "opts": [
             "--lift-mode"
+          ],
+          "param_type": "option"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "probe_mcp",
+          "opts": [
+            "--probe-mcp"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "multiple": true,
+          "name": "probe_mcp_env",
+          "opts": [
+            "--probe-mcp-env"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "choices": [
+            "wrapper",
+            "native",
+            "auto"
+          ],
+          "default": "wrapper",
+          "name": "plugin_load",
+          "opts": [
+            "--plugin-load"
           ],
           "param_type": "option"
         },

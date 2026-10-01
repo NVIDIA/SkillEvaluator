@@ -2748,7 +2748,9 @@ class SecurityValidator(ValidatorBase):
                     "suggestion": pattern_def.get("suggestion"),
                     "category": category,
                     "confidence": confidence,
-                    "matched_value": match.group(),
+                    # A pattern may match context around the value (to stay linear); its
+                    # ``value`` group, when present, is the part to report and group by.
+                    "matched_value": match.group("value") if "value" in regex.groupindex else match.group(),
                 }
             )
 

@@ -22,12 +22,13 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_TOTAL_BYTES,
     DESCRIPTION_MAX_LENGTH,
     NAME_MAX_LENGTH,
+    PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE,
     PLUGIN_CATALOG_MAX_MEMBER_CHARS,
     PLUGIN_CATALOG_MAX_MEMBERS,
-    PLUGIN_CONTAINED_MANIFEST_DIR,
     PLUGIN_CONTAINED_MANIFEST_FILE,
-    PLUGIN_CONTAINED_MANIFEST_TYPE,
+    PLUGIN_CONTAINED_MANIFEST_TYPES,
     PLUGIN_MANIFEST_FILES,
+    PLUGIN_NATIVE_MANIFEST_DIRS,
     SCAN_EXCLUDED_DIRS,
     SIMILARITY_MAX_DISCOVERED_PATHS,
 )
@@ -136,14 +137,17 @@ def _ref_member_name(ref: Any) -> str | None:
 def _load_manifest_data(plugin_root: Path, budget: ProfileByteBudget | None) -> tuple[dict[str, Any], str, str]:
     located = locate_plugin_manifest(plugin_root)
     if located is None:
-        raise PluginProfileError("No plugin manifest (agent_plugin.yaml/.yml or .claude-plugin/plugin.json) found")
+        raise PluginProfileError(
+            "No plugin manifest (agent_plugin.yaml/.yml, a .claude-plugin/, .codex-plugin/, or .cursor-plugin/ "
+            "plugin.json, or an Agent Plugins root plugin.json) found"
+        )
     raw = located.read_text()
     if budget is not None:
         budget.consume(raw)
     try:
         data: Any = (
             load_bounded_json(raw)
-            if located.manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE
+            if located.manifest_type in PLUGIN_CONTAINED_MANIFEST_TYPES
             else load_bounded_yaml(raw)
         )
     except StructuredDataError as exc:
@@ -255,11 +259,21 @@ def discover_plugin_roots(root: Path, *, max_plugins: int) -> list[Path]:
     """
     if locate_plugin_manifest(root) is not None:
         return [root]
-    contained = PurePosixPath(PLUGIN_CONTAINED_MANIFEST_DIR) / PLUGIN_CONTAINED_MANIFEST_FILE
+
+    def _is_vendor_manifest(posix: PurePosixPath) -> bool:
+        return (
+            posix.name == PLUGIN_CONTAINED_MANIFEST_FILE
+            and len(posix.parts) >= 2
+            and posix.parts[-2] in PLUGIN_NATIVE_MANIFEST_DIRS
+        )
 
     def _selected(relative: Path) -> bool:
         posix = PurePosixPath(relative.as_posix())
-        return posix.name in PLUGIN_MANIFEST_FILES or (len(posix.parts) >= 2 and posix.parts[-2:] == contained.parts)
+        return (
+            posix.name in PLUGIN_MANIFEST_FILES
+            or posix.name == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE
+            or _is_vendor_manifest(posix)
+        )
 
     files = discover_secure_files(
         root,
@@ -270,7 +284,15 @@ def discover_plugin_roots(root: Path, *, max_plugins: int) -> list[Path]:
     plugin_dirs: set[PurePosixPath] = set()
     for file in files:
         relative = PurePosixPath(file.relative_path.as_posix())
-        plugin_dir = relative.parent if relative.name in PLUGIN_MANIFEST_FILES else relative.parent.parent
+        plugin_dir = relative.parent.parent if _is_vendor_manifest(relative) else relative.parent
+        # A root plugin.json roots a plugin only when it is an Agent Plugins manifest.
+        if not _is_vendor_manifest(relative) and relative.name == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE:
+            try:
+                located = locate_plugin_manifest(root / Path(*plugin_dir.parts))
+            except PluginManifestPathError:
+                located = None
+            if located is None:
+                continue
         plugin_dirs.add(plugin_dir)
         if len(plugin_dirs) > max_plugins:
             raise ValueError(

@@ -439,3 +439,54 @@ class TestResolvePathFunctions:
             expected = expected.parent
 
         assert resolver(selected) == expected
+
+
+class TestAgentPluginsRootManifestDetection:
+    """Auto-detection of a root plugin.json agrees with the secure plugin locator."""
+
+    _SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+
+    def _plugin_with_skills(self, root: Path, manifest: bytes) -> Path:
+        root.mkdir()
+        (root / "plugin.json").write_bytes(manifest)
+        skill = root / "skills" / "a"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: a\ndescription: d\n---\nbody\n")
+        return root
+
+    def test_unparseable_manifest_naming_the_schema_is_a_plugin(self, tmp_path: Path) -> None:
+        """Regression: a syntax error in an Agent Plugins manifest must not demote the plugin to a skill."""
+        from skillevaluator.plugin_manifest import locate_plugin_manifest
+
+        manifest = f'{{"$schema": "{self._SCHEMA}", "name": "x",}}'.encode()
+        root = self._plugin_with_skills(tmp_path / "p", manifest)
+
+        located = locate_plugin_manifest(root)
+        assert located is not None
+        assert located.manifest_type == "agent_plugins_v1"
+        assert detect_content_type(root) == CONTENT_TYPE_PLUGIN
+        assert _detect_from_file(root / "plugin.json") == CONTENT_TYPE_PLUGIN
+
+    def test_unparseable_plugin_json_without_the_schema_is_not_a_plugin(self, tmp_path: Path) -> None:
+        root = self._plugin_with_skills(tmp_path / "p", b'{"name": "legacy",}')
+
+        assert detect_content_type(root) == CONTENT_TYPE_SKILL
+        assert _detect_from_file(root / "plugin.json") is None
+
+    @pytest.mark.parametrize("encoding", ["utf-16", "latin-1"])
+    def test_manifest_that_is_not_utf8_is_detected_like_the_locator(self, tmp_path: Path, encoding: str) -> None:
+        """Regression: a non-UTF-8 manifest naming the schema was a skill here but a manifest in the locator.
+
+        The locator reports its encoding error; auto-detection used to demote the folder to a skill instead,
+        so that error and the plugin's mcp.json were never checked.
+        """
+        from skillevaluator.plugin_manifest import locate_plugin_manifest
+
+        text = f'{{"$schema": "{self._SCHEMA}", "name": "caf\xe9"}}'
+        root = self._plugin_with_skills(tmp_path / "p", text.encode(encoding))
+
+        located = locate_plugin_manifest(root)
+        assert located is not None
+        assert located.manifest_type == "agent_plugins_v1"
+        assert _detect_from_file(root / "plugin.json") == CONTENT_TYPE_PLUGIN
+        assert detect_content_type(root) == CONTENT_TYPE_PLUGIN

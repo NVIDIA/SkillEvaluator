@@ -30,7 +30,7 @@ import unicodedata
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import parse_qs, unquote, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse, urlunparse
 
 import idna
 
@@ -83,7 +83,14 @@ _SECRET_KEY_RE = re.compile(
 # minimum payload length so a "${ENV}" reference or benign prose never matches; this
 # keeps Authorization-style inline secrets covered without keying on the header name.
 _INLINE_AUTH_SCHEME_RE = re.compile(r"(?i)^(?:bearer|basic)\s+[A-Za-z0-9+/._=~-]{12,}$")
-# Known inline-secret value shapes.
+# Known inline-secret value shapes. Only ``search`` truthiness is used.
+#
+# The JWT-like alternative starts only where a run of token characters starts
+# and scans to the run's first ``eyJ`` without ever stepping past one. A later
+# ``eyJ`` in the same run has fewer characters before the run ends, so it can
+# never match when the first one does not. A plain ``eyJ...`` alternative was
+# tried at every ``eyJ`` and scanned to the end of the run each time, which is
+# quadratic on a long ``eyJeyJ...`` value (about 1 s per 64 KB value).
 _SECRET_VALUE_RE = re.compile(
     r"(sk-[A-Za-z0-9]{16,}"
     r"|ghp_[A-Za-z0-9]{20,}"
@@ -92,7 +99,7 @@ _SECRET_VALUE_RE = re.compile(
     r"|xox[baprs]-[A-Za-z0-9-]{10,}"
     r"|nvapi-[A-Za-z0-9_-]{16,}"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
-    r"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"
+    r"|(?<![A-Za-z0-9_-])(?:(?!eyJ)[A-Za-z0-9_-])*eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"
 )
 
 
@@ -131,6 +138,16 @@ def _looks_like_inline_secret(key: str, value: str) -> bool:
     return bool(_SECRET_KEY_RE.search(str(key)))
 
 
+def is_env_reference(value: str) -> bool:
+    """Public alias: ``True`` when *value* is a pure ``$VAR`` / ``${VAR}`` reference."""
+    return _is_env_reference(value)
+
+
+def looks_like_inline_secret(key: str, value: str) -> bool:
+    """Public alias: ``True`` when a keyed value is an inline credential rather than a reference."""
+    return _looks_like_inline_secret(key, value)
+
+
 def _credential_flag_name(token: str) -> str | None:
     """Return the flag name when *token* is a credential-bearing option flag.
 
@@ -144,17 +161,142 @@ def _credential_flag_name(token: str) -> str | None:
     return flag if flag and _SECRET_KEY_RE.search(flag) else None
 
 
+# Everything after 'scheme:' (and any slashes or backslashes) through the last '@'
+# before the path: userinfo to urllib, and to WHATWG clients, which also read
+# 'https:user:pw@host' and 'https://user:pw\@host' as carrying it.
+_URL_USERINFO_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*:[/\\]*)[^/?#]*@")
+
+
 def redacted_url(url: str) -> str:
     """URL for finding messages: scheme, host, port, and path only.
 
     Userinfo, parameters, query, and fragment are dropped so an inline credential
-    is never echoed into reports or CI logs.
+    is never echoed into reports or CI logs, however the authority is written.
     """
     try:
-        parsed = urlparse(url.strip())
+        parsed = urlparse(_URL_USERINFO_RE.sub(r"\1", url.strip(), count=1))
     except ValueError:  # e.g. an unbalanced '[' in the authority
         return "<unparseable URL>"
     return urlunparse((parsed.scheme, parsed.netloc.rpartition("@")[2], parsed.path, "", "", ""))
+
+
+# --------------------------------------------------------------------------- #
+# WHATWG URL reading                                                          #
+# --------------------------------------------------------------------------- #
+# Node (Claude Code http hooks, MCP SDK fetch), Rust's url crate, and browsers
+# parse URLs with the WHATWG URL Standard. For its "special" schemes it reads a
+# backslash as '/', skips any run of slashes after 'scheme:', and drops tabs and
+# line breaks, where urllib.parse does not. Policy decisions must read the URL
+# the way the client that connects to it does.
+_WHATWG_SPECIAL_SCHEMES = frozenset({"http", "https", "ws", "wss", "ftp"})
+_C0_CONTROL_OR_SPACE = "".join(chr(code) for code in range(0x21))
+# Edge characters that both urllib (str.strip) and WHATWG clients (C0 control or space) drop.
+_ASCII_EDGE_WHITESPACE = "".join(char for char in _C0_CONTROL_OR_SPACE if char.isspace())
+_TAB_OR_NEWLINE_RE = re.compile(r"[\t\n\r]")
+_URL_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):")
+
+
+def _special_scheme_slashes(text: str) -> str:
+    """Read ``\\`` as ``/`` before the query or fragment, as WHATWG does for special schemes."""
+    cut = min((index for index in (text.find("?"), text.find("#")) if index != -1), default=len(text))
+    return text[:cut].replace("\\", "/") + text[cut:]
+
+
+def _url_scheme(text: str) -> str | None:
+    match = _URL_SCHEME_RE.match(text)
+    return match.group(1).lower() if match else None
+
+
+def whatwg_url(url: str, base: str | None = None) -> str:
+    """The absolute URL a WHATWG client resolves ``url`` (against ``base``) to, in a form urllib reads the same way.
+
+    For http(s), ws(s), and ftp URLs the result has ``scheme://`` followed by the
+    authority the client connects to, so ``urlsplit(result).hostname`` is the host
+    Node would use: ``https://evil.net\\.example.com/`` reads as host ``evil.net``,
+    and ``http:169.254.169.254/`` as host ``169.254.169.254``. Other schemes, and a
+    relative URL without a base, come back with only the WHATWG trimming applied.
+    """
+    text = _TAB_OR_NEWLINE_RE.sub("", url.strip(_C0_CONTROL_OR_SPACE))
+    base_url = whatwg_url(base) if base is not None else None
+    base_scheme = _url_scheme(base_url) if base_url is not None else None
+    scheme = _url_scheme(text)
+    if scheme is not None:
+        if scheme not in _WHATWG_SPECIAL_SCHEMES:
+            return text
+        rest = _special_scheme_slashes(text[len(scheme) + 1 :])
+        if base_url is not None and scheme == base_scheme and not rest.startswith("//"):
+            # Same special scheme as the base and no authority: a relative reference.
+            return urljoin(base_url, rest)
+        # Any run of '/' and '\' after a special scheme introduces the authority.
+        return f"{scheme}://{rest.lstrip('/')}"
+    if base_url is None:
+        return text
+    if base_scheme in _WHATWG_SPECIAL_SCHEMES:
+        text = _special_scheme_slashes(text)
+        if text.startswith("//"):
+            # Any run of '/' and '\' starts the authority; urljoin would keep the base host for '///host'.
+            return f"{base_scheme}://{text.lstrip('/')}"
+    return urljoin(base_url, text)
+
+
+def url_ambiguities(url: str, *, percent_in_host: bool = False) -> list[str]:
+    """Why urllib and a WHATWG client (Node, MCP SDKs) could read ``url`` differently, or as different text.
+
+    Flags whitespace or control characters inside the URL (only leading and
+    trailing ASCII whitespace is allowed, which both readings strip; a NUL,
+    U+2028, or no-break space at either end still counts), and invisible
+    format characters such as a zero-width space anywhere (WHATWG drops some of
+    them from a host name, urllib keeps them). For http(s), ws(s), and ftp URLs
+    it also flags a backslash before the query, a scheme not followed by
+    exactly ``//`` (WHATWG skips any run of slashes, so ``https:///host``
+    connects to ``host``), and (with ``percent_in_host``) percent-encoding in
+    the host, which WHATWG decodes before it connects.
+    """
+    text = url.strip()
+    problems: list[str] = []
+    inner = url.strip(_ASCII_EDGE_WHITESPACE)
+    if any(char.isspace() or unicodedata.category(char) == "Cc" for char in inner):
+        problems.append("whitespace or a control character")
+    if any(unicodedata.category(char) == "Cf" for char in url):
+        problems.append("an invisible format character (such as a zero-width space)")
+    trimmed = _TAB_OR_NEWLINE_RE.sub("", text.strip(_C0_CONTROL_OR_SPACE))
+    scheme = _url_scheme(trimmed)
+    if scheme not in _WHATWG_SPECIAL_SCHEMES:
+        return problems
+    rest = trimmed[len(scheme) + 1 :]
+    cut = min((index for index in (rest.find("?"), rest.find("#")) if index != -1), default=len(rest))
+    if "\\" in rest[:cut]:
+        problems.append("a backslash, which clients read as '/'")
+    if not rest.startswith("//"):
+        problems.append(f"no '//' after '{scheme}:'")
+    elif rest[2:3] in {"/", "\\"}:
+        problems.append(f"more than two slashes after '{scheme}:'")
+    if percent_in_host:
+        authority = re.split(r"[/\\?#]", rest.lstrip("/\\"), maxsplit=1)[0]
+        if "%" in authority.rpartition("@")[2]:
+            problems.append("percent-encoding in the host")
+    return problems
+
+
+def _client_reading(parsed: Any) -> str:
+    """How WHATWG clients read an ambiguous URL, for messages: no userinfo, query, or fragment."""
+    try:
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:  # e.g. 'https://user:password\@host' is host 'user' with port 'password'
+        return "reject it as invalid"
+    if not host:
+        return "find no host in it"
+    display_host = f"[{host}]" if ":" in host else host
+    shown = f"{parsed.scheme}://{display_host}{f':{port}' if port else ''}{parsed.path}"
+    return f"read it as {shown!r}"
+
+
+def _safe_hostname(parsed: Any) -> str | None:
+    try:
+        return parsed.hostname
+    except ValueError:
+        return None
 
 
 def _check_url_inline_secrets(name: str, url: str, parsed: Any, file_path: str, findings: list[Finding]) -> None:
@@ -370,7 +512,11 @@ def _validate_url(
 
     shown = redacted_url(url)  # messages never echo userinfo or query credentials
     try:
-        parsed = urlparse(url.strip())
+        # ``raw`` is how urllib (and Python clients) read the text; ``parsed`` is how
+        # WHATWG clients (Node and Rust MCP clients) read it. They differ only for an
+        # ambiguous URL, which is flagged below.
+        raw = urlparse(url.strip())
+        parsed = urlparse(whatwg_url(url))
     except ValueError:  # e.g. an unbalanced '[' in the authority
         findings.append(
             _finding(
@@ -383,10 +529,36 @@ def _validate_url(
             )
         )
         return
+    problems = url_ambiguities(url)
+    if problems:
+        findings.append(
+            _finding(
+                Severity.HIGH,
+                "mcp_url_malformed_authority",
+                f"url contains {', and '.join(problems)}, so MCP clients and URL parsers disagree on where it "
+                f"points: {shown!r} (WHATWG clients {_client_reading(parsed)})",
+                file_path,
+                "Write the URL with '//' after the scheme and without backslashes, whitespace, or control "
+                "characters, e.g. https://host/path.",
+                name=name,
+            )
+        )
     scheme = (parsed.scheme or "").lower()
     # Inline credentials in userinfo/query are persisted verbatim; check them
     # independent of the scheme (secure https URLs are the common case).
-    _check_url_inline_secrets(name, url, parsed, file_path, findings)
+    found = len(findings)
+    _check_url_inline_secrets(name, url, raw, file_path, findings)
+    if problems and len(findings) == found:
+        # WHATWG clients read userinfo urllib does not see, e.g. in 'https:user:password@host'.
+        _check_url_inline_secrets(name, url, parsed, file_path, findings)
+    if problems:
+        # A Python client may still connect where urllib reads the host: classify that one too.
+        try:
+            raw_host = raw.hostname
+        except ValueError:
+            raw_host = None
+        if raw_host and raw_host != _safe_hostname(parsed):
+            _validate_endpoint(name, url, raw_host, file_path, findings, allowed_private_hosts)
     if scheme in ALLOWED_MCP_URL_SCHEMES:
         # A secure scheme alone is not a usable endpoint: require a host to connect
         # to, and reject a malformed authority/port. Otherwise a URL like "https://"
@@ -983,6 +1155,43 @@ def classify_mcp_pinning(config: Any) -> McpPinning:
     return McpPinning("not_applicable", f"local interpreter, script, or binary ({base!r})")
 
 
+def mcp_container_image(config: Any) -> str | None:
+    """Return the image reference a ``docker|podman|nerdctl run`` MCP server launches, if any.
+
+    Uses the same argv parsing as :func:`classify_mcp_pinning`, so a flag value is
+    never mistaken for the image. Returns ``None`` for every other server kind.
+    """
+    if not isinstance(config, dict):
+        return None
+    command = config.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return None
+    raw_args = config.get("args")
+    args = [str(arg) for arg in raw_args] if isinstance(raw_args, list) else []
+    command_parts = command.split()
+    if len(command_parts) > 1:
+        command, args = command_parts[0], [*command_parts[1:], *args]
+    if _command_basename(command) not in _CONTAINER_RUNTIMES:
+        return None
+    if args[:1] == ["run"]:
+        rest = args[1:]
+    elif args[:2] == ["container", "run"]:
+        rest = args[2:]
+    else:
+        return None
+    return _first_positional(rest, _DOCKER_VALUE_FLAGS)
+
+
+def is_exact_container_image(image: str) -> bool:
+    """True when an image reference names one immutable (digest) or exact-version (tag) image."""
+    return classify_image_pinning(image).status == "pinned"
+
+
+def classify_image_pinning(image: str) -> McpPinning:
+    """Public wrapper around the container-image pinning classifier."""
+    return _classify_image(image.strip())
+
+
 def _classify_npm_runner(runner: str, tokens: list[str], value_flags: frozenset[str]) -> McpPinning:
     packages = _flag_values(tokens, ("-p", "--package"))
     if packages:
@@ -1005,9 +1214,13 @@ EndpointKind = Literal["metadata", "private"]
 _METADATA_HOSTNAMES = frozenset({"metadata.google.internal", "metadata"})
 _METADATA_ADDRESSES = frozenset(
     {
-        ipaddress.ip_address("169.254.169.254"),
-        ipaddress.ip_address("fd00:ec2::254"),
-        ipaddress.ip_address("100.100.100.200"),
+        ipaddress.ip_address("169.254.169.254"),  # AWS, Azure, GCP, OpenStack, and most other clouds
+        ipaddress.ip_address("fd00:ec2::254"),  # AWS IMDS over IPv6
+        ipaddress.ip_address("100.100.100.200"),  # Alibaba Cloud
+        ipaddress.ip_address("192.0.0.192"),  # Oracle Cloud (legacy)
+        ipaddress.ip_address("169.254.170.2"),  # AWS ECS task credentials
+        ipaddress.ip_address("169.254.170.23"),  # AWS EKS Pod Identity credentials
+        ipaddress.ip_address("fd00:ec2::23"),  # AWS EKS Pod Identity credentials over IPv6
     }
 )
 _LOOPBACK_HOSTNAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"})
@@ -1019,12 +1232,25 @@ _PRIVATE_NETWORKS: tuple[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, st
     (ipaddress.ip_network("192.168.0.0/16"), "private (RFC 1918)"),
     (ipaddress.ip_network("100.64.0.0/10"), "carrier-grade NAT (100.64.0.0/10)"),
     (ipaddress.ip_network("169.254.0.0/16"), "link-local"),
+    (ipaddress.ip_network("192.0.0.0/24"), "special-purpose (IETF protocol assignments)"),
+    (ipaddress.ip_network("192.0.2.0/24"), "special-purpose (documentation)"),
+    (ipaddress.ip_network("198.51.100.0/24"), "special-purpose (documentation)"),
+    (ipaddress.ip_network("203.0.113.0/24"), "special-purpose (documentation)"),
+    (ipaddress.ip_network("224.0.0.0/4"), "multicast"),
+    (ipaddress.ip_network("240.0.0.0/4"), "special-purpose (reserved, including broadcast)"),
     (ipaddress.ip_network("::1/128"), "loopback"),
     (ipaddress.ip_network("::/128"), "unspecified"),
     (ipaddress.ip_network("fc00::/7"), "unique local (fc00::/7)"),
     (ipaddress.ip_network("fe80::/10"), "link-local"),
     (ipaddress.ip_network("fec0::/10"), "site-local (deprecated)"),
+    (ipaddress.ip_network("2001:db8::/32"), "special-purpose (documentation)"),
+    (ipaddress.ip_network("ff00::/8"), "multicast"),
 )
+# 198.18.0.0/15 (benchmarking) is not globally routable, but fake-IP proxy and VPN
+# tools answer every DNS query from it and forward the connection to the real,
+# public host. Classifying it as private would flag every endpoint on such a
+# machine, so it is treated like a public address.
+_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 _NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
 # Ideographic / fullwidth / halfwidth full stops that UTS #46 maps to '.'.
 _DOT_LOOKALIKES = str.maketrans({chr(0x3002): ".", chr(0xFF0E): ".", chr(0xFF61): "."})
@@ -1139,6 +1365,50 @@ def _address_class(address: IPAddress) -> tuple[EndpointKind, str] | None:
     return None
 
 
+def _not_globally_reachable(address: IPAddress) -> tuple[EndpointKind, str] | None:
+    """Any other special-purpose address (IANA: not globally reachable, multicast, or reserved) is not public."""
+    if address.version == 4 and address in _FAKE_IP_NETWORK:
+        return None
+    if address.is_multicast:
+        return "private", "multicast"
+    if not address.is_global or address.is_reserved:
+        return "private", "special-purpose (not globally reachable)"
+    return None
+
+
+def _classify_address(address: IPAddress) -> tuple[tuple[EndpointKind, str] | None, bool]:
+    """``(classification, embedded)``: an embedded IPv4 (mapped, 6to4, Teredo, NAT64, compatible) decides for it."""
+    found = _address_class(address)
+    if found is not None:
+        return found, False
+    inner = _embedded_ipv4(address)
+    if inner is not None:
+        return _address_class(inner) or _not_globally_reachable(inner), True
+    return _not_globally_reachable(address), False
+
+
+def classify_endpoint_address(address: IPAddress) -> tuple[EndpointKind, str] | None:
+    """Classify one resolved IP address as ``metadata`` or ``private`` (``None`` when public).
+
+    IPv4 addresses embedded in IPv6 (mapped, 6to4, Teredo, NAT64, compatible)
+    are classified by the embedded address, like IP-literal hosts. Any address
+    that is not globally reachable (special-purpose, documentation, reserved,
+    broadcast, or multicast) counts as ``private``, except 198.18.0.0/15, which
+    fake-IP proxy tools hand out for public names.
+    """
+    return _classify_address(address)[0]
+
+
+def endpoint_client_host(host: str) -> str:
+    """The host name a WHATWG client (Node, the MCP SDKs) looks up for ``host``.
+
+    Percent-encoding is decoded and the name is lower-cased and IDNA-mapped, the
+    way the URL parser does before it connects, so ``internal%2eexample`` is
+    looked up as ``internal.example``. Brackets and a trailing dot are dropped.
+    """
+    return _normalize_host(host)
+
+
 def classify_endpoint_host(host: str) -> EndpointClass | None:
     """Classify an MCP URL host as a metadata or private endpoint, network-free.
 
@@ -1160,13 +1430,8 @@ def classify_endpoint_host(host: str) -> EndpointClass | None:
     address, encoded = _parse_host_address(normalized)
     if address is None:
         return None
-    encoded = encoded or name_encoded
-    found = _address_class(address)
-    if found is None:
-        inner = _embedded_ipv4(address)
-        if inner is not None:
-            found = _address_class(inner)
-            encoded = True
+    found, embedded = _classify_address(address)
+    encoded = encoded or name_encoded or embedded
     if found is None:
         return None
     kind, reason = found
@@ -1202,6 +1467,28 @@ def host_is_allowlisted(endpoint: EndpointClass, allowed_hosts: Iterable[str]) -
         except ValueError:
             continue
         if any(candidate.version == network.version and candidate in network for candidate in candidates):
+            return True
+    return False
+
+
+def host_name_is_allowlisted(host: str, allowed_hosts: Iterable[str]) -> bool:
+    """True when a policy entry names this host (exact name or ``*.suffix``).
+
+    Only host names match here: IP literals and CIDR entries are checked against
+    resolved addresses with :func:`host_is_allowlisted`, and cloud metadata host
+    names are never allowlisted.
+    """
+    normalized = _normalize_host(host)
+    if not normalized or normalized in _METADATA_HOSTNAMES:
+        return False
+    address, _encoded = _parse_host_address(normalized)
+    if address is not None:
+        return False
+    for raw in allowed_hosts:
+        if not isinstance(raw, str):
+            continue
+        entry = _normalize_host(raw)
+        if entry and (entry == normalized or (entry.startswith("*.") and normalized.endswith(entry[1:]))):
             return True
     return False
 
@@ -1256,6 +1543,7 @@ def _validate_endpoint(
 PERMISSION_BYPASS_FLAGS: tuple[str, ...] = (
     "--dangerously-skip-permissions",
     "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
     "--allow-dangerously-skip-permissions",
     "--yolo",
 )
@@ -1264,24 +1552,56 @@ _BYPASS_FLAG_RE = re.compile(
     re.IGNORECASE,
 )
 # Option/value pairs with the same effect: Claude Code's permission mode, Gemini
-# CLI's approval mode, and Codex CLI's sandbox (long and short option).
+# CLI's approval mode, and Codex CLI's sandbox and approval policy (long and short option).
 PERMISSION_BYPASS_OPTIONS: tuple[tuple[str, str], ...] = (
     ("--permission-mode", "bypassPermissions"),
     ("--approval-mode", "yolo"),
     ("--sandbox", "danger-full-access"),
     ("-s", "danger-full-access"),
+    ("--ask-for-approval", "never"),
+    ("-a", "never"),
 )
-# In one string: "--opt value", "--opt=value", or a quoted value.
-_BYPASS_OPTION_RES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
-    (
-        f"{option} {value}",
-        re.compile(rf"(?<![\w-]){re.escape(option)}(?:=|\s+)[\"']?{re.escape(value)}(?![\w-])", re.IGNORECASE),
-    )
+# Codex CLI config overrides with the same effect: '-c approval_policy=never',
+# '--config sandbox_mode="danger-full-access"'.
+PERMISSION_BYPASS_CONFIG: tuple[tuple[str, str], ...] = (
+    ("approval_policy", "never"),
+    ("sandbox_mode", "danger-full-access"),
+)
+# '-a' is a common short option and '-c' / '--config' a common flag, so '-a never' and the config
+# overrides count only after a codex command in the same string or argv ('grep -a never f' is not Codex).
+_CODEX_ONLY_OPTIONS = frozenset({"-a"})
+_CODEX_COMMAND_RE = re.compile(r"(?<![\w.-])codex(?:\.exe|\.cmd)?(?![\w.-])|\$\{?CODEX\w*", re.IGNORECASE)
+_BYPASS_CONFIG_OPTIONS = frozenset({"-c", "--config"})
+_BYPASS_CONFIG_VALUE_RES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (f"-c {key}={value}", re.compile(rf"^[\"']?{key}\s*=\s*[\"']?{re.escape(value)}[\"']?$", re.IGNORECASE))
+    for key, value in PERMISSION_BYPASS_CONFIG
+)
+# In one string: "--opt value", "--opt=value", or a quoted value; the last item is True for a Codex-only form.
+_BYPASS_OPTION_RES: tuple[tuple[str, re.Pattern[str], bool], ...] = (
+    *(
+        (
+            f"{option} {value}",
+            re.compile(rf"(?<![\w-]){re.escape(option)}(?:=|\s+)[\"']?{re.escape(value)}(?![\w-])", re.IGNORECASE),
+            option in _CODEX_ONLY_OPTIONS,
+        )
+        for option, value in PERMISSION_BYPASS_OPTIONS
+    ),
+    *(
+        (
+            f"-c {key}={value}",
+            re.compile(
+                rf"(?<![\w-])(?:-c|--config)(?:=|\s+)[\"']?{key}\s*=\s*[\"']?{re.escape(value)}(?![\w-])",
+                re.IGNORECASE,
+            ),
+            True,
+        )
+        for key, value in PERMISSION_BYPASS_CONFIG
+    ),
+)
+# Split across adjacent argv tokens: option -> (value, reported flag, Codex-only).
+_BYPASS_OPTION_VALUES: dict[str, tuple[str, str, bool]] = {
+    option.lower(): (value.lower(), f"{option} {value}", option in _CODEX_ONLY_OPTIONS)
     for option, value in PERMISSION_BYPASS_OPTIONS
-)
-# Split across adjacent argv tokens: option -> (value, reported flag).
-_BYPASS_OPTION_VALUES: dict[str, tuple[str, str]] = {
-    option.lower(): (value.lower(), f"{option} {value}") for option, value in PERMISSION_BYPASS_OPTIONS
 }
 # Keys whose values are prose, never executed config -- documentation mentions of
 # a flag are not flagged.
@@ -1372,22 +1692,43 @@ def iter_config_strings(value: Any, *, skip_doc_keys: bool = True) -> Iterator[t
             yield path, node
 
 
+def _codex_hit(text: str, start: int) -> bool:
+    """Whether a codex command comes before ``start`` in ``text``."""
+    return _CODEX_COMMAND_RE.search(text, 0, start) is not None
+
+
 def _bypass_hits(path: str, node: Any) -> Iterator[tuple[str, str]]:
     """Yield ``(json_path, flag)`` for bypass flags in a string or split across argv tokens."""
     if isinstance(node, str):
         for match in _BYPASS_FLAG_RE.finditer(node):
             yield path, match.group(1).lower()
-        for label, pattern in _BYPASS_OPTION_RES:
-            if pattern.search(node):
+        for label, pattern, codex_only in _BYPASS_OPTION_RES:
+            if any(not codex_only or _codex_hit(node, hit.start()) for hit in pattern.finditer(node)):
                 yield path, label
     elif isinstance(node, list):
-        # argv lists carry an option and its value as two tokens: ["--sandbox", "danger-full-access"].
-        for index, (option, value) in enumerate(itertools.pairwise(node)):
-            if not isinstance(option, str) or not isinstance(value, str):
-                continue
-            expected = _BYPASS_OPTION_VALUES.get(option.strip().lower())
-            if expected is not None and value.strip().strip("\"'").lower() == expected[0]:
-                yield f"{path}[{index}]", expected[1]
+        yield from _argv_bypass_hits(path, node, codex=False)
+    elif isinstance(node, dict):
+        # {"command": "codex", "args": ["-a", "never"]}: the args follow a codex command.
+        command, args = node.get("command"), node.get("args")
+        if isinstance(command, str) and isinstance(args, list) and _CODEX_COMMAND_RE.search(command):
+            yield from _argv_bypass_hits(f"{path}.args" if path else "args", args, codex=True)
+
+
+def _argv_bypass_hits(path: str, argv: list[Any], *, codex: bool) -> Iterator[tuple[str, str]]:
+    """Bypass options split across adjacent argv tokens (``["--sandbox", "danger-full-access"]``); the
+    Codex-only forms count only after a codex token, or when ``codex`` says the argv belongs to one."""
+    for index, (option, value) in enumerate(itertools.pairwise(argv)):
+        if isinstance(option, str) and _CODEX_COMMAND_RE.search(option):
+            codex = True
+        if not isinstance(option, str) or not isinstance(value, str):
+            continue
+        expected = _BYPASS_OPTION_VALUES.get(option.strip().lower())
+        if expected is not None and value.strip().strip("\"'").lower() == expected[0] and (codex or not expected[2]):
+            yield f"{path}[{index}]", expected[1]
+        if codex and option.strip().lower() in _BYPASS_CONFIG_OPTIONS:
+            for label, pattern in _BYPASS_CONFIG_VALUE_RES:
+                if pattern.match(value.strip()):
+                    yield f"{path}[{index}]", label
 
 
 def permission_bypass_issues(value: Any) -> list[OverrideIssue]:

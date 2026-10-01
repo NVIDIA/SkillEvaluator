@@ -202,7 +202,7 @@ Applies to the whole run: target typing, policy profile, reports, tier selection
 | `--policy FILE` | none | Custom policy YAML overlaid on top of `--profile`. |
 | `--repo-root DIRECTORY` | git top-level of the plugin | Plugin only: repository root used to resolve same-repository skill and rule references in Tier 1 and Tier 3. The missing-dependency gate also requires this root to have a git `origin` remote; otherwise references stay `unresolved` (advisory). |
 
-Auto-detection recognizes: a `SKILL.md` for skills, `.mdc` files for rules, `workflow-rules.mdc` for workflows, and — for plugins — a bundle-reference `agent_plugin.yaml`/`.yml` manifest or a contained `.claude-plugin/plugin.json` manifest. Plugins are validated against their public contract; quality, lint, and version checks run on each skill bundled under the plugin's `skills/` directory. Plugins run Tiers 1 and 2 by default; request plugin Tier 3 with `--tier3`. See [Plugin Evaluation](plugin-evaluation.mdx).
+Auto-detection recognizes: a `SKILL.md` for skills, `.mdc` files for rules, `workflow-rules.mdc` for workflows, and — for plugins — a bundle-reference `agent_plugin.yaml`/`.yml` manifest, or a contained `.claude-plugin/`, `.codex-plugin/`, or `.cursor-plugin/` `plugin.json` or Agent Plugins root `plugin.json` manifest ([precedence](plugin-evaluation.mdx#manifest-detection)). Plugins are validated against their public contract; quality, lint, and version checks run on each skill bundled under the plugin's `skills/` directory. Plugins run Tiers 1 and 2 by default; request plugin Tier 3 with `--tier3`. See [Plugin Evaluation](plugin-evaluation.mdx).
 
 `validate` also takes the standard `-r/--report` and `-o/--output-dir` options described under [Global conventions](#global-conventions).
 
@@ -212,7 +212,8 @@ Static checks; LLM-free by default. Tier 1 gates the exit code and always runs.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--checks, --tier1-checks TEXT` | all applicable | Comma-separated subset of Tier 1 checks. Default choices: `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, `lint`; opt-in (not run by default): `dependency`. `quality`/`lint`/`version` are skill-only and skipped for rules and workflows. |
+| `--checks, --tier1-checks TEXT` | all applicable | Comma-separated subset of Tier 1 checks. Default choices: `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, `lint`; opt-in (not run by default): `dependency`, and, for plugins, `claude-validate` (parity with `claude plugin validate --strict`). `quality`/`lint`/`version` are skill-only and skipped for rules and workflows. |
+| `--resolve-endpoints` | off | Plugin only, opt-in network check: resolve MCP and HTTP hook URL hosts and send one credential-free `HEAD` (no redirects followed) to flag names or redirects that reach private, link-local, or cloud-metadata addresses. Also enabled by `endpoints.resolve: true` in the policy. See [Plugin Evaluation](plugin-evaluation.mdx#opt-in-endpoint-dns-and-redirect-checks). |
 | `--fail-fast` | off | Stop on the first failing check instead of collecting all issues. |
 | `-c, --continue-on-failure` | off | Run the full pipeline without stopping early; record all issues in the reports. Overrides `--fail-fast`, and for folder validation keeps scanning every skill past a CRITICAL finding. |
 | `--llm, --tier1-llm / --no-llm, --no-tier1-llm` | `no-llm` | Enable LLM-backed security analysis (requires a configured public provider — see [Providers & Credentials](configuration.mdx)). |
@@ -242,6 +243,9 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents to evaluate. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. |
 | `--env-mode` | `docker` | Harbor environment backend (full list under [tier3 evaluate](#tier3-evaluate)). |
 | `--lift-mode [effectiveness\|integration\|both]` | `effectiveness` | Plugin only: compare the coordinated plugin with no plugin, its member skills staged individually, or both. Integration requires explicit cross-component dataset evidence. |
+| `--plugin-load [wrapper\|native\|auto]` | `wrapper` | Plugin only: how the with-plugin arm loads the plugin: the generated wrapper skill, the harness's own plugin layout, or native where supported. See [Native loading](plugin-evaluation.mdx#native-loading). |
+| `--probe-mcp` | off | Plugin only: before Tier 3, probe each author-supplied URL MCP server from the host (`initialize` + `tools/list`, bounded, no redirects) under the endpoint policy and `mcp.allowed_private_hosts` from `--policy`. Advisory; recorded as `mcp_proof`. See [Public MCP proof](plugin-evaluation.mdx#public-mcp-proof). |
+| `--probe-mcp-env NAME` | none | Plugin only, with `--probe-mcp`: a host environment variable the probe may expand into a server's declared `${NAME}` headers (repeatable). Without it, the probe sends only literal header values; a header that references any other variable is not sent. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
@@ -394,7 +398,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; experimental: `hermes` (container environments only, Anthropic provider); the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `--env-mode` | `docker` | Where trials run. All 16 values: `docker`, `daytona`, `e2b`, `modal`, `runloop`, `langsmith`, `gke`, `novita`, `apple-container`, `singularity`, `islo`, `tensorlake`, `cwsandbox`, `wandb`, `use-computer`, `local`. Cloud modes are provider-managed Harbor backends enabled by the matching Harbor extra; `local` runs on your host. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `--autopilot` | off | Create one eval case when no dataset/task source exists, then evaluate. The case is LLM-generated with the configured provider, with a deterministic keyless template fallback; an existing source is never overwritten. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
@@ -433,10 +437,13 @@ Flags marked "unset" fall back to their matching keys in `evals/config.yml` wher
 ## tier3 evaluate-plugin
 
 Run Tier 3 against a public plugin without fetching remote components. The
-command accepts a bundle-reference `agent_plugin.yaml`/`.yml` target or a
-contained `.claude-plugin/plugin.json` target, stages the locally evaluable
-skills, rules, and MCP declarations into a temporary wrapper, and records any
-unresolved remote references in plugin provenance.
+command accepts a plugin root or its manifest in any supported format: a
+bundle-reference `agent_plugin.yaml`/`.yml`, a contained `.claude-plugin/`,
+`.codex-plugin/`, or `.cursor-plugin/` `plugin.json`, or an Agent Plugins root
+`plugin.json` ([precedence](plugin-evaluation.mdx#manifest-detection)). It
+stages the locally evaluable skills, rules, and MCP declarations into a
+temporary wrapper (or the harness's own layout with `--plugin-load`), and
+records any unresolved remote references in plugin provenance.
 
 ```bash title="Evaluate plugin effectiveness and Integration"
 skillevaluator tier3 evaluate-plugin ./my-plugin --lift-mode both \
@@ -450,6 +457,9 @@ skillevaluator tier3 evaluate-plugin ./my-plugin --lift-mode both \
 | `--env-mode` | `docker` | Harbor environment backend; accepts the same values as [tier3 evaluate](#tier3-evaluate). |
 | `--skip-baseline` | off | Skip the no-plugin baseline. Invalid with `integration` or `both`, which require a baseline. |
 | `--lift-mode [effectiveness\|integration\|both]` | `effectiveness` | Compare the coordinated plugin with no plugin, its member skills staged individually, or both. `both` falls back to effectiveness when composition evidence is missing. |
+| `--plugin-load [wrapper\|native\|auto]` | `wrapper` | How the with-plugin arm loads the plugin. `native` fails for agents or environments without a native adapter; `auto` falls back to the wrapper. Baseline arms are unchanged. See [Native loading](plugin-evaluation.mdx#native-loading). |
+| `--probe-mcp` | off | Before the run, probe each author-supplied URL MCP server from the host (`initialize` + `tools/list`, bounded, no redirects) under the endpoint policy. This command takes no policy file and uses a bundled profile (`SKILLEVALUATOR_PROFILE` or the default), none of which allowlists private hosts, so private hosts are not probed; a custom `mcp.allowed_private_hosts` allowlist applies to `--probe-mcp` only through `validate --tier3 --policy <file>`. Advisory; recorded as `mcp_proof` in plugin provenance. See [Public MCP proof](plugin-evaluation.mdx#public-mcp-proof). |
+| `--probe-mcp-env NAME` | none | With `--probe-mcp`: a host environment variable the probe may expand into a server's declared `${NAME}` headers (repeatable). Without it, the probe sends only literal header values; a header that references any other variable is not sent. |
 | `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
 | `--pass-threshold FLOAT` | unset | Score threshold (0.0–1.0) for a case to count as passed. |
 | `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |

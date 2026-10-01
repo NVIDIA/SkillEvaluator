@@ -19,6 +19,14 @@ from urllib.parse import urlparse
 
 from skillevaluator.inference.types import EmptyLLMResponseError
 from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, _model_leaf, _supports_custom_temperature
+from skillevaluator.tier3.eval_core.atif_helpers import (
+    _SECTION_COMPACT_TOOL_HISTORY,
+    _SECTION_FINAL_RESPONSE,
+    _SECTION_USER_REQUEST,
+    _behavior_check_budget,
+    _behavior_final_response_limit,
+    _truncate_for_behavior,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -839,17 +847,86 @@ Respond with ONLY a JSON object:
 "score": <float between 0.0 and 1.0>, "summary": "<brief summary>"}}"""
 
 
-def _compact_behavior_conversation(conversation_text: str, limit: int = 8000) -> str:
+def _slice_with_middle_marker(
+    text: str,
+    budget: int,
+    marker: str,
+    *,
+    max_head: int | None = None,
+    fallback_tail: bool = False,
+) -> str:
+    """Compact *text* to fit *budget* by replacing the middle with *marker*."""
+    if budget <= 0 or not text:
+        return ""
+    if len(text) <= budget:
+        return text
+    if budget <= len(marker) + 2:
+        return text[-budget:] if fallback_tail else text[:budget]
+    avail = budget - len(marker)
+    head = max(1, avail // 2 if max_head is None else min(max_head, avail // 2))
+    tail = max(1, avail - head)
+    return f"{text[:head]}{marker}{text[-tail:]}"
+
+
+def _compact_behavior_conversation(conversation_text: str, limit: int | None = None) -> str:
     """Keep both setup context and late outcome evidence in behavior prompts."""
+    if limit is None:
+        limit = _behavior_check_budget()
     if len(conversation_text) <= limit:
         return conversation_text
 
     marker = "\n...[middle truncated for behavior check]...\n"
-    if limit <= len(marker):
+    if limit <= len(marker) + 1:
         return conversation_text[:limit]
 
-    head = max(1, (limit - len(marker)) * 2 // 3)
-    tail = max(1, limit - len(marker) - head)
+    final_limit = _behavior_final_response_limit()
+    final_header = f"{_SECTION_FINAL_RESPONSE}\n"
+    final_idx = -1
+    if conversation_text.startswith(final_header):
+        final_idx = 0
+    else:
+        pos = conversation_text.find(f"\n\n{final_header}")
+        if pos != -1:
+            final_idx = pos + 2
+
+    if final_idx != -1:
+        final_end = len(conversation_text)
+        for next_hdr in (f"\n\n{_SECTION_USER_REQUEST}\n", f"\n\n{_SECTION_COMPACT_TOOL_HISTORY}\n"):
+            pos = conversation_text.find(next_hdr, final_idx)
+            if pos != -1 and pos < final_end:
+                final_end = pos
+        prefix = conversation_text[:final_idx]
+        final_sec = conversation_text[final_idx:final_end]
+        suffix = conversation_text[final_end:]
+
+        reserved_other = min(1600, max(0, limit - final_limit), limit // 2)
+        max_final = min(final_limit, max(1, limit - reserved_other))
+        if len(final_sec) > max_final:
+            final_body = final_sec[len(final_header) :]
+            body_limit = max(1, max_final - len(final_header))
+            final_sec = f"{final_header}{_truncate_for_behavior(final_body, body_limit)}"[:max_final]
+
+        rem = limit - len(final_sec)
+        if rem <= 0:
+            return final_sec[:limit]
+        if len(prefix) + len(suffix) <= rem:
+            return f"{prefix}{final_sec}{suffix}"
+        if not suffix:
+            pre_comp = _slice_with_middle_marker(prefix, rem, marker)
+            return f"{pre_comp}{final_sec}"[:limit]
+        if len(prefix) <= rem // 2:
+            suf_comp = _slice_with_middle_marker(suffix, rem - len(prefix), marker, max_head=800, fallback_tail=True)
+            return f"{prefix}{final_sec}{suf_comp}"[:limit]
+        pre_budget = max(1, min(len(prefix), rem // 2))
+        suf_budget = max(0, rem - pre_budget)
+        pre_comp = _slice_with_middle_marker(prefix, pre_budget, marker)
+        suf_comp = _slice_with_middle_marker(suffix, suf_budget, marker, max_head=800, fallback_tail=True)
+        return f"{pre_comp}{final_sec}{suf_comp}"[:limit]
+
+    available = limit - len(marker)
+    reserved_head = min(1600, available // 2)
+    tail = max(1, available // 3, min(final_limit, max(1, available - max(1, reserved_head))))
+    head = max(1, available - tail)
     return f"{conversation_text[:head]}{marker}{conversation_text[-tail:]}"
 
 

@@ -1,0 +1,712 @@
+{#-
+    Plugin report sections. Every macro renders a display model built by
+    ``skillevaluator.reporting.plugin_sections``; values are pre-formatted
+    strings and small counts, and autoescape stays on for all of them. Callers
+    render a macro only when its model is present, so skill reports are
+    unchanged.
+-#}
+
+{% macro _pill_class(value) -%}
+{{ {'ok': 'ok', 'warn': 'warn', 'fail': 'fail', 'passed': 'ok', 'failed': 'fail', 'incomplete': 'warn'}.get(value, 'neutral') }}
+{%- endmacro %}
+
+{% macro _names_inline(names, empty='none') -%}
+{% if names %}{% for name in names %}<span class="metadata-tag">{{ name }}</span>{% endfor %}{% else %}{{ empty }}{% endif %}
+{%- endmacro %}
+
+{% macro _context_cost(cost, section_id) %}
+<div class="plugin-subsection" id="{{ section_id }}">
+    <h4>Context cost <span class="plugin-pill neutral">{{ cost.label }}</span></h4>
+    <div class="plugin-stat-row">
+        <div class="plugin-stat"><span class="plugin-stat-value">{{ cost.always_on }}</span><span class="plugin-stat-label">always-on tokens</span></div>
+        <div class="plugin-stat"><span class="plugin-stat-value">{{ cost.on_demand }}</span><span class="plugin-stat-label">on-demand tokens</span></div>
+    </div>
+    <p class="plugin-hint">{{ cost.note }}</p>
+    {% if cost.components %}
+    <div class="table-scroll"><table class="summary-table">
+        <thead><tr><th>Type</th><th>Component</th><th>Always-on</th><th>On-demand</th><th>Basis</th></tr></thead>
+        <tbody>
+        {% for row in cost.components %}
+        <tr><td>{{ row.type }}</td><td>{{ row.name }}</td><td>{{ row.always_on }}</td><td>{{ row.on_demand }}</td><td>{{ row.basis }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    {% if cost.omitted %}<p class="plugin-hint">{{ cost.omitted }} more component(s) omitted.</p>{% endif %}
+    {% endif %}
+    {% for note in cost.notes %}<p class="plugin-hint">{{ note }}</p>{% endfor %}
+</div>
+{% endmacro %}
+
+{% macro _pinning(pinning, unpinned, section_id) %}
+<div class="plugin-subsection" id="{{ section_id }}">
+    <h4>MCP pinning</h4>
+    <div class="plugin-stat-row">
+        <div class="plugin-stat"><span class="plugin-stat-value">{{ pinning.ratio_label }}</span><span class="plugin-stat-label">pinned ratio</span></div>
+        <div class="plugin-stat"><span class="plugin-stat-value">{{ pinning.summary }}</span><span class="plugin-stat-label">servers</span></div>
+        {% if pinning.not_applicable %}<div class="plugin-stat"><span class="plugin-stat-value">{{ pinning.not_applicable }}</span><span class="plugin-stat-label">not applicable</span></div>{% endif %}
+    </div>
+    {% if unpinned %}
+    <div class="plugin-callout warn">
+        <strong>Unpinned MCP servers ({{ unpinned | length }}):</strong> a server launched without a pinned version or digest can change between runs.
+        <div class="table-scroll"><table class="summary-table">
+            <thead><tr><th>Server</th><th>Kind</th><th>Source</th><th>Detail</th></tr></thead>
+            <tbody>
+            {% for server in unpinned %}
+            <tr><td>{{ server.name }}</td><td>{{ server.kind }}</td><td>{{ server.source }}</td><td>{{ server.pin_detail }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table></div>
+    </div>
+    {% endif %}
+</div>
+{% endmacro %}
+
+{#- ===================== Tier 1 / Tier 2: static plugin section ===================== -#}
+{% macro tier1_plugin_section(p) %}
+<section class="plugin-section" id="plugin-overview" aria-labelledby="plugin-overview-title">
+    <div class="plugin-section-head">
+        <h3 id="plugin-overview-title">Plugin{% if p.name %}: {{ p.name }}{% endif %}</h3>
+        {% if p.status_label %}<span class="plugin-pill {{ _pill_class(p.status) }}">{{ p.status_label }}</span>{% endif %}
+    </div>
+    <div class="plugin-kv">
+        <span><strong>Manifest:</strong> {{ p.manifest_type or 'unknown' }}{% if p.manifest_filename %} (<code>{{ p.manifest_filename }}</code>){% endif %}</span>
+        {% if p.plugin_mode %}<span><strong>Mode:</strong> {{ p.plugin_mode }}</span>{% endif %}
+        {% if p.in_plugin_skills is not none %}<span><strong>Contained skills:</strong> {{ p.in_plugin_skills }}</span>{% endif %}
+    </div>
+    {% if p.manifest_declarations %}{{ _manifest_declarations(p.manifest_declarations) }}{% endif %}
+    {% if p.declared_dependencies %}
+    <p class="plugin-hint"><strong>Declared dependencies:</strong>
+        {% for dep in p.declared_dependencies %}<span class="metadata-tag">{{ dep.kind }}: {{ dep.count }}</span>{% endfor %}
+    </p>
+    {% endif %}
+    {% if p.bundled_skills %}
+    <p class="plugin-hint"><strong>Bundled skills:</strong> {{ _names_inline(p.bundled_skills) }}{% if p.bundled_skills_omitted %} (+{{ p.bundled_skills_omitted }} more){% endif %}</p>
+    {% endif %}
+
+    {% if p.dependencies %}
+    {% set deps = p.dependencies %}
+    <div class="plugin-subsection" id="plugin-dependency-resolution">
+        <h4>Dependency resolution{% if deps.missing %} <span class="plugin-pill fail">{{ deps.missing }} missing</span>{% endif %}</h4>
+        {% if deps.counts %}
+        <div class="plugin-stat-row">
+            {% for row in deps.counts %}
+            <div class="plugin-stat{{ ' bad' if row.state == 'missing' and row.count else '' }}"><span class="plugin-stat-value">{{ row.count }}</span><span class="plugin-stat-label">{{ row.state }}</span></div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% if deps.rows %}
+        <div class="table-scroll"><table class="summary-table">
+            <thead><tr><th>Kind</th><th>Ref</th><th>State</th><th>Path</th><th>Reason</th></tr></thead>
+            <tbody>
+            {% for row in deps.rows %}
+            <tr>
+                <td>{{ row.kind }}</td><td><code>{{ row.ref }}</code></td>
+                <td><span class="plugin-pill {{ 'fail' if row.state == 'missing' else ('ok' if row.state in ['provided', 'referenced'] else 'neutral') }}">{{ row.state }}</span></td>
+                <td>{% if row.path %}<code>{{ row.path }}</code>{% else %}&mdash;{% endif %}</td>
+                <td>{{ row.reason }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table></div>
+        {% if deps.omitted %}<p class="plugin-hint">{{ deps.omitted }} more ref(s) omitted.</p>{% endif %}
+        {% endif %}
+    </div>
+    {% endif %}
+
+    {% if p.inventory %}
+    {% set inv = p.inventory %}
+    <div class="plugin-subsection" id="plugin-component-inventory">
+        <h4>Component inventory ({{ inv.total }})</h4>
+        {% if inv.counts %}<p class="plugin-hint">{% for row in inv.counts %}<span class="metadata-tag">{{ row.type }}: {{ row.count }}</span>{% endfor %}</p>{% endif %}
+        {% if inv.unsupported_types %}
+        <div class="plugin-callout warn" id="plugin-unsupported-types">
+            <strong>Unsupported component types present:</strong> {{ _names_inline(inv.unsupported_types) }}.
+            {{ inv.unsupported_note }}
+        </div>
+        {% endif %}
+        {% if inv.rows %}
+        <div class="table-scroll"><table class="summary-table">
+            <thead><tr><th>Type</th><th>Name</th><th>Origin</th><th>Support</th><th>Findings</th></tr></thead>
+            <tbody>
+            {% for row in inv.rows %}
+            <tr>
+                <td>{{ row.type }}</td>
+                <td>{{ row.name }}{% if row.path %}<div class="plugin-subtle"><code>{{ row.path }}</code></div>{% endif %}</td>
+                <td>{{ row.origin }}</td>
+                <td><span class="plugin-pill {{ 'ok' if row.support == 'evaluated' else ('fail' if row.support == 'unsupported' else 'neutral') }}">{{ row.support_label }}</span></td>
+                <td>{{ row.findings }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table></div>
+        {% if inv.omitted %}<p class="plugin-hint">{{ inv.omitted }} more component(s) omitted.</p>{% endif %}
+        {% endif %}
+    </div>
+    {% endif %}
+
+    {% if p.mcp and p.mcp.pinning %}{{ _pinning(p.mcp.pinning, p.mcp.unpinned, 'plugin-mcp-pinning') }}{% endif %}
+    {% if p.context_cost %}{{ _context_cost(p.context_cost, 'plugin-context-cost') }}{% endif %}
+    {% if p.static_risk %}{{ tier1_static_risk_sections(p.static_risk) }}{% endif %}
+    {% if p.catalog_skill_similarity %}{{ _similarity(p.catalog_skill_similarity, 'plugin-catalog-skill-similarity', 'Bundled skills vs. local skills catalog', 'skills') }}{% endif %}
+    {% if p.inter_plugin_similarity %}{{ _similarity(p.inter_plugin_similarity, 'plugin-inter-plugin-similarity', 'Plugin vs. other plugins in the local catalog', 'plugins') }}{% endif %}
+</section>
+{% endmacro %}
+
+{#- ===================== Tier 1: static risk (hooks, privileges, parity, CVEs, endpoints) ===================== -#}
+{% macro tier1_static_risk_sections(r) %}
+{% if r.privileges %}
+{% set pv = r.privileges %}
+<div class="plugin-subsection" id="plugin-privileges">
+    <h4>Subagent and command privileges{% if pv.flagged %} <span class="plugin-pill warn">{{ pv.flagged }} flagged</span>{% endif %}</h4>
+    <p class="plugin-hint">{{ pv.agents }} subagent(s), {{ pv.commands }} command(s). Grants are read from frontmatter; nothing is loaded or run.</p>
+    <div class="table-scroll"><table class="summary-table">
+        <thead><tr><th>Type</th><th>Name</th><th>Grants</th><th>Model</th><th>Permission mode</th><th>Invocation</th><th>Flags</th></tr></thead>
+        <tbody>
+        {% for row in pv.rows %}
+        <tr>
+            <td>{{ row.type }}</td>
+            <td>{{ row.name }}{% if row.path %}<div class="plugin-subtle"><code>{{ row.path }}</code></div>{% endif %}</td>
+            <td>{{ row.grants or '—' }}</td><td>{{ row.model or '—' }}</td><td>{{ row.permission_mode or '—' }}</td><td>{{ row.invocation or '—' }}</td>
+            <td>{% for flag in row.flags %}<span class="plugin-pill {{ 'warn' if row.risky else 'neutral' }}">{{ flag }}</span> {% else %}&mdash;{% endfor %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    {% if pv.omitted %}<p class="plugin-hint">{{ pv.omitted }} more row(s) omitted.</p>{% endif %}
+</div>
+{% endif %}
+{% if r.hooks %}
+{% set hk = r.hooks %}
+<div class="plugin-subsection" id="plugin-hook-risk">
+    <h4>Hook risk ({{ hk.total }} handlers){% if hk.flagged %} <span class="plugin-pill warn">{{ hk.flagged }} flagged</span>{% endif %}</h4>
+    {% if hk.by_flag %}<p class="plugin-hint">{% for row in hk.by_flag %}<span class="metadata-tag">{{ row.flag }}: {{ row.count }}</span>{% endfor %}</p>{% endif %}
+    <div class="table-scroll"><table class="summary-table">
+        <thead><tr><th>Event</th><th>Matcher</th><th>Handler</th><th>Target</th><th>Risk flags</th></tr></thead>
+        <tbody>
+        {% for row in hk.rows %}
+        <tr>
+            <td>{{ row.event }}</td><td><code>{{ row.matcher }}</code></td><td>{{ row.handler_type }}</td>
+            <td>{% if row.target %}<code>{{ row.target }}</code>{% else %}&mdash;{% endif %}</td>
+            <td>{% for flag in row.flags %}<span class="plugin-pill warn">{{ flag }}</span> {% else %}&mdash;{% endfor %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    {% if hk.omitted %}<p class="plugin-hint">{{ hk.omitted }} more hook(s) omitted.</p>{% endif %}
+</div>
+{% endif %}
+{% if r.cve %}
+<div class="plugin-subsection" id="plugin-cve-summary">
+    <h4>Dependency CVE audit{% if r.cve.incomplete %} <span class="plugin-pill warn">INCOMPLETE</span>{% endif %}</h4>
+    <div class="table-scroll"><table class="summary-table">
+        <thead><tr><th>Ecosystem</th><th>Status</th><th>Scanner</th><th>Audited</th><th>Unverified</th><th>Vulnerabilities</th></tr></thead>
+        <tbody>
+        {% for row in r.cve.rows %}
+        <tr>
+            <td>{{ row.ecosystem }}</td><td><span class="plugin-pill {{ row.status_class }}">{{ row.status_label }}</span></td>
+            <td>{{ row.scanners }}</td><td>{{ row.audited }}</td><td>{{ row.unverified }}</td><td>{{ row.severity_label }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    {% for row in r.cve.rows %}{% for error in row.errors %}<div class="plugin-callout warn"><strong>{{ row.ecosystem }} audit incomplete:</strong> {{ error }}</div>{% endfor %}{% endfor %}
+</div>
+{% endif %}
+{% if r.parity %}
+{% set pa = r.parity %}
+<div class="plugin-subsection" id="plugin-validator-parity">
+    <h4>Claude plugin validate parity <span class="plugin-pill {{ pa.agreement_class if pa.status == 'compared' else 'neutral' }}">{{ pa.status_label }}</span></h4>
+    {% if pa.status == 'compared' %}
+    <div class="plugin-stat-row">
+        <div class="plugin-stat"><span class="plugin-stat-value">{{ pa.claude_verdict }}</span><span class="plugin-stat-label">claude plugin validate --strict</span></div>
+        <div class="plugin-stat"><span class="plugin-stat-value">{{ pa.skillevaluator_verdict }}</span><span class="plugin-stat-label">SkillEvaluator</span></div>
+        <div class="plugin-stat"><span class="plugin-stat-value">{{ pa.agreement }}</span><span class="plugin-stat-label">agreement</span></div>
+        <div class="plugin-stat"><span class="plugin-stat-value">{{ pa.error_count }} / {{ pa.warning_count }}</span><span class="plugin-stat-label">errors / warnings</span></div>
+    </div>
+    {% for error in pa.errors %}<p class="plugin-hint"><strong>error:</strong> {{ error }}</p>{% endfor %}
+    {% for warning in pa.warnings %}<p class="plugin-hint"><strong>warning:</strong> {{ warning }}</p>{% endfor %}
+    {% else %}
+    <p class="plugin-hint">{{ pa.reason }}</p>
+    {% endif %}
+</div>
+{% endif %}
+{% if r.endpoints %}
+<div class="plugin-subsection" id="plugin-endpoint-resolution">
+    <h4>Endpoint DNS and redirect checks ({{ r.endpoints.total }})</h4>
+    {% if r.endpoints.rows %}
+    <div class="table-scroll"><table class="summary-table">
+        <thead><tr><th>Kind</th><th>Name</th><th>URL</th><th>Status</th><th>Addresses</th><th>HEAD</th><th>Redirect</th></tr></thead>
+        <tbody>
+        {% for row in r.endpoints.rows %}
+        <tr>
+            <td>{{ row.kind }}</td><td>{{ row.name }}</td><td>{% if row.url %}<code>{{ row.url }}</code>{% else %}&mdash;{% endif %}</td>
+            <td><span class="plugin-pill {{ row.status_class }}">{{ row.status }}</span>{% if row.reason %}<div class="plugin-subtle">{{ row.reason }}</div>{% endif %}</td>
+            <td>{{ row.addresses or '—' }}</td><td>{{ row.head or '—' }}</td>
+            <td>{% if row.redirect %}<code>{{ row.redirect }}</code>{% if row.redirect_classification %} ({{ row.redirect_classification }}){% endif %}{% else %}&mdash;{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    {% endif %}
+</div>
+{% endif %}
+{% endmacro %}
+
+{% macro _manifest_declarations(m) %}
+<div class="plugin-subsection" id="plugin-manifest-declarations">
+    <h4>Plugin manifests{% if m.conflicts %} <span class="plugin-pill warn">{{ m.conflicts | length }} conflict{{ '' if m.conflicts | length == 1 else 's' }}</span>{% endif %}</h4>
+    <div class="table-scroll"><table class="summary-table">
+        <thead><tr><th>Manifest</th><th>Type</th><th>Selected</th><th>Status</th><th>Name</th><th>Version</th></tr></thead>
+        <tbody>
+        {% for row in m.rows %}
+        <tr>
+            <td><code>{{ row.manifest_filename }}</code>{% if row.spec_version %}<div class="plugin-subtle">spec {{ row.spec_version }}</div>{% endif %}</td>
+            <td>{{ row.manifest_type }}</td>
+            <td>{% if row.selected %}<span class="plugin-pill ok">Selected</span>{% else %}Additional{% endif %}</td>
+            <td>{{ row.status }}</td><td>{{ row.name }}</td><td>{{ row.version }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    {% for c in m.conflicts %}
+    <div class="plugin-callout warn"><strong>Manifest conflict:</strong> <code>{{ c.manifest_filename }}</code> declares {{ c.field }} <code>{{ c.additional }}</code>; the selected manifest declares <code>{{ c.selected }}</code>.</div>
+    {% endfor %}
+    <p class="plugin-hint">{{ m.note }}</p>
+</div>
+{% endmacro %}
+
+{% macro _similarity(sim, section_id, title, kind) %}
+<div class="plugin-subsection" id="{{ section_id }}">
+    <h4>{{ title }} <span class="plugin-pill warn">Advisory</span> <span class="plugin-pill neutral">{{ sim.status_label }}</span></h4>
+    <p class="plugin-hint">
+        {% if sim.catalog_entries is not none %}{{ sim.catalog_entries }} catalog entr{{ 'y' if sim.catalog_entries == 1 else 'ies' }} compared.{% endif %}
+        {% if sim.reason %}{{ sim.reason }}{% endif %}
+        {% if sim.status == 'compared' and not sim.matches %}No similar entries found.{% endif %}
+    </p>
+    {% if sim.matches %}
+    <div class="table-scroll"><table class="summary-table">
+        {% if kind == 'skills' %}
+        <thead><tr><th>Bundled skill</th><th>Catalog match</th><th>Similarity</th></tr></thead>
+        <tbody>{% for m in sim.matches %}<tr><td>{{ m.subject }}</td><td>{{ m.match }}</td><td>{{ m.similarity }}</td></tr>{% endfor %}</tbody>
+        {% else %}
+        <thead><tr><th>Catalog plugin</th><th>Similarity</th><th>Member overlap</th><th>Verdict</th></tr></thead>
+        <tbody>{% for m in sim.matches %}<tr><td>{{ m.subject }}</td><td>{{ m.similarity }}</td><td>{{ m.member_overlap }}</td><td>{{ m.verdict }}</td></tr>{% endfor %}</tbody>
+        {% endif %}
+    </table></div>
+    {% if sim.omitted %}<p class="plugin-hint">{{ sim.omitted }} more match(es) omitted.</p>{% endif %}
+    {% endif %}
+</div>
+{% endmacro %}
+
+{#- ===================== Tier 3: INCOMPLETE callout ===================== -#}
+{% macro tier3_incomplete_callout(v, environment) %}
+{% if v.partial %}
+{% set c = v.completeness.counts %}
+<div class="t3-incomplete-callout" id="tier3-plugin-incomplete" role="status">
+    <div class="t3-incomplete-head">
+        <span class="t3-incomplete-badge">INCOMPLETE</span>
+        <span class="t3-incomplete-title">Tier 3 did not cover all declared plugin components</span>
+    </div>
+    {% if v.completeness.sidecar_error %}
+    <p class="t3-incomplete-body">
+        The plugin provenance sidecar could not be read (<code>{{ v.completeness.sidecar_error }}</code>), so this
+        report cannot show which declared components were evaluated. This run is a <strong>partial result</strong>,
+        not a pass.
+    </p>
+    {% else %}
+    <p class="t3-incomplete-body">
+        {{ v.incomplete_reason }}. This run is a <strong>partial result</strong>, not a pass: the score covers
+        the resolved components only, and &ldquo;not evaluated&rdquo; never implies safe or passing.
+    </p>
+    <div class="t3-incomplete-grid">
+        <div><span class="t3-incomplete-num ok">{{ c.skills_resolved }}</span><span>skills resolved</span></div>
+        <div><span class="t3-incomplete-num ok">{{ c.rules_resolved }}</span><span>rules resolved</span></div>
+        <div><span class="t3-incomplete-num bad">{{ c.skills_unresolved }}</span><span>skills unresolved</span></div>
+        <div><span class="t3-incomplete-num bad">{{ c.rules_unresolved }}</span><span>rules unresolved</span></div>
+        <div><span class="t3-incomplete-num bad">{{ c.mcp_provider_only + c.mcp_unsupported_config }}</span><span>MCP not evaluated</span></div>
+        <div><span class="t3-incomplete-env">{{ environment or 'not recorded' }}</span><span>environment</span></div>
+    </div>
+    {% endif %}
+    <a class="t3-incomplete-link" href="#tier3-plugin-completeness">View resolved / deferred breakdown &rarr;</a>
+</div>
+{% endif %}
+{% endmacro %}
+
+{#- ===================== Tier 3: component coverage ===================== -#}
+{% macro tier3_coverage_section(v) %}
+{% set cov = v.coverage %}
+<details class="t3-details" id="tier3-plugin-coverage" open>
+    <summary>Plugin Component Coverage &mdash;
+        {#- Green only when every component was staged and exercised in a trial: staged alone is not evaluated. #}
+        <span class="t3-pill {{ 'critical' if cov.not_staged else ('ok' if cov.all_exercised else 'warning') }}">{{ cov.headline }}</span>
+        {% if cov.staged_not_observed %}<span class="t3-pill warning">{{ cov.staged_not_observed }} staged, not observed</span>{% endif %}
+    </summary>
+    <div class="t3-details-body">
+    <p class="plugin-headline{{ ' bad' if cov.not_staged else '' }}" id="tier3-plugin-not-evaluated"><strong>{{ cov.headline }}</strong> of {{ cov.total }} declared or packaged component(s); {{ cov.staged }} staged{% if cov.observed_headline %}; {{ cov.observed_headline }}{% endif %}.</p>
+    <p class="t3-section-hint"><strong>Files staged &ne; components loaded &ne; behavior verified.</strong> {{ cov.note }}</p>
+    <p class="t3-section-hint">{% for row in cov.counts %}<span class="metadata-tag">{{ row.state | replace('_', ' ') }}: {{ row.count }}</span>{% endfor %}</p>
+    {% if cov.activation %}
+    <p class="t3-section-hint"><span class="t3-pill warning">Advisory</span> <strong>Observed activation:</strong> {{ cov.activation.summary }}.
+        {% if cov.activation.unverified %}Unverified: {{ _names_inline(cov.activation.unverified) }}.{% endif %}
+        {% if cov.activation.unavailable %}Unavailable at runtime: {{ _names_inline(cov.activation.unavailable) }}.{% endif %}
+    </p>
+    {% endif %}
+    {% if v.dataset %}
+    <p class="t3-section-hint"><strong>Dataset:</strong>
+        {{ v.dataset.cases if v.dataset.cases is not none else 'n/a' }} case(s),
+        {{ v.dataset.cross_component_cases if v.dataset.cross_component_cases is not none else 'n/a' }} cross-component case(s).
+    </p>
+    {% endif %}
+    {% if cov.rows %}
+    <div class="table-scroll"><table class="summary-table">
+        <thead><tr><th>Type</th><th>Component</th><th>Origin</th><th>State</th>{% if cov.activation %}<th>Observed in trials (advisory)</th>{% endif %}<th>Reason</th></tr></thead>
+        <tbody>
+        {% for row in cov.rows %}
+        <tr>
+            <td>{{ row.type }}</td>
+            <td>{{ row.name }}{% if row.path %}<div class="plugin-subtle"><code>{{ row.path }}</code></div>{% endif %}</td>
+            <td>{{ row.origin }}</td>
+            <td><span class="t3-pill {{ 'ok' if row.staged else ('critical' if row.state in ['invalid', 'unavailable'] else 'warning') }}">{{ row.state_label }}</span></td>
+            {% if cov.activation %}<td>{{ row.observed }}</td>{% endif %}
+            <td>{{ row.reason }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    {% if cov.omitted %}<p class="t3-section-hint">{{ cov.omitted }} more component(s) omitted.</p>{% endif %}
+    {% endif %}
+    {% if v.excluded %}
+    <div class="plugin-callout warn" id="tier3-plugin-excluded">
+        <strong>Not evaluated by this run:</strong>
+        <ul>{% for statement in v.excluded %}<li>{{ statement }}</li>{% endfor %}</ul>
+    </div>
+    {% endif %}
+    {% if v.mcp_pinning %}{{ _pinning(v.mcp_pinning, [], 'tier3-plugin-mcp-pinning') }}{% endif %}
+    {% if v.static_context_cost %}{{ _context_cost(v.static_context_cost, 'tier3-plugin-context-cost') }}{% endif %}
+    </div>
+</details>
+{% endmacro %}
+
+{#- ===================== Tier 3: native plugin loading ===================== -#}
+{% macro tier3_plugin_load_section(v) %}
+{% set pl = v.plugin_load %}
+<details class="t3-details" id="tier3-plugin-load" open>
+    <summary>Plugin Loading &mdash; <span class="t3-pill {{ 'ok' if pl.requested != 'wrapper' else 'warning' }}">requested: {{ pl.requested }}</span></summary>
+    <div class="t3-details-body">
+    <p class="t3-section-hint">{{ pl.note }}</p>
+    <div class="table-scroll"><table class="summary-table">
+        <thead><tr><th>Agent</th><th>Mode</th><th>Adapter</th><th>Native</th><th>Wrapper</th><th>Unsupported</th><th>Load census</th><th>Reason</th></tr></thead>
+        <tbody>
+        {% for row in pl.agents %}
+        <tr>
+            <td>{{ row.agent }}</td>
+            <td><span class="t3-pill {{ 'ok' if row.mode == 'native' else 'warning' }}">{{ row.mode }}</span></td>
+            <td><code>{{ row.adapter }}</code></td>
+            <td>{{ _names_inline(row.native) }}</td>
+            <td>{{ _names_inline(row.wrapper) }}</td>
+            <td>{{ _names_inline(row.unsupported) }}</td>
+            <td>{% if row.census %}{{ row.census_summary }}{% if row.unverified %}<br><span class="t3-pill fail">INCOMPLETE</span> {{ row.unverified }}{% endif %}{% if row.not_loaded %}<ul>{% for item in row.not_loaded %}<li class="plugin-subtle">{{ item }}</li>{% endfor %}</ul>{% endif %}{% else %}none{% endif %}</td>
+            <td>{{ row.reason }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    </div>
+</details>
+{% endmacro %}
+
+{#- ===================== Tier 3: resolved vs deferred ===================== -#}
+{% macro tier3_completeness_section(v) %}
+{% set comp = v.completeness %}
+{% set c = comp.counts %}
+<details class="t3-details" id="tier3-plugin-completeness" open>
+    <summary>Plugin Dependency Completeness &mdash;
+        {% if v.partial %}<span class="t3-pill critical">INCOMPLETE</span>{% else %}<span class="t3-pill ok">Complete</span>{% endif %}
+    </summary>
+    <div class="t3-details-body">
+    <p class="t3-section-hint">
+        Which declared plugin dependencies were resolved and evaluated versus deferred.
+        {% if comp.sidecar_error %}<strong>This run is INCOMPLETE:</strong> the plugin provenance sidecar could not be read
+        (<code>{{ comp.sidecar_error }}</code>), so the resolved and deferred components are unknown &mdash; never a pass.
+        {% elif v.partial and not comp.deferred and comp.reason %}<strong>This run is INCOMPLETE:</strong> {{ comp.reason }}.
+        Nothing was deferred, but the result is a partial result &mdash; never a pass.
+        {% elif v.partial %}<strong>This run is INCOMPLETE:</strong> required declared components could not be resolved at Tier 3,
+        so the result is a partial result &mdash; never a pass on a reduced denominator.{% else %}All declared dependencies were resolved.{% endif %}
+    </p>
+    {% if not comp.sidecar_error %}
+    <div class="table-scroll"><table class="summary-table">
+        <thead><tr><th>Category</th><th>Resolved</th><th>Deferred</th><th>Deferred names</th></tr></thead>
+        <tbody>
+        <tr><td>Skills</td><td>{{ c.skills_resolved }}</td><td>{{ c.skills_unresolved }}</td><td>{{ _names_inline(comp.names.skills_unresolved, '&mdash;' | safe) }}</td></tr>
+        <tr><td>Rules</td><td>{{ c.rules_resolved }}</td><td>{{ c.rules_unresolved }}</td><td>{{ _names_inline(comp.names.rules_unresolved, '&mdash;' | safe) }}</td></tr>
+        <tr><td>MCP servers</td><td>{{ c.mcp_runnable }}</td><td>{{ c.mcp_provider_only + c.mcp_unsupported_config }}</td><td>{{ _names_inline(comp.names.mcp_provider_only + comp.names.mcp_unsupported_config, '&mdash;' | safe) }}</td></tr>
+        </tbody>
+    </table></div>
+    {% endif %}
+    {% if v.dependency_counts %}
+    <p class="t3-section-hint" id="tier3-plugin-dependency-counts"><strong>Declared dependency resolution:</strong>
+        {% for row in v.dependency_counts %}<span class="metadata-tag">{{ row.state }}: {{ row.count }}</span>{% endfor %}
+    </p>
+    {% endif %}
+    </div>
+</details>
+{% endmacro %}
+
+{#- ===================== Tier 3: lift modes + Integration ===================== -#}
+{% macro _ci_badges(ci) %}
+<span class="t3-pill {{ {'ok': 'ok', 'warn': 'warning', 'fail': 'critical'}.get(ci.precision_class, 'neutral') }}">precision: {{ ci.precision }}</span>
+{% if ci.ci_includes_zero %}<span class="t3-pill warning" title="The interval includes zero, so this run cannot distinguish the lift from no effect.">CI includes zero</span>{% endif %}
+{% endmacro %}
+
+{% macro integration_section(i) %}
+<details class="t3-details" id="tier3-integration" open>
+    <summary>Integration (Plugin Composition) &mdash;
+        <span class="t3-pill {{ {'ok': 'ok', 'fail': 'critical'}.get(i.verdict_class, 'warning') }}">{{ i.verdict_label | upper if not i.measured else i.verdict_label }}</span>
+        <span class="t3-pill warning">Advisory &middot; Report-only</span>
+    </summary>
+    <div class="t3-details-body">
+    <p class="t3-section-hint">Compositional-lift ablation: the coordinated plugin versus its member components staged individually. This signal never affects the overall score or verdict.</p>
+    {% if i.modes %}
+    <p class="t3-section-hint" id="tier3-lift-modes"><strong>Lift mode:</strong> requested <code>{{ i.modes.requested }}</code> &middot; effective <code>{{ i.modes.effective }}</code>{% if i.modes.fallback %} <span class="t3-pill warning">fell back</span>{% endif %}</p>
+    {% endif %}
+    {% if i.measured %}
+    <div class="table-scroll"><table class="summary-table">
+        <thead><tr><th>Verdict</th><th>Plugin</th><th>Sum-of-parts</th><th>Integration Lift</th>{% if i.ci %}<th>{{ i.ci.confidence }}</th>{% endif %}<th>Components</th></tr></thead>
+        <tbody><tr>
+            <td><span class="t3-pill {{ {'ok': 'ok', 'fail': 'critical'}.get(i.verdict_class, 'warning') }}">{{ i.verdict_label }}</span>{% if i.point_verdict_label %}<div class="plugin-subtle">point estimate: {{ i.point_verdict_label }}</div>{% endif %}</td>
+            <td>{{ i.with_plugin }}</td>
+            <td>{{ i.sum_of_parts }}</td>
+            <td>{{ i.integration_lift }}</td>
+            {% if i.ci %}<td>{{ i.ci.interval }} {{ _ci_badges(i.ci) }}</td>{% endif %}
+            <td>{{ _names_inline(i.components) }}</td>
+        </tr></tbody>
+    </table></div>
+    {% else %}
+    <div class="plugin-callout warn" id="tier3-integration-inconclusive">
+        <strong>INCONCLUSIVE &mdash; Integration was not measured.</strong>
+        <p style="margin:0.35rem 0 0;">{{ i.reason }}</p>
+        <p style="margin:0.35rem 0 0;font-size:0.8rem;">The effectiveness results in this report are unaffected.</p>
+    </div>
+    {% endif %}
+    {% if i.interpretation and i.measured %}<p class="t3-section-hint">{{ i.interpretation }}</p>{% endif %}
+    {% if i.measured and i.reason %}<p class="t3-section-hint">{{ i.reason }}</p>{% endif %}
+    {% if i.completeness and i.completeness.issues %}{{ _completeness_issues(i.completeness) }}{% endif %}
+    </div>
+</details>
+{% endmacro %}
+
+{% macro lift_modes_line(modes) %}
+<p class="t3-section-hint" id="tier3-lift-modes"><strong>Lift mode:</strong> requested <code>{{ modes.requested }}</code> &middot; effective <code>{{ modes.effective }}</code>{% if modes.fallback %} <span class="t3-pill warning">fell back</span>{% endif %}</p>
+{% endmacro %}
+
+{% macro _completeness_issues(c) %}
+<div class="plugin-callout warn">
+    <strong>Integration completeness issues{% if c.complete is sameas false %} (incomplete){% endif %}:</strong>
+    <ul>
+        {% if c.missing_cases %}<li>Missing cases: {{ _names_inline(c.missing_cases) }}{% if c.missing_omitted %} (+{{ c.missing_omitted }} more){% endif %}</li>{% endif %}
+        {% if c.failed_arms %}<li>Failed arms: {{ _names_inline(c.failed_arms) }}</li>{% endif %}
+        {% for s in c.attempt_shortfall %}<li>Attempt shortfall in <code>{{ s.case }}</code>{% if s.arm %} ({{ s.arm }}){% endif %}: {{ s.observed }} of {{ s.expected }} attempts observed</li>{% endfor %}
+        {% if not c.missing_cases and not c.failed_arms and not c.attempt_shortfall %}<li>The compared arms did not score the same complete set of cases.</li>{% endif %}
+    </ul>
+</div>
+{% endmacro %}
+
+{#- ===================== Tier 3: statistics ===================== -#}
+{% macro statistics_section(stats) %}
+<details class="t3-details" id="tier3-plugin-statistics" open>
+    <summary>Plugin Statistics &mdash; <span class="t3-pill warning">Advisory &middot; Report-only</span></summary>
+    <div class="t3-details-body">
+    <p class="t3-section-hint">Uncertainty and cost context for the lift numbers above. These statistics are reported for interpretation only and never change a score or verdict.</p>
+    {% for scope in stats.scopes %}
+    <div class="plugin-subsection">
+        {% if stats.scopes | length > 1 %}<h4>{{ scope.label }}</h4>{% endif %}
+        {% if scope.lift_ci %}
+        <div class="table-scroll"><table class="summary-table">
+            <thead><tr><th>Lift</th><th>Estimate</th><th>Interval</th><th>Precision</th><th>Cases</th><th>Method</th></tr></thead>
+            <tbody>
+            {% for ci in scope.lift_ci %}
+            <tr>
+                <td><strong>{{ ci.label }}</strong></td>
+                <td>{{ ci.estimate }}</td>
+                <td>{{ ci.interval }} <span class="plugin-subtle">{{ ci.confidence }}</span></td>
+                <td>{{ _ci_badges(ci) }}</td>
+                <td>{{ ci.n_cases }}</td>
+                <td>{{ ci.method }}{% if ci.resamples != 'n/a' %} ({{ ci.resamples }} resamples){% endif %}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table></div>
+        {% for ci in scope.lift_ci %}{% if ci.ci_includes_zero %}
+        <p class="plugin-callout warn">The {{ ci.label | lower }} interval {{ ci.interval }} includes zero: this run cannot distinguish that lift from no effect.</p>
+        {% endif %}{% endfor %}
+        {% endif %}
+        {% if scope.arms and (scope.has_reliability or scope.has_tokens or scope.has_efficiency) %}
+        <div class="table-scroll"><table class="summary-table">
+            <thead><tr><th>Arm</th>
+                {% if scope.has_reliability %}<th>pass@k</th><th>pass^k</th><th>k</th><th>Cases</th>{% endif %}
+                {% if scope.has_tokens %}<th>Tokens / success</th>{% endif %}
+                {% if scope.show_usd %}<th>USD / success</th>{% endif %}
+                {% if scope.has_efficiency %}<th>Token efficiency</th>{% endif %}
+            </tr></thead>
+            <tbody>
+            {% for arm in scope.arms %}
+            <tr>
+                <td><strong>{{ arm.label }}</strong></td>
+                {% if scope.has_reliability %}<td>{{ arm.pass_at_k }}</td><td>{{ arm.pass_hat_k }}</td><td>{{ arm.k }}</td><td>{{ arm.n_cases }}</td>{% endif %}
+                {% if scope.has_tokens %}<td>{{ arm.tokens_per_success }}</td>{% endif %}
+                {% if scope.show_usd %}<td>{{ arm.usd_per_success }}</td>{% endif %}
+                {% if scope.has_efficiency %}<td>{{ arm.token_efficiency }}</td>{% endif %}
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table></div>
+        {% if scope.has_reliability %}<p class="t3-section-hint">pass@k: a case passes when any of k attempts passes. pass^k: a case passes only when all k attempts pass.</p>{% endif %}
+        {% if scope.usd_note %}<p class="t3-section-hint" id="tier3-plugin-usd-not-priced">{{ scope.usd_note }}</p>{% endif %}
+        {% endif %}
+        {% if scope.context_measured %}
+        {% set cm = scope.context_measured %}
+        <p class="t3-section-hint" id="tier3-plugin-context-measured"><strong>Measured context delta:</strong>
+            {% if cm.measured %}{{ cm.delta }} per first turn across {{ cm.n_pairs }} paired trial(s){% if cm.method %} (<code>{{ cm.method }}</code>){% endif %}.
+            {% else %}not measured ({{ cm.status }}){% if cm.reason %}: {{ cm.reason }}{% endif %}.{% endif %}
+        </p>
+        {% endif %}
+        {% if scope.completeness and scope.completeness.issues %}{{ _completeness_issues(scope.completeness) }}{% endif %}
+    </div>
+    {% endfor %}
+    </div>
+</details>
+{% endmacro %}
+
+{#- ===================== Tier 3: plugin signals ===================== -#}
+{% macro signals_section(sig) %}
+{% set not_configured = 'not configured for this dataset' %}
+<details class="t3-details" id="tier3-plugin-signals" open>
+    <summary>Plugin Signals &mdash; <span class="t3-pill warning">Advisory</span></summary>
+    <div class="t3-details-body">
+    <p class="t3-section-hint">{{ sig.note }}</p>
+    {% for entry in sig.entries %}
+    <div class="plugin-subsection plugin-signal-entry">
+        <h4>{{ entry.scope }} &middot; {{ entry.arm_label }} <span class="t3-pill warning">Advisory</span> <span class="plugin-subtle">{{ entry.n_trials }} trial(s){% if entry.n_missing_trajectory %}; {{ entry.n_missing_trajectory }} without a trajectory{% endif %}{% if entry.activations_per_trial %}; {{ entry.activations_per_trial }} activations per trial{% endif %}</span></h4>
+        <div class="table-scroll"><table class="summary-table plugin-signal-table">
+            <thead><tr><th>Signal</th><th>Result</th><th>Detail</th></tr></thead>
+            <tbody>
+            {% if entry.tool_selection %}{% set ts = entry.tool_selection %}
+            <tr><td>Tool selection (precision / recall / F1)</td>
+                <td>{% if ts.applicable %}{{ ts.precision }} / {{ ts.recall }} / {{ ts.f1 }}{% else %}{{ not_configured }}{% endif %}</td>
+                <td>{% if ts.applicable %}{{ ts.decoy_calls }} decoy call(s) ({{ ts.decoy_call_rate }} of calls){% if ts.n_scored != 'n/a' %}; {{ ts.n_scored }} trial(s) scored{% endif %}{% endif %}</td></tr>
+            {% endif %}
+            {% if entry.arguments %}{% set args = entry.arguments %}
+            <tr><td>Tool arguments</td>
+                <td>{% if args.applicable %}{{ args.pass_rate }} pass rate{% else %}{{ not_configured }}{% endif %}</td>
+                <td>{% if args.applicable %}{{ args.passed }}/{{ args.checked }} checks passed{% endif %}</td></tr>
+            {% endif %}
+            {% if entry.mcp_calls %}
+            <tr><td>MCP call success</td><td>{{ entry.mcp_calls.success_rate }}</td>
+                <td>{{ entry.mcp_calls.succeeded }}/{{ entry.mcp_calls.total }} succeeded; {{ entry.mcp_calls.failed }} failed; {{ entry.mcp_calls.unknown }} unknown</td></tr>
+            {% endif %}
+            {% for check in entry.checks %}
+            <tr><td>{{ check.name }} checks</td><td>{{ check.label }}</td><td>{% if check.applicable and check.n_scored != 'n/a' %}{{ check.n_scored }} trial(s) scored{% endif %}</td></tr>
+            {% endfor %}
+            {% if entry.activation %}
+            <tr><td>Activation coverage</td><td>{{ entry.activation.exercise_rate }} exercised</td>
+                <td>declared {{ entry.activation.declared | length }}, exercised {{ entry.activation.exercised | length }}, unverified {{ entry.activation.unverified | length }}, unavailable {{ entry.activation.unavailable | length }}</td></tr>
+            {% endif %}
+            </tbody>
+        </table></div>
+        {% if entry.arguments and entry.arguments.failures %}
+        <p class="t3-section-hint"><strong>Top argument failures:</strong></p>
+        <div class="table-scroll"><table class="summary-table">
+            <thead><tr><th>Tool</th><th>Argument</th><th>Rule</th><th>Detail</th><th>Count</th></tr></thead>
+            <tbody>
+            {% for f in entry.arguments.failures %}
+            <tr><td><code>{{ f.tool }}</code></td><td>{{ f.arg }}</td><td>{{ f.rule }}</td><td>{{ f.detail }}</td><td>{{ f.count }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table></div>
+        {% endif %}
+        {% if entry.mcp_calls and entry.mcp_calls.servers %}
+        <div class="table-scroll"><table class="summary-table">
+            <thead><tr><th>MCP server</th><th>Calls</th><th>Succeeded</th><th>Failed</th><th>Unknown</th><th>Success rate</th><th>Tools</th></tr></thead>
+            <tbody>
+            {% for s in entry.mcp_calls.servers %}
+            <tr><td>{{ s.server }}</td><td>{{ s.total }}</td><td>{{ s.succeeded }}</td><td>{{ s.failed }}</td><td>{{ s.unknown }}</td><td>{{ s.success_rate }}</td><td>{{ s.tools }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table></div>
+        {% endif %}
+        {% if entry.activation and (entry.activation.unverified or entry.activation.unavailable) %}
+        <p class="t3-section-hint">
+            {% if entry.activation.unverified %}Unverified: {{ _names_inline(entry.activation.unverified) }}{% endif %}
+            {% if entry.activation.unavailable %}<br>Unavailable: {{ _names_inline(entry.activation.unavailable) }}{% endif %}
+        </p>
+        {% endif %}
+    </div>
+    {% endfor %}
+    </div>
+</details>
+{% endmacro %}
+
+{#- ===================== Tier 3: runtime evidence ===================== -#}
+{% macro hook_census_section(hc) %}
+<details class="t3-details" id="tier3-plugin-hook-census" open>
+    <summary>Plugin Hook Census &mdash; <span class="t3-pill warning">Advisory</span></summary>
+    <div class="t3-details-body">
+    <p class="t3-section-hint">{{ hc.note }}</p>
+    {% for entry in hc.entries %}
+    <div class="plugin-subsection">
+        <h4>{{ entry.scope }} &middot; {{ entry.arm_label }} <span class="plugin-subtle">{{ entry.total_runs }} run(s), {{ entry.total_blocked }} blocked, {{ entry.total_failures }} failure(s), {{ entry.total_not_started }} not started{% if entry.trials is not none %}; census in {{ entry.trials_with_census }} of {{ entry.trials }} trial(s){% endif %}{% if entry.unreadable %}; {{ entry.unreadable }} unreadable{% endif %}{% if entry.invalid_lines %}; {{ entry.invalid_lines }} invalid line(s){% endif %}{% if entry.truncated %}; truncated{% endif %}</span></h4>
+        {% if entry.rows %}
+        <div class="table-scroll"><table class="summary-table">
+            <thead><tr><th>Hook</th><th>Event</th><th>Runs</th><th>Blocked (exit 2)</th><th>Failures</th><th>Not started</th><th>Failure rate</th></tr></thead>
+            <tbody>
+            {% for row in entry.rows %}
+            <tr><td><code>{{ row.hook_id }}</code></td><td>{{ row.event }}</td><td>{{ row.runs }}</td><td>{{ row.blocked }}</td><td>{{ row.failures }}</td><td>{{ row.not_started }}</td><td>{{ row.failure_rate }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table></div>
+        {% endif %}
+    </div>
+    {% endfor %}
+    </div>
+</details>
+{% endmacro %}
+
+{% macro canary_section(cn) %}
+<details class="t3-details" id="tier3-plugin-canary" open>
+    <summary>Canary Exfiltration</summary>
+    <div class="t3-details-body">
+    <p class="t3-section-hint">{{ cn.note }}</p>
+    {% for entry in cn.entries %}
+    <div class="plugin-subsection">
+        <h4>{{ entry.scope }} <span class="t3-pill {{ _pill_class(entry.verdict_class) }}">{{ entry.verdict }}</span></h4>
+        <div class="table-scroll"><table class="summary-table">
+            <thead><tr><th>Arm</th><th>Trials</th><th>Planted</th><th>Leaked</th><th>Leak rate</th><th>Sinks</th></tr></thead>
+            <tbody>
+            {% for row in entry.rows %}
+            <tr><td>{{ row.arm_label }}</td><td>{{ row.trials }}</td><td>{{ row.planted }}</td><td><span class="t3-pill {{ _pill_class(row.status_class) }}">{{ row.leaked }}</span></td><td>{{ row.leak_rate }}</td><td>{{ row.sinks }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table></div>
+    </div>
+    {% endfor %}
+    </div>
+</details>
+{% endmacro %}
+
+{% macro mcp_proof_section(mp) %}
+<details class="t3-details" id="tier3-plugin-mcp-proof" open>
+    <summary>MCP Proof &mdash; {{ mp.headline }} <span class="t3-pill warning">Advisory</span></summary>
+    <div class="t3-details-body">
+    <p class="t3-section-hint">{{ mp.note }}</p>
+    <div class="table-scroll"><table class="summary-table">
+        <thead><tr><th>Server</th><th>Status</th><th>Tools</th><th>Detail</th></tr></thead>
+        <tbody>
+        {% for row in mp.rows %}
+        <tr><td>{{ row.server }}</td><td><span class="t3-pill {{ _pill_class(row.status_class) }}">{{ row.status_label }}</span></td><td>{{ _names_inline(row.tools) }}{% if row.tools_omitted %} (+{{ row.tools_omitted }} more){% endif %}</td><td>{{ row.detail }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    {% if mp.omitted %}<p class="t3-section-hint">{{ mp.omitted }} more server(s) not shown.</p>{% endif %}
+    </div>
+</details>
+{% endmacro %}

@@ -12,6 +12,7 @@ their content -- a plugin *references* existing skills, rules, and MCP servers
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, Union, get_args
 
 from pydantic import (
@@ -165,6 +166,10 @@ class PluginDependencySection(BaseModel):
         return v
 
 
+MCP_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+_MCP_NAME_RE = re.compile(MCP_NAME_PATTERN)
+
+
 class PluginMcpEntry(BaseModel):
     """A single MCP server dependency entry.
 
@@ -176,6 +181,15 @@ class PluginMcpEntry(BaseModel):
 
     name: str = Field(..., min_length=1, description="MCP server name")
     provider: str = Field(..., min_length=1, description="MCP provider or transport identifier")
+
+    @field_validator("name")
+    @classmethod
+    def name_must_have_valid_charset(cls, value: str) -> str:
+        if not _MCP_NAME_RE.fullmatch(value):
+            raise ValueError(
+                "MCP name must start with an alphanumeric and contain only letters, digits, '.', '_', or '-'"
+            )
+        return value
 
 
 class PluginManifest(BaseModel):

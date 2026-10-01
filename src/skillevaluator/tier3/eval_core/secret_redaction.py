@@ -28,12 +28,16 @@ OPENSHIFT_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])sha256~[A-Za-z0-9._~-]+")
 # unchanged, which keeps JWTs glued to a "-" (x-eyJ...) redacted. Later starts in
 # the same run are never tried: their first segment reaches the same "." with
 # fewer characters, so they could only fail where the first start failed. ``lead``
-# stops at the first ``\beyJ`` and every earlier offset fails ``\beyJ``, so
-# backtracking into it is cheap. No atomic groups or possessive quantifiers: the
-# Harbor verifier copy runs on the task image's python3, which may predate 3.11.
+# is found inside a lookahead with a lazy one-character repeat, then consumed by a
+# backreference. Python never backtracks into a lookahead, and a one-character
+# repeat keeps no state per character, so the scan is linear in time and flat in
+# memory. (A repeated group such as ``(?:(?!\beyJ)[A-Za-z0-9_-])*`` keeps
+# backtracking state for every character, about 75 bytes each.) No atomic groups
+# or possessive quantifiers: the Harbor verifier copy runs on the task image's
+# python3, which may predate 3.11.
 LOG_JWT_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])(?P<lead>(?:(?!\beyJ)[A-Za-z0-9_-])*)"
-    r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"
+    r"(?<![A-Za-z0-9_-])(?=(?P<lead>(?:\b|[A-Za-z0-9_-]*?-)(?=eyJ)))(?P=lead)"
+    r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"
 )
 # GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained (github_pat_) tokens.
 # Single bounded character classes keep both patterns linear.

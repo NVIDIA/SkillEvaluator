@@ -20,7 +20,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS, NOT_APPLICABLE_ELIGIBLE_METRICS
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,14 @@ _MAX_STAGED_PATHS_SCANNED = 32_768
 _MAX_DATASET_RECORDS = 4096
 _MAX_DIAGNOSTIC_REASONS = 8
 _INVALID_JSON = object()
+_STATISTICS_KEYS = (
+    "lift_uncertainty",
+    "reliability",
+    "cost",
+    "token_efficiency",
+    "context_cost_measured",
+    "integration_completeness",
+)
 
 __all__ = (
     "DATASET_SNAPSHOT_DIGEST_ALGORITHM",
@@ -460,6 +468,13 @@ def logical_trial_reward_groups(rewards: list[dict[str, Any]]) -> list[list[dict
     return list(groups.values())
 
 
+def _not_applicable_metric_list(value: Any) -> list[str]:
+    """Return the judged metrics a summary recorded as N/A for its whole arm."""
+    if not isinstance(value, list):
+        return []
+    return [metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric in value]
+
+
 def _nonnegative_counter(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
@@ -507,8 +522,14 @@ def load_agent_data(
         agent_info: dict[str, Any] = {"name": agent_name}
         agent_diagnostics: list[dict[str, Any]] = []
         condition_execution: dict[str, dict[str, Any]] = {}
+        canary_arms: dict[str, dict[str, Any]] = {}
 
-        for variant in ("with-skill", "without-skill"):
+        variants = {
+            "with-skill": "with_skill",
+            "without-skill": "without_skill",
+            "sum-of-parts": "sum_of_parts",
+        }
+        for variant, key in variants.items():
             condition_dir = agent_dir / variant
             if not _is_safe_directory(condition_dir, results_dir):
                 continue
@@ -519,22 +540,32 @@ def load_agent_data(
                     scores = data.get("scores")
                     if not isinstance(scores, dict):
                         continue
-                    key = "with_skill" if variant == "with-skill" else "without_skill"
                     agent_info[key] = scores
-                    metric_key = "metrics_with_skill" if variant == "with-skill" else "metrics_without_skill"
+                    metric_key = f"metrics_{key}"
                     agent_info[metric_key] = data.get("metrics", [])
-                    custom_key = "custom_with_skill" if variant == "with-skill" else "custom_without_skill"
+                    custom_key = f"custom_{key}"
                     if "custom_scores" in data:
                         agent_info[custom_key] = data.get("custom_scores", {})
-                    overall_key = "overall_with_skill" if variant == "with-skill" else "overall_without_skill"
+                    overall_key = f"overall_{key}"
                     if "overall_score" in data:
                         agent_info[overall_key] = data.get("overall_score")
-                    dimension_key = "dimensions_with_skill" if variant == "with-skill" else "dimensions_without_skill"
+                    dimension_key = f"dimensions_{key}"
                     if "dimensions" in data:
                         agent_info[dimension_key] = data.get("dimensions", {})
-                    pass_key = "pass_with_skill" if variant == "with-skill" else "pass_without_skill"
+                    not_applicable = _not_applicable_metric_list(data.get("not_applicable_metrics"))
+                    if not_applicable:
+                        agent_info[f"not_applicable_{key}"] = not_applicable
+                    pass_key = f"pass_{key}"
                     if "pass_at_k" in data:
                         agent_info[pass_key] = data["pass_at_k"]
+                    # Advisory, report-only plugin signals aggregated per arm.
+                    signals_summary = data.get("plugin_signals_summary")
+                    if isinstance(signals_summary, dict) and signals_summary:
+                        agent_info.setdefault("plugin_signals_summary", {})[key] = signals_summary
+                    # Per-arm canary exfiltration results (plugin runs).
+                    canary_summary = data.get("canary_summary")
+                    if isinstance(canary_summary, dict) and canary_summary:
+                        canary_arms[key] = canary_summary
                     status = data.get("execution_status")
                     if status is None and allow_legacy_missing_status:
                         status = "succeeded"
@@ -542,7 +573,11 @@ def load_agent_data(
                         status = "unknown"
                     errors = data.get("execution_errors")
                     condition_errors = [str(error) for error in errors] if isinstance(errors, list) else []
-                    label = "With skill" if variant == "with-skill" else "Without skill"
+                    label = {
+                        "with-skill": "With skill",
+                        "without-skill": "Without skill",
+                        "sum-of-parts": "Sum of parts",
+                    }[variant]
                     job_failure = data.get("job_failure")
                     if job_failure:
                         condition_errors.append(f"{label} aggregate job: {job_failure}")
@@ -560,10 +595,21 @@ def load_agent_data(
                         "expected_attempts": _nonnegative_counter(data.get("expected_attempts")),
                         "scored_attempts": _nonnegative_counter(data.get("scored_attempts")),
                     }
-                    count_key = "num_trials" if variant == "with-skill" else "num_trials_baseline"
+                    count_key = {
+                        "with-skill": "num_trials",
+                        "without-skill": "num_trials_baseline",
+                        "sum-of-parts": "num_trials_sum_of_parts",
+                    }[variant]
                     num_trials = data.get("num_trials")
                     if isinstance(num_trials, int) and not isinstance(num_trials, bool) and num_trials >= 0:
                         agent_info[count_key] = num_trials
+
+        if canary_arms:
+            from skillevaluator.tier3.eval_core.runtime_evidence import canary_arm_comparison
+
+            canary = canary_arm_comparison(canary_arms)
+            if canary is not None:
+                agent_info["canary_summary"] = canary
 
         lift_file = agent_dir / "lift.json"
         if lift_file.exists():
@@ -583,9 +629,27 @@ def load_agent_data(
             if custom_lift is not _INVALID_JSON:
                 agent_info["custom_lift"] = custom_lift
 
-        for variant_key, variant_dir_name in (("rewards", "with-skill"), ("rewards_baseline", "without-skill")):
+        # Report-only statistics (lift CIs, pass^k, cost, token efficiency,
+        # measured context cost and per-case Integration completeness).
+        statistics_file = agent_dir / "statistics.json"
+        if statistics_file.exists():
+            statistics = _load_bounded_json(statistics_file, agent_diagnostics, artifact="statistics")
+            if isinstance(statistics, dict):
+                for key in _STATISTICS_KEYS:
+                    if isinstance(statistics.get(key), dict):
+                        agent_info[key] = statistics[key]
+
+        for variant_key, variant_dir_name in (
+            ("rewards", "with-skill"),
+            ("rewards_baseline", "without-skill"),
+            ("rewards_sum_of_parts", "sum-of-parts"),
+        ):
             trial_list: list[dict[str, Any]] = []
-            count_key = "num_trials" if variant_key == "rewards" else "num_trials_baseline"
+            count_key = {
+                "rewards": "num_trials",
+                "rewards_baseline": "num_trials_baseline",
+                "rewards_sum_of_parts": "num_trials_sum_of_parts",
+            }[variant_key]
             expected_reward_rows = agent_info.get(count_key)
             rewards_complete = isinstance(expected_reward_rows, int)
             trials_dir = agent_dir / variant_dir_name / "trials"
@@ -656,7 +720,9 @@ def load_agent_data(
         if "with_skill" not in agent_info:
             continue
 
-        active_conditions = list(condition_execution.values())
+        active_conditions = [
+            condition_execution[key] for key in ("with_skill", "without_skill") if key in condition_execution
+        ]
         execution_errors = [
             error for condition in active_conditions for error in condition.get("execution_errors", []) if error
         ]
@@ -699,11 +765,20 @@ def load_agent_data(
                 "pass_without_skill",
                 "rewards_baseline",
             ),
+            "sum_of_parts": (
+                "sum_of_parts",
+                "custom_sum_of_parts",
+                "overall_sum_of_parts",
+                "dimensions_sum_of_parts",
+                "pass_sum_of_parts",
+                "rewards_sum_of_parts",
+            ),
         }
         for condition, fields in condition_quality_fields.items():
             condition_status = _condition_status(agent_info, condition)
             if condition_status == "succeeded":
                 continue
+            agent_info.pop(f"not_applicable_{condition}", None)
             condition_info = condition_execution.get(condition, {})
             for field in fields:
                 if field.startswith("pass_") and condition_status in {"failed", "unknown"}:

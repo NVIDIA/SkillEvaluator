@@ -100,9 +100,17 @@ Reports for any of these runs are selected with `-r`/`--report` (`cli`, `json`, 
 | Skill | `skill` | `SKILL.md` in `skills/` or `team-skills/` |
 | Rules | `rules` | `.mdc` files in `team-rules/` |
 | Workflows | `workflows` | `workflow-rules.mdc` in a workflow directory |
-| Plugin | `plugin` | A bundle-reference `agent_plugin.yaml`/`.yml` manifest, or a contained `.claude-plugin/plugin.json` manifest |
+| Plugin | `plugin` | A bundle-reference `agent_plugin.yaml`/`.yml` manifest, a contained `.claude-plugin/`, `.codex-plugin/`, or `.cursor-plugin/` `plugin.json`, or an Agent Plugins root `plugin.json` ([precedence](plugin-evaluation.mdx#manifest-detection)) |
 
-Plugins are validated against their public contract; the `quality`, `lint`, and `version` checks are skill-only and are skipped for plugins, rules, and workflows.
+Validate a plugin with `skillevaluator validate ./my-plugin --tiers 1`; the direct `tier1 PATH` workflow takes a skill directory only. [Plugin Evaluation](plugin-evaluation.mdx#tier-1-static-validation) is the full plugin reference, including every MCP and component check name and severity.
+
+Plugins are validated against their public contract. The manifest, dependency, component, and MCP checks run as part of the `schema` check. The `quality`, `lint`, and `version` checks are skill checks: for a plugin they run on each skill bundled under the plugin's `skills/` directory, with findings attributed to that skill, and they are skipped for plugins without bundled skills, rules, and workflows.
+
+The `security`, `pii`, `license`, `code-integrity` (code risk, secrets, and hygiene), `unicode`, and `dependency` checks scan the whole plugin tree exactly once: each bundled skill, with its findings prefixed by the skill name, and then the plugin's own content (`scripts/`, `hooks/`, `commands/`, `agents/`, `.mcp.json`, root files, and so on) with the bundled skills excluded. Finding paths are relative to the plugin root. Before these checks read anything, the whole tree is walked without following links; a symlink, junction, hard link, or special file anywhere in it fails the run closed.
+
+For a bundle-reference plugin, each `skills.refs` and `rules.refs` entry is classified offline, without fetching anything: `provided` (bundled inside the plugin root), `referenced` (elsewhere in the same repository), `missing` (names the same repository, but nothing exists at that path), `external` (another repository; not verified), or `unresolved` (the repository cannot be identified, or the target is reachable only through a link). Only `missing` blocks, as a HIGH `plugin_dependency_missing` finding. A ref counts as same-repository only when the repository root is the git top-level and its `origin` remote matches the ref's `<owner>/<repo>`; otherwise every ref stays `unresolved` and advisory. The repository root defaults to the git top-level that contains the plugin; override it with `--repo-root`.
+
+Plugin validation also inventories every declared and packaged component and checks MCP servers from every `mcpServers` form and the root `.mcp.json`. Declared component paths must exist inside the plugin root. By default, MCP and HTTP hook endpoint checks inspect IP literals and well-known host names only, so validation stays network-free. The opt-in `validate --resolve-endpoints` flag (or `endpoints.resolve: true` in the policy, below) also resolves those host names and records redirects without following them; see [Plugin Evaluation](plugin-evaluation.mdx#opt-in-endpoint-dns-and-redirect-checks).
 
 For collections, pass a folder containing skills under `skills/` or `team-skills/`. Folder-level validation discovers each live `SKILL.md` below the target while excluding configured names such as `evals`, `results`, `versions`, `.git`, `.venv`, `node_modules`, and `__pycache__`.
 
@@ -126,7 +134,7 @@ SKILLEVALUATOR_PROFILE=external skillevaluator validate ./my-skill
 Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALUATOR_PROFILE` environment variable, then the bundled `external` default.
 
 <Accordion title="Write a custom policy overlay">
-  A custom policy overlays the external profile. It can narrow the accepted author domain and change severities by `CATEGORY.check_name` or `CATEGORY.*`:
+  A custom policy overlays the external profile. It can narrow the accepted author domain, change severities by `CATEGORY.check_name` or `CATEGORY.*`, and allow intended private MCP endpoint hosts:
 
   ```yaml title="policy.yaml"
   profile: community-strict
@@ -135,7 +143,20 @@ Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALU
   severity_overrides:
     SCHEMA.author_missing: critical
     LICENSE.*: critical
+  mcp:
+    # Exact names, *.suffix wildcards, IP literals, or CIDR networks.
+    # Cloud metadata endpoints are never allowed.
+    allowed_private_hosts: ["mcp.internal.localhost", "10.0.0.0/8"]
+  hooks:
+    # Plugin HTTP hook endpoints: URL prefixes or host patterns.
+    allowed_urls: ["https://hooks.example.com/"]
+  endpoints:
+    # Opt-in plugin DNS and redirect checks (same as validate --resolve-endpoints).
+    resolve: false
   ```
+
+  The `hooks` and `endpoints` keys apply to plugins; see
+  [Plugin Evaluation](plugin-evaluation.mdx#hook-risk-model).
 </Accordion>
 
 <Note>
@@ -144,7 +165,7 @@ Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALU
 
 ## The checks
 
-For `validate`, the default set is `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, and `lint`. The `dependency` check requires explicit selection with `--checks` (alias `--tier1-checks`) for `validate`; direct `tier1 PATH` includes it by default. Accepted check-name aliases include `code`/`code-risk` for `code-integrity`, `scripts`/`script-lint` for `lint`, `dependencies`/`deps`/`dependency-audit` for `dependency`, and `licence`/`license-check` for `license`.
+For `validate`, the default set is `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, and `lint`. The `dependency` check requires explicit selection with `--checks` (alias `--tier1-checks`) for `validate`; direct `tier1 PATH` includes it by default. For plugins, the opt-in `claude-validate` check compares the verdict with `claude plugin validate --strict`; see [Plugin Evaluation](plugin-evaluation.mdx#claude-plugin-validate-parity). Accepted check-name aliases include `code`/`code-risk` for `code-integrity`, `scripts`/`script-lint` for `lint`, `dependencies`/`deps`/`dependency-audit` for `dependency`, and `licence`/`license-check` for `license`.
 
 <AccordionGroup>
   <Accordion title="schema — frontmatter and repository governance">
@@ -289,7 +310,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
   </Accordion>
 
   <Accordion title="dependency — CVE audit (opt-in)">
-    Scans `requirements*.txt` for known Python package vulnerabilities. When `pyproject.toml` is present, `pip-audit --local` audits the active Python environment rather than resolving the dependencies declared in that file. `pip-audit` is the primary scanner; Safety supplies secondary coverage for requirements files when installed separately. The audit may use network-backed vulnerability databases.
+    Audits the Python dependencies declared in `requirements*.txt` and in `pyproject.toml` (`[project].dependencies`, `[project.optional-dependencies]`, and Poetry's `[tool.poetry.dependencies]`) for known vulnerabilities. Only exact `name==version` pins are audited: they are copied into a temporary requirements file and checked with `pip-audit --no-deps --disable-pip`, so nothing is installed or built, and pip options in the audited files (such as `--index-url` or `-e`) are never used. Each unpinned, ranged, or URL declaration gets an INFO `dependency-version-unverified` finding because a floating version cannot be audited. Transitive dependencies are not resolved; audit a fully pinned lockfile to cover them. `pip-audit` is the primary scanner; Safety supplies secondary coverage for the same pins when installed separately. The audit may use network-backed vulnerability databases.
 
     ```bash title="Opt-in dependency audit"
     skillevaluator validate ./my-skill --checks dependency

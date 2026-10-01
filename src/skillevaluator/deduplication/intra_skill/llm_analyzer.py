@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from skillevaluator.inference import LLMClient, LLMClientError, LLMVerdict
+from skillevaluator.inference import (
+    LLMClient,
+    LLMVerdict,
+    parse_bounded_llm_verdict,
+    validate_tier2_llm_prompt,
+)
 from skillevaluator.models.result import Severity
 
 if TYPE_CHECKING:
@@ -59,20 +64,20 @@ def build_user_prompt(cluster: ContentCluster) -> str:
     return "\n\n".join(parts)
 
 
-def analyze_cluster(client: LLMClient, cluster: ContentCluster) -> LLMVerdict:
+def analyze_cluster(
+    client: LLMClient,
+    cluster: ContentCluster,
+    *,
+    user_prompt: str | None = None,
+) -> LLMVerdict:
     """Run LLM analysis on a single content cluster."""
-    user_prompt = build_user_prompt(cluster)
+    user_prompt = build_user_prompt(cluster) if user_prompt is None else user_prompt
+    user_prompt = validate_tier2_llm_prompt(user_prompt, context="Content deduplication")
     data = client.extract_json_from_response(SYSTEM_PROMPT, user_prompt)
-
-    verdict = data.get("verdict", "")
-    if verdict not in VALID_VERDICTS:
-        raise LLMClientError(f"LLM returned unknown verdict '{verdict}'. Expected one of: {VALID_VERDICTS}")
-
-    return LLMVerdict(
-        verdict=verdict,
-        confidence=float(data.get("confidence", 0.0)),
-        reasoning=data.get("reasoning", ""),
-        suggestion=data.get("suggestion", ""),
+    return parse_bounded_llm_verdict(
+        data,
+        valid_verdicts=VALID_VERDICTS,
+        context="Content deduplication LLM",
     )
 
 

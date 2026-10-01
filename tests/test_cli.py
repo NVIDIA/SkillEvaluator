@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 from pathlib import Path
 
 import click
@@ -87,6 +88,34 @@ def test_tier_alias_help() -> None:
     for tier in ("tier1", "tier2", "tier3"):
         result = runner.invoke(cli, [tier, "--help"])
         assert result.exit_code == 0
+
+
+def test_validate_accepts_direct_skill_manifest(tmp_path: Path) -> None:
+    skill = tmp_path / "sample"
+    skill.mkdir()
+    manifest = skill / "SKILL.md"
+    manifest.write_text(
+        "---\n"
+        "name: sample\n"
+        "description: Direct manifest validation fixture\n"
+        "metadata:\n"
+        "  author: Test Author <test@example.com>\n"
+        "---\n\n"
+        "# Sample\n\nFollow the request.\n",
+        encoding="utf-8",
+    )
+
+    direct = CliRunner().invoke(
+        cli,
+        ["validate", str(manifest), "--checks", "schema", "--no-llm", "--no-dedup", "--report", "cli"],
+    )
+    directory = CliRunner().invoke(
+        cli,
+        ["validate", str(skill), "--checks", "schema", "--no-llm", "--no-dedup", "--report", "cli"],
+    )
+
+    assert direct.exit_code == directory.exit_code == 0, direct.output
+    assert "No skills found" not in direct.output
 
 
 def test_similarity_help_exposes_catalog_workflow_and_hides_legacy_cache_names() -> None:
@@ -245,22 +274,69 @@ def test_validate_preserves_linked_root_support_when_tier2_is_disabled(tmp_path:
     except OSError as exc:
         pytest.skip(f"Directory symlinks are unavailable: {exc}")
 
-    observed_targets: list[Path] = []
+    validated_paths: list[Path] = []
 
-    def record_validation(path: Path, **_kwargs) -> list[ValidationResult]:
-        observed_targets.append(path)
-        return [ValidationResult(validator_name="schema", passed=True)]
+    def validate_tier1(path: Path, **_kwargs):
+        validated_paths.append(path)
+        result = ValidationResult()
+        result.add_success("schema", "Tier 1 linked-root compatibility validation ran")
+        return [result]
 
-    monkeypatch.setattr("skillevaluator.cli.run_validation", record_validation)
+    monkeypatch.setattr("skillevaluator.cli.run_validation", validate_tier1)
 
     result = CliRunner().invoke(
         cli,
-        ["validate", "--no-tier3", str(linked_target), "--no-dedup", "--checks", "schema"],
+        [
+            "validate",
+            "--no-tier3",
+            str(linked_target),
+            "--no-dedup",
+            "--checks",
+            "schema",
+            "--report",
+            "cli",
+            "--output-dir",
+            str(tmp_path / "reports"),
+        ],
     )
 
     assert result.exit_code == 0, result.output
-    assert "symlink or reparse point" not in result.output
-    assert observed_targets == [target.resolve()]
+    assert validated_paths == [target.resolve()]
+
+
+def test_validate_rejects_direct_symlinked_manifest_in_tier1_only_mode(tmp_path: Path) -> None:
+    skill = tmp_path / "sample"
+    skill.mkdir()
+    source = tmp_path / "source.md"
+    source.write_text("---\nname: sample\ndescription: Linked manifest.\n---\n\n# Sample\n", encoding="utf-8")
+    manifest = skill / "SKILL.md"
+    manifest.symlink_to(source)
+
+    result = CliRunner().invoke(
+        cli,
+        ["validate", str(manifest), "--type", "skill", "--no-llm", "--no-dedup", "--report", "cli"],
+    )
+
+    assert result.exit_code != 0
+    assert "symlink" in result.output.lower() or "reparse" in result.output.lower()
+
+
+def test_validate_rejects_direct_hardlinked_manifest_in_tier1_only_mode(tmp_path: Path) -> None:
+    source = tmp_path / "source.md"
+    source.write_text("---\nname: sample\ndescription: Hard-linked manifest.\n---\n\n# Sample\n", encoding="utf-8")
+    manifest = tmp_path / "SKILL.md"
+    try:
+        os.link(source, manifest)
+    except OSError as exc:
+        pytest.skip(f"Hard links are unavailable: {exc}")
+
+    result = CliRunner().invoke(
+        cli,
+        ["validate", str(manifest), "--type", "skill", "--no-llm", "--no-dedup", "--report", "cli"],
+    )
+
+    assert result.exit_code != 0
+    assert "hard-linked" in result.output.lower()
 
 
 @pytest.mark.parametrize(

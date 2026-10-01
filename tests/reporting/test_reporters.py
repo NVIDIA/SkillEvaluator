@@ -1371,8 +1371,8 @@ class TestMarkdownReporter:
 
         output = MarkdownReporter(include_timestamp=False).render_all([result])
 
-        assert "`/steps/0/tool_calls/0/normalized/0`" in output
-        assert "`/steps/0/tool_calls/0/normalized/1`" in output
+        assert "<code>/steps/0/tool_calls/0/normalized/0</code>" in output
+        assert "<code>/steps/0/tool_calls/0/normalized/1</code>" in output
 
     def test_details_section(self, failure_result: ValidationResult) -> None:
         """Test expandable details section."""

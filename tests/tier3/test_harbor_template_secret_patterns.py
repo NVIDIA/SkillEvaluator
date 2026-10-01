@@ -110,6 +110,20 @@ def test_template_glued_id_or_hash_tokens_are_not_secrets(token):
 _SHARED_SECURITY_CONSTANTS = [
     "_SECRET_PATTERNS",
     "_DESTRUCTIVE_PATTERNS",
+    "_HOME_ANCHOR_RE",
+    "_PATH_WORD_RE",
+    "_SHELL_WORD",
+    "_REDIRECT_TARGET_RE",
+    "_FD_REDIRECT_TARGET_RE",
+    "_TEE_OPERANDS_RE",
+    "_SED_OPERANDS_RE",
+    "_SED_IN_PLACE_FLAG_RE",
+    "_FINDING_EVIDENCE_SCAN_CHARS",
+    "_URL_USERINFO_RE",
+    "_AUTH_HEADER_RE",
+    "_CREDENTIAL_FLAG_RE",
+    "_CREDENTIAL_ASSIGNMENT_RE",
+    "_TOKEN_PREFIX_RE",
     "_UNAUTHORIZED_PATHS",
     "_SENSITIVE_WRITE_PATHS",
     "_APPLY_PATCH_HEADER_RE",
@@ -136,6 +150,20 @@ _SHARED_SECURITY_CONSTANTS = [
     "_SECRET_VAR_NAME_RE",
     "_MAX_NETWORK_ACTION_CHARS",
     "WASTE_INDICATORS",
+    # Canary exfiltration (H04); the whole block is also compared verbatim in
+    # test_canary_exfiltration.py.
+    "CANARY_ENTRY_KEY",
+    "CANARY_FINDING_TYPE",
+    "CANARY_REDACTION",
+    "_CANARY_TOKEN_RE",
+    "_CANARY_URL_RE",
+    "_CANARY_NETWORK_CODE_RE",
+    "_CANARY_NETWORK_COMMANDS",
+    "_CANARY_NETWORK_TOOL_NAMES",
+    "_CANARY_GIT_SUBCOMMANDS",
+    "_CANARY_WRITE_REDIRECTS",
+    "_CANARY_NON_FILE_TARGETS",
+    "_CANARY_MAX_FILE_BYTES",
 ]
 
 

@@ -82,6 +82,20 @@ DIMENSION_QUESTIONS = {
     "efficiency": "Did it avoid wasted tool or skill usage?",
 }
 
+# A judged metric is "not applicable" when its dataset case has nothing to
+# judge against (no ground_truth / expected_behavior). The verifier records the
+# metric as ``null`` with ``details[metric].status == "not_applicable"``; N/A
+# metrics are excluded from the trial overall, the arm averages, and lift.
+# Deterministic metrics never become N/A, and an absent or non-finite metric
+# without the explicit marker stays an incomplete (unscored) reward.
+NOT_APPLICABLE_STATUS = "not_applicable"
+NOT_APPLICABLE_ELIGIBLE_METRICS = ("accuracy", "goal_accuracy", "behavior_check")
+NOT_APPLICABLE_REASONS = {
+    "accuracy": "No ground_truth defined, so there is no reference answer to judge against",
+    "goal_accuracy": "No ground_truth defined, so there is no expected outcome to judge against",
+    "behavior_check": "No expected_behavior defined, so there is no workflow to check",
+}
+
 _RESERVED_METADATA_KEYS = {
     "details",
     "entry_id",
@@ -123,6 +137,85 @@ def metric_value(reward: dict[str, Any], metric: str) -> float | None:
             return numeric
 
     return None
+
+
+def metric_is_not_applicable(reward: dict[str, Any], metric: str) -> bool:
+    """Return whether *reward* explicitly records a judged *metric* as not applicable.
+
+    Only the LLM-judged metrics can be N/A, only when no numeric value is
+    present, and only with the verifier's ``details[metric].status`` marker.
+    Absence alone never means N/A.
+    """
+    if metric not in NOT_APPLICABLE_ELIGIBLE_METRICS:
+        return False
+    if reward.get(metric) is not None or metric_value(reward, metric) is not None:
+        return False
+    details = reward.get("details")
+    detail = details.get(metric) if isinstance(details, dict) else None
+    return (
+        isinstance(detail, dict)
+        and detail.get("status") == NOT_APPLICABLE_STATUS
+        and _finite_number(detail.get("score")) is None
+    )
+
+
+def not_applicable_metrics(
+    rewards: list[dict[str, Any]],
+    metrics: tuple[str, ...] | list[str] | None = None,
+) -> list[str]:
+    """Return metrics that every reward records as N/A, so no reward scores them."""
+    if not rewards:
+        return []
+    if metrics is None:
+        _, metrics = metric_set_for_rewards(rewards)
+    return [
+        metric
+        for metric in metrics
+        if metric in NOT_APPLICABLE_ELIGIBLE_METRICS
+        and all(metric_is_not_applicable(reward, metric) for reward in rewards)
+    ]
+
+
+def not_applicable_counts(
+    rewards: list[dict[str, Any]],
+    metrics: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, int]:
+    """Return how many rewards record each metric as N/A (metrics with none are omitted)."""
+    if not rewards:
+        return {}
+    if metrics is None:
+        _, metrics = metric_set_for_rewards(rewards)
+    counts: dict[str, int] = {}
+    for metric in metrics:
+        count = sum(1 for reward in rewards if metric_is_not_applicable(reward, metric))
+        if count:
+            counts[metric] = count
+    return counts
+
+
+def mark_not_applicable(reward: dict[str, Any], metric: str) -> None:
+    """Record *metric* as N/A on *reward* using the verifier's marker shape."""
+    reward[metric] = None
+    details = reward.get("details")
+    if not isinstance(details, dict):
+        details = {}
+        reward["details"] = details
+    existing = details.get(metric)
+    detail = dict(existing) if isinstance(existing, dict) else {}
+    detail.update(
+        {
+            "score": None,
+            "status": NOT_APPLICABLE_STATUS,
+            "reason": NOT_APPLICABLE_REASONS.get(metric, "Not applicable to this eval case"),
+        }
+    )
+    details[metric] = detail
+
+
+def dimension_is_not_applicable(dimension: str, not_applicable: tuple[str, ...] | list[str] | set[str]) -> bool:
+    """Return whether every source metric of *dimension* is N/A."""
+    sources = DIMENSION_DEFINITIONS.get(dimension)
+    return bool(sources) and all(metric in not_applicable for metric in sources)
 
 
 def metric_set_for_reward(reward: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
@@ -185,16 +278,23 @@ def average_metrics(rewards: list[dict[str, Any]]) -> tuple[dict[str, float], st
 def overall_score(reward: dict[str, Any]) -> float | None:
     """Compute pass@k/lift overall score for a reward payload.
 
-    SkillEvaluator default rewards use the mean of their active SkillEvaluator metric set.  Custom
-    rewards without SkillEvaluator metrics can still pass through by emitting numeric
+    SkillEvaluator default rewards use the mean of their active SkillEvaluator metric set,
+    excluding metrics explicitly recorded as not applicable.  Custom rewards
+    without SkillEvaluator metrics can still pass through by emitting numeric
     ``overall``.
     """
     _, metrics = metric_set_for_reward(reward)
-    values = [metric_value(reward, m) for m in metrics]
     if metrics:
-        if not values or any(value is None for value in values):
+        values: list[float] = []
+        for metric in metrics:
+            value = metric_value(reward, metric)
+            if value is not None:
+                values.append(value)
+            elif not metric_is_not_applicable(reward, metric):
+                return None
+        if not values:
             return None
-        return sum(value for value in values if value is not None) / len(values)
+        return sum(values) / len(values)
 
     return _finite_number(reward.get("overall"))
 
@@ -203,23 +303,43 @@ def score_definition(metrics: tuple[str, ...] = DEFAULT_METRICS) -> str:
     """Human-readable definition for the SkillEvaluator overall score."""
     if not metrics:
         return "overall = user-provided reward overall"
-    return "overall = mean(" + ", ".join(metrics) + ")"
+    definition = "overall = mean(" + ", ".join(metrics) + ")"
+    if any(metric in NOT_APPLICABLE_ELIGIBLE_METRICS for metric in metrics):
+        definition += ", excluding metrics that are not applicable to a case"
+    return definition
 
 
-def dimension_scores(scores: dict[str, float]) -> dict[str, dict[str, Any]]:
-    """Compute report-only SkillEvaluator dimension scores from default metric scores."""
+def dimension_scores(
+    scores: dict[str, float],
+    not_applicable: tuple[str, ...] | list[str] | set[str] = (),
+) -> dict[str, dict[str, Any]]:
+    """Compute report-only SkillEvaluator dimension scores from default metric scores.
+
+    Source metrics that are N/A for the whole arm (and so absent from *scores*)
+    drop out and the remaining weights are renormalized. A dimension whose
+    sources are all N/A is omitted, as is one with any other missing source.
+    """
     out: dict[str, dict[str, Any]] = {}
-    for dimension, sources in DIMENSION_DEFINITIONS.items():
-        if not all(_finite_number(scores.get(metric)) is not None for metric in sources):
+    for dimension, configured_sources in DIMENSION_DEFINITIONS.items():
+        sources = {
+            metric: weight
+            for metric, weight in configured_sources.items()
+            if not (metric in not_applicable and _finite_number(scores.get(metric)) is None)
+        }
+        if not sources or not all(_finite_number(scores.get(metric)) is not None for metric in sources):
             continue
         total_weight = sum(sources.values())
         if total_weight <= 0:
             continue
         score = sum(float(scores[metric]) * weight for metric, weight in sources.items()) / total_weight
-        out[dimension] = {
+        entry: dict[str, Any] = {
             "score": round(score, 4),
             "sources": sources,
         }
+        skipped = [metric for metric in configured_sources if metric not in sources]
+        if skipped:
+            entry["not_applicable_sources"] = skipped
+        out[dimension] = entry
     return out
 
 

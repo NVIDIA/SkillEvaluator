@@ -904,12 +904,12 @@ def test_behavior_retry_transport_failure_salvages_only_complete_first_entries(j
         _pair_script([(truncated, None), (None, "request timed out")], calls),
     )
 
-    result = judge_module.judge_behavior_check("conversation", ["b1", "b2", "b3"])
+    result = judge_module.judge_behavior_check("conversation", ["b1"])
 
     assert len(calls) == 2
-    assert result["score"] == round(1 / 3, 4)
+    assert result["score"] == 1.0
     assert result["results"] == [{"step": 1, "passed": True, "reason": "observed"}]
-    assert "1/3" in result["reason"]
+    assert "1/1" in result["reason"]
 
 
 def test_behavior_retry_transport_failure_without_salvage_is_redacted_error(judge_module, monkeypatch) -> None:
@@ -966,6 +966,8 @@ def test_behavior_salvage_rejects_noncompletable_current_entry(
     assert len(calls) == 2
     _assert_error_result(result)
     assert result["results"] == []
+    # The parser rejects the text itself; an error here is not merely an incomplete salvage.
+    assert judge_module._salvage_behavior_results(malformed) == []
 
 
 @pytest.mark.parametrize(
@@ -981,7 +983,7 @@ def test_behavior_salvage_accepts_append_only_completable_current_entry(
     monkeypatch,
     unfinished_entry: str,
 ) -> None:
-    truncated = '{"results":[{"passed":true},' + unfinished_entry
+    truncated = '{"results":[{"step":1,"passed":true},' + unfinished_entry
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -989,11 +991,11 @@ def test_behavior_salvage_accepts_append_only_completable_current_entry(
         _pair_script([(truncated, None), (None, "request timed out")], calls),
     )
 
-    result = judge_module.judge_behavior_check("conversation", ["b1", "b2"])
+    result = judge_module.judge_behavior_check("conversation", ["b1"])
 
     assert len(calls) == 2
-    assert result["score"] == 0.5
-    assert result["results"] == [{"passed": True}]
+    assert result["score"] == 1.0
+    assert result["results"] == [{"step": 1, "passed": True}]
 
 
 def test_behavior_retries_ambiguous_multiple_documents_then_errors(judge_module, monkeypatch) -> None:
@@ -1062,6 +1064,8 @@ def test_behavior_salvage_rejects_excessive_nesting(
     assert len(calls) == 2
     _assert_error_result(result)
     assert result["results"] == []
+    # The parser rejects the text itself; an error here is not merely an incomplete salvage.
+    assert judge_module._salvage_behavior_results(malformed) == []
 
 
 @pytest.mark.parametrize(
@@ -1098,6 +1102,8 @@ def test_behavior_salvage_rejects_nonstandard_constants(
     assert len(calls) == 2
     _assert_error_result(result)
     assert result["results"] == []
+    # The parser rejects the text itself; an error here is not merely an incomplete salvage.
+    assert judge_module._salvage_behavior_results(malformed) == []
 
 
 @pytest.mark.parametrize(
@@ -1169,10 +1175,12 @@ def test_behavior_salvage_rejects_invalid_top_level_prefixes(
     assert len(calls) == 2
     _assert_error_result(result)
     assert result["results"] == []
+    # The parser rejects the text itself; an error here is not merely an incomplete salvage.
+    assert judge_module._salvage_behavior_results(malformed) == []
 
 
 def test_behavior_salvage_keeps_finite_top_level_score_prefix(judge_module, monkeypatch) -> None:
-    truncated = '{"score":0.5,"results":[{"passed":true},{"passed":false'
+    truncated = '{"score":1.0,"results":[{"step":1,"passed":true},{"step":2,"passed":false'
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -1180,17 +1188,17 @@ def test_behavior_salvage_keeps_finite_top_level_score_prefix(judge_module, monk
         _pair_script([(truncated, None), (None, "request timed out")], calls),
     )
 
-    result = judge_module.judge_behavior_check("conversation", ["b1", "b2"])
+    result = judge_module.judge_behavior_check("conversation", ["b1"])
 
-    assert result["score"] == 0.5
-    assert result["results"] == [{"passed": True}]
+    assert result["score"] == 1.0
+    assert result["results"] == [{"step": 1, "passed": True}]
 
 
 @pytest.mark.parametrize(
     "prefix", [pytest.param("Here is the JSON:\n", id="prose"), pytest.param("```json\n", id="fence")]
 )
 def test_behavior_salvage_tolerates_non_structural_wrappers(judge_module, monkeypatch, prefix: str) -> None:
-    truncated = f'{prefix}{{"results":[{{"passed":true}},{{"passed":false'
+    truncated = f'{prefix}{{"results":[{{"step":1,"passed":true}},{{"step":2,"passed":false'
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -1198,26 +1206,72 @@ def test_behavior_salvage_tolerates_non_structural_wrappers(judge_module, monkey
         _pair_script([(truncated, None), (None, "request timed out")], calls),
     )
 
-    result = judge_module.judge_behavior_check("conversation", ["b1", "b2"])
+    result = judge_module.judge_behavior_check("conversation", ["b1"])
 
-    assert result["score"] == 0.5
-    assert result["results"] == [{"passed": True}]
+    assert result["score"] == 1.0
+    assert result["results"] == [{"step": 1, "passed": True}]
 
 
-def test_neutral_judge_skips_remain_unchanged(judge_module) -> None:
-    assert judge_module.judge_accuracy("question", "", "agent response") == {
-        "score": 1.0,
-        "reason": "No ground_truth -- skipped",
+@pytest.mark.parametrize("ground_truth", ["", "   \n", None, []])
+def test_judges_without_ground_truth_are_not_applicable(judge_module, monkeypatch, ground_truth) -> None:
+    def no_llm(*_args, **_kwargs):
+        raise AssertionError("an N/A judge must not call the LLM")
+
+    monkeypatch.setattr(judge_module, "call_public_llm", no_llm)
+
+    assert judge_module.judge_accuracy("question", ground_truth, "agent response") == {
+        "score": None,
+        "status": "not_applicable",
+        "reason": "N/A: no ground_truth defined for this eval case",
     }
-    assert judge_module.judge_goal_accuracy("question", "", "agent response") == {
-        "score": 1.0,
-        "reason": "No ground_truth -- skipped",
+    assert judge_module.judge_goal_accuracy("question", ground_truth, "agent response") == {
+        "score": None,
+        "status": "not_applicable",
+        "reason": "N/A: no ground_truth defined for this eval case",
     }
-    assert judge_module.judge_behavior_check("conversation", []) == {
-        "score": 1.0,
-        "reason": "No expected_behavior defined",
+
+
+@pytest.mark.parametrize("ground_truth", [0, 0.0, False])
+def test_falsy_but_defined_ground_truth_is_judged(judge_module, monkeypatch, ground_truth) -> None:
+    accuracy_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        judge_module,
+        "call_public_llm",
+        _recorded_pair_script([(VALID_ACCURACY_RESPONSE, None)], accuracy_calls),
+    )
+    assert judge_module.judge_accuracy("How many tests fail?", ground_truth, "0 failing tests")["score"] == 0.6
+
+    goal_calls: list[dict[str, Any]] = []
+    _patch_goal_script(judge_module, monkeypatch, [(VALID_GOAL_RESPONSE, None, {})], goal_calls)
+    assert judge_module.judge_goal_accuracy("How many tests fail?", ground_truth, "0 failing tests")["score"] == 1.0
+
+    assert (len(accuracy_calls), len(goal_calls)) == (1, 1)
+    assert judge_module._has_judge_reference(ground_truth) is True
+    for missing in (None, "", "  ", [], [""], {}):
+        assert judge_module._has_judge_reference(missing) is False
+
+
+@pytest.mark.parametrize("expected_behaviors", [[], None, ["", "  "]])
+def test_behavior_check_without_expected_behavior_is_not_applicable(
+    judge_module, monkeypatch, expected_behaviors
+) -> None:
+    def no_llm(*_args, **_kwargs):
+        raise AssertionError("an N/A judge must not call the LLM")
+
+    monkeypatch.setattr(judge_module, "call_public_llm", no_llm)
+
+    assert judge_module.judge_behavior_check("conversation", expected_behaviors) == {
+        "score": None,
+        "status": "not_applicable",
+        "reason": "N/A: no expected_behavior defined for this eval case",
         "results": [],
     }
+
+
+def test_shared_and_template_not_applicable_results_match() -> None:
+    assert eval_template.judge_accuracy("q", "", "a") == llm_judge.judge_accuracy("q", "", "a")
+    assert eval_template.judge_goal_accuracy("q", "", "a") == llm_judge.judge_goal_accuracy("q", "", "a")
+    assert eval_template.judge_behavior_check("c", []) == llm_judge.judge_behavior_check("c", [])
 
 
 def test_shared_and_template_accuracy_core_results_match(monkeypatch) -> None:

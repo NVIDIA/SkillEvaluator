@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 import time
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -40,14 +40,18 @@ from skillevaluator.provider_config import (
     resolve_llm_provider,
 )
 from skillevaluator.source_identity import normalized_evaluated_source
+from skillevaluator.tier3.eval_core.plugin_signals import PluginSignalsContext, build_plugin_signals_context
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 from skillevaluator.tier3.harbor.adapter import (
     _VERIFIER_BUDGET_ENV_VARS,
     _VERIFIER_JUDGE_MODEL_ENV_VARS,
+    _load_mcp_servers,
     _prevalidate_baseline_skill_candidates,
     build_eval_base_image,
     find_evals_file,
     generate_harbor_tasks,
+    load_plugin_runtime_components,
+    load_plugin_subagent_aliases,
     private_evaluator_skill_snapshot,
     stage_native_harbor_tasks,
     validate_output_provenance_key_location,
@@ -116,9 +120,127 @@ def _persist_dataset_truth(run_dir: Path, *, fallback_task_ids: list[str]) -> di
     return snapshot
 
 
+def _plugin_signals_context(
+    *,
+    skill_path: Path,
+    evaluator_skill_path: Path,
+    workspace_skills: list[Path],
+    run_dir: Path,
+    baseline_has_members: bool,
+) -> PluginSignalsContext:
+    """Declared plugin components and staged case fields for report-only plugin signals.
+
+    Member skills are the workspace skills staged beside the generated wrapper;
+    runnable MCP servers come from the package's with-plugin-only MCP file,
+    read through the adapter's bounded no-follow loader; case fields come from
+    the staged task entries.
+    """
+    from skillevaluator.tier3.plugin_eval import PLUGIN_MCP_SERVERS_FILENAME
+
+    try:
+        servers = _load_mcp_servers(evaluator_skill_path, PLUGIN_MCP_SERVERS_FILENAME)
+    except (OSError, ValueError) as exc:
+        logger.warning("Plugin signals: could not read runnable MCP servers: %s", exc)
+        servers = []
+    try:
+        entries = load_staged_harbor_dataset(run_dir)
+    except (OSError, ValueError) as exc:
+        logger.warning("Plugin signals: could not read staged case entries: %s", exc)
+        entries = []
+    # The generated package directory is ``<plugin>-plugin-eval`` and its wrapper
+    # SKILL.md is named after the plugin; neither is a member-skill selection.
+    wrapper_names = [skill_path.name, skill_path.name.removesuffix("-plugin-eval")]
+    try:
+        runtime_components = load_plugin_runtime_components(evaluator_skill_path)
+    except (OSError, ValueError) as exc:
+        logger.warning("Plugin signals: could not read declared subagents and commands: %s", exc)
+        runtime_components = {"subagents": [], "commands": []}
+    try:
+        subagent_aliases = load_plugin_subagent_aliases(evaluator_skill_path)
+    except (OSError, ValueError) as exc:
+        logger.warning("Plugin signals: could not read staged subagent names: %s", exc)
+        subagent_aliases = {}
+    return build_plugin_signals_context(
+        member_skills=[path.name for path in workspace_skills],
+        mcp_servers=[server.get("name") for server in servers],
+        wrapper_skills=wrapper_names,
+        entries=entries,
+        baseline_has_members=baseline_has_members,
+        subagents=runtime_components["subagents"],
+        commands=runtime_components["commands"],
+        subagent_aliases=subagent_aliases,
+    )
+
+
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
 _NVIDIA_BUILD_AGENT_DEFAULT_MODEL = CHAT_DEFAULT_NVIDIA
+
+
+def _resolve_plugin_load_plan(
+    plugin_load: str,
+    agents: Sequence[str],
+    *,
+    env_mode: str,
+    task_source: str,
+    native_plugin_source: Any,
+) -> dict[str, Any]:
+    """Per-agent ``--plugin-load`` decisions, checked against the prepared plugin snapshot.
+
+    A native decision needs the snapshot, and an adapter that would stage a
+    component carrying a permission bypass refuses it. Under ``native`` either
+    case raises :class:`PluginLoadError`; under ``auto`` that agent falls back to
+    the wrapper with the reason recorded.
+    """
+    from skillevaluator.tier3.plugin_native import (
+        PluginLoadError,
+        adapter_for,
+        native_refusal,
+        resolve_plugin_load,
+        wrapper_decision,
+    )
+
+    decisions = dict(resolve_plugin_load(plugin_load, agents, env_mode=env_mode, task_source=task_source))
+    for agent, decision in list(decisions.items()):
+        if not decision.native:
+            continue
+        adapter = adapter_for(agent)
+        if native_plugin_source is None:
+            reason: str | None = "no native plugin snapshot was prepared for this run"
+        else:
+            reason = native_refusal(adapter, native_plugin_source) if adapter is not None else None
+        if reason is None:
+            continue
+        if plugin_load == "native":
+            raise PluginLoadError(f"--plugin-load native is not supported for {agent}: {reason}")
+        decisions[agent] = wrapper_decision(agent, f"auto: {reason}; using the generated wrapper")
+    return decisions
+
+
+def _plugin_load_census_plan(
+    plugin_load: str | None,
+    decisions: Mapping[str, Any],
+    stagings: Mapping[str, Any],
+    source: Any,
+) -> dict[str, dict[str, Any]] | None:
+    """Per-agent load mode and declared components for the collector's load census.
+
+    ``None`` in the default wrapper mode, so wrapper runs are unchanged.
+    """
+    if not decisions or (plugin_load or "wrapper") == "wrapper":
+        return None
+    plan: dict[str, dict[str, Any]] = {}
+    for agent, decision in decisions.items():
+        staging = stagings.get(agent)
+        if decision.native and staging is not None:
+            # Declared components, native types, staged hook ids, and the harness report to check.
+            plan[agent] = {"mode": decision.mode, **staging.bundle.census_plan()}
+            continue
+        declared = [{"type": "skill", "name": path.name} for path in getattr(source, "member_skills", ())]
+        declared += [{"type": "rule", "name": name} for name, _content in getattr(source, "rules", ())]
+        declared += [{"type": "mcp", "name": str(server.get("name"))} for server in getattr(source, "mcp_servers", ())]
+        plan[agent] = {"mode": decision.mode, "declared": declared}
+    return plan
 
 
 def _reserve_run_dir(results_root: Path, timestamp: str) -> Path:
@@ -307,6 +429,16 @@ _OPERATOR_OWNED_AGENT_ENV = frozenset(
         "OPENAI_BASE_URL",
     }
 )
+
+
+# Harbor's Hermes agent takes ``provider/model``: ``anthropic/...`` uses
+# ANTHROPIC_API_KEY, ``openai/...`` uses OPENAI_API_KEY and OPENAI_BASE_URL.
+_ANTHROPIC_NATIVE_BASE_URLS = frozenset({"https://api.anthropic.com", "https://api.anthropic.com/v1"})
+_HERMES_MODEL_NAMESPACES = {
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "openai-compatible": "openai",
+}
 
 
 @dataclass(frozen=True)
@@ -550,11 +682,24 @@ def _validate_agent_provider_credentials(
             "only its selected provider credential."
         ]
 
+    hermes_model = models.get("hermes")
+    expected_hermes_provider = _HERMES_MODEL_NAMESPACES.get(provider.provider)
+    if (
+        "hermes" in agents
+        and hermes_model
+        and expected_hermes_provider
+        and hermes_model.split("/", maxsplit=1)[0].casefold() != expected_hermes_provider
+    ):
+        return [
+            "Hermes needs a provider-qualified model that matches the evaluator provider "
+            f"({expected_hermes_provider}/MODEL), so it uses only the selected provider credential."
+        ]
+
     if provider.provider != "nv_build":
         supported_agents = {
-            "openai": {"claude-code", "codex", "opencode"},
-            "openai-compatible": {"claude-code", "codex", "opencode"},
-            "anthropic": {"claude-code", "codex", "opencode"},
+            "openai": {"claude-code", "codex", "opencode", "hermes"},
+            "openai-compatible": {"claude-code", "codex", "opencode", "hermes"},
+            "anthropic": {"claude-code", "codex", "opencode", "hermes"},
             "bedrock": {"claude-code"},
         }.get(provider.provider, set())
         unsupported = [agent for agent in agents if agent not in supported_agents]
@@ -567,6 +712,26 @@ def _validate_agent_provider_credentials(
             return ["anthropic with opencode does not support local mode; use Docker/cloud or select claude-code."]
         if env_mode == ENV_MODE_LOCAL and provider.provider == "bedrock":
             return ["bedrock live agents do not support local mode; use Docker or a supported cloud backend."]
+        if (
+            provider.provider == "anthropic"
+            and "hermes" in agents
+            and (provider.base_url or "").strip().rstrip("/") not in {"", *_ANTHROPIC_NATIVE_BASE_URLS}
+        ):
+            return [
+                "hermes with the Anthropic evaluator provider uses the native Anthropic endpoint; Harbor's Hermes "
+                "agent does not forward ANTHROPIC_BASE_URL. Unset it or select another agent."
+            ]
+        if provider.provider in {"openai", "openai-compatible"} and "hermes" in agents:
+            # Harbor's Hermes config pins neither the provider nor the base URL
+            # (``provider: auto``, no ``--provider`` for openai/MODEL), and Hermes
+            # resolves that to OpenRouter and ignores OPENAI_BASE_URL. The OpenAI or
+            # gateway key would then be sent to openrouter.ai.
+            return [
+                f"hermes with the {provider.provider} evaluator provider is refused: Harbor's Hermes agent does not "
+                "pin the provider or OPENAI_BASE_URL, and Hermes routes openai/MODEL to OpenRouter, so the "
+                "evaluator's OpenAI credential would be sent to openrouter.ai. Use the Anthropic provider (native "
+                "endpoint) for hermes, or select another agent."
+            ]
         if provider.provider == "bedrock" and "claude-code" in agents:
             has_bearer = bool(agent_runtime_env.get("AWS_BEARER_TOKEN_BEDROCK", "").strip())
             has_access_pair = bool(
@@ -983,6 +1148,9 @@ def _agent_credentials(
             name: os.environ.get(name, "") for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if os.environ.get(name)
         }
 
+    if provider.provider == "anthropic" and agent == "hermes":
+        # Harbor's Hermes agent reads ANTHROPIC_API_KEY only (native endpoint).
+        return {"ANTHROPIC_API_KEY": provider.api_key} if provider.api_key else {}
     if provider.provider == "anthropic" and agent in {"claude-code", "opencode"}:
         return {
             name: value
@@ -992,6 +1160,10 @@ def _agent_credentials(
             }.items()
             if value
         }
+    if provider.provider in {"openai", "openai-compatible"} and agent == "hermes":
+        # Never hand Hermes an OpenAI credential: it would route it to OpenRouter
+        # (see _validate_agent_provider_credentials, which refuses this pairing).
+        return {}
     if provider.provider in {"openai", "openai-compatible"} and agent in {"codex", "opencode"}:
         return {
             name: value
@@ -1071,7 +1243,7 @@ def _agent_provider_config(
             base_url=credentials.get("OPENAI_BASE_URL"),
             litellm_model=f"openai/{resolved_model}",
         )
-    if agent == "opencode":
+    if agent in {"opencode", "hermes"}:
         runtime_namespaces = {
             "anthropic": "anthropic/",
             "nv_build": "nvidia/",
@@ -1247,6 +1419,11 @@ def _model_for_agent(
             "openai-compatible": "openai",
         }.get(provider.provider)
         if namespace and source in {"public provider default", "openai-compatible agent default"}:
+            selected = f"{namespace}/{selected}"
+    if agent == "hermes":
+        # Harbor's Hermes agent requires provider/model and routes by the prefix.
+        namespace = _HERMES_MODEL_NAMESPACES.get(provider.provider)
+        if namespace and source == "public provider default":
             selected = f"{namespace}/{selected}"
     return selected, source
 
@@ -1617,6 +1794,7 @@ def _run_agent_pair(
     env_mode: str,
     with_skill: Path,
     baseline: Path | None,
+    sum_of_parts: Path | None = None,
     jobs_dir: Path,
     run_env: dict[str, str],
     n_attempts: int,
@@ -1631,17 +1809,26 @@ def _run_agent_pair(
     pass_threshold: float = 0.50,
     task_names: list[str] | None = None,
     verifier_env: Mapping[str, str] | None = None,
+    with_agent_import_path: str | None = None,
 ) -> list[str]:
+    """Launch the with-skill arm and its baselines for one agent.
+
+    ``with_agent_import_path`` overrides the Harbor agent for the with-skill arm
+    only (native plugin loading); baselines keep ``agent_import_path``.
+    """
+    import_paths = {"with": with_agent_import_path or agent_import_path}
     jobs = [("with", with_skill)]
     if baseline is not None:
         jobs.append(("without", baseline))
+    if sum_of_parts is not None:
+        jobs.append(("sumofparts", sum_of_parts))
     if stop_on_pass:
         # A later attempt is launched only after the previous one scored, so
         # stop-on-pass runs each condition sequentially, one attempt at a time.
         sequential_errors: list[str] = []
         for variant, dataset in jobs:
-            sequential_errors.extend(
-                _run_stop_on_pass_variant(
+            try:
+                variant_errors = _run_stop_on_pass_variant(
                     skill_name=skill_name,
                     agent=agent,
                     variant=variant,
@@ -1657,10 +1844,16 @@ def _run_agent_pair(
                     override_cpus=override_cpus,
                     override_memory_mb=override_memory_mb,
                     override_storage_mb=override_storage_mb,
-                    agent_import_path=agent_import_path,
+                    agent_import_path=import_paths.get(variant, agent_import_path),
                     verifier_env=verifier_env,
                 )
-            )
+            except Exception as exc:
+                if variant != "sumofparts":
+                    raise
+                _log_report_only_arm_failure(agent, exc)
+                continue
+            if variant != "sumofparts":
+                sequential_errors.extend(variant_errors)
         return sequential_errors
     # The advertised concurrency is one per-agent trial budget. Split it
     # across concurrently running conditions instead of multiplying it by two.
@@ -1688,17 +1881,33 @@ def _run_agent_pair(
                 override_cpus=override_cpus,
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
-                agent_import_path=agent_import_path,
+                agent_import_path=import_paths.get(variant, agent_import_path),
                 verifier_env=verifier_env,
                 expected_trials=expected_trials,
             ): variant
             for (variant, dataset), condition_concurrency in zip(jobs, job_concurrency, strict=True)
         }
         for future in as_completed(futures):
-            ok, detail = future.result()
-            if not ok:
+            try:
+                ok, detail = future.result()
+            except Exception as exc:
+                # The sum-of-parts arm is report-only: its crash must not discard the
+                # with-plugin and baseline results. The collector records it as failed.
+                if futures[future] != "sumofparts":
+                    raise
+                _log_report_only_arm_failure(agent, exc)
+                continue
+            if not ok and futures[future] != "sumofparts":
                 errors.append(f"{agent} {futures[future]}-skill Harbor run failed: {detail}")
     return errors
+
+
+def _log_report_only_arm_failure(agent: str, exc: BaseException) -> None:
+    logger.warning(
+        "%s sum-of-parts (report-only) Harbor run raised %s; keeping the other arms",
+        agent,
+        redact_progress_detail(f"{type(exc).__name__}: {exc}")[:500],
+    )
 
 
 class _RunProgressLifecycle:
@@ -1838,6 +2047,13 @@ def _run_harbor_eval_impl(
     custom_dockerfile_mode: str | None = None,
     skill_workspace_mode: str | None = None,
     include_skills: list[str | Path] | None = None,
+    workspace_skills_baseline: bool = True,
+    sum_of_parts_arm: bool = False,
+    eval_target_kind: str = "skill",
+    lift_mode_requested: str | None = None,
+    integration_skip_reason: str | None = None,
+    plugin_load: str = "wrapper",
+    native_plugin_source: Any = None,
     copy_repo: bool = False,
     grading_mode: str | None = None,
     reference_skills_dir: Path | None = None,
@@ -1980,13 +2196,6 @@ def _run_harbor_eval_impl(
         )
     )
 
-    reporter.emit(ProgressEvent(stage="environment-preflight", state="running", detail=env_mode))
-    prereq_errors = _check_prerequisites(env_mode=env_mode, agents=agents)
-    if prereq_errors:
-        reporter.emit(ProgressEvent(stage="environment-preflight", state="failed", detail="; ".join(prereq_errors)))
-        return {"error": prereq_errors}
-    reporter.emit(ProgressEvent(stage="environment-preflight", state="complete", detail=env_mode))
-
     # Resolve the effective source before constructing credential-probe targets.
     # Native Harbor tasks can select the standard-grader judge model at task or
     # step scope, so the provider fallback is not necessarily the runtime model.
@@ -1994,6 +2203,38 @@ def _run_harbor_eval_impl(
     native_exists = (evaluator_skill_path / "evals" / "harbor").exists()
     if task_source == "auto":
         task_source = "evals_json" if evals_exists else "native_harbor" if native_exists else ""
+    task_source_ready = (task_source == "evals_json" and evals_exists) or (
+        task_source == "native_harbor" and native_exists
+    )
+
+    # Native plugin loading (``--plugin-load``) applies to plugin runs only. The
+    # plan is a cheap, deterministic check, so it runs before the environment
+    # preflight: ``native`` with an unsupported environment fails with that
+    # reason, not with a missing local CLI. (A missing task source is reported
+    # after the preflight, as before.)
+    plugin_load_decisions: dict[str, Any] = {}
+    if (eval_target_kind or "skill") == "plugin" and task_source_ready:
+        from skillevaluator.tier3.plugin_native import PluginLoadError
+
+        try:
+            plugin_load_decisions = _resolve_plugin_load_plan(
+                plugin_load or "wrapper",
+                agents,
+                env_mode=env_mode,
+                task_source=task_source,
+                native_plugin_source=native_plugin_source,
+            )
+        except PluginLoadError as exc:
+            reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
+            return {"error": [str(exc)]}
+
+    reporter.emit(ProgressEvent(stage="environment-preflight", state="running", detail=env_mode))
+    prereq_errors = _check_prerequisites(env_mode=env_mode, agents=agents)
+    if prereq_errors:
+        reporter.emit(ProgressEvent(stage="environment-preflight", state="failed", detail="; ".join(prereq_errors)))
+        return {"error": prereq_errors}
+    reporter.emit(ProgressEvent(stage="environment-preflight", state="complete", detail=env_mode))
+
     if task_source == "evals_json" and not evals_exists:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="evaluation dataset missing"))
         return {"error": ["No evals/evals.json found. Run create-eval-dataset or add a dataset."]}
@@ -2025,6 +2266,20 @@ def _run_harbor_eval_impl(
         for agent in agents
         if (import_path := _agent_import_path(provider, agent, env_mode)) is not None
     }
+    with_agent_import_paths: dict[str, str] = {}
+    if any(decision.native for decision in plugin_load_decisions.values()):
+        from skillevaluator.tier3.plugin_native import PluginLoadError, native_agent_import_path, wrapper_decision
+
+        for agent, decision in list(plugin_load_decisions.items()):
+            if not decision.native:
+                continue
+            try:
+                with_agent_import_paths[agent] = native_agent_import_path(agent, agent_import_paths.get(agent))
+            except PluginLoadError as exc:
+                if plugin_load == "native":
+                    reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=str(exc)))
+                    return {"error": [f"--plugin-load native is not supported for {agent}: {exc}"]}
+                plugin_load_decisions[agent] = wrapper_decision(agent, f"auto: {exc}; using the generated wrapper")
     runtime_secret_values = set().union(
         *(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values())
     )
@@ -2218,6 +2473,33 @@ def _run_harbor_eval_impl(
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
+    run_sum_of_parts = bool(sum_of_parts_arm and not skip_baseline and workspace_skills)
+    run_config["eval_target"] = {"kind": eval_target_kind or "skill"}
+    run_config["skill_workspace"] = {
+        "mode": workspace_mode,
+        "include": [str(path) for path in workspace_skills],
+        "staged_skills": [path.name for path in workspace_skills],
+        "baseline_includes_workspace_skills": workspace_skills_baseline,
+        "sum_of_parts_arm": run_sum_of_parts,
+    }
+    if eval_target_kind == "plugin" and lift_mode_requested:
+        # Record what the operator asked for next to what actually ran, so a
+        # report can explain an Integration comparison that was not measured.
+        if run_sum_of_parts:
+            effective_lift_mode = "both"
+        elif workspace_skills_baseline and workspace_skills and not skip_baseline:
+            effective_lift_mode = "integration"
+        else:
+            effective_lift_mode = "effectiveness"
+        run_config["lift_mode"] = {
+            "requested": lift_mode_requested,
+            "effective": effective_lift_mode,
+            "integration_skip_reason": integration_skip_reason,
+        }
+    if plugin_load_decisions:
+        from skillevaluator.tier3.plugin_native import plugin_load_provenance
+
+        run_config["plugin_load"] = plugin_load_provenance(plugin_load or "wrapper", plugin_load_decisions)
 
     root = Path(output_dir) if output_dir is not None else skill_path / "evals" / "results"
     try:
@@ -2300,6 +2582,16 @@ def _run_harbor_eval_impl(
         return {"error": [str(exc)]}
 
     emitter = stage_native_harbor_tasks if task_source == "native_harbor" else generate_harbor_tasks
+    # Plugin runs plant a per-task canary in every arm's workspace (generated tasks only), unless
+    # ``harbor.plugin_canary: false`` turns it off, for example to reproduce a run without the decoy.
+    plant_canary = (
+        (eval_target_kind or "skill") == "plugin"
+        and emitter is generate_harbor_tasks
+        and harbor_config.get("plugin_canary", True) is not False
+    )
+    canary_kwargs: dict[str, Any] = {"plant_canary": True} if plant_canary else {}
+    if (eval_target_kind or "skill") == "plugin":
+        run_config["harbor"]["plugin_canary"] = plant_canary
     resource_config = harbor_config.get("resources", {})
     use_base_image = env_mode == "docker" and base_image_mode != "disabled"
     base_image = ""
@@ -2331,7 +2623,7 @@ def _run_harbor_eval_impl(
                     detail="base image build failed; falling back to per-task Dockerfiles",
                 )
             )
-    agent_task_dirs: dict[str, tuple[Path, Path | None]] = {}
+    agent_task_dirs: dict[str, tuple[Path, Path | None, Path | None]] = {}
     expected_task_names: list[str] | None = None
     reporter.emit(
         ProgressEvent(
@@ -2342,10 +2634,22 @@ def _run_harbor_eval_impl(
         )
     )
     staging_failure_stage = "with-skill-tasks"
+    native_stagings: dict[str, Any] = {}
     try:
         for agent in agents:
             with_dir = tasks_dir / agent / "with"
             without_dir = None if skip_baseline else tasks_dir / agent / "without"
+            sumofparts_dir = tasks_dir / agent / "sumofparts" if run_sum_of_parts else None
+            native_kwargs: dict[str, Any] = {}
+            decision = plugin_load_decisions.get(agent)
+            if decision is not None and decision.native:
+                from skillevaluator.tier3.harbor.native_staging import build_native_task_staging
+                from skillevaluator.tier3.plugin_native import adapter_for
+
+                adapter = adapter_for(agent)
+                assert adapter is not None
+                native_stagings[agent] = build_native_task_staging(agent, adapter, native_plugin_source)
+                native_kwargs["native_plugin"] = native_stagings[agent]
             task_paths = emitter(
                 skill_path,
                 with_dir,
@@ -2364,31 +2668,70 @@ def _run_harbor_eval_impl(
                 task_resources=resource_config,
                 agent_workdir=harbor_config.get("agent_workdir"),
                 evaluator_skill_path=evaluator_skill_path,
+                **canary_kwargs,
+                **native_kwargs,
             )
             task_names = [task.name for task in task_paths]
             if expected_task_names is None:
                 expected_task_names = task_names
             elif task_names != expected_task_names:
                 raise ValueError(f"Generated task cases differ for agent {agent}")
-            agent_task_dirs[agent] = (with_dir, without_dir)
+            agent_task_dirs[agent] = (with_dir, without_dir, sumofparts_dir)
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="ready", detail="task inputs staged"))
+        baseline_workspace_skills = workspace_skills if workspace_skills_baseline else []
+        baseline_alias_validation = None
+        sumofparts_alias_validation = None
         if not skip_baseline:
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="running"))
             staging_failure_stage = "baseline-tasks"
+            # The emitter accepts a proof only for the exact source set it stages. The baseline arm may leave the
+            # member skills out, while the sum-of-parts arm always stages them, so each arm gets its own proof.
             baseline_alias_validation = _prevalidate_baseline_skill_candidates(
                 skill_path,
                 reference_skills_dir,
-                workspace_skills,
+                baseline_workspace_skills,
                 excluded_roots=(root,),
             )
-        else:
-            baseline_alias_validation = None
+            if run_sum_of_parts:
+                sumofparts_alias_validation = (
+                    baseline_alias_validation
+                    if workspace_skills_baseline
+                    else _prevalidate_baseline_skill_candidates(
+                        skill_path,
+                        reference_skills_dir,
+                        workspace_skills,
+                        excluded_roots=(root,),
+                    )
+                )
         for agent in agents:
             without_dir = agent_task_dirs[agent][1]
             if without_dir is not None:
                 emitter(
                     skill_path,
                     without_dir,
+                    with_skill=False,
+                    reference_skills_dir=reference_skills_dir,
+                    workspace_skill_paths=baseline_workspace_skills,
+                    workspace_mode=workspace_mode,
+                    grading_mode=grading_mode,
+                    base_image=base_image,
+                    custom_dockerfile_mode=dockerfile_mode,
+                    copy_repo=copy_repo,
+                    repo_context_exclude_paths=(root,),
+                    runtime_env=dict(runtime_plans[agent].staged_env),
+                    verifier_env=staged_verifier_env,
+                    pre_agent_setup=harbor_config.get("pre_agent_setup", []),
+                    task_resources=resource_config,
+                    agent_workdir=harbor_config.get("agent_workdir"),
+                    evaluator_skill_path=evaluator_skill_path,
+                    _baseline_alias_validation=baseline_alias_validation,
+                    **canary_kwargs,
+                )
+            sumofparts_dir = agent_task_dirs[agent][2]
+            if sumofparts_dir is not None:
+                emitter(
+                    skill_path,
+                    sumofparts_dir,
                     with_skill=False,
                     reference_skills_dir=reference_skills_dir,
                     workspace_skill_paths=workspace_skills,
@@ -2404,7 +2747,8 @@ def _run_harbor_eval_impl(
                     task_resources=resource_config,
                     agent_workdir=harbor_config.get("agent_workdir"),
                     evaluator_skill_path=evaluator_skill_path,
-                    _baseline_alias_validation=baseline_alias_validation,
+                    _baseline_alias_validation=sumofparts_alias_validation,
+                    **canary_kwargs,
                 )
         if not skip_baseline:
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="ready", detail="baseline inputs staged"))
@@ -2416,7 +2760,7 @@ def _run_harbor_eval_impl(
 
     task_names = expected_task_names or []
     expected_trials = len(task_names) * n_attempts
-    variants = 1 if skip_baseline else 2
+    variants = (1 if skip_baseline else 2) + (1 if run_sum_of_parts else 0)
     matrix_trials = expected_trials * len(agents) * variants
     preflight_trials = len(agents) if agent_runtime_preflight else 0
     task_timeout_seconds = _task_timeout_plan(
@@ -2473,7 +2817,7 @@ def _run_harbor_eval_impl(
                 override_cpus=override_cpus,
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
-                agent_import_path=agent_import_paths.get(agent),
+                agent_import_path=with_agent_import_paths.get(agent) or agent_import_paths.get(agent),
             )
             if not preflight.ok:
                 preflight_errors.append(f"{agent} runtime preflight failed: {preflight.detail}")
@@ -2510,6 +2854,7 @@ def _run_harbor_eval_impl(
             env_mode=env_mode,
             with_skill=agent_task_dirs[agent][0],
             baseline=agent_task_dirs[agent][1],
+            sum_of_parts=agent_task_dirs[agent][2],
             jobs_dir=jobs_dir,
             run_env={**runtime_plans[agent].subprocess_env, **job_judge_subprocess_env},
             n_attempts=n_attempts,
@@ -2519,6 +2864,7 @@ def _run_harbor_eval_impl(
             override_memory_mb=override_memory_mb,
             override_storage_mb=override_storage_mb,
             agent_import_path=agent_import_paths.get(agent),
+            with_agent_import_path=with_agent_import_paths.get(agent),
             expected_trials=expected_trials,
             stop_on_pass=bool(stop_on_pass),
             pass_threshold=float(pass_threshold),
@@ -2580,6 +2926,17 @@ def _run_harbor_eval_impl(
         raise unexpected_worker_error
 
     reporter.emit(ProgressEvent(stage="collection", state="running"))
+    plugin_signals = (
+        _plugin_signals_context(
+            skill_path=skill_path,
+            evaluator_skill_path=evaluator_skill_path,
+            workspace_skills=workspace_skills,
+            run_dir=run_dir,
+            baseline_has_members=bool(workspace_skills_baseline and not skip_baseline),
+        )
+        if (eval_target_kind or "skill") == "plugin"
+        else None
+    )
     try:
         results = collect_harbor_results(
             skill_name=skill_path.name,
@@ -2587,6 +2944,7 @@ def _run_harbor_eval_impl(
             output_dir=run_dir,
             jobs_dir=jobs_dir,
             skip_baseline=skip_baseline,
+            sum_of_parts_arm=run_sum_of_parts,
             n_attempts=n_attempts,
             pass_threshold=float(pass_threshold),
             stop_on_pass=bool(stop_on_pass),
@@ -2598,6 +2956,10 @@ def _run_harbor_eval_impl(
             env_mode=env_mode,
             agent_models=model_resolution,
             launch_errors=errors,
+            plugin_signals=plugin_signals,
+            plugin_load_census=_plugin_load_census_plan(
+                plugin_load, plugin_load_decisions, native_stagings, native_plugin_source
+            ),
         )
     except Exception:
         reporter.emit(ProgressEvent(stage="collection", state="failed", detail="result collection failed"))

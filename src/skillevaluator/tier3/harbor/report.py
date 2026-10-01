@@ -25,6 +25,7 @@ from skillevaluator.tier3.harbor.metrics import (
     METRIC_DISPLAY,
     METRIC_QUESTIONS,
     extract_custom_metrics,
+    metric_is_not_applicable,
 )
 from skillevaluator.utils.redaction import redact_sensitive_data, redact_sensitive_text
 
@@ -196,7 +197,8 @@ def _extract_findings(
             trial_details = []
             for reward in reward_group:
                 details = _details_for_findings(reward)
-                if metric in details:
+                # An N/A judge has no verdict; its "no reference" note is not a finding reason.
+                if metric in details and not metric_is_not_applicable(reward, metric):
                     trial_details.append(
                         {
                             "score": _metric_score(reward, metric),

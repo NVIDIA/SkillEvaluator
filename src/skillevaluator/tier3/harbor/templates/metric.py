@@ -34,9 +34,9 @@ LEGACY_METRICS = [
 
 
 def _metrics_for_rewards(rewards: list[dict]) -> list[str]:
-    if any(isinstance(reward.get("security"), int | float) for reward in rewards):
+    if any(isinstance(reward.get("security"), (int, float)) for reward in rewards):
         return DEFAULT_METRICS
-    if any(any(isinstance(reward.get(m), int | float) for m in LEGACY_METRICS) for reward in rewards):
+    if any(any(isinstance(reward.get(m), (int, float)) for m in LEGACY_METRICS) for reward in rewards):
         return LEGACY_METRICS
     return DEFAULT_METRICS
 
@@ -67,10 +67,14 @@ def main(input_path: Path, output_path: Path) -> None:
                 sums[metric] += float(val)
                 counts[metric] += 1
 
+    # reward.json is numeric-only: a judged metric that was not applicable to a
+    # case (no ground_truth / expected_behavior) is absent rather than 0. Omit
+    # a metric no task scored instead of reporting it as 0.0.
     result: dict[str, float] = {}
     for metric in metrics:
         c = counts[metric]
-        result[metric] = round(sums[metric] / c, 4) if c > 0 else 0.0
+        if c > 0:
+            result[metric] = round(sums[metric] / c, 4)
 
     result["overall"] = round(sum(result.values()) / len(result), 4) if result else 0.0
     result["metric_set"] = "skill-evaluator-default-v2" if "security" in metrics else "skill-evaluator-default-v1"

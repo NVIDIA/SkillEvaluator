@@ -21,7 +21,9 @@ hence intermittent (5/16 trials).
 Fix contract under test:
 - behavior judge requests a reasoning-safe ``max_tokens`` (>= 4096) by default;
 - one retry max with a "ONLY minified JSON" reminder on parse failure;
-- complete entries are salvaged from a truncated ``results`` array;
+- a truncated ``results`` array is salvaged only when its complete entries
+  judge every expected behavior (distinct steps ``1..N``); a partial salvage
+  is a judge error, never a score that fails the unjudged behaviors;
 - final parse failure is a scoreless structured error with a bounded reason;
 - ``_extract_json`` tolerates fenced / prose-wrapped / trailing-junk responses;
 - the in-sandbox template copy (``harbor/templates/eval.py``) stays equivalent.
@@ -88,13 +90,27 @@ TRUNCATED_RESULTS_RESPONSE = (
 
 # Same truncation class, but every recovered entry passed: the cap cut entry 4
 # of 7 mid-string, so exactly 3 complete all-passed entries are salvageable.
-# Scoring those 3/3 instead of 3/7 silently inflates behavior_check to 1.0.
+# Scoring those 3/3 would inflate behavior_check to 1.0, and 3/7 would charge
+# the four behaviors the judge never reached to the agent.
 TRUNCATED_ALL_PASSED_RESPONSE = (
     '{"results":[{"step":1,"passed":true,"reason":"observed"},'
     '{"step":2,"passed":true,"reason":"observed"},'
     '{"step":3,"passed":true,"reason":"observed"},'
     '{"step":4,"passed":true,"reason":"cut by the completion cap mid-'
 )
+
+# Three complete entries for three behaviors, but step 1 twice and step 3
+# never: the count matches while one behavior was not judged.
+TRUNCATED_DUPLICATE_STEP_RESPONSE = (
+    '{"results":[{"step":1,"passed":true,"reason":"observed"},'
+    '{"step":1,"passed":true,"reason":"observed again"},'
+    '{"step":2,"passed":true,"reason":"observed"},'
+    '{"step":3,"passed":true,"reason":"cut by the completion cap mid-'
+)
+
+# Two complete entries for two behaviors before the cut, but neither carries a
+# step number, so nothing shows which behaviors were judged.
+TRUNCATED_UNNUMBERED_RESPONSE = '{"results":[{"passed":true,"reason":"observed"},{"passed":true,"reason":"observed"},'
 
 VALID_BEHAVIOR_RESPONSE = json.dumps(
     {
@@ -369,7 +385,7 @@ def test_behavior_judge_empty_reasoning_burn_yields_scoreless_error(monkeypatch)
     assert "response" in result["reason"].lower()
 
 
-def test_behavior_judge_salvages_truncated_results_after_retry(monkeypatch):
+def test_behavior_judge_salvages_truncated_results_that_judge_every_behavior(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(
         llm_judge,
@@ -377,35 +393,40 @@ def test_behavior_judge_salvages_truncated_results_after_retry(monkeypatch):
         _scripted_hub([TRUNCATED_RESULTS_RESPONSE, TRUNCATED_RESULTS_RESPONSE], calls),
     )
 
-    result = llm_judge.judge_behavior_check("conversation", ["b1", "b2", "b3"])
+    result = llm_judge.judge_behavior_check("conversation", ["b1", "b2"])
 
     assert len(calls) == 2
-    # Two complete entries recovered (step 1 passed, step 2 failed) out of
-    # THREE expected behaviors; the unrecovered third counts as not-passed.
-    assert result["score"] == round(1 / 3, 4)
+    # The cut fell after both expected behaviors were judged (step 1 passed,
+    # step 2 failed), so the salvaged verdict is complete.
+    assert result["score"] == 0.5
     assert [r["step"] for r in result["results"]] == [1, 2]
     assert "salvaged" in result["reason"].lower()
-    assert "2/3" in result["reason"]
+    assert "2/2" in result["reason"]
 
 
-def test_behavior_judge_salvage_scores_against_expected_behavior_count(monkeypatch):
-    # Inflation regression: 3 salvaged all-passed entries from 7 expected
-    # behaviors must score 3/7 (unrecovered behaviors not-passed), never 3/3.
+@pytest.mark.parametrize(
+    ("response", "behaviors"),
+    [
+        pytest.param(TRUNCATED_RESULTS_RESPONSE, ["b1", "b2", "b3"], id="two-of-three"),
+        pytest.param(TRUNCATED_ALL_PASSED_RESPONSE, [f"behavior {i}" for i in range(1, 8)], id="three-of-seven"),
+        pytest.param(TRUNCATED_DUPLICATE_STEP_RESPONSE, ["b1", "b2", "b3"], id="duplicate-step"),
+        pytest.param(TRUNCATED_UNNUMBERED_RESPONSE, ["b1", "b2"], id="unnumbered-steps"),
+    ],
+)
+def test_behavior_judge_partial_salvage_is_an_unscored_error(monkeypatch, response, behaviors):
+    # Behaviors the truncation cut off were never judged. Scoring them as
+    # not-passed (1/3, 3/7) or ignoring them (3/3) charges a judge failure to
+    # the agent, so an incomplete salvage stays unscored.
     calls: list[dict] = []
-    monkeypatch.setattr(
-        llm_judge,
-        "call_public_llm",
-        _scripted_hub([TRUNCATED_ALL_PASSED_RESPONSE, TRUNCATED_ALL_PASSED_RESPONSE], calls),
-    )
-    behaviors = [f"behavior {i}" for i in range(1, 8)]  # 7 expected
+    monkeypatch.setattr(llm_judge, "call_public_llm", _scripted_hub([response, response], calls))
 
     result = llm_judge.judge_behavior_check("conversation", behaviors)
 
-    assert [r["step"] for r in result["results"]] == [1, 2, 3]
-    assert result["score"] == round(3 / 7, 4)  # 0.4286, NOT 1.0
-    assert "salvaged" in result["reason"].lower()
-    assert "3/7" in result["reason"]
-    assert "truncated" in result["reason"].lower()
+    assert len(calls) == 2
+    assert result["score"] is None
+    assert result["status"] == "error"
+    assert result["results"] == []
+    assert "unparseable or invalid" in result["reason"]
 
 
 def test_behavior_judge_success_path_unchanged(monkeypatch):
@@ -653,19 +674,30 @@ def test_template_native_openai_gpt5_payload_matches_eval_core(model):
     assert "max_tokens" not in template_payload
 
 
-def test_template_salvage_score_matches_eval_core_on_partial_recovery(monkeypatch):
-    # Drift guard for the salvage denominator fix: 3 salvaged of 7 expected
-    # must score 3/7 in BOTH the shared judge and the in-sandbox template.
-    responses = [TRUNCATED_ALL_PASSED_RESPONSE, TRUNCATED_ALL_PASSED_RESPONSE]
+@pytest.mark.parametrize(
+    ("response", "behaviors"),
+    [
+        pytest.param(TRUNCATED_ALL_PASSED_RESPONSE, [f"behavior {i}" for i in range(1, 8)], id="three-of-seven"),
+        pytest.param(TRUNCATED_DUPLICATE_STEP_RESPONSE, ["b1", "b2", "b3"], id="duplicate-step"),
+    ],
+)
+def test_template_rejects_partial_salvage_like_eval_core(monkeypatch, response, behaviors):
+    # Drift guard: a salvage that leaves a behavior unjudged is an error in the
+    # shared judge and leaves the in-sandbox verifier's required judge unscored.
+    responses = [response, response]
     shared_calls: list[dict] = []
     template_calls: list[dict] = []
     monkeypatch.setattr(llm_judge, "call_public_llm", _scripted_hub(responses, shared_calls))
     monkeypatch.setattr(eval_template, "call_public_llm", _scripted_hub(responses, template_calls))
-    behaviors = [f"behavior {i}" for i in range(1, 8)]  # 7 expected
 
     shared = llm_judge.judge_behavior_check("conversation", behaviors)
     template = eval_template.judge_behavior_check("conversation", behaviors)
 
     assert template == shared
-    assert shared["score"] == round(3 / 7, 4)
-    assert "3/7" in template["reason"]
+    assert shared["score"] is None
+    assert shared["status"] == "error"
+    required = eval_template._call_required_judge(
+        "behavior_check", eval_template.judge_behavior_check, "conversation", behaviors
+    )
+    assert required["score"] is None
+    assert required["status"] == "error"

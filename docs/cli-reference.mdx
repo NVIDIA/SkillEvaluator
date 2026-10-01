@@ -30,6 +30,7 @@ commands referenced below.
 | [dedup-scan](#dedup-scan) | Alias of `context-optimization-check` | Embeddings + LLM provider key |
 | [similarity-check](#similarity-check) | Detect duplicate content across a collection | Embeddings provider key |
 | [tier3 evaluate](#tier3-evaluate) | Run Tier 3 live agent evaluation | Provider key plus a credential the selected agents can use (one `NVIDIA_API_KEY` covers both on NVIDIA Build), backend (Docker by default) |
+| [tier3 evaluate-plugin](#tier3-evaluate-plugin) | Run public plugin effectiveness or Integration evaluation | The same Tier 3 runtime requirements as `tier3 evaluate` |
 | [create-eval-dataset](#create-eval-dataset) | Generate synthetic eval datasets | LLM provider key (none with `--no-llm`) |
 | [init-custom-grader](#init-custom-grader) | Scaffold a bring-your-own-grader starter | Nothing |
 | [init-harbor-task](#init-harbor-task) | Scaffold a bring-your-own-task Harbor starter | Nothing |
@@ -81,15 +82,22 @@ named `validate`; `tier1 validate ./my-skill` invokes the Tier 1 workflow.
 | Workflow | Default scope | Scope controls |
 | --- | --- | --- |
 | `tier1 PATH` | All static checks including dependencies; rubric, LLM security, and finding verification when a provider is configured | `--no-llm` skips LLM stages; `--llm` requires provider access; `--checks` selects static checks |
-| `tier2 PATH` | Intra-skill analysis | `--catalog FILE` adds inter-skill comparison against a saved JSON catalog; without it, inter-skill is explicitly not run |
+| `tier2 PATH` | Intra-skill analysis; for a plugin root, plugin Checks A and C-intra | `--catalog FILE` adds inter-skill comparison (and, for plugins, inter-plugin comparison) against a saved JSON catalog; without it, catalog comparison is explicitly not run |
 | `tier3 PATH` | One missing starter case is generated, then the provider-native agent runs in Docker with and without the skill | Accepts the [tier3 evaluate](#tier3-evaluate) options; missing-source generation is implicit |
 
 Direct Tier 1 can run keyless, but marks its LLM stages as skipped. Missing
 required scanner evidence remains incomplete. Direct Tier 2 needs both chat and
-embedding access and takes one skill, not a collection. Create its catalog with
-`similarity-check ./skills --save-catalog ./skill-catalog.json`. Direct Tier 3
+embedding access and takes one skill or one plugin root, not a collection.
+Create its catalog with
+`similarity-check ./skills --save-catalog ./skill-catalog.json` (add
+`--type plugin` for a plugin catalog). Direct Tier 3
 preserves valid existing sources and rejects invalid ones; it does not overwrite
 a dataset to repair it.
+
+Direct `tier1 PATH` and `tier3 PATH` take a skill directory. For a plugin, run
+Tier 1 with `validate PLUGIN --tiers 1` and Tier 3 with
+[tier3 evaluate-plugin](#tier3-evaluate-plugin); see
+[Plugin Evaluation](plugin-evaluation.mdx#cli-quick-reference).
 
 `validate PATH` runs all three tiers for skills by default, including Tier 3
 autopilot. It is separate from these tier-only workflows.
@@ -110,10 +118,11 @@ Also accepts `-r/--report` and `-o/--output-dir` described above.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--catalog FILE` | unset | Saved JSON catalog for inter-skill comparison |
+| `--catalog FILE` | unset | Saved JSON catalog for inter-skill comparison; for plugins, also inter-plugin comparison |
 | `--threshold FLOAT` | `0.80` | Intra-skill candidate similarity threshold |
-| `--similarity-threshold FLOAT` | `0.75` | Inter-skill reporting threshold |
-| `--full-body` | off | Compare the full `SKILL.md` against a catalog created in full-body mode |
+| `--similarity-threshold FLOAT` | `0.75` | Inter-skill and inter-plugin reporting threshold |
+| `--full-body` | off | Compare the full `SKILL.md` against a catalog created in full-body mode (skills only) |
+| `--llm / --no-llm` | off | Plugins only: add an advisory LLM verdict to inter-plugin catalog matches; requires `--catalog` |
 
 Both thresholds accept values from 0 to 1. Also accepts `-r/--report` and
 `-o/--output-dir`. Direct Tier 3 accepts the options in
@@ -130,9 +139,9 @@ pipeline.
 | --- | --- |
 | `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
-| `tier3` | `evaluate`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `validate`, `harbor-view` |
+| `tier3` | `evaluate`, `evaluate-plugin`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `validate`, `harbor-view` |
 
-`health-check` and [models](#models) are top-level only. Two expert commands are advertised **only** inside the `tier3` group: [tier3 evaluate](#tier3-evaluate), documented with its full flag set below, and `tier3 validate`:
+`health-check` and [models](#models) are top-level only. Three expert commands are advertised **only** inside the `tier3` group: [tier3 evaluate](#tier3-evaluate), documented with its full flag set below, [tier3 evaluate-plugin](#tier3-evaluate-plugin), and `tier3 validate`:
 
 ### tier3 validate
 
@@ -166,6 +175,8 @@ skillevaluator validate ./my-skill --no-autopilot         # require an existing 
 skillevaluator validate ./my-skill --full -a codex        # compatibility: same default scope
 skillevaluator validate ./my-skill --tiers 1,2            # skip live evaluation
 skillevaluator validate ./my-skill --tiers 1              # static checks only
+skillevaluator validate ./my-plugin --type plugin --tier3 \
+    --lift-mode both                                      # plugin effectiveness + Integration
 skillevaluator validate ./my-skill --tiers 1,3            # explicit tier selection
 skillevaluator validate ./skills-folder                   # whole catalog, serially
 skillevaluator validate ./my-skill -a codex,claude-code \
@@ -189,8 +200,9 @@ Applies to the whole run: target typing, policy profile, reports, tier selection
 | `--profile TEXT` | `$SKILLEVALUATOR_PROFILE`, then `external` | Validation profile: `external` or a custom name. |
 | `--external` | — | Shortcut for `--profile external` (validate for public publication). |
 | `--policy FILE` | none | Custom policy YAML overlaid on top of `--profile`. |
+| `--repo-root DIRECTORY` | git top-level of the plugin | Plugin only: repository root used to resolve same-repository skill and rule references in Tier 1 and Tier 3. The missing-dependency gate also requires this root to have a git `origin` remote; otherwise references stay `unresolved` (advisory). |
 
-Auto-detection recognizes: a `SKILL.md` for skills, `.mdc` files for rules, `workflow-rules.mdc` for workflows, and — for plugins — a bundle-reference `agent_plugin.yaml`/`.yml` manifest or a contained `.claude-plugin/plugin.json` manifest. Plugins are validated against their public contract; quality, lint, and version checks are skill-only and skipped for plugins.
+Auto-detection recognizes: a `SKILL.md` for skills, `.mdc` files for rules, `workflow-rules.mdc` for workflows, and — for plugins — a bundle-reference `agent_plugin.yaml`/`.yml` manifest, or a contained `.claude-plugin/`, `.codex-plugin/`, or `.cursor-plugin/` `plugin.json` or Agent Plugins root `plugin.json` manifest ([precedence](plugin-evaluation.mdx#manifest-detection)). Plugins are validated against their public contract; quality, lint, and version checks run on each skill bundled under the plugin's `skills/` directory. Plugins run Tiers 1 and 2 by default; request plugin Tier 3 with `--tier3`. See [Plugin Evaluation](plugin-evaluation.mdx).
 
 `validate` also takes the standard `-r/--report` and `-o/--output-dir` options described under [Global conventions](#global-conventions).
 
@@ -200,7 +212,8 @@ Static checks; LLM-free by default. Tier 1 gates the exit code and always runs.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--checks, --tier1-checks TEXT` | all applicable | Comma-separated subset of Tier 1 checks. Default choices: `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, `lint`; opt-in (not run by default): `dependency`. `quality`/`lint`/`version` are skill-only and skipped for rules and workflows. |
+| `--checks, --tier1-checks TEXT` | all applicable | Comma-separated subset of Tier 1 checks. Default choices: `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, `lint`; opt-in (not run by default): `dependency`, and, for plugins, `claude-validate` (parity with `claude plugin validate --strict`). `quality`/`lint`/`version` are skill-only and skipped for rules and workflows. |
+| `--resolve-endpoints` | off | Plugin only, opt-in network check: resolve MCP and HTTP hook URL hosts and send one credential-free `HEAD` (no redirects followed) to flag names or redirects that reach private, link-local, or cloud-metadata addresses. Also enabled by `endpoints.resolve: true` in the policy. See [Plugin Evaluation](plugin-evaluation.mdx#opt-in-endpoint-dns-and-redirect-checks). |
 | `--fail-fast` | off | Stop on the first failing check instead of collecting all issues. |
 | `-c, --continue-on-failure` | off | Run the full pipeline without stopping early; record all issues in the reports. Overrides `--fail-fast`, and for folder validation keeps scanning every skill past a CRITICAL finding. |
 | `--llm, --tier1-llm / --no-llm, --no-tier1-llm` | `no-llm` | Enable LLM-backed security analysis (requires a configured public provider — see [Providers & Credentials](configuration.mdx)). |
@@ -229,6 +242,10 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | `--autopilot / --no-autopilot` | enabled for skills | Generate one starter case when no evaluation source exists, then run Tier 3. Existing sources are reused unchanged; invalid sources are reported. `--no-autopilot` requires an existing source. Explicit tier selection or `--no-tier3` can exclude Tier 3. |
 | `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents to evaluate. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. |
 | `--env-mode` | `docker` | Harbor environment backend (full list under [tier3 evaluate](#tier3-evaluate)). |
+| `--lift-mode [effectiveness\|integration\|both]` | `effectiveness` | Plugin only: compare the coordinated plugin with no plugin, its member skills staged individually, or both. Integration requires explicit cross-component dataset evidence. |
+| `--plugin-load [wrapper\|native\|auto]` | `wrapper` | Plugin only: how the with-plugin arm loads the plugin: the generated wrapper skill, the harness's own plugin layout, or native where supported. See [Native loading](plugin-evaluation.mdx#native-loading). |
+| `--probe-mcp` | off | Plugin only: before Tier 3, probe each author-supplied URL MCP server from the host (`initialize` + `tools/list`, bounded, no redirects) under the endpoint policy and `mcp.allowed_private_hosts` from `--policy`. Advisory; recorded as `mcp_proof`. See [Public MCP proof](plugin-evaluation.mdx#public-mcp-proof). |
+| `--probe-mcp-env NAME` | none | Plugin only, with `--probe-mcp`: a host environment variable the probe may expand into a server's declared `${NAME}` headers (repeatable). Without it, the probe sends only literal header values; a header that references any other variable is not sent. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
@@ -239,7 +256,7 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable). |
 | `--grading-mode [default\|default_plus_custom\|custom_only]` | unset | Reward/grading mode for live eval. |
 | `--results-dir DIRECTORY` | unset | Directory for Harbor live-eval results. |
-| `--include-skills PATH` | none | Additional skill(s) to mount into the eval environment (repeatable; paths must exist). Requires group workspace mode, set via `skill_workspace.mode: group` in `evals/config.yml`. |
+| `--include-skills PATH` | none | Additional skill(s) to mount into the eval environment (repeatable; paths must exist). Requires group workspace mode, set via `skill_workspace.mode: group` in `evals/config.yml`. For a plugin, the paths are staged as extra member skills; plugin evaluation always uses a group workspace. |
 | `--copy-repo` | off | Copy the surrounding repo into the eval environment. |
 | `--timeout-multiplier FLOAT` | unset | Scale Harbor step timeouts. |
 | `--harbor-keep-jobs` | off | Retain Harbor job dirs and artifacts after the run for inspection. |
@@ -356,12 +373,12 @@ skillevaluator similarity-check ./skills
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--type [skill\|rules\|workflows\|auto]` | `auto` | Content type of the target. |
+| `--type [skill\|rules\|workflows\|plugin\|auto]` | `auto` | Content type of the target. `plugin` builds a local catalog of plugins and their bundled skills and requires `--save-catalog`. |
 | `--threshold FLOAT` | `0.75` | Minimum similarity to report. |
 | `--full-body` | off | Embed full file bodies instead of descriptions. |
 | `--model TEXT` | provider default | Embedding model override. |
 | `--catalog FILE` | none | Compare exactly one skill against a local catalog. |
-| `--save-catalog FILE` | none | Build and save a versioned local catalog from this collection. |
+| `--save-catalog FILE` | none | Build and save a versioned local catalog from this collection (skills, or plugins with bundled skills). |
 | `--max-entries INTEGER` | `1024` | Maximum selected manifests for a fresh collection; range `1`–`5000`. Does not restrict loaded catalog queries. |
 | `--max-scalar-comparisons INTEGER` | `128000000` | Maximum comparisons multiplied by embedding dimensions; must be positive. Applies to pairwise scans and catalog queries. |
 
@@ -381,7 +398,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; experimental: `hermes` (container environments only, Anthropic provider); the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `--env-mode` | `docker` | Where trials run. All 16 values: `docker`, `daytona`, `e2b`, `modal`, `runloop`, `langsmith`, `gke`, `novita`, `apple-container`, `singularity`, `islo`, `tensorlake`, `cwsandbox`, `wandb`, `use-computer`, `local`. Cloud modes are provider-managed Harbor backends enabled by the matching Harbor extra; `local` runs on your host. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `--autopilot` | off | Create one eval case when no dataset/task source exists, then evaluate. The case is LLM-generated with the configured provider, with a deterministic keyless template fallback; an existing source is never overwritten. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
@@ -416,6 +433,64 @@ last value as `nvidia/nvidia/nemotron-3-super-120b-a12b` because its adapter
 namespace precedes the NVIDIA catalog ID.
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults. The exception is `--results-dir`, which resolves independently of `evals/config.yml`.
+
+## tier3 evaluate-plugin
+
+Run Tier 3 against a public plugin without fetching remote components. The
+command accepts a plugin root or its manifest in any supported format: a
+bundle-reference `agent_plugin.yaml`/`.yml`, a contained `.claude-plugin/`,
+`.codex-plugin/`, or `.cursor-plugin/` `plugin.json`, or an Agent Plugins root
+`plugin.json` ([precedence](plugin-evaluation.mdx#manifest-detection)). It
+stages the locally evaluable skills, rules, and MCP declarations into a
+temporary wrapper (or the harness's own layout with `--plugin-load`), and
+records any unresolved remote references in plugin provenance.
+
+```bash title="Evaluate plugin effectiveness and Integration"
+skillevaluator tier3 evaluate-plugin ./my-plugin --lift-mode both \
+  --evals-source ./evals/evals.json --agents codex
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--evals-source PATH` | auto-detect | Dataset file, `evals/` directory, or skill/plugin directory containing `evals/`. |
+| `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. |
+| `--env-mode` | `docker` | Harbor environment backend; accepts the same values as [tier3 evaluate](#tier3-evaluate). |
+| `--skip-baseline` | off | Skip the no-plugin baseline. Invalid with `integration` or `both`, which require a baseline. |
+| `--lift-mode [effectiveness\|integration\|both]` | `effectiveness` | Compare the coordinated plugin with no plugin, its member skills staged individually, or both. `both` falls back to effectiveness when composition evidence is missing. |
+| `--plugin-load [wrapper\|native\|auto]` | `wrapper` | How the with-plugin arm loads the plugin. `native` fails for agents or environments without a native adapter; `auto` falls back to the wrapper. Baseline arms are unchanged. See [Native loading](plugin-evaluation.mdx#native-loading). |
+| `--probe-mcp` | off | Before the run, probe each author-supplied URL MCP server from the host (`initialize` + `tools/list`, bounded, no redirects) under the endpoint policy. This command takes no policy file and uses a bundled profile (`SKILLEVALUATOR_PROFILE` or the default), none of which allowlists private hosts, so private hosts are not probed; a custom `mcp.allowed_private_hosts` allowlist applies to `--probe-mcp` only through `validate --tier3 --policy <file>`. Advisory; recorded as `mcp_proof` in plugin provenance. See [Public MCP proof](plugin-evaluation.mdx#public-mcp-proof). |
+| `--probe-mcp-env NAME` | none | With `--probe-mcp`: a host environment variable the probe may expand into a server's declared `${NAME}` headers (repeatable). Without it, the probe sends only literal header values; a header that references any other variable is not sent. |
+| `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
+| `--pass-threshold FLOAT` | unset | Score threshold (0.0–1.0) for a case to count as passed. |
+| `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
+| `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
+| `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
+| `--model TEXT` | unset | Global agent model override. |
+| `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable). |
+| `--custom-dockerfile-mode [preserve\|rebase]` | unset | Apply the dataset's custom Dockerfile using the same modes as `tier3 evaluate`. |
+| `--include-skills PATH` | none | Additional local member skills to stage (repeatable). Plugin evaluation always uses a group workspace. |
+| `--repo-root DIRECTORY` | auto-detect | Clone-root override used to resolve same-repository component references deterministically. |
+| `--copy-repo` | off | Copy the surrounding repository into the eval environment. |
+| `--grading-mode [default\|default_plus_custom\|custom_only]` | unset | Reward/grading mode — see [Custom Graders & Tasks](custom-graders.mdx). |
+| `--results-dir DIRECTORY` | unset | Directory for live-eval results. |
+| `--harbor-keep-jobs` | off | Retain Harbor job directories and artifacts for inspection. |
+| `--agent-runtime-preflight / --no-agent-runtime-preflight` | disabled | Add one agent-only execution of the first staged task per agent before the full evaluation matrix. |
+| `--timeout-multiplier FLOAT` | unset | Scale Harbor step timeouts. |
+| `--override-cpus INTEGER` | unset | Override eval-environment CPU allocation. |
+| `--override-memory-mb INTEGER` | unset | Override eval-environment memory in MB. |
+| `--override-storage-mb INTEGER` | unset | Override eval-environment storage in MB. |
+| `--progress [auto\|rich\|plain\|off]` | `auto` | Progress display for the run. |
+
+Integration requires at least one dataset case with `cross_component: true`
+and two or more distinct `expected_skills`. An explicit `integration` run is
+inconclusive without that evidence and exits 1 before any agent runs; `both`
+still runs the valid effectiveness comparison and records why Integration was
+skipped. A plugin with nothing locally evaluable is skipped with exit 0. A
+partial run (unresolved refs, provider-only MCP servers, or MCP `env` or
+`headers` the runtime cannot apply) writes its results and then exits 1 as
+`INCOMPLETE`. [Plugin Evaluation](plugin-evaluation.mdx#tier-3-live-evaluation)
+covers what each arm stages, component support, security restrictions, the
+plugin dataset fields, and result semantics.
 
 ## create-eval-dataset
 

@@ -23,6 +23,7 @@ from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
     RESERVED_METRIC_NAMES,
     metric_set_for_reward,
+    not_applicable_metrics,
     overall_score,
 )
 from skillevaluator.tier3.harbor.templates import custom_grader_runner
@@ -436,26 +437,110 @@ def test_verifier_main_keeps_accuracy_fail_closed_after_retry_exhaustion(
     assert "accuracy" not in numeric
 
 
-def test_verifier_main_keeps_documented_neutral_judge_skips_scoreable(
+_JUDGED_METRICS = ("accuracy", "goal_accuracy", "behavior_check")
+
+
+def _rewrite_entry(verifier: ModuleType, **updates) -> None:
+    entry = json.loads(verifier.ENTRY_PATH.read_text(encoding="utf-8"))
+    entry.update(updates)
+    verifier.ENTRY_PATH.write_text(json.dumps(entry), encoding="utf-8")
+
+
+def test_verifier_main_records_judges_without_reference_as_not_applicable(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     verifier = _load_verifier(tmp_path)
-    entry = json.loads(verifier.ENTRY_PATH.read_text(encoding="utf-8"))
-    entry["ground_truth"] = ""
-    entry["expected_behavior"] = []
-    verifier.ENTRY_PATH.write_text(json.dumps(entry), encoding="utf-8")
+    _rewrite_entry(verifier, ground_truth="", expected_behavior=[])
+
+    def no_llm(*_args, **_kwargs):
+        raise AssertionError("N/A judges must not call the LLM")
+
+    monkeypatch.setattr(verifier, "call_public_llm", no_llm)
+    monkeypatch.setattr(verifier, "_call_public_llm_with_provenance", no_llm)
 
     verifier.main()
 
     rich = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text(encoding="utf-8"))
     numeric = json.loads(verifier.REWARD_JSON.read_text(encoding="utf-8"))
     assert "evaluation_status" not in rich
-    assert {metric: numeric[metric] for metric in ("accuracy", "goal_accuracy", "behavior_check")} == {
-        "accuracy": 1.0,
-        "goal_accuracy": 1.0,
-        "behavior_check": 1.0,
-    }
-    assert overall_score(numeric) == 1.0
+    for metric in _JUDGED_METRICS:
+        assert rich[metric] is None
+        assert rich["details"][metric]["score"] is None
+        assert rich["details"][metric]["status"] == "not_applicable"
+        assert rich["details"][metric]["reason"].startswith("N/A: no ")
+    # reward.json stays numeric-only so Harbor's VerifierResult accepts it; the
+    # every-judge-N/A overall is the mean of the deterministic metrics.
+    assert numeric == {"security": 1.0, "skill_execution": 1.0, "skill_efficiency": 1.0, "overall": 1.0}
+    assert verifier.REWARD_TXT.read_text(encoding="utf-8") == "1.0"
+    harbor_result = pytest.importorskip("harbor.models.verifier.result")
+    assert harbor_result.VerifierResult(rewards=numeric).rewards == numeric
+
+    # Without the sidecar the numeric reward is incomplete, never silently N/A.
+    assert overall_score(numeric) is None
+    collected = dict(numeric)
+    collector._merge_reward_sidecars(collected, verifier.VERIFIER_DIR)
+    assert overall_score(collected) == 1.0
+    assert not_applicable_metrics([collected]) == list(_JUDGED_METRICS)
+
+
+def test_verifier_main_excludes_only_the_not_applicable_metric_from_overall(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_verifier(tmp_path)
+    _rewrite_entry(verifier, expected_behavior=[])
+
+    def zero(*_args, **_kwargs):
+        return {"score": 0.0, "reason": "valid model verdict"}
+
+    monkeypatch.setattr(verifier, "judge_accuracy", zero)
+    monkeypatch.setattr(verifier, "judge_goal_accuracy", zero)
+
+    verifier.main()
+
+    rich = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text(encoding="utf-8"))
+    numeric = json.loads(verifier.REWARD_JSON.read_text(encoding="utf-8"))
+    assert rich["behavior_check"] is None
+    assert rich["details"]["behavior_check"]["status"] == "not_applicable"
+    assert "behavior_check" not in numeric
+    assert numeric["accuracy"] == numeric["goal_accuracy"] == 0.0
+    # mean(1, 1, 1, 0, 0): N/A is neither a fabricated 1.0 (0.667) nor a 0.0 (0.5).
+    assert numeric["overall"] == 0.6
+    collected = dict(numeric)
+    collector._merge_reward_sidecars(collected, verifier.VERIFIER_DIR)
+    assert overall_score(collected) == pytest.approx(0.6)
+
+
+@pytest.mark.parametrize("metric", _JUDGED_METRICS)
+def test_verifier_main_rejects_not_applicable_when_the_case_has_a_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    metric: str,
+) -> None:
+    verifier = _load_verifier(tmp_path)
+
+    def scored(*_args, **_kwargs):
+        return {"score": 1.0, "reason": "valid"}
+
+    def claims_not_applicable(*_args, **_kwargs):
+        return {"score": None, "status": "not_applicable", "reason": "N/A"}
+
+    for name in _JUDGED_METRICS:
+        monkeypatch.setattr(
+            verifier,
+            f"judge_{name}",
+            claims_not_applicable if name == metric else scored,
+        )
+
+    with pytest.raises(SystemExit) as exc_info:
+        verifier.main()
+
+    assert exc_info.value.code == 1
+    rich = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text(encoding="utf-8"))
+    assert rich["evaluation_status"] == "failed"
+    assert rich["details"][metric]["status"] == "error"
+    assert set(rich["evaluation_errors"]) == {metric}
 
 
 @pytest.mark.parametrize("failure_kind", ["missing-score", "exception"])

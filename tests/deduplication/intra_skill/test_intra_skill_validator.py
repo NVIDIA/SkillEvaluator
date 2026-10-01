@@ -142,6 +142,30 @@ class TestIntraSkillValidatorValidate:
         }
         mock_build_clusters.assert_not_called()
 
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_scalar_work_limit_stops_before_remaining_embedding_batches(
+        self, mock_embed, mock_build_clusters, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(intra_skill_validator, "CONTENT_DEDUP_EMBEDDING_BATCH_SIZE", 2)
+        monkeypatch.setattr(intra_skill_validator, "CONTENT_DEDUP_MAX_SCALAR_COMPARISONS", 1)
+        skill_dir = tmp_path / "batched-scalar-limit"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "\n".join(f"## Section {index}\n" + chr(97 + index) * 100 for index in range(5))
+        )
+        mock_embed.return_value.embed.side_effect = [
+            [[1.0, 0.0], [0.0, 1.0]],
+            [[1.0, 0.0], [0.0, 1.0]],
+            [[1.0, 0.0]],
+        ]
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.findings[0].check_name == "scalar_comparison_limit"
+        assert mock_embed.return_value.embed.call_count == 1
+        mock_build_clusters.assert_not_called()
+
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
@@ -395,7 +419,7 @@ class TestIntraSkillValidatorValidate:
         (skill / "SKILL.md").write_text("\n".join(f"## Section {letter}\n{letter.lower() * 200}" for letter in "ABCD"))
         mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
 
-        def analyze(_client, cluster):
+        def analyze(_client, cluster, **_kwargs):
             if any("Section A" in member.heading for member in cluster.members):
                 return LLMVerdict("DUPLICATE", 0.9, "Same content", "Remove one")
             raise RuntimeError("private provider response")
@@ -458,7 +482,7 @@ class TestIntraSkillValidatorValidate:
                 self.status_code = status
                 super().__init__("private provider response")
 
-        def analyze(_client, cluster):
+        def analyze(_client, cluster, **_kwargs):
             raise ServiceError(429 if any("Section A" in member.heading for member in cluster.members) else 400)
 
         mock_analyze.side_effect = analyze

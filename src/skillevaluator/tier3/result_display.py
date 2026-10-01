@@ -26,6 +26,8 @@ from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRICS,
     DIMENSION_DISPLAY,
     METRIC_DISPLAY,
+    NOT_APPLICABLE_ELIGIBLE_METRICS,
+    dimension_is_not_applicable,
 )
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.tier3.harbor.runner import format_harbor_view_command
@@ -67,6 +69,24 @@ def _score_cell(value: object, *, unavailable: str = "NO SCORE") -> tuple[Text, 
     return Text(f"{numeric:.2f}", style=f"bold {style}"), Text(_score_bar(numeric), style=style)
 
 
+_NOT_APPLICABLE_LABEL = "N/A"
+
+
+def _not_applicable_cell() -> tuple[Text, Text]:
+    return Text(_NOT_APPLICABLE_LABEL, style="dim italic"), Text("")
+
+
+def _not_applicable_metrics(data: Mapping[str, Any], variant: str) -> frozenset[str]:
+    """Judged metrics a usable arm recorded as not applicable in every trial."""
+    if not _condition_usable(data, variant):
+        return frozenset()
+    by_variant = data.get("not_applicable_metrics")
+    raw = by_variant.get(variant) if isinstance(by_variant, Mapping) else None
+    if not isinstance(raw, list | tuple):
+        return frozenset()
+    return frozenset(metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric in raw)
+
+
 def _delta_cell(value: object) -> Text:
     numeric = _finite_number(value)
     if numeric is None:
@@ -98,12 +118,17 @@ def _default_with_skill_overall(data: Mapping[str, Any]) -> float | None:
     scores = data.get("with_skill")
     if not isinstance(scores, Mapping):
         return None
+    not_applicable = _not_applicable_metrics(data, "with_skill")
     values: list[float] = []
     for metric in DEFAULT_METRICS:
         value = _finite_number(scores.get(metric))
         if value is None:
+            if metric in not_applicable:
+                continue
             return None
         values.append(value)
+    if not values:
+        return None
     return round(sum(values) / len(values), 4)
 
 
@@ -407,11 +432,15 @@ def _render_agent_scores(
         table.add_column("", no_wrap=True, width=10)
         table.add_column("Lift", justify="right", no_wrap=True, width=8)
 
+    with_not_applicable = _not_applicable_metrics(data, "with_skill")
+    baseline_not_applicable = _not_applicable_metrics(data, "without_skill") if baseline_usable else frozenset()
     for metric in metrics:
         with_value = with_scores.get(metric) if with_usable else None
         baseline_value = baseline_scores.get(metric) if baseline_usable else None
+        with_na = metric in with_not_applicable and _finite_number(with_value) is None
+        baseline_na = metric in baseline_not_applicable and _finite_number(baseline_value) is None
         label = Text(METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()), style="bold")
-        with_score, with_bar = _score_cell(with_value)
+        with_score, with_bar = _not_applicable_cell() if with_na else _score_cell(with_value)
         row: list[Text] = [label, with_score, with_bar]
         if show_baseline:
             persisted = lift.get(metric) if isinstance(lift.get(metric), Mapping) else {}
@@ -420,9 +449,19 @@ def _render_agent_scores(
                 if _finite_number(with_value) is not None and _finite_number(baseline_value) is not None
                 else None
             )
-            baseline_score, baseline_bar = _score_cell(baseline_value)
-            row.extend([baseline_score, baseline_bar, _delta_cell(delta)])
+            baseline_score, baseline_bar = _not_applicable_cell() if baseline_na else _score_cell(baseline_value)
+            delta_cell = (
+                Text(_NOT_APPLICABLE_LABEL, style="dim italic")
+                if delta is None and (with_na or baseline_na)
+                else _delta_cell(delta)
+            )
+            row.extend([baseline_score, baseline_bar, delta_cell])
         table.add_row(*row)
+    if (with_not_applicable | baseline_not_applicable).intersection(metrics):
+        table.caption = (
+            "N/A = not applicable: no eval case gave that evaluator a ground_truth or expected_behavior "
+            "to judge against, so it is excluded from scores and lift."
+        )
 
     if custom_with or custom_without:
         if metrics:
@@ -575,10 +614,18 @@ def _render_dimensions(
             )
             with_numeric = _finite_number(with_score)
             baseline_numeric = _finite_number(baseline_score)
-            with_cell, with_bar = _score_cell(with_numeric)
+            with_na = with_numeric is None and dimension_is_not_applicable(
+                dimension, _not_applicable_metrics(data, "with_skill")
+            )
+            baseline_na = baseline_numeric is None and dimension_is_not_applicable(
+                dimension, _not_applicable_metrics(data, "without_skill")
+            )
+            with_cell, with_bar = _not_applicable_cell() if with_na else _score_cell(with_numeric)
             baseline_skipped = _condition_status(data, "without_skill") == "skipped"
             if baseline_skipped:
                 baseline_cell, baseline_bar = Text("skipped", style="dim"), Text("")
+            elif baseline_na:
+                baseline_cell, baseline_bar = _not_applicable_cell()
             else:
                 baseline_cell, baseline_bar = _score_cell(baseline_numeric)
             delta = (
@@ -590,7 +637,9 @@ def _render_dimensions(
                 with_bar,
                 baseline_cell,
                 baseline_bar,
-                _delta_cell(delta),
+                Text(_NOT_APPLICABLE_LABEL, style="dim italic")
+                if delta is None and (with_na or baseline_na)
+                else _delta_cell(delta),
             ]
             table.add_row(*row)
 
@@ -707,6 +756,63 @@ def _render_feedback_and_suggestions(
     )
 
 
+def _redact_strings(value: Any, safe: Any) -> Any:
+    if isinstance(value, str):
+        return safe(value)
+    if isinstance(value, dict):
+        return {key: _redact_strings(item, safe) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_strings(item, safe) for item in value]
+    return value
+
+
+def _with_report_integration(result: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Add the report payload's Integration block to a raw engine result.
+
+    The engine result has no ``integration`` block: the reports build it from
+    the per-agent scores, the run config and the plugin provenance. Without it
+    the CLI said Integration "recorded no sum-of-parts comparison" right above a
+    measured Integration lift. This builds it with the same payload builder the
+    reports use, so the CLI and the reports agree.
+    """
+    from skillevaluator.reporting.plugin_sections import is_plugin_payload
+
+    if isinstance(result.get("integration"), Mapping) or not is_plugin_payload(result):
+        return result
+    agents = result.get("agents")
+    if not isinstance(agents, Mapping):
+        return result
+    run_config = result.get("run_config")
+    provenance = result.get("plugin_provenance")
+    try:
+        from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+
+        payload = build_agent_eval_payload(
+            str(result.get("skill_name") or "plugin"),
+            {str(name): dict(agent) for name, agent in agents.items() if isinstance(agent, Mapping)},
+            run_config=dict(run_config) if isinstance(run_config, Mapping) else None,
+            plugin_provenance=dict(provenance) if isinstance(provenance, Mapping) else None,
+            use_llm_judge=False,
+        )
+    except Exception:  # advisory block: never break the run summary
+        logging.getLogger(__name__).debug("Integration block for the run summary skipped", exc_info=True)
+        return result
+    integration = (payload or {}).get("integration")
+    if not isinstance(integration, Mapping):
+        return result
+    return {**result, "integration": integration}
+
+
+def _render_plugin_blocks(*, console: Console, result: Mapping[str, Any], safe: Any) -> None:
+    """Render advisory plugin statistics and signals carried by a plugin run's engine result."""
+    from skillevaluator.reporting.cli import print_plugin_tier3
+    from skillevaluator.reporting.plugin_sections import tier3_plugin_view
+
+    view = tier3_plugin_view(_with_report_integration(result))
+    if view is not None:
+        print_plugin_tier3(_redact_strings(view, safe), console)
+
+
 def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> None:
     """Render persisted engine truth, aggregating only canonical score components."""
     secret_values = secret_values_from_environment(os.environ)
@@ -745,6 +851,7 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
             )
 
         _render_dimensions(console=console, agents=agents, safe=safe)
+        _render_plugin_blocks(console=console, result=result, safe=safe)
 
         # The per-evaluator findings report — evaluator reasonings, evidence
         # pointers, and next-step suggestions — is the feedback surface that

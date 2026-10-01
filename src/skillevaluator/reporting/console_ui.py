@@ -525,6 +525,7 @@ def _is_skipped(result: ValidationResult) -> bool:
 
 
 _VALIDATOR_CHECK_KEYS = (
+    ("claude plugin validate", "claude-validate"),
     ("schema", "schema"),
     ("security scan", "security"),
     ("pii", "pii"),

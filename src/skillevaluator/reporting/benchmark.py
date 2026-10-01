@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Publication-ready BENCHMARK.md reporter for skill evaluation cards."""
+"""Publication-ready BENCHMARK.md reporter for skill and plugin evaluation cards."""
 
 from __future__ import annotations
 
@@ -22,8 +22,10 @@ from skillevaluator.constants import (
     TIER3_LIFT_PASS_THRESHOLD,
 )
 from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
+from skillevaluator.reporting.plugin_sections import inventory_view, statically_checked_types, tier3_plugin_view
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
+from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -80,10 +82,12 @@ class BenchmarkReporter(ReporterBase):
         include_timestamp: bool = True,
         max_findings_shown: int = 5,
         skill_name: str | None = None,
+        content_type: str = "skill",
     ) -> None:
         self.include_timestamp = include_timestamp
         self.max_findings_shown = max_findings_shown
         self.skill_name = skill_name
+        self.content_type = content_type
 
     @property
     def name(self) -> str:
@@ -97,7 +101,14 @@ class BenchmarkReporter(ReporterBase):
         return self.render_all([result])
 
     def render_all(self, results: list[ValidationResult]) -> str:
+        # Untrusted text can carry lone surrogates (which UTF-8 cannot encode) and
+        # terminal escape sequences (which run when someone prints the card).
+        return strip_terminal_controls(self._render_card(results))
+
+    def _render_card(self, results: list[ValidationResult]) -> str:
         ae = _agent_eval_payload(results)
+        if self.content_type == "plugin":
+            return self._render_plugin_card(results, ae)
         skill_name = _publication_safe_skill_name(self.skill_name or _skill_name(results, ae))
         private_labels = _private_environment_labels(ae)
         policy = _benchmark_policy(results, ae)
@@ -184,8 +195,10 @@ class BenchmarkReporter(ReporterBase):
         benchmark_policy: dict[str, bool],
         *,
         private_labels: tuple[str, ...],
+        subject_label: str = "Skill",
+        extra_lines: list[str] | None = None,
     ) -> None:
-        lines.extend(["## Evaluation Metadata", "", f"- Skill: `{skill_name}`"])
+        lines.extend(["## Evaluation Metadata", "", f"- {subject_label}: `{skill_name}`"])
 
         evaluated_at = _evaluated_at(ae)
         lines.append(
@@ -278,6 +291,7 @@ class BenchmarkReporter(ReporterBase):
             lines.append(
                 f"- Tier 3 live evaluation: SKIPPED — {_publication_safe_inline(skip_message, private_labels)}"
             )
+        lines.extend(extra_lines or [])
 
         lines.append("")
         environment_note = _environment_note(environment)
@@ -306,6 +320,9 @@ class BenchmarkReporter(ReporterBase):
         lines: list[str],
         ae: dict[str, Any] | None,
         private_labels: tuple[str, ...],
+        subject: str = "skill",
+        *,
+        sum_of_parts_baseline: bool = False,
     ) -> None:
         lines.extend(["## Results at a Glance", ""])
         agents = _agents(ae)
@@ -320,7 +337,7 @@ class BenchmarkReporter(ReporterBase):
 
         headers = [
             "Measure",
-            *[_agent_table_label(name, agent, private_labels) for name, agent in agents.items()],
+            *[_agent_table_label(name, agent, private_labels, subject) for name, agent in agents.items()],
         ]
         lines.append("| " + " | ".join(_md_cell(header, private_labels) for header in headers) + " |")
         lines.append("|---|" + "|".join(["---:"] * len(agents)) + "|")
@@ -345,17 +362,25 @@ class BenchmarkReporter(ReporterBase):
                 row.append(_score_transition(dimension))
             lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
 
+        # Lift mode integration runs no no-plugin arm: its baseline is the sum of parts.
+        baseline = (
+            f"the same task attempted with the {subject}'s member components staged individually "
+            f"(sum of parts), not without the {subject}"
+            if sum_of_parts_baseline
+            else f"the same task attempted without the target {subject}"
+        )
+        example_baseline = "sum-of-parts" if sum_of_parts_baseline else f"no-{subject}"
         lines.extend(
             [
                 "",
                 (
-                    "**How to read this table:** baseline is the same task attempted without the target skill. "
-                    "Uplift is `skill score - baseline score`, shown in percentage points."
+                    f"**How to read this table:** baseline is {baseline}. "
+                    f"Uplift is `{subject} score - baseline score`, shown in percentage points."
                 ),
                 "",
                 (
-                    "Example: `47% → 92% (+45 points)` means the skill-assisted run scored 92%, "
-                    "45 percentage points above its 47% no-skill baseline."
+                    f"Example: `47% → 92% (+45 points)` means the {subject}-assisted run scored 92%, "
+                    f"45 percentage points above its 47% {example_baseline} baseline."
                 ),
                 "",
             ]
@@ -378,6 +403,7 @@ class BenchmarkReporter(ReporterBase):
         ae: dict[str, Any] | None,
         benchmark_policy: dict[str, bool],
         private_labels: tuple[str, ...],
+        tier3_override: tuple[str, str] | None = None,
     ) -> None:
         tier_groups = [
             ("Tier 1", "Static validation", _tier1_results(results)),
@@ -395,6 +421,8 @@ class BenchmarkReporter(ReporterBase):
         )
         for tier, purpose, tier_results in tier_groups:
             status, evidence = _tier_status(tier, tier_results, ae, benchmark_policy)
+            if tier == "Tier 3" and tier3_override is not None and tier_results:
+                status, evidence = tier3_override
             lines.append(f"| {tier} | {purpose} | **{status}** | {_md_cell(evidence, private_labels)} |")
         lines.append("")
 
@@ -565,18 +593,377 @@ class BenchmarkReporter(ReporterBase):
         lines.extend(["</details>", ""])
 
     @staticmethod
-    def _render_freshness(lines: list[str]) -> None:
+    def _render_freshness(lines: list[str], subject: str = "skill") -> None:
+        changed = "plugin or any of its components" if subject == "plugin" else "skill"
         lines.extend(
             [
                 "## Freshness",
                 "",
                 (
-                    "Regenerate this benchmark when the skill, evaluation dataset, target agent/model, "
+                    f"Regenerate this benchmark when the {changed}, evaluation dataset, target agent/model, "
                     "evaluator version, environment, or scoring policy changes."
                 ),
                 "",
             ]
         )
+
+    # ------------------------------------------------------------------
+    # Plugin card
+    # ------------------------------------------------------------------
+
+    def _render_plugin_card(self, results: list[ValidationResult], ae: dict[str, Any] | None) -> str:
+        """Render the plugin card: the skill card plus coverage, Integration, and exclusions."""
+        plugin = self._plugin_block_from_results(results) or {}
+        view = tier3_plugin_view(ae)
+        name = _publication_safe_target_name(
+            (plugin.get("name"), (view or {}).get("plugin_name"), self.skill_name),
+            fallback="plugin",
+        )
+        private_labels = _private_environment_labels(ae)
+        policy = _benchmark_policy(results, ae)
+        partial = bool(view and view["partial"])
+        status = _plugin_overall_status(results, ae, policy, partial=partial)
+
+        lines: list[str] = [f"# Plugin Benchmark: {name}", "", _verdict_callout(status), ""]
+        if status == "PASS":
+            lines.extend(["## Publication Recommendation", ""])
+            if _advisory_agent_eval_skip_message(results):
+                lines.append(
+                    "Tier 3 live evaluation was skipped and does not block required validation. "
+                    "Publication suitability in this report is based on the completed required-tier "
+                    "results; rerun Tier 3 when the live evaluation runtime is available."
+                )
+            else:
+                lines.append(
+                    "Recommended for publication based on the completed evaluation evidence in this report. "
+                    "The recommendation covers only the components this run staged and the behavior its trials "
+                    "exercised, as listed below."
+                )
+            lines.append("")
+        elif status == "FAIL":
+            lines.extend(
+                [
+                    (
+                        "The plugin should be reviewed before publication. Address the blocking findings below, "
+                        "then rerun SkillEvaluator."
+                    ),
+                    "",
+                ]
+            )
+        elif status == "INCOMPLETE":
+            lines.extend(
+                [
+                    (
+                        "Tier 3 evaluated only part of this plugin, so this benchmark is a partial result and is "
+                        "not publication-complete."
+                        if partial
+                        else (
+                            "One or more required evaluation tiers did not complete, so this benchmark is not "
+                            "publication-complete."
+                        )
+                    ),
+                    "",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    (
+                        "Live evaluation did not show a material gain or regression. Collect more evidence or "
+                        "improve the plugin before making a publication decision."
+                    ),
+                    "",
+                ]
+            )
+
+        self._render_metadata(
+            lines,
+            results,
+            ae,
+            name,
+            policy,
+            private_labels=private_labels,
+            subject_label="Plugin",
+            extra_lines=_plugin_metadata_lines(plugin, view, private_labels),
+        )
+        self._render_plugin_purpose(lines)
+        self._render_results_at_a_glance(
+            lines,
+            ae,
+            private_labels,
+            subject="plugin",
+            sum_of_parts_baseline=bool(view and view["sum_of_parts_baseline"]),
+        )
+        self._render_plugin_effectiveness(lines, ae, view, private_labels)
+        self._render_plugin_canary(lines, view, private_labels)
+        self._render_plugin_coverage(lines, view, private_labels)
+        self._render_plugin_provenance(lines, view, private_labels, plugin)
+        tier3_override = (
+            ("INCOMPLETE", f"Partial plugin run: {view['incomplete_reason']}") if view and partial else None
+        )
+        self._render_tier_status(lines, results, ae, policy, private_labels, tier3_override)
+        self._render_findings(lines, results, private_labels)
+        self._render_methodology(lines, ae, private_labels)
+        self._render_freshness(lines, subject="plugin")
+        return "\n".join(lines).rstrip() + "\n"
+
+    @staticmethod
+    def _render_plugin_purpose(lines: list[str]) -> None:
+        lines.extend(
+            [
+                "## What This Report Answers",
+                "",
+                "The three-tier evaluation checks whether the plugin:",
+                "",
+                "- is safe to use;",
+                "- produces correct answers;",
+                "- is discovered and activated when needed;",
+                "- helps the agent complete the user's goal and expected workflow;",
+                "- avoids wasted skill and tool usage; and",
+                "- adds value as a coordinated plugin beyond its individual components (Integration, when measured).",
+                "",
+                (
+                    "A plugin evaluation demonstrates only what it staged and exercised. Files staged ≠ components "
+                    "loaded ≠ behavior verified, so the coverage and exclusion sections below state what this run "
+                    "did not evaluate."
+                ),
+                "",
+            ]
+        )
+
+    @staticmethod
+    def _render_plugin_effectiveness(
+        lines: list[str],
+        ae: dict[str, Any] | None,
+        view: dict[str, Any] | None,
+        private_labels: tuple[str, ...],
+    ) -> None:
+        lines.extend(
+            [
+                "## Effectiveness and Integration",
+                "",
+                "| Measure | Result | Uncertainty |",
+                "|---|---|---|",
+            ]
+        )
+        statistics = (view or {}).get("statistics")
+        lift_ci = {row["kind"]: row for row in statistics["primary"]["lift_ci"]} if statistics else {}
+        summary = _mapping((ae or {}).get("summary"))
+        overall_lift = _number((ae or {}).get("overall_lift", summary.get("overall_lift")))
+        sum_of_parts_baseline = bool(view and view["sum_of_parts_baseline"])
+        if sum_of_parts_baseline:
+            # The only baseline staged the member components individually, so the
+            # overall lift and its interval are the Integration comparison.
+            effectiveness = "Not measured — lift mode integration compares against sum-of-parts"
+            effectiveness_uncertainty = "Not measured"
+        else:
+            effectiveness = _format_points(overall_lift) if overall_lift is not None else "Not available"
+            effectiveness_uncertainty = _ci_label(lift_ci.get("effectiveness"))
+        lines.append(
+            f"| Effectiveness (plugin vs. no plugin) | {_md_cell(effectiveness, private_labels)} "
+            f"| {_md_cell(effectiveness_uncertainty, private_labels)} |"
+        )
+        integration = (view or {}).get("integration")
+        modes = (view or {}).get("lift_modes")
+        if integration and integration["measured"]:
+            lift = integration.get("lift_value")
+            result = f"{integration['verdict_label']}, {_format_points(lift) if lift is not None else 'lift n/a'}"
+            uncertainty = _ci_label(integration.get("ci") or lift_ci.get("integration"))
+        elif integration:
+            result = f"INCONCLUSIVE — {integration['reason']}"
+            uncertainty = "Not measured"
+        elif modes:
+            result = f"Not requested (lift mode: {modes['requested']})"
+            uncertainty = "Not measured"
+        else:
+            result = "Not measured"
+            uncertainty = "Not measured"
+        lines.append(
+            f"| Integration (plugin vs. its own parts) | {_md_cell(result, private_labels)} "
+            f"| {_md_cell(uncertainty, private_labels)} |"
+        )
+        lines.extend(
+            [
+                "",
+                (
+                    "Effectiveness compares the plugin with the same tasks run without it. Integration compares the "
+                    "coordinated plugin with its member components staged individually; it is advisory and never "
+                    "changes the verdict."
+                ),
+                "",
+            ]
+        )
+        if sum_of_parts_baseline:
+            lines.extend(
+                [
+                    (
+                        "This run used lift mode `integration`: its only baseline staged the member components "
+                        "individually, so the plugin was never compared with a run without it."
+                    ),
+                    "",
+                ]
+            )
+        if modes:
+            lines.extend(
+                [
+                    (
+                        f"Lift mode: requested `{_md_cell(modes['requested'], private_labels)}`, "
+                        f"effective `{_md_cell(modes['effective'], private_labels)}`."
+                    ),
+                    "",
+                ]
+            )
+
+    @staticmethod
+    def _render_plugin_canary(
+        lines: list[str],
+        view: dict[str, Any] | None,
+        private_labels: tuple[str, ...],
+    ) -> None:
+        """Surface canary exfiltration results, so a plugin-attributable leak is on the card."""
+        canary = (view or {}).get("canary")
+        if not canary:
+            return
+        lines.extend(["## Canary Exfiltration", ""])
+        for entry in canary["entries"]:
+            marker = "**CRITICAL:** " if entry.get("verdict_class") == "fail" else ""
+            lines.append(
+                f"- {_publication_safe_inline(entry['scope'], private_labels)}: "
+                f"{marker}{_publication_safe_inline(entry['verdict'], private_labels)}"
+            )
+        lines.append("")
+
+    @staticmethod
+    def _render_plugin_coverage(
+        lines: list[str],
+        view: dict[str, Any] | None,
+        private_labels: tuple[str, ...],
+    ) -> None:
+        lines.extend(["## Component Coverage", ""])
+        coverage = (view or {}).get("coverage")
+        if not coverage:
+            lines.extend(
+                [
+                    (
+                        "Per-component coverage was not recorded for this run. Do not assume that every declared "
+                        "component was evaluated."
+                    ),
+                    "",
+                ]
+            )
+            return
+        observed = (
+            f"; {_md_cell(coverage['observed_headline'], private_labels)}" if coverage["observed_headline"] else ""
+        )
+        lines.extend(
+            [
+                (
+                    f"**{_md_cell(coverage['headline'], private_labels)}** of {coverage['total']} declared or "
+                    f"packaged component(s); {coverage['staged']} staged{observed}."
+                ),
+                "",
+                f"Files staged ≠ components loaded ≠ behavior verified. {_md_cell(coverage['note'], private_labels)}",
+                "",
+                "| Component | Type | State | Reason |",
+                "|---|---|---|---|",
+            ]
+        )
+        for row in coverage["rows"]:
+            lines.append(
+                f"| {_md_cell(row['name'] or 'unnamed', private_labels)} | {_md_cell(row['type'], private_labels)} "
+                f"| {_md_cell(row['state_label'], private_labels)} | {_md_cell(row['reason'] or '—', private_labels)} |"
+            )
+        if coverage["omitted"]:
+            lines.append(f"| {coverage['omitted']} more component(s) | | | |")
+        lines.append("")
+        if coverage["not_staged_rows"]:
+            lines.extend(["Not staged:", ""])
+            for row in coverage["not_staged_rows"]:
+                reason = f" — {_publication_safe_inline(row['reason'], private_labels)}" if row["reason"] else ""
+                lines.append(
+                    f"- {_publication_safe_inline(row['type'], private_labels)} "
+                    f"{_publication_safe_inline(row['name'], private_labels)} "
+                    f"({_publication_safe_inline(row['state_label'], private_labels)}){reason}"
+                )
+            lines.append("")
+        if coverage["staged_not_observed_rows"]:
+            lines.extend(["Staged but not observed in any plugin trial:", ""])
+            lines.extend(
+                f"- {_publication_safe_inline(row['type'], private_labels)} "
+                f"{_publication_safe_inline(row['name'], private_labels)} "
+                f"({_publication_safe_inline(row['observed'], private_labels)})"
+                for row in coverage["staged_not_observed_rows"]
+            )
+            lines.append("")
+
+    @staticmethod
+    def _render_plugin_provenance(
+        lines: list[str],
+        view: dict[str, Any] | None,
+        private_labels: tuple[str, ...],
+        plugin: dict[str, Any],
+    ) -> None:
+        lines.extend(["## Provenance and Excluded Behavior", ""])
+        excluded = list((view or {}).get("excluded") or [])
+        inventory = inventory_view(plugin.get("component_inventory"))
+        if inventory and inventory["unsupported_types"]:
+            # A type is evaluated when a Tier 3 row of that type was staged, loaded
+            # or exercised (native loading), and checked when Tier 1 has
+            # static-risk rows for it. Only the rest is excluded outright.
+            coverage = (view or {}).get("coverage") or {}
+            runtime_types = {row["type"] for row in coverage.get("rows") or [] if row.get("staged")}
+            static_types = statically_checked_types(plugin)
+            remaining = [name for name in inventory["unsupported_types"] if name not in runtime_types]
+            static_only = [name for name in remaining if name in static_types]
+            not_evaluated = [name for name in remaining if name not in static_types]
+            if static_only:
+                excluded.append(
+                    "Runtime behavior of these component types was not evaluated (Tier 3 does not stage them in "
+                    "wrapper mode); Tier 1 checks them statically: " + ", ".join(static_only)
+                )
+            if not_evaluated:
+                excluded.append(
+                    "Tier 3 does not stage these component types in wrapper mode, and no check evaluates them: "
+                    + ", ".join(not_evaluated)
+                )
+        completeness = (view or {}).get("completeness")
+        if not completeness:
+            lines.append(
+                "- Plugin provenance was not recorded for this run; treat component coverage and exclusions as unknown."
+            )
+            lines.extend(f"- {_publication_safe_inline(statement, private_labels)}" for statement in excluded)
+            lines.append("")
+            return
+        counts = completeness["counts"]
+        if view and view["partial"]:
+            lines.append(
+                f"- Status: **INCOMPLETE** — {_publication_safe_inline(view['incomplete_reason'], private_labels)}. "
+                "This is a partial result, not a pass."
+            )
+        else:
+            lines.append("- Status: complete — every declared dependency was resolved for Tier 3.")
+        # An unreadable sidecar recorded no counts; zeros would read as "nothing deferred".
+        if not completeness.get("sidecar_error"):
+            lines.append(
+                f"- Resolved: {counts['skills_resolved']} skill(s), {counts['rules_resolved']} rule(s), "
+                f"{counts['mcp_runnable']} runnable MCP server(s)"
+            )
+            lines.append(
+                f"- Deferred: {counts['skills_unresolved']} skill ref(s), {counts['rules_unresolved']} rule ref(s), "
+                f"{counts['mcp_provider_only']} provider-only MCP server(s), "
+                f"{counts['mcp_unsupported_config']} MCP server(s) with unsupported config"
+            )
+        dataset = (view or {}).get("dataset")
+        if dataset:
+            cases = dataset["cases"] if dataset["cases"] is not None else "not recorded"
+            cross = dataset["cross_component_cases"] if dataset["cross_component_cases"] is not None else "not recorded"
+            lines.append(f"- Dataset: {cases} case(s), {cross} cross-component case(s)")
+        lines.extend(["", "Excluded behavior:", ""])
+        if excluded:
+            lines.extend(f"- {_publication_safe_inline(statement, private_labels)}" for statement in excluded)
+        else:
+            lines.append("- No declared component or measurement was recorded as excluded from this run.")
+        lines.append("")
 
     def get_file_extension(self) -> str:
         return ".md"
@@ -762,6 +1149,68 @@ def _overall_status(
     return "PASS"
 
 
+def _plugin_overall_status(
+    results: list[ValidationResult],
+    ae: dict[str, Any] | None,
+    benchmark_policy: dict[str, bool],
+    *,
+    partial: bool,
+) -> str:
+    """Return the card verdict; a partial plugin run is INCOMPLETE unless something failed."""
+    if not partial:
+        return _overall_status(results, ae, benchmark_policy)
+    non_tier3 = [result for result in results if not _is_tier3(result)]
+    if any(not passes_required_gate(result) and not result.is_incomplete for result in non_tier3):
+        return "FAIL"
+    summary = _mapping((ae or {}).get("summary"))
+    verdict = str((ae or {}).get("verdict") or summary.get("verdict") or "").lower()
+    if verdict == "fail" or _tier3_dimension_verdict(ae) == "fail":
+        return "FAIL"
+    return "INCOMPLETE"
+
+
+def _plugin_metadata_lines(
+    plugin: dict[str, Any],
+    view: dict[str, Any] | None,
+    private_labels: tuple[str, ...],
+) -> list[str]:
+    lines: list[str] = []
+    manifest_type = plugin.get("manifest_type")
+    if manifest_type:
+        lines.append(f"- Plugin manifest: {_publication_safe_inline(manifest_type, private_labels)}")
+    dataset = (view or {}).get("dataset") or {}
+    cross = dataset.get("cross_component_cases")
+    if cross is not None:
+        lines.append(f"- Cross-component tasks: {cross}")
+    coverage = (view or {}).get("coverage")
+    if coverage:
+        observed = (
+            f"; {_publication_safe_inline(coverage['observed_headline'], private_labels)}"
+            if coverage["observed_headline"]
+            else ""
+        )
+        lines.append(
+            f"- Component coverage: {_publication_safe_inline(coverage['headline'], private_labels)}{observed}"
+        )
+    if view is not None:
+        lines.append(f"- Plugin run: {'INCOMPLETE (partial)' if view['partial'] else 'complete'}")
+    return lines
+
+
+def _ci_label(row: dict[str, Any] | None) -> str:
+    """Render a lift interval in percentage points, with its precision and zero warning."""
+    if not row:
+        return "Not measured"
+    low = row.get("low_value")
+    high = row.get("high_value")
+    if low is None or high is None:
+        return f"Interval not recorded; precision {row['precision']}"
+    label = f"[{low * 100:+.0f}, {high * 100:+.0f}] points ({row['confidence']}); precision {row['precision']}"
+    if row.get("ci_includes_zero"):
+        label += "; CI includes zero"
+    return label
+
+
 def _verdict_callout(status: str) -> str:
     labels = {
         "PASS": "✅ **Overall verdict: PASS — Recommended for publication**",
@@ -810,11 +1259,12 @@ def _agent_table_label(
     name: str,
     agent: dict[str, Any],
     private_labels: tuple[str, ...] = (),
+    subject: str = "skill",
 ) -> str:
     display = _human_agent_name(
         _publication_safe_label(agent.get("display_name") or agent.get("label") or name, private_labels)
     )
-    return f"{display} (Baseline → Skill Uplift)"
+    return f"{display} (Baseline → {subject.title()} Uplift)"
 
 
 def _human_agent_name(name: str) -> str:
@@ -1149,6 +1599,15 @@ def _publication_safe_skill_name(value: object) -> str:
     return "skill"
 
 
+def _publication_safe_target_name(candidates: tuple[object, ...], *, fallback: str) -> str:
+    """Return the first canonical kebab-case identity among *candidates*, else *fallback*."""
+    for value in candidates:
+        candidate = " ".join(str(value or "").split())
+        if candidate and re.fullmatch(KEBAB_CASE_PATTERN, candidate) is not None:
+            return candidate
+    return fallback
+
+
 def _private_environment_labels(ae: dict[str, Any] | None) -> tuple[str, ...]:
     """Return imported non-public environment labels that must not escape in free text."""
     if not ae:
@@ -1178,7 +1637,7 @@ def _publication_safe_label(value: object, private_labels: tuple[str, ...] = ())
 
 def _publication_safe_inline(value: object, private_labels: tuple[str, ...] = ()) -> str:
     """Render untrusted metadata as one publication-safe Markdown line."""
-    text = " ".join(str(value).split())
+    text = " ".join(strip_terminal_controls(str(value)).split())
     text = _redact_absolute_paths(text)
     text = _RETIRED_SANDBOX_REFERENCE.sub("isolated sandbox", text)
     for label in sorted(private_labels, key=len, reverse=True):

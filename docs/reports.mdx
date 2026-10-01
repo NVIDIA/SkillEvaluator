@@ -68,13 +68,20 @@ and never clobbers the previous run.
 
 ## BENCHMARK.md
 
-When the target is a skill, `validate` always writes `BENCHMARK.md` to the
-output directory — regardless of which `-r` formats you picked, and even when
-validation fails. It is a decision-first publication card: the overall verdict
+When the target is a skill or a plugin, `validate` always writes `BENCHMARK.md`
+to the output directory — regardless of which `-r` formats you picked, and even
+when validation fails. It is a decision-first publication card: the overall verdict
 and recommendation come first, followed by per-tier evidence, evaluator and
 dataset provenance, agent/model details, and a dimension-by-dimension
 `Baseline → Skill Uplift` table when Tier 3 ran. Public cards omit validation
 profile names and absolute host paths.
+
+A plugin card (`# Plugin Benchmark:`) adds Effectiveness and Integration results
+with their confidence intervals when recorded, a per-component coverage table,
+and the behavior the run did not evaluate: components that were not staged,
+provider-only MCP servers, unresolved references, and an unmeasured Integration.
+Staging a component's files is not evidence that the agent loaded it or that its
+behavior was verified, so a partial plugin run is `INCOMPLETE`, never a pass.
 
 The card carries one overall verdict — `PASS`, `NEUTRAL`, `FAIL`, or
 `INCOMPLETE`. It
@@ -87,6 +94,15 @@ by default, so a missing, skipped, or incomplete live evaluation produces
 `INCOMPLETE` rather than a publication recommendation. A catalog may
 explicitly persist `benchmark_policy.tier3_required = false`; the card
 discloses that exception instead of implying that Tier 3 ran.
+
+For a plugin target, the card is titled `# Plugin Benchmark: <name>`. It adds
+Effectiveness and Integration (with confidence intervals), Component Coverage,
+and Provenance and Excluded Behavior sections, and a partial plugin run is
+`INCOMPLETE`.
+
+Plugin runs are covered in
+[Plugin Evaluation](plugin-evaluation.mdx#reports-and-verdicts), including the
+plugin verdicts and what makes a plugin run `INCOMPLETE`.
 
 ### Evaluated source provenance
 
@@ -206,6 +222,15 @@ completed run directly:
 - **`<agent>/lift.json`** and **`<agent>/pass_at_k_lift.json`** — per-metric
   deltas between the two arms; written only when both arms produced scores
   (a `--skip-baseline` run has neither).
+- **`<agent>/statistics.json`** — report-only statistics: 95% bootstrap
+  intervals for the lift, pass^k, tokens and reported USD cost per passed
+  case, token efficiency, the measured first-turn context delta, and per-case
+  Integration completeness. None of these change a score or verdict.
+- **`plugin_provenance.json`** — plugin runs only: which member skills,
+  rules, and MCP servers were evaluated, what stayed unresolved, per-component
+  coverage, the static context-cost estimate, MCP pinning, and the requested
+  and effective lift modes. See
+  [Plugin Evaluation](plugin-evaluation.mdx#where-results-are-recorded).
 - **`<agent>/{with-skill,without-skill}/`** — each arm's `summary.json`
   (scores, dimensions, pass@k, trial counts) and a `trials/` directory of
   per-trial artifacts.

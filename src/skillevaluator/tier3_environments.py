@@ -35,3 +35,6 @@ HARBOR_ENV_MODES = frozenset(HARBOR_ENVIRONMENTS)
 HARBOR_NATIVE_ENV_MODES = frozenset(m for m in HARBOR_ENVIRONMENTS if m != "local")
 ENV_MODE_LOCAL = "local"
 DEFAULT_ENV_MODE = "docker"
+
+#: ``--plugin-load`` choices for plugin Tier 3 runs; ``wrapper`` is the default.
+PLUGIN_LOAD_CHOICES: tuple[str, ...] = ("wrapper", "native", "auto")

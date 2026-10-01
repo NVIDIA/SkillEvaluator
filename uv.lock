@@ -1976,6 +1976,7 @@ dependencies = [
     { name = "markdown-it-py" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "regex" },
     { name = "rich" },
 ]
 
@@ -2047,6 +2048,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.2.0" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "regex", specifier = ">=2024.11.6" },
     { name = "rich", specifier = ">=13.5.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.4,<0.16" },
     { name = "skillevaluator", extras = ["llm"], marker = "extra == 'tier2'" },

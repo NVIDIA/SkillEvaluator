@@ -63,6 +63,21 @@ class ValidationPolicy:
             severity that the validator would otherwise emit.
         source: Path to the YAML file the policy was loaded from (for
             diagnostics). ``None`` for programmatically constructed policies.
+        mcp_allowed_private_hosts: Intended private MCP endpoint hosts
+            (``mcp.allowed_private_hosts`` in YAML). Exact names, ``*.suffix``
+            wildcards, IP literals, or CIDR networks. Matching hosts do not raise
+            ``mcp_endpoint_private``; cloud metadata endpoints are never allowed.
+        hook_allowed_urls: Allowed HTTP hook endpoints (``hooks.allowed_urls`` in
+            YAML). Each entry is a URL prefix (``https://hooks.example.com/``),
+            matched parsed (same scheme, host, and port, and a path on a ``/``
+            boundary; an entry with userinfo, a query, or a fragment matches
+            nothing), or a host pattern with the ``mcp.allowed_private_hosts`` syntax. When the
+            list is non-empty, an HTTP hook whose URL matches no entry is a
+            blocking finding; a matching hook raises no endpoint finding.
+        resolve_endpoints: Opt-in DNS and redirect checks for MCP and HTTP hook
+            URLs (``endpoints.resolve`` in YAML, or ``validate
+            --resolve-endpoints``). Off by default, so validation stays
+            network-free.
     """
 
     profile: str = DEFAULT_PROFILE_NAME
@@ -70,16 +85,26 @@ class ValidationPolicy:
     author_email_regex: re.Pattern[str] | None = None
     severity_overrides: dict[str, Severity] = field(default_factory=dict)
     source: Path | None = None
+    mcp_allowed_private_hosts: tuple[str, ...] = ()
+    hook_allowed_urls: tuple[str, ...] = ()
+    resolve_endpoints: bool = False
 
     @property
     def digest(self) -> str:
         """Return a stable digest for the effective, source-independent policy."""
-        payload = {
+        payload: dict[str, Any] = {
             "profile": self.profile,
             "audience": self.audience,
             "author_email_regex": self.author_email_regex.pattern if self.author_email_regex else None,
             "severity_overrides": {key: value.value for key, value in sorted(self.severity_overrides.items())},
         }
+        if self.mcp_allowed_private_hosts:
+            # Only present when configured, so existing policy digests are unchanged.
+            payload["mcp_allowed_private_hosts"] = sorted(self.mcp_allowed_private_hosts)
+        if self.hook_allowed_urls:
+            payload["hook_allowed_urls"] = sorted(self.hook_allowed_urls)
+        if self.resolve_endpoints:
+            payload["resolve_endpoints"] = True
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
 
@@ -114,7 +139,7 @@ class ValidationPolicy:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for inclusion in reports (read-only summary)."""
-        return {
+        summary: dict[str, Any] = {
             "profile": self.profile,
             "audience": self.audience,
             "digest": self.digest,
@@ -122,6 +147,13 @@ class ValidationPolicy:
             "severity_overrides": {k: v.value for k, v in self.severity_overrides.items()},
             "source": str(self.source) if self.source else None,
         }
+        if self.mcp_allowed_private_hosts:
+            summary["mcp_allowed_private_hosts"] = list(self.mcp_allowed_private_hosts)
+        if self.hook_allowed_urls:
+            summary["hook_allowed_urls"] = list(self.hook_allowed_urls)
+        if self.resolve_endpoints:
+            summary["resolve_endpoints"] = True
+        return summary
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +189,91 @@ def _coerce_email_regex(value: Any, source: str) -> re.Pattern[str] | None:
         return None
 
 
-_KNOWN_TOP_LEVEL_KEYS = {"profile", "identity", "severity_overrides"}
+_KNOWN_TOP_LEVEL_KEYS = {"profile", "identity", "severity_overrides", "mcp", "hooks", "endpoints"}
 _KNOWN_IDENTITY_KEYS = {"author_email_regex"}
+_KNOWN_MCP_KEYS = {"allowed_private_hosts"}
+_KNOWN_HOOKS_KEYS = {"allowed_urls"}
+_KNOWN_ENDPOINTS_KEYS = {"resolve"}
+MAX_MCP_ALLOWED_PRIVATE_HOSTS = 256
+MAX_HOOK_ALLOWED_URLS = 256
+
+
+def _coerce_allowed_private_hosts(value: Any, source: str) -> tuple[str, ...]:
+    """Normalize ``mcp.allowed_private_hosts`` to a bounded tuple of non-empty strings."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        logger.warning("Ignoring non-list 'mcp.allowed_private_hosts' in %s.", source)
+        return ()
+    hosts: list[str] = []
+    for entry in value[:MAX_MCP_ALLOWED_PRIVATE_HOSTS]:
+        if isinstance(entry, str) and entry.strip() and len(entry) <= 255:
+            hosts.append(entry.strip())
+        else:
+            logger.warning("Ignoring invalid 'mcp.allowed_private_hosts' entry %r in %s.", entry, source)
+    if len(value) > MAX_MCP_ALLOWED_PRIVATE_HOSTS:
+        logger.warning(
+            "Ignoring 'mcp.allowed_private_hosts' entries beyond the first %d in %s.",
+            MAX_MCP_ALLOWED_PRIVATE_HOSTS,
+            source,
+        )
+    return tuple(dict.fromkeys(hosts))
+
+
+def _mcp_block(data: dict[str, Any], source: str) -> dict[str, Any]:
+    block = data.get("mcp") or {}
+    if not isinstance(block, dict):
+        logger.warning("Ignoring non-mapping 'mcp' block in %s.", source)
+        return {}
+    _warn_unknown_keys(block, _KNOWN_MCP_KEYS, "mcp", source)
+    return block
+
+
+def _named_block(data: dict[str, Any], name: str, known: set[str], source: str) -> dict[str, Any]:
+    block = data.get(name) or {}
+    if not isinstance(block, dict):
+        logger.warning("Ignoring non-mapping '%s' block in %s.", name, source)
+        return {}
+    _warn_unknown_keys(block, known, name, source)
+    return block
+
+
+def _coerce_hook_allowed_urls(value: Any, source: str) -> tuple[str, ...]:
+    """Normalize ``hooks.allowed_urls`` to a bounded tuple of non-empty strings.
+
+    A URL entry with userinfo, a query, or a fragment is kept, so the allowlist
+    stays enforced, but it matches no hook URL, and a warning is logged.
+    """
+    from skillevaluator.plugin_component_risk import hook_url_entry_problem, safe_url
+
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        logger.warning("Ignoring non-list 'hooks.allowed_urls' in %s.", source)
+        return ()
+    entries: list[str] = []
+    for entry in value[:MAX_HOOK_ALLOWED_URLS]:
+        if isinstance(entry, str) and entry.strip() and len(entry) <= 2048:
+            entries.append(entry.strip())
+            problem = hook_url_entry_problem(entry)
+            if problem:
+                logger.warning(
+                    "'hooks.allowed_urls' entry %r in %s %s; it matches no hook URL.", safe_url(entry), source, problem
+                )
+        else:
+            logger.warning("Ignoring invalid 'hooks.allowed_urls' entry %r in %s.", entry, source)
+    if len(value) > MAX_HOOK_ALLOWED_URLS:
+        logger.warning("Ignoring 'hooks.allowed_urls' entries beyond the first %d in %s.", MAX_HOOK_ALLOWED_URLS, source)
+    return tuple(dict.fromkeys(entries))
+
+
+def _coerce_resolve_endpoints(value: Any, source: str) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        logger.warning("Ignoring non-boolean 'endpoints.resolve' in %s.", source)
+        return False
+    return value
 
 
 def _load_policy_yaml(path: Path) -> Any:
@@ -220,12 +335,18 @@ def _policy_from_data(
             if sev is not None:
                 severity_overrides[key] = sev
 
+    mcp_block = _mcp_block(data, source_str)
+    hooks_block = _named_block(data, "hooks", _KNOWN_HOOKS_KEYS, source_str)
+    endpoints_block = _named_block(data, "endpoints", _KNOWN_ENDPOINTS_KEYS, source_str)
     return ValidationPolicy(
         profile=profile_name,
         audience="external",
         author_email_regex=author_email_regex,
         severity_overrides=severity_overrides,
         source=source,
+        mcp_allowed_private_hosts=_coerce_allowed_private_hosts(mcp_block.get("allowed_private_hosts"), source_str),
+        hook_allowed_urls=_coerce_hook_allowed_urls(hooks_block.get("allowed_urls"), source_str),
+        resolve_endpoints=_coerce_resolve_endpoints(endpoints_block.get("resolve"), source_str),
     )
 
 
@@ -273,6 +394,14 @@ def load_policy_file(
     if not isinstance(identity_block, dict):
         identity_block = {}
     overlay_sets_email_regex = "author_email_regex" in identity_block
+    # Like author_email_regex, the overlay replaces the base allowlist only when
+    # it sets the key (an explicit empty list clears it).
+    mcp_block = custom_data.get("mcp") if isinstance(custom_data, dict) else None
+    overlay_sets_private_hosts = isinstance(mcp_block, dict) and "allowed_private_hosts" in mcp_block
+    hooks_overlay = custom_data.get("hooks") if isinstance(custom_data, dict) else None
+    overlay_sets_hook_urls = isinstance(hooks_overlay, dict) and "allowed_urls" in hooks_overlay
+    endpoints_overlay = custom_data.get("endpoints") if isinstance(custom_data, dict) else None
+    overlay_sets_resolve = isinstance(endpoints_overlay, dict) and "resolve" in endpoints_overlay
 
     return ValidationPolicy(
         profile=custom.profile,
@@ -280,6 +409,11 @@ def load_policy_file(
         author_email_regex=(custom.author_email_regex if overlay_sets_email_regex else base.author_email_regex),
         severity_overrides=merged_overrides,
         source=path,
+        mcp_allowed_private_hosts=(
+            custom.mcp_allowed_private_hosts if overlay_sets_private_hosts else base.mcp_allowed_private_hosts
+        ),
+        hook_allowed_urls=custom.hook_allowed_urls if overlay_sets_hook_urls else base.hook_allowed_urls,
+        resolve_endpoints=custom.resolve_endpoints if overlay_sets_resolve else base.resolve_endpoints,
     )
 
 
@@ -342,17 +476,32 @@ def apply_policy(
     if policy is None:
         return results
     for result in results:
+        advisory = isinstance(result.metadata, dict) and result.metadata.get("advisory_tier2")
+        security_failure = isinstance(result.metadata, dict) and result.metadata.get("security_failure")
         changed = False
         for finding in result.findings:
             current = (
                 finding.severity if isinstance(finding.severity, Severity) else Severity(str(finding.severity).lower())
             )
-            new_severity = policy.severity_for(finding.category, finding.check_name, current)
+            # Security failures describe unsafe input that was refused before a
+            # validator could run. Policy overrides must not hide that failure.
+            new_severity = current if security_failure else policy.severity_for(
+                finding.category,
+                finding.check_name,
+                current,
+            )
+            if advisory and not security_failure and new_severity in (Severity.CRITICAL, Severity.HIGH):
+                new_severity = Severity.MEDIUM
             if new_severity != current:
                 finding.severity = new_severity
                 changed = True
         if changed:
             result.recalculate_from_findings()
+        if security_failure:
+            result.passed = False
+            result.metadata["execution_status"] = "failed"
+        elif advisory:
+            result.passed = True
         if isinstance(result.metadata, dict):
             result.metadata["policy"] = policy.to_dict()
     return results

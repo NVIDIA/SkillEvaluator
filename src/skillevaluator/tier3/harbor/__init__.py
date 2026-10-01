@@ -40,7 +40,11 @@ HARBOR_AGENTS_SUPPORTED = frozenset(
     }
 )
 
-HARBOR_AGENTS_EXPERIMENTAL: frozenset[str] = frozenset()
+# Harbor's installed Hermes agent (NousResearch hermes-agent). Container
+# environments only: local mode keeps LOCAL_HARBOR_AGENTS. Experimental because
+# Harbor installs Hermes from its default branch at trial time (no version pin)
+# and no end-to-end Hermes plugin run has been verified yet.
+HARBOR_AGENTS_EXPERIMENTAL: frozenset[str] = frozenset({"hermes"})
 
 HARBOR_AGENTS = HARBOR_AGENTS_SUPPORTED | HARBOR_AGENTS_EXPERIMENTAL
 

@@ -43,6 +43,7 @@ from skillevaluator.source_identity import normalized_evaluated_source
 from skillevaluator.tier3.eval_core.plugin_signals import PluginSignalsContext, build_plugin_signals_context
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 from skillevaluator.tier3.harbor.adapter import (
+    _VERIFIER_BUDGET_ENV_VARS,
     _VERIFIER_JUDGE_MODEL_ENV_VARS,
     _load_mcp_servers,
     _prevalidate_baseline_skill_candidates,
@@ -521,7 +522,11 @@ def _provider_environment(config: ProviderConfig) -> dict[str, str]:
         "SKILL_EVAL_LLM_MODEL": config.model,
     }
     environment.update(
-        {name: value for name in _VERIFIER_JUDGE_MODEL_ENV_VARS if (value := os.environ.get(name, "").strip())}
+        {
+            name: value
+            for name in (_VERIFIER_JUDGE_MODEL_ENV_VARS | _VERIFIER_BUDGET_ENV_VARS)
+            if (value := os.environ.get(name, "").strip())
+        }
     )
     if config.provider == "anthropic":
         environment["ANTHROPIC_API_KEY"] = config.api_key or ""

@@ -38,6 +38,7 @@ All notable changes to SkillEvaluator are documented in this file.
   Effectiveness and Integration results, and the behavior the run excluded.
 - Added a Plugin Evaluation docs page covering all three tiers, the plugin
   dataset fields, verdicts, and current limitations.
+- Configurable evidence bundle budgets (`SKILL_EVAL_ACCURACY_BUDGET`, `SKILL_EVAL_GOAL_ACCURACY_BUDGET`, `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`) and final response limit (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`).
 
 ### Changed
 

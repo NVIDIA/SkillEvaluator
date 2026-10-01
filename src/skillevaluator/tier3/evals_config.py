@@ -41,6 +41,7 @@ _HARBOR_KEYS = {
     "max_agents",
     "timeout_multiplier",
     "agent_runtime_preflight",
+    "plugin_canary",
     "agent_workdir",
     "resources",
     "runtime_env",
@@ -160,6 +161,8 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
                 config_path,
                 "harbor.agent_runtime_preflight",
             )
+        if "plugin_canary" in harbor_raw:
+            harbor["plugin_canary"] = _bool(harbor_raw["plugin_canary"], config_path, "harbor.plugin_canary")
         if "agent_workdir" in harbor_raw:
             harbor["agent_workdir"] = _non_empty_string(
                 harbor_raw["agent_workdir"],

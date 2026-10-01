@@ -70,7 +70,7 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 
 def _numeric(value: Any) -> float | None:
-    if isinstance(value, int | float) and not isinstance(value, bool):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
     return None
 
@@ -124,7 +124,7 @@ def _numeric_reward_payload(reward: dict[str, Any], *, overall: float | None = N
     for key, value in reward.items():
         if isinstance(value, bool):
             continue
-        if isinstance(value, int | float):
+        if isinstance(value, (int, float)):
             payload[str(key)] = float(value)
     if overall is not None:
         payload["overall"] = float(overall)

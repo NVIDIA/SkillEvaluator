@@ -427,6 +427,7 @@ def integration_completeness(
     n_attempts: int,
     stop_on_pass: bool,
     pass_threshold: float,
+    requested: bool = True,
 ) -> dict[str, Any]:
     """Check that the Integration arms cover the same cases with enough attempts.
 
@@ -434,10 +435,18 @@ def integration_completeness(
     compared case to be present in both arms, no failed arm (including a failed
     sum-of-parts Harbor job), and no case below its required attempt count:
     ``n_attempts``, or the first passing attempt when ``stop_on_pass`` legitimately
-    ended a case early.
+    ended a case early. ``complete`` is ``None`` when no sum-of-parts arm was
+    ``requested`` (effectiveness-only lift, ``--skip-baseline``): there is
+    nothing to compare, so nothing is incomplete. A requested arm without
+    observations is listed in ``failed_arms``.
     """
+    if not requested:
+        return {"complete": None, "missing_cases": [], "failed_arms": [], "attempt_shortfall": []}
     if with_arm is None or sum_of_parts_arm is None:
-        return {"complete": False, "missing_cases": [], "failed_arms": [], "attempt_shortfall": []}
+        missing_arms = [
+            arm for arm, observed in ((ARM_WITH, with_arm), (ARM_SUM_OF_PARTS, sum_of_parts_arm)) if observed is None
+        ]
+        return {"complete": False, "missing_cases": [], "failed_arms": missing_arms, "attempt_shortfall": []}
 
     failed_arms: list[str] = []
     if not with_arm.succeeded:
@@ -526,5 +535,6 @@ def build_agent_statistics(
             n_attempts=n_attempts,
             stop_on_pass=stop_on_pass,
             pass_threshold=pass_threshold,
+            requested=sum_of_parts_requested,
         ),
     }

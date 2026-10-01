@@ -33,6 +33,7 @@ from skillevaluator.tier3.evals_spec import validate_harbor_contract, validate_s
 from skillevaluator.tier3.harbor import (
     DEFAULT_LLM_VERIFIER_TIMEOUT_SEC,
     HARBOR_AGENTS,
+    HARBOR_AGENTS_EXPERIMENTAL,
     HARBOR_AGENTS_SUPPORTED,
     canonical_agent_name,
 )
@@ -647,6 +648,8 @@ def evaluate(
     eval_target_kind: str = "skill",
     lift_mode_requested: str | None = None,
     integration_skip_reason: str | None = None,
+    plugin_load: str = "wrapper",
+    native_plugin_source: Any = None,
     copy_repo: bool,
     grading_mode: str | None,
     results_dir: Path | None,
@@ -693,7 +696,10 @@ def evaluate(
         unknown = validate_agents(agent_list)
         if unknown:
             supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))
-            raise ValueError(f"Unknown agent(s): {', '.join(unknown)}. Supported agents: {supported}")
+            experimental = ", ".join(sorted(HARBOR_AGENTS_EXPERIMENTAL))
+            raise ValueError(
+                f"Unknown agent(s): {', '.join(unknown)}. Supported agents: {supported}; experimental: {experimental}"
+            )
 
         if agents is not None:
             try:
@@ -729,6 +735,8 @@ def evaluate(
             eval_target_kind=eval_target_kind,
             lift_mode_requested=lift_mode_requested,
             integration_skip_reason=integration_skip_reason,
+            plugin_load=plugin_load,
+            native_plugin_source=native_plugin_source,
             copy_repo=copy_repo,
             grading_mode=grading_mode,
             output_dir=output_dir,

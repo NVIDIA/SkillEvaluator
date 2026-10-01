@@ -102,7 +102,7 @@ EVALS_SPEC: list[EntrySpec] = [
         formats=[".yml", ".yaml"],
         validation_notes=[
             "schema_version must be 1.",
-            "Supported harbor keys include task_source (auto|evals_json|native_harbor), custom_dockerfile_mode, base_image_mode, n_attempts, pass_threshold, stop_on_pass, n_concurrent, max_agents, timeout_multiplier, agent_runtime_preflight, runtime_env, pre_agent_setup, and agents.<name>.model.",
+            "Supported harbor keys include task_source (auto|evals_json|native_harbor), custom_dockerfile_mode, base_image_mode, n_attempts, pass_threshold, stop_on_pass, n_concurrent, max_agents, timeout_multiplier, agent_runtime_preflight, plugin_canary, runtime_env, pre_agent_setup, and agents.<name>.model.",
             "passthrough_env and setup_commands are accepted as compatibility aliases for runtime_env and pre_agent_setup.",
             "Supported skill_workspace keys: mode (isolated|group), include.",
             "Supported grading keys: mode (default|default_plus_custom|custom_only).",

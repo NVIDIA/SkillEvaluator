@@ -530,7 +530,8 @@ def test_collector_reports_context_cost_unavailable_without_step_metrics(tmp_pat
 
     assert agent["context_cost_measured"]["status"] == "unavailable"
     assert agent["lift_uncertainty"]["integration"] is None
-    assert agent["integration_completeness"]["complete"] is False
+    # No sum-of-parts arm was requested, so nothing is incomplete.
+    assert agent["integration_completeness"]["complete"] is None
 
 
 def test_trial_usage_falls_back_to_harbor_agent_result(tmp_path: Path) -> None:
@@ -799,3 +800,36 @@ def test_cli_plugin_summary_prints_integration_interval_and_reason() -> None:
     assert "Integration: INCONCLUSIVE (lift +0.15)" in output
     assert "95% CI [-0.05, +0.35], precision low" in output
     assert "includes zero" in output
+
+
+def test_completeness_without_a_requested_sum_of_parts_arm_is_not_applicable() -> None:
+    result = stats.integration_completeness(
+        _arm(_full(["a"])),
+        None,
+        expected_case_ids=["a"],
+        n_attempts=1,
+        stop_on_pass=False,
+        pass_threshold=0.5,
+        requested=False,
+    )
+    assert result == {"complete": None, "missing_cases": [], "failed_arms": [], "attempt_shortfall": []}
+
+
+def test_a_requested_sum_of_parts_arm_without_observations_is_a_failed_arm() -> None:
+    result = stats.integration_completeness(
+        _arm(_full(["a"])), None, expected_case_ids=["a"], n_attempts=1, stop_on_pass=False, pass_threshold=0.5
+    )
+    assert result["failed_arms"] == ["sum_of_parts"]
+
+
+def test_agent_statistics_of_an_effectiveness_only_run_have_nothing_incomplete() -> None:
+    arms = {"with_skill": _arm(_full(["a", "b"])), "without_skill": _arm(_full(["a", "b"], score=0.4))}
+    result = stats.build_agent_statistics(
+        arms,
+        expected_case_ids=["a", "b"],
+        n_attempts=2,
+        stop_on_pass=False,
+        pass_threshold=0.5,
+        sum_of_parts_requested=False,
+    )
+    assert result["integration_completeness"]["complete"] is None

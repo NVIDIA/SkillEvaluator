@@ -150,6 +150,20 @@ _SHARED_SECURITY_CONSTANTS = [
     "_SECRET_VAR_NAME_RE",
     "_MAX_NETWORK_ACTION_CHARS",
     "WASTE_INDICATORS",
+    # Canary exfiltration (H04); the whole block is also compared verbatim in
+    # test_canary_exfiltration.py.
+    "CANARY_ENTRY_KEY",
+    "CANARY_FINDING_TYPE",
+    "CANARY_REDACTION",
+    "_CANARY_TOKEN_RE",
+    "_CANARY_URL_RE",
+    "_CANARY_NETWORK_CODE_RE",
+    "_CANARY_NETWORK_COMMANDS",
+    "_CANARY_NETWORK_TOOL_NAMES",
+    "_CANARY_GIT_SUBCOMMANDS",
+    "_CANARY_WRITE_REDIRECTS",
+    "_CANARY_NON_FILE_TARGETS",
+    "_CANARY_MAX_FILE_BYTES",
 ]
 
 

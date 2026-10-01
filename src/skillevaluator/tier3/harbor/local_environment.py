@@ -68,13 +68,22 @@ _BLOCKED_COMMAND_ENV_NAMES = frozenset(
     }
 )
 _BLOCKED_COMMAND_ENV_PREFIXES = ("DYLD_", "LD_", "PYTHON")
+# Python starts with SIGPIPE (and SIGXFSZ) ignored, and an ignored signal stays
+# ignored across exec. The bootstrap restores the defaults before it execs bash,
+# like subprocess does for its children. Otherwise a pipeline such as
+# `yes | tr -d x | head -c 5` never ends: the writers keep getting EPIPE instead
+# of being stopped by SIGPIPE.
 _INNER_ENV_BOOTSTRAP = """
 import json
 import os
+import signal
 import sys
 
 environment = json.load(sys.stdin)
 command = sys.argv[1:]
+for name in ("SIGPIPE", "SIGXFSZ"):
+    if hasattr(signal, name):
+        signal.signal(getattr(signal, name), signal.SIG_DFL)
 os.execvpe(command[0], command, environment)
 """
 # Evaluator/provider credentials are not seeded into every skill child by
@@ -679,6 +688,11 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         linked_root_src = self.environment_dir / "repo-linked-root"
         if linked_root_src.is_dir():
             self._copy_dir_contents(linked_root_src, self._workspace)
+
+        # Plugin-run canary decoy (adapter CANARY_CONTEXT_DIR -> workspace .skilleval/).
+        canary_src = self.environment_dir / "skilleval-canary"
+        if canary_src.is_dir():
+            self._copy_dir_contents(canary_src, self._workspace / ".skilleval")
 
         codex_config = self.environment_dir / "codex-config" / "config.toml"
         if codex_config.is_file():

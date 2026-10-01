@@ -34,9 +34,9 @@ LEGACY_METRICS = [
 
 
 def _metrics_for_rewards(rewards: list[dict]) -> list[str]:
-    if any(isinstance(reward.get("security"), int | float) for reward in rewards):
+    if any(isinstance(reward.get("security"), (int, float)) for reward in rewards):
         return DEFAULT_METRICS
-    if any(any(isinstance(reward.get(m), int | float) for m in LEGACY_METRICS) for reward in rewards):
+    if any(any(isinstance(reward.get(m), (int, float)) for m in LEGACY_METRICS) for reward in rewards):
         return LEGACY_METRICS
     return DEFAULT_METRICS
 

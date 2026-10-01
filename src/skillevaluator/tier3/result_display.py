@@ -766,12 +766,49 @@ def _redact_strings(value: Any, safe: Any) -> Any:
     return value
 
 
+def _with_report_integration(result: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Add the report payload's Integration block to a raw engine result.
+
+    The engine result has no ``integration`` block: the reports build it from
+    the per-agent scores, the run config and the plugin provenance. Without it
+    the CLI said Integration "recorded no sum-of-parts comparison" right above a
+    measured Integration lift. This builds it with the same payload builder the
+    reports use, so the CLI and the reports agree.
+    """
+    from skillevaluator.reporting.plugin_sections import is_plugin_payload
+
+    if isinstance(result.get("integration"), Mapping) or not is_plugin_payload(result):
+        return result
+    agents = result.get("agents")
+    if not isinstance(agents, Mapping):
+        return result
+    run_config = result.get("run_config")
+    provenance = result.get("plugin_provenance")
+    try:
+        from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+
+        payload = build_agent_eval_payload(
+            str(result.get("skill_name") or "plugin"),
+            {str(name): dict(agent) for name, agent in agents.items() if isinstance(agent, Mapping)},
+            run_config=dict(run_config) if isinstance(run_config, Mapping) else None,
+            plugin_provenance=dict(provenance) if isinstance(provenance, Mapping) else None,
+            use_llm_judge=False,
+        )
+    except Exception:  # advisory block: never break the run summary
+        logging.getLogger(__name__).debug("Integration block for the run summary skipped", exc_info=True)
+        return result
+    integration = (payload or {}).get("integration")
+    if not isinstance(integration, Mapping):
+        return result
+    return {**result, "integration": integration}
+
+
 def _render_plugin_blocks(*, console: Console, result: Mapping[str, Any], safe: Any) -> None:
     """Render advisory plugin statistics and signals carried by a plugin run's engine result."""
     from skillevaluator.reporting.cli import print_plugin_tier3
     from skillevaluator.reporting.plugin_sections import tier3_plugin_view
 
-    view = tier3_plugin_view(result)
+    view = tier3_plugin_view(_with_report_integration(result))
     if view is not None:
         print_plugin_tier3(_redact_strings(view, safe), console)
 

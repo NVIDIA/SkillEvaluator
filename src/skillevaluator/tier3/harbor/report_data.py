@@ -522,6 +522,7 @@ def load_agent_data(
         agent_info: dict[str, Any] = {"name": agent_name}
         agent_diagnostics: list[dict[str, Any]] = []
         condition_execution: dict[str, dict[str, Any]] = {}
+        canary_arms: dict[str, dict[str, Any]] = {}
 
         variants = {
             "with-skill": "with_skill",
@@ -561,6 +562,10 @@ def load_agent_data(
                     signals_summary = data.get("plugin_signals_summary")
                     if isinstance(signals_summary, dict) and signals_summary:
                         agent_info.setdefault("plugin_signals_summary", {})[key] = signals_summary
+                    # Per-arm canary exfiltration results (plugin runs).
+                    canary_summary = data.get("canary_summary")
+                    if isinstance(canary_summary, dict) and canary_summary:
+                        canary_arms[key] = canary_summary
                     status = data.get("execution_status")
                     if status is None and allow_legacy_missing_status:
                         status = "succeeded"
@@ -598,6 +603,13 @@ def load_agent_data(
                     num_trials = data.get("num_trials")
                     if isinstance(num_trials, int) and not isinstance(num_trials, bool) and num_trials >= 0:
                         agent_info[count_key] = num_trials
+
+        if canary_arms:
+            from skillevaluator.tier3.eval_core.runtime_evidence import canary_arm_comparison
+
+            canary = canary_arm_comparison(canary_arms)
+            if canary is not None:
+                agent_info["canary_summary"] = canary
 
         lift_file = agent_dir / "lift.json"
         if lift_file.exists():

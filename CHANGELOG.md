@@ -4,8 +4,45 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Tier 3 support for Harbor GKE execution mode (`--env-mode gke`) and `--ek`
+  argument forwarding. API keys, bearer tokens, and passwords passed in `--ek`
+  keys or values are rejected to keep credentials out of process listings, while
+  configuration such as rate limits and token counts is preserved. Cluster
+  infrastructure settings in skill configs are rejected to enforce security
+  boundaries in favor of host environment variables and CLI flags.
+- Claude Code live agent routing for Google Cloud Vertex AI
+  (`CLAUDE_CODE_USE_VERTEX=1`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`),
+  with redirect-blocking preflight probes, case-insensitive model alias
+  resolution, and explicit trusted-skill opt-in (`SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1`
+  or `--ek allow_workload_identity=true`) when using single-pod GKE Workload Identity.
+- Fail-closed validation for skill-authored MCP server configurations
+  (`evals/environment/mcp_servers.toml` and `mcp_servers.json`) that blocks
+  operator/provider credential references and literal secrets, while allowing
+  operator-approved MCP endpoints and non-LLM secrets via
+  `SKILLEVALUATOR_ALLOWED_MCP_HOSTS` and `SKILLEVALUATOR_ALLOWED_MCP_SECRETS`.
+
+## 0.4.0 - 2026-09-30
+
 ### Fixed
 
+- Render untrusted skill content, paths, tool messages, and LLM output literally
+  in CLI reports and logs. Escape Rich markup and strip terminal control
+  sequences to prevent rendering failures and misleading output, including
+  catalog summaries and the compact validation view. Preserve Windows paths
+  and literal emoji codes
+  ([#173](https://github.com/NVIDIA/SkillEvaluator/pull/173),
+  [#175](https://github.com/NVIDIA/SkillEvaluator/pull/175)).
+- Make sensitive-assignment, JWT, and private-key redaction linear-time,
+  preventing long adversarial text from stalling logs and reports. Apply the
+  JWT fix to Tier 3 command output and the bundled Harbor verifier
+  ([#172](https://github.com/NVIDIA/SkillEvaluator/pull/172),
+  [#176](https://github.com/NVIDIA/SkillEvaluator/pull/176)).
+- `--no-llm` full datasets include a negative bucket only when eval guidance
+  supplies an off-skill prompt; template mode no longer guesses canned
+  negatives from a fixed question list. CLI and docs now describe `--full` as
+  up to four cases instead of always four.
 - Treat `apply_patch` file headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`,
   `*** Move to:`) as write targets in the Tier 3 security check. A patch that targets a shell
   profile, SSH, credential, or privileged config path, sent as an `apply_patch` tool call or a
@@ -125,22 +162,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- Tier 3 support for Harbor GKE execution mode (`--env-mode gke`) and `--ek`
-  argument forwarding. API keys, bearer tokens, and passwords passed in `--ek`
-  keys or values are rejected to keep credentials out of process listings, while
-  configuration such as rate limits and token counts is preserved. Cluster
-  infrastructure settings in skill configs are rejected to enforce security
-  boundaries in favor of host environment variables and CLI flags.
-- Claude Code live agent routing for Google Cloud Vertex AI
-  (`CLAUDE_CODE_USE_VERTEX=1`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`),
-  with redirect-blocking preflight probes, case-insensitive model alias
-  resolution, and explicit trusted-skill opt-in (`SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1`
-  or `--ek allow_workload_identity=true`) when using single-pod GKE Workload Identity.
-- Fail-closed validation for skill-authored MCP server configurations
-  (`evals/environment/mcp_servers.toml` and `mcp_servers.json`) that blocks
-  operator/provider credential references and literal secrets, while allowing
-  operator-approved MCP endpoints and non-LLM secrets via
-  `SKILLEVALUATOR_ALLOWED_MCP_HOSTS` and `SKILLEVALUATOR_ALLOWED_MCP_SECRETS`.
 - Interactive top-level help now opens with a green SkillEvaluator wordmark,
   installed version, and tier overview. Narrow terminals use a compact header;
   redirected output and subcommands keep their existing output format.
@@ -159,6 +180,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Show elapsed waiting time during autopilot dataset generation and identify
+  deterministic starter datasets used after a provider failure. Fully unscored
+  Tier 3 runs show an `INCOMPLETE` summary with coverage, consolidated execution
+  errors, and recovery steps; completed comparisons highlight overall Skill
+  Lift ([#152](https://github.com/NVIDIA/SkillEvaluator/pull/152)).
+- Harden documentation publishing with restricted token permissions, pinned
+  checkout and Fern versions, and disabled persisted checkout credentials.
+  Apply the checkout credential restriction to DCO checks
+  ([#158](https://github.com/NVIDIA/SkillEvaluator/pull/158)).
+- Add the methodology paper as the preferred citation and link research,
+  developer-blog, and livestream resources from the README
+  ([#146](https://github.com/NVIDIA/SkillEvaluator/pull/146),
+  [#159](https://github.com/NVIDIA/SkillEvaluator/pull/159)).
 - `validate PATH` now runs all three tiers for skills by default. Tier 3
   autopilot reuses an existing evaluation source or creates one starter case
   when none exists. `--full` remains compatible but is unnecessary;
@@ -183,6 +217,7 @@ All notable changes to SkillEvaluator are documented in this file.
 ## 0.3.0 - 2026-09-17
 
 ### Added
+
 - Catalog validation now writes `catalog-summary.json` at the reports root with
   per-skill pass/fail status, optional severity rollups from child JSON reports,
   and paths to per-skill report directories.
@@ -236,10 +271,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- `--no-llm` full datasets include a negative bucket only when eval guidance
-  supplies an off-skill prompt; template mode no longer guesses canned
-  negatives from a fixed question list. CLI and docs now describe `--full` as
-  up to four cases instead of always four.
 - Fully covered documentation-only skills no longer fail security validation
   solely because non-applicable SkillSpector analyzers report a partial status
   ([#137](https://github.com/NVIDIA/SkillEvaluator/issues/137)).

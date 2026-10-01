@@ -5417,3 +5417,58 @@ class TestSpdxAndIpFalsePositiveHardening:
         result = SecurityValidator().validate_pii_only(skill_dir)
 
         assert any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36\n",
+            "HeadlessChrome/151.0.0.0 -> Chrome/151.0.0.0\n",
+            "Edge reports `Edg/140.0.0.0` and Opera reports OPR/122.0.0.0.\n",
+            "page = browser.new_page(user_agent='Chrome/140.0.0.0', base_url=base)\n",
+            '{"ua": "Mozilla\\/5.0 (X11; Linux x86_64) Chrome\\/140.0.0.0 Safari\\/537.36"}\n',
+        ],
+    )
+    def test_user_agent_product_versions_are_not_pii(self, tmp_path: Path, line: str) -> None:
+        skill_dir = tmp_path / "user-agent-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(line, encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert not any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "backups/8.8.8.8\n",
+            "Backups/8.8.8.8\n",
+            "whitelist: Office/52.14.1.9\n",
+            "https://files.example.com/Chrome/8.8.8.8\n",
+            "Proxy/8.8.8.8\n",
+            "Allow 52.0.0.0 through the firewall.\n",
+            "allowlist/52.0.0.0/8\n",
+            "https://api.example.com/v1/ips/52.0.0.0/8\n",
+        ],
+    )
+    def test_ip_outside_a_reduced_user_agent_version_remains_pii(self, tmp_path: Path, line: str) -> None:
+        skill_dir = tmp_path / "slash-ip-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(line, encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    def test_real_ip_on_a_user_agent_line_remains_pii(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / "user-agent-and-ip-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("Chrome/140.0.0.0 through proxy 8.8.8.8\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert [
+            finding.metadata.get("matched_value")
+            for finding in result.findings
+            if finding.check_name == "ip_addresses"
+        ] == ["8.8.8.8"]

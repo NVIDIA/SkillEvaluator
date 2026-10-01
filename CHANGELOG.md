@@ -4,8 +4,55 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for
+  LLM judges in both the Harbor container verifier (`eval.py`) and host runtime
+  (`LLMClient`). Features zero-dependency full jitter exponential backoff,
+  RFC-7231 `Retry-After` header parsing, finite-value environment overrides
+  (`SKILL_EVAL_LLM_MAX_RETRIES`, `SKILL_EVAL_LLM_RETRY_BASE_DELAY`, and
+  `SKILL_EVAL_LLM_RETRY_MAX_DELAY`), and
+  automatic container forwarding via Harbor `task.toml`, and a per-judge
+  verifier time budget that leaves room for failure artifacts, without altering
+  benchmark metrics or scoring formulas.
+- Provider-aware structured JSON schema enforcement (`response_format` for
+  OpenAI-compatible / Gemini Vertex / NVIDIA NIM endpoints and `output_config`
+  for Anthropic `/v1/messages`) across the custom `judge_accuracy`,
+  `judge_goal_accuracy`, and `judge_behavior_check` paths, with automatic
+  schema-specific `HTTP 400`/`422` downgrade and per-target memoization
+  (`_SCHEMA_UNSUPPORTED_TARGETS`), boolean prompt alignment, and a guard for
+  missing `message` fields on reasoning token exhaustion. The canonical OpenAI
+  RAGAS goal scorer retains its separate scoring path.
+
+## 0.4.0 - 2026-09-30
+
 ### Fixed
 
+- Render untrusted skill content, paths, tool messages, and LLM output literally
+  in CLI reports and logs. Escape Rich markup and strip terminal control
+  sequences to prevent rendering failures and misleading output, including
+  catalog summaries and the compact validation view. Preserve Windows paths
+  and literal emoji codes
+  ([#173](https://github.com/NVIDIA/SkillEvaluator/pull/173),
+  [#175](https://github.com/NVIDIA/SkillEvaluator/pull/175)).
+- Make sensitive-assignment, JWT, and private-key redaction linear-time,
+  preventing long adversarial text from stalling logs and reports. Apply the
+  JWT fix to Tier 3 command output and the bundled Harbor verifier
+  ([#172](https://github.com/NVIDIA/SkillEvaluator/pull/172),
+  [#176](https://github.com/NVIDIA/SkillEvaluator/pull/176)).
+- `--no-llm` full datasets include a negative bucket only when eval guidance
+  supplies an off-skill prompt; template mode no longer guesses canned
+  negatives from a fixed question list. CLI and docs now describe `--full` as
+  up to four cases instead of always four.
+- Treat `apply_patch` file headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`,
+  `*** Move to:`) as write targets in the Tier 3 security check. A patch that targets a shell
+  profile, SSH, credential, or privileged config path, sent as an `apply_patch` tool call or a
+  shell heredoc, is now a critical `sensitive_file_write` finding whose evidence names the
+  protected path, not the patch. Every header in the patch is checked.
+- Mask GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, and `github_pat_`) in Tier 3
+  evidence excerpts and Harbor verifier log output.
+- Stop the PII scan reporting User-Agent product versions such as `Chrome/140.0.0.0`
+  as public IP addresses. Chromium's reduced User-Agent gives every version this shape.
 - Separate Tier 2 collection limits from the 256-file per-skill limit. Fresh
   similarity scans now allow 1,024 selected manifests and 128 million scalar
   comparisons by default, covering 343 skills with 2,048-dimensional embeddings.
@@ -116,23 +163,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for
-  LLM judges in both the Harbor container verifier (`eval.py`) and host runtime
-  (`LLMClient`). Features zero-dependency full jitter exponential backoff,
-  RFC-7231 `Retry-After` header parsing, finite-value environment overrides
-  (`SKILL_EVAL_LLM_MAX_RETRIES`, `SKILL_EVAL_LLM_RETRY_BASE_DELAY`, and
-  `SKILL_EVAL_LLM_RETRY_MAX_DELAY`), and
-  automatic container forwarding via Harbor `task.toml`, and a per-judge
-  verifier time budget that leaves room for failure artifacts, without altering
-  benchmark metrics or scoring formulas.
-- Provider-aware structured JSON schema enforcement (`response_format` for
-  OpenAI-compatible / Gemini Vertex / NVIDIA NIM endpoints and `output_config`
-  for Anthropic `/v1/messages`) across the custom `judge_accuracy`,
-  `judge_goal_accuracy`, and `judge_behavior_check` paths, with automatic
-  schema-specific `HTTP 400`/`422` downgrade and per-target memoization
-  (`_SCHEMA_UNSUPPORTED_TARGETS`), boolean prompt alignment, and a guard for
-  missing `message` fields on reasoning token exhaustion. The canonical OpenAI
-  RAGAS goal scorer retains its separate scoring path.
 - Interactive top-level help now opens with a green SkillEvaluator wordmark,
   installed version, and tier overview. Narrow terminals use a compact header;
   redirected output and subcommands keep their existing output format.
@@ -151,6 +181,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Show elapsed waiting time during autopilot dataset generation and identify
+  deterministic starter datasets used after a provider failure. Fully unscored
+  Tier 3 runs show an `INCOMPLETE` summary with coverage, consolidated execution
+  errors, and recovery steps; completed comparisons highlight overall Skill
+  Lift ([#152](https://github.com/NVIDIA/SkillEvaluator/pull/152)).
+- Harden documentation publishing with restricted token permissions, pinned
+  checkout and Fern versions, and disabled persisted checkout credentials.
+  Apply the checkout credential restriction to DCO checks
+  ([#158](https://github.com/NVIDIA/SkillEvaluator/pull/158)).
+- Add the methodology paper as the preferred citation and link research,
+  developer-blog, and livestream resources from the README
+  ([#146](https://github.com/NVIDIA/SkillEvaluator/pull/146),
+  [#159](https://github.com/NVIDIA/SkillEvaluator/pull/159)).
 - `validate PATH` now runs all three tiers for skills by default. Tier 3
   autopilot reuses an existing evaluation source or creates one starter case
   when none exists. `--full` remains compatible but is unnecessary;
@@ -229,10 +272,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- `--no-llm` full datasets include a negative bucket only when eval guidance
-  supplies an off-skill prompt; template mode no longer guesses canned
-  negatives from a fixed question list. CLI and docs now describe `--full` as
-  up to four cases instead of always four.
 - Fully covered documentation-only skills no longer fail security validation
   solely because non-applicable SkillSpector analyzers report a partial status
   ([#137](https://github.com/NVIDIA/SkillEvaluator/issues/137)).

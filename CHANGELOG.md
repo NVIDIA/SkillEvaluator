@@ -4,8 +4,53 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Configurable evidence bundle budgets (`SKILL_EVAL_ACCURACY_BUDGET`, `SKILL_EVAL_GOAL_ACCURACY_BUDGET`, `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`) and final response limit (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`).
+
+## 0.4.0 - 2026-09-30
+
 ### Fixed
 
+- Render untrusted skill content, paths, tool messages, and LLM output literally
+  in CLI reports and logs. Escape Rich markup and strip terminal control
+  sequences to prevent rendering failures and misleading output, including
+  catalog summaries and the compact validation view. Preserve Windows paths
+  and literal emoji codes
+  ([#173](https://github.com/NVIDIA/SkillEvaluator/pull/173),
+  [#175](https://github.com/NVIDIA/SkillEvaluator/pull/175)).
+- Make sensitive-assignment, JWT, and private-key redaction linear-time,
+  preventing long adversarial text from stalling logs and reports. Apply the
+  JWT fix to Tier 3 command output and the bundled Harbor verifier
+  ([#172](https://github.com/NVIDIA/SkillEvaluator/pull/172),
+  [#176](https://github.com/NVIDIA/SkillEvaluator/pull/176)).
+- `--no-llm` full datasets include a negative bucket only when eval guidance
+  supplies an off-skill prompt; template mode no longer guesses canned
+  negatives from a fixed question list. CLI and docs now describe `--full` as
+  up to four cases instead of always four.
+- Treat `apply_patch` file headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`,
+  `*** Move to:`) as write targets in the Tier 3 security check. A patch that targets a shell
+  profile, SSH, credential, or privileged config path, sent as an `apply_patch` tool call or a
+  shell heredoc, is now a critical `sensitive_file_write` finding whose evidence names the
+  protected path, not the patch. Every header in the patch is checked.
+- Mask GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, and `github_pat_`) in Tier 3
+  evidence excerpts and Harbor verifier log output.
+- Stop the PII scan reporting User-Agent product versions such as `Chrome/140.0.0.0`
+  as public IP addresses. Chromium's reduced User-Agent gives every version this shape.
+- Separate Tier 2 collection limits from the 256-file per-skill limit. Fresh
+  similarity scans now allow 1,024 selected manifests and 128 million scalar
+  comparisons by default, covering 343 skills with 2,048-dimensional embeddings.
+  Add `--max-entries` and `--max-scalar-comparisons` for explicit scan budgets;
+  exceeded limits fail with actionable errors and never truncate the collection.
+  Fresh pairwise scans reject excessive scalar work after the first validated
+  embedding response, before requesting more embeddings or saving a catalog.
+  Collection discovery has its own 20,000-path ceiling, allowing the supported
+  5,000-entry maximum for minimal collections while retaining the 4,096-path
+  per-skill ceiling. Invalid Python command API budgets raise option-specific
+  errors before provider initialization. Similarity comparisons validate and
+  normalize each vector once instead of once per pair, making large pairwise
+  scans more than an order of magnitude faster. Equal nonzero embeddings score
+  exactly 1.0, so `--threshold 1` reports exact duplicates.
 - Keep headings and comments inside fenced code examples in their enclosing Markdown
   section during Tier 2 content chunking, preserving original source line numbers.
 - Run the public Docker image as an unprivileged user, with writable default report and home directories.
@@ -27,10 +72,81 @@ All notable changes to SkillEvaluator are documented in this file.
 - Report Tier 2 embedding and LLM service failures as incomplete checks, retaining
   a nonzero exit without inventing duplicate-content findings. Provider error
   messages include recovery guidance without echoing raw response bodies.
+- Tier 3 script execution credit now requires evidence that the expected script
+  was invoked. `check_script_execution` previously treated the script name as a
+  substring of an execution command, so reading, printing or searching the
+  script, or running a similarly named file, scored a full `Executed <script>`.
+  Credit is now given only for a recognised invocation: the script run directly,
+  an interpreter given it as its script argument, a `source`, or a `sh -c`
+  payload that does one of those, with `cd` tracked and script identity compared
+  exactly. Interpreter and wrapper options come from grammars derived by running
+  each option against a script that records whether it executed, so `--help`,
+  `perl -c` and `bash -n` run no script while `python -Wignore` and
+  `env FOO=1` still resolve to theirs. A command the walk cannot resolve keeps
+  the existing 0.75 partial credit rather than being scored either way: a path
+  built at run time, an option outside a grammar, a name only in heredoc data,
+  inline code or a module that names the script, and anything reaching a command
+  through standard input, including `xargs` and `parallel`, whose behaviour the
+  command text never determines. Partial credit is only ever given for a
+  command that names the script: an unresolved command that never mentions it
+  scores zero, as before. Redirections standing before the script
+  (`python3 < /dev/null run.py`), a script's own arguments that look like shell
+  options (`bash run.sh -c '...'`), invocations inside `if`, `while`, `until`
+  and `for` bodies, and versioned interpreter names (`perl5.38.2`, `python3.13`)
+  resolve as the shell runs them. A loop over an empty list keeps the earlier
+  binding and its body is not read; a binding made inside `( ... )` stays
+  there; the last command of a pipeline keeps its bindings where the shell
+  does (zsh, ksh) and not where it forks it (bash, dash, mksh), with an
+  option change that could move it (`shopt -s lastpipe`, `emulate sh`)
+  read as unresolved; a quoted or escaped word that would read as syntax
+  (`'done'`, `printf "("`, `';|'`) is the ordinary word it is; groups and
+  compound pipeline stages nest in either order, each compound tested for its
+  own pipe; `((` closed by `))` is an arithmetic command where the shell has
+  one; the positional
+  parameters are empty unless the text gives some, so `for f; do` at the top
+  level runs nothing and keeps the variable's value; an interpreter fed its
+  program by a pipe (`cat run.py | python3`) is unresolved like
+  `python3 < run.py`; a variable bound by `export` or `readonly`, or by
+  `declare` and `typeset` where the shell has them, holds the value it had
+  when the builtin ran, `unset` empties it, `+x` and `export -n` unexport it
+  however the builtin is reached, and one bound from data the text does not
+  carry (`read`, `printf -v`, `local` outside a function, `declare -u`, a name
+  `eval` may bind, including from a program held in a variable) is
+  unresolved, as is a later assignment to a name given `-i`, `-u` or `-n`,
+  while `-l` lowercases it and an array is never exported; what is done to a
+  `-n` name (`nameref` in ksh and mksh) leaves the name it refers to
+  unresolved; `let`, `$((...))` and `$[...]` assign as `((...))` does; an
+  assignment the shell rejects (a value that is not a number for an `-i`
+  name) and a special builtin given an option the shell rejects end the
+  credit where the shell stops there; an assignment written before a command,
+  `env NAME=value` included, is that command's environment only, reaching
+  neither its own words nor the commands after it, except before a special
+  builtin in the POSIX shells; a `-c` payload's shell sees the exported names,
+  its command's own prefix and what `env` adds and removes, and a `$` quoted
+  or escaped from the outer shell is expanded there (one left unquoted is
+  expanded here, a name never bound to nothing), with the payload's own
+  heredoc bodies kept as data; text that `eval`, inline
+  code or a shell reading a heredoc may expand again is unresolved when a
+  variable in it holds the script; every heredoc declared on a line takes its
+  body after the line, in order, and past the number a shell accepts on one
+  line (16 in bash) the line and the rest are data; a here-string, which dash
+  and busybox ash reject before running anything, leaves nothing credited
+  under those shells, and so does a compound's opening word written after an
+  assignment (`A=1 for ...`, `A=1 if ...`, `A=1 ( ... )`), which every
+  modelled shell rejects and which no longer raises; `(((` is a subshell
+  around `((` in bash, zsh and mksh; and `ksh`, `mksh` and `ash` are
+  recognised shells.
+  Applied to both the host checker and the bundled Harbor verifier.
+
+- Added `scripts/script_invocation_differential.py`, a differential harness that
+  executes each command for real against fixtures that record whether they ran,
+  and compares the result against both implementations. `--baseline REF` also
+  scores every command with the checker at an earlier ref and lists each score
+  that moved, so a change that lowers a command that ran, or raises one that
+  did not, is seen before it is pushed.
 
 ### Added
 
-- Configurable evidence bundle budgets (`SKILL_EVAL_ACCURACY_BUDGET`, `SKILL_EVAL_GOAL_ACCURACY_BUDGET`, `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`) and final response limit (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`).
 - Interactive top-level help now opens with a green SkillEvaluator wordmark,
   installed version, and tier overview. Narrow terminals use a compact header;
   redirected output and subcommands keep their existing output format.
@@ -49,6 +165,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Show elapsed waiting time during autopilot dataset generation and identify
+  deterministic starter datasets used after a provider failure. Fully unscored
+  Tier 3 runs show an `INCOMPLETE` summary with coverage, consolidated execution
+  errors, and recovery steps; completed comparisons highlight overall Skill
+  Lift ([#152](https://github.com/NVIDIA/SkillEvaluator/pull/152)).
+- Harden documentation publishing with restricted token permissions, pinned
+  checkout and Fern versions, and disabled persisted checkout credentials.
+  Apply the checkout credential restriction to DCO checks
+  ([#158](https://github.com/NVIDIA/SkillEvaluator/pull/158)).
+- Add the methodology paper as the preferred citation and link research,
+  developer-blog, and livestream resources from the README
+  ([#146](https://github.com/NVIDIA/SkillEvaluator/pull/146),
+  [#159](https://github.com/NVIDIA/SkillEvaluator/pull/159)).
 - `validate PATH` now runs all three tiers for skills by default. Tier 3
   autopilot reuses an existing evaluation source or creates one starter case
   when none exists. `--full` remains compatible but is unnecessary;
@@ -127,10 +256,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- `--no-llm` full datasets include a negative bucket only when eval guidance
-  supplies an off-skill prompt; template mode no longer guesses canned
-  negatives from a fixed question list. CLI and docs now describe `--full` as
-  up to four cases instead of always four.
 - Fully covered documentation-only skills no longer fail security validation
   solely because non-applicable SkillSpector analyzers report a partial status
   ([#137](https://github.com/NVIDIA/SkillEvaluator/issues/137)).

@@ -19,6 +19,11 @@ import click
 
 from skillevaluator import __version__
 from skillevaluator.cli_help import GroupedOption, RichGroup
+from skillevaluator.constants import (
+    SIMILARITY_DEFAULT_MAX_ENTRIES,
+    SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
+    SIMILARITY_MAX_ENTRIES,
+)
 from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.reporting.console_ui import (
@@ -52,6 +57,7 @@ from skillevaluator.tier1.commands import (
 )
 from skillevaluator.tier3_environments import HARBOR_ENVIRONMENTS
 from skillevaluator.tier_group import TierGroup
+from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 from skillevaluator.utils.tier2_paths import (
     is_link_or_reparse,
     paths_refer_to_same_location,
@@ -782,7 +788,7 @@ def _print_catalog_divider(index: int, total: int, name: str) -> None:
         ("━━ ", FAINT),
         (f"skill {index}/{total}", f"bold {GREEN}"),
         (" · ", FAINT),
-        (name, "bold"),
+        (strip_terminal_controls(name), "bold"),
         (" ", ""),
     )
     fill = max(0, width - label.cell_len)
@@ -818,7 +824,11 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
         )
         lines: list = [headline, Text()]
         for name, reason in failures[:10]:
-            lines.append(Text.assemble(("  ✗ ", f"bold {RED}"), (f"{name:<28}", TEXT), (reason[:56], MUTED)))
+            # Strip before padding and truncating, so controls neither print nor count toward the widths.
+            name_text = f"{strip_terminal_controls(name):<28}"
+            lines.append(
+                Text.assemble(("  ✗ ", f"bold {RED}"), (name_text, TEXT), (strip_terminal_controls(reason)[:56], MUTED))
+            )
         if len(failures) > 10:
             lines.append(Text(f"  … {len(failures) - 10} more — see per-skill reports", style=MUTED))
         body = Group(*lines)
@@ -842,7 +852,8 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
             title_align="left",
         )
     )
-    console_.print(Text.assemble(("      reports     ", MUTED), (f"{reports_root}/<skill>/", MUTED)))
+    reports = f"{strip_terminal_controls(str(reports_root))}/<skill>/"
+    console_.print(Text.assemble(("      reports     ", MUTED), (reports, MUTED)))
 
 
 CATALOG_SUMMARY_FILENAME = "catalog-summary.json"
@@ -1124,7 +1135,7 @@ def _validate_catalog(
     if failures:
         raise click.ClickException(
             f"{len(failures)}/{len(skill_dirs)} skills failed validation: "
-            + ", ".join(name for name, _reason in failures)
+            + ", ".join(strip_terminal_controls(name) for name, _reason in failures)
         )
 
 
@@ -1185,7 +1196,7 @@ def _validate_catalog_parallel(
     if failures:
         raise click.ClickException(
             f"{len(failures)}/{len(skill_dirs)} skills failed validation: "
-            + ", ".join(name for name, _reason in failures)
+            + ", ".join(strip_terminal_controls(name) for name, _reason in failures)
         )
 
 
@@ -1274,11 +1285,11 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     run up front instead of opening straight on the Tier 1 section.
     """
     console.print(f"\n[bold]SkillEvaluator {content_type.title()} Validation[/bold]")
-    console.print(f"Target: {target_path}")
+    console.print(f"Target: {escape_markup(str(target_path))}")
     console.print(f"Type: {content_type}")
     if profile:
         profile_color = "cyan"
-        console.print(f"Profile: [{profile_color}]{profile}[/{profile_color}]")
+        console.print(f"Profile: [{profile_color}]{escape_markup(str(profile))}[/{profile_color}]")
 
 
 @cli.command(epilog=_VALIDATE_EPILOG)
@@ -2127,6 +2138,20 @@ def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir:
 @click.option("--full-body", is_flag=True, help="Embed full file bodies instead of descriptions.")
 @click.option("--model", default=None, help="Embedding model override.")
 @click.option(
+    "--max-entries",
+    type=click.IntRange(1, SIMILARITY_MAX_ENTRIES),
+    default=SIMILARITY_DEFAULT_MAX_ENTRIES,
+    show_default=True,
+    help="Maximum selected manifests for a fresh collection scan.",
+)
+@click.option(
+    "--max-scalar-comparisons",
+    type=click.IntRange(min=1),
+    default=SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
+    show_default=True,
+    help="Maximum comparisons multiplied by embedding dimensions.",
+)
+@click.option(
     "--catalog",
     type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
     default=None,
@@ -2147,6 +2172,8 @@ def similarity_check(
     threshold: float,
     full_body: bool,
     model: str | None,
+    max_entries: int,
+    max_scalar_comparisons: int,
     catalog: Path | None,
     save_catalog: Path | None,
     cache: Path | None,
@@ -2187,6 +2214,8 @@ def similarity_check(
         threshold=threshold,
         full_body=full_body,
         model=model,
+        max_entries=max_entries,
+        max_scalar_comparisons=max_scalar_comparisons,
         catalog=resolved_catalog,
         save_catalog=resolved_save_catalog,
     )

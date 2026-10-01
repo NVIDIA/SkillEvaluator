@@ -310,3 +310,61 @@ def test_assemble_micro_budgets_and_missing_final_response_fallback(monkeypatch,
         assert "config.yaml" in shared_b[metric]["prompt_evidence"]
         assert shared_b[metric]["omitted"]["truncated"] is True
 
+
+@pytest.mark.parametrize("implementation", ["shared", "harbor"])
+@pytest.mark.parametrize(
+    "budgets", [None, (7000, 11000)], ids=["defaults", "custom"]
+)
+@pytest.mark.parametrize("metric", ["accuracy", "goal_accuracy"])
+def test_tool_only_trajectory_retains_latest_verification_failure(monkeypatch, implementation, budgets, metric) -> None:
+    for name in ("SKILL_EVAL_ACCURACY_BUDGET", "SKILL_EVAL_GOAL_ACCURACY_BUDGET"):
+        monkeypatch.delenv(name, raising=False)
+    accuracy_budget, goal_budget = budgets or (8000, 12000)
+    if budgets:
+        monkeypatch.setenv("SKILL_EVAL_ACCURACY_BUDGET", str(accuracy_budget))
+        monkeypatch.setenv("SKILL_EVAL_GOAL_ACCURACY_BUDGET", str(goal_budget))
+
+    steps = [{"source": "user", "message": "Write the GPU tests and verify the suite."}]
+    for idx in range(7):
+        steps.append({
+            "source": "agent",
+            "tool_calls": [{
+                "tool_call_id": f"write-{idx}",
+                "function_name": "Write",
+                "arguments": {
+                    "file_path": f"/workspace/output/test_gpu_{idx}.py",
+                    "content": "\n".join(
+                        f"def test_gpu_case_{case:03d}(): assert select_engine('gpu') == 'gpu'" for case in range(40)
+                    ),
+                },
+            }],
+        })
+    failure = "FAILED tests/test_gpu.py::test_gpu_engine - AssertionError: expected gpu, got cpu"
+    for idx in range(9):
+        result = failure if idx == 8 else f"Verification run {idx + 1}: all GPU tests passed"
+        output = "\n".join([
+            result,
+            "============================= test session starts ==============================",
+            "platform linux -- Python 3.12.12, pytest-8.4.0",
+            *(f"tests/test_gpu.py::test_gpu_engine[dataset_{case:02d}] PASSED [100%]" for case in range(14)),
+            "============================= 14 tests completed ==============================",
+        ])
+        steps.append({
+            "source": "agent",
+            "tool_calls": [{
+                "tool_call_id": f"verify-{idx}",
+                "function_name": "bash",
+                "arguments": {"command": "pytest -v tests/test_gpu.py"},
+            }],
+            "observation": {"results": [{"source_call_id": f"verify-{idx}", "content": output}]},
+        })
+
+    module = atif_helpers if implementation == "shared" else _load_harbor_template_module()
+    bundles = module.build_metric_evidence_bundles({"steps": steps}, steps[0]["message"])
+    bundle = bundles[metric]
+    evidence = bundle["prompt_evidence"]
+    assert evidence.find(failure) >= 0, "The latest failed verification must survive without a final response"
+    assert "FINAL RESPONSE" not in evidence
+    assert len(evidence) <= {"accuracy": accuracy_budget, "goal_accuracy": goal_budget}[metric]
+    assert bundle["omitted"]["truncated"] is True
+    assert bundle["omitted"]["count"] > 0

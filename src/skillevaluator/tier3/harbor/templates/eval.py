@@ -1065,7 +1065,7 @@ def _assemble(sections, budget):
         if used + len(block) <= budget:
             parts.append(block)
             used += len(block) + 2
-        elif (title == _SECTION_FINAL_RESPONSE or not parts) and budget - used > 0:
+        elif title == _SECTION_FINAL_RESPONSE and budget - used > 0:
             avail = budget - used
             later_blocks = [len(f"{t}\n{b}") + 2 for t, b in non_empty[idx + 1 :]]
             if later_blocks and avail >= 160:

@@ -283,6 +283,7 @@ grading:
 | `harbor.max_agents` | integer ≥ 1 | Cap on agents evaluated in one run. |
 | `harbor.timeout_multiplier` | number > 0 | Scales task timeouts. |
 | `harbor.agent_runtime_preflight` | boolean | Opt-in extra agent-only execution of the first staged task before the measured evaluation. Default: `false`; the CLI flag overrides this value. |
+| `harbor.plugin_canary` | boolean | Plant the canary decoy credential in every arm of a plugin run. Default: `true`. Set `false` to run a plugin evaluation without it. |
 | `harbor.agent_workdir` | string | Working directory for the agent inside the container. |
 | `harbor.resources` | `cpus`, `memory_mb`, `storage_mb` | Per-container resource requests. |
 | `harbor.runtime_env` | list or mapping | Non-credential task values passed into the container. Prefer a list of plain names — each expands to `${NAME}` from your shell; a mapping sets explicit templates. Entries that name or reference operator-owned credentials (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, base-URL variables, AWS credential variables) fail with a hard error. Alias: `passthrough_env`. |

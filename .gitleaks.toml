@@ -11,6 +11,20 @@ regexes = ['''^sk-AbCdEf1234567890$''']
 paths = ['''^tests/test_tier3_(progress|result_display)\.py$''']
 
 [[allowlists]]
+description = "Synthetic API key used by plugin hook inline-secret tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^abcd1234secret$''']
+paths = ['''^tests/validators/test_plugin_component_risk\.py$''']
+
+[[allowlists]]
+description = "Synthetic Docker registry login (base64 of a fake user:password) used by the scanner-credential tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^dXNlcjpodW50ZXIy$''']
+paths = ['''^tests/validators/test_audits_endpoints_review_fixes\.py$''']
+
+[[allowlists]]
 description = "Synthetic basic-auth, cloud-key and URL-token fixtures in the first revisions of the security-evidence and MCP-hardening tests; both files now assemble them from split literals"
 condition = "AND"
 commits = ["66ae1d4c1188e2a8d9f0586abe0a895e04b78758", "727826808a2d4c3c2b7c393d67f5339efde28532"]

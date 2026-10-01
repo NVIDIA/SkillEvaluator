@@ -605,6 +605,33 @@ Because the gate needs every dimension, that agent's verdict is Neutral
 (inconclusive) rather than Pass or Fail. A missing metric without the
 verifier's not-applicable marker still leaves the trial unscored.
 
+The judges read evidence the verifier builds from the trajectory, not the raw
+trajectory. Every judge gets the agent's final answer and what it wrote: the
+body of each write, edit, `apply_patch`, or shell write. Write bodies share
+the room the evidence has left, at least 1,800 characters each. `accuracy` and
+`goal_accuracy` also get the newest tool results, and file changes always leave
+room for the newest two. `behavior_check` also gets a compact tool history;
+there each write is one short line, because FILE CHANGES already shows its
+body, so skill calls and test runs keep their room. Long text keeps its start
+and end around a marker such as `...[4213 chars truncated]...`, never a silent
+cut. When the evidence is over budget, earlier writes shrink or drop first,
+and the tool history drops its middle first. The history's copy of the final
+answer, which FINAL RESPONSE already shows, shrinks before any tool call drops.
+Secrets are redacted before the evidence reaches a judge. Placeholder keys
+such as `sk-your-key-here` or `nvapi-REPLACE_ME` are left as written, so a
+config file the task asks for still matches the expected answer. Each judged
+metric's `omitted` field records whether evidence was dropped or shortened to
+fit the budget.
+
+The budgets are 8,000 characters for `accuracy` and `behavior_check` and 12,000
+for `goal_accuracy`. Set `SKILL_EVAL_ACCURACY_BUDGET`,
+`SKILL_EVAL_GOAL_ACCURACY_BUDGET`, or `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` to
+change them, and `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` (default 800) to
+change how much of the final answer `behavior_check` shows. The runner passes
+them to the verifier. `behavior_check` always keeps 4,000 characters past the
+final answer limit for the request, file changes, and tool history, and one
+write body can use up to the largest budget.
+
 A partially errored Harbor job remains an execution failure, but rewards from
 its completed trials are preserved when every aggregate error maps to a
 concrete failed trial and Harbor reports no failed status or non-zero aggregate

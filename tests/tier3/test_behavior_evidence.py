@@ -708,6 +708,16 @@ def _trajectory_with_long_final_response() -> dict:
     }
 
 
+# Cut text carries a "...[N chars truncated]..." marker; the tool history marks
+# its own (shorter) copy of the final answer too, so look at FINAL RESPONSE.
+_CUT_MARKER = "chars truncated]..."
+
+
+def _final_response_section(evidence: str) -> str:
+    section = evidence.split("FINAL RESPONSE\n", 1)[1]
+    return section.split("\n\nUSER REQUEST\n", 1)[0]
+
+
 def test_behavior_evidence_final_response_default_and_env_override(monkeypatch) -> None:
     traj = _trajectory_with_long_final_response()
 
@@ -715,14 +725,14 @@ def test_behavior_evidence_final_response_default_and_env_override(monkeypatch) 
     default_evidence = build_behavior_evidence(traj, "question")
     assert "START_MARKER_" in default_evidence
     assert "_LATE_MARKER_" not in default_evidence
-    assert "...[truncated]..." in default_evidence
+    assert _CUT_MARKER in _final_response_section(default_evidence)
 
     # Overriding via environment variable expands the capture limit
     monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "3000")
     expanded_evidence = build_behavior_evidence(traj, "question", max_chars=8000)
     assert "START_MARKER_" in expanded_evidence
     assert "_LATE_MARKER_" in expanded_evidence
-    assert "...[truncated]..." not in expanded_evidence
+    assert _CUT_MARKER not in _final_response_section(expanded_evidence)
 
 
 def test_behavior_evidence_final_response_explicit_arg() -> None:
@@ -731,7 +741,7 @@ def test_behavior_evidence_final_response_explicit_arg() -> None:
     evidence = build_behavior_evidence(traj, "question", max_chars=8000, final_response_limit=3000)
     assert "START_MARKER_" in evidence
     assert "_LATE_MARKER_" in evidence
-    assert "...[truncated]..." not in evidence
+    assert _CUT_MARKER not in _final_response_section(evidence)
 
 
 def test_behavior_evidence_standalone_reconciles_max_chars(monkeypatch) -> None:
@@ -741,7 +751,7 @@ def test_behavior_evidence_standalone_reconciles_max_chars(monkeypatch) -> None:
     evidence = build_behavior_evidence(traj, "question", final_response_limit=3000)
     assert "START_MARKER_" in evidence
     assert "_LATE_MARKER_" in evidence
-    assert "...[truncated]..." not in evidence
+    assert _CUT_MARKER not in _final_response_section(evidence)
 
     # When SKILL_EVAL_BEHAVIOR_CHECK_BUDGET is set in env, standalone call uses it
     monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "12000")
@@ -974,14 +984,14 @@ def test_harbor_template_behavior_evidence_respects_custom_limits(monkeypatch) -
     evidence_default = module.build_behavior_evidence(traj, "question")
     assert "START_MARKER_" in evidence_default
     assert "_LATE_MARKER_" not in evidence_default
-    assert "...[truncated]..." in evidence_default
+    assert _CUT_MARKER in _final_response_section(evidence_default)
 
     # Template override respects SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT
     monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "3000")
     evidence_custom = module.build_behavior_evidence(traj, "question", max_chars=8000)
     assert "START_MARKER_" in evidence_custom
     assert "_LATE_MARKER_" in evidence_custom
-    assert "...[truncated]..." not in evidence_custom
+    assert _CUT_MARKER not in _final_response_section(evidence_custom)
 
     # Template helpers match shared atif_helpers logic
     assert module._behavior_final_response_limit() == atif_helpers._behavior_final_response_limit()

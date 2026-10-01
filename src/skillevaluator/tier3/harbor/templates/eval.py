@@ -474,6 +474,10 @@ _DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT = 800
 _DEFAULT_BEHAVIOR_CHECK_BUDGET = 8000
 _DEFAULT_TOOL_HISTORY_HEADROOM = 4000
 _MIN_BEHAVIOR_HISTORY_HEADROOM = 1600
+_SECTION_COMPACT_TOOL_HISTORY = "COMPACT TOOL HISTORY"
+_SECTION_FILE_CHANGES = "FILE CHANGES"
+_SECTION_FINAL_RESPONSE = "FINAL RESPONSE"
+_SECTION_USER_REQUEST = "USER REQUEST"
 
 
 def _env_positive_int(name, default):
@@ -656,16 +660,55 @@ def build_behavior_evidence(
     remaining = max_chars
 
     file_changes = "\n\n".join(_collect_file_change_evidence(traj))
-    if file_changes:
-        remaining = _append_section_with_budget(parts, "FILE CHANGES", file_changes, remaining)
-
     final = _get_final_response(traj)
+    history = build_conversation_summary(traj, question)
+    user_needed = (
+        min(800, len(_SECTION_USER_REQUEST) + len(question.strip()) + 2) if question and question.strip() else 0
+    )
+    history_needed = (
+        len(_SECTION_COMPACT_TOOL_HISTORY) + len(history.strip()) + 2 if history and history.strip() else 0
+    )
+    tail_needed = user_needed + (2 if user_needed and history_needed else 0) + history_needed
+
+    if file_changes:
+        file_section_limit = None
+        if final and final.strip():
+            reserved_tail = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, max_chars // 4, tail_needed)
+            reserved_final = min(
+                effective_final_limit,
+                len(_SECTION_FINAL_RESPONSE) + len(final.strip()) + 2,
+                max(1, max_chars - min(_MIN_BEHAVIOR_HISTORY_HEADROOM, max_chars // 2)),
+            )
+            if (
+                len(_SECTION_FILE_CHANGES) + len(file_changes.strip()) + 2 + reserved_final + reserved_tail + 4
+                > remaining
+            ):
+                file_section_limit = max(
+                    min(800, remaining // 3),
+                    remaining - reserved_final - reserved_tail - 4,
+                )
+        remaining = _append_section_with_budget(
+            parts,
+            _SECTION_FILE_CHANGES,
+            file_changes,
+            remaining,
+            section_limit=file_section_limit,
+        )
+
     if final:
-        reserved_headroom = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, remaining // 2)
+        if max_chars > effective_final_limit:
+            reserved_headroom = min(
+                _MIN_BEHAVIOR_HISTORY_HEADROOM,
+                remaining // 2,
+                tail_needed,
+                max(800, remaining - effective_final_limit),
+            )
+        else:
+            reserved_headroom = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, remaining // 2, tail_needed)
         bounded_final_limit = min(effective_final_limit, max(1, remaining - reserved_headroom))
         remaining = _append_section_with_budget(
             parts,
-            "FINAL RESPONSE",
+            _SECTION_FINAL_RESPONSE,
             final,
             remaining,
             section_limit=bounded_final_limit,
@@ -673,14 +716,13 @@ def build_behavior_evidence(
 
     remaining = _append_section_with_budget(
         parts,
-        "USER REQUEST",
+        _SECTION_USER_REQUEST,
         question,
         remaining,
         section_limit=800,
     )
 
-    history = build_conversation_summary(traj, question)
-    remaining = _append_section_with_budget(parts, "COMPACT TOOL HISTORY", history, remaining)
+    remaining = _append_section_with_budget(parts, _SECTION_COMPACT_TOOL_HISTORY, history, remaining)
 
     return "\n\n".join(parts)[:max_chars]
 
@@ -1017,14 +1059,32 @@ def _assemble(sections, budget):
     used = 0
     dropped = 0
     truncated = False
-    for title, body in sections:
-        body = str(body or "").strip()
-        if not body:
-            continue
+    non_empty = [(title, str(body or "").strip()) for title, body in sections if str(body or "").strip()]
+    for idx, (title, body) in enumerate(non_empty):
         block = f"{title}\n{body}"
         if used + len(block) <= budget:
             parts.append(block)
             used += len(block) + 2
+        elif (title == _SECTION_FINAL_RESPONSE or not parts) and budget - used > 0:
+            avail = budget - used
+            later_blocks = [len(f"{t}\n{b}") + 2 for t, b in non_empty[idx + 1 :]]
+            if later_blocks and avail >= 160:
+                reserve_later = min(avail // 2, *later_blocks)
+                if avail - reserve_later > len(title) + 16:
+                    avail -= reserve_later
+            header = f"{title}\n"
+            clip_suffix = " …[clipped]"
+            if avail > len(header) + len(clip_suffix):
+                clipped_body = _clip(body, avail - len(header) - len(clip_suffix))
+                clipped_block = f"{header}{clipped_body}"
+            elif avail > len(header):
+                clipped_block = f"{header}{body[: avail - len(header)]}"
+            else:
+                clipped_block = block[:avail]
+            parts.append(clipped_block)
+            used += len(clipped_block) + 2
+            dropped += 1
+            truncated = True
         else:
             dropped += 1
             truncated = True
@@ -1168,7 +1228,7 @@ def build_metric_evidence_bundles(traj, question, *, ground_truth="", expected_b
     budgets = _bundle_budgets()
     acc_text, acc_drop, acc_trunc = _assemble(
         [
-            ("FINAL RESPONSE", final),
+            (_SECTION_FINAL_RESPONSE, final),
             ("PRODUCED FILES / WRITES", file_changes),
             ("KEY OBSERVATIONS", "\n---\n".join(late_obs[:_BUNDLE_ACCURACY_MAX_OBS])),
         ],
@@ -1186,7 +1246,7 @@ def build_metric_evidence_bundles(traj, question, *, ground_truth="", expected_b
     }
     goal_text, goal_drop, goal_trunc = _assemble(
         [
-            ("FINAL RESPONSE", final),
+            (_SECTION_FINAL_RESPONSE, final),
             ("END-STATE FILE CHANGES", file_changes),
             ("RECENT TOOL RESULTS (newest first)", "\n---\n".join(late_obs[:_BUNDLE_GOAL_MAX_OBS])),
         ],
@@ -1202,7 +1262,9 @@ def build_metric_evidence_bundles(traj, question, *, ground_truth="", expected_b
         },
         "verified": facts,
     }
-    bc_text = build_behavior_evidence(traj, question, max_chars=budgets["behavior_check"])
+    facts_overhead = len(facts_section) + 2 if facts_section else 0
+    bc_budget = max(1, budgets["behavior_check"] - facts_overhead)
+    bc_text = build_behavior_evidence(traj, question, max_chars=bc_budget)
     bc_full = build_behavior_evidence(traj, question, max_chars=10**9)
     bc_trunc = len(bc_full) > len(bc_text)
     bundles["behavior_check"] = {
@@ -1218,6 +1280,20 @@ def build_metric_evidence_bundles(traj, question, *, ground_truth="", expected_b
     return bundles
 
 
+def _slice_with_middle_marker(text, budget, marker, *, max_head=None, fallback_tail=False):
+    """Compact *text* to fit *budget* by replacing the middle with *marker*."""
+    if budget <= 0 or not text:
+        return ""
+    if len(text) <= budget:
+        return text
+    if budget <= len(marker) + 2:
+        return text[-budget:] if fallback_tail else text[:budget]
+    avail = budget - len(marker)
+    head = max(1, avail // 2 if max_head is None else min(max_head, avail // 2))
+    tail = max(1, avail - head)
+    return f"{text[:head]}{marker}{text[-tail:]}"
+
+
 def _compact_behavior_conversation(conversation_text, limit=None):
     """Keep both setup context and late outcome evidence in behavior prompts."""
     if limit is None:
@@ -1227,9 +1303,52 @@ def _compact_behavior_conversation(conversation_text, limit=None):
     marker = "\n...[middle truncated for behavior check]...\n"
     if limit <= len(marker) + 1:
         return conversation_text[:limit]
+    final_limit = _behavior_final_response_limit()
+    final_header = f"{_SECTION_FINAL_RESPONSE}\n"
+    final_idx = -1
+    if conversation_text.startswith(final_header):
+        final_idx = 0
+    else:
+        pos = conversation_text.find(f"\n\n{final_header}")
+        if pos != -1:
+            final_idx = pos + 2
+
+    if final_idx != -1:
+        final_end = len(conversation_text)
+        for next_hdr in (f"\n\n{_SECTION_USER_REQUEST}\n", f"\n\n{_SECTION_COMPACT_TOOL_HISTORY}\n"):
+            pos = conversation_text.find(next_hdr, final_idx)
+            if pos != -1 and pos < final_end:
+                final_end = pos
+        prefix = conversation_text[:final_idx]
+        final_sec = conversation_text[final_idx:final_end]
+        suffix = conversation_text[final_end:]
+
+        reserved_other = min(1600, max(0, limit - final_limit), limit // 2)
+        max_final = min(final_limit, max(1, limit - reserved_other))
+        if len(final_sec) > max_final:
+            final_body = final_sec[len(final_header) :]
+            body_limit = max(1, max_final - len(final_header))
+            final_sec = f"{final_header}{_truncate_for_behavior(final_body, body_limit)}"[:max_final]
+
+        rem = limit - len(final_sec)
+        if rem <= 0:
+            return final_sec[:limit]
+        if len(prefix) + len(suffix) <= rem:
+            return f"{prefix}{final_sec}{suffix}"
+        if not suffix:
+            pre_comp = _slice_with_middle_marker(prefix, rem, marker)
+            return f"{pre_comp}{final_sec}"[:limit]
+        if len(prefix) <= rem // 2:
+            suf_comp = _slice_with_middle_marker(suffix, rem - len(prefix), marker, max_head=800, fallback_tail=True)
+            return f"{prefix}{final_sec}{suf_comp}"[:limit]
+        pre_budget = max(1, min(len(prefix), rem // 2))
+        suf_budget = max(0, rem - pre_budget)
+        pre_comp = _slice_with_middle_marker(prefix, pre_budget, marker)
+        suf_comp = _slice_with_middle_marker(suffix, suf_budget, marker, max_head=800, fallback_tail=True)
+        return f"{pre_comp}{final_sec}{suf_comp}"[:limit]
+
     available = limit - len(marker)
     reserved_head = min(1600, available // 2)
-    final_limit = _behavior_final_response_limit()
     tail = max(1, available // 3, min(final_limit, max(1, available - max(1, reserved_head))))
     head = max(1, available - tail)
     return f"{conversation_text[:head]}{marker}{conversation_text[-tail:]}"

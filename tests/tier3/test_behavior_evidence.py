@@ -105,12 +105,17 @@ def test_behavior_evidence_prioritizes_late_write_tool_calls() -> None:
     assert 'collect(engine="gpu")' in evidence
 
 
-def test_harbor_template_behavior_evidence_matches_shared_helper() -> None:
+def _load_harbor_template_module():
     template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
     spec = importlib.util.spec_from_file_location("harbor_eval_template", template_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def test_harbor_template_behavior_evidence_matches_shared_helper() -> None:
+    module = _load_harbor_template_module()
 
     evidence = module.build_behavior_evidence(_trajectory_with_late_write(), "question")
 
@@ -173,11 +178,7 @@ def test_metric_evidence_refs_link_judges_to_trajectory_and_expected_artifacts()
 
 
 def test_harbor_template_metric_evidence_refs_match_shared_helper() -> None:
-    template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    spec = importlib.util.spec_from_file_location("harbor_eval_template_refs", template_path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_harbor_template_module()
 
     traj = _trajectory_with_metric_refs()
     shared_refs = atif_helpers.build_metric_evidence_refs(
@@ -288,11 +289,7 @@ def test_metric_evidence_refs_redact_secret_like_values_in_all_fields() -> None:
 
 
 def test_harbor_template_metric_evidence_refs_redact_harbor_secret_shapes() -> None:
-    template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    spec = importlib.util.spec_from_file_location("harbor_eval_template_secret_refs", template_path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_harbor_template_module()
     sha256_token = "sha256~abcdefghijklmnop"
     cursor_token = "crsr_deadbeefcafebabe"
     jwt_token = (
@@ -380,11 +377,7 @@ def test_metric_evidence_refs_redact_runtime_api_key_values(monkeypatch, env_var
 
 
 def test_harbor_template_and_shared_redact_runtime_api_key_values_identically(monkeypatch) -> None:
-    template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    spec = importlib.util.spec_from_file_location("harbor_eval_template_env_keys", template_path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_harbor_template_module()
 
     api_key = "qqq-other-runtime-secret-0987654321"
     monkeypatch.setenv("NVIDIA_API_KEY", api_key)
@@ -404,11 +397,7 @@ def test_harbor_template_and_shared_redact_runtime_api_key_values_identically(mo
 
 
 def test_harbor_template_main_persists_evidence_refs_in_reward_json(monkeypatch, tmp_path) -> None:
-    template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    spec = importlib.util.spec_from_file_location("harbor_eval_template_main_refs", template_path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_harbor_template_module()
 
     logs_dir = tmp_path / "logs"
     agent_dir = logs_dir / "agent"
@@ -627,11 +616,7 @@ def test_behavior_evidence_does_not_treat_read_like_tool_names_as_writes() -> No
 
 
 def test_harbor_template_behavior_judge_keeps_late_tail_evidence(monkeypatch) -> None:
-    template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    spec = importlib.util.spec_from_file_location("harbor_eval_template_for_judge", template_path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_harbor_template_module()
     prompts: list[str] = []
 
     def fake_call_public_llm(prompt, **kwargs):
@@ -797,15 +782,6 @@ def test_behavior_check_budget_auto_reconciles_tool_history_headroom(monkeypatch
         monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", explicit_budget)
         assert atif_helpers._behavior_check_budget() == 12000
         assert judge_budget() == 12000
-
-
-def _load_harbor_template_module():
-    template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    spec = importlib.util.spec_from_file_location("harbor_eval_template_headroom", template_path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _trajectory_with_failed_verification_and_long_claim(*, include_file_changes: bool = False) -> dict:
@@ -1011,4 +987,268 @@ def test_harbor_template_behavior_evidence_respects_custom_limits(monkeypatch) -
     assert module._behavior_final_response_limit() == atif_helpers._behavior_final_response_limit()
     assert module._behavior_check_budget() == atif_helpers._behavior_check_budget()
 
+
+def test_verified_facts_preserve_final_response_in_behavior_judge_prompt(monkeypatch) -> None:
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    template_module = _load_harbor_template_module()
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "8000")
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "8000")
+
+    steps: list[dict] = [
+        {
+            "source": "user",
+            "message": "Run all twelve verification checks and summarize the outcome.",
+        },
+        {
+            "source": "agent",
+            "tool_calls": [
+                {
+                    "tool_call_id": "write-0",
+                    "function_name": "Write",
+                    "arguments": {
+                        "file_path": "/workspace/output/report.py",
+                        "content": "# generated report\n" + ("value = 1\n" * 170),
+                    },
+                }
+            ],
+            "observation": {
+                "results": [
+                    {
+                        "source_call_id": "write-0",
+                        "content": "Wrote /workspace/output/report.py",
+                    }
+                ]
+            },
+        },
+    ]
+    behaviors: list[str] = []
+    for idx in range(12):
+        token = f"pytest -q tests/check_module_{idx:02d}.py --maxfail=1 --tb=short"
+        behaviors.append(f"Execute `{token}` and confirm the final assertion")
+        steps.append(
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "tool_call_id": f"cmd-{idx}",
+                        "function_name": "Bash",
+                        "arguments": {"command": f"{token} && echo status_{idx:02d}_ok_" + ("x" * 90)},
+                    }
+                ],
+                "observation": {
+                    "results": [
+                        {
+                            "source_call_id": f"cmd-{idx}",
+                            "content": f"passed check {idx:02d} " + ("y" * 80),
+                        }
+                    ]
+                },
+            }
+        )
+
+    final_claim = "FINAL_CLAIM_ASSERTION: All twelve verification modules passed without errors."
+    steps.append(
+        {
+            "source": "agent",
+            "message": final_claim + "\n" + ("P" * 6100) + "\nFINAL_TAIL_MARKER",
+        }
+    )
+    traj = {"steps": steps}
+    question = "Run all twelve verification checks and summarize the outcome."
+
+    def make_judge_stub(captured_prompts: list[str], count: int):
+        def _stub(prompt: str, **kwargs):
+            captured_prompts.append(prompt)
+            passed = final_claim in prompt
+            score = 1.0 if passed else 0.0
+            results = [{"step": i + 1, "passed": passed, "reason": "checked"} for i in range(count)]
+            return json.dumps({"results": results, "score": score, "summary": "done"}), None
+
+        return _stub
+
+    shared_prompts_no_facts: list[str] = []
+    monkeypatch.setattr(llm_judge, "call_public_llm", make_judge_stub(shared_prompts_no_facts, 1))
+    no_facts_bundle = atif_helpers.build_metric_evidence_bundles(
+        traj, question, expected_behavior=["Confirm the final assertion in the summary"]
+    )["behavior_check"]
+    no_facts_res = llm_judge.judge_behavior_check(
+        no_facts_bundle["prompt_evidence"], ["Confirm the final assertion in the summary"]
+    )
+    assert no_facts_res["score"] == 1.0
+
+    shared_prompts: list[str] = []
+    template_prompts: list[str] = []
+    monkeypatch.setattr(llm_judge, "call_public_llm", make_judge_stub(shared_prompts, len(behaviors)))
+    monkeypatch.setattr(template_module, "call_public_llm", make_judge_stub(template_prompts, len(behaviors)))
+
+    shared_bundle = atif_helpers.build_metric_evidence_bundles(
+        traj, question, expected_behavior=behaviors
+    )["behavior_check"]
+    template_bundle = template_module.build_metric_evidence_bundles(
+        traj, question, expected_behavior=behaviors
+    )["behavior_check"]
+
+    assert shared_bundle == template_bundle
+    assert len(shared_bundle["verified"]) == 12
+    assert len(shared_bundle["prompt_evidence"]) <= 12000
+    assert shared_bundle["omitted"]["truncated"] is True
+    assert shared_bundle["omitted"]["count"] == 1
+
+    shared_res = llm_judge.judge_behavior_check(shared_bundle["prompt_evidence"], behaviors)
+    template_res = template_module.judge_behavior_check(template_bundle["prompt_evidence"], behaviors)
+
+    assert shared_res["score"] == 1.0
+    assert template_res["score"] == 1.0
+    for prompt in (shared_prompts[0], template_prompts[0]):
+        assert "VERIFIED FACTS (deterministic):" in prompt
+        assert final_claim in prompt
+        assert "FINAL_TAIL_MARKER" in prompt
+
+
+def test_compact_behavior_conversation_preserves_final_response_section(monkeypatch) -> None:
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    template_module = _load_harbor_template_module()
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "8000")
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "8000")
+
+    facts_block = "VERIFIED FACTS (deterministic):\n" + "\n".join(
+        f"- [OBSERVED step {i}] claim_{i:02d} :: " + ("f" * 140) for i in range(1, 13)
+    )
+    file_changes_block = "FILE CHANGES\nAgent called: Write\nPath: /workspace/output/out.py\n" + ("c" * 1850)
+    final_claim = "FINAL_RESPONSE_CLAIM: The verification report is complete and accurate."
+    final_block = f"FINAL RESPONSE\n{final_claim}\n" + ("R" * 6000) + "\nFINAL_RESPONSE_END"
+    user_block = "USER REQUEST\nVerify the output and report."
+    history_block = "COMPACT TOOL HISTORY\n" + ("H" * 2100) + "\nLAST_TOOL_OBSERVATION"
+
+    oversized_bundle = f"{facts_block}\n\n{file_changes_block}\n\n{final_block}\n\n{user_block}\n\n{history_block}"
+    assert len(oversized_bundle) > 12000
+
+    shared_compacted = llm_judge._compact_behavior_conversation(oversized_bundle)
+    template_compacted = template_module._compact_behavior_conversation(oversized_bundle)
+
+    assert shared_compacted == template_compacted
+    assert len(shared_compacted) <= 12000
+    assert final_claim in shared_compacted
+    assert "FINAL_RESPONSE_END" in shared_compacted
+    assert "LAST_TOOL_OBSERVATION" in shared_compacted
+
+
+@pytest.mark.parametrize(
+    "case_name,limit,final_limit_env,text_builder,expected_substrings",
+    [
+        (
+            "no_prefix_long_suffix",
+            1200,
+            "600",
+            lambda: (
+                "FINAL RESPONSE\nSTART_FINAL_CLAIM_OK\n"
+                + ("F" * 300)
+                + "\nEND_FINAL_CLAIM_OK\n\nUSER REQUEST\nRun check.\n\nCOMPACT TOOL HISTORY\n"
+                + ("H" * 1500)
+                + "\nTAIL_HISTORY_MARKER"
+            ),
+            ["START_FINAL_CLAIM_OK", "END_FINAL_CLAIM_OK", "TAIL_HISTORY_MARKER"],
+        ),
+        (
+            "no_prefix_tiny_suffix_budget",
+            420,
+            "400",
+            lambda: (
+                "FINAL RESPONSE\n"
+                + ("F" * 370)
+                + "\nEND_FINAL\n\nCOMPACT TOOL HISTORY\n"
+                + ("H" * 500)
+                + "\nTINY_TAIL"
+            ),
+            ["FINAL RESPONSE", "END_FINAL"],
+        ),
+        (
+            "long_prefix_no_suffix",
+            1200,
+            "500",
+            lambda: (
+                "FILE CHANGES\nHEAD_FILE_MARKER\n"
+                + ("C" * 1500)
+                + "\nLATE_FILE_MARKER\n\nFINAL RESPONSE\nFINAL_ONLY_SUFFIX_OK"
+            ),
+            ["HEAD_FILE_MARKER", "LATE_FILE_MARKER", "FINAL_ONLY_SUFFIX_OK"],
+        ),
+        (
+            "long_prefix_no_suffix_tiny_rem",
+            420,
+            "400",
+            lambda: (
+                "FILE CHANGES\nHEAD_TINY_PRE\n"
+                + ("C" * 600)
+                + "\n\nFINAL RESPONSE\n"
+                + ("F" * 370)
+                + "\nFINAL_END_TINY_REM"
+            ),
+            ["FINAL RESPONSE", "FINAL_END_TINY_REM"],
+        ),
+        (
+            "oversized_final_with_small_prefix_and_suffix",
+            1500,
+            "800",
+            lambda: (
+                "FILE CHANGES\nSHORT_PREFIX\n\nFINAL RESPONSE\nFINAL_HEAD_KEEP\n"
+                + ("F" * 2000)
+                + "\nFINAL_TAIL_KEEP\n\nUSER REQUEST\nSHORT_SUFFIX"
+            ),
+            ["SHORT_PREFIX", "FINAL_HEAD_KEEP", "FINAL_TAIL_KEEP", "SHORT_SUFFIX"],
+        ),
+        (
+            "both_prefix_and_suffix_exceed_half_budgets",
+            2000,
+            "600",
+            lambda: (
+                "FILE CHANGES\nPRE_START_MARK\n"
+                + ("P" * 1500)
+                + "\nPRE_END_MARK\n\nFINAL RESPONSE\nCORE_FINAL_CLAIM\n\nCOMPACT TOOL HISTORY\nSUF_START_MARK\n"
+                + ("S" * 1500)
+                + "\nSUF_END_MARK"
+            ),
+            ["PRE_START_MARK", "PRE_END_MARK", "CORE_FINAL_CLAIM", "SUF_START_MARK", "SUF_END_MARK"],
+        ),
+        (
+            "both_prefix_and_suffix_with_tiny_remaining_budget",
+            440,
+            "400",
+            lambda: (
+                "FILE CHANGES\n"
+                + ("P" * 300)
+                + "\n\nFINAL RESPONSE\n"
+                + ("F" * 375)
+                + "\nTINY_BOTH_FINAL\n\nCOMPACT TOOL HISTORY\n"
+                + ("S" * 300)
+            ),
+            ["FINAL RESPONSE", "TINY_BOTH_FINAL"],
+        ),
+    ],
+)
+def test_compact_behavior_conversation_section_layout_permutations(
+    monkeypatch,
+    case_name: str,
+    limit: int,
+    final_limit_env: str,
+    text_builder,
+    expected_substrings: list[str],
+) -> None:
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    template_module = _load_harbor_template_module()
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", final_limit_env)
+
+    raw_text = text_builder()
+    assert len(raw_text) > limit, case_name
+
+    shared_out = llm_judge._compact_behavior_conversation(raw_text, limit=limit)
+    template_out = template_module._compact_behavior_conversation(raw_text, limit=limit)
+
+    assert shared_out == template_out, case_name
+    assert len(shared_out) <= limit, case_name
+    for substr in expected_substrings:
+        assert substr in shared_out, f"{case_name}: missing {substr!r}"
 

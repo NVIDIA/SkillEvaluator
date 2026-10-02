@@ -6,7 +6,14 @@
 Based on SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md and HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specifications.
 """
 
+from __future__ import annotations
+
+import importlib.util
+import json
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -533,3 +540,58 @@ Handle state management problems.
 """)
 
     return workflow_dir
+
+
+# =============================================================================
+# HARBOR VERIFIER & URLLIB TEST HELPERS
+# =============================================================================
+
+_HARBOR_EVAL_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent.parent / "src/skillevaluator/tier3/harbor/templates/eval.py"
+)
+
+
+def load_harbor_eval_template(module_name: str = "harbor_eval_template") -> ModuleType:
+    """Load the standalone Harbor verifier template module dynamically."""
+    spec = importlib.util.spec_from_file_location(module_name, _HARBOR_EVAL_TEMPLATE_PATH)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class MockUrllibResponse:
+    """Mock a urllib response context manager returning serialized JSON or raw bytes."""
+
+    def __init__(self, payload: Any) -> None:
+        """Initialize the mock response with a JSON-serializable object, string, or bytes."""
+        if isinstance(payload, bytes):
+            self._body = payload
+        elif isinstance(payload, str):
+            self._body = payload.encode("utf-8")
+        else:
+            self._body = json.dumps(payload).encode("utf-8")
+
+    def read(self) -> bytes:
+        """Return the response body bytes."""
+        return self._body
+
+    def __enter__(self) -> MockUrllibResponse:
+        """Enter the response context manager."""
+        return self
+
+    def __exit__(self, *args: object) -> bool:
+        """Exit the response context manager without suppressing exceptions."""
+        return False
+
+
+@pytest.fixture
+def harbor_eval_template() -> ModuleType:
+    """Return a freshly loaded standalone Harbor verifier template module."""
+    return load_harbor_eval_template()
+
+
+@pytest.fixture
+def make_urllib_json_response() -> Callable[[Any], MockUrllibResponse]:
+    """Return a factory that builds MockUrllibResponse instances from payloads."""
+    return MockUrllibResponse

@@ -8,7 +8,14 @@ from __future__ import annotations
 import pytest
 
 from skillevaluator.provider_config import ProviderConfig
-from skillevaluator.tier3.harbor.runner import _model_for_agent, _validate_agent_provider_credentials
+from skillevaluator.tier3.harbor.runner import (
+    _OPERATOR_OWNED_AGENT_ENV,
+    _agent_provider_config,
+    _independent_anthropic_agent_credentials,
+    _is_operator_owned_runtime_name,
+    _model_for_agent,
+    _validate_agent_provider_credentials,
+)
 
 
 def _provider(name: str, model: str) -> ProviderConfig:
@@ -298,3 +305,130 @@ def test_anthropic_provider_rejects_an_openai_opencode_override() -> None:
     )
     assert errors and "must match the evaluator provider" in errors[0]
     assert "OPENAI_API_KEY" not in errors[0]
+
+
+def test_openai_provider_accepts_claude_with_vertex_backend() -> None:
+    assert (
+        _validate_agent_provider_credentials(
+            _provider("openai", "gpt-5.5"),
+            ["claude-code"],
+            {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "test-project"},
+            {"claude-code": "CLI"},
+            env_mode="gke",
+            environment_kwargs={"allow_workload_identity": "true"},
+        )
+        == []
+    )
+
+
+def test_openai_provider_rejects_default_gpt_model_for_claude_with_vertex() -> None:
+    errors = _validate_agent_provider_credentials(
+        _provider("openai", "gpt-5.5"),
+        ["claude-code"],
+        {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "test-project"},
+        {"claude-code": "public provider default"},
+        env_mode="gke",
+        environment_kwargs={"allow_workload_identity": "true"},
+    )
+    assert errors and "needs an explicit Anthropic model" in errors[0]
+
+
+def test_independent_anthropic_agent_credentials_resolves_vertex_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "test-project")
+    monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+
+    creds = _independent_anthropic_agent_credentials()
+    assert creds.get("CLAUDE_CODE_USE_VERTEX") == "1"
+    assert creds.get("ANTHROPIC_VERTEX_PROJECT_ID") == "test-project"
+    assert creds.get("CLOUD_ML_REGION") == "us-central1"
+    assert "ANTHROPIC_API_KEY" not in creds
+
+
+def test_operator_owned_agent_env_includes_vertex_variables() -> None:
+    assert "CLAUDE_CODE_USE_VERTEX" in _OPERATOR_OWNED_AGENT_ENV
+    assert "ANTHROPIC_VERTEX_PROJECT_ID" in _OPERATOR_OWNED_AGENT_ENV
+    assert "GOOGLE_CLOUD_PROJECT" in _OPERATOR_OWNED_AGENT_ENV
+    assert "GCP_PROJECT" in _OPERATOR_OWNED_AGENT_ENV
+    assert "CLOUD_ML_REGION" in _OPERATOR_OWNED_AGENT_ENV
+    assert "GOOGLE_APPLICATION_CREDENTIALS" in _OPERATOR_OWNED_AGENT_ENV
+    assert _is_operator_owned_runtime_name("CLAUDE_CODE_USE_VERTEX")
+    assert _is_operator_owned_runtime_name("ANTHROPIC_VERTEX_PROJECT_ID")
+    assert _is_operator_owned_runtime_name("GOOGLE_CLOUD_PROJECT")
+    assert _is_operator_owned_runtime_name("GCP_PROJECT")
+    assert _is_operator_owned_runtime_name("CLOUD_ML_REGION")
+    assert _is_operator_owned_runtime_name("GOOGLE_APPLICATION_CREDENTIALS")
+
+
+def test_independent_anthropic_agent_credentials_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fall back to GOOGLE_CLOUD_PROJECT, default region us-east5, strip GAC in GKE mode, strip API key."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
+    monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+    monkeypatch.delenv("CLOUD_ML_REGION", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_REGION", raising=False)
+    monkeypatch.delenv("GCP_REGION", raising=False)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "fallback-gcp-proj")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/path/to/host/key.json")
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+
+    # In GKE mode without opt-in, fail closed:
+    assert _independent_anthropic_agent_credentials(env_mode="gke") == {}
+
+    # In GKE mode with explicit opt-in:
+    creds_gke = _independent_anthropic_agent_credentials(
+        env_mode="gke",
+        environment_kwargs={"allow_workload_identity": "true"},
+    )
+    assert creds_gke["CLAUDE_CODE_USE_VERTEX"] == "1"
+    assert creds_gke["ANTHROPIC_VERTEX_PROJECT_ID"] == "fallback-gcp-proj"
+    assert creds_gke["CLOUD_ML_REGION"] == "us-east5"
+    assert "ANTHROPIC_API_KEY" not in creds_gke
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in creds_gke
+
+    # In non-GKE mode:
+    creds_cloud = _independent_anthropic_agent_credentials(env_mode="cloud")
+    assert creds_cloud.get("GOOGLE_APPLICATION_CREDENTIALS") == "/path/to/host/key.json"
+
+
+def test_agent_provider_config_claude_vertex_decoupling() -> None:
+    """Verify Claude on Vertex agent route does not inherit evaluator base_url or region."""
+    evaluator_provider = ProviderConfig(
+        provider="openai",
+        model="gpt-5.5",
+        api_key="eval-key",
+        base_url="https://api.openai.com/v1",
+        litellm_model="openai/gpt-5.5",
+        region="eval-region-1",
+    )
+
+    # Without explicit ANTHROPIC_BASE_URL or CLOUD_ML_REGION
+    config_default = _agent_provider_config(
+        evaluator_provider=evaluator_provider,
+        agent="claude-code",
+        model="claude-3-7-sonnet",
+        credentials={"CLAUDE_CODE_USE_VERTEX": "1"},
+        env_mode="gke",
+    )
+    assert config_default.provider == "anthropic"
+    assert config_default.model == "claude-3-7-sonnet"
+    assert config_default.api_key is None
+    assert config_default.base_url is None
+    assert config_default.region is None
+    assert config_default.credential_env == "CLAUDE_CODE_USE_VERTEX"
+
+    # With explicit agent credentials
+    config_explicit = _agent_provider_config(
+        evaluator_provider=evaluator_provider,
+        agent="claude-code",
+        model="claude-3-7-sonnet",
+        credentials={
+            "CLAUDE_CODE_USE_VERTEX": "1",
+            "ANTHROPIC_BASE_URL": "https://custom-vertex.internal/v1",
+            "CLOUD_ML_REGION": "us-central1",
+        },
+        env_mode="gke",
+    )
+    assert config_explicit.base_url == "https://custom-vertex.internal/v1"
+    assert config_explicit.region == "us-central1"

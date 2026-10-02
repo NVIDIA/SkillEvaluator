@@ -1625,3 +1625,368 @@ def test_local_nvidia_provider_preserves_explicit_codex_credentials(
     assert environment["NVIDIA_API_KEY"] == "provider-key"
     assert environment["OPENAI_API_KEY"] == "codex-key"
     assert environment["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
+
+
+def test_resolve_agent_runtime_plan_preserves_refreshed_adc_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _resolve_agent_runtime_plan preserves refreshed ADC token and does not overwrite with expired token."""
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+    provider = ProviderConfig(
+        provider="openai",
+        model="google/gemini-3.8-flash",
+        api_key="expired-token",
+        base_url=base_url,
+        litellm_model="openai/google/gemini-3.8-flash",
+        credential_env="ADC",
+        base_url_env="OPENAI_BASE_URL",
+    )
+    monkeypatch.setattr(runner, "_get_google_access_token", lambda **_kw: "fresh-token")
+    monkeypatch.setattr(runner.os, "environ", {"PATH": "/usr/bin"})
+
+    plans = runner._resolve_agent_runtime_plan(
+        provider=provider,
+        agents=["opencode", "codex"],
+        models={
+            "opencode": "openai/google/gemini-3.8-flash",
+            "codex": "google/gemini-3.8-flash",
+        },
+        configured_runtime_env={},
+        env_mode="docker",
+    )
+
+    for agent in ("opencode", "codex"):
+        plan = plans[agent]
+        assert plan.subprocess_env["OPENAI_API_KEY"] == "fresh-token"
+        assert plan.provider.api_key == "fresh-token"
+        assert plan.subprocess_env["OPENAI_BASE_URL"] == base_url
+
+
+def test_run_harbor_reissues_adc_token_for_bounded_jobs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Verify _run_harbor refreshes ADC token in child env without leaking secrets to argv and sets a bounded timeout."""
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+    captured_command: list[str] = []
+    captured_env: dict[str, str] = {}
+    captured_timeout: float | None = None
+
+    def mock_run(command, *args, **kwargs):
+        nonlocal captured_timeout
+        captured_command.extend(command)
+        captured_env.update(kwargs.get("env") or {})
+        captured_timeout = kwargs.get("timeout")
+        return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", mock_run)
+    monkeypatch.setattr(runner, "_validate_harbor_job_result", lambda *_args, **_kwargs: (True, "success"))
+    monkeypatch.setattr(runner, "_get_google_access_token", lambda **_kw: "fresh-reissued-token")
+
+    run_env = {
+        "OPENAI_API_KEY": "stale-initial-token",
+        "OPENAI_BASE_URL": base_url,
+        "SKILL_EVAL_LLM_CREDENTIAL_SOURCE": "ADC",
+        "PATH": "/usr/bin",
+    }
+    verifier_env = {"LLM_JUDGE_MODEL": "${LLM_JUDGE_MODEL}"}
+
+    ok, _detail = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="opencode",
+        job_name="test-job",
+        env_mode="docker",
+        model="google/gemini-3.8-flash",
+        jobs_dir=tmp_path / "jobs",
+        run_env=run_env,
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+        verifier_env=verifier_env,
+    )
+
+    assert ok is True
+    rendered_argv = " ".join(captured_command)
+    assert "fresh-reissued-token" not in rendered_argv
+    assert "stale-initial-token" not in rendered_argv
+    assert "OPENAI_API_KEY=" not in rendered_argv
+    assert captured_env.get("OPENAI_API_KEY") == "fresh-reissued-token"
+    assert captured_timeout is not None and 0 < captured_timeout < 3600
+
+
+def test_run_harbor_preserves_explicit_vertex_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Preserve explicit operator credentials on Vertex URLs without overwriting from host ADC."""
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+    captured_env: dict[str, str] = {}
+    captured_timeout: float | None = None
+
+    def mock_run(command, *args, **kwargs):
+        nonlocal captured_timeout
+        captured_env.update(kwargs.get("env") or {})
+        captured_timeout = kwargs.get("timeout")
+        return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", mock_run)
+    monkeypatch.setattr(runner, "_validate_harbor_job_result", lambda *_args, **_kwargs: (True, "success"))
+    monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kw: "ambient-host-adc")
+
+    explicit_env = {
+        "OPENAI_API_KEY": "explicit-operator-key",
+        "OPENAI_BASE_URL": base_url,
+        "PATH": "/usr/bin",
+    }
+    ok, _detail = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="opencode",
+        job_name="explicit-job",
+        env_mode="docker",
+        model="google/gemini-3.8-flash",
+        jobs_dir=tmp_path / "jobs",
+        run_env=explicit_env,
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+    )
+    assert ok is True
+    assert captured_env.get("OPENAI_API_KEY") == "explicit-operator-key"
+    assert captured_timeout is None
+
+
+@pytest.mark.parametrize(
+    "verifier_env",
+    [
+        {"OPENAI_API_KEY": "raw-secret-token"},
+        {"ANTHROPIC_API_KEY": "sk-ant-raw-secret"},
+        {"SKILL_EVAL_LLM_CREDENTIAL_SOURCE": "ADC"},
+    ],
+)
+def test_build_harbor_run_command_rejects_raw_verifier_env_secrets(
+    tmp_path: Path,
+    verifier_env: dict[str, str],
+) -> None:
+    """Reject raw secrets or operator-owned values in verifier_env without ${VAR} placeholder indirection."""
+    with pytest.raises(ValueError, match="Sensitive key detected in verifier_env"):
+        runner.build_harbor_run_command(
+            dataset_path=tmp_path / "dataset",
+            agent="opencode",
+            job_name="bad-verifier-env",
+            env_mode="docker",
+            verifier_env=verifier_env,
+        )
+
+
+def test_run_harbor_enforces_adc_job_timeout_and_stages_credential_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Enforce bounded ADC timeout on non-GKE jobs and stage SKILL_EVAL_LLM_CREDENTIAL_SOURCE for the verifier."""
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+    adc_provider = ProviderConfig(
+        provider="openai-compatible",
+        model="google/gemini-3.8-flash",
+        api_key="initial-adc-token",
+        base_url=base_url,
+        litellm_model="openai/google/gemini-3.8-flash",
+        credential_env="ADC",
+        base_url_env="SKILL_EVAL_LLM_BASE_URL",
+    )
+    monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kw: "fresh-adc-token")
+    monkeypatch.setattr(runner, "_get_google_access_token", lambda **_kw: "fresh-adc-token")
+
+    provider_env = runner._provider_environment(adc_provider)
+    assert provider_env.get("SKILL_EVAL_LLM_CREDENTIAL_SOURCE") == "ADC"
+    assert "SKILL_EVAL_LLM_CREDENTIAL_SOURCE" in _verifier_env_vars(provider_env)
+
+    def timeout_run(command, *args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout", 3300))
+
+    monkeypatch.setattr(runner.subprocess, "run", timeout_run)
+    adc_env = {
+        "OPENAI_API_KEY": "initial-adc-token",
+        "OPENAI_BASE_URL": base_url,
+        "SKILL_EVAL_LLM_CREDENTIAL_SOURCE": "ADC",
+        "PATH": "/usr/bin",
+    }
+    ok_timeout, detail_timeout = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="opencode",
+        job_name="timeout-job",
+        env_mode="docker",
+        model="google/gemini-3.8-flash",
+        jobs_dir=tmp_path / "jobs",
+        run_env=adc_env,
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+    )
+    assert ok_timeout is False
+    assert "ADC token lifetime" in detail_timeout
+
+
+def test_run_harbor_caps_configured_adc_timeout_and_rejects_near_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cap SKILLEVALUATOR_VERTEX_ADC_JOB_TIMEOUT_SEC to remaining token ceiling and reject <= 30s tokens."""
+    import time as time_mod
+
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+    fixed_now = 1_700_000_000.0
+    monkeypatch.setattr(time_mod, "time", lambda: fixed_now)
+    monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kw: None)
+    monkeypatch.setattr(runner, "_get_google_access_token", lambda **_kw: None)
+
+    captured_timeouts: list[float | None] = []
+
+    def fake_run(command, *args, **kwargs):
+        captured_timeouts.append(kwargs.get("timeout"))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "_validate_harbor_job_result", lambda *_args, **_kwargs: (True, "success"))
+
+    # 1. 600s token + SKILLEVALUATOR_VERTEX_ADC_JOB_TIMEOUT_SEC=5000 -> capped at 540s
+    monkeypatch.setenv(runner.VERTEX_ADC_JOB_TIMEOUT_ENV, "5000")
+    adc_env_600 = {
+        "OPENAI_API_KEY": "short-lived-adc-token",
+        "OPENAI_BASE_URL": base_url,
+        "SKILL_EVAL_LLM_CREDENTIAL_SOURCE": "ADC",
+        "SKILL_EVAL_LLM_CREDENTIAL_EXPIRY": str(fixed_now + 600.0),
+        "PATH": "/usr/bin",
+    }
+    ok_capped, _ = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="opencode",
+        job_name="capped-job",
+        env_mode="docker",
+        model="google/gemini-3.8-flash",
+        jobs_dir=tmp_path / "jobs",
+        run_env=adc_env_600,
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+    )
+    assert ok_capped is True
+    assert captured_timeouts[-1] == pytest.approx(540.0)
+
+    # 2. 600s token + SKILLEVALUATOR_VERTEX_ADC_JOB_TIMEOUT_SEC=300 -> honors 300s
+    monkeypatch.setenv(runner.VERTEX_ADC_JOB_TIMEOUT_ENV, "300")
+    ok_smaller, _ = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="opencode",
+        job_name="smaller-job",
+        env_mode="docker",
+        model="google/gemini-3.8-flash",
+        jobs_dir=tmp_path / "jobs",
+        run_env=adc_env_600,
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+    )
+    assert ok_smaller is True
+    assert captured_timeouts[-1] == pytest.approx(300.0)
+
+    # 3. Malformed or non-positive SKILLEVALUATOR_VERTEX_ADC_JOB_TIMEOUT_SEC falls back to 540s ceiling
+    for bad_override in ("invalid", "-10", "nan"):
+        monkeypatch.setenv(runner.VERTEX_ADC_JOB_TIMEOUT_ENV, bad_override)
+        ok_bad_override, _ = runner._run_harbor(
+            dataset=tmp_path / "dataset",
+            agent="opencode",
+            job_name="bad-override-job",
+            env_mode="docker",
+            model="google/gemini-3.8-flash",
+            jobs_dir=tmp_path / "jobs",
+            run_env=adc_env_600,
+            n_attempts=1,
+            n_concurrent=1,
+            timeout_multiplier=1.0,
+            override_cpus=None,
+            override_memory_mb=None,
+            override_storage_mb=None,
+        )
+        assert ok_bad_override is True
+        assert captured_timeouts[-1] == pytest.approx(540.0)
+
+    # 4. 20s remaining (<= 30s safety floor) fails closed before launching Harbor
+    monkeypatch.delenv(runner.VERTEX_ADC_JOB_TIMEOUT_ENV, raising=False)
+    adc_env_near_expiry = {
+        **adc_env_600,
+        "SKILL_EVAL_LLM_CREDENTIAL_EXPIRY": str(fixed_now + 20.0),
+    }
+    ok_near, detail_near = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="opencode",
+        job_name="near-expiry-job",
+        env_mode="docker",
+        model="google/gemini-3.8-flash",
+        jobs_dir=tmp_path / "jobs",
+        run_env=adc_env_near_expiry,
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+    )
+    assert ok_near is False
+    assert "only 20.0s remaining" in detail_near
+    assert len(captured_timeouts) == 5
+
+
+def test_harbor_subprocess_environment_forwards_adc_vars_only_to_non_local_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Forward GOOGLE_APPLICATION_CREDENTIALS and CLOUDSDK_CONFIG to docker/gke Harbor host processes but not local."""
+    adc_file = tmp_path / "custom_adc.json"
+    adc_file.write_text("{}", encoding="utf-8")
+    gcloud_dir = tmp_path / "gcloud-cfg"
+    gcloud_dir.mkdir()
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(adc_file))
+    monkeypatch.setenv("CLOUDSDK_CONFIG", str(gcloud_dir))
+
+    adc_provider = ProviderConfig(
+        provider="openai-compatible",
+        model="google/gemini-3.8-flash",
+        api_key="adc-token",
+        base_url="https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi",
+        litellm_model="openai/google/gemini-3.8-flash",
+        credential_env="ADC",
+        base_url_env="SKILL_EVAL_LLM_BASE_URL",
+    )
+    provider_env = {"SKILL_EVAL_LLM_CREDENTIAL_SOURCE": "ADC", "OPENAI_API_KEY": "adc-token"}
+
+    docker_env = runner._harbor_subprocess_environment(
+        env_mode="docker",
+        provider=adc_provider,
+        configured_runtime_env={},
+        provider_env=provider_env,
+        agent="opencode",
+        agent_model="openai/google/gemini-3.8-flash",
+    )
+    assert docker_env.get("GOOGLE_APPLICATION_CREDENTIALS") == str(adc_file)
+    assert docker_env.get("CLOUDSDK_CONFIG") == str(gcloud_dir)
+
+    local_env = runner._harbor_subprocess_environment(
+        env_mode="local",
+        provider=adc_provider,
+        configured_runtime_env={},
+        provider_env=provider_env,
+        agent="opencode",
+        agent_model="openai/google/gemini-3.8-flash",
+    )
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in local_env
+    assert "CLOUDSDK_CONFIG" not in local_env

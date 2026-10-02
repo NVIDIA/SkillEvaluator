@@ -16,10 +16,10 @@ import subprocess
 import tempfile
 import time
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
@@ -31,16 +31,39 @@ from uuid import uuid4
 from skillevaluator import __version__
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import (
+    ADC_DISCOVERY_ENV_VARS,
     CHAT_DEFAULT_ANTHROPIC,
     CHAT_DEFAULT_NVIDIA,
+    CREDENTIAL_EXPIRY_ENV,
+    CREDENTIAL_SOURCE_ADC,
+    CREDENTIAL_SOURCE_ENV,
     GATEWAY_AGENT_DEFAULT_MODELS,
     ProviderConfig,
     ProviderConfigurationError,
+    _get_google_access_token,
+    _is_vertex_openapi_endpoint,
     _normalize_anthropic_base_url,
+    _normalize_expiry_epoch,
+    compute_adc_job_timeout,
+    get_adc_token_expiry,
+    refresh_host_vertex_adc_environment,
     resolve_llm_provider,
 )
 from skillevaluator.source_identity import normalized_evaluated_source
-from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
+from skillevaluator.tier3.eval_core.secret_redaction import (
+    LOG_CRSR_RE,
+    LOG_JWT_RE,
+    LOG_NVAPI_RE,
+    LOG_SK_RE,
+    LOG_YA29_RE,
+    OPENSHIFT_TOKEN_RE,
+)
+from skillevaluator.tier3.evals_config import (
+    _GKE_INFRASTRUCTURE_KWARGS,
+    _SKILL_SAFE_ENVIRONMENT_KWARGS,
+    EvalsConfigError,
+    load_evals_config,
+)
 from skillevaluator.tier3.harbor.adapter import (
     _VERIFIER_BUDGET_ENV_VARS,
     _VERIFIER_JUDGE_MODEL_ENV_VARS,
@@ -59,6 +82,14 @@ from skillevaluator.tier3.harbor.collector import (
     collect_harbor_results,
     harbor_job_passed,
     validate_harbor_job_result,
+)
+from skillevaluator.tier3.harbor.gke_environment import (
+    GKE_ALLOW_WORKLOAD_IDENTITY_ENV,
+    GKE_BOUND_SERVICE_ACCOUNT_ERROR_TEMPLATE,
+    GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL,
+    SECURE_GKE_ENV_IMPORT_PATH,
+    inspect_bound_gcp_service_account,
+    is_gke_workload_identity_allowed,
 )
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_definition
 from skillevaluator.tier3.harbor.progress import (
@@ -90,6 +121,7 @@ from skillevaluator.tier3.output_provenance import (
 )
 from skillevaluator.tier3.results_location import publish_latest_results
 from skillevaluator.tier3_environments import DEFAULT_ENV_MODE, ENV_MODE_LOCAL, HARBOR_ENV_MODES
+from skillevaluator.utils.redaction import is_sensitive_key
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +185,8 @@ _HARBOR_BASE_ENV_VARS = frozenset(
         "LC_CTYPE",
         "PATH",
         "PATHEXT",
+        "SKILLEVALUATOR_ALLOWED_MCP_HOSTS",
+        "SKILLEVALUATOR_ALLOWED_MCP_SECRETS",
         "SYSTEMROOT",
         "TEMP",
         "TMP",
@@ -194,7 +228,14 @@ _HARBOR_ENV_MODE_VARS = {
         }
     ),
     "gke": frozenset(
-        {"CLOUDSDK_CONFIG", "GCP_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "KUBECONFIG"}
+        {
+            "CLOUDSDK_CONFIG",
+            "GCP_PROJECT",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_CLOUD_PROJECT",
+            "KUBECONFIG",
+            "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY",
+        }
     ),
     "novita": frozenset({"NOVITA_API_KEY", "NOVITA_API_URL", "NOVITA_BASE_URL", "NOVITA_DOMAIN"}),
     "islo": frozenset({"ISLO_API_KEY", "ISLO_API_URL", "ISLO_COMPUTE_URL"}),
@@ -223,6 +264,16 @@ _BEDROCK_HOST_ENV_VARS = frozenset(
         "AWS_SESSION_TOKEN",
         "AWS_SHARED_CREDENTIALS_FILE",
         "AWS_WEB_IDENTITY_TOKEN_FILE",
+    }
+)
+_ADC_HOST_ENV_VARS = ADC_DISCOVERY_ENV_VARS
+_VERTEX_HOST_ENV_VARS = frozenset(
+    {
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLOUD_ML_REGION",
+        "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY",
+        *_ADC_HOST_ENV_VARS,
     }
 )
 _RUNTIME_ENV_HOST_CONTROL_NAMES = (
@@ -279,6 +330,7 @@ _RUNTIME_ENV_HOST_CONTROL_NAMES = (
         }
     )
     | _BEDROCK_HOST_ENV_VARS
+    | _VERTEX_HOST_ENV_VARS
     | _VERIFIER_JUDGE_MODEL_ENV_VARS
     | frozenset().union(*_HARBOR_ENV_MODE_VARS.values())
 )
@@ -302,11 +354,149 @@ _OPERATOR_OWNED_AGENT_ENV = frozenset(
     {
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
         "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLOUD_ML_REGION",
+        "GCP_PROJECT",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_PROJECT",
         "NVIDIA_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
+        CREDENTIAL_EXPIRY_ENV,
+        CREDENTIAL_SOURCE_ENV,
+        GKE_ALLOW_WORKLOAD_IDENTITY_ENV,
     }
+)
+_VERTEX_ADC_MAX_JOB_TIMEOUT_SEC = 3300.0
+VERTEX_ADC_JOB_TIMEOUT_ENV = "SKILLEVALUATOR_VERTEX_ADC_JOB_TIMEOUT_SEC"
+GKE_WORKLOAD_IDENTITY_ERROR_MESSAGE = (
+    "CLAUDE_CODE_USE_VERTEX=1 in GKE mode uses single-pod Kubernetes Workload Identity, "
+    "which shares the pod service account and GKE metadata server with evaluated skill "
+    "commands. Restrict this mode to trusted skills by setting "
+    "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1 or --ek allow_workload_identity=1."
+)
+GKE_WORKLOAD_IDENTITY_WARNING_MESSAGE = (
+    "GKE Workload Identity mode shares pod-level GCP Service Account permissions with skill setup scripts "
+    "and agent subprocesses via the Kubernetes metadata server; evaluate only trusted skills in this mode."
+)
+_OPERATOR_SECRET_PREFIXES = (
+    "ANTHROPIC_",
+    "AWS_",
+    "CLAUDE_CODE_",
+    "DAYTONA_",
+    "E2B_",
+    "GCLOUD_",
+    "GCP_",
+    "GOOGLE_",
+    "MODAL_",
+    "NVIDIA_",
+    "OPENAI_",
+    "RUNLOOP_",
+    "SKILL_EVAL_",
+    "SKILLEVALUATOR_",
+)
+
+
+def is_operator_owned_or_provider_secret(name: str) -> bool:
+    """Return True if an environment variable name belongs to operator, provider, or cloud credentials."""
+    cleaned = name.strip()
+    if not cleaned:
+        return False
+    upper = cleaned.upper()
+    if upper in _OPERATOR_OWNED_AGENT_ENV or upper in _VERIFIER_JUDGE_MODEL_ENV_VARS or upper == "KUBECONFIG":
+        return True
+    return upper.startswith(_OPERATOR_SECRET_PREFIXES)
+
+
+def is_gke_vertex_workload_identity_active(
+    env_mode: str,
+    agents: Sequence[str] = ("claude-code",),
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    """Return True when GKE mode is paired with Claude Code and CLAUDE_CODE_USE_VERTEX=1."""
+    if env_mode != "gke" or "claude-code" not in agents:
+        return False
+    lookup_env = env if env is not None else os.environ
+    return (
+        str(lookup_env.get("CLAUDE_CODE_USE_VERTEX", "")).strip() == "1"
+        or os.environ.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1"
+    )
+
+
+_SENSITIVE_EK_KEY_RE = re.compile(
+    r"(?i)(?:^|.*[_-])(?:api[_-]?key|secret|password|credential|credentials|authorization|bearer|"
+    r"private[_-]?key|service[_-]?account[_-]?key|access[_-]?key|session[_-]?token|auth[_-]?token|"
+    r"cookie|session[_-]?cookie|client[_-]?certificate|client[_-]?cert|certificate|cert|passphrase|oauth|"
+    r"(?:access|refresh|id|auth|user|client|secret)[_-]?tokens?)(?:$|[_-].*)"
+)
+_SAFE_BACKEND_CONSTRUCTOR_KWARGS: dict[str, frozenset[str]] = {
+    "gke": frozenset(
+        {
+            "allow_workload_identity",
+            "cluster_name",
+            "region",
+            "namespace",
+            "registry_location",
+            "registry_name",
+            "project_id",
+            "cloud_build_machine_type",
+            "cloud_build_disk_size_gb",
+            "memory_limit_multiplier",
+            "cpu_request",
+            "cpu_limit",
+            "memory_request",
+            "memory_limit",
+            "ephemeral_storage_request",
+            *_SKILL_SAFE_ENVIRONMENT_KWARGS,
+        }
+    ),
+    "docker": frozenset(
+        {
+            "image",
+            "container_name",
+            "network_name",
+            "pull_policy",
+            *_SKILL_SAFE_ENVIRONMENT_KWARGS,
+        }
+    ),
+    "daytona": frozenset(
+        {
+            "target",
+            "snapshot",
+            "workspace_id",
+            *_SKILL_SAFE_ENVIRONMENT_KWARGS,
+        }
+    ),
+}
+_NON_CREDENTIAL_TOKEN_KEY_RE = re.compile(
+    r"^(?:max|min|num|total|count|prompt|completion|input|output|request)?[_-]?tokens$|"
+    r"^(?:max|min|num|total|count|prompt|completion|input|output)[_-]token$|"
+    r"(?:^|.*[_-])tokens?[_-](?:bucket|rate|count|limit|budget|window|usage|size|per[_-]\w+)$|"
+    r"(?:^|.*[_-])(?:tokenizer|tokenizers|detokenize|detokenizer|tokenization|detokenization)(?:[_-].*)?$",
+    re.IGNORECASE,
+)
+
+
+def _is_sensitive_ek_key(key: str) -> bool:
+    """Determine whether an environment kwarg key name represents a sensitive credential."""
+    normalized_key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key).lower()
+    if _NON_CREDENTIAL_TOKEN_KEY_RE.search(normalized_key):
+        return False
+    return is_sensitive_key(key) or bool(_SENSITIVE_EK_KEY_RE.search(normalized_key))
+
+
+_SENSITIVE_EK_VALUE_PATTERNS = (
+    LOG_SK_RE,
+    LOG_NVAPI_RE,
+    LOG_YA29_RE,
+    LOG_JWT_RE,
+    LOG_CRSR_RE,
+    OPENSHIFT_TOKEN_RE,
+    re.compile(r"(?<![A-Za-z0-9_-])(?:AKIA|ASIA)[0-9A-Z]{12,}"),
+    re.compile(r"-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----"),
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]{15,}"),
 )
 
 
@@ -369,6 +559,53 @@ def _nvidia_build_key_handoff(
     return _NvidiaBuildKeyHandoff(subprocess_env)
 
 
+_GKE_ENV_VAR_MAPPINGS: Mapping[str, str] = MappingProxyType(
+    {
+        "cluster_name": "SKILLEVALUATOR_GKE_CLUSTER",
+        "region": "SKILLEVALUATOR_GKE_REGION",
+        "namespace": "SKILLEVALUATOR_GKE_NAMESPACE",
+        "registry_location": "SKILLEVALUATOR_GKE_REGISTRY_LOCATION",
+        "registry_name": "SKILLEVALUATOR_GKE_REGISTRY_NAME",
+    }
+)
+
+_GKE_REQUIRED_KWARGS = tuple(_GKE_ENV_VAR_MAPPINGS)
+
+
+def _missing_gke_kwargs(kwargs: Mapping[str, str]) -> list[str]:
+    """Return required GKE kwargs that are missing or empty."""
+    return [k for k in _GKE_REQUIRED_KWARGS if not str(kwargs.get(k, "")).strip()]
+
+
+def _resolve_environment_kwargs(
+    env_mode: str,
+    *,
+    config_kwargs: Mapping[str, str] | None = None,
+    cli_kwargs: Mapping[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Resolve environment kwargs with CLI > environment variable > config precedence."""
+    resolved: dict[str, str] = {}
+    env = environ if environ is not None else os.environ
+
+    if config_kwargs:
+        for k, v in config_kwargs.items():
+            if v is not None and k not in _GKE_INFRASTRUCTURE_KWARGS:
+                resolved[k] = str(v).strip()
+
+    if env_mode == "gke":
+        for kwarg, env_var in _GKE_ENV_VAR_MAPPINGS.items():
+            if val := env.get(env_var, "").strip():
+                resolved[kwarg] = val
+
+    if cli_kwargs:
+        for k, v in cli_kwargs.items():
+            if v is not None:
+                resolved[k] = str(v).strip()
+
+    return resolved
+
+
 def build_harbor_run_command(
     *,
     dataset_path: str | Path,
@@ -387,6 +624,7 @@ def build_harbor_run_command(
     override_storage_mb: int | None = None,
     agent_import_path: str | None = None,
     verifier_env: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Build a Harbor invocation for a built-in environment type or local mode."""
     if env_mode not in HARBOR_ENV_MODES:
@@ -440,18 +678,43 @@ def build_harbor_run_command(
                 f"inherit_agent_keys={str(local_sandbox.coerce_flag(None, env_var=local_sandbox.INHERIT_AGENT_KEYS_ENV)).lower()}",
             ]
         )
-    elif env_mode == "docker":
+    elif env_mode in {"docker", "gke"}:
+        from skillevaluator.tier3.harbor import CONTAINER_AGENT_IMPORT_PATHS
+
+        agent_import_path = agent_import_path or CONTAINER_AGENT_IMPORT_PATHS.get(agent)
         if agent_import_path:
             command.extend(["--agent-import-path", agent_import_path])
         else:
             command.extend(["-a", agent])
-        command.extend(["--environment-import-path", SECURE_DOCKER_ENV_IMPORT_PATH])
+        if env_mode == "docker":
+            command.extend(["--environment-import-path", SECURE_DOCKER_ENV_IMPORT_PATH])
+        else:
+            command.extend(["--env", env_mode, "--environment-import-path", SECURE_GKE_ENV_IMPORT_PATH])
     else:
         if agent_import_path:
             command.extend(["--agent-import-path", agent_import_path])
         else:
             command.extend(["-a", agent])
         command.extend(["--env", env_mode])
+
+    if env_mode != ENV_MODE_LOCAL:
+        safe_keys = _SAFE_BACKEND_CONSTRUCTOR_KWARGS.get(env_mode, _SKILL_SAFE_ENVIRONMENT_KWARGS)
+        for key, value in sorted((environment_kwargs or {}).items()):
+            str_val = str(value)
+            normalized_key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key).lower()
+            is_benign_token = bool(_NON_CREDENTIAL_TOKEN_KEY_RE.search(normalized_key))
+            if (
+                (key not in safe_keys and not is_benign_token)
+                or _is_sensitive_ek_key(key)
+                or any(pattern.search(str_val) for pattern in _SENSITIVE_EK_VALUE_PATTERNS)
+            ):
+                raise ValueError(
+                    f"Sensitive key or value detected in environment_kwargs: {key}. "
+                    "Credentials and disallowed settings must not be passed via CLI flags or process arguments."
+                )
+            if key == "allow_workload_identity":
+                continue
+            command.extend(["--ek", f"{key}={value}"])
     if jobs_dir is not None:
         command.extend(["--jobs-dir", str(jobs_dir)])
     if disable_verification:
@@ -469,6 +732,14 @@ def build_harbor_run_command(
     if override_storage_mb is not None:
         command.extend(["--override-storage-mb", str(override_storage_mb)])
     for name, value in sorted((verifier_env or {}).items()):
+        str_val = str(value)
+        if (is_operator_owned_or_provider_secret(name) or _is_sensitive_ek_key(name)) and not re.fullmatch(
+            r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", str_val
+        ):
+            raise ValueError(
+                f"Sensitive key detected in verifier_env: {name}. "
+                "Credentials and operator-owned settings must use ${VAR} placeholder indirection."
+            )
         command.extend(["--verifier-env", f"{name}={value}"])
     if _harbor_supports_yes():
         command.append("--yes")
@@ -488,17 +759,29 @@ def _provider_environment(config: ProviderConfig) -> dict[str, str]:
             if (value := os.environ.get(name, "").strip())
         }
     )
+    if getattr(config, "credential_env", None) == CREDENTIAL_SOURCE_ADC:
+        fresh_token = _get_google_access_token()
+        api_key = fresh_token or getattr(config, "api_key", None) or ""
+        environment[CREDENTIAL_SOURCE_ENV] = CREDENTIAL_SOURCE_ADC
+        expiry_epoch = get_adc_token_expiry(api_key)
+        if expiry_epoch is None and not fresh_token:
+            expiry_epoch = getattr(config, "credential_expiry", None)
+        if expiry_epoch is not None:
+            environment[CREDENTIAL_EXPIRY_ENV] = str(expiry_epoch)
+    else:
+        api_key = getattr(config, "api_key", None) or ""
+
     if config.provider == "anthropic":
-        environment["ANTHROPIC_API_KEY"] = config.api_key or ""
+        environment["ANTHROPIC_API_KEY"] = api_key
         if config.base_url:
             environment["ANTHROPIC_BASE_URL"] = config.base_url
     elif config.provider == "bedrock":
         environment["AWS_REGION"] = config.region or "us-west-2"
         environment.update({name: os.environ[name] for name in _BEDROCK_HOST_ENV_VARS if os.environ.get(name)})
     elif config.provider == "nv_build":
-        environment["NVIDIA_API_KEY"] = config.api_key or ""
+        environment["NVIDIA_API_KEY"] = api_key
     else:
-        environment["OPENAI_API_KEY"] = config.api_key or ""
+        environment["OPENAI_API_KEY"] = api_key
         environment["OPENAI_BASE_URL"] = config.base_url or ""
     return {name: value for name, value in environment.items() if value}
 
@@ -527,6 +810,7 @@ def _validate_agent_provider_credentials(
     *,
     env_mode: str = DEFAULT_ENV_MODE,
     agent_models: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Reject provider-to-agent combinations that cannot use the selected API."""
     model_sources = agent_model_sources or {}
@@ -550,6 +834,26 @@ def _validate_agent_provider_credentials(
             "OpenCode's provider-qualified model must match the evaluator provider so each agent route uses "
             "only its selected provider credential."
         ]
+
+    has_vertex = (
+        agent_runtime_env.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1"
+        or os.environ.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1"
+    )
+    if "claude-code" in agents and has_vertex:
+        if env_mode != "gke":
+            return [
+                f"vertex ai live agents do not support {env_mode} mode; use --env-mode gke or a supported cloud backend."
+            ]
+        if not is_gke_workload_identity_allowed(environment_kwargs, agent_runtime_env):
+            return [GKE_WORKLOAD_IDENTITY_ERROR_MESSAGE]
+        from skillevaluator.tier3.harbor.runtime_preflight import _resolve_vertex_project_id
+
+        has_project = bool(_resolve_vertex_project_id(agent_runtime_env) or _resolve_vertex_project_id())
+        if not has_project:
+            return [
+                "CLAUDE_CODE_USE_VERTEX=1 requires a Google Cloud project ID. "
+                "Set ANTHROPIC_VERTEX_PROJECT_ID, GOOGLE_CLOUD_PROJECT, or GCP_PROJECT."
+            ]
 
     if provider.provider != "nv_build":
         supported_agents = {
@@ -581,9 +885,12 @@ def _validate_agent_provider_credentials(
                 ]
 
         if provider.provider == "openai" and "claude-code" in agents:
-            if not agent_runtime_env.get("ANTHROPIC_API_KEY", "").strip():
+            has_anthropic_key = bool(agent_runtime_env.get("ANTHROPIC_API_KEY", "").strip())
+            has_vertex = env_mode == "gke" and agent_runtime_env.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1"
+            if not has_anthropic_key and not has_vertex:
+                suffix = " or CLAUDE_CODE_USE_VERTEX=1" if env_mode == "gke" else ""
                 return [
-                    "claude-code with the OpenAI evaluator provider requires an independent ANTHROPIC_API_KEY "
+                    f"claude-code with the OpenAI evaluator provider requires an independent ANTHROPIC_API_KEY{suffix} "
                     "in the operator host environment."
                 ]
             if model_sources.get("claude-code", "public provider default") == "public provider default":
@@ -647,9 +954,12 @@ def _validate_agent_provider_credentials(
         return []
 
     if "claude-code" in agents:
-        if not agent_runtime_env.get("ANTHROPIC_API_KEY", "").strip():
+        has_anthropic_key = bool(agent_runtime_env.get("ANTHROPIC_API_KEY", "").strip())
+        has_vertex = env_mode == "gke" and agent_runtime_env.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1"
+        if not has_anthropic_key and not has_vertex:
+            suffix = " or CLAUDE_CODE_USE_VERTEX=1" if env_mode == "gke" else ""
             return [
-                "claude-code with NVIDIA Build requires an independent ANTHROPIC_API_KEY in the agent runtime "
+                f"claude-code with NVIDIA Build requires an independent ANTHROPIC_API_KEY{suffix} in the agent runtime "
                 "environment; NVIDIA_API_KEY is not an Anthropic credential."
             ]
         model_source = (agent_model_sources or {}).get("claude-code", "public provider default")
@@ -684,11 +994,155 @@ def _validate_agent_provider_credentials(
     return []
 
 
+_KUBECONFIG_FILE_PATH_KEYS = frozenset(
+    {
+        "certificate-authority",
+        "client-certificate",
+        "client-key",
+        "tokenFile",
+        "idp-certificate-authority",
+    }
+)
+
+
+def _resolve_relative_kubeconfig_path(
+    raw_value: str,
+    base_dir: Path | None,
+    fallback_dirs: Sequence[Path] = (),
+) -> str:
+    """Resolve a relative kubeconfig path against its source file directory."""
+    expanded = Path(raw_value.strip()).expanduser()
+    if expanded.is_absolute():
+        return str(expanded)
+    if base_dir is not None:
+        return str((base_dir / expanded).resolve())
+    for directory in fallback_dirs:
+        candidate = (directory / expanded).resolve()
+        if candidate.exists():
+            return str(candidate)
+    if fallback_dirs:
+        return str((fallback_dirs[0] / expanded).resolve())
+    return raw_value
+
+
+def _unwrap_kubeconfig_node(
+    obj: Any,
+    source_path: str | None = None,
+    fallback_dirs: Sequence[Path] = (),
+) -> Any:
+    """Recursively unwrap Kubernetes ConfigNode wrappers while absolutizing relative file paths."""
+    node_path = getattr(obj, "path", None) or source_path
+    if hasattr(obj, "value"):
+        return _unwrap_kubeconfig_node(obj.value, source_path=node_path, fallback_dirs=fallback_dirs)
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        base_dir = Path(node_path).expanduser().resolve().parent if node_path else None
+        for k, v in obj.items():
+            unwrapped = _unwrap_kubeconfig_node(v, source_path=node_path, fallback_dirs=fallback_dirs)
+            if (
+                isinstance(unwrapped, str)
+                and unwrapped.strip()
+                and (k in _KUBECONFIG_FILE_PATH_KEYS or (k == "command" and ("/" in unwrapped or os.sep in unwrapped)))
+            ):
+                unwrapped = _resolve_relative_kubeconfig_path(unwrapped, base_dir, fallback_dirs)
+            out[k] = unwrapped
+        return out
+    if isinstance(obj, list):
+        return [_unwrap_kubeconfig_node(item, source_path=node_path, fallback_dirs=fallback_dirs) for item in obj]
+    return obj
+
+
+_MERGED_KUBECONFIG_CACHE: dict[str, Path] = {}
+
+
+def _resolve_single_kubeconfig(raw_kubeconfig: str | None = None) -> Path | None:
+    """Resolve a single existing kubeconfig file path from KUBECONFIG or default location.
+
+    If multiple path entries are specified, merge them into a single temporary kubeconfig
+    file preserving all clusters, contexts, and credentials, restricted to permissions 0600.
+    """
+    raw = raw_kubeconfig if raw_kubeconfig is not None else os.environ.get("KUBECONFIG")
+    if raw:
+        valid_candidates: list[Path] = []
+        for entry in raw.split(os.pathsep):
+            cleaned = entry.strip()
+            if cleaned:
+                candidate = Path(cleaned).expanduser().resolve()
+                if candidate.is_file():
+                    valid_candidates.append(candidate)
+        if valid_candidates:
+            if len(valid_candidates) == 1:
+                return valid_candidates[0]
+            paths_str = os.pathsep.join(str(p) for p in valid_candidates)
+            cache_key = os.pathsep.join(f"{p}:{p.stat().st_mtime_ns}:{p.stat().st_size}" for p in valid_candidates)
+            cached_path = _MERGED_KUBECONFIG_CACHE.get(cache_key)
+            if cached_path is not None and cached_path.is_file():
+                return cached_path
+            try:
+                import atexit
+                import tempfile
+
+                import yaml
+                from kubernetes.config.kube_config import KubeConfigMerger
+
+                with tempfile.TemporaryDirectory(prefix="kubeconfig_stage_") as stage_dir:
+                    staged_paths: list[str] = []
+                    for idx, cand in enumerate(valid_candidates):
+                        cand_data = yaml.safe_load(cand.read_text(encoding="utf-8"))
+                        if isinstance(cand_data, dict):
+                            cand_data = _unwrap_kubeconfig_node(cand_data, source_path=str(cand))
+                            staged_file = Path(stage_dir) / f"cand_{idx}.yaml"
+                            staged_file.write_text(
+                                yaml.safe_dump(cand_data, default_flow_style=False),
+                                encoding="utf-8",
+                            )
+                            staged_file.chmod(0o600)
+                            staged_paths.append(str(staged_file))
+                        else:
+                            staged_paths.append(str(cand))
+                    merger = KubeConfigMerger(os.pathsep.join(staged_paths))
+                    fallback_dirs = [p.parent for p in valid_candidates]
+                    merged_dict = _unwrap_kubeconfig_node(merger.config, fallback_dirs=fallback_dirs)
+                if not merged_dict or not isinstance(merged_dict, dict):
+                    logger.error("KubeConfigMerger produced empty or invalid configuration from %s", paths_str)
+                    return None
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    prefix="merged_kubeconfig_",
+                    suffix=".yaml",
+                    delete=False,
+                ) as handle:
+                    merged_path = Path(handle.name)
+                    yaml.safe_dump(merged_dict, handle, default_flow_style=False)
+                    merged_path.chmod(0o600)
+                _MERGED_KUBECONFIG_CACHE[cache_key] = merged_path
+                atexit.register(lambda: merged_path.unlink(missing_ok=True))
+                logger.info(
+                    "Merged %d kubeconfig files into temporary file %s",
+                    len(valid_candidates),
+                    merged_path,
+                )
+                return merged_path
+            except Exception as exc:
+                logger.error(
+                    "Failed to merge multiple kubeconfigs (%s): %s",
+                    raw,
+                    exc,
+                )
+                return None
+        return None
+    default_path = (Path.home() / ".kube" / "config").resolve()
+    return default_path if default_path.is_file() else None
+
+
 def _check_prerequisites(
     env_mode: str = DEFAULT_ENV_MODE,
     agents: list[str] | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
+    verify_live_cluster: bool = False,
 ) -> list[str]:
-    """Check Harbor and the selected environment (built-in or local mode)."""
+    """Check Harbor and the selected environment (built-in, GKE, or local mode)."""
     if env_mode not in HARBOR_ENV_MODES:
         return [f"Unsupported Harbor environment '{env_mode}'. Choose one of: {', '.join(sorted(HARBOR_ENV_MODES))}"]
     if env_mode == ENV_MODE_LOCAL:
@@ -704,6 +1158,76 @@ def _check_prerequisites(
             "harbor CLI not found. Reinstall with the Tier 3 extra: "
             'uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
         ]
+
+    if env_mode == "gke":
+        gke_errors = []
+        if not shutil.which("gcloud"):
+            gke_errors.append(
+                "GKE requires the gcloud CLI to be installed. See https://cloud.google.com/sdk/docs/install"
+            )
+        try:
+            import kubernetes  # noqa: F401
+        except ImportError:
+            gke_errors.append(
+                "GKE requires the 'kubernetes' Python package. Install it with 'uv add kubernetes' or 'pip install \"harbor[gke]\"'."
+            )
+        if _resolve_single_kubeconfig() is None:
+            gke_errors.append(
+                "GKE requires Kubernetes credentials. Run "
+                "'gcloud container clusters get-credentials <CLUSTER> "
+                "--region <REGION>' to configure credentials, or set the "
+                "KUBECONFIG environment variable."
+            )
+        missing_kwargs = _missing_gke_kwargs(environment_kwargs or {})
+        if missing_kwargs:
+            gke_errors.append(
+                f"GKE mode requires environment kwargs: {', '.join(missing_kwargs)}. "
+                "Specify them via --ek key=value or SKILLEVALUATOR_GKE_* environment variables."
+            )
+        if is_gke_vertex_workload_identity_active(
+            env_mode,
+            agents or ["claude-code"],
+        ) and not is_gke_workload_identity_allowed(environment_kwargs):
+            gke_errors.append(GKE_WORKLOAD_IDENTITY_ERROR_MESSAGE)
+        if verify_live_cluster and not gke_errors:
+            try:
+                from kubernetes import client as k8s_client
+                from kubernetes import config as k8s_config
+
+                resolved_kc = _resolve_single_kubeconfig()
+                k8s_config.load_kube_config(config_file=str(resolved_kc) if resolved_kc else None)
+                api = k8s_client.CoreV1Api()
+                api.get_api_resources(_request_timeout=5.0)
+                if not is_gke_workload_identity_allowed(environment_kwargs):
+                    from skillevaluator.tier3.harbor.gke_environment import ensure_gke_metadata_network_policy
+
+                    target_namespace = (
+                        str((environment_kwargs or {}).get("namespace") or "default").strip() or "default"
+                    )
+                    bound_gcp_sa = inspect_bound_gcp_service_account(
+                        api,
+                        namespace=target_namespace,
+                        service_account="default",
+                    )
+                    if bound_gcp_sa:
+                        gke_errors.append(
+                            GKE_BOUND_SERVICE_ACCOUNT_ERROR_TEMPLATE.format(
+                                namespace=target_namespace,
+                                service_account="default",
+                                gcp_sa=bound_gcp_sa,
+                            )
+                        )
+                    api_client = getattr(api, "api_client", None)
+                    networking_cls = getattr(k8s_client, "NetworkingV1Api", None)
+                    if api_client is not None and callable(networking_cls):
+                        networking_api = networking_cls(api_client)
+                        ensure_gke_metadata_network_policy(
+                            networking_api,
+                            namespace=target_namespace,
+                        )
+            except Exception as exc:
+                gke_errors.append(f"GKE cluster probe failed: {exc}")
+        return gke_errors
 
     if env_mode == ENV_MODE_LOCAL:
         # Local mode is a host sandbox, not a Harbor-native backend: verify the
@@ -815,6 +1339,7 @@ def _harbor_subprocess_environment(
     provider_env: Mapping[str, str],
     agent: str | None = None,
     agent_model: str | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Build Harbor's minimal host environment without ambient secrets."""
     host_env = os.environ
@@ -822,8 +1347,20 @@ def _harbor_subprocess_environment(
     environment.update(_selected_host_environment(_HARBOR_ENV_MODE_VARS.get(env_mode, frozenset()), host_env))
     if provider.provider == "bedrock":
         environment.update(_selected_host_environment(_BEDROCK_HOST_ENV_VARS, host_env))
+    is_adc = (
+        getattr(provider, "credential_env", None) == CREDENTIAL_SOURCE_ADC
+        or provider_env.get(CREDENTIAL_SOURCE_ENV) == CREDENTIAL_SOURCE_ADC
+    )
+    if is_adc and env_mode != ENV_MODE_LOCAL:
+        environment.update(_selected_host_environment(_ADC_HOST_ENV_VARS, host_env))
     environment.update(configured_runtime_env)
     environment.update(provider_env)
+    if env_mode == "gke":
+        resolved_kubeconfig = _resolve_single_kubeconfig(environment.get("KUBECONFIG"))
+        if resolved_kubeconfig is not None:
+            environment["KUBECONFIG"] = str(resolved_kubeconfig)
+        if is_gke_workload_identity_allowed(environment_kwargs, environment):
+            environment[GKE_ALLOW_WORKLOAD_IDENTITY_ENV] = "1"
     if env_mode == ENV_MODE_LOCAL:
         from skillevaluator.tier3.harbor.local_runtime import local_subprocess_env
 
@@ -856,11 +1393,43 @@ def _harbor_subprocess_environment(
     return environment
 
 
-def _independent_anthropic_agent_credentials() -> dict[str, str]:
-    """Resolve and validate a host-owned Anthropic credential pair."""
-    credentials = {
-        name: os.environ.get(name, "") for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL") if os.environ.get(name)
-    }
+def _independent_anthropic_agent_credentials(
+    *,
+    env_mode: str = "",
+    environment_kwargs: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Resolve and validate a host-owned Anthropic credential pair or Vertex AI configuration."""
+    candidate_names = (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_USE_VERTEX",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "CLOUD_ML_REGION",
+    )
+    credentials = {name: os.environ.get(name, "") for name in candidate_names if os.environ.get(name)}
+
+    if credentials.get("CLAUDE_CODE_USE_VERTEX") == "1":
+        from skillevaluator.tier3.harbor.runtime_preflight import (
+            _resolve_vertex_project_id,
+            _resolve_vertex_region,
+        )
+
+        credentials.pop("ANTHROPIC_API_KEY", None)
+        if "ANTHROPIC_VERTEX_PROJECT_ID" not in credentials and (project_id := _resolve_vertex_project_id()):
+            credentials["ANTHROPIC_VERTEX_PROJECT_ID"] = project_id
+
+        if "CLOUD_ML_REGION" not in credentials:
+            credentials["CLOUD_ML_REGION"] = _resolve_vertex_region()
+
+        # In GKE mode, strip host-local GOOGLE_APPLICATION_CREDENTIALS paths;
+        # pods authenticate via Kubernetes Workload Identity only when explicitly allowed.
+        if env_mode == "gke":
+            credentials.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+            if not is_gke_workload_identity_allowed(environment_kwargs):
+                return {}
+        elif g_creds := os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip():
+            credentials["GOOGLE_APPLICATION_CREDENTIALS"] = g_creds
+
     if base_url := credentials.get("ANTHROPIC_BASE_URL"):
         normalized_base_url = _normalize_anthropic_base_url(
             base_url,
@@ -873,15 +1442,20 @@ def _independent_anthropic_agent_credentials() -> dict[str, str]:
     return credentials
 
 
-def _gateway_anthropic_agent_credentials(provider: ProviderConfig) -> dict[str, str]:
+def _gateway_anthropic_agent_credentials(
+    provider: ProviderConfig,
+    *,
+    env_mode: str = "docker",
+    environment_kwargs: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """Use a shared gateway unless the operator selected a separate Claude route.
 
     A standalone Anthropic key keeps its native endpoint, so a native key is
     never silently sent to the shared gateway. An explicit base URL without a
     separate key selects another API root on the operator's gateway.
     """
-    credentials = _independent_anthropic_agent_credentials()
-    if credentials.get("ANTHROPIC_API_KEY", "").strip():
+    credentials = _independent_anthropic_agent_credentials(env_mode=env_mode, environment_kwargs=environment_kwargs)
+    if credentials.get("ANTHROPIC_API_KEY", "").strip() or credentials.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1":
         return credentials
     base_url = credentials.get("ANTHROPIC_BASE_URL")
     if not base_url:
@@ -955,6 +1529,7 @@ def _agent_credentials(
     provider: ProviderConfig,
     agent: str,
     env_mode: str,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Resolve operator-owned credentials for exactly one agent runtime."""
     if provider.provider == "nv_build":
@@ -968,7 +1543,7 @@ def _agent_credentials(
             # sentinel and must not inherit NVIDIA_API_KEY in task env.
             return {}
         if agent == "claude-code":
-            return _independent_anthropic_agent_credentials()
+            return _independent_anthropic_agent_credentials(env_mode=env_mode, environment_kwargs=environment_kwargs)
         if agent == "codex":
             return {
                 name: os.environ.get(name, "") for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if os.environ.get(name)
@@ -976,15 +1551,17 @@ def _agent_credentials(
         return {}
 
     if provider.provider == "openai-compatible" and agent == "claude-code":
-        return _gateway_anthropic_agent_credentials(provider)
+        return _gateway_anthropic_agent_credentials(provider, env_mode=env_mode, environment_kwargs=environment_kwargs)
     if provider.provider == "openai" and agent == "claude-code":
-        return _independent_anthropic_agent_credentials()
+        return _independent_anthropic_agent_credentials(env_mode=env_mode, environment_kwargs=environment_kwargs)
     if provider.provider == "anthropic" and agent == "codex":
         return {
             name: os.environ.get(name, "") for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if os.environ.get(name)
         }
 
     if provider.provider == "anthropic" and agent in {"claude-code", "opencode"}:
+        if agent == "claude-code" and os.environ.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1":
+            return _independent_anthropic_agent_credentials(env_mode=env_mode, environment_kwargs=environment_kwargs)
         return {
             name: value
             for name, value in {
@@ -1020,6 +1597,17 @@ def _agent_provider_config(
     env_mode: str,
 ) -> ProviderConfig:
     """Describe the API provider the selected agent will actually call."""
+    if agent == "claude-code" and credentials.get("CLAUDE_CODE_USE_VERTEX") == "1":
+        resolved_model = model.removeprefix("anthropic/")
+        return ProviderConfig(
+            provider="anthropic",
+            model=resolved_model,
+            api_key=None,
+            base_url=credentials.get("ANTHROPIC_BASE_URL"),
+            litellm_model=f"anthropic/{resolved_model}",
+            region=credentials.get("CLOUD_ML_REGION"),
+            credential_env="CLAUDE_CODE_USE_VERTEX",
+        )
     if evaluator_provider.provider in {"openai", "openai-compatible"} and agent == "claude-code":
         resolved_model = model.removeprefix("anthropic/")
         return ProviderConfig(
@@ -1104,6 +1692,7 @@ def _resolve_agent_runtime_plan(
     configured_runtime_env: Mapping[str, str],
     env_mode: str,
     model_sources: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> dict[str, AgentRuntimePlan]:
     """Resolve the single credential plan used by staging and execution.
 
@@ -1125,28 +1714,52 @@ def _resolve_agent_runtime_plan(
         for name, value in _provider_environment(provider).items()
         if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS
     }
+    effective_provider = provider
+    if provider.provider in {"openai", "openai-compatible"}:
+        refreshed_key = provider_env.get("OPENAI_API_KEY")
+        refreshed_expiry = _normalize_expiry_epoch(provider_env.get(CREDENTIAL_EXPIRY_ENV))
+        if (refreshed_key and refreshed_key != provider.api_key) or refreshed_expiry != getattr(
+            provider, "credential_expiry", None
+        ):
+            effective_provider = replace(
+                provider,
+                api_key=refreshed_key or provider.api_key,
+                credential_expiry=refreshed_expiry,
+            )
+    elif provider.provider == "anthropic":
+        refreshed_key = provider_env.get("ANTHROPIC_API_KEY")
+        if refreshed_key and refreshed_key != provider.api_key:
+            effective_provider = replace(provider, api_key=refreshed_key)
+
     plans: dict[str, AgentRuntimePlan] = {}
     for agent in agents:
-        credentials = _agent_credentials(provider=provider, agent=agent, env_mode=env_mode)
+        credentials = _agent_credentials(
+            provider=effective_provider,
+            agent=agent,
+            env_mode=env_mode,
+            environment_kwargs=environment_kwargs,
+        )
         validation_env = {**configured_runtime_env, **credentials}
         credential_errors = _validate_agent_provider_credentials(
-            provider,
+            effective_provider,
             [agent],
             validation_env,
             dict(model_sources or {}),
             env_mode=env_mode,
             agent_models={agent: models[agent]},
+            environment_kwargs=environment_kwargs,
         )
         if credential_errors:
             raise ValueError(credential_errors[0])
 
         subprocess_env = _harbor_subprocess_environment(
             env_mode=env_mode,
-            provider=provider,
+            provider=effective_provider,
             configured_runtime_env=configured_runtime_env,
             provider_env=provider_env,
             agent=agent,
             agent_model=models[agent],
+            environment_kwargs=environment_kwargs,
         )
         subprocess_env.update(credentials)
         staged = {name: f"${{{name}}}" for name in (*configured_runtime_env, *credentials)}
@@ -1154,7 +1767,7 @@ def _resolve_agent_runtime_plan(
             agent=agent,
             model=models[agent],
             provider=_agent_provider_config(
-                evaluator_provider=provider,
+                evaluator_provider=effective_provider,
                 agent=agent,
                 model=models[agent],
                 credentials=credentials,
@@ -1297,7 +1910,44 @@ def _run_harbor(
     expected_trials: int | None = None,
     expected_total_trials: int | None = None,
     include_task_names: list[str] | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> tuple[bool, str]:
+    base_url = (
+        (verifier_env or {}).get("OPENAI_BASE_URL")
+        or run_env.get("OPENAI_BASE_URL")
+        or (verifier_env or {}).get("SKILL_EVAL_LLM_BASE_URL")
+        or run_env.get("SKILL_EVAL_LLM_BASE_URL")
+    )
+    run_env_copy = dict(run_env)
+    try:
+        fresh_token = refresh_host_vertex_adc_environment(
+            run_env_copy,
+            base_url_override=base_url,
+            fail_on_expired=True,
+            token_getter=_get_google_access_token,
+        )
+    except RuntimeError as exc:
+        return False, str(exc)
+    if fresh_token:
+        run_env = run_env_copy
+        if verifier_env is not None and "OPENAI_API_KEY" in verifier_env:
+            verifier_env = dict(verifier_env)
+            verifier_env["OPENAI_API_KEY"] = "${OPENAI_API_KEY}"
+
+    adc_timeout: float | None = None
+    is_adc = run_env.get(CREDENTIAL_SOURCE_ENV) == CREDENTIAL_SOURCE_ADC
+    if is_adc and _is_vertex_openapi_endpoint(base_url) and env_mode != "gke":
+        active_token = run_env.get("OPENAI_API_KEY")
+        expiry_epoch = get_adc_token_expiry(active_token) or _normalize_expiry_epoch(run_env.get(CREDENTIAL_EXPIRY_ENV))
+        raw_timeout = os.environ.get(VERTEX_ADC_JOB_TIMEOUT_ENV, "").strip()
+        try:
+            adc_timeout = compute_adc_job_timeout(
+                expiry_epoch=expiry_epoch,
+                configured_timeout_sec=raw_timeout or None,
+            )
+        except ValueError as exc:
+            return False, str(exc)
+
     command = build_harbor_run_command(
         dataset_path=dataset,
         agent=agent,
@@ -1314,11 +1964,16 @@ def _run_harbor(
         override_storage_mb=override_storage_mb,
         agent_import_path=agent_import_path,
         verifier_env=verifier_env,
+        environment_kwargs=environment_kwargs,
     )
     try:
         handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
         # Harbor owns its phase deadlines, and native tasks may intentionally
-        # leave the agent unbounded. An outer deadline can preempt valid jobs.
+        # leave the agent unbounded. An outer deadline can preempt valid jobs,
+        # except when non-GKE jobs rely on short-lived Google ADC bearer tokens.
+        run_kwargs: dict[str, Any] = {}
+        if adc_timeout is not None:
+            run_kwargs["timeout"] = adc_timeout
         result = subprocess.run(
             command,
             capture_output=True,
@@ -1326,7 +1981,10 @@ def _run_harbor(
             input=handoff.stdin_text,
             env=handoff.subprocess_env,
             check=False,
+            **run_kwargs,
         )
+    except subprocess.TimeoutExpired:
+        return False, f"Harbor job exceeded Google ADC token lifetime ({adc_timeout:g}s) in {env_mode} mode"
     except OSError as exc:
         return False, str(exc)
     if result.returncode == 0:
@@ -1573,6 +2231,7 @@ def _run_stop_on_pass_variant(
     override_storage_mb: int | None,
     agent_import_path: str | None = None,
     verifier_env: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Run each case one attempt at a time, stopping its attempts on first pass."""
     errors: list[str] = []
@@ -1598,6 +2257,7 @@ def _run_stop_on_pass_variant(
                 verifier_env=verifier_env,
                 expected_trials=1,
                 include_task_names=[task_name],
+                environment_kwargs=environment_kwargs,
             )
             job_dir = jobs_dir / job_name
             attempt_job_dirs.append(job_dir)
@@ -1632,6 +2292,7 @@ def _run_agent_pair(
     pass_threshold: float = 0.50,
     task_names: list[str] | None = None,
     verifier_env: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> list[str]:
     jobs = [("with", with_skill)]
     if baseline is not None:
@@ -1660,6 +2321,7 @@ def _run_agent_pair(
                     override_storage_mb=override_storage_mb,
                     agent_import_path=agent_import_path,
                     verifier_env=verifier_env,
+                    environment_kwargs=environment_kwargs,
                 )
             )
         return sequential_errors
@@ -1692,6 +2354,7 @@ def _run_agent_pair(
                 agent_import_path=agent_import_path,
                 verifier_env=verifier_env,
                 expected_trials=expected_trials,
+                environment_kwargs=environment_kwargs,
             ): variant
             for (variant, dataset), condition_concurrency in zip(jobs, job_concurrency, strict=True)
         }
@@ -1853,6 +2516,7 @@ def _run_harbor_eval_impl(
     override_storage_mb: int | None = None,
     evaluated_source: dict[str, str] | None = None,
     progress_reporter: ProgressReporter | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
     _evaluator_skill_path: Path | None = None,
     _monotonic_start: float | None = None,
 ) -> dict[str, Any]:
@@ -1981,8 +2645,20 @@ def _run_harbor_eval_impl(
         )
     )
 
+    config_env_kwargs = harbor_config.get("environment_kwargs", {})
+    resolved_environment_kwargs = _resolve_environment_kwargs(
+        env_mode,
+        config_kwargs=config_env_kwargs,
+        cli_kwargs=environment_kwargs,
+        environ=os.environ,
+    )
+
     reporter.emit(ProgressEvent(stage="environment-preflight", state="running", detail=env_mode))
-    prereq_errors = _check_prerequisites(env_mode=env_mode, agents=agents)
+    prereq_errors = _check_prerequisites(
+        env_mode=env_mode,
+        agents=agents,
+        environment_kwargs=resolved_environment_kwargs,
+    )
     if prereq_errors:
         reporter.emit(ProgressEvent(stage="environment-preflight", state="failed", detail="; ".join(prereq_errors)))
         return {"error": prereq_errors}
@@ -2017,6 +2693,7 @@ def _run_harbor_eval_impl(
             configured_runtime_env=configured_runtime_env,
             env_mode=env_mode,
             model_sources={agent: details["source"] for agent, details in model_resolution.items()},
+            environment_kwargs=resolved_environment_kwargs,
         )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=str(exc)))
@@ -2035,6 +2712,8 @@ def _run_harbor_eval_impl(
     # this import must remain lazy to avoid a module cycle.
     from skillevaluator.tier3.harbor.runtime_preflight import (
         CredentialProbeDisposition,
+        ModelCatalogFailureKind,
+        _is_vertex_openapi_endpoint,
         credential_probe_disposition,
         probe_model,
     )
@@ -2134,9 +2813,25 @@ def _run_harbor_eval_impl(
             continue
 
         safe_detail = redact_progress_detail(probe.detail, secret_values=runtime_secret_values)
-        disposition = credential_probe_disposition(selected_provider, probe)
+        disposition = credential_probe_disposition(selected_provider, probe, env_mode=env_mode)
+        is_vertex = (
+            _is_vertex_openapi_endpoint(getattr(selected_provider, "base_url", None))
+            or getattr(selected_provider, "credential_env", None) == "CLAUDE_CODE_USE_VERTEX"
+        )
+        is_auth_failure = getattr(probe, "failure_kind", None) in {
+            ModelCatalogFailureKind.AUTHENTICATION,
+            ModelCatalogFailureKind.AUTHORIZATION,
+        }
         if probe.ok and disposition == CredentialProbeDisposition.DEGRADED:
             safe_detail = "model catalog access does not verify runtime credentials for this endpoint"
+        elif (
+            not probe.ok
+            and env_mode == "gke"
+            and is_vertex
+            and is_auth_failure
+            and disposition == CredentialProbeDisposition.DEGRADED
+        ):
+            safe_detail = GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL
         credential_validation_targets.append(
             {
                 "labels": list(selected_labels),
@@ -2475,6 +3170,7 @@ def _run_harbor_eval_impl(
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
                 agent_import_path=agent_import_paths.get(agent),
+                environment_kwargs=resolved_environment_kwargs,
             )
             if not preflight.ok:
                 preflight_errors.append(f"{agent} runtime preflight failed: {preflight.detail}")
@@ -2525,6 +3221,7 @@ def _run_harbor_eval_impl(
             pass_threshold=float(pass_threshold),
             task_names=task_names,
             verifier_env=job_judge_verifier_env,
+            environment_kwargs=resolved_environment_kwargs,
         )
 
     active_agents: set[str] = set()
@@ -2665,6 +3362,8 @@ def _run_harbor_eval_impl(
             report_warning = "HTML report was not generated: report file is missing"
     except Exception as exc:
         report_warning = f"HTML report was not generated: {exc}"
+    if is_gke_vertex_workload_identity_active(env_mode, agents):
+        results.setdefault("security_notices", []).append(GKE_WORKLOAD_IDENTITY_WARNING_MESSAGE)
     if report_warning:
         results.setdefault("warnings", []).append(report_warning)
         results["report_status"] = "degraded"

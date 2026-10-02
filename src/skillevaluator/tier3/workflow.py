@@ -89,15 +89,21 @@ def _source_snapshot(skill_path: Path) -> Iterator[Path]:
         yield snapshot
 
 
-def _preflight_options(skill_path: Path, params: dict[str, Any]) -> None:
+def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, str]:
     """Reject known configuration errors before generating a paid dataset."""
     from skillevaluator.cli import _evaluated_source_from_options
     from skillevaluator.provider_config import resolve_llm_provider
-    from skillevaluator.tier3.commands import parse_agent_model_overrides, resolve_agents, validate_agents
+    from skillevaluator.tier3.commands import (
+        parse_agent_model_overrides,
+        parse_environment_kwargs,
+        resolve_agents,
+        validate_agents,
+    )
     from skillevaluator.tier3.evals_config import _validate_config, load_evals_config
     from skillevaluator.tier3.harbor.runner import (
         _model_for_agent,
         _resolve_agent_runtime_plan,
+        _resolve_environment_kwargs,
         _resolve_runtime_env,
         _workspace_skills,
     )
@@ -160,6 +166,12 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> None:
         )
         for agent in agents
     }
+    parsed_environment_kwargs = parse_environment_kwargs(params.get("environment_kwargs", ()))
+    resolved_environment_kwargs = _resolve_environment_kwargs(
+        params["env_mode"],
+        config_kwargs=harbor.get("environment_kwargs"),
+        cli_kwargs=parsed_environment_kwargs,
+    )
     runtime_env, errors = _resolve_runtime_env(harbor.get("runtime_env"))
     if errors:
         raise ValueError("; ".join(errors))
@@ -170,24 +182,42 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> None:
         configured_runtime_env=runtime_env,
         env_mode=params["env_mode"],
         model_sources={agent: value[1] for agent, value in resolution.items()},
+        environment_kwargs=resolved_environment_kwargs,
     )
     _evaluated_source_from_options(
         params["evaluated_source_repository"],
         params["evaluated_source_revision"],
         params["evaluator_container_revision"],
     )
+    return resolved_environment_kwargs
 
 
-def _preflight_environment(params: dict[str, Any]) -> None:
+def _preflight_environment(
+    params: dict[str, Any],
+    *,
+    environment_kwargs: dict[str, str] | None = None,
+) -> None:
     """Check installed runtimes and backend configuration without an agent run."""
-    from skillevaluator.tier3.commands import parse_agents
-    from skillevaluator.tier3.harbor.runner import _check_prerequisites
+    from skillevaluator.tier3.commands import parse_agents, parse_environment_kwargs
+    from skillevaluator.tier3.harbor.runner import _check_prerequisites, _resolve_environment_kwargs
 
     # These Harbor preflights perform remote authentication RPCs. Leave those
     # probes in the execution engine instead of running them before generation.
     if params["env_mode"] in {"cwsandbox", "wandb", "langsmith"}:
         return
-    errors = _check_prerequisites(env_mode=params["env_mode"], agents=parse_agents(params["agents"]))
+    if environment_kwargs is None:
+        parsed_environment_kwargs = parse_environment_kwargs(params.get("environment_kwargs", ()))
+        resolved_environment_kwargs = _resolve_environment_kwargs(
+            params["env_mode"],
+            cli_kwargs=parsed_environment_kwargs,
+        )
+    else:
+        resolved_environment_kwargs = environment_kwargs
+    errors = _check_prerequisites(
+        env_mode=params["env_mode"],
+        agents=parse_agents(params["agents"]),
+        environment_kwargs=resolved_environment_kwargs,
+    )
     if errors:
         raise ValueError("; ".join(errors))
 
@@ -249,8 +279,8 @@ def build_tier3_workflow(evaluate_command: click.Command) -> click.Command:
             _validate_skill_root(params["skill_path"])
             params["skill_path"] = params["skill_path"].resolve()
             with _source_snapshot(params["skill_path"]) as source_path:
-                _preflight_options(source_path, params)
-                _preflight_environment(params)
+                resolved_environment_kwargs = _preflight_options(source_path, params)
+                _preflight_environment(params, environment_kwargs=resolved_environment_kwargs)
                 _prepare_dataset(params["skill_path"], source_path=source_path, progress=params["progress"])
         except ImportError as exc:
             raise click.ClickException(

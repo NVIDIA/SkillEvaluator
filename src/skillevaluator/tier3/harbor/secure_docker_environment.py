@@ -27,6 +27,15 @@ from typing import Any
 from harbor.environments.base import ExecResult
 from harbor.environments.docker.docker import DockerEnvironment, _sanitize_docker_compose_project_name
 
+from skillevaluator.provider_config import (
+    ADC_DISCOVERY_ENV_VARS,
+    CREDENTIAL_EXPIRY_ENV,
+    CREDENTIAL_SOURCE_ADC,
+    CREDENTIAL_SOURCE_ENV,
+    _get_google_access_token,
+    refresh_host_vertex_adc_environment,
+    sync_refreshed_adc_persistent_env,
+)
 from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_STDIN_SENTINEL,
     read_nvidia_build_key_from_stdin,
@@ -88,6 +97,11 @@ def _secure_exec_arguments(
 ) -> tuple[list[str], dict[str, str]]:
     """Put env names on argv and every value in the child process env."""
     subprocess_environment = _validate_environment(environment)
+    if (
+        subprocess_environment.get(CREDENTIAL_SOURCE_ENV) == CREDENTIAL_SOURCE_ADC
+        or os.environ.get(CREDENTIAL_SOURCE_ENV) == CREDENTIAL_SOURCE_ADC
+    ):
+        subprocess_environment = _host_handoff_environment(subprocess_environment)
     arguments = [part for name in subprocess_environment for part in ("-e", name)]
     return arguments, subprocess_environment
 
@@ -154,8 +168,24 @@ async def _terminate_process_tree(
 
 
 def _host_handoff_environment(environment: Mapping[str, str]) -> dict[str, str]:
-    """Resolve a private NVIDIA Build sentinel without putting its value in argv."""
+    """Resolve private credential sentinels or refresh host ADC tokens without putting values in argv."""
     resolved = _validate_environment(environment)
+    refresh_host_vertex_adc_environment(
+        resolved,
+        fallback_env=os.environ,
+        require_existing_api_key=True,
+        require_refresh=True,
+        fail_on_expired=True,
+        update_os_environ=True,
+        token_getter=_get_google_access_token,
+    )
+    for host_only_var in (CREDENTIAL_EXPIRY_ENV, *ADC_DISCOVERY_ENV_VARS):
+        if (
+            host_only_var == "GOOGLE_APPLICATION_CREDENTIALS"
+            and resolved.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1"
+        ):
+            continue
+        resolved.pop(host_only_var, None)
     if resolved.get("NVIDIA_API_KEY") == NVIDIA_BUILD_STDIN_SENTINEL:
         resolved["NVIDIA_API_KEY"] = read_nvidia_build_key_from_stdin()
         return resolved
@@ -453,6 +483,10 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
             )
 
         merged = _host_handoff_environment(merged)
+        sync_refreshed_adc_persistent_env(
+            getattr(self, "_persistent_env", None),
+            fresh_token=merged.get("OPENAI_API_KEY"),
+        )
         remote_path = f"/tmp/.skillevaluator-exec-env-{uuid.uuid4().hex}.sh"
         primary_error: BaseException | None = None
         try:

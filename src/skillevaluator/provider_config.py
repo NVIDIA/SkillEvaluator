@@ -5,18 +5,41 @@
 
 from __future__ import annotations
 
+import datetime
 import ipaddress
+import math
 import os
 import re
+import shutil
+import subprocess
+import time
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping, MutableMapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from urllib.parse import quote, unquote_to_bytes, urlsplit, urlunsplit
 
 import idna
 
-PUBLIC_NVIDIA_BUILD_BASE_URL = "https://integrate.api.nvidia.com/v1"
+CREDENTIAL_SOURCE_ADC = "ADC"
+CREDENTIAL_SOURCE_ENV = "SKILL_EVAL_LLM_CREDENTIAL_SOURCE"
+CREDENTIAL_EXPIRY_ENV = "SKILL_EVAL_LLM_CREDENTIAL_EXPIRY"
+GOOGLE_ADC_TOKEN_LIFETIME_SEC = 3600.0
+_ADC_MIN_REMAINING_LIFETIME_SEC = 30.0
+_ADC_MAX_SAFETY_MARGIN_SEC = 300.0
+_ADC_SAFETY_MARGIN_FRACTION = 0.1
+ADC_DISCOVERY_ENV_VARS: frozenset[str] = frozenset(
+    {
+        "CLOUDSDK_CONFIG",
+        "CLOUDSDK_CORE_PROJECT",
+        "GCP_PROJECT",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_PROJECT",
+    }
+)
+_ADC_TOKEN_EXPIRY_BY_TOKEN: dict[str, float] = {}
 OPENAI_BASE_URL = "https://api.openai.com/v1"
+PUBLIC_NVIDIA_BUILD_BASE_URL = "https://integrate.api.nvidia.com/v1"
 _PROVIDER_SETUP_URL = "https://docs.nvidia.com/skills/skillevaluator/configuration"
 
 # Pinned frontier chat defaults (not floating aliases like ``gpt-5`` / ``claude-opus-latest``).
@@ -106,12 +129,15 @@ class ProviderConfig:
     region: str | None = None
     credential_env: str | None = None
     base_url_env: str | None = None
+    credential_expiry: float | None = None
 
     def child_environment(self) -> dict[str, str]:
         """Return this provider's public credential settings for a child process."""
         environment: dict[str, str] = {}
-        if self.credential_env and self.api_key:
+        if self.credential_env and self.credential_env != "ADC" and self.api_key:
             environment[self.credential_env] = self.api_key
+        if self.provider == "openai" and self.api_key:
+            environment["OPENAI_API_KEY"] = self.api_key
 
         if self.base_url_env and self.base_url:
             environment[self.base_url_env] = self.base_url
@@ -125,6 +151,285 @@ class ProviderConfig:
             environment["AWS_REGION"] = self.region
 
         return environment
+
+
+def _normalize_expiry_epoch(expiry: object) -> float | None:
+    """Convert a credential expiry value into a UTC epoch timestamp."""
+    if expiry is None or isinstance(expiry, bool):
+        return None
+    if isinstance(expiry, (int, float)):
+        return float(expiry)
+    if isinstance(expiry, datetime.datetime):
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=datetime.UTC)
+        return float(expiry.timestamp())
+    if isinstance(expiry, str):
+        raw = expiry.strip()
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+        try:
+            parsed_dt = datetime.datetime.fromisoformat(raw)
+            if parsed_dt.tzinfo is None:
+                parsed_dt = parsed_dt.replace(tzinfo=datetime.UTC)
+            return float(parsed_dt.timestamp())
+        except ValueError:
+            return None
+    return None
+
+
+def get_adc_token_expiry(token: str | None) -> float | None:
+    """Return the recorded UTC epoch expiry for an ADC token, if known."""
+    if not token:
+        return None
+    return _ADC_TOKEN_EXPIRY_BY_TOKEN.get(token)
+
+
+def compute_adc_job_timeout(
+    *,
+    expiry_epoch: float | None = None,
+    now_epoch: float | None = None,
+    configured_timeout_sec: str | float | None = None,
+) -> float:
+    """Compute the maximum safe Harbor job duration for an ADC access token."""
+    now = time.time() if now_epoch is None else float(now_epoch)
+    remaining = (float(expiry_epoch) - now) if expiry_epoch is not None else GOOGLE_ADC_TOKEN_LIFETIME_SEC
+    if remaining <= _ADC_MIN_REMAINING_LIFETIME_SEC:
+        raise ValueError(
+            f"Vertex AI ADC access token has only {remaining:.1f}s remaining; "
+            "refresh credentials before running Harbor."
+        )
+    safety_margin = min(
+        _ADC_MAX_SAFETY_MARGIN_SEC,
+        max(_ADC_MIN_REMAINING_LIFETIME_SEC, _ADC_SAFETY_MARGIN_FRACTION * remaining),
+    )
+    effective_ceiling = max(1.0, remaining - safety_margin)
+    if configured_timeout_sec is not None and str(configured_timeout_sec).strip():
+        try:
+            parsed = float(str(configured_timeout_sec).strip())
+        except ValueError:
+            return effective_ceiling
+        if not math.isfinite(parsed) or parsed <= 0:
+            return effective_ceiling
+        return min(parsed, effective_ceiling)
+    return effective_ceiling
+
+
+def sync_refreshed_adc_persistent_env(
+    persistent_env: object,
+    *,
+    fresh_token: str | None,
+) -> bool:
+    """Scrub host-only ADC expiry metadata from a container _persistent_env and update OPENAI_API_KEY."""
+    if not isinstance(persistent_env, MutableMapping):
+        return False
+    persistent_env.pop(CREDENTIAL_EXPIRY_ENV, None)
+    if fresh_token and str(persistent_env.get("OPENAI_API_KEY", "")).strip():
+        persistent_env["OPENAI_API_KEY"] = fresh_token
+        return True
+    return False
+
+
+@contextmanager
+def _scoped_adc_discovery_environ(*sources: Mapping[str, str] | None) -> Iterator[None]:
+    """Temporarily populate missing ADC discovery env vars in os.environ."""
+    restorations: dict[str, str | None] = {}
+    try:
+        for key in ADC_DISCOVERY_ENV_VARS:
+            if os.environ.get(key, "").strip():
+                continue
+            for source in sources:
+                if source and (val := source.get(key, "").strip()):
+                    restorations[key] = os.environ.get(key)
+                    os.environ[key] = val
+                    break
+        yield
+    finally:
+        for key, previous in restorations.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+
+
+def _is_vertex_openapi_endpoint(base_url: str | None) -> bool:
+    """Return whether the base URL points to a Vertex AI Agent Platform OpenAPI endpoint."""
+    if not isinstance(base_url, str) or not base_url.strip():
+        return False
+    clean = base_url.strip()
+    if "\\" in clean or any(character in clean for character in ("?", "#", ";")):
+        return False
+    try:
+        endpoint = urlsplit(clean)
+        port = endpoint.port
+    except (TypeError, ValueError):
+        return False
+    if (
+        endpoint.scheme.casefold() != "https"
+        or endpoint.hostname is None
+        or endpoint.username is not None
+        or endpoint.password is not None
+        or port not in {None, 443}
+    ):
+        return False
+    host = endpoint.hostname.casefold()
+    if not re.fullmatch(r"(?:[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)?-)?aiplatform\.googleapis\.com", host):
+        return False
+    path = endpoint.path.rstrip("/")
+    return bool(re.fullmatch(r"/v1(?:beta[0-9]+)?/projects/[^/]+/locations/[^/]+/endpoints/openapi", path))
+
+
+def _parse_vertex_openapi_metadata(base_url: str) -> tuple[str | None, str | None]:
+    """Extract project ID and location from a Vertex AI OpenAPI base URL."""
+    if not isinstance(base_url, str) or not base_url.strip():
+        return None, None
+    try:
+        endpoint = urlsplit(base_url.strip())
+        match = re.search(r"/projects/([^/]+)/locations/([^/]+)/endpoints/openapi", endpoint.path)
+        if match:
+            return match.group(1), match.group(2)
+    except Exception:
+        pass
+    return None, None
+
+
+def _get_google_access_token(
+    timeout_seconds: float = 10.0,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> str | None:
+    """Acquire Google Cloud access token via google.auth or gcloud CLI."""
+    with _scoped_adc_discovery_environ(environ):
+        try:
+            import google.auth
+            import google.auth.transport.requests
+
+            credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+            request = google.auth.transport.requests.Request()
+            credentials.refresh(request)
+            if getattr(credentials, "token", None):
+                token = str(credentials.token)
+                expiry_epoch = _normalize_expiry_epoch(getattr(credentials, "expiry", None))
+                if expiry_epoch is not None:
+                    _ADC_TOKEN_EXPIRY_BY_TOKEN[token] = expiry_epoch
+                return token
+        except Exception:
+            pass
+
+        gcloud_path = shutil.which("gcloud")
+        if gcloud_path:
+            for args in (
+                [gcloud_path, "auth", "application-default", "print-access-token"],
+                [gcloud_path, "auth", "print-access-token"],
+            ):
+                try:
+                    proc = subprocess.run(
+                        args,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout_seconds,
+                        check=False,
+                        env=dict(os.environ),
+                    )
+                    if proc.returncode == 0 and proc.stdout.strip():
+                        return proc.stdout.strip()
+                except Exception:
+                    pass
+
+    return None
+
+
+def refresh_host_vertex_adc_environment(
+    env: MutableMapping[str, str],
+    *,
+    fallback_env: Mapping[str, str] | None = None,
+    base_url_override: str | None = None,
+    require_existing_api_key: bool = False,
+    require_refresh: bool = False,
+    fail_on_expired: bool = False,
+    update_os_environ: bool = False,
+    token_getter: Callable[[], str | None] | None = None,
+) -> str | None:
+    """Refresh OPENAI_API_KEY in-place when provenance is ADC and endpoint is Vertex OpenAPI."""
+    source = env.get(CREDENTIAL_SOURCE_ENV) or (fallback_env or {}).get(CREDENTIAL_SOURCE_ENV)
+    if source != CREDENTIAL_SOURCE_ADC:
+        return None
+    if require_existing_api_key and not env.get("OPENAI_API_KEY", "").strip():
+        return None
+    base_url = (
+        base_url_override
+        or env.get("OPENAI_BASE_URL")
+        or env.get("SKILL_EVAL_LLM_BASE_URL")
+        or (fallback_env or {}).get("OPENAI_BASE_URL")
+        or (fallback_env or {}).get("SKILL_EVAL_LLM_BASE_URL")
+    )
+    if not _is_vertex_openapi_endpoint(base_url):
+        return None
+    getter = token_getter or _get_google_access_token
+    with _scoped_adc_discovery_environ(env, fallback_env):
+        fresh_token = getter()
+    now = time.time()
+    if fresh_token:
+        env["OPENAI_API_KEY"] = fresh_token
+        if update_os_environ:
+            os.environ["OPENAI_API_KEY"] = fresh_token
+        expiry_epoch = get_adc_token_expiry(fresh_token)
+        if expiry_epoch is not None:
+            env[CREDENTIAL_EXPIRY_ENV] = str(expiry_epoch)
+            if update_os_environ:
+                os.environ[CREDENTIAL_EXPIRY_ENV] = str(expiry_epoch)
+            if fail_on_expired and expiry_epoch <= now:
+                raise RuntimeError("Refreshed Google ADC access token is already expired.")
+        else:
+            env.pop(CREDENTIAL_EXPIRY_ENV, None)
+            if update_os_environ:
+                os.environ.pop(CREDENTIAL_EXPIRY_ENV, None)
+        return fresh_token
+
+    if require_refresh:
+        raise RuntimeError(
+            "Failed to refresh Google ADC access token for Vertex AI OpenAPI endpoint before container execution."
+        )
+    if fail_on_expired:
+        existing_token = env.get("OPENAI_API_KEY") or (fallback_env or {}).get("OPENAI_API_KEY")
+        existing_expiry = get_adc_token_expiry(existing_token) or _normalize_expiry_epoch(
+            env.get(CREDENTIAL_EXPIRY_ENV) or (fallback_env or {}).get(CREDENTIAL_EXPIRY_ENV)
+        )
+        if existing_expiry is not None and existing_expiry <= now:
+            raise RuntimeError(
+                "Google ADC access token for Vertex AI OpenAPI endpoint has expired and token refresh failed."
+            )
+    return None
+
+
+def _build_vertex_openapi_adc_config(
+    provider: str,
+    model: str,
+    base_url: str,
+    *,
+    base_url_env: str,
+    timeout_seconds: float = 10.0,
+    environ: Mapping[str, str] | None = None,
+) -> ProviderConfig:
+    """Build a ProviderConfig using Google Application Default Credentials for Vertex OpenAPI."""
+    token = _get_google_access_token(timeout_seconds=timeout_seconds, environ=environ)
+    if not token:
+        raise ProviderConfigurationError(
+            "Vertex AI OpenAPI endpoint requires an API key or Google Application Default Credentials (ADC)."
+        )
+    return ProviderConfig(
+        provider=provider,
+        model=model,
+        api_key=token,
+        base_url=base_url,
+        litellm_model=f"openai/{model}",
+        credential_env=CREDENTIAL_SOURCE_ADC,
+        base_url_env=base_url_env,
+        credential_expiry=get_adc_token_expiry(token),
+    )
 
 
 def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderConfig:
@@ -141,13 +446,26 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
             raise ProviderConfigurationError("SKILL_EVAL_LLM_MODEL must be a non-empty string when set.")
 
     if provider == "openai":
+        base_url = (env.get("SKILL_EVAL_LLM_BASE_URL") or env.get("OPENAI_BASE_URL") or OPENAI_BASE_URL).rstrip("/")
+        api_key = env.get("OPENAI_API_KEY") or env.get("SKILL_EVAL_LLM_API_KEY")
+        if _is_vertex_openapi_endpoint(base_url) and not api_key:
+            return _build_vertex_openapi_adc_config(
+                provider=provider,
+                model=model,
+                base_url=base_url,
+                base_url_env="OPENAI_BASE_URL",
+                environ=env,
+            )
+        credential_env = "OPENAI_API_KEY" if env.get("OPENAI_API_KEY") else "SKILL_EVAL_LLM_API_KEY"
+        if not api_key:
+            raise ProviderConfigurationError("OPENAI_API_KEY or SKILL_EVAL_LLM_API_KEY is required.")
         return ProviderConfig(
             provider=provider,
             model=model,
-            api_key=_required(env, "OPENAI_API_KEY"),
-            base_url=(env.get("SKILL_EVAL_LLM_BASE_URL") or env.get("OPENAI_BASE_URL") or OPENAI_BASE_URL).rstrip("/"),
+            api_key=api_key,
+            base_url=base_url,
             litellm_model=f"openai/{model}",
-            credential_env="OPENAI_API_KEY",
+            credential_env=credential_env,
             base_url_env="OPENAI_BASE_URL",
         )
     if provider == "anthropic":
@@ -179,11 +497,21 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
             region=env.get("AWS_REGION") or "us-west-2",
         )
 
+    base_url = _required(env, "SKILL_EVAL_LLM_BASE_URL").rstrip("/")
+    api_key = env.get("SKILL_EVAL_LLM_API_KEY")
+    if _is_vertex_openapi_endpoint(base_url) and not api_key:
+        return _build_vertex_openapi_adc_config(
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            base_url_env="SKILL_EVAL_LLM_BASE_URL",
+            environ=env,
+        )
     return ProviderConfig(
         provider=provider,
         model=model,
         api_key=_required(env, "SKILL_EVAL_LLM_API_KEY"),
-        base_url=_required(env, "SKILL_EVAL_LLM_BASE_URL").rstrip("/"),
+        base_url=base_url,
         litellm_model=f"openai/{model}",
         credential_env="SKILL_EVAL_LLM_API_KEY",
         base_url_env="SKILL_EVAL_LLM_BASE_URL",

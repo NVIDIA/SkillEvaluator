@@ -46,6 +46,7 @@ def test_redact_sensitive_text_masks_unlabelled_secret_shapes() -> None:
             "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
         )
     )
+    google_access_token = "".join(("ya29.", "a0Aa4xrX", "1234567890abcdefghijklmnopqrstuvwxyz"))  # noqa: FLY002
     private_key = "\n".join(
         (
             "-----BEGIN " + "RSA PRIVATE KEY-----",
@@ -53,14 +54,16 @@ def test_redact_sensitive_text_masks_unlabelled_secret_shapes() -> None:
             "-----END " + "RSA PRIVATE KEY-----",
         )
     )
-    source = f"aws={aws_access_key}\njwt={jwt}\n{private_key}"
+    source = f"aws={aws_access_key}\njwt={jwt}\ngoogle={google_access_token}\n{private_key}"
 
     redacted = redact_sensitive_text(source)
 
     assert aws_access_key not in redacted
     assert jwt not in redacted
+    assert google_access_token not in redacted
     assert private_key not in redacted
-    assert redacted.count("<redacted>") >= 3
+    assert "ya29.<redacted>" in redacted
+    assert redacted.count("<redacted>") >= 4
 
 
 @pytest.mark.parametrize(

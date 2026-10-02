@@ -6,6 +6,22 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 3 support for Harbor GKE execution mode (`--env-mode gke`) and `--ek`
+  argument forwarding. API keys, bearer tokens, and passwords passed in `--ek`
+  keys or values are rejected to keep credentials out of process listings, while
+  configuration such as rate limits and token counts is preserved. Cluster
+  infrastructure settings in skill configs are rejected to enforce security
+  boundaries in favor of host environment variables and CLI flags.
+- Claude Code live agent routing for Google Cloud Vertex AI
+  (`CLAUDE_CODE_USE_VERTEX=1`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`),
+  with redirect-blocking preflight probes, case-insensitive model alias
+  resolution, and explicit trusted-skill opt-in (`SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1`
+  or `--ek allow_workload_identity=true`) when using single-pod GKE Workload Identity.
+- Fail-closed validation for skill-authored MCP server configurations
+  (`evals/environment/mcp_servers.toml` and `mcp_servers.json`) that blocks
+  operator/provider credential references and literal secrets, while allowing
+  operator-approved MCP endpoints and non-LLM secrets via
+  `SKILLEVALUATOR_ALLOWED_MCP_HOSTS` and `SKILLEVALUATOR_ALLOWED_MCP_SECRETS`.
 - Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for
   LLM judges in both the Harbor container verifier (`eval.py`) and host runtime
   (`LLMClient`). Features zero-dependency full jitter exponential backoff,

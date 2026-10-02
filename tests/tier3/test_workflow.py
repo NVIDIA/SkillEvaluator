@@ -608,3 +608,108 @@ def test_duplicate_agent_model_aliases_fail_before_generation(skill, configured,
     assert "same agent" in result.output
     assert not (skill / "evals").exists()
     assert not configured
+
+
+def test_gke_workflow_resolves_env_vars_and_enforces_precedence_before_preflight(
+    skill: Path,
+    configured: list,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve SKILLEVALUATOR_GKE_* env vars with CLI > env > config precedence before workflow preflight."""
+    from skillevaluator.tier3.harbor import runner
+
+    _dataset(skill)
+    (skill / "evals" / "config.yml").write_text(
+        "schema_version: 1\n"
+        "harbor:\n"
+        "  environment_kwargs:\n"
+        "    workload_profile: 'standard'\n"
+        "    custom_setting: 'from-config'\n"
+    )
+    gke_env = {
+        "SKILLEVALUATOR_GKE_CLUSTER": "env-cluster",
+        "SKILLEVALUATOR_GKE_REGION": "us-central1",
+        "SKILLEVALUATOR_GKE_NAMESPACE": "env-ns",
+        "SKILLEVALUATOR_GKE_REGISTRY_LOCATION": "us-central1",
+        "SKILLEVALUATOR_GKE_REGISTRY_NAME": "env-registry",
+    }
+    for key, value in gke_env.items():
+        monkeypatch.setenv(key, value)
+
+    captured_prereq_kwargs: list[dict[str, str]] = []
+
+    def check_gke_prereqs(*, env_mode: str, agents: list[str], environment_kwargs: dict[str, str] | None = None, **_kw):
+        del agents
+        assert env_mode == "gke"
+        resolved = dict(environment_kwargs or {})
+        captured_prereq_kwargs.append(resolved)
+        missing = runner._missing_gke_kwargs(resolved)
+        return [f"Missing required GKE kwargs: {', '.join(missing)}"] if missing else []
+
+    monkeypatch.setattr(runner, "_check_prerequisites", check_gke_prereqs)
+
+    # 1. Env-only workflow path (all five SKILLEVALUATOR_GKE_* set, no --ek)
+    result_env_only = CliRunner().invoke(
+        _command(),
+        [str(skill), "--env-mode", "gke", "--agents", "opencode", "--progress", "off"],
+    )
+    assert result_env_only.exit_code == 0, result_env_only.output
+    assert len(captured_prereq_kwargs) == 1
+    assert captured_prereq_kwargs[0] == {
+        "cluster_name": "env-cluster",
+        "region": "us-central1",
+        "namespace": "env-ns",
+        "registry_location": "us-central1",
+        "registry_name": "env-registry",
+        "workload_profile": "standard",
+        "custom_setting": "from-config",
+    }
+
+    # 2. CLI > env > config precedence
+    result_override = CliRunner().invoke(
+        _command(),
+        [
+            str(skill),
+            "--env-mode",
+            "gke",
+            "--agents",
+            "opencode",
+            "--ek",
+            "namespace=cli-ns",
+            "--ek",
+            "custom_setting=from-cli",
+            "--progress",
+            "off",
+        ],
+    )
+    assert result_override.exit_code == 0, result_override.output
+    assert len(captured_prereq_kwargs) == 2
+    assert captured_prereq_kwargs[1]["namespace"] == "cli-ns"
+    assert captured_prereq_kwargs[1]["cluster_name"] == "env-cluster"
+    assert captured_prereq_kwargs[1]["custom_setting"] == "from-cli"
+    assert captured_prereq_kwargs[1]["workload_profile"] == "standard"
+
+    # 3. Skill-authored GKE infrastructure kwargs are rejected in config.yml and stripped by _resolve_environment_kwargs
+    stripped = runner._resolve_environment_kwargs(
+        "gke",
+        config_kwargs={
+            "cluster_name": "attacker-cluster",
+            "project_id": "attacker-proj",
+            "workload_profile": "standard",
+        },
+        cli_kwargs={},
+    )
+    assert stripped["cluster_name"] == "env-cluster"
+    assert "project_id" not in stripped
+    assert stripped["workload_profile"] == "standard"
+
+    (skill / "evals" / "config.yml").write_text(
+        "schema_version: 1\nharbor:\n  environment_kwargs:\n    cluster_name: 'attacker-cluster'\n"
+    )
+    result_infra_in_config = CliRunner().invoke(
+        _command(),
+        [str(skill), "--env-mode", "gke", "--agents", "opencode", "--progress", "off"],
+    )
+    assert result_infra_in_config.exit_code != 0
+    assert "cluster_name cannot be configured in skill evals/config.yml" in result_infra_in_config.output
+    assert len(captured_prereq_kwargs) == 2

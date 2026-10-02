@@ -220,6 +220,7 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
 
     assert "mcp>=1.28.1,<2" in tier3
     assert "pyjwt[crypto]>=2.13.0" in tier3
+    assert "oauthlib>=4.0.0" in tier3
     assert "telemetry" not in extras
     assert all(
         "protobuf" not in requirement.lower() for requirements in extras.values() for requirement in requirements
@@ -229,6 +230,7 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
     )
     assert all(version >= Version("1.28.1") for version in all_lock_versions["mcp"])
     assert all(version >= Version("2.13.0") for version in all_lock_versions["pyjwt"])
+    assert all(version >= Version("4.0.0") for version in all_lock_versions["oauthlib"])
     assert "protobuf" not in all_lock_versions
     assert not any(name.startswith("opentelemetry") for name in all_lock_versions)
 

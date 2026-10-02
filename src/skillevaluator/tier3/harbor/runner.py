@@ -44,6 +44,7 @@ from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_confi
 from skillevaluator.tier3.harbor.adapter import (
     _VERIFIER_BUDGET_ENV_VARS,
     _VERIFIER_JUDGE_MODEL_ENV_VARS,
+    _VERIFIER_RETRY_ENV_VARS,
     _native_entry_id,
     _prevalidate_baseline_skill_candidates,
     build_eval_base_image,
@@ -484,7 +485,7 @@ def _provider_environment(config: ProviderConfig) -> dict[str, str]:
     environment.update(
         {
             name: value
-            for name in (_VERIFIER_JUDGE_MODEL_ENV_VARS | _VERIFIER_BUDGET_ENV_VARS)
+            for name in (_VERIFIER_JUDGE_MODEL_ENV_VARS | _VERIFIER_BUDGET_ENV_VARS | _VERIFIER_RETRY_ENV_VARS)
             if (value := os.environ.get(name, "").strip())
         }
     )

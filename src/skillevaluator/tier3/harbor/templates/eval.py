@@ -7765,8 +7765,8 @@ def check_error_recovery(tool_calls, expected_script=None):
         "error",
         "traceback",
         "exception",
-        "exit code 1",
-        "exit code 2",
+        "status=failed",
+        "status=error",
         "not found",
         "command not found",
         "permission denied",
@@ -7774,6 +7774,8 @@ def check_error_recovery(tool_calls, expected_script=None):
         "filenotfounderror",
         "modulenotfounderror",
     ]
+    # Match exit_code=N / "exit code N" for any nonzero N (not just 1/2).
+    nonzero_exit_re = re.compile(r"(?:exit_code|exit\s+code)\s*[=:]?\s*(?!0\b)(\d+)", re.IGNORECASE)
     skill_fault_kw = [
         "no such file",
         "filenotfounderror",
@@ -7787,6 +7789,8 @@ def check_error_recovery(tool_calls, expected_script=None):
 
     def _is_failure(tc):
         obs = str(tc.get("observation", "")).lower()
+        if nonzero_exit_re.search(obs):
+            return True
         return any(kw in obs for kw in error_kw)
 
     def _cmd_text(tc):

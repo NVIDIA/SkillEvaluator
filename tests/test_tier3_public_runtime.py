@@ -1501,3 +1501,27 @@ def test_verifier_401_does_not_retry_non_vertex_endpoints(monkeypatch: pytest.Mo
     assert error is not None
     assert "401" in error or "Unauthorized" in error
     assert refresh_called is False
+
+
+def test_write_task_toml_forwards_retry_env(tmp_path: Path) -> None:
+    """Verify that _write_task_toml stages LLM retry variables into [verifier.env]."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    runtime_env = {
+        "SKILL_EVAL_LLM_MAX_RETRIES": "5",
+        "SKILL_EVAL_LLM_RETRY_BASE_DELAY": "2.0",
+        "SKILL_EVAL_LLM_RETRY_MAX_DELAY": "40.0",
+        "UNRELATED_CUSTOM_VAR": "secret",
+    }
+    _write_task_toml(
+        case_dir,
+        {"id": "case-001", "expected_skill": "demo"},
+        has_skill=True,
+        runtime_env=runtime_env,
+    )
+    task = tomllib.loads((case_dir / "task.toml").read_text(encoding="utf-8"))
+    verifier_env = task["verifier"]["env"]
+    assert verifier_env["SKILL_EVAL_LLM_MAX_RETRIES"] == "${SKILL_EVAL_LLM_MAX_RETRIES}"
+    assert verifier_env["SKILL_EVAL_LLM_RETRY_BASE_DELAY"] == "${SKILL_EVAL_LLM_RETRY_BASE_DELAY}"
+    assert verifier_env["SKILL_EVAL_LLM_RETRY_MAX_DELAY"] == "${SKILL_EVAL_LLM_RETRY_MAX_DELAY}"
+    assert "UNRELATED_CUSTOM_VAR" not in verifier_env

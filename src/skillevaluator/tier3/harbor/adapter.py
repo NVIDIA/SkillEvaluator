@@ -211,6 +211,14 @@ _VERIFIER_BUDGET_ENV_VARS = frozenset(
         "SKILL_EVAL_GOAL_ACCURACY_BUDGET",
     }
 )
+_VERIFIER_RETRY_ENV_VARS = frozenset(
+    {
+        "SKILL_EVAL_LLM_JUDGE_BUDGET_SEC",
+        "SKILL_EVAL_LLM_MAX_RETRIES",
+        "SKILL_EVAL_LLM_RETRY_BASE_DELAY",
+        "SKILL_EVAL_LLM_RETRY_MAX_DELAY",
+    }
+)
 _VERIFIER_PROVIDER_ENV_VARS = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -236,6 +244,7 @@ _VERIFIER_PROVIDER_ENV_VARS = frozenset(
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         *_VERIFIER_BUDGET_ENV_VARS,
+        *_VERIFIER_RETRY_ENV_VARS,
         "SKILL_EVAL_LLM_API_KEY",
         "SKILL_EVAL_LLM_BASE_URL",
         "SKILL_EVAL_LLM_CREDENTIAL_SOURCE",
@@ -2578,10 +2587,11 @@ def _resolve_docker_source_variables(source: str, defaults: dict[str, str | None
         def _replace(match: re.Match[str]) -> str:
             nonlocal changed
             name = match.group("braced") or match.group("plain")
-            if name not in defaults or defaults[name] is None:
+            value = defaults.get(name) if name is not None else None
+            if value is None:
                 return match.group(0)
             changed = True
-            return defaults[name]
+            return value
 
         updated = _DOCKER_VARIABLE_RE.sub(_replace, resolved)
         resolved = updated
@@ -2638,7 +2648,7 @@ def _dockerfile_resolved_build_context_sources(
             raise ValueError(f"Cannot safely parse custom Dockerfile ENV: {payload}") from exc
         pairs: list[tuple[str, str]] = []
         if assignments and all("=" in assignment for assignment in assignments):
-            pairs = [tuple(assignment.split("=", 1)) for assignment in assignments]
+            pairs = [(key, val) for key, _, val in (assignment.partition("=") for assignment in assignments)]
         elif len(assignments) >= 2:
             pairs = [(assignments[0], " ".join(assignments[1:]))]
         if not pairs:
@@ -4541,15 +4551,27 @@ def _native_task_workdir(task_dir: Path, *, allow_docker_image: bool = False) ->
     return _validated_agent_workdir(workdir)
 
 
+def _toml_table_header(line: str) -> str | None:
+    """Return the normalized '[...]' or '[[...]]' header from a TOML line, or None."""
+    stripped = line.split("#", 1)[0].strip()
+    if stripped.startswith("[") and stripped.endswith("]"):
+        return stripped
+    return None
+
+
 def _ensure_native_skills_dir(task_dir: Path) -> None:
     """Pin native tasks to the evaluator-owned runtime skill projection."""
     task_toml = task_dir / "task.toml"
     content = task_toml.read_text(encoding="utf-8")
     lines = content.splitlines()
-    if "[environment]" in lines:
-        environment_index = lines.index("[environment]")
+    environment_index = next((i for i, line in enumerate(lines) if _toml_table_header(line) == "[environment]"), None)
+    if environment_index is not None:
         section_end = next(
-            (index for index in range(environment_index + 1, len(lines)) if lines[index].strip().startswith("[")),
+            (
+                index
+                for index in range(environment_index + 1, len(lines))
+                if _toml_table_header(lines[index]) is not None
+            ),
             len(lines),
         )
         if any(line.strip().startswith("skills_dir") for line in lines[environment_index + 1 : section_end]):
@@ -4560,38 +4582,76 @@ def _ensure_native_skills_dir(task_dir: Path) -> None:
     task_toml.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _merge_toml_env_table_section(
+    lines: list[str],
+    header_idx: int,
+    rendered: dict[str, str],
+    *,
+    prepend_missing: bool = False,
+) -> None:
+    """Replace colliding keys in-place inside a TOML env table section and add missing keys."""
+    idx = header_idx + 1
+    env_end = next(
+        (end_idx for end_idx in range(idx, len(lines)) if _toml_table_header(lines[end_idx]) is not None),
+        len(lines),
+    )
+    seen_keys: set[str] = set()
+    updated_section: list[str] = []
+    for line in lines[idx:env_end]:
+        stripped_line = line.strip()
+        assignment = (
+            line.split("=", 1)[0].strip() if stripped_line and not stripped_line.startswith("#") and "=" in line else ""
+        )
+        matching_key = next(
+            (key for key in rendered if assignment in {key, _toml_quote(key), f"'{key}'"}),
+            None,
+        )
+        if matching_key is not None:
+            if matching_key in seen_keys:
+                continue
+            updated_section.append(rendered[matching_key])
+            seen_keys.add(matching_key)
+        else:
+            updated_section.append(line)
+    missing_lines = [line for key, line in rendered.items() if key not in seen_keys]
+    if missing_lines:
+        if prepend_missing:
+            updated_section[0:0] = missing_lines
+        else:
+            updated_section.extend(missing_lines)
+    lines[idx:env_end] = updated_section
+
+
 def _ensure_skill_evaluator_verifier_env(task_dir: Path, *, verifier_env: dict[str, str] | None) -> None:
     """Ensure staged native tasks forward configured public provider variables."""
+    rendered = {name: f'{name} = "${{{name}}}"' for name in _verifier_env_vars(verifier_env)}
+    if not rendered:
+        return
     task_toml = task_dir / "task.toml"
     content = task_toml.read_text(encoding="utf-8")
-    env_lines = [f'{name} = "${{{name}}}"' for name in _verifier_env_vars(verifier_env)]
-    if all(line in content for line in env_lines):
-        return
+    env_lines = list(rendered.values())
 
     lines = content.splitlines()
-    if "[verifier.env]" in lines:
-        idx = lines.index("[verifier.env]") + 1
-        existing = set(lines)
-        for line in reversed(env_lines):
-            if line not in existing:
-                lines.insert(idx, line)
+    verifier_env_idx = next((i for i, line in enumerate(lines) if _toml_table_header(line) == "[verifier.env]"), None)
+    if verifier_env_idx is not None:
+        _merge_toml_env_table_section(lines, verifier_env_idx, rendered, prepend_missing=True)
         task_toml.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return
 
     env_block = ["[verifier.env]", *env_lines]
-    if "[verifier]" in lines:
-        start = lines.index("[verifier]") + 1
-        insert_at = len(lines)
-        for idx in range(start, len(lines)):
-            line = lines[idx].strip()
-            if line.startswith("[") and line.endswith("]"):
-                insert_at = idx
-                break
+    verifier_idx = next((i for i, line in enumerate(lines) if _toml_table_header(line) == "[verifier]"), None)
+    if verifier_idx is not None:
+        start = verifier_idx + 1
+        insert_at = next(
+            (idx for idx in range(start, len(lines)) if _toml_table_header(lines[idx]) is not None),
+            len(lines),
+        )
         lines[insert_at:insert_at] = ["", *env_block]
         task_toml.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return
 
-    insert_at = lines.index("[environment]") if "[environment]" in lines else len(lines)
+    env_table_idx = next((i for i, line in enumerate(lines) if _toml_table_header(line) == "[environment]"), None)
+    insert_at = env_table_idx if env_table_idx is not None else len(lines)
     lines[insert_at:insert_at] = [
         "[verifier]",
         f"timeout_sec = {DEFAULT_LLM_VERIFIER_TIMEOUT_SEC}",
@@ -4604,20 +4664,21 @@ def _ensure_skill_evaluator_verifier_env(task_dir: Path, *, verifier_env: dict[s
 
 def _insert_table_block(lines: list[str], anchor: str, block: list[str]) -> None:
     """Insert a TOML table block after *anchor* and before the next table."""
-    if anchor not in lines:
+    anchor_idx = next((i for i, line in enumerate(lines) if _toml_table_header(line) == anchor), None)
+    if anchor_idx is None:
         lines.extend(["", anchor])
-    start = lines.index(anchor) + 1
-    insert_at = len(lines)
-    for idx in range(start, len(lines)):
-        stripped = lines[idx].strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            insert_at = idx
-            break
+        anchor_idx = len(lines) - 1
+    start = anchor_idx + 1
+    insert_at = next(
+        (idx for idx in range(start, len(lines)) if _toml_table_header(lines[idx]) is not None),
+        len(lines),
+    )
     prefix = [] if insert_at == 0 or (insert_at > 0 and lines[insert_at - 1] == "") else [""]
     lines[insert_at:insert_at] = [*prefix, *block]
 
 
 def _ensure_environment_env(task_dir: Path, runtime_env: dict[str, str]) -> None:
+    """Ensure staged native tasks populate [environment.env] with runtime environment variables."""
     runtime_env = {**runtime_env, **_EVALUATOR_MANAGED_RUNTIME_ENV}
 
     task_toml = task_dir / "task.toml"
@@ -4625,33 +4686,9 @@ def _ensure_environment_env(task_dir: Path, runtime_env: dict[str, str]) -> None
     header = "[environment.env]"
     rendered = {key: f"{_toml_quote(key)} = {_toml_quote(runtime_env[key])}" for key in sorted(runtime_env)}
     env_lines = list(rendered.values())
-    if header in lines:
-        idx = lines.index(header) + 1
-        env_end = len(lines)
-        for end_idx in range(idx, len(lines)):
-            stripped = lines[end_idx].strip()
-            if stripped.startswith("[") and stripped.endswith("]"):
-                env_end = end_idx
-                break
-        seen_keys: set[str] = set()
-        updated_section: list[str] = []
-        for line in lines[idx:env_end]:
-            assignment = line.split("=", 1)[0].strip() if line.strip() and "=" in line else ""
-            matching_key = next(
-                (key for key in runtime_env if assignment in {key, _toml_quote(key)}),
-                None,
-            )
-            if matching_key is not None:
-                if matching_key in seen_keys:
-                    continue
-                updated_section.append(rendered[matching_key])
-                seen_keys.add(matching_key)
-            else:
-                updated_section.append(line)
-        for key, line in rendered.items():
-            if key not in seen_keys:
-                updated_section.append(line)
-        lines[idx:env_end] = updated_section
+    header_idx = next((i for i, line in enumerate(lines) if _toml_table_header(line) == header), None)
+    if header_idx is not None:
+        _merge_toml_env_table_section(lines, header_idx, rendered, prepend_missing=False)
         task_toml.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return
 

@@ -14,13 +14,14 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-DOC_PREFIXES = (b"docs/", b"fern/")
+DOC_PREFIXES = (b"docs/",)
+DOC_FILES = frozenset({b"fern/docs.yml"})
 KNOWN_STATUSES = frozenset(b"ACDMRTUXB")
 
 
 def is_docs_only(paths: Sequence[bytes]) -> bool:
     """Return whether every changed path belongs to published documentation."""
-    return bool(paths) and all(path.startswith(DOC_PREFIXES) for path in paths)
+    return bool(paths) and all(path.startswith(DOC_PREFIXES) or path in DOC_FILES for path in paths)
 
 
 def parse_name_status_z(payload: bytes) -> list[bytes]:

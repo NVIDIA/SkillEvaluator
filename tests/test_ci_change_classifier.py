@@ -42,7 +42,11 @@ def git_repo(tmp_path: Path) -> tuple[Path, str]:
     ("paths", "expected"),
     [
         ([b"docs/index.mdx"], True),
-        ([b"fern/fern.config.json"], True),
+        ([b"fern/fern.config.json"], False),
+        ([b"fern/package.json"], False),
+        ([b"fern/package-lock.json"], False),
+        ([b"fern/new-config.yml"], False),
+        ([b"docs/index.mdx", b"fern/package-lock.json"], False),
         ([b"fern/docs.yml", b"docs/assets/logo.svg"], True),
         ([b"docs"], False),
         ([b"fern"], False),

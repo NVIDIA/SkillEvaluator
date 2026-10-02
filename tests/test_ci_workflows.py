@@ -336,9 +336,14 @@ def test_every_workflow_declares_explicit_permissions() -> None:
 # fail closed on any npm mention this parser cannot resolve to a plain
 # invocation, because a guard that silently sees nothing is worse than one that
 # is noisy.
+#
+# A mention is npm as a whole word, so `pnpm`, `npm-cache` and `--no-npm` stay
+# quiet. Inside `${...}`, though, `-`, `=`, `+`, `?` and `/` are the parameter
+# expansion operators that open a word the shell substitutes -- `${UNSET:-npm}
+# install` runs npm -- so inside the braces they delimit npm too.
 NPM_EXECUTABLE = re.compile(r"^(?:.*[/\\])?npm(?:\.cmd|\.exe|\.ps1)?$", re.IGNORECASE)
 NPM_MENTION = re.compile(
-    r"""(?:^|[\s'"`(;&|=])(?:[\w./\\-]*[/\\])?npm(?:\.cmd|\.exe|\.ps1)?(?=$|[\s'"`);&|])""",
+    r"""(?:^|[\s'"`(;&|=]|\$\{[^}]*?[-=+?/])(?:[\w./\\-]*[/\\])?npm(?:\.cmd|\.exe|\.ps1)?(?=$|[\s'"`);&|}])""",
     re.IGNORECASE,
 )
 SHELL_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -490,6 +495,7 @@ def test_npm_commands_ignores_npm_outside_a_command() -> None:
     assert _npm_commands("# npm install is what this step replaces") == []
     assert _npm_commands("uv run pytest") == []
     assert _npm_commands("echo 'no npm-cache here' > /dev/null") == []
+    assert _npm_commands('echo "${NPM_TOKEN}" "${NPM_CONFIG_CACHE:-$HOME/.npm}" ${PM:-pnpm}') == []
 
 
 def test_npm_commands_fails_closed_on_forms_it_cannot_classify() -> None:
@@ -509,6 +515,30 @@ def test_npm_commands_fails_closed_on_forms_it_cannot_classify() -> None:
 @pytest.mark.parametrize(
     "run",
     [
+        'NPM_BIN=${UNSET:-npm}; "$NPM_BIN" install',
+        "${UNSET:-npm} install",
+        '"${UNSET:-npm}" install',
+        "${UNSET-npm} install",
+        "${UNSET:=npm} install",
+        "${UNSET=npm} install",
+        "${SET:+npm} install",
+        "${UNSET:-/usr/bin/npm} install",
+        "${PM/p/npm} install",
+    ],
+)
+def test_npm_commands_fails_closed_on_npm_chosen_by_parameter_expansion(run: str) -> None:
+    """With ``UNSET`` unset, Bash runs ``${UNSET:-npm} install`` as ``npm install``.
+
+    Which word the expansion yields depends on the runner's environment, so
+    the guard cannot classify it -- and must say so rather than see nothing.
+    """
+    with pytest.raises(AssertionError, match="cannot classify"):
+        _npm_commands(run)
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
         "npm install --package-lock-only --ignore-scripts",
         "npm ci --ignore-scripts --omit=optional",
         "npm ci --prefix fern --ignore-scripts --omit=optional --no-omit",
@@ -516,6 +546,7 @@ def test_npm_commands_fails_closed_on_forms_it_cannot_classify() -> None:
         "npm ci -- --ignore-scripts",
         "npm ci --prefix fern --ignore-scripts --no-ignore-s --omit=optional",
         "npm cit --prefix fern --ignore-scripts --omit=optional",
+        'NPM_BIN=${UNSET:-npm}; "$NPM_BIN" install',
     ],
 )
 def test_unreviewed_npm_commands_fail_the_workflow_guard(

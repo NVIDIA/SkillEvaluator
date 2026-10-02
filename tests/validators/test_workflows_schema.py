@@ -169,6 +169,27 @@ metadata:
         assert result.passed, f"Expected validation to pass. Errors: {result.errors}"
         assert any("fastapi-setup" in msg.lower() for msg in result.messages)
 
+    @pytest.mark.parametrize("relative_path", ["workflow-rules.mdc", "references/api-design.mdc"])
+    def test_non_string_frontmatter_key_returns_validation_error(self, validator, valid_workflow_dir, relative_path):
+        manifest = valid_workflow_dir / relative_path
+        content = manifest.read_text()
+        manifest.write_text(content.replace("---\n", "---\n123: extra value\n", 1))
+
+        result = validator.validate(valid_workflow_dir)
+
+        assert not result.passed
+        assert any("Keys should be strings" in error for error in result.errors)
+
+    def test_non_string_metadata_key_returns_validation_error(self, validator, valid_workflow_dir):
+        manifest = valid_workflow_dir / "workflow-rules.mdc"
+        content = manifest.read_text()
+        manifest.write_text(content.replace("metadata:\n", "metadata:\n  123: extra value\n", 1))
+
+        result = validator.validate(valid_workflow_dir)
+
+        assert not result.passed
+        assert any("metadata" in error and "Keys should be strings" in error for error in result.errors)
+
     def test_validate_missing_readme(self, validator: WorkflowsSchemaValidator, incomplete_workflow_dir: Path):
         """Test validation fails when README.md is missing."""
         result = validator.validate(incomplete_workflow_dir)

@@ -25,6 +25,14 @@ All notable changes to SkillEvaluator are documented in this file.
   RAGAS goal scorer retains its separate scoring path.
 - Configurable evidence bundle budgets (`SKILL_EVAL_ACCURACY_BUDGET`, `SKILL_EVAL_GOAL_ACCURACY_BUDGET`, `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`) and final response limit (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`).
 
+### Fixed
+
+- Tier 3 Harbor dual-arm evaluation propagates arm suffixes (`-with-skill`,
+  `-without-skill`) to `[task] name` in staged native `task.toml` files,
+  normalizes external repository and namespace prefixes, and commutatively
+  resolves canonical case IDs across attempt and arm suffix combinations
+  while preserving expected case IDs.
+
 ## 0.4.0 - 2026-09-30
 
 ### Fixed

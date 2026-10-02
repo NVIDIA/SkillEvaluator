@@ -245,6 +245,69 @@ def test_provider_environment_forwards_each_host_judge_model_override(
     assert environment.get(name) == expected
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "SKILL_EVAL_LLM_MAX_RETRIES",
+        "SKILL_EVAL_LLM_RETRY_BASE_DELAY",
+        "SKILL_EVAL_LLM_RETRY_MAX_DELAY",
+    ],
+)
+@pytest.mark.parametrize("provider_name", ["openai", "openai-compatible", "anthropic", "bedrock", "nv_build"])
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("0", "0"),
+        ("  0.25  ", "0.25"),
+        ("", None),
+        ("   ", None),
+    ],
+)
+def test_provider_environment_forwards_each_host_retry_override(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    provider_name: str,
+    configured: str,
+    expected: str | None,
+) -> None:
+    """Verify _provider_environment forwards stripped host retry settings and omits blank values."""
+    monkeypatch.setattr(runner.os, "environ", {name: configured})
+
+    environment = runner._provider_environment(_provider(provider_name))
+
+    assert environment.get(name) == expected
+
+
+def test_resolve_agent_runtime_plan_retains_retry_settings_in_subprocess_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify _resolve_agent_runtime_plan forwards host retry settings to Harbor subprocess_env."""
+    monkeypatch.setattr(
+        runner.os,
+        "environ",
+        {
+            "PATH": "/usr/bin",
+            "SKILL_EVAL_LLM_MAX_RETRIES": "0",
+            "SKILL_EVAL_LLM_RETRY_BASE_DELAY": "0.1",
+            "SKILL_EVAL_LLM_RETRY_MAX_DELAY": "0.5",
+        },
+    )
+
+    plans = runner._resolve_agent_runtime_plan(
+        provider=_provider("openai"),
+        agents=["codex"],
+        models={"codex": "gpt-4o-mini"},
+        configured_runtime_env={},
+        env_mode="docker",
+    )
+
+    subprocess_env = plans["codex"].subprocess_env
+    assert subprocess_env["SKILL_EVAL_LLM_MAX_RETRIES"] == "0"
+    assert subprocess_env["SKILL_EVAL_LLM_RETRY_BASE_DELAY"] == "0.1"
+    assert subprocess_env["SKILL_EVAL_LLM_RETRY_MAX_DELAY"] == "0.5"
+    assert "SKILL_EVAL_LLM_MAX_RETRIES" not in plans["codex"].staged_env
+
+
 @pytest.mark.parametrize("source_name", ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"])
 def test_runtime_env_rejects_operator_owned_windows_style_variable_references(
     monkeypatch: pytest.MonkeyPatch,

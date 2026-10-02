@@ -653,6 +653,23 @@ def test_template_native_openai_gpt5_payload_matches_eval_core(model):
     assert "max_tokens" not in template_payload
 
 
+def test_template_schema_and_payload_match_eval_core():
+    assert eval_template.ACCURACY_JSON_SCHEMA == llm_judge.ACCURACY_JSON_SCHEMA
+    assert eval_template.GOAL_ACCURACY_JSON_SCHEMA == llm_judge.GOAL_ACCURACY_JSON_SCHEMA
+    assert eval_template.BEHAVIOR_CHECK_JSON_SCHEMA == llm_judge.BEHAVIOR_CHECK_JSON_SCHEMA
+    kwargs = {
+        "model": "gpt-4o",
+        "prompt": "Judge this response",
+        "max_tokens": 512,
+        "temperature": 0.0,
+        "provider": "openai",
+        "request_url": llm_judge.OPENAI_CHAT_URL,
+        "response_schema": llm_judge.ACCURACY_JSON_SCHEMA,
+        "schema_name": "accuracy_judgment",
+    }
+    assert eval_template._chat_completion_payload(**kwargs) == llm_judge._chat_completion_payload(**kwargs)
+
+
 def test_template_salvage_score_matches_eval_core_on_partial_recovery(monkeypatch):
     # Drift guard for the salvage denominator fix: 3 salvaged of 7 expected
     # must score 3/7 in BOTH the shared judge and the in-sandbox template.

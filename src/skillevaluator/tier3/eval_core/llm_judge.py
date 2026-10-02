@@ -209,6 +209,8 @@ def _chat_completion_payload(
     temperature: float,
     provider: str | None = None,
     request_url: str | None = None,
+    response_schema: dict[str, Any] | None = None,
+    schema_name: str = "judge_response",
 ) -> dict[str, Any]:
     resolved_provider = _provider() if provider is None else provider
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
@@ -226,6 +228,10 @@ def _chat_completion_payload(
     }
     if temperature is not None and _supports_custom_temperature(model):
         payload["temperature"] = temperature
+    if response_schema is not None:
+        from skillevaluator.inference.client import _build_openai_response_format
+
+        payload["response_format"] = _build_openai_response_format(response_schema, schema_name)
     return payload
 
 
@@ -238,6 +244,8 @@ def call_public_llm(
     temperature: float = 0.0,
     timeout: int = 60,
     allow_model_fallback: bool = True,
+    response_schema: dict[str, Any] | None = None,
+    schema_name: str = "judge_response",
 ) -> tuple[str | None, str | None]:
     """Call the configured public provider through the shared client.
 
@@ -255,7 +263,15 @@ def call_public_llm(
             max_tokens=max_tokens,
             temperature=temperature,
         )
-        return client.completions("You are a precise evaluation judge.", prompt), None
+        return (
+            client.completions(
+                "You are a precise evaluation judge.",
+                prompt,
+                response_schema=response_schema,
+                schema_name=schema_name,
+            ),
+            None,
+        )
     except EmptyLLMResponseError:
         return "", None
     except Exception as exc:
@@ -608,6 +624,7 @@ def _call_validated_json_judge(
     extract: Any,
     **call_kwargs: Any,
 ) -> tuple[Any, str | None, dict[str, Any]]:
+    """Invoke a JSON judge with one format-correction retry when payload validation fails."""
     call_kwargs.setdefault("max_tokens", STRUCTURED_JUDGE_MAX_TOKENS)
 
     def invoke(call_prompt: str) -> tuple[Any, str | None, dict[str, Any], str | None]:
@@ -635,8 +652,72 @@ def _call_validated_json_judge(
 # Accuracy judge (5-criterion)
 # ---------------------------------------------------------------------------
 
+ACCURACY_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "criteria": {
+            "type": "object",
+            "properties": {
+                "SKILL_IDENTIFIED": {"type": "boolean"},
+                "ACTION_CORRECT": {"type": "boolean"},
+                "FACTUALLY_ACCURATE": {"type": "boolean"},
+                "TASK_ADDRESSED": {"type": "boolean"},
+                "ACTIONABLE": {"type": "boolean"},
+            },
+            "required": [
+                "SKILL_IDENTIFIED",
+                "ACTION_CORRECT",
+                "FACTUALLY_ACCURATE",
+                "TASK_ADDRESSED",
+                "ACTIONABLE",
+            ],
+            "additionalProperties": False,
+        },
+        "score": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["criteria", "score", "reason"],
+    "additionalProperties": False,
+}
+
+GOAL_ACCURACY_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "user_goal": {"type": "string"},
+        "end_state": {"type": "string"},
+        "achieved": {"type": "boolean"},
+        "score": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["user_goal", "end_state", "achieved", "score", "reason"],
+    "additionalProperties": False,
+}
+
+BEHAVIOR_CHECK_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "step": {"type": "integer"},
+                    "passed": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["step", "passed", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        "score": {"type": "number"},
+        "summary": {"type": "string"},
+    },
+    "required": ["results", "score", "summary"],
+    "additionalProperties": False,
+}
+
 ACCURACY_PROMPT = """You are an expert evaluator for AI agent responses. Evaluate by checking \
-each criterion below against the expected answer. For each, answer YES or NO.
+each criterion below against the expected answer. For each criterion, determine true (satisfied) or false (not satisfied).
 
 1. SKILL_IDENTIFIED: Does the response reference or use the correct skill for the task?
 2. ACTION_CORRECT: Does the response describe or execute the correct actions/scripts?
@@ -644,8 +725,7 @@ each criterion below against the expected answer. For each, answer YES or NO.
 4. TASK_ADDRESSED: Does the response directly address the user's request?
 5. ACTIONABLE: Does the response provide actionable information (not just acknowledgment)?
 
-For each criterion write: YES or NO with a brief reason.
-Then compute score = count(YES) / 5.
+Compute score = count(true) / 5.
 Be lenient on exact wording but strict on factual correctness.
 
 Respond with ONLY a JSON object:
@@ -674,6 +754,7 @@ _ACCURACY_CRITERIA_KEYS = frozenset(
 
 
 def _valid_accuracy_criteria(value: Any) -> bool:
+    """Return True when value is a complete 5-criterion boolean mapping."""
     return (
         isinstance(value, dict)
         and value.keys() == _ACCURACY_CRITERIA_KEYS
@@ -682,6 +763,7 @@ def _valid_accuracy_criteria(value: Any) -> bool:
 
 
 def _accuracy_payload_error(parsed: Any) -> str | None:
+    """Validate a parsed accuracy judge payload and return an error message if malformed."""
     if not isinstance(parsed, dict):
         return "Judge response was not a valid JSON object"
     if "reason" in parsed and not isinstance(parsed["reason"], str):
@@ -710,6 +792,8 @@ def judge_accuracy(
         ground_truth=ground_truth,
         agent_text=agent_text,
     )
+    kwargs.setdefault("response_schema", ACCURACY_JSON_SCHEMA)
+    kwargs.setdefault("schema_name", "accuracy_judgment")
 
     parsed, error, _provenance = _call_validated_json_judge(
         prompt,
@@ -769,6 +853,7 @@ Respond with ONLY a JSON object:
 
 
 def _goal_payload_error(parsed: Any) -> str | None:
+    """Validate a parsed goal-accuracy judge payload and return an error message if malformed."""
     if not isinstance(parsed, dict):
         return "Judge response was not a valid JSON object"
     for field in ("reason", "user_goal", "end_state"):
@@ -798,6 +883,8 @@ def judge_goal_accuracy(
         tool_summary=tool_summary,
         agent_text=agent_text,
     )
+    kwargs.setdefault("response_schema", GOAL_ACCURACY_JSON_SCHEMA)
+    kwargs.setdefault("schema_name", "goal_accuracy_judgment")
 
     parsed, error, _provenance = _call_validated_json_judge(
         prompt,
@@ -840,7 +927,7 @@ CONVERSATION:
 EXPECTED BEHAVIORS:
 {behaviors}
 
-For each behavior, respond YES (observed) or NO (not observed) with a brief reason.
+For each behavior, set "passed" to true (observed) or false (not observed) with a brief reason.
 
 Respond with ONLY a JSON object:
 {{"results": [{{"step": 1, "passed": true/false, "reason": "..."}}, ...], \
@@ -959,12 +1046,15 @@ def judge_behavior_check(
         behaviors=behaviors_text,
     )
     kwargs.setdefault("max_tokens", BEHAVIOR_JUDGE_MAX_TOKENS)
+    kwargs.setdefault("response_schema", BEHAVIOR_CHECK_JSON_SCHEMA)
+    kwargs.setdefault("schema_name", "behavior_check_judgment")
 
     content, error = call_public_llm(prompt, **kwargs)
     if error:
         return _judge_error(f"LLM judge error: {error}", results=[])
 
-    def _parse_judge_object(text: str) -> dict[str, Any] | list[Any] | None:
+    def _parse_judge_object(text: str | None) -> dict[str, Any] | list[Any] | None:
+        """Parse a JSON object or list from judge response text."""
         return _extract_json(text) if text else None
 
     parsed = _parse_judge_object(content)

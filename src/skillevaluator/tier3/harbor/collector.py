@@ -1934,6 +1934,10 @@ def _resolve_harbor_result_entry_id(
 
     if fallback_dir_name and task_entry_id_map and fallback_dir_name in task_entry_id_map:
         return task_entry_id_map[fallback_dir_name], True
+    # The task directory is canonical; repository-prefixed task names are only a
+    # fallback when Harbor omits the task path.
+    if fallback_dir_name:
+        return fallback_dir_name, False
 
     task_name = result.get("task_name")
     if isinstance(task_name, str) and task_name.strip():
@@ -1960,9 +1964,7 @@ def _resolve_harbor_result_entry_id(
                 return attempt_stripped_short.removesuffix(arm_suffix), False
         return short_raw, False
 
-    if fallback_dir_name and task_entry_id_map and fallback_dir_name in task_entry_id_map:
-        return task_entry_id_map[fallback_dir_name], True
-    return fallback_dir_name, False
+    return "", False
 
 
 def _entry_id_from_harbor_result(

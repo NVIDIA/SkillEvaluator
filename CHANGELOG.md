@@ -24,6 +24,17 @@ All notable changes to SkillEvaluator are documented in this file.
   missing `message` fields on reasoning token exhaustion. The canonical OpenAI
   RAGAS goal scorer retains its separate scoring path.
 - Configurable evidence bundle budgets (`SKILL_EVAL_ACCURACY_BUDGET`, `SKILL_EVAL_GOAL_ACCURACY_BUDGET`, `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`) and final response limit (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`).
+- Tier 3 log converters now rebuild ATIF trajectories from OpenCode JSON streams
+  (`opencode.txt`) and structured Codex tee logs (`codex.txt`) when
+  `trajectory.json` is missing or empty.
+
+### Fixed
+
+- Harbor ``result.json`` case ids now prefer canonical ``task_id.path`` metadata
+  over repository-prefixed ``task_name`` values when resolving eval entries.
+- Codex log synthesis maps ``web_search`` action payloads and ``collab_tool_call``
+  thread items into ATIF, and error-recovery checks recognize ``status=failed`` /
+  ``exit_code=`` terminal evidence emitted by Codex converters.
 
 ### Fixed
 

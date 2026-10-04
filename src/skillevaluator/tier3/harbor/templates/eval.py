@@ -2495,13 +2495,16 @@ def _parse_retry_after(header_value, fallback_delay):
     except ValueError:
         pass
     try:
-        from datetime import UTC, datetime
+        # ``timezone.utc``, not ``datetime.UTC``: the verifier also runs on
+        # Python 3.9/3.10 task images, where ``UTC`` does not exist and the
+        # ImportError would silently turn every HTTP date into the fallback.
+        from datetime import datetime, timezone
         from email.utils import parsedate_to_datetime
 
         target = parsedate_to_datetime(clean_val)
         if target.tzinfo is None:
-            target = target.replace(tzinfo=UTC)
-        now = datetime.now(UTC)
+            target = target.replace(tzinfo=timezone.utc)  # noqa: UP017 -- Python 3.9 task images
+        now = datetime.now(timezone.utc)  # noqa: UP017 -- Python 3.9 task images
         return max(0.0, (target - now).total_seconds())
     except Exception:
         return fallback_delay

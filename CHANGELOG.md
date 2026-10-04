@@ -214,6 +214,9 @@ All notable changes to SkillEvaluator are documented in this file.
   structured-output check reads it. `LLM_JUDGE_FALLBACK_MODELS` again switches
   models on a 400/422 "invalid model" error, and the judge error shows the
   provider's message instead of only `HTTP 400: Bad Request`.
+- The Harbor verifier honors a `Retry-After` HTTP date on Python 3.9 and 3.10
+  task images. It used to fall back to the 1-second base delay there, and a date
+  past `SKILL_EVAL_LLM_RETRY_MAX_DELAY` did not fail fast.
 - Plugin signals and in-agent MCP proof map native MCP tool names (Claude Code `mcp__plugin_<plugin>_<server>__<tool>`, OpenCode `<server>_<tool>`, Hermes `mcp_<server>_<tool>`, Codex bare names via its session log) to the declared server, and never credit one server's calls to a similarly named one.
 - Plugin signals count Claude Code `Skill(<plugin>:<command>)` calls as command activations, credit every SKILL.md in a chained shell read, and no longer mark a skill read as failed because the skill text says something is "not available".
 - The Harbor verifier matches Claude Code native `<plugin>:<skill>` names exactly and keeps `<plugin>:<command>` calls out of skill activation and routing grades.

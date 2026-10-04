@@ -116,6 +116,22 @@ def test_parse_retry_after_naive_date() -> None:
     assert result == 0.0
 
 
+def test_verifier_parses_an_http_date_retry_after_without_datetime_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify the verifier honors an HTTP-date Retry-After on Python 3.9/3.10 task images (no ``datetime.UTC``)."""
+    import datetime as datetime_module
+
+    verifier = load_harbor_eval_template("harbor_template_retry_after_http_date")
+    soon = format_datetime(datetime.now(UTC) + timedelta(seconds=20), usegmt=True)
+    far = format_datetime(datetime.now(UTC) + timedelta(hours=1), usegmt=True)
+    monkeypatch.delattr(datetime_module, "UTC")
+
+    assert 18.0 <= verifier._parse_retry_after(soon, fallback_delay=1.0) <= 21.0
+    # A date past SKILL_EVAL_LLM_RETRY_MAX_DELAY still fails fast instead of becoming the 1 s fallback.
+    error = urllib.error.HTTPError("https://judge.invalid/v1", 429, "Too Many Requests", hdrs=_http_headers(), fp=None)
+    with pytest.raises(urllib.error.HTTPError):
+        verifier._compute_bounded_retry_delay(far, attempt=0, base_delay=1.0, max_delay=30.0, error=error)
+
+
 @pytest.mark.parametrize("attempt", [0, 1, 2, 3, 5, 10])
 def test_calculate_full_jitter_delay_bounds(attempt: int) -> None:
     """Verify calculate_full_jitter_delay generates non-negative values bounded by backoff."""

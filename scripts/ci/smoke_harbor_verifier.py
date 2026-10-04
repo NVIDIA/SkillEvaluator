@@ -7,9 +7,10 @@ The Harbor verifier (``eval.py`` and the helpers staged beside it) runs with
 the task image's ``python3``, which can be older than the Python
 SkillEvaluator needs. Compiling the files only catches syntax; this script
 also runs code that uses newer runtime features (``zip(strict=)``,
-``isinstance(x, A | B)``): the canary check, the judge retry test, the
-judge evidence builders, the custom grader's reward helpers, and the dataset
-metric.
+``isinstance(x, A | B)``, ``datetime.UTC``) or old-Python internals: the
+canary check, the judge retry test, HTTP-date ``Retry-After`` parsing, the
+400 error body kept after the structured-output check, the judge evidence
+builders, the custom grader's reward helpers, and the dataset metric.
 
 Usage: ``python -I scripts/ci/smoke_harbor_verifier.py [STAGED_TESTS_DIR]``.
 Without a directory, the files are copied from this source tree first. The
@@ -18,14 +19,17 @@ interpreter needs ``idna`` (the verifier image installs it).
 
 from __future__ import annotations
 
+import email.utils
 import http.client
 import importlib.util
+import io
 import os
 import shutil
 import socket
 import ssl
 import sys
 import tempfile
+import time
 import urllib.error
 from pathlib import Path
 
@@ -79,6 +83,16 @@ def smoke(staged: Path) -> None:
         (ValueError(), False),
     ):
         _expect(f"transient {type(error).__name__}", verifier._is_transient_judge_error(error), transient)
+    # An HTTP-date Retry-After; ``datetime.UTC`` would not exist on Python 3.9/3.10.
+    retry_at = email.utils.formatdate(time.time() + 120, usegmt=True)
+    _expect("HTTP-date Retry-After", 100.0 <= verifier._parse_retry_after(retry_at, 1.0) <= 121.0, True)
+    # The structured-output check reads a 400 body; the error report and model fallback must still see it.
+    body = b'{"error": {"message": "invalid model: judge-model"}}'
+    error = urllib.error.HTTPError("https://judge.invalid/v1", 400, "Bad Request", None, io.BytesIO(body))
+    _expect("schema check on an unrelated 400", verifier._is_schema_unsupported_http_error(error), False)
+    detail, try_fallback = verifier._format_http_error_with_fallback(error)
+    _expect("400 body kept after the schema check", "invalid model: judge-model" in detail, True)
+    _expect("400 invalid model tries the fallback model", try_fallback, True)
 
     patch = "*** Begin Patch\n*** Add File: /workspace/NOTE.md\n" + "+line\n" * 400 + "+-- reviewed\n*** End Patch"
     call = {"tool_call_id": "p", "function_name": "apply_patch", "arguments": {"patchText": patch}}

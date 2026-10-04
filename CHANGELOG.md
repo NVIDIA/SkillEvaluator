@@ -208,6 +208,10 @@ All notable changes to SkillEvaluator are documented in this file.
   response body cut short (`IncompleteRead`), and never retries a failed TLS
   certificate check or a URL error that is not a network failure. The host
   `LLMClient` retries the same HTTP statuses.
+- A judge HTTP 400 or 422 keeps the provider's error body after the
+  structured-output check reads it. `LLM_JUDGE_FALLBACK_MODELS` again switches
+  models on a 400/422 "invalid model" error, and the judge error shows the
+  provider's message instead of only `HTTP 400: Bad Request`.
 - Plugin signals and in-agent MCP proof map native MCP tool names (Claude Code `mcp__plugin_<plugin>_<server>__<tool>`, OpenCode `<server>_<tool>`, Hermes `mcp_<server>_<tool>`, Codex bare names via its session log) to the declared server, and never credit one server's calls to a similarly named one.
 - Plugin signals count Claude Code `Skill(<plugin>:<command>)` calls as command activations, credit every SKILL.md in a chained shell read, and no longer mark a skill read as failed because the skill text says something is "not available".
 - The Harbor verifier matches Claude Code native `<plugin>:<skill>` names exactly and keeps `<plugin>:<command>` calls out of skill activation and routing grades.

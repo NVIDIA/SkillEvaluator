@@ -18,6 +18,7 @@ provider-native credential. Importing this module never requires a key.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -191,6 +192,22 @@ def _message_rejects_schema_option(text: str, param: str | None = None) -> bool:
     return bool(_SCHEMA_REJECTION_AFTER_OPTION.search(text) or _SCHEMA_REJECTION_BEFORE_OPTION.search(text))
 
 
+def _peek_http_error_body(error: urllib.error.HTTPError) -> bytes:
+    """Read an HTTPError body and leave it readable for the next ``error.read()``.
+
+    ``HTTPError.read`` goes through a tempfile wrapper that reads ``error.file``
+    and caches the bound ``read`` method, so swapping ``error.fp`` alone leaves
+    later readers with ``b""``. The Harbor verifier template keeps the same
+    helper.
+    """
+    body = error.read()
+    replacement = io.BytesIO(body)
+    error.fp = replacement
+    error.file = replacement
+    error.__dict__.pop("read", None)
+    return body
+
+
 def _is_schema_unsupported_error(exc: Exception) -> bool:
     """Determine whether an exception indicates structured output schema is unsupported."""
     status_code = getattr(exc, "status_code", None)
@@ -225,12 +242,8 @@ def _is_schema_unsupported_error(exc: Exception) -> bool:
             parts.append(text)
 
     if isinstance(exc, urllib.error.HTTPError):
-        try:
-            body_bytes = exc.read()
-            exc.fp = io.BytesIO(body_bytes)
-            parts.append(body_bytes.decode("utf-8", "replace"))
-        except Exception:
-            pass
+        with contextlib.suppress(Exception):
+            parts.append(_peek_http_error_body(exc).decode("utf-8", "replace"))
 
     full_text = " ".join(part for part in parts if part)
     return _message_rejects_schema_option(full_text, error_param)

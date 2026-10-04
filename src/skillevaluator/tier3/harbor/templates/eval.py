@@ -2686,17 +2686,29 @@ def _message_rejects_schema_option(text, param=None):
     return bool(_SCHEMA_REJECTION_AFTER_OPTION.search(text) or _SCHEMA_REJECTION_BEFORE_OPTION.search(text))
 
 
+def _peek_http_error_body(error):
+    """Read an HTTPError body and leave it readable for the next ``error.read()``.
+
+    ``HTTPError.read`` goes through a tempfile wrapper that reads ``error.file``
+    and caches the bound ``read`` method, so swapping ``error.fp`` alone leaves
+    later readers (the error report and the model-fallback check) with ``b""``.
+    Keep in sync with ``skillevaluator.inference.client._peek_http_error_body``.
+    """
+    body = error.read()
+    replacement = io.BytesIO(body)
+    error.fp = replacement
+    error.file = replacement
+    error.__dict__.pop("read", None)
+    return body
+
+
 def _is_schema_unsupported_http_error(error):
     """Determine whether an HTTP error indicates structured output schema is unsupported."""
     if getattr(error, "code", None) not in {400, 422}:
         return False
     body_text = ""
-    try:
-        body_bytes = error.read()
-        error.fp = io.BytesIO(body_bytes)
-        body_text = body_bytes.decode("utf-8", "replace")
-    except Exception:
-        pass
+    with contextlib.suppress(Exception):
+        body_text = _peek_http_error_body(error).decode("utf-8", "replace")
     error_param = None
     try:
         body = json.loads(body_text)

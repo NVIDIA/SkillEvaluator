@@ -317,6 +317,48 @@ def test_generated_call_public_llm_preserves_fallback_detection_and_redacts_exha
     assert credential not in error
 
 
+@pytest.mark.parametrize(("code", "reason"), [(400, "Bad Request"), (422, "Unprocessable Entity")])
+def test_generated_call_public_llm_falls_back_on_an_invalid_model_400_after_the_schema_check(
+    verifier_module,
+    monkeypatch: pytest.MonkeyPatch,
+    code: int,
+    reason: str,
+) -> None:
+    # A 400/422 is first read by the structured-output check. The model
+    # fallback and the error report must still see the provider's body.
+    credential = _CREDENTIALS["SKILL_EVAL_LLM_API_KEY"]
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", credential)
+    monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", "https://provider.invalid/v1")
+    monkeypatch.setenv("LLM_JUDGE_FALLBACK_MODELS", "fallback-model")
+    models: list[str] = []
+
+    def reject_model(request, *_args, **_kwargs):
+        payload = json.loads(request.data)
+        models.append(payload["model"])
+        assert "response_format" in payload
+        raise _http_error(
+            json.dumps({"error": {"message": f"invalid model: {payload['model']}", "echo": credential}}),
+            code=code,
+            reason=reason,
+        )
+
+    monkeypatch.setattr(verifier_module.urllib.request, "urlopen", reject_model)
+
+    content, error = verifier_module.call_public_llm(
+        "safe prompt", model="primary-model", response_schema={"type": "object"}
+    )
+
+    assert content is None
+    assert models == ["primary-model", "fallback-model"]
+    assert error is not None
+    assert error.startswith("LLM judge model fallback exhausted:")
+    assert "invalid model: primary-model" in error
+    assert "invalid model: fallback-model" in error
+    assert "[REDACTED]" in error
+    assert credential not in error
+
+
 def test_generated_call_public_llm_does_not_redact_successful_content(
     verifier_module,
     monkeypatch: pytest.MonkeyPatch,

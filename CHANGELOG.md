@@ -4,11 +4,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
-### Fixed
-
-- Report non-string YAML frontmatter keys, including keys under `metadata`,
-  as validation errors in rules and workflows instead of raising a `TypeError`.
-
 ### Added
 
 - Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for
@@ -35,6 +30,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Report non-string YAML keys as validation errors in skills, rules, workflows,
+  and plugin manifests instead of raising a `TypeError`, including frontmatter
+  `metadata` keys. Show boolean, null, and date keys in a readable YAML form.
 - Harbor ``result.json`` case ids now prefer canonical ``task_id.path`` metadata
   over repository-prefixed ``task_name`` values when resolving eval entries.
 - Codex log synthesis maps ``web_search`` action payloads and ``collab_tool_call``

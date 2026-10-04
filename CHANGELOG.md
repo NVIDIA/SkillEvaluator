@@ -203,9 +203,11 @@ All notable changes to SkillEvaluator are documented in this file.
   evidence: the load and hook census read every trial, `plugin_provenance.json`
   is written before the error, and Tier 3 reports an INCOMPLETE result instead
   of a skip; a crash in the report-only sum-of-parts arm no longer ends the run.
-- The Tier 3 verifier's judge retry also covers HTTP 408 and a response body
-  cut short (`IncompleteRead`), and never retries a failed TLS certificate
-  check or a URL error that is not a network failure.
+- The Tier 3 verifier's judge retry also covers HTTP 408, every 5xx except 501
+  and 505 (so Anthropic's 529 "overloaded" and proxy 520-524 errors), and a
+  response body cut short (`IncompleteRead`), and never retries a failed TLS
+  certificate check or a URL error that is not a network failure. The host
+  `LLMClient` retries the same HTTP statuses.
 - Plugin signals and in-agent MCP proof map native MCP tool names (Claude Code `mcp__plugin_<plugin>_<server>__<tool>`, OpenCode `<server>_<tool>`, Hermes `mcp_<server>_<tool>`, Codex bare names via its session log) to the declared server, and never credit one server's calls to a similarly named one.
 - Plugin signals count Claude Code `Skill(<plugin>:<command>)` calls as command activations, credit every SKILL.md in a chained shell read, and no longer mark a skill read as failed because the skill text says something is "not available".
 - The Harbor verifier matches Claude Code native `<plugin>:<skill>` names exactly and keeps `<plugin>:<command>` calls out of skill activation and routing grades.

@@ -2434,7 +2434,8 @@ def _anthropic_url():
     return _validate_http_url(url)
 
 
-_RETRIABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+# 501 Not Implemented and 505 HTTP Version Not Supported do not change on a retry.
+_NON_RETRIABLE_5XX_CODES = frozenset({501, 505})
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_BASE_DELAY = 1.0
 _DEFAULT_MAX_DELAY = 30.0
@@ -2560,18 +2561,31 @@ def _compute_bounded_retry_delay(retry_after_str, *, attempt, base_delay, max_de
     return sleep_duration
 
 
+def _is_retriable_http_status(code):
+    """Return whether an HTTP status is worth another attempt.
+
+    408, 429, and every 5xx except 501 and 505. That covers Anthropic's 529
+    "overloaded" and proxy 520-524 statuses. Keep in sync with
+    ``skillevaluator.inference.retry.is_retriable_status_code``.
+    """
+    if not isinstance(code, int) or isinstance(code, bool):
+        return False
+    return code in (408, 429) or (500 <= code <= 599 and code not in _NON_RETRIABLE_5XX_CODES)
+
+
 def _is_transient_judge_error(error):
     """Return whether a failed judge request is worth another attempt.
 
-    Transient: HTTP 408, 429, 500, 502, 503, and 504; dropped connections and
-    other network errors; read timeouts (on the Python 3.9 task images a read
-    timeout is a ``socket.timeout``, an ``OSError`` that is not yet a
-    ``TimeoutError``); and a body cut short (``http.client.IncompleteRead``).
+    Transient: HTTP 408, 429, and 5xx other than 501 and 505 (so Anthropic's
+    529 "overloaded" too); dropped connections and other network errors; read
+    timeouts (on the Python 3.9 task images a read timeout is a
+    ``socket.timeout``, an ``OSError`` that is not yet a ``TimeoutError``);
+    and a body cut short (``http.client.IncompleteRead``).
     Never retried: other HTTP statuses, a failed TLS certificate check, a URL
     error that is not a network failure, and an exhausted judge time budget.
     """
     if isinstance(error, urllib.error.HTTPError):
-        return error.code in _RETRIABLE_HTTP_CODES or error.code == 408
+        return _is_retriable_http_status(error.code)
     cause = error.reason if isinstance(error, urllib.error.URLError) else error
     if isinstance(cause, ssl.SSLCertVerificationError):
         return False
@@ -2820,9 +2834,7 @@ def _classify_bedrock_retry_error(error):
                 break
 
     if http_status is not None or error_code:
-        is_retriable = (
-            http_status in _RETRIABLE_HTTP_CODES or http_status == 408 or error_code in _RETRIABLE_BEDROCK_ERROR_CODES
-        )
+        is_retriable = _is_retriable_http_status(http_status) or error_code in _RETRIABLE_BEDROCK_ERROR_CODES
         status_label = f"HTTP {http_status}" if http_status is not None else error_code
         return is_retriable, status_label, retry_after_str
 

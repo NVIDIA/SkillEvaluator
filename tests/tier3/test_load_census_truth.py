@@ -868,7 +868,9 @@ def _judge_server(statuses: list[int]) -> tuple[ThreadingHTTPServer, list[int]]:
         ([503], "judge ok", 2),
         ([502, 429], "judge ok", 3),
         ([408], "judge ok", 2),
+        ([529], "judge ok", 2),  # Anthropic "overloaded"
         ([503, 503, 503], None, 3),
+        ([501], None, 1),
         ([400], None, 1),
     ],
 )
@@ -948,7 +950,20 @@ def test_the_verifier_judge_classifies_transient_errors(verifier, error: BaseExc
 
 @pytest.mark.parametrize(
     ("code", "transient"),
-    [(408, True), (429, True), (500, True), (502, True), (503, True), (504, True), (400, False), (401, False)],
+    [
+        (408, True),
+        (429, True),
+        (500, True),
+        (502, True),
+        (503, True),
+        (504, True),
+        (520, True),
+        (529, True),
+        (400, False),
+        (401, False),
+        (501, False),
+        (505, False),
+    ],
 )
 def test_the_verifier_judge_classifies_http_statuses(verifier, code: int, transient: bool) -> None:
     error = urllib.error.HTTPError("https://judge.invalid/v1", code, "status", hdrs=None, fp=None)

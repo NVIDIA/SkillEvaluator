@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_RETRIES: int = 3
 DEFAULT_BASE_DELAY: float = 1.0
 DEFAULT_MAX_DELAY: float = 30.0
-_RETRIABLE_HTTP_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+# 501 Not Implemented and 505 HTTP Version Not Supported do not change on a retry.
+_NON_RETRIABLE_5XX_STATUS_CODES: frozenset[int] = frozenset({501, 505})
 _MAX_RETRIES_ENV: str = "SKILL_EVAL_LLM_MAX_RETRIES"
 _BASE_DELAY_ENV: str = "SKILL_EVAL_LLM_RETRY_BASE_DELAY"
 _MAX_DELAY_ENV: str = "SKILL_EVAL_LLM_RETRY_MAX_DELAY"
@@ -37,8 +38,17 @@ class RetryConfig:
 
 
 def is_retriable_status_code(status_code: int | None) -> bool:
-    """Return True if the given HTTP status code represents a transient, retriable condition."""
-    return status_code in _RETRIABLE_HTTP_STATUS_CODES
+    """Return True if the given HTTP status code represents a transient, retriable condition.
+
+    408, 429, and every 5xx except 501 and 505. That covers Anthropic's 529
+    "overloaded" and proxy 520-524 statuses. The Harbor verifier template keeps
+    the same rule in ``_is_retriable_http_status``.
+    """
+    if not isinstance(status_code, int) or isinstance(status_code, bool):
+        return False
+    return status_code in (408, 429) or (
+        500 <= status_code <= 599 and status_code not in _NON_RETRIABLE_5XX_STATUS_CODES
+    )
 
 
 def parse_retry_after(header_value: str | None, fallback_delay: float) -> float:

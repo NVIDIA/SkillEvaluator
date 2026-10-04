@@ -38,15 +38,20 @@ def _http_headers(retry_after: str | None = None) -> Message:
 @pytest.mark.parametrize(
     ("code", "expected"),
     [
+        (408, True),
         (429, True),
         (500, True),
         (502, True),
         (503, True),
         (504, True),
+        (520, True),
+        (529, True),
         (400, False),
         (401, False),
         (403, False),
         (404, False),
+        (501, False),
+        (505, False),
         (200, False),
         (None, False),
     ],
@@ -54,6 +59,14 @@ def _http_headers(retry_after: str | None = None) -> Message:
 def test_is_retriable_status_code(code: int | None, expected: bool) -> None:
     """Verify is_retriable_status_code correctly classifies transient status codes."""
     assert is_retriable_status_code(code) is expected
+
+
+def test_host_and_verifier_retry_the_same_http_statuses() -> None:
+    """Verify the host client and the Harbor verifier retry exactly the same HTTP statuses."""
+    verifier = load_harbor_eval_template("harbor_template_retry_status_parity")
+    host = {code for code in range(100, 600) if is_retriable_status_code(code)}
+    template = {code for code in range(100, 600) if verifier._is_retriable_http_status(code)}
+    assert host == template
 
 
 @pytest.mark.parametrize(

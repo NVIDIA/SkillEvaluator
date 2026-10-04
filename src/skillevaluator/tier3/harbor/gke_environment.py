@@ -49,6 +49,8 @@ GKE_METADATA_ISOLATION_ERROR_TEMPLATE = (
 GKE_METADATA_ISOLATION_LABEL_KEY = "skillevaluator.nvidia.com/metadata-isolated"
 GKE_METADATA_ISOLATION_LABEL_VALUE = "true"
 GKE_METADATA_NETWORK_POLICY_NAME = "skillevaluator-block-gce-metadata"
+GKE_METADATA_PROBE_CONTAINER_NAME = "skillevaluator-metadata-probe"
+GKE_METADATA_PROBE_IMAGE_ENV = "SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE"
 GKE_SERVICE_ACCOUNT_INSPECTION_ERROR_TEMPLATE = (
     "Failed to inspect GKE namespace '{namespace}' ServiceAccount '{service_account}' for Workload Identity "
     "isolation ({detail}). Grant 'get' permission on serviceaccounts or explicitly opt in via "
@@ -56,10 +58,15 @@ GKE_SERVICE_ACCOUNT_INSPECTION_ERROR_TEMPLATE = (
 )
 SECURE_GKE_ENV_IMPORT_PATH = "skillevaluator.tier3.harbor.gke_environment:SkillEvaluatorGKEEnvironment"
 
+_AUTOPILOT_MAX_EPHEMERAL_STORAGE_MIB = 10240
 _BLOCKED_GCE_METADATA_CIDRS = ("169.254.169.252/32", "169.254.169.254/32")
 _BLOCKED_GCE_METADATA_HOST = "127.0.0.1:1"
+_DEFAULT_GKE_METADATA_PROBE_IMAGE = "python:3.12-slim"
 _DEFAULT_K8S_REQUEST_TIMEOUT_SEC = 5.0
+_DNS_PORT = 53
+_DNS_PROTOCOLS = frozenset({"UDP", "TCP"})
 _EXEC_QUERY_COMMAND_RE = re.compile(r"(?P<sep>[?&])command=[^\s\"']+")
+_GKE_CLOUD_DNS_METADATA_CIDR = "169.254.169.254/32"
 _GKE_DIRECT_WIF_PRINCIPAL_ANNOTATION = "iam.gke.io/return-principal-id-as-email"
 _GKE_METADATA_PROBE_URLS = (
     "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token",
@@ -67,13 +74,22 @@ _GKE_METADATA_PROBE_URLS = (
 )
 _GKE_WORKLOAD_IDENTITY_ANNOTATION = "iam.gke.io/gcp-service-account"
 _GOOGLE_CREDENTIAL_RE = re.compile(r"(?<![A-Za-z0-9_-])(?:ya29\.[A-Za-z0-9._-]{6,}|AIza[A-Za-z0-9_-]{12,})")
+_KUBE_DNS_POD_LABEL_KEY = "k8s-app"
+_KUBE_DNS_POD_LABEL_VALUE = "kube-dns"
+_KUBE_SYSTEM_NAMESPACE_LABEL_KEY = "kubernetes.io/metadata.name"
+_KUBE_SYSTEM_NAMESPACE_LABEL_VALUE = "kube-system"
 _MAX_TRANSIENT_EXEC_ATTEMPTS = 4
 _METADATA_PROBE_HTTP_TIMEOUT_SEC = 2
+_METADATA_PROBE_ISOLATED_SENTINEL = "SKILLEVALUATOR_METADATA_ISOLATED_OK"
 _METADATA_PROBE_MISSING_TOOL_EXIT_CODE = 43
 _METADATA_PROBE_STREAM_TIMEOUT_SEC = 8
 _METADATA_REACHABLE_EXIT_CODE = 42
 _MIN_EXACT_SECRET_LENGTH = 8
+_PROBE_CONTAINER_CPU_REQUEST = "10m"
+_PROBE_CONTAINER_EPHEMERAL_STORAGE_MIB = 64
+_PROBE_CONTAINER_MEMORY_REQUEST = "32Mi"
 _READINESS_PROBE_STREAM_TIMEOUT_SEC = 5
+_STORAGE_QUANTITY_RE = re.compile(r"^\s*(?P<amount>\d+)\s*(?P<unit>Mi|Gi|M|G)?\s*$")
 _TRAILING_QUOTES_RE = re.compile(r"[\s\"']+\Z")
 _TRANSIENT_KUBELET_EXEC_ERROR_SNIPPETS = (
     "error sending request:",
@@ -82,42 +98,138 @@ _TRANSIENT_KUBELET_EXEC_ERROR_SNIPPETS = (
 )
 
 
-def _build_in_pod_metadata_isolation_probe_script() -> str:
+def _build_in_pod_metadata_isolation_probe_script(
+    urls: tuple[str, ...] = _GKE_METADATA_PROBE_URLS,
+) -> str:
     """Build the shell script that verifies GKE/GCE metadata endpoints are unreachable inside the pod."""
-    py_urls = ", ".join(f'"{url}"' for url in _GKE_METADATA_PROBE_URLS)
-    sh_urls = " ".join(_GKE_METADATA_PROBE_URLS)
+    py_urls = ", ".join(f'"{url}"' for url in urls)
+    sh_urls = " ".join(shlex.quote(url) for url in urls)
     return (
+        "unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY; "
         "if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then "
         "PY=$(command -v python3 || command -v python); "
-        f"$PY -c '"
+        f"out=$($PY -I -c '"
         "import sys, urllib.error, urllib.request\n"
-        f"for url in ({py_urls}):\n"
-        '    req = urllib.request.Request(url, headers={"Metadata-Flavor": "Google"})\n'
+        "opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))\n"
+        f"for url in [{py_urls}]:\n"
         "    try:\n"
-        f"        with urllib.request.urlopen(req, timeout={_METADATA_PROBE_HTTP_TIMEOUT_SEC}):\n"
+        '        req = urllib.request.Request(url, headers={"Metadata-Flavor": "Google"})\n'
+        f"        with opener.open(req, timeout={_METADATA_PROBE_HTTP_TIMEOUT_SEC}):\n"
         f"            sys.exit({_METADATA_REACHABLE_EXIT_CODE})\n"
         "    except urllib.error.HTTPError:\n"
         f"        sys.exit({_METADATA_REACHABLE_EXIT_CODE})\n"
         "    except Exception:\n"
         "        pass\n"
+        f'print("{_METADATA_PROBE_ISOLATED_SENTINEL}")\n'
         "sys.exit(0)"
-        "'; "
+        "' 2>/dev/null); rc=$?; "
+        f'if [ "$rc" -eq {_METADATA_REACHABLE_EXIT_CODE} ]; then exit {_METADATA_REACHABLE_EXIT_CODE}; fi; '
+        f'if [ "$rc" -ne 0 ] || [ "$out" != "{_METADATA_PROBE_ISOLATED_SENTINEL}" ]; then '
+        f"exit {_METADATA_PROBE_MISSING_TOOL_EXIT_CODE}; fi; "
+        "exit 0; "
         "elif command -v curl >/dev/null 2>&1; then "
         f"for u in {sh_urls}; do "
-        f'code=$(curl -s -o /dev/null -m {_METADATA_PROBE_HTTP_TIMEOUT_SEC} -w "%{{http_code}}" '
-        '-H "Metadata-Flavor: Google" "$u" 2>/dev/null || true); '
-        f'if [ -n "$code" ] && [ "$code" != "000" ]; then exit {_METADATA_REACHABLE_EXIT_CODE}; fi; '
+        f'code=$(curl --noproxy "*" -s -o /dev/null -m {_METADATA_PROBE_HTTP_TIMEOUT_SEC} '
+        '-w "HTTP_CODE:%{http_code}" -H "Metadata-Flavor: Google" "$u" 2>/dev/null || true); '
+        'case "$code" in '
+        '"HTTP_CODE:000") ;; '
+        f'"HTTP_CODE:"*) exit {_METADATA_REACHABLE_EXIT_CODE} ;; '
+        f"*) exit {_METADATA_PROBE_MISSING_TOOL_EXIT_CODE} ;; "
+        "esac; "
         "done; exit 0; "
         "elif command -v wget >/dev/null 2>&1; then "
         f"for u in {sh_urls}; do "
-        f'if wget -S -T {_METADATA_PROBE_HTTP_TIMEOUT_SEC} --header="Metadata-Flavor: Google" '
-        f'-O /dev/null "$u" 2>&1 | grep -q "HTTP/"; then exit {_METADATA_REACHABLE_EXIT_CODE}; fi; '
+        f'out=$(wget --no-proxy -S -T {_METADATA_PROBE_HTTP_TIMEOUT_SEC} --header="Metadata-Flavor: Google" '
+        '-O /dev/null "$u" 2>&1 || true); '
+        'if [ -z "$out" ]; then '
+        f"exit {_METADATA_PROBE_MISSING_TOOL_EXIT_CODE}; fi; "
+        'if printf "%s\\n" "$out" | grep -q "HTTP/"; then '
+        f"exit {_METADATA_REACHABLE_EXIT_CODE}; fi; "
         "done; exit 0; "
         f"else exit {_METADATA_PROBE_MISSING_TOOL_EXIT_CODE}; fi"
     )
 
 
 _IN_POD_METADATA_ISOLATION_PROBE_SCRIPT = _build_in_pod_metadata_isolation_probe_script()
+
+
+def _get_metadata_probe_image(env: Mapping[str, str] | None = None) -> str:
+    """Return the trusted container image used for the GKE metadata isolation probe."""
+    for candidate_env in (env, os.environ):
+        if candidate_env is not None:
+            configured = str(candidate_env.get(GKE_METADATA_PROBE_IMAGE_ENV) or "").strip()
+            if configured:
+                return configured
+    return _DEFAULT_GKE_METADATA_PROBE_IMAGE
+
+
+def _parse_storage_mib(quantity: object) -> int | None:
+    """Parse a Kubernetes storage quantity string (Mi/Gi/M/G) into MiB."""
+    if not isinstance(quantity, str):
+        return None
+    match = _STORAGE_QUANTITY_RE.match(quantity)
+    if not match:
+        return None
+    amount = int(match.group("amount"))
+    unit = match.group("unit") or "Mi"
+    if unit in ("Gi", "G"):
+        return amount * 1024
+    return amount
+
+
+def _adjust_autopilot_ephemeral_storage_for_probe(main_container: Any) -> None:
+    """Cap main container ephemeral-storage so adding the probe container stays within Autopilot's 10Gi ceiling."""
+    resources = getattr(main_container, "resources", None)
+    if resources is None:
+        return
+    max_main_mib = _AUTOPILOT_MAX_EPHEMERAL_STORAGE_MIB - _PROBE_CONTAINER_EPHEMERAL_STORAGE_MIB
+    for attr_name in ("requests", "limits"):
+        mapping = getattr(resources, attr_name, None)
+        if not isinstance(mapping, dict):
+            continue
+        current_mib = _parse_storage_mib(mapping.get("ephemeral-storage"))
+        if current_mib is not None and current_mib > max_main_mib:
+            mapping["ephemeral-storage"] = f"{max_main_mib}Mi"
+
+
+def _build_metadata_probe_container(env: Mapping[str, str] | None = None) -> k8s_client.V1Container:
+    """Build the trusted companion container used to verify GKE metadata isolation in the pod network namespace."""
+    probe_storage = f"{_PROBE_CONTAINER_EPHEMERAL_STORAGE_MIB}Mi"
+    return k8s_client.V1Container(
+        name=GKE_METADATA_PROBE_CONTAINER_NAME,
+        image=_get_metadata_probe_image(env),
+        command=["sleep", "infinity"],
+        env=[k8s_client.V1EnvVar(name="GCE_METADATA_HOST", value=_BLOCKED_GCE_METADATA_HOST)],
+        resources=k8s_client.V1ResourceRequirements(
+            requests={
+                "cpu": _PROBE_CONTAINER_CPU_REQUEST,
+                "memory": _PROBE_CONTAINER_MEMORY_REQUEST,
+                "ephemeral-storage": probe_storage,
+            },
+            limits={
+                "memory": _PROBE_CONTAINER_MEMORY_REQUEST,
+                "ephemeral-storage": probe_storage,
+            },
+        ),
+        volume_mounts=[],
+    )
+
+
+def _ensure_default_exec_container_routing(api: Any, *, default_container: str = "main") -> None:
+    """Ensure untargeted connect_get_namespaced_pod_exec calls default to the main task container."""
+    orig = getattr(api, "connect_get_namespaced_pod_exec", None)
+    if not callable(orig) or getattr(orig, "_skillevaluator_default_container_wrapped", False):
+        return
+
+    def _wrapped_exec(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("container") is None:
+            kwargs["container"] = default_container
+        return orig(*args, **kwargs)
+
+    _wrapped_exec._skillevaluator_default_container_wrapped = True  # type: ignore[attr-defined]
+    _wrapped_exec.__self__ = getattr(orig, "__self__", api)  # type: ignore[attr-defined]
+    with contextlib.suppress(Exception):
+        api.connect_get_namespaced_pod_exec = _wrapped_exec
 
 
 def coerce_gke_opt_in_flag(value: object) -> bool:
@@ -259,7 +371,7 @@ def inspect_bound_gcp_service_account(
 
 
 def _build_metadata_blocking_network_policy(namespace: str) -> k8s_client.V1NetworkPolicy:
-    """Build a pod-scoped egress NetworkPolicy blocking GCE and GKE metadata server IPs."""
+    """Build a pod-scoped egress NetworkPolicy blocking GCE/GKE metadata HTTP while preserving DNS."""
     return k8s_client.V1NetworkPolicy(
         metadata=k8s_client.V1ObjectMeta(
             name=GKE_METADATA_NETWORK_POLICY_NAME,
@@ -279,16 +391,79 @@ def _build_metadata_blocking_network_policy(namespace: str) -> k8s_client.V1Netw
                                 _except=list(_BLOCKED_GCE_METADATA_CIDRS),
                             )
                         ),
+                    ]
+                ),
+                k8s_client.V1NetworkPolicyEgressRule(
+                    ports=[
+                        k8s_client.V1NetworkPolicyPort(port=_DNS_PORT, protocol="UDP"),
+                        k8s_client.V1NetworkPolicyPort(port=_DNS_PORT, protocol="TCP"),
+                    ],
+                    to=[
                         k8s_client.V1NetworkPolicyPeer(
                             ip_block=k8s_client.V1IPBlock(
-                                cidr="::/0",
+                                cidr=_GKE_CLOUD_DNS_METADATA_CIDR,
                             )
                         ),
-                    ]
-                )
+                        k8s_client.V1NetworkPolicyPeer(
+                            namespace_selector=k8s_client.V1LabelSelector(
+                                match_labels={_KUBE_SYSTEM_NAMESPACE_LABEL_KEY: _KUBE_SYSTEM_NAMESPACE_LABEL_VALUE}
+                            ),
+                            pod_selector=k8s_client.V1LabelSelector(
+                                match_labels={_KUBE_DNS_POD_LABEL_KEY: _KUBE_DNS_POD_LABEL_VALUE}
+                            ),
+                        ),
+                    ],
+                ),
             ],
         ),
     )
+
+
+def _is_dns_only_egress_rule(rule: Any) -> bool:
+    """Return True if an egress rule strictly permits only UDP/TCP port 53 to Cloud DNS or kube-dns."""
+    ports = getattr(rule, "ports", None) or []
+    if not ports:
+        return False
+    for port_obj in ports:
+        port_val = getattr(port_obj, "port", None)
+        if isinstance(port_val, bool) or port_val != _DNS_PORT:
+            return False
+        end_port = getattr(port_obj, "end_port", None)
+        if end_port is not None and (isinstance(end_port, bool) or end_port != _DNS_PORT):
+            return False
+        protocol = str(getattr(port_obj, "protocol", "") or "TCP").strip().upper()
+        if protocol not in _DNS_PROTOCOLS:
+            return False
+
+    peers = getattr(rule, "to", None) or []
+    if not peers:
+        return False
+    for peer in peers:
+        ip_block = getattr(peer, "ip_block", None)
+        ns_sel = getattr(peer, "namespace_selector", None)
+        pod_sel = getattr(peer, "pod_selector", None)
+        if ip_block is not None:
+            if ns_sel is not None or pod_sel is not None:
+                return False
+            cidr = str(getattr(ip_block, "cidr", "") or "").strip()
+            if cidr != _GKE_CLOUD_DNS_METADATA_CIDR:
+                return False
+            if getattr(ip_block, "_except", None):
+                return False
+        else:
+            if ns_sel is None or pod_sel is None:
+                return False
+            if getattr(ns_sel, "match_expressions", None) or getattr(pod_sel, "match_expressions", None):
+                return False
+            ns_labels = getattr(ns_sel, "match_labels", None)
+            pod_labels = getattr(pod_sel, "match_labels", None)
+            if not isinstance(ns_labels, dict) or not isinstance(pod_labels, dict):
+                return False
+            if ns_labels.get(_KUBE_SYSTEM_NAMESPACE_LABEL_KEY) != _KUBE_SYSTEM_NAMESPACE_LABEL_VALUE:
+                return False
+            if pod_labels.get(_KUBE_DNS_POD_LABEL_KEY) != _KUBE_DNS_POD_LABEL_VALUE:
+                return False
+    return True
 
 
 def _network_policy_blocks_metadata(policy: Any) -> bool:
@@ -314,16 +489,21 @@ def _network_policy_blocks_metadata(policy: Any) -> bool:
         peers = getattr(rule, "to", None) or []
         if not peers:
             return False
+        if _is_dns_only_egress_rule(rule):
+            continue
         for peer in peers:
+            if getattr(peer, "namespace_selector", None) is not None or getattr(peer, "pod_selector", None) is not None:
+                return False
             ip_block = getattr(peer, "ip_block", None)
             if ip_block is None:
                 return False
             cidr = str(getattr(ip_block, "cidr", "") or "").strip()
-            if cidr == "0.0.0.0/0":
-                saw_ipv4_rule = True
-                exceptions = {str(item).strip() for item in (getattr(ip_block, "_except", None) or [])}
-                if not required_cidrs.issubset(exceptions):
-                    return False
+            if cidr != "0.0.0.0/0":
+                return False
+            saw_ipv4_rule = True
+            exceptions = {str(item).strip() for item in (getattr(ip_block, "_except", None) or [])}
+            if not required_cidrs.issubset(exceptions):
+                return False
     return saw_ipv4_rule
 
 
@@ -453,6 +633,13 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
             labels[GKE_METADATA_ISOLATION_LABEL_KEY] = GKE_METADATA_ISOLATION_LABEL_VALUE
             pod.metadata.labels = labels
 
+            compose_mode = bool(getattr(self, "_compose_mode", False))
+            if not compose_mode:
+                annotations = dict(getattr(pod.metadata, "annotations", None) or {})
+                annotations.setdefault("autopilot.gke.io/primary-container", "main")
+                annotations.setdefault("kubectl.kubernetes.io/default-container", "main")
+                pod.metadata.annotations = annotations
+
             if getattr(pod, "spec", None) is not None:
                 pod.spec.automount_service_account_token = False
                 pod.spec.host_network = False
@@ -461,11 +648,20 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
                     or getattr(pod.spec, "service_account", None)
                     or "default"
                 )
-                for container in getattr(pod.spec, "containers", None) or []:
+                containers = list(getattr(pod.spec, "containers", None) or [])
+                for container in containers:
                     env_list = list(getattr(container, "env", None) or [])
                     if not any(getattr(item, "name", None) == "GCE_METADATA_HOST" for item in env_list):
                         env_list.append(k8s_client.V1EnvVar(name="GCE_METADATA_HOST", value=_BLOCKED_GCE_METADATA_HOST))
                         container.env = env_list
+                if not compose_mode and not any(
+                    getattr(c, "name", None) == GKE_METADATA_PROBE_CONTAINER_NAME for c in containers
+                ):
+                    for container in containers:
+                        if getattr(container, "name", None) == "main":
+                            _adjust_autopilot_ephemeral_storage_for_probe(container)
+                    containers.append(_build_metadata_probe_container())
+                    pod.spec.containers = containers
             else:
                 sa_name = "default"
             persistent = getattr(self, "_persistent_env", None)
@@ -480,6 +676,8 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
                         detail="Kubernetes CoreV1Api client is not initialized",
                     )
                 )
+            if not compose_mode:
+                _ensure_default_exec_container_routing(api, default_container="main")
             bound_gcp_sa = await asyncio.to_thread(
                 inspect_bound_gcp_service_account,
                 api,
@@ -518,7 +716,13 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
                     namespace=self.namespace,
                 )
 
-    async def _exec_pod_stream_command(self, command: list[str], *, timeout_sec: int) -> int | None:
+    async def _exec_pod_stream_command(
+        self,
+        command: list[str],
+        *,
+        timeout_sec: int,
+        container: str | None = None,
+    ) -> int | None:
         """Execute a command via Kubernetes WebSocket exec stream, draining output and returning returncode."""
         stream_kwargs: dict[str, Any] = {
             "command": command,
@@ -528,7 +732,9 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
             "tty": False,
             "_preload_content": False,
         }
-        if getattr(self, "_compose_mode", False):
+        if container is not None:
+            stream_kwargs["container"] = container
+        elif getattr(self, "_compose_mode", False):
             stream_kwargs["container"] = "dind"
 
         resp = None
@@ -550,12 +756,14 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
                     resp.close()
 
     async def _verify_in_pod_metadata_isolation(self) -> None:
-        """Verify inside the running pod that GCE/GKE metadata endpoints are unreachable."""
+        """Verify from the trusted probe container that GCE/GKE metadata endpoints are unreachable."""
         namespace = getattr(self, "namespace", "default")
+        probe_container = "dind" if getattr(self, "_compose_mode", False) else GKE_METADATA_PROBE_CONTAINER_NAME
         try:
             rc = await self._exec_pod_stream_command(
                 ["sh", "-c", _IN_POD_METADATA_ISOLATION_PROBE_SCRIPT],
                 timeout_sec=_METADATA_PROBE_STREAM_TIMEOUT_SEC,
+                container=probe_container,
             )
         except Exception as exc:
             await self._delete_unisolated_pod_best_effort()
@@ -586,6 +794,11 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
 
     async def _wait_for_container_exec_ready(self, max_attempts: int = 60) -> None:
         """Wait until the GKE kubelet accepts exec streams and verify metadata server isolation."""
+        if not self._is_workload_identity_enabled() and not getattr(self, "_compose_mode", False):
+            api = getattr(self, "_api", None)
+            if api is not None:
+                _ensure_default_exec_container_routing(api, default_container="main")
+
         for attempt in range(max_attempts):
             await self._check_pod_terminated()
             try:

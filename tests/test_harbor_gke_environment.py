@@ -6,8 +6,15 @@
 from __future__ import annotations
 
 import asyncio
+import http.server
+import os
+import shutil
+import stat
+import subprocess
+import threading
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +25,9 @@ from kubernetes import client as k8s_client
 import skillevaluator.tier3.harbor.gke_environment as gke_env_mod
 from skillevaluator.tier3.harbor.gke_environment import (
     SkillEvaluatorGKEEnvironment,
+    _build_in_pod_metadata_isolation_probe_script,
     _build_metadata_blocking_network_policy,
+    _network_policy_blocks_metadata,
     _redact_exec_stderr,
 )
 
@@ -36,6 +45,38 @@ def _make_weak_metadata_network_policy(namespace: str = "skill-eval") -> k8s_cli
     policy = _build_metadata_blocking_network_policy(namespace)
     policy.spec.egress[0].to[0].ip_block._except = ["169.254.169.254/32"]
     return policy
+
+
+@pytest.fixture
+def local_metadata_http_server() -> Iterator[Callable[[int], str]]:
+    """Run an ephemeral local HTTP server returning configurable HTTP status codes for probe script tests."""
+    status_holder = {"code": 200}
+
+    class _MetadataHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            code = status_holder["code"]
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"access_token":"fake-token"}')
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _MetadataHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+
+    def _url_for_status(code: int) -> str:
+        status_holder["code"] = code
+        return f"http://{host}:{port}/computeMetadata/v1/instance/service-accounts/default/token"
+
+    try:
+        yield _url_for_status
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 @pytest.fixture
@@ -59,6 +100,8 @@ def make_gke_env(monkeypatch: pytest.MonkeyPatch) -> Callable[..., SkillEvaluato
         env._kwargs = {"allow_workload_identity": "1"} if allow_workload_identity else {}
         env._allow_workload_identity = allow_workload_identity
         env._persistent_env = {}
+        env.default_user = None
+        env.task_env_config = SimpleNamespace(workdir=None, user=None)
         env._fake_api = fake_api
         if networking_api is not None:
             env._networking_api = networking_api
@@ -134,7 +177,7 @@ def test_gke_environment_create_pod_blocks_metadata_host_and_bound_ksa_when_unpr
     expected_automount: bool | None,
     expect_error: bool,
 ) -> None:
-    """Enforce metadata NetworkPolicy, disable token automount + hostNetwork, and reject bound/unisolated KSAs unless opted in."""
+    """Enforce metadata NetworkPolicy, trusted probe container, token automount=False, and reject bound KSAs unless opted in."""
     created_pods: list[k8s_client.V1Pod] = []
     created_policies: list[k8s_client.V1NetworkPolicy] = []
 
@@ -178,10 +221,74 @@ def test_gke_environment_create_pod_blocks_metadata_host_and_bound_ksa_when_unpr
     if not allow_workload_identity:
         assert pod.spec.host_network is False
         assert pod.metadata.labels.get("skillevaluator.nvidia.com/metadata-isolated") == "true"
+        assert pod.metadata.annotations.get("autopilot.gke.io/primary-container") == "main"
+        assert pod.metadata.annotations.get("kubectl.kubernetes.io/default-container") == "main"
+        assert [c.name for c in pod.spec.containers] == ["main", "skillevaluator-metadata-probe"]
+        probe_container = pod.spec.containers[1]
+        assert probe_container.image == "python:3.12-slim"
+        assert probe_container.command == ["sleep", "infinity"]
         assert len(created_policies) == 1
+        assert len(created_policies[0].spec.egress) == 2
+        dns_rule = created_policies[0].spec.egress[1]
+        assert {(p.port, p.protocol) for p in dns_rule.ports} == {(53, "UDP"), (53, "TCP")}
+    else:
+        assert [c.name for c in pod.spec.containers] == ["main"]
     assert env._persistent_env.get("GCE_METADATA_HOST") == expected_metadata_host
     container_env_map = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
     assert container_env_map.get("GCE_METADATA_HOST") == expected_metadata_host
+
+
+@pytest.mark.parametrize(
+    ("mutate_policy", "expected_valid"),
+    [
+        # 1. Default two-rule policy (IPv4 egress excluding metadata + UDP/TCP 53 DNS exception) -> valid
+        (lambda _p: None, True),
+        # 2. Legacy single-rule policy (ipBlock only, no DNS exception rule) -> valid
+        (lambda p: setattr(p.spec, "egress", [p.spec.egress[0]]), True),
+        # 3. Missing 169.254.169.252/32 from IPv4 except -> invalid
+        (lambda p: setattr(p.spec.egress[0].to[0].ip_block, "_except", ["169.254.169.254/32"]), False),
+        # 4. DNS rule exposes HTTP port 80 to 169.254.169.254/32 -> invalid
+        (
+            lambda p: p.spec.egress[1].ports.append(k8s_client.V1NetworkPolicyPort(port=80, protocol="TCP")),
+            False,
+        ),
+        # 5. DNS rule uses port range 53..80 -> invalid
+        (
+            lambda p: setattr(p.spec.egress[1].ports[0], "end_port", 80),
+            False,
+        ),
+        # 6. DNS rule omits ports (allowing all ports to 169.254.169.254/32) -> invalid
+        (
+            lambda p: setattr(p.spec.egress[1], "ports", []),
+            False,
+        ),
+        # 7. DNS rule targets 169.254.169.252/32 instead of 169.254.169.254/32 -> invalid
+        (
+            lambda p: setattr(p.spec.egress[1].to[0].ip_block, "cidr", "169.254.169.252/32"),
+            False,
+        ),
+        # 8. DNS rule targets arbitrary pod selector instead of kube-dns in kube-system -> invalid
+        (
+            lambda p: setattr(p.spec.egress[1].to[1].pod_selector, "match_labels", {"app": "attacker"}),
+            False,
+        ),
+        # 9. IPv6 ::/0 peer is rejected (causes Cilium/Dataplane V2 to grant reserved:world on IPv4 clusters) -> invalid
+        (
+            lambda p: p.spec.egress[0].to.append(
+                k8s_client.V1NetworkPolicyPeer(ip_block=k8s_client.V1IPBlock(cidr="::/0"))
+            ),
+            False,
+        ),
+    ],
+)
+def test_network_policy_blocks_metadata_accepts_valid_and_rejects_weakened_rules(
+    mutate_policy: Callable[[k8s_client.V1NetworkPolicy], None],
+    expected_valid: bool,
+) -> None:
+    """Validate that _network_policy_blocks_metadata permits only UDP/TCP 53 DNS rules and rejects non-53 metadata exposure."""
+    policy = _build_metadata_blocking_network_policy("skill-eval")
+    mutate_policy(policy)
+    assert _network_policy_blocks_metadata(policy) is expected_valid
 
 
 @pytest.mark.parametrize(
@@ -242,6 +349,105 @@ def test_gke_environment_create_pod_rejects_weakened_existing_network_policy(
 
 
 @pytest.mark.parametrize(
+    (
+        "storage_request",
+        "storage_limit",
+        "compose_mode",
+        "custom_probe_image",
+        "expected_main_request",
+        "expected_main_limit",
+        "expected_containers",
+        "expected_probe_image",
+    ),
+    [
+        # 1. Autopilot 10Gi (10240Mi) main storage is capped to 10176Mi so main + 64Mi probe == 10240Mi
+        (
+            "10240Mi",
+            "10Gi",
+            False,
+            None,
+            "10176Mi",
+            "10176Mi",
+            ["main", "skillevaluator-metadata-probe"],
+            "python:3.12-slim",
+        ),
+        # 2. Sub-ceiling storage (5120Mi) is untouched and custom probe image env var is honored
+        (
+            "5120Mi",
+            None,
+            False,
+            "us-central1-docker.pkg.dev/my-proj/eval/probe:v1",
+            "5120Mi",
+            None,
+            ["main", "skillevaluator-metadata-probe"],
+            "us-central1-docker.pkg.dev/my-proj/eval/probe:v1",
+        ),
+        # 3. Compose mode (DinD) does not inject a second probe container or cap dind storage
+        (
+            "10240Mi",
+            None,
+            True,
+            None,
+            "10240Mi",
+            None,
+            ["main"],
+            None,
+        ),
+    ],
+)
+def test_gke_environment_create_pod_autopilot_storage_idempotency_and_custom_probe_image(
+    monkeypatch: pytest.MonkeyPatch,
+    make_gke_env: Callable[..., SkillEvaluatorGKEEnvironment],
+    storage_request: str,
+    storage_limit: str | None,
+    compose_mode: bool,
+    custom_probe_image: str | None,
+    expected_main_request: str,
+    expected_main_limit: str | None,
+    expected_containers: list[str],
+    expected_probe_image: str | None,
+) -> None:
+    """Cap Autopilot 10Gi ephemeral-storage, honor custom probe image override, and avoid duplicate probe containers on retry."""
+    if custom_probe_image is not None:
+        monkeypatch.setenv("SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE", custom_probe_image)
+
+    async def noop_create_pod(self: GKEEnvironment, pod: k8s_client.V1Pod) -> None:
+        _ = pod
+
+    monkeypatch.setattr(GKEEnvironment, "_create_pod", noop_create_pod)
+    env = make_gke_env(
+        compose_mode=compose_mode,
+        fake_api=SimpleNamespace(
+            read_namespaced_service_account=lambda **_kw: SimpleNamespace(metadata=SimpleNamespace(annotations={}))
+        ),
+        networking_api=SimpleNamespace(
+            read_namespaced_network_policy=lambda **_kw: _build_metadata_blocking_network_policy("skill-eval"),
+            create_namespaced_network_policy=lambda **_kw: _build_metadata_blocking_network_policy("skill-eval"),
+        ),
+    )
+
+    pod = _make_pod("pod-storage-check")
+    pod.spec.containers[0].resources = k8s_client.V1ResourceRequirements(
+        requests={"cpu": "1", "memory": "2048Mi", "ephemeral-storage": storage_request},
+        limits={"ephemeral-storage": storage_limit} if storage_limit else None,
+    )
+
+    # Call _create_pod twice to verify idempotency on retry/recreation
+    asyncio.run(env._create_pod(pod))
+    asyncio.run(env._create_pod(pod))
+
+    assert [c.name for c in pod.spec.containers] == expected_containers
+    assert pod.spec.containers[0].resources.requests["ephemeral-storage"] == expected_main_request
+    if expected_main_limit is not None:
+        assert pod.spec.containers[0].resources.limits["ephemeral-storage"] == expected_main_limit
+    if expected_probe_image is not None:
+        probe_container = pod.spec.containers[1]
+        assert probe_container.image == expected_probe_image
+        assert probe_container.resources.requests["ephemeral-storage"] == "64Mi"
+        assert probe_container.resources.limits["ephemeral-storage"] == "64Mi"
+
+
+@pytest.mark.parametrize(
     ("probe_rc", "compose_mode", "expect_error"),
     [
         (0, False, False),
@@ -257,7 +463,7 @@ def test_gke_environment_wait_for_container_exec_ready_drains_stream_and_retries
     compose_mode: bool,
     expect_error: bool,
 ) -> None:
-    """Drain the Kubernetes WSClient stream, retry readiness, and enforce the in-pod direct metadata isolation probe."""
+    """Drain the Kubernetes WSClient stream, retry readiness, and enforce the in-pod metadata isolation probe in the trusted probe container."""
     ws_outcomes: list[int | Exception] = [
         ValueError(
             "invalid literal for int() with base 10: "
@@ -336,6 +542,7 @@ def test_gke_environment_wait_for_container_exec_ready_drains_stream_and_retries
         with pytest.raises(RuntimeError, match="SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1"):
             asyncio.run(env._wait_for_container_exec_ready(max_attempts=4))
         assert deleted_pods == [("pod-ready-check", "skilleval")]
+        assert recorded_calls[-1][1] == "skillevaluator-metadata-probe"
         return
 
     asyncio.run(env._wait_for_container_exec_ready(max_attempts=4))
@@ -343,8 +550,10 @@ def test_gke_environment_wait_for_container_exec_ready_drains_stream_and_retries
     assert read_output_calls == 4
     assert deleted_pods == []
     assert any("169.254.169.254" in " ".join(cmd) for cmd, _ in recorded_calls)
-    expected_container = "dind" if compose_mode else None
-    assert all(container == expected_container for _, container in recorded_calls)
+    expected_readiness_container = "dind" if compose_mode else None
+    expected_probe_container = "dind" if compose_mode else "skillevaluator-metadata-probe"
+    assert [container for _, container in recorded_calls[:3]] == [expected_readiness_container] * 3
+    assert recorded_calls[3][1] == expected_probe_container
 
     # Exhausting max_attempts raises RuntimeError
     ws_outcomes[:] = [RuntimeError("kubelet stream refused")]
@@ -352,6 +561,196 @@ def test_gke_environment_wait_for_container_exec_ready_drains_stream_and_retries
     with pytest.raises(RuntimeError, match="Container not ready for exec after 2 attempts"):
         asyncio.run(env._wait_for_container_exec_ready(max_attempts=2))
     assert ws_attempts == 2
+
+
+@pytest.mark.parametrize(
+    ("scenario", "http_status", "with_dead_proxy", "tool_mode", "expected_rc"),
+    [
+        # 1. Unreachable endpoint via python returns 0 (isolated)
+        ("python_unreachable", None, False, "python", 0),
+        # 2. Reachable 200 OK endpoint via python returns 42 even with dead http_proxy / HTTP_PROXY (SP-2)
+        ("python_reachable_200_with_dead_proxy", 200, True, "python", 42),
+        # 3. Reachable 403 Forbidden endpoint via python returns 42 (HTTPError proves TCP reachability, EC-4)
+        ("python_reachable_403", 403, True, "python", 42),
+        # 4. Reachable 404 Not Found endpoint via python returns 42 (EC-4)
+        ("python_reachable_404", 404, False, "python", 42),
+        # 5. Unreachable endpoint via curl fallback (--noproxy '*') returns 0
+        ("curl_unreachable", None, True, "curl_only", 0),
+        # 6. Reachable 200 OK endpoint via curl fallback returns 42 even with dead http_proxy (SP-2)
+        ("curl_reachable_200_with_dead_proxy", 200, True, "curl_only", 42),
+        # 7. Shimmed python3/python returning 0 without sentinel output returns 43 (SP-3)
+        ("shimmed_python", 200, False, "shimmed_python", 43),
+        # 8. Shimmed curl returning 0 without HTTP_CODE:000 output returns 43 (SP-3)
+        ("shimmed_curl", 200, False, "shimmed_curl", 43),
+    ],
+)
+def test_in_pod_metadata_isolation_probe_script_resists_proxy_and_binary_shims(
+    tmp_path: Path,
+    local_metadata_http_server: Callable[[int], str],
+    scenario: str,
+    http_status: int | None,
+    with_dead_proxy: bool,
+    tool_mode: str,
+    expected_rc: int,
+) -> None:
+    """Verify the shell probe script ignores http_proxy variables, catches HTTP 4xx responses, and rejects /bin/true shims."""
+    _ = scenario
+    target_url = (
+        "http://127.0.0.1:1/computeMetadata/v1/instance/service-accounts/default/token"
+        if http_status is None
+        else local_metadata_http_server(http_status)
+    )
+    script = _build_in_pod_metadata_isolation_probe_script(urls=(target_url,))
+    env = dict(os.environ)
+    if with_dead_proxy:
+        env["http_proxy"] = "http://127.0.0.1:9"
+        env["HTTP_PROXY"] = "http://127.0.0.1:9"
+        env["all_proxy"] = "http://127.0.0.1:9"
+        env["ALL_PROXY"] = "http://127.0.0.1:9"
+    if tool_mode == "curl_only":
+        real_curl = shutil.which("curl")
+        if real_curl is None:
+            pytest.skip("curl is not installed on host")
+        bin_dir = tmp_path / "curl_only_bin"
+        bin_dir.mkdir()
+        (bin_dir / "curl").symlink_to(real_curl)
+        env["PATH"] = str(bin_dir)
+    elif tool_mode == "shimmed_python":
+        shim_dir = tmp_path / "shims_py"
+        shim_dir.mkdir()
+        for tool_name in ("python3", "python"):
+            shim_path = shim_dir / tool_name
+            shim_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            shim_path.chmod(shim_path.stat().st_mode | stat.S_IXUSR)
+        env["PATH"] = str(shim_dir)
+    elif tool_mode == "shimmed_curl":
+        shim_dir = tmp_path / "shims_curl"
+        shim_dir.mkdir()
+        shim_path = shim_dir / "curl"
+        shim_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        shim_path.chmod(shim_path.stat().st_mode | stat.S_IXUSR)
+        env["PATH"] = str(shim_dir)
+
+    completed = subprocess.run(
+        ["/bin/sh", "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == expected_rc
+
+
+@pytest.mark.parametrize(
+    ("probe_container_rc", "expect_isolation_failure"),
+    [
+        # SC-1: Probe container confirms isolation (rc=0) while untargeted Harbor exec routes to "main"
+        (0, False),
+        # SC-2 / SP-1: Compromised "main" container spoofs rc=0, but trusted probe container detects reachable metadata (rc=42)
+        (42, True),
+    ],
+)
+def test_gke_environment_seam_routes_untargeted_exec_to_main_and_probes_trusted_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+    make_gke_env: Callable[..., SkillEvaluatorGKEEnvironment],
+    probe_container_rc: int,
+    expect_isolation_failure: bool,
+) -> None:
+    """Verify Harbor untargeted exec calls route to 'main' while metadata isolation verification runs in 'skillevaluator-metadata-probe'."""
+    exec_dispatches: list[tuple[list[str], str | None]] = []
+    deleted_pods: list[tuple[str, str]] = []
+
+    class FakeWSResponse:
+        def __init__(self, returncode: int, stdout: str = "") -> None:
+            self.returncode = returncode
+            self._stdout = stdout
+
+        def is_open(self) -> bool:
+            return False
+
+        def run_forever(self, timeout: int | float | None = None) -> None:
+            _ = timeout
+
+        def close(self) -> None:
+            return
+
+    class FakeCoreV1Api:
+        def __init__(self) -> None:
+            self.api_client = object()
+
+        def read_namespaced_service_account(self, **_kw: object) -> object:
+            return SimpleNamespace(metadata=SimpleNamespace(annotations={}))
+
+        def create_namespaced_pod(self, **_kw: object) -> object:
+            return None
+
+        def delete_namespaced_pod(self, name: str, namespace: str, **_kw: object) -> None:
+            deleted_pods.append((name, namespace))
+
+        def connect_get_namespaced_pod_exec(
+            self,
+            _name: str,
+            _namespace: str,
+            *,
+            command: list[str] | None = None,
+            container: str | None = None,
+            **_kwargs: object,
+        ) -> FakeWSResponse:
+            cmd_list = list(command or [])
+            exec_dispatches.append((cmd_list, container))
+            if container == "skillevaluator-metadata-probe":
+                return FakeWSResponse(returncode=probe_container_rc)
+            # Even if a compromised "main" container always returns 0, the probe never trusts "main"
+            return FakeWSResponse(returncode=0, stdout="from-main")
+
+    def passthrough_stream(fn: Callable[..., FakeWSResponse], *args: object, **kwargs: object) -> FakeWSResponse:
+        # Kubernetes stream() requires fn.__self__.api_client to exist on bound API methods
+        assert hasattr(getattr(fn, "__self__", None), "api_client")
+        return fn(*args, **kwargs)
+
+    async def noop_check_terminated(self: GKEEnvironment) -> None:
+        return None
+
+    async def direct_ensure_client(self: GKEEnvironment) -> None:
+        return None
+
+    monkeypatch.setattr(gke_env_mod, "stream", passthrough_stream, raising=False)
+    monkeypatch.setattr("harbor.environments.gke.stream", passthrough_stream, raising=False)
+    monkeypatch.setattr(GKEEnvironment, "_check_pod_terminated", noop_check_terminated)
+    monkeypatch.setattr(GKEEnvironment, "_ensure_client", direct_ensure_client)
+
+    fake_api = FakeCoreV1Api()
+    env = make_gke_env(
+        namespace="skill-eval",
+        fake_api=fake_api,
+        networking_api=SimpleNamespace(
+            read_namespaced_network_policy=lambda **_kw: _build_metadata_blocking_network_policy("skill-eval"),
+            create_namespaced_network_policy=lambda **_kw: _build_metadata_blocking_network_policy("skill-eval"),
+        ),
+    )
+    env.task_env_config = SimpleNamespace(workdir=None, user=None)
+    env._read_exec_output = lambda _resp: ("from-main", "")  # type: ignore[method-assign]
+
+    pod = _make_pod("pod-seam-test")
+    asyncio.run(env._create_pod(pod))
+
+    if expect_isolation_failure:
+        with pytest.raises(RuntimeError, match="SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1"):
+            asyncio.run(env._wait_for_container_exec_ready(max_attempts=2))
+        assert deleted_pods == [("pod-under-test", "skill-eval")]
+        assert [container for _, container in exec_dispatches] == ["main", "skillevaluator-metadata-probe"]
+        return
+
+    asyncio.run(env._wait_for_container_exec_ready(max_attempts=2))
+    exec_result = asyncio.run(env.exec("echo hello"))
+    assert exec_result.return_code == 0
+    assert exec_result.stdout == "from-main"
+    assert [container for _, container in exec_dispatches] == [
+        "main",
+        "skillevaluator-metadata-probe",
+        "main",
+    ]
 
 
 def test_gke_environment_exec_retries_transient_kubelet_errors(

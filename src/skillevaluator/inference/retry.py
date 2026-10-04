@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import random
+import ssl
 import time
 import urllib.error
 from collections.abc import Callable, Mapping
@@ -136,11 +137,42 @@ def extract_retry_after(exc: BaseException) -> str | None:
     return None
 
 
+def _is_certificate_failure(exc: BaseException) -> bool:
+    """Return whether ``exc`` is, or wraps, a failed TLS certificate check.
+
+    The OpenAI and Anthropic SDKs raise ``APIConnectionError`` with the
+    ``ssl.SSLCertVerificationError`` chained under httpx's ``ConnectError``;
+    urllib keeps it in ``URLError.reason``; botocore keeps it in
+    ``kwargs["error"]``. A retry cannot fix a bad CA bundle. The Harbor
+    verifier template keeps the same helper.
+    """
+    pending: list[object] = [exc]
+    seen: set[int] = set()
+    while pending and len(seen) < 32:
+        current = pending.pop()
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        seen.add(id(current))
+        if isinstance(current, urllib.error.URLError):
+            pending.append(current.reason)
+        kwargs = getattr(current, "kwargs", None)
+        if isinstance(kwargs, dict):
+            pending.append(kwargs.get("error"))
+        pending.extend(current.args)
+        pending.extend((current.__cause__, current.__context__))
+    return False
+
+
 def is_retriable_exception(exc: BaseException) -> bool:
     """Return True if an exception represents a transient failure eligible for retry."""
     status = extract_http_status(exc)
     if status is not None:
         return is_retriable_status_code(status)
+
+    if _is_certificate_failure(exc):
+        return False
 
     if isinstance(exc, (TimeoutError, urllib.error.URLError, ConnectionError, OSError)):
         return True

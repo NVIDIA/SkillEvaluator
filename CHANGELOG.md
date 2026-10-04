@@ -207,7 +207,9 @@ All notable changes to SkillEvaluator are documented in this file.
   and 505 (so Anthropic's 529 "overloaded" and proxy 520-524 errors), and a
   response body cut short (`IncompleteRead`), and never retries a failed TLS
   certificate check or a URL error that is not a network failure. The host
-  `LLMClient` retries the same HTTP statuses.
+  `LLMClient` retries the same HTTP statuses. No judge path retries a failed
+  certificate check: not the HTTP providers, not Bedrock, and not the host
+  `LLMClient`, even when an SDK wraps it in a connection error.
 - A judge HTTP 400 or 422 keeps the provider's error body after the
   structured-output check reads it. `LLM_JUDGE_FALLBACK_MODELS` again switches
   models on a 400/422 "invalid model" error, and the judge error shows the

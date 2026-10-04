@@ -928,6 +928,34 @@ def test_the_verifier_judge_retries_a_read_timeout(verifier, monkeypatch: pytest
     assert 0.0 <= verifier.recorded_sleeps[1] <= verifier._DEFAULT_BASE_DELAY * 2
 
 
+def _raised_from(outer: BaseException, inner: BaseException) -> BaseException:
+    """Return ``outer`` raised while handling ``inner``, the way SDKs wrap transport errors."""
+    try:
+        try:
+            raise inner
+        except BaseException as caught:
+            raise outer from caught
+    except BaseException as raised:
+        return raised
+
+
+def _botocore_cert_error(*, chained: bool) -> BaseException:
+    """Build botocore's SSLError for a failed certificate check.
+
+    ``chained`` matches what botocore raises over urllib3 (the cert error two
+    links down); otherwise the cert error sits directly in ``kwargs["error"]``.
+    """
+    import botocore.exceptions
+    import urllib3.exceptions
+
+    endpoint = "https://bedrock-runtime.invalid"
+    cert = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+    if not chained:
+        return botocore.exceptions.SSLError(endpoint_url=endpoint, error=cert)
+    urllib3_error = _raised_from(urllib3.exceptions.SSLError(cert), cert)
+    return _raised_from(botocore.exceptions.SSLError(endpoint_url=endpoint, error=urllib3_error), urllib3_error)
+
+
 @pytest.mark.parametrize(
     ("error", "transient"),
     [
@@ -939,6 +967,11 @@ def test_the_verifier_judge_retries_a_read_timeout(verifier, monkeypatch: pytest
         pytest.param(urllib.error.URLError("timed out"), True, id="url-timed-out"),
         pytest.param(urllib.error.URLError(ssl.SSLCertVerificationError("bad cert")), False, id="url-cert"),
         pytest.param(ssl.SSLCertVerificationError("bad cert"), False, id="cert"),
+        pytest.param(
+            _raised_from(ConnectionError("connect failed"), ssl.SSLCertVerificationError("bad cert")),
+            False,
+            id="chained-cert",
+        ),
         pytest.param(urllib.error.URLError("unknown url type: ftp"), False, id="url-not-network"),
         pytest.param(TimeoutError("LLM judge time budget exhausted"), False, id="budget-exhausted"),
         pytest.param(ValueError("bad json"), False, id="value-error"),
@@ -968,6 +1001,28 @@ def test_the_verifier_judge_classifies_transient_errors(verifier, error: BaseExc
 def test_the_verifier_judge_classifies_http_statuses(verifier, code: int, transient: bool) -> None:
     error = urllib.error.HTTPError("https://judge.invalid/v1", code, "status", hdrs=None, fp=None)
     assert verifier._is_transient_judge_error(error) is transient
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(_botocore_cert_error(chained=True), id="botocore-ssl-chained"),
+        pytest.param(_botocore_cert_error(chained=False), id="botocore-ssl-kwargs"),
+        pytest.param(ssl.SSLCertVerificationError(1, "certificate verify failed"), id="bare-cert"),
+    ],
+)
+def test_the_verifier_bedrock_classifier_never_retries_a_certificate_failure(verifier, error: BaseException) -> None:
+    # botocore's SSLError is an OSError, which the Bedrock classifier otherwise treats as a network blip.
+    assert isinstance(error, OSError)
+    retriable, _label, _retry_after = verifier._classify_bedrock_retry_error(error)
+    assert retriable is False
+
+
+def test_the_verifier_bedrock_classifier_still_retries_a_dropped_connection(verifier) -> None:
+    import botocore.exceptions
+
+    error = botocore.exceptions.EndpointConnectionError(endpoint_url="https://bedrock-runtime.invalid")
+    assert verifier._classify_bedrock_retry_error(error)[0] is True
 
 
 def test_the_verifier_judge_never_retries_a_certificate_failure(verifier, monkeypatch: pytest.MonkeyPatch) -> None:

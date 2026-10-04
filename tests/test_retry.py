@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ssl
 import urllib.error
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -20,6 +21,7 @@ from skillevaluator.inference.retry import (
     DEFAULT_MAX_DELAY,
     DEFAULT_MAX_RETRIES,
     calculate_full_jitter_delay,
+    is_retriable_exception,
     is_retriable_status_code,
     parse_retry_after,
     resolve_retry_config,
@@ -214,6 +216,94 @@ def test_verifier_preserves_rate_limit_error_body_when_retry_after_exceeds_cap(
         verifier._urlopen_with_retry(request)
 
     assert "capacity returns in one hour" in verifier._format_http_error(exc_info.value)
+
+
+def _raised_from(outer: BaseException, inner: BaseException) -> BaseException:
+    """Return ``outer`` raised while handling ``inner``, the way SDKs wrap transport errors."""
+    try:
+        try:
+            raise inner
+        except BaseException as caught:
+            raise outer from caught
+    except BaseException as raised:
+        return raised
+
+
+def _cert_error() -> ssl.SSLCertVerificationError:
+    return ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+
+
+def _sdk_connection_error(cause: BaseException) -> BaseException:
+    """Build openai.APIConnectionError the way the SDK raises it over httpx."""
+    import httpx
+    import openai
+
+    request = httpx.Request("POST", "https://judge.invalid/v1/chat/completions")
+    connect_error = _raised_from(httpx.ConnectError(str(cause), request=request), cause)
+    return _raised_from(openai.APIConnectionError(request=request), connect_error)
+
+
+@pytest.mark.parametrize(
+    ("make_error", "expected"),
+    [
+        pytest.param(lambda: urllib.error.URLError(_cert_error()), False, id="urllib-cert"),
+        pytest.param(lambda: _sdk_connection_error(_cert_error()), False, id="sdk-cert"),
+        pytest.param(lambda: _sdk_connection_error(ConnectionResetError("reset")), True, id="sdk-connection-reset"),
+        pytest.param(lambda: urllib.error.URLError(ConnectionResetError("reset")), True, id="urllib-connection-reset"),
+    ],
+)
+def test_is_retriable_exception_never_retries_a_certificate_failure(
+    make_error: Callable[[], BaseException], expected: bool
+) -> None:
+    """Verify a failed TLS certificate check is not retried, however the SDK wraps it."""
+    assert is_retriable_exception(make_error()) is expected
+
+
+def test_host_and_verifier_classify_certificate_failures_alike() -> None:
+    """Verify the host and the verifier template agree on wrapped certificate failures."""
+    import botocore.exceptions
+
+    from skillevaluator.inference import retry
+
+    verifier = load_harbor_eval_template("harbor_template_cert_parity")
+    cases = [
+        urllib.error.URLError(_cert_error()),
+        _sdk_connection_error(_cert_error()),
+        botocore.exceptions.SSLError(endpoint_url="https://bedrock-runtime.invalid", error=_cert_error()),
+        _sdk_connection_error(ConnectionResetError("reset")),
+        ConnectionResetError("reset"),
+    ]
+    assert [retry._is_certificate_failure(case) for case in cases] == [True, True, True, False, False]
+    assert [verifier._is_certificate_failure(case) for case in cases] == [True, True, True, False, False]
+
+
+def test_llm_client_does_not_retry_a_certificate_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify one judge call against a bad certificate makes one connection, not 1 + max_retries."""
+    import httpx
+
+    from skillevaluator.inference.client import LLMClient
+
+    slept: list[float] = []
+    monkeypatch.setattr("skillevaluator.inference.retry.time.sleep", slept.append)
+    connections: list[str] = []
+
+    def bad_certificate(request: httpx.Request) -> httpx.Response:
+        connections.append(str(request.url))
+        raise _raised_from(httpx.ConnectError("certificate verify failed", request=request), _cert_error())
+
+    client = LLMClient(
+        model="judge-model",
+        base_url="https://judge.invalid/v1",
+        api_key="test-judge-key",
+        max_retries=3,
+        http_client=httpx.Client(transport=httpx.MockTransport(bad_certificate)),
+    )
+
+    with pytest.raises(Exception, match="Connection error"):
+        client.completions("sys", "judge this")
+
+    assert len(connections) == 1
+    assert slept == []
 
 
 def test_retry_call_with_backoff_immediate_success() -> None:
@@ -604,6 +694,31 @@ def test_bedrock_converse_transport_retries_transient_connection_error(
     assert (content, error) == ("reconnected", None)
     assert bedrock_harness.requests_sent == 2
     assert len(bedrock_harness.slept) == 1
+
+
+def test_bedrock_converse_transport_does_not_retry_a_certificate_failure(
+    bedrock_harness: _BedrockTransportHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify _call_bedrock fails fast on a failed TLS certificate check instead of retrying it as a network blip."""
+    import botocore.exceptions
+    import urllib3.exceptions
+
+    monkeypatch.setenv("AWS_MAX_ATTEMPTS", "1")
+    monkeypatch.setenv("SKILL_EVAL_LLM_MAX_RETRIES", "3")
+
+    def bad_certificate(req: Any) -> Any:
+        cert = _cert_error()
+        urllib3_error = _raised_from(urllib3.exceptions.SSLError(cert), cert)
+        raise _raised_from(botocore.exceptions.SSLError(endpoint_url=req.url, error=urllib3_error), urllib3_error)
+
+    bedrock_harness.set_handler(bad_certificate)
+
+    content, error = bedrock_harness.call_bedrock()
+    assert content is None
+    assert error is not None and "Bedrock request failed" in error and "CERTIFICATE_VERIFY_FAILED" in error
+    assert bedrock_harness.requests_sent == 1
+    assert bedrock_harness.slept == []
 
 
 @pytest.mark.parametrize("exc_cls", [FileNotFoundError, PermissionError, IsADirectoryError, NotADirectoryError])

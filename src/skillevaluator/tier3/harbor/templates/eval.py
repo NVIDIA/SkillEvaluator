@@ -2573,6 +2573,33 @@ def _is_retriable_http_status(code):
     return code in (408, 429) or (500 <= code <= 599 and code not in _NON_RETRIABLE_5XX_CODES)
 
 
+def _is_certificate_failure(error):
+    """Return whether ``error`` is, or wraps, a failed TLS certificate check.
+
+    urllib keeps the ``ssl.SSLCertVerificationError`` in ``URLError.reason``;
+    botocore's ``SSLError`` keeps it in ``kwargs["error"]`` and chains it.
+    A retry cannot fix a bad CA bundle, so no judge path retries it. Keep in
+    sync with ``skillevaluator.inference.retry._is_certificate_failure``.
+    """
+    pending = [error]
+    seen = set()
+    while pending and len(seen) < 32:
+        current = pending.pop()
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        seen.add(id(current))
+        if isinstance(current, urllib.error.URLError):
+            pending.append(current.reason)
+        kwargs = getattr(current, "kwargs", None)
+        if isinstance(kwargs, dict):
+            pending.append(kwargs.get("error"))
+        pending.extend(current.args)
+        pending.extend((current.__cause__, current.__context__))
+    return False
+
+
 def _is_transient_judge_error(error):
     """Return whether a failed judge request is worth another attempt.
 
@@ -2586,9 +2613,9 @@ def _is_transient_judge_error(error):
     """
     if isinstance(error, urllib.error.HTTPError):
         return _is_retriable_http_status(error.code)
-    cause = error.reason if isinstance(error, urllib.error.URLError) else error
-    if isinstance(cause, ssl.SSLCertVerificationError):
+    if _is_certificate_failure(error):
         return False
+    cause = error.reason if isinstance(error, urllib.error.URLError) else error
     if isinstance(cause, TimeoutError) and "LLM judge time budget exhausted" in str(cause):
         return False
     if isinstance(error, urllib.error.URLError) and not isinstance(cause, OSError):
@@ -2820,6 +2847,10 @@ def _classify_bedrock_retry_error(error):
     if isinstance(error, TimeoutError) and "LLM judge time budget exhausted" in str(error):
         return False, type(error).__name__, None
     if isinstance(error, (FileNotFoundError, IsADirectoryError, NotADirectoryError, PermissionError)):
+        return False, type(error).__name__, None
+    # botocore's SSLError is an OSError; without this check a bad CA bundle
+    # would be retried as a network blip.
+    if _is_certificate_failure(error):
         return False, type(error).__name__, None
 
     response = getattr(error, "response", None)

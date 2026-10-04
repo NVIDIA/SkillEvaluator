@@ -23,8 +23,10 @@ import importlib.util
 import os
 import shutil
 import socket
+import ssl
 import sys
 import tempfile
+import urllib.error
 from pathlib import Path
 
 _PACKAGE = Path(__file__).resolve().parents[2] / "src" / "skillevaluator"
@@ -73,6 +75,7 @@ def smoke(staged: Path) -> None:
         (socket.timeout(), True),  # noqa: UP041 -- on Python 3.9 not yet a TimeoutError
         (ConnectionResetError(), True),
         (http.client.IncompleteRead(b""), True),
+        (urllib.error.URLError(ssl.SSLCertVerificationError()), False),
         (ValueError(), False),
     ):
         _expect(f"transient {type(error).__name__}", verifier._is_transient_judge_error(error), transient)

@@ -73,6 +73,23 @@ All notable changes to SkillEvaluator are documented in this file.
   host variable in to `${NAME}` header expansion.
 - Plugin reports render the hook census, canary results, and MCP proof.
 - `harbor.plugin_canary: false` in `evals/config.yml` turns off the canary decoy for a plugin run, and the run config records the choice.
+- Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for
+  LLM judges in both the Harbor container verifier (`eval.py`) and host runtime
+  (`LLMClient`). Features zero-dependency full jitter exponential backoff,
+  RFC-7231 `Retry-After` header parsing, finite-value environment overrides
+  (`SKILL_EVAL_LLM_MAX_RETRIES`, `SKILL_EVAL_LLM_RETRY_BASE_DELAY`, and
+  `SKILL_EVAL_LLM_RETRY_MAX_DELAY`), and
+  automatic container forwarding via Harbor `task.toml`, and a per-judge
+  verifier time budget that leaves room for failure artifacts, without altering
+  benchmark metrics or scoring formulas.
+- Provider-aware structured JSON schema enforcement (`response_format` for
+  OpenAI-compatible / Gemini Vertex / NVIDIA NIM endpoints and `output_config`
+  for Anthropic `/v1/messages`) across the custom `judge_accuracy`,
+  `judge_goal_accuracy`, and `judge_behavior_check` paths, with automatic
+  schema-specific `HTTP 400`/`422` downgrade and per-target memoization
+  (`_SCHEMA_UNSUPPORTED_TARGETS`), boolean prompt alignment, and a guard for
+  missing `message` fields on reasoning token exhaustion. The canonical OpenAI
+  RAGAS goal scorer retains its separate scoring path.
 - Configurable evidence bundle budgets (`SKILL_EVAL_ACCURACY_BUDGET`, `SKILL_EVAL_GOAL_ACCURACY_BUDGET`, `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`) and final response limit (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`).
 
 ### Changed
@@ -186,9 +203,9 @@ All notable changes to SkillEvaluator are documented in this file.
   evidence: the load and hook census read every trial, `plugin_provenance.json`
   is written before the error, and Tier 3 reports an INCOMPLETE result instead
   of a skip; a crash in the report-only sum-of-parts arm no longer ends the run.
-- The Tier 3 verifier retries a judge call that timed out, lost its connection,
-  or got HTTP 408/429/5xx, with a short backoff bounded inside the verifier
-  timeout; other errors are not retried.
+- The Tier 3 verifier's judge retry also covers HTTP 408 and a response body
+  cut short (`IncompleteRead`), and never retries a failed TLS certificate
+  check or a URL error that is not a network failure.
 - Plugin signals and in-agent MCP proof map native MCP tool names (Claude Code `mcp__plugin_<plugin>_<server>__<tool>`, OpenCode `<server>_<tool>`, Hermes `mcp_<server>_<tool>`, Codex bare names via its session log) to the declared server, and never credit one server's calls to a similarly named one.
 - Plugin signals count Claude Code `Skill(<plugin>:<command>)` calls as command activations, credit every SKILL.md in a chained shell read, and no longer mark a skill read as failed because the skill text says something is "not available".
 - The Harbor verifier matches Claude Code native `<plugin>:<skill>` names exactly and keeps `<plugin>:<command>` calls out of skill activation and routing grades.

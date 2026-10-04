@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-import importlib.util
+import email.message
 import io
 import json
 import sys
@@ -13,13 +13,10 @@ import urllib.error
 from pathlib import Path
 
 import pytest
+from tests.conftest import MockUrllibResponse, load_harbor_eval_template
 
 from skillevaluator.inference.client import LLMClient
 from skillevaluator.tier3.eval_core import llm_judge
-
-_TEMPLATE = (
-    Path(__file__).resolve().parents[1] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-)
 
 _CREDENTIALS = {
     "OPENAI_API_KEY": "dummy-openai-credential-DO-NOT-USE",
@@ -38,6 +35,9 @@ _PROVIDER_ENV = (
     *_CREDENTIALS,
     "SKILL_EVAL_LLM_PROVIDER",
     "SKILL_EVAL_LLM_BASE_URL",
+    "SKILL_EVAL_LLM_MAX_RETRIES",
+    "SKILL_EVAL_LLM_RETRY_BASE_DELAY",
+    "SKILL_EVAL_LLM_RETRY_MAX_DELAY",
     "OPENAI_BASE_URL",
     "ANTHROPIC_BASE_URL",
     "LLM_JUDGE_FALLBACK_MODELS",
@@ -58,18 +58,13 @@ def _clean_provider_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def verifier_module(tmp_path: Path):
     module_name = f"harbor_template_error_redaction_{tmp_path.name}"
-    spec = importlib.util.spec_from_file_location(module_name, _TEMPLATE)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
+    module = load_harbor_eval_template(module_name=module_name)
     sys.modules[module_name] = module
-    spec.loader.exec_module(module)
 
     module.VERIFIER_DIR = tmp_path
     module.REWARD_JSON = tmp_path / "reward.json"
     module.REWARD_TXT = tmp_path / "reward.txt"
     module.SKILL_EVALUATOR_REWARD_JSON = tmp_path / "skill_evaluator_reward.json"
-    # Transient judge errors are retried with a backoff; keep these tests instant.
-    module._judge_retry_sleep = lambda _seconds: None
     return module
 
 
@@ -78,23 +73,9 @@ def _http_error(body: str, *, code: int = 401, reason: str = "Unauthorized") -> 
         "https://provider.invalid/chat/completions",
         code,
         reason,
-        hdrs=None,
+        hdrs=email.message.Message(),
         fp=io.BytesIO(body.encode()),
     )
-
-
-class _FakeResponse:
-    def __init__(self, body: dict) -> None:
-        self._body = json.dumps(body).encode()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, traceback) -> bool:
-        return False
-
-    def read(self) -> bytes:
-        return self._body
 
 
 @pytest.mark.parametrize("module_fixture", ["source_judge", "verifier_module"])
@@ -258,6 +239,7 @@ def test_generated_provider_error_preserves_selected_judge_provenance(
     def time_out(*_args, **_kwargs):
         raise TimeoutError(f"request timed out with {credential}")
 
+    monkeypatch.setattr(verifier_module.time, "sleep", lambda _s: None)
     monkeypatch.setattr(verifier_module.urllib.request, "urlopen", time_out)
 
     content, error, provenance = verifier_module._call_public_llm_with_provenance(
@@ -342,7 +324,7 @@ def test_generated_call_public_llm_does_not_redact_successful_content(
     credential = _CREDENTIALS["OPENAI_API_KEY"]
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", credential)
-    response = _FakeResponse({"choices": [{"message": {"content": f"model content: {credential}"}}]})
+    response = MockUrllibResponse({"choices": [{"message": {"content": f"model content: {credential}"}}]})
     monkeypatch.setattr(verifier_module.urllib.request, "urlopen", lambda *_args, **_kwargs: response)
 
     content, error = verifier_module.call_public_llm("safe prompt")
@@ -453,3 +435,185 @@ def test_write_reward_outputs_preserves_fixed_schema_keys_when_a_credential_matc
         "security": 1.0,
         "overall": 0.75,
     }
+
+
+@pytest.mark.parametrize(
+    ("status_code", "reason", "error_body"),
+    [
+        (429, "Too Many Requests", "rate limited"),
+        (503, "Service Unavailable", "service unavailable"),
+    ],
+)
+def test_generated_call_public_llm_retries_transient_http_error_and_succeeds(
+    verifier_module,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    reason: str,
+    error_body: str,
+) -> None:
+    """Verify call_public_llm retries on transient HTTP status codes and succeeds on subsequent attempt."""
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    slept: list[float] = []
+    monkeypatch.setattr(verifier_module.time, "sleep", slept.append)
+
+    calls = 0
+
+    def mock_urlopen(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _http_error(error_body, code=status_code, reason=reason)
+        return MockUrllibResponse({"choices": [{"message": {"content": "judge success"}}]})
+
+    monkeypatch.setattr(verifier_module.urllib.request, "urlopen", mock_urlopen)
+
+    content, error = verifier_module.call_public_llm("safe prompt")
+
+    assert content == "judge success"
+    assert error is None
+    assert calls == 2
+    assert len(slept) == 1
+
+
+def test_generated_call_public_llm_exhausts_retries_on_persistent_429(
+    verifier_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify call_public_llm exhausts retries and returns redacted error on persistent 429."""
+    credential = _CREDENTIALS["OPENAI_API_KEY"]
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", credential)
+
+    slept: list[float] = []
+    monkeypatch.setattr(verifier_module.time, "sleep", slept.append)
+
+    calls = 0
+
+    def fail_request(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise _http_error(f'{{"error": "rate limited with {credential}"}}', code=429, reason="Too Many Requests")
+
+    monkeypatch.setattr(verifier_module.urllib.request, "urlopen", fail_request)
+
+    content, error = verifier_module.call_public_llm("safe prompt", allow_model_fallback=False)
+
+    assert content is None
+    assert error is not None
+    assert "HTTP 429: Too Many Requests" in error
+    assert credential not in error
+    assert "[REDACTED]" in error
+    assert calls == 4  # 1 initial + 3 retries
+    assert len(slept) == 3
+
+
+def test_generated_call_public_llm_respects_retry_after_header(
+    verifier_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify call_public_llm respects Retry-After header on HTTP 429."""
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    slept: list[float] = []
+    monkeypatch.setattr(verifier_module.time, "sleep", slept.append)
+
+    hdrs = email.message.Message()
+    hdrs["Retry-After"] = "4.0"
+
+    calls = 0
+
+    def mock_urlopen(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            err = urllib.error.HTTPError(
+                "https://provider.invalid/chat/completions",
+                429,
+                "Too Many Requests",
+                hdrs=hdrs,
+                fp=io.BytesIO(b'{"error": "rate limit"}'),
+            )
+            raise err
+        return MockUrllibResponse({"choices": [{"message": {"content": "finished"}}]})
+
+    monkeypatch.setattr(verifier_module.urllib.request, "urlopen", mock_urlopen)
+
+    content, error = verifier_module.call_public_llm("safe prompt")
+
+    assert content == "finished"
+    assert error is None
+    assert calls == 2
+    assert len(slept) == 1
+    assert 4.0 <= slept[0] <= 4.6
+
+
+def test_generated_call_public_llm_fails_fast_on_http_401(
+    verifier_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify call_public_llm fails fast immediately on HTTP 401 Unauthorized without retry or sleep."""
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "invalid-key")
+
+    slept: list[float] = []
+    monkeypatch.setattr(verifier_module.time, "sleep", slept.append)
+
+    calls = 0
+
+    def fail_unauthorized(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise _http_error('{"error": "invalid api key"}', code=401, reason="Unauthorized")
+
+    monkeypatch.setattr(verifier_module.urllib.request, "urlopen", fail_unauthorized)
+
+    content, error = verifier_module.call_public_llm("safe prompt", allow_model_fallback=False)
+
+    assert content is None
+    assert error is not None
+    assert "HTTP 401: Unauthorized" in error
+    assert calls == 1
+    assert len(slept) == 0
+
+
+def test_generated_call_public_llm_fails_fast_if_retry_after_exceeds_max_delay(
+    verifier_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify call_public_llm fails fast without sleeping if Retry-After exceeds max_delay."""
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("SKILL_EVAL_LLM_RETRY_MAX_DELAY", "10.0")
+
+    slept: list[float] = []
+    monkeypatch.setattr(verifier_module.time, "sleep", slept.append)
+
+    hdrs = email.message.Message()
+    hdrs["Retry-After"] = "3600"
+
+    calls = 0
+
+    def fail_request(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        err = urllib.error.HTTPError(
+            "https://provider.invalid/chat/completions",
+            429,
+            "Too Many Requests",
+            hdrs=hdrs,
+            fp=io.BytesIO(b'{"error": "rate limit"}'),
+        )
+        raise err
+
+    monkeypatch.setattr(verifier_module.urllib.request, "urlopen", fail_request)
+
+    content, error = verifier_module.call_public_llm("safe prompt", allow_model_fallback=False)
+
+    assert content is None
+    assert error is not None
+    assert "HTTP 429: Too Many Requests" in error
+    assert calls == 1
+    assert len(slept) == 0

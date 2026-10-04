@@ -11,9 +11,13 @@ Harbor, Docker, or a model.
 
 from __future__ import annotations
 
+import http.client
 import json
 import shutil
+import socket
+import ssl
 import subprocess
+import time
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -789,6 +793,19 @@ def test_a_crash_in_the_report_only_sum_of_parts_arm_keeps_the_other_arms(
 # --------------------------------------------------------------------------- #
 # The verifier judge retries transient failures                               #
 # --------------------------------------------------------------------------- #
+class _RecordingTime:
+    """The real ``time`` module for the verifier, except ``sleep`` records the backoff instead of waiting."""
+
+    def __init__(self, sleeps: list[float]) -> None:
+        self._sleeps = sleeps
+
+    def sleep(self, seconds: float) -> None:
+        self._sleeps.append(seconds)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+
 @pytest.fixture
 def verifier(monkeypatch: pytest.MonkeyPatch):
     import importlib.util
@@ -805,6 +822,10 @@ def verifier(monkeypatch: pytest.MonkeyPatch):
         "SKILL_EVAL_JUDGE_MODEL",
         "SKILL_EVAL_LLM_MODEL",
         "LLM_JUDGE_FALLBACK_MODELS",
+        "SKILL_EVAL_LLM_MAX_RETRIES",
+        "SKILL_EVAL_LLM_RETRY_BASE_DELAY",
+        "SKILL_EVAL_LLM_RETRY_MAX_DELAY",
+        "SKILL_EVAL_LLM_JUDGE_BUDGET_SEC",
     ):
         monkeypatch.delenv(name, raising=False)
     spec = importlib.util.spec_from_file_location("p3_judge_retry_verifier", TEMPLATE)
@@ -812,7 +833,7 @@ def verifier(monkeypatch: pytest.MonkeyPatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     sleeps: list[float] = []
-    module._judge_retry_sleep = sleeps.append
+    module.time = _RecordingTime(sleeps)
     module.recorded_sleeps = sleeps
     return module
 
@@ -843,7 +864,13 @@ def _judge_server(statuses: list[int]) -> tuple[ThreadingHTTPServer, list[int]]:
 
 @pytest.mark.parametrize(
     ("statuses", "content", "attempts"),
-    [([503], "judge ok", 2), ([502, 429], "judge ok", 3), ([503, 503, 503], None, 3), ([400], None, 1)],
+    [
+        ([503], "judge ok", 2),
+        ([502, 429], "judge ok", 3),
+        ([408], "judge ok", 2),
+        ([503, 503, 503], None, 3),
+        ([400], None, 1),
+    ],
 )
 def test_the_verifier_judge_retries_transient_http_errors(
     verifier, monkeypatch: pytest.MonkeyPatch, statuses: list[int], content: str | None, attempts: int
@@ -853,6 +880,7 @@ def test_the_verifier_judge_retries_transient_http_errors(
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai-compatible")
         monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", "test-judge-key")
         monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", f"http://127.0.0.1:{server.server_address[1]}/v1")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MAX_RETRIES", "2")
         result, error = verifier.call_public_llm("judge this", model="judge-model", allow_model_fallback=False)
     finally:
         server.shutdown()
@@ -892,24 +920,88 @@ def test_the_verifier_judge_retries_a_read_timeout(verifier, monkeypatch: pytest
 
     assert (content, error) == ("judge ok", None)
     assert len(calls) == 3
-    assert verifier.recorded_sleeps == list(verifier._JUDGE_RETRY_DELAYS_SEC)
+    # Full-jitter backoff: attempt n sleeps somewhere in [0, base_delay * 2**n].
+    assert len(verifier.recorded_sleeps) == 2
+    assert 0.0 <= verifier.recorded_sleeps[0] <= verifier._DEFAULT_BASE_DELAY
+    assert 0.0 <= verifier.recorded_sleeps[1] <= verifier._DEFAULT_BASE_DELAY * 2
+
+
+@pytest.mark.parametrize(
+    ("error", "transient"),
+    [
+        pytest.param(socket.timeout("timed out"), True, id="socket-timeout"),  # noqa: UP041 -- Python 3.9 read timeout
+        pytest.param(TimeoutError("The read operation timed out"), True, id="read-timeout"),
+        pytest.param(ConnectionResetError("reset"), True, id="connection-reset"),
+        pytest.param(http.client.IncompleteRead(b"partial"), True, id="incomplete-read"),
+        pytest.param(urllib.error.URLError(ConnectionResetError("reset")), True, id="url-connection-reset"),
+        pytest.param(urllib.error.URLError("timed out"), True, id="url-timed-out"),
+        pytest.param(urllib.error.URLError(ssl.SSLCertVerificationError("bad cert")), False, id="url-cert"),
+        pytest.param(ssl.SSLCertVerificationError("bad cert"), False, id="cert"),
+        pytest.param(urllib.error.URLError("unknown url type: ftp"), False, id="url-not-network"),
+        pytest.param(TimeoutError("LLM judge time budget exhausted"), False, id="budget-exhausted"),
+        pytest.param(ValueError("bad json"), False, id="value-error"),
+    ],
+)
+def test_the_verifier_judge_classifies_transient_errors(verifier, error: BaseException, transient: bool) -> None:
+    assert verifier._is_transient_judge_error(error) is transient
+
+
+@pytest.mark.parametrize(
+    ("code", "transient"),
+    [(408, True), (429, True), (500, True), (502, True), (503, True), (504, True), (400, False), (401, False)],
+)
+def test_the_verifier_judge_classifies_http_statuses(verifier, code: int, transient: bool) -> None:
+    error = urllib.error.HTTPError("https://judge.invalid/v1", code, "status", hdrs=None, fp=None)
+    assert verifier._is_transient_judge_error(error) is transient
+
+
+def test_the_verifier_judge_never_retries_a_certificate_failure(verifier, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def bad_cert(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append("call")
+        raise urllib.error.URLError(ssl.SSLCertVerificationError("certificate verify failed"))
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-judge-key")
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", bad_cert)
+
+    content, error = verifier.call_public_llm("judge this", model="judge-model", allow_model_fallback=False)
+
+    assert content is None and error and "certificate verify failed" in error
+    assert calls == ["call"] and verifier.recorded_sleeps == []
 
 
 def test_the_verifier_judge_does_not_retry_past_its_time_budget(verifier, monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[str] = []
-    clock = iter([0.0, 150.0, 150.0])
+    now = [0.0]
+    timeouts: list[float] = []
 
-    def slow(*_args: Any, **_kwargs: Any) -> Any:
-        calls.append("call")
+    class Clock(_RecordingTime):
+        def monotonic(self) -> float:
+            return now[0]
+
+        def sleep(self, seconds: float) -> None:
+            super().sleep(seconds)
+            now[0] += seconds
+
+    def slow(_request: Any, timeout: float) -> Any:
+        timeouts.append(timeout)
+        now[0] += timeout  # every attempt waits out its whole read timeout
         raise TimeoutError("The read operation timed out")
 
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "test-judge-key")
+    monkeypatch.setattr(verifier, "time", Clock(verifier.recorded_sleeps))
     monkeypatch.setattr(verifier.urllib.request, "urlopen", slow)
-    monkeypatch.setattr(verifier.time, "monotonic", lambda: next(clock))
+    budget = verifier._resolve_judge_wall_time_budget()
+    token = verifier._ACTIVE_JUDGE_DEADLINE.set(budget)  # what _call_required_judge sets for a required judge
+    try:
+        content, error = verifier.call_public_llm("judge this", model="judge-model", allow_model_fallback=False)
+    finally:
+        verifier._ACTIVE_JUDGE_DEADLINE.reset(token)
 
-    content, error = verifier.call_public_llm("judge this", model="judge-model", allow_model_fallback=False)
-
-    # 150 s already spent: another full request would not fit in the budget.
-    assert content is None and error and "timed out" in error
-    assert calls == ["call"] and verifier.recorded_sleeps == []
+    # The retry only gets the time left, and none starts once the budget is spent.
+    assert content is None and error and "time budget exhausted" in error
+    assert len(timeouts) == 2 and timeouts[0] == 90 and timeouts[1] <= budget - 90
+    assert len(verifier.recorded_sleeps) == 1
+    assert now[0] <= budget

@@ -481,6 +481,15 @@ class _ResolvedPath(NamedTuple):
 
 
 class _Builder:
+    """Builds the inventory of one manifest view: its components, findings, and hook and privilege records.
+
+    :meth:`build` runs one phase per component type, and each section below
+    holds one phase with its helpers. Declared paths are resolved with the
+    view's format profile (:meth:`_resolve_declared`), and every read is
+    bounded and never follows links (:class:`PluginRootReader`).
+    :func:`build_plugin_inventory` builds a view per manifest and merges them.
+    """
+
     def __init__(
         self,
         root: Path,
@@ -885,55 +894,64 @@ class _Builder:
                 candidates.append(rel_dir / variant)
                 break
         if not candidates:
-            start = self.reader.root if str(rel_dir) == "." else self.reader.root / rel_dir.as_posix()
-            try:
-                with os.scandir(start) as iterator:
-                    entries = sorted(iterator, key=lambda entry: entry.name)
-            except OSError:
-                entries = []
-            for entry in entries[:CONTENT_DEDUP_MAX_DISCOVERED_PATHS]:
-                if entry.name.startswith(".") or (
-                    entry.name in SCAN_EXCLUDED_DIRS and entry.name not in SCAN_ARTIFACT_DIRS
-                ):
-                    continue  # hidden folders, VCS, virtualenv, package, and bytecode caches
-                child = PurePosixPath(entry.name) if str(rel_dir) == "." else rel_dir / entry.name
-                if str(rel_dir) == "." and entry.name == "skills":
-                    continue  # the default skills/ scan covers it
-                if entry.is_symlink():
-                    self.inventory.findings.append(
-                        _plugin_finding(
-                            Severity.HIGH,
-                            "plugin_component_path_unsafe",
-                            f"skills directory entry '{child.as_posix()}' is a symlink; it was not followed",
-                            self.reader.display(child),
-                            "Replace linked skill directories with regular contained directories.",
-                        )
-                    )
-                    continue
-                if not entry.is_dir(follow_symlinks=False):
-                    continue
-                for variant in SKILL_MANIFEST_VARIANTS:
-                    kind = self.reader.kind(child / variant)
-                    if kind == "file":
-                        candidates.append(child / variant)
-                        break
-                    if kind in {"link", "special"}:
-                        self.inventory.findings.append(
-                            _path_problem_finding(
-                                self.reader,
-                                "skills",
-                                DeclaredPath((child / variant).as_posix(), child / variant),
-                                self.manifest_rel,
-                                "unsafe",
-                                child / variant,
-                            )
-                        )
-                        break
+            candidates = self._child_skill_manifests(rel_dir)
         for manifest_rel in candidates:
             skill_dir = manifest_rel.parent
             name = skill_dir.name if str(skill_dir) != "." else self.reader.root.name
             component = self._add(Component("skill", name, "declared", skill_dir.as_posix(), "evaluated"))
             self._skill_cost(component, manifest_rel)
+
+    def _child_skill_manifests(self, rel_dir: PurePosixPath) -> list[PurePosixPath]:
+        """The ``SKILL.md`` of each skill folder directly in a declared skills dir.
+
+        A linked child folder or skill manifest is reported and not followed.
+        """
+        start = self.reader.root if str(rel_dir) == "." else self.reader.root / rel_dir.as_posix()
+        try:
+            with os.scandir(start) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+        except OSError:
+            entries = []
+        manifests: list[PurePosixPath] = []
+        for entry in entries[:CONTENT_DEDUP_MAX_DISCOVERED_PATHS]:
+            if entry.name.startswith(".") or (
+                entry.name in SCAN_EXCLUDED_DIRS and entry.name not in SCAN_ARTIFACT_DIRS
+            ):
+                continue  # hidden folders, VCS, virtualenv, package, and bytecode caches
+            child = PurePosixPath(entry.name) if str(rel_dir) == "." else rel_dir / entry.name
+            if str(rel_dir) == "." and entry.name == "skills":
+                continue  # the default skills/ scan covers it
+            if entry.is_symlink():
+                self.inventory.findings.append(
+                    _plugin_finding(
+                        Severity.HIGH,
+                        "plugin_component_path_unsafe",
+                        f"skills directory entry '{child.as_posix()}' is a symlink; it was not followed",
+                        self.reader.display(child),
+                        "Replace linked skill directories with regular contained directories.",
+                    )
+                )
+                continue
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            for variant in SKILL_MANIFEST_VARIANTS:
+                kind = self.reader.kind(child / variant)
+                if kind == "file":
+                    manifests.append(child / variant)
+                    break
+                if kind in {"link", "special"}:
+                    self.inventory.findings.append(
+                        _path_problem_finding(
+                            self.reader,
+                            "skills",
+                            DeclaredPath((child / variant).as_posix(), child / variant),
+                            self.manifest_rel,
+                            "unsafe",
+                            child / variant,
+                        )
+                    )
+                    break
+        return manifests
 
     def _declared_skill_tree(self, rel_dir: PurePosixPath) -> None:
         """Every skill below a declared folder, at any depth (Codex recursive discovery).
@@ -1230,6 +1248,7 @@ class _Builder:
             self._privileges(component, parsed.frontmatter, self.reader.display(rel))
 
     def _command_map(self, commands: dict[str, Any]) -> None:
+        """The object form of ``commands``: each entry has a ``source`` Markdown file or inline ``content``."""
         self._check_item_count("'commands' map", len(commands))
         for index, (command_name, entry) in enumerate(commands.items()):
             if index >= PLUGIN_COMPONENT_MAX_ITEMS:
@@ -1245,46 +1264,52 @@ class _Builder:
                     )
                 )
                 self._add(Component("command", str(command_name), "declared", None, "unsupported", problem="invalid"))
-                continue
-            description = entry.get("description") if isinstance(entry.get("description"), str) else ""
-            if "content" in entry:
-                content = entry.get("content") if isinstance(entry.get("content"), str) else ""
-                component = self._add(Component("command", str(command_name), "declared", None, "unsupported"))
-                component.cost = CostRow(
-                    "command",
-                    component.name,
-                    len(description),
-                    len(content),
-                    "always-on: description; on-demand: inline content",
-                )
-                self._privileges(component, {}, self.manifest_display, entry=entry)
-                continue
-            resolved = self._resolve_component(
-                "command",
-                f"commands[{command_name!r}].source",
-                entry.get("source"),
-                kinds=("file",),
-                name=str(command_name),
-                wrong_kind_field="commands",
-            )
-            if resolved is None:
-                continue
-            text = self._read(resolved.rel)
-            component = self._add(
-                Component("command", str(command_name), "declared", resolved.rel.as_posix(), "unsupported")
-            )
-            if text is not None:
-                parsed = parse_markdown(text)
-                component.cost = CostRow(
-                    "command",
-                    component.name,
-                    len(description or parsed.description or ""),
-                    len(parsed.body),
-                    "always-on: description; on-demand: command body",
-                )
-                self._privileges(component, parsed.frontmatter, self.reader.display(resolved.rel), entry=entry)
+            elif "content" in entry:
+                self._inline_command(command_name, entry)
             else:
-                self._privileges(component, {}, self.manifest_display, entry=entry)
+                self._command_file(command_name, entry)
+
+    def _inline_command(self, command_name: str, entry: dict[str, Any]) -> None:
+        description = entry.get("description") if isinstance(entry.get("description"), str) else ""
+        content = entry.get("content") if isinstance(entry.get("content"), str) else ""
+        component = self._add(Component("command", str(command_name), "declared", None, "unsupported"))
+        component.cost = CostRow(
+            "command",
+            component.name,
+            len(description),
+            len(content),
+            "always-on: description; on-demand: inline content",
+        )
+        self._privileges(component, {}, self.manifest_display, entry=entry)
+
+    def _command_file(self, command_name: str, entry: dict[str, Any]) -> None:
+        resolved = self._resolve_component(
+            "command",
+            f"commands[{command_name!r}].source",
+            entry.get("source"),
+            kinds=("file",),
+            name=str(command_name),
+            wrong_kind_field="commands",
+        )
+        if resolved is None:
+            return
+        description = entry.get("description") if isinstance(entry.get("description"), str) else ""
+        text = self._read(resolved.rel)
+        component = self._add(
+            Component("command", str(command_name), "declared", resolved.rel.as_posix(), "unsupported")
+        )
+        if text is not None:
+            parsed = parse_markdown(text)
+            component.cost = CostRow(
+                "command",
+                component.name,
+                len(description or parsed.description or ""),
+                len(parsed.body),
+                "always-on: description; on-demand: command body",
+            )
+            self._privileges(component, parsed.frontmatter, self.reader.display(resolved.rel), entry=entry)
+        else:
+            self._privileges(component, {}, self.manifest_display, entry=entry)
 
     # -- tool and permission grants (skills, agents, commands) ------------- #
     def _privileges(
@@ -1454,80 +1479,11 @@ class _Builder:
             self._settings_checks(inline, self.manifest_rel, "plugin.json#settings")
 
     def _settings_checks(self, config: Any, rel: str, component_name: str) -> None:
-        display = self.reader.display(rel)
         if not isinstance(config, dict):
             return
-        start = len(self.inventory.findings)
-        self._settings_findings(config, rel, display)
-        for finding in self.inventory.findings[start:]:
+        for finding in _settings_findings(config, rel, self.reader.display(rel)):
             finding.metadata["plugin_component"] = {"type": "settings", "name": component_name}
-
-    def _settings_findings(self, config: dict[str, Any], rel: str, display: str) -> None:
-        permissions = config.get("permissions")
-        if isinstance(permissions, dict):
-            mode = permissions.get("defaultMode")
-            if mode == "bypassPermissions":
-                self.inventory.findings.append(
-                    _plugin_finding(
-                        Severity.HIGH,
-                        "plugin_settings_bypass_permissions",
-                        f"shipped settings '{rel}' sets permissions.defaultMode to 'bypassPermissions', which "
-                        "disables every tool-approval prompt",
-                        display,
-                        "Remove permissions.defaultMode (Claude Code ignores it from plugins, but shipping it is a "
-                        "red flag and it applies if the file is copied into a project).",
-                    )
-                )
-            elif isinstance(mode, str) and mode in PERMISSIVE_PERMISSION_MODES:
-                self.inventory.findings.append(
-                    _plugin_finding(
-                        Severity.MEDIUM,
-                        "plugin_settings_permission_mode",
-                        f"shipped settings '{rel}' sets permissions.defaultMode to {mode!r}, which approves some "
-                        "tool calls (file edits, or what a classifier allows) without a prompt",
-                        display,
-                        "Remove permissions.defaultMode; let the user choose the permission mode (Claude Code "
-                        "ignores it from plugins, but it applies if the file is copied into a project).",
-                    )
-                )
-            allow = permissions.get("allow")
-            if isinstance(allow, list):
-                broad = sorted(
-                    {
-                        str(rule)
-                        for rule in allow  # every rule: already bounded by the structured-data limits
-                        if isinstance(rule, str) and is_broad_allow_rule(rule)
-                    }
-                )
-                if broad:
-                    self.inventory.findings.append(
-                        _plugin_finding(
-                            Severity.HIGH,
-                            "plugin_settings_broad_allow",
-                            f"shipped settings '{rel}' pre-approves unrestricted tools or interpreter Bash rules "
-                            f"that run any command {broad[:8]}",
-                            display,
-                            "Remove blanket allow rules such as Bash / Bash(*) / Bash(python3:*); scope permissions "
-                            "to exact commands.",
-                        )
-                    )
-        if config.get("enableAllProjectMcpServers") is True:
-            self.inventory.findings.append(
-                _plugin_finding(
-                    Severity.MEDIUM,
-                    "plugin_settings_auto_approve",
-                    f"shipped settings '{rel}' sets enableAllProjectMcpServers, auto-approving every project MCP "
-                    "server",
-                    display,
-                    "Remove enableAllProjectMcpServers; let users approve MCP servers explicitly.",
-                )
-            )
-        self.inventory.findings.extend(_override_findings(env_override_issues(config.get("env")), display, where=rel))
-        self.inventory.findings.extend(
-            _override_findings(
-                [*permission_bypass_issues(config), *permission_mode_flag_issues(config)], display, where=rel
-            )
-        )
+            self.inventory.findings.append(finding)
 
     # -- Codex apps (connectors) ------------------------------------------- #
     def apps(self) -> None:
@@ -1585,18 +1541,20 @@ class _Builder:
         for namespace, origin in namespaces.items():
             path = namespace if namespace in directories else self.manifest_rel
             self._add(Component("extension", namespace, origin, path, "unsupported"))
-            if namespace not in directories:
-                continue
-            base = PurePosixPath(namespace)
-            for component_type, folder in (("agent", "agents"), ("command", "commands")):
-                if self.reader.kind(base / folder) == "dir":
-                    self._markdown_dir(component_type, base / folder, "packaged")
-            if self.reader.kind(base / "rules") == "dir":
-                self._rule_dir(base / "rules", "packaged", support="unsupported")
-            hooks_file = base / "hooks" / "hooks.json"
-            if self.reader.kind(hooks_file) == "file":
-                config = self._load_json(hooks_file, "hooks")
-                self._hook(_JsonSource(hooks_file.as_posix(), "packaged", hooks_file.as_posix(), config))
+            if namespace in directories:
+                self._namespace_components(PurePosixPath(namespace))
+
+    def _namespace_components(self, base: PurePosixPath) -> None:
+        """The documented client layouts in a namespace folder, inventoried as their own (unsupported) types."""
+        for component_type, folder in (("agent", "agents"), ("command", "commands")):
+            if self.reader.kind(base / folder) == "dir":
+                self._markdown_dir(component_type, base / folder, "packaged")
+        if self.reader.kind(base / "rules") == "dir":
+            self._rule_dir(base / "rules", "packaged", support="unsupported")
+        hooks_file = base / "hooks" / "hooks.json"
+        if self.reader.kind(hooks_file) == "file":
+            config = self._load_json(hooks_file, "hooks")
+            self._hook(_JsonSource(hooks_file.as_posix(), "packaged", hooks_file.as_posix(), config))
 
     # -- OpenAI settings of an Agent Plugins manifest ---------------------- #
     def openai_extension(self) -> None:
@@ -1657,6 +1615,76 @@ class _Builder:
                     "Do not package .env files.",
                 )
             )
+
+
+def _settings_findings(config: dict[str, Any], rel: str, display: str) -> list[Finding]:
+    """The checks on shipped Claude Code settings: a settings file, or the manifest's inline ``settings``."""
+    findings: list[Finding] = []
+    permissions = config.get("permissions")
+    if isinstance(permissions, dict):
+        mode = permissions.get("defaultMode")
+        if mode == "bypassPermissions":
+            findings.append(
+                _plugin_finding(
+                    Severity.HIGH,
+                    "plugin_settings_bypass_permissions",
+                    f"shipped settings '{rel}' sets permissions.defaultMode to 'bypassPermissions', which "
+                    "disables every tool-approval prompt",
+                    display,
+                    "Remove permissions.defaultMode (Claude Code ignores it from plugins, but shipping it is a "
+                    "red flag and it applies if the file is copied into a project).",
+                )
+            )
+        elif isinstance(mode, str) and mode in PERMISSIVE_PERMISSION_MODES:
+            findings.append(
+                _plugin_finding(
+                    Severity.MEDIUM,
+                    "plugin_settings_permission_mode",
+                    f"shipped settings '{rel}' sets permissions.defaultMode to {mode!r}, which approves some "
+                    "tool calls (file edits, or what a classifier allows) without a prompt",
+                    display,
+                    "Remove permissions.defaultMode; let the user choose the permission mode (Claude Code "
+                    "ignores it from plugins, but it applies if the file is copied into a project).",
+                )
+            )
+        allow = permissions.get("allow")
+        if isinstance(allow, list):
+            broad = sorted(
+                {
+                    str(rule)
+                    for rule in allow  # every rule: already bounded by the structured-data limits
+                    if isinstance(rule, str) and is_broad_allow_rule(rule)
+                }
+            )
+            if broad:
+                findings.append(
+                    _plugin_finding(
+                        Severity.HIGH,
+                        "plugin_settings_broad_allow",
+                        f"shipped settings '{rel}' pre-approves unrestricted tools or interpreter Bash rules "
+                        f"that run any command {broad[:8]}",
+                        display,
+                        "Remove blanket allow rules such as Bash / Bash(*) / Bash(python3:*); scope permissions "
+                        "to exact commands.",
+                    )
+                )
+    if config.get("enableAllProjectMcpServers") is True:
+        findings.append(
+            _plugin_finding(
+                Severity.MEDIUM,
+                "plugin_settings_auto_approve",
+                f"shipped settings '{rel}' sets enableAllProjectMcpServers, auto-approving every project MCP server",
+                display,
+                "Remove enableAllProjectMcpServers; let users approve MCP servers explicitly.",
+            )
+        )
+    findings.extend(_override_findings(env_override_issues(config.get("env")), display, where=rel))
+    findings.extend(
+        _override_findings(
+            [*permission_bypass_issues(config), *permission_mode_flag_issues(config)], display, where=rel
+        )
+    )
+    return findings
 
 
 def _markdown_cost(component_type: str, name: str, parsed: _Markdown) -> CostRow:

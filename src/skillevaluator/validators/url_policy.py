@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""URL reading and inline-credential checks shared by the MCP, hook, and endpoint policies.
+"""URL reading, credential checks, and report display shared by the MCP, hook, and endpoint policies.
 
 Node (Claude Code http hooks, MCP SDK fetch), Rust's url crate, and browsers read
 URLs with the WHATWG URL Standard, and urllib.parse does not always agree:
@@ -10,7 +10,9 @@ URLs with the WHATWG URL Standard, and urllib.parse does not always agree:
 
 The credential predicates decide whether a keyed value (an env entry, a header,
 a command-line flag, a URL query parameter) is an inline credential rather than
-a ``$VAR`` / ``${VAR}`` reference.
+a ``$VAR`` / ``${VAR}`` reference; :func:`url_credentials` applies them to a URL.
+:func:`safe_url` and :func:`report_text` are how URLs and other plugin text
+appear in findings and reports: bounded, with credentials removed.
 
 Nothing here touches the network.
 """
@@ -124,10 +126,10 @@ def url_credentials(url: str, *, any_userinfo: bool) -> UrlCredentials:
     ``#``, and the userinfo through its last ``@``.
 
     * Userinfo: with ``any_userinfo`` every user name or password counts, even a
-      ``$VAR`` one, because the client sends what is written there with every
-      request (MCP servers, HTTP hooks). Otherwise (a URL inside a command line)
-      only a literal password counts, or a user name shaped like a token, so
-      ``https://x-access-token:${GITHUB_TOKEN}@github.com/...`` does not.
+      ``$VAR`` one, for a URL a client calls with every request (MCP servers,
+      HTTP hooks): credentials belong in a header there. Otherwise (a URL inside
+      a command line) only a literal password counts, or a user name shaped like
+      a token, so ``https://x-access-token:${GITHUB_TOKEN}@github.com/...`` does not.
     * Query: a parameter counts when it has a literal value under a credential
       name (``api_key=literal``) or a value shaped like a secret under any name
       (``q=sk-...``). A ``$VAR`` / ``${VAR}`` reference never counts.
@@ -292,7 +294,7 @@ def safe_url(url: str) -> str:
 
     An http(s), ws(s), or ftp URL is shown the way a WHATWG client (Node, the MCP
     SDKs) reads it, so the report names the host a client would actually contact.
-    A path segment shaped like a secret is shown as ``<redacted>``.
+    A token in the path is redacted like any other report text (:func:`report_text`).
     """
     try:
         parsed = urlparse(whatwg_url(url))
@@ -303,7 +305,7 @@ def safe_url(url: str) -> str:
     if not parsed.scheme or not host:
         return _unparsed_url(url)
     display_host = f"[{host}]" if ":" in host else host
-    return report_text(f"{parsed.scheme}://{display_host}{port}{_redacted_path(parsed.path)}")
+    return report_text(f"{parsed.scheme}://{display_host}{port}{parsed.path}")
 
 
 def _unparsed_url(url: str) -> str:
@@ -313,8 +315,4 @@ def _unparsed_url(url: str) -> str:
     if not slashes:
         prefix, rest = "", text
     authority, slash, path = rest.partition("/")
-    return report_text(f"{prefix}{slashes}{authority.rpartition('@')[2]}{slash}{_redacted_path(path)}")
-
-
-def _redacted_path(path: str) -> str:
-    return "/".join("<redacted>" if has_secret_shape(segment) else segment for segment in path.split("/"))
+    return report_text(f"{prefix}{slashes}{authority.rpartition('@')[2]}{slash}{path}")

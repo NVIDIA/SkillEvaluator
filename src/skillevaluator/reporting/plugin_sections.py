@@ -378,11 +378,30 @@ def _fmt_overlap(value: object) -> str:
     return fmt_count(numeric)
 
 
+# Per similarity kind: the section title and the table columns (header, match key).
+_SIMILARITY_TABLES = {
+    "skills": (
+        "Bundled skills vs. local skills catalog",
+        (("Bundled skill", "subject"), ("Catalog match", "match"), ("Similarity", "similarity")),
+    ),
+    "plugins": (
+        "Plugin vs. other plugins in the local catalog",
+        (
+            ("Catalog plugin", "subject"),
+            ("Similarity", "similarity"),
+            ("Member overlap", "member_overlap"),
+            ("Verdict", "verdict"),
+        ),
+    ),
+}
+
+
 def similarity_view(value: object, *, kind: str) -> dict[str, Any] | None:
-    """Return an advisory Tier 2 local-catalog similarity result (skills or plugins)."""
+    """Return an advisory Tier 2 local-catalog similarity result (``kind`` is skills or plugins)."""
     similarity = _mapping(value)
     if not similarity:
         return None
+    title, columns = _SIMILARITY_TABLES[kind]
     status = text(similarity.get("status"), limit=32).lower() or "unknown"
     matches: list[dict[str, str]] = []
     total = 0
@@ -409,13 +428,25 @@ def similarity_view(value: object, *, kind: str) -> dict[str, Any] | None:
                     "verdict": text(match.get("verdict"), limit=64),
                 }
             )
+    catalog_entries = count(similarity.get("catalog_entries"))
+    reason = text(similarity.get("reason"))
+    summary = []
+    if catalog_entries is not None:
+        summary.append(f"{_plural(catalog_entries, 'catalog entry', 'catalog entries')} compared.")
+    if reason:
+        summary.append(reason)
+    if status == "compared" and not matches:
+        summary.append("No similar entries found.")
     return {
+        "title": title,
+        "columns": [{"label": label, "key": key} for label, key in columns],
         "status": status,
         "status_label": {"compared": "Compared", "skipped": "Skipped"}.get(status, _humanize(status)),
-        "catalog_entries": count(similarity.get("catalog_entries")),
+        "catalog_entries": catalog_entries,
         "matches": matches,
         "omitted": max(0, total - len(matches)),
-        "reason": text(similarity.get("reason")),
+        "reason": reason,
+        "summary": " ".join(summary),
     }
 
 

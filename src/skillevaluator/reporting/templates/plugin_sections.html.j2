@@ -149,8 +149,8 @@
     {% if p.mcp and p.mcp.pinning %}{{ _pinning(p.mcp.pinning, p.mcp.unpinned, 'plugin-mcp-pinning') }}{% endif %}
     {% if p.context_cost %}{{ _context_cost(p.context_cost, 'plugin-context-cost') }}{% endif %}
     {% if p.static_risk %}{{ tier1_static_risk_sections(p.static_risk) }}{% endif %}
-    {% if p.catalog_skill_similarity %}{{ _similarity(p.catalog_skill_similarity, 'plugin-catalog-skill-similarity', 'Bundled skills vs. local skills catalog', 'skills') }}{% endif %}
-    {% if p.inter_plugin_similarity %}{{ _similarity(p.inter_plugin_similarity, 'plugin-inter-plugin-similarity', 'Plugin vs. other plugins in the local catalog', 'plugins') }}{% endif %}
+    {% if p.catalog_skill_similarity %}{{ _similarity(p.catalog_skill_similarity, 'plugin-catalog-skill-similarity') }}{% endif %}
+    {% if p.inter_plugin_similarity %}{{ _similarity(p.inter_plugin_similarity, 'plugin-inter-plugin-similarity') }}{% endif %}
 </section>
 {% endmacro %}
 
@@ -277,23 +277,14 @@
 </div>
 {% endmacro %}
 
-{% macro _similarity(sim, section_id, title, kind) %}
+{% macro _similarity(sim, section_id) %}
 <div class="plugin-subsection" id="{{ section_id }}">
-    <h4>{{ title }} <span class="plugin-pill warn">Advisory</span> <span class="plugin-pill neutral">{{ sim.status_label }}</span></h4>
-    <p class="plugin-hint">
-        {% if sim.catalog_entries is not none %}{{ sim.catalog_entries }} catalog entr{{ 'y' if sim.catalog_entries == 1 else 'ies' }} compared.{% endif %}
-        {% if sim.reason %}{{ sim.reason }}{% endif %}
-        {% if sim.status == 'compared' and not sim.matches %}No similar entries found.{% endif %}
-    </p>
+    <h4>{{ sim.title }} <span class="plugin-pill warn">Advisory</span> <span class="plugin-pill neutral">{{ sim.status_label }}</span></h4>
+    <p class="plugin-hint">{{ sim.summary }}</p>
     {% if sim.matches %}
     <div class="table-scroll"><table class="summary-table">
-        {% if kind == 'skills' %}
-        <thead><tr><th>Bundled skill</th><th>Catalog match</th><th>Similarity</th></tr></thead>
-        <tbody>{% for m in sim.matches %}<tr><td>{{ m.subject }}</td><td>{{ m.match }}</td><td>{{ m.similarity }}</td></tr>{% endfor %}</tbody>
-        {% else %}
-        <thead><tr><th>Catalog plugin</th><th>Similarity</th><th>Member overlap</th><th>Verdict</th></tr></thead>
-        <tbody>{% for m in sim.matches %}<tr><td>{{ m.subject }}</td><td>{{ m.similarity }}</td><td>{{ m.member_overlap }}</td><td>{{ m.verdict }}</td></tr>{% endfor %}</tbody>
-        {% endif %}
+        <thead><tr>{% for column in sim.columns %}<th>{{ column.label }}</th>{% endfor %}</tr></thead>
+        <tbody>{% for m in sim.matches %}<tr>{% for column in sim.columns %}<td>{{ m[column.key] }}</td>{% endfor %}</tr>{% endfor %}</tbody>
     </table></div>
     {% if sim.omitted %}<p class="plugin-hint">{{ sim.omitted }} more match(es) omitted.</p>{% endif %}
     {% endif %}

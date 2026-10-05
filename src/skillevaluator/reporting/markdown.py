@@ -416,41 +416,20 @@ class MarkdownReporter(ReporterBase):
         if view.get("static_risk"):
             self._render_plugin_static_risk(view["static_risk"], lines)
 
-        for key, title, headers in (
-            (
-                "catalog_skill_similarity",
-                "Bundled skills vs. local skills catalog",
-                ("Bundled skill", "Catalog match", "Similarity"),
-            ),
-            (
-                "inter_plugin_similarity",
-                "Plugin vs. other plugins in the local catalog",
-                ("Catalog plugin", "Similarity", "Member overlap", "Verdict"),
-            ),
-        ):
-            similarity = view.get(key)
+        for similarity in (view["catalog_skill_similarity"], view["inter_plugin_similarity"]):
             if not similarity:
                 continue
-            lines.append(f"### {title} (advisory)")
+            lines.append(f"### {similarity['title']} (advisory)")
             lines.append("")
-            entries = similarity["catalog_entries"]
-            summary = f"**Status:** {cell(similarity['status_label'])}"
-            if entries is not None:
-                summary += f" · {entries} catalog entries"
-            if similarity["reason"]:
-                summary += f" · {cell(similarity['reason'])}"
-            lines.append(summary)
+            summary = f" · {cell(similarity['summary'])}" if similarity["summary"] else ""
+            lines.append(f"**Status:** {cell(similarity['status_label'])}{summary}")
             lines.append("")
             if similarity["matches"]:
-                lines.append("| " + " | ".join(headers) + " |")
-                lines.append("|" + "|".join("---" for _ in headers) + "|")
+                columns = similarity["columns"]
+                lines.append("| " + " | ".join(column["label"] for column in columns) + " |")
+                lines.append("|" + "|".join("---" for _ in columns) + "|")
                 for match in similarity["matches"]:
-                    values = [
-                        match[field]
-                        for field in ("subject", "match", "similarity", "member_overlap", "verdict")
-                        if field in match
-                    ]
-                    lines.append("| " + " | ".join(cell(value) for value in values) + " |")
+                    lines.append("| " + " | ".join(cell(match[column["key"]]) for column in columns) + " |")
                 lines.append("")
 
     @staticmethod

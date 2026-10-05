@@ -848,3 +848,24 @@ def test_a_partial_plugin_run_recorded_only_under_the_summary_is_incomplete() ->
     assert is_partial_plugin_agent_eval(result) is True
     assert ReporterBase._plugin_status([tier1_plugin_result(), result]) == "incomplete"
     assert tier3_plugin_view(result.metadata["agent_eval"])["partial"] is True
+
+
+def test_similarity_views_carry_their_title_columns_and_summary() -> None:
+    from skillevaluator.reporting.plugin_sections import similarity_view
+
+    skills = similarity_view({"status": "compared", "catalog_entries": 1, "matches": []}, kind="skills")
+    plugins = similarity_view(tier2_plugin_result().metadata["plugin"]["inter_plugin_similarity"], kind="plugins")
+
+    assert skills is not None and plugins is not None
+    assert skills["title"] == "Bundled skills vs. local skills catalog"
+    assert skills["summary"] == "1 catalog entry compared. No similar entries found."
+    assert [column["label"] for column in plugins["columns"]] == [
+        "Catalog plugin",
+        "Similarity",
+        "Member overlap",
+        "Verdict",
+    ]
+    markdown = MarkdownReporter(include_timestamp=False).render_all([tier1_plugin_result(), tier2_plugin_result()])
+    assert "### Plugin vs. other plugins in the local catalog (advisory)" in markdown
+    assert "**Status:** Compared · 3 catalog entries compared." in markdown
+    assert "| Catalog plugin | Similarity | Member overlap | Verdict |" in markdown

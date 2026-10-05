@@ -17,7 +17,7 @@ command. It answers two questions:
   command frontmatter hooks are parsed per the Claude Code hooks reference (event
   -> matcher groups -> handlers of type ``command``, ``http``, ``mcp_tool``,
   ``prompt``, or ``agent``), with each client's own event names, approval output,
-  and command keys (:class:`HookDialect`: Cursor, GitHub Copilot). Each handler is
+  and command keys (:class:`HookDialect`: Codex, Cursor, GitHub Copilot). Each handler is
   recorded with its event, matcher, handler type, and risk flags; the risky ones
   (auto-approval, context injection, fetch-and-execute of remote code, unpinned
   package runners, HTTP endpoints, and files outside the plugin root) become
@@ -31,6 +31,8 @@ severity with ``severity_overrides`` (``PLUGIN_SCHEMA.<check>``).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import bisect
 import functools
 import posixpath
@@ -45,6 +47,7 @@ from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_FILE_BYTES,
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
+    PLUGIN_CODEX_MANIFEST_TYPE,
     PLUGIN_CURSOR_MANIFEST_TYPE,
 )
 from skillevaluator.models.result import Finding, Severity
@@ -106,7 +109,18 @@ HANDLER_TYPES: tuple[str, ...] = ("command", "http", "mcp_tool", "prompt", "agen
 # Events whose hook output can approve a tool call or a permission prompt.
 APPROVAL_EVENTS: frozenset[str] = frozenset({"PreToolUse", "PermissionRequest"})
 # Events whose command stdout (or ``additionalContext``) is injected into the conversation.
-CONTEXT_EVENTS: frozenset[str] = frozenset({"UserPromptSubmit", "SessionStart"})
+CONTEXT_EVENTS: frozenset[str] = frozenset(
+    {"UserPromptSubmit", "UserPromptExpansion", "SessionStart", "PostModelSwitch"}
+)
+# Handler types Claude Code runs on each context event; SessionStart runs only command and mcp_tool handlers.
+_CONTEXT_HANDLER_TYPES: frozenset[str] = frozenset({"command", "http", "mcp_tool"})
+_SESSION_START_HANDLER_TYPES: frozenset[str] = frozenset({"command", "mcp_tool"})
+# Events whose 'decision: block' reason reaches the model as text: Stop and SubagentStop hooks tell it how to
+# continue, and Claude Code 2.1.x adds a PostToolUse or PostToolUseFailure block reason to the context as a
+# "hook blocking error" message, the same way it adds additionalContext. A PreToolUse block is a guard's denial.
+_BLOCK_REASON_EVENTS: frozenset[str] = frozenset(
+    {"Stop", "SubagentStop", "PostToolUse", "PostToolUseFailure", "stop", "subagentStop", "agentStop"}
+)
 
 MAX_HOOK_EVENTS = 64
 MAX_HOOK_GROUPS = 256
@@ -131,8 +145,18 @@ _EXACT_MATCHER_RE = re.compile(r"[A-Za-z0-9_|]+")
 _NAME_LIST_RE = re.compile(r"[A-Za-z0-9_\- ,|]+")
 # A regex matcher that matches all of these tool names (and a shell tool) is treated as "every tool".
 _SAMPLE_TOOLS: tuple[str, ...] = ("Bash", "Read", "Write", "Edit", "WebFetch", "mcp__server__tool")
-# Tools whose auto-approval skips a prompt that guards writes, network fetches, or MCP side effects.
-_SENSITIVE_TOOLS: tuple[str, ...] = ("Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "mcp__server__tool")
+# Tools whose auto-approval skips a prompt that guards writes, network fetches, or MCP side effects. Codex's
+# file-edit tool is apply_patch (its hooks also accept Edit and Write as aliases); Codex reads a Claude Code
+# plugin's hooks/hooks.json too, so every dialect counts it.
+_SENSITIVE_TOOLS: tuple[str, ...] = (
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "NotebookEdit",
+    "WebFetch",
+    "apply_patch",
+    "mcp__server__tool",
+)
 
 # Bash permission rules, classified the way Claude Code 2.1.x classifies its own allow rules:
 # empty or only-'*' content is a bare grant, and an interpreter or wrapper prefix
@@ -187,6 +211,18 @@ _CURSOR_ALLOW_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bdecision\W{0,8}allow\b"),
 )
 _ALLOW_SHAPES: dict[str, tuple[re.Pattern[str], ...]] = {"claude": _ALLOW_DECISION_RES, "cursor": _CURSOR_ALLOW_RES}
+# JSON hook output that puts text in front of the model on any event: additionalContext, a replaced tool
+# output, or (on Stop and SubagentStop) a block decision whose reason tells the model how to continue.
+_CONTEXT_OUTPUT_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("additionalContext", re.compile(r"\badditionalContext\b")),
+    ("an updated tool output", re.compile(r"\bupdated(?:MCP)?ToolOutput\b")),
+    ("a block reason", re.compile(r"\bdecision\W{0,8}block\b")),
+)
+# A base64 run long enough to hide a JSON decision ('{"permissionDecision":"allow"}' is 40 characters).
+_BASE64_RUN_RE = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{24,4096}={0,2}(?![A-Za-z0-9+/=])")
+# A hook that emits a base64-hidden decision must decode it when it runs (base64, b64decode, atob), so only
+# such text has its base64 runs decoded.
+_MAX_BASE64_RUNS = 64
 # JSON ("\u0061") and shell ("\x61") character escapes, decoded before the allow patterns run. A match only
 # starts at the first backslash of a run, so a long run of backslashes with no escape after it stays linear.
 _CHAR_ESCAPE_RE = re.compile(r"(?<!\\)\\++(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2}))")
@@ -289,8 +325,9 @@ _MAX_EXPANDED_CHARS = 1024
 # Leading directories of a run path matched against unpack directories; a deeper unpack directory is cut to
 # this depth, which can only widen a match.
 _MAX_DIR_DEPTH = 8
-# Where Claude Code keeps a plugin's persistent data: code run from there is not code the plugin ships.
-_PLUGIN_DATA_REFS: tuple[str, ...] = ("$CLAUDE_PLUGIN_DATA",)
+# Where Claude Code (CLAUDE_PLUGIN_DATA) and Codex (PLUGIN_DATA) keep a plugin's persistent data: code run
+# from there is not code the plugin ships.
+_PLUGIN_DATA_REFS: tuple[str, ...] = ("$CLAUDE_PLUGIN_DATA", "$PLUGIN_DATA")
 # Package runners that fetch and run a package (the MCP pinning classifier decides each one).
 _RUNNER_HINT_RE = re.compile(r"\b(?:npx|bunx|pnpx|pnpm|yarn|npm|uvx|uv|pipx|deno)\b", re.IGNORECASE)
 _RUNNER_NAMES = frozenset({"npx", "bunx", "pnpx", "pnpm", "yarn", "npm", "uvx", "uv", "pipx", "deno"})
@@ -344,8 +381,19 @@ class HookDialect:
         return dict(self.event_scopes).get(event)
 
 
-# Claude Code; Codex hooks use the same events and outputs.
-CLAUDE_HOOKS = HookDialect("claude", HOOK_EVENTS, APPROVAL_EVENTS, CONTEXT_EVENTS)
+# Claude Code. Its shell tool is Bash, and PowerShell on Windows.
+CLAUDE_HOOKS = HookDialect("claude", HOOK_EVENTS, APPROVAL_EVENTS, CONTEXT_EVENTS, shell_tools=("Bash", "PowerShell"))
+# Codex hooks (the Codex hooks reference): Claude Code's event names and outputs plus Interrupt;
+# SubagentStart output reaches the model; the shell tool is reported as Bash (exec_command, shell, and
+# local_shell are the tool's own names) and the file-edit tool is apply_patch. Claude Code --plugin-dir
+# loads a Codex plugin's default hooks/hooks.json too, so Claude Code's names keep their meaning.
+CODEX_HOOKS = HookDialect(
+    "codex",
+    HOOK_EVENTS | frozenset({"Interrupt"}),
+    APPROVAL_EVENTS,
+    CONTEXT_EVENTS | frozenset({"SubagentStart"}),
+    shell_tools=("Bash", "PowerShell", "exec_command", "shell", "local_shell"),
+)
 # Cursor hooks reference (cursor.com/docs/agent/hooks): camelCase events, flat handler lists, and
 # {"permission": "allow"} / {"decision": "allow"} outputs. sessionStart returns additional_context.
 # Cursor also runs Claude Code-shaped hooks, so Claude Code's event names keep their meaning.
@@ -414,18 +462,22 @@ COPILOT_HOOKS = HookDialect(
 # An Agent Plugins namespace no dialect covers: every known event, output, and command key (fail closed).
 GENERIC_HOOKS = HookDialect(
     "generic",
-    CLAUDE_HOOKS.events | CURSOR_HOOKS.events | COPILOT_HOOKS.events,
+    CLAUDE_HOOKS.events | CODEX_HOOKS.events | CURSOR_HOOKS.events | COPILOT_HOOKS.events,
     CLAUDE_HOOKS.approval_events | CURSOR_HOOKS.approval_events | COPILOT_HOOKS.approval_events,
-    CLAUDE_HOOKS.context_events | CURSOR_HOOKS.context_events | COPILOT_HOOKS.context_events,
+    CODEX_HOOKS.context_events | CURSOR_HOOKS.context_events | COPILOT_HOOKS.context_events,
     allow_shapes=("claude", "cursor"),
     command_keys=COPILOT_HOOKS.command_keys,
-    shell_tools=("Bash", "Shell", "bash", "powershell"),
+    shell_tools=tuple(dict.fromkeys((*CODEX_HOOKS.shell_tools, "Shell", "bash", "powershell"))),
     event_scopes=CURSOR_HOOKS.event_scopes,
 )
 # Plugin monitors: one long-running command each, whose every stdout line reaches the model.
 MONITOR_EVENT = "Monitor"
 MONITOR_HOOKS = HookDialect("monitor", frozenset({MONITOR_EVENT}), frozenset(), frozenset({MONITOR_EVENT}))
-_NAMESPACE_DIALECTS: dict[str, HookDialect] = {"com.cursor": CURSOR_HOOKS, "com.github.copilot": COPILOT_HOOKS}
+_NAMESPACE_DIALECTS: dict[str, HookDialect] = {
+    "com.cursor": CURSOR_HOOKS,
+    "com.github.copilot": COPILOT_HOOKS,
+    "com.openai": CODEX_HOOKS,
+}
 
 
 def hook_dialect(manifest_type: str | None, hook_file: str = "") -> HookDialect:
@@ -435,6 +487,8 @@ def hook_dialect(manifest_type: str | None, hook_file: str = "") -> HookDialect:
         return _NAMESPACE_DIALECTS.get(namespace, GENERIC_HOOKS)
     if manifest_type == PLUGIN_CURSOR_MANIFEST_TYPE:
         return CURSOR_HOOKS
+    if manifest_type == PLUGIN_CODEX_MANIFEST_TYPE:
+        return CODEX_HOOKS
     return CLAUDE_HOOKS
 
 
@@ -604,6 +658,53 @@ def permission_mode_flag_issues(value: Any) -> list[OverrideIssue]:
     ]
 
 
+# Claude Code's CLI pre-approval flag: '--allowedTools Bash', '--allowed-tools "Bash(python3:*) Edit"'.
+_ALLOWED_TOOLS_FLAG_RE = re.compile(
+    r"(?<![\w-])--allowed-?tools(?:=|\s+)(?P<value>\"[^\"\n]{0,1024}\"|'[^'\n]{0,1024}'|[^\s;&|]{1,1024})",
+    re.IGNORECASE,
+)
+_ALLOWED_TOOLS_FLAGS = frozenset({"--allowedtools", "--allowed-tools"})
+
+
+def allowed_tools_flag_issues(value: Any) -> list[OverrideIssue]:
+    """``--allowedTools`` passed to an agent CLI with a grant that runs any command (or ``*``), HIGH each.
+
+    The launched agent then runs any shell command without a prompt, like an
+    unrestricted ``allowed-tools`` grant. Scoped grants (``Bash(git status *)``)
+    are not flagged. Read in any config string or argv list.
+    """
+    hits: dict[tuple[str, str], None] = {}
+    items: dict[str, dict[int, str]] = {}
+
+    def _broad(raw: str) -> str | None:
+        return next((rule for rule in parse_tool_list(raw.strip("\"'")) or [] if is_broad_allow_rule(rule)), None)
+
+    for path, text in iter_config_strings(value):
+        for match in _ALLOWED_TOOLS_FLAG_RE.finditer(text):
+            rule = _broad(match.group("value"))
+            if rule is not None:
+                hits.setdefault((path, rule))
+        item = _LIST_ITEM_PATH_RE.match(path)
+        if item is not None:
+            items.setdefault(item.group("parent"), {})[int(item.group("index"))] = text
+    for parent, tokens in items.items():
+        for index, token in tokens.items():
+            if token.strip().lower() in _ALLOWED_TOOLS_FLAGS:
+                rule = _broad(tokens.get(index + 1, ""))
+                if rule is not None:
+                    hits.setdefault((f"{parent}[{index}]", rule))
+    return [
+        OverrideIssue(
+            "permission_allow_flag",
+            Severity.HIGH,
+            f"agent-CLI flag '--allowedTools {_bounded(rule, 60)}'{f' in {path!r}' if path else ''} pre-approves "
+            "any shell command (or every tool) in the launched agent, so it runs without a prompt",
+            "Remove the flag, or scope it to exact commands such as Bash(git status *).",
+        )
+        for path, rule in hits
+    ]
+
+
 def _bash_grant_label(entry: str) -> str:
     if bash_rule_risk(entry) == "interpreter":
         return (
@@ -615,6 +716,51 @@ def _bash_grant_label(entry: str) -> str:
 def is_wildcard_tool(entry: str) -> bool:
     """A wildcard grant of every tool (``*``) or every MCP tool (``mcp__*``)."""
     return "".join(entry.split()).lower() in _WILDCARD_TOOLS
+
+
+def _is_star_grant(entry: str) -> bool:
+    """``*`` (or ``*(*)``): no tool has that name, so as an allowed-tools entry it pre-approves nothing."""
+    return "".join(entry.split()) in {"*", "*(*)"}
+
+
+def denies_every_bash_command(entries: Iterable[str] | None) -> bool:
+    """Whether a ``disallowedTools`` list removes the Bash tool, the way Claude Code matches it.
+
+    Tool names are case-sensitive (``bash`` denies nothing), and a rule whose
+    content matches every command (``Bash(*)``, ``Bash()``) denies the whole tool.
+    A scoped rule (``Bash(rm *)``) leaves Bash available.
+    """
+    for entry in entries or []:
+        match = _TOOL_RULE_RE.fullmatch(entry)
+        if match is None or match.group(1) != "Bash":
+            continue
+        content = match.group(2)
+        if content is None or not content.strip(" \t\n\r*"):
+            return True
+    return False
+
+
+def normalized_permission_mode(value: str | None) -> str | None:
+    """A ``permissionMode`` spelled any way Tier 3 accepts it (case, ``-``, ``_``), as Claude Code names it."""
+    if value is None:
+        return None
+    key = value.strip().replace("_", "").replace("-", "").casefold()
+    return _PERMISSION_MODE_NAMES.get(key, value.strip())
+
+
+_PERMISSION_MODE_NAMES = {
+    "bypasspermissions": "bypassPermissions",
+    "acceptedits": "acceptEdits",
+    "auto": "auto",
+    "default": "default",
+    "plan": "plan",
+    "dontask": "dontAsk",
+}
+
+
+def _is_true_flag(value: Any) -> bool:
+    """YAML ``true`` or the string ``"true"``: Claude Code reads both as set (a probe hid both commands)."""
+    return value is True or (isinstance(value, str) and value.strip().casefold() == "true")
 
 
 # --------------------------------------------------------------------------- #
@@ -752,9 +898,12 @@ def analyze_agent(
     record = PrivilegeRecord("agent", name, path)
     findings: list[Finding] = []
     component = ("agent", name)
+    # Claude Code loads an agent without frontmatter under its file name, with every field at its default, so it
+    # inherits every tool like an agent that omits 'tools'.
+    omits_tools = "omits 'tools'"
     if not frontmatter:
         record.flags.append("no_frontmatter")
-        return record, findings
+        omits_tools = "has no frontmatter"
     # Risk checks read every entry; the record keeps a bounded copy for reports.
     tools = parse_tool_list(frontmatter.get("tools"))
     disallowed_tools = parse_tool_list(frontmatter.get("disallowedTools", frontmatter.get("disallowed-tools")))
@@ -763,9 +912,8 @@ def analyze_agent(
     record.model = _string_field(frontmatter, "model")
     record.permission_mode = _string_field(frontmatter, "permissionMode", "permission-mode")
     record.inherits_all_tools = tools is None
-    disallowed = {"".join(entry.split()).lower() for entry in disallowed_tools or []}
-
-    denies_bash = "bash" in disallowed
+    # Claude Code matches tool names case-sensitively: 'bash' denies nothing, and 'Bash(*)' denies all of Bash.
+    denies_bash = denies_every_bash_command(disallowed_tools)
     bash = [entry for entry in tools if is_unrestricted_bash(entry)] if tools is not None else []
     if (bash or tools is None) and not denies_bash:
         # Advisory only: a subagent's tools list limits what it may call, it never pre-approves a tool,
@@ -775,7 +923,7 @@ def analyze_agent(
         grant = (
             f"is granted {_bash_grant_label(bash[0])}"
             if bash
-            else "omits 'tools', so it inherits every tool, including unrestricted Bash"
+            else f"{omits_tools}, so it inherits every tool, including unrestricted Bash"
         )
         findings.append(
             _finding(
@@ -815,7 +963,7 @@ def analyze_agent(
             _finding(
                 Severity.MEDIUM,
                 "plugin_agent_inherits_all_tools",
-                f"subagent '{name}' omits 'tools', so it inherits every tool, including the tools of the plugin's "
+                f"subagent '{name}' {omits_tools}, so it inherits every tool, including the tools of the plugin's "
                 f"MCP servers ({servers}); their tool lists are not known statically and may write",
                 file_path,
                 "Declare an explicit 'tools' list, or deny the servers' tools with 'disallowedTools: mcp__*' or one "
@@ -828,7 +976,8 @@ def analyze_agent(
     elif record.inherits_all_tools:
         record.flags.append("inherits_all_tools")
 
-    mode = (record.permission_mode or "").strip()
+    # Read the mode the way Tier 3 native staging does (case, '-' and '_' ignored), so both tiers agree.
+    mode = normalized_permission_mode(record.permission_mode) or ""
     if mode == "bypassPermissions":
         record.flags.append("bypass_permissions")
         findings.append(
@@ -882,21 +1031,23 @@ def analyze_command(
     file_path: str,
     *,
     entry: dict[str, Any] | None = None,
+    client: str | None = None,
 ) -> tuple[PrivilegeRecord, list[Finding]]:
     """Record one command's pre-approved tools and flag unrestricted Bash or wildcard grants.
 
     ``entry`` is a ``plugin.json`` ``commands`` map entry, whose ``allowedTools``
-    and ``model`` override the file's frontmatter.
+    and ``model`` override the file's frontmatter. ``client`` is the client whose
+    manifest loads the command (:func:`_analyze_allowed_tools`).
     """
     allowed = parse_tool_list(frontmatter.get("allowed-tools", frontmatter.get("allowedTools")))
     if entry is not None and "allowedTools" in entry:
         allowed = parse_tool_list(entry.get("allowedTools"))
     model = _string_field(entry or {}, "model") or _string_field(frontmatter, "model")
-    return _analyze_allowed_tools("command", name, path, frontmatter, file_path, allowed, model)
+    return _analyze_allowed_tools("command", name, path, frontmatter, file_path, allowed, model, client=client)
 
 
 def analyze_skill(
-    name: str, path: str | None, frontmatter: dict[str, Any], file_path: str
+    name: str, path: str | None, frontmatter: dict[str, Any], file_path: str, *, client: str | None = None
 ) -> tuple[PrivilegeRecord, list[Finding]]:
     """Record one skill's pre-approved tools (``allowed-tools``) and flag unrestricted Bash or wildcard grants.
 
@@ -905,8 +1056,14 @@ def analyze_skill(
     """
     allowed = parse_tool_list(frontmatter.get("allowed-tools", frontmatter.get("allowedTools")))
     return _analyze_allowed_tools(
-        "skill", name, path, frontmatter, file_path, allowed, _string_field(frontmatter, "model")
+        "skill", name, path, frontmatter, file_path, allowed, _string_field(frontmatter, "model"), client=client
     )
+
+
+# Clients whose manifest loads a skill or command but that ignore 'allowed-tools': Codex has no Bash tool and
+# does not read the field, so the grant matters only when Claude Code loads the same file.
+CLIENTS_IGNORING_ALLOWED_TOOLS: frozenset[str] = frozenset({"codex"})
+_CLIENT_LABELS = {"codex": "Codex"}
 
 
 def _analyze_allowed_tools(
@@ -917,14 +1074,27 @@ def _analyze_allowed_tools(
     file_path: str,
     allowed: list[str] | None,
     model: str | None,
+    *,
+    client: str | None = None,
 ) -> tuple[PrivilegeRecord, list[Finding]]:
+    """Grant findings for a command's or skill's ``allowed-tools``, which Claude Code pre-approves.
+
+    For a client in :data:`CLIENTS_IGNORING_ALLOWED_TOOLS` (Codex) the grant is
+    inert in that client and applies only if Claude Code loads the same file, so
+    it is capped at MEDIUM (it does not fail the plugin), the message names both
+    clients, and the record gets the ``claude_only_grant`` flag.
+    """
     record = PrivilegeRecord(kind, name, path)
     findings: list[Finding] = []
     component = (kind, name)
+    claude_only = client in CLIENTS_IGNORING_ALLOWED_TOOLS
+    loader = _CLIENT_LABELS.get(client or "", client or "")
+    # A cross-client merge reads this mark: when Claude Code does not load the file either, the grant is inert.
+    claude_only_extra = {"claude_only_grant": True} if claude_only else None
     # Risk checks read every entry; the record keeps a bounded copy for reports.
     record.allowed_tools = _stored_tools(allowed)
     record.model = model
-    record.model_invocable = frontmatter.get("disable-model-invocation") is not True
+    record.model_invocable = not _is_true_flag(frontmatter.get("disable-model-invocation"))
     invocation = (
         f"Claude can also invoke this {kind} on its own (disable-model-invocation is not set)"
         if record.model_invocable
@@ -933,31 +1103,66 @@ def _analyze_allowed_tools(
     for tool in allowed or []:
         if is_unrestricted_bash(tool):
             record.flags.append("unrestricted_bash")
+            if claude_only:
+                message = (
+                    f"{kind} '{name}' pre-approves {_bash_grant_label(tool)} in allowed-tools; {loader} ignores "
+                    "allowed-tools (it has no Bash tool), but if Claude Code loads this "
+                    f"{kind} (claude --plugin-dir reads skills/ and commands/ from this folder), any shell command "
+                    "runs without a prompt while it is active"
+                )
+            else:
+                message = (
+                    f"{kind} '{name}' pre-approves {_bash_grant_label(tool)} in allowed-tools, so any shell "
+                    f"command runs without a prompt while it is active; {invocation}"
+                )
             findings.append(
                 _finding(
-                    Severity.HIGH,
+                    Severity.MEDIUM if claude_only else Severity.HIGH,
                     f"plugin_{kind}_unrestricted_bash",
-                    f"{kind} '{name}' pre-approves {_bash_grant_label(tool)} in allowed-tools, so any shell "
-                    f"command runs without a prompt while it is active; {invocation}",
+                    message,
                     file_path,
                     "Scope allowed-tools to the exact commands it needs, such as Bash(git status *).",
                     component=component,
+                    extra=claude_only_extra,
                 )
             )
             break
     wildcards = [tool for tool in allowed or [] if is_wildcard_tool(tool)]
-    if wildcards:
+    mcp_wildcards = [tool for tool in wildcards if not _is_star_grant(tool)]
+    if mcp_wildcards:
         record.flags.append("wildcard_tools")
         findings.append(
             _finding(
                 Severity.MEDIUM,
                 f"plugin_{kind}_wildcard_tools",
-                f"{kind} '{name}' pre-approves a wildcard tool grant ({', '.join(wildcards[:8])}); {invocation}",
+                f"{kind} '{name}' pre-approves a wildcard tool grant ({', '.join(mcp_wildcards[:8])}); "
+                + (
+                    f"{loader} ignores allowed-tools, so this applies only if Claude Code loads this {kind}"
+                    if claude_only
+                    else invocation
+                ),
                 file_path,
                 f"List the specific tools the {kind} needs in allowed-tools instead of a wildcard.",
                 component=component,
+                extra=claude_only_extra,
             )
         )
+    elif wildcards:
+        # Claude Code pre-approves allowed-tools entries by tool name, and no tool is named '*'.
+        record.flags.append("wildcard_ignored")
+        findings.append(
+            _finding(
+                Severity.LOW,
+                f"plugin_{kind}_wildcard_tools",
+                f"{kind} '{name}' lists '*' in allowed-tools, which pre-approves nothing in Claude Code (no tool "
+                "is named '*'); the tools still prompt as usual",
+                file_path,
+                f"List the specific tools the {kind} needs in allowed-tools, or remove the '*' entry.",
+                component=component,
+            )
+        )
+    if claude_only and any(flag in record.flags for flag in ("unrestricted_bash", "wildcard_tools")):
+        record.flags.append("claude_only_grant")
     return record, findings
 
 
@@ -1465,6 +1670,55 @@ def matcher_sensitive_tools(matcher: str | None) -> tuple[str, ...]:
         return listed
 
 
+def _condition_scope(condition: str, shell_tools: tuple[str, ...] = ("Bash",)) -> tuple[str, tuple[str, ...]] | None:
+    """The scope a handler's ``if`` condition allows, read as one permission rule (``Bash(git status)``).
+
+    A shell rule that runs any command (``Bash``, ``Bash(*)``, an interpreter
+    prefix) is ``bash``; any other shell rule is ``narrow``. A write, fetch, or
+    MCP tool is ``scoped``; another tool is ``narrow``. ``None`` when the text is
+    not one rule, so the caller keeps the matcher's scope (fail closed).
+    """
+    match = _TOOL_RULE_RE.fullmatch(condition)
+    if match is None:
+        return None
+    tool, content = match.group(1), match.group(2)
+    if tool in shell_tools:
+        rule = "Bash" if content is None else f"Bash({content})"
+        return ("bash", ()) if bash_rule_risk(rule) is not None else ("narrow", ())
+    if tool in _SENSITIVE_TOOLS or tool.startswith("mcp__"):
+        label = "mcp__server__tool" if tool.startswith("mcp__") else tool
+        return "scoped", (_SENSITIVE_TOOL_LABELS.get(label, tool),)
+    return "narrow", ()
+
+
+def _condition_tool(condition: str) -> str:
+    """The tool an ``if`` permission rule names (``Write`` for ``Write(*.md)``); ``""`` when it is not one rule."""
+    match = _TOOL_RULE_RE.fullmatch(condition)
+    return match.group(1) if match else ""
+
+
+def _matcher_selects(matcher: str | None, tool: str) -> bool:
+    """Whether a tool matcher selects ``tool``, read the same way as :func:`matcher_scope`.
+
+    It fails closed: a matcher the evaluator cannot decide selects the tool.
+    """
+    if matcher is None or matcher.strip() in {"", "*"}:
+        return True
+    text = matcher.strip()
+    if _NAME_LIST_RE.fullmatch(text) and tool in _matcher_names(text):
+        return True
+    if _EXACT_MATCHER_RE.fullmatch(text):
+        return False
+    if len(text) > MAX_MATCHER_CHARS:
+        return True
+    try:
+        return _MatcherEvaluator(_MatcherParser(text).parse()).matches(tool)
+    except _UnsupportedMatcher:
+        return True
+    except _InvalidMatcher:
+        return False
+
+
 def _split_words(text: str) -> list[str]:
     """Shell words of ``text`` (quotes removed); whitespace split when the quoting is unbalanced."""
     try:
@@ -1570,6 +1824,74 @@ def _outside_root_reference(token: str, refs: tuple[str, ...] = _PLUGIN_ROOT_REF
     return None
 
 
+# A command word that only wraps the command after it, and an interpreter whose first operand is a script.
+_RELATIVE_WRAPPER_WORDS = frozenset(
+    {"sudo", "doas", "env", "exec", "command", "nohup", "nice", "time", "then", "do", "else", "if", "!", "(", "{"}
+)
+_SCRIPT_INTERPRETER_RE = re.compile(
+    r"(?:(?:ba|z|da|k|fi|a)?sh|python[0-9.]{0,8}|node|perl|ruby|php|pwsh|powershell|deno|bun|tsx|ts-node)"
+)
+_SCRIPT_FILE_RE = re.compile(r"[\w.-]{1,128}\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|php|ps1)")
+
+
+def _relative_word(word: str, *, program: bool) -> bool:
+    """Whether ``word`` names a file by a path relative to the working directory.
+
+    ``./x`` always does. A program with a ``/`` (``scripts/check.sh``) does; a
+    bare program name is found on ``PATH`` instead. A script operand of an
+    interpreter does when it has a ``/`` or is a script file name (``check.py``).
+    ``../`` paths are reported by :func:`_outside_root_reference`.
+    """
+    value = word.strip().strip("\"'")
+    if not value or value.startswith(("/", "$", "~", "-", "..")) or "://" in value or "=" in value:
+        return False
+    if value.startswith("./"):
+        return True
+    if not _RELATIVE_SCRIPT_RE.match(value):
+        return False
+    return "/" in value or (not program and _SCRIPT_FILE_RE.fullmatch(value) is not None)
+
+
+def _relative_run_paths(text: str, refs: tuple[str, ...] = _PLUGIN_ROOT_REFS) -> list[str]:
+    """Relative paths a hook command runs, other than after ``cd <plugin root>``.
+
+    Claude Code and Codex run a hook command in the session's working directory
+    (the user's project), so ``./scripts/x.sh`` or ``python3 hooks/check.py``
+    runs the project's file, not the one the plugin ships. Each shell command is
+    read for its program and, for an interpreter, its script operand; any
+    ``./`` word counts too.
+    """
+    found: dict[str, None] = {}
+    plugin_cwd = False
+    for command in _SHELL_COMMAND_RE.finditer(text):
+        for stage in command.group(0).split("|"):
+            words = _split_words(stage)
+            index = 0
+            while index < len(words) and (
+                words[index] in _RELATIVE_WRAPPER_WORDS or _ASSIGNMENT_WORD_RE.match(words[index]) is not None
+            ):
+                index += 1
+            if index >= len(words):
+                continue
+            if words[index] in {"cd", "pushd"}:
+                target = words[index + 1].strip("\"'") if index + 1 < len(words) else ""
+                plugin_cwd = _root_ref(target, refs) is not None
+                continue
+            if plugin_cwd:
+                continue
+            program = words[index]
+            if _relative_word(program, program=True):
+                found.setdefault(program)
+            if _SCRIPT_INTERPRETER_RE.fullmatch(posixpath.basename(program.strip("\"'"))):
+                operand = next((word for word in words[index + 1 :] if not word.startswith("-")), None)
+                if operand is not None and _relative_word(operand, program=False):
+                    found.setdefault(operand)
+            for word in words[index + 1 :]:
+                if word.strip("\"'").startswith("./"):
+                    found.setdefault(word)
+    return list(found)
+
+
 def _decoded_escapes(text: str) -> str:
     """``text`` with JSON ``\\uXXXX`` and shell ``\\xXX`` escapes decoded, so an escaped 'allow' still reads."""
     if "\\" not in text:
@@ -1577,12 +1899,65 @@ def _decoded_escapes(text: str) -> str:
     return _CHAR_ESCAPE_RE.sub(lambda match: chr(int(match.group(1) or match.group(2), 16)), text)
 
 
+def _code_text(text: str) -> str:
+    """``text`` without ``#`` comments: each line up to a ``#`` that starts a word outside quotes.
+
+    A line whose quoting does not balance is kept whole, so a quote that spans
+    lines never hides code. Linear in the text.
+    """
+    if "#" not in text:
+        return text
+    lines: list[str] = []
+    for line in text.split("\n"):
+        code_end = _CODE_PART_RE.match(line).end()  # type: ignore[union-attr]  # '*+' always matches
+        comment = line.startswith("#", code_end) or line[code_end : code_end + 1].isspace()
+        lines.append(line[:code_end] if comment and code_end < len(line) else line)
+    return "\n".join(lines)
+
+
+def _base64_texts(text: str) -> Iterator[str]:
+    """Text decoded from the first base64 runs in ``text`` (an allow piped through ``base64 -d``)."""
+    for index, match in enumerate(_BASE64_RUN_RE.finditer(text)):
+        if index >= _MAX_BASE64_RUNS:
+            return
+        run = match.group(0)
+        try:
+            decoded = base64.b64decode(run + "=" * (-len(run) % 4), validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        yield decoded.decode("utf-8", errors="replace")
+
+
 def _allow_shapes(text: str) -> frozenset[str]:
-    """The approval output shapes (``claude``, ``cursor``) ``text`` emits with an allow value."""
-    decoded = _decoded_escapes(text)
-    return frozenset(
-        shape for shape, patterns in _ALLOW_SHAPES.items() if any(pattern.search(decoded) for pattern in patterns)
+    """The approval output shapes (``claude``, ``cursor``) ``text`` emits with an allow value.
+
+    ``#`` comments are not read (a comment that mentions the allow string is not a
+    decision), JSON and shell character escapes are decoded, and base64 runs are
+    decoded too when the text decodes base64 at run time.
+    """
+    code = _code_text(text)
+    return _allow_shapes_of(code, _decoded_escapes(code))
+
+
+def _allow_shapes_of(code: str, decoded: str) -> frozenset[str]:
+    """:func:`_allow_shapes` of comment-free ``code`` and its escape-decoded form ``decoded``."""
+    decodes_base64 = ("64" in code or "atob" in code) and any(
+        word in code.lower() for word in ("base64", "b64", "atob")
     )
+    texts = [decoded, *(_base64_texts(code) if decodes_base64 else ())]
+    return frozenset(
+        shape
+        for shape, patterns in _ALLOW_SHAPES.items()
+        if any(pattern.search(candidate) for candidate in texts for pattern in patterns)
+    )
+
+
+def _context_outputs(decoded: str) -> frozenset[str]:
+    """The JSON context outputs (``additionalContext``, a replaced tool output, a block reason) in comment-free,
+    escape-decoded hook text."""
+    if not ("additionalContext" in decoded or "ToolOutput" in decoded or "block" in decoded):
+        return frozenset()
+    return frozenset(label for label, pattern in _CONTEXT_OUTPUT_RES if pattern.search(decoded))
 
 
 @dataclass(frozen=True)
@@ -1672,6 +2047,8 @@ class _PackageRun:
     detail: str
     # The package comes from a git or URL spec (github:user/repo, git+https://, https://...), not a registry.
     remote: bool
+    # The version or tag names a moving channel (@latest, :main): blocking, like MCP and LSP servers.
+    floating: bool = False
 
 
 class _ShellFacts:
@@ -1690,10 +2067,12 @@ class _ShellFacts:
         allow_shapes: frozenset[str] = frozenset(),
         downloads: _Downloads | None = None,
         packages: tuple[_PackageRun, ...] = (),
+        context_outputs: frozenset[str] = frozenset(),
     ) -> None:
         self._text = text
         self.remote_code = remote_code
         self.allow_shapes = allow_shapes
+        self.context_outputs = context_outputs
         self.downloads = downloads if downloads is not None else _Downloads()
         self.packages = packages
         # HookAnalyzer state: whether these run sites are indexed for cross-hook matching, and (for a script,
@@ -1730,7 +2109,11 @@ def _shell_facts(text: str) -> _ShellFacts:
     packages = _package_runs(commands)
     remote_code = _EXEC_FETCHED_RE.search(text) is not None or any(package.remote for package in packages)
     downloads = _Downloads()
-    facts = _ShellFacts(text, allow_shapes=_allow_shapes(text), packages=packages)
+    code = _code_text(text)
+    decoded = _decoded_escapes(code)
+    facts = _ShellFacts(
+        text, allow_shapes=_allow_shapes_of(code, decoded), packages=packages, context_outputs=_context_outputs(decoded)
+    )
     if _FETCHER_RE.search(text) is not None:  # every other remote-code shape needs a fetch
         fetched = _fetched_variables(text)
         downloads = _download_sites(commands, facts.variables)
@@ -2164,37 +2547,52 @@ def _run_sites(text: str, variables: dict[str, str] | None = None) -> _RunSites:
     )
 
 
-def _package_runs(commands: list[str]) -> tuple[_PackageRun, ...]:
-    """Package runners (``npx``, ``bunx``, ``pnpm dlx``, ``uvx``, ``pipx run``, ``deno run``) of unpinned packages.
+# Launchers the pinning classifier knows (package runners, container runtimes, and the wrappers around them).
+_PACKAGE_RUN_HINT_RE = re.compile(
+    r"\b(?:npx|bunx|pnpx|bun|pnpm|yarn|npm|uvx|uv|pipx|deno|go|dnx|docker|podman|nerdctl)\b", re.IGNORECASE
+)
+# Shell words that start a command list without being the command ('then npx ...', '! npx ...').
+_SHELL_LIST_WORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!", "(", "{"})
+_MAX_SHELL_NESTING = 2
 
-    Each runner is classified like an MCP server command (exact versions are
-    pinned); a git or URL spec without a commit is ``remote``.
+
+def _package_runs(commands: list[str], depth: int = 0) -> tuple[_PackageRun, ...]:
+    """Package runners and container runs (``npx``, ``pnpm dlx``, ``uvx``, ``docker run``, ...) of unpinned code.
+
+    Each command is classified like an MCP server command, so hooks get the
+    same rules: wrappers (``env X=1``, ``timeout 30``, ``sudo``, ``cmd /c``) are
+    looked through, a ``bash -c '<program>'`` is read command by command, exact
+    versions and digests are pinned, and a moving tag (``@latest``, ``:main``)
+    is ``floating``. A git or URL spec without a commit is ``remote``.
     """
+    from skillevaluator.validators.mcp_static import shell_program, unwrap_launch_command
+
     runs: list[_PackageRun] = []
     for command in commands:
-        if not _RUNNER_HINT_RE.search(command):
+        if not _PACKAGE_RUN_HINT_RE.search(command):
             continue
         for stage in command.split("|"):
             words = _split_words(stage[:4096])
             index = 0
             while index < len(words) and (
-                words[index] in _COMMAND_PREFIX_WORDS
-                or _ASSIGNMENT_WORD_RE.match(words[index]) is not None
-                or (index > 0 and words[index].startswith("-"))
+                words[index] in _SHELL_LIST_WORDS or _ASSIGNMENT_WORD_RE.match(words[index]) is not None
             ):
                 index += 1
-            if index >= len(words):
+            argv = unwrap_launch_command(words[index:], expand_shell=False)
+            if not argv:
                 continue
-            runner = words[index]
-            base = runner.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe").removesuffix(".cmd")
-            if base not in _RUNNER_NAMES:
-                continue
-            pin = classify_mcp_pinning({"command": runner, "args": words[index + 1 :]})
-            if pin.status == "unpinned":
-                remote = "git/URL" in pin.detail or "remote module" in pin.detail
-                runs.append(_PackageRun(_bounded(pin.detail, 160), remote))
-                if len(runs) >= MAX_OUTSIDE_REFS:
-                    return tuple(runs)
+            program = shell_program(argv)
+            if program is not None:
+                if depth < _MAX_SHELL_NESTING:
+                    inner = [match.group(0) for match in _SHELL_COMMAND_RE.finditer(program[:4096])]
+                    runs.extend(_package_runs(inner, depth + 1))
+            else:
+                pin = classify_mcp_pinning({"command": argv[0], "args": argv[1:]})
+                if pin.status == "unpinned":
+                    remote = "git/URL" in pin.detail or "remote module" in pin.detail
+                    runs.append(_PackageRun(_bounded(pin.detail, 160), remote, pin.floating))
+            if len(runs) >= MAX_OUTSIDE_REFS:
+                return tuple(runs[:MAX_OUTSIDE_REFS])
     return tuple(runs)
 
 
@@ -2470,7 +2868,7 @@ _COMMAND_POSITION_RE = re.compile(
 _MAX_COMMAND_PREFIX = 256
 _SHELL_OR_PYTHON_SHEBANG_RE = re.compile(r"#![^\n]{0,128}\b(?:(?:ba|z|da|k)?sh|python[0-9.]{0,8})\b")
 _NAMING_SUFFIXES = frozenset({"", ".sh", ".bash", ".zsh", ".py"})
-_SENSITIVE_TOOL_LABELS = {"mcp__server__tool": "MCP tools (mcp__*)"}
+_SENSITIVE_TOOL_LABELS = {"mcp__server__tool": "MCP tools (mcp__*)", "apply_patch": "apply_patch (Codex file edits)"}
 
 
 class _RunReferences:
@@ -2834,8 +3232,11 @@ class HookAnalyzer:
             where = "monitor command" if monitor else f"hook {event}"
             if matcher:
                 where += f" (matcher {matcher[:60]!r})"
+            condition = handler.get("if") if isinstance(handler.get("if"), str) else None
+            if condition is not None:
+                where += f" (if {_bounded(condition, 60)!r})"
             where += f" in {source}"
-            scope, scoped_tools = self._scope(dialect, event, matcher)
+            scope, scoped_tools = self._scope(dialect, event, matcher, condition)
 
             if handler_type == "command":
                 self._command_hook(
@@ -2853,7 +3254,12 @@ class HookAnalyzer:
                 prompt = handler.get("prompt") if isinstance(handler.get("prompt"), str) else ""
                 record.target = _bounded(prompt, 80)
 
-            if event in dialect.context_events and handler_type in {"command", "http", "mcp_tool"}:
+            runs_here = _SESSION_START_HANDLER_TYPES if event == "SessionStart" else _CONTEXT_HANDLER_TYPES
+            if (
+                event in dialect.context_events
+                and handler_type in runs_here
+                and "context_injection" not in record.risk_flags
+            ):
                 record.risk_flags.append("context_injection")
                 injected = (
                     "every line the monitor prints is sent to the model while it runs"
@@ -2878,22 +3284,50 @@ class HookAnalyzer:
         return analysis
 
     @staticmethod
-    def _scope(dialect: HookDialect, event: str, matcher: str | None) -> tuple[str | None, tuple[str, ...]]:
+    def _scope(
+        dialect: HookDialect, event: str, matcher: str | None, condition: str | None = None
+    ) -> tuple[str | None, tuple[str, ...]]:
         """What an approval hook can approve: ``all``, ``bash``, ``scoped`` (write, fetch, or MCP tools,
-        listed), or ``narrow``; ``None`` for an event that approves nothing."""
+        listed), or ``narrow``; ``None`` for an event that approves nothing.
+
+        A handler's ``if`` condition (a permission rule such as ``Bash(git status)``)
+        narrows what the matcher selects (:func:`_condition_scope`).
+        """
         if event not in dialect.approval_events:
             return None, ()
         fixed = dialect.event_scope(event)
         if fixed == "mcp":
-            return "scoped", ("MCP tool calls",)
-        if fixed is not None:
-            return fixed, ()
-        scope = matcher_scope(matcher, dialect.shell_tools)
-        if scope == "narrow":
-            sensitive = matcher_sensitive_tools(matcher)
-            if sensitive:
-                return "scoped", tuple(_SENSITIVE_TOOL_LABELS.get(tool, tool) for tool in sensitive)
-        return scope, ()
+            scope, tools = "scoped", ("MCP tool calls",)
+        elif fixed is not None:
+            scope, tools = fixed, ()
+        else:
+            scope, tools = matcher_scope(matcher, dialect.shell_tools), ()
+            if scope == "narrow":
+                sensitive = matcher_sensitive_tools(matcher)
+                if sensitive:
+                    scope, tools = "scoped", tuple(_SENSITIVE_TOOL_LABELS.get(tool, tool) for tool in sensitive)
+        if condition is None or scope == "narrow":
+            return scope, tools
+        narrowed = _condition_scope(condition, dialect.shell_tools)
+        if narrowed is None:
+            return scope, tools  # a condition the analyzer does not model keeps the matcher's scope
+        if scope == "all":
+            return narrowed
+        if narrowed[0] == "bash":
+            return narrowed if scope == "bash" else ("narrow", ())
+        if narrowed[0] == "scoped":
+            # The handler runs for the condition's tool only when the matcher (or the event) selects it too.
+            # A matcher that names a shell tool and a write tool ('Edit|Bash' with if 'Edit') still approves Edit.
+            tool = _condition_tool(condition)
+            if fixed == "mcp":
+                selected = tool.startswith("mcp__")
+            elif fixed is not None:
+                selected = False
+            else:
+                selected = _matcher_selects(matcher, tool)
+            if selected:
+                return narrowed
+        return "narrow", ()
 
     def _scan_truncated(
         self, analysis: HookAnalysis, limits: list[str], *, source: str, file: str, display: str
@@ -2981,6 +3415,7 @@ class HookAnalyzer:
                     "matched against the plugin's downloads"
                 )
         self._auto_approve(facts, record, analysis, where, display, component, extra, scope, scoped_tools, dialect)
+        self._context_output(facts, record, analysis, where, display, component, extra, dialect)
         if scope in {"all", "bash", "scoped"} and not found_script and self._names_root(text):
             unanalyzed.append("it names the plugin root, but no plugin script it runs could be found and read")
         if unanalyzed:
@@ -3020,6 +3455,13 @@ class HookAnalyzer:
             reason = _outside_root_reference(token, self.root_refs)
             if reason and len(outside) < MAX_OUTSIDE_REFS:
                 outside.append(f"{_bounded(token, 80)} ({reason})")
+        if not self.relative_scripts:
+            for path in _relative_run_paths(text, self.root_refs):
+                if len(outside) < MAX_OUTSIDE_REFS:
+                    outside.append(
+                        f"{_bounded(path, 80)} (is a relative path, which the client resolves against the session's "
+                        "working directory, the user's project, not the plugin root)"
+                    )
         if outside:
             record.risk_flags.append("outside_root")
             analysis.findings.append(
@@ -3047,8 +3489,27 @@ class HookAnalyzer:
     ) -> None:
         """MEDIUM findings for code a hook runs that the plugin does not ship (and that is not remote code)."""
         packages = [package for fact in facts for package in fact.packages]
-        if packages:
+        floating = [package for package in packages if package.floating]
+        if floating:
+            # Same rule as MCP and LSP servers: a moving tag blocks, and is not reported again as unpinned.
             record.risk_flags.append("unpinned_package")
+            analysis.findings.append(
+                _finding(
+                    Severity.HIGH,
+                    "plugin_hook_command_floating_version",
+                    f"{where}: the command runs a package or image with a floating version or tag "
+                    f"({'; '.join(dict.fromkeys(package.detail for package in floating[:3]))}); each run may fetch "
+                    "different code",
+                    display,
+                    "Pin the package or image to an exact version or digest, not a moving tag such as latest.",
+                    component=component,
+                    extra=extra,
+                )
+            )
+            packages = [package for package in packages if not package.floating]
+        if packages:
+            if "unpinned_package" not in record.risk_flags:
+                record.risk_flags.append("unpinned_package")
             details = "; ".join(dict.fromkeys(package.detail for package in packages[:3]))
             analysis.findings.append(
                 _finding(
@@ -3126,6 +3587,42 @@ class HookAnalyzer:
                     extra=extra,
                 )
             )
+
+    def _context_output(
+        self,
+        facts: list[_ShellFacts],
+        record: HookRecord,
+        analysis: HookAnalysis,
+        where: str,
+        display: str,
+        component: tuple[str, str],
+        extra: dict[str, Any],
+        dialect: HookDialect,
+    ) -> None:
+        """LOW when the command emits JSON that puts text in front of the model on an event whose plain output
+        does not: ``additionalContext``, a replaced tool output, or a Stop or PostToolUse block reason."""
+        event = str(extra.get("hook_event", ""))
+        if event in dialect.context_events:
+            return  # every output of a context event is already reported
+        outputs = set().union(*(fact.context_outputs for fact in facts))
+        if event not in _BLOCK_REASON_EVENTS:
+            outputs.discard("a block reason")  # a PreToolUse block reason is a guard's denial message
+        if not outputs:
+            return
+        record.risk_flags.append("context_injection")
+        shown = ", ".join(label for label, _pattern in _CONTEXT_OUTPUT_RES if label in outputs)
+        analysis.findings.append(
+            _finding(
+                Severity.LOW,
+                "plugin_hook_context_injection",
+                f"{where}: the command emits {shown}, which is added to the agent's context",
+                display,
+                "Review what the hook emits; keep injected context minimal and never derived from untrusted "
+                "remote content.",
+                component=component,
+                extra=extra,
+            )
+        )
 
     def _remote_approval(
         self,
@@ -3303,8 +3800,8 @@ class HookAnalyzer:
                 _finding(
                     Severity.MEDIUM,
                     "plugin_hook_http_endpoint_private",
-                    f"{where}: the http handler targets a {endpoint.reason} address {record.target!r} (static check "
-                    "only: DNS resolution and redirects are evaluated only with --resolve-endpoints)",
+                    f"{where}: the http handler targets a {endpoint.reason} address {record.target!r} (a static "
+                    "check of the URL's host; --resolve-endpoints adds DNS and redirect checks of public hosts)",
                     display,
                     "Allow the intended host through hooks.allowed_urls or mcp.allowed_private_hosts in the policy.",
                     component=component,
@@ -3385,10 +3882,16 @@ def privilege_summary(records: Iterable[PrivilegeRecord]) -> dict[str, Any]:
             "agents": sum(1 for row in rows if row["type"] == "agent"),
             "commands": sum(1 for row in rows if row["type"] == "command"),
             "skills": sum(1 for row in rows if row["type"] == "skill"),
-            "flagged": sum(1 for row in rows if any(flag not in _BENIGN_FLAGS for flag in row["flags"])),
+            "flagged": sum(
+                1
+                for row in rows
+                if "inert_grant" not in row["flags"] and any(flag not in _BENIGN_FLAGS for flag in row["flags"])
+            ),
             "by_flag": dict(sorted(by_flag.items())),
         },
     }
 
 
-_BENIGN_FLAGS = frozenset({"no_frontmatter", "inherits_all_tools", "ignored_hooks", "ignored_mcpServers"})
+_BENIGN_FLAGS = frozenset(
+    {"no_frontmatter", "inherits_all_tools", "ignored_hooks", "ignored_mcpServers", "wildcard_ignored"}
+)

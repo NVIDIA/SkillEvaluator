@@ -172,14 +172,14 @@ def test_json_report_carries_the_raw_blocks() -> None:
 
 def test_markdown_renders_static_risk_sections() -> None:
     markdown = MarkdownReporter(include_timestamp=False).render_all([_result()])
-    assert "### Subagent and command privileges (1 agents, 1 commands; 1 flagged)" in markdown
+    assert "### Subagent, command, and skill privileges (1 agents, 1 commands, 0 skills; 1 flagged)" in markdown
     assert "| command | ship | Bash | opus | — | user and model | unrestricted Bash |" in markdown
     assert "### Hook risk (2 handlers; 2 flagged)" in markdown
     assert HOSTILE not in markdown
     assert "### Dependency CVE audit" in markdown
     assert "| npm | Audited | osv-scanner | 3 | 1 | 2 high, 1 low |" in markdown
     assert "container audit incomplete:** no container vulnerability scanner is installed" in markdown
-    assert "**claude plugin validate --strict:** failed" in markdown
+    assert "**claude plugin validate:** failed" in markdown
     assert "### Endpoint DNS and redirect checks (2 endpoints)" in markdown
 
 
@@ -208,11 +208,11 @@ def test_html_without_static_risk_has_no_new_sections() -> None:
 def test_cli_prints_static_risk_summary() -> None:
     output = CLIReporter().render_all([_result()])
     plain = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", output).split())
-    assert "Plugin privileges: 1 subagent(s), 1 command(s); 1 flagged" in plain
+    assert "Plugin privileges: 1 subagent(s), 1 command(s), 0 skill(s); 1 flagged" in plain
     assert "command ship: unrestricted Bash" in plain
     assert "Plugin hooks: 2 handler(s); 2 flagged" in plain
     assert "Dependency CVE audit: npm Audited (3 audited, 1 unverified, 2 high, 1 low)" in plain
-    assert "claude plugin validate --strict: failed (1 errors, 0 warnings); SkillEvaluator passed (disagree)" in plain
+    assert "claude plugin validate: failed (1 errors, 0 warnings); SkillEvaluator passed (disagree)" in plain
     assert "Endpoint DNS/redirect checks: 2 endpoint(s) (private=1, public=1)" in plain
 
 

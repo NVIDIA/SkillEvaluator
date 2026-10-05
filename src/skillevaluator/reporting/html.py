@@ -299,8 +299,20 @@ class HTMLReporter(ReporterBase):
         self._env = self._create_environment()
 
     def _create_environment(self) -> Environment:
+        from markupsafe import Markup
+
+        from skillevaluator.utils.rich_markup import show_format_characters
+
+        def _finalize(value: object) -> object:
+            # Plugin and scanner text can carry bidi controls, zero-width and tag characters
+            # (Unicode Cf); HTML escaping keeps them, so show each as a visible escape, as the
+            # Markdown and CLI reports do. Markup (already-safe template HTML) is left alone.
+            if isinstance(value, str) and not isinstance(value, Markup):
+                return show_format_characters(value)
+            return value
+
         loader = PackageLoader("skillevaluator.reporting", "templates")
-        environment = Environment(loader=loader, autoescape=True)
+        environment = Environment(loader=loader, autoescape=True, finalize=_finalize)
         environment.filters["related_paths"] = _related_paths
         environment.filters["additional_errors"] = additional_errors
         environment.filters["adaptive_percent"] = _adaptive_percent

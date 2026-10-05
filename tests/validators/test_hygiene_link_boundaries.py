@@ -19,6 +19,11 @@ from skillevaluator.validators.hygiene import HygieneValidator, _link_display
 from skillevaluator.validators.markdown import markdown_link_targets, normalized_local_path
 
 
+def _messages(result: ValidationResult) -> list[str]:
+    """Hygiene failures are structured findings (proof L15); their messages keep the old wording."""
+    return [finding.message for finding in result.findings]
+
+
 def _validate_document(tmp_path: Path, content: str):
     """Scan a supporting document through the public Tier 1 orchestration."""
     (tmp_path / "SKILL.md").write_text("---\nname: sample\ndescription: Example skill\n---\n", encoding="utf-8")
@@ -29,7 +34,7 @@ def _validate_document(tmp_path: Path, content: str):
 
 def test_encoded_colon_stays_a_local_destination(tmp_path: Path) -> None:
     result = _validate_document(tmp_path, "[guide][target]\n\n[target]: missing%3Aguide.md\n")
-    assert result.errors == ["Dead link in guide.md: missing%3Aguide.md"]
+    assert _messages(result) == ["Dead link in guide.md: missing%3Aguide.md"]
     assert normalized_local_path("missing%3Aguide.md") == "missing:guide.md"
 
 
@@ -55,8 +60,8 @@ def test_unsafe_relative_anchors_produce_findings_without_lookup(
     monkeypatch.setattr(Path, "exists", exists)
     result = _validate_document(tmp_path, f"[bad][target]\n\n[target]: {href}\n\n[other](missing.md)")
     assert len(result.errors) == 2
-    assert result.errors[0] == f"Invalid local link in guide.md: {href} (absolute or drive-relative path)"
-    assert result.errors[1] == "Dead link in guide.md: missing.md"
+    assert _messages(result)[0] == f"Invalid local link in guide.md: {href} (absolute or drive-relative path)"
+    assert _messages(result)[1] == "Dead link in guide.md: missing.md"
 
 
 def test_repeated_unsafe_anchor_is_reported_once_per_document(tmp_path: Path) -> None:
@@ -66,7 +71,7 @@ def test_repeated_unsafe_anchor_is_reported_once_per_document(tmp_path: Path) ->
     )
     (tmp_path / "another.md").write_text(content, encoding="utf-8")
     result = _validate_document(tmp_path, content)
-    assert sorted(result.errors) == sorted(
+    assert sorted(_messages(result)) == sorted(
         f"{message} in {name}: {target}"
         for name in ("another.md", "guide.md")
         for message, target in (
@@ -79,22 +84,22 @@ def test_repeated_unsafe_anchor_is_reported_once_per_document(tmp_path: Path) ->
 def test_invalid_utf8_does_not_alias_an_existing_replacement_character(tmp_path: Path) -> None:
     (tmp_path / "\ufffd.md").write_text("Existing unrelated document", encoding="utf-8")
     result = _validate_document(tmp_path, '<a href="%FF.md">one</a> <a href="%FE.md">two</a>')
-    assert result.errors == ["Dead link in guide.md: %FF.md", "Dead link in guide.md: %FE.md"]
+    assert _messages(result) == ["Dead link in guide.md: %FF.md", "Dead link in guide.md: %FE.md"]
     assert normalized_local_path("%FF.md") != normalized_local_path("%FE.md")
 
 
 @pytest.mark.parametrize("value", ["9" * 5000, "[" * 1500 + "0" + "]" * 1500], ids=["huge-integer", "deep-sequence"])
 def test_frontmatter_limits_do_not_abort_validation(tmp_path: Path, value: str) -> None:
     result = _validate_document(tmp_path, f"---\nvalue: {value}\n---\n[guide](missing.md)\n")
-    assert result.errors == ["Dead link in guide.md: missing.md"]
+    assert _messages(result) == ["Dead link in guide.md: missing.md"]
 
 
 def test_reference_lookup_failure_does_not_abort_other_links(tmp_path: Path) -> None:
     target = "a" * 300 + ".md"
     result = _validate_document(tmp_path, f"[long][target]\n\n[target]: {target}\n\n[other](missing.md)\n")
     assert len(result.errors) == 2
-    assert result.errors[-1] == "Dead link in guide.md: missing.md"
-    assert len(result.errors[0]) < 220
+    assert _messages(result)[-1] == "Dead link in guide.md: missing.md"
+    assert len(_messages(result)[0]) < 220
 
 
 def test_lookup_oserror_is_contained_per_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -107,7 +112,7 @@ def test_lookup_oserror_is_contained_per_target(tmp_path: Path, monkeypatch: pyt
 
     monkeypatch.setattr(Path, "exists", exists)
     result = _validate_document(tmp_path, "[guide][target]\n\n[target]: unreadable.md\n\n[other](missing.md)")
-    assert result.errors == ["Dead link in guide.md: unreadable.md", "Dead link in guide.md: missing.md"]
+    assert _messages(result) == ["Dead link in guide.md: unreadable.md", "Dead link in guide.md: missing.md"]
 
 
 def test_lookup_programming_errors_are_not_silenced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -211,7 +216,7 @@ def test_html_guard_uses_each_inline_sources_offsets(opener: str, closed: str) -
 def test_link_diagnostics_bound_escaped_unicode(tmp_path: Path, reporter_type: type) -> None:
     result = _validate_document(tmp_path, '<a href="missing/' + "\U0001f600" * 200 + '">bad</a>')
     assert len(result.errors) == 1
-    assert result.errors[0].endswith("...")
-    assert len(result.errors[0]) < 220
-    assert "\\U0001f600" in result.errors[0]
+    assert _messages(result)[0].endswith("...")
+    assert len(_messages(result)[0]) < 220
+    assert "\\U0001f600" in _messages(result)[0]
     assert len(reporter_type().render_all([result])) < 3000

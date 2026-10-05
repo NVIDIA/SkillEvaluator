@@ -15,6 +15,7 @@ import pytest
 from skillevaluator.models.result import Severity, ValidationResult
 from skillevaluator.plugin_component_risk import (
     _fetches_remote_code,
+    _outside_root_reference,
     _url_matches_allowlist,
     hook_allowlist_hosts,
     matcher_scope,
@@ -429,6 +430,11 @@ def test_context_injection_hooks_are_low(tmp_path: Path) -> None:
     assert result.passed
 
 
+def test_a_dot_slash_path_whose_dots_stay_inside_does_not_climb_out() -> None:
+    assert _outside_root_reference("./a/../b") is None
+    assert _outside_root_reference("./a/../../b") == "climbs out of the working directory with '..'"
+
+
 @pytest.mark.parametrize(
     ("token", "expected"),
     [
@@ -442,7 +448,9 @@ def test_context_injection_hooks_are_low(tmp_path: Path) -> None:
         ("a/../../x", True),
         ("a\\..\\..\\x", True),
         ("--file=../x", True),
-        ("./a/../b", False),
+        # A '..' that stays inside is not an escape. (A './' word is still reported, as a path the client
+        # resolves against the user's project, so the inside case is checked without './'; see below.)
+        ("a/../b", False),
         ("a/..", False),
     ],
 )

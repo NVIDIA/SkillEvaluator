@@ -45,6 +45,7 @@ from skillevaluator.tier3.harbor.adapter import (
     _VERIFIER_BUDGET_ENV_VARS,
     _VERIFIER_JUDGE_MODEL_ENV_VARS,
     _VERIFIER_RETRY_ENV_VARS,
+    _native_entry_id,
     _prevalidate_baseline_skill_candidates,
     build_eval_base_image,
     find_evals_file,
@@ -2334,6 +2335,7 @@ def _run_harbor_eval_impl(
             )
     agent_task_dirs: dict[str, tuple[Path, Path | None]] = {}
     expected_task_names: list[str] | None = None
+    expected_case_ids: list[str] | None = None
     reporter.emit(
         ProgressEvent(
             stage="with-skill-tasks",
@@ -2344,6 +2346,9 @@ def _run_harbor_eval_impl(
     )
     staging_failure_stage = "with-skill-tasks"
     try:
+        is_dual_arm = not skip_baseline
+        with_arm_suffix = "-with-skill" if is_dual_arm else ""
+        without_arm_suffix = "-without-skill" if is_dual_arm else ""
         for agent in agents:
             with_dir = tasks_dir / agent / "with"
             without_dir = None if skip_baseline else tasks_dir / agent / "without"
@@ -2365,11 +2370,14 @@ def _run_harbor_eval_impl(
                 task_resources=resource_config,
                 agent_workdir=harbor_config.get("agent_workdir"),
                 evaluator_skill_path=evaluator_skill_path,
+                arm_suffix=with_arm_suffix,
             )
             task_names = [task.name for task in task_paths]
+            case_ids = [_native_entry_id(task) for task in task_paths]
             if expected_task_names is None:
                 expected_task_names = task_names
-            elif task_names != expected_task_names:
+                expected_case_ids = case_ids
+            elif task_names != expected_task_names or case_ids != expected_case_ids:
                 raise ValueError(f"Generated task cases differ for agent {agent}")
             agent_task_dirs[agent] = (with_dir, without_dir)
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="ready", detail="task inputs staged"))
@@ -2406,6 +2414,7 @@ def _run_harbor_eval_impl(
                     agent_workdir=harbor_config.get("agent_workdir"),
                     evaluator_skill_path=evaluator_skill_path,
                     _baseline_alias_validation=baseline_alias_validation,
+                    arm_suffix=without_arm_suffix,
                 )
         if not skip_baseline:
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="ready", detail="baseline inputs staged"))
@@ -2416,6 +2425,7 @@ def _run_harbor_eval_impl(
         return _persist_pre_execution_failure([str(exc)])
 
     task_names = expected_task_names or []
+    case_ids = expected_case_ids or task_names
     expected_trials = len(task_names) * n_attempts
     variants = 1 if skip_baseline else 2
     matrix_trials = expected_trials * len(agents) * variants
@@ -2432,7 +2442,7 @@ def _run_harbor_eval_impl(
             agent_models=tuple((agent, model_resolution[agent]["model"]) for agent in agents),
             provider=provider.provider,
             task_count=len(task_names),
-            case_count=len(task_names),
+            case_count=len(case_ids),
             attempts=n_attempts,
             baseline=not skip_baseline,
             concurrency=n_concurrent,
@@ -2591,8 +2601,8 @@ def _run_harbor_eval_impl(
             n_attempts=n_attempts,
             pass_threshold=float(pass_threshold),
             stop_on_pass=bool(stop_on_pass),
-            expected_cases=len(task_names),
-            expected_case_ids=task_names,
+            expected_cases=len(case_ids),
+            expected_case_ids=case_ids,
             # Early-stopped cases legitimately use fewer trials than the
             # n_attempts maximum; per-case coverage is validated instead.
             expected_trials=None if stop_on_pass else expected_trials,
@@ -2605,7 +2615,7 @@ def _run_harbor_eval_impl(
         _emit_run_finished("failed", "result collection failed")
         raise
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
-    dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=task_names)
+    dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=case_ids)
     results.update(
         {
             "skill_name": skill_path.name,

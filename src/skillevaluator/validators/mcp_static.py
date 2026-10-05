@@ -1438,58 +1438,73 @@ _BYPASS_FLAG_RE = re.compile(
     r"(?<![\w-])(" + "|".join(re.escape(flag) for flag in PERMISSION_BYPASS_FLAGS) + r")(?![\w-])",
     re.IGNORECASE,
 )
-# Option/value pairs with the same effect: Claude Code's permission mode, Gemini
-# CLI's approval mode, and Codex CLI's sandbox and approval policy (long and short option).
-PERMISSION_BYPASS_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("--permission-mode", "bypassPermissions"),
-    ("--approval-mode", "yolo"),
-    ("--sandbox", "danger-full-access"),
-    ("-s", "danger-full-access"),
-    ("--ask-for-approval", "never"),
-    ("-a", "never"),
+
+
+@dataclass(frozen=True)
+class _OptionRisk:
+    """What an agent-CLI option value does: the issue it raises, and whether only Codex reads it."""
+
+    concept: Literal["permission_bypass_flag", "permission_mode_flag"]
+    severity: Severity
+    # '-a' is a common short option and '-c' / '--config' a common flag, so '-a never' and the config
+    # overrides count only after a codex command in the same string or argv ('grep -a never f' is not Codex).
+    codex_only: bool = False
+
+
+_BYPASS = _OptionRisk("permission_bypass_flag", Severity.HIGH)
+_CODEX_BYPASS = _OptionRisk("permission_bypass_flag", Severity.HIGH, codex_only=True)
+_PERMISSIVE_MODE = _OptionRisk("permission_mode_flag", Severity.MEDIUM)
+# Agent-CLI options and the values that disable approvals or the sandbox (bypass) or let the launched agent
+# approve some tool calls without a prompt (permissive mode): Claude Code's permission mode, Gemini CLI's approval
+# mode, and Codex CLI's sandbox and approval policy (long and short option). Options and values match in any
+# letter case and are reported as written here.
+_OPTION_VALUE_RISKS: dict[str, dict[str, _OptionRisk]] = {
+    "--permission-mode": {"bypassPermissions": _BYPASS, "acceptEdits": _PERMISSIVE_MODE, "auto": _PERMISSIVE_MODE},
+    "--approval-mode": {"yolo": _BYPASS},
+    "--sandbox": {"danger-full-access": _BYPASS},
+    "-s": {"danger-full-access": _BYPASS},
+    "--ask-for-approval": {"never": _BYPASS},
+    "-a": {"never": _CODEX_BYPASS},
+}
+# The same table by lower-case option and value, with the flag each value reports ("--permission-mode auto").
+_OPTION_VALUES: dict[str, dict[str, tuple[str, _OptionRisk]]] = {
+    option.lower(): {value.lower(): (f"{option} {value}", risk) for value, risk in values.items()}
+    for option, values in _OPTION_VALUE_RISKS.items()
+}
+# Each option in one string: "--opt value", "--opt=value", or a quoted value.
+_OPTION_VALUE_RES: tuple[tuple[re.Pattern[str], dict[str, tuple[str, _OptionRisk]]], ...] = tuple(
+    (
+        re.compile(
+            rf"(?<![\w-]){re.escape(option)}(?:=|\s+)[\"']?(?P<value>{'|'.join(map(re.escape, values))})(?![\w-])",
+            re.IGNORECASE,
+        ),
+        _OPTION_VALUES[option.lower()],
+    )
+    for option, values in _OPTION_VALUE_RISKS.items()
 )
-# Codex CLI config overrides with the same effect: '-c approval_policy=never',
+# Codex CLI config overrides with the bypass effect: '-c approval_policy=never',
 # '--config sandbox_mode="danger-full-access"'.
 PERMISSION_BYPASS_CONFIG: tuple[tuple[str, str], ...] = (
     ("approval_policy", "never"),
     ("sandbox_mode", "danger-full-access"),
 )
-# '-a' is a common short option and '-c' / '--config' a common flag, so '-a never' and the config
-# overrides count only after a codex command in the same string or argv ('grep -a never f' is not Codex).
-_CODEX_ONLY_OPTIONS = frozenset({"-a"})
 _CODEX_COMMAND_RE = re.compile(r"(?<![\w.-])codex(?:\.exe|\.cmd)?(?![\w.-])|\$\{?CODEX\w*", re.IGNORECASE)
 _BYPASS_CONFIG_OPTIONS = frozenset({"-c", "--config"})
+# A config override as the argv value after '-c', and anywhere in one string.
 _BYPASS_CONFIG_VALUE_RES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (f"-c {key}={value}", re.compile(rf"^[\"']?{key}\s*=\s*[\"']?{re.escape(value)}[\"']?$", re.IGNORECASE))
     for key, value in PERMISSION_BYPASS_CONFIG
 )
-# In one string: "--opt value", "--opt=value", or a quoted value; the last item is True for a Codex-only form.
-_BYPASS_OPTION_RES: tuple[tuple[str, re.Pattern[str], bool], ...] = (
-    *(
-        (
-            f"{option} {value}",
-            re.compile(rf"(?<![\w-]){re.escape(option)}(?:=|\s+)[\"']?{re.escape(value)}(?![\w-])", re.IGNORECASE),
-            option in _CODEX_ONLY_OPTIONS,
-        )
-        for option, value in PERMISSION_BYPASS_OPTIONS
-    ),
-    *(
-        (
-            f"-c {key}={value}",
-            re.compile(
-                rf"(?<![\w-])(?:-c|--config)(?:=|\s+)[\"']?{key}\s*=\s*[\"']?{re.escape(value)}(?![\w-])",
-                re.IGNORECASE,
-            ),
-            True,
-        )
-        for key, value in PERMISSION_BYPASS_CONFIG
-    ),
+_BYPASS_CONFIG_TEXT_RES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (
+        f"-c {key}={value}",
+        re.compile(
+            rf"(?<![\w-])(?:-c|--config)(?:=|\s+)[\"']?{key}\s*=\s*[\"']?{re.escape(value)}(?![\w-])",
+            re.IGNORECASE,
+        ),
+    )
+    for key, value in PERMISSION_BYPASS_CONFIG
 )
-# Split across adjacent argv tokens: option -> (value, reported flag, Codex-only).
-_BYPASS_OPTION_VALUES: dict[str, tuple[str, str, bool]] = {
-    option.lower(): (value.lower(), f"{option} {value}", option in _CODEX_ONLY_OPTIONS)
-    for option, value in PERMISSION_BYPASS_OPTIONS
-}
 # Keys whose values are prose, never executed config -- documentation mentions of
 # a flag are not flagged.
 _DOC_KEYS = frozenset({"description", "title", "summary", "notes", "note", "comment", "comments", "help"})
@@ -1531,6 +1546,7 @@ class OverrideIssue:
     concept: Literal[
         "permission_bypass_flag",
         "permission_bypass_scan_truncated",
+        "permission_mode_flag",
         "env_code_injection",
         "env_traffic_redirect",
         "auto_approve",
@@ -1572,74 +1588,70 @@ class _ConfigWalk:
                     stack.append((f"{path}[{index}]", child))
 
 
-def iter_config_strings(value: Any, *, skip_doc_keys: bool = True) -> Iterator[tuple[str, str]]:
-    """Yield ``(json_path, string)`` for string leaves of a config value (bounded, iterative)."""
-    for path, node in _ConfigWalk(value, skip_doc_keys=skip_doc_keys):
-        if isinstance(node, str):
-            yield path, node
-
-
 def _codex_hit(text: str, start: int) -> bool:
     """Whether a codex command comes before ``start`` in ``text``."""
     return _CODEX_COMMAND_RE.search(text, 0, start) is not None
 
 
-def _bypass_hits(path: str, node: Any) -> Iterator[tuple[str, str]]:
-    """Yield ``(json_path, flag)`` for bypass flags in a string or split across argv tokens."""
+def _flag_hits(path: str, node: Any) -> Iterator[tuple[str, str, _OptionRisk]]:
+    """Yield ``(json_path, flag, risk)`` for permission flags in a string or split across argv tokens."""
     if isinstance(node, str):
         for match in _BYPASS_FLAG_RE.finditer(node):
-            yield path, match.group(1).lower()
-        for label, pattern, codex_only in _BYPASS_OPTION_RES:
-            if any(not codex_only or _codex_hit(node, hit.start()) for hit in pattern.finditer(node)):
-                yield path, label
+            yield path, match.group(1).lower(), _BYPASS
+        for pattern, values in _OPTION_VALUE_RES:
+            for match in pattern.finditer(node):
+                flag, risk = values[match.group("value").lower()]
+                if not risk.codex_only or _codex_hit(node, match.start()):
+                    yield path, flag, risk
+        for flag, pattern in _BYPASS_CONFIG_TEXT_RES:
+            if any(_codex_hit(node, match.start()) for match in pattern.finditer(node)):
+                yield path, flag, _CODEX_BYPASS
     elif isinstance(node, list):
-        yield from _argv_bypass_hits(path, node, codex=False)
+        yield from _argv_flag_hits(path, node, codex=False)
     elif isinstance(node, dict):
         # {"command": "codex", "args": ["-a", "never"]}: the args follow a codex command.
         command, args = node.get("command"), node.get("args")
         if isinstance(command, str) and isinstance(args, list) and _CODEX_COMMAND_RE.search(command):
-            yield from _argv_bypass_hits(f"{path}.args" if path else "args", args, codex=True)
+            yield from _argv_flag_hits(f"{path}.args" if path else "args", args, codex=True)
 
 
-def _argv_bypass_hits(path: str, argv: list[Any], *, codex: bool) -> Iterator[tuple[str, str]]:
-    """Bypass options split across adjacent argv tokens (``["--sandbox", "danger-full-access"]``); the
-    Codex-only forms count only after a codex token, or when ``codex`` says the argv belongs to one."""
+def _argv_flag_hits(path: str, argv: list[Any], *, codex: bool) -> Iterator[tuple[str, str, _OptionRisk]]:
+    """Options split across adjacent argv tokens (``["--sandbox", "danger-full-access"]``); the Codex-only
+    forms count only after a codex token, or when ``codex`` says the argv belongs to one."""
     for index, (option, value) in enumerate(itertools.pairwise(argv)):
         if isinstance(option, str) and _CODEX_COMMAND_RE.search(option):
             codex = True
         if not isinstance(option, str) or not isinstance(value, str):
             continue
-        expected = _BYPASS_OPTION_VALUES.get(option.strip().lower())
-        if expected is not None and value.strip().strip("\"'").lower() == expected[0] and (codex or not expected[2]):
-            yield f"{path}[{index}]", expected[1]
-        if codex and option.strip().lower() in _BYPASS_CONFIG_OPTIONS:
-            for label, pattern in _BYPASS_CONFIG_VALUE_RES:
+        name = option.strip().lower()
+        found = _OPTION_VALUES.get(name, {}).get(value.strip().strip("\"'").lower())
+        if found is not None and (codex or not found[1].codex_only):
+            flag, risk = found
+            yield f"{path}[{index}]", flag, risk
+        if codex and name in _BYPASS_CONFIG_OPTIONS:
+            for flag, pattern in _BYPASS_CONFIG_VALUE_RES:
                 if pattern.match(value.strip()):
-                    yield f"{path}[{index}]", label
+                    yield f"{path}[{index}]", flag, _CODEX_BYPASS
 
 
-def permission_bypass_issues(value: Any) -> list[OverrideIssue]:
-    """Find agent-CLI permission-bypass flags in any config/command string or argv list.
+def permission_flag_issues(value: Any) -> list[OverrideIssue]:
+    """Find agent-CLI permission flags in any config/command string or argv list, in one bounded walk.
 
-    A config too large to walk completely is itself a HIGH issue (fail closed).
+    Flags and options that disable approvals or the sandbox (``--dangerously-skip-permissions``,
+    ``--yolo``, ``--permission-mode bypassPermissions``, ``--sandbox danger-full-access``, Codex's
+    ``-a never`` and ``-c approval_policy=never``) are HIGH ``permission_bypass_flag`` issues;
+    ``--permission-mode acceptEdits`` and ``auto`` are MEDIUM ``permission_mode_flag`` issues. Options
+    and values match in any letter case. A config too large to walk completely adds a HIGH
+    ``permission_bypass_scan_truncated`` issue last (fail closed).
     """
     issues: list[OverrideIssue] = []
     seen: set[tuple[str, str]] = set()
     walk = _ConfigWalk(value)
     for node_path, node in walk:
-        for path, flag in _bypass_hits(node_path, node):
-            if (path, flag) in seen:
-                continue
-            seen.add((path, flag))
-            where = f" in '{path}'" if path else ""
-            issues.append(
-                OverrideIssue(
-                    "permission_bypass_flag",
-                    Severity.HIGH,
-                    f"agent-CLI permission-bypass flag {flag!r}{where} disables tool-approval prompts or sandboxing",
-                    "Remove the permission-bypass flag; plugins must not disable the host agent's approvals or sandbox.",
-                )
-            )
+        for path, flag, risk in _flag_hits(node_path, node):
+            if (path, flag) not in seen:
+                seen.add((path, flag))
+                issues.append(_permission_flag_issue(flag, path, risk))
     if not walk.complete:
         issues.append(
             OverrideIssue(
@@ -1651,6 +1663,29 @@ def permission_bypass_issues(value: Any) -> list[OverrideIssue]:
             )
         )
     return issues
+
+
+def _permission_flag_issue(flag: str, path: str, risk: _OptionRisk) -> OverrideIssue:
+    if risk.concept == "permission_mode_flag":
+        return OverrideIssue(
+            "permission_mode_flag",
+            risk.severity,
+            f"agent-CLI flag {flag!r}{f' in {path!r}' if path else ''} lets the launched agent approve some tool "
+            "calls without a prompt",
+            "Remove the flag; let the user choose the permission mode of any agent CLI the plugin launches.",
+        )
+    where = f" in '{path}'" if path else ""
+    return OverrideIssue(
+        "permission_bypass_flag",
+        risk.severity,
+        f"agent-CLI permission-bypass flag {flag!r}{where} disables tool-approval prompts or sandboxing",
+        "Remove the permission-bypass flag; plugins must not disable the host agent's approvals or sandbox.",
+    )
+
+
+def permission_bypass_issues(value: Any) -> list[OverrideIssue]:
+    """The HIGH part of :func:`permission_flag_issues`: permission-bypass flags, and a scan that stopped early."""
+    return [issue for issue in permission_flag_issues(value) if issue.concept != "permission_mode_flag"]
 
 
 def _is_passthrough(key: str, value: str) -> bool:

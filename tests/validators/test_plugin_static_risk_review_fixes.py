@@ -18,7 +18,7 @@ import pytest
 
 from skillevaluator.models.result import Severity, ValidationResult
 from skillevaluator.plugin_component_risk import MAX_RUN_SITES, MAX_SCRIPT_BYTES, _fetches_remote_code
-from skillevaluator.validators.mcp_static import permission_bypass_issues
+from skillevaluator.validators.mcp_static import permission_bypass_issues, permission_flag_issues
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 
 _AP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
@@ -664,11 +664,33 @@ def test_codex_safe_approval_flags_pass() -> None:
         assert not permission_bypass_issues({"command": "codex", "args": args})
 
 
-@pytest.mark.parametrize("args", [["--permission-mode", "auto"], ["--permission-mode=acceptEdits"]])
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--permission-mode", "auto"],
+        ["--permission-mode=acceptEdits"],
+        # Regression: the permission-mode scan was case-sensitive, while the bypass scan was not.
+        ["--permission-mode", "AUTO"],
+        ["--PERMISSION-MODE=acceptedits"],
+    ],
+)
 def test_permissive_permission_mode_flags_are_medium(tmp_path: Path, args: list[str]) -> None:
     lsp = {"agent": {"command": "claude", "args": ["-p", *args]}}
     result = _validate(_claude(tmp_path, {".lsp.json": lsp}))
     assert _checks(result)["plugin_permission_mode_flag"] == Severity.MEDIUM
+
+
+def test_one_walk_reports_bypass_and_permissive_mode_flags() -> None:
+    config = {"command": "codex", "args": ["exec", "-a", "never"], "env": {"AGENT": "claude --permission-mode Auto"}}
+
+    issues = permission_flag_issues(config)
+
+    assert [(issue.concept, issue.severity) for issue in issues] == [
+        ("permission_bypass_flag", Severity.HIGH),
+        ("permission_mode_flag", Severity.MEDIUM),
+    ]
+    assert "'--permission-mode auto' in 'env.AGENT'" in issues[1].message
+    assert [issue.concept for issue in permission_bypass_issues(config)] == ["permission_bypass_flag"]
 
 
 # --------------------------------------------------------------------------- #

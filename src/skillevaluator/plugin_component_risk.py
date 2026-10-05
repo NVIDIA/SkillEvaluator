@@ -54,7 +54,7 @@ from skillevaluator.validators.mcp_static import (
     classify_endpoint_host,
     classify_mcp_pinning,
     host_is_allowlisted,
-    iter_config_strings,
+    permission_flag_issues,
 )
 from skillevaluator.validators.url_policy import (
     is_env_reference,
@@ -576,35 +576,15 @@ def is_broad_allow_rule(rule: str) -> bool:
 # Claude Code permission modes that approve some tool calls without a prompt ('bypassPermissions', which
 # approves every call, is a HIGH permission-bypass flag of its own).
 PERMISSIVE_PERMISSION_MODES: frozenset[str] = frozenset({"acceptEdits", "auto"})
-_PERMISSION_MODE_FLAG_RE = re.compile(r"(?<![\w-])--permission-mode(?:=|\s+)[\"']?(acceptEdits|auto)(?![\w-])")
-_LIST_ITEM_PATH_RE = re.compile(r"^(?P<parent>.*)\[(?P<index>\d+)\]$")
 
 
 def permission_mode_flag_issues(value: Any) -> list[OverrideIssue]:
-    """``--permission-mode auto`` or ``acceptEdits`` in any config string or argv list (MEDIUM each)."""
-    hits: dict[tuple[str, str], None] = {}
-    items: dict[str, dict[int, str]] = {}
-    for path, text in iter_config_strings(value):
-        for match in _PERMISSION_MODE_FLAG_RE.finditer(text):
-            hits.setdefault((path, match.group(1)))
-        item = _LIST_ITEM_PATH_RE.match(path)
-        if item is not None:
-            items.setdefault(item.group("parent"), {})[int(item.group("index"))] = text
-    for parent, tokens in items.items():
-        for index, token in tokens.items():
-            mode = tokens.get(index + 1, "").strip().strip("\"'")
-            if token.strip() == "--permission-mode" and mode in PERMISSIVE_PERMISSION_MODES:
-                hits.setdefault((f"{parent}[{index}]", mode))
-    return [
-        OverrideIssue(
-            "permission_mode_flag",
-            Severity.MEDIUM,
-            f"agent-CLI flag '--permission-mode {mode}'{f' in {path!r}' if path else ''} lets the launched agent "
-            "approve some tool calls without a prompt",
-            "Remove the flag; let the user choose the permission mode of any agent CLI the plugin launches.",
-        )
-        for path, mode in hits
-    ]
+    """The MEDIUM part of :func:`~skillevaluator.validators.mcp_static.permission_flag_issues`.
+
+    ``--permission-mode acceptEdits`` or ``auto`` (in any letter case) in any config string or argv list. A
+    caller that also needs the permission-bypass flags gets both from one ``permission_flag_issues`` walk.
+    """
+    return [issue for issue in permission_flag_issues(value) if issue.concept == "permission_mode_flag"]
 
 
 def _bash_grant_label(entry: str) -> str:

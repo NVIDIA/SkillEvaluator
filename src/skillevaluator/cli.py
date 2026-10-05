@@ -451,6 +451,34 @@ def _report_formats_explicit() -> bool:
     return False
 
 
+_TIER2_EXTRA_SKIP = "Skipped: install the Tier 2 extra (make install EXTRAS=tier2), or pass --no-dedup."
+
+
+def _embedding_backend_problem() -> str | None:
+    """Why Tier 2 cannot embed here, or ``None`` when it can.
+
+    Embedding needs the ``tier2`` extra (``openai``) and a configured public
+    embedding provider. ``find_spec`` does not import the module (so nothing
+    leaks into a base install) and may raise if a meta-path blocker is active;
+    any failure there counts as the extra missing.
+    """
+    import importlib.util
+
+    from skillevaluator.provider_config import ProviderConfigurationError, resolve_embedding_provider
+
+    try:
+        has_openai = importlib.util.find_spec("openai") is not None
+    except (ImportError, ValueError):
+        has_openai = False
+    if not has_openai:
+        return _TIER2_EXTRA_SKIP
+    try:
+        resolve_embedding_provider()
+    except ProviderConfigurationError as exc:
+        return f"Tier 2 skipped: embedding setup is required.\n\n{exc}\n\nTo skip Tier 2, pass --no-dedup."
+    return None
+
+
 def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
     """Run Tier 2 dedup when possible, else return a non-failing skipped result.
 
@@ -458,7 +486,6 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
     configured public embedding provider. When either is missing it degrades
     gracefully to a warning so a lightweight ``validate`` keeps working.
     """
-    import importlib.util
 
     def _skip(message: str) -> list[ValidationResult]:
         result = ValidationResult(
@@ -469,49 +496,24 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
         result.metadata["skipped"] = True
         return [result]
 
-    def _available(module: str) -> bool:
-        # find_spec does not import the module (so nothing leaks into a base
-        # install) and may raise if a meta-path blocker is active; treat any
-        # failure as "unavailable" so dedup degrades to a warning.
-        try:
-            return importlib.util.find_spec(module) is not None
-        except (ImportError, ValueError):
-            return False
-
-    if not _available("openai"):
-        return _skip("Skipped: install the Tier 2 extra (make install EXTRAS=tier2), or pass --no-dedup.")
     try:
-        from skillevaluator.provider_config import ProviderConfigurationError, resolve_embedding_provider
         from skillevaluator.tier2.commands import run_dedup_scan
     except ImportError:
-        return _skip("Skipped: install the Tier 2 extra (make install EXTRAS=tier2), or pass --no-dedup.")
-    try:
-        resolve_embedding_provider()
-    except ProviderConfigurationError as exc:
-        return _skip(f"Tier 2 skipped: embedding setup is required.\n\n{exc}\n\nTo skip Tier 2, pass --no-dedup.")
+        return _skip(_TIER2_EXTRA_SKIP)
+    if problem := _embedding_backend_problem():
+        return _skip(problem)
     return run_dedup_scan(target_path)
 
 
 def _run_plugin_dedup_or_skip(plugin_root: Path) -> list[ValidationResult]:
-    """Run the public plugin Tier 2 contract without remote catalog services."""
-    import importlib.util
+    """Run the public plugin Tier 2 contract without remote catalog services.
 
+    The embedding-based context checks run only when an embedding backend is
+    available; the rest of the contract runs either way.
+    """
     from skillevaluator.tier2.commands import run_plugin_dedup_scan
 
-    try:
-        has_openai = importlib.util.find_spec("openai") is not None
-    except (ImportError, ValueError):
-        has_openai = False
-    can_embed = False
-    if has_openai:
-        try:
-            from skillevaluator.provider_config import resolve_embedding_provider
-
-            resolve_embedding_provider()
-            can_embed = True
-        except Exception:
-            can_embed = False
-    return run_plugin_dedup_scan(plugin_root, run_context=can_embed)
+    return run_plugin_dedup_scan(plugin_root, run_context=_embedding_backend_problem() is None)
 
 
 def _partial_agent_eval_result(

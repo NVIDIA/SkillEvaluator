@@ -42,7 +42,7 @@ from skillevaluator.reporting.base import (
     passes_required_gate,
 )
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
-from skillevaluator.reporting.plugin_sections import split_display_prefix, tier1_plugin_view, tier3_plugin_view
+from skillevaluator.reporting.plugin_sections import split_display_prefix, tier3_plugin_view
 from skillevaluator.utils.rich_markup import replace_unencodable
 
 if TYPE_CHECKING:
@@ -1148,16 +1148,7 @@ class HTMLReporter(ReporterBase):
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
         # Plugin sections are built from the complete canonical data (not the
         # bounded HTML preview) into their own bounded display models.
-        plugin_meta = self._plugin_block_from_results(results)
-        plugin_view = (
-            tier1_plugin_view(
-                plugin_meta,
-                status=self._plugin_status(results),
-                bundled_skills=self._plugin_child_names(results),
-            )
-            if plugin_meta is not None
-            else None
-        )
+        plugin_view = self._tier1_plugin_view(results)
         tier3_plugin = tier3_plugin_view(tier3_data)
 
         # Keep the Tier 1 dashboard scoped to Tier 1. Tier 2 and Tier 3 have

@@ -31,7 +31,7 @@ from skillevaluator.reporting.harbor_viewer import (
     normalize_harbor_viewer_for_display,
     safe_url,
 )
-from skillevaluator.reporting.plugin_sections import format_score, tier1_plugin_view, tier3_plugin_view
+from skillevaluator.reporting.plugin_sections import format_score, tier3_plugin_view
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 if TYPE_CHECKING:
@@ -188,9 +188,9 @@ class MarkdownReporter(ReporterBase):
         lines.append(f"| Total Issues | {issue_str} |")
         lines.append("")
 
-        plugin = self._plugin_block_from_results(results)
-        if plugin is not None:
-            self._render_plugin_section(results, plugin, lines)
+        plugin_view = self._tier1_plugin_view(results)
+        if plugin_view is not None:
+            self._render_plugin_section(plugin_view, lines)
 
         # Quality Score summary (if any QUALITY results present)
         quality_results = [r for r in results if r.metadata.get("quality_scores")]
@@ -322,16 +322,8 @@ class MarkdownReporter(ReporterBase):
 
         return _markdown_output("\n".join(lines))
 
-    def _render_plugin_section(self, results: list[ValidationResult], plugin: dict, lines: list[str]) -> None:
+    def _render_plugin_section(self, view: dict, lines: list[str]) -> None:
         """Render the Tier 1 plugin block: manifest, dependencies, components, MCP, context."""
-        view = tier1_plugin_view(
-            plugin,
-            status=self._plugin_status(results),
-            bundled_skills=self._plugin_child_names(results),
-        )
-        if view is None:
-            # An empty plugin block has nothing to show; the HTML report omits the section too.
-            return
         cell = _markdown_table_cell
         status = {"failed": "❌ FAILED", "incomplete": "⚠️ INCOMPLETE", "passed": "✅ PASSED"}.get(view["status"], "")
         lines.append("## Plugin")

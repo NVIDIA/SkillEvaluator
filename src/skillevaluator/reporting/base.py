@@ -26,7 +26,13 @@ from typing import TYPE_CHECKING, Any
 import click
 
 from skillevaluator.constants import PLUGIN_CATALOG_PLUGIN_SIMILARITY_KEY, PLUGIN_CATALOG_SKILL_SIMILARITY_KEY
-from skillevaluator.reporting.plugin_sections import completeness_view, plugin_block, split_display_prefix
+from skillevaluator.reporting.plugin_sections import (
+    completeness_view,
+    plugin_block,
+    plugin_provenance,
+    split_display_prefix,
+    tier1_plugin_view,
+)
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
 
 if TYPE_CHECKING:
@@ -360,10 +366,7 @@ def is_advisory_agent_eval_skip(result: ValidationResult) -> bool:
 def is_partial_plugin_agent_eval(result: ValidationResult) -> bool:
     """Return whether a Tier 3 result records a partial (INCOMPLETE) plugin run."""
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
-    payload = metadata.get("agent_eval")
-    if not isinstance(payload, dict):
-        return False
-    completeness = completeness_view(payload.get("plugin_provenance"))
+    completeness = completeness_view(plugin_provenance(metadata.get("agent_eval")))
     return bool(completeness and completeness["partial"])
 
 
@@ -540,9 +543,25 @@ class ReporterBase(ABC):
         return merged if found else None
 
     @classmethod
-    def _plugin_child_names(cls, results: list[ValidationResult]) -> list[str]:
-        """Return canonical root-relative bundled-skill identifiers."""
+    def _tier1_plugin_view(cls, results: list[ValidationResult]) -> dict[str, Any] | None:
+        """Return the Tier 1 plugin section's display model for *results*, or ``None`` without plugin data."""
         block = cls._plugin_block_from_results(results)
+        if block is None:
+            return None
+        return tier1_plugin_view(
+            block,
+            status=cls._plugin_status(results),
+            bundled_skills=cls._plugin_child_names(results, block),
+        )
+
+    @classmethod
+    def _plugin_child_names(cls, results: list[ValidationResult], block: dict[str, Any] | None = None) -> list[str]:
+        """Return canonical root-relative bundled-skill identifiers.
+
+        *block* is the merged plugin block when the caller already has it.
+        """
+        if block is None:
+            block = cls._plugin_block_from_results(results)
         if block is None:
             return []
 

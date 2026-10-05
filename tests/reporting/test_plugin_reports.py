@@ -837,3 +837,14 @@ def test_html_and_cli_say_how_many_integration_components_were_left_out(tmp_path
 
     assert "skill-63 (+6 more)" in (element_text(html, "tier3-integration") or "")
     assert "skill-63 (+6 more)" in " ".join(console.file.getvalue().split())
+
+
+def test_a_partial_plugin_run_recorded_only_under_the_summary_is_incomplete() -> None:
+    from skillevaluator.reporting.base import ReporterBase, is_partial_plugin_agent_eval
+
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Tier 3")
+    result.metadata["agent_eval"] = {"summary": {"plugin_provenance": provenance(partial=True)}}
+
+    assert is_partial_plugin_agent_eval(result) is True
+    assert ReporterBase._plugin_status([tier1_plugin_result(), result]) == "incomplete"
+    assert tier3_plugin_view(result.metadata["agent_eval"])["partial"] is True

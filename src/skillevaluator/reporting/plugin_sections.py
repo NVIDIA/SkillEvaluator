@@ -805,9 +805,11 @@ def component_for_path(file_path: object, block: object) -> dict[str, str] | Non
 # ---------------------------------------------------------------------------
 
 
-def _plugin_provenance(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    return _mapping(payload.get("plugin_provenance")) or _mapping(
-        _mapping(payload.get("summary")).get("plugin_provenance")
+def plugin_provenance(payload: object) -> Mapping[str, Any]:
+    """Return a Tier 3 payload's plugin provenance, at the top level or under ``summary``; ``{}`` when absent."""
+    source = _mapping(payload)
+    return _mapping(source.get("plugin_provenance")) or _mapping(
+        _mapping(source.get("summary")).get("plugin_provenance")
     )
 
 
@@ -844,7 +846,7 @@ class _Tier3Context:
 
 
 def _tier3_context(payload: Mapping[str, Any]) -> _Tier3Context:
-    provenance = _plugin_provenance(payload)
+    provenance = plugin_provenance(payload)
     modes = _lift_modes(payload, provenance)
     best_agent = text(payload.get("best_agent") or _mapping(payload.get("summary")).get("best_agent"), limit=64)
     return _Tier3Context(

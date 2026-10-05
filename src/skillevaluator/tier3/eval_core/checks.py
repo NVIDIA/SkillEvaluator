@@ -1838,20 +1838,6 @@ def _secret_exposure_finding(
     )
 
 
-def _tool_mentions_skill(tool_call: dict[str, Any], expected_skill: str) -> bool:
-    if not expected_skill:
-        return False
-    expected = expected_skill.lower()
-    action = str(tool_call.get("action", "")).lower()
-    args = _action_args(tool_call)
-    skill_name = str(args.get("skill") or args.get("name") or "").lower()
-    if action == "skill" and skill_name == expected:
-        return True
-    text = _action_text(tool_call).replace("\\", "/")
-    text_lower = text.lower()
-    return f"/{expected}/skill.md" in text_lower or f"skill({expected})" in text_lower
-
-
 def _tool_mentions_any_skill(
     tool_call: dict[str, Any],
     expected_skill: str,
@@ -6220,10 +6206,6 @@ def _heredoc_header(line: str) -> tuple[str, list[str], list[tuple[str, bool]]] 
             cut = _unquoted_separator_index(operand)
             strings.append(operand[:cut])
             rest = " " + operand[cut:]
-
-
-def _is_redirection_operator(token: str) -> bool:
-    return _is_output_redirect(token) or _is_heredoc_redirect(token) or token in _INPUT_REDIRECT_OPERATORS
 
 
 # A redirection operator as the tokenizer hands it over: a word of its own,

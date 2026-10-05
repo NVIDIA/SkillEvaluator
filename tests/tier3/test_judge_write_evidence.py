@@ -594,7 +594,7 @@ def test_big_writes_do_not_push_the_newest_test_result_out(copy, writes):
         evidence = bundles[metric]["prompt_evidence"]
         assert "TESTS: 42 passed" in evidence, metric
         assert f"MODULE_{writes - 1}_TAIL" in evidence, metric
-        assert len(evidence) <= copy._BUNDLE_BUDGETS[metric], metric
+        assert len(evidence) <= copy._bundle_budgets()[metric], metric
 
 
 @COPIES
@@ -615,7 +615,7 @@ def test_big_write_keeps_small_recent_results_in_view(copy):
 
     assert all(f"CHECK_{index}_OK" in evidence for index in range(5))
     assert "BIG_START" in evidence
-    assert len(evidence) <= copy._BUNDLE_BUDGETS["accuracy"]
+    assert len(evidence) <= copy._bundle_budgets()["accuracy"]
 
 
 @COPIES

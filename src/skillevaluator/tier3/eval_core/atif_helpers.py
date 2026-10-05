@@ -1189,11 +1189,6 @@ def attach_metric_evidence_refs(
 _BUNDLE_ITEM_CHARS = 1500  # per-item excerpt for the judge prompt (refs use 300)
 _DEFAULT_ACCURACY_BUDGET = 8000
 _DEFAULT_GOAL_ACCURACY_BUDGET = 12000
-_BUNDLE_BUDGETS = {
-    "accuracy": _DEFAULT_ACCURACY_BUDGET,
-    "goal_accuracy": _DEFAULT_GOAL_ACCURACY_BUDGET,
-    "behavior_check": _DEFAULT_BEHAVIOR_CHECK_BUDGET,
-}
 _BUNDLE_ACCURACY_MAX_OBS = 6  # newest observations fed to accuracy (<= ~6x1500 <= budget)
 _BUNDLE_GOAL_MAX_OBS = 12  # newest observations fed to goal_accuracy (end-state)
 _BUNDLE_RESERVED_OBS = 2  # newest observations file changes always leave room for

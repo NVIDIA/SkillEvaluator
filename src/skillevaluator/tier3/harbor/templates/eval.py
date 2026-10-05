@@ -452,19 +452,7 @@ _tool_call_wrapper_observation = normalized_tool_call_wrapper_observation
 
 
 def get_all_tool_calls(traj):
-    calls = []
-    for step, tc in iter_tool_calls(traj):
-        fn = tc.get("function_name") or ""
-        args = tc.get("arguments") or {}
-        calls.append(
-            {
-                "fn": fn,
-                "args": args,
-                "args_text": json.dumps(args).lower(),
-                "obs": _tool_call_observation(step, tc).lower(),
-            }
-        )
-    return calls
+    return [{"fn": tc.get("function_name") or "", "args": tc.get("arguments") or {}} for _, tc in iter_tool_calls(traj)]
 
 
 def get_skill_tool_calls(traj):
@@ -475,32 +463,6 @@ def get_skill_tool_calls(traj):
             if name:
                 skills.append(str(name))
     return skills
-
-
-def get_read_calls(traj):
-    paths = []
-    for tc in get_all_tool_calls(traj):
-        fn = tc["fn"].lower()
-        if fn in ("read", "read_file"):
-            path = tc["args"].get("path", tc["args"].get("file_path", ""))
-            if path:
-                paths.append(str(path))
-        elif fn in ("bash", "execute"):
-            cmd = tc["args"].get("command", "")
-            if "cat " in str(cmd) and "SKILL" in str(cmd).upper():
-                paths.append(str(cmd))
-    return paths
-
-
-def get_bash_commands(traj):
-    cmds = []
-    for _, tc in iter_tool_calls(traj):
-        fn = (tc.get("function_name") or "").lower()
-        if fn in ("bash", "execute", "run_code", "run"):
-            cmd = (tc.get("arguments") or {}).get("command", "") or (tc.get("arguments") or {}).get("code", "")
-            if cmd:
-                cmds.append(str(cmd))
-    return cmds
 
 
 def get_agent_text(traj):
@@ -1529,11 +1491,6 @@ def attach_metric_evidence_refs(details, evidence_refs):
 _BUNDLE_ITEM_CHARS = 1500
 _DEFAULT_ACCURACY_BUDGET = 8000
 _DEFAULT_GOAL_ACCURACY_BUDGET = 12000
-_BUNDLE_BUDGETS = {
-    "accuracy": _DEFAULT_ACCURACY_BUDGET,
-    "goal_accuracy": _DEFAULT_GOAL_ACCURACY_BUDGET,
-    "behavior_check": _DEFAULT_BEHAVIOR_CHECK_BUDGET,
-}
 _BUNDLE_ACCURACY_MAX_OBS = 6
 _BUNDLE_GOAL_MAX_OBS = 12
 _BUNDLE_RESERVED_OBS = 2  # newest observations file changes always leave room for
@@ -4887,20 +4844,6 @@ def _secret_exposure_finding(observation, *, tool, target_skill_used_before):
         tool=tool,
         target_skill_used_before=target_skill_used_before,
     )
-
-
-def _tool_mentions_skill(tc, expected_skill):
-    if not expected_skill:
-        return False
-    expected = expected_skill.lower()
-    action = str(tc.get("action", "")).lower()
-    args = _action_args(tc)
-    skill_name = str(args.get("skill") or args.get("name") or "").lower()
-    if action == "skill" and skill_name == expected:
-        return True
-    text = _action_text(tc).replace("\\", "/")
-    text_lower = text.lower()
-    return f"/{expected}/skill.md" in text_lower or f"skill({expected})" in text_lower
 
 
 def _tool_mentions_any_skill(tc, expected_skill, acceptable_skills=None):
@@ -9363,10 +9306,6 @@ def _heredoc_header(line: str) -> tuple[str, list[str], list[tuple[str, bool]]] 
             cut = _unquoted_separator_index(operand)
             strings.append(operand[:cut])
             rest = " " + operand[cut:]
-
-
-def _is_redirection_operator(token: str) -> bool:
-    return _is_output_redirect(token) or _is_heredoc_redirect(token) or token in _INPUT_REDIRECT_OPERATORS
 
 
 # A redirection operator as the tokenizer hands it over: a word of its own,

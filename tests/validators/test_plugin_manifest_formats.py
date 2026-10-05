@@ -408,6 +408,20 @@ def test_cursor_invalid_manifest_findings(tmp_path: Path) -> None:
     assert checks["plugin_manifest_unknown_field"] == Severity.MEDIUM
 
 
+def test_unknown_fields_past_the_reported_limit_are_counted_in_a_note(tmp_path: Path) -> None:
+    """Only the first 32 unknown fields get their own finding; a LOW note says how many more there are."""
+    root = _cursor(tmp_path, {f"extra{index:02}": True for index in range(40)})
+
+    result = _validate(root)
+    unknown = [finding for finding in result.findings if finding.check_name == "plugin_manifest_unknown_field"]
+    assert [finding.metadata["field"] for finding in unknown] == [f"extra{index:02}" for index in range(32)]
+    [note] = [finding for finding in result.findings if finding.check_name == "schema:<root>:unknown_fields_truncated"]
+    assert note.severity == Severity.LOW
+    assert "has 40 top-level fields it does not define" in note.message
+    assert "8 more are not listed" in note.message
+    assert result.passed
+
+
 def test_cursor_inline_mcp_and_root_skill_fallback(tmp_path: Path) -> None:
     root = _cursor(
         tmp_path,

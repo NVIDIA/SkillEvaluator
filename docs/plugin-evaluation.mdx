@@ -343,6 +343,7 @@ other unrecognized 1.x version.
 | `name` is required: 1 to 64 characters of `a-z`, `0-9`, `-`, and `.`; it starts and ends with a letter or digit, with no `--` or `..` (`schema:name:pattern`) | HIGH |
 | `version`, `description`, `homepage`, `repository`, and `license` are strings, `keywords` is a string array, and `author` allows only string `name`, `email`, and `url` | HIGH |
 | Any other top-level field, such as `skills` or `mcpServers` (`plugin_manifest_unknown_field`); clients report and ignore it | MEDIUM |
+| More than 32 such fields: the first 32 by name are reported one by one, and one note counts the rest (`schema:<root>:unknown_fields_truncated`) | LOW |
 | `extensions` is not an object; clients ignore it | MEDIUM |
 
 The `mcp.json` file must declare the Agent Plugins MCP `$schema` of the same
@@ -435,6 +436,7 @@ published schema (`schemas/plugin.schema.json` in `cursor/plugins` at
 | `name` is required and lowercase kebab-case: `a-z`, `0-9`, `-`, and `.`, starting and ending with a letter or digit | HIGH |
 | Declared fields have the schema's types; `author` requires `name` and allows only `name` and `email` | HIGH |
 | A top-level field outside the published schema (`plugin_manifest_unknown_field`) | MEDIUM |
+| More than 32 such fields: the first 32 by name are reported one by one, and one note counts the rest (`schema:<root>:unknown_fields_truncated`) | LOW |
 | `version` is not a semantic version; the docs ask for one but the schema does not enforce it | LOW |
 
 Paths are plugin-root relative; `./` is conventional but not required. A

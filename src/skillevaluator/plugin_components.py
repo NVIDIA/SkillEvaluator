@@ -180,6 +180,10 @@ _TYPE_SUPPORT: dict[str, Support] = {
 MCP_JSON = PurePosixPath(".mcp.json")
 _ENV_TEMPLATE_SUFFIXES = frozenset({"example", "sample", "template", "dist", "defaults", "tmpl"})
 _MAX_ENV_FILE_FINDINGS = 20
+# Directory levels below the plugin root that the .env name walk descends.
+_ENV_SCAN_MAX_DEPTH = 32
+# Broad allow rules quoted in one plugin_settings_broad_allow message (the finding covers them all).
+_MAX_QUOTED_BROAD_ALLOW_RULES = 8
 _MANIFEST_PATHS = frozenset(PLUGIN_MANIFEST_RELATIVE_PATHS)
 # Agent Plugins client-extension namespace directory names (reverse-domain).
 _NAMESPACE_DIR_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$")
@@ -1664,7 +1668,7 @@ def _settings_findings(config: dict[str, Any], rel: str, display: str) -> list[F
                         Severity.HIGH,
                         "plugin_settings_broad_allow",
                         f"shipped settings '{rel}' pre-approves unrestricted tools or interpreter Bash rules "
-                        f"that run any command {broad[:8]}",
+                        f"that run any command {broad[:_MAX_QUOTED_BROAD_ALLOW_RULES]}",
                         display,
                         "Remove blanket allow rules such as Bash / Bash(*) / Bash(python3:*); scope permissions "
                         "to exact commands.",
@@ -1750,7 +1754,7 @@ def _scan_env_entries(
         if not is_dir:
             if is_env_file(entry.name):
                 hits.append(rel_dir / entry.name)
-        elif entry.name not in SCAN_EXCLUDED_DIRS and depth < 32:
+        elif entry.name not in SCAN_EXCLUDED_DIRS and depth < _ENV_SCAN_MAX_DEPTH:
             children.append(entry.name)
     return children, budget
 
@@ -1764,8 +1768,8 @@ def _find_env_files(root: Path) -> tuple[list[PurePosixPath], bool]:
     On POSIX every directory is opened relative to its parent descriptor with
     ``O_NOFOLLOW``, so a directory swapped for a symlink is never listed. The walk
     is depth-first and opens a subdirectory only after its previous sibling's
-    subtree is closed, so open descriptors grow with depth (at most 33), not with
-    the number of sibling directories.
+    subtree is closed, so open descriptors grow with depth (at most
+    ``_ENV_SCAN_MAX_DEPTH + 1``), not with the number of sibling directories.
     """
     hits: list[PurePosixPath] = []
     budget = CONTENT_DEDUP_MAX_DISCOVERED_PATHS

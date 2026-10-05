@@ -37,6 +37,8 @@ from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, discover
 
 PLUGIN_CATEGORY = "PLUGIN_SCHEMA"
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+# A longer declared path is "invalid": no component path comes close, and it bounds the work per path.
+_MAX_DECLARED_PATH_CHARS = 4096
 
 
 # --------------------------------------------------------------------------- #
@@ -70,7 +72,7 @@ def normalize_declared_path(raw: str, root_prefixes: Iterable[str] = ("${CLAUDE_
     text = raw.strip()
     if not text:
         return DeclaredPath(raw, None, "empty")
-    if "\x00" in text or len(text) > 4096:
+    if "\x00" in text or len(text) > _MAX_DECLARED_PATH_CHARS:
         return DeclaredPath(raw, None, "invalid")
     normalized = text.replace("\\", "/")
     dot_relative = normalized in {".", "./"} or normalized.startswith("./")

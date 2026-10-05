@@ -614,3 +614,52 @@ def test_atomic_write_failure_never_unlinks_swapped_temporary_canary(
     assert temporary_name.read_text() == "INNOCENT_CANARY"
     assert saved_payload.read_text() == "PAYLOAD"
     assert not destination.exists()
+
+
+@pytest.mark.parametrize("listing_order", ["forward", "reversed"])
+def test_path_budget_is_consumed_in_name_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listing_order: str
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    for name in ("b.bin", "c.bin", "a.bin"):
+        (root / name).write_bytes(b"x")
+    real_scandir = os.scandir
+
+    class OrderedScandir:
+        def __init__(self, path) -> None:
+            with real_scandir(path) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+            self._entries = entries if listing_order == "forward" else entries[::-1]
+
+        def __enter__(self):
+            return iter(self._entries)
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(secure_fs.os, "scandir", OrderedScandir)
+
+    # Unused excluded names let the whole listing in, so the budget runs out
+    # while entries are admitted, not while the directory is listed.
+    with pytest.raises(SecurePathError) as caught:
+        discover_secure_files(root, selected=lambda _relative: False, excluded_dirs=("x", "y"), max_paths=2)
+
+    assert caught.value.code == "path_count_limit"
+    assert caught.value.relative_path == "c.bin"
+    assert caught.value.metadata == {"actual": 3, "limit": 2}
+
+
+def test_directory_listing_stops_once_the_budget_cannot_fit(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "nested").mkdir(parents=True)
+    for index in range(3):
+        (root / "nested" / f"file-{index}.md").write_text("x")
+
+    with pytest.raises(SecurePathError) as caught:
+        discover_secure_files(root, selected=lambda _relative: False, max_paths=3)
+
+    # "nested" used one path; listing a third name in it cannot fit the two left.
+    assert caught.value.code == "path_count_limit"
+    assert caught.value.relative_path == "nested"
+    assert caught.value.metadata == {"actual": 4, "limit": 3}

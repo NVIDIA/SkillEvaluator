@@ -24,6 +24,19 @@ _NATIVE_FUNCTIONS = (
 )
 
 
+def _admission(
+    root: Path, *, max_paths: int = 10, excluded_dirs: tuple[str, ...] = ()
+) -> secure_fs._DiscoveryAdmission:
+    return secure_fs._DiscoveryAdmission(
+        root,
+        selected=lambda _relative: False,
+        excluded_dirs=excluded_dirs,
+        max_paths=max_paths,
+        max_depth=None,
+        allow_context_alias=True,
+    )
+
+
 def _fake_windows_api(**functions: object) -> SimpleNamespace:
     """A stand-in for the bound native functions; any call not supplied fails the test."""
 
@@ -254,7 +267,9 @@ def test_windows_directory_name_enumeration_occurs_between_handle_snapshots(
     monkeypatch.setattr(secure_fs, "_windows_handle_metadata", metadata)
     monkeypatch.setattr(secure_fs.os, "scandir", scandir)
 
-    names, stable = secure_fs._windows_enumerate_pinned_directory_names(root, 123, Path(), snapshot)
+    names, stable = secure_fs._windows_enumerate_pinned_directory_names(
+        root, 123, Path(), snapshot, admission=_admission(root)
+    )
 
     assert names == ["a.md", "z.md"]
     assert stable == snapshot
@@ -290,14 +305,14 @@ def test_windows_directory_name_enumeration_is_bounded_by_path_budget(
     monkeypatch.setattr(secure_fs, "_windows_handle_metadata", lambda _handle: snapshot)
     monkeypatch.setattr(secure_fs.os, "scandir", lambda _path: _Scandir())
 
+    # Two budgeted paths plus one excluded directory name may be listed.
     with pytest.raises(secure_fs.SecurePathError) as caught:
         secure_fs._windows_enumerate_pinned_directory_names(
             root,
             123,
             Path(),
             snapshot,
-            max_names=3,
-            path_limit=2,
+            admission=_admission(root, max_paths=2, excluded_dirs=(".git",)),
         )
 
     assert caught.value.code == "path_count_limit"
@@ -688,3 +703,147 @@ def test_windows_final_path_drops_the_extended_length_prefix(
     monkeypatch.setattr(secure_fs, "_windows_api", lambda: _fake_windows_api(get_final_path=get_final_path))
 
     assert str(secure_fs._windows_final_path_from_handle(5)) == expected
+
+
+class _TreeBackedWindowsHandles:
+    """Native handle stand-ins backed by a real tree, so the Windows walker runs on any platform.
+
+    Handles never follow links: a symlink is reported as a reparse point, with
+    the directory attribute when it points at a directory, like a junction.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.paths: dict[int, Path] = {}
+        self.closed: list[int] = []
+        monkeypatch.setattr(secure_fs, "_windows_open_anchored_directory_chain", self.open_chain)
+        monkeypatch.setattr(secure_fs, "_windows_open_relative_handle", self.open_relative)
+        monkeypatch.setattr(secure_fs, "_windows_handle_metadata", self.metadata)
+        monkeypatch.setattr(secure_fs, "_windows_close_handle", self.closed.append)
+
+    def _open(self, path: Path) -> int:
+        handle = 100 + len(self.paths)
+        self.paths[handle] = path
+        return handle
+
+    def open_chain(self, path: Path, *, expected: os.stat_result) -> list[int]:
+        assert os.path.samestat(path.lstat(), expected)
+        return [self._open(path)]
+
+    def open_relative(self, parent_handle: int, name: str, **kwargs: int) -> int:
+        path = self.paths[parent_handle] / name
+        follows_no_reparse = kwargs.get("object_attributes_flags", 0) & secure_fs._WINDOWS_OBJ_DONT_REPARSE
+        if path.is_symlink() and follows_no_reparse:
+            raise OSError(4390, "The file or directory is not a reparse point.")
+        return self._open(path)
+
+    def metadata(self, handle: int) -> secure_fs._WindowsHandleMetadata:
+        path = self.paths[handle]
+        metadata = path.lstat()
+        attributes = 0x10 if stat.S_ISDIR(metadata.st_mode) else 0
+        if path.is_symlink():
+            attributes = 0x400 | (0x10 if path.is_dir() else 0)
+        return secure_fs._WindowsHandleMetadata(
+            attributes=attributes,
+            volume_serial=metadata.st_dev,
+            file_id=metadata.st_ino,
+            size=metadata.st_size,
+            link_count=metadata.st_nlink,
+            last_write_time=metadata.st_mtime_ns,
+        )
+
+    def walk(self, root: Path, **options: object) -> list[str]:
+        admission = secure_fs._DiscoveryAdmission(
+            root,
+            selected=lambda relative: relative.suffix == ".md",
+            excluded_dirs=options.pop("excluded_dirs", ()),
+            max_paths=options.pop("max_paths", 50),
+            max_depth=None,
+            allow_context_alias=True,
+        )
+        secure_fs._walk_windows(root, root.lstat(), admission)
+        return [file.rel_path for file in admission.selected_files()]
+
+    def all_closed(self) -> bool:
+        return sorted(self.closed) == sorted(self.paths)
+
+
+_SKIP_ON_NATIVE_WINDOWS = pytest.mark.skipif(
+    os.name == "nt", reason="native Windows walks are covered by the real-handle tests"
+)
+
+
+@_SKIP_ON_NATIVE_WINDOWS
+def test_windows_walker_selects_like_the_posix_walker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "skill"
+    (root / "references" / "deep").mkdir(parents=True)
+    (root / ".git").mkdir()
+    (root / ".git" / "ignored.md").write_text("pruned")
+    (root / "SKILL.md").write_text("skill")
+    (root / "references" / "guide.md").write_text("guide")
+    (root / "references" / "deep" / "notes.md").write_text("notes")
+    (root / "references" / "data.bin").write_bytes(b"x")
+    (root / "AGENTS.md").write_text("agents")
+    (root / "CLAUDE.md").symlink_to("AGENTS.md")
+    posix = [
+        file.rel_path
+        for file in secure_fs.discover_secure_files(
+            root, selected=lambda relative: relative.suffix == ".md", excluded_dirs=(".git",), max_paths=50
+        )
+    ]
+    handles = _TreeBackedWindowsHandles(monkeypatch)
+
+    selected = handles.walk(root, excluded_dirs=(".git",))
+
+    assert selected == posix == ["AGENTS.md", "SKILL.md", "references/deep/notes.md", "references/guide.md"]
+    assert handles.all_closed()
+
+
+@_SKIP_ON_NATIVE_WINDOWS
+@pytest.mark.parametrize(
+    ("make_link", "match"),
+    [
+        (lambda root, outside: (root / "linked").symlink_to(outside, target_is_directory=True), "linked directory"),
+        (lambda root, outside: (root / "guide.md").symlink_to(outside / "secret.md"), "symlink or reparse"),
+        (lambda root, _outside: (root / "CLAUDE.md").symlink_to("SKILL.md"), "symlink or reparse"),
+    ],
+    ids=["junction", "file-link", "wrong-alias"],
+)
+def test_windows_walker_refuses_redirects_and_closes_every_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_link, match: str
+) -> None:
+    root = tmp_path / "skill"
+    root.mkdir()
+    (root / "SKILL.md").write_text("skill")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret")
+    make_link(root, outside)
+    handles = _TreeBackedWindowsHandles(monkeypatch)
+
+    with pytest.raises(secure_fs.SecurePathError, match=match):
+        handles.walk(root)
+
+    assert handles.all_closed()
+    assert all(not path.is_relative_to(outside) for path in handles.paths.values())
+
+
+@_SKIP_ON_NATIVE_WINDOWS
+def test_windows_walker_consumes_the_path_budget_like_the_posix_walker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "skill"
+    (root / "b-dir").mkdir(parents=True)
+    for name in ("c.md", "a.md", "b-dir/z.md"):
+        (root / name).write_text("x")
+    with pytest.raises(secure_fs.SecurePathError) as posix:
+        secure_fs.discover_secure_files(
+            root, selected=lambda relative: relative.suffix == ".md", excluded_dirs=("x", "y"), max_paths=3
+        )
+    handles = _TreeBackedWindowsHandles(monkeypatch)
+
+    with pytest.raises(secure_fs.SecurePathError) as windows:
+        handles.walk(root, excluded_dirs=("x", "y"), max_paths=3)
+
+    assert (windows.value.relative_path, windows.value.metadata) == (posix.value.relative_path, posix.value.metadata)
+    assert windows.value.relative_path == "b-dir/z.md"
+    assert handles.all_closed()

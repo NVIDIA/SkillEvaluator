@@ -190,6 +190,160 @@ def _raise_directory_depth_limit(relative: Path) -> None:
     )
 
 
+def _inspect_root(root: Path) -> os.stat_result:
+    """Return the no-follow metadata of a declared root, which must be a real directory."""
+    try:
+        metadata = root.lstat()
+    except OSError as exc:
+        raise SecurePathError("invalid_root", f"Cannot inspect Tier 2 root: {exc}") from exc
+    if stat_is_link_or_reparse(metadata):
+        raise SecurePathError("unsafe_root", f"Tier 2 root is a symlink or reparse point: {root.name}")
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise SecurePathError("invalid_root", f"Tier 2 root is not a regular directory: {root}")
+    return metadata
+
+
+class _DiscoveryAdmission:
+    """Entry admission rules and the path budget, shared by the POSIX and Windows walkers.
+
+    The walkers own every open, snapshot re-validation, and identity check.
+    They hand each listed entry, in name order, to :meth:`admit_directory` or
+    :meth:`admit_file`, so selection, exclusion, link, depth, and budget rules
+    are applied identically on every platform and the path reported by a
+    budget error does not depend on directory listing order.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        selected: Callable[[Path], bool],
+        excluded_dirs: Iterable[str],
+        max_paths: int,
+        max_depth: int | None,
+        allow_context_alias: bool,
+    ) -> None:
+        self.root = root
+        self.selected = selected
+        self.excluded = frozenset(excluded_dirs)
+        self.max_paths = max_paths
+        self.max_depth = max_depth
+        self.allow_context_alias = allow_context_alias
+        self.discovered_paths = 0
+        self.files: list[SecureFile] = []
+        # Keep exact authored spelling. ``WindowsPath`` keys compare
+        # case-insensitively, which would otherwise let ``agents.md`` satisfy the
+        # required exact ``CLAUDE.md -> AGENTS.md`` compatibility target.
+        self.regular_by_relative: dict[str, os.stat_result] = {}
+        self.pending_aliases: list[tuple[Path, Path]] = []
+
+    def check_listing(self, directory: Path, listed: int) -> None:
+        """Stop listing ``directory`` once its names must exceed the path budget.
+
+        An excluded directory is the only entry that does not consume the
+        budget, and each excluded name appears at most once per directory, so
+        a listing longer than the remaining budget plus the excluded names
+        cannot fit. This bounds memory before the listing is sorted.
+        """
+        if listed > self.max_paths - self.discovered_paths + len(self.excluded):
+            self._raise_path_count_limit(directory, self.discovered_paths + listed)
+
+    def admit_directory(self, relative: Path, *, linked: bool) -> bool:
+        """Apply the directory rules; return whether the walker should descend."""
+        if linked:
+            raise SecurePathError(
+                "unsafe_path",
+                f"Refusing linked directory or reparse point before descent: {relative.as_posix()}",
+                relative_path=relative.as_posix(),
+            )
+        if relative.name in self.excluded:
+            return False
+        if self.selected(relative):
+            _raise_unsafe_file(relative)
+        self._consume_path(relative)
+        directory_depth = len(relative.parts)
+        if directory_depth > MAX_SECURE_DIRECTORY_DEPTH:
+            _raise_directory_depth_limit(relative)
+        return self.max_depth is None or directory_depth < self.max_depth
+
+    def admit_file(
+        self,
+        relative: Path,
+        metadata: os.stat_result,
+        read_alias_target: Callable[[], str],
+    ) -> None:
+        """Apply the rules for a non-directory entry and keep it when selected.
+
+        Redirects fail closed except the exact ``CLAUDE.md -> AGENTS.md`` alias,
+        whose target is only recorded here and checked by :meth:`selected_files`.
+        """
+        self._consume_path(relative)
+        is_selected = self.selected(relative)
+        if stat_is_link_or_reparse(metadata):
+            self._admit_compatibility_alias(relative, metadata, read_alias_target)
+            return
+        if stat.S_ISREG(metadata.st_mode):
+            self.regular_by_relative[relative.as_posix()] = metadata
+        if not is_selected:
+            return
+        if not stat.S_ISREG(metadata.st_mode):
+            _raise_unsafe_file(relative)
+        if getattr(metadata, "st_nlink", 1) != 1:
+            _raise_unsafe_file(relative, hardlink=True)
+        self.files.append(SecureFile(self.root, self.root / relative, relative, metadata))
+
+    def selected_files(self) -> list[SecureFile]:
+        """Require each alias target to be an independently discovered regular file; return the selection."""
+        for alias, target in self.pending_aliases:
+            target_metadata = self.regular_by_relative.get(target.as_posix())
+            if target_metadata is None or getattr(target_metadata, "st_nlink", 1) != 1:
+                raise SecurePathError(
+                    "unsafe_path",
+                    f"Compatibility alias target is not an independently enumerated regular file: {alias.as_posix()}",
+                    relative_path=alias.as_posix(),
+                )
+        return sorted(self.files, key=lambda item: item.rel_path)
+
+    def _admit_compatibility_alias(
+        self,
+        relative: Path,
+        metadata: os.stat_result,
+        read_alias_target: Callable[[], str],
+    ) -> None:
+        target: Path | None = None
+        if self.allow_context_alias and relative.name == "CLAUDE.md":
+            try:
+                target = _compatibility_alias_target(read_alias_target(), relative)
+            except OSError as exc:
+                raise SecurePathError(
+                    "unsafe_path",
+                    f"Cannot inspect selected compatibility alias: {relative.as_posix()}: {exc}",
+                    relative_path=relative.as_posix(),
+                ) from exc
+        if target is None:
+            raise SecurePathError(
+                "unsafe_path",
+                f"Refusing symlink or reparse point: {relative.as_posix()}",
+                relative_path=relative.as_posix(),
+            )
+        if getattr(metadata, "st_nlink", 1) != 1:
+            _raise_unsafe_file(relative, hardlink=True)
+        self.pending_aliases.append((relative, target))
+
+    def _consume_path(self, relative: Path) -> None:
+        self.discovered_paths += 1
+        if self.discovered_paths > self.max_paths:
+            self._raise_path_count_limit(relative, self.discovered_paths)
+
+    def _raise_path_count_limit(self, relative: Path, actual: int) -> None:
+        raise SecurePathError(
+            "path_count_limit",
+            f"Tier 2 tree exceeds the path limit of {self.max_paths} entries.",
+            relative_path=relative.as_posix(),
+            metadata={"actual": actual, "limit": self.max_paths},
+        )
+
+
 def discover_secure_files(
     root: Path,
     *,
@@ -202,416 +356,309 @@ def discover_secure_files(
     """Discover selected files below ``root`` without following redirects.
 
     Excluded directories are pruned before they consume the path budget.
-    Every other authored entry consumes the budget. File and directory redirects
-    fail closed without target content reads except for the exact contained
-    ``CLAUDE.md -> AGENTS.md`` compatibility alias, whose regular target must be
-    independently discovered; only that target is returned and read.
+    Every other authored entry consumes the budget, in name order within each
+    directory. File and directory redirects fail closed without target content
+    reads except for the exact contained ``CLAUDE.md -> AGENTS.md``
+    compatibility alias, whose regular target must be independently
+    discovered; only that target is returned and read.
     """
     if max_paths < 1:
         raise ValueError("max_paths must be positive")
     max_depth = _validate_discovery_depth(max_depth)
     root = _absolute_no_resolve(root)
-    try:
-        root_metadata = root.lstat()
-    except OSError as exc:
-        raise SecurePathError("invalid_root", f"Cannot inspect Tier 2 root: {exc}") from exc
-    if stat_is_link_or_reparse(root_metadata):
-        raise SecurePathError("unsafe_root", f"Tier 2 root is a symlink or reparse point: {root.name}")
-    if not stat.S_ISDIR(root_metadata.st_mode):
-        raise SecurePathError("invalid_root", f"Tier 2 root is not a regular directory: {root}")
-
-    excluded = frozenset(excluded_dirs)
-    files: list[SecureFile] = []
-    # Keep exact authored spelling. ``WindowsPath`` keys compare
-    # case-insensitively, which would otherwise let ``agents.md`` satisfy the
-    # required exact ``CLAUDE.md -> AGENTS.md`` compatibility target.
-    regular_by_relative: dict[str, os.stat_result] = {}
-    pending_aliases: list[tuple[Path, Path]] = []
-    discovered_paths = 0
-
-    def consume_path(relative: Path) -> None:
-        nonlocal discovered_paths
-        discovered_paths += 1
-        if discovered_paths > max_paths:
-            raise SecurePathError(
-                "path_count_limit",
-                f"Tier 2 tree exceeds the path limit of {max_paths} entries.",
-                relative_path=relative.as_posix(),
-                metadata={"actual": discovered_paths, "limit": max_paths},
-            )
-
-    def record_file(
-        relative: Path,
-        metadata: os.stat_result,
-        read_alias_target: Callable[[], str],
-        *,
-        selected_result: bool | None = None,
-    ) -> None:
-        is_selected = selected(relative) if selected_result is None else selected_result
-        if stat_is_link_or_reparse(metadata):
-            target: Path | None = None
-            if allow_context_alias and relative.name == "CLAUDE.md":
-                try:
-                    target = _compatibility_alias_target(read_alias_target(), relative)
-                except OSError as exc:
-                    raise SecurePathError(
-                        "unsafe_path",
-                        f"Cannot inspect selected compatibility alias: {relative.as_posix()}: {exc}",
-                        relative_path=relative.as_posix(),
-                    ) from exc
-            if target is not None:
-                if getattr(metadata, "st_nlink", 1) != 1:
-                    _raise_unsafe_file(relative, hardlink=True)
-                pending_aliases.append((relative, target))
-                return
-            raise SecurePathError(
-                "unsafe_path",
-                f"Refusing symlink or reparse point: {relative.as_posix()}",
-                relative_path=relative.as_posix(),
-            )
-        if stat.S_ISREG(metadata.st_mode):
-            regular_by_relative[relative.as_posix()] = metadata
-        if not is_selected:
-            return
-        if not stat.S_ISREG(metadata.st_mode):
-            _raise_unsafe_file(relative)
-        if getattr(metadata, "st_nlink", 1) != 1:
-            _raise_unsafe_file(relative, hardlink=True)
-        secure_file = SecureFile(root, root / relative, relative, metadata)
-        files.append(secure_file)
-
+    root_metadata = _inspect_root(root)
+    admission = _DiscoveryAdmission(
+        root,
+        selected=selected,
+        excluded_dirs=excluded_dirs,
+        max_paths=max_paths,
+        max_depth=max_depth,
+        allow_context_alias=allow_context_alias,
+    )
     if os.name == "posix":
-        if not (_OPEN_SUPPORTS_DIR_FD and _READLINK_SUPPORTS_DIR_FD and _SCANDIR_SUPPORTS_FD):
-            raise SecurePathError(
-                "secure_open_unavailable",
-                "This platform cannot guarantee descriptor-anchored no-follow Tier 2 discovery.",
-            )
-        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-        root_fd = _open_absolute_directory_posix(root)
-        frames = [_DirectoryFrame(root_fd, Path(), root_metadata)]
-        try:
-            # A descriptor stack makes the walk linear: root is opened once,
-            # each descended child is opened once relative to its held parent,
-            # and only the descriptors on the active DFS path remain live.
-            while frames:
-                frame = frames[-1]
-                if frame.children is None:
-                    current = os.fstat(frame.descriptor)
-                    _validate_directory_snapshot(current, frame.relative_path, frame.expected)
-                    directory_entries: list[tuple[str, os.stat_result]] = []
-                    file_entries: list[tuple[str, os.stat_result, bool | None]] = []
-                    try:
-                        with os.scandir(frame.descriptor) as iterator:
-                            for entry in iterator:
-                                relative = frame.relative_path / entry.name
-                                try:
-                                    metadata = entry.stat(follow_symlinks=False)
-                                except OSError as exc:
-                                    raise SecurePathError(
-                                        "path_access_error",
-                                        f"Cannot inspect Tier 2 path {relative.as_posix()}: {exc}",
-                                        relative_path=relative.as_posix(),
-                                    ) from exc
-                                entry_selected = selected(relative)
-                                linked_or_reparse = stat_is_link_or_reparse(metadata)
-                                if stat.S_ISDIR(metadata.st_mode):
-                                    if linked_or_reparse:
-                                        raise SecurePathError(
-                                            "unsafe_path",
-                                            "Refusing linked directory or reparse point before descent: "
-                                            f"{relative.as_posix()}",
-                                            relative_path=relative.as_posix(),
-                                        )
-                                    if entry.name in excluded:
-                                        continue
-                                    if entry_selected:
-                                        _raise_unsafe_file(relative)
-                                    consume_path(relative)
-                                    directory_depth = len(relative.parts)
-                                    if directory_depth > MAX_SECURE_DIRECTORY_DEPTH:
-                                        _raise_directory_depth_limit(relative)
-                                    if max_depth is None or directory_depth < max_depth:
-                                        directory_entries.append((entry.name, metadata))
-                                    continue
-                                consume_path(relative)
-                                file_entries.append((entry.name, metadata, entry_selected))
-                    except SecurePathError:
-                        raise
-                    except OSError as exc:
-                        raise SecurePathError(
-                            "path_access_error",
-                            f"Cannot enumerate Tier 2 directory {frame.relative_path.as_posix()}: {exc}",
-                            relative_path=frame.relative_path.as_posix(),
-                        ) from exc
-
-                    after_scan = os.fstat(frame.descriptor)
-                    _validate_directory_snapshot(after_scan, frame.relative_path, current)
-                    for name, metadata, selected_result in sorted(file_entries, key=lambda item: item[0]):
-                        relative = frame.relative_path / name
-                        record_file(
-                            relative,
-                            metadata,
-                            lambda name=name, directory_fd=frame.descriptor: os.readlink(
-                                name,
-                                dir_fd=directory_fd,
-                            ),
-                            selected_result=selected_result,
-                        )
-                    stable = os.fstat(frame.descriptor)
-                    _validate_directory_snapshot(stable, frame.relative_path, after_scan)
-                    frame.expected = stable
-                    frame.children = sorted(directory_entries, key=lambda item: item[0])
-                    continue
-
-                if frame.next_child < len(frame.children):
-                    name, discovered = frame.children[frame.next_child]
-                    frame.next_child += 1
-                    relative = frame.relative_path / name
-                    try:
-                        before_open = os.stat(name, dir_fd=frame.descriptor, follow_symlinks=False)
-                    except OSError as exc:
-                        raise SecurePathError(
-                            "unsafe_path",
-                            f"Cannot revalidate Tier 2 directory before descent: {relative.as_posix()}: {exc}",
-                            relative_path=relative.as_posix(),
-                        ) from exc
-                    _validate_directory_snapshot(before_open, relative, discovered)
-                    try:
-                        child_fd = os.open(name, directory_flags, dir_fd=frame.descriptor)
-                    except OSError as exc:
-                        raise SecurePathError(
-                            "unsafe_path",
-                            f"Cannot securely open Tier 2 directory {relative.as_posix()}: {exc}",
-                            relative_path=relative.as_posix(),
-                        ) from exc
-                    try:
-                        opened = os.fstat(child_fd)
-                        _validate_directory_snapshot(opened, relative, before_open)
-                    except BaseException:
-                        os.close(child_fd)
-                        raise
-                    frames.append(
-                        _DirectoryFrame(
-                            child_fd,
-                            relative,
-                            opened,
-                            parent_name=name,
-                        )
-                    )
-                    continue
-
-                stable = os.fstat(frame.descriptor)
-                _validate_directory_snapshot(stable, frame.relative_path, frame.expected)
-                if frame.parent_name is None:
-                    try:
-                        declared_root = root.lstat()
-                    except OSError as exc:
-                        raise SecurePathError(
-                            "unsafe_root",
-                            f"Cannot revalidate declared Tier 2 root after discovery: {exc}",
-                        ) from exc
-                    _validate_directory_snapshot(declared_root, Path(), stable)
-                else:
-                    parent = frames[-2]
-                    try:
-                        parent_entry = os.stat(
-                            frame.parent_name,
-                            dir_fd=parent.descriptor,
-                            follow_symlinks=False,
-                        )
-                    except OSError as exc:
-                        raise SecurePathError(
-                            "unsafe_path",
-                            (
-                                "Cannot revalidate Tier 2 directory after its subtree: "
-                                f"{frame.relative_path.as_posix()}: {exc}"
-                            ),
-                            relative_path=frame.relative_path.as_posix(),
-                        ) from exc
-                    _validate_directory_snapshot(parent_entry, frame.relative_path, stable)
-
-                finished = frames.pop()
-                os.close(finished.descriptor)
-        finally:
-            while frames:
-                os.close(frames.pop().descriptor)
+        _walk_posix(root, root_metadata, admission)
     elif os.name == "nt":
-        root_handles: list[int] = []
-        frames: list[_WindowsDirectoryFrame] = []
-        try:
-            root_handles = _windows_open_anchored_directory_chain(root, expected=root_metadata)
-            root_handle = root_handles[-1]
-            root_snapshot = _windows_handle_metadata(root_handle)
-            _validate_windows_read_directory_handle(root_handle, Path())
-            frames.append(
-                _WindowsDirectoryFrame(
-                    root_handle,
-                    root,
-                    Path(),
-                    root_snapshot,
-                    owns_handle=False,
-                )
-            )
-
-            while frames:
-                frame = frames[-1]
-                if frame.children is None:
-                    names, stable = _windows_enumerate_pinned_directory_names(
-                        frame.path,
-                        frame.handle,
-                        frame.relative_path,
-                        frame.expected,
-                        max_names=max_paths + len(excluded),
-                        path_limit=max_paths,
-                    )
-                    directory_entries: list[tuple[str, _WindowsHandleMetadata]] = []
-                    file_entries: list[tuple[str, os.stat_result, str | None]] = []
-
-                    for name in names:
-                        path = frame.path / name
-                        relative = frame.relative_path / name
-                        entry_handle = -1
-                        try:
-                            try:
-                                entry_handle, handle_metadata = _windows_open_discovery_handle(frame.handle, name)
-                            except OSError as exc:
-                                raise SecurePathError(
-                                    "path_access_error",
-                                    f"Cannot securely inspect Tier 2 Windows path {relative.as_posix()}: {exc}",
-                                    relative_path=relative.as_posix(),
-                                ) from exc
-                            try:
-                                metadata = path.lstat()
-                            except OSError as exc:
-                                raise SecurePathError(
-                                    "path_access_error",
-                                    f"Cannot inspect pinned Tier 2 Windows path {relative.as_posix()}: {exc}",
-                                    relative_path=relative.as_posix(),
-                                ) from exc
-                            _validate_windows_entry_snapshot(metadata, handle_metadata, relative)
-
-                            is_reparse = bool(handle_metadata.attributes & 0x400)
-                            is_directory = bool(handle_metadata.attributes & 0x10)
-                            if is_reparse and is_directory:
-                                raise SecurePathError(
-                                    "unsafe_path",
-                                    f"Refusing linked directory or reparse point before descent: {relative.as_posix()}",
-                                    relative_path=relative.as_posix(),
-                                )
-                            if is_directory:
-                                if name in excluded:
-                                    continue
-                                directory_entries.append((name, handle_metadata))
-                                continue
-
-                            alias_target: str | None = None
-                            if is_reparse and allow_context_alias and relative.name == "CLAUDE.md":
-                                try:
-                                    alias_target = os.readlink(path)  # noqa: PTH115
-                                except OSError as exc:
-                                    raise SecurePathError(
-                                        "unsafe_path",
-                                        f"Cannot inspect selected compatibility alias: {relative.as_posix()}: {exc}",
-                                        relative_path=relative.as_posix(),
-                                    ) from exc
-                            file_entries.append((name, metadata, alias_target))
-                        finally:
-                            if entry_handle >= 0:
-                                _windows_close_handle(entry_handle)
-
-                    kept_directories: list[tuple[str, _WindowsHandleMetadata]] = []
-                    for name, handle_metadata in directory_entries:
-                        relative = frame.relative_path / name
-                        if selected(relative):
-                            _raise_unsafe_file(relative)
-                        consume_path(relative)
-                        directory_depth = len(relative.parts)
-                        if directory_depth > MAX_SECURE_DIRECTORY_DEPTH:
-                            _raise_directory_depth_limit(relative)
-                        if max_depth is None or directory_depth < max_depth:
-                            kept_directories.append((name, handle_metadata))
-
-                    for name, metadata, alias_target in file_entries:
-                        relative = frame.relative_path / name
-                        consume_path(relative)
-                        record_file(
-                            relative,
-                            metadata,
-                            lambda alias_target=alias_target: alias_target or "",
-                            selected_result=selected(relative),
-                        )
-
-                    current = _windows_handle_metadata(frame.handle)
-                    _validate_windows_discovery_directory_snapshot(current, frame.relative_path, stable)
-                    frame.expected = current
-                    frame.children = kept_directories
-                    continue
-
-                if frame.next_child < len(frame.children):
-                    name, discovered = frame.children[frame.next_child]
-                    frame.next_child += 1
-                    relative = frame.relative_path / name
-                    try:
-                        child_handle = _windows_open_relative_handle(
-                            frame.handle,
-                            name,
-                            access=_WINDOWS_DIRECTORY_READ_ACCESS,
-                            share=_WINDOWS_SHARE_READ_WRITE,
-                            disposition=_WINDOWS_FILE_OPEN,
-                            file_attributes=0,
-                            create_options=_WINDOWS_DIRECTORY_OPEN_OPTIONS,
-                        )
-                    except OSError as exc:
-                        raise SecurePathError(
-                            "unsafe_path",
-                            f"Cannot securely open Tier 2 Windows directory {relative.as_posix()}: {exc}",
-                            relative_path=relative.as_posix(),
-                        ) from exc
-                    try:
-                        opened = _windows_handle_metadata(child_handle)
-                        _validate_windows_discovery_directory_snapshot(opened, relative, discovered)
-                    except BaseException:
-                        _windows_close_handle(child_handle)
-                        raise
-                    frames.append(
-                        _WindowsDirectoryFrame(
-                            child_handle,
-                            frame.path / name,
-                            relative,
-                            opened,
-                            owns_handle=True,
-                        )
-                    )
-                    continue
-
-                current = _windows_handle_metadata(frame.handle)
-                _validate_windows_discovery_directory_snapshot(current, frame.relative_path, frame.expected)
-                finished = frames.pop()
-                if finished.owns_handle:
-                    _windows_close_handle(finished.handle)
-        finally:
-            while frames:
-                frame = frames.pop()
-                if frame.owns_handle:
-                    _windows_close_handle(frame.handle)
-            while root_handles:
-                _windows_close_handle(root_handles.pop())
+        _walk_windows(root, root_metadata, admission)
     else:
         raise SecurePathError(
             "secure_open_unavailable",
             "This platform cannot guarantee no-follow Tier 2 discovery.",
         )
+    return admission.selected_files()
 
-    for alias, target in pending_aliases:
-        target_metadata = regular_by_relative.get(target.as_posix())
-        if target_metadata is None or getattr(target_metadata, "st_nlink", 1) != 1:
+
+def _posix_directory_flags() -> int:
+    """No-follow directory open flags (``AttributeError`` where the platform lacks them)."""
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _walk_posix(root: Path, root_metadata: os.stat_result, admission: _DiscoveryAdmission) -> None:
+    """Admit every entry below ``root`` through held directory descriptors, never following links."""
+    if not (_OPEN_SUPPORTS_DIR_FD and _READLINK_SUPPORTS_DIR_FD and _SCANDIR_SUPPORTS_FD):
+        raise SecurePathError(
+            "secure_open_unavailable",
+            "This platform cannot guarantee descriptor-anchored no-follow Tier 2 discovery.",
+        )
+    frames = [_DirectoryFrame(_open_absolute_directory_posix(root), Path(), root_metadata)]
+    try:
+        # A descriptor stack makes the walk linear: root is opened once,
+        # each descended child is opened once relative to its held parent,
+        # and only the descriptors on the active DFS path remain live.
+        while frames:
+            frame = frames[-1]
+            if frame.children is None:
+                _admit_posix_directory(frame, admission)
+            elif frame.next_child < len(frame.children):
+                frames.append(_open_posix_child_directory(frame))
+            else:
+                _revalidate_finished_posix_directory(frames, root)
+                os.close(frames.pop().descriptor)
+    finally:
+        while frames:
+            os.close(frames.pop().descriptor)
+
+
+def _admit_posix_directory(frame: _DirectoryFrame, admission: _DiscoveryAdmission) -> None:
+    """List one held directory between stable snapshots and admit its entries in name order."""
+    current = os.fstat(frame.descriptor)
+    _validate_directory_snapshot(current, frame.relative_path, frame.expected)
+    entries = _list_posix_directory(frame, admission)
+    after_scan = os.fstat(frame.descriptor)
+    _validate_directory_snapshot(after_scan, frame.relative_path, current)
+    children: list[tuple[str, os.stat_result]] = []
+    for name, metadata in entries:
+        relative = frame.relative_path / name
+        if stat.S_ISDIR(metadata.st_mode):
+            if admission.admit_directory(relative, linked=stat_is_link_or_reparse(metadata)):
+                children.append((name, metadata))
+            continue
+        admission.admit_file(
+            relative,
+            metadata,
+            lambda name=name, directory_fd=frame.descriptor: os.readlink(name, dir_fd=directory_fd),
+        )
+    stable = os.fstat(frame.descriptor)
+    _validate_directory_snapshot(stable, frame.relative_path, after_scan)
+    frame.expected = stable
+    frame.children = children
+
+
+def _list_posix_directory(frame: _DirectoryFrame, admission: _DiscoveryAdmission) -> list[tuple[str, os.stat_result]]:
+    """Return one held directory's entries with their no-follow metadata, sorted by name."""
+    entries: list[tuple[str, os.stat_result]] = []
+    try:
+        with os.scandir(frame.descriptor) as iterator:
+            for listed, entry in enumerate(iterator, start=1):
+                admission.check_listing(frame.relative_path, listed)
+                relative = frame.relative_path / entry.name
+                try:
+                    metadata = entry.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise SecurePathError(
+                        "path_access_error",
+                        f"Cannot inspect Tier 2 path {relative.as_posix()}: {exc}",
+                        relative_path=relative.as_posix(),
+                    ) from exc
+                entries.append((entry.name, metadata))
+    except SecurePathError:
+        raise
+    except OSError as exc:
+        raise SecurePathError(
+            "path_access_error",
+            f"Cannot enumerate Tier 2 directory {frame.relative_path.as_posix()}: {exc}",
+            relative_path=frame.relative_path.as_posix(),
+        ) from exc
+    return sorted(entries, key=lambda item: item[0])
+
+
+def _open_posix_child_directory(frame: _DirectoryFrame) -> _DirectoryFrame:
+    """Open the frame's next admitted child relative to its held descriptor, still unchanged."""
+    name, discovered = frame.children[frame.next_child]
+    frame.next_child += 1
+    relative = frame.relative_path / name
+    try:
+        before_open = os.stat(name, dir_fd=frame.descriptor, follow_symlinks=False)
+    except OSError as exc:
+        raise SecurePathError(
+            "unsafe_path",
+            f"Cannot revalidate Tier 2 directory before descent: {relative.as_posix()}: {exc}",
+            relative_path=relative.as_posix(),
+        ) from exc
+    _validate_directory_snapshot(before_open, relative, discovered)
+    try:
+        child_fd = os.open(name, _posix_directory_flags(), dir_fd=frame.descriptor)
+    except OSError as exc:
+        raise SecurePathError(
+            "unsafe_path",
+            f"Cannot securely open Tier 2 directory {relative.as_posix()}: {exc}",
+            relative_path=relative.as_posix(),
+        ) from exc
+    try:
+        opened = os.fstat(child_fd)
+        _validate_directory_snapshot(opened, relative, before_open)
+    except BaseException:
+        os.close(child_fd)
+        raise
+    return _DirectoryFrame(child_fd, relative, opened, parent_name=name)
+
+
+def _revalidate_finished_posix_directory(frames: list[_DirectoryFrame], root: Path) -> None:
+    """Require a finished directory to be unchanged and still bound to its declared name."""
+    frame = frames[-1]
+    stable = os.fstat(frame.descriptor)
+    _validate_directory_snapshot(stable, frame.relative_path, frame.expected)
+    if frame.parent_name is None:
+        try:
+            declared_root = root.lstat()
+        except OSError as exc:
             raise SecurePathError(
-                "unsafe_path",
-                f"Compatibility alias target is not an independently enumerated regular file: {alias.as_posix()}",
-                relative_path=alias.as_posix(),
-            )
+                "unsafe_root",
+                f"Cannot revalidate declared Tier 2 root after discovery: {exc}",
+            ) from exc
+        _validate_directory_snapshot(declared_root, Path(), stable)
+        return
+    parent = frames[-2]
+    try:
+        parent_entry = os.stat(frame.parent_name, dir_fd=parent.descriptor, follow_symlinks=False)
+    except OSError as exc:
+        raise SecurePathError(
+            "unsafe_path",
+            f"Cannot revalidate Tier 2 directory after its subtree: {frame.relative_path.as_posix()}: {exc}",
+            relative_path=frame.relative_path.as_posix(),
+        ) from exc
+    _validate_directory_snapshot(parent_entry, frame.relative_path, stable)
 
-    return sorted(files, key=lambda item: item.rel_path)
+
+def _walk_windows(root: Path, root_metadata: os.stat_result, admission: _DiscoveryAdmission) -> None:
+    """Admit every entry below ``root`` through pinned native handles, never following reparse points."""
+    root_handles: list[int] = []
+    frames: list[_WindowsDirectoryFrame] = []
+    try:
+        root_handles = _windows_open_anchored_directory_chain(root, expected=root_metadata)
+        root_handle = root_handles[-1]
+        root_snapshot = _windows_handle_metadata(root_handle)
+        _validate_windows_read_directory_handle(root_handle, Path())
+        frames.append(_WindowsDirectoryFrame(root_handle, root, Path(), root_snapshot, owns_handle=False))
+        while frames:
+            frame = frames[-1]
+            if frame.children is None:
+                _admit_windows_directory(frame, admission)
+            elif frame.next_child < len(frame.children):
+                frames.append(_open_windows_child_directory(frame))
+            else:
+                current = _windows_handle_metadata(frame.handle)
+                _validate_windows_discovery_directory_snapshot(current, frame.relative_path, frame.expected)
+                finished = frames.pop()
+                if finished.owns_handle:
+                    _windows_close_handle(finished.handle)
+    finally:
+        while frames:
+            frame = frames.pop()
+            if frame.owns_handle:
+                _windows_close_handle(frame.handle)
+        while root_handles:
+            _windows_close_handle(root_handles.pop())
+
+
+def _admit_windows_directory(frame: _WindowsDirectoryFrame, admission: _DiscoveryAdmission) -> None:
+    """List one pinned directory and admit its entries in name order, then require it unchanged."""
+    names, stable = _windows_enumerate_pinned_directory_names(
+        frame.path,
+        frame.handle,
+        frame.relative_path,
+        frame.expected,
+        admission=admission,
+    )
+    children: list[tuple[str, _WindowsHandleMetadata]] = []
+    for name in names:
+        child = _admit_windows_entry(frame, name, admission)
+        if child is not None:
+            children.append(child)
+    current = _windows_handle_metadata(frame.handle)
+    _validate_windows_discovery_directory_snapshot(current, frame.relative_path, stable)
+    frame.expected = current
+    frame.children = children
+
+
+def _admit_windows_entry(
+    frame: _WindowsDirectoryFrame,
+    name: str,
+    admission: _DiscoveryAdmission,
+) -> tuple[str, _WindowsHandleMetadata] | None:
+    """Admit one entry while a no-follow handle pins it; return it when it is a directory to descend."""
+    path = frame.path / name
+    relative = frame.relative_path / name
+    try:
+        entry_handle, handle_metadata = _windows_open_discovery_handle(frame.handle, name)
+    except OSError as exc:
+        raise SecurePathError(
+            "path_access_error",
+            f"Cannot securely inspect Tier 2 Windows path {relative.as_posix()}: {exc}",
+            relative_path=relative.as_posix(),
+        ) from exc
+    try:
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise SecurePathError(
+                "path_access_error",
+                f"Cannot inspect pinned Tier 2 Windows path {relative.as_posix()}: {exc}",
+                relative_path=relative.as_posix(),
+            ) from exc
+        _validate_windows_entry_snapshot(metadata, handle_metadata, relative)
+
+        is_reparse = bool(handle_metadata.attributes & 0x400)
+        is_directory = bool(handle_metadata.attributes & 0x10)
+        if is_directory:
+            if admission.admit_directory(relative, linked=is_reparse):
+                return name, handle_metadata
+            return None
+
+        # Read an alias target only while the entry handle pins the reparse point.
+        alias_target = ""
+        if is_reparse and admission.allow_context_alias and relative.name == "CLAUDE.md":
+            try:
+                alias_target = os.readlink(path)  # noqa: PTH115
+            except OSError as exc:
+                raise SecurePathError(
+                    "unsafe_path",
+                    f"Cannot inspect selected compatibility alias: {relative.as_posix()}: {exc}",
+                    relative_path=relative.as_posix(),
+                ) from exc
+        admission.admit_file(relative, metadata, lambda: alias_target)
+        return None
+    finally:
+        _windows_close_handle(entry_handle)
+
+
+def _open_windows_child_directory(frame: _WindowsDirectoryFrame) -> _WindowsDirectoryFrame:
+    """Open the frame's next admitted child relative to its pinned handle, still unchanged."""
+    name, discovered = frame.children[frame.next_child]
+    frame.next_child += 1
+    relative = frame.relative_path / name
+    try:
+        child_handle = _windows_open_relative_handle(
+            frame.handle,
+            name,
+            access=_WINDOWS_DIRECTORY_READ_ACCESS,
+            share=_WINDOWS_SHARE_READ_WRITE,
+            disposition=_WINDOWS_FILE_OPEN,
+            file_attributes=0,
+            create_options=_WINDOWS_DIRECTORY_OPEN_OPTIONS,
+        )
+    except OSError as exc:
+        raise SecurePathError(
+            "unsafe_path",
+            f"Cannot securely open Tier 2 Windows directory {relative.as_posix()}: {exc}",
+            relative_path=relative.as_posix(),
+        ) from exc
+    try:
+        opened = _windows_handle_metadata(child_handle)
+        _validate_windows_discovery_directory_snapshot(opened, relative, discovered)
+    except BaseException:
+        _windows_close_handle(child_handle)
+        raise
+    return _WindowsDirectoryFrame(child_handle, frame.path / name, relative, opened, owns_handle=True)
 
 
 class SecureRoot:
@@ -627,14 +674,7 @@ class SecureRoot:
     def __enter__(self) -> SecureRoot:
         if self._entered:
             raise SecurePathError("unsafe_root", "Secure Tier 2 root context is already active.")
-        try:
-            metadata = self.root.lstat()
-        except OSError as exc:
-            raise SecurePathError("invalid_root", f"Cannot inspect Tier 2 root: {exc}") from exc
-        if stat_is_link_or_reparse(metadata):
-            raise SecurePathError("unsafe_root", f"Tier 2 root is a symlink or reparse point: {self.root.name}")
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise SecurePathError("invalid_root", f"Tier 2 root is not a regular directory: {self.root}")
+        metadata = _inspect_root(self.root)
         if self._expected is not None:
             _validate_directory_snapshot(metadata, Path(), self._expected)
 
@@ -939,17 +979,20 @@ def _validate_opened_file(
         _raise_unsafe_file(relative_path)
     if getattr(metadata, "st_nlink", 1) != 1:
         _raise_unsafe_file(relative_path, hardlink=True)
-    if expected is not None:
-        changed = not os.path.samestat(metadata, expected)
-        for attribute in ("st_size", "st_mtime_ns", "st_ctime_ns"):
-            if getattr(metadata, attribute, None) != getattr(expected, attribute, None):
-                changed = True
-        if changed:
-            raise SecurePathError(
-                "unsafe_path",
-                f"Selected Tier 2 file changed identity or contents while being opened: {relative_path.as_posix()}",
-                relative_path=relative_path.as_posix(),
-            )
+    if expected is not None and _snapshot_changed(metadata, expected):
+        raise SecurePathError(
+            "unsafe_path",
+            f"Selected Tier 2 file changed identity or contents while being opened: {relative_path.as_posix()}",
+            relative_path=relative_path.as_posix(),
+        )
+
+
+def _snapshot_changed(metadata: os.stat_result, expected: os.stat_result) -> bool:
+    """Return whether two no-follow snapshots differ in identity, size, or modification or change time."""
+    return not os.path.samestat(metadata, expected) or any(
+        getattr(metadata, field, None) != getattr(expected, field, None)
+        for field in ("st_size", "st_mtime_ns", "st_ctime_ns")
+    )
 
 
 def _validate_directory_snapshot(
@@ -958,15 +1001,7 @@ def _validate_directory_snapshot(
     expected: os.stat_result,
 ) -> None:
     """Require one regular directory identity and entry snapshot to stay stable."""
-    changed = (
-        stat_is_link_or_reparse(metadata)
-        or not stat.S_ISDIR(metadata.st_mode)
-        or not os.path.samestat(metadata, expected)
-    )
-    for attribute in ("st_size", "st_mtime_ns", "st_ctime_ns"):
-        if getattr(metadata, attribute, None) != getattr(expected, attribute, None):
-            changed = True
-    if changed:
+    if stat_is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode) or _snapshot_changed(metadata, expected):
         label = relative_path.as_posix()
         raise SecurePathError(
             "unsafe_path",
@@ -1501,26 +1536,17 @@ def _windows_enumerate_pinned_directory_names(
     relative_path: Path,
     expected: _WindowsHandleMetadata,
     *,
-    max_names: int | None = None,
-    path_limit: int | None = None,
+    admission: _DiscoveryAdmission,
 ) -> tuple[list[str], _WindowsHandleMetadata]:
     """Enumerate names by path only while native handles pin every path component."""
     before = _windows_handle_metadata(handle)
     _validate_windows_discovery_directory_snapshot(before, relative_path, expected)
+    names: list[str] = []
     try:
         with os.scandir(path) as iterator:
-            names: list[str] = []
-            for entry in iterator:
+            for listed, entry in enumerate(iterator, start=1):
+                admission.check_listing(relative_path, listed)
                 names.append(entry.name)
-                if max_names is not None and len(names) > max_names:
-                    limit = path_limit if path_limit is not None else max_names
-                    raise SecurePathError(
-                        "path_count_limit",
-                        f"Tier 2 tree exceeds the path limit of {limit} entries.",
-                        relative_path=relative_path.as_posix(),
-                        metadata={"actual": len(names), "limit": limit},
-                    )
-            names.sort()
     except SecurePathError:
         raise
     except OSError as exc:
@@ -1529,6 +1555,7 @@ def _windows_enumerate_pinned_directory_names(
             f"Cannot enumerate pinned Tier 2 Windows directory {relative_path.as_posix()}: {exc}",
             relative_path=relative_path.as_posix(),
         ) from exc
+    names.sort()
     after = _windows_handle_metadata(handle)
     _validate_windows_discovery_directory_snapshot(after, relative_path, before)
     return names, after
@@ -1758,13 +1785,7 @@ def _validate_windows_destination_unchanged(
 ) -> None:
     if (before is None) != (current is None):
         raise SecurePathError("unsafe_path", "Windows output destination appeared or disappeared during the write.")
-    if before is None or current is None:
-        return
-    changed = not os.path.samestat(before, current)
-    for attribute in ("st_size", "st_mtime_ns", "st_ctime_ns"):
-        if getattr(before, attribute, None) != getattr(current, attribute, None):
-            changed = True
-    if changed:
+    if before is not None and current is not None and _snapshot_changed(current, before):
         raise SecurePathError("unsafe_path", "Windows output destination changed while output was prepared.")
 
 

@@ -339,8 +339,11 @@ _SHELL_STATUS_LINE_RE = re.compile(
 # A shell tool's error line about a file (``cat: <dir>/SKILL.md: Permission denied``).
 _SHELL_ERROR_LINE_RE = re.compile(r"[\w./+-]+:\s")
 # A result that came back as a runtime/transport failure rather than an answer.
+# A 4xx/5xx status counts only at the start of a line ("403: forbidden",
+# "Error: 500 - boom", "HTTP/1.1 404 - x"), so issue numbers, file:line
+# references and totals inside a successful answer are not failures.
 _FAILED_CALL_RE = re.compile(
-    r"(?:\b[45]\d{2}\b\s*[:\-])"
+    r"(?:^[ \t]*(?:(?:error|http/\d(?:\.\d)?|status(?:[ _]code)?)[ \t:=]*)?[45]\d{2}\b[ \t]*[:\-])"
     r"|<tool_use_error>"
     r"|\bmcp error\b"
     r"|\bpermission denied\b"
@@ -350,7 +353,7 @@ _FAILED_CALL_RE = re.compile(
     r"|\bfailed to decrypt\b"
     r"|\binvalid[_ ]token\b"
     r"|\btoken (?:expired|is expired)\b",
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
 _SCHEMA_TYPES = frozenset({"string", "number", "integer", "boolean", "object", "array", "null"})
 _SCHEMA_KEYWORDS = frozenset({"type", "properties", "required", "enum", "pattern", "minimum", "maximum"})

@@ -214,11 +214,26 @@ class TestOutcomeTriState:
 
     @pytest.mark.parametrize(
         "content",
-        ["403: Failed to decrypt access token", "<tool_use_error>No such tool</tool_use_error>", "MCP error -32602"],
+        [
+            "403: Failed to decrypt access token",
+            "<tool_use_error>No such tool</tool_use_error>",
+            "MCP error -32602",
+            "500: boom",
+            "HTTP/1.1 404 - Not Found",
+            "Done.\nstatus code 502: bad gateway",
+        ],
     )
     def test_failure_markers_mark_failure(self, content: str) -> None:
         traj = _traj(_one("mcp__github__x", content=content))
         assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is False
+
+    @pytest.mark.parametrize(
+        "content",
+        ["Open issues:\n#451 - Crash", "Found in src/app.py:404: def handler()", "Total: 500 - all good"],
+    )
+    def test_status_like_numbers_inside_a_successful_answer_are_not_failures(self, content: str) -> None:
+        traj = _traj(_one("mcp__github__x", content=content))
+        assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is True
 
     def test_failure_marker_mid_way_through_a_long_successful_body_is_ignored(self) -> None:
         # Scanning is bounded: each block's head and the result's tail, not the middle.

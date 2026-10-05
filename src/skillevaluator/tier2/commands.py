@@ -113,7 +113,9 @@ def run_dedup_scan(
 
 
 def _make_advisory(result: ValidationResult) -> ValidationResult:
-    """Cap plugin Tier 2 findings and legacy errors at advisory severity."""
+    """Cap plugin Tier 2 findings at advisory severity and keep other notes as warnings."""
+    from skillevaluator.deduplication.plugin.catalog_checks import advisory_severity
+
     if result.metadata.get("security_failure"):
         # Filesystem-integrity failures mean the requested check could not be
         # executed safely. Keep them blocking instead of disguising them as an
@@ -122,19 +124,17 @@ def _make_advisory(result: ValidationResult) -> ValidationResult:
         result.metadata.update({"execution_status": "failed", "optional": False})
         return result
 
-    legacy_errors = list(result.errors)
+    # Errors and warnings that are not a finding's legacy string (provider
+    # failures, skip reasons) are notes. Finding strings are rebuilt from the
+    # capped severities, then each note is kept once as a warning.
+    finding_strings = {finding.to_legacy_string() for finding in result.findings}
+    notes = [message for message in (*result.warnings, *result.errors) if message not in finding_strings]
     for finding in result.findings:
-        if finding.severity in (Severity.CRITICAL, Severity.HIGH):
-            finding.severity = Severity.MEDIUM
-    if result.findings:
-        result.recalculate_from_findings()
-    else:
-        result.errors.clear()
-        result.summary.errors = 0
-    for error in legacy_errors:
-        if error not in result.warnings:
-            result.warnings.append(error)
-            result.summary.warnings += 1
+        finding.severity = advisory_severity(finding.severity)
+    result.recalculate_from_findings()
+    for note in notes:
+        if note not in result.warnings:
+            result.add_warning(note)
     result.passed = True
     result.metadata["advisory_tier2"] = True
     return result

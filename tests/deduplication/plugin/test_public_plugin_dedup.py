@@ -9,7 +9,7 @@ import pytest
 
 from skillevaluator.deduplication.plugin.intra_plugin_validator import IntraPluginValidator
 from skillevaluator.deduplication.plugin.ref_utils import find_duplicate_refs, normalize_ref
-from skillevaluator.models.result import Severity
+from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.tier2.commands import run_plugin_dedup_scan, run_plugin_skill_context_dedup
 
 
@@ -127,6 +127,47 @@ def test_hard_linked_bundled_skill_file_is_a_blocking_security_failure(tmp_path:
     assert result.metadata["optional"] is False
     assert [finding.check_name for finding in result.findings] == ["unsafe_hardlink"]
     assert result.findings[0].severity == Severity.CRITICAL
+
+
+def test_plugin_context_scan_caps_findings_once_and_keeps_plain_notes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier2 import commands
+
+    plugin = tmp_path / "plugin"
+    skill = plugin / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: d\n---\n# Demo\n", encoding="utf-8")
+    skill_result = ValidationResult(validator_name="Context Deduplication")
+    skill_result.add_finding(Finding("DUPLICATE", Severity.HIGH, "duplicate", "Repeated instructions", "SKILL.md"))
+    skill_result.add_warning("Optional provider note")
+    skill_result.add_error("LLM analysis did not complete for 1 of 2 content clusters")
+
+    class FixedResultValidator:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def validate(self, _skill_dir: Path) -> ValidationResult:
+            return skill_result
+
+    monkeypatch.setattr(commands, "IntraSkillValidator", FixedResultValidator)
+
+    [result] = run_plugin_skill_context_dedup(plugin)
+
+    assert result.passed
+    assert result.metadata["advisory_tier2"] is True
+    assert [finding.severity for finding in result.findings] == [Severity.MEDIUM]
+    assert result.errors == []
+    assert result.warnings == [
+        "[demo] [DUPLICATE-MEDIUM] Repeated instructions in SKILL.md",
+        "[demo] Optional provider note",
+        "[demo] LLM analysis did not complete for 1 of 2 content clusters",
+    ]
+    assert result.summary.warnings == 3
+    assert result.summary.errors == 0
+    assert result.summary.high_count == 0
+    assert result.summary.medium_count == 1
 
 
 def test_plugin_context_scan_caps_single_skill_llm_budget_at_cluster_limit(

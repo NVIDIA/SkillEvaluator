@@ -74,7 +74,6 @@ from skillevaluator.plugin_component_risk import (
     hook_risk_summary,
     is_broad_allow_rule,
     mcp_server_is_read_only,
-    permission_mode_flag_issues,
     privilege_summary,
 )
 from skillevaluator.plugin_formats import (
@@ -125,7 +124,7 @@ from skillevaluator.utils.structured_data import StructuredDataError, load_bound
 from skillevaluator.validators.mcp_static import (
     OverrideIssue,
     env_override_issues,
-    permission_bypass_issues,
+    permission_flag_issues,
     validate_mcp_command,
     validate_mcp_pinning,
 )
@@ -1153,7 +1152,7 @@ class _Builder:
         if config is not None:
             self.inventory.findings.extend(
                 _override_findings(
-                    [*permission_bypass_issues(config), *permission_mode_flag_issues(config)],
+                    permission_flag_issues(config),
                     self.reader.display(rel),
                     where=f"hooks ({name})",
                     component=("hook", name),
@@ -1355,7 +1354,7 @@ class _Builder:
         source = f"{file}#hooks"
         self.inventory.findings.extend(
             _override_findings(
-                [*permission_bypass_issues(config), *permission_mode_flag_issues(config)],
+                permission_flag_issues(config),
                 display,
                 where=f"hooks ({source})",
                 component=("hook", source),
@@ -1384,7 +1383,7 @@ class _Builder:
                 component = ("lsp", str(server_name))
                 self.inventory.findings.extend(
                     _override_findings(
-                        [*permission_bypass_issues(server), *permission_mode_flag_issues(server)],
+                        permission_flag_issues(server),
                         display,
                         where=where,
                         component=component,
@@ -1431,7 +1430,7 @@ class _Builder:
                 self._monitor_command(monitor_name, entry, rel)
             self.inventory.findings.extend(
                 _override_findings(
-                    [*permission_bypass_issues(entries), *permission_mode_flag_issues(entries)],
+                    permission_flag_issues(entries),
                     self.reader.display(rel),
                     where=f"monitors ({name})",
                 )
@@ -1681,11 +1680,7 @@ def _settings_findings(config: dict[str, Any], rel: str, display: str) -> list[F
             )
         )
     findings.extend(_override_findings(env_override_issues(config.get("env")), display, where=rel))
-    findings.extend(
-        _override_findings(
-            [*permission_bypass_issues(config), *permission_mode_flag_issues(config)], display, where=rel
-        )
-    )
+    findings.extend(_override_findings(permission_flag_issues(config), display, where=rel))
     return findings
 
 

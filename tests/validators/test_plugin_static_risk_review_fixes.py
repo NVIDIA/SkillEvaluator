@@ -693,6 +693,18 @@ def test_one_walk_reports_bypass_and_permissive_mode_flags() -> None:
     assert [issue.concept for issue in permission_bypass_issues(config)] == ["permission_bypass_flag"]
 
 
+def test_a_component_reports_its_permission_flags_in_config_order(tmp_path: Path) -> None:
+    """One walk per config: the findings follow the config, not all bypass flags before all mode flags."""
+    args = ["-p", "--permission-mode", "auto", "--dangerously-skip-permissions"]
+    result = _validate(_claude(tmp_path, {".lsp.json": {"agent": {"command": "claude", "args": args}}}))
+
+    flags = {"plugin_permission_bypass_flag", "plugin_permission_mode_flag"}
+    assert [finding.check_name for finding in result.findings if finding.check_name in flags] == [
+        "plugin_permission_mode_flag",
+        "plugin_permission_bypass_flag",
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Second review pass                                                          #
 # --------------------------------------------------------------------------- #

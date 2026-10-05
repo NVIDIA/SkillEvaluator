@@ -52,10 +52,8 @@ from skillevaluator.validators.mcp_static import (
     TRUTHY_VALUES,
     EndpointClass,
     HostAllowlist,
-    OverrideIssue,
     classify_endpoint_host,
     classify_mcp_pinning,
-    permission_flag_issues,
 )
 from skillevaluator.validators.url_policy import (
     DEFAULT_PORTS,
@@ -577,15 +575,6 @@ def is_broad_allow_rule(rule: str) -> bool:
 # Claude Code permission modes that approve some tool calls without a prompt ('bypassPermissions', which
 # approves every call, is a HIGH permission-bypass flag of its own).
 PERMISSIVE_PERMISSION_MODES: frozenset[str] = frozenset({"acceptEdits", "auto"})
-
-
-def permission_mode_flag_issues(value: Any) -> list[OverrideIssue]:
-    """The MEDIUM part of :func:`~skillevaluator.validators.mcp_static.permission_flag_issues`.
-
-    ``--permission-mode acceptEdits`` or ``auto`` (in any letter case) in any config string or argv list. A
-    caller that also needs the permission-bypass flags gets both from one ``permission_flag_issues`` walk.
-    """
-    return [issue for issue in permission_flag_issues(value) if issue.concept == "permission_mode_flag"]
 
 
 def _bash_grant_label(entry: str) -> str:

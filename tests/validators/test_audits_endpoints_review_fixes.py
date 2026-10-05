@@ -366,8 +366,8 @@ def test_backslash_hook_url_fails_the_cli_policy_run(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "url",
-    ["https://hooks.example.com/x y", "https://hooks.example.com/\x7fx", "https://hooks%2eexample.com/x"],
-    ids=["space", "control", "percent-host"],
+    ["https://hooks.example .com/x", "https://hooks.example.com/\x7fx", "https://hooks%2eexample.com/x"],
+    ids=["space-in-host", "control", "percent-host"],
 )
 def test_hook_urls_with_whitespace_controls_or_an_encoded_host_are_invalid(tmp_path: Path, url: str) -> None:
     result = PluginSchemaValidator().validate(_hook_plugin(tmp_path / "demo", url))
@@ -410,9 +410,9 @@ def _mcp_plugin(root: Path, url: str) -> Path:
         ("https:\\\\169.254.169.254/mcp", (), "mcp_endpoint_metadata"),
         ("https://mcp.example.com/mcp\nhermes chat", (), None),
         ("https://mcp.example.com/mcp\x00", (), None),
-        ("https://mcp.example.com/m cp", (), None),
+        ("https://mcp.example .com/mcp", (), None),
     ],
-    ids=["backslash-host", "no-slashes", "backslashes", "newline", "nul", "space"],
+    ids=["backslash-host", "no-slashes", "backslashes", "newline", "nul", "space-in-host"],
 )
 def test_ambiguous_mcp_urls_are_rejected_and_classified_where_clients_connect(
     tmp_path: Path, url: str, allowed: tuple[str, ...], endpoint_check: str | None
@@ -959,6 +959,8 @@ def test_pinned_python_mcp_package_joins_the_pip_audit_batch(
     pip_audit = _FakeTool("pip-audit", [_ok(report)])
     monkeypatch.setattr(Tools, "pip_audit", pip_audit)
     monkeypatch.setattr(Tools, "safety", _FakeTool("safety", available=False))
+    # No network: the advisory severity lookup is stubbed.
+    monkeypatch.setattr(eco, "fetch_osv_record", lambda _id: {"database_specific": {"severity": "HIGH"}})
     result = _dependency_result(_bare_plugin(tmp_path / "demo", {".mcp.json": {"mcpServers": {"fetch": server}}}))
 
     [call] = pip_audit.calls

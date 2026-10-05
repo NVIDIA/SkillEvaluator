@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ipaddress
 import itertools
+import math
 import re
 import unicodedata
 from collections.abc import Iterable, Iterator
@@ -34,6 +35,11 @@ from urllib.parse import parse_qs, unquote, urljoin, urlparse, urlunparse
 
 import idna
 
+from skillevaluator.constants import (
+    PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
+    PLUGIN_CODEX_MANIFEST_TYPE,
+    PLUGIN_CURSOR_MANIFEST_TYPE,
+)
 from skillevaluator.models.plugin import MCP_NAME_PATTERN
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.utils.structured_data import MAX_STRUCTURED_NODES
@@ -56,26 +62,56 @@ _MCP_NAME_RE = re.compile(MCP_NAME_PATTERN)
 # MCP stdio commands are exec'd argv-style (not through a shell), so these have no
 # legitimate purpose in a command/arg and indicate injection or shell smuggling.
 _SHELL_METACHAR_RE = re.compile(r"[;&|`\n\r]|\$\(|<\(|>\(|&&|\|\||[<>]")
+# In a plain argv argument only these still signal shell use: an argument that is just an operator, or
+# command or process substitution and line breaks.
+_SHELL_OPERATOR_ARG_RE = re.compile(r"^(?:&&|\|\||;;?|\|&?|&|[0-9]?>>?&?[0-9]?|&>>?|<<?<?)$")
+_SUBSTITUTION_ARG_RE = re.compile(r"\$\(|`|<\(|>\(|[\n\r]")
 # Interpreters invoked with an inline program string execute arbitrary code.
-_SHELL_INTERPRETERS: frozenset[str] = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
-# A shell's inline-program flag: '-c' alone or inside a short-option cluster
-# ('-lc', '-ec', '-xc'); bash, sh and zsh also run '+c' as '-c'. Long options
-# such as '--config' never match.
-_SHELL_INLINE_PROGRAM_FLAG_RE = re.compile(r"[-+][A-Za-z]*c[A-Za-z]*")
-# Shell options that take the next argument as their value: '--rcfile file',
-# '--init-file file', and '-o name' / '-O name' (also '+o', '+O', and inside a
-# cluster such as '-eo pipefail').
-_SHELL_VALUE_LONG_OPTIONS: frozenset[str] = frozenset({"--rcfile", "--init-file"})
-# Floating / non-pinned version markers (supply-chain drift risk).
-_FLOATING_MARKERS: tuple[str, ...] = ("@latest", "@main", "@master", "@head", "@next", "@canary", ":latest", ":main")
-# A marker counts only when it is attached to a package or image name ("pkg@latest",
-# "img:main", "pkg@latest-beta"). An '@' that starts a token or follows a separator
-# (space, '=', ',', ':', a slash, a quote) begins an npm scope such as
-# "@nextcloud/..." or "@next-auth/...", and a marker that runs on into a longer
-# word or host name ("@mainstay", "git@main.example.com") is not a tag.
-_FLOATING_MARKER_RE = re.compile(
-    r"(?<=[^\s=,:/\\'\"])(?:" + "|".join(map(re.escape, _FLOATING_MARKERS)) + r")(?![\w.])",
-    re.IGNORECASE,
+_SHELL_INTERPRETERS: frozenset[str] = frozenset(
+    {"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "csh", "tcsh"}
+)
+# Options of other interpreters that run a program given inline ('python -c CODE', 'node -e CODE'). Such a
+# program is code, not an argument, so its text gets the shell-metacharacter check.
+_INLINE_CODE_OPTIONS: dict[str, frozenset[str]] = {
+    "python": frozenset({"-c"}),
+    "node": frozenset({"-e", "--eval", "-p", "--print"}),
+    "bun": frozenset({"-e", "--eval", "-p", "--print"}),
+    "perl": frozenset({"-e", "-E"}),
+    "ruby": frozenset({"-e"}),
+    "php": frozenset({"-r"}),
+    "lua": frozenset({"-e"}),
+    "osascript": frozenset({"-e"}),
+}
+_INTERPRETER_ALIASES: dict[str, str] = {"nodejs": "node", "py": "python"}
+_PYTHON_NAME_RE = re.compile(r"^(?:python|pypy)[0-9.]*$")
+# Interpreter options that take a value before the inline program ('python -W ignore -c CODE').
+_INTERPRETER_VALUE_OPTIONS = frozenset({"-W", "-X", "-r", "--require", "--import"})
+# Moving tags: a dist-tag, branch, or image tag that names a release channel, not one release. They are
+# matched only where the package runner reads a version or tag (after the package name's '@', or the image's
+# ':tag'), never as a substring, so '@nextui-org/mcp@1.0.0', 'mod.cli:main', or an e-mail are not floating.
+_FLOATING_TAGS: frozenset[str] = frozenset(
+    {
+        "latest",
+        "next",
+        "canary",
+        "beta",
+        "alpha",
+        "rc",
+        "main",
+        "master",
+        "head",
+        "trunk",
+        "nightly",
+        "edge",
+        "dev",
+        "develop",
+        "unstable",
+        "experimental",
+        "snapshot",
+        "preview",
+        "insiders",
+        "stable",
+    }
 )
 
 # Command flags that disable TLS/cert verification.
@@ -83,8 +119,24 @@ _INSECURE_TLS_FLAGS: frozenset[str] = frozenset(
     {"--insecure", "-k", "--no-check-certificate", "--tls-no-verify", "--ssl-no-verify", "--no-verify-tls"}
 )
 
-# env-var reference forms that are acceptable in place of an inline secret.
-_ENV_REF_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$|^\$[A-Za-z_][A-Za-z0-9_]*$")
+# Environment references. Claude Code expands '${NAME}' and '${NAME:-default}' in an MCP server's command,
+# args, env, url, and headers (the default when NAME is unset); hooks and many configs also use '$NAME';
+# Cursor documents '${env:NAME}'. A reference with no default (or an empty one) carries no value of its own.
+_ENV_EXPANSION_RE = re.compile(
+    r"\$\{(?P<cursor>env:)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}"
+    r"|\$(?P<bare>[A-Za-z_][A-Za-z0-9_]*)"
+)
+# Only the braced forms are expanded inside an MCP URL.
+_URL_EXPANSION_RE = re.compile(r"\$\{(?P<cursor>env:)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}")
+# What is left of an Authorization-style value once its references are removed: 'Bearer ${TOKEN}'.
+_AUTH_SCHEME_ONLY_RE = re.compile(r"(?i)^\s*(?:bearer|basic|token)?\s*$")
+# The MCP client that loads a manifest format decides how environment references in its MCP config expand.
+McpClient = Literal["claude", "codex", "cursor", "agent_plugins"]
+_CLIENT_BY_MANIFEST: dict[str, McpClient] = {
+    PLUGIN_CODEX_MANIFEST_TYPE: "codex",
+    PLUGIN_CURSOR_MANIFEST_TYPE: "cursor",
+    PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE: "agent_plugins",
+}
 # env keys that name a credential -- their value must be a reference, never a literal.
 # The auth/bearer/token alternatives are suffix-anchored so benign config keys that
 # merely contain those substrings -- AUTH_TYPE, OAUTH_CLIENT_ID, BEARER_FORMAT,
@@ -120,6 +172,229 @@ _SECRET_VALUE_RE = re.compile(
 )
 
 
+# Whole keys (env names, query parameters, flag names) that name a credential on their own: '--auth', a cloud
+# URL signature ('X-Amz-Signature'), and the bare nouns.
+_CREDENTIAL_KEYS_EXACT = frozenset(
+    {
+        "auth",
+        "x-amz-signature",
+        "x-goog-signature",
+        "apikey",
+        "passwd",
+        "password",
+        "secret",
+        "token",
+        "credential",
+        "credentials",
+    }
+)
+# Keys that name a credential in a URL query (Google's 'key=', a signed URL's 'sig='), but are often a setting as
+# a flag or env name ('--key primary', '--pass 2', '--signature sha256'). There the value must also look like
+# secret material.
+_QUERY_CREDENTIAL_KEYS = frozenset({"key", "sig", "signature", "pass", "pwd"})
+# A last key word that makes a credential noun a setting about the credential, not the credential:
+# PASSWORD_POLICY, DB_PASSWORD_FILE, SECRET_NAME, API_KEY_PATH, PASSWORD_MIN_LENGTH.
+_NON_CREDENTIAL_QUALIFIERS = frozenset(
+    {
+        "policy",
+        "file",
+        "path",
+        "dir",
+        "directory",
+        "name",
+        "env",
+        "var",
+        "variable",
+        "type",
+        "kind",
+        "length",
+        "len",
+        "min",
+        "max",
+        "url",
+        "uri",
+        "endpoint",
+        "header",
+        "format",
+        "mode",
+        "rotation",
+        "expiry",
+        "expires",
+        "expiration",
+        "ttl",
+        "hint",
+        "prompt",
+        "required",
+        "enabled",
+        "disabled",
+        "strength",
+        "algorithm",
+        "alg",
+        "location",
+        "ref",
+        "command",
+        "cmd",
+        "helper",
+        "source",
+        "store",
+        "provider",
+        "manager",
+        "field",
+        "count",
+        "age",
+        "days",
+        "interval",
+        "timeout",
+        "issuer",
+        "audience",
+        "scope",
+        "scopes",
+        "method",
+        "version",
+    }
+)
+# Values that are a setting, not secret material, even under a credential-named key: booleans, auth modes,
+# and paths ('PASSWORD=true', '--auth basic', 'PRIVATE_KEY=/run/secrets/key').
+_NEUTRAL_CREDENTIAL_VALUES = frozenset(
+    {
+        "true",
+        "false",
+        "yes",
+        "no",
+        "on",
+        "off",
+        "none",
+        "null",
+        "basic",
+        "bearer",
+        "digest",
+        "oauth",
+        "oauth2",
+        "oidc",
+        "token",
+        "apikey",
+        "api-key",
+        "api_key",
+        "ntlm",
+        "kerberos",
+        "negotiate",
+        "anonymous",
+        "required",
+        "optional",
+        "enabled",
+        "disabled",
+        "jwt",
+        "mtls",
+    }
+)
+# Where a path starts: '/', '~/' or '~user/', './' or '../', 'C:\', or '${VAR}/'.
+_PATH_VALUE_RE = re.compile(
+    r"^(?:/|~[A-Za-z0-9._-]*[/\\]|~$|\.{1,2}[/\\]|[A-Za-z]:[/\\]|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[/\\])"
+)
+_PATH_SEPARATOR_RE = re.compile(r"[/\\]+")
+_FILE_EXTENSION_RE = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,7}$")
+_BASE64_TEXT_RE = re.compile(r"^[A-Za-z0-9+/=_-]+$")
+# Symbols that ordinary names use; any other symbol counts as a character class of its own.
+_NAME_SYMBOL_RE = re.compile(r"[^A-Za-z0-9._:/\\-]")
+_KEY_WORD_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+# A long random-looking value (hex, or mixed-case base64-like) under a key that names nothing secret.
+_RANDOM_VALUE_RE = re.compile(r"^[A-Za-z0-9+/=_-]{32,}$")
+_HEX_VALUE_RE = re.compile(r"^[0-9a-fA-F]+$")
+_UUID_VALUE_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+# Key words that say a random-looking value is an identifier or a hash, not a credential.
+_IDENTIFIER_KEY_WORDS = frozenset(
+    {"sha", "hash", "digest", "checksum", "commit", "rev", "revision", "version", "uuid", "guid", "id", "etag"}
+)
+
+
+def _key_words(key: str) -> list[str]:
+    """Lower-case words of an env name, header, flag, or camelCase key (``clientSecret`` -> client, secret)."""
+    return [word.lower() for word in _KEY_WORD_RE.findall(str(key))]
+
+
+def _is_credential_key(key: str, *, query: bool = False) -> bool:
+    """Whether a key names a credential (``API_KEY``, ``clientSecret``, ``--auth``), not a setting about one.
+
+    With ``query`` (a URL query parameter) the short keys ``key``, ``sig``,
+    ``signature``, ``pass``, and ``pwd`` count too.
+    """
+    text = str(key).strip().lstrip("-")
+    if text.lower() in _CREDENTIAL_KEYS_EXACT or (query and text.lower() in _QUERY_CREDENTIAL_KEYS):
+        return True
+    if not _SECRET_KEY_RE.search(text):
+        return False
+    words = _key_words(text)
+    return not (words and words[-1] in _NON_CREDENTIAL_QUALIFIERS)
+
+
+def _is_query_credential_key(key: str) -> bool:
+    """A short key (``key``, ``sig``, ``pass``) that names a credential in a URL query, but not on its own elsewhere."""
+    return str(key).strip().lstrip("-").lower() in _QUERY_CREDENTIAL_KEYS
+
+
+def _looks_like_secret_material(value: str) -> bool:
+    """Whether a value reads as key material by its shape, whatever its key says.
+
+    Three character classes out of lower case, upper case, digits, and other
+    symbols (``rawFAKEvalue0123``, ``S3cret!pw``), or a long random hex or
+    base64 token. A word, a number, or a name such as ``primary``, ``v2``, or
+    ``sha256`` is not.
+    """
+    text = value.strip()
+    if len(text) < 8 or any(char.isspace() for char in text):
+        return False
+    classes = sum(1 for pattern in (r"[a-z]", r"[A-Z]", r"[0-9]") if re.search(pattern, text))
+    classes += 1 if _NAME_SYMBOL_RE.search(text) else 0
+    return classes >= 3 or _looks_like_random_secret("value", text)
+
+
+def _looks_like_path(text: str) -> bool:
+    """A file path (``/run/secrets/db``, ``./key.pem``, ``~/.config/x``), not a token that starts with ``/``.
+
+    A base64 secret starts with ``/`` about once in 64, and may hold more
+    slashes. One name after the prefix that reads as key material, or a long
+    random base64 text, is a token.
+    """
+    match = _PATH_VALUE_RE.match(text)
+    if match is None:
+        return False
+    rest = text[match.end() :]
+    segments = [segment for segment in _PATH_SEPARATOR_RE.split(rest) if segment]
+    if len(segments) == 1:
+        segment = segments[0]
+        return bool(_FILE_EXTENSION_RE.search(segment)) or not _looks_like_secret_material(segment)
+    if len(segments) > 1 and _BASE64_TEXT_RE.match(rest) and len(rest) >= 32:
+        classes = sum(1 for pattern in (r"[a-z]", r"[A-Z]", r"[0-9]") if re.search(pattern, rest))
+        return not (classes == 3 and _shannon_entropy(rest) >= 4.5)
+    return True
+
+
+def _is_neutral_value(value: str) -> bool:
+    """A boolean, an auth mode, or a path: never secret material by itself."""
+    text = value.strip()
+    return text.lower() in _NEUTRAL_CREDENTIAL_VALUES or _looks_like_path(text)
+
+
+def _shannon_entropy(text: str) -> float:
+    counts: dict[str, int] = {}
+    for char in text:
+        counts[char] = counts.get(char, 0) + 1
+    return -sum(count / len(text) * math.log2(count / len(text)) for count in counts.values())
+
+
+def _looks_like_random_secret(key: str, value: str) -> bool:
+    """A neutral-key value that still looks like generated key material (``SERVICE_SEED=9f2c...``)."""
+    text = value.strip()
+    if not _RANDOM_VALUE_RE.match(text) or _UUID_VALUE_RE.match(text):
+        return False
+    if _IDENTIFIER_KEY_WORDS & set(_key_words(key)):
+        return False
+    if _HEX_VALUE_RE.match(text):
+        return _shannon_entropy(text) >= 3.0
+    classes = sum(1 for pattern in (r"[a-z]", r"[A-Z]", r"[0-9]") if re.search(pattern, text))
+    return classes == 3 and _shannon_entropy(text) >= 4.0
+
+
 def _finding(
     severity: Severity, check_name: str, message: str, file_path: str, suggestion: str, *, name: str | None = None
 ) -> Finding:
@@ -136,33 +411,67 @@ def _finding(
 
 
 def _is_env_reference(value: str) -> bool:
-    """True when *value* is an ``$VAR`` / ``${VAR}`` env reference (not a literal)."""
-    return bool(_ENV_REF_RE.match(value.strip()))
+    """True when *value* is one environment reference that carries no literal value of its own.
+
+    ``$VAR``, ``${VAR}``, ``${VAR:-}`` (an empty default), and Cursor's
+    ``${env:VAR}`` qualify. ``${VAR:-default}`` with a non-empty default does not:
+    the default ships with the plugin, so it is checked like any literal.
+    """
+    match = _ENV_EXPANSION_RE.fullmatch(value.strip())
+    return match is not None and not match.group("default")
 
 
-def _looks_like_inline_secret(key: str, value: str) -> bool:
-    """True when an env/header value is an inline credential rather than a reference."""
+def env_defaults_text(value: str) -> str:
+    """The text *value* carries when every referenced variable is unset: defaults stay, references go."""
+    return _ENV_EXPANSION_RE.sub(lambda match: match.group("default") or "", value)
+
+
+def _looks_like_inline_secret(key: str, value: str, *, query: bool = False) -> bool:
+    """True when an env/header value is an inline credential rather than a reference.
+
+    With ``query`` the key is a URL query parameter or an HTTP header name, where
+    a short key such as ``key`` or ``sig`` names a credential on its own.
+    """
     v = value.strip()
     if not v or _is_env_reference(v):
         return False
+    if _ENV_EXPANSION_RE.search(v):
+        # Judge only what the plugin ships: the literal text around the references and their defaults.
+        literal = env_defaults_text(v)
+        if _AUTH_SCHEME_ONLY_RE.match(literal):
+            return False
+        return _looks_like_inline_secret(key, literal, query=query)
     if _SECRET_VALUE_RE.search(v):
         return True
     # An inline HTTP auth-scheme credential ("Bearer <token>" / "Basic <base64>"),
     # independent of the key name -- covers Authorization-style headers.
     if _INLINE_AUTH_SCHEME_RE.match(v):
         return True
-    # A credential-named key whose value is a non-empty, non-reference literal.
-    return bool(_SECRET_KEY_RE.search(str(key)))
+    # A credential-named key whose value is a non-empty literal that is not a setting (true, basic, a path).
+    if _is_credential_key(str(key), query=query):
+        return not _is_neutral_value(v)
+    # A short key such as KEY or '--pass' counts only with a value shaped like key material.
+    return _is_query_credential_key(str(key)) and not _is_neutral_value(v) and _looks_like_secret_material(v)
 
 
 def is_env_reference(value: str) -> bool:
-    """Public alias: ``True`` when *value* is a pure ``$VAR`` / ``${VAR}`` reference."""
+    """Public alias: ``True`` when *value* is a pure ``$VAR`` / ``${VAR}`` / ``${VAR:-}`` / ``${env:VAR}`` reference."""
     return _is_env_reference(value)
 
 
-def looks_like_inline_secret(key: str, value: str) -> bool:
-    """Public alias: ``True`` when a keyed value is an inline credential rather than a reference."""
-    return _looks_like_inline_secret(key, value)
+def mcp_client_for_manifest(manifest_type: str | None) -> McpClient:
+    """The client whose MCP config rules apply to a manifest format (Claude Code by default)."""
+    return _CLIENT_BY_MANIFEST.get(manifest_type or "", "claude")
+
+
+def looks_like_inline_secret(key: str, value: str, *, query: bool = True) -> bool:
+    """Public alias: ``True`` when a keyed value is an inline credential rather than a reference.
+
+    Callers check URL query parameters and HTTP headers (hooks, Codex
+    ``http_headers``), so ``query`` defaults to ``True``: ``?key=...`` names a
+    credential. Pass ``False`` for an env name or a command flag.
+    """
+    return _looks_like_inline_secret(key, value, query=query)
 
 
 def _credential_flag_name(token: str) -> str | None:
@@ -170,12 +479,12 @@ def _credential_flag_name(token: str) -> str | None:
 
     Handles ``--api-key`` / ``--api-key=VALUE`` (and short ``-x`` / ``-x=VALUE``)
     forms. The flag name (leading dashes stripped) is matched against the same
-    credential vocabulary used for env keys (:data:`_SECRET_KEY_RE`).
+    credential vocabulary used for env keys (:func:`_is_credential_key`).
     """
     if not token.startswith("-"):
         return None
     flag = token.lstrip("-").split("=", 1)[0]
-    return flag if flag and _SECRET_KEY_RE.search(flag) else None
+    return flag if flag and (_is_credential_key(flag) or _is_query_credential_key(flag)) else None
 
 
 # Everything after 'scheme:' (and any slashes or backslashes) through the last '@'
@@ -184,17 +493,134 @@ def _credential_flag_name(token: str) -> str | None:
 _URL_USERINFO_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*:[/\\]*)[^/?#]*@")
 
 
+# The same userinfo anywhere in a text: inside '${VAR:-https://user:pw@host}', after another word, or after a
+# scheme-less '//'. A query or fragment that follows a URL anywhere in a text.
+# Inside other text only an authority introduced by two slashes counts, so 'mcp:1.2.3@sha256:...' or
+# 'npm:pkg@1.2.3' is left alone.
+_EMBEDDED_USERINFO_RE = re.compile(r"(?i)((?:\b[a-z][a-z0-9+.\-]*:)?[/\\]{2,})[^\s/\\?#@{}'\"<>]*@")
+_EMBEDDED_URL_QUERY_RE = re.compile(
+    r"(?i)(\b[a-z][a-z0-9+.\-]*:[/\\]{2,}(?:\$\{[^}]*\}|[^\s?#'\"<>{}])*)\?(?:\$\{[^}]*\}|[^\s#'\"<>{}])*"
+)
+_EMBEDDED_URL_FRAGMENT_RE = re.compile(
+    r"(?i)(\b[a-z][a-z0-9+.\-]*:[/\\]{2,}(?:\$\{[^}]*\}|[^\s#'\"<>{}])*)#(?:\$\{[^}]*\}|[^\s'\"<>{}])*"
+)
+# Values that read as credentials wherever they appear in an echoed command or spec: 'Bearer <token>', the
+# value after a credential-named flag ('--api-key X', '--token=X'), and a credential-named assignment.
+_ECHOED_AUTH_VALUE_RE = re.compile(r"(?i)\b(bearer|basic|token)(\s+)[A-Za-z0-9+/._=~-]{8,}")
+_ECHOED_CREDENTIAL_FLAG_RE = re.compile(
+    r"(?i)((?<![\w-])--?[\w-]*(?:token|secret|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|auth)[\w-]*"
+    r"(?:=|\s+))(?!\$)[^\s'\"|;&]+"
+)
+_ECHOED_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r"(?i)(\b[A-Z0-9_]*(?:TOKEN|SECRET|PASSW(?:OR)?D|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY)[A-Z0-9_]*=)(?!\$)[^\s'\"|;&]+"
+)
+_MAX_USERINFO_PASSES = 4
+
+
+def _strip_embedded_url_secrets(text: str, *, fragments: bool = True) -> str:
+    """``text`` with the userinfo and query (and, with ``fragments``, the fragment) of every URL in it removed."""
+    for _pass in range(_MAX_USERINFO_PASSES):
+        stripped = _EMBEDDED_USERINFO_RE.sub(r"\1", text)
+        if stripped == text:
+            break
+        text = stripped
+    text = _EMBEDDED_URL_QUERY_RE.sub(r"\1", text)
+    return _EMBEDDED_URL_FRAGMENT_RE.sub(r"\1", text) if fragments else text
+
+
+def redact_secrets(text: str) -> str:
+    """``text`` (a command token, spec, or line) with credentials removed, for finding messages.
+
+    URL userinfo and queries are dropped (a fragment such as a git ref stays), and
+    known secret shapes (``ghp_...``, ``sk-...``, a JWT, ``Bearer <token>``) become
+    ``<redacted>``.
+    """
+    text = _strip_embedded_url_secrets(text, fragments=False)
+    text = _SECRET_VALUE_RE.sub("<redacted>", text)
+    text = _ECHOED_AUTH_VALUE_RE.sub(r"\1\2<redacted>", text)
+    text = _ECHOED_CREDENTIAL_FLAG_RE.sub(r"\1<redacted>", text)
+    return _ECHOED_CREDENTIAL_ASSIGNMENT_RE.sub(r"\1<redacted>", text)
+
+
 def redacted_url(url: str) -> str:
     """URL for finding messages: scheme, host, port, and path only.
 
     Userinfo, parameters, query, and fragment are dropped so an inline credential
-    is never echoed into reports or CI logs, however the authority is written.
+    is never echoed into reports or CI logs, however the authority is written,
+    and also when the URL sits inside an environment reference
+    (``${MCP_URL:-https://user:pw@host/mcp}``) or after other text.
     """
+    text = url.strip()
+    if _URL_EXPANSION_RE.search(text):
+        return _redacted_reference_url(text)
     try:
-        parsed = urlparse(_URL_USERINFO_RE.sub(r"\1", url.strip(), count=1))
+        parsed = urlparse(_URL_USERINFO_RE.sub(r"\1", text, count=1))
     except ValueError:  # e.g. an unbalanced '[' in the authority
         return "<unparseable URL>"
-    return urlunparse((parsed.scheme, parsed.netloc.rpartition("@")[2], parsed.path, "", "", ""))
+    shown = urlunparse((parsed.scheme, parsed.netloc.rpartition("@")[2], parsed.path, "", "", ""))
+    return _strip_embedded_url_secrets(shown)
+
+
+def _url_display_mask(url: str) -> list[bool]:
+    """For each character of ``url``: whether a finding may show it (scheme, host, port, and path).
+
+    User information (through the last ``@`` of the authority) and everything
+    from the first ``?`` or ``#`` on are hidden.
+    """
+    keep = [True] * len(url)
+    scheme = _URL_SCHEME_RE.match(url)
+    start = scheme.end() if scheme else 0
+    authority = start
+    while authority < len(url) and url[authority] in "/\\":
+        authority += 1
+    if scheme or authority > start:
+        ends = [index for index in (url.find(mark, authority) for mark in "/?#") if index != -1]
+        at = url.rfind("@", authority, min(ends, default=len(url)))
+        for index in range(authority, at + 1):
+            keep[index] = False
+    cut = min((index for index in (url.find("?"), url.find("#")) if index != -1), default=len(url))
+    for index in range(cut, len(url)):
+        keep[index] = False
+    return keep
+
+
+def _redacted_reference_url(text: str) -> str:
+    """:func:`redacted_url` for a URL that holds ``${NAME}`` or ``${NAME:-default}`` references.
+
+    What is hidden is decided on the URL the client builds, with every default
+    in place, so a default in the path (``${P:-/mcp?token=...}``), a query after
+    a reference (``${BASE:-https://host}/mcp?token=...``), or user information
+    split over references is never shown. The references stay readable:
+    ``${MCP_URL:-https://host/mcp}``.
+    """
+    pieces: list[tuple[str, re.Match[str] | None]] = []
+    position = 0
+    for match in _URL_EXPANSION_RE.finditer(text):
+        if match.start() > position:
+            pieces.append((text[position : match.start()], None))
+        default = match.group("default")
+        # A reference with no default (or Cursor's form, never expanded here) stands for some host-like text.
+        pieces.append((default if default and not match.group("cursor") else _ENV_MARKER, match))
+        position = match.end()
+    if position < len(text):
+        pieces.append((text[position:], None))
+    keep = _url_display_mask("".join(piece for piece, _match in pieces))
+    shown: list[str] = []
+    offset = 0
+    for piece, match in pieces:
+        kept = "".join(char for char, wanted in zip(piece, keep[offset : offset + len(piece)], strict=True) if wanted)
+        offset += len(piece)
+        if match is None:
+            shown.append(kept)
+        elif not kept:
+            continue  # the whole reference sits in the user information, query, or fragment
+        elif match.group("default") and not match.group("cursor"):
+            shown.append(f"${{{match.group('name')}:-{kept}}}")
+        elif match.group("default"):
+            shown.append(f"${{env:{match.group('name')}:-{redacted_url(match.group('default'))}}}")
+        else:
+            shown.append(match.group(0))
+    return _strip_embedded_url_secrets("".join(shown))
 
 
 # --------------------------------------------------------------------------- #
@@ -256,6 +682,15 @@ def whatwg_url(url: str, base: str | None = None) -> str:
     return urljoin(base_url, text)
 
 
+def _authority_end(text: str, scheme: str | None) -> int:
+    """Index where the path, query, or fragment starts after ``scheme:`` and the authority of a special URL."""
+    start = len(scheme) + 1 if scheme else 0
+    while start < len(text) and text[start] in "/\\":
+        start += 1
+    ends = [index for index in (text.find(mark, start) for mark in "/\\?#") if index != -1]
+    return min(ends, default=len(text))
+
+
 def url_ambiguities(url: str, *, percent_in_host: bool = False) -> list[str]:
     """Why urllib and a WHATWG client (Node, MCP SDKs) could read ``url`` differently, or as different text.
 
@@ -272,7 +707,15 @@ def url_ambiguities(url: str, *, percent_in_host: bool = False) -> list[str]:
     text = url.strip()
     problems: list[str] = []
     inner = url.strip(_ASCII_EDGE_WHITESPACE)
-    if any(char.isspace() or unicodedata.category(char) == "Cc" for char in inner):
+    # A plain space after the host ('https://host/a b') reads the same way to both parsers: clients
+    # percent-encode it. Whitespace before the path, other (Unicode) whitespace, and control characters
+    # anywhere can change where the URL points or hide part of it.
+    inner_scheme = _url_scheme(inner)
+    path_start = _authority_end(inner, inner_scheme) if inner_scheme in _WHATWG_SPECIAL_SCHEMES else len(inner)
+    if any(
+        unicodedata.category(char) == "Cc" or (char.isspace() and (index < path_start or char != " "))
+        for index, char in enumerate(inner)
+    ):
         problems.append("whitespace or a control character")
     if any(unicodedata.category(char) == "Cf" for char in url):
         problems.append("an invisible format character (such as a zero-width space)")
@@ -316,18 +759,33 @@ def _safe_hostname(parsed: Any) -> str | None:
         return None
 
 
-def _check_url_inline_secrets(name: str, url: str, parsed: Any, file_path: str, findings: list[Finding]) -> None:
-    """Flag inline credentials embedded in a URL's userinfo or query string."""
+def _check_url_inline_secrets(
+    name: str,
+    url: str,
+    parsed: Any,
+    file_path: str,
+    findings: list[Finding],
+    *,
+    label: str = "url",
+    password_only: bool = False,
+) -> None:
+    """Flag inline credentials embedded in a URL's userinfo or query string (``url`` is only displayed, redacted).
+
+    With ``password_only``, a user name alone does not count (a reading in which
+    other text lands in the user name).
+    """
     try:
         username, password = parsed.username, parsed.password
     except ValueError:  # malformed netloc / port
         username = password = None
+    if password_only:
+        username = None
     if (password and not _is_env_reference(password)) or (username and not _is_env_reference(username)):
         findings.append(
             _finding(
                 Severity.CRITICAL,
                 "mcp_url_inline_secret",
-                f"url embeds inline userinfo credentials: {redacted_url(url)!r} (userinfo withheld); only "
+                f"{label} embeds inline userinfo credentials: {redacted_url(url)!r} (userinfo withheld); only "
                 "${ENV} references are allowed",
                 file_path,
                 'Remove user:password@ from the URL; pass credentials by reference (e.g. header "${MY_TOKEN}").',
@@ -335,14 +793,15 @@ def _check_url_inline_secrets(name: str, url: str, parsed: Any, file_path: str, 
             )
         )
     for key, values in parse_qs(parsed.query, keep_blank_values=True).items():
-        if not _SECRET_KEY_RE.search(key):
+        if not _is_credential_key(key, query=True):
             continue
-        if any(v and not _is_env_reference(v) for v in values):
+        if any(v and not _is_env_reference(v) and not _is_neutral_value(v) for v in values):
             findings.append(
                 _finding(
                     Severity.CRITICAL,
                     "mcp_url_inline_secret",
-                    f"url query parameter {key!r} carries an inline credential; only ${{ENV}} references are allowed",
+                    f"{label} query parameter {key!r} carries an inline credential; only ${{ENV}} references are "
+                    "allowed",
                     file_path,
                     "Do not put credentials in the URL query string; reference a secret handle/env var instead.",
                     name=name,
@@ -376,6 +835,48 @@ def _iter_command_tokens(config: dict[str, Any]) -> list[str]:
     return tokens
 
 
+_COMMAND_LINE_PARSERS: dict[str, frozenset[str]] = {
+    "cmd": frozenset({"/c", "/k", "/r"}),
+    "powershell": frozenset({"-c", "-command", "-commandwithargs"}),
+    "pwsh": frozenset({"-c", "-command", "-commandwithargs"}),
+}
+
+
+def _parses_shell_operators(argv: list[str]) -> bool:
+    """Whether the arguments of ``argv`` reach a command-line parser (``cmd /c``, ``powershell -Command``)."""
+    if not argv:
+        return False
+    inner = unwrap_launch_command(_launch_argv(argv[0], argv[1:]), expand_shell=False, stop_at=_COMMAND_LINE_PARSERS)
+    switches = _COMMAND_LINE_PARSERS.get(_command_basename(inner[0])) if inner else None
+    return switches is not None and any(token.lower() in switches for token in inner[1:])
+
+
+def _interpreter_inline_code(argv: list[str]) -> str | None:
+    """The program of ``python -c CODE``, ``node -e CODE``, ``perl -e CODE``, ``deno eval CODE``, and the like."""
+    if not argv:
+        return None
+    base = _command_basename(argv[0])
+    base = "python" if _PYTHON_NAME_RE.match(base) else _INTERPRETER_ALIASES.get(base, base)
+    if base == "deno":
+        return argv[2] if argv[1:2] == ["eval"] and len(argv) > 2 else None
+    options = _INLINE_CODE_OPTIONS.get(base)
+    if options is None:
+        return None
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token == "--" or not token.startswith("-") or len(token) == 1:
+            return None  # a script or module runs; what follows are its arguments
+        name, sep, attached = token.partition("=")
+        # The option itself ('-c', '--eval=CODE'), or a short-option cluster that ends in it ('python -Bc CODE').
+        if name in options or (not token.startswith("--") and f"-{token[-1]}" in options):
+            if sep and name in options:
+                return attached
+            return argv[index + 1] if index + 1 < len(argv) else None
+        index += 2 if token in _INTERPRETER_VALUE_OPTIONS else 1
+    return None
+
+
 def _validate_command(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
     command = config.get("command")
     if not isinstance(command, str) or not command.strip():
@@ -405,15 +906,33 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
         )
 
     tokens = _iter_command_tokens(config)
-    for token in tokens:
-        if _SHELL_METACHAR_RE.search(token):
+    # The program the launch really runs, with wrappers looked through ('env sh -c', 'timeout 30 bash -lc',
+    # 'sudo sh -c', 'cmd /c sh -c'). A shell's '-c' program and an interpreter's inline program ('python -c',
+    # 'node -e') are code, so their text is checked like a shell line.
+    launched = unwrap_launch_command(_launch_argv(command, tokens[1:]), expand_shell=False)
+    runs_shell_program, shell_text_program = (
+        _shell_inline(launched) if launched and _command_basename(launched[0]) in _SHELL_INTERPRETERS else (False, None)
+    )
+    programs = [program for program in (shell_text_program, _interpreter_inline_code(launched)) if program]
+    # MCP clients start the server argv-style, without a shell, so an operator inside one argument ('foo|bar',
+    # a PEP 440 range '>=1.2,<2') is plain text. Operators count in 'command' itself (a shell line smuggled into
+    # the executable), in the arguments of a command-line wrapper that does parse them ('cmd /c', PowerShell),
+    # in an inline program, and as an argument that is only an operator ('&&') or carries command substitution
+    # ('$(...)', a backtick).
+    shell_args = _parses_shell_operators(tokens)
+    for index, token in enumerate(tokens):
+        shell_text = index == 0 or shell_args or (token in programs)
+        if (shell_text and _SHELL_METACHAR_RE.search(token)) or (
+            not shell_text and (_SHELL_OPERATOR_ARG_RE.match(token.strip()) or _SUBSTITUTION_ARG_RE.search(token))
+        ):
             findings.append(
                 _finding(
                     Severity.CRITICAL,
                     "mcp_command_shell_metacharacters",
-                    f"command token contains shell metacharacters: {token!r}",
+                    f"command token contains shell metacharacters: {redact_secrets(token)!r}",
                     file_path,
-                    "Remove shell operators (; | & ` $() < >). MCP commands run argv-style, not via a shell.",
+                    "Remove shell operators (; | & ` $() < >) from 'command' and from 'cmd /c' or PowerShell "
+                    "command lines; other arguments are passed argv-style, not through a shell.",
                     name=name,
                 )
             )
@@ -428,18 +947,19 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
                     name=name,
                 )
             )
-        if _FLOATING_MARKER_RE.search(token):
+    for program in programs:
+        # An inline program split out of one command-line string ('env -S "sh -c ..."') is not a token of its own.
+        if program not in tokens and _SHELL_METACHAR_RE.search(program):
             findings.append(
                 _finding(
-                    Severity.HIGH,
-                    "mcp_command_floating_version",
-                    f"command token uses a floating (unpinned) version: {token!r}",
+                    Severity.CRITICAL,
+                    "mcp_command_shell_metacharacters",
+                    f"inline program contains shell metacharacters: {redact_secrets(program)!r}",
                     file_path,
-                    "Pin the referenced package/image to an exact version, not latest/main.",
+                    "Invoke the server binary directly instead of passing it an inline program.",
                     name=name,
                 )
             )
-
     # Inline credentials carried in command arguments. A credential-named flag
     # (--api-key, --token, --password, ...) must reference an env var, never a raw
     # literal; and any argument whose *value* has a known secret shape or is an
@@ -458,7 +978,9 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
                 value, value_idx = arg_list[idx + 1], idx + 1
             else:
                 value, value_idx = "", -1
-            if value and not _is_env_reference(value):
+            # A setting ('--auth basic', a path) is not a credential; a short flag such as '--key' or '--pass'
+            # needs a value shaped like key material ('--key primary' is a setting).
+            if value and _looks_like_inline_secret(flag, value):
                 findings.append(
                     _finding(
                         Severity.CRITICAL,
@@ -483,30 +1005,24 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
                 _finding(
                     Severity.CRITICAL,
                     "mcp_command_inline_secret",
-                    f"command argument contains an inline credential: {token!r}",
+                    f"command argument args[{idx}] contains an inline credential (value not shown); only ${{ENV}} "
+                    "references are allowed",
                     file_path,
                     'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
                     name=name,
                 )
             )
 
-    # Shell interpreter invoked with an inline program string (`sh -c "..."`, `bash -lc "..."`).
-    command_words = command.split()
-    shell_args: list[str] | None = None
-    if _command_basename(command) in _SHELL_INTERPRETERS:
-        # 'command' names only the shell, possibly as a path with spaces such as
-        # "C:\Program Files\Git\bin\bash.exe", so every shell option is in 'args'.
-        shell_args = arg_list
-    elif _command_basename(command_words[0]) in _SHELL_INTERPRETERS:
-        # A whole command line in 'command' ("bash -c node") is read argv-style, as
-        # classify_mcp_pinning does.
-        shell_args = [*command_words[1:], *arg_list]
-    if shell_args is not None and _shell_runs_inline_program(shell_args):
+    # Shell interpreter invoked with an inline program string ('sh -c "..."', 'bash -lc', 'env sh -c', 'sudo sh -c').
+    if runs_shell_program:
+        shell, wrapper = launched[0], _launch_argv(command, tokens[1:])[0]
+        through = "" if wrapper == shell else f" through {redact_secrets(wrapper)!r}"
         findings.append(
             _finding(
                 Severity.CRITICAL,
                 "mcp_command_dangerous_form",
-                f"command invokes a shell interpreter with '-c' ({command!r}); this executes an arbitrary program string",
+                f"command invokes a shell interpreter with '-c' ({redact_secrets(shell)!r}{through}); this executes "
+                "an arbitrary program string",
                 file_path,
                 "Invoke the server binary directly instead of wrapping it in a shell '-c' string.",
                 name=name,
@@ -514,26 +1030,130 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
         )
 
 
-def _shell_runs_inline_program(shell_args: list[str]) -> bool:
-    """Return whether a shell's arguments select an inline program string ('-c').
+# Stand-in for a reference with no default, so the URL can be parsed to see what the reference decides.
+_ENV_MARKER = "zzenvrefzz"
 
-    A shell reads options only until its first operand (the script it runs) or an
-    end-of-options marker ('--' or '-'). Later arguments belong to the script, so
-    a script's own '-config' or '-recursive' is not the shell's '-c'.
+
+def _expand_url_defaults(url: str) -> tuple[str, list[str]]:
+    """An MCP URL as Claude Code expands it when no variable is set.
+
+    ``${NAME:-default}`` becomes its default. ``${NAME}``, ``${NAME:-}``, and
+    Cursor's ``${env:NAME}`` stay; their names are returned, because their value
+    comes from the user's environment.
     """
-    index = 0
-    while index < len(shell_args):
-        arg = shell_args[index].strip()
-        if arg in {"-", "--"} or not arg.startswith(("-", "+")):
-            return False
-        if _SHELL_INLINE_PROGRAM_FLAG_RE.fullmatch(arg):
-            return True
-        if arg.startswith("--"):
-            takes_value = arg in _SHELL_VALUE_LONG_OPTIONS
-        else:
-            takes_value = "o" in arg or "O" in arg
-        index += 2 if takes_value else 1
-    return False
+    unresolved: list[str] = []
+
+    def _expand(match: re.Match[str]) -> str:
+        default = match.group("default")
+        if default and not match.group("cursor"):
+            return default
+        unresolved.append(match.group("name"))
+        return match.group(0)
+
+    return _URL_EXPANSION_RE.sub(_expand, url), unresolved
+
+
+def expand_url_defaults(url: str) -> str:
+    """The URL with every ``${NAME:-default}`` replaced by its default; references without a default are kept."""
+    return _expand_url_defaults(url)[0]
+
+
+def _env_controls_endpoint(expanded: str) -> bool:
+    """Whether a reference without a default decides the scheme, host, or port of ``expanded``."""
+    probe = _URL_EXPANSION_RE.sub(_ENV_MARKER, expanded)
+    try:
+        parsed = urlparse(whatwg_url(probe))
+        host = parsed.hostname or ""
+        port = str(parsed.port or "")
+    except ValueError:
+        return True
+    return not parsed.scheme or any(_ENV_MARKER in part for part in (parsed.scheme.lower(), host, port))
+
+
+def _url_secrets_in_text(name: str, url: str, text: str, label: str, file_path: str, findings: list[Finding]) -> None:
+    """Credentials the URL text ships (also in a default), when the URL is not otherwise checked."""
+    try:
+        parsed = urlparse(text.strip())
+    except ValueError:
+        return
+    _check_url_inline_secrets(name, url, parsed, file_path, findings, label=label)
+
+
+def _resolve_url_references(
+    name: str, url: str, label: str, file_path: str, findings: list[Finding], client: McpClient
+) -> str | None:
+    """The URL to check for an MCP URL that uses environment expansion, or ``None`` when it cannot be checked.
+
+    Claude Code (and, leniently, Cursor and Agent Plugins clients) expand
+    ``${NAME:-default}``: the default the plugin ships is checked like any URL.
+    A reference without a default that decides the scheme or host leaves the
+    endpoint to the user, which is a LOW advisory. Codex does not expand
+    references in plugin MCP URLs at all (it reads the text as a relative URL
+    and never connects), which is HIGH.
+    """
+    expanded, unresolved = _expand_url_defaults(url)
+    shown = redacted_url(url)
+    if client == "codex":
+        effect = (
+            "reads it as a relative URL and never connects to the server"
+            if _env_controls_endpoint(_URL_EXPANSION_RE.sub("${UNSET}", url))
+            else "sends the '${...}' text literally, so the variable is never filled in"
+        )
+        findings.append(
+            _finding(
+                Severity.HIGH,
+                "mcp_url_env_not_expanded",
+                f"{label} {shown!r} uses '${{...}}' environment expansion, which Codex does not apply to plugin "
+                f"MCP URLs; Codex {effect}",
+                file_path,
+                "Write the full https:// endpoint in a Codex plugin; '${VAR:-default}' expansion is a Claude Code "
+                "feature.",
+                name=name,
+            )
+        )
+        _url_secrets_in_text(name, url, expanded, label, file_path, findings)
+        return None
+    if unresolved and _env_controls_endpoint(expanded):
+        variables = ", ".join(dict.fromkeys(unresolved))
+        findings.append(
+            _finding(
+                Severity.LOW,
+                "mcp_url_env_unchecked",
+                f"{label} {shown!r} takes its scheme or host from environment variable(s) {variables} with no "
+                "default, so the endpoint the client reaches cannot be checked statically",
+                file_path,
+                'Give the variable a safe default ("${VAR:-https://host/mcp}") or document the value users must set.',
+                name=name,
+            )
+        )
+        _url_secrets_in_text(name, url, expanded, label, file_path, findings)
+        return None
+    return expanded
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    endpoint = classify_endpoint_host(host) if host else None
+    return endpoint is not None and endpoint.reason == "loopback"
+
+
+def _validate_oauth_urls(
+    name: str,
+    config: dict[str, Any],
+    file_path: str,
+    findings: list[Finding],
+    allowed_private_hosts: Iterable[str],
+    *,
+    client: McpClient,
+) -> None:
+    """Claude Code fetches OAuth server metadata from ``oauth.authServerMetadataUrl``: the same URL policy applies."""
+    oauth = config.get("oauth")
+    if not isinstance(oauth, dict):
+        return
+    url = oauth.get("authServerMetadataUrl")
+    if isinstance(url, str) and url.strip():
+        _check_endpoint_url(
+            name, url, "oauth.authServerMetadataUrl", file_path, findings, allowed_private_hosts, client=client
+        )
 
 
 def _validate_url(
@@ -542,6 +1162,8 @@ def _validate_url(
     file_path: str,
     findings: list[Finding],
     allowed_private_hosts: Iterable[str] = (),
+    *,
+    client: McpClient = "claude",
 ) -> None:
     url = config.get("url")
     if not isinstance(url, str) or not url.strip():
@@ -556,8 +1178,27 @@ def _validate_url(
             )
         )
         return
+    _check_endpoint_url(name, url, "url", file_path, findings, allowed_private_hosts, client=client)
 
-    shown = redacted_url(url)  # messages never echo userinfo or query credentials
+
+def _check_endpoint_url(
+    name: str,
+    url: str,
+    label: str,
+    file_path: str,
+    findings: list[Finding],
+    allowed_private_hosts: Iterable[str],
+    *,
+    client: McpClient = "claude",
+) -> None:
+    """Scheme, host, credential, and endpoint checks for one URL field of an MCP server (``label`` names it)."""
+    display = url  # messages show the declared text, redacted
+    if _URL_EXPANSION_RE.search(url):
+        expanded = _resolve_url_references(name, url, label, file_path, findings, client)
+        if expanded is None:
+            return
+        url = expanded
+    shown = redacted_url(display)  # messages never echo userinfo or query credentials
     try:
         # ``raw`` is how urllib (and Python clients) read the text; ``parsed`` is how
         # WHATWG clients (Node and Rust MCP clients) read it. They differ only for an
@@ -569,7 +1210,7 @@ def _validate_url(
             _finding(
                 Severity.HIGH,
                 "mcp_url_malformed_authority",
-                "url could not be parsed (malformed authority)",
+                f"{label} could not be parsed (malformed authority)",
                 file_path,
                 "Use a valid host[:port] authority, e.g. https://host:443/path.",
                 name=name,
@@ -582,7 +1223,7 @@ def _validate_url(
             _finding(
                 Severity.HIGH,
                 "mcp_url_malformed_authority",
-                f"url contains {', and '.join(problems)}, so MCP clients and URL parsers disagree on where it "
+                f"{label} contains {', and '.join(problems)}, so MCP clients and URL parsers disagree on where it "
                 f"points: {shown!r} (WHATWG clients {_client_reading(parsed)})",
                 file_path,
                 "Write the URL with '//' after the scheme and without backslashes, whitespace, or control "
@@ -591,13 +1232,18 @@ def _validate_url(
             )
         )
     scheme = (parsed.scheme or "").lower()
+    # Host findings name the URL the way the client that connects reads it: for
+    # 'https://169.254.169.254\\@pub.example/' that is the metadata host, not pub.example.
+    client_shown = redacted_url(whatwg_url(url)) if problems else shown
     # Inline credentials in userinfo/query are persisted verbatim; check them
-    # independent of the scheme (secure https URLs are the common case).
+    # independent of the scheme (secure https URLs are the common case). The
+    # userinfo is the one WHATWG clients send (also in 'https:user:password@host').
     found = len(findings)
-    _check_url_inline_secrets(name, url, raw, file_path, findings)
+    _check_url_inline_secrets(name, display, parsed, file_path, findings, label=label)
     if problems and len(findings) == found:
-        # WHATWG clients read userinfo urllib does not see, e.g. in 'https:user:password@host'.
-        _check_url_inline_secrets(name, url, parsed, file_path, findings)
+        # urllib reads another authority. A literal password there still ships in the plugin text, but text
+        # before a backslash that urllib reads as a user name ('169.254.169.254\\@host') is not a credential.
+        _check_url_inline_secrets(name, display, raw, file_path, findings, label=label, password_only=True)
     if problems:
         # A Python client may still connect where urllib reads the host: classify that one too.
         try:
@@ -605,7 +1251,16 @@ def _validate_url(
         except ValueError:
             raw_host = None
         if raw_host and raw_host != _safe_hostname(parsed):
-            _validate_endpoint(name, url, raw_host, file_path, findings, allowed_private_hosts)
+            _validate_endpoint(
+                name,
+                display,
+                raw_host,
+                file_path,
+                findings,
+                allowed_private_hosts,
+                label=label,
+                shown=f"{shown} (as Python clients read it)",
+            )
     if scheme in ALLOWED_MCP_URL_SCHEMES:
         # A secure scheme alone is not a usable endpoint: require a host to connect
         # to, and reject a malformed authority/port. Otherwise a URL like "https://"
@@ -618,7 +1273,7 @@ def _validate_url(
                 _finding(
                     Severity.HIGH,
                     "mcp_url_malformed_authority",
-                    f"url has a malformed authority/port: {shown!r}",
+                    f"{label} has a malformed authority/port: {shown!r}",
                     file_path,
                     "Use a valid host[:port] authority, e.g. https://host:443/path.",
                     name=name,
@@ -630,13 +1285,15 @@ def _validate_url(
                 _finding(
                     Severity.HIGH,
                     "mcp_url_no_host",
-                    f"url uses scheme {scheme!r} but has no host to connect to: {shown!r}",
+                    f"{label} uses scheme {scheme!r} but has no host to connect to: {shown!r}",
                     file_path,
                     "Provide a full endpoint with a hostname, e.g. https://host[:port]/path.",
                     name=name,
                 )
             )
-        _validate_endpoint(name, url, host, file_path, findings, allowed_private_hosts)
+        _validate_endpoint(
+            name, display, host, file_path, findings, allowed_private_hosts, label=label, shown=client_shown
+        )
         return
     if scheme in _INSECURE_URL_SCHEMES:
         # Plaintext endpoints are blocked below; still report where they point.
@@ -644,24 +1301,41 @@ def _validate_url(
             insecure_host = parsed.hostname
         except ValueError:
             insecure_host = None
-        _validate_endpoint(name, url, insecure_host, file_path, findings, allowed_private_hosts)
-    if scheme in _DANGEROUS_URL_SCHEMES or scheme == "":
+        _validate_endpoint(
+            name, display, insecure_host, file_path, findings, allowed_private_hosts, label=label, shown=client_shown
+        )
+    if scheme == "":
+        findings.append(
+            _finding(
+                Severity.HIGH,
+                "mcp_url_scheme_missing",
+                f"{label} {shown!r} has no scheme, so MCP clients cannot connect to it",
+                file_path,
+                "Write the full endpoint with its scheme, e.g. https://host/mcp.",
+                name=name,
+            )
+        )
+    elif scheme in _DANGEROUS_URL_SCHEMES:
         findings.append(
             _finding(
                 Severity.CRITICAL,
                 "mcp_url_dangerous_scheme",
-                f"url uses a dangerous/invalid scheme {scheme or '(none)'!r}: {shown!r}",
+                f"{label} uses a dangerous scheme {scheme!r}: {shown!r}",
                 file_path,
                 "Use a secure https:// or wss:// endpoint; file/data/javascript/ftp schemes are not permitted.",
                 name=name,
             )
         )
+    elif scheme in _INSECURE_URL_SCHEMES and _is_loopback_host(_safe_hostname(parsed)):
+        # Same rule as HTTP hooks: plaintext to this machine's loopback interface does not cross a network
+        # (a local desktop app's MCP server); the MEDIUM loopback finding above still reports it.
+        pass
     elif scheme in _INSECURE_URL_SCHEMES:
         findings.append(
             _finding(
                 Severity.HIGH,
                 "mcp_url_insecure_scheme",
-                f"url uses an insecure plaintext scheme {scheme!r}: {shown!r}",
+                f"{label} uses an insecure plaintext scheme {scheme!r}: {shown!r}",
                 file_path,
                 "Use https:// (or wss://) so the MCP transport is encrypted.",
                 name=name,
@@ -672,7 +1346,7 @@ def _validate_url(
             _finding(
                 Severity.HIGH,
                 "mcp_url_scheme_not_allowed",
-                f"url scheme {scheme!r} is not an allowed MCP scheme: {shown!r}",
+                f"{label} scheme {scheme!r} is not an allowed MCP scheme: {shown!r}",
                 file_path,
                 f"Use one of the allowed secure schemes: {', '.join(sorted(ALLOWED_MCP_URL_SCHEMES))}.",
                 name=name,
@@ -680,7 +1354,14 @@ def _validate_url(
         )
 
 
-def _validate_env_and_headers(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+# Codex MCP fields that carry auth or environment the evaluation runtime does not apply (Tier 3 then reports
+# the server INCOMPLETE); kept in step with plugin_components._CODEX_UNAPPLIED_MCP_FIELDS.
+_CODEX_UNAPPLIED_FIELDS = ("env_vars", "env_http_headers", "bearer_token_env_var", "http_headers_helper", "oauth")
+
+
+def _validate_env_and_headers(
+    name: str, config: dict[str, Any], file_path: str, findings: list[Finding], *, client: McpClient = "claude"
+) -> None:
     for section in ("env", "headers"):
         block = config.get(section)
         if block is None:
@@ -697,49 +1378,89 @@ def _validate_env_and_headers(name: str, config: dict[str, Any], file_path: str,
                 )
             )
             continue
-        # NON-BLOCKING advisory: the evaluation runtime applies command+args (stdio)
-        # and url (http/sse) only -- Harbor's per-MCP-server config has no env/headers
-        # field and no agent adapter emits them, so this block will not reach the
-        # launched MCP server (use task-level environment / CI credential injection
-        # instead). The inline-secret / insecure-TLS checks below still run, so a raw
-        # credential declared here is still caught and blocks.
+        # NON-BLOCKING advisory: the wrapper runtime applies command+args (stdio) and
+        # url (http/sse) only -- Harbor's per-MCP-server config has no env/headers field.
+        # Only a native Claude Code arm (the plugin's own .mcp.json) applies them. The
+        # inline-secret / insecure-TLS checks below still run, so a raw credential
+        # declared here is still caught and blocks.
         findings.append(
             _finding(
                 Severity.LOW,
                 "mcp_field_ignored",
-                f"'{section}' is not applied by the evaluation runtime and will be ignored; "
-                "a Tier 3 run of this server is reported INCOMPLETE",
+                f"'{section}' is applied only when Tier 3 loads the plugin natively in Claude Code; the wrapper "
+                "runtime and the other harnesses ignore it, and such a Tier 3 run of this server is reported "
+                "INCOMPLETE",
                 file_path,
-                f"Remove '{section}' or rely on task-level environment / CI credential injection; "
-                "the runtime applies command+args (stdio) and url (http/sse) only.",
+                f"Use --plugin-load native with Claude Code, or remove '{section}' and rely on task-level "
+                "environment / CI credential injection.",
                 name=name,
             )
         )
-        for key, value in block.items():
-            if not isinstance(value, str):
-                continue
-            if _is_insecure_tls_env(key, value):
+        _validate_secret_values(name, section, block, file_path, findings, tls_env=True)
+    oauth = config.get("oauth")
+    if isinstance(oauth, dict):
+        # A literal client secret in the OAuth block ships with the plugin like any other credential.
+        _validate_secret_values(name, "oauth", oauth, file_path, findings, tls_env=False)
+    if client == "codex":
+        for field in _CODEX_UNAPPLIED_FIELDS:
+            if config.get(field):
                 findings.append(
                     _finding(
-                        Severity.CRITICAL,
-                        "mcp_insecure_tls_env",
-                        f"'{section}.{key}' disables TLS/certificate verification",
+                        Severity.LOW,
+                        "mcp_field_ignored",
+                        f"Codex '{field}' is not applied by the evaluation runtime; a Tier 3 run of this server is "
+                        "reported INCOMPLETE",
                         file_path,
-                        "Do not disable TLS verification via environment variables.",
+                        f"Expect an INCOMPLETE Tier 3 run, or remove '{field}' if the server works without it.",
                         name=name,
                     )
                 )
-            if _looks_like_inline_secret(key, value):
-                findings.append(
-                    _finding(
-                        Severity.CRITICAL,
-                        "mcp_inline_secret",
-                        f"'{section}.{key}' contains an inline credential; only ${{ENV}} references are allowed",
-                        file_path,
-                        'Reference a secret handle/env var (e.g. "${MY_TOKEN}"); never inline a raw secret.',
-                        name=name,
-                    )
+
+
+def _validate_secret_values(
+    name: str, section: str, block: dict[Any, Any], file_path: str, findings: list[Finding], *, tls_env: bool
+) -> None:
+    """Inline credentials (and, for env and headers, TLS-off switches) among one block's string values."""
+    for key, value in block.items():
+        if not isinstance(value, str):
+            continue
+        if tls_env and _is_insecure_tls_env(key, value):
+            findings.append(
+                _finding(
+                    Severity.CRITICAL,
+                    "mcp_insecure_tls_env",
+                    f"'{section}.{key}' disables TLS/certificate verification",
+                    file_path,
+                    "Do not disable TLS verification via environment variables.",
+                    name=name,
                 )
+            )
+        # A header name such as 'Key' names a credential the way a query key does; an env name 'KEY' needs a
+        # value shaped like key material.
+        if _looks_like_inline_secret(key, value, query=section == "headers"):
+            findings.append(
+                _finding(
+                    Severity.CRITICAL,
+                    "mcp_inline_secret",
+                    f"'{section}.{key}' contains an inline credential; only ${{ENV}} references are allowed",
+                    file_path,
+                    'Reference a secret handle/env var (e.g. "${MY_TOKEN}"); never inline a raw secret.',
+                    name=name,
+                )
+            )
+        elif _looks_like_random_secret(key, env_defaults_text(value)):
+            findings.append(
+                _finding(
+                    Severity.MEDIUM,
+                    "mcp_possible_inline_secret",
+                    f"'{section}.{key}' holds a long random-looking value that may be a credential (value not "
+                    "shown); the key name does not say what it is",
+                    file_path,
+                    'If it is a secret, reference it (e.g. "${MY_SECRET}"); if not, rename the key to say what it '
+                    "holds.",
+                    name=name,
+                )
+            )
 
 
 def _validate_transport(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
@@ -847,6 +1568,7 @@ _PEP440_EXACT_RE = re.compile(
 _GIT_SHA_RE = re.compile(r"(?:#|@)[0-9a-fA-F]{40}(?:$|[&#])")
 _DOCKER_DIGEST_RE = re.compile(r"@sha256:[0-9a-fA-F]{64}$")
 _VERSION_TAG_RE = re.compile(r"^v?\d+(?:\.\d+)*(?:[-+._][0-9A-Za-z.]+)*$")
+_DOTTED_VERSION_PREFIX_RE = re.compile(r"^v?\d+\.\d+(?![0-9A-Za-z])")
 _PLUGIN_PATH_REFS: tuple[str, ...] = ("${CLAUDE_PLUGIN_ROOT}", "${CLAUDE_PLUGIN_DATA}", "${CLAUDE_PROJECT_DIR}")
 _LOCAL_SPEC_PREFIXES: tuple[str, ...] = (".", "/", "~", "file:", *_PLUGIN_PATH_REFS)
 _REMOTE_SPEC_PREFIXES: tuple[str, ...] = ("git+", "git:", "github:", "gitlab:", "bitbucket:", "http://", "https://")
@@ -854,9 +1576,59 @@ _REMOTE_SPEC_PREFIXES: tuple[str, ...] = ("git+", "git:", "github:", "gitlab:", 
 # Value-taking flags per package runner, so a flag's value is never mistaken for
 # the package spec. Unknown flags are treated as boolean.
 _NPX_VALUE_FLAGS = frozenset(
-    {"-p", "--package", "-c", "--call", "--registry", "--cache", "--userconfig", "--prefix", "-w", "--workspace"}
+    {
+        "-p",
+        "--package",
+        "-c",
+        "--call",
+        "--registry",
+        "--cache",
+        "--userconfig",
+        "--globalconfig",
+        "--prefix",
+        "-w",
+        "--workspace",
+        "--loglevel",
+        "--node-options",
+        "--script-shell",
+        "--include",
+        "--omit",
+        "--before",
+    }
 )
-_DLX_VALUE_FLAGS = frozenset({"-p", "--package", "--registry", "--allow-build"})
+_DLX_VALUE_FLAGS = frozenset(
+    {"-p", "--package", "--registry", "--allow-build", "-C", "--dir", "--reporter", "--loglevel", "--filter"}
+)
+# Options that take a value before the 'run'/'exec'/'dlx' subcommand of a runner front end.
+_NPM_GLOBAL_VALUE_FLAGS = frozenset({*_NPX_VALUE_FLAGS, "-C", "--dir"})
+_UV_RUN_VALUE_FLAGS = frozenset(
+    {
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+        "-p",
+        "--python",
+        "--project",
+        "--directory",
+        "--package",
+        "--extra",
+        "--group",
+        "--only-group",
+        "--no-group",
+        "--env-file",
+        "--index",
+        "--default-index",
+        "-i",
+        "--index-url",
+        "--extra-index-url",
+        "-f",
+        "--find-links",
+        "--config-file",
+        "--cache-dir",
+    }
+)
+_GO_RUN_VALUE_FLAGS = frozenset({"-C", "-exec", "-o", "-p", "-tags", "-ldflags", "-gcflags", "-mod", "-modfile"})
+_DNX_VALUE_FLAGS = frozenset({"--version", "--source", "--add-source", "--configfile", "--verbosity", "-v"})
 _UVX_VALUE_FLAGS = frozenset(
     {
         "--from",
@@ -998,14 +1770,66 @@ _DOCKER_VALUE_FLAGS = frozenset(
     }
 )
 _CONTAINER_RUNTIMES = frozenset({"docker", "podman", "nerdctl"})
+_CONTAINER_GLOBAL_VALUE_FLAGS = frozenset({"-c", "--context", "-H", "--host", "--config", "-l", "--log-level"})
+# Programs that a launch command wraps around the real one: their own options (and, for timeout, the
+# duration) come first, then the wrapped command line.
+_WRAPPER_VALUE_FLAGS: dict[str, frozenset[str]] = {
+    "env": frozenset({"-u", "--unset", "-C", "--chdir"}),
+    "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "nohup": frozenset(),
+    "sudo": frozenset({"-u", "--user", "-g", "--group", "-C", "-D", "--chdir", "-h", "--host", "-p", "--prompt"}),
+    "doas": frozenset({"-u", "-C"}),
+    "exec": frozenset({"-a"}),
+    "command": frozenset(),
+    "time": frozenset({"-f", "--format", "-o", "--output"}),
+    "stdbuf": frozenset({"-i", "-o", "-e"}),
+    "busybox": frozenset(),
+}
+# Shell options whose value is the program (fish), and long options that take a value.
+_SHELL_COMMAND_OPTIONS = frozenset({"--command"})
+_SHELL_LONG_VALUE_OPTIONS = frozenset({"--rcfile", "--init-file", "--init-command"})
+_MAX_UNWRAP_DEPTH = 8
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Everything the pinning classifier knows by name; a 'command' with spaces that ends in one of
+# these is a path ('C:\\Program Files\\nodejs\\npx.cmd'), not a whole command line.
+_KNOWN_LAUNCHERS = frozenset(
+    {
+        "npx",
+        "bunx",
+        "pnpx",
+        "bun",
+        "pnpm",
+        "yarn",
+        "npm",
+        "uvx",
+        "uv",
+        "pipx",
+        "deno",
+        "go",
+        "dnx",
+        "cmd",
+        "powershell",
+        "pwsh",
+        *_CONTAINER_RUNTIMES,
+        *_SHELL_INTERPRETERS,
+        *_WRAPPER_VALUE_FLAGS,
+    }
+)
 
 
 @dataclass(frozen=True)
 class McpPinning:
-    """Static supply-chain pinning classification of one MCP declaration."""
+    """Static supply-chain pinning classification of one MCP declaration.
+
+    ``floating`` marks an ``unpinned`` launch whose version or tag names a
+    moving release channel (``@latest``, ``:main``, ``:1-nightly``); it is the
+    blocking case. Other ``unpinned`` launches (no version, a range) warn.
+    """
 
     status: PinStatus
     detail: str
+    floating: bool = False
 
     @property
     def pinned(self) -> bool | None:
@@ -1016,11 +1840,177 @@ class McpPinning:
 
 
 def _command_basename(command: str) -> str:
-    base = command.strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
+    base = command.strip().strip("\"'").replace("\\", "/").rsplit("/", 1)[-1].lower()
     for suffix in (".exe", ".cmd", ".bat", ".ps1"):
         if base.endswith(suffix):
             return base[: -len(suffix)]
     return base
+
+
+def _is_floating_tag(tag: str, *, composite: bool = True) -> bool:
+    """Whether a version or tag names a moving channel: ``latest``, ``main``, and, with ``composite``, ``1-latest``."""
+    lowered = tag.strip().lower()
+    if lowered in _FLOATING_TAGS:
+        return True
+    return composite and any(part in _FLOATING_TAGS for part in re.split(r"[-+._]", lowered) if part)
+
+
+def _is_floating_image_tag(tag: str) -> bool:
+    """Whether an image tag names a moving channel: ``latest``, ``1-latest``, ``0-nightly``, ``stable-alpine``.
+
+    A tag that starts with a version of at least ``major.minor`` names one
+    release, also with a pre-release word (``1.0.0-beta``, ``2.1.0-rc``,
+    ``3.0-dev``, ``2024.01-preview``), as ``@1.0.0-beta`` does for npm. Only
+    ``latest`` moves wherever it appears (``1.2-latest``).
+    """
+    lowered = tag.strip().lower()
+    if not _is_floating_tag(lowered):
+        return False
+    if _DOTTED_VERSION_PREFIX_RE.match(lowered):
+        return "latest" in re.split(r"[-+._]", lowered)
+    return True
+
+
+def _split_command_line(tokens: list[str]) -> list[str]:
+    """A command line given as one string (``cmd /c "npx -y pkg"``) as words; other argv as is."""
+    if len(tokens) == 1 and any(char.isspace() for char in tokens[0]):
+        return [word.strip("\"'") for word in tokens[0].split()]
+    return list(tokens)
+
+
+def _launch_argv(command: str, args: list[str]) -> list[str]:
+    """The argv a launch config runs: ``command`` plus ``args``.
+
+    A ``command`` with spaces is a whole command line (``"npx -y pkg"``) unless it
+    is a path to a known launcher (``C:\\Program Files\\nodejs\\npx.cmd``).
+    """
+    stripped = command.strip()
+    if any(char.isspace() for char in stripped) and _command_basename(stripped) not in _KNOWN_LAUNCHERS:
+        return [*_split_command_line([stripped]), *args]
+    return [stripped, *args]
+
+
+def _skip_options(tokens: list[str], value_flags: frozenset[str]) -> int:
+    """Index of the first positional token, skipping options and the values of ``value_flags``."""
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return index + 1
+        if not token.startswith("-") or len(token) == 1:
+            return index
+        if "=" not in token and token in value_flags:
+            index += 1
+        index += 1
+    return index
+
+
+def _shell_inline(tokens: list[str]) -> tuple[bool, str | None]:
+    """``(runs a -c program, the program)`` for a shell argv.
+
+    Reads ``sh -c '<program>'``, combined flags (``bash -lc``, ``sh -ec``),
+    the ``+c`` form bash, sh, and zsh also accept, options before or after
+    ``-c`` (``bash -o pipefail -c``, ``bash -oe pipefail -c``, ``bash -c -e``),
+    ``--`` before the program, and fish's ``--command``. Options end at the
+    first operand (a script's own ``-config`` is not the shell's). The program
+    is the first word after the options; it is ``None`` when none follows.
+    """
+    inline = False
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            index += 1
+            break
+        if token in _SHELL_COMMAND_OPTIONS:
+            return True, (tokens[index + 1] if index + 1 < len(tokens) else None)
+        if token.startswith(tuple(f"{option}=" for option in _SHELL_COMMAND_OPTIONS)):
+            return True, token.partition("=")[2]
+        if token.startswith("--"):
+            index += 2 if token in _SHELL_LONG_VALUE_OPTIONS else 1
+            continue
+        if len(token) > 1 and token[0] in "-+":
+            letters = token[1:]
+            # bash, sh, and zsh also run '+c' (and '+lc') as '-c'.
+            inline = inline or "c" in letters
+            # '-o pipefail', '-euo pipefail', '-oe pipefail', '+O extglob': the option name is the next word.
+            index += 2 if "o" in letters or "O" in letters else 1
+            continue
+        break
+    if not inline:
+        return False, None
+    return True, (tokens[index] if index < len(tokens) else None)
+
+
+def _shell_program(tokens: list[str]) -> str | None:
+    """The program string of ``sh -c '<program>'`` (also ``bash -lc``); ``None`` otherwise."""
+    return _shell_inline(tokens)[1]
+
+
+def shell_program(tokens: list[str]) -> str | None:
+    """The program string when ``tokens`` run a shell interpreter with ``-c`` (``bash -c '<program>'``)."""
+    if not tokens or _command_basename(tokens[0]) not in _SHELL_INTERPRETERS:
+        return None
+    return _shell_program([str(token) for token in tokens])
+
+
+def unwrap_launch_command(tokens: list[str], *, expand_shell: bool = True, stop_at: Iterable[str] = ()) -> list[str]:
+    """Strip launch wrappers so the runner they start is classified.
+
+    ``cmd /c <command line>``, ``powershell -Command <line>``, ``env [opts]
+    NAME=VALUE ...``, ``timeout <duration>``, ``nice``, ``nohup``, ``sudo``,
+    ``doas``, ``exec``, ``command``, ``time``, and ``stdbuf`` are removed, along
+    with their own options. With ``expand_shell``, ``sh -c '<program>'`` is
+    replaced by the program's words (its first command only; hook analysis
+    splits shell programs into commands itself and passes ``False``).
+    Unwrapping stops at a launcher named in ``stop_at``.
+    """
+    current = [str(token) for token in tokens]
+    stops = frozenset(stop_at)
+    for _depth in range(_MAX_UNWRAP_DEPTH):
+        if not current:
+            return current
+        base = _command_basename(current[0])
+        rest = current[1:]
+        if base in stops:
+            return current
+        if base == "cmd":
+            switch = next((index for index, token in enumerate(rest) if token.lower() in {"/c", "/k", "/r"}), None)
+            if switch is None:
+                return current
+            current = _split_command_line(rest[switch + 1 :])
+        elif base in {"powershell", "pwsh"}:
+            switch = next(
+                (index for index, token in enumerate(rest) if token.lower() in {"-c", "-command", "-commandwithargs"}),
+                None,
+            )
+            if switch is None:
+                return current
+            current = _split_command_line([" ".join(rest[switch + 1 :])]) if rest[switch + 1 :] else []
+        elif base in _SHELL_INTERPRETERS and expand_shell:
+            program = _shell_program(current)
+            if program is None:
+                return current
+            current = _split_command_line([program]) if program.strip() else []
+        elif base == "env":
+            split_string = _flag_values(rest, ("-S", "--split-string"))
+            if split_string:
+                current = _split_command_line([split_string[0]])
+                continue
+            index = 0
+            while index < len(rest) and (rest[index].startswith("-") or _ENV_ASSIGNMENT_RE.match(rest[index])):
+                if rest[index] in _WRAPPER_VALUE_FLAGS["env"]:
+                    index += 1
+                index += 1
+            current = rest[index:]
+        elif base in _WRAPPER_VALUE_FLAGS:
+            index = _skip_options(rest, _WRAPPER_VALUE_FLAGS[base])
+            if base == "timeout" and index < len(rest):
+                index += 1  # the duration
+            current = rest[index:]
+        else:
+            return current
+    return current
 
 
 def _positionals(tokens: list[str], value_flags: frozenset[str]) -> Iterator[tuple[int, str]]:
@@ -1069,13 +2059,43 @@ def _is_local_spec(spec: str) -> bool:
     return spec.startswith(_LOCAL_SPEC_PREFIXES)
 
 
+def _git_ref(spec: str) -> str | None:
+    """The branch or tag a git/URL spec names, or ``None`` when it names none.
+
+    npm reads the ref after ``#`` (``github:o/r#main``, ``git+https://h/o/r.git#main``);
+    pip and uv read it after the last ``@`` of the URL path
+    (``git+https://h/o/r@main``, ``pkg @ git+https://h/o/r@main#egg=pkg``). A user
+    name before the host (``git+ssh://git@h/o/r``), a ``key=value`` fragment
+    (``#egg=``, ``#subdirectory=``), and npm's ``#semver:`` / ``#path:`` parts are
+    not refs.
+    """
+    start = re.search(r"git\+|git:|github:|gitlab:|bitbucket:|https?://", spec)
+    body, _hash, fragment = spec[start.start() if start else 0 :].partition("#")
+    for part in re.split(r"&|::", fragment):
+        if part and "=" not in part and not part.startswith(("semver:", "path:")):
+            return part
+    if "://" in body:
+        path = body.split("://", 1)[1].partition("/")[2]
+    else:
+        path = body.split(":", 1)[1] if ":" in body else body
+    _repo, at, ref = path.rpartition("@")
+    return ref if at and ref else None
+
+
 def _classify_npm_spec(spec: str) -> McpPinning:
     """Classify an npm package spec (``pkg``, ``@scope/pkg@1.2.3``, git/URL, local path)."""
     if _is_local_spec(spec):
         return McpPinning("not_applicable", f"local package path {spec!r}")
+    if spec.startswith("$"):
+        return McpPinning("unpinned", f"package spec {spec!r} is taken from an environment reference")
     if spec.startswith(_REMOTE_SPEC_PREFIXES) or (not spec.startswith("@") and "/" in spec):
         if _GIT_SHA_RE.search(spec):
             return McpPinning("pinned", f"git/URL spec pinned to a commit: {spec!r}")
+        ref = _git_ref(spec)
+        if ref and _is_floating_tag(ref, composite=False):
+            return McpPinning(
+                "unpinned", f"git/URL spec {spec!r} follows the moving branch or tag {ref!r}", floating=True
+            )
         return McpPinning("unpinned", f"git/URL/GitHub spec without a commit SHA: {spec!r}")
     at = spec.find("@", 1) if spec.startswith("@") else spec.find("@")
     if at <= 0:
@@ -1083,6 +2103,11 @@ def _classify_npm_spec(spec: str) -> McpPinning:
     version = spec[at + 1 :]
     if _EXACT_SEMVER_RE.match(version):
         return McpPinning("pinned", f"exact version {spec!r}")
+    if "$" in version:
+        return McpPinning("unpinned", f"package {spec!r} takes its version from an environment reference")
+    # A dist-tag starts with a letter; a range starts with a digit or an operator ('^1.0.0-beta' is a range).
+    if _is_floating_tag(version, composite=version[:1].isalpha()):
+        return McpPinning("unpinned", f"package {spec!r} uses the floating dist-tag {version!r}", floating=True)
     return McpPinning("unpinned", f"package {spec!r} uses a version range or dist-tag, not an exact version")
 
 
@@ -1090,56 +2115,128 @@ def _classify_python_spec(spec: str) -> McpPinning:
     """Classify a PyPI requirement spec as used by ``uvx`` / ``pipx run``."""
     if _is_local_spec(spec):
         return McpPinning("not_applicable", f"local package path {spec!r}")
+    if spec.startswith("$"):
+        return McpPinning("unpinned", f"package spec {spec!r} is taken from an environment reference")
     if spec.startswith(_REMOTE_SPEC_PREFIXES) or "@ git+" in spec or "@git+" in spec:
         if _GIT_SHA_RE.search(spec) or "#sha256=" in spec:
             return McpPinning("pinned", f"git/URL spec pinned to a commit or hash: {spec!r}")
+        ref = _git_ref(spec)
+        if ref and _is_floating_tag(ref, composite=False):
+            return McpPinning(
+                "unpinned", f"git/URL spec {spec!r} follows the moving branch or tag {ref!r}", floating=True
+            )
         return McpPinning("unpinned", f"git/URL spec without a commit SHA or hash: {spec!r}")
     if _PEP440_EXACT_RE.match(spec):
         return McpPinning("pinned", f"exact version {spec!r}")
     name, sep, version = spec.partition("@")
     if sep and name and _EXACT_SEMVER_RE.match(version.strip()):
         return McpPinning("pinned", f"exact version {spec!r}")
+    if sep and name and _is_floating_tag(version, composite=False):
+        # uv reads 'pkg@latest' as "the newest release, refreshed on every run".
+        return McpPinning("unpinned", f"package {spec!r} uses the floating version {version.strip()!r}", floating=True)
     if any(marker in spec for marker in ("<", ">", "~", "!", "*", ",", "=", "@")):
         return McpPinning("unpinned", f"requirement {spec!r} is a range or tag, not an exact '==' version")
     return McpPinning("unpinned", f"package {spec!r} has no version (resolves to the latest release)")
 
 
+_IMAGE_ENV_REF_RE = re.compile(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+
+
 def _classify_image(image: str) -> McpPinning:
-    """Classify a container image reference."""
+    """Classify a container image reference (``repo[:tag][@digest]``)."""
     if _DOCKER_DIGEST_RE.search(image):
+        # A digest names one image; a tag next to it ('mcp:latest@sha256:...') is ignored by the runtime.
         return McpPinning("pinned", f"image pinned by digest {image!r}")
-    if "${" in image or image.startswith("$"):
+    if "$" in image:
+        # The name comes from the environment, but a tag written after it ('${IMAGE}:main') still floats.
+        literal = _IMAGE_ENV_REF_RE.sub("\x00", image)
+        literal_last = literal.rsplit("/", 1)[-1].partition("@")[0]
+        literal_tag = literal_last.split(":", 1)[1] if ":" in literal_last else None
+        if literal_tag and "\x00" not in literal_tag and _is_floating_image_tag(literal_tag):
+            return McpPinning("unpinned", f"image {image!r} uses the floating tag {literal_tag!r}", floating=True)
         return McpPinning("unpinned", f"image {image!r} is taken from an environment reference")
-    last = image.rsplit("/", 1)[-1]
+    last, at, digest = image.rsplit("/", 1)[-1].partition("@")
+    if at:
+        return McpPinning("unpinned", f"image {image!r} has an incomplete digest {digest!r} (not a sha256 digest)")
     tag = last.split(":", 1)[1] if ":" in last else None
     if tag is None:
         return McpPinning("unpinned", f"image {image!r} has no tag or digest (implicit ':latest')")
-    if tag.lower() == "latest":
-        return McpPinning("unpinned", f"image {image!r} uses the mutable 'latest' tag")
+    if _is_floating_image_tag(tag):
+        return McpPinning("unpinned", f"image {image!r} uses the floating tag {tag!r}", floating=True)
     if _VERSION_TAG_RE.match(tag):
         return McpPinning("pinned", f"image {image!r} uses a version tag (tags are mutable; a digest is stronger)")
     return McpPinning("unpinned", f"image {image!r} uses the non-version tag {tag!r}")
 
 
 def _classify_spec_list(specs: list[str], classify: Any) -> McpPinning:
+    """The worst classification of several specs: floating, then unpinned, then pinned."""
     results = [classify(spec) for spec in specs]
-    unpinned = [result for result in results if result.status == "unpinned"]
-    if unpinned:
-        return unpinned[0]
-    pinned = [result for result in results if result.status == "pinned"]
-    if pinned:
-        return pinned[0]
+    for wanted in (
+        lambda result: result.floating,
+        lambda result: result.status == "unpinned",
+        lambda result: result.status == "pinned",
+    ):
+        found = next((result for result in results if wanted(result)), None)
+        if found is not None:
+            return found
     return results[0]
 
 
-def classify_mcp_pinning(config: Any) -> McpPinning:
+def _subcommand(tokens: list[str], value_flags: frozenset[str]) -> tuple[str | None, list[str]]:
+    """``(subcommand, tokens after it)`` of a runner front end, skipping its global options."""
+    index = _skip_options(tokens, value_flags)
+    if index >= len(tokens):
+        return None, []
+    return tokens[index], tokens[index + 1 :]
+
+
+def classify_mcp_pinning(config: Any, *, client: McpClient = "claude") -> McpPinning:
+    """Classify whether one MCP declaration runs an exactly-pinned package (see :func:`_classify_launch`).
+
+    Claude Code expands ``${NAME:-default}`` in ``command`` and ``args`` (Cursor
+    and Agent Plugins servers are read the same way, and so is a shell running a
+    hook command), so the default the plugin ships is what gets classified:
+    ``npx -y ${PKG:-@scope/mcp@latest}`` is floating. Codex runs the text as is.
+    The detail never carries a credential from the spec it quotes.
+    """
+    launch = config if client == "codex" else _with_launch_defaults(config)
+    pin = _classify_launch(launch)
+    if launch is not config:
+        pin = McpPinning(pin.status, f"{pin.detail}, with each ${{NAME:-default}} read at its default", pin.floating)
+    return _redacted_pin(pin)
+
+
+def _with_launch_defaults(config: Any) -> Any:
+    """``config`` with every ``${NAME:-default}`` in ``command`` and ``args`` replaced by its default.
+
+    The same object comes back when nothing has a default.
+    """
+    if not isinstance(config, dict) or not isinstance(config.get("command"), str):
+        return config
+    raw_args = config.get("args")
+    fields = [config["command"], *(raw_args if isinstance(raw_args, list) else [])]
+    if not any(isinstance(field, str) and _URL_EXPANSION_RE.search(field) for field in fields):
+        return config
+    expanded = [expand_url_defaults(field) if isinstance(field, str) else field for field in fields]
+    if expanded == fields:
+        return config
+    launch = dict(config, command=expanded[0])
+    if isinstance(raw_args, list):
+        launch["args"] = expanded[1:]
+    return launch
+
+
+def _classify_launch(config: Any) -> McpPinning:
     """Classify whether one MCP declaration runs an exactly-pinned package.
 
-    Package runners (``npx``, ``bunx``, ``pnpm dlx``, ``yarn dlx``, ``npm exec``,
-    ``uvx``, ``uv tool run``, ``pipx run``, ``deno run`` of a registry spec, and
-    ``docker|podman run``) are ``pinned`` only with an exact version
+    Package runners (``npx``, ``bunx``, ``bun x``, ``pnpm dlx``, ``yarn dlx``,
+    ``npm exec``, ``uvx``, ``uv tool run``, ``uv run --with``, ``pipx run``,
+    ``deno run`` of a registry spec, ``go run pkg@version``, ``dnx``, and
+    ``docker|podman|nerdctl run``) are ``pinned`` only with an exact version
     (``pkg@1.2.3``, ``pkg==1.2.3``, ``--from pkg==1.2.3``, ``image:1.2.3``,
-    ``image@sha256:...``); otherwise they are ``unpinned``. Local interpreters and
+    ``image@sha256:...``); otherwise they are ``unpinned`` (``floating`` for a
+    moving tag such as ``@latest``). Launch wrappers (``cmd /c``, ``env X=1``,
+    ``timeout``, ``sudo``, ``sh -c``) are looked through. Local interpreters and
     scripts (``node ./server.js``, ``python -m local_module``, ``./bin/server``),
     URL servers, and provider-only entries are ``not_applicable``.
     """
@@ -1152,26 +2249,45 @@ def classify_mcp_pinning(config: Any) -> McpPinning:
         return McpPinning("not_applicable", "provider-only or non-runnable declaration")
     raw_args = config.get("args")
     args = [str(arg) for arg in raw_args] if isinstance(raw_args, list) else []
-    command_parts = command.split()
-    if len(command_parts) > 1:
-        # A whole command line in 'command' ("npx -y pkg"): classify it argv-style.
-        command, args = command_parts[0], [*command_parts[1:], *args]
-    base = _command_basename(command)
+    argv = unwrap_launch_command(_launch_argv(command, args))
+    if not argv:
+        return McpPinning("not_applicable", "launch wrapper without a command")
+    base, args = _command_basename(argv[0]), argv[1:]
 
-    if base in {"npx", "bunx", "pnpx"} or (base in {"pnpm", "yarn"} and args[:1] == ["dlx"]):
-        rest = args[1:] if base in {"pnpm", "yarn"} else args
-        value_flags = _NPX_VALUE_FLAGS if base == "npx" else _DLX_VALUE_FLAGS
-        runner = f"{base} dlx" if base in {"pnpm", "yarn"} else base
-        return _classify_npm_runner(runner, rest, value_flags)
-    if base == "npm" and args[:1] in (["exec"], ["x"]):
-        return _classify_npm_runner("npm exec", args[1:], _NPX_VALUE_FLAGS)
-    if base == "uvx" or (base == "uv" and args[:2] in (["tool", "run"], ["tool", "x"])):
-        rest = args if base == "uvx" else args[2:]
-        from_values = _flag_values(rest, ("--from",))
-        spec = from_values[0] if from_values else _first_positional(rest, _UVX_VALUE_FLAGS)
-        if spec is None:
-            return McpPinning("unpinned", "uvx invocation without a package spec")
-        return _prefixed(f"{base if base == 'uvx' else 'uv tool run'}: ", _classify_python_spec(spec))
+    if base in {"npx", "bunx", "pnpx"}:
+        return _classify_npm_runner(base, args, _NPX_VALUE_FLAGS if base == "npx" else _DLX_VALUE_FLAGS)
+    if base == "bun":
+        sub, rest = _subcommand(args, _DLX_VALUE_FLAGS)
+        if sub == "x":
+            return _classify_npm_runner("bun x", rest, _DLX_VALUE_FLAGS)
+    if base in {"pnpm", "yarn"}:
+        sub, rest = _subcommand(args, _DLX_VALUE_FLAGS)
+        if sub == "dlx":
+            # '--package' may come before 'dlx' ('pnpm --package=@scope/pkg dlx bin').
+            before = args[: len(args) - len(rest) - 1]
+            packages = _flag_values(before, ("-p", "--package"))
+            rest = [*(f"--package={spec}" for spec in packages), *rest]
+            return _classify_npm_runner(f"{base} dlx", rest, _DLX_VALUE_FLAGS)
+    if base == "npm":
+        sub, rest = _subcommand(args, _NPM_GLOBAL_VALUE_FLAGS)
+        if sub in {"exec", "x"}:
+            return _classify_npm_runner("npm exec", rest, _NPX_VALUE_FLAGS)
+    if base == "uvx":
+        return _classify_uv_tool("uvx", args)
+    if base == "uv":
+        sub, rest = _subcommand(args, _UV_RUN_VALUE_FLAGS)
+        if sub == "tool":
+            tool_sub, tool_rest = _subcommand(rest, _UVX_VALUE_FLAGS)
+            if tool_sub in {"run", "x"}:
+                return _classify_uv_tool("uv tool run", tool_rest)
+            return McpPinning("not_applicable", "uv tool invocation is not 'run'")
+        if sub == "run":
+            # 'uv run' runs from the project environment; '--with' adds packages resolved on every run.
+            options = [*args[: len(args) - len(rest) - 1], *rest[: _skip_options(rest, _UV_RUN_VALUE_FLAGS)]]
+            with_specs = _flag_values(options, ("--with",))
+            if with_specs:
+                return _prefixed("uv run --with: ", _classify_spec_list(with_specs, _classify_python_spec))
+            return McpPinning("not_applicable", "uv run of the project environment (no '--with' package)")
     if base == "pipx" and args[:1] == ["run"]:
         rest = args[1:]
         spec_values = _flag_values(rest, ("--spec",))
@@ -1188,25 +2304,81 @@ def classify_mcp_pinning(config: Any) -> McpPinning:
                 return McpPinning("pinned", f"deno run: remote module pinned to an exact version: {spec!r}")
             return McpPinning("unpinned", f"deno run: remote module without an exact version: {spec!r}")
         return McpPinning("not_applicable", "deno run of a local script")
+    if base == "go" and args[:1] == ["run"]:
+        return _classify_go_run(_first_positional(args[1:], _GO_RUN_VALUE_FLAGS))
+    if base == "dnx":
+        return _classify_dnx(args)
     if base in _CONTAINER_RUNTIMES:
-        if args[:1] == ["run"]:
-            rest = args[1:]
-        elif args[:2] == ["container", "run"]:
-            rest = args[2:]
-        else:
+        image = _container_run_image(args)
+        if image is False:
             return McpPinning("not_applicable", f"{base} invocation is not 'run'")
-        image = _first_positional(rest, _DOCKER_VALUE_FLAGS)
         if image is None:
             return McpPinning("unpinned", f"{base} run invocation without an image")
-        return _prefixed(f"{base} run: ", _classify_image(image))
+        return _prefixed(f"{base} run: ", _classify_image(str(image)))
     return McpPinning("not_applicable", f"local interpreter, script, or binary ({base!r})")
+
+
+def _classify_uv_tool(runner: str, rest: list[str]) -> McpPinning:
+    """``uvx [opts] pkg`` / ``uv tool run``: the tool spec (or ``--from``) and every ``--with`` requirement."""
+    from_values = _flag_values(rest, ("--from",))
+    spec = from_values[0] if from_values else _first_positional(rest, _UVX_VALUE_FLAGS)
+    if spec is None:
+        return McpPinning("unpinned", f"{runner} invocation without a package spec")
+    tool = _classify_python_spec(spec)
+    # '--with' installs more packages next to the tool, each resolved on every run unless exact. The worst one
+    # decides: a floating spec (tool or extra) beats an unpinned one, which beats the tool's own result.
+    extras = [_classify_python_spec(extra) for extra in _flag_values(rest, ("--with",))]
+    for wanted in (lambda result: result.floating, lambda result: result.status == "unpinned"):
+        if wanted(tool):
+            return _prefixed(f"{runner}: ", tool)
+        worst = next((extra for extra in extras if wanted(extra)), None)
+        if worst is not None:
+            return _prefixed(f"{runner} --with: ", worst)
+    return _prefixed(f"{runner}: ", tool)
+
+
+def _classify_go_run(spec: str | None) -> McpPinning:
+    """``go run module/path@version``: pinned for an exact ``vX.Y.Z``; a local package is not applicable."""
+    if spec is None or "@" not in spec:
+        return McpPinning("not_applicable", "go run of a local package (versions come from go.mod)")
+    version = spec.rpartition("@")[2]
+    if re.match(r"^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$", version):
+        return McpPinning("pinned", f"go run: exact module version {spec!r}")
+    if _is_floating_tag(version, composite=False):
+        return McpPinning("unpinned", f"go run: module {spec!r} uses the floating query {version!r}", floating=True)
+    return McpPinning("unpinned", f"go run: module {spec!r} is not pinned to an exact vX.Y.Z version")
+
+
+def _classify_dnx(args: list[str]) -> McpPinning:
+    """``dnx Package[@version]`` or ``dnx Package --version X`` (.NET tool runner)."""
+    spec = _first_positional(args, _DNX_VALUE_FLAGS)
+    if spec is None:
+        return McpPinning("unpinned", "dnx invocation without a package")
+    versions = _flag_values(args, ("--version",))
+    version = versions[0] if versions else (spec.rpartition("@")[2] if "@" in spec else "")
+    if version and _EXACT_SEMVER_RE.match(version):
+        return McpPinning("pinned", f"dnx: exact version {version!r} of {spec!r}")
+    if version and _is_floating_tag(version, composite=False):
+        return McpPinning("unpinned", f"dnx: package {spec!r} uses the floating version {version!r}", floating=True)
+    return McpPinning("unpinned", f"dnx: package {spec!r} has no exact version (resolves to the latest release)")
+
+
+def _container_run_image(args: list[str]) -> str | None | bool:
+    """The image of ``docker [global opts] run|container run [opts] IMAGE``; ``False`` when it is not a run."""
+    sub, rest = _subcommand(args, _CONTAINER_GLOBAL_VALUE_FLAGS)
+    if sub == "container" and rest[:1] == ["run"]:
+        rest = rest[1:]
+    elif sub != "run":
+        return False
+    return _first_positional(rest, _DOCKER_VALUE_FLAGS)
 
 
 def mcp_container_image(config: Any) -> str | None:
     """Return the image reference a ``docker|podman|nerdctl run`` MCP server launches, if any.
 
-    Uses the same argv parsing as :func:`classify_mcp_pinning`, so a flag value is
-    never mistaken for the image. Returns ``None`` for every other server kind.
+    Uses the same argv parsing as :func:`classify_mcp_pinning` (wrappers such as
+    ``cmd /c`` are looked through), so a flag value is never mistaken for the
+    image. Returns ``None`` for every other server kind.
     """
     if not isinstance(config, dict):
         return None
@@ -1215,18 +2387,11 @@ def mcp_container_image(config: Any) -> str | None:
         return None
     raw_args = config.get("args")
     args = [str(arg) for arg in raw_args] if isinstance(raw_args, list) else []
-    command_parts = command.split()
-    if len(command_parts) > 1:
-        command, args = command_parts[0], [*command_parts[1:], *args]
-    if _command_basename(command) not in _CONTAINER_RUNTIMES:
+    argv = unwrap_launch_command(_launch_argv(command, args))
+    if not argv or _command_basename(argv[0]) not in _CONTAINER_RUNTIMES:
         return None
-    if args[:1] == ["run"]:
-        rest = args[1:]
-    elif args[:2] == ["container", "run"]:
-        rest = args[2:]
-    else:
-        return None
-    return _first_positional(rest, _DOCKER_VALUE_FLAGS)
+    image = _container_run_image(argv[1:])
+    return image if isinstance(image, str) else None
 
 
 def is_exact_container_image(image: str) -> bool:
@@ -1240,7 +2405,8 @@ def classify_image_pinning(image: str) -> McpPinning:
 
 
 def _classify_npm_runner(runner: str, tokens: list[str], value_flags: frozenset[str]) -> McpPinning:
-    packages = _flag_values(tokens, ("-p", "--package"))
+    # '-p a@latest,b' is read as two packages, so a floating one cannot hide behind a comma.
+    packages = [part for value in _flag_values(tokens, ("-p", "--package")) for part in value.split(",") if part]
     if packages:
         return _prefixed(f"{runner}: ", _classify_spec_list(packages, _classify_npm_spec))
     spec = _first_positional(tokens, value_flags)
@@ -1250,7 +2416,12 @@ def _classify_npm_runner(runner: str, tokens: list[str], value_flags: frozenset[
 
 
 def _prefixed(prefix: str, pin: McpPinning) -> McpPinning:
-    return McpPinning(pin.status, f"{prefix}{pin.detail}")
+    return McpPinning(pin.status, f"{prefix}{pin.detail}", pin.floating)
+
+
+def _redacted_pin(pin: McpPinning) -> McpPinning:
+    """The classification with credentials in its detail removed (a spec can be a URL with a token in it)."""
+    return McpPinning(pin.status, redact_secrets(pin.detail), pin.floating)
 
 
 # --------------------------------------------------------------------------- #
@@ -1258,12 +2429,22 @@ def _prefixed(prefix: str, pin: McpPinning) -> McpPinning:
 # --------------------------------------------------------------------------- #
 EndpointKind = Literal["metadata", "private"]
 
-_METADATA_HOSTNAMES = frozenset({"metadata.google.internal", "metadata"})
+_METADATA_HOSTNAMES = frozenset(
+    {
+        "metadata.google.internal",
+        "metadata",
+        "instance-data",  # AWS (EC2 resolves it to 169.254.169.254)
+        "instance-data.ec2.internal",
+        "metadata.tencentyun.com",  # Tencent Cloud
+    }
+)
 _METADATA_ADDRESSES = frozenset(
     {
         ipaddress.ip_address("169.254.169.254"),  # AWS, Azure, GCP, OpenStack, and most other clouds
         ipaddress.ip_address("fd00:ec2::254"),  # AWS IMDS over IPv6
         ipaddress.ip_address("100.100.100.200"),  # Alibaba Cloud
+        ipaddress.ip_address("169.254.0.23"),  # Tencent Cloud
+        ipaddress.ip_address("168.63.129.16"),  # Azure host (WireServer): extension settings and certificates
         ipaddress.ip_address("192.0.0.192"),  # Oracle Cloud (legacy)
         ipaddress.ip_address("169.254.170.2"),  # AWS ECS task credentials
         ipaddress.ip_address("169.254.170.23"),  # AWS EKS Pod Identity credentials
@@ -1547,6 +2728,9 @@ def _validate_endpoint(
     file_path: str,
     findings: list[Finding],
     allowed_private_hosts: Iterable[str],
+    *,
+    label: str = "url",
+    shown: str | None = None,
 ) -> None:
     if not host:
         return
@@ -1554,13 +2738,13 @@ def _validate_endpoint(
     if endpoint is None:
         return
     encoded = f" (encoded as {host!r})" if endpoint.encoded else ""
-    shown = redacted_url(url)  # never echo userinfo or query credentials
+    shown = shown if shown is not None else redacted_url(url)  # never echo userinfo or query credentials
     if endpoint.kind == "metadata":
         findings.append(
             _finding(
                 Severity.HIGH,
                 "mcp_endpoint_metadata",
-                f"url targets a {endpoint.reason} endpoint{encoded}: {shown!r}; an MCP client pointed here "
+                f"{label} targets a {endpoint.reason} endpoint{encoded}: {shown!r}; an MCP client pointed here "
                 f"can expose instance credentials ({_ENDPOINT_STATIC_NOTE})",
                 file_path,
                 "Remove the instance-metadata endpoint; MCP servers must never target cloud metadata services.",
@@ -1574,7 +2758,7 @@ def _validate_endpoint(
         _finding(
             Severity.MEDIUM,
             "mcp_endpoint_private",
-            f"url host is a {endpoint.reason} address{encoded}: {shown!r}; the endpoint is not publicly "
+            f"{label} host is a {endpoint.reason} address{encoded}: {shown!r}; the endpoint is not publicly "
             f"reachable and may target local services ({_ENDPOINT_STATIC_NOTE})",
             file_path,
             "Use a public HTTPS endpoint, or allow this intended private host through the validation policy "
@@ -1614,10 +2798,25 @@ PERMISSION_BYPASS_CONFIG: tuple[tuple[str, str], ...] = (
     ("approval_policy", "never"),
     ("sandbox_mode", "danger-full-access"),
 )
-# '-a' is a common short option and '-c' / '--config' a common flag, so '-a never' and the config
-# overrides count only after a codex command in the same string or argv ('grep -a never f' is not Codex).
-_CODEX_ONLY_OPTIONS = frozenset({"-a"})
-_CODEX_COMMAND_RE = re.compile(r"(?<![\w.-])codex(?:\.exe|\.cmd)?(?![\w.-])|\$\{?CODEX\w*", re.IGNORECASE)
+# '-a', '-s', and '-c' / '--config' are common options, so '-a never', '-s danger-full-access', and the config
+# overrides count only after a codex command in the same shell command or argv ('grep -a never f' and
+# 'tool -s danger-full-access' are not Codex). A codex command may be a wrapper named for it ('codex-wrapper',
+# 'my-codex') or a variable ('${CODEX_BIN}').
+_CODEX_ONLY_OPTIONS = frozenset({"-a", "-s"})
+_CODEX_COMMAND_RE = re.compile(
+    r"(?<![\w.-])(?:[\w.-]*[-_.])?codex(?:[-_][\w-]*)?(?:\.exe|\.cmd)?(?![\w.])|\$\{?CODEX\w*", re.IGNORECASE
+)
+# Gemini CLI's '-y' is short for '--yolo'; '-y' alone means "yes" to many tools (npx, apt), so it counts only
+# after a gemini command in the same shell command or argv.
+_GEMINI_COMMAND_RE = re.compile(
+    r"(?<![\w.-])(?:[\w.-]*[-_.])?gemini(?:[-_][\w-]*)?(?:\.exe|\.cmd)?(?![\w.])", re.IGNORECASE
+)
+_GEMINI_YES_RE = re.compile(r"(?<![\w-])-y(?![\w-])")
+# Where one shell command ends: a newline, ';', '&&', '||', a pipe, or a lone '&' (a background job). The '&'
+# or '|' of a redirection ('2>&1', '>&2', '&>log', '<&3', '>|log') does not end the command.
+_COMMAND_BREAK_RE = re.compile(r"\|\||&&|[;\n]|(?<!>)\||(?<![<>&])&(?![>&])")
+# A backslash-newline joins two lines into one shell command ('codex exec \\\n  -a never').
+_LINE_CONTINUATION_RE = re.compile(r"\\\r?\n")
 _BYPASS_CONFIG_OPTIONS = frozenset({"-c", "--config"})
 _BYPASS_CONFIG_VALUE_RES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (f"-c {key}={value}", re.compile(rf"^[\"']?{key}\s*=\s*[\"']?{re.escape(value)}[\"']?$", re.IGNORECASE))
@@ -1657,6 +2856,15 @@ _DOC_KEYS = frozenset({"description", "title", "summary", "notes", "note", "comm
 # completely; a walk that still hits the bound is reported, never silently cut.
 _MAX_SCAN_NODES = MAX_STRUCTURED_NODES
 _CODE_INJECTION_ENV = frozenset({"LD_PRELOAD", "LD_AUDIT", "DYLD_INSERT_LIBRARIES"})
+# BASH_ENV names a file every non-interactive bash runs first; PERL5OPT and RUBYOPT can load a module.
+_STARTUP_FILE_ENV = frozenset({"BASH_ENV"})
+_INTERPRETER_OPTION_ENV: dict[str, re.Pattern[str]] = {
+    "PERL5OPT": re.compile(r"(?:^|\s)-[MmI]"),
+    "RUBYOPT": re.compile(r"(?:^|\s)-[rI]"),
+}
+# Module search paths: a path outside the plugin can shadow the modules the launched process imports.
+_MODULE_PATH_ENV = frozenset({"PYTHONPATH", "NODE_PATH", "PERL5LIB", "PERLLIB", "RUBYLIB"})
+_PLUGIN_ROOT_PATH_RE = re.compile(r"^\$\{?(?:CLAUDE_PLUGIN_ROOT|PLUGIN_ROOT|CURSOR_PLUGIN_ROOT)\}?(?:[/\\]|$)")
 _NODE_OPTIONS_INJECTION_RE = re.compile(
     r"(?:^|\s)(--require|-r|--import|--loader|--experimental-loader)(?:=|\s|$)", re.IGNORECASE
 )
@@ -1691,8 +2899,12 @@ class OverrideIssue:
     concept: Literal[
         "permission_bypass_flag",
         "permission_bypass_scan_truncated",
+        "permission_mode_flag",
+        "permission_allow_flag",
         "env_code_injection",
         "env_traffic_redirect",
+        "env_insecure_tls",
+        "env_inline_secret",
         "auto_approve",
     ]
     severity: Severity
@@ -1739,31 +2951,63 @@ def iter_config_strings(value: Any, *, skip_doc_keys: bool = True) -> Iterator[t
             yield path, node
 
 
+def _join_continuations(text: str) -> str:
+    """``text`` with each backslash-newline replaced by spaces of the same length (offsets stay the same)."""
+    return _LINE_CONTINUATION_RE.sub(lambda match: " " * len(match.group()), text)
+
+
+def _command_before(text: str, start: int, command_re: re.Pattern[str]) -> bool:
+    """Whether ``command_re`` matches before ``start`` in the same shell command of ``text``.
+
+    ``echo codex done; grep -a never f`` puts the codex word in another command,
+    so it does not make ``-a never`` a Codex option. A backslash-continued line and
+    a redirection (``codex exec 2>&1 -a never``) stay in the same command.
+    """
+    text = _join_continuations(text)
+    begin = 0
+    for match in _COMMAND_BREAK_RE.finditer(text, 0, start):
+        begin = match.end()
+    return command_re.search(text, begin, start) is not None
+
+
 def _codex_hit(text: str, start: int) -> bool:
-    """Whether a codex command comes before ``start`` in ``text``."""
-    return _CODEX_COMMAND_RE.search(text, 0, start) is not None
+    """Whether a codex command comes before ``start`` in the same shell command of ``text``."""
+    return _command_before(text, start, _CODEX_COMMAND_RE)
 
 
 def _bypass_hits(path: str, node: Any) -> Iterator[tuple[str, str]]:
     """Yield ``(json_path, flag)`` for bypass flags in a string or split across argv tokens."""
     if isinstance(node, str):
+        node = _join_continuations(node)
         for match in _BYPASS_FLAG_RE.finditer(node):
             yield path, match.group(1).lower()
         for label, pattern, codex_only in _BYPASS_OPTION_RES:
             if any(not codex_only or _codex_hit(node, hit.start()) for hit in pattern.finditer(node)):
                 yield path, label
+        if any(_command_before(node, hit.start(), _GEMINI_COMMAND_RE) for hit in _GEMINI_YES_RE.finditer(node)):
+            yield path, "gemini -y"
     elif isinstance(node, list):
         yield from _argv_bypass_hits(path, node, codex=False)
     elif isinstance(node, dict):
-        # {"command": "codex", "args": ["-a", "never"]}: the args follow a codex command.
+        # {"command": "codex", "args": ["-a", "never"]}: the args follow a codex (or gemini) command.
         command, args = node.get("command"), node.get("args")
-        if isinstance(command, str) and isinstance(args, list) and _CODEX_COMMAND_RE.search(command):
-            yield from _argv_bypass_hits(f"{path}.args" if path else "args", args, codex=True)
+        if isinstance(command, str) and isinstance(args, list):
+            args_path = f"{path}.args" if path else "args"
+            if _CODEX_COMMAND_RE.search(command):
+                yield from _argv_bypass_hits(args_path, args, codex=True)
+            if _GEMINI_COMMAND_RE.search(command):
+                yield from _argv_bypass_hits(args_path, args, codex=False, gemini=True)
 
 
-def _argv_bypass_hits(path: str, argv: list[Any], *, codex: bool) -> Iterator[tuple[str, str]]:
+def _argv_bypass_hits(path: str, argv: list[Any], *, codex: bool, gemini: bool = False) -> Iterator[tuple[str, str]]:
     """Bypass options split across adjacent argv tokens (``["--sandbox", "danger-full-access"]``); the
-    Codex-only forms count only after a codex token, or when ``codex`` says the argv belongs to one."""
+    Codex-only forms count only after a codex token, or when ``codex`` says the argv belongs to one, and
+    Gemini CLI's ``-y`` only after a gemini token (or when ``gemini`` says so)."""
+    for index, token in enumerate(argv):
+        if isinstance(token, str) and _GEMINI_COMMAND_RE.search(token):
+            gemini = True
+        elif gemini and isinstance(token, str) and token.strip() == "-y":
+            yield f"{path}[{index}]", "gemini -y"
     for index, (option, value) in enumerate(itertools.pairwise(argv)):
         if isinstance(option, str) and _CODEX_COMMAND_RE.search(option):
             codex = True
@@ -1841,6 +3085,40 @@ def env_override_issues(env: Any) -> list[OverrideIssue]:
                     f"Remove '{key}'; plugins must not inject libraries into the processes they launch.",
                 )
             )
+        elif upper in _STARTUP_FILE_ENV:
+            issues.append(
+                OverrideIssue(
+                    "env_code_injection",
+                    Severity.HIGH,
+                    f"env '{key}' makes every non-interactive bash in the launched process run a file first "
+                    "(code injection)",
+                    f"Remove '{key}'; plugins must not inject startup code into the processes they launch.",
+                )
+            )
+        elif upper in _INTERPRETER_OPTION_ENV and _INTERPRETER_OPTION_ENV[upper].search(value):
+            issues.append(
+                OverrideIssue(
+                    "env_code_injection",
+                    Severity.HIGH,
+                    f"env '{key}' loads extra code or a module search path into every {upper[:4].lower()} process",
+                    f"Remove '{key}'; load code explicitly from the server instead.",
+                )
+            )
+        elif upper in _MODULE_PATH_ENV and not all(
+            not entry.strip()
+            or _PLUGIN_ROOT_PATH_RE.match(entry.strip().strip("\"'"))
+            or _is_passthrough(key, entry.strip().strip("\"'"))
+            for entry in re.split(r"[:;]", value)
+        ):
+            issues.append(
+                OverrideIssue(
+                    "env_code_injection",
+                    Severity.MEDIUM,
+                    f"env '{key}' adds module search paths outside the plugin root, which can shadow the modules "
+                    "the launched process imports",
+                    f"Point '{key}' only at the plugin's own files (${{CLAUDE_PLUGIN_ROOT}}/...), or remove it.",
+                )
+            )
         elif upper == "NODE_OPTIONS" and (match := _NODE_OPTIONS_INJECTION_RE.search(value)):
             issues.append(
                 OverrideIssue(
@@ -1859,6 +3137,41 @@ def env_override_issues(env: Any) -> list[OverrideIssue]:
                     "redirect or intercept traffic",
                     f"Remove '{key}' or pass the user's own value through as \"${{{key}}}\"; do not ship "
                     "endpoint, proxy, or CA overrides.",
+                )
+            )
+    return issues
+
+
+def env_tls_and_secret_issues(env: Any, *, severity: Severity = Severity.CRITICAL) -> list[OverrideIssue]:
+    """The MCP ``env`` checks for any other env block: TLS verification turned off, and inline credentials.
+
+    The same rules as ``mcp_insecure_tls_env`` and ``mcp_inline_secret`` (values
+    are never echoed). LSP servers get them at CRITICAL like MCP servers; a
+    settings file passes its own ``severity``.
+    """
+    if not isinstance(env, dict):
+        return []
+    issues: list[OverrideIssue] = []
+    for raw_key, raw_value in env.items():
+        key = str(raw_key).strip()
+        if not isinstance(raw_value, str):
+            continue
+        if _is_insecure_tls_env(key, raw_value):
+            issues.append(
+                OverrideIssue(
+                    "env_insecure_tls",
+                    severity,
+                    f"env '{key}' disables TLS/certificate verification in the launched process",
+                    f"Remove '{key}'; do not disable TLS verification through environment variables.",
+                )
+            )
+        if _looks_like_inline_secret(key, raw_value):
+            issues.append(
+                OverrideIssue(
+                    "env_inline_secret",
+                    severity,
+                    f"env '{key}' contains an inline credential; only ${{ENV}} references are allowed",
+                    'Reference the secret as an env var (e.g. "${MY_TOKEN}"); never ship a raw credential.',
                 )
             )
     return issues
@@ -1892,19 +3205,43 @@ def _append_override_findings(name: str, issues: list[OverrideIssue], file_path:
 
 
 def _validate_overrides(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
-    """Permission-bypass flags anywhere in the entry, dangerous env, and auto-approve keys."""
+    """Permission-bypass flags anywhere in the entry, permissive agent-CLI flags (``--permission-mode
+    acceptEdits``, ``--allowedTools Bash``), dangerous env, and auto-approve keys."""
+    from skillevaluator.plugin_component_risk import allowed_tools_flag_issues, permission_mode_flag_issues
+
     _append_override_findings(name, permission_bypass_issues(config), file_path, findings)
+    _append_override_findings(
+        name, [*permission_mode_flag_issues(config), *allowed_tools_flag_issues(config)], file_path, findings
+    )
     _append_override_findings(name, env_override_issues(config.get("env")), file_path, findings)
     _append_override_findings(name, auto_approve_issues(config), file_path, findings)
 
 
-def _validate_pinning(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
-    pin = classify_mcp_pinning(config)
+def _validate_pinning(
+    name: str, config: dict[str, Any], file_path: str, findings: list[Finding], *, client: McpClient = "claude"
+) -> None:
+    """HIGH for a moving tag (``@latest``, ``:main``) where the runner reads the version; MEDIUM for no exact version.
+
+    The tag is read from the parsed package or image spec, never as a substring
+    of any argument, so a scope (``@nextui-org/mcp@1.0.0``), an entry point
+    (``mod.cli:main``), an e-mail, or a digest-pinned ``:latest@sha256:...`` is
+    not floating. ``${NAME:-default}`` is read at its default except for Codex.
+    """
+    pin = classify_mcp_pinning(config, client=client)
     if pin.status != "unpinned":
         return
-    # A floating marker (@latest, :latest, ...) already raised the blocking
-    # mcp_command_floating_version finding for this entry; do not double-report.
-    if any(f.check_name == "mcp_command_floating_version" and f.metadata.get("mcp_server") == name for f in findings):
+    if pin.floating:
+        findings.append(
+            _finding(
+                Severity.HIGH,
+                "mcp_command_floating_version",
+                f"package runner uses a floating version or tag ({pin.detail}); each launch may fetch different code",
+                file_path,
+                "Pin the referenced package/image to an exact version or digest, not a moving tag such as latest "
+                "or main.",
+                name=name,
+            )
+        )
         return
     findings.append(
         _finding(
@@ -1918,19 +3255,64 @@ def _validate_pinning(name: str, config: dict[str, Any], file_path: str, finding
     )
 
 
+def _validate_cursor_references(
+    name: str, config: dict[str, Any], file_path: str, findings: list[Finding], client: McpClient
+) -> None:
+    """LOW: Cursor's ``${env:NAME}`` is a reference (never an inline secret), but its expansion is unverified."""
+    # Non-list 'args' is its own mcp_args_not_list finding; it must not crash this check.
+    args = config.get("args")
+    fields = [
+        label
+        for label, value in (
+            ("command", config.get("command")),
+            ("url", config.get("url")),
+            *((f"args[{index}]", arg) for index, arg in enumerate(args if isinstance(args, list) else [])),
+            *(
+                (f"{section}.{key}", value)
+                for section in ("env", "headers")
+                if isinstance(config.get(section), dict)
+                for key, value in config[section].items()
+            ),
+        )
+        if isinstance(value, str) and "${env:" in value
+    ]
+    if not fields:
+        return
+    where = ", ".join(fields[:5]) + (f" and {len(fields) - 5} more" if len(fields) > 5 else "")
+    expands = (
+        "whether Cursor expands it in a plugin's MCP config is not verified"
+        if client == "cursor"
+        else "it is Cursor's form, and Claude Code and Codex are not documented to expand it"
+    )
+    findings.append(
+        _finding(
+            Severity.LOW,
+            "mcp_env_reference_unverified",
+            f"'${{env:NAME}}' in {where} is read as an environment reference, not an inline secret; {expands}",
+            file_path,
+            "Check that the client expands the reference; Claude Code expands ${NAME} and ${NAME:-default}.",
+            name=name,
+        )
+    )
+
+
 def validate_mcp_server_declaration(
     name: Any,
     config: Any,
     file_path: str,
     *,
     allowed_private_hosts: Iterable[str] = (),
+    manifest_type: str | None = None,
 ) -> list[Finding]:
     """Statically validate one contained ``mcpServers`` entry (``name`` -> config).
 
     ``allowed_private_hosts`` comes from the validation policy
     (``mcp.allowed_private_hosts``) and suppresses ``mcp_endpoint_private`` for
     intended private hosts; cloud metadata endpoints are never allowlisted.
+    ``manifest_type`` names the format whose client loads the server (Claude
+    Code by default); it decides how ``${VAR}`` references in the URL expand.
     """
+    client = mcp_client_for_manifest(manifest_type)
     findings: list[Finding] = []
 
     if not isinstance(name, str) or not _MCP_NAME_RE.match(name.strip()):
@@ -1990,14 +3372,16 @@ def validate_mcp_server_declaration(
 
     _validate_transport(name, config, file_path, findings)
     _validate_insecure_tls_config(name, config, file_path, findings)
-    _validate_env_and_headers(name, config, file_path, findings)
+    _validate_env_and_headers(name, config, file_path, findings, client=client)
     _validate_overrides(name, config, file_path, findings)
+    _validate_cursor_references(name, config, file_path, findings, client)
 
     if has_command:
         _validate_command(name, config, file_path, findings)
-        _validate_pinning(name, config, file_path, findings)
+        _validate_pinning(name, config, file_path, findings, client=client)
     if has_url:
-        _validate_url(name, config, file_path, findings, allowed_private_hosts)
+        _validate_url(name, config, file_path, findings, allowed_private_hosts, client=client)
+    _validate_oauth_urls(name, config, file_path, findings, allowed_private_hosts, client=client)
     if has_provider and not (has_command or has_url):
         provider = config.get("provider")
         if not isinstance(provider, str) or not provider.strip():
@@ -2020,6 +3404,7 @@ def validate_contained_mcp_servers(
     file_path: str,
     *,
     allowed_private_hosts: Iterable[str] = (),
+    manifest_type: str | None = None,
 ) -> list[Finding]:
     """Statically validate an in-memory ``.claude-plugin/plugin.json`` ``mcpServers`` value.
 
@@ -2041,7 +3426,9 @@ def validate_contained_mcp_servers(
                 continue
             if isinstance(entry, dict):
                 findings.extend(
-                    validate_contained_mcp_servers(entry, file_path, allowed_private_hosts=allowed_private_hosts)
+                    validate_contained_mcp_servers(
+                        entry, file_path, allowed_private_hosts=allowed_private_hosts, manifest_type=manifest_type
+                    )
                 )
                 continue
             findings.append(
@@ -2070,6 +3457,8 @@ def validate_contained_mcp_servers(
     findings = []
     for name, config in mcp_servers.items():
         findings.extend(
-            validate_mcp_server_declaration(name, config, file_path, allowed_private_hosts=allowed_private_hosts)
+            validate_mcp_server_declaration(
+                name, config, file_path, allowed_private_hosts=allowed_private_hosts, manifest_type=manifest_type
+            )
         )
     return findings

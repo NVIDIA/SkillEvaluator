@@ -1813,78 +1813,17 @@ def build_metric_evidence_bundles(traj, question, *, ground_truth="", expected_b
     return bundles
 
 
-def _slice_with_middle_marker(text, budget, marker, *, max_head=None, fallback_tail=False):
-    """Compact *text* to fit *budget* by replacing the middle with *marker*."""
-    if budget <= 0 or not text:
-        return ""
-    if len(text) <= budget:
-        return text
-    if budget <= len(marker) + 2:
-        return text[-budget:] if fallback_tail else text[:budget]
-    avail = budget - len(marker)
-    head = max(1, avail // 2 if max_head is None else min(max_head, avail // 2))
-    tail = max(1, avail - head)
-    return f"{text[:head]}{marker}{text[-tail:]}"
-
-
 def _compact_behavior_conversation(conversation_text, limit=None):
-    """Keep both setup context and late outcome evidence in behavior prompts."""
+    """Cap the behavior evidence at *limit* chars (the behavior budget), keeping its head and tail.
+
+    ``build_metric_evidence_bundles`` already fits the evidence, its facts
+    header included, to the behavior budget, so this cuts only text built
+    some other way. The host judge (``eval_core.llm_judge``) compacts by
+    section instead, because its callers pass unfitted text.
+    """
     if limit is None:
         limit = _behavior_check_budget()
-    if len(conversation_text) <= limit:
-        return conversation_text
-    marker = "\n...[middle truncated for behavior check]...\n"
-    if limit <= len(marker) + 1:
-        return conversation_text[:limit]
-    final_limit = _behavior_final_response_limit()
-    final_header = f"{_SECTION_FINAL_RESPONSE}\n"
-    final_idx = -1
-    if conversation_text.startswith(final_header):
-        final_idx = 0
-    else:
-        pos = conversation_text.find(f"\n\n{final_header}")
-        if pos != -1:
-            final_idx = pos + 2
-
-    if final_idx != -1:
-        final_end = len(conversation_text)
-        for next_hdr in (f"\n\n{_SECTION_USER_REQUEST}\n", f"\n\n{_SECTION_COMPACT_TOOL_HISTORY}\n"):
-            pos = conversation_text.find(next_hdr, final_idx)
-            if pos != -1 and pos < final_end:
-                final_end = pos
-        prefix = conversation_text[:final_idx]
-        final_sec = conversation_text[final_idx:final_end]
-        suffix = conversation_text[final_end:]
-
-        reserved_other = min(1600, max(0, limit - final_limit), limit // 2)
-        max_final = min(final_limit, max(1, limit - reserved_other))
-        if len(final_sec) > max_final:
-            final_body = final_sec[len(final_header) :]
-            body_limit = max(1, max_final - len(final_header))
-            final_sec = f"{final_header}{_truncate_for_behavior(final_body, body_limit)}"[:max_final]
-
-        rem = limit - len(final_sec)
-        if rem <= 0:
-            return final_sec[:limit]
-        if len(prefix) + len(suffix) <= rem:
-            return f"{prefix}{final_sec}{suffix}"
-        if not suffix:
-            pre_comp = _slice_with_middle_marker(prefix, rem, marker)
-            return f"{pre_comp}{final_sec}"[:limit]
-        if len(prefix) <= rem // 2:
-            suf_comp = _slice_with_middle_marker(suffix, rem - len(prefix), marker, max_head=800, fallback_tail=True)
-            return f"{prefix}{final_sec}{suf_comp}"[:limit]
-        pre_budget = max(1, min(len(prefix), rem // 2))
-        suf_budget = max(0, rem - pre_budget)
-        pre_comp = _slice_with_middle_marker(prefix, pre_budget, marker)
-        suf_comp = _slice_with_middle_marker(suffix, suf_budget, marker, max_head=800, fallback_tail=True)
-        return f"{pre_comp}{final_sec}{suf_comp}"[:limit]
-
-    available = limit - len(marker)
-    reserved_head = min(1600, available // 2)
-    tail = max(1, available // 3, min(final_limit, max(1, available - max(1, reserved_head))))
-    head = max(1, available - tail)
-    return f"{conversation_text[:head]}{marker}{conversation_text[-tail:]}"
+    return _truncate_for_behavior(conversation_text, limit)
 
 
 # ── Public Provider Caller ───────────────────────────────────────────────────

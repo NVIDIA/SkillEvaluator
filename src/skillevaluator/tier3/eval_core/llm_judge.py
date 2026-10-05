@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 from skillevaluator.inference.types import EmptyLLMResponseError
 from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, _model_leaf, _supports_custom_temperature
 from skillevaluator.tier3.eval_core.atif_helpers import (
+    _BEHAVIOR_SECTION_CHARS,
+    _MIN_BEHAVIOR_HISTORY_HEADROOM,
     _SECTION_COMPACT_TOOL_HISTORY,
     _SECTION_FINAL_RESPONSE,
     _SECTION_USER_REQUEST,
@@ -992,7 +994,7 @@ def _compact_behavior_conversation(conversation_text: str, limit: int | None = N
         final_sec = conversation_text[final_idx:final_end]
         suffix = conversation_text[final_end:]
 
-        reserved_other = min(1600, max(0, limit - final_limit), limit // 2)
+        reserved_other = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, max(0, limit - final_limit), limit // 2)
         max_final = min(final_limit, max(1, limit - reserved_other))
         if len(final_sec) > max_final:
             final_body = final_sec[len(final_header) :]
@@ -1008,16 +1010,20 @@ def _compact_behavior_conversation(conversation_text: str, limit: int | None = N
             pre_comp = _slice_with_middle_marker(prefix, rem, marker)
             return f"{pre_comp}{final_sec}"[:limit]
         if len(prefix) <= rem // 2:
-            suf_comp = _slice_with_middle_marker(suffix, rem - len(prefix), marker, max_head=800, fallback_tail=True)
+            suf_comp = _slice_with_middle_marker(
+                suffix, rem - len(prefix), marker, max_head=_BEHAVIOR_SECTION_CHARS, fallback_tail=True
+            )
             return f"{prefix}{final_sec}{suf_comp}"[:limit]
         pre_budget = max(1, min(len(prefix), rem // 2))
         suf_budget = max(0, rem - pre_budget)
         pre_comp = _slice_with_middle_marker(prefix, pre_budget, marker)
-        suf_comp = _slice_with_middle_marker(suffix, suf_budget, marker, max_head=800, fallback_tail=True)
+        suf_comp = _slice_with_middle_marker(
+            suffix, suf_budget, marker, max_head=_BEHAVIOR_SECTION_CHARS, fallback_tail=True
+        )
         return f"{pre_comp}{final_sec}{suf_comp}"[:limit]
 
     available = limit - len(marker)
-    reserved_head = min(1600, available // 2)
+    reserved_head = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, available // 2)
     tail = max(1, available // 3, min(final_limit, max(1, available - max(1, reserved_head))))
     head = max(1, available - tail)
     return f"{conversation_text[:head]}{marker}{conversation_text[-tail:]}"

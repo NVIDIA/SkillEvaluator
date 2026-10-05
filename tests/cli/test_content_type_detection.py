@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator import cli_core
+from skillevaluator import cli_core, plugin_manifest
 from skillevaluator.cli_core import (
     _detect_from_directory,
     _detect_from_file,
@@ -27,6 +27,8 @@ from skillevaluator.constants import (
     CONTENT_TYPE_UNKNOWN,
     CONTENT_TYPE_WORKFLOWS,
 )
+from skillevaluator.plugin_manifest import agent_plugins_path_opt_in
+from skillevaluator.utils.secure_fs import SecurePathError
 
 
 class TestDetectFromFile:
@@ -489,4 +491,28 @@ class TestAgentPluginsRootManifestDetection:
         assert located is not None
         assert located.manifest_type == "agent_plugins_v1"
         assert _detect_from_file(root / "plugin.json") == CONTENT_TYPE_PLUGIN
+        assert detect_content_type(root) == CONTENT_TYPE_PLUGIN
+
+    def test_hard_linked_manifest_is_not_read_for_the_opt_in(self, tmp_path: Path) -> None:
+        """The opt-in reads plugin.json like every other manifest read, so a hard link is refused, not parsed."""
+        root = self._plugin_with_skills(tmp_path / "p", f'{{"$schema": "{self._SCHEMA}", "name": "x"}}'.encode())
+        os.link(root / "plugin.json", tmp_path / "alias.json")
+
+        with pytest.raises(SecurePathError):
+            agent_plugins_path_opt_in(root / "plugin.json")
+        assert _detect_from_file(root / "plugin.json") is None
+
+    def test_manifest_over_the_opt_in_bound_opts_in_unread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Clients read any size, so a root plugin.json over the bound opts in without being parsed."""
+        root = self._plugin_with_skills(tmp_path / "p", b'{"name": "legacy-copilot"}')
+        assert agent_plugins_path_opt_in(root / "plugin.json") is False
+
+        def parse(raw: bytes) -> bool:
+            raise AssertionError("an oversize manifest must not be parsed")
+
+        monkeypatch.setattr(plugin_manifest, "AGENT_PLUGINS_OPT_IN_MAX_BYTES", 8)
+        monkeypatch.setattr(plugin_manifest, "agent_plugins_opt_in", parse)
+        assert agent_plugins_path_opt_in(root / "plugin.json") is True
         assert detect_content_type(root) == CONTENT_TYPE_PLUGIN

@@ -148,37 +148,6 @@ def _read_secure_manifest(
         ) from exc
 
 
-def _read_prefix(root: Path, relative: Path, max_bytes: int, *, expected: os.stat_result | None = None) -> bytes:
-    """First ``max_bytes`` bytes of a regular single-link file below ``root``.
-
-    The file is opened through the anchored root descriptor without following
-    links, like every other manifest read; only the read itself is shorter, so
-    an oversize file can still show what it starts with. Raises
-    :class:`SecurePathError`.
-    """
-    with SecureRoot(root) as secure_root:
-        opener = secure_root._open_posix if os.name == "posix" else secure_root._open_windows
-        descriptor = opener(relative, expected)
-        try:
-            chunks: list[bytes] = []
-            total = 0
-            while total < max_bytes:
-                chunk = os.read(descriptor, min(65_536, max_bytes - total))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-            return b"".join(chunks)
-        finally:
-            os.close(descriptor)
-
-
-def read_path_prefix(path: Path, max_bytes: int) -> bytes:
-    """First ``max_bytes`` bytes of the regular single-link file at ``path`` (anchored at its parent, no-follow)."""
-    absolute = Path(os.path.abspath(os.fspath(path)))  # noqa: PTH100 - lexical, never resolved
-    return _read_prefix(absolute.parent, Path(absolute.name), max_bytes)
-
-
 def decode_manifest_leniently(raw: bytes) -> str:
     """Decode manifest bytes the way a lenient client does, never failing.
 
@@ -318,18 +287,16 @@ _AGENT_PLUGINS_HOST_MARKERS: tuple[bytes, ...] = tuple(
 def agent_plugins_opt_in(raw: bytes) -> bool:
     """Whether the bytes of a root ``plugin.json`` opt into Agent Plugins semantics.
 
-    ``raw`` is the whole file, read up to :data:`AGENT_PLUGINS_OPT_IN_MAX_BYTES`
-    plus one byte. A longer read opts in: clients read any size, so the file is
-    treated as the Agent Plugins manifest and then fails as unreadable. The
-    bytes are decoded leniently (:func:`decode_manifest_leniently`) and parsed;
-    a JSON object opts in when it declares an Agent Plugins ``$schema``, however
-    much whitespace comes first and however its slashes are escaped. JSON that
-    does not parse still counts when its bytes name the schema host in UTF-8,
-    UTF-16, or UTF-32, so its syntax or encoding error is reported rather than
-    hidden.
+    ``raw`` is the whole file. Callers do not read a file over
+    :data:`AGENT_PLUGINS_OPT_IN_MAX_BYTES`: it opts in unread, because clients
+    read any size, so the file is treated as the Agent Plugins manifest and
+    then fails as unreadable. The bytes are decoded leniently
+    (:func:`decode_manifest_leniently`) and parsed; a JSON object opts in when
+    it declares an Agent Plugins ``$schema``, however much whitespace comes
+    first and however its slashes are escaped. JSON that does not parse still
+    counts when its bytes name the schema host in UTF-8, UTF-16, or UTF-32, so
+    its syntax or encoding error is reported rather than hidden.
     """
-    if len(raw) > AGENT_PLUGINS_OPT_IN_MAX_BYTES:
-        return True
     try:
         return declares_agent_plugins_schema(load_bounded_json(decode_manifest_leniently(raw)))
     except (StructuredDataError, ValueError):
@@ -340,10 +307,21 @@ def agent_plugins_opt_in(raw: bytes) -> bool:
 def agent_plugins_path_opt_in(path: Path) -> bool:
     """:func:`agent_plugins_opt_in` for the root ``plugin.json`` at ``path`` (bounded, anchored, no-follow read).
 
-    Raises :class:`SecurePathError` or :class:`OSError` when the file cannot
-    be read safely (a link, special file, or missing file).
+    The file is read like every other manifest, through the descriptor of its
+    parent directory, and a file over :data:`AGENT_PLUGINS_OPT_IN_MAX_BYTES`
+    opts in unread. Raises :class:`SecurePathError` or :class:`OSError` when
+    the file cannot be read safely (a link, special or hard-linked file, a file
+    that changes while it is read, or a missing file).
     """
-    return agent_plugins_opt_in(read_path_prefix(path, AGENT_PLUGINS_OPT_IN_MAX_BYTES + 1))
+    absolute = Path(os.path.abspath(os.fspath(path)))  # noqa: PTH100 - lexical, never resolved
+    try:
+        with SecureRoot(absolute.parent) as secure_root:
+            raw, _metadata = secure_root.read_bytes(Path(absolute.name), AGENT_PLUGINS_OPT_IN_MAX_BYTES)
+    except SecurePathError as exc:
+        if exc.code != "file_size_limit":
+            raise
+        return True
+    return agent_plugins_opt_in(raw)
 
 
 def _is_agent_plugins_manifest(secure_file: SecureFile, declared_path: Path) -> bool:

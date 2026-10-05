@@ -3586,10 +3586,6 @@ def _save_trials(
             if trial_src and not reward.get("_step_name") and not (trial_src / "agent" / "trajectory.json").exists()
             else None
         )
-        if merged_traj and "_trajectory_summary" not in reward:
-            reward["_trajectory_summary"] = _summarize_trajectory(merged_traj)
-        elif src_traj and src_traj.exists() and "_trajectory_summary" not in reward:
-            reward["_trajectory_summary"] = _summarize_trajectory_file(src_traj)
 
         clean_reward = {k: v for k, v in reward.items() if not k.startswith("_")}
         _add_trusted_invocation_evidence(clean_reward, reward, trial_src, skill_name)
@@ -3637,47 +3633,6 @@ def _save_trials(
         agent_model=agent_model,
         agent_model_source=agent_model_source,
     )
-
-
-def _summarize_trajectory_file(path: Path) -> dict[str, Any]:
-    """Return safe trajectory metadata without raw prompts, outputs, or arguments."""
-    data = _read_json(path)
-    if not isinstance(data, dict):
-        return {"readable": False}
-
-    return _summarize_trajectory(data)
-
-
-def _summarize_trajectory(data: dict[str, Any]) -> dict[str, Any]:
-    """Return safe trajectory metadata without raw prompts, outputs, or arguments."""
-    steps = data.get("steps", [])
-    if not isinstance(steps, list):
-        return {"readable": True, "steps": 0, "tool_calls": 0, "tool_names": []}
-
-    tool_names: list[str] = []
-    tool_calls = 0
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        calls = step.get("tool_calls", [])
-        if not isinstance(calls, list):
-            continue
-        for call in calls:
-            if not isinstance(call, dict):
-                continue
-            tool_calls += 1
-            name = call.get("function_name") or call.get("name") or call.get("tool_name")
-            if name:
-                tool_names.append(str(name))
-
-    unique_tool_names = sorted(dict.fromkeys(tool_names))
-    return {
-        "readable": True,
-        "steps": len(steps),
-        "tool_calls": tool_calls,
-        "unique_tools": len(unique_tool_names),
-        "tool_names": unique_tool_names[:20],
-    }
 
 
 def _usage_counter(value: Any) -> float | None:

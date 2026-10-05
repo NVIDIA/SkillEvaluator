@@ -188,7 +188,7 @@ class TestFindBundledPluginSkillManifests:
         manifests = find_bundled_plugin_skill_manifests(Path("plugin"))
 
         assert [manifest.rel_path for manifest in manifests] == ["a/SKILL.md", "evals/SKILL.md", "versions/v2/SKILL.md"]
-        assert {manifest.root for manifest in manifests} == {tmp_path / "plugin" / "skills"}
+        assert {manifest.root for manifest in manifests} == {Path.cwd() / "plugin" / "skills"}
         assert all(manifest.path == manifest.root / manifest.relative_path for manifest in manifests)
 
 

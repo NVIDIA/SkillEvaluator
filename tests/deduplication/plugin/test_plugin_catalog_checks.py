@@ -743,6 +743,7 @@ class TestUnsafeOrOversizedInputs:
         results = run_plugin_catalog_checks(plugins / "alpha", catalog=catalog)
 
         assert all(result.metadata["work_limit_exceeded"] for result in results)
+        assert all(result.metadata["actual_skills"] == 2 for result in results)
         assert all(result.metadata["execution_status"] == "skipped" for result in results)
         assert not embed_calls
 
@@ -805,6 +806,38 @@ def test_plugin_dedup_scan_records_catalog_checks_without_a_catalog(plugins: Pat
     assert all(result.passed for result in results)
     assert results[2].metadata["plugin"]["catalog_skill_similarity"]["status"] == "skipped"
     assert results[3].metadata["plugin"]["inter_plugin_similarity"]["status"] == "skipped"
+
+
+def test_plugin_dedup_scan_discovers_bundled_skills_once(plugins: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.deduplication.plugin import profile as profile_module
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.tier2 import commands
+    from skillevaluator.utils import helpers
+
+    catalog = plugins.parent / "catalog.json"
+    _save_catalog(plugins, catalog)
+    discovered: list[Path] = []
+    real_discovery = helpers.find_bundled_plugin_skill_manifests
+
+    def counting_discovery(plugin_root: Path, *args: object, **kwargs: object):
+        discovered.append(plugin_root)
+        return real_discovery(plugin_root, *args, **kwargs)
+
+    class OfflineContextValidator:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def validate(self, _skill_dir: Path) -> ValidationResult:
+            return ValidationResult(validator_name="Context Deduplication")
+
+    monkeypatch.setattr(helpers, "find_bundled_plugin_skill_manifests", counting_discovery)
+    monkeypatch.setattr(profile_module, "find_bundled_plugin_skill_manifests", counting_discovery)
+    monkeypatch.setattr(commands, "IntraSkillValidator", OfflineContextValidator)
+
+    results = _by_name(run_plugin_dedup_scan(plugins / "alpha", catalog=catalog))
+
+    assert discovered == [plugins / "alpha"]
+    assert results["Inter-Skill Deduplication"].metadata["plugin"]["catalog_skill_similarity"]["status"] == "compared"
 
 
 def test_profile_reads_bundled_skill_manifests_without_rediscovering_them(

@@ -79,8 +79,6 @@ _INTEGRATION_REASON_NO_WORKSPACE = "The run recorded no plugin workspace, so no 
 _INTEGRATION_REASON_NO_COMPONENTS = "The run staged no member components, so no member-skills arm could be compared."
 _INTEGRATION_REASON_NO_ARM = "The member-skills (sum-of-parts) arm was not run, so Integration was not measured."
 _INTEGRATION_REASON_NO_SCORE = "The member-skills (sum-of-parts) arm produced no comparable score."
-# Report-only statistics produced by the collector (shared C4 contract).
-_STATISTICS_FIELDS = ("lift_uncertainty", "reliability", "cost", "token_efficiency", "context_cost_measured")
 # The per-trial rewards list of each arm in the loaded agent data.
 _ARM_REWARDS_FIELDS = {
     "with_skill": "rewards",
@@ -883,7 +881,7 @@ def build_agent_eval_payload(
     if plugin_provenance:
         payload["plugin_provenance"] = plugin_provenance
         summary["plugin_provenance"] = plugin_provenance
-    for field_name in _STATISTICS_FIELDS:
+    for field_name in _statistics_fields():
         if isinstance(best.get(field_name), dict):
             payload[field_name] = best[field_name]
     if _is_plugin_target(run_config) or plugin_provenance:
@@ -1422,7 +1420,7 @@ def _build_agent(
         "sum_of_parts": sum_of_parts_overall,
         "integration_lift": integration_lift,
         "integration_completeness": info.get("integration_completeness") or {},
-        **{field: info[field] for field in _STATISTICS_FIELDS if isinstance(info.get(field), dict)},
+        **{field: info[field] for field in _statistics_fields() if isinstance(info.get(field), dict)},
         "num_trials": int(info.get("num_trials", 0) or 0),
         "num_trials_baseline": int(info.get("num_trials_baseline", len(baseline_trials)) or 0),
         "trials": trials,
@@ -1491,14 +1489,22 @@ def _attach_agent_report_details(
     )
 
 
+def _statistics_fields() -> tuple[str, ...]:
+    """The report-only statistics blocks the collector stores for an agent (``STATISTICS_BLOCKS``), copied as is.
+
+    Integration completeness is left out: an agent's payload sets it on its own,
+    and the payload reports it in the Integration block, not at the top level.
+    """
+    from skillevaluator.tier3.harbor.stats import STATISTICS_BLOCKS
+
+    return tuple(block for block in STATISTICS_BLOCKS if block != "integration_completeness")
+
+
 def _arm_not_applicable(info: dict[str, Any], condition: str) -> list[str]:
     """Judged metrics an arm recorded as not applicable in every trial."""
-    from skillevaluator.tier3.harbor.metrics import NOT_APPLICABLE_ELIGIBLE_METRICS
+    from skillevaluator.tier3.harbor.metrics import not_applicable_list
 
-    raw = info.get(f"not_applicable_{condition}")
-    if not isinstance(raw, list):
-        return []
-    return [metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric in raw]
+    return not_applicable_list(info.get(f"not_applicable_{condition}"))
 
 
 def _not_applicable_evaluators(
@@ -1565,8 +1571,10 @@ def _build_evaluators(
 
 def _arm_dimension_score(scores: dict[str, Any], precomputed: dict[str, Any], dim_id: str) -> float | None:
     """Return one arm's score for a dimension: the engine's, else the weighted evaluator scores."""
+    from skillevaluator.tier3.harbor.metrics import weighted_dimension_score
+
     score = _precomputed_score(precomputed, dim_id)
-    return score if score is not None else _dimension_score(scores, DIMENSION_MAPPING[dim_id])
+    return score if score is not None else weighted_dimension_score(scores.get, DIMENSION_MAPPING[dim_id])
 
 
 def _dimension_scores(scores: dict[str, Any], precomputed: dict[str, Any]) -> list[float | None]:
@@ -2751,25 +2759,6 @@ def _pass_threshold_from_policy(attempt_policy: dict[str, Any]) -> float:
 # ---------------------------------------------------------------------------
 # Scoring helpers
 # ---------------------------------------------------------------------------
-
-
-def _dimension_score(scores: dict[str, Any], cfg: dict[str, Any]) -> float | None:
-    value = _weighted(scores, cfg.get("evaluators", []), cfg.get("weights", []))
-    if value is None and cfg.get("fallback_evaluators"):
-        value = _weighted(scores, cfg["fallback_evaluators"], cfg.get("fallback_weights", []))
-    return value
-
-
-def _weighted(scores: dict[str, Any], evaluators: list[str], weights: list[float]) -> float | None:
-    num = 0.0
-    den = 0.0
-    for evaluator, weight in zip(evaluators, weights, strict=False):
-        value = _finite_float(scores.get(evaluator))
-        finite_weight = _finite_float(weight)
-        if value is not None and finite_weight is not None:
-            num += value * finite_weight
-            den += finite_weight
-    return (num / den) if den > 0 else None
 
 
 def _precomputed_score(precomputed: dict[str, Any], dim_id: str) -> float | None:

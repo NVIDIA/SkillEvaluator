@@ -575,6 +575,15 @@ def test_report_data_loads_arm_not_applicable_metrics(partial_run: tuple[Path, d
     assert agents["opencode"]["not_applicable_without_skill"] == ["behavior_check"]
 
 
+def test_report_reads_an_arms_not_applicable_list_with_the_loaders_reader() -> None:
+    """The report reads the stored list with not_applicable_list, as report_data does (a tuple counts too)."""
+    from skillevaluator.evaluation.tier3_report import _arm_not_applicable
+
+    info = {"not_applicable_with_skill": ("behavior_check", "accuracy"), "not_applicable_without_skill": "accuracy"}
+    assert _arm_not_applicable(info, "with_skill") == ["accuracy", "behavior_check"]
+    assert _arm_not_applicable(info, "without_skill") == []
+
+
 def _render_cli(result: dict[str, Any]) -> str:
     buffer = io.StringIO()
     console = Console(file=buffer, width=160, force_terminal=False, color_system=None)

@@ -21,8 +21,7 @@ from skillevaluator import __version__
 from skillevaluator.reporting.base import ReporterBase
 from skillevaluator.reporting.plugin_sections import (
     PLUGIN_ARMS,
-    component_for_path,
-    finding_artifact_path,
+    ComponentIndex,
     inventory_view,
     json_safe,
     pinning_view,
@@ -39,6 +38,8 @@ _RULE_ID_PATTERN = re.compile(r"[^A-Za-z0-9._/-]+")
 # GitHub's base id for the checkout root; repository-relative URIs resolve against it.
 _SRCROOT = "%SRCROOT%"
 CANARY_RULE_ID = "AGENT_EVAL/canary_exfiltration"
+# A run without plugin metadata still drops the "[skill] " labels from finding paths.
+_NO_INVENTORY = ComponentIndex(None)
 _CANARY_RULE: dict[str, Any] = {
     "id": CANARY_RULE_ID,
     "name": "canary_exfiltration",
@@ -178,21 +179,21 @@ def _physical_location(
     return {"physicalLocation": location}
 
 
-def _plugin_component(artifact_path: str, plugin: dict[str, Any], scan_root: Path | None) -> dict[str, str] | None:
+def _plugin_component(artifact_path: str, components: ComponentIndex, scan_root: Path | None) -> dict[str, str] | None:
     """Return the inventory component a finding's file belongs to.
 
     The plugin block records its root as typed (``.`` for ``validate .``),
     which an absolute finding path cannot match. The scan root is the resolved
     plugin root, so such a path is looked up relative to it instead.
     """
-    component = component_for_path(artifact_path, plugin)
+    component = components.component(artifact_path)
     if component is not None or scan_root is None or not Path(artifact_path).is_absolute():
         return component
     try:
         relative = _resolve_artifact_path(artifact_path, scan_root).relative_to(scan_root.resolve())
     except ValueError:
         return None
-    return component_for_path(relative.as_posix(), plugin)
+    return components.component(relative.as_posix())
 
 
 def _result_from_finding(
@@ -200,8 +201,9 @@ def _result_from_finding(
     validator_name: str,
     workspace_root: Path | None,
     scan_root: Path | None = None,
-    plugin: dict[str, Any] | None = None,
+    components: ComponentIndex | None = None,
 ) -> dict[str, Any]:
+    """Convert one finding; *components* indexes the plugin inventory of a plugin run."""
     severity = _finding_severity_value(finding)
     result: dict[str, Any] = {
         "ruleId": _rule_id(validator_name, finding.check_name),
@@ -211,7 +213,7 @@ def _result_from_finding(
     if finding.suggestion:
         result["message"]["markdown"] = f"{finding.message}\n\n**Suggestion:** {finding.suggestion}"
     # Resolve the file the finding points at once, so its location and its plugin component agree.
-    artifact_path = finding_artifact_path(finding.file_path, plugin) if finding.file_path else ""
+    artifact_path = (components or _NO_INVENTORY).artifact_path(finding.file_path) if finding.file_path else ""
     location = _physical_location(finding, artifact_path, workspace_root, scan_root)
     if location is not None:
         result["locations"] = [location]
@@ -223,7 +225,7 @@ def _result_from_finding(
     }
     if finding.metadata:
         properties["metadata"] = finding.metadata
-    plugin_component = _plugin_component(artifact_path, plugin, scan_root) if plugin is not None else None
+    plugin_component = _plugin_component(artifact_path, components, scan_root) if components is not None else None
     if plugin_component:
         properties["pluginComponent"] = plugin_component
     result["properties"] = properties
@@ -489,12 +491,15 @@ class SARIFReporter(ReporterBase):
         scan_root = self.scan_root
 
         plugin = self._plugin_block_from_results(results)
+        components = ComponentIndex(plugin) if plugin is not None else None
         for result in results:
             validator_name = result.validator_name or "UNKNOWN"
             for finding in result.findings:
                 rule = _rule_descriptor(finding, validator_name)
                 rules[rule["id"]] = rule
-                sarif_results.append(_result_from_finding(finding, validator_name, workspace_root, scan_root, plugin))
+                sarif_results.append(
+                    _result_from_finding(finding, validator_name, workspace_root, scan_root, components)
+                )
         canary_results = _canary_results(results, plugin, workspace_root, scan_root)
         if canary_results:
             rules[CANARY_RULE_ID] = _CANARY_RULE

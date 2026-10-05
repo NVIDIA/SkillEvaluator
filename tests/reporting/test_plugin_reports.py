@@ -869,3 +869,21 @@ def test_similarity_views_carry_their_title_columns_and_summary() -> None:
     assert "### Plugin vs. other plugins in the local catalog (advisory)" in markdown
     assert "**Status:** Compared · 3 catalog entries compared." in markdown
     assert "| Catalog plugin | Similarity | Member overlap | Verdict |" in markdown
+
+
+def test_component_index_places_a_folder_walker_label_only_when_it_is_unambiguous() -> None:
+    from skillevaluator.reporting.plugin_sections import ComponentIndex
+
+    skills = [("nested/bar", "skills/nested/bar"), ("a/x", "skills/a/x"), ("b/x", "skills/b/x")]
+    block = {
+        "root": "/work/p",
+        "component_inventory": {"components": [{"type": "skill", "name": n, "path": p} for n, p in skills]},
+    }
+    index = ComponentIndex(block)
+
+    # Folder walkers label a bundled skill with its directory name only.
+    assert index.artifact_path("[bar] SKILL.md") == "skills/nested/bar/SKILL.md"
+    # Two skills end in "x": the path is left as it is rather than guessed.
+    assert index.artifact_path("[x] SKILL.md") == "SKILL.md"
+    assert (index.component("[nested/bar] SKILL.md") or {}).get("path") == "skills/nested/bar"
+    assert (index.component("/work/p/skills/b/x/run.py") or {}).get("name") == "b/x"

@@ -768,81 +768,106 @@ def _component_path(component: Mapping[str, Any]) -> str:
     return text(component.get("path"), limit=4096).replace("\\", "/").removeprefix("./").rstrip("/")
 
 
-def _bundled_skill_dir(label: str, block: object) -> str | None:
-    """Return the root-relative directory of the bundled skill a finding label names."""
-    skills = [
-        (text(component.get("name")), _component_path(component))
-        for component in _inventory_components(block)
-        if component.get("type") == "skill"
-    ]
-    by_name = [path for name, path in skills if name == label and path]
-    if by_name:
-        return by_name[0]
-    # Folder walkers label a skill with its directory name ("bar" for skills/nested/bar).
-    by_directory = [path for _name, path in skills if path == label or path.endswith(f"/{label}")]
-    return by_directory[0] if len(by_directory) == 1 else None
+class ComponentIndex:
+    """A plugin inventory indexed by component path, to place many findings without rescanning it.
+
+    *block* is the Tier 1 plugin block. Build one index per report and look
+    up each finding with :meth:`artifact_path` and :meth:`component`.
+    """
+
+    def __init__(self, block: object) -> None:
+        source = _mapping(block)
+        self._root = text(source.get("root"), limit=4096).replace("\\", "/").rstrip("/")
+        components = _inventory_components(source)
+        self._by_path: dict[str, dict[str, str]] = {}
+        for component in components[: MAX_TABLE_ROWS * 5]:
+            path = _component_path(component)
+            if path and path not in self._by_path:
+                self._by_path[path] = {
+                    "type": text(component.get("type"), limit=32),
+                    "name": text(component.get("name")),
+                    "path": path,
+                    "support": text(component.get("support"), limit=32),
+                }
+        self._skill_by_name: dict[str, str] = {}
+        # Folder walkers label a skill with its directory name ("bar" for skills/nested/bar),
+        # so every trailing part of a skill directory maps back to it.
+        self._skills_by_suffix: dict[str, list[str]] = {}
+        for component in components:
+            if component.get("type") != "skill":
+                continue
+            path = _component_path(component)
+            name = text(component.get("name"))
+            if path and name not in self._skill_by_name:
+                self._skill_by_name[name] = path
+            parts = path.split("/")
+            for start in range(len(parts)):
+                self._skills_by_suffix.setdefault("/".join(parts[start:]), []).append(path)
+
+    def _bundled_skill_dir(self, label: str) -> str | None:
+        """Return the root-relative directory of the bundled skill a finding label names."""
+        if label in self._skill_by_name:
+            return self._skill_by_name[label]
+        matches = self._skills_by_suffix.get(label, [])
+        return matches[0] if len(matches) == 1 else None
+
+    def artifact_path(self, file_path: str) -> str:
+        """Return the file a finding points at: its path without the ``[skill] `` label.
+
+        Validators rebase a bundled skill's relative paths onto the plugin root
+        (``skills/foo/SKILL.md``), but some report them relative to the skill
+        (Tier 2 says ``SKILL.md``). A relative path that is not already inside
+        the labelled skill's directory is joined onto that directory. Absolute
+        and unlabelled paths are returned unchanged.
+        """
+        skill, inner = split_display_prefix(file_path)
+        inner = inner.strip()
+        if skill is None or not inner:
+            return file_path
+        if _is_absolute(inner):
+            return inner
+        skill_dir = self._bundled_skill_dir(skill)
+        relative = inner.replace("\\", "/").removeprefix("./")
+        if skill_dir in (None, ".") or relative == skill_dir or relative.startswith(f"{skill_dir}/"):
+            return inner
+        return f"{skill_dir}/{relative}"
+
+    def component(self, file_path: object) -> dict[str, str] | None:
+        """Return the inventory component whose root-relative path contains *file_path*.
+
+        Absolute paths are made root-relative against the plugin root. The
+        longest matching component path wins, so a file inside ``skills/foo``
+        maps to that skill rather than to a broader component.
+        """
+        raw = self.artifact_path(text(file_path, limit=4096))
+        if not raw:
+            return None
+        normalized = raw.replace("\\", "/")
+        if self._root and (normalized == self._root or normalized.startswith(self._root + "/")):
+            normalized = normalized[len(self._root) :].lstrip("/")
+        elif _is_absolute(raw):
+            return None
+        parts = normalized.removeprefix("./").split("/")
+        # The longest leading run of path parts that names a component.
+        for end in range(len(parts), 0, -1):
+            component = self._by_path.get("/".join(parts[:end]))
+            if component is not None:
+                return dict(component)
+        return None
 
 
 def finding_artifact_path(file_path: str, block: object) -> str:
-    """Return the file a finding points at: its path without the ``[skill] `` label.
-
-    Validators rebase a bundled skill's relative paths onto the plugin root
-    (``skills/foo/SKILL.md``), but some report them relative to the skill
-    (Tier 2 says ``SKILL.md``). A relative path that is not already inside the
-    labelled skill's directory is joined onto that directory, taken from the
-    plugin inventory in *block*. Absolute and unlabelled paths are returned
-    unchanged.
-    """
-    skill, inner = split_display_prefix(file_path)
-    inner = inner.strip()
-    if skill is None or not inner:
-        return file_path
-    if _is_absolute(inner):
-        return inner
-    skill_dir = _bundled_skill_dir(skill, block)
-    relative = inner.replace("\\", "/").removeprefix("./")
-    if skill_dir in (None, ".") or relative == skill_dir or relative.startswith(f"{skill_dir}/"):
-        return inner
-    return f"{skill_dir}/{relative}"
+    """Return the file a finding points at (see :meth:`ComponentIndex.artifact_path`)."""
+    return ComponentIndex(block).artifact_path(file_path)
 
 
 def component_for_path(file_path: object, block: object) -> dict[str, str] | None:
-    """Return the inventory component whose root-relative path contains *file_path*.
+    """Return the inventory component that contains a finding's file (see :meth:`ComponentIndex.component`).
 
     Findings carry either root-relative or absolute paths, and a bundled
-    skill's findings carry a ``[skill] `` label (see
-    :func:`finding_artifact_path`). Absolute paths are made root-relative
-    against the plugin root; the longest matching component path wins, so a
-    file inside ``skills/foo`` maps to that skill rather than to a broader
-    component.
+    skill's findings carry a ``[skill] `` label.
     """
-    source = _mapping(block)
-    raw = finding_artifact_path(text(file_path, limit=4096), source)
-    if not raw:
-        return None
-    normalized = raw.replace("\\", "/")
-    root = text(source.get("root"), limit=4096).replace("\\", "/").rstrip("/")
-    if root and (normalized == root or normalized.startswith(root + "/")):
-        normalized = normalized[len(root) :].lstrip("/")
-    elif _is_absolute(raw):
-        return None
-    normalized = normalized.removeprefix("./")
-    best: dict[str, str] | None = None
-    best_length = -1
-    for component in _inventory_components(source)[: MAX_TABLE_ROWS * 5]:
-        component_path = _component_path(component)
-        if not component_path:
-            continue
-        contains = normalized == component_path or normalized.startswith(component_path + "/")
-        if contains and len(component_path) > best_length:
-            best_length = len(component_path)
-            best = {
-                "type": text(component.get("type"), limit=32),
-                "name": text(component.get("name")),
-                "path": component_path,
-                "support": text(component.get("support"), limit=32),
-            }
-    return best
+    return ComponentIndex(block).component(file_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1139,6 +1164,7 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
     if not coverage:
         return None
     activation = (signals or {}).get("activation")
+    observations = _observation_sets(activation) if activation else ()
     rows: list[dict[str, Any]] = []
     total = 0
     not_staged_rows: list[dict[str, Any]] = []
@@ -1164,7 +1190,7 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
             "observed": "",
         }
         if activation:
-            row["observed"] = _observed_activation(row, activation)
+            row["observed"] = _observed_activation(row, observations)
         if len(rows) < MAX_TABLE_ROWS:
             rows.append(row)
         if state not in EVALUATED_COVERAGE_STATES:
@@ -1222,16 +1248,19 @@ def _coverage_state_class(state: str) -> str:
 _ACTIVATION_TYPE_ALIASES = {"rule": ("rule", COMPONENT_RULE_READ), "agent": ("agent", COMPONENT_SUBAGENT)}
 
 
-def _observed_activation(row: Mapping[str, Any], activation: Mapping[str, Any]) -> str:
+# What trials observed of a component, strongest evidence first.
+_OBSERVATIONS = ("exercised", "unavailable", "unverified")
+
+
+def _observation_sets(activation: Mapping[str, Any]) -> tuple[tuple[str, frozenset[str]], ...]:
+    """Return each observation with the activation keys (``type:name``) recorded for it."""
+    return tuple((observation, frozenset(activation.get(observation) or [])) for observation in _OBSERVATIONS)
+
+
+def _observed_activation(row: Mapping[str, Any], observations: tuple[tuple[str, frozenset[str]], ...]) -> str:
     """Return whether trials observed a coverage row's component (advisory)."""
     keys = {f"{kind}:{row['name']}" for kind in _ACTIVATION_TYPE_ALIASES.get(row["type"], (row["type"],))}
-    if keys & set(activation.get("exercised") or []):
-        return "exercised"
-    if keys & set(activation.get("unavailable") or []):
-        return "unavailable"
-    if keys & set(activation.get("unverified") or []):
-        return "unverified"
-    return "not observed"
+    return next((observation for observation, recorded in observations if keys & recorded), "not observed")
 
 
 def _lift_modes(payload: Mapping[str, Any], provenance: Mapping[str, Any]) -> dict[str, str] | None:

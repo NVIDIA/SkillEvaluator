@@ -173,7 +173,7 @@ def test_coverage_headline_counts_loaded_and_exercised_components_as_staged(tmp_
 
     result = _result(tmp_path, component_coverage=deepcopy(_EXERCISED_COVERAGE))
     markdown = MarkdownReporter().render_all([result])
-    assert "**1 component not staged** of 4 component(s); 3 staged." in markdown
+    assert "**1 component not staged** of 4 declared or packaged component(s); 3 staged." in markdown
     html = HTMLReporter(include_timestamp=False).render_all([result])
     assert element_text(html, "tier3-plugin-not-evaluated") == (
         "1 component not staged of 4 declared or packaged component(s); 3 staged."
@@ -182,7 +182,9 @@ def test_coverage_headline_counts_loaded_and_exercised_components_as_staged(tmp_
     assert view is not None
     console = Console(record=True, width=200, color_system=None)
     print_plugin_tier3(view, console)
-    assert "Component coverage: 1 component not staged (of 4; 3 staged)" in " ".join(console.export_text().split())
+    assert "Component coverage: 1 component not staged (of 4 declared or packaged component(s); 3 staged)" in " ".join(
+        console.export_text().split()
+    )
 
 
 def test_html_renders_runtime_evidence_sections(tmp_path: Path) -> None:

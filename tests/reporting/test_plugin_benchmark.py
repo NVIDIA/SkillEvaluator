@@ -190,7 +190,10 @@ def test_partial_plugin_card_is_incomplete_and_lists_excluded_behavior(tmp_path:
     assert "- Plugin run: INCOMPLETE (partial)" in rendered
     assert "| Integration (plugin vs. its own parts) | INCONCLUSIVE — No cross-component case completed. |" in rendered
     assert "**2 components not staged** of 4 declared or packaged component(s); 2 staged." in rendered
-    assert "- mcp docs (Unavailable) — provider-only MCP server" in rendered
+    assert "| docs | mcp | Unavailable | provider-only MCP server |" in rendered
+    # The coverage table and the excluded list already name each component that was not staged.
+    assert "Not staged:" not in rendered
+    assert "- 2 components not staged: mcp docs, hook pre-commit" in rendered
     assert "- Status: **INCOMPLETE** — 1 unresolved skill ref, 1 provider-only MCP server" in rendered
     assert "- Provider-only MCP servers were not exercised: docs" in rendered
     assert "- Unresolved skill refs were not evaluated: github::org/repo::skills::remote" in rendered

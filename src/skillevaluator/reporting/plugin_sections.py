@@ -102,6 +102,7 @@ _STATISTIC_KEYS = (
 )
 _COMPLETENESS_ISSUE_KEYS = ("missing_cases", "failed_arms", "attempt_shortfall")
 
+STAGING_CAVEAT = "Files staged ≠ components loaded ≠ behavior verified."
 STAGED_IS_NOT_VERIFIED = (
     "Staged means the component's files were placed in the evaluation workspace. "
     "It does not show that the agent loaded the component, and it does not verify the component's behavior."
@@ -1131,21 +1132,30 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
     # A ``loaded`` or ``exercised`` component was also staged, so the headline's
     # staged count covers every evaluated state, not only rows still ``staged``.
     staged = sum(row["count"] for row in counts if row["state"] in EVALUATED_COVERAGE_STATES)
+    total = total or sum(row["count"] for row in counts)
+    observed_headline = (
+        f"{_plural(unobserved, 'staged component')} not observed in any plugin trial" if unobserved else ""
+    )
+    all_exercised = bool(activation) and staged > 0 and not_staged == 0 and unobserved == 0
     return {
         "rows": rows,
         "omitted": max(0, total - len(rows)),
-        "total": total or sum(row["count"] for row in counts),
+        "total": total,
         "staged": staged,
         "counts": [row for row in counts if row["count"] or row["state"] in COVERAGE_STATES],
         "not_staged": not_staged,
         "not_staged_rows": not_staged_rows,
         "headline": f"{_plural(not_staged, 'component')} not staged",
+        # The sentence every format prints after the headline.
+        "detail": f"of {total} declared or packaged component(s); {staged} staged"
+        + (f"; {observed_headline}" if observed_headline else ""),
+        # Staged alone is not evaluated: ok only when every component was staged and exercised.
+        "status_class": "fail" if not_staged else ("ok" if all_exercised else "warn"),
         "staged_not_observed": unobserved if activation else None,
         "staged_not_observed_rows": unobserved_rows,
-        "observed_headline": (
-            f"{_plural(unobserved, 'staged component')} not observed in any plugin trial" if unobserved else ""
-        ),
-        "all_exercised": bool(activation) and staged > 0 and not_staged == 0 and unobserved == 0,
+        "observed_headline": observed_headline,
+        "all_exercised": all_exercised,
+        "caveat": STAGING_CAVEAT,
         "note": STAGED_IS_NOT_VERIFIED,
         "activation": activation,
     }
@@ -1725,6 +1735,13 @@ def _signal_entry(
     }
 
 
+def _component_list(rows: list[dict[str, Any]], total: int, *, limit: int = 12) -> str:
+    """Name the first *limit* coverage rows and count the rest of *total*."""
+    names = [f"{row['type']} {row['name']}".strip() for row in rows[:limit]]
+    omitted = max(0, total - len(names))
+    return ", ".join(names) + (f" (+{omitted} more)" if names and omitted else "")
+
+
 def excluded_behavior(view: Mapping[str, Any], provenance: object) -> list[str]:
     """Return plain-language statements of what this plugin run did not evaluate."""
     source = _mapping(provenance)
@@ -1734,14 +1751,11 @@ def excluded_behavior(view: Mapping[str, Any], provenance: object) -> list[str]:
         statements.append(sidecar_reason[:1].upper() + sidecar_reason[1:])
     coverage = _mapping(view.get("coverage"))
     if coverage and coverage.get("not_staged"):
-        names = [f"{row['type']} {row['name']}".strip() for row in _sequence(coverage.get("not_staged_rows"))[:12]]
-        statements.append(f"{coverage['headline']}: {', '.join(names)}" if names else str(coverage["headline"]))
+        listed = _component_list(coverage["not_staged_rows"], coverage["not_staged"])
+        statements.append(f"{coverage['headline']}: {listed}" if listed else str(coverage["headline"]))
     if coverage and coverage.get("staged_not_observed"):
-        rows = _sequence(coverage.get("staged_not_observed_rows"))
-        names = [f"{row['type']} {row['name']}".strip() for row in rows[:12]]
-        omitted = max(0, int(coverage["staged_not_observed"]) - len(names))
-        suffix = f" (+{omitted} more)" if omitted else ""
-        statements.append(f"Staged but not observed in any plugin trial: {', '.join(names)}{suffix}")
+        listed = _component_list(coverage["staged_not_observed_rows"], coverage["staged_not_observed"])
+        statements.append(f"Staged but not observed in any plugin trial: {listed}")
     for deferral in _DEFERRALS:
         names, omitted = _names(source.get(deferral.field), limit=12)
         if names:

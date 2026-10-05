@@ -70,6 +70,17 @@ def _related_paths(finding: Finding) -> list[str]:
     return paths
 
 
+# Rich styles for the ok / warn / fail status classes of the plugin views.
+_STATUS_STYLES = {"ok": "green", "warn": "yellow", "fail": "bold red"}
+# How many rows of a plugin list the terminal shows before "... and N more".
+_CLI_LIST_ITEMS = 10
+
+
+def _print_remaining(console: Console, remaining: int) -> None:
+    if remaining > 0:
+        console.print(f"    [dim]... and {remaining} more[/dim]")
+
+
 def print_plugin_tier1_static(risk: dict, console: Console) -> None:
     """Print compact Tier 1 plugin static-risk lines: privileges, hooks, CVE audit, parity, endpoints."""
     privileges = risk.get("privileges")
@@ -135,29 +146,24 @@ def print_plugin_tier3(view: dict, console: Console) -> None:
         )
     coverage = view.get("coverage")
     if coverage:
-        # Green only when every component was staged and exercised: staged alone is not evaluated.
-        style = "bold red" if coverage["not_staged"] else ("green" if coverage["all_exercised"] else "yellow")
-        observed = f"; {esc(coverage['observed_headline'])}" if coverage["observed_headline"] else ""
+        style = _STATUS_STYLES[coverage["status_class"]]
         console.print(
-            f"  [{style}]Component coverage: {esc(coverage['headline'])}[/{style}] "
-            f"(of {coverage['total']}; {coverage['staged']} staged{observed})",
+            f"  [{style}]Component coverage: {esc(coverage['headline'])}[/{style}] ({esc(coverage['detail'])})",
             soft_wrap=True,
         )
-        console.print("    [dim]Files staged ≠ components loaded ≠ behavior verified.[/dim]")
-        for row in coverage["not_staged_rows"][:10]:
+        console.print(f"    [dim]{esc(coverage['caveat'])}[/dim]")
+        shown = coverage["not_staged_rows"][:_CLI_LIST_ITEMS]
+        for row in shown:
             reason = f": {esc(row['reason'])}" if row["reason"] else ""
             console.print(f"    [dim]- {esc(row['type'])} {esc(row['name'])} ({esc(row['state_label'])}){reason}[/dim]")
-        remaining = len(coverage["not_staged_rows"]) - 10
-        if remaining > 0:
-            console.print(f"    [dim]... and {remaining} more[/dim]")
-        for row in coverage["staged_not_observed_rows"][:10]:
+        _print_remaining(console, coverage["not_staged"] - len(shown))
+        shown = coverage["staged_not_observed_rows"][:_CLI_LIST_ITEMS]
+        for row in shown:
             console.print(
                 f"    [dim]- {esc(row['type'])} {esc(row['name'])} (staged, {esc(row['observed'])})[/dim]",
                 soft_wrap=True,
             )
-        remaining = len(coverage["staged_not_observed_rows"]) - 10
-        if remaining > 0:
-            console.print(f"    [dim]... and {remaining} more[/dim]")
+        _print_remaining(console, (coverage["staged_not_observed"] or 0) - len(shown))
         activation = coverage.get("activation")
         if activation:
             console.print(f"    [dim]Observed activation (advisory): {esc(activation['summary'])}[/dim]")
@@ -196,7 +202,8 @@ def print_plugin_tier3(view: dict, console: Console) -> None:
             if integration["reason"]:
                 console.print(f"    [dim]{esc(integration['reason'])}[/dim]", soft_wrap=True)
             if integration["components"]:
-                console.print(f"    [dim]components: {esc(', '.join(integration['components']))}[/dim]")
+                more = f" (+{integration['components_omitted']} more)" if integration["components_omitted"] else ""
+                console.print(f"    [dim]components: {esc(', '.join(integration['components']))}{more}[/dim]")
             if integration["interpretation"]:
                 console.print(f"    [dim]{esc(integration['interpretation'])}[/dim]", soft_wrap=True)
         else:
@@ -254,7 +261,7 @@ def print_plugin_runtime_evidence(view: dict, console: Console) -> None:
     canary = view.get("canary")
     if canary:
         for entry in canary["entries"]:
-            style = {"fail": "bold red", "ok": "green"}.get(entry["verdict_class"], "yellow")
+            style = _STATUS_STYLES.get(entry["verdict_class"], "yellow")
             console.print(
                 f"  [bold]Canary exfiltration ({esc(entry['scope'])}):[/bold] [{style}]{esc(entry['verdict'])}[/{style}]"
             )

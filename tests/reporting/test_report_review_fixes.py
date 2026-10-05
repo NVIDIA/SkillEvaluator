@@ -996,7 +996,7 @@ def test_cli_prints_the_tier3_plugin_block_for_a_passing_agent_eval(tmp_path: Pa
 
     assert "[AGENT_EVAL] Tier 3 plugin evaluation" in plain
     assert "Verdict: FAIL" in plain
-    assert "Component coverage: 0 components not staged (of 4; 4 staged" in plain
+    assert "Component coverage: 0 components not staged (of 4 declared or packaged component(s); 4 staged" in plain
     assert "Plugin signals (advisory" in plain
     assert plain.count("Verdict: FAIL") == 1
 

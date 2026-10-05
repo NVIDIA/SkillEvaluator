@@ -169,8 +169,15 @@ def test_markdown_tier3_plugin_blocks_state_what_was_not_evaluated(tmp_path: Pat
     markdown = MarkdownReporter(include_timestamp=False).render_all([_tier3_result(tmp_path, integration=integration)])
 
     assert "INCOMPLETE: 1 unresolved skill ref, 1 provider-only MCP server" in markdown
-    assert "**2 components not staged** of 4 component(s); 2 staged." in markdown
+    assert "**2 components not staged** of 4 declared or packaged component(s); 2 staged." in markdown
     assert "| mcp | docs | Unavailable | provider-only MCP server |" in markdown
+    excluded = markdown.split("**Not evaluated by this run:**", 1)[1].split("###", 1)[0]
+    assert "- 2 components not staged: mcp docs, hook pre-commit" in excluded
+    assert "- Unresolved skill refs were not evaluated: github::org/repo::skills::remote" in excluded
+    assert "- Provider-only MCP servers were not exercised: docs" in excluded
+    assert "- Integration (the plugin versus its own parts) was not measured: No cross-component case completed." in (
+        excluded
+    )
     assert "**Lift mode:** requested <code>both</code>, effective <code>effectiveness</code>" in markdown
     assert "**INCONCLUSIVE:** No cross-component case completed." in markdown
     assert "Effectiveness lift: +0.30 [-0.02, +0.55] (95% CI), precision low — ⚠️ CI includes zero" in markdown
@@ -358,17 +365,18 @@ def test_staged_but_unexercised_components_are_not_reported_as_evaluated(tmp_pat
         "0 components not staged of 4 declared or packaged component(s); 4 staged; "
         "4 staged components not observed in any plugin trial."
     ) in section
-    assert '<span class="t3-pill warning">0 components not staged</span>' in html
+    assert '<span class="t3-pill warn">0 components not staged</span>' in html
     assert "4 staged, not observed" in section
     assert unobserved in (element_text(html, "tier3-plugin-excluded") or "")
     markdown = MarkdownReporter(include_timestamp=False).render_all([result])
     assert (
-        "**0 components not staged** of 4 component(s); 4 staged; 4 staged components not observed in any plugin trial."
+        "**0 components not staged** of 4 declared or packaged component(s); 4 staged; 4 staged components not observed in any plugin "
+        "trial."
     ) in markdown
     console = Console(file=StringIO(), width=200, color_system=None)
     print_plugin_tier3(view, console)
     assert (
-        "Component coverage: 0 components not staged (of 4; 4 staged; "
+        "Component coverage: 0 components not staged (of 4 declared or packaged component(s); 4 staged; "
         "4 staged components not observed in any plugin trial)"
     ) in " ".join(console.file.getvalue().split())
     sarif = json.loads(SARIFReporter(include_timestamp=False).render_all([tier1_plugin_result(), result]))
@@ -654,7 +662,7 @@ def test_cli_reporter_prints_tier3_plugin_blocks(tmp_path: Path) -> None:
     plain = " ".join(plain.split())
 
     assert "INCOMPLETE: 1 unresolved skill ref" in plain
-    assert "Component coverage: 2 components not staged (of 4; 2 staged)" in plain
+    assert "Component coverage: 2 components not staged (of 4 declared or packaged component(s); 2 staged)" in plain
     assert "Files staged ≠ components loaded ≠ behavior verified." in plain
     assert "Lift mode: requested both · effective effectiveness (fell back)" in plain
     assert "Integration: INCONCLUSIVE — No cross-component case completed. (advisory)" in plain
@@ -769,3 +777,63 @@ def test_html_activation_coverage_reads_the_per_component_rate_the_arm_summary_s
     signals = element_text(html, "tier3-plugin-signals") or ""
     assert "Activation coverage 67% exercised declared 3, exercised 2, unverified 1, unavailable 0" in signals
     assert "n/a exercised" not in signals
+
+
+def _many_components_view(count: int) -> dict:
+    coverage = {"components": [{"type": "hook", "name": f"h{index}", "state": "unsupported"} for index in range(count)]}
+    view = tier3_plugin_view({"plugin_provenance": {"plugin_name": "p", "component_coverage": coverage}})
+    assert view is not None
+    return view
+
+
+def test_cli_counts_the_not_staged_components_past_the_row_limit() -> None:
+    from io import StringIO
+
+    from rich.console import Console
+
+    from skillevaluator.reporting.cli import print_plugin_tier3
+
+    view = _many_components_view(205)
+    console = Console(file=StringIO(), width=200, color_system=None)
+
+    print_plugin_tier3(view, console)
+
+    plain = " ".join(console.file.getvalue().split())
+    assert "Component coverage: 205 components not staged" in plain
+    # Ten are listed; the other 195 are counted, not just the 190 left of the 200 kept rows.
+    assert "... and 195 more" in plain
+
+
+def test_the_not_staged_statement_counts_the_components_it_does_not_name() -> None:
+    view = _many_components_view(15)
+
+    [statement] = [line for line in view["excluded"] if line.startswith("15 components not staged")]
+
+    assert statement.endswith("h11 (+3 more)")
+
+
+def test_html_and_cli_say_how_many_integration_components_were_left_out(tmp_path: Path) -> None:
+    from io import StringIO
+
+    from rich.console import Console
+
+    from skillevaluator.reporting.cli import print_plugin_tier3
+
+    integration = {
+        "verdict": "real_integration",
+        "measured": True,
+        "with_plugin": 0.8,
+        "sum_of_parts": 0.6,
+        "integration_lift": 0.2,
+        "components": [f"skill-{index}" for index in range(70)],
+    }
+    result = _tier3_result(tmp_path, integration=integration)
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    view = tier3_plugin_view(result.metadata["agent_eval"])
+    assert view is not None
+    console = Console(file=StringIO(), width=400, color_system=None)
+    print_plugin_tier3(view, console)
+
+    assert "skill-63 (+6 more)" in (element_text(html, "tier3-integration") or "")
+    assert "skill-63 (+6 more)" in " ".join(console.file.getvalue().split())

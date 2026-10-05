@@ -602,18 +602,10 @@ class MarkdownReporter(ReporterBase):
         if coverage:
             lines.append("### Plugin Component Coverage")
             lines.append("")
-            observed = f"; {cell(coverage['observed_headline'])}" if coverage["observed_headline"] else ""
-            lines.append(
-                f"**{cell(coverage['headline'])}** of {coverage['total']} component(s); "
-                f"{coverage['staged']} staged{observed}."
-            )
+            lines.append(f"**{cell(coverage['headline'])}** {cell(coverage['detail'])}.")
             lines.append("")
-            lines.append(f"*Files staged ≠ components loaded ≠ behavior verified. {cell(coverage['note'])}*")
+            lines.append(f"*{coverage['caveat']} {cell(coverage['note'])}*")
             lines.append("")
-            if coverage["staged_not_observed_rows"]:
-                names = ", ".join(f"{row['type']} {row['name']}" for row in coverage["staged_not_observed_rows"])
-                lines.append(f"Staged but not observed in any plugin trial: {cell(names)}")
-                lines.append("")
             if coverage["not_staged_rows"]:
                 lines.append("| Type | Component | State | Reason |")
                 lines.append("|------|-----------|-------|--------|")
@@ -623,6 +615,11 @@ class MarkdownReporter(ReporterBase):
                         f"| {cell(row['reason'])} |"
                     )
                 lines.append("")
+        if view["excluded"]:
+            lines.append("**Not evaluated by this run:**")
+            lines.append("")
+            lines.extend(f"- {cell(statement)}" for statement in view["excluded"])
+            lines.append("")
         plugin_load = view.get("plugin_load")
         if plugin_load:
             lines.append("### Plugin Loading")

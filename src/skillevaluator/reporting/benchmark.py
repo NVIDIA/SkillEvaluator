@@ -22,7 +22,7 @@ from skillevaluator.constants import (
     TIER3_LIFT_PASS_THRESHOLD,
 )
 from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
-from skillevaluator.reporting.plugin_sections import tier3_plugin_view, unsupported_type_split
+from skillevaluator.reporting.plugin_sections import STAGING_CAVEAT, tier3_plugin_view, unsupported_type_split
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 from skillevaluator.utils.rich_markup import strip_terminal_controls
@@ -723,9 +723,8 @@ class BenchmarkReporter(ReporterBase):
                 "- adds value as a coordinated plugin beyond its individual components (Integration, when measured).",
                 "",
                 (
-                    "A plugin evaluation demonstrates only what it staged and exercised. Files staged ≠ components "
-                    "loaded ≠ behavior verified, so the coverage and exclusion sections below state what this run "
-                    "did not evaluate."
+                    f"A plugin evaluation demonstrates only what it staged and exercised. {STAGING_CAVEAT} The "
+                    "coverage and exclusion sections below state what this run did not evaluate."
                 ),
                 "",
             ]
@@ -852,17 +851,14 @@ class BenchmarkReporter(ReporterBase):
                 ]
             )
             return
-        observed = (
-            f"; {_md_cell(coverage['observed_headline'], private_labels)}" if coverage["observed_headline"] else ""
-        )
         lines.extend(
             [
                 (
-                    f"**{_md_cell(coverage['headline'], private_labels)}** of {coverage['total']} declared or "
-                    f"packaged component(s); {coverage['staged']} staged{observed}."
+                    f"**{_md_cell(coverage['headline'], private_labels)}** "
+                    f"{_md_cell(coverage['detail'], private_labels)}."
                 ),
                 "",
-                f"Files staged ≠ components loaded ≠ behavior verified. {_md_cell(coverage['note'], private_labels)}",
+                f"{coverage['caveat']} {_md_cell(coverage['note'], private_labels)}",
                 "",
                 "| Component | Type | State | Reason |",
                 "|---|---|---|---|",
@@ -876,16 +872,6 @@ class BenchmarkReporter(ReporterBase):
         if coverage["omitted"]:
             lines.append(f"| {coverage['omitted']} more component(s) | | | |")
         lines.append("")
-        if coverage["not_staged_rows"]:
-            lines.extend(["Not staged:", ""])
-            for row in coverage["not_staged_rows"]:
-                reason = f" — {_publication_safe_inline(row['reason'], private_labels)}" if row["reason"] else ""
-                lines.append(
-                    f"- {_publication_safe_inline(row['type'], private_labels)} "
-                    f"{_publication_safe_inline(row['name'], private_labels)} "
-                    f"({_publication_safe_inline(row['state_label'], private_labels)}){reason}"
-                )
-            lines.append("")
         if coverage["staged_not_observed_rows"]:
             lines.extend(["Staged but not observed in any plugin trial:", ""])
             lines.extend(

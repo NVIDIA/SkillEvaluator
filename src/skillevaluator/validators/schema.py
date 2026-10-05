@@ -183,12 +183,7 @@ class SchemaValidator(ValidatorBase):
             return result
 
         # Run remaining validations
-        result.merge(
-            self._validate_folder_structure(
-                skill_path,
-                manifest_present=True if manifest_path is not None else None,
-            )
-        )
+        result.merge(self._validate_folder_structure(skill_path, manifest_known=manifest_path is not None))
         result.merge(self._validate_naming_conventions(skill_path))
         result.merge(self._validate_line_count(skill_md, content=manifest_content))
         result.merge(self._validate_body_content(skill_md, content=manifest_content))
@@ -308,9 +303,13 @@ class SchemaValidator(ValidatorBase):
         self,
         skill_path: Path,
         *,
-        manifest_present: bool | None = None,
+        manifest_known: bool = False,
     ) -> ValidationResult:
-        """Verify skill is in valid folder hierarchy (skills/ or team-skills/)."""
+        """Verify skill is in valid folder hierarchy (skills/ or team-skills/).
+
+        ``manifest_known`` says the caller already holds the skill's manifest
+        (secure discovery), so its presence is not checked again.
+        """
         result = ValidationResult()
         parts = skill_path.parts
         file_path = str(skill_path)
@@ -368,7 +367,7 @@ class SchemaValidator(ValidatorBase):
             )
 
         # Verify SKILL.md exists (case-insensitive)
-        if manifest_present is False or (manifest_present is None and not self._find_skill_manifest(skill_path)):
+        if not manifest_known and not self._find_skill_manifest(skill_path):
             result.add_finding(
                 Finding(
                     category="SCHEMA",

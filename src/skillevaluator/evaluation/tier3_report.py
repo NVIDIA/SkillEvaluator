@@ -516,31 +516,25 @@ def agent_eval_result_from_directory(
     return _validation_result_from_payload(payload)
 
 
-def _incomplete_skip_reason(provenance: dict[str, Any]) -> str:
-    """Return a stable explanation for a partial plugin evaluation."""
-    from skillevaluator.reporting.plugin_sections import sidecar_error_reason
+def incomplete_reason(provenance: dict[str, Any]) -> str:
+    """Return why a partial plugin run is INCOMPLETE, worded as every report words it.
 
-    if sidecar_reason := sidecar_error_reason(provenance):
-        return f"INCOMPLETE: {sidecar_reason}"
-    # A plugin run that did not complete, or whose native plugin load was never
-    # confirmed in any with-plugin trial, keeps its evidence but is INCOMPLETE.
-    notes = [str(provenance.get("execution_incomplete") or "").strip()]
-    unverified = provenance.get("native_load_unverified")
-    if isinstance(unverified, dict):
-        notes.extend(str(reason) for reason in unverified.values())
-    if notes := [note for note in notes if note]:
-        return "INCOMPLETE: " + "; ".join(notes)
-    counts = (
-        ("unresolved skill ref(s)", len(provenance.get("unresolved_skill_refs") or [])),
-        ("unresolved rule ref(s)", len(provenance.get("unresolved_rule_refs") or [])),
-        ("unresolved provider MCP server(s)", len(provenance.get("provider_only_mcp_servers") or [])),
-        (
-            "MCP server(s) declaring config the runtime cannot apply",
-            len(provenance.get("mcp_unsupported_config") or []),
-        ),
-    )
-    detail = ", ".join(f"{count} {label}" for label, count in counts if count) or "required declared components"
-    return f"INCOMPLETE: {detail} could not be resolved/evaluated at Tier 3"
+    The text is the completeness view's reason: an unreadable provenance
+    sidecar, otherwise why the run did not complete or its native plugin load
+    was never confirmed, followed by the declared components it deferred.
+    """
+    return f"INCOMPLETE: {_plugin_completeness(provenance)['reason']}"
+
+
+# The earlier private name; ``cli.py`` imports it.
+_incomplete_skip_reason = incomplete_reason
+
+
+def _plugin_completeness(provenance: dict[str, Any]) -> dict[str, Any]:
+    from skillevaluator.reporting.plugin_sections import completeness_view
+
+    # An empty record still belongs to a partial run, for a reason nobody recorded.
+    return completeness_view(provenance or {"partial": True}) or {}
 
 
 def _validation_result_from_payload(payload: dict[str, Any] | None) -> ValidationResult | None:
@@ -565,7 +559,7 @@ def _validation_result_from_payload(payload: dict[str, Any] | None) -> Validatio
         if partial:
             result.passed = False
             result.metadata["execution_status"] = "skipped"
-            result.metadata["skip_reason"] = _incomplete_skip_reason(plugin_provenance)
+            result.metadata["skip_reason"] = incomplete_reason(plugin_provenance)
     else:
         errors = payload.get("execution_errors") or ["Tier 3 evaluation did not produce a complete scored run"]
         for error in errors:
@@ -2627,59 +2621,37 @@ def _build_conclusions(
 
 
 def _plugin_incompleteness_conclusion(plugin_provenance: dict[str, Any]) -> dict[str, str]:
-    """Build the leading deterministic conclusion for a partial plugin run."""
-    from skillevaluator.reporting.plugin_sections import sidecar_error_reason
+    """Build the leading deterministic conclusion for a partial plugin run.
 
-    if sidecar_reason := sidecar_error_reason(plugin_provenance):
-        return {
-            "severity": "fail",
-            "title": "Evaluation INCOMPLETE - plugin provenance unreadable",
-            "message": (
-                f"This plugin run is INCOMPLETE: {sidecar_reason}. "
-                "The score is not a full evaluation and must not be read as a pass."
-            ),
-        }
-    unresolved = []
-    for label, key in (
-        ("skill ref(s)", "unresolved_skill_refs"),
-        ("rule ref(s)", "unresolved_rule_refs"),
-        ("provider MCP server(s)", "provider_only_mcp_servers"),
-        ("MCP server config(s)", "mcp_unsupported_config"),
-    ):
-        count = len(plugin_provenance.get(key) or [])
-        if count:
-            unresolved.append(f"{count} {label}")
-    if not unresolved:
-        # Nothing was deferred: the run is INCOMPLETE because it did not complete or a native load was unconfirmed.
-        from skillevaluator.reporting.plugin_sections import text
+    The message states the same reason as every report (see :func:`incomplete_reason`);
+    the title names the main cause.
+    """
+    from skillevaluator.reporting.plugin_sections import text
 
-        execution = text(plugin_provenance.get("execution_incomplete"))
-        unverified_map = plugin_provenance.get("native_load_unverified")
-        unverified = (
-            [text(reason) for reason in (unverified_map or {}).values()] if isinstance(unverified_map, dict) else []
+    completeness = _plugin_completeness(plugin_provenance)
+    if completeness["sidecar_error"]:
+        title = "plugin provenance unreadable"
+        consequence = "The score is not a full evaluation and must not be read as a pass."
+    elif completeness["run_notes"] and not completeness["deferred"]:
+        title = (
+            "the run did not complete"
+            if text(plugin_provenance.get("execution_incomplete"))
+            else "native plugin load not confirmed"
         )
-        details = [note for note in (execution, *unverified) if note]
-        if details:
-            title = "the run did not complete" if execution else "native plugin load not confirmed"
-            return {
-                "severity": "fail",
-                "title": f"Evaluation INCOMPLETE - {title}",
-                "message": (
-                    f"This plugin run is INCOMPLETE: {'; '.join(details)}. No declared component was deferred, "
-                    "but the score is not a full evaluation and must not be read as a pass."
-                ),
-            }
-    unresolved_text = ", ".join(unresolved) or "required components"
-    resolved_skills = len(plugin_provenance.get("evaluated_member_skills") or [])
-    resolved_rules = len(plugin_provenance.get("staged_rules") or [])
+        consequence = (
+            "No declared component was deferred, but the score is not a full evaluation and must not be read as a pass."
+        )
+    else:
+        counts = completeness["counts"]
+        title = "unresolved dependencies"
+        consequence = (
+            f"The score reflects only the resolved components ({counts['skills_resolved']} skill(s), "
+            f"{counts['rules_resolved']} rule(s)) and must not be read as a full pass."
+        )
     return {
         "severity": "fail",
-        "title": "Evaluation INCOMPLETE - unresolved dependencies",
-        "message": (
-            f"This plugin run is INCOMPLETE: {unresolved_text} could not be fully evaluated at Tier 3. "
-            f"The score reflects only the resolved components ({resolved_skills} skill(s), "
-            f"{resolved_rules} rule(s)) and must not be read as a full pass."
-        ),
+        "title": f"Evaluation INCOMPLETE - {title}",
+        "message": f"This plugin run is INCOMPLETE: {completeness['reason']}. {consequence}",
     }
 
 
@@ -3522,5 +3494,6 @@ __all__ = [
     "advisory_skip_result",
     "agent_eval_result_from_run",
     "build_agent_eval_payload",
+    "incomplete_reason",
     "refresh_plugin_run_report",
 ]

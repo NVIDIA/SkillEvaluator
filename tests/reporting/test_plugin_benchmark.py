@@ -69,7 +69,7 @@ def _tier3(*, partial: bool, integration: dict[str, Any] | None = None, coverage
         result.passed = False
         result.metadata["execution_status"] = "skipped"
         result.metadata["skip_reason"] = (
-            "INCOMPLETE: 1 unresolved skill ref(s) could not be resolved/evaluated at Tier 3"
+            "INCOMPLETE: 1 unresolved skill ref, 1 provider-only MCP server could not be resolved or evaluated at Tier 3"
         )
     result.metadata["gating"] = {"tier": 3, "blocking": False}
     return result

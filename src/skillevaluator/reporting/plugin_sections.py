@@ -251,8 +251,8 @@ def json_safe(value: Any, *, _depth: int = 0) -> Any:
     return str(value)
 
 
-def _plural(value: int, noun: str) -> str:
-    return f"{value} {noun}{'' if value == 1 else 's'}"
+def _plural(value: int, noun: str, plural: str | None = None) -> str:
+    return f"{value} {noun if value == 1 else plural or noun + 's'}"
 
 
 # ---------------------------------------------------------------------------
@@ -862,15 +862,57 @@ def tier3_plugin_view(payload: object) -> dict[str, Any] | None:
     return view
 
 
-_COMPLETENESS_FIELDS = {
+# The provenance lists of resolved declared components, keyed as completeness_view() counts them.
+_RESOLVED_FIELDS = {
     "skills_resolved": "evaluated_member_skills",
     "rules_resolved": "staged_rules",
     "mcp_runnable": "runnable_mcp_servers",
-    "skills_unresolved": "unresolved_skill_refs",
-    "rules_unresolved": "unresolved_rule_refs",
-    "mcp_provider_only": "provider_only_mcp_servers",
-    "mcp_unsupported_config": "mcp_unsupported_config",
 }
+
+
+class _Deferral(NamedTuple):
+    """One provenance list of declared components that Tier 3 deferred."""
+
+    key: str  # how completeness_view() counts and names it
+    field: str  # the provenance list
+    singular: str  # what one deferred entry is called in the INCOMPLETE reason
+    plural: str
+    excluded: str  # the "not evaluated by this run" statement that lists the entries
+
+
+# Every deferral makes a plugin run INCOMPLETE. The order is the order every report lists them in.
+_DEFERRALS = (
+    _Deferral(
+        "skills_unresolved",
+        "unresolved_skill_refs",
+        "unresolved skill ref",
+        "unresolved skill refs",
+        "Unresolved skill refs were not evaluated",
+    ),
+    _Deferral(
+        "rules_unresolved",
+        "unresolved_rule_refs",
+        "unresolved rule ref",
+        "unresolved rule refs",
+        "Unresolved rule refs were not evaluated",
+    ),
+    _Deferral(
+        "mcp_provider_only",
+        "provider_only_mcp_servers",
+        "provider-only MCP server",
+        "provider-only MCP servers",
+        "Provider-only MCP servers were not exercised",
+    ),
+    _Deferral(
+        "mcp_unsupported_config",
+        "mcp_unsupported_config",
+        "MCP server declaring config the runtime cannot apply",
+        "MCP servers declaring config the runtime cannot apply",
+        "MCP servers declare configuration the runtime cannot apply",
+    ),
+)
+# The provenance fields that hold deferred components; the sidecar reader keeps its own copy of this list.
+DEFERRAL_FIELDS = tuple(deferral.field for deferral in _DEFERRALS)
 
 
 def sidecar_error_reason(provenance: object) -> str:
@@ -888,50 +930,51 @@ def sidecar_error_reason(provenance: object) -> str:
 
 
 def completeness_view(provenance: object) -> dict[str, Any] | None:
-    """Return resolved versus deferred declared components for a plugin run."""
+    """Return resolved versus deferred declared components for a plugin run, and why it is INCOMPLETE.
+
+    ``reason`` is the one explanation every report gives: an unreadable
+    provenance sidecar alone, otherwise why the run did not complete or its
+    native plugin load was never confirmed, followed by what it deferred.
+    """
     source = _mapping(provenance)
     if not source:
         return None
-    sidecar_reason = sidecar_error_reason(source)
-    groups = {
-        "skills_resolved": _names(source.get("evaluated_member_skills")),
-        "rules_resolved": _names(source.get("staged_rules")),
-        "mcp_runnable": _names(source.get("runnable_mcp_servers")),
-        "skills_unresolved": _names(source.get("unresolved_skill_refs")),
-        "rules_unresolved": _names(source.get("unresolved_rule_refs")),
-        "mcp_provider_only": _names(source.get("provider_only_mcp_servers")),
-        "mcp_unsupported_config": _names(source.get("mcp_unsupported_config")),
-    }
-    counts = {key: len(_sequence(source.get(field))) for key, field in _COMPLETENESS_FIELDS.items()}
-    deferred = [
-        (counts["skills_unresolved"], "unresolved skill ref"),
-        (counts["rules_unresolved"], "unresolved rule ref"),
-        (counts["mcp_provider_only"], "provider-only MCP server"),
-        (counts["mcp_unsupported_config"], "MCP server declaring config the runtime cannot apply"),
-    ]
-    declared_partial = source.get("partial") is True
-    computed_partial = any(amount for amount, _label in deferred)
-    detail = ", ".join(_plural(amount, label) for amount, label in deferred if amount)
+    lists = {key: source.get(field) for key, field in _RESOLVED_FIELDS.items()}
+    lists.update({deferral.key: source.get(deferral.field) for deferral in _DEFERRALS})
+    counts = {key: len(_sequence(value)) for key, value in lists.items()}
+    deferred = ", ".join(
+        _plural(counts[deferral.key], deferral.singular, deferral.plural)
+        for deferral in _DEFERRALS
+        if counts[deferral.key]
+    )
     # A run that did not complete, or a native arm whose plugin load was never confirmed, explains itself.
-    unverified = "; ".join(
+    run_notes = [
         note
         for note in (
             text(source.get("execution_incomplete")),
             *(text(reason) for reason in _mapping(source.get("native_load_unverified")).values()),
         )
         if note
-    )
+    ]
+    sidecar_reason = sidecar_error_reason(source)
     return {
-        "partial": declared_partial or computed_partial or bool(sidecar_reason),
+        "partial": source.get("partial") is True or bool(deferred) or bool(sidecar_reason),
         "counts": counts,
-        "names": {key: names for key, (names, _omitted) in groups.items()},
+        "names": {key: _names(value)[0] for key, value in lists.items()},
         "sidecar_error": text(source.get("sidecar_error"), limit=64) if sidecar_reason else "",
         # Whether something was actually deferred; a run can be INCOMPLETE only because it did not complete.
-        "deferred": computed_partial,
-        "reason": sidecar_reason
-        or (unverified if unverified and not detail else "")
-        or f"{detail or 'required declared components'} could not be resolved or evaluated at Tier 3",
+        "deferred": bool(deferred),
+        "run_notes": run_notes,
+        "reason": sidecar_reason or _incomplete_reason(run_notes, deferred),
     }
+
+
+def _incomplete_reason(run_notes: list[str], deferred: str) -> str:
+    """Say why the run did not complete, then what it deferred (or that required components were)."""
+    parts = list(run_notes)
+    if deferred or not run_notes:
+        parts.append(f"{deferred or 'required declared components'} could not be resolved or evaluated at Tier 3")
+    return "; ".join(parts)
 
 
 def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -1601,16 +1644,11 @@ def excluded_behavior(view: Mapping[str, Any], provenance: object) -> list[str]:
         omitted = max(0, int(coverage["staged_not_observed"]) - len(names))
         suffix = f" (+{omitted} more)" if omitted else ""
         statements.append(f"Staged but not observed in any plugin trial: {', '.join(names)}{suffix}")
-    for label, field in (
-        ("Provider-only MCP servers were not exercised", "provider_only_mcp_servers"),
-        ("MCP servers declare configuration the runtime cannot apply", "mcp_unsupported_config"),
-        ("Unresolved skill refs were not evaluated", "unresolved_skill_refs"),
-        ("Unresolved rule refs were not evaluated", "unresolved_rule_refs"),
-    ):
-        names, omitted = _names(source.get(field), limit=12)
+    for deferral in _DEFERRALS:
+        names, omitted = _names(source.get(deferral.field), limit=12)
         if names:
             suffix = f" (+{omitted} more)" if omitted else ""
-            statements.append(f"{label}: {', '.join(names)}{suffix}")
+            statements.append(f"{deferral.excluded}: {', '.join(names)}{suffix}")
     integration = _mapping(view.get("integration"))
     if integration and not integration.get("measured"):
         statements.append(

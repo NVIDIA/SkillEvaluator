@@ -2203,6 +2203,9 @@ declared component that the run needs could not be evaluated:
 
 The score then reflects only the resolved components. The report leads with an
 "Evaluation INCOMPLETE" conclusion that counts what was and was not evaluated.
+Every report and the `INCOMPLETE: ...` message give the same reason: why the
+run did not complete or why a native plugin load is unconfirmed, followed by the
+deferred components. An unreadable provenance sidecar is reported on its own.
 The Tier 3 result is not marked as passed, so with `--block-on-agent-eval` it
 fails `validate`. `evaluate-plugin` writes its results and then exits 1 with an
 `INCOMPLETE: ...` message.

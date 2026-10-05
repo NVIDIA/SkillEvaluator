@@ -110,7 +110,12 @@ from skillevaluator.plugin_dependencies import parse_canonical_ref as _parse_can
 from skillevaluator.plugin_dependencies import ref_label as _ref_label
 from skillevaluator.plugin_dependencies import ref_name as _ref_name
 from skillevaluator.plugin_dependencies import ref_source as _ref_source
-from skillevaluator.plugin_formats import manifest_syntax, normalized_component_manifest, profile_for
+from skillevaluator.plugin_formats import (
+    manifest_syntax,
+    normalized_component_manifest,
+    parse_manifest_text,
+    profile_for,
+)
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries, normalize_dataset_entries
 from skillevaluator.tier3.eval_core.plugin_signals import validate_plugin_case_fields
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
@@ -1316,12 +1321,13 @@ def _manifest_location(plugin_path: Path) -> PluginManifestLocation:
 
 
 def _load_manifest_text(raw_text: str, manifest_path: Path, manifest_type: str) -> dict[str, Any]:
-    json_syntax = manifest_syntax(manifest_type) == "json"
+    syntax = manifest_syntax(manifest_type)
+    # The YAML parser skips a leading byte-order mark itself; the JSON parser does not.
+    text = raw_text.lstrip("\ufeff") if syntax == "json" else raw_text
     try:
-        data = load_bounded_json(raw_text.lstrip("\ufeff")) if json_syntax else load_bounded_yaml(raw_text)
+        data = parse_manifest_text(manifest_type, text)
     except StructuredDataError as exc:
-        syntax = "JSON" if json_syntax else "YAML"
-        raise ValueError(f"{manifest_path} is not valid bounded {syntax}: {exc}") from exc
+        raise ValueError(f"{manifest_path} is not valid bounded {syntax.upper()}: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError(f"{manifest_path} must contain a manifest object")
     return data

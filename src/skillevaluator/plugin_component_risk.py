@@ -132,6 +132,8 @@ MAX_RUN_SITES = 2048
 MAX_TOOL_ENTRIES = 256
 MAX_MATCHER_CHARS = 256
 MAX_OUTSIDE_REFS = 5
+# Tool grants, allow rules, or server names one finding message quotes (the finding covers them all).
+MAX_QUOTED_ENTRIES = 8
 
 _WILDCARD_TOOLS = frozenset({"*", "*(*)", "mcp__*", "mcp__*__*"})
 # Claude Code reads a matcher of only these characters as an exact tool name or '|' list, not a regex.
@@ -806,7 +808,7 @@ def analyze_agent(
                 component_finding(
                     Severity.MEDIUM,
                     "plugin_agent_wildcard_tools",
-                    f"subagent '{name}' lists a wildcard tool grant ({', '.join(wildcards[:8])})",
+                    f"subagent '{name}' lists a wildcard tool grant ({', '.join(wildcards[:MAX_QUOTED_ENTRIES])})",
                     file_path,
                     "List the specific tools the subagent needs instead of a wildcard.",
                     component=component,
@@ -814,7 +816,7 @@ def analyze_agent(
             )
     elif write_capable_mcp and not _disallows_all_mcp(disallowed, write_capable_mcp, plugin_name):
         record.flags.append("inherits_all_tools_with_write_mcp")
-        servers = ", ".join(write_capable_mcp[:8])
+        servers = ", ".join(write_capable_mcp[:MAX_QUOTED_ENTRIES])
         example = (
             plugin_mcp_tool_prefix(plugin_name, write_capable_mcp[0])
             if plugin_name and plugin_name.strip()
@@ -934,7 +936,8 @@ def _analyze_allowed_tools(
             component_finding(
                 Severity.MEDIUM,
                 f"plugin_{kind}_wildcard_tools",
-                f"{kind} '{name}' pre-approves a wildcard tool grant ({', '.join(wildcards[:8])}); {invocation}",
+                f"{kind} '{name}' pre-approves a wildcard tool grant ({', '.join(wildcards[:MAX_QUOTED_ENTRIES])}); "
+                f"{invocation}",
                 file_path,
                 f"List the specific tools the {kind} needs in allowed-tools instead of a wildcard.",
                 component=component,

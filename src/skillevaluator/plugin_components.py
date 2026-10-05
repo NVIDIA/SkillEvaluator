@@ -59,6 +59,7 @@ from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.plugin_component_risk import (
     CLAUDE_HOOKS,
+    MAX_QUOTED_ENTRIES,
     MAX_SCRIPT_BYTES,
     MONITOR_EVENT,
     MONITOR_HOOKS,
@@ -161,8 +162,6 @@ _ENV_TEMPLATE_SUFFIXES = frozenset({"example", "sample", "template", "dist", "de
 _MAX_ENV_FILE_FINDINGS = 20
 # Directory levels below the plugin root that the .env name walk descends.
 _ENV_SCAN_MAX_DEPTH = 32
-# Broad allow rules quoted in one plugin_settings_broad_allow message (the finding covers them all).
-_MAX_QUOTED_BROAD_ALLOW_RULES = 8
 _MANIFEST_PATHS = frozenset(PLUGIN_MANIFEST_RELATIVE_PATHS)
 # Agent Plugins client-extension namespace directory names (reverse-domain).
 _NAMESPACE_DIR_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$")
@@ -1647,7 +1646,7 @@ def _settings_findings(config: dict[str, Any], rel: str, display: str) -> list[F
                         Severity.HIGH,
                         "plugin_settings_broad_allow",
                         f"shipped settings '{rel}' pre-approves unrestricted tools or interpreter Bash rules "
-                        f"that run any command {broad[:_MAX_QUOTED_BROAD_ALLOW_RULES]}",
+                        f"that run any command {broad[:MAX_QUOTED_ENTRIES]}",
                         display,
                         "Remove blanket allow rules such as Bash / Bash(*) / Bash(python3:*); scope permissions "
                         "to exact commands.",

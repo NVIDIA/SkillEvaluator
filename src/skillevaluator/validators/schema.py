@@ -258,6 +258,20 @@ class SchemaValidator(ValidatorBase):
                 )
             )
             return result
+        except RecursionError:
+            # Deeply nested YAML exhausts the parser: report it like any other YAML error, never crash.
+            result.add_finding(
+                Finding(
+                    category="SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="yaml_syntax",
+                    message="Invalid YAML syntax in frontmatter: it is nested too deeply to parse",
+                    file_path=file_path,
+                    line_number=2,
+                    suggestion="Flatten the frontmatter; nest values only a few levels deep",
+                )
+            )
+            return result
 
         if not data or not isinstance(data, dict):
             result.add_finding(
@@ -273,6 +287,11 @@ class SchemaValidator(ValidatorBase):
             )
             return result
 
+        allowed_tools = data.get("allowed-tools")
+        if isinstance(allowed_tools, list) and all(isinstance(tool, str) for tool in allowed_tools):
+            # Claude Code accepts allowed-tools as a YAML list as well as a string; the plugin
+            # privilege check reads both, so a list is valid frontmatter, not a schema failure.
+            data = {**data, "allowed-tools": " ".join(tool.strip() for tool in allowed_tools)}
         try:
             frontmatter = SkillFrontmatter.model_validate(data)
             result.add_success(

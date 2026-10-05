@@ -206,7 +206,8 @@ def test_linked_manifest_fails_closed_even_when_another_manifest_wins(tmp_path: 
 def test_hardlinked_additional_manifest_fails_closed(tmp_path: Path) -> None:
     root = _codex(tmp_path / "p")
     os.link(root / ".codex-plugin" / "plugin.json", tmp_path / "other.json")
-    assert _checks(_validate(root)) == {"manifest_outside_root": Severity.HIGH}
+    # A hard link is named as one, not as a manifest outside the root (proof L6).
+    assert _checks(_validate(root)) == {"manifest_hardlinked": Severity.HIGH}
 
 
 @_SKIP_LINKS
@@ -394,9 +395,12 @@ def test_cursor_inline_mcp_and_root_skill_fallback(tmp_path: Path) -> None:
         {"mcpServers": {"ctx": {"command": "npx", "args": ["-y", "context-mode@1.0.0"]}}},
         {"SKILL.md": _SKILL.format(name="demo"), "mcp.json": {"mcpServers": {"dropped": _PINNED}}},
     )
-    rows = {(row["type"], row["name"]): row for row in _components(_validate(root))}
+    result = _validate(root)
+    rows = {(row["type"], row["name"]): row for row in _components(result)}
     assert rows[("mcp", "ctx")]["support"] == "evaluated"
-    assert ("mcp", "dropped") not in rows  # a declared mcpServers replaces mcp.json discovery
+    # The Cursor loader may read the root mcp.json next to a declared mcpServers, so it stays checked (proof H12).
+    assert rows[("mcp", "dropped")]["path"] == "mcp.json"
+    assert _checks(result)["mcp_root_config_also_checked"] == Severity.LOW
     assert rows[("skill", tmp_path.name)]["path"] == "."
 
 

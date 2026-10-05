@@ -301,7 +301,11 @@ class PluginManifestLocation:
         return _read_secure_manifest(self.secure_file, self.declared_path, encoding=encoding, max_bytes=max_bytes)
 
     def read_lenient_text(self, *, max_bytes: int = CONTENT_DEDUP_MAX_TOTAL_BYTES) -> str:
-        """Read the discovered inode leniently, like :meth:`PluginManifestCandidate.read_lenient_text`."""
+        """Read the selected manifest with a larger bound and lenient decoding, like a client does.
+
+        See :meth:`PluginManifestCandidate.read_lenient_text`. Link,
+        special-file, and identity-change problems still raise.
+        """
         return _read_lenient_manifest(self.secure_file, self.declared_path, max_bytes=max_bytes)
 
 
@@ -491,3 +495,177 @@ def locate_plugin_manifest(path: Path) -> PluginManifestLocation | None:
         secure_file=selected_file,
         additional=additional,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Claude Code marketplace lookup for plugin dependencies                      #
+# --------------------------------------------------------------------------- #
+CLAUDE_MARKETPLACE_RELATIVE = Path(".claude-plugin") / "marketplace.json"
+# How far above the plugin root a marketplace root may be (``plugins/<name>`` is two levels).
+CLAUDE_MARKETPLACE_SEARCH_LEVELS = 3
+# Bounds on what is read from a marketplace manifest and from a dependencies list.
+CLAUDE_MARKETPLACE_MAX_PLUGINS = 1024
+CLAUDE_DEPENDENCY_MAX_ENTRIES = 256
+
+
+@dataclass(frozen=True)
+class ClaudeMarketplace:
+    """A Claude Code marketplace manifest that lists the evaluated plugin."""
+
+    name: str
+    root: Path
+    # Plugin name -> its relative source folder ("" when the source is not a local path).
+    plugins: dict[str, str]
+    allowed_marketplaces: frozenset[str]
+
+    @property
+    def manifest_filename(self) -> str:
+        return CLAUDE_MARKETPLACE_RELATIVE.as_posix()
+
+
+def _marketplace_source_dir(root: Path, source: Any, plugin_root_setting: Any) -> Path | None:
+    """The folder a relative marketplace ``source`` names (Claude Code resolves it from the marketplace root)."""
+    if not isinstance(source, str) or not source or "://" in source or Path(source).is_absolute():
+        return None
+    if not source.startswith(("./", "../")) and source not in {".", "./"}:
+        # A bare name is resolved under metadata.pluginRoot.
+        if not isinstance(plugin_root_setting, str) or not plugin_root_setting.startswith("./"):
+            return None
+        source = f"{plugin_root_setting.rstrip('/')}/{source}"
+    return Path(os.path.normpath(root / source))
+
+
+def _parse_claude_marketplace(
+    data: Any, root: Path, plugin_root: Path, plugin_name: str | None
+) -> ClaudeMarketplace | None:
+    if not isinstance(data, dict) or not isinstance(data.get("name"), str) or not isinstance(data.get("plugins"), list):
+        return None
+    metadata = data.get("metadata")
+    plugin_root_setting = metadata.get("pluginRoot") if isinstance(metadata, dict) else None
+    plugins: dict[str, str] = {}
+    lists_this_plugin = False
+    for entry in data["plugins"][:CLAUDE_MARKETPLACE_MAX_PLUGINS]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            continue
+        folder = _marketplace_source_dir(root, entry.get("source"), plugin_root_setting)
+        plugins.setdefault(entry["name"], os.path.relpath(folder, root) if folder is not None else "")
+        if folder is not None:
+            lists_this_plugin = lists_this_plugin or folder == plugin_root
+        elif plugin_name is not None and entry["name"] == plugin_name:
+            lists_this_plugin = True
+    if not lists_this_plugin:
+        return None
+    allowed = data.get("allowCrossMarketplaceDependenciesOn")
+    return ClaudeMarketplace(
+        name=data["name"],
+        root=root,
+        plugins=plugins,
+        allowed_marketplaces=frozenset(item for item in allowed if isinstance(item, str))
+        if isinstance(allowed, list)
+        else frozenset(),
+    )
+
+
+def find_claude_marketplace(
+    plugin_root: Path, *, plugin_name: str | None, stop: Path | None
+) -> ClaudeMarketplace | None:
+    """The Claude Code marketplace that lists the plugin at ``plugin_root``, or ``None``.
+
+    Claude Code resolves a bare dependency name against the marketplace a
+    plugin is installed from. Its manifest is ``.claude-plugin/marketplace.json``
+    in the marketplace root: the plugin root itself, or a parent up to
+    :data:`CLAUDE_MARKETPLACE_SEARCH_LEVELS` levels above it, never above
+    ``stop`` (the repository root). Each file is read bounded through an
+    anchored, no-follow read; a linked, unreadable, or malformed one is
+    skipped. A marketplace counts only when an entry is this plugin: a relative
+    ``source`` that names the plugin root, or else an entry with its name.
+    """
+    root = Path(os.path.abspath(plugin_root))  # noqa: PTH100 - callers pass a resolved root
+    directory = root
+    for _level in range(CLAUDE_MARKETPLACE_SEARCH_LEVELS + 1):
+        try:
+            metadata = (directory / CLAUDE_MARKETPLACE_RELATIVE).lstat()
+        except OSError:
+            metadata = None
+        if metadata is not None and stat.S_ISREG(metadata.st_mode):
+            try:
+                with SecureRoot(directory) as secure_root:
+                    raw, _metadata = secure_root.read_bytes(CLAUDE_MARKETPLACE_RELATIVE, CONTENT_DEDUP_MAX_FILE_BYTES)
+                data = load_bounded_json(raw.decode("utf-8-sig"))
+            except (SecurePathError, OSError, UnicodeError, StructuredDataError, ValueError):
+                data = None
+            marketplace = _parse_claude_marketplace(data, directory, root, plugin_name)
+            if marketplace is not None:
+                return marketplace
+        if (stop is not None and directory == stop) or directory.parent == directory:
+            break
+        directory = directory.parent
+    return None
+
+
+def _source_folder_problem(marketplace: ClaudeMarketplace, folder: str) -> str | None:
+    """Why a listed plugin's local source folder is unusable (no-follow), or ``None``."""
+    current = marketplace.root
+    for part in Path(folder).parts:
+        if part in {".", ""}:
+            continue
+        if part == "..":
+            return f"its source '{folder}' leaves the marketplace root"
+        current = current / part
+        try:
+            metadata = current.lstat()
+        except OSError:
+            return f"its source folder '{folder}' does not exist"
+        if stat_is_link_or_reparse(metadata):
+            return f"its source '{folder}' passes through a link"
+    try:
+        if not stat.S_ISDIR(current.lstat().st_mode):
+            return f"its source '{folder}' is not a folder"
+    except OSError:
+        return f"its source folder '{folder}' does not exist"
+    return None
+
+
+def classify_claude_dependency(name: str, marketplace_name: str | None, marketplace: ClaudeMarketplace | None) -> Any:
+    """Classify one Claude Code dependency as a :class:`~skillevaluator.plugin_dependencies.DependencyRow`.
+
+    ``referenced`` when the plugin's marketplace lists it, ``missing`` when that
+    marketplace does not (or lists it with a local source folder that is not
+    there), ``external`` when it names another marketplace, and ``unresolved``
+    when no marketplace that lists this plugin was found.
+    """
+    from skillevaluator.plugin_dependencies import DependencyRow
+
+    ref = f"{name}@{marketplace_name}" if marketplace_name else name
+    if marketplace is None:
+        if marketplace_name:
+            return DependencyRow(ref, "external", None, f"it is in marketplace '{marketplace_name}'")
+        return DependencyRow(
+            ref,
+            "unresolved",
+            None,
+            "no .claude-plugin/marketplace.json that lists this plugin was found above it, so the marketplace "
+            "Claude Code resolves a bare name against is unknown",
+        )
+    where = f"{marketplace.name}' ({marketplace.manifest_filename}"
+    if marketplace_name and marketplace_name != marketplace.name:
+        if marketplace_name in marketplace.allowed_marketplaces:
+            reason = (
+                f"it is in marketplace '{marketplace_name}', which marketplace '{marketplace.name}' allows; Claude "
+                "Code installs it only when that marketplace is added"
+            )
+        else:
+            reason = (
+                f"it is in marketplace '{marketplace_name}', and marketplace '{marketplace.name}' does not list it in "
+                "allowCrossMarketplaceDependenciesOn, so Claude Code blocks installing it and users must install it "
+                "first"
+            )
+        return DependencyRow(ref, "external", None, reason)
+    if name not in marketplace.plugins:
+        return DependencyRow(ref, "missing", None, f"marketplace '{where}) lists no plugin named '{name}'")
+    folder = marketplace.plugins[name]
+    if folder:
+        problem = _source_folder_problem(marketplace, folder)
+        if problem is not None:
+            return DependencyRow(ref, "missing", folder, f"marketplace '{where}) lists it, but {problem}")
+    return DependencyRow(ref, "referenced", folder or None, f"listed in marketplace '{where})")

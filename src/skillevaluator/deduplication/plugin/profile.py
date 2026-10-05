@@ -21,13 +21,13 @@ from typing import Any
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_TOTAL_BYTES,
     DESCRIPTION_MAX_LENGTH,
-    NAME_MAX_LENGTH,
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE,
     PLUGIN_CATALOG_MAX_MEMBER_CHARS,
     PLUGIN_CATALOG_MAX_MEMBERS,
     PLUGIN_CONTAINED_MANIFEST_FILE,
     PLUGIN_CONTAINED_MANIFEST_TYPES,
     PLUGIN_MANIFEST_FILES,
+    PLUGIN_NAME_MAX_REPORT_CHARS,
     PLUGIN_NATIVE_MANIFEST_DIRS,
     SCAN_EXCLUDED_DIRS,
     SIMILARITY_MAX_DISCOVERED_PATHS,
@@ -204,7 +204,8 @@ def load_plugin_profile(
     if raw_name is None or (isinstance(raw_name, str) and not raw_name.strip()):
         raw_name = plugin_root.resolve().name
     try:
-        name = require_bounded_string(raw_name, "Plugin name", max_chars=NAME_MAX_LENGTH).strip()
+        # Plugin names are not skill names: Claude Code and Codex load names longer than 64 characters.
+        name = require_bounded_string(raw_name, "Plugin name", max_chars=PLUGIN_NAME_MAX_REPORT_CHARS).strip()
     except ValueError as exc:
         raise PluginProfileError(f"Invalid plugin name: {exc}") from exc
 

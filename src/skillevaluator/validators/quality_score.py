@@ -282,7 +282,22 @@ class QualityScoreValidator(ValidatorBase):
             result.metadata["quality_scores"] = qs.to_dict()
             return result
 
-        content = manifest.read_text(encoding="utf-8-sig")
+        try:
+            content = manifest.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            # Report it and keep scoring the other skills (a plugin run must not stop here).
+            result.add_finding(
+                Finding(
+                    category="QUALITY",
+                    severity=Severity.HIGH,
+                    check_name="skill_manifest",
+                    message="SKILL.md is not valid UTF-8 text, so it cannot be scored",
+                    file_path=str(manifest),
+                    suggestion="Save SKILL.md as UTF-8 text.",
+                )
+            )
+            result.metadata["quality_scores"] = qs.to_dict()
+            return result
         lines = content.split("\n")
 
         frontmatter_data = self._parse_frontmatter(content)
@@ -340,7 +355,8 @@ class QualityScoreValidator(ValidatorBase):
         try:
             data = yaml.safe_load(fm_match.group(1))
             return data if isinstance(data, dict) else None
-        except yaml.YAMLError:
+        except (yaml.YAMLError, RecursionError):
+            # RecursionError: deeply nested YAML; scored as missing frontmatter instead of crashing the run.
             return None
 
     # -----------------------------------------------------------------

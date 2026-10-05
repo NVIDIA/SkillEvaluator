@@ -4,9 +4,12 @@
 """Opt-in parity check against Claude Code's own plugin validator.
 
 When the plugin's selected manifest is ``.claude-plugin/plugin.json`` and the
-``claude`` CLI is on ``PATH``, ``claude plugin validate <root> --strict --json``
-is run once against the plugin root (``--json`` needs Claude Code v2.1.259 or
-later; older builds are rerun without it and their text report is parsed).
+``claude`` CLI is on ``PATH``, ``claude plugin validate <root> --json`` is run
+once against the plugin root (``--json`` needs Claude Code v2.1.259 or later;
+older builds are rerun without it and their text report is parsed). It runs
+without ``--strict``: the comparison is about what Claude Code refuses to load,
+and its warnings (which ``--strict`` also fails) are still listed, with the
+verdict ``--strict`` would give recorded as ``strict_verdict``.
 Codex, Cursor, Agent Plugins, and bundle-reference plugins are not Claude Code
 plugins, so the check is recorded as not applicable for them.
 
@@ -20,9 +23,12 @@ environment reaches it.
 
 The Tier 1 result records Claude Code's verdict, errors, and warnings next to
 SkillEvaluator's own manifest verdict, with file paths relative to the plugin
-root. Claude Code's errors are MEDIUM and its warnings LOW (advisory; a policy
-overlay can raise them), and a disagreement between the two verdicts is an INFO
-finding. Without the CLI the check is skipped with a reason; a CLI that crashes,
+root. The two are compared field by field as well as by verdict: they agree
+only when the verdicts match, every manifest field Claude Code reports an error
+on has a blocking SkillEvaluator finding, and every manifest field
+SkillEvaluator's schema check fails is one Claude Code also reports. Claude
+Code's errors are MEDIUM and its warnings LOW (advisory; a policy overlay can
+raise them), and a disagreement is an INFO finding that names the fields. Without the CLI the check is skipped with a reason; a CLI that crashes,
 times out, or prints a report with no verdict leaves the check INCOMPLETE.
 """
 
@@ -40,10 +46,11 @@ from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
 from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.tool_runner import ExternalTool, Tools, parse_json_output
+from skillevaluator.validators.mcp_static import CATEGORY as MCP_CATEGORY
 
 CATEGORY = "PLUGIN_PARITY"
 VALIDATOR_NAME = "Claude Plugin Validate Parity"
-VALIDATOR_DESCRIPTION = "Compare SkillEvaluator's plugin verdict with `claude plugin validate --strict`"
+VALIDATOR_DESCRIPTION = "Compare SkillEvaluator's plugin manifest findings with `claude plugin validate`"
 SCAN_NAME = "claude plugin validate"
 TIMEOUT_SECONDS = 120
 MAX_MESSAGES = 50
@@ -104,6 +111,28 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # and the heavy right-pointing angle that marks each message.
 _BULLETS = "\u2718\u2717\u00d7\u274c\u26a0\u2714\u2713\u2022\u276f\u203a*- "
 _UNKNOWN_OPTION_RE = re.compile(r"(?i)(unknown option|unexpected argument|unrecognized)[^\n]*--json")
+# The top-level manifest field a report path or message names: "name", "dependencies.0", "skills[1]", ...
+_FIELD_RE = re.compile(r"^(?P<field>[A-Za-z_$][\w$-]*)(?:[.\[][^:]*)?$")
+_TEXT_FIELD_RE = re.compile(r"^(?:(?:error|warning)\s*:\s*)?(?P<path>[A-Za-z_$][\w$.\[\]-]*)\s*:", re.IGNORECASE)
+# Report paths that mean the whole manifest (it is not JSON, not an object, or not readable).
+_ROOT_PATHS = frozenset({"", "root", "json", "file"})
+ROOT_FIELD = "<root>"
+# SkillEvaluator findings about the whole selected manifest.
+_MANIFEST_ROOT_CHECKS = frozenset(
+    {
+        "manifest_invalid_json",
+        "manifest_not_object",
+        "manifest_complexity_limit",
+        "manifest_unsafe",
+        "manifest_unreadable",
+        "manifest_outside_root",
+        "manifest_linked",
+        "manifest_hardlinked",
+    }
+)
+# Component path findings start with the manifest field they are about: "'skills' path ...", or a
+# path into it: "'commands['x'].source' path ...".
+_COMPONENT_FIELD_RE = re.compile(r"^'(?P<field>[A-Za-z_$][\w$]*)['.\[]")
 
 
 def _strip_userinfo(value: str) -> str:
@@ -196,6 +225,28 @@ def _relativize_text(text: str, roots: tuple[str, ...]) -> str:
     return text
 
 
+def _top_field(path: str) -> str | None:
+    """The top-level manifest field a Claude Code report path names (``"<root>"`` for the whole file)."""
+    path = path.strip()
+    if path in _ROOT_PATHS:
+        return ROOT_FIELD
+    match = _FIELD_RE.match(path)
+    return match.group("field") if match else None
+
+
+def _is_manifest_file(file: str | None) -> bool:
+    """Whether a report section is about ``plugin.json`` (a section with no file is the manifest too)."""
+    return file is None or file.replace("\\", "/").rsplit("/", 1)[-1] == "plugin.json"
+
+
+def _item_field(item: Any) -> str | None:
+    if isinstance(item, dict):
+        where = item.get("path") or item.get("field")
+        return _top_field(str(where)) if isinstance(where, str) else ROOT_FIELD
+    match = _TEXT_FIELD_RE.match(str(item).strip())
+    return _top_field(match.group("path")) if match else None
+
+
 def _message(item: Any, file: str | None, roots: tuple[str, ...] = ()) -> str:
     if isinstance(item, dict):
         text = str(item.get("message") or item.get("msg") or item.get("error") or item)
@@ -219,17 +270,20 @@ def parse_json_report(data: dict[str, Any], *, root: Path | str | None = None) -
     roots = _root_forms(root)
     errors: list[str] = []
     warnings: list[str] = []
-    sections: list[Any] = []
+    error_fields: set[str] = set()
+    sections: list[tuple[Any, bool]] = []
     if isinstance(data.get("manifest"), dict):
-        sections.append(data["manifest"])
+        sections.append((data["manifest"], True))
     if isinstance(data.get("contents"), list):
-        sections.extend(data["contents"])
-    for section in sections:
+        sections.extend((section, False) for section in data["contents"])
+    for section, is_manifest in sections:
         if not isinstance(section, dict):
             continue
         file = section.get("file") if isinstance(section.get("file"), str) else None
         for item in section.get("errors") or []:
             errors.append(_message(item, file, roots))
+            if is_manifest and (field := _item_field(item)) is not None:
+                error_fields.add(field)
         for item in section.get("warnings") or []:
             warnings.append(_message(item, file, roots))
     success = data.get("success")
@@ -237,6 +291,7 @@ def parse_json_report(data: dict[str, Any], *, root: Path | str | None = None) -
         "claude_verdict": "passed" if success is True else "failed" if success is False else "unknown",
         "errors": errors,
         "warnings": warnings,
+        "error_fields": sorted(error_fields),
         "format": "json",
         "manifest_found": not ("manifest" in data and data["manifest"] is None),
     }
@@ -258,6 +313,7 @@ def parse_text_report(stdout: str, stderr: str, *, root: Path | str | None = Non
     verdicts = _VERDICT_RE.findall(text)
     verdict = verdicts[-1] if verdicts else "unknown"
     found: dict[str, list[str]] = {"error": [], "warning": []}
+    error_fields: set[str] = set()
     section: str | None = None
     section_messages = 0
     file: str | None = None
@@ -280,15 +336,25 @@ def parse_text_report(stdout: str, stderr: str, *, root: Path | str | None = Non
         if section is not None:
             found[section].append(_message(line, file, roots))
             section_messages += 1
+            if section == "error" and _is_manifest_file(file) and (field := _item_field(line)) is not None:
+                error_fields.add(field)
             continue
         if stripped[:1] in _MESSAGE_MARKERS:
             continue  # a note: a message line under no error or warning section
         lowered = line.lower()
         if lowered.startswith("error") or " error" in lowered[:40]:
             found["error"].append(_message(line, None, roots))
+            if _is_manifest_file(file) and (field := _item_field(line)) is not None:
+                error_fields.add(field)
         elif lowered.startswith("warning") or " warning" in lowered[:40]:
             found["warning"].append(_message(line, None, roots))
-    return {"claude_verdict": verdict, "errors": found["error"], "warnings": found["warning"], "format": "text"}
+    return {
+        "claude_verdict": verdict,
+        "errors": found["error"],
+        "warnings": found["warning"],
+        "error_fields": sorted(error_fields),
+        "format": "text",
+    }
 
 
 def claude_plugin_applicability(root: Path) -> tuple[str, str] | None:
@@ -313,7 +379,7 @@ def claude_plugin_applicability(root: Path) -> tuple[str, str] | None:
 
 
 class ClaudePluginValidateParity:
-    """Run ``claude plugin validate --strict`` and compare it with SkillEvaluator's verdict."""
+    """Run ``claude plugin validate`` and compare it with SkillEvaluator's manifest verdict and findings."""
 
     def __init__(self, tool: ExternalTool | None = None) -> None:
         self.tool = tool if tool is not None else Tools.claude
@@ -326,11 +392,24 @@ class ClaudePluginValidateParity:
     def description(self) -> str:
         return VALIDATOR_DESCRIPTION
 
-    def validate(self, root: Path, *, skillevaluator_verdict: str | None = None) -> ValidationResult:
+    def validate(
+        self,
+        root: Path,
+        *,
+        skillevaluator_verdict: str | None = None,
+        skillevaluator_fields: Mapping[str, Any] | None = None,
+    ) -> ValidationResult:
+        """Run Claude Code's validator once and compare it with SkillEvaluator.
+
+        ``skillevaluator_fields`` comes from :func:`skillevaluator_manifest_fields`:
+        the manifest fields with a blocking SkillEvaluator finding (``blocking``),
+        and the subset its manifest schema check fails (``schema``). Without it
+        only the verdicts are compared.
+        """
         result = ValidationResult(validator_name=VALIDATOR_NAME, validator_description=VALIDATOR_DESCRIPTION)
         parity: dict[str, Any] = {
-            "command": "claude plugin validate <plugin-root> --strict --json",
-            "strict": True,
+            "command": "claude plugin validate <plugin-root> --json",
+            "strict": False,
             "skillevaluator_verdict": skillevaluator_verdict or "unknown",
         }
         result.metadata["plugin"] = {"validator_parity": parity}
@@ -363,10 +442,13 @@ class ClaudePluginValidateParity:
         errors: list[str] = report["errors"]
         warnings: list[str] = report["warnings"]
         claude_verdict = report["claude_verdict"]
+        known = {"passed", "failed"}
+        strict_verdict = ("failed" if errors or warnings else "passed") if claude_verdict in known else claude_verdict
         parity.update(
             status="compared",
             format=report["format"],
             claude_verdict=claude_verdict,
+            strict_verdict=strict_verdict,
             error_count=len(errors),
             warning_count=len(warnings),
             errors=errors[:MAX_MESSAGES],
@@ -389,44 +471,85 @@ class ClaudePluginValidateParity:
                     category=CATEGORY,
                     severity=Severity.LOW,
                     check_name="claude_validate_warning",
-                    message=f"claude plugin validate (--strict): {message}",
+                    message=f"claude plugin validate warning (fails --strict): {message}",
                     file_path="<plugin-root>",
-                    suggestion="Fix the warning; --strict treats it as an error in CI.",
+                    suggestion="Fix the warning; claude plugin validate --strict treats it as an error in CI.",
                 )
             )
-        known = {"passed", "failed"}
         if claude_verdict in known and skillevaluator_verdict in known:
-            agree = claude_verdict == skillevaluator_verdict
+            details = self._compare_fields(report, skillevaluator_fields, parity)
+            agree = claude_verdict == skillevaluator_verdict and not details
             parity["agree"] = agree
             if not agree:
+                lead = (
+                    f"claude plugin validate {claude_verdict} the plugin, but SkillEvaluator's manifest and "
+                    f"component checks {skillevaluator_verdict} it"
+                    if claude_verdict != skillevaluator_verdict
+                    else f"claude plugin validate and SkillEvaluator both {claude_verdict} the plugin, for different "
+                    "reasons"
+                )
                 result.add_finding(
                     Finding(
                         category=CATEGORY,
                         severity=Severity.INFO,
                         check_name="claude_validate_disagreement",
-                        message=(
-                            f"claude plugin validate --strict {claude_verdict} the plugin, but SkillEvaluator's "
-                            f"manifest and component checks {skillevaluator_verdict} it"
-                        ),
+                        message="; ".join([lead, *details]),
                         file_path="<plugin-root>",
                         suggestion=(
-                            "Compare the two reports: SkillEvaluator adds security checks Claude Code does not run, "
-                            "and Claude Code validates the full manifest schema that SkillEvaluator checks only "
-                            "shallowly."
+                            "Compare the two reports: SkillEvaluator adds security and dependency checks Claude Code "
+                            "does not run, and a field one side fails and the other passes is a parity gap."
                         ),
                         metadata={
                             "claude_verdict": claude_verdict,
                             "skillevaluator_verdict": skillevaluator_verdict,
+                            **parity.get("fields", {}),
                         },
                     )
                 )
         else:
             parity["agree"] = None
         result.add_message(
-            f"claude plugin validate --strict: {claude_verdict} ({len(errors)} error(s), {len(warnings)} warning(s)); "
-            f"SkillEvaluator: {skillevaluator_verdict or 'unknown'}"
+            f"claude plugin validate: {claude_verdict} ({len(errors)} error(s), {len(warnings)} warning(s); "
+            f"--strict: {strict_verdict}); SkillEvaluator: {skillevaluator_verdict or 'unknown'}"
         )
         return result
+
+    @staticmethod
+    def _compare_fields(
+        report: Mapping[str, Any], skillevaluator_fields: Mapping[str, Any] | None, parity: dict[str, Any]
+    ) -> list[str]:
+        """Field-level differences between the two sides, as message fragments (empty when they match).
+
+        Claude Code's manifest errors are compared with the fields that have a
+        blocking SkillEvaluator finding; SkillEvaluator's manifest schema errors
+        are compared with the fields Claude Code reports. Other blocking
+        SkillEvaluator findings (MCP policy, dependencies, ...) only decide the
+        verdict, because Claude Code does not run those checks.
+        """
+        if skillevaluator_fields is None:
+            return []
+        claude_fields = set(report.get("error_fields") or ())
+        blocking = {str(field) for field in skillevaluator_fields.get("blocking") or ()}
+        schema = {str(field) for field in skillevaluator_fields.get("schema") or ()}
+        claude_only = sorted(claude_fields - blocking)
+        skillevaluator_only = sorted(schema - claude_fields)
+        parity["fields"] = {
+            "claude_error_fields": sorted(claude_fields),
+            "skillevaluator_error_fields": sorted(blocking),
+            "claude_only": claude_only,
+            "skillevaluator_only": skillevaluator_only,
+        }
+        details = []
+        if claude_only:
+            details.append(
+                f"Claude Code reports errors on {', '.join(claude_only[:10])}, which SkillEvaluator does not block on"
+            )
+        if skillevaluator_only:
+            details.append(
+                f"SkillEvaluator's manifest check fails {', '.join(skillevaluator_only[:10])}, which Claude Code "
+                "accepts"
+            )
+        return details
 
     @staticmethod
     def _not_applicable(result: ValidationResult, parity: dict[str, Any], reason: str) -> ValidationResult:
@@ -449,7 +572,7 @@ class ClaudePluginValidateParity:
             _copy_version_pins(home)
             env = _child_env(home)
             run = self.tool.run(
-                ["plugin", "validate", target, "--strict", "--json"],
+                ["plugin", "validate", target, "--json"],
                 cwd=cwd,
                 timeout=TIMEOUT_SECONDS,
                 env=env,
@@ -471,9 +594,9 @@ class ClaudePluginValidateParity:
                 return parse_json_report(data, root=root)
             if _UNKNOWN_OPTION_RE.search(f"{run.stdout}\n{run.stderr}"):
                 # Claude Code before v2.1.259 has no --json; parse the text report instead.
-                parity["command"] = "claude plugin validate <plugin-root> --strict"
+                parity["command"] = "claude plugin validate <plugin-root>"
                 run = self.tool.run(
-                    ["plugin", "validate", target, "--strict"],
+                    ["plugin", "validate", target],
                     cwd=cwd,
                     timeout=TIMEOUT_SECONDS,
                     env=env,
@@ -512,4 +635,56 @@ def skillevaluator_manifest_verdict(results: list[ValidationResult], schema_vali
             for finding in result.findings
         )
         return "failed" if blocking else "passed"
+    return None
+
+
+def _is_claude_manifest_path(path: str | None) -> bool:
+    """Whether a finding's file is the Claude Code manifest, ``.claude-plugin/plugin.json``."""
+    return bool(path) and str(path).replace("\\", "/").rsplit("/", 2)[-2:] == [".claude-plugin", "plugin.json"]
+
+
+def _finding_field(finding: Finding) -> str | None:
+    """The top-level field of the selected Claude Code manifest a SkillEvaluator finding is about, if any."""
+    metadata = finding.metadata if isinstance(finding.metadata, dict) else {}
+    if metadata.get("manifest_type") not in (None, PLUGIN_CONTAINED_MANIFEST_TYPE):
+        return None
+    field = metadata.get("field")
+    if isinstance(field, str) and field:
+        return _top_field(field)
+    if finding.check_name in _MANIFEST_ROOT_CHECKS:
+        return ROOT_FIELD
+    if finding.category == MCP_CATEGORY and _is_claude_manifest_path(finding.file_path):
+        # A server declared inline in the manifest: Claude Code reports its problems under mcpServers.
+        return "mcpServers"
+    if "plugin_component_ref" in metadata and (match := _COMPONENT_FIELD_RE.match(finding.message or "")):
+        return match.group("field")
+    return None
+
+
+def skillevaluator_manifest_fields(
+    results: list[ValidationResult], schema_validator_name: str
+) -> dict[str, Any] | None:
+    """The manifest fields SkillEvaluator fails, for the field-level parity comparison.
+
+    ``blocking`` lists every top-level manifest field with a CRITICAL or HIGH
+    plugin-schema finding (the manifest schema check and the component path
+    checks); ``schema`` lists the ones the manifest schema check itself fails,
+    which claim that Claude Code refuses the field. ``None`` when the schema
+    check did not run.
+    """
+    for result in results:
+        if result.validator_name != schema_validator_name:
+            continue
+        blocking: set[str] = set()
+        schema: set[str] = set()
+        for finding in result.findings:
+            severity = (
+                finding.severity if isinstance(finding.severity, Severity) else Severity(str(finding.severity).lower())
+            )
+            if severity not in (Severity.CRITICAL, Severity.HIGH) or (field := _finding_field(finding)) is None:
+                continue
+            blocking.add(field)
+            if finding.check_name.startswith(("schema:", "plugin_manifest_", "manifest_")):
+                schema.add(field)
+        return {"blocking": sorted(blocking), "schema": sorted(schema)}
     return None

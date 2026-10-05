@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
+import os
 import stat
 import time
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import click
 from rich.console import Console
@@ -66,12 +67,12 @@ DEFAULT_CHECKS = (
     "lint",
 )
 # Opt-in checks: recognized by ``--checks`` but excluded from the default run.
-# The dependency CVE audit is also available through the standalone
-# ``dependency-audit`` command; the version check above runs by default.
+# The dependency CVE audit is selected with ``--checks dependency`` (or its
+# ``dependency-audit`` alias); the version check above runs by default.
 OPTIONAL_CHECKS = ("dependency",)
 # Opt-in, plugin-only checks. They are not part of the skill workflows' "all
-# checks" lineup: ``claude-validate`` runs ``claude plugin validate --strict``
-# for a parity comparison when the Claude Code CLI is installed.
+# checks" lineup: ``claude-validate`` runs ``claude plugin validate`` for a
+# parity comparison when the Claude Code CLI is installed.
 PLUGIN_OPTIONAL_CHECKS = ("claude-validate",)
 # Every canonical check name ``run_validation`` understands after alias
 # resolution (the default run plus the opt-in checks).
@@ -315,6 +316,9 @@ def run_validation(
     # scored or linted as one, so the two scopes cannot double-report.
     skill_like = content_type in (None, CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN) or bool(bundled_skill_dirs)
     skill_target = target_path / "skills" if content_type == CONTENT_TYPE_PLUGIN else target_path
+    # QUALITY scores the skills the plugin's own client loads: declared skill
+    # folders too, and not a skills/ folder that the declared ones replace.
+    quality_dirs = _plugin_quality_skill_dirs(target_path) if content_type == CONTENT_TYPE_PLUGIN else None
 
     def _schema_results() -> list[ValidationResult]:
         v = _schema_validator_for(content_type, policy, repo_root, resolve_endpoints=resolve_endpoints)
@@ -323,12 +327,14 @@ def run_validation(
     def _claude_validate_results() -> list[ValidationResult]:
         from skillevaluator.validators.claude_plugin_validate import (
             ClaudePluginValidateParity,
+            skillevaluator_manifest_fields,
             skillevaluator_manifest_verdict,
         )
 
         verdict = skillevaluator_manifest_verdict(results, PluginSchemaValidator().name)
+        fields = skillevaluator_manifest_fields(results, PluginSchemaValidator().name)
         v = ClaudePluginValidateParity()
-        return [v.validate(target_path, skillevaluator_verdict=verdict)]
+        return [v.validate(target_path, skillevaluator_verdict=verdict, skillevaluator_fields=fields)]
 
     def _security_results() -> list[ValidationResult]:
         v = SecurityValidator(use_llm=use_llm, verify_llm=llm_verify)
@@ -349,8 +355,11 @@ def run_validation(
         return [_as_result(v.name, v.description, v.validate, target_path)]
 
     def _quality_results() -> list[ValidationResult]:
-        v = QualityScoreValidator(min_score=min_score)
-        return [_as_result(v.name, v.description, v.validate, skill_target)]
+        if quality_dirs is None or _same_dirs(quality_dirs, bundled_skill_dirs):
+            v = QualityScoreValidator(min_score=min_score)
+            return [_as_result(v.name, v.description, v.validate, skill_target)]
+        listed = _ListedSkillsQuality(quality_dirs, min_score=min_score)
+        return [_as_result(listed.name, listed.description, listed.validate_listed, target_path)]
 
     def _lint_results() -> list[ValidationResult]:
         v = ScriptLintValidator()
@@ -383,7 +392,7 @@ def run_validation(
         ("code-integrity", _code_integrity_results, True),
         ("dependency", _dependency_results, True),
         ("unicode", _unicode_results, True),
-        ("quality", _quality_results, skill_like),
+        ("quality", _quality_results, skill_like if quality_dirs is None else bool(quality_dirs)),
         ("lint", _lint_results, skill_like),
         ("claude-validate", _claude_validate_results, content_type == CONTENT_TYPE_PLUGIN),
     )
@@ -471,6 +480,51 @@ def run_lint_scripts(target_path: Path) -> list[ValidationResult]:
 def _is_dedup_result(result: ValidationResult) -> bool:
     """Return True when a result came from a Tier 2 deduplication validator."""
     return is_tier2_validator_name(result.validator_name)
+
+
+def _plugin_quality_skill_dirs(plugin_root: Path) -> list[Path] | None:
+    """The skill folders the plugin's own client loads, from the static inventory (``None`` if unreadable).
+
+    These are the selected manifest's skills: declared skill folders, and
+    ``skills/`` unless the declared folders replace it (Cursor, Codex). Broken
+    declarations and skills only another client loads are left out.
+    """
+    from skillevaluator.plugin_components import plugin_inventory_for_root
+
+    inventory = plugin_inventory_for_root(plugin_root)
+    if inventory is None:
+        return None
+    dirs: dict[str, Path] = {}
+    for component in inventory.components:
+        if component.type != "skill" or component.problem or component.declared_by or not component.path:
+            continue
+        relative = PurePosixPath(component.path)
+        dirs.setdefault(relative.as_posix(), plugin_root if str(relative) == "." else plugin_root / relative)
+    return [dirs[key] for key in sorted(dirs)]
+
+
+def _same_dirs(left: list[Path], right: list[Path]) -> bool:
+    """Whether two lists name the same folders (compared lexically, links never followed)."""
+
+    def key(path: Path) -> str:
+        return os.path.abspath(os.fspath(path))  # noqa: PTH100 - lexical, never resolved
+
+    return {key(path) for path in left} == {key(path) for path in right}
+
+
+class _ListedSkillsQuality(QualityScoreValidator):
+    """QUALITY over a given list of skill folders, aggregated like a skills folder."""
+
+    def __init__(self, skill_dirs: list[Path], *, min_score: int) -> None:
+        super().__init__(min_score=min_score)
+        self._listed = list(skill_dirs)
+
+    def _find_all_skills(self, root_path: Path) -> list[Path]:  # noqa: ARG002 - the listed folders replace discovery
+        return list(self._listed)
+
+    def validate_listed(self, root: Path) -> ValidationResult:
+        """Score every listed skill folder of the plugin at ``root``."""
+        return self._validate_folder(root)
 
 
 def _verified_skill_dirs_outside_tree_walk(plugin_root: Path) -> list[Path]:

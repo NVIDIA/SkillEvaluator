@@ -398,6 +398,9 @@ _UNVERIFIED_SUGGESTIONS = {
     "npm": "Pin an exact version (or an image digest), or commit a lockfile, then rerun the dependency audit.",
     "container": "Pin the image by digest (image@sha256:...) or an exact version tag, then rerun the dependency audit.",
 }
+_DEFAULT_UNVERIFIED_SUGGESTION = (
+    "Pin an exact version or digest, or commit a lockfile, then rerun the dependency audit."
+)
 
 
 def unverified_finding(
@@ -420,7 +423,7 @@ def unverified_finding(
         ),
         file_path=source,
         line_number=line_number,
-        suggestion=_UNVERIFIED_SUGGESTIONS[ecosystem],
+        suggestion=_UNVERIFIED_SUGGESTIONS.get(ecosystem, _DEFAULT_UNVERIFIED_SUGGESTION),
         metadata={
             "ecosystem": ecosystem,
             "package_name": label,

@@ -147,6 +147,15 @@ def test_image_refs_that_look_like_flags_are_never_exact() -> None:
     assert eco.image_declaration("ghcr.io/org/img:1.2.3", "mcp").exact is True
 
 
+def test_unverified_finding_for_another_ecosystem_gets_the_default_suggestion() -> None:
+    """Regression: an ecosystem without its own suggestion raised KeyError."""
+    finding = eco.unverified_finding("serde", "^1", "Cargo.toml", ecosystem="cargo", role="runtime", kind="crate")
+    assert finding.severity == Severity.INFO
+    assert finding.check_name == eco.UNVERIFIED_CHECK_NAME
+    assert finding.suggestion == eco._DEFAULT_UNVERIFIED_SUGGESTION
+    assert finding.metadata["ecosystem"] == "cargo"
+
+
 def test_npm_audit_parser_skips_transitive_via_entries() -> None:
     outcome = eco.AuditOutcome(scanner="npm audit")
     error = eco.parse_npm_audit_output(NPM_AUDIT_REPORT, {"lodash": "4.17.20"}, source="package.json", outcome=outcome)

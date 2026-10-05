@@ -13,6 +13,7 @@ host helper and on the Harbor verifier copy, and check the two copies agree.
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 from pathlib import Path
 
@@ -264,6 +265,69 @@ def test_shell_writes_get_the_write_budget(copy, name, arguments):
     assert "FINAL_ROW" in summary
     assert "report.txt" in summary
     assert "FINAL_ROW" in file_changes
+
+
+def _single_call_trajectory(name: str, arguments: dict) -> dict:
+    return {"steps": [_step(_call("c1", name, arguments), results=("",)), {"source": "agent", "message": "Done."}]}
+
+
+@COPIES
+@pytest.mark.parametrize(
+    ("name", "arguments", "paths"),
+    [
+        ("Bash", {"command": "echo hi>Out.txt"}, "Out.txt"),
+        ("Bash", {"command": "cat notes.txt &> Log.txt"}, "Log.txt"),
+        ("Bash", {"command": "echo x >| Force.txt"}, "Force.txt"),
+        ("Bash", {"command": "sed -i 's/a/b/' Conf.ini"}, "Conf.ini"),
+        ("Bash", {"command": "sed -i -e 's/a/b/' -e 's/c/d/' A.cfg B.cfg"}, "A.cfg, B.cfg"),
+        ("Bash", {"command": "make 2>&1 | tee -a Build.log Copy.log"}, "Build.log, Copy.log"),
+        ("Bash", {"command": 'echo hi > "My Notes.txt"'}, "My Notes.txt"),
+        ("functions.exec_command", {"cmd": "echo hi > Out.txt"}, "Out.txt"),
+        ("mcp__shell__bash", {"command": "echo hi > Out.txt"}, "Out.txt"),
+    ],
+    ids=[
+        "glued-redirect",
+        "stdout-and-stderr",
+        "noclobber-override",
+        "sed-in-place",
+        "sed-in-place-scripts",
+        "every-tee-operand",
+        "quoted-path",
+        "codex-namespaced-exec",
+        "mcp-shell-tool",
+    ],
+)
+def test_shell_writes_are_read_like_the_security_extractor(copy, name, arguments, paths):
+    traj = _single_call_trajectory(name, arguments)
+
+    file_changes = copy.build_behavior_evidence(traj, "q").split("FINAL RESPONSE", 1)[0]
+    refs = copy.build_metric_evidence_refs(traj, "q", expected_behavior=["x"])["behavior_check"]
+
+    # Paths keep their case.
+    assert f"Path: {paths}\n" in file_changes
+    [ref] = [ref for ref in refs if ref["kind"] == "file_change"]
+    assert ref["excerpt"] == next(iter(arguments.values()))
+
+
+@COPIES
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest -q > /dev/null 2>&1",
+        "make 2>&1 | tee",
+        "echo the committee met",
+        "sed 's/a/b/' notes.txt",
+    ],
+    ids=["discarded-output", "tee-to-stdout", "tee-inside-a-word", "sed-without-in-place"],
+)
+def test_commands_that_write_no_file_are_not_file_changes(copy, command):
+    traj = _single_call_trajectory("Bash", {"command": command})
+
+    evidence = copy.build_behavior_evidence(traj, "q")
+    refs = copy.build_metric_evidence_refs(traj, "q", expected_behavior=["x"])["behavior_check"]
+
+    assert "FILE CHANGES" not in evidence
+    assert all(ref["kind"] != "file_change" for ref in refs)
 
 
 @COPIES
@@ -530,7 +594,7 @@ def test_big_writes_do_not_push_the_newest_test_result_out(copy, writes):
         evidence = bundles[metric]["prompt_evidence"]
         assert "TESTS: 42 passed" in evidence, metric
         assert f"MODULE_{writes - 1}_TAIL" in evidence, metric
-        assert len(evidence) <= copy._BUNDLE_BUDGETS[metric], metric
+        assert len(evidence) <= copy._bundle_budgets()[metric], metric
 
 
 @COPIES
@@ -551,7 +615,7 @@ def test_big_write_keeps_small_recent_results_in_view(copy):
 
     assert all(f"CHECK_{index}_OK" in evidence for index in range(5))
     assert "BIG_START" in evidence
-    assert len(evidence) <= copy._BUNDLE_BUDGETS["accuracy"]
+    assert len(evidence) <= copy._bundle_budgets()["accuracy"]
 
 
 @COPIES
@@ -623,6 +687,29 @@ def test_runtime_key_is_redacted_even_when_it_looks_like_a_placeholder(copy, mon
 
     assert runtime_key not in redacted
     assert "sk-your-key-here" not in redacted
+
+
+@COPIES
+def test_configured_credentials_never_reach_the_judges(copy, monkeypatch):
+    # A credential value need not look like a key: its exact value is redacted wherever it shows.
+    credential = _fixture_secret("opaque", "-anthropic-", "credential")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", credential)
+    traj = {
+        "steps": [
+            _step(
+                _call("w1", "Write", {"file_path": "/workspace/.env", "content": f"KEY={credential}\n"}),
+                _call("b1", "Bash", {"command": f"echo {credential}"}),
+                results=("ok", f"{credential}\n"),
+            ),
+            {"source": "agent", "message": f"The key is {credential}."},
+        ]
+    }
+
+    bundles = copy.build_metric_evidence_bundles(traj, f"Use {credential}.", ground_truth="x", expected_behavior=["y"])
+
+    for metric, bundle in bundles.items():
+        assert credential not in json.dumps(bundle), metric
+        assert "<redacted>" in bundle["prompt_evidence"], metric
 
 
 def _parity_corpus() -> list[dict]:
@@ -852,9 +939,9 @@ def test_history_shrinks_an_entry_only_as_far_as_the_budget_needs(copy):
     # A history 50 chars over budget cut a 1,000-char tool result down to a
     # 160-char short line and left the rest of the room empty.
     entries = [
-        ["User: Fix the build.", copy._RANK_MESSAGE, ()],
-        ["Tool returned: " + "a" * 1000, copy._RANK_LOW, ()],
-        ["Agent: Fixed it.", copy._RANK_KEEP, ()],
+        copy._Entry("User: Fix the build.", copy._RANK_MESSAGE),
+        copy._Entry("Tool returned: " + "a" * 1000, copy._RANK_LOW),
+        copy._Entry("Agent: Fixed it.", copy._RANK_KEEP),
     ]
     full = copy._fit_history(entries, None)
 

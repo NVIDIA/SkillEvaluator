@@ -617,9 +617,11 @@ and end around a marker such as `...[4213 chars truncated]...`, never a silent
 cut. When the evidence is over budget, earlier writes shrink or drop first,
 and the tool history drops its middle first. The history's copy of the final
 answer, which FINAL RESPONSE already shows, shrinks before any tool call drops.
-Secrets are redacted before the evidence reaches a judge. Placeholder keys
-such as `sk-your-key-here` or `nvapi-REPLACE_ME` are left as written, so a
-config file the task asks for still matches the expected answer. Each judged
+Secrets are redacted before the evidence reaches a judge: key-shaped text
+such as `sk-…` or `ghp_…`, the exact value of every provider credential in the
+verifier's environment, and the run's canary token. Placeholder keys such as
+`sk-your-key-here` or `nvapi-REPLACE_ME` are left as written, so a config file
+the task asks for still matches the expected answer. Each judged
 metric's `omitted` field records whether evidence was dropped or shortened to
 fit the budget.
 

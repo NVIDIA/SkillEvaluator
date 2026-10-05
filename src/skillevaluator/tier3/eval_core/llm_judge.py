@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 from skillevaluator.inference.types import EmptyLLMResponseError
 from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, _model_leaf, _supports_custom_temperature
 from skillevaluator.tier3.eval_core.atif_helpers import (
+    _BEHAVIOR_SECTION_CHARS,
+    _MIN_BEHAVIOR_HISTORY_HEADROOM,
     _SECTION_COMPACT_TOOL_HISTORY,
     _SECTION_FINAL_RESPONSE,
     _SECTION_USER_REQUEST,
@@ -27,6 +29,7 @@ from skillevaluator.tier3.eval_core.atif_helpers import (
     _behavior_final_response_limit,
     _truncate_for_behavior,
 )
+from skillevaluator.tier3.eval_core.secret_redaction import _configured_secret_values
 
 logger = logging.getLogger(__name__)
 
@@ -37,20 +40,6 @@ DEFAULT_JUDGE_MODEL = CHAT_DEFAULT_OPENAI
 _ERROR_REDACTION_MARKER = "[REDACTED]"
 _JUDGE_ERROR_REASON_LIMIT = 512
 _JUDGE_TEXT_LIMIT = 512
-# Match verifier log redaction; shorter placeholders can corrupt ordinary diagnostic text.
-_MIN_EXACT_SECRET_LENGTH = 8
-_CREDENTIAL_ENV_VARS = (
-    "OPENAI_API_KEY",
-    "NVIDIA_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "SKILL_EVAL_LLM_API_KEY",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SECURITY_TOKEN",
-    "AWS_SESSION_TOKEN",
-    "AWS_BEARER_TOKEN_BEDROCK",
-    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
-)
 
 
 # ---------------------------------------------------------------------------
@@ -123,19 +112,6 @@ def _is_native_openai_chat_url(provider: str, request_url: str) -> bool:
         and "?" not in raw_url
         and "#" not in raw_url
     )
-
-
-def _configured_secret_values(extra_secret_values: tuple[str | None, ...] = ()) -> list[str]:
-    values = {
-        value
-        for name in _CREDENTIAL_ENV_VARS
-        if (value := os.environ.get(name, "")) and len(value) >= _MIN_EXACT_SECRET_LENGTH
-    }
-    for value in extra_secret_values:
-        text = str(value) if value else ""
-        if len(text) >= _MIN_EXACT_SECRET_LENGTH:
-            values.add(text)
-    return sorted(values, key=len, reverse=True)
 
 
 def _redact_configured_credentials(text: str, extra_secret_values: tuple[str | None, ...] = ()) -> str:
@@ -1018,7 +994,7 @@ def _compact_behavior_conversation(conversation_text: str, limit: int | None = N
         final_sec = conversation_text[final_idx:final_end]
         suffix = conversation_text[final_end:]
 
-        reserved_other = min(1600, max(0, limit - final_limit), limit // 2)
+        reserved_other = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, max(0, limit - final_limit), limit // 2)
         max_final = min(final_limit, max(1, limit - reserved_other))
         if len(final_sec) > max_final:
             final_body = final_sec[len(final_header) :]
@@ -1034,16 +1010,20 @@ def _compact_behavior_conversation(conversation_text: str, limit: int | None = N
             pre_comp = _slice_with_middle_marker(prefix, rem, marker)
             return f"{pre_comp}{final_sec}"[:limit]
         if len(prefix) <= rem // 2:
-            suf_comp = _slice_with_middle_marker(suffix, rem - len(prefix), marker, max_head=800, fallback_tail=True)
+            suf_comp = _slice_with_middle_marker(
+                suffix, rem - len(prefix), marker, max_head=_BEHAVIOR_SECTION_CHARS, fallback_tail=True
+            )
             return f"{prefix}{final_sec}{suf_comp}"[:limit]
         pre_budget = max(1, min(len(prefix), rem // 2))
         suf_budget = max(0, rem - pre_budget)
         pre_comp = _slice_with_middle_marker(prefix, pre_budget, marker)
-        suf_comp = _slice_with_middle_marker(suffix, suf_budget, marker, max_head=800, fallback_tail=True)
+        suf_comp = _slice_with_middle_marker(
+            suffix, suf_budget, marker, max_head=_BEHAVIOR_SECTION_CHARS, fallback_tail=True
+        )
         return f"{pre_comp}{final_sec}{suf_comp}"[:limit]
 
     available = limit - len(marker)
-    reserved_head = min(1600, available // 2)
+    reserved_head = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, available // 2)
     tail = max(1, available // 3, min(final_limit, max(1, available - max(1, reserved_head))))
     head = max(1, available - tail)
     return f"{conversation_text[:head]}{marker}{conversation_text[-tail:]}"

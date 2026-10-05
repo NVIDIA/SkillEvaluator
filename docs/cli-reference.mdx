@@ -35,6 +35,7 @@ commands referenced below.
 | [init-harbor-task](#init-harbor-task) | Scaffold a bring-your-own-task Harbor starter | Nothing |
 | [view](#view) | Open the latest HTML live-evaluation report | A previous `tier3 evaluate` run |
 | [compare](#compare) | Compare live-evaluation results across agents | A previous `tier3 evaluate` run |
+| [dashboard](#dashboard) | Filter quantitative tables and paired usage differences | Saved JSON reports or retained runs; dashboard extra |
 | [harbor-view](#harbor-view) | Browse retained Harbor job artifacts | A run made with `--harbor-keep-jobs` |
 | [doctor](#doctor) | Live-evaluation readiness check | Nothing |
 | [health-check](#health-check) | Quick CLI + backend readiness check | Nothing |
@@ -494,6 +495,26 @@ skillevaluator compare ./my-skill
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--results-dir DIRECTORY` | unset | Results directory to read from. |
+
+## dashboard
+
+Open the optional local tables dashboard. Install `skillevaluator[dashboard]`
+first, then pass JSON reports, retained run directories, or directories containing
+reports. With no paths, upload JSON files in the browser.
+
+```bash
+skillevaluator dashboard reports/run-a.json reports/run-b.json
+skillevaluator dashboard --no-browser --port 8502
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--port` | `8501` | Local server port, from 1 through 65535. |
+| `--no-browser` | off | Start the server without opening a browser. |
+
+The server listens on `127.0.0.1`; Ctrl+C stops it. See the
+[dashboard guide](reports.mdx#performance-dashboard) for measurements and
+comparison eligibility.
 
 ## harbor-view
 

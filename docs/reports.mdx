@@ -359,6 +359,63 @@ skillevaluator harbor-view ./my-skill/evals/results/20260709_141530_12345_a1b2c3
 (`skillevaluator tier3 harbor-view` is the same command under its expert
 alias.)
 
+## Performance dashboard
+
+Install the optional Python dashboard and open saved JSON reports or individual
+retained Tier 3 run directories:
+
+```bash
+pip install "skillevaluator[dashboard]"
+skillevaluator dashboard reports/run-a.json reports/run-b.json
+skillevaluator dashboard ./my-skill/evals/results/<run-id>
+# Start with an empty dashboard and upload several JSON reports in the browser:
+skillevaluator dashboard
+```
+
+From a checkout, use `uv run --extra dashboard skillevaluator dashboard ...`.
+The server runs at `http://127.0.0.1:8501`; use `--port 8502` for another port,
+`--no-browser` to suppress opening a browser, and Ctrl+C to stop it.
+
+Filter the sortable tables by skill, model, harness, recorded harness features,
+condition, and execution status. Download the visible performance or comparison
+rows as CSV. Each performance row represents one run, harness, and condition.
+The comparison table calculates **with skill minus without skill**, and percent
+change relative to without skill. A negative usage difference means less usage;
+a positive score difference means higher performance. Comparisons stay within
+the same run and require successful conditions with matching trial coverage.
+
+Missing measurements stay unavailable: older JSON reports may contain token
+counts without time or cost, and cost is shown only when recorded in USD.
+For retained runs, duration measures agent execution rather than the entire
+evaluation workflow. Cached tokens are shown separately and are not added again
+to prompt plus completion tokens. No pricing estimates or new agent evaluations
+are performed. Adverse conditions and harness features are displayed when
+explicitly recorded; the dashboard does not run these experiments.
+
+
+### Recorded harness features
+
+Features are experiment metadata, not inferred from the harness name. In a
+canonical Tier 3 JSON payload, an agent or condition can include:
+
+```json
+"dashboard_metadata": {
+  "harness_features": ["claude-rules:enabled", "memory:disabled"]
+}
+```
+
+For retained runs, the dashboard also reads this metadata from `run_config.json`
+(at the root or within the agent configuration) and each condition's
+`summary.json`. An empty feature list records that no features were enabled;
+an absent field is displayed as **unknown**. Differing recorded models or feature
+configurations are kept separate when pairing conditions.
+
+An explicitly imported adverse condition uses `conditions.adverse`,
+`trials_adverse`, `num_trials_adverse`, and `adverse` for its score in the same
+agent payload. It appears in the performance table; usage differences are
+calculated for with/without pairs only. Existing evaluator runs do not create
+adverse trials through the dashboard.
+
 ## Machine-readable contract
 
 For CI and tooling, two JSON entry points matter:

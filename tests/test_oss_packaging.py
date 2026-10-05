@@ -229,7 +229,16 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
     )
     assert all(version >= Version("1.28.1") for version in all_lock_versions["mcp"])
     assert all(version >= Version("2.13.0") for version in all_lock_versions["pyjwt"])
-    assert "protobuf" not in all_lock_versions
+    # The optional dashboard uses Streamlit's protobuf transport. It does not
+    # restore the removed evaluator telemetry integration or its dependencies.
+    protobuf_consumers = {
+        package["name"]
+        for package in _lock()["package"]
+        if any(dependency["name"] == "protobuf" for dependency in package.get("dependencies", []))
+    }
+    assert protobuf_consumers == {"streamlit"}
+    assert extras["dashboard"] == ["streamlit>=1.49,<2"]
+    assert not any("streamlit" in dependency for dependency in project["project"]["dependencies"])
     assert not any(name.startswith("opentelemetry") for name in all_lock_versions)
 
 

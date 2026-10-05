@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Optional `skillevaluator dashboard` tables for comparing saved Tier 3 reports
+  and retained runs across skills, models, harnesses, and skill conditions,
+  with paired token, agent runtime, and recorded USD cost differences.
 - Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for
   LLM judges in both the Harbor container verifier (`eval.py`) and host runtime
   (`LLMClient`). Features zero-dependency full jitter exponential backoff,

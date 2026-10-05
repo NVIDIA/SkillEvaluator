@@ -173,6 +173,37 @@
         }
       ]
     },
+    "dashboard": {
+      "params": [
+        {
+          "name": "paths",
+          "opts": [
+            "paths"
+          ],
+          "param_type": "argument",
+          "type": "path"
+        },
+        {
+          "default": "8501",
+          "name": "port",
+          "opts": [
+            "--port"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "no_browser",
+          "opts": [
+            "--no-browser"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        }
+      ]
+    },
     "dedup-scan": {
       "params": [
         {

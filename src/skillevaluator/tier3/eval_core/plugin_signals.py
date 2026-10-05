@@ -1630,6 +1630,55 @@ def _trajectory_agent(trajectory: Mapping[str, Any]) -> str:
     return name.strip()[:_MAX_LABEL_CHARS] if isinstance(name, str) else ""
 
 
+def _step_tool_calls(step: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(step, Mapping) or not isinstance(step.get("tool_calls"), list):
+        return []
+    return [item for item in step["tool_calls"] if isinstance(item, Mapping)]
+
+
+def _expanded_tool_calls(raw: Mapping[str, Any], outer_id: str, mcp_call_servers: Mapping[str, str]) -> list[Any]:
+    """One raw tool call as normalized calls: a Codex ``exec`` wrapper becomes the calls it made."""
+    name = _tool_name(raw)
+    server = mcp_call_servers.get(outer_id) if outer_id else None
+    if server and name and not name.casefold().startswith(_MCP_PREFIX):
+        # The harness log names the server this bare MCP tool name came from (Codex).
+        name = f"mcp__{server}__{name}"[:_MAX_LABEL_CHARS]
+    prepared = {**raw, "function_name": name, "arguments": _arguments(raw)}
+    try:
+        return normalize_tool_call(prepared)
+    except (TypeError, ValueError, RecursionError):
+        return [prepared]
+
+
+def _identify_call(
+    tool_call: Mapping[str, Any],
+    declared: Mapping[str, Sequence[str]],
+    *,
+    seq: int,
+    step_index: int,
+    agent: str,
+    subagent_aliases: Mapping[str, str] | None,
+) -> _Call:
+    """A normalized tool call with its identities (its window owner and outcome are filled in later)."""
+    fn = str(tool_call.get("function_name") or "")[:_MAX_LABEL_CHARS]
+    args = tool_call.get("arguments")
+    args = args if isinstance(args, dict) else {}
+    mcp = _mcp_ident(fn, declared.get(COMPONENT_MCP) or (), agent=agent)
+    fn_base = _base_tool_name(mcp.tool if mcp is not None and mcp.tool else fn)
+    idents = _identities(fn, fn_base, mcp, args, declared, subagent_aliases=subagent_aliases)
+    return _Call(seq=seq, step_index=step_index, fn=fn, fn_base=fn_base, args=args, idents=idents, mcp=mcp)
+
+
+def _claimable_results(
+    tool_call: Mapping[str, Any], results: Sequence[_Result], outer_id: str, *, call_count: int
+) -> list[_Result]:
+    """The step results this call may claim: an unwrapped inner call only when the normalizer proved it owns them."""
+    status = tool_call.get("_atif_observation_status")
+    if status is None or status == MAPPED_OUTER_EXEC_OBSERVATION:
+        return _results_for_call(results, outer_id, call_count=call_count)
+    return []
+
+
 def _extract_calls(
     trajectory: Mapping[str, Any],
     declared: Mapping[str, Sequence[str]],
@@ -1640,56 +1689,30 @@ def _extract_calls(
     if not isinstance(steps, list):
         return None
     agent = _trajectory_agent(trajectory)
-    declared_mcp = declared.get(COMPONENT_MCP) or ()
     calls: list[_Call] = []
-    owner: int | None = None
+    owner: int | None = None  # the latest skill/command activation: it opens a window for the calls after it
     for step_index, step in enumerate(steps[:_MAX_STEPS]):
-        if not isinstance(step, Mapping):
+        raw_calls = _step_tool_calls(step)
+        if not raw_calls:
             continue
-        raw_calls = step.get("tool_calls")
-        if not isinstance(raw_calls, list) or not raw_calls:
-            continue
-        raw_calls = [item for item in raw_calls if isinstance(item, Mapping)]
         results = _observations(step)
         for raw in raw_calls:
             outer_id = str(raw.get("tool_call_id") or raw.get("id") or "")
-            name = _tool_name(raw)
-            server = (mcp_call_servers or {}).get(outer_id) if outer_id else None
-            if server and name and not name.casefold().startswith(_MCP_PREFIX):
-                # The harness log names the server this bare MCP tool name came from (Codex).
-                name = f"mcp__{server}__{name}"[:_MAX_LABEL_CHARS]
-            prepared = {**raw, "function_name": name, "arguments": _arguments(raw)}
-            try:
-                normalized = normalize_tool_call(prepared)
-            except (TypeError, ValueError, RecursionError):
-                normalized = [prepared]
-            for tool_call in normalized:
+            for tool_call in _expanded_tool_calls(raw, outer_id, mcp_call_servers or {}):
                 if len(calls) >= _MAX_CALLS:
                     return calls
-                status = tool_call.get("_atif_observation_status")
-                if status is None or status == MAPPED_OUTER_EXEC_OBSERVATION:
-                    correlated = _results_for_call(results, outer_id, call_count=len(raw_calls))
-                else:
-                    correlated = []
-                fn = str(tool_call.get("function_name") or "")[:_MAX_LABEL_CHARS]
-                args = tool_call.get("arguments")
-                args = args if isinstance(args, dict) else {}
-                mcp = _mcp_ident(fn, declared_mcp, agent=agent)
-                fn_base = _base_tool_name(mcp.tool if mcp is not None and mcp.tool else fn)
-                idents = _identities(fn, fn_base, mcp, args, declared, subagent_aliases=subagent_aliases)
-                seq = len(calls)
-                if any(ident.kind in {COMPONENT_SKILL, COMPONENT_COMMAND} for ident in idents):
-                    owner = seq
-                call = _Call(
-                    seq=seq,
+                call = _identify_call(
+                    tool_call,
+                    declared,
+                    seq=len(calls),
                     step_index=step_index,
-                    fn=fn,
-                    fn_base=fn_base,
-                    args=args,
-                    idents=idents,
-                    mcp=mcp,
-                    owner=owner,
+                    agent=agent,
+                    subagent_aliases=subagent_aliases,
                 )
+                if any(ident.kind in {COMPONENT_SKILL, COMPONENT_COMMAND} for ident in call.idents):
+                    owner = call.seq
+                call.owner = owner
+                correlated = _claimable_results(tool_call, results, outer_id, call_count=len(raw_calls))
                 call.observation, call.succeeded = _outcome(
                     correlated, shell=call.is_shell, content_read=call.is_content_read
                 )

@@ -114,6 +114,7 @@ from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     MAPPED_OUTER_EXEC_OBSERVATION,
     normalize_tool_call,
 )
+from skillevaluator.tier3.harbor.stats import ARM_SUM_OF_PARTS, ARM_WITH, ARM_WITHOUT
 from skillevaluator.utils.redaction import redact_sensitive_text
 
 COMPONENT_SKILL = "skill"
@@ -124,10 +125,6 @@ COMPONENT_RULE_READ = "rule_read"
 
 STATUS_SCORED = "scored"
 STATUS_NOT_APPLICABLE = "not_applicable"
-
-ARM_WITH_SKILL = "with_skill"
-ARM_WITHOUT_SKILL = "without_skill"
-ARM_SUM_OF_PARTS = "sum_of_parts"
 
 PLUGIN_CASE_FIELDS = (
     "expected_tools",
@@ -864,14 +861,14 @@ class PluginSignalsContext:
     subagent_aliases: Mapping[str, str] = field(default_factory=dict)
 
     def arm_enabled(self, arm: str) -> bool:
-        if arm in {ARM_WITH_SKILL, ARM_SUM_OF_PARTS}:
+        if arm in {ARM_WITH, ARM_SUM_OF_PARTS}:
             return True
-        return arm == ARM_WITHOUT_SKILL and self.baseline_has_members
+        return arm == ARM_WITHOUT and self.baseline_has_members
 
     def declared_for(self, arm: str) -> dict[str, list[str]]:
         """Declared components staged in ``arm`` (MCP is wired into the with-plugin arm only)."""
         declared: dict[str, list[str]] = {COMPONENT_SKILL: list(self.member_skills)}
-        with_plugin = arm == ARM_WITH_SKILL
+        with_plugin = arm == ARM_WITH
         declared[COMPONENT_MCP] = list(self.mcp_servers) if with_plugin else []
         if with_plugin and self.subagents:
             declared[COMPONENT_SUBAGENT] = list(self.subagents)
@@ -881,7 +878,7 @@ class PluginSignalsContext:
 
     def aliases_for(self, arm: str) -> Mapping[str, str]:
         """Subagent name aliases for ``arm`` (declared subagents count in the with-plugin arm only)."""
-        return self.subagent_aliases if arm == ARM_WITH_SKILL and self.subagents else {}
+        return self.subagent_aliases if arm == ARM_WITH and self.subagents else {}
 
     def case_spec(self, case_id: str) -> Mapping[str, Any]:
         return self.cases.get(case_id) or {}
@@ -2596,9 +2593,6 @@ def summarize_plugin_signals(signals: Sequence[Mapping[str, Any] | None]) -> dic
 
 
 __all__ = [
-    "ARM_SUM_OF_PARTS",
-    "ARM_WITHOUT_SKILL",
-    "ARM_WITH_SKILL",
     "COMPONENT_COMMAND",
     "COMPONENT_MCP",
     "COMPONENT_RULE_READ",

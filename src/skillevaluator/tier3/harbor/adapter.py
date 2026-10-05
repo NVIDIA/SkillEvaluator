@@ -32,7 +32,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
 from skillevaluator.tier3.case_ids import (
@@ -58,6 +58,9 @@ from skillevaluator.tier3.output_provenance import (
 from skillevaluator.tier3.toml_utils import extract_toml_metadata_entry_id, toml_quote
 from skillevaluator.utils.process_environment import child_process_env
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
+
+if TYPE_CHECKING:
+    from skillevaluator.tier3.harbor.native_staging import NativeTaskStaging
 
 logger = logging.getLogger(__name__)
 
@@ -2092,7 +2095,7 @@ def _write_entry_json(
 _NATIVE_PLUGIN_NAME_KEYS = frozenset({"native_plugin_prefix", "native_plugin_commands"})
 
 
-def _native_plugin_names(native_plugin: Any) -> dict[str, Any]:
+def _native_plugin_names(native_plugin: NativeTaskStaging | None) -> dict[str, Any]:
     """Trusted entry.json fields for a harness that namespaces plugin names (Claude Code: ``<plugin>:<name>``).
 
     ``native_plugin_prefix`` is the ``<plugin>`` part, read from the adapter's
@@ -2108,8 +2111,7 @@ def _native_plugin_names(native_plugin: Any) -> dict[str, Any]:
     prefix = str(native_plugin.adapter.skill_namespace(native_plugin.source) or "")
     if not prefix:
         return {}
-    texts = getattr(native_plugin.source, "texts", ()) or ()
-    commands = sorted({str(text.name) for text in texts if getattr(text, "type", "") == "command" and text.name})
+    commands = sorted({text.name for text in native_plugin.source.texts if text.type == "command" and text.name})
     return {"native_plugin_prefix": prefix, "native_plugin_commands": commands}
 
 
@@ -3625,7 +3627,7 @@ def _append_evaluator_runtime_lines(content: str, lines: list[str], *, elevate: 
 def _write_agent_configs(
     env_dir: Path,
     *,
-    native_plugin: Any = None,
+    native_plugin: NativeTaskStaging | None = None,
     excluded_roots: Sequence[Path] = (),
 ) -> list[str]:
     """Use Harbor's agent integrations and provider-native environment variables.
@@ -3888,7 +3890,7 @@ def _write_dockerfile(
     agent_workdir: str | None = None,
     baseline_aliases_prevalidated: bool = False,
     canary_token: str | None = None,
-    native_plugin: Any = None,
+    native_plugin: NativeTaskStaging | None = None,
 ) -> None:
     """Generate a Dockerfile that installs skills into the container.
 
@@ -5456,7 +5458,7 @@ def _generate_harbor_tasks_into(
     agent_workdir: str | None = None,
     baseline_aliases_prevalidated: bool = False,
     plant_canary: bool = False,
-    native_plugin: Any = None,
+    native_plugin: NativeTaskStaging | None = None,
     arm_suffix: str = "",
 ) -> list[Path]:
     """Generate Harbor task directories inside a private output directory.
@@ -6045,7 +6047,7 @@ def generate_harbor_tasks(
     evaluator_skill_path: Path | None = None,
     _baseline_alias_validation: _BaselineAliasValidation | None = None,
     plant_canary: bool = False,
-    native_plugin: Any = None,
+    native_plugin: NativeTaskStaging | None = None,
     arm_suffix: str = "",
 ) -> list[Path]:
     """Generate tasks from one private evals snapshot, then publish exactly."""

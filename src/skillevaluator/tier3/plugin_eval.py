@@ -125,7 +125,22 @@ from skillevaluator.tier3.harbor.adapter import (
     PLUGIN_RUNTIME_COMPONENTS_FILENAME,
 )
 from skillevaluator.tier3.harbor.secure_copy import UnsafeStagingError, copy_file_secure, copytree_secure
-from skillevaluator.tier3.plugin_native import foreign_root_var_re, plugin_root_var_names, to_claude_root
+from skillevaluator.tier3.plugin_native import (
+    HARNESS_ADAPTERS,
+    AgentLoadDecision,
+    ClaudeCodeAdapter,
+    NativePluginSource,
+    PluginLoadError,
+    adapter_for,
+    apply_native_refusals,
+    build_native_source,
+    foreign_root_var_re,
+    native_component_types,
+    opencode_agent_name,
+    plugin_root_var_names,
+    resolve_plugin_load,
+    to_claude_root,
+)
 from skillevaluator.utils.helpers import find_bundled_plugin_skills
 from skillevaluator.utils.secure_fs import (
     SecurePathError,
@@ -197,7 +212,7 @@ class PluginEvalPackage:
     # Native plugin loading (``--plugin-load native|auto``): the bounded plugin
     # snapshot the harness adapters stage for the with-plugin arm. ``None`` in
     # the default wrapper mode.
-    native_source: Any = dataclass_field(default=None, compare=False, hash=False, repr=False)
+    native_source: NativePluginSource | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
     # Report-only static inventory outputs (C2). ``None`` for packages built
     # without an inventory (e.g. constructed directly in tests).
     component_coverage: dict[str, Any] | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
@@ -443,8 +458,6 @@ def prepare_plugin_eval_package(
     native_plan = _preview_plugin_load_plan(plugin_load, agents, env_mode, _preview_task_source(resolved_source))
     native_source = None
     if plugin_load != "wrapper" and (native_plan is None or any(d.native for d in native_plan.values())):
-        from skillevaluator.tier3.plugin_native import build_native_source
-
         # Newer contained formats stage through their Claude-field-name view; the
         # Claude Code and bundle-reference manifests stage as before.
         native_manifest = (
@@ -645,7 +658,7 @@ def _pinned_task_source(source: Path | None) -> str | None:
 
 def _preview_plugin_load_plan(
     plugin_load: str, agents: str | Sequence[str] | None, env_mode: str | None, task_source: str
-) -> dict[str, Any] | None:
+) -> dict[str, AgentLoadDecision] | None:
     """Per-agent load decisions for this run, or ``None`` when the agents or environment are unknown.
 
     Raises ``PluginLoadError`` for ``native`` with an agent or environment that
@@ -656,20 +669,18 @@ def _preview_plugin_load_plan(
     planned = _planned_agents(agents)
     if not planned:
         return None
-    from skillevaluator.tier3.plugin_native import resolve_plugin_load
-
     return dict(resolve_plugin_load(plugin_load, planned, env_mode=env_mode, task_source=task_source))
 
 
-def _apply_native_refusals(plugin_load: str, plan: dict[str, Any] | None, source: Any) -> dict[str, Any] | None:
+def _apply_native_refusals(
+    plugin_load: str, plan: dict[str, AgentLoadDecision] | None, source: NativePluginSource
+) -> dict[str, AgentLoadDecision] | None:
     """Turn bypass refusals into errors (``native``) or wrapper fallbacks (``auto``), per agent.
 
     Only the component types an agent's adapter stages natively count. With an
     unknown plan, ``native`` refuses any bypass (every adapter might stage it)
     and ``auto`` leaves the decision to the runner.
     """
-    from skillevaluator.tier3.plugin_native import PluginLoadError, apply_native_refusals
-
     if plan is None:
         if plugin_load == "native" and source.refusals:
             raise PluginLoadError(source.refusals[0][2])
@@ -677,20 +688,20 @@ def _apply_native_refusals(plugin_load: str, plan: dict[str, Any] | None, source
     return apply_native_refusals(plugin_load, plan, source)
 
 
-def _copies_tree(agent: str, decision: Any) -> bool:
+def _copies_tree(agent: str, decision: AgentLoadDecision) -> bool:
     """Whether this with-plugin arm loads the plugin natively through a copied plugin tree (Claude Code)."""
-    from skillevaluator.tier3.plugin_native import adapter_for
-
     adapter = adapter_for(agent)
     return decision.native and adapter is not None and adapter.copies_plugin_tree
 
 
-def _claude_native_arm(plan: dict[str, Any] | None) -> bool:
+def _claude_native_arm(plan: dict[str, AgentLoadDecision] | None) -> bool:
     """Whether some with-plugin arm loads the plugin natively through a copied plugin tree (Claude Code)."""
     return any(_copies_tree(agent, decision) for agent, decision in (plan or {}).items())
 
 
-def _unsupported_mcp_for_plan(mcp: _McpSplit, plan: dict[str, Any] | None, defaults: set[str]) -> list[str]:
+def _unsupported_mcp_for_plan(
+    mcp: _McpSplit, plan: dict[str, AgentLoadDecision] | None, defaults: set[str]
+) -> list[str]:
     """MCP servers some with-plugin arm cannot fully apply (the run is then INCOMPLETE).
 
     When every arm is a native Claude Code arm (the plugin tree is copied, and
@@ -704,13 +715,13 @@ def _unsupported_mcp_for_plan(mcp: _McpSplit, plan: dict[str, Any] | None, defau
     ]
 
 
-def _every_arm_claude_native(plan: dict[str, Any] | None) -> bool:
+def _every_arm_claude_native(plan: dict[str, AgentLoadDecision] | None) -> bool:
     """Whether every with-plugin arm is a native Claude Code arm (a known plan only)."""
     return bool(plan) and all(_copies_tree(agent, decision) for agent, decision in (plan or {}).items())
 
 
 def _plugin_file_gap_notes(
-    mcp: _McpSplit, plan: dict[str, Any] | None, defaults: set[str], unsupported: Sequence[str]
+    mcp: _McpSplit, plan: dict[str, AgentLoadDecision] | None, defaults: set[str], unsupported: Sequence[str]
 ) -> dict[str, str]:
     """Why each unsupported plugin-file MCP server leaves the run INCOMPLETE, from its own gaps."""
     every_arm_claude = _every_arm_claude_native(plan)
@@ -730,10 +741,10 @@ def _plugin_file_gap_notes(
     return notes
 
 
-def _native_loaded_types(plugin_load: str, plan: dict[str, Any] | None, source: Any) -> set[str]:
+def _native_loaded_types(
+    plugin_load: str, plan: dict[str, AgentLoadDecision] | None, source: NativePluginSource | None
+) -> set[str]:
     """Component types some native with-plugin arm loads (with an unknown plan: any adapter under ``native``)."""
-    from skillevaluator.tier3.plugin_native import HARNESS_ADAPTERS, adapter_for, native_component_types
-
     if source is None:
         return set()
     if plan is None:
@@ -747,10 +758,8 @@ def _native_loaded_types(plugin_load: str, plan: dict[str, Any] | None, source: 
     return loaded
 
 
-def _claude_skill_dirs(source: Any) -> tuple[str, ...]:
+def _claude_skill_dirs(source: NativePluginSource | None) -> tuple[str, ...]:
     """Plugin-relative skill directories the native Claude Code plugin loads in place."""
-    from skillevaluator.tier3.plugin_native import ClaudeCodeAdapter
-
     if source is None:
         return ()
     return tuple(rel for _name, rel, copy_from in ClaudeCodeAdapter().staged_skills(source) if copy_from is None)
@@ -796,10 +805,10 @@ class _ArmStaging:
         return sorted([*self.wrapper, *wrapped])
 
 
-def _arm_staging(plugin_load: str, plan: dict[str, Any] | None, source: Any) -> _ArmStaging | None:
+def _arm_staging(
+    plugin_load: str, plan: dict[str, AgentLoadDecision] | None, source: NativePluginSource | None
+) -> _ArmStaging | None:
     """The per-arm staging for the coverage reasons; ``None`` when a native or auto plan is not known."""
-    from skillevaluator.tier3.plugin_native import adapter_for, native_component_types
-
     if plugin_load == "wrapper":
         return _ArmStaging(native={}, wrapper=())
     if plan is None:
@@ -831,8 +840,6 @@ def _rule_reason(staging: _ArmStaging | None, wrapper_reason: str = _WRAPPER_RUL
 
 
 def _native_capable_agents(component_type: str) -> list[str]:
-    from skillevaluator.tier3.plugin_native import HARNESS_ADAPTERS
-
     return sorted(
         agent
         for agent, adapter in HARNESS_ADAPTERS.items()
@@ -840,7 +847,7 @@ def _native_capable_agents(component_type: str) -> list[str]:
     )
 
 
-def _other_type_row(component: Any, staging: _ArmStaging | None) -> dict[str, Any]:
+def _other_type_row(component: Component, staging: _ArmStaging | None) -> dict[str, Any]:
     """Coverage row of a hook, subagent, command, or other type the generated wrapper does not stage.
 
     The reason follows the resolved plan: ``staged natively for <agents>`` when
@@ -1011,7 +1018,7 @@ def _inventory_provenance(
 
 
 def _mcp_coverage_row(
-    component: Any,
+    component: Component,
     contained: bool,
     runnable_names: tuple[str, ...],
     provider_names: tuple[str, ...],
@@ -2364,8 +2371,6 @@ def _write_plugin_runtime_components(evals_dir: Path, inventory: PluginInventory
     (OpenCode stages an agent named like a built-in as ``<plugin>-<name>``) back
     to the declared name. The key is written only when some agent is renamed.
     """
-    from skillevaluator.tier3.plugin_native import opencode_agent_name
-
     names: dict[str, Any] = {"subagents": [], "commands": []}
     aliases: dict[str, str] = {}
     for component in inventory.components:

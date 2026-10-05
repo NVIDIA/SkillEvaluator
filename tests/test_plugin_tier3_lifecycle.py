@@ -29,6 +29,8 @@ def test_plugin_dispatch_configures_clean_effectiveness_and_sum_of_parts_arms(
         skipped=False,
         package_path=package_path,
         include_skills=(member,),
+        native_source=None,
+        mcp_probe_targets=(),
         integration_evidence_error=lambda: None,
         provenance=lambda: {"plugin_name": "plugin", "partial": False},
     )
@@ -114,6 +116,8 @@ def test_tier3_evaluate_plugin_command_uses_public_plugin_options(
         unresolved_skill_refs=(),
         unresolved_rule_refs=(),
         unresolved_mcp_servers=(),
+        native_source=None,
+        mcp_probe_targets=(),
         integration_evidence_error=lambda: None,
         provenance=lambda: {"plugin_name": "plugin", "partial": False},
     )
@@ -165,6 +169,8 @@ def test_tier3_evaluate_plugin_rejects_invalid_integration_requests(
         unresolved_skill_refs=(),
         unresolved_rule_refs=(),
         unresolved_mcp_servers=(),
+        native_source=None,
+        mcp_probe_targets=(),
         integration_evidence_error=lambda: evidence_error,
         provenance=lambda: {"plugin_name": "plugin", "partial": False},
     )
@@ -195,6 +201,8 @@ def _fake_prepared(tmp_path: Path) -> SimpleNamespace:
         unresolved_skill_refs=(),
         unresolved_rule_refs=(),
         unresolved_mcp_servers=(),
+        native_source=None,
+        mcp_probe_targets=(),
         integration_evidence_error=lambda: None,
         provenance=lambda: {"plugin_name": "plugin", "partial": False},
     )

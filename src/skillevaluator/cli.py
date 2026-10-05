@@ -911,7 +911,7 @@ def _plugin_evaluation_options(
         lift_mode_requested=lift_mode,
         integration_skip_reason=integration_skip_reason,
         plugin_load=plugin_load,
-        native_plugin_source=getattr(prepared, "native_source", None),
+        native_plugin_source=prepared.native_source,
         results_dir=results_dir,
         resolved_results_root=resolve_results_root(plugin_dir, results_dir),
         **run_options,
@@ -925,7 +925,7 @@ def _engine_run_dir(engine_result: Any) -> Path | None:
 
 
 def _plugin_mcp_proof(
-    prepared: Any,
+    prepared: PluginEvalPackage,
     *,
     probe_mcp: bool,
     allowed_private_hosts: tuple[str, ...] = (),
@@ -940,7 +940,7 @@ def _plugin_mcp_proof(
     variables that may be sent are printed per host before the probe runs.
     Advisory only: it never changes the INCOMPLETE rule.
     """
-    targets = tuple(getattr(prepared, "mcp_probe_targets", ()) or ())
+    targets = prepared.mcp_probe_targets
     if not targets:
         return None
     from skillevaluator.tier3.mcp_proof import declared_mcp_proof, planned_env_sends, probe_mcp_servers
@@ -957,7 +957,7 @@ def _plugin_mcp_proof(
 
 
 def _incomplete_plugin_provenance(
-    prepared: Any,
+    prepared: PluginEvalPackage,
     engine_result: Any,
     mcp_proof: dict[str, Any] | None,
     failure: str,
@@ -987,7 +987,7 @@ def _incomplete_plugin_provenance(
 
 
 def _completed_plugin_provenance(
-    prepared: Any,
+    prepared: PluginEvalPackage,
     engine_result: Any,
     mcp_proof: dict[str, Any] | None,
     metadata: dict[str, str],
@@ -1008,7 +1008,7 @@ def _completed_plugin_provenance(
 
 
 def _plugin_provenance_with_runtime_evidence(
-    prepared: Any, engine_result: Any, mcp_proof: dict[str, Any] | None
+    prepared: PluginEvalPackage, engine_result: Any, mcp_proof: dict[str, Any] | None
 ) -> dict[str, Any]:
     """Plugin provenance plus runtime coverage (``exercised``) and the MCP proof."""
     from skillevaluator.tier3.plugin_native import finalize_native_provenance
@@ -1025,7 +1025,7 @@ def _plugin_provenance_with_runtime_evidence(
 def _incomplete_plugin_agent_eval_result(
     plugin_dir: Path,
     *,
-    prepared: Any,
+    prepared: PluginEvalPackage,
     engine_result: Any,
     failure: str,
     mcp_proof: dict[str, Any] | None,
@@ -1054,7 +1054,7 @@ def _incomplete_plugin_agent_eval_result(
         failure=message,
         results_dir=results_dir,
         env_mode=env_mode,
-        dataset_source=getattr(prepared, "package_path", None),
+        dataset_source=prepared.package_path,
         plugin_provenance=provenance,
     )
     if result is None:

@@ -13,9 +13,11 @@ from skillevaluator.utils import find_skills_in_directory, get_skill_name_from_p
 from skillevaluator.utils.helpers import (
     _ssh_to_https,
     git_origin_https_url,
+    preferred_skill_manifests,
     resolve_git_remote_url,
     resolve_git_root,
 )
+from skillevaluator.utils.secure_fs import SecureFile
 
 
 class TestFindSkillsInDirectory:
@@ -141,6 +143,33 @@ class TestGetSkillNameFromPath:
         ]
         for path, expected in cases:
             assert get_skill_name_from_path(path) == expected, path
+
+
+class TestPreferredSkillManifests:
+    """One manifest per skill folder, chosen without reading anything."""
+
+    def test_prefers_skill_md_per_folder_in_path_order(self, tmp_path: Path) -> None:
+        metadata = tmp_path.stat()
+
+        def manifest(relative: str) -> SecureFile:
+            return SecureFile(tmp_path, tmp_path / relative, Path(relative), metadata)
+
+        files = [
+            manifest("a-b/skill.md"),
+            manifest("a/b/skill.md"),
+            manifest("a/b/SKILL.md"),
+            manifest("skill.md"),
+            manifest("SKILL.md"),
+            manifest("c/skill.md"),
+        ]
+
+        assert [file.rel_path for file in preferred_skill_manifests(files)] == [
+            "SKILL.md",
+            "a/b/SKILL.md",
+            "a-b/skill.md",
+            "c/skill.md",
+        ]
+        assert preferred_skill_manifests([]) == []
 
 
 class TestSshToHttps:

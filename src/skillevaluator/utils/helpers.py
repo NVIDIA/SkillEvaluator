@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import subprocess
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
@@ -71,6 +72,31 @@ def find_skills_in_directory(root_path: Path) -> list[Path]:
     return [(root_path / manifest.relative_path).parent for manifest in manifests]
 
 
+# Preference among the manifest spellings of one skill folder: SKILL.md first.
+_SKILL_MANIFEST_RANK = {name: rank for rank, name in enumerate(SKILL_MANIFEST_VARIANTS)}
+
+
+def preferred_skill_manifests(files: Iterable[SecureFile]) -> list[SecureFile]:
+    """Pick one manifest per skill folder, ``SKILL.md`` over ``skill.md``.
+
+    ``files`` are skill manifests (each named like one of
+    :data:`~skillevaluator.constants.SKILL_MANIFEST_VARIANTS`) from secure
+    discovery. The result holds the preferred one for each
+    ``relative_path.parent``, ordered by that folder as paths compare (part by
+    part, so ``a/b`` comes before ``a-b``). Nothing is read.
+    """
+    best: dict[Path, SecureFile] = {}
+    for file in files:
+        folder = file.relative_path.parent
+        current = best.get(folder)
+        if (
+            current is None
+            or _SKILL_MANIFEST_RANK[file.relative_path.name] < _SKILL_MANIFEST_RANK[current.relative_path.name]
+        ):
+            best[folder] = file
+    return [best[folder] for folder in sorted(best)]
+
+
 def _discover_skill_manifests(root_path: Path) -> list[SecureFile]:
     """Return one securely discovered manifest identity per skill directory."""
     manifests = discover_secure_files(
@@ -79,14 +105,7 @@ def _discover_skill_manifests(root_path: Path) -> list[SecureFile]:
         excluded_dirs=SCAN_EXCLUDED_DIRS,
         max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
     )
-    priority = {name: index for index, name in enumerate(SKILL_MANIFEST_VARIANTS)}
-    selected: dict[Path, SecureFile] = {}
-    for manifest in manifests:
-        directory = manifest.relative_path.parent
-        current = selected.get(directory)
-        if current is None or priority[manifest.relative_path.name] < priority[current.relative_path.name]:
-            selected[directory] = manifest
-    return [selected[directory] for directory in sorted(selected)]
+    return preferred_skill_manifests(manifests)
 
 
 def _plugin_skills_root(plugin_root: Path, skills_dir: str = "skills") -> Path | None:
@@ -208,8 +227,8 @@ def find_skill_manifest_in(skill_dir: Path) -> SecureFile | None:
         max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
         max_depth=1,
     )
-    priority = {name: index for index, name in enumerate(SKILL_MANIFEST_VARIANTS)}
-    return min(manifests, key=lambda manifest: priority[manifest.relative_path.name], default=None)
+    preferred = preferred_skill_manifests(manifests)
+    return preferred[0] if preferred else None
 
 
 def find_bundled_plugin_skills(plugin_root: Path) -> list[Path]:

@@ -22,7 +22,7 @@ from skillevaluator.constants import (
     TIER3_LIFT_PASS_THRESHOLD,
 )
 from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
-from skillevaluator.reporting.plugin_sections import STAGING_CAVEAT, tier3_plugin_view, unsupported_type_split
+from skillevaluator.reporting.plugin_sections import STAGING_CAVEAT, number, tier3_plugin_view, unsupported_type_split
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 from skillevaluator.utils.rich_markup import strip_terminal_controls
@@ -345,8 +345,8 @@ class BenchmarkReporter(ReporterBase):
         overall_row = ["Overall"]
         overall_row.extend(
             _score_transition_values(
-                _number(agent.get("baseline")),
-                _number(agent.get("with_skill", agent.get("overall_score"))),
+                number(agent.get("baseline")),
+                number(agent.get("with_skill", agent.get("overall_score"))),
             )
             for agent in agents.values()
         )
@@ -508,15 +508,15 @@ class BenchmarkReporter(ReporterBase):
     ) -> None:
         policy = _mapping((ae or {}).get("verdict_policy"))
         attempt_policy = _mapping((ae or {}).get("attempt_policy"))
-        attempt_threshold = _number(policy.get("attempt_pass_threshold", attempt_policy.get("pass_threshold")))
-        dimension_pass = _number(policy.get("dimension_pass_threshold")) or DIMENSION_VERDICT_PASS_THRESHOLD
+        attempt_threshold = number(policy.get("attempt_pass_threshold", attempt_policy.get("pass_threshold")))
+        dimension_pass = number(policy.get("dimension_pass_threshold")) or DIMENSION_VERDICT_PASS_THRESHOLD
         dimension_neutral = (
-            _number(policy.get("dimension_neutral_threshold"))
+            number(policy.get("dimension_neutral_threshold"))
             if policy.get("dimension_neutral_threshold") is not None
             else DIMENSION_VERDICT_NEUTRAL_THRESHOLD
         )
-        lift_pass = _number(policy.get("lift_pass_threshold"))
-        lift_fail = _number(policy.get("lift_fail_threshold"))
+        lift_pass = number(policy.get("lift_pass_threshold"))
+        lift_fail = number(policy.get("lift_fail_threshold"))
         if lift_pass is None:
             lift_pass = TIER3_LIFT_PASS_THRESHOLD
         if lift_fail is None:
@@ -748,7 +748,7 @@ class BenchmarkReporter(ReporterBase):
         statistics = (view or {}).get("statistics")
         lift_ci = {row["kind"]: row for row in statistics["primary"]["lift_ci"]} if statistics else {}
         summary = _mapping((ae or {}).get("summary"))
-        overall_lift = _number((ae or {}).get("overall_lift", summary.get("overall_lift")))
+        overall_lift = number((ae or {}).get("overall_lift", summary.get("overall_lift")))
         sum_of_parts_baseline = bool(view and view["sum_of_parts_baseline"])
         if sum_of_parts_baseline:
             # The only baseline staged the member components individually, so the
@@ -767,7 +767,8 @@ class BenchmarkReporter(ReporterBase):
         if integration and integration["measured"]:
             lift = integration.get("lift_value")
             result = f"{integration['verdict_label']}, {_format_points(lift) if lift is not None else 'lift n/a'}"
-            uncertainty = _ci_label(integration.get("ci") or lift_ci.get("integration"))
+            # The view's Integration interval already falls back to the statistics block.
+            uncertainty = _ci_label(integration.get("ci"))
         elif integration:
             result = f"INCONCLUSIVE — {integration['reason']}"
             uncertainty = "Not measured"
@@ -1067,7 +1068,7 @@ def _agent_dimension_scores(agent: dict[str, Any]) -> list[float] | None:
         if dimension is None:
             return None
         value = dimension.get("with_skill") if "with_skill" in dimension else dimension.get("score")
-        score = _number(value)
+        score = number(value)
         if score is None or not 0.0 <= score <= 1.0:
             return None
         scores.append(score)
@@ -1390,13 +1391,6 @@ def _nonnegative_int(value: object) -> int:
         return 0
 
 
-def _number(value: object) -> float | None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
-
-
 def _agent_dimension(agent: dict[str, Any], dim_id: str) -> dict[str, Any] | None:
     for dimension in agent.get("dimensions") or []:
         if isinstance(dimension, dict) and dimension.get("id") == dim_id:
@@ -1407,8 +1401,8 @@ def _agent_dimension(agent: dict[str, Any], dim_id: str) -> dict[str, Any] | Non
 def _score_transition(dimension: dict[str, Any] | None) -> str:
     if not dimension:
         return "Not available"
-    baseline = _number(dimension.get("baseline"))
-    score = _number(dimension.get("with_skill", dimension.get("score")))
+    baseline = number(dimension.get("baseline"))
+    score = number(dimension.get("with_skill", dimension.get("score")))
     return _score_transition_values(baseline, score)
 
 

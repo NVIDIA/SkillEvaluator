@@ -277,3 +277,15 @@ def test_validate_writes_plugin_benchmark_card(monkeypatch: pytest.MonkeyPatch, 
     card = output / "BENCHMARK.md"
     assert card.is_file(), outcome.output
     assert card.read_text(encoding="utf-8").startswith("# Plugin Benchmark: demo-plugin\n")
+
+
+def test_card_treats_an_overflowing_score_as_missing(tmp_path: Path) -> None:
+    tier3 = _tier3(partial=False, integration=_MEASURED_INTEGRATION)
+    payload = tier3.metadata["agent_eval"]
+    payload["overall_lift"] = 10**400
+    payload["agents"]["codex"]["baseline"] = 10**400
+
+    rendered = _render([tier1_plugin_result(), tier3])
+
+    assert "| Effectiveness (plugin vs. no plugin) | Not available |" in rendered
+    assert _gate(tmp_path, rendered) == []

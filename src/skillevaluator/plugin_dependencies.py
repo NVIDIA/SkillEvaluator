@@ -49,7 +49,7 @@ from urllib.parse import urlparse
 
 from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
 from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
-from skillevaluator.utils.helpers import resolve_git_remote_url, resolve_git_root
+from skillevaluator.utils.helpers import git_origin_https_url, resolve_git_root
 from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
 from skillevaluator.utils.structured_data import require_bounded_string
 
@@ -99,7 +99,11 @@ def parse_canonical_ref(ref: Any) -> tuple[str, str, str, str] | None:
     :func:`~skillevaluator.models.plugin._validate_canonical_ref` validator. A ref
     that is not a confidently-parseable 4-segment canonical ID returns ``None``.
     """
-    canonical = normalize_ref(ref)
+    return _split_canonical(normalize_ref(ref))
+
+
+def _split_canonical(canonical: str | None) -> tuple[str, str, str, str] | None:
+    """Split a :func:`normalize_ref` result into ``(source, repo, kind, name)`` (see :func:`parse_canonical_ref`)."""
     if not canonical:
         return None
     segments = canonical.split("::")
@@ -114,11 +118,11 @@ def parse_canonical_ref(ref: Any) -> tuple[str, str, str, str] | None:
 def slug_from_remote_url(url: str) -> str | None:
     """Extract the ``<group>/<repo>`` slug from a git-remote URL.
 
-    The sole caller (:func:`local_repo_slug`) passes a URL that
-    :func:`~skillevaluator.utils.helpers.resolve_git_remote_url` has already
+    :func:`local_repo_slug` passes a URL that
+    :func:`~skillevaluator.utils.helpers.git_origin_https_url` has already
     normalized to HTTPS -- SSH ``ssh://`` and SCP-style (``git@host:group/repo``)
     remotes are converted by ``_ssh_to_https`` first -- so in practice this
-    receives an ``https://host/group/repo[/-/tree/...]`` URL. The SCP and
+    receives an ``https://host/group/repo`` URL. The SCP and
     ``ssh://`` forms are nonetheless handled directly here as defense-in-depth,
     so the slug is correct no matter how the URL reaches this function (a
     standard URI would otherwise dump an SCP string verbatim into ``path``).
@@ -142,21 +146,25 @@ def slug_from_remote_url(url: str) -> str | None:
     return slug.lower() or None
 
 
-def local_repo_slug(clone_root: Path) -> str | None:
+def local_repo_slug(clone_root: Path, *, git_root: Path | None = None) -> str | None:
     """Return the ``<group>/<repo>`` slug of ``clone_root``'s git origin, or ``None``.
 
     Fails closed: the slug is trusted only when ``clone_root`` is itself the git
     top-level. For a subdirectory the remote URL would carry a browse-path
     suffix and, more importantly, repository-relative refs would be resolved
-    against the wrong base.
+    against the wrong base. A caller that already resolved the git top-level
+    of ``clone_root`` passes it as ``git_root``, so only ``git remote get-url
+    origin`` runs. Only ssh, SCP-style, and https origins give a slug
+    (:func:`~skillevaluator.utils.helpers.git_origin_https_url`).
     """
     try:
-        git_root = resolve_git_root(clone_root)
+        if git_root is None:
+            git_root = resolve_git_root(clone_root)
         if git_root is None or git_root != clone_root.resolve():
             return None
     except (OSError, RuntimeError):
         return None
-    url = resolve_git_remote_url(clone_root)
+    url = git_origin_https_url(git_root)
     return slug_from_remote_url(url) if url else None
 
 
@@ -216,7 +224,11 @@ def ref_name(ref: Any) -> str | None:
 
 def ref_label(ref: Any) -> str:
     """Return a stable, human-readable label for reporting a ref."""
-    canonical = normalize_ref(ref)
+    return _ref_label_from(ref, normalize_ref(ref))
+
+
+def _ref_label_from(ref: Any, canonical: str | None) -> str:
+    """:func:`ref_label` of a ref whose :func:`normalize_ref` result is ``canonical``."""
     if canonical:
         return canonical
     name = ref_name(ref)
@@ -263,6 +275,8 @@ def resolve_repository_identity(plugin_root: Path, repo_root: Path | None = None
     plugin_real = plugin_root.expanduser().resolve()
     ignored = False
     clone_root: Path | None = None
+    # The git top-level of clone_root, when it is already known.
+    clone_git_root: Path | None = None
     if repo_root is not None:
         override = repo_root.expanduser().resolve()
         if plugin_real.is_relative_to(override):
@@ -272,11 +286,11 @@ def resolve_repository_identity(plugin_root: Path, repo_root: Path | None = None
     if clone_root is None:
         git_root = resolve_git_root(plugin_real)
         if git_root is not None and plugin_real.is_relative_to(git_root):
-            clone_root = git_root
+            clone_root = clone_git_root = git_root
         else:
             clone_root = find_repo_root(plugin_real).resolve()
 
-    slug = local_repo_slug(clone_root)
+    slug = local_repo_slug(clone_root, git_root=clone_git_root)
     reason = None
     if slug is None:
         reason = (
@@ -415,16 +429,35 @@ def classify_ref(
     bundled_by_leaf: Mapping[str, str] | None = None,
 ) -> DependencyRow:
     """Classify one ``skills``/``rules`` reference (``kind``) without network access."""
+    return _classify_ref(
+        ref,
+        kind=kind,
+        plugin_real=plugin_root.expanduser().resolve(),
+        identity=identity,
+        bundled_by_leaf=bundled_by_leaf,
+    )
+
+
+def _classify_ref(
+    ref: Any,
+    *,
+    kind: str,
+    plugin_real: Path,
+    identity: RepositoryIdentity,
+    bundled_by_leaf: Mapping[str, str] | None,
+) -> DependencyRow:
+    """:func:`classify_ref` for a plugin root that is already resolved (``plugin_real``)."""
     hints = bundled_by_leaf if kind == "skills" and bundled_by_leaf else {}
+    canonical = normalize_ref(ref)
     try:
-        label = ref_label(ref)
+        label = _ref_label_from(ref, canonical)
         leaf = ref_name(ref)
     except ValueError as exc:
         return DependencyRow("<invalid reference>", "unresolved", None, f"invalid reference: {exc}")
     if len(label) > MAX_REF_LABEL_CHARS:
         label = label[: MAX_REF_LABEL_CHARS - 3] + "..."
 
-    parsed = parse_canonical_ref(ref)
+    parsed = _split_canonical(canonical)
     if parsed is None:
         return DependencyRow(
             label, "unresolved", None, "not a canonical <source>::<owner/repo>::<kind>::<name> reference"
@@ -464,7 +497,6 @@ def classify_ref(
         return DependencyRow(label, "unresolved", None, f"unsafe reference path '{ref_kind}/{name}'")
 
     relative = Path(ref_kind) / relative_name
-    plugin_real = plugin_root.expanduser().resolve()
     target = identity.clone_root / relative
     # Outside the plugin root a ref may only reach a recognized content root
     # (never .git/, secrets/, ...); inside it, any bundled path is eligible.
@@ -530,13 +562,14 @@ def classify_plugin_dependencies(
     bundled_by_leaf: dict[str, str] = {}
     for bundled in bundled_skills:
         bundled_by_leaf.setdefault(bundled.rsplit("/", 1)[-1], bundled)
+    plugin_real = plugin_root.expanduser().resolve()
     sections: dict[str, tuple[DependencyRow, ...]] = {}
     for kind in ("skills", "rules"):
         sections[kind] = tuple(
-            classify_ref(
+            _classify_ref(
                 ref,
                 kind=kind,
-                plugin_root=plugin_root,
+                plugin_real=plugin_real,
                 identity=identity,
                 bundled_by_leaf=bundled_by_leaf,
             )

@@ -104,3 +104,29 @@ def test_resolve_endpoints_covers_mcp_servers_of_additional_manifests(
     ]
     assert captured[1].file_path == str(root / "mcp.json")
     assert result.metadata["plugin"]["endpoint_resolution"]["enabled"] is True
+
+
+def test_unsafe_plugin_tree_still_resolves_endpoints_when_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: the schema check that reports an unsafe plugin tree was built without --resolve-endpoints."""
+    captured: list[er.EndpointTarget] = []
+
+    def _check(_self: er.EndpointChecker, targets: Any) -> tuple[dict[str, Any], list]:
+        captured.extend(targets)
+        return {"enabled": True, "endpoints": [], "counts": {}}, []
+
+    monkeypatch.setattr(er.EndpointChecker, "check", _check)
+    root = _plugin(tmp_path / "p")
+    (tmp_path / "outside.sh").write_text("echo outside\n")
+    (root / "scripts" / "sub").mkdir(parents=True)
+    (root / "scripts" / "sub" / "run.sh").symlink_to(tmp_path / "outside.sh")
+
+    schema, tree = run_validation(
+        root, checks="schema,security", content_type=CONTENT_TYPE_PLUGIN, resolve_endpoints=True
+    )
+
+    assert tree.validator_name == "Plugin Tree Security"
+    assert tree.metadata["security_failure"] is True
+    assert [(target.kind, target.name) for target in captured] == [("mcp", "remote")]
+    assert schema.metadata["plugin"]["endpoint_resolution"]["enabled"] is True

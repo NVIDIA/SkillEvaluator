@@ -24,11 +24,16 @@ from skillevaluator.constants import (
     CONTENT_TYPE_PLUGIN,
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
     PLUGIN_CODEX_MANIFEST_TYPE,
+    PLUGIN_CONTAINED_MANIFEST_TYPE,
+    PLUGIN_CURSOR_MANIFEST_TYPE,
+    PLUGIN_MANIFEST_TYPE,
 )
 from skillevaluator.models.result import Severity, ValidationResult
+from skillevaluator.plugin_formats import parse_manifest_text
 from skillevaluator.plugin_manifest import locate_plugin_manifest
 from skillevaluator.tier1.commands import run_validation
 from skillevaluator.utils.helpers import find_bundled_plugin_skills
+from skillevaluator.utils.structured_data import StructuredDataError
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 
 _AP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
@@ -159,6 +164,38 @@ def test_latin1_additional_claude_manifest_is_read_leniently(tmp_path: Path) -> 
     assert checks["plugin_manifest_additional_unreadable"] == Severity.HIGH
     assert checks["mcp_url_insecure_scheme"] == Severity.HIGH
     assert "security_failure" not in result.metadata
+
+
+def test_parsed_additional_reads_each_client_manifest_like_its_client(tmp_path: Path) -> None:
+    """The audits' view of the additional manifests: lenient for client content problems, unparseable ones left out."""
+    latin1 = json.dumps({"name": "caf\xe9"}, ensure_ascii=False).encode("latin-1")
+    root = _write(
+        tmp_path / "p",
+        {
+            "agent_plugin.yaml": "name: demo\nauthor:\n  email: a@example.com\nmcp:\n  - name: t\n    provider: p\n",
+            ".claude-plugin/plugin.json": latin1,
+            ".codex-plugin/plugin.json": b'{"name": "demo",}',
+            ".cursor-plugin/plugin.json": {"name": "demo"},
+        },
+    )
+
+    located = locate_plugin_manifest(root)
+    assert located is not None
+    assert located.parsed_additional() == [
+        (PLUGIN_CONTAINED_MANIFEST_TYPE, ".claude-plugin/plugin.json", {"name": "caf\ufffd"}),
+        (PLUGIN_CURSOR_MANIFEST_TYPE, ".cursor-plugin/plugin.json", {"name": "demo"}),
+    ]
+
+
+def test_parse_manifest_text_uses_the_bounded_parser_of_the_format() -> None:
+    assert parse_manifest_text(PLUGIN_CODEX_MANIFEST_TYPE, '{"name": "demo"}') == {"name": "demo"}
+    assert parse_manifest_text(PLUGIN_MANIFEST_TYPE, "name: demo\n") == {"name": "demo"}
+    with pytest.raises(StructuredDataError):
+        parse_manifest_text(PLUGIN_CODEX_MANIFEST_TYPE, "name: demo\n")
+    # Deep nesting is a structured-data limit error, never a RecursionError.
+    for manifest_type in (PLUGIN_CODEX_MANIFEST_TYPE, PLUGIN_MANIFEST_TYPE):
+        with pytest.raises(StructuredDataError):
+            parse_manifest_text(manifest_type, "[" * 50_000 + "]" * 50_000)
 
 
 # --------------------------------------------------------------------------- #
@@ -446,6 +483,42 @@ def test_skill_inside_a_skills_own_artifact_folder_is_high(tmp_path: Path) -> No
     findings = [f for f in result.findings if f.check_name == "plugin_skill_in_unscanned_folder"]
     assert [f.metadata["path"] for f in findings] == ["skills/a/evals/results/run1/SKILL.md"]
     assert findings[0].severity == Severity.HIGH
+
+
+def test_unscanned_skills_past_the_reporting_cap_are_counted(tmp_path: Path) -> None:
+    """Only the first 100 unscanned skills get their own finding; one more HIGH finding counts the rest."""
+    files: dict[str, bytes | str | dict | list] = {".claude-plugin/plugin.json": {"name": "demo"}}
+    for index in range(105):
+        files[f"skills/a/evals/run{index:03}/SKILL.md"] = _SKILL.format(name="a")
+    root = _write(tmp_path / "p", files)
+
+    result = _validate(root)
+    findings = [f for f in result.findings if f.check_name == "plugin_skill_in_unscanned_folder"]
+    assert len(findings) == 100
+    [truncated] = [f for f in result.findings if f.check_name == "schema_errors_truncated"]
+    assert truncated.severity == Severity.HIGH
+    assert truncated.metadata == {"actual": 105, "reported": 100}
+    assert "produced 105 findings; only the first 100 are reported" in truncated.message
+
+
+def test_manifest_field_error_past_the_reporting_cap_still_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whether the manifest passed its field checks is decided over every problem, not the 100 reported."""
+    from skillevaluator.plugin_formats import ManifestIssue
+    from skillevaluator.validators import plugin_schema
+
+    issues = [ManifestIssue(f"field{index:03}", "unknown_field", "advisory", "warning") for index in range(100)]
+    issues.append(ManifestIssue("name", "pattern", "the client rejects this name"))
+    monkeypatch.setattr(plugin_schema, "validate_manifest_fields", lambda *_args, **_kwargs: issues)
+    root = _write(tmp_path / "p", {".codex-plugin/plugin.json": _CODEX})
+
+    result = _validate(root)
+    assert "schema:name:pattern" not in _checks(result)  # past the cap: counted, not listed
+    [truncated] = [f for f in result.findings if f.check_name == "schema_errors_truncated"]
+    assert truncated.metadata == {"actual": 101, "reported": 100}
+    assert "plugin_manifest" not in [detail.check_name for detail in result.success_details]
+    assert not result.passed
 
 
 def test_declared_component_in_an_unscanned_folder_is_high(tmp_path: Path) -> None:

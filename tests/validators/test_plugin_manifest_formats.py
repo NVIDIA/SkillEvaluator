@@ -26,7 +26,7 @@ from skillevaluator.constants import (
 from skillevaluator.deduplication.plugin.profile import discover_plugin_roots, load_plugin_profile
 from skillevaluator.models.result import Severity, ValidationResult
 from skillevaluator.plugin_components import build_plugin_inventory
-from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
+from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest, manifest_root_for
 from skillevaluator.reporting.markdown import MarkdownReporter
 from skillevaluator.reporting.plugin_sections import manifest_declarations_view, tier1_plugin_view
 from skillevaluator.tier3.plugin_eval import PLUGIN_MCP_SERVERS_FILENAME, prepare_plugin_eval_package
@@ -181,6 +181,26 @@ def test_direct_manifest_paths_resolve_to_the_plugin_root(tmp_path: Path, relati
     assert resolve_plugin_path(root / relative) == root
     assert detect_content_type(root / relative) == CONTENT_TYPE_PLUGIN
     assert detect_content_type(root) == CONTENT_TYPE_PLUGIN
+
+
+@pytest.mark.parametrize(
+    ("path", "root"),
+    [
+        ("p/agent_plugin.yaml", "p"),
+        ("p/.claude-plugin/plugin.json", "p"),
+        # Clients on a case-insensitive filesystem open this spelling as .codex-plugin/plugin.json.
+        ("p/.Codex-Plugin/Plugin.JSON", "p"),
+        # Lexical: a root plugin.json names the root whether or not it opts into Agent Plugins.
+        ("p/plugin.json", "p"),
+        ("plugin.json", "."),
+        # Only client (JSON) manifests match without regard to case.
+        ("p/Agent_Plugin.yaml", None),
+        ("p/.claude-plugin/other.json", None),
+        ("p/skills/SKILL.md", None),
+    ],
+)
+def test_manifest_root_for_names_the_root_of_a_manifest_path(path: str, root: str | None) -> None:
+    assert manifest_root_for(Path(path)) == (Path(root) if root is not None else None)
 
 
 def test_plain_root_plugin_json_directory_is_not_detected_as_a_plugin(tmp_path: Path) -> None:
@@ -386,6 +406,20 @@ def test_cursor_invalid_manifest_findings(tmp_path: Path) -> None:
     assert checks["schema:name:pattern"] == Severity.HIGH
     assert checks["schema:author.name:missing"] == Severity.HIGH
     assert checks["plugin_manifest_unknown_field"] == Severity.MEDIUM
+
+
+def test_unknown_fields_past_the_reported_limit_are_counted_in_a_note(tmp_path: Path) -> None:
+    """Only the first 32 unknown fields get their own finding; a LOW note says how many more there are."""
+    root = _cursor(tmp_path, {f"extra{index:02}": True for index in range(40)})
+
+    result = _validate(root)
+    unknown = [finding for finding in result.findings if finding.check_name == "plugin_manifest_unknown_field"]
+    assert [finding.metadata["field"] for finding in unknown] == [f"extra{index:02}" for index in range(32)]
+    [note] = [finding for finding in result.findings if finding.check_name == "schema:<root>:unknown_fields_truncated"]
+    assert note.severity == Severity.LOW
+    assert "has 40 top-level fields it does not define" in note.message
+    assert "8 more are not listed" in note.message
+    assert result.passed
 
 
 def test_cursor_inline_mcp_and_root_skill_fallback(tmp_path: Path) -> None:

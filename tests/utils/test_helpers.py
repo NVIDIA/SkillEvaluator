@@ -12,9 +12,12 @@ import pytest
 from skillevaluator.utils import find_skills_in_directory, get_skill_name_from_path
 from skillevaluator.utils.helpers import (
     _ssh_to_https,
+    git_origin_https_url,
+    preferred_skill_manifests,
     resolve_git_remote_url,
     resolve_git_root,
 )
+from skillevaluator.utils.secure_fs import SecureFile
 
 
 class TestFindSkillsInDirectory:
@@ -142,6 +145,33 @@ class TestGetSkillNameFromPath:
             assert get_skill_name_from_path(path) == expected, path
 
 
+class TestPreferredSkillManifests:
+    """One manifest per skill folder, chosen without reading anything."""
+
+    def test_prefers_skill_md_per_folder_in_path_order(self, tmp_path: Path) -> None:
+        metadata = tmp_path.stat()
+
+        def manifest(relative: str) -> SecureFile:
+            return SecureFile(tmp_path, tmp_path / relative, Path(relative), metadata)
+
+        files = [
+            manifest("a-b/skill.md"),
+            manifest("a/b/skill.md"),
+            manifest("a/b/SKILL.md"),
+            manifest("skill.md"),
+            manifest("SKILL.md"),
+            manifest("c/skill.md"),
+        ]
+
+        assert [file.rel_path for file in preferred_skill_manifests(files)] == [
+            "SKILL.md",
+            "a/b/SKILL.md",
+            "a-b/skill.md",
+            "c/skill.md",
+        ]
+        assert preferred_skill_manifests([]) == []
+
+
 class TestSshToHttps:
     """Tests for _ssh_to_https credential stripping and URL conversion."""
 
@@ -233,6 +263,33 @@ class TestResolveGitRoot:
 
     def test_returns_none_outside_git_repository(self, tmp_path: Path) -> None:
         assert resolve_git_root(tmp_path) is None
+
+
+class TestGitOriginHttpsUrl:
+    """Tests for the origin lookup shared by report links and plugin repository identity."""
+
+    @pytest.mark.parametrize(
+        ("origin", "expected"),
+        [
+            ("git@github.com:example/project.git", "https://github.com/example/project"),
+            ("https://token@github.com/example/project.git", "https://github.com/example/project"),
+            ("http://github.com/example/project.git", None),
+            # Not misread as the SCP-style remote "user@github.com:8080/...".
+            ("http://user@github.com:8080/example/project.git", None),
+            ("git://git@github.com:9418/example/project.git", None),
+            ("file:///srv/git/example/project.git", None),
+        ],
+    )
+    def test_accepts_only_ssh_and_https_origins(self, tmp_path: Path, origin: str, expected: str | None) -> None:
+        repo_root = tmp_path / "repo"
+        _init_git_repo(repo_root, origin)
+
+        assert git_origin_https_url(repo_root) == expected
+
+    def test_returns_none_without_an_origin(self, tmp_path: Path) -> None:
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+        assert git_origin_https_url(tmp_path) is None
 
 
 class TestResolveGitRemoteUrl:

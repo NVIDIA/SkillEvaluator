@@ -460,6 +460,30 @@ def test_linked_root_content_fails_closed_alongside_the_schema_result(tmp_path: 
     assert scanners.scanned == {}
 
 
+def test_unsafe_bundled_skill_run_still_recounts_component_findings(tmp_path: Path) -> None:
+    """Regression: a run stopped by an unsafe entry under skills/ skipped the component finding recount.
+
+    The schema check counts component findings before it validates declared skill folders, so only the
+    recount every other run path makes counted the finding of the declared skill below.
+    """
+    plugin = _plugin(tmp_path, root_script=None)
+    (plugin / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "probe-plugin", "skills": "./my-skills/"}), encoding="utf-8"
+    )
+    (plugin / "my-skills" / "x").mkdir(parents=True)
+    (plugin / "my-skills" / "x" / "SKILL.md").write_text("---\nname: x\n---\nNo description.\n", encoding="utf-8")
+    (tmp_path / "outside").mkdir()
+    _link_or_skip(plugin / "skills" / "foo" / "linked", tmp_path / "outside")
+
+    [result] = run_validation(plugin, checks="schema", content_type=CONTENT_TYPE_PLUGIN)
+
+    assert result.metadata["security_failure"] is True
+    assert "bundled_skill_path_unsafe" in {finding.check_name for finding in result.findings}
+    rows = result.metadata["plugin"]["component_inventory"]["components"]
+    [declared] = [row for row in rows if row["path"] == "my-skills/x"]
+    assert declared["findings"] == 1
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX special files")
 def test_special_root_file_is_rejected(tmp_path: Path, scanners: FakeScanners) -> None:
     plugin = _plugin(tmp_path)

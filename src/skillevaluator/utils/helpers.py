@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import subprocess
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
@@ -71,6 +72,31 @@ def find_skills_in_directory(root_path: Path) -> list[Path]:
     return [(root_path / manifest.relative_path).parent for manifest in manifests]
 
 
+# Preference among the manifest spellings of one skill folder: SKILL.md first.
+_SKILL_MANIFEST_RANK = {name: rank for rank, name in enumerate(SKILL_MANIFEST_VARIANTS)}
+
+
+def preferred_skill_manifests(files: Iterable[SecureFile]) -> list[SecureFile]:
+    """Pick one manifest per skill folder, ``SKILL.md`` over ``skill.md``.
+
+    ``files`` are skill manifests (each named like one of
+    :data:`~skillevaluator.constants.SKILL_MANIFEST_VARIANTS`) from secure
+    discovery. The result holds the preferred one for each
+    ``relative_path.parent``, ordered by that folder as paths compare (part by
+    part, so ``a/b`` comes before ``a-b``). Nothing is read.
+    """
+    best: dict[Path, SecureFile] = {}
+    for file in files:
+        folder = file.relative_path.parent
+        current = best.get(folder)
+        if (
+            current is None
+            or _SKILL_MANIFEST_RANK[file.relative_path.name] < _SKILL_MANIFEST_RANK[current.relative_path.name]
+        ):
+            best[folder] = file
+    return [best[folder] for folder in sorted(best)]
+
+
 def _discover_skill_manifests(root_path: Path) -> list[SecureFile]:
     """Return one securely discovered manifest identity per skill directory."""
     manifests = discover_secure_files(
@@ -79,14 +105,7 @@ def _discover_skill_manifests(root_path: Path) -> list[SecureFile]:
         excluded_dirs=SCAN_EXCLUDED_DIRS,
         max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
     )
-    priority = {name: index for index, name in enumerate(SKILL_MANIFEST_VARIANTS)}
-    selected: dict[Path, SecureFile] = {}
-    for manifest in manifests:
-        directory = manifest.relative_path.parent
-        current = selected.get(directory)
-        if current is None or priority[manifest.relative_path.name] < priority[current.relative_path.name]:
-            selected[directory] = manifest
-    return [selected[directory] for directory in sorted(selected)]
+    return preferred_skill_manifests(manifests)
 
 
 def _plugin_skills_root(plugin_root: Path, skills_dir: str = "skills") -> Path | None:
@@ -208,8 +227,8 @@ def find_skill_manifest_in(skill_dir: Path) -> SecureFile | None:
         max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
         max_depth=1,
     )
-    priority = {name: index for index, name in enumerate(SKILL_MANIFEST_VARIANTS)}
-    return min(manifests, key=lambda manifest: priority[manifest.relative_path.name], default=None)
+    preferred = preferred_skill_manifests(manifests)
+    return preferred[0] if preferred else None
 
 
 def find_bundled_plugin_skills(plugin_root: Path) -> list[Path]:
@@ -288,16 +307,11 @@ def resolve_git_remote_url(local_path: Path) -> str | None:
     repo_root = resolve_git_root(resolved)
     if repo_root is None:
         return None
+    https_url = git_origin_https_url(repo_root)
+    if not https_url:
+        return None
 
     try:
-        # Get the remote origin URL
-        remote_url = subprocess.check_output(
-            ["git", "remote", "get-url", "origin"],
-            cwd=str(repo_root),
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-
         # Get the current branch.
         # In CI pipelines (detached HEAD), git returns "HEAD" so prefer an
         # explicitly supplied branch name.
@@ -328,11 +342,6 @@ def resolve_git_remote_url(local_path: Path) -> str | None:
         if branch == "HEAD":
             branch = "main"
 
-        # Convert SSH URL to HTTPS.
-        https_url = _ssh_to_https(remote_url)
-        if not https_url:
-            return None
-
         # Compute the relative path within the repo
         try:
             rel_path = str(resolved.relative_to(repo_root))
@@ -346,6 +355,32 @@ def resolve_git_remote_url(local_path: Path) -> str | None:
 
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None
+
+
+def git_origin_https_url(git_root: Path) -> str | None:
+    """Return the ``origin`` remote of the repository at *git_root* as an HTTPS URL, or ``None``.
+
+    Runs one ``git remote get-url origin``. Only ``ssh://``, SCP-style
+    (``git@host:group/repo``), and ``https://`` remotes are accepted, with any
+    credentials stripped (see :func:`_ssh_to_https`). Any other remote, such
+    as ``http://``, ``git://``, ``file://``, or a local path, gives ``None``,
+    so repository identity derived from it fails closed.
+    """
+    try:
+        remote_url = subprocess.check_output(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(git_root),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    # Checked here because _ssh_to_https reads "http://user@host:8080/group/repo"
+    # as an SCP-style "user@host:path" remote.
+    scheme, separator, _rest = remote_url.partition("://")
+    if separator and scheme.lower() not in {"https", "ssh"}:
+        return None
+    return _ssh_to_https(remote_url)
 
 
 def _ssh_to_https(remote_url: str) -> str | None:

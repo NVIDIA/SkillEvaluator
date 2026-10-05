@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from skillevaluator.constants import (
+    CONTENT_DEDUP_MAX_LLM_CLUSTERS,
     MAX_PLUGIN_DEDUP_LLM_CALLS,
     MAX_PLUGIN_DEDUP_SKILLS,
     SIMILARITY_DEFAULT_MAX_ENTRIES,
@@ -222,7 +223,13 @@ def run_plugin_skill_context_dedup(
         return [_plugin_work_limit_result(len(skill_dirs))]
 
     skills_root = plugin_root / "skills"
-    per_skill_llm_budget = max(1, MAX_PLUGIN_DEDUP_LLM_CALLS // len(skill_dirs))
+    # Share the plugin-wide LLM allowance across skills without exceeding the
+    # per-skill cluster limit the validator accepts; a plugin with few skills
+    # would otherwise hand one skill more than that limit.
+    per_skill_llm_budget = min(
+        CONTENT_DEDUP_MAX_LLM_CLUSTERS,
+        max(1, MAX_PLUGIN_DEDUP_LLM_CALLS // len(skill_dirs)),
+    )
     validator = IntraSkillValidator(
         threshold=threshold,
         embedding_model=model,

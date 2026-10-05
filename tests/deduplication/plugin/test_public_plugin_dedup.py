@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -103,6 +104,36 @@ def test_plugin_context_scan_rejects_linked_skills_root(tmp_path: Path) -> None:
     scan_results = run_plugin_dedup_scan(plugin, run_context=False)
     assert any(result.metadata.get("security_failure") for result in scan_results)
     assert any(not result.passed for result in scan_results)
+
+
+def test_plugin_context_scan_caps_single_skill_llm_budget_at_cluster_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.constants import CONTENT_DEDUP_MAX_LLM_CLUSTERS, MAX_PLUGIN_DEDUP_LLM_CALLS
+    from skillevaluator.deduplication.intra_skill import intra_skill_validator
+
+    assert MAX_PLUGIN_DEDUP_LLM_CALLS > CONTENT_DEDUP_MAX_LLM_CLUSTERS
+    plugin = tmp_path / "plugin"
+    skill = plugin / "skills" / "only"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: only\ndescription: d\n---\n## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200,
+        encoding="utf-8",
+    )
+    embedding_client = MagicMock()
+    embedding_client.return_value.embed.return_value = [[1.0, 0.0], [0.0, 1.0]]
+    llm_client = MagicMock()
+    monkeypatch.setattr(intra_skill_validator, "EmbeddingClient", embedding_client)
+    monkeypatch.setattr(intra_skill_validator, "LLMClient", llm_client)
+
+    [result] = run_plugin_skill_context_dedup(plugin)
+
+    assert result.passed
+    assert result.findings == []
+    assert result.metadata["max_llm_calls"] == CONTENT_DEDUP_MAX_LLM_CLUSTERS
+    embedding_client.return_value.embed.assert_called_once()
+    llm_client.assert_not_called()
 
 
 def test_plugin_context_scan_skips_before_provider_work_above_skill_limit(

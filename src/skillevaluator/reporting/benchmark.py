@@ -826,7 +826,7 @@ class BenchmarkReporter(ReporterBase):
             return
         lines.extend(["## Canary Exfiltration", ""])
         for entry in canary["entries"]:
-            marker = "**CRITICAL:** " if entry.get("verdict_class") == "fail" else ""
+            marker = "**CRITICAL:** " if entry["plugin_attributable_leak"] else ""
             lines.append(
                 f"- {_publication_safe_inline(entry['scope'], private_labels)}: "
                 f"{marker}{_publication_safe_inline(entry['verdict'], private_labels)}"

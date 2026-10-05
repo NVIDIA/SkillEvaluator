@@ -10,6 +10,7 @@ import pytest
 from skillevaluator.deduplication.plugin.intra_plugin_validator import IntraPluginValidator
 from skillevaluator.deduplication.plugin.ref_utils import find_duplicate_refs, normalize_ref
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.reporting.cli import CLIReporter
 from skillevaluator.tier2.commands import run_plugin_dedup_scan, run_plugin_skill_context_dedup
 
 
@@ -45,6 +46,20 @@ def test_invalid_manifest_is_an_optional_skip(tmp_path: Path) -> None:
     assert result.passed
     assert result.metadata["execution_status"] == "skipped"
     assert result.metadata["optional"] is True
+    assert result.metadata["skipped"] is True
+
+
+def test_every_plugin_tier2_skip_is_reported_as_skipped(tmp_path: Path) -> None:
+    (tmp_path / "agent_plugin.yaml").write_text("name: [unterminated", encoding="utf-8")
+
+    results = run_plugin_dedup_scan(tmp_path, run_context=False)
+
+    # Check A (unparseable manifest), C-intra (no provider), C-inter and B (no catalog).
+    assert [result.metadata["skipped"] for result in results] == [True, True, True, True]
+    assert all(result.metadata["skip_reason"] in result.warnings for result in results)
+    rendered = CLIReporter().render_all(results[:2])
+    assert rendered.count("Skipped (see warnings)") == 2
+    assert "OK" not in rendered
 
 
 def test_symlinked_manifest_outside_plugin_is_a_security_failure(tmp_path: Path) -> None:
@@ -248,3 +263,5 @@ def test_plugin_context_scan_skips_before_provider_work_above_skill_limit(
     assert result.passed
     assert result.metadata["work_limit_exceeded"] is True
     assert result.metadata["actual_skills"] == MAX_PLUGIN_DEDUP_SKILLS + 1
+    assert result.metadata["skipped"] is True
+    assert result.warnings == [result.metadata["skip_reason"]]

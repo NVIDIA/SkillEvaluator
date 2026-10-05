@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_LLM_CLUSTERS,
@@ -16,11 +18,15 @@ from skillevaluator.constants import (
     SIMILARITY_DEFAULT_THRESHOLD,
 )
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
+from skillevaluator.deduplication.result_status import mark_advisory_skip, mark_security_failure
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.tier1.commands import emit_reports
 from skillevaluator.utils.secure_fs import SecurePathError
 from skillevaluator.validators.similarity import SimilarityValidator
+
+if TYPE_CHECKING:
+    from skillevaluator.utils.secure_fs import SecureFile
 
 
 def _guarded_result(title: str, target_path: Path, callback) -> list[ValidationResult]:
@@ -120,9 +126,7 @@ def _make_advisory(result: ValidationResult) -> ValidationResult:
         # Filesystem-integrity failures mean the requested check could not be
         # executed safely. Keep them blocking instead of disguising them as an
         # ordinary advisory deduplication finding.
-        result.passed = False
-        result.metadata.update({"execution_status": "failed", "optional": False})
-        return result
+        return mark_security_failure(result)
 
     # Errors and warnings that are not a finding's legacy string (provider
     # failures, skip reasons) are notes. Finding strings are rebuilt from the
@@ -161,14 +165,7 @@ def _unsafe_plugin_result(
             suggestion="Replace links, hardlinks, and special selected files with regular files inside the plugin root.",
         )
     )
-    result.metadata.update(
-        {
-            "security_failure": True,
-            "execution_status": "failed",
-            "optional": False,
-        }
-    )
-    return result
+    return mark_security_failure(result)
 
 
 def _plugin_work_limit_result(actual_skills: int) -> ValidationResult:
@@ -181,19 +178,13 @@ def _plugin_work_limit_result(actual_skills: int) -> ValidationResult:
         validator_name="Context Deduplication",
         validator_description="Detect redundant content within each bundled plugin skill",
     )
-    result.add_warning(reason)
-    result.metadata.update(
-        {
-            "advisory_tier2": True,
-            "execution_status": "skipped",
-            "optional": True,
-            "skip_reason": reason,
-            "work_limit_exceeded": True,
-            "actual_skills": actual_skills,
-            "skill_limit": MAX_PLUGIN_DEDUP_SKILLS,
-        }
+    return mark_advisory_skip(
+        result,
+        reason,
+        work_limit_exceeded=True,
+        actual_skills=actual_skills,
+        skill_limit=MAX_PLUGIN_DEDUP_SKILLS,
     )
-    return result
 
 
 def run_plugin_skill_context_dedup(
@@ -202,19 +193,25 @@ def run_plugin_skill_context_dedup(
     threshold: float = 0.80,
     model: str | None = None,
     llm_model: str | None = None,
+    skill_dirs: Sequence[Path] | None = None,
 ) -> list[ValidationResult]:
-    """Run C-intra over each safely discovered bundled skill."""
-    from skillevaluator.utils.helpers import find_bundled_plugin_skills
+    """Run C-intra over each safely discovered bundled skill.
 
+    ``skill_dirs`` are the bundled skill folders when the caller has already
+    discovered them; otherwise they are discovered here.
+    """
     aggregate = ValidationResult(
         validator_name="Context Deduplication",
         validator_description="Detect redundant content within each bundled plugin skill",
     )
     aggregate.metadata["advisory_tier2"] = True
-    try:
-        skill_dirs = find_bundled_plugin_skills(plugin_root)
-    except ValueError as exc:
-        return [_unsafe_plugin_result(exc)]
+    if skill_dirs is None:
+        from skillevaluator.utils.helpers import find_bundled_plugin_skills
+
+        try:
+            skill_dirs = find_bundled_plugin_skills(plugin_root)
+        except ValueError as exc:
+            return [_unsafe_plugin_result(exc)]
     if not skill_dirs:
         aggregate.add_success("context_dedup", "No bundled skills to deduplicate")
         return [aggregate]
@@ -267,13 +264,7 @@ def run_plugin_skill_context_dedup(
         aggregate.summary.medium_count += skill_result.summary.medium_count
         aggregate.summary.low_count += skill_result.summary.low_count
         if skill_result.metadata.get("security_failure"):
-            aggregate.metadata.update(
-                {
-                    "security_failure": True,
-                    "execution_status": "failed",
-                    "optional": False,
-                }
-            )
+            mark_security_failure(aggregate)
     aggregate.passed = not aggregate.metadata.get("security_failure", False)
     aggregate.metadata["advisory_tier2"] = True
     return [aggregate]
@@ -329,13 +320,16 @@ def run_plugin_catalog_checks(
     llm_verdict: bool = False,
     llm_model: str | None = None,
     max_scalar_comparisons: int = SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
+    skill_manifests: Sequence[SecureFile] | None = None,
 ) -> list[ValidationResult]:
     """Run advisory Check C-inter and Check B against a local JSON catalog.
 
     Without a catalog both checks are recorded as skipped, not failed. The
     catalog is read with the bounded no-follow loader; plugin and bundled skill
-    reads use the secure plugin helpers. Only the configured embedding provider
-    (and the chat LLM when ``llm_verdict`` is set) is contacted.
+    reads use the secure plugin helpers. ``skill_manifests`` are the bundled
+    skill manifests when the caller has already discovered them. Only the
+    configured embedding provider (and the chat LLM when ``llm_verdict`` is
+    set) is contacted.
     """
     from skillevaluator.deduplication.plugin.catalog_checks import (
         INTER_PLUGIN_DESCRIPTION,
@@ -363,19 +357,20 @@ def run_plugin_catalog_checks(
         return _catalog_check_skips(_NO_CATALOG_REASON)
 
     try:
-        profile = load_plugin_profile(plugin_root, max_skills=MAX_PLUGIN_DEDUP_SKILLS)
-    except PluginSkillLimitError:
-        from skillevaluator.utils.helpers import find_bundled_plugin_skills
-
-        actual = len(find_bundled_plugin_skills(plugin_root))
+        profile = load_plugin_profile(
+            plugin_root,
+            max_skills=MAX_PLUGIN_DEDUP_SKILLS,
+            skill_manifests=skill_manifests,
+        )
+    except PluginSkillLimitError as exc:
         reason = (
-            f"Plugin bundles {actual} skills, exceeding the automatic Tier 2 limit of "
+            f"Plugin bundles {exc.actual} skills, exceeding the automatic Tier 2 limit of "
             f"{MAX_PLUGIN_DEDUP_SKILLS}; no embedding, catalog, or LLM calls were made."
         )
         return _catalog_check_skips(
             reason,
             work_limit_exceeded=True,
-            actual_skills=actual,
+            actual_skills=exc.actual,
             skill_limit=MAX_PLUGIN_DEDUP_SKILLS,
         )
     except PluginProfileError as exc:
@@ -449,24 +444,28 @@ def run_plugin_dedup_scan(
 
     Check A and C-intra always run offline or against the configured embedding
     provider. Check C-inter and Check B compare against an optional local JSON
-    catalog and are recorded as skipped when no catalog is supplied.
+    catalog and are recorded as skipped when no catalog is supplied. The
+    bundled skills are discovered once and shared by C-intra and the catalog
+    checks.
     """
     from skillevaluator.deduplication.plugin import IntraPluginValidator
-    from skillevaluator.utils.helpers import find_bundled_plugin_skills
+    from skillevaluator.utils.helpers import find_bundled_plugin_skill_manifests
 
     results = [_make_advisory(IntraPluginValidator().validate(plugin_root))]
     try:
-        find_bundled_plugin_skills(plugin_root)
+        skill_manifests = find_bundled_plugin_skill_manifests(plugin_root)
     except ValueError as exc:
         results.append(_unsafe_plugin_result(exc))
         return results
     if run_context:
+        skills_root = plugin_root / "skills"
         results.extend(
             run_plugin_skill_context_dedup(
                 plugin_root,
                 threshold=threshold,
                 model=model,
                 llm_model=llm_model,
+                skill_dirs=[skills_root / manifest.relative_path.parent for manifest in skill_manifests],
             )
         )
     else:
@@ -475,11 +474,7 @@ def run_plugin_dedup_scan(
             validator_description="Detect redundant content within each bundled plugin skill",
         )
         reason = "Skipped: configure a public embedding provider or install the Tier 2 extra."
-        skipped.add_warning(reason)
-        skipped.metadata.update(
-            {"execution_status": "skipped", "skip_reason": reason, "optional": True, "advisory_tier2": True}
-        )
-        results.append(skipped)
+        results.append(mark_advisory_skip(skipped, reason))
     if catalog is not None and not run_context:
         results.extend(
             _catalog_check_skips(
@@ -495,6 +490,7 @@ def run_plugin_dedup_scan(
                 model=model,
                 llm_verdict=llm_verdict,
                 llm_model=llm_model,
+                skill_manifests=skill_manifests,
             )
         )
     return results

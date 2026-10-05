@@ -15,14 +15,13 @@ from typing import TYPE_CHECKING
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_CHUNKS,
-    CONTENT_DEDUP_MAX_PAIR_COMPARISONS,
     CONTENT_DEDUP_MAX_SCALAR_COMPARISONS,
     CONTENT_DEDUP_SIMILARITY_THRESHOLD,
 )
 from skillevaluator.embedding.client import (
-    EmbeddingClient,
     SimilarityConfigError,
-    validate_embedding_vector,
+    normalize_embedding_vector,
+    unit_vector_similarity,
     validate_similarity_threshold,
 )
 
@@ -75,27 +74,33 @@ def build_clusters(
     chunks: list[ContentChunk],
     threshold: float = CONTENT_DEDUP_SIMILARITY_THRESHOLD,
 ) -> list[ContentCluster]:
-    """Cluster chunks by pairwise cosine similarity using Union-Find."""
+    """Cluster chunks by pairwise cosine similarity using Union-Find.
+
+    Each embedding is validated and normalized once; every pair then costs one
+    dot product. Scores equal :meth:`EmbeddingClient.cosine_similarity`, and a
+    zero vector scores 0.0 against everything.
+    """
     n = len(chunks)
     if n < 2:
         return []
+    # Bounding the chunk count also bounds the pair count to
+    # CONTENT_DEDUP_MAX_PAIR_COMPARISONS.
     if n > CONTENT_DEDUP_MAX_CHUNKS:
         raise ValueError(f"Content chunk count exceeds {CONTENT_DEDUP_MAX_CHUNKS}")
     pair_count = n * (n - 1) // 2
-    if pair_count > CONTENT_DEDUP_MAX_PAIR_COMPARISONS:
-        raise ValueError(f"Content pair comparison count exceeds {CONTENT_DEDUP_MAX_PAIR_COMPARISONS}")
     threshold = validate_similarity_threshold(threshold, context="Content deduplication")
+    unit_vectors: list[list[float]] = []
     vector_dimension: int | None = None
     try:
         for index, chunk in enumerate(chunks):
-            dimension = validate_embedding_vector(
+            unit_vector = normalize_embedding_vector(
                 chunk.embedding,
                 vector_dimension,
                 context=f"Content chunk {index}",
                 allow_zero=True,
             )
-            if vector_dimension is None:
-                vector_dimension = dimension
+            vector_dimension = len(unit_vector)
+            unit_vectors.append(unit_vector)
     except SimilarityConfigError as exc:
         raise ValueError(str(exc)) from exc
     scalar_work = pair_count * (vector_dimension or 0)
@@ -106,10 +111,7 @@ def build_clusters(
     pair_scores: dict[tuple[int, int], float] = {}
 
     for i, j in combinations(range(n), 2):
-        score = EmbeddingClient.cosine_similarity(
-            chunks[i].embedding,
-            chunks[j].embedding,
-        )
+        score = unit_vector_similarity(unit_vectors[i], unit_vectors[j])
         pair_scores[(i, j)] = score
         if score >= threshold:
             uf.union(i, j)

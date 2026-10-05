@@ -60,9 +60,21 @@ class ContentEntry:
         return f"{self.name}: {self.description}"
 
 
+class CollectionLimitError(ValueError):
+    """A collection-wide entry or byte limit was reached before any embedding request."""
+
+
 @dataclass
-class _ExtractionBudget:
-    """Tracks collection bounds before any embedding request is made."""
+class ExtractionBudget:
+    """Entry and byte bounds for one collection, checked before any embedding request.
+
+    Share one budget across every read of a collection. Each selected manifest
+    reserves an entry and its declared size before it is read, so a manifest
+    that then fails to parse still counts; its actual size replaces the
+    declared one after the read. A manifest over the per-file limit raises a
+    plain ``ValueError`` (only that manifest is unusable); the collection limits
+    raise :class:`CollectionLimitError`.
+    """
 
     max_entries: int = SIMILARITY_DEFAULT_MAX_ENTRIES
     entry_count: int = 0
@@ -71,21 +83,25 @@ class _ExtractionBudget:
     def reserve(self, file: SecureFile) -> None:
         self.entry_count += 1
         if self.entry_count > self.max_entries:
-            raise ValueError(
+            raise CollectionLimitError(
                 f"Collection entry limit exceeded ({self.max_entries}) before embedding; "
                 "increase --max-entries within its supported range to scan the complete collection"
             )
         declared_bytes = file.metadata.st_size
         if declared_bytes > MAX_MANIFEST_BYTES:
             raise ValueError(f"Manifest exceeds the Tier 2 per-file byte limit ({MAX_MANIFEST_BYTES}): {file.rel_path}")
-        self.total_bytes += declared_bytes
-        if self.total_bytes > MAX_COLLECTION_BYTES:
-            raise ValueError(f"Collection total byte limit exceeded ({MAX_COLLECTION_BYTES}) before embedding")
+        self.consume_bytes(declared_bytes)
 
     def reconcile(self, declared_bytes: int, actual_bytes: int) -> None:
-        self.total_bytes += actual_bytes - declared_bytes
+        self.consume_bytes(actual_bytes - declared_bytes)
+
+    def consume_bytes(self, byte_count: int) -> None:
+        """Count bytes read outside a reserved entry, such as a plugin manifest."""
+        self.total_bytes += byte_count
         if self.total_bytes > MAX_COLLECTION_BYTES:
-            raise ValueError(f"Collection total byte limit exceeded ({MAX_COLLECTION_BYTES}) before embedding")
+            raise CollectionLimitError(
+                f"Collection total byte limit exceeded ({MAX_COLLECTION_BYTES}) before embedding"
+            )
 
 
 def _parse_frontmatter_text(file: SecureFile, raw_text: str) -> tuple[dict, str] | None:
@@ -114,7 +130,7 @@ def _extract_secure_file(
     name_field: str,
     description_field: str,
     content_type: str,
-    budget: _ExtractionBudget,
+    budget: ExtractionBudget,
     display_root: Path,
 ) -> ContentEntry | None:
     budget.reserve(file)
@@ -147,6 +163,31 @@ def _extract_secure_file(
     )
 
 
+def extract_skill_manifest(
+    secure_root: SecureRoot,
+    file: SecureFile,
+    *,
+    budget: ExtractionBudget,
+    display_root: Path,
+) -> ContentEntry | None:
+    """Extract one discovered skill manifest through an active ``secure_root``.
+
+    ``file`` must have been discovered below ``secure_root``'s root. Returns
+    ``None`` when the frontmatter has no name or description. Raises
+    :class:`CollectionLimitError` when ``budget`` is exhausted and
+    ``ValueError`` for a manifest that is too large or has invalid fields.
+    """
+    return _extract_secure_file(
+        secure_root,
+        file,
+        name_field="name",
+        description_field="description",
+        content_type=CONTENT_TYPE_SKILL,
+        budget=budget,
+        display_root=display_root,
+    )
+
+
 def _discover(
     root: Path,
     *,
@@ -162,6 +203,17 @@ def _discover(
     )
 
 
+def _preferred_skill_manifests(files: list[SecureFile]) -> list[SecureFile]:
+    """Keep one manifest per skill folder (``SKILL.md`` over ``skill.md``), ordered by folder."""
+    by_folder: dict[Path, dict[str, SecureFile]] = {}
+    for file in files:
+        by_folder.setdefault(file.relative_path.parent, {})[file.relative_path.name] = file
+    return [
+        next(variants[name] for name in SKILL_MANIFEST_VARIANTS if name in variants)
+        for _folder, variants in sorted(by_folder.items(), key=lambda item: item[0].as_posix())
+    ]
+
+
 def extract_from_skill(skill_dir: Path) -> ContentEntry | None:
     """Extract one regular SKILL.md/skill.md without following redirects."""
     files = _discover(
@@ -169,21 +221,12 @@ def extract_from_skill(skill_dir: Path) -> ContentEntry | None:
         selected=lambda relative: len(relative.parts) == 1 and relative.name in SKILL_MANIFEST_VARIANTS,
         max_depth=1,
     )
-    by_name = {file.relative_path.name: file for file in files}
-    selected_file = next((by_name[name] for name in SKILL_MANIFEST_VARIANTS if name in by_name), None)
-    if selected_file is None:
+    manifests = _preferred_skill_manifests(files)
+    if not manifests:
         logger.debug("No SKILL.md found in %s", skill_dir)
         return None
     with SecureRoot(skill_dir) as secure_root:
-        return _extract_secure_file(
-            secure_root,
-            selected_file,
-            name_field="name",
-            description_field="description",
-            content_type=CONTENT_TYPE_SKILL,
-            budget=_ExtractionBudget(),
-            display_root=skill_dir,
-        )
+        return extract_skill_manifest(secure_root, manifests[0], budget=ExtractionBudget(), display_root=skill_dir)
 
 
 def extract_from_rule(rule_path: Path) -> ContentEntry | None:
@@ -206,7 +249,7 @@ def extract_from_rule(rule_path: Path) -> ContentEntry | None:
             name_field="title",
             description_field="description",
             content_type=CONTENT_TYPE_RULES,
-            budget=_ExtractionBudget(),
+            budget=ExtractionBudget(),
             display_root=rule_path.parent,
         )
 
@@ -228,7 +271,7 @@ def extract_from_workflow(workflow_dir: Path) -> ContentEntry | None:
             name_field="title",
             description_field="description",
             content_type=CONTENT_TYPE_WORKFLOWS,
-            budget=_ExtractionBudget(),
+            budget=ExtractionBudget(),
             display_root=workflow_dir,
         )
 
@@ -255,15 +298,9 @@ def discover_and_extract(
 
     files = _discover(root, selected=selector)
     if content_type == CONTENT_TYPE_SKILL:
-        grouped: dict[Path, dict[str, SecureFile]] = {}
-        for file in files:
-            grouped.setdefault(file.relative_path.parent, {})[file.relative_path.name] = file
-        files = [
-            next(variants[name] for name in SKILL_MANIFEST_VARIANTS if name in variants)
-            for _directory, variants in sorted(grouped.items(), key=lambda item: item[0].as_posix())
-        ]
+        files = _preferred_skill_manifests(files)
 
-    budget = _ExtractionBudget(max_entries=max_entries)
+    budget = ExtractionBudget(max_entries=max_entries)
     entries: list[ContentEntry] = []
     with SecureRoot(root) as secure_root:
         for file in files:

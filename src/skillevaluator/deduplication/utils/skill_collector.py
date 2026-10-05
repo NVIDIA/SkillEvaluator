@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,11 +60,6 @@ class CollectedFile:
     line_offset: int = 0
 
 
-def _is_excluded(rel_parts: tuple[str, ...], excluded_dirs: frozenset[str]) -> bool:
-    """Return True if any path component is in the excluded set."""
-    return any(part in excluded_dirs for part in rel_parts)
-
-
 def _strip_valid_frontmatter(raw_text: str) -> tuple[str, int]:
     """Strip valid mapping frontmatter and return its original line offset."""
     match = FRONTMATTER_PATTERN.match(raw_text)
@@ -98,35 +92,26 @@ def _collection_error(exc: SecurePathError) -> SkillCollectionError:
     )
 
 
-def collect_files(
-    skill_root: Path,
-    excluded_dirs: Iterable[str] | None = None,
-    excluded_files: Iterable[str] | None = None,
-) -> list[CollectedFile]:
+def collect_files(skill_root: Path) -> list[CollectedFile]:
     """Collect all selected Tier 2 text through a verified root descriptor.
 
-    Generated directories are pruned before the path budget. Other authored
-    paths count even when irrelevant. Redirects fail closed except for the exact
-    validated compatibility alias; selected hardlinks, special files, and
-    unbounded inputs also fail closed.
+    Generated directories are pruned before the path budget, so nothing below
+    them is selected. Other authored paths count even when irrelevant.
+    Redirects fail closed except for the exact validated compatibility alias;
+    selected hardlinks, special files, and unbounded inputs also fail closed.
     """
-    excluded = CONTENT_DEDUP_EXCLUDED_DIRS if excluded_dirs is None else frozenset(excluded_dirs)
-    excluded_basenames = (
-        CONTENT_DEDUP_EXCLUDED_FILES if excluded_files is None else frozenset(name.lower() for name in excluded_files)
-    )
 
     def selected(relative: Path) -> bool:
         return (
             relative.suffix.lower() in CONTENT_DEDUP_SCANNABLE_EXTENSIONS
-            and relative.name.lower() not in excluded_basenames
-            and not _is_excluded(relative.parts, excluded)
+            and relative.name.lower() not in CONTENT_DEDUP_EXCLUDED_FILES
         )
 
     try:
         secure_files = discover_secure_files(
             skill_root,
             selected=selected,
-            excluded_dirs=excluded,
+            excluded_dirs=CONTENT_DEDUP_EXCLUDED_DIRS,
             max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
             allow_context_alias=True,
         )

@@ -697,7 +697,7 @@ def test_custom_agent_import_path_preserves_native_cloud_environment(env_mode: s
 
 
 def test_custom_agent_import_path_is_rejected_for_native_cloud() -> None:
-    with pytest.raises(ValueError, match="agent_import_path is supported only with --env docker, kata, or local"):
+    with pytest.raises(ValueError, match="agent_import_path is supported only with --env docker, local, or gke"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="codex",
@@ -1833,906 +1833,212 @@ def test_anthropic_idna_matches_httpx_sdk_and_bundled_verifier(
     assert verifier._anthropic_url() == expected_url
 
 
-@pytest.mark.parametrize(
-    ("has_skill", "arm_suffix", "expected_task_name"),
-    [
-        (True, "", "nvidia/skillevaluator-case-001"),
-        (True, "-with-skill", "nvidia/skillevaluator-case-001-with-skill"),
-        (False, "-without-skill", "nvidia/skillevaluator-case-001-without-skill"),
-    ],
-)
-def test_write_task_toml_dual_arm_suffix(
-    tmp_path: Path,
-    has_skill: bool,
-    arm_suffix: str,
-    expected_task_name: str,
-) -> None:
-    """Verify that arm suffix is appended only when provided for dual-arm runs."""
-    case_dir = tmp_path / "case"
-    case_dir.mkdir()
-    _write_task_toml(
-        case_dir,
-        {"id": "case-001", "expected_skill": "demo"},
-        has_skill=has_skill,
-        arm_suffix=arm_suffix,
-    )
-    task = tomllib.loads((case_dir / "task.toml").read_text(encoding="utf-8"))
-    assert task["task"]["name"] == expected_task_name
+def test_verifier_refreshes_adc_token_on_401_for_vertex_openapi(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify verifier template refreshes ADC token in-process upon HTTP 401 when calling Vertex OpenAPI with ADC provenance."""
+    import io
+    import urllib.error
 
+    verifier = _load_verifier_template()
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/test-p/locations/global/endpoints/openapi"
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_BASE_URL", base_url)
+    monkeypatch.setenv("OPENAI_API_KEY", "expired-initial-token")
+    monkeypatch.setenv("SKILL_EVAL_LLM_CREDENTIAL_SOURCE", "ADC")
+    monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "google/gemini-3.8-flash")
 
-def test_write_task_toml_type_safety(tmp_path: Path) -> None:
-    """Verify that _write_task_toml rejects non-string arm_suffix values."""
-    case_dir = tmp_path / "case"
-    case_dir.mkdir()
+    attempts: list[str] = []
 
-    with pytest.raises(TypeError, match="arm_suffix must be a string"):
-        _write_task_toml(case_dir, {"id": "case-001"}, has_skill=True, arm_suffix=123)  # type: ignore[arg-type]
+    def mock_urlopen(request, timeout=90):
+        url = getattr(request, "full_url", str(request))
+        if "169.254.169.254" in url:
+            resp = Mock()
+            resp.read.return_value = json.dumps({"access_token": "refreshed-metadata-token"}).encode("utf-8")
+            resp.__enter__ = Mock(return_value=resp)
+            resp.__exit__ = Mock(return_value=False)
+            return resp
 
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ("case-001-with-skill", "case-001"),
-        ("case-001-without-skill", "case-001"),
-        ("case-001-with", "case-001-with"),
-        ("case-001-without", "case-001-without"),
-        ("case-001", "case-001"),
-    ],
-)
-def test_strip_arm_suffix(value: str, expected: str) -> None:
-    """Verify _strip_arm_suffix trims exact dual-arm suffixes."""
-    from skillevaluator.tier3.harbor.collector import _strip_arm_suffix
-
-    assert _strip_arm_suffix(value) == expected
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ("case-001-with-skill-attempt1", "case-001"),
-        ("case-001-without-skill_attempt2", "case-001"),
-        ("case-001-attempt1-with-skill", "case-001"),
-        ("case-001_attempt2-without-skill", "case-001"),
-        ("case-001-with-skill", "case-001"),
-        ("case-001-without-skill", "case-001"),
-        ("case-001-attempt1", "case-001"),
-        ("case-001", "case-001"),
-    ],
-)
-def test_strip_arm_and_attempt_suffixes(value: str, expected: str) -> None:
-    """Verify _strip_arm_and_attempt_suffixes removes both suffixes regardless of ordering."""
-    from skillevaluator.tier3.harbor.collector import _strip_arm_and_attempt_suffixes
-
-    assert _strip_arm_and_attempt_suffixes(value) == expected
-
-
-@pytest.mark.parametrize(
-    ("raw_input", "expected_ids", "expected_output"),
-    [
-        # Bare case IDs without expected_case_ids preserve authored prefixes/suffixes
-        ("case-001", None, "case-001"),
-        ("skillevaluator-case-001", None, "skillevaluator-case-001"),
-        ("skillevaluator-case-001", {"case-001", "case-002"}, "case-001"),
-        # Without expected_case_ids, authored -with-skill / -without-skill are preserved
-        ("case-001-with-skill", None, "case-001-with-skill"),
-        ("case-001-without-skill", None, "case-001-without-skill"),
-        ("skillevaluator-case-001-with-skill", None, "skillevaluator-case-001-with-skill"),
-        ("skillevaluator-case-001-without-skill", None, "skillevaluator-case-001-without-skill"),
-        # Dual-arm suffixes with expected_case_ids matching
-        ("case-001-with-skill", {"case-001", "case-002"}, "case-001"),
-        ("case-001-without-skill", {"case-001", "case-002"}, "case-001"),
-        ("skillevaluator-case-001-with-skill", {"case-001", "case-002"}, "case-001"),
-        ("skillevaluator-case-001-without-skill", {"case-001", "case-002"}, "case-001"),
-        # Namespaced task names (e.g., nvidia/...)
-        ("nvidia/skillevaluator-case-001", None, "skillevaluator-case-001"),
-        ("nvidia/skillevaluator-case-001", {"case-001"}, "case-001"),
-        ("nvidia/skillevaluator-case-001-with-skill", None, "skillevaluator-case-001-with-skill"),
-        ("nvidia/skillevaluator-case-001-with-skill", {"case-001"}, "case-001"),
-        ("nvidia/skillevaluator-case-001-without-skill", None, "skillevaluator-case-001-without-skill"),
-        ("nvidia/skillevaluator-case-001-without-skill", {"case-001"}, "case-001"),
-        ("custom/repo/skillevaluator-case-002-with-skill", {"case-002"}, "case-002"),
-        # Attempt suffixes combined with dual-arm suffixes in both orderings
-        ("case-001-with-skill-attempt1", None, "case-001-with-skill"),
-        ("case-001-with-skill-attempt1", {"case-001"}, "case-001"),
-        ("case-001-without-skill_attempt2", None, "case-001-without-skill"),
-        ("case-001-without-skill_attempt2", {"case-001"}, "case-001"),
-        ("case-001-attempt1-with-skill", {"case-001"}, "case-001"),
-        ("case-001_attempt2-without-skill", {"case-001"}, "case-001"),
-        ("skillevaluator-case-001-with-skill-attempt1", None, "skillevaluator-case-001-with-skill"),
-        ("skillevaluator-case-001-with-skill-attempt1", {"case-001"}, "case-001"),
-        ("skillevaluator-case-001-attempt1-with-skill", {"case-001"}, "case-001"),
-        ("nvidia/skillevaluator-case-001-with-skill-attempt3", {"case-001"}, "case-001"),
-        ("nvidia/skillevaluator-case-001-attempt3-with-skill", {"case-001"}, "case-001"),
-        ("nvidia/skillevaluator-case-001-without-skill_attempt4", None, "skillevaluator-case-001-without-skill"),
-        # Legitimate case IDs ending with -with or -without preserved when in expected_case_ids
-        ("case-with", {"case-with"}, "case-with"),
-        ("case-without", {"case-without"}, "case-without"),
-        ("nvidia/case-with", {"case-with"}, "case-with"),
-        ("nvidia/case-without", {"case-without"}, "case-without"),
-        ("skillevaluator-case-with", {"case-with"}, "case-with"),
-        ("skillevaluator-case-without", {"case-without"}, "case-without"),
-        ("case-with-attempt1", {"case-with"}, "case-with"),
-        ("case-without-attempt2", {"case-without"}, "case-without"),
-        # Dual-arm runs on legitimate -with / -without IDs
-        ("case-with-with-skill", {"case-with"}, "case-with"),
-        ("case-without-without-skill", {"case-without"}, "case-without"),
-        ("skillevaluator-case-with-with-skill", {"case-with"}, "case-with"),
-        ("skillevaluator-case-without-without-skill", {"case-without"}, "case-without"),
-        ("nvidia/skillevaluator-case-with-with-skill", {"case-with"}, "case-with"),
-        ("nvidia/skillevaluator-case-without-without-skill", {"case-without"}, "case-without"),
-        ("case-with-with-skill-attempt1", {"case-with"}, "case-with"),
-        ("case-with-attempt1-with-skill", {"case-with"}, "case-with"),
-        ("case-without-without-skill_attempt2", {"case-without"}, "case-without"),
-        ("case-without_attempt2-without-skill", {"case-without"}, "case-without"),
-        # Case IDs that retain the skillevaluator- prefix in expected_case_ids
-        ("skillevaluator-case-001-with-skill", {"skillevaluator-case-001"}, "skillevaluator-case-001"),
-        ("skillevaluator-case-001-without-skill", {"skillevaluator-case-001"}, "skillevaluator-case-001"),
-        ("nvidia/skillevaluator-case-001-with-skill", {"skillevaluator-case-001"}, "skillevaluator-case-001"),
-        ("skillevaluator-case-001-with-skill-attempt1", {"skillevaluator-case-001"}, "skillevaluator-case-001"),
-        ("skillevaluator-case-001-attempt1-with-skill", {"skillevaluator-case-001"}, "skillevaluator-case-001"),
-        # Empty and blank strings
-        ("", None, ""),
-        ("   ", None, ""),
-        ("", {"case-001"}, ""),
-        # Double arm suffixes must strip at most one arm suffix (never collapse authored -with-skill onto base case)
-        ("case-1-with-skill-with-skill", {"case-1"}, "case-1-with-skill-with-skill"),
-        ("case-1-with-skill-with-skill", {"case-1", "case-1-with-skill"}, "case-1-with-skill"),
-        ("case-1-with-skill-with-skill_attempt2", {"case-1", "case-1-with-skill"}, "case-1-with-skill"),
-        ("case-1-with-skill_attempt2-with-skill", {"case-1", "case-1-with-skill"}, "case-1-with-skill"),
-    ],
-)
-def test_canonical_case_id_arm_stripping(
-    raw_input: str,
-    expected_ids: set[str] | None,
-    expected_output: str,
-) -> None:
-    """Verify _canonical_case_id normalizes task identifiers across naming and attempt variants."""
-    from skillevaluator.tier3.harbor.collector import _canonical_case_id
-
-    assert _canonical_case_id(raw_input, expected_ids) == expected_output
-
-
-@pytest.mark.parametrize(
-    ("arm_suffix", "expected_task_name"),
-    [
-        ("-with-skill", "nvidia/case-001-with-skill"),
-        ("-without-skill", "nvidia/case-001-without-skill"),
-    ],
-)
-def test_stage_native_harbor_tasks_dual_arm_suffix(
-    tmp_path: Path,
-    arm_suffix: str,
-    expected_task_name: str,
-) -> None:
-    """Verify that stage_native_harbor_tasks appends arm suffix to native task.toml name."""
-    skill_dir = tmp_path / "target-skill"
-    skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text("# Target Skill\n", encoding="utf-8")
-    evals_dir = skill_dir / "evals" / "harbor"
-    task_dir = evals_dir / "case-001"
-    task_dir.mkdir(parents=True)
-    (task_dir / "instruction.md").write_text("Instruction\n", encoding="utf-8")
-    (task_dir / "task.toml").write_text(
-        'schema_version = "1.3"\n\n[task]\nname = "nvidia/case-001"\n\n[environment]\n',
-        encoding="utf-8",
-    )
-    tests_dir = task_dir / "tests"
-    tests_dir.mkdir()
-    (tests_dir / "test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
-
-    out_dir = tmp_path / f"out{arm_suffix}"
-    staged = stage_native_harbor_tasks(
-        skill_dir,
-        out_dir,
-        grading_mode="custom_only",
-        arm_suffix=arm_suffix,
-    )[0]
-    task = tomllib.loads((staged / "task.toml").read_text(encoding="utf-8"))
-    assert task["task"]["name"] == expected_task_name
-
-
-@pytest.mark.parametrize(
-    ("task_toml_body", "expected_task_name", "expected_metadata_name"),
-    [
-        (
-            'schema_version = "1.3"\n\n[task]\nname = """nvidia/case-001"""\n\n[environment]\n',
-            "nvidia/case-001-with-skill",
-            None,
-        ),
-        (
-            "schema_version = \"1.3\"\n\n[task]\nname = '''nvidia/case-001'''\n\n[environment]\n",
-            "nvidia/case-001-with-skill",
-            None,
-        ),
-        (
-            'schema_version = "1.3"\n\n[metadata]\nname = "keep-metadata-name"\n\n'
-            '[task] # task identity\nauthors = [{ name = "Alice" }]\nname = "nvidia/case-001" # inline comment\n\n[environment]\n',
-            "nvidia/case-001-with-skill",
-            "keep-metadata-name",
-        ),
-        (
-            'schema_version = "1.3"\n"task.name" = "root-quoted-dot-key"\n\n'
-            '[task.subtable]\nname = "subtable-name"\n\n'
-            '[task]\nkeywords = [\n  "alpha",\n  "beta",\n]\n'
-            'description = """\n[metadata]\n[task]\nname = "fake-inside-multiline"\n"""\n'
-            'name = "nvidia/case-001"\n\n[environment]\n',
-            "nvidia/case-001-with-skill",
-            None,
-        ),
-        (
-            'schema_version = "1.3"\nmetadata = { name = "inline-metadata-name" }\n\n'
-            '[task]\nname = "nvidia/case-001"\n\n[environment]\n',
-            "nvidia/case-001-with-skill",
-            "inline-metadata-name",
-        ),
-        (
-            'schema_version = "1.3"\nmetadata = {}\n\n'
-            'task = { authors = [{ name = "Alice" }], name = "nvidia/case-001", tags = ["a", "b"] }\n\n[environment]\n',
-            "nvidia/case-001-with-skill",
-            None,
-        ),
-        (
-            'schema_version = "1.3"\nmetadata.name = "dotted-metadata-name"\n'
-            'task = { subtable = { name = "subtable-name" }, name = "nvidia/case-001" }\n\n[environment]\n',
-            "nvidia/case-001-with-skill",
-            "dotted-metadata-name",
-        ),
-        (
-            'schema_version = "1.3"\n["\\u006detadata"]\nname = "escaped-metadata-name"\n\n'
-            '["\\u0074ask"]\n"\\u006eame" = "nvidia/case-001"\n\n[environment]\n',
-            "nvidia/case-001-with-skill",
-            "escaped-metadata-name",
-        ),
-        (
-            'schema_version = "1.3"\n"\\u0074ask"."\\u006eame" = "nvidia/case-001"\n\n[environment]\n',
-            "nvidia/case-001-with-skill",
-            None,
-        ),
-        (
-            'schema_version = "1.3"\ntask.name = "nvidia/case-001"\n\n[environment]\n',
-            "nvidia/case-001-with-skill",
-            None,
-        ),
-        (
-            'schema_version = "1.3"\n\n[metadata.extra]\nfoo = "bar"\n\n[task]\nname = "nvidia/case-001"\n\n[environment]\n',
-            "nvidia/case-001-with-skill",
-            None,
-        ),
-        (
-            'schema_version = "1.3"\n\n[[metadata.items]]\nname = "item1"\n\n[task]\nname = "nvidia/case-001"\n\n[environment]\n',
-            "nvidia/case-001-with-skill",
-            None,
-        ),
-    ],
-)
-def test_stage_native_harbor_tasks_structural_toml_variants(
-    tmp_path: Path,
-    task_toml_body: str,
-    expected_task_name: str,
-    expected_metadata_name: str | None,
-) -> None:
-    """Verify structural [task].name update preserves valid TOML across inline tables, escaped keys, and [metadata]."""
-    skill_dir = tmp_path / "target-skill"
-    skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text("# Target Skill\n", encoding="utf-8")
-    task_dir = skill_dir / "evals" / "harbor" / "case-001"
-    task_dir.mkdir(parents=True)
-    (task_dir / "instruction.md").write_text("Instruction\n", encoding="utf-8")
-    (task_dir / "task.toml").write_text(task_toml_body, encoding="utf-8")
-    tests_dir = task_dir / "tests"
-    tests_dir.mkdir()
-    (tests_dir / "test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
-
-    staged = stage_native_harbor_tasks(
-        skill_dir,
-        tmp_path / "out",
-        grading_mode="custom_only",
-        arm_suffix="-with-skill",
-    )[0]
-    parsed = tomllib.loads((staged / "task.toml").read_text(encoding="utf-8"))
-    assert parsed["task"]["name"] == expected_task_name
-    assert parsed["metadata"]["entry_id"] == "case-001"
-    if expected_metadata_name is not None:
-        assert parsed["metadata"]["name"] == expected_metadata_name
-    if "task.name" in parsed:
-        assert parsed["task.name"] == "root-quoted-dot-key"
-        assert parsed["task"]["subtable"]["name"] == "subtable-name"
-
-
-def test_append_native_task_name_suffix_sad_paths(tmp_path: Path) -> None:
-    """Verify _append_native_task_name_suffix safely handles missing/corrupt/non-string task names and fails closed when [metadata].entry_id cannot be written."""
-    from skillevaluator.tier3.harbor.adapter import _append_native_task_name_suffix
-
-    missing_dir = tmp_path / "missing"
-    missing_dir.mkdir()
-    _append_native_task_name_suffix(missing_dir, "-with-skill")
-    assert not (missing_dir / "task.toml").exists()
-
-    for idx, body in enumerate(
-        (
-            "[task\nname = 'unclosed'\n",
-            'schema_version = "1.3"\n[environment]\n',
-            'schema_version = "1.3"\n[task]\nname = 123\n',
-        )
-    ):
-        case_dir = tmp_path / f"sad-{idx}"
-        case_dir.mkdir()
-        (case_dir / "task.toml").write_text(body, encoding="utf-8")
-        _append_native_task_name_suffix(case_dir, "-with-skill")
-        assert (case_dir / "task.toml").read_text(encoding="utf-8") == body
-
-    preserved_dir = tmp_path / "preserved-entry"
-    preserved_dir.mkdir()
-    (preserved_dir / "task.toml").write_text(
-        '[metadata]\nentry_id = "authored-entry"\n\n[task]\nname = "nvidia/case-1"\n',
-        encoding="utf-8",
-    )
-    _append_native_task_name_suffix(preserved_dir, "")
-    assert tomllib.loads((preserved_dir / "task.toml").read_text(encoding="utf-8"))["task"]["name"] == "nvidia/case-1"
-    _append_native_task_name_suffix(preserved_dir, "-with-skill", entry_id="authored-entry")
-    parsed = tomllib.loads((preserved_dir / "task.toml").read_text(encoding="utf-8"))
-    assert parsed["task"]["name"] == "nvidia/case-1-with-skill"
-    assert parsed["metadata"]["entry_id"] == "authored-entry"
-
-    uninjectable_dir = tmp_path / "uninjectable-metadata"
-    uninjectable_dir.mkdir()
-    (uninjectable_dir / "task.toml").write_text(
-        'metadata = "not-a-table"\n\n[task]\nname = "nvidia/case-1"\n',
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="Updated native Harbor task config is invalid TOML"):
-        _append_native_task_name_suffix(uninjectable_dir, "-with-skill")
-
-    mismatched_dir = tmp_path / "mismatched-metadata"
-    mismatched_dir.mkdir()
-    (mismatched_dir / "task.toml").write_text(
-        '[metadata]\nentry_id = "existing-id"\n\n[task]\nname = "nvidia/case-1"\n',
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match=r"Failed to record \[metadata\]\.entry_id"):
-        _append_native_task_name_suffix(mismatched_dir, "-with-skill", entry_id="conflicting-id")
-
-
-def test_dual_arm_native_tasks_with_authored_arm_suffix_do_not_collide_in_custom_only_collection(
-    tmp_path: Path,
-) -> None:
-    """Verify dual-arm staging and custom-only collection keep 'case-1', 'case-1-with-skill', and 'retry-attempt1' distinct across inline and standard task.toml syntax."""
-    from skillevaluator.tier3.harbor.collector import collect_harbor_results
-
-    skill_dir = tmp_path / "target-skill"
-    skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text("# Target Skill\n", encoding="utf-8")
-    harbor_dir = skill_dir / "evals" / "harbor"
-    task_toml_templates = {
-        "case-1": 'schema_version = "1.3"\n\n["\\u0074ask"]\n"\\u006eame" = "nvidia/case-1"\n\n[environment]\n',
-        "case-1-with-skill": 'schema_version = "1.3"\ntask = { name = "nvidia/case-1-with-skill" }\n\n[environment]\n',
-        "retry-attempt1": 'schema_version = "1.3"\n[task]\nname = "nvidia/skillevaluator-retry-attempt1"\n\n[environment]\n',
-    }
-    for case_id, toml_body in task_toml_templates.items():
-        task_dir = harbor_dir / case_id
-        task_dir.mkdir(parents=True)
-        (task_dir / "instruction.md").write_text("Instruction\n", encoding="utf-8")
-        (task_dir / "task.toml").write_text(toml_body, encoding="utf-8")
-        tests_dir = task_dir / "tests"
-        tests_dir.mkdir()
-        (tests_dir / "test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
-
-    # Stage into results-1/_harbor-tasks/opencode/{with,without} so idx=1 (expected_case_ids=None)
-    # tests authoritative [metadata].entry_id lookup via _staged_task_entry_id_map, while idx=0
-    # (expected_case_ids=[...], no _harbor-tasks in results-0) tests deferred attempt-suffix stripping
-    # on raw result["task_name"] protected by expected_case_ids.
-    staged_root = tmp_path / "results-1" / "_harbor-tasks" / "opencode"
-    with_staged = {
-        p.name: tomllib.loads((p / "task.toml").read_text(encoding="utf-8"))
-        for p in stage_native_harbor_tasks(
-            skill_dir,
-            staged_root / "with",
-            grading_mode="custom_only",
-            arm_suffix="-with-skill",
-        )
-    }
-    without_staged = {
-        p.name: tomllib.loads((p / "task.toml").read_text(encoding="utf-8"))
-        for p in stage_native_harbor_tasks(
-            skill_dir,
-            staged_root / "without",
-            grading_mode="custom_only",
-            with_skill=False,
-            arm_suffix="-without-skill",
-        )
-    }
-
-    assert with_staged["case-1"]["task"]["name"] == "nvidia/case-1-with-skill"
-    assert with_staged["case-1-with-skill"]["task"]["name"] == "nvidia/case-1-with-skill-with-skill"
-    assert with_staged["retry-attempt1"]["task"]["name"] == "nvidia/skillevaluator-retry-attempt1-with-skill"
-    assert without_staged["case-1"]["task"]["name"] == "nvidia/case-1-without-skill"
-    assert without_staged["case-1-with-skill"]["task"]["name"] == "nvidia/case-1-with-skill-without-skill"
-    assert without_staged["retry-attempt1"]["task"]["name"] == "nvidia/skillevaluator-retry-attempt1-without-skill"
-
-    jobs_dir = tmp_path / "jobs"
-    for variant, staged_map, scores in (
-        ("with", with_staged, {"case-1": 1.0, "case-1-with-skill": 0.9, "retry-attempt1": 0.8}),
-        ("without", without_staged, {"case-1": 0.2, "case-1-with-skill": 0.3, "retry-attempt1": 0.4}),
-    ):
-        job_dir = jobs_dir / f"target-skill-opencode-{variant}"
-        trial_names: list[str] = []
-        for idx, (case_id, parsed_toml) in enumerate(staged_map.items(), start=1):
-            trial_name = f"trial-{idx}__attempt1"
-            trial_names.append(trial_name)
-            trial_dir = job_dir / trial_name
-            trial_dir.mkdir(parents=True)
-            # Test both raw task_name (no _attempt1 suffix) and _attempt1 suffixed task_name
-            task_name_val = (
-                parsed_toml["task"]["name"]
-                if case_id == "retry-attempt1"
-                else f"{parsed_toml['task']['name']}_attempt1"
+        auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
+        attempts.append(auth_header)
+        if auth_header == "Bearer expired-initial-token":
+            raise urllib.error.HTTPError(
+                url=request.full_url,
+                code=401,
+                msg="Unauthorized",
+                hdrs={},
+                fp=io.BytesIO(b'{"error": {"message": "Token expired"}}'),
             )
-            (trial_dir / "result.json").write_text(
-                json.dumps(
-                    {
-                        "trial_name": trial_name,
-                        "task_name": task_name_val,
-                        "verifier_result": {"rewards": {"reward": scores[case_id]}},
-                    }
-                ),
-                encoding="utf-8",
-            )
-        (job_dir / "result.json").write_text(
-            json.dumps(
-                {
-                    "n_total_trials": len(trial_names),
-                    "stats": {
-                        "n_trials": len(trial_names),
-                        "n_errors": 0,
-                        "evals": {
-                            "opencode": {
-                                "n_trials": len(trial_names),
-                                "n_errors": 0,
-                                "reward_stats": {"reward": {"1.0": trial_names}},
-                            }
-                        },
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
+        if auth_header == "Bearer refreshed-metadata-token":
+            resp = Mock()
+            resp.read.return_value = json.dumps(
+                {"choices": [{"message": {"content": "grading verdict from refreshed token"}}]}
+            ).encode("utf-8")
+            resp.__enter__ = Mock(return_value=resp)
+            resp.__exit__ = Mock(return_value=False)
+            return resp
+        raise RuntimeError(f"Unexpected auth header: {auth_header}")
 
-    for idx, expected_ids in enumerate((["case-1", "case-1-with-skill", "retry-attempt1"], None)):
-        result = collect_harbor_results(
-            skill_name="target-skill",
-            agents=["opencode"],
-            output_dir=tmp_path / f"results-{idx}",
-            jobs_dir=jobs_dir,
-            n_attempts=1,
-            expected_cases=3,
-            expected_case_ids=expected_ids,
-        )
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", mock_urlopen)
 
-        assert result["execution_status"] == "succeeded"
-        agent_res = result["agents"]["opencode"]
-        assert set(agent_res["pass_at_k"]["with_skill"]["cases"]) == {"case-1", "case-1-with-skill", "retry-attempt1"}
-        assert set(agent_res["pass_at_k"]["without_skill"]["cases"]) == {
-            "case-1",
-            "case-1-with-skill",
-            "retry-attempt1",
-        }
-        assert agent_res["pass_at_k"]["with_skill"]["cases"]["case-1"]["best_score"] == 1.0
-        assert agent_res["pass_at_k"]["with_skill"]["cases"]["case-1-with-skill"]["best_score"] == 0.9
-        assert agent_res["pass_at_k"]["with_skill"]["cases"]["retry-attempt1"]["best_score"] == 0.8
-        assert agent_res["pass_at_k"]["without_skill"]["cases"]["case-1"]["best_score"] == 0.2
-        assert agent_res["pass_at_k"]["without_skill"]["cases"]["case-1-with-skill"]["best_score"] == 0.3
-        assert agent_res["pass_at_k"]["without_skill"]["cases"]["retry-attempt1"]["best_score"] == 0.4
-
-    # Sad path: if only 'case-1' is expected, 'case-1-with-skill' must be flagged as unexpected, not collapsed onto 'case-1'
-    partial_expected_result = collect_harbor_results(
-        skill_name="target-skill",
-        agents=["opencode"],
-        output_dir=tmp_path / "results-unexpected",
-        jobs_dir=jobs_dir,
-        n_attempts=1,
-        expected_cases=3,
-        expected_case_ids=["case-1"],
+    content, error, _provenance = verifier._call_public_llm_with_provenance(
+        "Evaluate this trajectory",
+        allow_model_fallback=False,
     )
-    assert partial_expected_result["execution_status"] == "failed"
-    assert any("case-1-with-skill" in err for err in partial_expected_result["execution_errors"])
+
+    assert error is None
+    assert content == "grading verdict from refreshed token"
+    assert attempts == ["Bearer expired-initial-token", "Bearer refreshed-metadata-token"]
+    assert verifier.os.environ.get("OPENAI_API_KEY") == "refreshed-metadata-token"
 
 
-def test_stage_native_harbor_tasks_validates_metadata_entry_ids_sad_paths(tmp_path: Path) -> None:
-    """Verify native staging rejects unsafe or duplicate [metadata].entry_id values before mutating output_dir."""
-    # 1. Unsafe metadata.entry_id (e.g. path traversal or boolean)
-    for idx, bad_entry_id in enumerate(('"../escape"', "true", '""')):
-        skill_dir = tmp_path / f"bad-skill-{idx}"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text("# Bad Skill\n", encoding="utf-8")
-        task_dir = skill_dir / "evals" / "harbor" / "physical-case"
-        task_dir.mkdir(parents=True)
-        (task_dir / "instruction.md").write_text("Instruction\n", encoding="utf-8")
-        (task_dir / "task.toml").write_text(
-            f'[metadata]\nentry_id = {bad_entry_id}\n\n[task]\nname = "nvidia/physical-case"\n',
-            encoding="utf-8",
-        )
-        tests_dir = task_dir / "tests"
-        tests_dir.mkdir()
-        (tests_dir / "test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+def test_verifier_refreshes_adc_token_on_401_via_gcloud_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify verifier template refreshes ADC token in-process via gcloud CLI fallback upon HTTP 401."""
+    import io
+    import subprocess
+    import urllib.error
 
-        out_dir = tmp_path / f"out-bad-{idx}"
-        with pytest.raises(ValueError, match="case id"):
-            stage_native_harbor_tasks(skill_dir, out_dir, grading_mode="custom_only")
-        assert not out_dir.exists()
+    verifier = _load_verifier_template()
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/test-p/locations/global/endpoints/openapi"
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_BASE_URL", base_url)
+    monkeypatch.setenv("OPENAI_API_KEY", "expired-initial-token")
+    monkeypatch.setenv("SKILL_EVAL_LLM_CREDENTIAL_SOURCE", "ADC")
+    monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "google/gemini-3.8-flash")
 
-    # 2. Duplicate metadata.entry_id across two distinct physical task directories
-    dup_skill = tmp_path / "dup-skill"
-    dup_skill.mkdir()
-    (dup_skill / "SKILL.md").write_text("# Dup Skill\n", encoding="utf-8")
-    for folder in ("physical-a", "physical-b"):
-        task_dir = dup_skill / "evals" / "harbor" / folder
-        task_dir.mkdir(parents=True)
-        (task_dir / "instruction.md").write_text("Instruction\n", encoding="utf-8")
-        (task_dir / "task.toml").write_text(
-            '[metadata]\nentry_id = "shared-authored-id"\n\n[task]\nname = "nvidia/task"\n',
-            encoding="utf-8",
-        )
-        tests_dir = task_dir / "tests"
-        tests_dir.mkdir()
-        (tests_dir / "test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    # Simulate gcloud available and returning refreshed token
+    monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/gcloud" if cmd == "gcloud" else None)
 
-    dup_out = tmp_path / "out-dup"
-    with pytest.raises(ValueError, match=r"duplicate or cross-platform colliding case id.*shared-authored-id"):
-        stage_native_harbor_tasks(dup_skill, dup_out, grading_mode="custom_only")
-    assert not dup_out.exists()
+    def mock_subprocess_run(args, **kwargs):
+        if args[0] == "/usr/bin/gcloud" and "print-access-token" in args:
+            return subprocess.CompletedProcess(args, returncode=0, stdout="refreshed-gcloud-token\n", stderr="")
+        return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", mock_subprocess_run)
+
+    attempts: list[str] = []
+
+    def mock_urlopen(request, timeout=90):
+        url = getattr(request, "full_url", str(request))
+        if "169.254.169.254" in url:
+            # Metadata server unavailable outside GCE/GKE
+            raise urllib.error.URLError("Network is unreachable")
+
+        auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
+        attempts.append(auth_header)
+        if auth_header == "Bearer expired-initial-token":
+            raise urllib.error.HTTPError(
+                url=request.full_url,
+                code=401,
+                msg="Unauthorized",
+                hdrs={},
+                fp=io.BytesIO(b'{"error": {"message": "Token expired"}}'),
+            )
+        if auth_header == "Bearer refreshed-gcloud-token":
+            resp = Mock()
+            resp.read.return_value = json.dumps(
+                {"choices": [{"message": {"content": "grading verdict from gcloud token"}}]}
+            ).encode("utf-8")
+            resp.__enter__ = Mock(return_value=resp)
+            resp.__exit__ = Mock(return_value=False)
+            return resp
+        raise RuntimeError(f"Unexpected auth header: {auth_header}")
+
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", mock_urlopen)
+
+    content, error, _provenance = verifier._call_public_llm_with_provenance(
+        "Evaluate this trajectory",
+        allow_model_fallback=False,
+    )
+
+    assert error is None
+    assert content == "grading verdict from gcloud token"
+    assert attempts == ["Bearer expired-initial-token", "Bearer refreshed-gcloud-token"]
+    assert verifier.os.environ.get("OPENAI_API_KEY") == "refreshed-gcloud-token"
 
 
-def test_native_harbor_metadata_entry_id_seam_across_runner_collector_and_dataset_snapshot(
-    tmp_path: Path,
+def test_verifier_401_does_not_switch_principals_for_explicit_vertex_credential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify native custom-only tasks with [metadata].entry_id != directory name align across runner, collector, and dataset_snapshot.json."""
-    from skillevaluator.provider_config import ProviderConfig
-    from skillevaluator.tier3.harbor import runner, runtime_preflight
+    """Do not replace an explicitly supplied Vertex OpenAPI token with ambient ADC on HTTP 401."""
+    import io
+    import urllib.error
 
-    skill_dir = tmp_path / "target-skill"
-    skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text("---\nname: target-skill\ndescription: demo\n---\n# Body\n", encoding="utf-8")
-    (skill_dir / "evals").mkdir()
-    (skill_dir / "evals" / "config.yaml").write_text(
-        "schema_version: 1\nharbor:\n  task_source: native_harbor\ngrading:\n  mode: custom_only\n",
-        encoding="utf-8",
-    )
-    for folder, authored_entry_id in (("physical-case", '"authored-entry"'), ("zero-case", "0")):
-        task_dir = skill_dir / "evals" / "harbor" / folder
-        task_dir.mkdir(parents=True)
-        (task_dir / "instruction.md").write_text("Solve the task.\n", encoding="utf-8")
-        (task_dir / "task.toml").write_text(
-            f'schema_version = "1.3"\n\n[metadata]\nentry_id = {authored_entry_id}\n\n'
-            f'[task]\nname = "nvidia/{folder}"\n\n[environment]\n',
-            encoding="utf-8",
-        )
-        tests_dir = task_dir / "tests"
-        tests_dir.mkdir()
-        (tests_dir / "test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    verifier = _load_verifier_template()
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/test-p/locations/global/endpoints/openapi"
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_BASE_URL", base_url)
+    monkeypatch.setenv("OPENAI_API_KEY", "explicit-operator-token")
+    monkeypatch.delenv("SKILL_EVAL_LLM_CREDENTIAL_SOURCE", raising=False)
+    monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "google/gemini-3.8-flash")
 
-    output_dir = tmp_path / "eval-out"
-    provider = ProviderConfig(
-        provider="nv_build",
-        model="nvidia/nemotron-3-nano-30b-a3b",
-        api_key="nvapi-test",
-        base_url="https://integrate.api.nvidia.com/v1",
-        litellm_model="nvidia_nim/nvidia/nemotron-3-nano-30b-a3b",
-    )
-    monkeypatch.setattr(runner, "resolve_llm_provider", lambda: provider)
-    monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kwargs: [])
-    monkeypatch.setattr(
-        runtime_preflight,
-        "probe_model",
-        lambda selected_provider: runtime_preflight.ModelProbeResult(
-            True,
-            selected_provider.provider,
-            selected_provider.model,
-            "ok",
-        ),
-    )
+    refresh_called = False
 
-    seen_include_task_names: list[list[str] | None] = []
+    def mock_get_token(**_kw):
+        nonlocal refresh_called
+        refresh_called = True
+        return "ambient-adc-token"
 
-    def fake_run_harbor(
-        *,
-        dataset: Path,
-        agent: str,
-        job_name: str,
-        env_mode: str,
-        model: str,
-        jobs_dir: Path,
-        run_env: dict[str, str],
-        n_attempts: int,
-        n_concurrent: int,
-        timeout_multiplier: float,
-        override_cpus: int | None,
-        override_memory_mb: int | None,
-        override_storage_mb: int | None,
-        expected_trials: int,
-        agent_import_path: str | None = None,
-        verifier_env: object = None,
-        include_task_names: list[str] | None = None,
-        environment_kwargs: object = None,
-    ) -> tuple[bool, str]:
-        from datetime import UTC, datetime
-        from uuid import uuid4
+    monkeypatch.setattr(verifier, "_get_vertex_access_token", mock_get_token)
 
-        from harbor.models.job.result import JobResult, JobStats
-        from harbor.models.trial.result import TrialResult
-
-        seen_include_task_names.append(include_task_names)
-        job_dir = jobs_dir / job_name
-        is_with = "-with-" in job_name or job_name.endswith("-with")
-        arm_suffix = "-with-skill" if is_with else "-without-skill"
-        selected_folders = include_task_names or ["physical-case", "zero-case"]
-        now = datetime(2026, 9, 12, tzinfo=UTC)
-        trial_results: list[TrialResult] = []
-        for idx, folder in enumerate(selected_folders, start=1):
-            trial_name = f"trial-{idx}-{folder}__attempt1"
-            trial_dir = job_dir / trial_name
-            trial_dir.mkdir(parents=True, exist_ok=True)
-            # Harbor persists the staged task path, while task_name carries the
-            # suffixed display name; only the runner's selector map may turn the
-            # staged directory into the authored [metadata].entry_id.
-            task_path = str(dataset / folder)
-            trial_result = TrialResult.model_validate(
-                {
-                    "id": uuid4(),
-                    "task_name": f"nvidia/{folder}{arm_suffix}_attempt1",
-                    "trial_name": trial_name,
-                    "trial_uri": trial_dir.as_uri(),
-                    "task_id": {"path": task_path},
-                    "task_checksum": "native-entry-id-seam-fixture",
-                    "config": {"task": {"path": task_path}, "trial_name": trial_name, "trials_dir": str(job_dir)},
-                    "agent_info": {"name": agent, "version": "test", "model_info": {"name": "test-model"}},
-                    "agent_result": {},
-                    "verifier_result": {"rewards": {"reward": 1.0 if is_with else 0.25}},
-                    "started_at": now,
-                    "finished_at": now,
-                }
-            )
-            (trial_dir / "result.json").write_text(trial_result.model_dump_json(indent=2), encoding="utf-8")
-            (trial_dir / "config.json").write_text(trial_result.config.model_dump_json(indent=2), encoding="utf-8")
-            trial_results.append(trial_result)
-        job_result = JobResult(
-            id=uuid4(),
-            started_at=now,
-            updated_at=now,
-            finished_at=now,
-            n_total_trials=len(trial_results),
-            stats=JobStats.from_trial_results(trial_results, n_total_trials=len(trial_results)),
-            trial_results=[],
-        )
-        (job_dir / "result.json").write_text(job_result.model_dump_json(indent=2), encoding="utf-8")
-        return True, ""
-
-    monkeypatch.setattr(runner, "_run_harbor", fake_run_harbor)
-
-    results = runner.run_harbor_eval(
-        skill_path=skill_dir,
-        agents=["opencode"],
-        output_dir=output_dir,
-        env_mode="docker",
-        n_attempts=2,
-        stop_on_pass=True,
-        agent_runtime_preflight=False,
-    )
-
-    assert results["execution_status"] == "succeeded"
-    # stop_on_pass passes physical task directory names to Harbor CLI --include-task-name
-    # With-skill passes on attempt 1 (1.0 >= 0.50), baseline runs 2 attempts per task (0.25 < 0.50)
-    assert seen_include_task_names == [
-        ["physical-case"],
-        ["zero-case"],
-        ["physical-case"],
-        ["physical-case"],
-        ["zero-case"],
-        ["zero-case"],
-    ]
-
-    agent_res = results["agents"]["opencode"]
-    assert set(agent_res["pass_at_k"]["with_skill"]["cases"]) == {"authored-entry", "0"}
-    assert set(agent_res["pass_at_k"]["without_skill"]["cases"]) == {"authored-entry", "0"}
-    assert agent_res["pass_at_k"]["with_skill"]["cases"]["authored-entry"]["best_score"] == 1.0
-    assert agent_res["pass_at_k"]["without_skill"]["cases"]["authored-entry"]["best_score"] == 0.25
-
-    run_dir = Path(results["run_dir"])
-    snapshot = json.loads((run_dir / "dataset_snapshot.json").read_text(encoding="utf-8"))
-    assert snapshot["dataset"] == [{"id": "authored-entry"}, {"id": "0"}]
-
-
-def test_stage_native_harbor_tasks_type_safety(tmp_path: Path) -> None:
-    """Verify that native staging functions reject non-string arm_suffix values."""
-    skill_dir = tmp_path / "target-skill"
-    skill_dir.mkdir()
-
-    with pytest.raises(TypeError, match="arm_suffix must be a string"):
-        stage_native_harbor_tasks(skill_dir, tmp_path / "err", arm_suffix=123)  # type: ignore[arg-type]
-
-    with pytest.raises(TypeError, match="arm_suffix must be a string"):
-        _stage_native_harbor_tasks_into(
-            skill_dir,
-            tmp_path / "err",
-            evaluator_skill_path=skill_dir,
-            arm_suffix=123,  # type: ignore[arg-type]
+    def mock_urlopen(request, timeout=90):
+        raise urllib.error.HTTPError(
+            url=request.full_url,
+            code=401,
+            msg="Unauthorized",
+            hdrs={},
+            fp=io.BytesIO(b'{"error": "Explicit token rejected"}'),
         )
 
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", mock_urlopen)
 
-def test_generate_harbor_tasks_dual_arm_suffix(tmp_path: Path) -> None:
-    """Verify that generate_harbor_tasks propagates arm suffix into task.toml name."""
-    skill_dir = tmp_path / "gen-skill"
-    skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text("# Gen Skill\n", encoding="utf-8")
-    evals_dir = skill_dir / "evals"
-    evals_dir.mkdir()
-    (evals_dir / "evals.json").write_text(
-        json.dumps([{"id": "case-001", "prompt": "test prompt"}]),
-        encoding="utf-8",
+    content, error, _provenance = verifier._call_public_llm_with_provenance(
+        "Evaluate this trajectory",
+        allow_model_fallback=False,
     )
 
-    out = tmp_path / "gen_out"
-    staged = generate_harbor_tasks(skill_dir, out, arm_suffix="-with-skill")[0]
-    task = tomllib.loads((staged / "task.toml").read_text(encoding="utf-8"))
-    assert task["task"]["name"] == "nvidia/skillevaluator-case-001-with-skill"
+    assert content is None
+    assert error is not None
+    assert "401" in error or "Unauthorized" in error
+    assert refresh_called is False
+    assert verifier.os.environ.get("OPENAI_API_KEY") == "explicit-operator-token"
 
-    with pytest.raises(TypeError, match="arm_suffix must be a string"):
-        generate_harbor_tasks(skill_dir, tmp_path / "err", arm_suffix=123)  # type: ignore[arg-type]
 
-    with pytest.raises(TypeError, match="arm_suffix must be a string"):
-        _generate_harbor_tasks_into(
-            skill_dir,
-            tmp_path / "err",
-            evaluator_skill_path=skill_dir,
-            arm_suffix=123,  # type: ignore[arg-type]
+def test_verifier_401_does_not_retry_non_vertex_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify verifier template does not attempt ADC refresh on HTTP 401 for non-Vertex endpoints."""
+    import io
+    import urllib.error
+
+    verifier = _load_verifier_template()
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "invalid-key")
+    monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "gpt-4o")
+
+    refresh_called = False
+
+    def mock_get_token(**_kw):
+        nonlocal refresh_called
+        refresh_called = True
+        return "some-token"
+
+    monkeypatch.setattr(verifier, "_get_vertex_access_token", mock_get_token)
+
+    def mock_urlopen(request, timeout=90):
+        raise urllib.error.HTTPError(
+            url=request.full_url,
+            code=401,
+            msg="Unauthorized",
+            hdrs={},
+            fp=io.BytesIO(b'{"error": "Invalid API key"}'),
         )
 
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", mock_urlopen)
 
-def test_write_task_toml_forwards_retry_env(tmp_path: Path) -> None:
-    """Verify that _write_task_toml stages LLM retry variables into [verifier.env]."""
-    case_dir = tmp_path / "case"
-    case_dir.mkdir()
-    runtime_env = {
-        "SKILL_EVAL_LLM_MAX_RETRIES": "5",
-        "SKILL_EVAL_LLM_RETRY_BASE_DELAY": "2.0",
-        "SKILL_EVAL_LLM_RETRY_MAX_DELAY": "40.0",
-        "UNRELATED_CUSTOM_VAR": "secret",
-    }
-    _write_task_toml(
-        case_dir,
-        {"id": "case-001", "expected_skill": "demo"},
-        has_skill=True,
-        runtime_env=runtime_env,
-    )
-    task = tomllib.loads((case_dir / "task.toml").read_text(encoding="utf-8"))
-    verifier_env = task["verifier"]["env"]
-    assert verifier_env["SKILL_EVAL_LLM_MAX_RETRIES"] == "${SKILL_EVAL_LLM_MAX_RETRIES}"
-    assert verifier_env["SKILL_EVAL_LLM_RETRY_BASE_DELAY"] == "${SKILL_EVAL_LLM_RETRY_BASE_DELAY}"
-    assert verifier_env["SKILL_EVAL_LLM_RETRY_MAX_DELAY"] == "${SKILL_EVAL_LLM_RETRY_MAX_DELAY}"
-    assert "UNRELATED_CUSTOM_VAR" not in verifier_env
-
-
-@pytest.mark.parametrize(
-    ("env_mode", "agent_import_path"),
-    [
-        ("docker", None),
-        ("docker", "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex"),
-        ("local", None),
-        ("e2b", None),
-        ("daytona", "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayCodex"),
-    ],
-)
-def test_codex_runs_pin_harbor_022_reasoning_effort_and_cli_version(
-    env_mode: str, agent_import_path: str | None
-) -> None:
-    command = build_harbor_run_command(
-        dataset_path="/tmp/dataset",
-        agent="codex",
-        job_name="effort",
-        env_mode=env_mode,
-        agent_import_path=agent_import_path,
+    content, error, _provenance = verifier._call_public_llm_with_provenance(
+        "Evaluate this trajectory",
+        allow_model_fallback=False,
     )
 
-    # Local mode runs the installed CLI, so only Harbor-installed runs pin a version.
-    expected = (
-        {"reasoning_effort": "high"} if env_mode == "local" else {"reasoning_effort": "high", "version": "0.161.0"}
-    )
-    assert _harbor_agent_kwargs(command) == expected
-
-
-def _harbor_agent_kwargs(command: list[str]) -> dict[str, object]:
-    from harbor.cli.utils import parse_kwargs
-
-    return parse_kwargs([command[index + 1] for index, value in enumerate(command) if value == "--ak"])
-
-
-@pytest.mark.parametrize(
-    ("model", "expected"),
-    [
-        (None, {"version": "2.1.292"}),
-        ("claude-opus-5", {"version": "2.1.292"}),
-        ("us.anthropic.claude-opus-5", {"version": "2.1.292"}),
-        ("aws/anthropic/bedrock-claude-opus-5", {"version": "2.1.292"}),
-        ("claude-opus-5-5", {"reasoning_effort": "medium", "version": "2.1.292"}),
-        ("us.anthropic.claude-opus-5-5", {"reasoning_effort": "medium", "version": "2.1.292"}),
-        ("aws/anthropic/bedrock-claude-opus-5-5", {"reasoning_effort": "medium", "version": "2.1.292"}),
-        ("anthropic/claude-sonnet-5-5-20261001", {"reasoning_effort": "medium", "version": "2.1.292"}),
-    ],
-)
-def test_claude_code_runs_pin_cli_version_and_claude_5_5_effort(model: str | None, expected: dict[str, str]) -> None:
-    command = build_harbor_run_command(
-        dataset_path="/tmp/dataset", agent="claude-code", job_name="effort", env_mode="docker", model=model
-    )
-
-    assert _harbor_agent_kwargs(command) == expected
-
-
-def test_local_claude_code_runs_keep_effort_without_a_cli_version() -> None:
-    command = build_harbor_run_command(
-        dataset_path="/tmp/dataset", agent="claude-code", job_name="effort", env_mode="local", model="claude-opus-5-5"
-    )
-
-    assert _harbor_agent_kwargs(command) == {"reasoning_effort": "medium"}
-
-
-def test_documented_agent_cli_versions_match_the_pins() -> None:
-    from skillevaluator.tier3.harbor import local_agents, runner
-
-    docs = Path(__file__).resolve().parents[1] / "docs"
-    pages = {
-        page: " ".join((docs / page).read_text(encoding="utf-8").split())
-        for page in ("agents-and-sandboxes.mdx", "tier3-live-evaluation.mdx")
-    }
-    for page, text in pages.items():
-        assert f"Codex {runner._CODEX_VERSION}" in text, page
-        assert f"Claude Code {runner._CLAUDE_CODE_VERSION}" in text, page
-    for name, minimum in (
-        ("Claude Code", local_agents._CLAUDE_CODE_MIN_VERSION_FOR_CLAUDE_5_5),
-        ("Codex", local_agents._CODEX_MIN_VERSION_FOR_GPT_6),
-    ):
-        assert f"{name} {'.'.join(map(str, minimum))} or newer" in pages["agents-and-sandboxes.mdx"]
-
-
-def test_opencode_runs_pass_no_agent_kwargs() -> None:
-    command = build_harbor_run_command(
-        dataset_path="/tmp/dataset",
-        agent="opencode",
-        job_name="effort",
-        env_mode="docker",
-        model="anthropic/claude-opus-5-5",
-    )
-
-    assert "--ak" not in command
-
-
-def test_codex_agents_render_the_pinned_reasoning_effort(tmp_path: Path) -> None:
-    from harbor.agents.installed.codex import Codex
-
-    from skillevaluator.tier3.harbor import local_agents
-
-    for agent_class in (
-        Codex,
-        local_agents.SkillEvaluatorGatewayCodex,
-        local_agents.SkillEvaluatorLocalCodex,
-        local_agents.SkillEvaluatorNvidiaBuildCodex,
-    ):
-        agent = agent_class(logs_dir=tmp_path, model_name="openai/gpt-5", reasoning_effort="high")
-        assert "-c model_reasoning_effort=high" in agent.build_cli_flags(), agent_class.__name__
-
-
-def test_claude_code_agents_accept_the_pinned_version_and_effort(tmp_path: Path) -> None:
-    from harbor.agents.installed.claude_code import ClaudeCode
-
-    from skillevaluator.tier3.harbor import local_agents
-
-    for agent_class in (
-        ClaudeCode,
-        local_agents.SkillEvaluatorLocalClaudeCode,
-        local_agents.SkillEvaluatorNvidiaBuildClaudeCode,
-        local_agents.SkillEvaluatorLocalNvidiaBuildClaudeCode,
-    ):
-        agent = agent_class(
-            logs_dir=tmp_path, model_name="anthropic/claude-opus-5-5", reasoning_effort="medium", version="2.1.292"
-        )
-        assert "--effort medium" in agent.build_cli_flags(), agent_class.__name__
-        assert agent.version() == "2.1.292", agent_class.__name__
+    assert content is None
+    assert error is not None
+    assert "401" in error or "Unauthorized" in error
+    assert refresh_called is False

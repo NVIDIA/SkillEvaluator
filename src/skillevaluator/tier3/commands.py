@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import tomllib
 import webbrowser
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,7 @@ from skillevaluator.tier3.harbor.runner import (
     _harbor_launch_environment,
     _model_for_agent,
     _resolve_agent_runtime_plan,
+    _resolve_environment_kwargs,
     run_harbor_eval,
 )
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
@@ -401,6 +403,28 @@ def parse_agent_model_overrides(raw_overrides: tuple[str, ...]) -> dict[str, lis
     return overrides
 
 
+def parse_environment_kwargs(raw_kwargs: tuple[str, ...]) -> dict[str, str]:
+    """Parse repeatable ``--ek key=value`` CLI pairs."""
+    from skillevaluator.tier3.harbor.runner import _SENSITIVE_EK_VALUE_PATTERNS, _is_sensitive_ek_key
+
+    parsed: dict[str, str] = {}
+    for raw in raw_kwargs:
+        if "=" not in raw:
+            raise ValueError(f"--ek/--environment-kwarg must be in KEY=VALUE form, got: {raw}")
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise ValueError(f"--ek/--environment-kwarg key cannot be empty, got: {raw}")
+        if _is_sensitive_ek_key(key) or any(pattern.search(value) for pattern in _SENSITIVE_EK_VALUE_PATTERNS):
+            raise ValueError(
+                f"Sensitive key or value detected in environment_kwargs: {key}. "
+                "Credentials must not be passed via CLI flags or process arguments."
+            )
+        parsed[key] = value
+    return parsed
+
+
 def validate_agents(agents: list[str]) -> list[str]:
     """Return unsupported agent names."""
     return [agent for agent in agents if agent not in HARBOR_AGENTS]
@@ -669,6 +693,7 @@ def evaluate(
     repo_context_exclude_paths: tuple[Path, ...] = (),
     evaluated_source: dict[str, str] | None = None,
     progress_reporter: ProgressReporter | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run Harbor live-agent evaluation for a skill."""
     env_mode = _engine_env_mode(env_mode)
@@ -752,6 +777,7 @@ def evaluate(
             override_storage_mb=override_storage_mb,
             repo_context_exclude_paths=repo_context_exclude_paths,
             progress_reporter=reporter,
+            environment_kwargs=environment_kwargs,
         )
     except Exception as exc:
         if not engine_started:
@@ -768,6 +794,7 @@ def doctor(
     environment_kwarg: tuple[str, ...] = (),
     verify_models: bool = False,
     agent_model: tuple[str, ...] = (),
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> int:
     """Check whether live evaluation dependencies are available."""
     env_mode = _engine_env_mode(env_mode)
@@ -775,6 +802,11 @@ def doctor(
     rows: list[tuple[str, str, str]] = []
     rows.append(("CLI package", "pass", f"skillevaluator {__version__}"))
 
+    resolved_env_kwargs = _resolve_environment_kwargs(
+        env_mode,
+        cli_kwargs=environment_kwargs,
+        environ=os.environ,
+    )
     provider = None
     model_resolution: dict[str, tuple[str, str]] = {}
     runtime_plans: dict[str, Any] = {}
@@ -819,6 +851,7 @@ def doctor(
                     configured_runtime_env={},
                     env_mode=env_mode,
                     model_sources={agent: details[1] for agent, details in model_resolution.items()},
+                    environment_kwargs=resolved_env_kwargs,
                 )
             except ValueError as exc:
                 plan_error = str(exc)
@@ -846,21 +879,12 @@ def doctor(
     else:
         rows.append(("Harbor agents", "pass", ", ".join(agent_list)))
 
-    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
-
-    try:
-        environment_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
-    except ValueError as exc:
-        environment_kwargs = {}
-        prereq_errors = [str(exc)]
-    else:
-        prerequisite_subprocess_env = dict(next(iter(runtime_plans.values())).subprocess_env) if runtime_plans else None
-        prereq_errors = _check_prerequisites(
-            env_mode=env_mode,
-            agents=agent_list,
-            environment_kwargs=environment_kwargs,
-            subprocess_env=prerequisite_subprocess_env,
-        )
+    prereq_errors = _check_prerequisites(
+        env_mode=env_mode,
+        agents=agent_list,
+        environment_kwargs=resolved_env_kwargs,
+        verify_live_cluster=verify_models,
+    )
     if prereq_errors:
         for error in prereq_errors:
             rows.append((f"{env_mode} prerequisite", "fail", error))
@@ -871,8 +895,13 @@ def doctor(
         if provider is None or not runtime_plans:
             rows.append(("provider model", "fail", "provider model resolution was unavailable"))
         else:
+            from skillevaluator.tier3.harbor.gke_environment import (
+                GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL,
+            )
             from skillevaluator.tier3.harbor.runtime_preflight import (
                 CredentialProbeDisposition,
+                ModelCatalogFailureKind,
+                _is_vertex_openapi_endpoint,
                 credential_probe_disposition,
                 probe_model,
             )
@@ -880,15 +909,26 @@ def doctor(
             for agent in agent_list:
                 selected_provider = runtime_plans[agent].provider
                 probe = probe_model(selected_provider)
-                disposition = credential_probe_disposition(selected_provider, probe)
+                disposition = credential_probe_disposition(selected_provider, probe, env_mode=env_mode)
                 if disposition == CredentialProbeDisposition.FATAL:
                     status = "fail"
                     detail = probe.detail
                 elif disposition == CredentialProbeDisposition.DEGRADED:
                     status = "warn"
-                    detail = probe.detail
-                    if probe.ok:
-                        detail = f"{detail}; catalog access does not verify runtime credentials for this endpoint"
+                    is_vertex = (
+                        _is_vertex_openapi_endpoint(getattr(selected_provider, "base_url", None))
+                        or getattr(selected_provider, "credential_env", None) == "CLAUDE_CODE_USE_VERTEX"
+                    )
+                    is_auth_failure = getattr(probe, "failure_kind", None) in {
+                        ModelCatalogFailureKind.AUTHENTICATION,
+                        ModelCatalogFailureKind.AUTHORIZATION,
+                    }
+                    if not probe.ok and env_mode == "gke" and is_vertex and is_auth_failure:
+                        detail = GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL
+                    elif probe.ok:
+                        detail = f"{probe.detail}; catalog access does not verify runtime credentials for this endpoint"
+                    else:
+                        detail = probe.detail
                 else:
                     status = "pass"
                     detail = probe.detail
@@ -1380,6 +1420,7 @@ __all__ = [
     "init_custom_grader",
     "init_harbor_task",
     "parse_agents",
+    "parse_environment_kwargs",
     "validate_evals",
     "view_results",
 ]

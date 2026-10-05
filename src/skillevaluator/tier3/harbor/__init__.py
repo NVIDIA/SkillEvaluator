@@ -31,6 +31,7 @@ LOCAL_AGENT_IMPORT_PATHS = {
     "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalCodex",
     "opencode": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalOpenCode",
 }
+from skillevaluator.tier3.harbor.local_agents import CONTAINER_AGENT_IMPORT_PATHS
 
 # Docker wrappers retain Harbor's installers while avoiding redundant Node/npm
 # packages on the branches that bootstrap their own runtime.
@@ -66,6 +67,7 @@ def canonical_agent_name(agent: str) -> str:
 
 __all__ = [
     "AGENT_ALIASES",
+    "CONTAINER_AGENT_IMPORT_PATHS",
     "DEFAULT_ENV_MODE",
     "DEFAULT_LLM_VERIFIER_TIMEOUT_SEC",
     "DOCKER_AGENT_IMPORT_PATHS",

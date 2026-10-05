@@ -2556,131 +2556,14 @@ def dedup_scan(
         raise click.ClickException("dedup scan failed")
 
 
-def _workflow_report_options(func):
-    func = _report_options(func)
-    for param in func.__click_params__:
-        if param.name == "report_formats":
-            param.default = ("cli", "json", "html")
-            param.help = "Report formats; repeat -r or separate values with commas."
-    return func
-
-
-@click.command(cls=cli.command_class, context_settings=CONTEXT_SETTINGS)
-@click.argument("skill_path", metavar="PATH", type=click.Path(exists=True, file_okay=False, path_type=Path))
-@click.option("--checks", default=None, help="Select static checks; by default all checks include dependency auditing.")
-@click.option(
-    "--llm/--no-llm", default=None, help="Include rubric, LLM security, and verification [default: when configured]."
-)
-@click.option("--min-score", type=click.IntRange(0, 100), default=70, show_default=True)
-@click.option("--profile", default=None, help="Validation policy profile [default: external].")
-@click.option("--previous-version", default=None, help="Previous version for version checks.")
-@_workflow_report_options
-def _tier1_workflow(
-    skill_path: Path,
-    checks: str | None,
-    llm: bool | None,
-    min_score: int,
-    profile: str | None,
-    previous_version: str | None,
-    report_formats: tuple[str, ...],
-    output_dir: Path,
-) -> None:
-    """Run Tier 1 static checks and configured LLM checks for one skill."""
-    from skillevaluator.tier_workflows import run_tier1_workflow
-    from skillevaluator.validators.policy import resolve_policy
+def _parse_environment_kwargs_cli(raw_kwargs: tuple[str, ...]) -> dict[str, str]:
+    """Parse and validate environment kwargs for CLI commands, raising Click BadParameter on errors."""
+    from skillevaluator.tier3.commands import parse_environment_kwargs
 
     try:
-        policy = resolve_policy(profile=profile)
-    except (FileNotFoundError, ValueError) as exc:
-        raise click.ClickException(str(exc)) from exc
-    results = run_tier1_workflow(
-        skill_path,
-        checks=checks,
-        llm=llm,
-        min_score=min_score,
-        profile=policy,
-        previous_version=previous_version,
-    )
-    # Resolved after the run so configuration errors still leave no output.
-    output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
-    if not emit_reports(
-        results,
-        report_formats=report_formats,
-        output_dir=output_dir,
-        basename=report_basename("tier1"),
-        policy=policy,
-        target_path=str(skill_path),
-    ):
-        raise click.ClickException("Tier 1 checks failed or were incomplete")
-
-
-@click.command(cls=cli.command_class, context_settings=CONTEXT_SETTINGS)
-@click.argument("skill_path", metavar="PATH", type=click.Path(exists=True, file_okay=False, path_type=Path))
-@click.option(
-    "--catalog",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    default=None,
-    help="Saved JSON catalog for inter-skill comparison.",
-)
-@click.option(
-    "--threshold",
-    type=float,
-    default=0.80,
-    show_default=True,
-    callback=_validate_similarity_threshold,
-    help="Intra-skill similarity threshold.",
-)
-@click.option(
-    "--similarity-threshold",
-    type=float,
-    default=0.75,
-    show_default=True,
-    callback=_validate_similarity_threshold,
-    help="Inter-skill similarity threshold.",
-)
-@click.option("--full-body", is_flag=True, help="Compare full SKILL.md content against a full-body catalog.")
-@_workflow_report_options
-def _tier2_workflow(
-    skill_path: Path,
-    catalog: Path | None,
-    threshold: float,
-    similarity_threshold: float,
-    full_body: bool,
-    report_formats: tuple[str, ...],
-    output_dir: Path,
-) -> None:
-    """Run intra-skill deduplication and optional inter-skill catalog comparison."""
-    from skillevaluator.tier_workflows import run_tier2_workflow
-
-    _reject_linked_tier2_root(skill_path)
-    basename = report_basename("tier2")
-    _reject_catalog_report_collisions(catalog, report_formats=report_formats, output_dir=output_dir, basename=basename)
-    results = run_tier2_workflow(
-        skill_path,
-        catalog=catalog,
-        threshold=threshold,
-        similarity_threshold=similarity_threshold,
-        full_body=full_body,
-    )
-    sanitize_tier2_results(results, skill_path, catalog)
-    # Resolved after the run so configuration errors still leave no output; a
-    # relocated directory gets the same catalog-collision check before writing.
-    resolved_output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
-    if resolved_output_dir != output_dir:
-        _reject_catalog_report_collisions(
-            catalog,
-            report_formats=report_formats,
-            output_dir=resolved_output_dir,
-            basename=basename,
-        )
-    if not emit_reports(
-        results,
-        report_formats=report_formats,
-        output_dir=resolved_output_dir,
-        basename=basename,
-        target_path=str(skill_path),
-    ):
-        raise click.ClickException("Tier 2 checks failed or were incomplete")
+        return parse_environment_kwargs(raw_kwargs)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint=["--ek"]) from exc
 
 
 # Hidden top-level spelling of ``tier3 evaluate`` — kept working for scripts,
@@ -2760,6 +2643,13 @@ def _tier2_workflow(
     show_default=True,
     help="Tier 3 progress presentation (auto uses Rich on a TTY and plain lines otherwise).",
 )
+@click.option(
+    "--ek",
+    "--environment-kwarg",
+    "environment_kwargs",
+    multiple=True,
+    help="Environment kwarg override in KEY=VALUE form (repeatable).",
+)
 def evaluate(
     skill_path: Path,
     agents: str | None,
@@ -2790,6 +2680,7 @@ def evaluate(
     evaluated_source_revision: str | None,
     evaluator_container_revision: str | None,
     progress: str,
+    environment_kwargs: tuple[str, ...] = (),
 ) -> None:
     """Run Tier 3 live agent evaluation."""
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
@@ -2805,6 +2696,8 @@ def evaluate(
     )
     if autopilot:
         _ensure_autopilot_dataset(skill_path, progress=progress)
+
+    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwargs)
 
     options = EvaluationOptions(
         skill_path=skill_path,
@@ -2831,7 +2724,7 @@ def evaluate(
         override_cpus=override_cpus,
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
-        evaluated_source=evaluated_source,
+        environment_kwargs=parsed_environment_kwargs,
     )
     try:
         if env_mode == "local":
@@ -2850,6 +2743,31 @@ def evaluate(
                     padding=(0, 1),
                 )
             )
+        elif env_mode == "gke":
+            from skillevaluator.tier3.commands import parse_agents
+            from skillevaluator.tier3.harbor.runner import (
+                is_gke_vertex_workload_identity_active,
+                is_gke_workload_identity_allowed,
+            )
+
+            if is_gke_vertex_workload_identity_active(
+                env_mode, parse_agents(agents)
+            ) and is_gke_workload_identity_allowed(options.environment_kwargs):
+                from rich.panel import Panel
+                from rich.text import Text
+
+                console.print(
+                    Panel(
+                        Text(
+                            "Intended for trusted skills and least-privilege service accounts. Harbor 0.13.2 single-pod "
+                            "GKE execution shares the pod service account and metadata server with evaluated skill commands.",
+                            style="yellow",
+                        ),
+                        title=Text("GKE Workload Identity · Trusted Skills Only", style="bold cyan"),
+                        border_style="yellow",
+                        padding=(0, 1),
+                    )
+                )
         progress_reporter = create_progress_reporter(progress, stream=click.get_text_stream("stderr"))
         engine_result = service.evaluate(options, progress_reporter=progress_reporter)
         failure = service.failure_reason(engine_result)
@@ -3035,16 +2953,24 @@ def models_command(limit: int, as_json: bool) -> None:
     is_flag=True,
     help="Check resolved agent-model catalog reachability with a live credential-bearing request.",
 )
+@click.option(
+    "--ek",
+    "--environment-kwarg",
+    "environment_kwargs",
+    multiple=True,
+    help="Environment kwarg override in KEY=VALUE form (repeatable).",
+)
 def doctor(
-    agents: str | None,
+    agents: str,
     env_mode: str,
-    environment_kwarg: tuple[str, ...],
     agent_model: tuple[str, ...],
     verify_models: bool,
+    environment_kwargs: tuple[str, ...] = (),
 ) -> None:
     """Check live-evaluation runtime readiness."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
+    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwargs)
     raise SystemExit(
         tier3_doctor(
             agents=agents,
@@ -3052,6 +2978,7 @@ def doctor(
             environment_kwarg=environment_kwarg,
             verify_models=verify_models,
             agent_model=agent_model,
+            environment_kwargs=parsed_environment_kwargs,
         )
     )
 
@@ -3078,9 +3005,9 @@ def health_check(agents: str | None, env_mode: str, environment_kwarg: tuple[str
         tier3_doctor(
             agents=agents,
             env_mode=env_mode,
-            environment_kwarg=environment_kwarg,
             verify_models=False,
             agent_model=(),
+            environment_kwargs={},
         )
     )
 

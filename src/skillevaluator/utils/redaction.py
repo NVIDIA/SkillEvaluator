@@ -15,9 +15,14 @@ _SECRET_KEY_PARTS = {
     "auth",
     "authorization",
     "bearer",
+    "cert",
+    "certificate",
+    "cookie",
     "credential",
     "credentials",
     "key",
+    "oauth",
+    "passphrase",
     "password",
     "private",
     "secret",
@@ -73,13 +78,9 @@ _SENSITIVE_KEY_WORD = (
     r"access[_-]?key|session[_-]?token|private[_-]?key)"
 )
 _SENSITIVE_KEY_PATTERN = (
-    rf"(?<!{_SENSITIVE_KEY_CHAR})"
-    # ``lead`` is empty when the run starts at a word boundary. Otherwise the first
-    # boundary follows the run's leading [.-] characters ("--api-key"), or its
-    # leading [a-z0-9_] characters when the run is glued to a word character that
-    # is not a key character ("é" in "étoken.secret").
-    r"(?P<lead>\b|(?<=\w)[a-z0-9_]++(?=[.-])|(?<!\w)[.-]++(?=[a-z0-9_]))"
-    rf"(?P<key>(?>{_SENSITIVE_KEY_CHAR}*?{_SENSITIVE_KEY_WORD}){_SENSITIVE_KEY_CHAR}*+)"
+    r"[a-z0-9_.-]*(?:api[_-]?key|secret|password|credential|authorization|bearer|token|"
+    r"access[_-]?key|session[_-]?token|private[_-]?key|service[_-]?account[_-]?key|"
+    r"cookie|session[_-]?cookie|client[_-]?certificate|certificate|cert|passphrase|oauth)[a-z0-9_.-]*"
 )
 _AUTH_HEADER_RE = re.compile(r"(?im)\b(?P<key>(?:proxy-)?authorization)\s*:\s*(?P<scheme>[A-Za-z]+)\s+[^\r\n]+")
 _CREDENTIAL_URI_USERINFO_RE = re.compile(r"(?i)(?P<scheme>[a-z][a-z0-9+.-]{0,31}://)(?P<userinfo>[^\s/?#]+@)")
@@ -139,24 +140,11 @@ _REDACTIONS = (
     (_JWT_RE, r"\g<lead>jwt-<redacted>"),
     (re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}"), "aws-access-key-<redacted>"),
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer <redacted>"),
-    (re.compile(r"(?<![A-Za-z0-9])sk-[a-zA-Z0-9_-]{8,}"), "sk-<redacted>"),
-    (re.compile(r"nvapi-[a-zA-Z0-9_-]{8,}"), "nvapi-<redacted>"),
-    (re.compile(r"crsr_[a-f0-9]{16,}"), "crsr_<redacted>"),
-    (re.compile(r"sha256~[A-Za-z0-9._~-]+"), "sha256~<redacted>"),
-    # GitHub's p/o/u/r families retain the 36-character opaque body. The s
-    # family also has a variable-length ``ghs_APPID_JWT`` stateless format.
-    (
-        re.compile(r"(?i)gh[pour]_[A-Za-z0-9]{36}"),
-        "github-token-<redacted>",
-    ),
-    (
-        re.compile(r"(?i)ghs_[A-Za-z0-9.\-_]{36,}"),
-        "github-token-<redacted>",
-    ),
-    (re.compile(r"(?i)github_pat_[A-Za-z0-9_]{20,}"), "github-token-<redacted>"),
-    (re.compile(r"(?i)xox[baprs]-[A-Za-z0-9-]{10,}"), "slack-token-<redacted>"),
-    (re.compile(r"AIza[A-Za-z0-9_-]{20,}"), "google-api-key-<redacted>"),
-    (re.compile(r"(?i)glpat-[A-Za-z0-9_-]{20,}"), "gitlab-token-<redacted>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])sk-[a-zA-Z0-9_-]{8,}"), "sk-<redacted>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])nvapi-[a-zA-Z0-9_-]{8,}"), "nvapi-<redacted>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])crsr_[a-f0-9]{16,}"), "crsr_<redacted>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])sha256~[A-Za-z0-9._~-]+"), "sha256~<redacted>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])ya29\.[A-Za-z0-9_-]{20,}"), "ya29.<redacted>"),
 )
 
 

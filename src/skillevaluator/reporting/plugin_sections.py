@@ -31,9 +31,10 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
 
-# The Tier 3 signal and runtime-evidence producers are pure modules that import no reporting code.
+# The Tier 3 signal, runtime-evidence, and statistics producers are pure modules that import no reporting code.
 from skillevaluator.tier3.eval_core.plugin_signals import COMPONENT_RULE_READ, COMPONENT_SUBAGENT
 from skillevaluator.tier3.eval_core.runtime_evidence import canary_leak_rate
+from skillevaluator.tier3.harbor.stats import STATISTICS_BLOCKS
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 MAX_TABLE_ROWS = 200
@@ -107,14 +108,6 @@ _SIGNAL_SECTIONS = (
     "handoff",
     "conflict",
     "activation_coverage",
-)
-_STATISTIC_KEYS = (
-    "lift_uncertainty",
-    "reliability",
-    "cost",
-    "token_efficiency",
-    "context_cost_measured",
-    "integration_completeness",
 )
 _COMPLETENESS_ISSUE_KEYS = ("missing_cases", "failed_arms", "attempt_shortfall")
 
@@ -1399,7 +1392,7 @@ def _has_completeness_issue_keys(value: object) -> bool:
 def _statistics_block(source: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
     return {
         key: value
-        for key in _STATISTIC_KEYS
+        for key in STATISTICS_BLOCKS
         if (value := _mapping(source.get(key)))
         and (key != "integration_completeness" or _has_completeness_issue_keys(value))
     }
@@ -1417,7 +1410,7 @@ def statistics_view(payload: object, *, context: _Tier3Context | None = None) ->
     best = context.best_agent
     sum_of_parts_baseline = context.sum_of_parts_baseline
     run_statistics: dict[str, Mapping[str, Any]] = {}
-    for key in _STATISTIC_KEYS:
+    for key in STATISTICS_BLOCKS:
         for candidate in _statistic_sources(source):
             value = _mapping(candidate.get(key))
             if value and (key != "integration_completeness" or _has_completeness_issue_keys(value)):

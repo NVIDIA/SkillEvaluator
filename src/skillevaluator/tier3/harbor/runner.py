@@ -933,6 +933,12 @@ def _harbor_bin() -> str:
 # no file outside the allowlisted environment can add credentials or settings.
 # These controls are applied at launch, outside the secret-tracked environment.
 _HARBOR_LAUNCH_ENV = MappingProxyType({"HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_DISABLED": "1"})
+# Harbor 0.22's Codex agent ran with ``model_reasoning_effort=high``; later
+# releases defer to Codex's own default. Pin the effort SkillEvaluator was
+# validated with so scores and cost stay comparable across Harbor upgrades.
+_HARBOR_AGENT_KWARGS: Mapping[str, Mapping[str, str]] = MappingProxyType(
+    {"codex": MappingProxyType({"reasoning_effort": "high"})}
+)
 # Allowlisted host variables that name a file or directory. A relative value keeps
 # its meaning by being anchored to the operator's working directory.
 _HARBOR_HOST_PATH_ENV_VARS = frozenset(
@@ -1254,6 +1260,8 @@ def build_harbor_run_command(
         command.extend(["--env", SECURE_DOCKER_ENV_IMPORT_PATH])
     else:
         command.extend(["--agent", agent_import_path or agent, "--env", env_mode])
+    for name, value in sorted(_HARBOR_AGENT_KWARGS.get(agent, {}).items()):
+        command.extend(["--ak", encode_environment_kwarg(name, value)])
     for name, value in sorted(validated_environment_kwargs.items()):
         command.extend(["--ek", encode_environment_kwarg(name, value)])
     if jobs_dir is not None:

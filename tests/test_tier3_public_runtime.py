@@ -2601,3 +2601,50 @@ def test_write_task_toml_forwards_retry_env(tmp_path: Path) -> None:
     assert verifier_env["SKILL_EVAL_LLM_RETRY_BASE_DELAY"] == "${SKILL_EVAL_LLM_RETRY_BASE_DELAY}"
     assert verifier_env["SKILL_EVAL_LLM_RETRY_MAX_DELAY"] == "${SKILL_EVAL_LLM_RETRY_MAX_DELAY}"
     assert "UNRELATED_CUSTOM_VAR" not in verifier_env
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "agent_import_path"),
+    [
+        ("docker", None),
+        ("docker", "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex"),
+        ("local", None),
+        ("e2b", None),
+        ("daytona", "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayCodex"),
+    ],
+)
+def test_codex_runs_pin_harbor_022_reasoning_effort(env_mode: str, agent_import_path: str | None) -> None:
+    from harbor.cli.utils import parse_kwargs
+
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="codex",
+        job_name="effort",
+        env_mode=env_mode,
+        agent_import_path=agent_import_path,
+    )
+
+    agent_kwargs = [command[index + 1] for index, value in enumerate(command) if value == "--ak"]
+    assert parse_kwargs(agent_kwargs) == {"reasoning_effort": "high"}
+
+
+@pytest.mark.parametrize("agent", ["claude-code", "opencode"])
+def test_non_codex_runs_pass_no_agent_kwargs(agent: str) -> None:
+    command = build_harbor_run_command(dataset_path="/tmp/dataset", agent=agent, job_name="effort", env_mode="docker")
+
+    assert "--ak" not in command
+
+
+def test_codex_agents_render_the_pinned_reasoning_effort(tmp_path: Path) -> None:
+    from harbor.agents.installed.codex import Codex
+
+    from skillevaluator.tier3.harbor import local_agents
+
+    for agent_class in (
+        Codex,
+        local_agents.SkillEvaluatorGatewayCodex,
+        local_agents.SkillEvaluatorLocalCodex,
+        local_agents.SkillEvaluatorNvidiaBuildCodex,
+    ):
+        agent = agent_class(logs_dir=tmp_path, model_name="openai/gpt-5", reasoning_effort="high")
+        assert "-c model_reasoning_effort=high" in agent.build_cli_flags(), agent_class.__name__

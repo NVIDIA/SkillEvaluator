@@ -393,7 +393,23 @@ class AuditOutcome:
             self.omitted += 1
 
 
-def unverified_finding(label: str, raw: str, source: str, *, ecosystem: str, role: str, kind: str) -> Finding:
+_UNVERIFIED_SUGGESTIONS = {
+    "python": "Pin an exact version (name==x.y.z) or audit a lockfile, then rerun the dependency audit.",
+    "npm": "Pin an exact version (or an image digest), or commit a lockfile, then rerun the dependency audit.",
+    "container": "Pin the image by digest (image@sha256:...) or an exact version tag, then rerun the dependency audit.",
+}
+
+
+def unverified_finding(
+    label: str,
+    raw: str,
+    source: str,
+    *,
+    ecosystem: str,
+    role: str,
+    kind: str,
+    line_number: int | None = None,
+) -> Finding:
     return Finding(
         category="DEPENDENCY",
         severity=Severity.INFO,
@@ -403,11 +419,8 @@ def unverified_finding(label: str, raw: str, source: str, *, ecosystem: str, rol
             "vulnerability applicability was not asserted"
         ),
         file_path=source,
-        suggestion=(
-            "Pin an exact version (or an image digest), or commit a lockfile, then rerun the dependency audit."
-            if ecosystem == "npm"
-            else "Pin the image by digest (image@sha256:...) or an exact version tag, then rerun the dependency audit."
-        ),
+        line_number=line_number,
+        suggestion=_UNVERIFIED_SUGGESTIONS[ecosystem],
         metadata={
             "ecosystem": ecosystem,
             "package_name": label,

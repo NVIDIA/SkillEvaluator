@@ -969,6 +969,29 @@ def test_pinned_python_mcp_package_joins_the_pip_audit_batch(
     assert not result.passed
 
 
+def test_python_mcp_runner_findings_name_the_declaring_manifest(
+    tmp_path: Path, tools: dict[str, _FakeTool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: uvx findings said 'plugin.json', so Claude Code and Codex servers were indistinguishable."""
+    pip_audit = _FakeTool("pip-audit")
+    monkeypatch.setattr(Tools, "pip_audit", pip_audit)
+    monkeypatch.setattr(Tools, "safety", _FakeTool("safety", available=False))
+    fetch = {"command": "uvx", "args": ["mcp-fetch"]}
+    git = {"command": "uvx", "args": ["mcp-git"]}
+    files = {
+        ".claude-plugin/plugin.json": {"name": "demo", "mcpServers": {"fetch": fetch}},
+        ".codex-plugin/plugin.json": {"name": "demo", "mcpServers": {"git": git}},
+    }
+    result = _dependency_result(_bare_plugin(tmp_path / "demo", files))
+
+    unverified = [f for f in result.findings if f.check_name == "dependency-version-unverified"]
+    assert sorted((f.metadata["package_name"], f.metadata.get("ecosystem"), f.file_path) for f in unverified) == [
+        ("mcp-fetch", "python", ".claude-plugin/plugin.json"),
+        ("mcp-git", "python", ".codex-plugin/plugin.json"),
+    ]
+    assert pip_audit.calls == []
+
+
 # --------------------------------------------------------------------------- #
 # Verifier follow-ups: percent-encoded hosts, credentials, scanner logins    #
 # --------------------------------------------------------------------------- #

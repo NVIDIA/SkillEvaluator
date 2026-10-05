@@ -1173,8 +1173,7 @@ def _inventory_skill_dirs(inventory: PluginInventory, plugin_root: Path) -> tupl
 def _inventory_rule_files(inventory: PluginInventory, plugin_root: Path) -> list[_StagedRule]:
     """Read the selected manifest's rule files through the anchored, no-follow plugin root."""
     rules = [component for component in inventory.components if _stageable_component(component, "rule")]
-    if len(rules) > MAX_PLUGIN_MANIFEST_ITEMS:
-        raise ValueError(f"Plugin rules exceed the {MAX_PLUGIN_MANIFEST_ITEMS}-file limit")
+    _check_rule_bounds(count=len(rules))
     staged: list[_StagedRule] = []
     total = 0
     try:
@@ -1182,8 +1181,7 @@ def _inventory_rule_files(inventory: PluginInventory, plugin_root: Path) -> list
             for component in rules:
                 content = secure_root.read_text(Path(str(component.path)), CONTENT_DEDUP_MAX_FILE_BYTES).strip()
                 total += len(content.encode("utf-8"))
-                if total > CONTENT_DEDUP_MAX_TOTAL_BYTES:
-                    raise ValueError(f"Plugin rules exceed the {CONTENT_DEDUP_MAX_TOTAL_BYTES}-byte total limit")
+                _check_rule_bounds(total_bytes=total)
                 staged.append(_StagedRule(name=component.name, content=content))
     except SecurePathError as exc:
         raise ValueError(f"Refusing unsafe or unbounded plugin rules: {exc}") from exc
@@ -1436,12 +1434,10 @@ def _resolve_rules(
     def _stage(path: Path) -> None:
         nonlocal total_bytes
         rule = _load_rule_path(path)
-        # Every staged body is held in memory and embedded in the wrapper (the
-        # with-plugin arm's skill context), so MAX_PLUGIN_MANIFEST_ITEMS
-        # per-file-bounded refs must not add up to a wrapper the contained
-        # rules/ form would reject.
+        # MAX_PLUGIN_MANIFEST_ITEMS per-file-bounded refs must not add up to a
+        # wrapper the contained rules/ form would reject.
         total_bytes += len(rule.content.encode("utf-8"))
-        _reject_rules_over_total_limit(total_bytes)
+        _check_rule_bounds(total_bytes=total_bytes)
         staged.append(rule)
         seen.add(path)
 
@@ -1493,8 +1489,15 @@ def _resolve_contained_file(ref: Any, plugin_dir: Path, plugin_root: Path) -> Pa
     return None
 
 
-def _reject_rules_over_total_limit(total_bytes: int) -> None:
-    """Fail closed once staged plugin rules exceed the shared aggregate byte bound."""
+def _check_rule_bounds(*, count: int = 0, total_bytes: int = 0) -> None:
+    """Fail closed once the staged plugin rules exceed the shared file-count or aggregate byte bound.
+
+    Every staged rule body is held in memory and embedded in the generated
+    wrapper (the with-plugin arm's skill context), so the contained ``rules/``
+    form, the inventory's rule files, and resolved rule refs share these bounds.
+    """
+    if count > MAX_PLUGIN_MANIFEST_ITEMS:
+        raise ValueError(f"Plugin rules exceed the {MAX_PLUGIN_MANIFEST_ITEMS}-file limit")
     if total_bytes > CONTENT_DEDUP_MAX_TOTAL_BYTES:
         raise ValueError(f"Plugin rules exceed the {CONTENT_DEDUP_MAX_TOTAL_BYTES}-byte total limit")
 
@@ -1532,9 +1535,7 @@ def _discover_contained_rule_files(plugin_root: Path) -> list[_StagedRule]:
             max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
             allow_context_alias=False,
         )
-        if len(files) > MAX_PLUGIN_MANIFEST_ITEMS:
-            raise ValueError(f"Plugin rules exceed the {MAX_PLUGIN_MANIFEST_ITEMS}-file limit")
-        _reject_rules_over_total_limit(sum(file.metadata.st_size for file in files))
+        _check_rule_bounds(count=len(files), total_bytes=sum(file.metadata.st_size for file in files))
         with SecureRoot(rules_root) as secure_root:
             return [
                 _StagedRule(

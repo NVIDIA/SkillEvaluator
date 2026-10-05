@@ -30,7 +30,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
-- Upgraded the optional Tier 3 backend to Harbor 0.22.0 and its compatible
+- Upgraded the optional Tier 3 backend to Harbor 0.24.0 and its compatible
   LiteLLM 1.92-1.93 window. Existing SkillEvaluator agent and environment
   options now use Harbor's unified selectors; installed Codex adapters preserve
   merged user and MCP configuration; Docker and local execution stream redacted
@@ -39,13 +39,33 @@ All notable changes to SkillEvaluator are documented in this file.
   limit; and Docker supports stdin plus isolated sidecar operations without
   exposing environment values on Compose argv. Generated schema 1.3 and
   unmodified native task schemas remain compatible, while collection accepts
-  Harbor 0.22 job, trial, reward, and ATIF v1.7 artifacts.
-- Exposed 23 Harbor 0.22 backends alongside local mode. `cua-cloud`,
-  `opensandbox`, and `hf-sandbox` remain disabled until generated tasks can be
-  projected through a trusted image or backend-native provisioning path.
-  Non-secret backend constructor options can be supplied with repeatable,
-  operator-only `--environment-kwarg` / `--ek` flags; skill-owned configuration,
+  Harbor 0.24 job, trial, reward, and ATIF v1.8 artifacts. Multimodal tool
+  output reaches judges and reports as text with `[image]`/`[audio]` markers.
+- Exposed 23 Harbor 0.24 backends alongside local mode. `cua-cloud`,
+  `opensandbox`, `hf-sandbox`, `podman`, `kata`, `runta`, `prime`, `mosaic`,
+  and `smol` remain disabled until generated tasks can be projected through a
+  trusted image or backend-native provisioning path. Non-secret backend
+  constructor options can be supplied with repeatable, operator-only
+  `--environment-kwarg` / `--ek` flags; skill-owned configuration,
   credentials, and sandbox-policy overrides remain outside that surface.
+  Harbor's `stream` and `enable_environment_dir_upload` options are reserved,
+  and Modal's `modal_sandbox_v2` option no longer exists.
+- `--env-mode wandb` now runs Harbor's `cwsandbox` backend with W&B
+  authentication, because Harbor 0.24 merged the two. Install
+  `harbor[cwsandbox]==0.24.0` instead of the removed `harbor[wandb]` extra.
+- Harbor now always starts in an empty, evaluator-owned working directory with
+  `.env` loading and Harbor telemetry disabled. A `.env.local` or `.env` file
+  near the operator's project can no longer add credentials or settings that
+  SkillEvaluator's allowlisted environment removed. The `tier3` extra requires
+  python-dotenv 1.2.0.
+- Codex runs with `reasoning_effort=high`, the default under Harbor 0.22, so
+  scores and cost stay comparable after Harbor stopped pinning it.
+- Native tasks follow Harbor 0.24's separate-verifier precedence. A dedicated
+  verifier image or build definition must ship its own test script and never
+  receives SkillEvaluator's grader. Otherwise the verifier is built from
+  `environment/`, whose Compose model must stay within the verifier's
+  environment allowlist. `docker-compose.yml` verifier definitions, which
+  Harbor ignores, are rejected.
 
 ### Fixed
 
@@ -73,7 +93,8 @@ All notable changes to SkillEvaluator are documented in this file.
   nonzero exits, timeouts, output limits, and persisted launch errors.
 - Tier 3 local OpenCode runs routed through NVIDIA Build now retain the rendered
   user instruction for ATIF conversion and fail on OpenCode error events, in
-  parity with Harbor 0.22's upstream agent lifecycle.
+  parity with Harbor's upstream agent lifecycle. Remote MCP servers in that
+  configuration disable OAuth, as Harbor's own OpenCode configuration does.
 - Tier 3 reports now use the collector's logical attempt overall whenever a
   condition mixes standard and custom rewards, including across separate
   trials, and aggregate execution summaries preserve child-declared hidden
@@ -91,7 +112,7 @@ All notable changes to SkillEvaluator are documented in this file.
   fallback models are forwarded only to standard verifier jobs, not agent or
   `custom_only` environments. Its Python payload now runs from a replaced
   evaluator-owned directory in isolated mode. `custom_only`
-  retains Harbor-native collect hooks and Harbor 0.22's shared/separate
+  retains Harbor-native collect hooks and Harbor's shared/separate
   step-test resolution, and fully authored native test paths are left untouched
   instead of replacing their unused `tests/skill_evaluator/` package.
   All native grading modes reject Windows agent or effective verifier
@@ -100,6 +121,13 @@ All notable changes to SkillEvaluator are documented in this file.
   custom-metric contracts, publishes exact truncation metadata for bounded
   case and failure-detail samples, and keeps findings, attribution, and
   per-trial JSON inside the report loader's artifact envelope.
+- Tier 3 progress output, diagnostics, and result summaries no longer redact
+  counts such as `0/1 scored` or `1 errored` when a credential-named
+  environment variable holds a short flag value such as `1`. Short credential
+  fragments in proxy URLs are still redacted.
+- `create-eval-dataset --refine` no longer requires the `tier3` extra to read
+  case IDs from Harbor result files, and no longer fails on multimodal
+  trajectory messages.
 
 ## 0.4.0 - 2026-09-30
 

@@ -188,12 +188,13 @@ def test_claude_skill_tool_call_of_a_plugin_command_is_a_command_activation() ->
         _provenance({"type": "command", "name": "deploy", "state": "loaded"}), _engine("claude-code", summary)
     )
 
+    # One component is one identity: the declared spelling, whatever the namespace prefix.
     assert [(a["type"], a["name"]) for a in signals["activations"]] == [
-        ("command", "demo-plugin:deploy"),
-        ("skill", "demo-plugin:release-note"),
+        ("command", "deploy"),
+        ("skill", "release-note"),
     ]
-    assert signals["tool_selection"]["recall"] == 1.0
-    assert signals["tool_selection"]["precision"] == 1.0
+    assert signals["routing"]["recall"] == 1.0
+    assert signals["routing"]["precision"] == 1.0
     assert signals["activation_coverage"]["exercised"] == ["skill:release-note", "command:deploy"]
     assert provenance["component_coverage"]["components"][0]["state"] == "exercised"
 

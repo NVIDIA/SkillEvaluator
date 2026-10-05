@@ -85,13 +85,14 @@ AGENT_LOG_ARTIFACTS = (
 )
 GENERATED_AGENT_ARTIFACTS = (
     "lift.json",
+    "integration_lift.json",
     "custom_lift.json",
     "pass_at_k_lift.json",
     "security_attribution.json",
     "findings.json",
     "statistics.json",
 )
-GENERATED_CONDITION_DIRS = ("with-skill", "without-skill")
+GENERATED_CONDITION_DIRS = ("with-skill", "without-skill", "sum-of-parts")
 GENERATED_ROOT_ARTIFACTS = ("attempt_policy.json", "comparison.json")
 _MAX_FAILED_JUDGE_SIDECARS = 64
 _MAX_FAILED_JUDGE_STEP_PATHS_SCANNED = 256

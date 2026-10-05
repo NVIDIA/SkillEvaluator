@@ -31,6 +31,7 @@ enabled.
 
 from __future__ import annotations
 
+import functools
 import http.client
 import ipaddress
 import queue
@@ -253,6 +254,79 @@ def _where(blocked: tuple[str, str, str | None]) -> str:
     return f"a {blocked[1]} address" if blocked[2] is not None else blocked[1]
 
 
+@dataclass(frozen=True)
+class HostVerdict:
+    """Where one host leads, statically or by every address it resolves to."""
+
+    # The static class when the host itself is a non-public name or IP literal; it is then never resolved.
+    static: EndpointClass | None = None
+    # Every address a public-looking host resolved to (empty when it was not resolved).
+    addresses: tuple[str, ...] = ()
+    # Non-public addresses as (kind, reason, address): the static host's own, or the resolved ones.
+    non_public: tuple[tuple[str, str, str | None], ...] = ()
+    # The metadata address, else the first non-public address the allowlist does not cover (see blocked_address).
+    blocked: tuple[str, str, str | None] | None = None
+
+    @property
+    def classification(self) -> str:
+        """``metadata``, ``private``, or ``public``: the worst of the non-public addresses."""
+        return _worst_kind(list(self.non_public))
+
+
+def classify_host(
+    host: str,
+    port: int,
+    allowed: HostAllowlist | Iterable[str],
+    *,
+    resolve: Callable[[str, int], list[str]] | None = None,
+) -> HostVerdict:
+    """Classify the host a client contacts: statically, then (with ``resolve``) by every address it resolves to.
+
+    ``host`` is the name the client looks up (see ``endpoint_client_host``). A
+    loopback, private, or cloud-metadata name or IP literal is classified
+    statically and never resolved. A public-looking name is resolved with
+    ``resolve(host, port)`` when one is given, and every answer is classified
+    (:func:`_classify_addresses`); DNS errors propagate to the caller.
+    ``blocked`` applies the allowlist (:func:`blocked_address`).
+    """
+    static = classify_endpoint_host(host)
+    if static is not None:
+        rows = ((static.kind, static.reason, str(static.address) if static.address else None),)
+        return HostVerdict(static, non_public=rows, blocked=blocked_address(host, list(rows), allowed))
+    if resolve is None:
+        return HostVerdict()
+    addresses = resolve(host, port)
+    rows = tuple(_classify_addresses(addresses))
+    return HostVerdict(None, tuple(addresses), rows, blocked_address(host, list(rows), allowed))
+
+
+def dns_resolver(timeout: float = DNS_TIMEOUT_SECONDS) -> Callable[[str, int], list[str]]:
+    """A :func:`classify_host` resolver: ``getaddrinfo`` in a daemon thread, bounded by ``timeout`` seconds."""
+    return lambda host, port: _resolve(host, port, timeout)
+
+
+def _parse_endpoint(url: str) -> tuple[str, str | None, int, str] | None:
+    """``(scheme, host, port, path)`` of an absolute URL (port defaulted by scheme), or ``None`` for a malformed one."""
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        scheme = (parsed.scheme or "").lower()
+        port = parsed.port or _DEFAULT_PORTS.get(scheme, 443)
+    except ValueError:
+        return None
+    return scheme, host, port, parsed.path
+
+
+@functools.lru_cache(maxsize=32)
+def _target_allowlist(entries: tuple[str, ...]) -> HostAllowlist:
+    """The parsed allowlist of an endpoint target; targets share a few entry tuples, each parsed once."""
+    return HostAllowlist.from_entries(entries)
+
+
+class _BudgetExhausted(Exception):
+    """The time budget ran out before a redirect target could be resolved."""
+
+
 @dataclass
 class _Run:
     """Bookkeeping for one :meth:`EndpointChecker.check` call."""
@@ -413,8 +487,13 @@ class EndpointChecker:
             metadata=metadata,
         )
 
-    def _lookup(self, host: str, port: int, run: _Run) -> list[str]:
-        """Resolve within the DNS timeout and the remaining budget; counts the lookup for the summary."""
+    def _lookup(self, host: str, port: int, run: _Run, *, needs_budget: bool = False) -> list[str]:
+        """Resolve within the DNS timeout and the remaining budget; counts the lookup for the summary.
+
+        With ``needs_budget``, a lookup when no time is left raises :class:`_BudgetExhausted` instead.
+        """
+        if needs_budget and self._remaining(run) <= 0:
+            raise _BudgetExhausted
         run.lookups += 1
         try:
             addresses = self.resolver(host, port, max(0.0, min(self.dns_timeout, self._remaining(run))))
@@ -429,15 +508,12 @@ class EndpointChecker:
         findings: list[Finding] = []
         display_url = safe_url(target.url)
         row: dict[str, Any] = {"kind": target.kind, "name": target.name, "url": display_url}
-        try:
-            # Read the URL the way the client that connects to it does (WHATWG).
-            parsed = urlparse(whatwg_url(target.url))
-            host = parsed.hostname
-            port = parsed.port or _DEFAULT_PORTS.get((parsed.scheme or "").lower(), 443)
-        except ValueError:
+        # Read the URL the way the client that connects to it does (WHATWG).
+        endpoint = _parse_endpoint(whatwg_url(target.url))
+        if endpoint is None:
             row.update(status="skipped", reason="malformed URL")
             return row, findings, None
-        scheme = (parsed.scheme or "").lower()
+        scheme, host, port, path = endpoint
         if scheme not in _DEFAULT_PORTS or not host:
             row.update(status="skipped", reason=f"scheme {scheme or '(none)'!r} is not checked")
             return row, findings, None
@@ -452,13 +528,10 @@ class EndpointChecker:
         if not host:
             row.update(status="skipped", reason="URL has no host")
             return row, findings, None
-        static = classify_endpoint_host(host)
-        if static is not None:
-            # The static policy already reported this host; never contact it.
-            row.update(status="static_non_public", classification=static.kind, reason=static.reason)
-            return row, findings, None
         try:
-            addresses = self._lookup(host, port, run)
+            verdict = classify_host(
+                host, port, _target_allowlist(target.allowed_hosts), resolve=functools.partial(self._lookup, run=run)
+            )
         except (OSError, UnicodeError) as exc:
             reason = "timed out" if isinstance(exc, TimeoutError) else type(exc).__name__
             row.update(status="unresolved", reason=f"DNS resolution failed ({reason})")
@@ -472,15 +545,19 @@ class EndpointChecker:
                 )
             )
             return row, findings, None
+        if verdict.static is not None:
+            # The static policy already reported this host; never contact it.
+            row.update(status="static_non_public", classification=verdict.static.kind, reason=verdict.static.reason)
+            return row, findings, None
+        addresses = list(verdict.addresses)
         row["addresses"] = addresses[:MAX_ADDRESSES]
         if len(addresses) > MAX_ADDRESSES:
             row["addresses_not_classified"] = len(addresses) - MAX_ADDRESSES
-        non_public = _classify_addresses(addresses)
-        kind = _worst_kind(non_public)
+        kind = verdict.classification
         row["classification"] = kind
         if kind != "public":
             row["status"] = kind
-            blocked = blocked_address(host, non_public, target.allowed_hosts)
+            blocked = verdict.blocked
             if blocked is not None and blocked[0] == "metadata":
                 findings.append(
                     self._finding(
@@ -514,7 +591,7 @@ class EndpointChecker:
             row.update(status="unresolved", reason="no addresses")
             return row, findings, None
         row["status"] = "resolved"
-        return row, findings, _Pending(target, row, scheme, host, port, addresses[0], parsed.path or "/")
+        return row, findings, _Pending(target, row, scheme, host, port, addresses[0], path or "/")
 
     def _head_and_redirect(self, item: _Pending, run: _Run) -> list[Finding]:
         """Send the one ``HEAD`` for a public endpoint within the remaining budget, then classify its redirect."""
@@ -551,14 +628,11 @@ class EndpointChecker:
         display = safe_url(absolute)
         redirect: dict[str, Any] = {"url": display}
         row["redirect"] = redirect
-        try:
-            parsed = urlparse(absolute)
-            host = parsed.hostname
-            port = parsed.port or _DEFAULT_PORTS.get((parsed.scheme or "").lower(), 443)
-        except ValueError:
+        endpoint = _parse_endpoint(absolute)
+        if endpoint is None:
             redirect["classification"] = "malformed"
             return findings
-        new_scheme = (parsed.scheme or "").lower()
+        new_scheme, host, port, _path = endpoint
         if scheme in {"https", "wss"} and new_scheme in {"http", "ws"}:
             redirect["downgrade"] = True
             findings.append(
@@ -575,26 +649,27 @@ class EndpointChecker:
         if not host:
             redirect["classification"] = "no_host"
             return findings
-        static = classify_endpoint_host(host)
-        if static is not None:
-            non_public = [(static.kind, static.reason, str(static.address) if static.address else None)]
-        elif self._remaining(run) <= 0:
+        try:
+            verdict = classify_host(
+                host,
+                port,
+                _target_allowlist(target.allowed_hosts),
+                resolve=functools.partial(self._lookup, run=run, needs_budget=True),
+            )
+        except _BudgetExhausted:
             redirect["classification"] = "skipped"
             redirect["reason"] = f"time budget of {self.budget:.0f}s exhausted before the redirect target was resolved"
             run.budget_skipped += 1
             run.unchecked.append(target)
             return findings
-        else:
-            try:
-                addresses = self._lookup(host, port, run)
-            except (OSError, UnicodeError):
-                redirect["classification"] = "unresolved"
-                return findings
-            redirect["addresses"] = addresses[:MAX_ADDRESSES]
-            non_public = _classify_addresses(addresses)
-        kind = _worst_kind(non_public)
+        except (OSError, UnicodeError):
+            redirect["classification"] = "unresolved"
+            return findings
+        if verdict.static is None:
+            redirect["addresses"] = list(verdict.addresses[:MAX_ADDRESSES])
+        kind = verdict.classification
         redirect["classification"] = kind
-        blocked = blocked_address(host, non_public, target.allowed_hosts)
+        blocked = verdict.blocked
         if kind == "metadata":
             findings.append(
                 self._finding(

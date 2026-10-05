@@ -252,3 +252,63 @@ def test_evaluate_plugin_prepares_the_plugin_root_of_a_manifest_path(
 
     assert result.exit_code == 0, result.output
     assert prepared_from == [plugin]
+
+
+@pytest.mark.parametrize(
+    ("lift_mode", "skip_baseline", "reason", "expected"),
+    [
+        ("effectiveness", True, None, None),
+        ("integration", False, None, None),
+        ("both", False, "no composition evidence", None),
+        ("both", True, None, "Integration requires a baseline; remove --skip-baseline."),
+        ("integration", True, "no composition evidence", "Integration requires a baseline; remove --skip-baseline."),
+        (
+            "integration",
+            False,
+            "no composition evidence",
+            "Integration is inconclusive: no composition evidence. "
+            "Add a cross-component case or use --lift-mode effectiveness.",
+        ),
+    ],
+)
+def test_plugin_integration_error(
+    lift_mode: str, skip_baseline: bool, reason: str | None, expected: str | None
+) -> None:
+    assert cli_module._plugin_integration_error(lift_mode, skip_baseline, reason) == expected
+
+
+@pytest.mark.parametrize(
+    ("lift_mode", "skip_baseline", "evidence_error", "expected"),
+    [
+        ("integration", False, "composition evidence is missing", "Tier 3 plugin Integration is inconclusive"),
+        ("both", True, None, "Tier 3 plugin Integration requires a baseline"),
+    ],
+)
+def test_validate_plugin_path_skips_an_integration_request_it_cannot_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lift_mode: str,
+    skip_baseline: bool,
+    evidence_error: str | None,
+    expected: str,
+) -> None:
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    prepared = _fake_prepared(tmp_path)
+    prepared.integration_evidence_error = lambda: evidence_error
+    monkeypatch.setattr("skillevaluator.tier3.plugin_eval.prepare_plugin_eval_package", lambda *_a, **_k: prepared)
+    monkeypatch.setattr(EvaluationService, "evaluate", lambda *_a, **_k: pytest.fail("evaluation must not start"))
+
+    result = cli_module._run_agent_eval_or_skip(
+        plugin,
+        agents="codex",
+        env_mode="docker",
+        skip_baseline=skip_baseline,
+        n_concurrent=1,
+        max_agents=1,
+        kind="plugin",
+        lift_mode=lift_mode,
+    )
+
+    assert result.passed is False
+    assert [warning for warning in result.warnings if warning.startswith(expected)]

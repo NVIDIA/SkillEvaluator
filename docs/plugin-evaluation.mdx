@@ -145,9 +145,13 @@ and a file over 8 MiB always counts. Such a file is the Agent Plugins manifest.
 As the selected manifest it fails HIGH `manifest_unreadable`, like any selected
 manifest that is not UTF-8 or is larger than 1 MiB. A JSON one is then read
 leniently, as an unreadable additional manifest is (see below), so what it
-declares is still checked. Auto-detection uses the same rule, so such a folder
-stays a plugin instead of becoming a skill. Only a linked, hard-linked,
-special, or changed file fails discovery or fails as a security check.
+declares is still checked. When nothing can be parsed from the selected
+manifest, even leniently (`agent_plugin.yaml` is never read leniently), none of
+the components it declares are checked. Then `severity_overrides` cannot lower
+`manifest_unreadable`, and Tier 1 stops after the schema check, as for an unsafe
+manifest. Auto-detection uses the same rule, so such a folder stays a plugin
+instead of becoming a skill. Only a linked, hard-linked, special, or changed
+file fails discovery or fails as `manifest_unsafe`.
 
 Clients open fixed manifest paths. On a case-insensitive filesystem, such as
 the macOS default, a client that opens `.codex-plugin/plugin.json` reads

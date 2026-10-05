@@ -520,6 +520,9 @@ class PluginSchemaValidator(ValidatorBase):
             raw = location.read_text()
         except PluginManifestPathError as exc:
             if exc.content_error:
+                # The YAML manifest is not read leniently, so nothing it declares is
+                # checked: a policy override must not turn this finding into a pass.
+                result.metadata["security_failure"] = True
                 filename = location.manifest_filename
                 result.add_finding(
                     Finding(
@@ -635,9 +638,11 @@ class PluginSchemaValidator(ValidatorBase):
         """Read and parse a contained JSON manifest; record a HIGH finding on failure.
 
         Returns ``(data, readable)``. A manifest that is not UTF-8 or is over the
-        manifest size bound is HIGH ``manifest_unreadable`` but not a security
-        failure. It is then parsed leniently, as the clients that load it read
-        it, so ``data`` can still be inventoried while ``readable`` is ``False``.
+        manifest size bound is HIGH ``manifest_unreadable``. It is then parsed
+        leniently, as the clients that load it read it, so ``data`` can still be
+        inventoried while ``readable`` is ``False``. Only when even the lenient
+        parse yields nothing is it also a security failure, so a policy override
+        cannot pass a plugin whose declared components were never checked.
         """
         manifest_path = location.path
         filename = location.manifest_filename
@@ -646,6 +651,8 @@ class PluginSchemaValidator(ValidatorBase):
         except PluginManifestPathError as exc:
             if exc.content_error:
                 data, _status = self._parse_unreadable(location, self._content_problem(exc), result, selected=True)
+                if data is None:
+                    result.metadata["security_failure"] = True
                 return data, False
             result.metadata["security_failure"] = True
             result.add_finding(

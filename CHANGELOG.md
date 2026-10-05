@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Optional `skillevaluator dashboard` tables for comparing saved Tier 3 reports
+  and retained runs across skills, models, harnesses, and skill conditions,
+  with paired token, agent runtime, and recorded USD cost differences.
 - Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for
   LLM judges in both the Harbor container verifier (`eval.py`) and host runtime
   (`LLMClient`). Features zero-dependency full jitter exponential backoff,
@@ -30,6 +33,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Preserve missing Tier 3 token counters as `null` in canonical JSON exports
+  instead of reporting unmeasured usage as zero.
+- Keep dashboard comparisons unavailable for contradictory trial identities or
+  invalid coverage counts, and enforce the documented 16 MB browser upload limit.
 - Report non-string YAML keys as validation errors in skills, rules, workflows,
   and plugin manifests instead of raising a `TypeError`, including frontmatter
   `metadata` keys. Show boolean, null, and date keys in a readable YAML form.

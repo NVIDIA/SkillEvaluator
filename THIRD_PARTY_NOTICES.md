@@ -10,3 +10,4 @@ records the exact resolved dependency set used for this release.
 | LLM | Anthropic (MIT), Boto3 (Apache-2.0), LiteLLM (MIT), OpenAI (Apache-2.0) |
 | Tier 3 | Harbor (Apache-2.0) |
 | Security | Bandit (Apache-2.0), pip-audit (Apache-2.0) |
+| Dashboard | Streamlit (Apache-2.0) |

@@ -161,7 +161,7 @@ Examples:
 
 _TOP_LEVEL_COMMAND_HELP_GROUPS = (
     ("Tier workflows", ("tier1", "tier2", "tier3")),
-    ("Core workflows", ("validate", "health-check", "doctor", "models")),
+    ("Core workflows", ("validate", "health-check", "doctor", "models", "dashboard")),
     (
         "Tier 1 · Static and security",
         ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts"),
@@ -2727,6 +2727,21 @@ def models_command(limit: int, as_json: bool) -> None:
     from skillevaluator.model_commands import run_models_command
 
     raise SystemExit(run_models_command(limit=limit, as_json=as_json))
+
+
+@cli.command("dashboard")
+@click.argument("paths", nargs=-1, type=click.Path(exists=True, path_type=Path))
+@click.option("--port", type=click.IntRange(1, 65535), default=8501, show_default=True)
+@click.option("--no-browser", is_flag=True, help="Start the server without opening a browser.")
+def dashboard_command(paths: tuple[Path, ...], port: int, no_browser: bool) -> None:
+    """Compare saved JSON reports or retained Tier 3 run directories in tables.
+
+    Install skillevaluator[dashboard] first. With no PATHS, upload JSON reports
+    in the browser. The server listens on 127.0.0.1; Ctrl+C stops it.
+    """
+    from skillevaluator.reporting.dashboard import launch_dashboard
+
+    raise SystemExit(launch_dashboard(paths, port=port, no_browser=no_browser))
 
 
 @cli.command()

@@ -72,6 +72,10 @@ security = [
     "bandit>=1.9.4",
     "pip-audit>=2.10.0",
 ]
+# Optional local UI for comparing saved reports; never imported by base commands.
+dashboard = [
+    "streamlit>=1.49,<2",
+]
 # Full public install convenience bundle.
 all = [
     "skillevaluator[tier2,tier3,security]",

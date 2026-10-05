@@ -49,6 +49,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.validators.mcp_static import (
+    TRUTHY_VALUES,
     EndpointClass,
     HostAllowlist,
     OverrideIssue,
@@ -57,6 +58,7 @@ from skillevaluator.validators.mcp_static import (
     permission_flag_issues,
 )
 from skillevaluator.validators.url_policy import (
+    DEFAULT_PORTS,
     is_env_reference,
     looks_like_inline_secret,
     report_text,
@@ -135,6 +137,7 @@ MAX_OUTSIDE_REFS = 5
 _WILDCARD_TOOLS = frozenset({"*", "*(*)", "mcp__*", "mcp__*__*"})
 # Claude Code reads a matcher of only these characters as an exact tool name or '|' list, not a regex.
 _EXACT_MATCHER_RE = re.compile(r"[A-Za-z0-9_|]+")
+_MATCHER_NAME_SEPARATOR_RE = re.compile(r"[|,]")
 # A looser name list ('Edit, Bash'): one that names Bash is treated as matching Bash.
 _NAME_LIST_RE = re.compile(r"[A-Za-z0-9_\- ,|]+")
 # A regex matcher that matches a shell tool and all of these other tool names is treated as "every tool".
@@ -177,6 +180,8 @@ _DANGEROUS_BASH_PREFIXES: tuple[str, ...] = (
 # 'python -m pkg.module *' is the one option-prefixed interpreter rule Claude Code treats as scoped.
 _PYTHON_DOTTED_MODULE_RE = re.compile(r"-m\s+\w+\.[\w.]+(?:\s*:|\s+)")
 _ENV_REF_ANYWHERE_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+# The auth scheme in front of a header value's literal part ('Bearer ', 'Basic ', 'token ').
+_AUTH_SCHEME_PREFIX_RE = re.compile(r"(?i)^\s*(bearer|basic|token)\s*")
 _URL_IN_TEXT_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^\s'\"`<>]{1,2048}")
 
 # Hook output that approves a tool call or a permission request: Claude Code's and Codex's shapes
@@ -223,6 +228,7 @@ _SHELL_COMMAND_RE = re.compile(r"""(?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|\|(?!\|)&?|[
 _FETCHER_RE = re.compile(rf"\b{_FETCHERS}\b", re.IGNORECASE)
 # A pipeline stage that starts with an interpreter: '| sh', '| sudo bash', '|& /usr/bin/env python3'.
 _STAGE_INTERPRETER_RE = re.compile(rf"&?\s*(?P<interpreter>{_INTERPRETER})", re.IGNORECASE)
+_XARGS_RE = re.compile(r"\bxargs\b", re.IGNORECASE)
 # A pipeline stage that sources its standard input: '| source /dev/stdin', '| . /dev/fd/0'.
 _STAGE_SOURCE_STDIN_RE = re.compile(
     r"&?\s*(?:source|\.)\s+[\"']?(?:/dev/stdin|/dev/fd/0|/proc/self/fd/0|-)[\"']?(?:\s|$)"
@@ -599,7 +605,6 @@ def is_wildcard_tool(entry: str) -> bool:
 # Subagents and commands                                                      #
 # --------------------------------------------------------------------------- #
 _READ_ONLY_FLAGS = frozenset({"--read-only", "--readonly", "--read_only"})
-_TRUTHY_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSY_VALUES = frozenset({"0", "false", "no", "off"})
 
 
@@ -610,7 +615,7 @@ def _declares_read_only_flag(tokens: list[str]) -> bool:
         if name not in _READ_ONLY_FLAGS:
             continue
         if separator:
-            if value.strip().strip("'\"") in _TRUTHY_VALUES:
+            if value.strip().strip("'\"") in TRUTHY_VALUES:
                 return True
             continue
         following = tokens[index + 1].strip("'\"") if index + 1 < len(tokens) else ""
@@ -639,7 +644,7 @@ def mcp_server_is_read_only(config: Any) -> bool:
         for key, value in env.items():
             normalized = str(key).upper().replace("-", "_")
             read_only_key = normalized in {"READ_ONLY", "READONLY"} or normalized.endswith("_READ_ONLY")
-            if read_only_key and str(value).strip().lower() in {"1", "true", "yes", "on"}:
+            if read_only_key and str(value).strip().lower() in TRUTHY_VALUES:
                 return True
     return False
 
@@ -1409,7 +1414,7 @@ def matcher_scope(matcher: str | None, shell_tools: tuple[str, ...] = ("Bash",))
 
 
 def _matcher_names(text: str) -> set[str]:
-    return {part.strip() for part in re.split(r"[|,]", text)}
+    return {part.strip() for part in _MATCHER_NAME_SEPARATOR_RE.split(text)}
 
 
 def _name_list_scope(text: str, shell_tools: tuple[str, ...] = ("Bash",)) -> str:
@@ -1881,7 +1886,7 @@ def _stage_runs_stdin(stage: str, depth: int = 0) -> bool:
     if match is None:
         return False
     head = match.group("interpreter")
-    if re.search(r"\bxargs\b", head, re.IGNORECASE):
+    if _XARGS_RE.search(head):
         return True  # xargs hands the downloaded text to the interpreter as arguments
     name = head.split()[-1].strip("\"'").replace("\\", "/").rsplit("/", 1)[-1].lower().strip("${}")
     return _program_from_stdin(_interpreter_family(name), _stage_arguments(stage[match.end() :][:2048]), depth)
@@ -2197,9 +2202,6 @@ def _package_runs(commands: list[str]) -> tuple[_PackageRun, ...]:
     return tuple(runs)
 
 
-_DEFAULT_PORTS = {"http": 80, "https": 443}
-
-
 def _url_parts(url: str) -> tuple[str, str, int | None, str] | None:
     """``(scheme, host, effective port, normalized path)`` of an absolute URL, or ``None`` when unparseable.
 
@@ -2216,7 +2218,7 @@ def _url_parts(url: str) -> tuple[str, str, int | None, str] | None:
     if not scheme or not host:
         return None
     path = posixpath.normpath("/" + unquote(parsed.path).lstrip("/"))
-    return scheme, host.rstrip(".").lower(), port or _DEFAULT_PORTS.get(scheme), path
+    return scheme, host.rstrip(".").lower(), port or DEFAULT_PORTS.get(scheme), path
 
 
 def hook_url_entry_problem(entry: str) -> str | None:
@@ -2317,7 +2319,7 @@ def _header_secret(key: str, value: str) -> bool:
         return False
     if _ENV_REF_ANYWHERE_RE.search(stripped):
         literal = _ENV_REF_ANYWHERE_RE.sub("", stripped)
-        literal = re.sub(r"(?i)^\s*(bearer|basic|token)\s*", "", literal).strip()
+        literal = _AUTH_SCHEME_PREFIX_RE.sub("", literal).strip()
         return bool(literal) and looks_like_inline_secret("value", literal)
     return looks_like_inline_secret(key, stripped)
 
@@ -3197,6 +3199,10 @@ def hook_risk_summary(records: Iterable[HookRecord]) -> dict[str, Any]:
     }
 
 
+# Privilege flags that describe a component without raising a risk; they do not count as flagged.
+_BENIGN_FLAGS = frozenset({"no_frontmatter", "inherits_all_tools", "ignored_hooks", "ignored_mcpServers"})
+
+
 def privilege_summary(records: Iterable[PrivilegeRecord]) -> dict[str, Any]:
     """The ``plugin.privileges`` metadata block."""
     rows = [record.to_dict() for record in records]
@@ -3214,6 +3220,3 @@ def privilege_summary(records: Iterable[PrivilegeRecord]) -> dict[str, Any]:
             "by_flag": dict(sorted(by_flag.items())),
         },
     }
-
-
-_BENIGN_FLAGS = frozenset({"no_frontmatter", "inherits_all_tools", "ignored_hooks", "ignored_mcpServers"})

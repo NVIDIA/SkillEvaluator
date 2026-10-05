@@ -54,7 +54,7 @@ from skillevaluator.validators.mcp_static import (
     endpoint_client_host,
     mcp_finding,
 )
-from skillevaluator.validators.url_policy import safe_url, whatwg_url
+from skillevaluator.validators.url_policy import DEFAULT_PORTS, safe_url, whatwg_url
 
 DNS_TIMEOUT_SECONDS = 3.0
 HEAD_TIMEOUT_SECONDS = 5.0
@@ -65,7 +65,6 @@ MAX_ADDRESSES = 64
 USER_AGENT = "skillevaluator-endpoint-check"
 # ``incomplete_scans`` name when endpoints were left unchecked.
 INCOMPLETE_SCAN = "endpoint-resolution"
-_DEFAULT_PORTS = {"http": 80, "ws": 80, "https": 443, "wss": 443}
 
 Resolver = Callable[[str, int, float], list[str]]
 HeadRequester = Callable[[str, str, int, str, str, float], "HeadResult"]
@@ -309,7 +308,7 @@ def _parse_endpoint(url: str) -> tuple[str, str | None, int, str] | None:
         parsed = urlparse(url)
         host = parsed.hostname
         scheme = (parsed.scheme or "").lower()
-        port = parsed.port or _DEFAULT_PORTS.get(scheme, 443)
+        port = parsed.port or DEFAULT_PORTS.get(scheme, 443)
     except ValueError:
         return None
     return scheme, host, port, parsed.path
@@ -504,7 +503,7 @@ class EndpointChecker:
             row.update(status="skipped", reason="malformed URL")
             return row, findings, None
         scheme, host, port, path = endpoint
-        if scheme not in _DEFAULT_PORTS or not host:
+        if scheme not in DEFAULT_PORTS or not host:
             row.update(status="skipped", reason=f"scheme {scheme or '(none)'!r} is not checked")
             return row, findings, None
         if "$" in host:

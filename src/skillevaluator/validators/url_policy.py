@@ -99,6 +99,10 @@ def looks_like_inline_secret(key: str, value: str) -> bool:
     return has_secret_shape(text) or is_credential_name(str(key))
 
 
+# Where the authority of a URL's raw text ends (a backslash does not end it there).
+_RAW_AUTHORITY_END_RE = re.compile(r"[/?#]")
+
+
 @dataclass(frozen=True)
 class UrlCredentials:
     """Where the text of one URL carries credentials; false when it carries none."""
@@ -128,7 +132,7 @@ def url_credentials(url: str, *, any_userinfo: bool) -> UrlCredentials:
       name (``api_key=literal``) or a value shaped like a secret under any name
       (``q=sk-...``). A ``$VAR`` / ``${VAR}`` reference never counts.
     """
-    authority = re.split(r"[/?#]", url.partition("//")[2], maxsplit=1)[0]
+    authority = _RAW_AUTHORITY_END_RE.split(url.partition("//")[2], maxsplit=1)[0]
     userinfo, at, _host = authority.rpartition("@")
     user, _colon, password = userinfo.partition(":")
     query = url.partition("?")[2].partition("#")[0]
@@ -172,6 +176,10 @@ _C0_CONTROL_OR_SPACE = "".join(chr(code) for code in range(0x21))
 _ASCII_EDGE_WHITESPACE = "".join(char for char in _C0_CONTROL_OR_SPACE if char.isspace())
 _TAB_OR_NEWLINE_RE = re.compile(r"[\t\n\r]")
 _URL_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):")
+# Where the authority of a special-scheme URL ends, as WHATWG clients read it.
+_AUTHORITY_END_RE = re.compile(r"[/\\?#]")
+# The port each scheme an MCP server or HTTP hook uses connects to when the URL names none.
+DEFAULT_PORTS: dict[str, int] = {"http": 80, "ws": 80, "https": 443, "wss": 443}
 
 
 def _special_scheme_slashes(text: str) -> str:
@@ -250,7 +258,7 @@ def url_ambiguities(url: str, *, percent_in_host: bool = False) -> list[str]:
     elif rest[2:3] in {"/", "\\"}:
         problems.append(f"more than two slashes after '{scheme}:'")
     if percent_in_host:
-        authority = re.split(r"[/\\?#]", rest.lstrip("/\\"), maxsplit=1)[0]
+        authority = _AUTHORITY_END_RE.split(rest.lstrip("/\\"), maxsplit=1)[0]
         if "%" in authority.rpartition("@")[2]:
             problems.append("percent-encoding in the host")
     return problems

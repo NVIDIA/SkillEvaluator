@@ -68,7 +68,7 @@ _MCP_NAME_RE = re.compile(MCP_NAME_PATTERN)
 # Shell metacharacters that enable command chaining, substitution, or redirection.
 # MCP stdio commands are exec'd argv-style (not through a shell), so these have no
 # legitimate purpose in a command/arg and indicate injection or shell smuggling.
-_SHELL_METACHAR_RE = re.compile(r"[;&|`\n\r]|\$\(|<\(|>\(|&&|\|\||[<>]")
+_SHELL_METACHAR_RE = re.compile(r"[;&|`\n\r<>]|\$\(")
 # Interpreters invoked with an inline program string execute arbitrary code.
 _SHELL_INTERPRETERS: frozenset[str] = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
 # A shell's inline-program flag: '-c' alone or inside a short-option cluster
@@ -108,6 +108,8 @@ _FLOATING_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Values that switch an environment or command-line setting on.
+TRUTHY_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 # Command flags that disable TLS/cert verification.
 _INSECURE_TLS_FLAGS: frozenset[str] = frozenset(
     {"--insecure", "-k", "--no-check-certificate", "--tls-no-verify", "--ssl-no-verify", "--no-verify-tls"}
@@ -218,7 +220,7 @@ def _is_insecure_tls_env(key: str, value: str) -> bool:
         # absent) and any other value keep verification ON -- flagging those is a FP.
         return v == "0"
     if k in {"GIT_SSL_NO_VERIFY", "CURL_INSECURE", "SSL_NO_VERIFY", "TLS_INSECURE", "SSL_VERIFY_NONE"}:
-        return v in {"1", "true", "yes", "on"}
+        return v in TRUTHY_VALUES
     return False
 
 
@@ -514,10 +516,7 @@ def _check_url(server: _ServerFindings, config: dict[str, Any], allowed_private_
     _check_url_inline_secrets(server, url, ambiguous=bool(problems))
     if problems:
         # A Python client may still connect where urllib reads the host: classify that one too.
-        try:
-            raw_host = raw.hostname
-        except ValueError:
-            raw_host = None
+        raw_host = _safe_hostname(raw)
         if raw_host and raw_host != _safe_hostname(parsed):
             _check_endpoint(server, url, raw_host, allowed_private_hosts)
     if scheme in ALLOWED_MCP_URL_SCHEMES:
@@ -546,11 +545,7 @@ def _check_url(server: _ServerFindings, config: dict[str, Any], allowed_private_
         return
     if scheme in _INSECURE_URL_SCHEMES:
         # Plaintext endpoints are blocked below; still report where they point.
-        try:
-            insecure_host = parsed.hostname
-        except ValueError:
-            insecure_host = None
-        _check_endpoint(server, url, insecure_host, allowed_private_hosts)
+        _check_endpoint(server, url, _safe_hostname(parsed), allowed_private_hosts)
     if scheme in _DANGEROUS_URL_SCHEMES or scheme == "":
         server.report(
             Severity.CRITICAL,

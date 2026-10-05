@@ -27,10 +27,9 @@ from fractions import Fraction
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from harbor.models.trajectories import Trajectory
-
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts, get_skill_tool_calls
 from skillevaluator.tier3.eval_core.checks import check_negative_case
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -732,7 +731,7 @@ def _trajectory_agent_runtime_failure_reason(trajectory: Any) -> str:
     for step in steps:
         if not isinstance(step, dict):
             continue
-        message = str(step.get("message") or "")
+        message = atif_content_text(step.get("message"))
         reason = _text_contains_agent_runtime_failure(message)
         if reason and tokenless:
             return reason
@@ -1802,6 +1801,21 @@ def _validate_generated_json_value(
         raise ValueError("encoded JSON exceeds limit")
 
 
+_ATIF_SCHEMA_VERSION_RE = re.compile(r"ATIF-v(?P<major>\d+)\.(?P<minor>\d+)")
+# Merged trajectories emit v1.7 fields such as trajectory_id and subagent refs.
+_MERGED_ATIF_SCHEMA_FLOOR = (1, 7)
+
+
+def _merged_atif_schema_version(*trajectories: Mapping[str, Any]) -> str:
+    """Label a merged trajectory with the newest source ATIF version, never below v1.7."""
+    newest = _MERGED_ATIF_SCHEMA_FLOOR
+    for trajectory in trajectories:
+        match = _ATIF_SCHEMA_VERSION_RE.fullmatch(str(trajectory.get("schema_version") or ""))
+        if match:
+            newest = max(newest, (int(match["major"]), int(match["minor"])))
+    return f"ATIF-v{newest[0]}.{newest[1]}"
+
+
 def _validated_trajectory_dict(data: Any) -> dict[str, Any]:
     try:
         # Bound traversal before deepcopy so hostile ATIF cannot amplify work
@@ -1900,6 +1914,8 @@ def _validated_trajectory_dict(data: Any) -> dict[str, Any]:
             max_nodes=ATIF_JSON_MAX_NODES,
             max_bytes=GENERATED_JSON_MAX_BYTES,
         )
+        from harbor.models.trajectories import Trajectory
+
         validated = Trajectory.model_validate(candidate).to_json_dict()
         _validate_generated_json_value(
             validated,
@@ -2232,7 +2248,7 @@ def _combine_continuation_trajectories(
         appended_steps = continuation_steps
 
     combined = copy.deepcopy(scoped_base)
-    combined["schema_version"] = "ATIF-v1.7"
+    combined["schema_version"] = _merged_atif_schema_version(base, continuation)
     combined["agent"] = copy.deepcopy(scoped_continuation["agent"])
     combined["steps"] = [copy.deepcopy(step) for step in (*base_steps, *appended_steps)]
     for index, step in enumerate(combined["steps"], start=1):
@@ -2788,7 +2804,7 @@ def _merged_step_trajectory(trial_root: Path) -> dict[str, Any] | None:
             json.dumps(source_identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
         ).hexdigest()[:20]
         merged: dict[str, Any] = {
-            "schema_version": "ATIF-v1.7",
+            "schema_version": _merged_atif_schema_version(*(trajectory for _, trajectory in trajectories)),
             "session_id": f"skillevaluator-multistep-{digest}",
             "trajectory_id": f"skillevaluator-multistep-{digest}",
             "agent": copy.deepcopy(trajectories[-1][1]["agent"]),

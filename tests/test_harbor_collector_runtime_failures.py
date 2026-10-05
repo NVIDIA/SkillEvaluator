@@ -2381,3 +2381,40 @@ def test_grader_authored_reward_cannot_set_collector_identity_controls(
         assert reward["entry_id"] == "logical-case"
         assert reward["_authoritative_entry_id"] is True
         assert collector_module._entry_id(reward) == "logical-case"
+
+
+@pytest.mark.parametrize(
+    "exception_type",
+    ["VerifierTimeoutError", "EnvironmentStartTimeoutError", "VerifierOutputParseError", "RewardFileNotFoundError"],
+)
+@pytest.mark.parametrize("multistep", [False, True])
+def test_harbor_verifier_and_environment_failures_are_unscored_not_agent_failures(
+    tmp_path: Path,
+    exception_type: str,
+    multistep: bool,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    _write_actual_harbor_022_result(
+        job_dir,
+        reward=1.0,
+        exception_type=None if multistep else exception_type,
+        step_rewards=(1.0, 1.0) if multistep else None,
+        step_exception_type=exception_type if multistep else None,
+    )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    opencode = results["agents"]["opencode"]
+    assert opencode["num_trials_with"] == 0
+    assert opencode["agent_runtime_failures"]["with_skill"] == []
+    assert results["execution_status"] == "failed"

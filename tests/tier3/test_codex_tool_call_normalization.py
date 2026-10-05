@@ -1003,3 +1003,58 @@ def test_copied_verifier_imports_its_sibling_codex_normalizer(tmp_path):
         ]
         == "exec_command"
     )
+
+
+def _multimodal_trajectory() -> dict:
+    return {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [{"tool_call_id": "call-1", "function_name": "view_image", "arguments": {}}],
+                "observation": {
+                    "results": [
+                        {
+                            "source_call_id": "call-1",
+                            "content": [
+                                {"type": "text", "text": "rendered chart"},
+                                {"type": "image", "source": {"media_type": "image/png", "path": "/secret/a.png"}},
+                                {"type": "audio", "source": {"media_type": "audio/wav", "path": "/secret/a.wav"}},
+                                {"type": "video"},
+                            ],
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+
+
+def test_atif_content_text_flattens_parts_without_source_paths() -> None:
+    content = _multimodal_trajectory()["steps"][0]["observation"]["results"][0]["content"]
+
+    assert codex_tool_call_normalizer.atif_content_text(None) == ""
+    assert codex_tool_call_normalizer.atif_content_text("plain") == "plain"
+    assert codex_tool_call_normalizer.atif_content_text(content) == "rendered chart\n[image]\n[audio]"
+    assert "/secret" not in codex_tool_call_normalizer.atif_content_text(content)
+
+
+@pytest.mark.parametrize("extract", _EXTRACTORS)
+def test_list_observation_content_is_text_not_repr(extract) -> None:
+    [call] = extract(_multimodal_trajectory())
+
+    assert call["observation"] == "rendered chart\n[image]\n[audio]"
+
+
+def test_host_and_template_summaries_agree_on_list_observations() -> None:
+    from skillevaluator.tier3.eval_core import atif_helpers
+
+    trajectory = _multimodal_trajectory()
+
+    host = atif_helpers.build_conversation_summary(trajectory, "question")
+    template = _TEMPLATE_MODULE.build_conversation_summary(trajectory, "question")
+    assert host == template
+    assert "Tool returned: rendered chart\n[image]\n[audio]" in host
+    assert "/secret" not in host
+    assert atif_helpers._late_observation_excerpts(trajectory, 200) == _TEMPLATE_MODULE._late_observation_excerpts(
+        trajectory, 200
+    )

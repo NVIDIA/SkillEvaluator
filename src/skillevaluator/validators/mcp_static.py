@@ -59,8 +59,13 @@ _SHELL_METACHAR_RE = re.compile(r"[;&|`\n\r]|\$\(|<\(|>\(|&&|\|\||[<>]")
 # Interpreters invoked with an inline program string execute arbitrary code.
 _SHELL_INTERPRETERS: frozenset[str] = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
 # A shell's inline-program flag: '-c' alone or inside a short-option cluster
-# ('-lc', '-ec', '-xc'). Long options such as '--config' never match.
-_SHELL_INLINE_PROGRAM_FLAG_RE = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
+# ('-lc', '-ec', '-xc'); bash, sh and zsh also run '+c' as '-c'. Long options
+# such as '--config' never match.
+_SHELL_INLINE_PROGRAM_FLAG_RE = re.compile(r"[-+][A-Za-z]*c[A-Za-z]*")
+# Shell options that take the next argument as their value: '--rcfile file',
+# '--init-file file', and '-o name' / '-O name' (also '+o', '+O', and inside a
+# cluster such as '-eo pipefail').
+_SHELL_VALUE_LONG_OPTIONS: frozenset[str] = frozenset({"--rcfile", "--init-file"})
 # Floating / non-pinned version markers (supply-chain drift risk).
 _FLOATING_MARKERS: tuple[str, ...] = ("@latest", "@main", "@master", "@head", "@next", "@canary", ":latest", ":main")
 # A marker counts only when it is attached to a package or image name ("pkg@latest",
@@ -486,16 +491,17 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
             )
 
     # Shell interpreter invoked with an inline program string (`sh -c "..."`, `bash -lc "..."`).
-    # A whole command line in 'command' ("bash -c node") is read argv-style, as
-    # classify_mcp_pinning does.
     command_words = command.split()
-    runs_shell = (
-        _command_basename(command_words[0]) in _SHELL_INTERPRETERS
-        # An unsplit path with spaces, e.g. "C:\Program Files\Git\bin\bash.exe".
-        or _command_basename(command) in _SHELL_INTERPRETERS
-    )
-    shell_args = [*command_words[1:], *arg_list]
-    if runs_shell and any(_SHELL_INLINE_PROGRAM_FLAG_RE.fullmatch(arg.strip()) for arg in shell_args):
+    shell_args: list[str] | None = None
+    if _command_basename(command) in _SHELL_INTERPRETERS:
+        # 'command' names only the shell, possibly as a path with spaces such as
+        # "C:\Program Files\Git\bin\bash.exe", so every shell option is in 'args'.
+        shell_args = arg_list
+    elif _command_basename(command_words[0]) in _SHELL_INTERPRETERS:
+        # A whole command line in 'command' ("bash -c node") is read argv-style, as
+        # classify_mcp_pinning does.
+        shell_args = [*command_words[1:], *arg_list]
+    if shell_args is not None and _shell_runs_inline_program(shell_args):
         findings.append(
             _finding(
                 Severity.CRITICAL,
@@ -506,6 +512,28 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
                 name=name,
             )
         )
+
+
+def _shell_runs_inline_program(shell_args: list[str]) -> bool:
+    """Return whether a shell's arguments select an inline program string ('-c').
+
+    A shell reads options only until its first operand (the script it runs) or an
+    end-of-options marker ('--' or '-'). Later arguments belong to the script, so
+    a script's own '-config' or '-recursive' is not the shell's '-c'.
+    """
+    index = 0
+    while index < len(shell_args):
+        arg = shell_args[index].strip()
+        if arg in {"-", "--"} or not arg.startswith(("-", "+")):
+            return False
+        if _SHELL_INLINE_PROGRAM_FLAG_RE.fullmatch(arg):
+            return True
+        if arg.startswith("--"):
+            takes_value = arg in _SHELL_VALUE_LONG_OPTIONS
+        else:
+            takes_value = "o" in arg or "O" in arg
+        index += 2 if takes_value else 1
+    return False
 
 
 def _validate_url(

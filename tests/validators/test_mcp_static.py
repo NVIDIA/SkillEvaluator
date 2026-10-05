@@ -75,6 +75,15 @@ def test_command_shell_interpreter_dash_c_is_blocked() -> None:
         {"command": "sh", "args": ["-xc", "startserver"]},
         {"command": "bash -c startserver"},
         {"command": "bash -l", "args": ["-c", "startserver"]},
+        {"command": "bash", "args": ["-l", "-c", "startserver"]},
+        {"command": "bash", "args": ["+c", "startserver"]},
+        # Option values are skipped, not mistaken for the script operand.
+        {"command": "bash", "args": ["-o", "pipefail", "-c", "startserver"]},
+        {"command": "bash", "args": ["-eo", "pipefail", "-c", "startserver"]},
+        {"command": "bash", "args": ["-O", "extglob", "-c", "startserver"]},
+        {"command": "bash", "args": ["--rcfile", "x", "-c", "startserver"]},
+        {"command": "bash", "args": ["--init-file", "x", "-c", "startserver"]},
+        {"command": "C:\\Program Files\\Git\\bin\\bash.exe", "args": ["-l", "-c", "startserver"]},
     ],
 )
 def test_command_shell_inline_program_forms_are_blocked(config) -> None:
@@ -87,6 +96,12 @@ def test_command_shell_inline_program_forms_are_blocked(config) -> None:
     [
         {"command": "bash", "args": ["script.sh"]},
         {"command": "bash", "args": ["--rcfile", "x", "script.sh"]},
+        # The script's own arguments are not shell options.
+        {"command": "bash", "args": ["server.sh", "-config", "x.yml"]},
+        {"command": "bash", "args": ["run.sh", "--watch", "-recursive"]},
+        {"command": "bash server.sh", "args": ["-c", "x"]},
+        {"command": "bash", "args": ["-o", "pipefail", "server.sh", "-c"]},
+        {"command": "bash", "args": ["--", "server.sh", "-c"]},
         {"command": "node", "args": ["--config", "x"]},
         {"command": "python", "args": ["-c", "print(1)"]},
     ],

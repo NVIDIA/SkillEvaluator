@@ -54,12 +54,13 @@ from skillevaluator.utils.tool_runner import Severity, Tools, cvss_to_severity, 
 from skillevaluator.validators import dependency_ecosystems as eco
 from skillevaluator.validators.base import ValidationResult, ValidatorBase
 from skillevaluator.validators.mcp_static import (
-    EXACT_PEP440_VERSION_RE,
-    exact_pypi_version,
     is_local_spec,
+    is_pep440_version,
     is_remote_pypi_spec,
     mcp_container_image,
     parse_mcp_runner,
+    pypi_pin,
+    specifier_pin,
 )
 from skillevaluator.validators.plugin_tree import (
     active_plugin_tree,
@@ -145,9 +146,11 @@ def canonicalize_package_name(name: str) -> str:
 def parse_dependency_declaration(raw: str, *, line_number: int | None, role: str) -> DependencyDeclaration:
     """Parse one PEP 508 requirement string without installing or resolving it.
 
-    Only a single ``==`` specifier with a plain PEP 440 version counts as an
-    exact pin. Direct URL references, wildcards, ``===`` arbitrary equality,
-    ranges, and malformed strings are returned with ``exact_version=None``.
+    Only a single ``==`` or ``===`` specifier that names one valid PEP 440
+    version, in any spelling PEP 440 accepts, is an exact pin
+    (:func:`~skillevaluator.validators.mcp_static.specifier_pin`). Direct URL
+    references, wildcards, a ``===`` string that is not a version, ranges, and
+    malformed strings are returned with ``exact_version=None``.
     """
     text = raw.strip()
     match = _REQUIREMENT_RE.fullmatch(text)
@@ -168,9 +171,8 @@ def parse_dependency_declaration(raw: str, *, line_number: int | None, role: str
         if spec is None:
             return DependencyDeclaration(text, name, line_number, role, None)
         specifiers.append((spec.group("op"), spec.group("version")))
-    exact = None
-    if len(specifiers) == 1 and specifiers[0][0] == "==" and EXACT_PEP440_VERSION_RE.fullmatch(specifiers[0][1]):
-        exact = specifiers[0][1]
+    pin = specifier_pin(*specifiers[0]) if len(specifiers) == 1 else None
+    exact = pin.version if pin is not None and pin.auditable else None
     return DependencyDeclaration(text, name, line_number, role, exact)
 
 
@@ -256,7 +258,7 @@ def _parse_poetry_declaration(name: str, constraint: object) -> DependencyDeclar
     text = constraint.strip() if isinstance(constraint, str) else "*"
     if text in {"", "*"}:
         return parse_dependency_declaration(name, line_number=None, role="poetry")
-    if EXACT_PEP440_VERSION_RE.fullmatch(text):
+    if is_pep440_version(text):
         return parse_dependency_declaration(f"{name}=={text}", line_number=None, role="poetry")
     declaration = parse_dependency_declaration(f"{name}{text}", line_number=None, role="poetry")
     if declaration.name is None:
@@ -293,10 +295,11 @@ def _load_npm_lockfile(text: str) -> Any:
 def _python_runner_declaration(spec: str) -> DependencyDeclaration | None:
     """A ``uvx``/``pipx run`` package spec as a declaration; local paths are skipped.
 
-    Its version is exact when the MCP pinning check calls the spec pinned: both
-    use :func:`~skillevaluator.validators.mcp_static.exact_pypi_version`, which
-    also reads uv's ``pkg@1.2.3`` spelling of ``pkg==1.2.3``. Git and URL specs
-    are kept as unverifiable.
+    The MCP pinning check reads the same pin
+    (:func:`~skillevaluator.validators.mcp_static.pypi_pin`, which also reads
+    uv's ``pkg@1.2.3`` spelling of ``pkg==1.2.3``): a pinned spec is audited
+    when its version is a valid PEP 440 version. A ``===`` pin of any other
+    string, and git and URL specs, are kept as unverifiable.
     """
     text = spec.strip()
     if not text or is_local_spec(text):
@@ -304,7 +307,8 @@ def _python_runner_declaration(spec: str) -> DependencyDeclaration | None:
     if is_remote_pypi_spec(text):
         return DependencyDeclaration(text, None, None, "mcp", None)
     declaration = parse_dependency_declaration(text, line_number=None, role="mcp")
-    return replace(declaration, exact_version=exact_pypi_version(text))
+    pin = pypi_pin(text)
+    return replace(declaration, exact_version=pin.version if pin is not None and pin.auditable else None)
 
 
 class DependencySecurityValidator(ValidatorBase):

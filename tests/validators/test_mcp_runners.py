@@ -18,12 +18,14 @@ from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators import dependency_ecosystems as eco
 from skillevaluator.validators.dependencies import _python_runner_declaration
 from skillevaluator.validators.mcp_static import (
+    PypiPin,
     RunnerInvocation,
     classify_mcp_pinning,
     exact_npm_version,
-    exact_pypi_version,
+    is_pep440_version,
     mcp_container_image,
     parse_mcp_runner,
+    pypi_pin,
     validate_mcp_server_declaration,
 )
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
@@ -270,22 +272,43 @@ def test_exact_npm_version(version: str, exact: str | None) -> None:
 
 
 @pytest.mark.parametrize(
-    ("requirement", "exact"),
+    ("version", "valid"),
     [
-        ("pkg==1.2.3", "1.2.3"),
-        ("pkg[extra] == 1.0.post1", "1.0.post1"),
-        ("pkg@1.2", "1.2"),
-        ("pkg==1.0; python_version >= '3.12'", "1.0"),
-        ("pkg===1.0", None),
+        *[(version, True) for version in ("1.2.3", "v1.2.3", "V1.0", "1.0rc", "1.0c1", "1.0-1", "1.2.3-beta.1")],
+        *[(version, True) for version in ("1.0_alpha2", "1!2.0", "1.0.post1.dev2+local.7", "2024.11.25")],
+        *[(version, False) for version in ("1.0.*", "latest", "1.0+", "1..0", "", "local-build")],
+    ],
+)
+def test_pep440_versions_match_in_every_spelling_pep_440_accepts(version: str, valid: bool) -> None:
+    assert is_pep440_version(version) is valid
+
+
+@pytest.mark.parametrize(
+    ("requirement", "pin"),
+    [
+        ("pkg==1.2.3", PypiPin("1.2.3", auditable=True)),
+        ("pkg[extra] == 1.0.post1", PypiPin("1.0.post1", auditable=True)),
+        ("pkg@1.2", PypiPin("1.2", auditable=True)),
+        ("pkg==1.0; python_version >= '3.12'", PypiPin("1.0", auditable=True)),
+        ("pkg==v1.2.3", PypiPin("v1.2.3", auditable=True)),
+        ("pkg==1.0rc", PypiPin("1.0rc", auditable=True)),
+        ("pkg==1.0-1", PypiPin("1.0-1", auditable=True)),
+        ("pkg@1.2.3-beta.1", PypiPin("1.2.3-beta.1", auditable=True)),
+        ("pkg===1.0", PypiPin("1.0", auditable=True)),
+        ("pkg===local-build", PypiPin("local-build", auditable=False)),
+        ("pkg (==1.0)", PypiPin("1.0", auditable=True)),
+        ("pkg[x] (===1.0)", PypiPin("1.0", auditable=True)),
         ("pkg==1.0.*", None),
         ("pkg==1.0,<2", None),
+        ("pkg>=1", None),
         ("pkg@latest", None),
+        ("pkg==latest", None),
         ("pkg @ https://example.invalid/pkg.whl", None),
         ("pkg", None),
     ],
 )
-def test_exact_pypi_version(requirement: str, exact: str | None) -> None:
-    assert exact_pypi_version(requirement) == exact
+def test_pypi_pin(requirement: str, pin: PypiPin | None) -> None:
+    assert pypi_pin(requirement) == pin
 
 
 _NPM_RUNNER_SPECS = (
@@ -295,7 +318,7 @@ _NPM_RUNNER_SPECS = (
 _PYTHON_RUNNER_SPECS = (
     *("pkg", "pkg==1.0", "pkg[x]==1.0", "pkg===1.0", "pkg==1.0.*", "pkg>=1", "pkg==1.0,<2", "pkg==1.0rc", "pkg@1.2"),
     *("pkg@1.2.3", "pkg@v1.2.3", "pkg@1.2.3-beta.1", "pkg@latest", "pkg==1.0; python_version > '3'", "pkg==v1.0"),
-    "pkg @ https://example.invalid/pkg.whl",
+    *("pkg==1.0-1", "pkg (==1.0)", "pkg[x] (===1.0)", "pkg==latest", "pkg @ https://example.invalid/pkg.whl"),
 )
 
 
@@ -313,6 +336,23 @@ def test_python_runner_spec_is_pinned_exactly_when_the_audit_finds_one_version(s
     declaration = _python_runner_declaration(spec)
     assert declaration is not None
     assert (pin.status == "pinned") == (declaration.exact_version is not None)
+
+
+@pytest.mark.parametrize(
+    "spec", ["pkg===1.0", "pkg@v1.2.3", "pkg@1.2.3-beta.1", "pkg==1.0rc", "pkg==1.0-1", "pkg==v1.0", "pkg (==1.0)"]
+)
+def test_every_pep440_spelling_of_an_exact_version_is_pinned(spec: str) -> None:
+    """Regression: exact pins in a non-canonical PEP 440 spelling (or with ``===``) were reported unpinned."""
+    findings = validate_mcp_server_declaration("s", {"command": "uvx", "args": [spec]}, "p.json")
+    assert "mcp_unpinned_package" not in {finding.check_name for finding in findings}
+    assert classify_mcp_pinning({"command": "uvx", "args": [spec]}).status == "pinned"
+
+
+def test_arbitrary_equality_with_a_non_version_is_pinned_but_unverified() -> None:
+    assert classify_mcp_pinning({"command": "uvx", "args": ["pkg===local-build"]}).status == "pinned"
+    declaration = _python_runner_declaration("pkg===local-build")
+    assert declaration is not None
+    assert (declaration.name, declaration.exact_version) == ("pkg", None)
 
 
 # --------------------------------------------------------------------------- #
@@ -430,6 +470,29 @@ def test_audit_reads_runner_paths_with_spaces(tmp_path: Path, pip_audit: _FakeTo
     assert packages["node_modules/lodash"] == {"version": "4.17.20"}
     [pip_call] = pip_audit.calls
     assert pip_call["files"] == {"requirements-0.txt": "mcp-server-fetch==2024.11.25\n"}
+
+
+def test_pip_audit_gets_every_exact_pep440_spelling_as_name_equals_version(
+    tmp_path: Path, pip_audit: _FakeTool
+) -> None:
+    """Regression: these pins were unverified (or unpinned) although each names one release."""
+    servers = {
+        "v": {"command": "uvx", "args": ["--from", "alpha@v1.2.3", "alpha"]},
+        "parens": {"command": "uvx", "args": ["beta (==1.0)"]},
+        "arbitrary": {"command": "pipx", "args": ["run", "--spec", "gamma===2.0", "gamma"]},
+        "beta-tag": {"command": "uvx", "args": ["delta@1.2.3-beta.1"]},
+        "label": {"command": "uvx", "args": ["epsilon===local-build"]},
+    }
+    result = _audit(tmp_path / "demo", servers)
+
+    [call] = pip_audit.calls
+    assert call["files"] == {"requirements-0.txt": "alpha==v1.2.3\nbeta==1.0\ndelta==1.2.3-beta.1\ngamma==2.0\n"}
+    unverified = [
+        (f.metadata["package_name"], f.metadata["declared_constraint"])
+        for f in result.findings
+        if f.check_name == "dependency-version-unverified"
+    ]
+    assert unverified == [("epsilon", "epsilon===local-build")]
 
 
 def test_audit_and_pinning_read_the_same_uvx_requirements(tmp_path: Path, pip_audit: _FakeTool) -> None:

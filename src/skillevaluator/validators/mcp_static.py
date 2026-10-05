@@ -846,14 +846,47 @@ RunnerEcosystem = Literal["npm", "pypi", "deno", "container"]
 # An exact npm version: "1.2.3", "=1.2.3", or "v1.2.3", with optional
 # prerelease and build metadata.
 _NPM_EXACT_RE = re.compile(r"^=?v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$")
-# A conservative exact PEP 440 version (public or local, no wildcards). Anything
-# else is treated as unverifiable rather than handed to pip-audit.
-EXACT_PEP440_VERSION_RE = re.compile(
-    r"(?:\d+!)?\d+(?:\.\d+)*(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?(?:\+[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?",
-    re.IGNORECASE,
+# The canonical PEP 440 version pattern, verbatim from PEP 440 Appendix B. It
+# matches every spelling PEP 440 accepts for one version, such as "1.2.3",
+# "v1.2.3", "1.0rc", "1.0-1", or "1.2.3-beta.1"; a wildcard such as "1.0.*" is
+# not a version.
+_PEP440_VERSION_PATTERN = r"""
+    v?
+    (?:
+        (?:(?P<epoch>[0-9]+)!)?                           # epoch
+        (?P<release>[0-9]+(?:\.[0-9]+)*)                  # release segment
+        (?P<pre>                                          # pre-release
+            [-_\.]?
+            (?P<pre_l>(a|b|c|rc|alpha|beta|pre|preview))
+            [-_\.]?
+            (?P<pre_n>[0-9]+)?
+        )?
+        (?P<post>                                         # post release
+            (?:-(?P<post_n1>[0-9]+))
+            |
+            (?:
+                [-_\.]?
+                (?P<post_l>post|rev|r)
+                [-_\.]?
+                (?P<post_n2>[0-9]+)?
+            )
+        )?
+        (?P<dev>                                          # dev release
+            [-_\.]?
+            (?P<dev_l>dev)
+            [-_\.]?
+            (?P<dev_n>[0-9]+)?
+        )?
+    )
+    (?:\+(?P<local>[a-z0-9]+(?:[-_\.][a-z0-9]+)*))?       # local version
+"""
+PEP440_VERSION_RE = re.compile(r"^\s*" + _PEP440_VERSION_PATTERN + r"\s*$", re.VERBOSE | re.IGNORECASE)
+# A PyPI requirement: a distribution name, optional extras, then its version specifier.
+_PYPI_REQUIREMENT_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\s*(?:\[[^\]]*\])?\s*(?P<specifier>.*)", re.DOTALL
 )
-# A PyPI requirement that names one version: "pkg==V", "pkg[extra]==V", or uv's "pkg@V".
-_PYPI_PIN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\s*(?:\[[^\]]*\])?\s*(?:==|@)\s*(?P<version>\S+)")
+# A version specifier that can pin one version: "==V", "===V", or uv's "@V".
+_PIN_SPECIFIER_RE = re.compile(r"(?P<operator>===|==|@)\s*(?P<version>\S+)")
 _GIT_SHA_RE = re.compile(r"(?:#|@)[0-9a-fA-F]{40}(?:$|[&#])")
 _DOCKER_DIGEST_RE = re.compile(r"@sha256:[0-9a-fA-F]{64}$")
 _VERSION_TAG_RE = re.compile(r"^v?\d+(?:\.\d+)*(?:[-+._][0-9A-Za-z.]+)*$")
@@ -1281,18 +1314,54 @@ def exact_npm_version(version: str) -> str | None:
     return match.group(1) if match else None
 
 
-def exact_pypi_version(requirement: str) -> str | None:
-    """The version a PyPI requirement pins exactly, else ``None``.
+def is_pep440_version(text: str) -> bool:
+    """Whether *text* is one valid PEP 440 version, in any spelling PEP 440 accepts."""
+    return PEP440_VERSION_RE.fullmatch(text) is not None
 
-    ``pkg==1.2.3``, ``pkg[extra]==1.2.3``, and uv's ``pkg@1.2.3`` each pin one
-    version (an environment marker after ``;`` is ignored); the version must
-    match :data:`EXACT_PEP440_VERSION_RE`. Ranges, wildcards, ``===``, tags, and
-    URLs are not exact.
+
+@dataclass(frozen=True)
+class PypiPin:
+    """The version a PyPI requirement pins with ``==``, ``===``, or uv's ``@``.
+
+    ``auditable`` is set when the version is a valid PEP 440 version, so the
+    dependency audit can hand ``name==version`` to pip-audit. A ``===`` pin of
+    any other string still pins the package, but no release can be matched to
+    it, so the audit reports it unverified.
     """
-    match = _PYPI_PIN_RE.fullmatch(requirement.split(";", 1)[0].strip())
-    if match is None or not EXACT_PEP440_VERSION_RE.fullmatch(match.group("version")):
+
+    version: str
+    auditable: bool
+
+
+def specifier_pin(operator: str, version: str) -> PypiPin | None:
+    """What one version specifier pins: ``==V`` and uv's ``@V`` when ``V`` is a PEP 440 version, and ``===V``.
+
+    The MCP pinning check and the dependency audit (``requirements*.txt``,
+    ``pyproject.toml``, and runner specs) all decide exactness here.
+    """
+    if operator == "===":
+        return PypiPin(version, auditable=is_pep440_version(version))
+    if operator in {"==", "@"} and is_pep440_version(version):
+        return PypiPin(version, auditable=True)
+    return None
+
+
+def pypi_pin(requirement: str) -> PypiPin | None:
+    """The version a PyPI runner requirement pins, else ``None``.
+
+    Reads ``pkg==V``, ``pkg===V``, uv's ``pkg@V``, extras (``pkg[x]==V``), and
+    the PEP 508 parenthesized form ``pkg (==V)``; an environment marker after
+    ``;`` is ignored. Ranges, wildcards, tags such as ``@latest``, and URLs pin
+    nothing (see :func:`specifier_pin`).
+    """
+    match = _PYPI_REQUIREMENT_RE.fullmatch(requirement.split(";", 1)[0].strip())
+    if match is None:
         return None
-    return match.group("version")
+    specifier = match.group("specifier").strip()
+    if specifier.startswith("(") and specifier.endswith(")"):
+        specifier = specifier[1:-1].strip()
+    pin = _PIN_SPECIFIER_RE.fullmatch(specifier)
+    return None if pin is None else specifier_pin(pin.group("operator"), pin.group("version"))
 
 
 def _classify_npm_spec(spec: str) -> McpPinning:
@@ -1319,7 +1388,7 @@ def _classify_python_spec(spec: str) -> McpPinning:
         if _GIT_SHA_RE.search(spec) or "#sha256=" in spec:
             return McpPinning("pinned", f"git/URL spec pinned to a commit or hash: {spec!r}", remote=True)
         return McpPinning("unpinned", f"git/URL spec without a commit SHA or hash: {spec!r}", remote=True)
-    if exact_pypi_version(spec):
+    if pypi_pin(spec) is not None:
         return McpPinning("pinned", f"exact version {spec!r}")
     if any(marker in spec for marker in ("<", ">", "~", "!", "*", ",", "=", "@")):
         return McpPinning("unpinned", f"requirement {spec!r} is a range or tag, not an exact '==' version")

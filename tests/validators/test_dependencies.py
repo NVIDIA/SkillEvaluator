@@ -242,13 +242,34 @@ def test_poetry_bare_versions_are_exact(tmp_path: Path, pip_audit_available) -> 
     assert unverified == ["httpx"]
 
 
+def test_every_pep440_spelling_of_an_exact_pin_is_audited(tmp_path: Path, pip_audit_available) -> None:
+    """Regression: ``===`` and non-canonical PEP 440 spellings were unverified although they name one release."""
+    skill = _skill(tmp_path)
+    (skill / "requirements.txt").write_text(
+        "alpha===1.0\nbeta==v2.0\ndelta==1.2.3-beta.1\ngamma===local-build\n", encoding="utf-8"
+    )
+    fake = _RecordingPipAudit()
+
+    with patch.object(Tools.pip_audit, "run", side_effect=fake):
+        result = DependencySecurityValidator(use_safety=False).validate(skill)
+
+    assert [call["content"] for call in fake.calls] == ["alpha==1.0\nbeta==v2.0\ndelta==1.2.3-beta.1\n"]
+    unverified = [f.metadata["package_name"] for f in result.findings if f.check_name == UNVERIFIED_CHECK_NAME]
+    assert unverified == ["gamma"]
+
+
 @pytest.mark.parametrize(
     ("raw", "name", "exact"),
     [
         ("requests==2.31.0", "requests", "2.31.0"),
         ("Foo_Bar[extra]==1.0.post1 ; sys_platform == 'linux'", "foo-bar", "1.0.post1"),
         ("pkg==1.0.*", "pkg", None),
-        ("pkg===1.0", "pkg", None),
+        ("pkg===1.0", "pkg", "1.0"),
+        ("pkg===local-build", "pkg", None),
+        ("pkg==v1.0", "pkg", "v1.0"),
+        ("pkg==1.0-1", "pkg", "1.0-1"),
+        ("pkg==1.2.3-beta.1", "pkg", "1.2.3-beta.1"),
+        ("pkg (==1.0)", "pkg", "1.0"),
         ("pkg>=1,<2", "pkg", None),
         ("pkg==1.0,==1.0", "pkg", None),
         ("pkg", "pkg", None),

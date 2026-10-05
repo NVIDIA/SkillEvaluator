@@ -12,6 +12,7 @@ import pytest
 from skillevaluator.utils import find_skills_in_directory, get_skill_name_from_path
 from skillevaluator.utils.helpers import (
     _ssh_to_https,
+    git_origin_https_url,
     resolve_git_remote_url,
     resolve_git_root,
 )
@@ -233,6 +234,33 @@ class TestResolveGitRoot:
 
     def test_returns_none_outside_git_repository(self, tmp_path: Path) -> None:
         assert resolve_git_root(tmp_path) is None
+
+
+class TestGitOriginHttpsUrl:
+    """Tests for the origin lookup shared by report links and plugin repository identity."""
+
+    @pytest.mark.parametrize(
+        ("origin", "expected"),
+        [
+            ("git@github.com:example/project.git", "https://github.com/example/project"),
+            ("https://token@github.com/example/project.git", "https://github.com/example/project"),
+            ("http://github.com/example/project.git", None),
+            # Not misread as the SCP-style remote "user@github.com:8080/...".
+            ("http://user@github.com:8080/example/project.git", None),
+            ("git://git@github.com:9418/example/project.git", None),
+            ("file:///srv/git/example/project.git", None),
+        ],
+    )
+    def test_accepts_only_ssh_and_https_origins(self, tmp_path: Path, origin: str, expected: str | None) -> None:
+        repo_root = tmp_path / "repo"
+        _init_git_repo(repo_root, origin)
+
+        assert git_origin_https_url(repo_root) == expected
+
+    def test_returns_none_without_an_origin(self, tmp_path: Path) -> None:
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+        assert git_origin_https_url(tmp_path) is None
 
 
 class TestResolveGitRemoteUrl:

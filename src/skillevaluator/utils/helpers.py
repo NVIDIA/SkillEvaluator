@@ -288,16 +288,11 @@ def resolve_git_remote_url(local_path: Path) -> str | None:
     repo_root = resolve_git_root(resolved)
     if repo_root is None:
         return None
+    https_url = git_origin_https_url(repo_root)
+    if not https_url:
+        return None
 
     try:
-        # Get the remote origin URL
-        remote_url = subprocess.check_output(
-            ["git", "remote", "get-url", "origin"],
-            cwd=str(repo_root),
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-
         # Get the current branch.
         # In CI pipelines (detached HEAD), git returns "HEAD" so prefer an
         # explicitly supplied branch name.
@@ -328,11 +323,6 @@ def resolve_git_remote_url(local_path: Path) -> str | None:
         if branch == "HEAD":
             branch = "main"
 
-        # Convert SSH URL to HTTPS.
-        https_url = _ssh_to_https(remote_url)
-        if not https_url:
-            return None
-
         # Compute the relative path within the repo
         try:
             rel_path = str(resolved.relative_to(repo_root))
@@ -346,6 +336,32 @@ def resolve_git_remote_url(local_path: Path) -> str | None:
 
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None
+
+
+def git_origin_https_url(git_root: Path) -> str | None:
+    """Return the ``origin`` remote of the repository at *git_root* as an HTTPS URL, or ``None``.
+
+    Runs one ``git remote get-url origin``. Only ``ssh://``, SCP-style
+    (``git@host:group/repo``), and ``https://`` remotes are accepted, with any
+    credentials stripped (see :func:`_ssh_to_https`). Any other remote, such
+    as ``http://``, ``git://``, ``file://``, or a local path, gives ``None``,
+    so repository identity derived from it fails closed.
+    """
+    try:
+        remote_url = subprocess.check_output(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(git_root),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    # Checked here because _ssh_to_https reads "http://user@host:8080/group/repo"
+    # as an SCP-style "user@host:path" remote.
+    scheme, separator, _rest = remote_url.partition("://")
+    if separator and scheme.lower() not in {"https", "ssh"}:
+        return None
+    return _ssh_to_https(remote_url)
 
 
 def _ssh_to_https(remote_url: str) -> str | None:

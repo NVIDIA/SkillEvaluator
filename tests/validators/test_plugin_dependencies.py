@@ -254,6 +254,46 @@ def test_repo_root_that_is_not_the_git_top_level_fails_closed(tmp_path: Path) ->
     assert _rows(result)[f"github::{REPO}::skills::shared"]["state"] == "unresolved"
 
 
+@requires_git
+def test_repository_identity_runs_two_git_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The top-level and the origin remote; the branch and HEAD a browse link needs are never asked for."""
+    repo = _git_repo(tmp_path / "repo")
+    plugin = _manifest(repo / "plugins" / "p", skills=[f"github::{REPO}::skills::shared"])
+    commands: list[list[str]] = []
+    real_check_output = subprocess.check_output
+
+    def recording_check_output(args, *more, **kwargs):
+        commands.append(list(args))
+        return real_check_output(args, *more, **kwargs)
+
+    monkeypatch.setattr(subprocess, "check_output", recording_check_output)
+
+    identity = resolve_repository_identity(plugin)
+
+    assert identity.local_slug == REPO
+    assert commands == [["git", "rev-parse", "--show-toplevel"], ["git", "remote", "get-url", "origin"]]
+
+
+@requires_git
+@pytest.mark.parametrize(
+    ("origin", "slug"),
+    [
+        (ORIGIN, REPO),
+        ("git@github.com:Example-Org/example-repo.git", REPO),
+        ("ssh://git@github.com/Example-Org/example-repo.git", REPO),
+        ("http://github.com/Example-Org/example-repo.git", None),
+        # Read as an SCP-style "user@host:path" remote before the scheme was checked first.
+        ("http://user@github.com:8080/Example-Org/example-repo.git", None),
+        ("git://git@github.com:9418/Example-Org/example-repo.git", None),
+        ("file:///srv/git/Example-Org/example-repo.git", None),
+    ],
+)
+def test_only_ssh_and_https_origins_establish_identity(tmp_path: Path, origin: str, slug: str | None) -> None:
+    repo = _git_repo(tmp_path / "repo", origin=origin)
+
+    assert local_repo_slug(repo) == slug
+
+
 @pytest.mark.parametrize(
     ("ref", "reason"),
     [

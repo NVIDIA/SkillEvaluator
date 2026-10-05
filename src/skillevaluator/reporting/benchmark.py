@@ -22,7 +22,7 @@ from skillevaluator.constants import (
     TIER3_LIFT_PASS_THRESHOLD,
 )
 from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
-from skillevaluator.reporting.plugin_sections import inventory_view, statically_checked_types, tier3_plugin_view
+from skillevaluator.reporting.plugin_sections import tier3_plugin_view, unsupported_type_split
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 from skillevaluator.utils.rich_markup import strip_terminal_controls
@@ -905,27 +905,17 @@ class BenchmarkReporter(ReporterBase):
     ) -> None:
         lines.extend(["## Provenance and Excluded Behavior", ""])
         excluded = list((view or {}).get("excluded") or [])
-        inventory = inventory_view(plugin.get("component_inventory"))
-        if inventory and inventory["unsupported_types"]:
-            # A type is evaluated when a Tier 3 row of that type was staged, loaded
-            # or exercised (native loading), and checked when Tier 1 has
-            # static-risk rows for it. Only the rest is excluded outright.
-            coverage = (view or {}).get("coverage") or {}
-            runtime_types = {row["type"] for row in coverage.get("rows") or [] if row.get("staged")}
-            static_types = statically_checked_types(plugin)
-            remaining = [name for name in inventory["unsupported_types"] if name not in runtime_types]
-            static_only = [name for name in remaining if name in static_types]
-            not_evaluated = [name for name in remaining if name not in static_types]
-            if static_only:
-                excluded.append(
-                    "Runtime behavior of these component types was not evaluated (Tier 3 does not stage them in "
-                    "wrapper mode); Tier 1 checks them statically: " + ", ".join(static_only)
-                )
-            if not_evaluated:
-                excluded.append(
-                    "Tier 3 does not stage these component types in wrapper mode, and no check evaluates them: "
-                    + ", ".join(not_evaluated)
-                )
+        unsupported = unsupported_type_split(plugin, (view or {}).get("coverage"))
+        if unsupported["static_only"]:
+            excluded.append(
+                "Runtime behavior of these component types was not evaluated (Tier 3 does not stage them in "
+                "wrapper mode); Tier 1 checks them statically: " + ", ".join(unsupported["static_only"])
+            )
+        if unsupported["unevaluated"]:
+            excluded.append(
+                "Tier 3 does not stage these component types in wrapper mode, and no check evaluates them: "
+                + ", ".join(unsupported["unevaluated"])
+            )
         completeness = (view or {}).get("completeness")
         if not completeness:
             lines.append(

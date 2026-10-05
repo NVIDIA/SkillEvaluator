@@ -215,9 +215,7 @@ HOOK_RISK = {
     ],
     "counts": {"total": 1, "flagged": 1},
 }
-UNSUPPORTED_NOTE = (
-    "Tier 3 does not stage these types in wrapper mode; Tier 1 checks hooks, subagents and commands statically."
-)
+UNSUPPORTED_NOTE = "Tier 3 does not stage these types in wrapper mode; Tier 1 checks hooks statically."
 
 
 def _tier1_with_hook_risk(*, hook_risk: bool = True) -> ValidationResult:
@@ -286,6 +284,40 @@ def test_benchmark_lists_a_hook_nothing_checks_as_not_evaluated(tmp_path: Path) 
     card = _card([_tier1_with_hook_risk(hook_risk=False), _tier3_with_hook_state(tmp_path, "unsupported")])
 
     assert any("no check evaluates them: hook" in line for line in _excluded_lines(card))
+
+
+def test_markdown_does_not_claim_a_static_check_the_benchmark_says_did_not_run(tmp_path: Path) -> None:
+    """Without hook-risk rows, Markdown said Tier 1 checked hooks while BENCHMARK.md said nothing evaluated them."""
+    tier1 = _tier1_with_hook_risk(hook_risk=False)
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([tier1])
+    card = _card([tier1, _tier3_with_hook_state(tmp_path, "unsupported")])
+
+    assert (
+        "**Unsupported component types present:** hook. "
+        "Tier 3 does not stage these types in wrapper mode, and SkillEvaluator only lists them."
+    ) in markdown
+    assert "Tier 1 checks" not in markdown
+    assert any("no check evaluates them: hook" in line for line in _excluded_lines(card))
+
+
+def test_unsupported_type_split_names_only_the_types_tier1_checked() -> None:
+    from skillevaluator.reporting.plugin_sections import unsupported_type_split, unsupported_types_note
+
+    block = tier1_plugin_result().metadata["plugin"]
+    block["component_inventory"]["unsupported_types_present"] = ["hook", "agent", "lsp"]
+    block["privileges"] = {"components": [{"type": "agent", "name": "reviewer", "path": "agents/reviewer.md"}]}
+    coverage = {"rows": [{"type": "lsp", "staged": True}]}
+
+    tier1_split = unsupported_type_split(block)
+    tier3_split = unsupported_type_split(block, coverage)
+
+    assert tier1_split == {"static_only": ["agent"], "unevaluated": ["hook", "lsp"]}
+    assert tier3_split == {"static_only": ["agent"], "unevaluated": ["hook"]}
+    assert unsupported_types_note(tier1_split) == (
+        "Tier 3 does not stage these types in wrapper mode; Tier 1 checks subagents statically and only lists "
+        "hook, lsp."
+    )
 
 
 # ---------------------------------------------------------------------------

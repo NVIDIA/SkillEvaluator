@@ -283,6 +283,8 @@ def tier1_plugin_view(
     if not source:
         return None
     bundled, bundled_omitted = _names(source.get("bundled_skills") if bundled_skills is None else bundled_skills)
+    # Tier 1 runs have no Tier 3 coverage, so no unsupported type counts as staged here.
+    unsupported = unsupported_type_split(source)
     return {
         "name": text(source.get("name")),
         "manifest_type": text(source.get("manifest_type")),
@@ -296,7 +298,7 @@ def tier1_plugin_view(
         "bundled_skills": bundled,
         "bundled_skills_omitted": bundled_omitted,
         "in_plugin_skills": count(source.get("in_plugin_skills")),
-        "inventory": inventory_view(source.get("component_inventory")),
+        "inventory": inventory_view(source.get("component_inventory"), unsupported_split=unsupported),
         "mcp": mcp_view(source.get("mcp")),
         "context_cost": context_cost_view(source.get("context_cost")),
         "catalog_skill_similarity": similarity_view(source.get("catalog_skill_similarity"), kind="skills"),
@@ -460,15 +462,22 @@ def dependency_view(block: object) -> dict[str, Any] | None:
     }
 
 
-def inventory_view(value: object) -> dict[str, Any] | None:
-    """Return the component inventory table and unsupported-type callout."""
+def inventory_view(
+    value: object,
+    *,
+    unsupported_split: Mapping[str, list[str]] | None = None,
+) -> dict[str, Any] | None:
+    """Return the component inventory table and unsupported-type callout.
+
+    *unsupported_split* is :func:`unsupported_type_split` for the plugin
+    block; without it the callout claims no static check for those types.
+    """
     inventory = _mapping(value)
     if not inventory:
         return None
     rows: list[dict[str, Any]] = []
     total = 0
     computed_counts: dict[str, int] = {}
-    unsupported_seen: list[str] = []
     for component in _sequence(inventory.get("components")):
         if not isinstance(component, Mapping):
             continue
@@ -476,8 +485,6 @@ def inventory_view(value: object) -> dict[str, Any] | None:
         component_type = text(component.get("type"), limit=32) or "unknown"
         support = text(component.get("support"), limit=32)
         computed_counts[component_type] = computed_counts.get(component_type, 0) + 1
-        if support == "unsupported" and component_type not in unsupported_seen:
-            unsupported_seen.append(component_type)
         if len(rows) >= MAX_TABLE_ROWS:
             continue
         rows.append(
@@ -498,52 +505,80 @@ def inventory_view(value: object) -> dict[str, Any] | None:
         for key, raw in sorted(count_source.items(), key=lambda item: str(item[0]))
         if (amount := count(raw)) is not None and text(key, limit=32)
     ][:MAX_LIST_ITEMS]
-    if "unsupported_types_present" in inventory:
-        unsupported, _omitted = _names(inventory.get("unsupported_types_present"))
-    else:
-        unsupported = unsupported_seen
+    unsupported = _unsupported_types(inventory)
     return {
         "rows": rows,
         "omitted": max(0, total - len(rows)),
         "total": total or sum(item["count"] for item in counts),
         "counts": counts,
         "unsupported_types": unsupported,
-        "unsupported_note": unsupported_types_note(unsupported) if unsupported else "",
+        "unsupported_note": unsupported_types_note(unsupported_split) if unsupported else "",
     }
 
 
-# Component types that Tier 1 checks statically: hooks (Hook risk) and
-# subagents and commands (Subagent and command privileges).
-STATICALLY_CHECKED_TYPES = ("hook", "agent", "command")
+def _unsupported_types(inventory: Mapping[str, Any]) -> list[str]:
+    """Return the component types the Tier 3 wrapper cannot stage, as recorded or read from the rows."""
+    if "unsupported_types_present" in inventory:
+        return _names(inventory.get("unsupported_types_present"))[0]
+    unsupported: list[str] = []
+    for component in _sequence(inventory.get("components")):
+        if isinstance(component, Mapping) and text(component.get("support"), limit=32) == "unsupported":
+            component_type = text(component.get("type"), limit=32) or "unknown"
+            if component_type not in unsupported:
+                unsupported.append(component_type)
+    return unsupported
 
 
-def unsupported_types_note(types: list[str]) -> str:
-    """Say what happens to inventory types that Tier 3 cannot stage.
+# The component types Tier 1 checks statically (Hook risk, Subagent and command
+# privileges) when the plugin block carries rows for them, as reports name them.
+_STATIC_RISK_TYPE_NAMES = {"hook": "hooks", "agent": "subagents", "command": "commands"}
 
-    "Unsupported" means the Tier 3 wrapper cannot stage the type. It does not
-    mean nothing checks it: Tier 1 has static checks for hooks, subagents and
-    commands, and native loading can stage and exercise them.
+
+def unsupported_type_split(block: object, coverage: Mapping[str, Any] | None = None) -> dict[str, list[str]]:
+    """Split the inventory types that Tier 3 cannot stage by what evaluated them instead.
+
+    "Unsupported" means the Tier 3 wrapper cannot stage the type, not that
+    nothing checks it. A type with a staged, loaded or exercised Tier 3 row in
+    *coverage* (native loading) is in neither list. Of the rest,
+    ``static_only`` types have Tier 1 static-risk rows in *block*, and nothing
+    evaluated the ``unevaluated`` ones. Every report states these lists, so
+    none can call a type checked that another calls unevaluated.
     """
-    listed_only = [name for name in types if name not in STATICALLY_CHECKED_TYPES]
+    source = _mapping(block)
+    staged = {row.get("type") for row in _sequence(_mapping(coverage).get("rows")) if row.get("staged")}
+    static = _statically_checked_types(source)
+    remaining = [name for name in _unsupported_types(_mapping(source.get("component_inventory"))) if name not in staged]
+    return {
+        "static_only": [name for name in remaining if name in static],
+        "unevaluated": [name for name in remaining if name not in static],
+    }
+
+
+def _statically_checked_types(block: Mapping[str, Any]) -> set[str]:
+    """Return the component types this Tier 1 plugin block carries static-risk rows for."""
+    checked = {"hook"} if hook_risk_view(block.get("hook_risk")) else set()
+    privileges = privileges_view(block.get("privileges"))
+    if privileges:
+        checked.update(row["type"] for row in privileges["rows"] if row["type"] in _STATIC_RISK_TYPE_NAMES)
+    return checked
+
+
+def unsupported_types_note(split: Mapping[str, list[str]] | None) -> str:
+    """Say what happens to the inventory types that Tier 3 cannot stage (see :func:`unsupported_type_split`)."""
+    static_only = list((split or {}).get("static_only") or [])
+    unevaluated = list((split or {}).get("unevaluated") or [])
     note = "Tier 3 does not stage these types in wrapper mode"
-    if len(listed_only) == len(types):
+    if not static_only:
         return f"{note}, and SkillEvaluator only lists them."
-    note += "; Tier 1 checks hooks, subagents and commands statically"
-    if listed_only:
-        note += f" and only lists {', '.join(listed_only)}"
+    note += f"; Tier 1 checks {_prose_list([_STATIC_RISK_TYPE_NAMES[name] for name in static_only])} statically"
+    if unevaluated:
+        note += f" and only lists {', '.join(unevaluated)}"
     return f"{note}."
 
 
-def statically_checked_types(block: object) -> set[str]:
-    """Return the component types this Tier 1 plugin block carries static-risk rows for."""
-    source = _mapping(block)
-    checked: set[str] = set()
-    if hook_risk_view(source.get("hook_risk")):
-        checked.add("hook")
-    privileges = privileges_view(source.get("privileges"))
-    if privileges:
-        checked.update(row["type"] for row in privileges["rows"] if row["type"] in STATICALLY_CHECKED_TYPES)
-    return checked
+def _prose_list(items: list[str]) -> str:
+    """Join *items* as prose: "a", "a and b", "a, b and c"."""
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 def pinning_view(value: object, servers: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:

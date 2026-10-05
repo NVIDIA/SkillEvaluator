@@ -677,14 +677,17 @@ def _apply_native_refusals(plugin_load: str, plan: dict[str, Any] | None, source
     return apply_native_refusals(plugin_load, plan, source)
 
 
-def _claude_native_arm(plan: dict[str, Any] | None) -> bool:
-    """Whether some with-plugin arm loads the plugin natively through a copied plugin tree (Claude Code)."""
+def _copies_tree(agent: str, decision: Any) -> bool:
+    """Whether this with-plugin arm loads the plugin natively through a copied plugin tree (Claude Code)."""
     from skillevaluator.tier3.plugin_native import adapter_for
 
-    return any(
-        decision.native and getattr(adapter_for(agent), "copies_plugin_tree", False)
-        for agent, decision in (plan or {}).items()
-    )
+    adapter = adapter_for(agent)
+    return decision.native and adapter is not None and adapter.copies_plugin_tree
+
+
+def _claude_native_arm(plan: dict[str, Any] | None) -> bool:
+    """Whether some with-plugin arm loads the plugin natively through a copied plugin tree (Claude Code)."""
+    return any(_copies_tree(agent, decision) for agent, decision in (plan or {}).items())
 
 
 def _unsupported_mcp_for_plan(mcp: _McpSplit, plan: dict[str, Any] | None, defaults: set[str]) -> list[str]:
@@ -703,12 +706,7 @@ def _unsupported_mcp_for_plan(mcp: _McpSplit, plan: dict[str, Any] | None, defau
 
 def _every_arm_claude_native(plan: dict[str, Any] | None) -> bool:
     """Whether every with-plugin arm is a native Claude Code arm (a known plan only)."""
-    from skillevaluator.tier3.plugin_native import adapter_for
-
-    return bool(plan) and all(
-        decision.native and getattr(adapter_for(agent), "copies_plugin_tree", False)
-        for agent, decision in (plan or {}).items()
-    )
+    return bool(plan) and all(_copies_tree(agent, decision) for agent, decision in (plan or {}).items())
 
 
 def _plugin_file_gap_notes(

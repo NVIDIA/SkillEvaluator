@@ -240,7 +240,7 @@ def native_component_types(adapter: HarnessAdapter, source: NativePluginSource) 
     tree; settings and LSP count only when there is something to stage.
     """
     present = source.present_types()
-    if getattr(adapter, "copies_plugin_tree", False) and source.plugin_file_mcp_servers:
+    if adapter.copies_plugin_tree and source.plugin_file_mcp_servers:
         present.add("mcp")
     if not source.settings:
         present.discard("settings")
@@ -979,6 +979,8 @@ class HarnessAdapter:
     stage_member_skills = True
     #: Pass the plugin's MCP servers through Harbor's task MCP list.
     plugin_mcp_via_task = False
+    #: Copy the plugin root into the task, so MCP servers that launch from plugin files can start.
+    copies_plugin_tree = False
     #: Why ``--plugin-load auto`` uses the generated wrapper for this harness even
     #: where the adapter works (``None``: ``auto`` uses the adapter).
     auto_wrapper_reason: str | None = None
@@ -1023,7 +1025,7 @@ class HarnessAdapter:
             rows.extend(("hook", hook.name, reason) for hook in source.hooks)
         rows.extend((text.type, text.name, reason) for text in source.texts if modes.get(text.type) == "unsupported")
         rows.extend((component_type, name, reason) for component_type, name in source.other)
-        if not getattr(self, "copies_plugin_tree", False):
+        if not self.copies_plugin_tree:
             # Only an adapter that copies the plugin tree can start a server that launches from plugin files.
             rows.extend(
                 (

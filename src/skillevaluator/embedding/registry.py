@@ -12,14 +12,13 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
-import math
 import os
 import re
 import secrets
 import stat
 import tempfile
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -49,6 +48,7 @@ from skillevaluator.embedding.client import (
     normalize_embedding_vector,
     unit_vector_similarity,
     validate_embedding_vector,
+    validate_similarity_threshold,
 )
 from skillevaluator.embedding.extractor import (
     MAX_MANIFEST_BYTES,
@@ -76,7 +76,6 @@ logger = get_logger(__name__)
 # version 1 so older readers keep loading them; both versions load here.
 SKILL_CATALOG_SCHEMA_VERSION = 1
 PLUGIN_CATALOG_SCHEMA_VERSION = 2
-CATALOG_SCHEMA_VERSION = PLUGIN_CATALOG_SCHEMA_VERSION
 SUPPORTED_CATALOG_SCHEMA_VERSIONS = frozenset({SKILL_CATALOG_SCHEMA_VERSION, PLUGIN_CATALOG_SCHEMA_VERSION})
 MAX_CATALOG_BYTES = 32 * 1024 * 1024
 MAX_CATALOG_ENTRIES = SIMILARITY_MAX_ENTRIES
@@ -389,13 +388,25 @@ class EmbeddingRegistry:
         )
         return build
 
-    def _embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Embed description texts in bounded batches, validating each vector."""
+    def _embed_texts(
+        self,
+        texts: list[str],
+        *,
+        full_body: bool = False,
+        on_first_batch: Callable[[int], None] | None = None,
+    ) -> list[list[float]]:
+        """Embed texts in bounded batches, validating each vector against the registry width.
+
+        Full-body texts are embedded one at a time with chunked pooling.
+        ``on_first_batch`` receives the vector width once the first batch is
+        validated, before any further request, so it can refuse the workload.
+        """
         vector_dimension = self._vector_dimension
         vectors: list[list[float]] = []
-        for start in range(0, len(texts), EMBEDDING_BATCH_SIZE):
-            batch = texts[start : start + EMBEDDING_BATCH_SIZE]
-            batch_vectors = self._client.embed(batch)
+        batch_size = 1 if full_body else EMBEDDING_BATCH_SIZE
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start : start + batch_size]
+            batch_vectors = [self._client.embed_chunked(batch[0])] if full_body else self._client.embed(batch)
             if len(batch_vectors) != len(batch):
                 raise ValueError(
                     f"Embedding provider returned {len(batch_vectors)} vectors for {len(batch)} entries in batch"
@@ -403,8 +414,25 @@ class EmbeddingRegistry:
             for vector in batch_vectors:
                 vector_dimension = _validate_vector(vector, vector_dimension)
                 vectors.append(vector)
+            if start == 0 and on_first_batch is not None:
+                on_first_batch(vector_dimension or 0)
         self._vector_dimension = vector_dimension
         return vectors
+
+    def _prepare_catalog(
+        self,
+        entries: Sequence[RegistryEntry | PluginRegistryEntry],
+        *,
+        comparisons: int,
+    ) -> tuple[int, list[list[float]]]:
+        """Check the comparison work, then return the vector width and one unit vector per entry.
+
+        ``comparisons`` is the number of vector pairs the caller will score.
+        Each catalog vector is validated against the width and normalized once.
+        """
+        vector_dimension = _registry_vector_dimension(entries, self._vector_dimension)
+        _validate_scalar_work(comparisons, vector_dimension, self._max_scalar_comparisons)
+        return vector_dimension, _normalized_registry_vectors(entries, vector_dimension)
 
     def score_plugin_text(self, text: str) -> list[tuple[PluginRegistryEntry, float]]:
         """Embed one plugin description text and score it against every catalog plugin entry.
@@ -415,9 +443,7 @@ class EmbeddingRegistry:
         entries = list(self._plugin_entries.values())
         if not entries:
             return []
-        vector_dimension = _registry_vector_dimension(entries, self._vector_dimension)
-        _validate_scalar_work(len(entries), vector_dimension, self._max_scalar_comparisons)
-        unit_vectors = _normalized_registry_vectors(entries, vector_dimension)
+        vector_dimension, unit_vectors = self._prepare_catalog(entries, comparisons=len(entries))
         _validate_embedding_text(text, full_body=False)
         query_vector = _normalized_vector(self._client.embed_single(text), vector_dimension or None)
         return [
@@ -434,9 +460,7 @@ class EmbeddingRegistry:
         catalog_entries = list(self.skill_entries)
         if not targets or not catalog_entries:
             return [[] for _target in targets]
-        vector_dimension = _registry_vector_dimension(catalog_entries, self._vector_dimension)
-        _validate_scalar_work(len(catalog_entries), vector_dimension, self._max_scalar_comparisons)
-        unit_vectors = _normalized_registry_vectors(catalog_entries, vector_dimension)
+        vector_dimension, unit_vectors = self._prepare_catalog(catalog_entries, comparisons=len(catalog_entries))
         texts = [target.embedding_text for target in targets]
         for text in texts:
             _validate_embedding_text(text, full_body=False)
@@ -503,26 +527,18 @@ class EmbeddingRegistry:
 
         entry_count = len(self._entries.keys() | {entry.entry_id for entry in pending_entries})
         comparison_count = entry_count * (entry_count - 1) // 2
-        vector_dimension = self._vector_dimension
-        validated_vectors: list[list[float]] = []
-        batch_size = 1 if self._full_body else EMBEDDING_BATCH_SIZE
-        for start in range(0, len(texts), batch_size):
-            batch = texts[start : start + batch_size]
-            vectors = [self._client.embed_chunked(batch[0])] if self._full_body else self._client.embed(batch)
-            if len(vectors) != len(batch):
-                raise ValueError(
-                    f"Embedding provider returned {len(vectors)} vectors for {len(batch)} entries in batch"
-                )
-            for vector in vectors:
-                vector_dimension = _validate_vector(vector, vector_dimension)
-                validated_vectors.append(vector)
-            if start == 0 and for_pairwise_scan:
-                _validate_scalar_work(comparison_count, vector_dimension or 0, self._max_scalar_comparisons)
 
-        for entry, vector in zip(pending_entries, validated_vectors, strict=True):
+        def check_pairwise_work(vector_dimension: int) -> None:
+            _validate_scalar_work(comparison_count, vector_dimension, self._max_scalar_comparisons)
+
+        vectors = self._embed_texts(
+            texts,
+            full_body=self._full_body,
+            on_first_batch=check_pairwise_work if for_pairwise_scan else None,
+        )
+        for entry, vector in zip(pending_entries, vectors, strict=True):
             entry.embedding = vector
         self._entries.update((entry.entry_id, entry) for entry in pending_entries)
-        self._vector_dimension = vector_dimension
 
         logger.debug("Indexed %d entries from %s", len(self._entries), safe_path_label(root))
         return len(self._entries)
@@ -533,7 +549,7 @@ class EmbeddingRegistry:
         Only pairs with cosine similarity >= threshold are returned,
         sorted by score descending.
         """
-        _validate_threshold(threshold)
+        validate_similarity_threshold(threshold, context="Similarity")
         entries = list(self._entries.values())
         comparison_count = len(entries) * (len(entries) - 1) // 2
         if comparison_count > self._max_pairwise_comparisons:
@@ -541,9 +557,7 @@ class EmbeddingRegistry:
                 f"Pairwise comparison limit exceeded ({self._max_pairwise_comparisons}); "
                 "increase --max-entries within its supported range to compare the complete collection"
             )
-        vector_dimension = _registry_vector_dimension(entries, self._vector_dimension)
-        _validate_scalar_work(comparison_count, vector_dimension, self._max_scalar_comparisons)
-        unit_vectors = _normalized_registry_vectors(entries, vector_dimension)
+        _, unit_vectors = self._prepare_catalog(entries, comparisons=comparison_count)
         matches: list[SimilarityMatch] = []
 
         for (a, unit_a), (b, unit_b) in combinations(zip(entries, unit_vectors, strict=True), 2):
@@ -569,11 +583,9 @@ class EmbeddingRegistry:
 
         Useful for checking a new item against the existing registry.
         """
-        _validate_threshold(threshold)
+        validate_similarity_threshold(threshold, context="Similarity")
         entries = list(self._entries.values())
-        vector_dimension = _registry_vector_dimension(entries, self._vector_dimension)
-        _validate_scalar_work(len(entries), vector_dimension, self._max_scalar_comparisons)
-        unit_vectors = _normalized_registry_vectors(entries, vector_dimension)
+        vector_dimension, unit_vectors = self._prepare_catalog(entries, comparisons=len(entries))
         _validate_embedding_text(text, full_body=self._full_body)
         vector = self._client.embed_chunked(text) if self._full_body else self._client.embed_single(text)
         query_vector = _normalized_vector(vector, vector_dimension or self._vector_dimension)
@@ -599,11 +611,9 @@ class EmbeddingRegistry:
 
     def query_entry(self, entry: ContentEntry, threshold: float) -> list[SimilarityMatch]:
         """Compare one extracted target entry against every catalog entry."""
-        _validate_threshold(threshold)
+        validate_similarity_threshold(threshold, context="Similarity")
         catalog_entries = list(self._entries.values())
-        vector_dimension = _registry_vector_dimension(catalog_entries, self._vector_dimension)
-        _validate_scalar_work(len(catalog_entries), vector_dimension, self._max_scalar_comparisons)
-        unit_vectors = _normalized_registry_vectors(catalog_entries, vector_dimension)
+        vector_dimension, unit_vectors = self._prepare_catalog(catalog_entries, comparisons=len(catalog_entries))
         text = entry.full_text if self._full_body else entry.embedding_text
         _validate_embedding_text(text, full_body=self._full_body)
         vector = self._client.embed_chunked(text) if self._full_body else self._client.embed_single(text)
@@ -931,13 +941,6 @@ def _client_endpoint_fingerprint(client: EmbeddingClient) -> str:
         path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/") or "/"
         identity = f"{scheme}://{authority}{path}"
     return f"sha256:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
-
-
-def _validate_threshold(threshold: float) -> None:
-    if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
-        raise ValueError("Similarity threshold must be finite and within [0, 1]")
-    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
-        raise ValueError("Similarity threshold must be finite and within [0, 1]")
 
 
 def _validate_embedding_text(text: object, *, full_body: bool) -> None:

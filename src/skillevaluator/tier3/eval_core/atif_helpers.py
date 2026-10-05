@@ -1288,50 +1288,33 @@ def _assemble_bundle(
         if used + len(obs_title) + 1 + len("\n---\n".join([*kept, obs])) > budget:
             break
         kept.append(obs)
-    text, dropped, truncated = _assemble(
+    text, dropped = _assemble(
         [(_SECTION_FINAL_RESPONSE, final), (files_title, files), (obs_title, "\n---\n".join(kept))], budget
     )
     omitted = dropped + len(observations) - len(kept) + (1 if entries and not files else 0) + (1 if final_cut else 0)
-    return text, omitted, truncated or files_cut or omitted > 0
+    return text, omitted, files_cut or omitted > 0
 
 
-def _assemble(sections: list[tuple[str, str]], budget: int) -> tuple[str, int, bool]:
-    """Join (title, body) sections under a char budget. Returns (text, dropped, truncated).
+def _assemble(sections: list[tuple[str, str]], budget: int) -> tuple[str, int]:
+    """Join the non-empty (title, body) sections that fit under a char budget, in order.
 
-    A FINAL RESPONSE that does not fit is cut to its head and tail rather than
-    dropped (and counted as dropped), leaving room for the smallest later
-    section when the budget allows.
+    Returns (text, dropped): how many sections did not fit. ``_assemble_bundle``
+    has already cut FINAL RESPONSE, the first section, to fit.
     """
     parts: list[str] = []
     used = 0
     dropped = 0
-    truncated = False
-    non_empty = [(title, str(body or "").strip()) for title, body in sections if str(body or "").strip()]
-    for idx, (title, body) in enumerate(non_empty):
+    for title, body in sections:
+        body = str(body or "").strip()
+        if not body:
+            continue
         block = f"{title}\n{body}"
         if used + len(block) <= budget:
             parts.append(block)
             used += len(block) + 2
-        elif title == _SECTION_FINAL_RESPONSE and budget - used > 0:
-            avail = budget - used
-            later_blocks = [len(f"{t}\n{b}") + 2 for t, b in non_empty[idx + 1 :]]
-            if later_blocks and avail >= _BUNDLE_FINAL_SHARE_MIN_BUDGET:
-                reserve_later = min(avail // 2, *later_blocks)
-                if avail - reserve_later > len(title) + 16:
-                    avail -= reserve_later
-            header = f"{title}\n"
-            if avail > len(header):
-                clipped_block = f"{header}{_truncate_for_behavior(body, avail - len(header), recount=False)}"
-            else:
-                clipped_block = block[:avail]
-            parts.append(clipped_block)
-            used += len(clipped_block) + 2
-            dropped += 1
-            truncated = True
         else:
             dropped += 1
-            truncated = True
-    return "\n\n".join(parts), dropped, truncated
+    return "\n\n".join(parts), dropped
 
 
 _BACKTICK_TOKEN_RE = re.compile(r"`([^`]{4,})`")

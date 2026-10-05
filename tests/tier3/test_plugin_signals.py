@@ -807,6 +807,17 @@ class TestHandoff:
         (failure,) = _signals(_traj(), case)["handoff"]["failures"]
         assert failure["detail"] == "producer was not activated; consumer was not activated"
 
+    def test_prompts_are_read_only_when_a_handoff_checks_a_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        reads: list[int] = []
+        prompt_texts = plugin_signals._prompt_texts
+        monkeypatch.setattr(plugin_signals, "_prompt_texts", lambda traj: reads.append(1) or prompt_texts(traj))
+        traj = _traj(_one("Skill", {"skill": "alpha"}))
+
+        _signals(traj, {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "artifact": "a.json"}]})
+        assert reads == []
+        _signals(traj, {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "value": "v"}]})
+        assert reads == [1]
+
 
 class TestConflict:
     def test_pass_fail_and_alternatives(self) -> None:

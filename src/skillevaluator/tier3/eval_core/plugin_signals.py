@@ -102,7 +102,7 @@ import math
 import re
 import shlex
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -125,16 +125,6 @@ COMPONENT_RULE_READ = "rule_read"
 
 STATUS_SCORED = "scored"
 STATUS_NOT_APPLICABLE = "not_applicable"
-
-PLUGIN_CASE_FIELDS = (
-    "expected_tools",
-    "acceptable_tools",
-    "decoy_tools",
-    "tool_arguments",
-    "expected_order",
-    "handoffs",
-    "conflict_probes",
-)
 
 # -- dataset field bounds ----------------------------------------------------
 MAX_TOOL_PATTERNS = 64
@@ -588,8 +578,7 @@ def _check_arg_mapping(value: Any, where: str, errors: _FieldErrors, *, kind: st
     return parsed
 
 
-def _parse_tool_arguments(value: Any, errors: _FieldErrors) -> list[dict[str, Any]] | None:
-    where = "tool_arguments"
+def _parse_tool_arguments(value: Any, where: str, errors: _FieldErrors) -> list[dict[str, Any]] | None:
     if not isinstance(value, list):
         errors.add(where, "must be a list of argument rules")
         return None
@@ -638,8 +627,7 @@ def _parse_tool_arguments(value: Any, errors: _FieldErrors) -> list[dict[str, An
     return rules
 
 
-def _parse_expected_order(value: Any, errors: _FieldErrors) -> list[list[list[str]]] | None:
-    where = "expected_order"
+def _parse_expected_order(value: Any, where: str, errors: _FieldErrors) -> list[list[list[str]]] | None:
     if not isinstance(value, list):
         errors.add(where, "must be a list of [before, after] edges")
         return None
@@ -660,8 +648,7 @@ def _parse_expected_order(value: Any, errors: _FieldErrors) -> list[list[list[st
     return edges
 
 
-def _parse_handoffs(value: Any, errors: _FieldErrors) -> list[dict[str, Any]] | None:
-    where = "handoffs"
+def _parse_handoffs(value: Any, where: str, errors: _FieldErrors) -> list[dict[str, Any]] | None:
     if not isinstance(value, list):
         errors.add(where, "must be a list of handoff objects")
         return None
@@ -713,8 +700,7 @@ def _parse_handoffs(value: Any, errors: _FieldErrors) -> list[dict[str, Any]] | 
     return handoffs
 
 
-def _parse_conflict_probes(value: Any, errors: _FieldErrors) -> list[dict[str, Any]] | None:
-    where = "conflict_probes"
+def _parse_conflict_probes(value: Any, where: str, errors: _FieldErrors) -> list[dict[str, Any]] | None:
     if not isinstance(value, list):
         errors.add(where, "must be a list of probe objects")
         return None
@@ -758,25 +744,18 @@ def _parse_conflict_probes(value: Any, errors: _FieldErrors) -> list[dict[str, A
     return probes
 
 
-def _parse_case_field(name: str, value: Any, errors: _FieldErrors) -> Any:
-    if name in {"expected_tools", "acceptable_tools", "decoy_tools"}:
-        return _check_tool_patterns(value, name, errors)
-    if name == "tool_arguments":
-        return _parse_tool_arguments(value, errors)
-    if name == "expected_order":
-        return _parse_expected_order(value, errors)
-    if name == "handoffs":
-        return _parse_handoffs(value, errors)
-    return _parse_conflict_probes(value, errors)
-
-
-def _spec_field(spec: Mapping[str, Any] | None, name: str) -> list[Any]:
-    """One normalized case field (raw entries and :func:`plugin_case_spec` output both work)."""
-    if not isinstance(spec, Mapping) or spec.get(name) is None:
-        return []
-    errors = _FieldErrors()
-    parsed = _parse_case_field(name, spec[name], errors)
-    return list(parsed) if parsed is not None and not errors.messages else []
+# Each advisory case field and its parser: ``parser(value, field_name, errors)``
+# returns the normalized value, or ``None`` after recording the problem.
+_FIELD_PARSERS: dict[str, Callable[[Any, str, _FieldErrors], list[Any] | None]] = {
+    "expected_tools": _check_tool_patterns,
+    "acceptable_tools": _check_tool_patterns,
+    "decoy_tools": _check_tool_patterns,
+    "tool_arguments": _parse_tool_arguments,
+    "expected_order": _parse_expected_order,
+    "handoffs": _parse_handoffs,
+    "conflict_probes": _parse_conflict_probes,
+}
+PLUGIN_CASE_FIELDS = tuple(_FIELD_PARSERS)
 
 
 def validate_plugin_case_fields(entry: Any) -> list[str]:
@@ -788,11 +767,10 @@ def validate_plugin_case_fields(entry: Any) -> list[str]:
     if not isinstance(entry, Mapping):
         return []
     errors = _FieldErrors()
-    for name in PLUGIN_CASE_FIELDS:
+    for name, parse in _FIELD_PARSERS.items():
         value = entry.get(name)
-        if value is None:
-            continue
-        _parse_case_field(name, value, errors)
+        if value is not None:
+            parse(value, name, errors)
     return errors.messages
 
 
@@ -805,12 +783,12 @@ def plugin_case_spec(entry: Any) -> dict[str, Any]:
     if not isinstance(entry, Mapping):
         return {}
     spec: dict[str, Any] = {}
-    for name in PLUGIN_CASE_FIELDS:
+    for name, parse in _FIELD_PARSERS.items():
         value = entry.get(name)
         if value is None:
             continue
         errors = _FieldErrors()
-        parsed = _parse_case_field(name, value, errors)
+        parsed = parse(value, name, errors)
         if parsed is not None and not errors.messages:
             spec[name] = parsed
     return spec
@@ -1799,8 +1777,8 @@ def _ratio(numerator: float, denominator: float) -> float | None:
     return round(numerator / denominator, 4) if denominator else None
 
 
-def grade_tool_selection(
-    calls: Sequence[_Call], spec: Mapping[str, Any] | None, *, wrapper_skills: Sequence[str] = ()
+def _grade_tool_selection(
+    calls: Sequence[_Call], spec: Mapping[str, Any], *, wrapper_skills: Sequence[str] = ()
 ) -> dict[str, Any]:
     """Precision/recall/F1 of called tools against ``expected_tools`` + ``acceptable_tools``.
 
@@ -1811,9 +1789,9 @@ def grade_tool_selection(
     nothing is expected and nothing in scope was called; ``recall``/``f1`` are
     ``None`` when nothing is expected.
     """
-    expected = _spec_field(spec, "expected_tools")
-    acceptable = _spec_field(spec, "acceptable_tools")
-    decoys = _spec_field(spec, "decoy_tools")
+    expected = spec.get("expected_tools", [])
+    acceptable = spec.get("acceptable_tools", [])
+    decoys = spec.get("decoy_tools", [])
     expected_refs, acceptable_refs, decoy_refs = _refs(expected), _refs(acceptable), _refs(decoys)
     all_refs = [*expected_refs, *acceptable_refs, *decoy_refs]
 
@@ -2036,7 +2014,7 @@ def _argument_failures(
     return failures
 
 
-def grade_arguments(calls: Sequence[_Call], spec: Mapping[str, Any] | None) -> dict[str, Any]:
+def _grade_arguments(calls: Sequence[_Call], spec: Mapping[str, Any]) -> dict[str, Any]:
     """Check ``tool_arguments`` rules against every call that matches each rule's ``tool``.
 
     ``checked``/``passed`` count (call, rule) pairs. A rule that matched no call
@@ -2045,7 +2023,7 @@ def grade_arguments(calls: Sequence[_Call], spec: Mapping[str, Any] | None) -> d
     share one time budget; a check that runs out of time is a failure, never a
     pass.
     """
-    rules = _spec_field(spec, "tool_arguments")
+    rules = spec.get("tool_arguments", [])
     failures: list[dict[str, str]] = []
     checked = 0
     passed = 0
@@ -2101,7 +2079,7 @@ def _count_outcome(bucket: dict[str, Any], succeeded: bool | None) -> None:
         bucket["unknown"] += 1
 
 
-def grade_mcp_calls(calls: Sequence[_Call]) -> dict[str, Any]:
+def _grade_mcp_calls(calls: Sequence[_Call]) -> dict[str, Any]:
     """Outcome counts across every MCP call (any server), with a per-server breakdown.
 
     ``success_rate`` is ``succeeded / (succeeded + failed)``: calls whose outcome
@@ -2131,9 +2109,9 @@ def _first_seq(refs: Sequence[_Ref], calls: Sequence[_Call]) -> int | None:
     return next((call.seq for call in calls if _call_matches(refs, call)), None)
 
 
-def grade_order(calls: Sequence[_Call], spec: Mapping[str, Any] | None) -> dict[str, Any]:
+def _grade_order(calls: Sequence[_Call], spec: Mapping[str, Any]) -> dict[str, Any]:
     """Check ``expected_order`` precedence edges by first occurrence (emission order)."""
-    edges = _spec_field(spec, "expected_order")
+    edges = spec.get("expected_order", [])
     satisfied = 0
     violated: list[dict[str, str]] = []
     for before, after in edges:
@@ -2246,11 +2224,9 @@ def _handoff_artifact_failure(artifact: str, producer_calls: Sequence[_Call], co
     return ""
 
 
-def grade_handoff(
-    calls: Sequence[_Call], spec: Mapping[str, Any] | None, *, prompts: Sequence[str] = ()
-) -> dict[str, Any]:
+def _grade_handoff(calls: Sequence[_Call], spec: Mapping[str, Any], *, prompts: Sequence[str] = ()) -> dict[str, Any]:
     """Verify each ``handoffs[i]`` carried producer output into consumer input (see module docs)."""
-    handoffs = _spec_field(spec, "handoffs")
+    handoffs = spec.get("handoffs", [])
     failures: list[dict[str, str]] = []
     passed = 0
     for handoff in handoffs:
@@ -2290,9 +2266,9 @@ def grade_handoff(
     }
 
 
-def grade_conflict(calls: Sequence[_Call], spec: Mapping[str, Any] | None) -> dict[str, Any]:
+def _grade_conflict(calls: Sequence[_Call], spec: Mapping[str, Any]) -> dict[str, Any]:
     """Each probe passes when ``must_use`` was activated and ``must_not_use`` was not."""
-    probes = _spec_field(spec, "conflict_probes")
+    probes = spec.get("conflict_probes", [])
     failures: list[dict[str, str]] = []
     passed = 0
     for probe in probes:
@@ -2336,7 +2312,7 @@ def _ident_is_component(ident: _Ident, kind: str, name: str, declared_mcp: Seque
     return name.casefold() in _name_candidates(ident.name)
 
 
-def grade_activation_coverage(calls: Sequence[_Call], declared: Mapping[str, Sequence[str]] | None) -> dict[str, Any]:
+def _grade_activation_coverage(calls: Sequence[_Call], declared: Mapping[str, Sequence[str]]) -> dict[str, Any]:
     """Declared components exercised, never activated, or whose every activation failed.
 
     Entries are ``"<type>:<name>"``. ``unavailable`` is a subset of ``exercised``.
@@ -2393,8 +2369,8 @@ def compute_plugin_signals(
 ) -> dict[str, Any] | None:
     """Per-trial C3 ``plugin_signals`` for one ATIF trajectory, or ``None`` if unreadable.
 
-    ``case`` is a :func:`plugin_case_spec` result (raw entries are normalized
-    defensively). ``declared`` maps ``skill``/``mcp`` (and, in the with-plugin
+    ``case`` is a dataset case entry or a :func:`plugin_case_spec` result; it is
+    normalized once here, and invalid fields are ignored. ``declared`` maps ``skill``/``mcp`` (and, in the with-plugin
     arm, ``subagent``/``command``) to the declared component names in this arm.
     ``mcp_call_servers`` maps a tool call id to the MCP server the harness log
     says it went to, for harnesses whose trajectory keeps only the bare tool
@@ -2407,16 +2383,18 @@ def compute_plugin_signals(
     calls = _extract_calls(trajectory, declared_map, mcp_call_servers, subagent_aliases)
     if calls is None:
         return None
-    spec: Mapping[str, Any] = case if isinstance(case, Mapping) else {}
+    spec = plugin_case_spec(case)
+    # The prompts only matter to rule out a handoff value the consumer could have copied from them.
+    has_value = any(handoff.get("value") is not None for handoff in spec.get("handoffs", []))
     return {
         "activations": _activations(calls),
-        "tool_selection": grade_tool_selection(calls, spec, wrapper_skills=wrapper_skills),
-        "arguments": grade_arguments(calls, spec),
-        "mcp_calls": grade_mcp_calls(calls),
-        "order": grade_order(calls, spec),
-        "handoff": grade_handoff(calls, spec, prompts=_prompt_texts(trajectory)),
-        "conflict": grade_conflict(calls, spec),
-        "activation_coverage": grade_activation_coverage(calls, declared_map),
+        "tool_selection": _grade_tool_selection(calls, spec, wrapper_skills=wrapper_skills),
+        "arguments": _grade_arguments(calls, spec),
+        "mcp_calls": _grade_mcp_calls(calls),
+        "order": _grade_order(calls, spec),
+        "handoff": _grade_handoff(calls, spec, prompts=_prompt_texts(trajectory) if has_value else ()),
+        "conflict": _grade_conflict(calls, spec),
+        "activation_coverage": _grade_activation_coverage(calls, declared_map),
     }
 
 

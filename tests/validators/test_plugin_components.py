@@ -269,7 +269,8 @@ def test_unparseable_remote_mcp_url_is_reported_not_raised(tmp_path: Path) -> No
 def test_non_dot_relative_mcp_path_gets_style_finding(tmp_path: Path) -> None:
     root = _plugin(tmp_path, {"mcpServers": "cfg.json"}, {"cfg.json": {"x": _PINNED_FS}})
     result = _validate(root)
-    assert _checks(result)["plugin_component_path_style"] == Severity.MEDIUM
+    # Claude Code rejects the whole manifest for a path without './' (proof H7), so it blocks.
+    assert _checks(result)["plugin_component_path_style"] == Severity.HIGH
     assert _servers(result)["x"]["source"] == "path_ref"
 
 
@@ -724,16 +725,18 @@ def test_is_env_file_ignores_letter_case(name: str, expected: bool) -> None:
 def test_context_cost_splits_always_on_and_on_demand(tmp_path: Path) -> None:
     cost = _validate(_rich_plugin(tmp_path)).metadata["plugin"]["context_cost"]
     assert cost["method"] == "static_estimate"
-    assert cost["estimator"] == "chars_div_4"
+    assert cost["estimator"] == "chars_div_4_cjk"
     rows = {(row["type"], row["name"]): row for row in cost["by_component"]}
     skill = rows[("skill", "demo")]
     assert skill["always_on_tokens"] == -(-len("demo" + "Demo skill") // 4)
     assert skill["on_demand_tokens"] == -(-len("# Demo\n\nBody.") // 4)
-    assert rows[("rule", "style.md")]["always_on_tokens"] == 0
-    assert rows[("rule", "style.md")]["on_demand_tokens"] > 0
+    # Native Claude Code loading stages rules as user rules, which load in every session.
+    assert rows[("rule", "style.md")]["always_on_tokens"] > 0
+    assert rows[("rule", "style.md")]["on_demand_tokens"] == 0
     assert rows[("agent", "reviewer")]["always_on_tokens"] == -(-len("Reviews code") // 4)
     assert rows[("command", "about")]["always_on_tokens"] == -(-len("About") // 4)
-    assert rows[("output_style", "terse")]["always_on_tokens"] > 0  # force-for-plugin
+    # force-for-plugin: the style replaces Claude Code's default coding instructions, so it shrinks the prompt.
+    assert rows[("output_style", "terse")]["always_on_tokens"] < 0
     assert rows[("mcp", "fs")] == {**rows[("mcp", "fs")], "always_on_tokens": 0, "on_demand_tokens": 0}
     assert cost["always_on_tokens"] == sum(row["always_on_tokens"] for row in cost["by_component"])
     notes = " ".join(cost["notes"])

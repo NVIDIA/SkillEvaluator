@@ -75,7 +75,8 @@ def test_bootstrap_is_deterministic_for_a_seed() -> None:
 def test_bootstrap_known_datasets_give_expected_interval_shape() -> None:
     constant = stats.paired_case_bootstrap(dict.fromkeys(CASES, 0.9), dict.fromkeys(CASES, 0.8))
     assert (constant["estimate"], constant["ci_low"], constant["ci_high"]) == (0.1, 0.1, 0.1)
-    assert constant["precision"] == "adequate"
+    # Proof M12: six cases are too few for "adequate", however narrow the interval.
+    assert constant["precision"] == "low"
     assert constant["ci_includes_zero"] is False
 
     # Alternating +/-0.2 deltas centre on zero; resampled means stay inside the
@@ -137,8 +138,9 @@ def test_trial_quality_score_matches_dimension_mean_and_skips_na_metrics() -> No
     ("n_cases", "low", "high", "expected"),
     [
         (4, 0.0, 0.05, "insufficient"),
-        (5, 0.0, 0.2, "adequate"),
-        (5, 0.0, 0.2001, "low"),
+        (5, 0.0, 0.2, "low"),
+        (10, 0.0, 0.2, "adequate"),
+        (10, 0.0, 0.2001, "low"),
         (50, -0.3, 0.3, "low"),
         (5, None, None, "insufficient"),
     ],
@@ -314,10 +316,18 @@ def test_completeness_without_a_sum_of_parts_arm_is_not_complete() -> None:
 
 def test_context_cost_is_the_paired_first_turn_prompt_delta() -> None:
     with_arm = _arm(
-        [_trial("a", 0.9, first_turn_prompt_tokens=1_500), _trial("b", 0.9, first_turn_prompt_tokens=1_700)]
+        [
+            _trial("a", 0.9, first_turn_prompt_tokens=1_500),
+            _trial("b", 0.9, first_turn_prompt_tokens=1_700),
+            _trial("c", 0.9, first_turn_prompt_tokens=1_600),
+        ]
     )
     without_arm = _arm(
-        [_trial("a", 0.5, first_turn_prompt_tokens=1_000), _trial("b", 0.5, first_turn_prompt_tokens=1_000)]
+        [
+            _trial("a", 0.5, first_turn_prompt_tokens=1_000),
+            _trial("b", 0.5, first_turn_prompt_tokens=1_000),
+            _trial("c", 0.5, first_turn_prompt_tokens=1_000),
+        ]
     )
 
     result = stats.context_cost_measured(with_arm, without_arm)
@@ -325,19 +335,30 @@ def test_context_cost_is_the_paired_first_turn_prompt_delta() -> None:
     assert result == {
         "method": "paired_first_turn_prompt_tokens",
         "delta_tokens_mean": 600.0,
-        "n_pairs": 2,
+        "n_pairs": 3,
+        "min_pairs": 3,
         "status": "measured",
+        "partial": False,
+        "excluded": {"hosted_search": 0, "missing_tokens": 0},
         "reason": None,
     }
 
 
 def test_context_cost_is_unavailable_without_per_step_prompt_tokens() -> None:
-    with_arm = _arm([_trial("a", 0.9, first_turn_prompt_tokens=1_500), _trial("b", 0.9)])
-    without_arm = _arm([_trial("a", 0.5, first_turn_prompt_tokens=1_000), _trial("b", 0.5)])
+    # "b" has usage from final_metrics, but its trajectory has no per-step prompt counts.
+    with_arm = _arm([_trial("a", 0.9, first_turn_prompt_tokens=1_500), _trial("b", 0.9, prompt_tokens=3_000)])
+    without_arm = _arm([_trial("a", 0.5, first_turn_prompt_tokens=1_000), _trial("b", 0.5, prompt_tokens=2_000)])
     result = stats.context_cost_measured(with_arm, without_arm)
-    assert result["status"] == "unavailable"
-    assert result["delta_tokens_mean"] is None
-    assert "per-step prompt token counts" in result["reason"]
+    # The pair that has counts is kept; the trials without counts make the result partial.
+    assert result["status"] == "insufficient"
+    assert result["delta_tokens_mean"] == 500.0
+    assert result["partial"] is True
+    assert "no first-turn prompt token count" in result["reason"]
+
+    no_counts = stats.context_cost_measured(_arm([_trial("a", 0.9), _trial("b", 0.9)]), without_arm)
+    assert no_counts["status"] == "unavailable"
+    assert no_counts["delta_tokens_mean"] is None
+    assert "with-plugin arm has no trial" in no_counts["reason"]
 
     skipped = stats.context_cost_measured(with_arm, _arm([], status="skipped"))
     assert skipped["status"] == "unavailable"
@@ -436,11 +457,17 @@ def test_collector_emits_c4_statistics_for_every_arm(tmp_path: Path) -> None:
     effectiveness = agent["lift_uncertainty"]["effectiveness"]
     assert effectiveness["n_cases"] == 6
     assert (effectiveness["estimate"], effectiveness["ci_low"], effectiveness["ci_high"]) == (0.5, 0.5, 0.5)
-    assert effectiveness["precision"] == "adequate"
+    assert effectiveness["precision"] == "low"  # six cases: never "adequate" (proof M12)
     assert effectiveness["ci_includes_zero"] is False
     assert agent["lift_uncertainty"]["integration"]["estimate"] == 0.2
 
-    assert agent["reliability"]["with_skill"] == {"pass_at_k": 1.0, "pass_hat_k": 1.0, "k": 2, "n_cases": 6}
+    assert agent["reliability"]["with_skill"] == {
+        "pass_at_k": 1.0,
+        "pass_hat_k": 1.0,
+        "k": 2,
+        "n_cases": 6,
+        "not_applicable_metrics": [],
+    }
     assert agent["reliability"]["without_skill"]["pass_hat_k"] == 0.0
     assert set(agent["reliability"]) == {"with_skill", "without_skill", "sum_of_parts"}
 
@@ -507,7 +534,10 @@ def test_collector_marks_integration_incomplete_on_attempt_shortfall(tmp_path: P
     assert completeness["complete"] is False
     assert completeness["failed_arms"] == ["sum_of_parts"]
     assert {"case": "case-6", "arm": "sum_of_parts", "expected": 2, "observed": 1} in completeness["attempt_shortfall"]
-    assert agent["lift_uncertainty"]["integration"] is None
+    # Proof M4: one missing attempt keeps the interval, marked partial (6 of 6 cases paired).
+    integration = agent["lift_uncertainty"]["integration"]
+    assert integration["partial"] is True and integration["failed_arms"] == ["sum_of_parts"]
+    assert (integration["n_cases"], integration["expected_cases"]) == (6, 6)
     assert "sum_of_parts" not in agent["reliability"]
 
 
@@ -700,8 +730,12 @@ def test_integration_ci_excluding_zero_keeps_the_point_verdict() -> None:
     assert negative is not None
     assert negative["verdict"] == negative["point_verdict"] == "negative_integration"
     assert negative["reason"] is None
-    low_precision = _build_integration_report(_best(_uncertainty(0.01, 0.4, precision="low")), PLUGIN_CONFIG)
+    low_precision = _build_integration_report(_best(_uncertainty(0.06, 0.4, precision="low")), PLUGIN_CONFIG)
     assert low_precision is not None and low_precision["verdict"] == "real_integration"
+    # Proof L24: "real" needs the whole interval to clear +0.05, not just to exclude zero.
+    edge = _build_integration_report(_best(_uncertainty(0.01, 0.4, precision="low")), PLUGIN_CONFIG)
+    assert edge is not None and edge["verdict"] == "inconclusive"
+    assert "+0.05 band edge" in edge["reason"]
 
 
 def test_integration_incomplete_arms_explain_the_inconclusive_verdict() -> None:
@@ -717,7 +751,7 @@ def test_integration_incomplete_arms_explain_the_inconclusive_verdict() -> None:
     assert report["verdict"] == "inconclusive"
     assert report["point_verdict"] == "real_integration"
     assert "missing case(s): case-9" in report["reason"]
-    assert "failed arm(s): sum_of_parts" in report["reason"]
+    assert "did not complete: member-skills (sum-of-parts) arm" in report["reason"]
 
 
 def test_legacy_integration_mode_uses_the_member_skills_baseline_interval() -> None:

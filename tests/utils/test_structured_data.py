@@ -50,7 +50,7 @@ def test_bounded_json_rejects_deep_nesting_and_non_json_syntax() -> None:
 
 @pytest.mark.parametrize(
     "escape",
-    [r"A", r"\n", r"\\", r"\"", r"😀"],
+    [r"\u0041", r"\n", r"\\", r"\"", r"\ud83d\ude00"],
     ids=["unicode", "newline", "backslash", "quote", "surrogate-pair"],
 )
 def test_json_preflight_counts_each_escape_as_one_character(escape: str) -> None:

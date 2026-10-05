@@ -83,8 +83,7 @@ def build_clusters(
     n = len(chunks)
     if n < 2:
         return []
-    # Bounding the chunk count also bounds the pair count to
-    # CONTENT_DEDUP_MAX_PAIR_COMPARISONS.
+    # Bounding the chunk count also bounds the pair count.
     if n > CONTENT_DEDUP_MAX_CHUNKS:
         raise ValueError(f"Content chunk count exceeds {CONTENT_DEDUP_MAX_CHUNKS}")
     pair_count = n * (n - 1) // 2

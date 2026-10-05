@@ -48,6 +48,7 @@ from skillevaluator.utils.structured_data import (
 from skillevaluator.utils.tool_runner import Severity, Tools, cvss_to_severity, parse_json_output
 from skillevaluator.validators import dependency_ecosystems as eco
 from skillevaluator.validators.base import ValidationResult, ValidatorBase
+from skillevaluator.validators.mcp_static import mcp_container_image, parse_mcp_runner
 from skillevaluator.validators.plugin_tree import active_plugin_tree, is_plugin_tree_root, plugin_tree_exclusions
 
 if TYPE_CHECKING:
@@ -1017,8 +1018,6 @@ class DependencySecurityValidator(ValidatorBase):
 
     def _mcp_images(self, root: Path) -> list[tuple[str, str]]:
         """Container images launched by the plugin's MCP servers (every declared form, no validation)."""
-        from skillevaluator.validators.mcp_static import mcp_container_image
-
         images: list[tuple[str, str]] = []
         seen_images: set[str] = set()
         for declaration in self._mcp_declarations(root):
@@ -1059,8 +1058,10 @@ class DependencySecurityValidator(ValidatorBase):
     def _audit_mcp_packages(self, root: Path) -> ValidationResult:
         """CVE-audit the packages MCP package runners install (``npx``/``bunx``/``pnpm dlx``, ``uvx``/``pipx run``).
 
-        Exact npm specs (``pkg@1.2.3``) join the npm audit and exact PyPI specs
-        (``pkg==1.2.3`` or ``pkg@1.2.3``) the pip-audit batch, with the role
+        Runner argv is read by :func:`~skillevaluator.validators.mcp_static.parse_mcp_runner`,
+        the reader the pinning check uses. Exact npm specs (``pkg@1.2.3``) join
+        the npm audit and exact PyPI specs (``pkg==1.2.3`` or ``pkg@1.2.3``,
+        including ``uvx --with`` requirements) the pip-audit batch, with the role
         ``mcp``, one audit per MCP config file; floating specs get the INFO
         ``dependency-version-unverified`` finding. Local paths are skipped.
         """
@@ -1068,18 +1069,17 @@ class DependencySecurityValidator(ValidatorBase):
         npm: dict[str, list[eco.NpmDeclaration]] = {}
         pypi: dict[str, list[DependencyDeclaration]] = {}
         for declaration in self._mcp_declarations(root):
-            packages = eco.mcp_runner_packages(declaration.config)
-            if packages is None:
+            invocation = parse_mcp_runner(declaration.config)
+            if invocation is None:
                 continue
-            ecosystem, specs = packages
             # One audit per MCP config file, so a file with many servers runs each scanner once.
             label = str(declaration.file)
-            for spec in specs:
-                if ecosystem == "npm":
-                    npm_declaration = eco.npm_spec_declaration(spec, "mcp")
-                    if npm_declaration is not None:
-                        npm.setdefault(label, []).append(npm_declaration)
-                else:
+            for spec in invocation.npm_specs:
+                npm_declaration = eco.npm_spec_declaration(spec, "mcp")
+                if npm_declaration is not None:
+                    npm.setdefault(label, []).append(npm_declaration)
+            if invocation.ecosystem == "pypi":
+                for spec in invocation.specs:
                     python_declaration = _python_runner_declaration(spec)
                     if python_declaration is not None:
                         pypi.setdefault(label, []).append(python_declaration)

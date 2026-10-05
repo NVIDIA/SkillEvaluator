@@ -914,7 +914,9 @@ stages a server.
 
     A server is **pinned** when a package runner fetches an exact version:
     `pkg@1.2.3`, `pkg==1.2.3`, `--from pkg==1.2.3`, a git or URL spec with a
-    40-character commit SHA, `image:1.2.3`, or `image@sha256:...`. An image
+    40-character commit SHA, `image:1.2.3`, or `image@sha256:...`. Every
+    package the runner installs must be exact, including each `uvx --with`
+    requirement. An image
     version tag counts as pinned, but a digest is stronger because tags can be
     moved. The
     recognized runners are `npx`, `bunx`, `pnpx`, `pnpm dlx`, `yarn dlx`,

@@ -224,62 +224,6 @@ def parse_dockerfile_images(text: str) -> list[ImageDeclaration]:
 # --------------------------------------------------------------------------- #
 # MCP package runners                                                         #
 # --------------------------------------------------------------------------- #
-def mcp_runner_packages(config: Any) -> tuple[str, list[str]] | None:
-    """The package specs an MCP package runner installs: ``("npm", specs)``, ``("pypi", specs)``, or ``None``.
-
-    Uses the argv parsing of the MCP pinning classifier
-    (:func:`~skillevaluator.validators.mcp_static.classify_mcp_pinning`), so a
-    flag value is never mistaken for the package: ``npx``, ``bunx``, ``pnpx``,
-    ``pnpm dlx``, ``yarn dlx``, ``npm exec``, and ``deno run npm:`` give npm specs
-    (every ``-p``/``--package`` value, else the first positional); ``uvx``,
-    ``uv tool run``, and ``pipx run`` give PyPI specs (``--from``/``--spec``, else
-    the first positional, plus every ``uvx --with`` requirement).
-    """
-    from skillevaluator.validators import mcp_static as ms
-
-    if not isinstance(config, dict):
-        return None
-    command = config.get("command")
-    if not isinstance(command, str) or not command.strip():
-        return None
-    raw_args = config.get("args")
-    args = [str(arg) for arg in raw_args] if isinstance(raw_args, list) else []
-    parts = command.split()
-    if len(parts) > 1:
-        command, args = parts[0], [*parts[1:], *args]
-    base = ms._command_basename(command)
-    if base in {"npx", "bunx", "pnpx"} or (base in {"pnpm", "yarn"} and args[:1] == ["dlx"]):
-        rest = args[1:] if base in {"pnpm", "yarn"} else args
-        return "npm", _npm_runner_specs(rest, ms._NPX_VALUE_FLAGS if base == "npx" else ms._DLX_VALUE_FLAGS)
-    if base == "npm" and args[:1] in (["exec"], ["x"]):
-        return "npm", _npm_runner_specs(args[1:], ms._NPX_VALUE_FLAGS)
-    if base == "deno" and args[:1] == ["run"]:
-        spec = ms._first_positional(args[1:], ms._DENO_VALUE_FLAGS)
-        return ("npm", [spec[4:]]) if spec and spec.startswith("npm:") else None
-    if base == "uvx" or (base == "uv" and args[:2] in (["tool", "run"], ["tool", "x"])):
-        rest = args if base == "uvx" else args[2:]
-        from_values = ms._flag_values(rest, ("--from",))
-        spec = from_values[0] if from_values else ms._first_positional(rest, ms._UVX_VALUE_FLAGS)
-        extra = [item.strip() for value in ms._flag_values(rest, ("--with",)) for item in value.split(",")]
-        return "pypi", [item for item in (spec, *extra) if item]
-    if base == "pipx" and args[:1] == ["run"]:
-        rest = args[1:]
-        spec_values = ms._flag_values(rest, ("--spec",))
-        spec = spec_values[0] if spec_values else ms._first_positional(rest, ms._PIPX_VALUE_FLAGS)
-        return ("pypi", [spec]) if spec else None
-    return None
-
-
-def _npm_runner_specs(tokens: list[str], value_flags: frozenset[str]) -> list[str]:
-    from skillevaluator.validators import mcp_static as ms
-
-    packages = ms._flag_values(tokens, ("-p", "--package"))
-    if packages:
-        return packages
-    spec = ms._first_positional(tokens, value_flags)
-    return [spec] if spec else []
-
-
 def npm_spec_declaration(spec: str, role: str) -> NpmDeclaration | None:
     """An npm runner spec (``pkg``, ``@scope/pkg@1.2.3``, git or URL) as a declaration; ``None`` for a local path."""
     from skillevaluator.validators import mcp_static as ms

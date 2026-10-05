@@ -84,6 +84,7 @@ from skillevaluator.plugin_formats import (
     FormatProfile,
     declared_value_replaces_default,
     normalized_component_manifest,
+    parse_manifest_text,
     profile_for,
 )
 
@@ -1837,7 +1838,6 @@ def plugin_inventory_for_root(root: Path) -> PluginInventory | None:
     :func:`build_plugin_inventory` adds the cross-client views. No policy is
     applied; the schema check reports every finding.
     """
-    from skillevaluator.plugin_formats import manifest_syntax
     from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
 
     try:
@@ -1850,9 +1850,8 @@ def plugin_inventory_for_root(root: Path) -> PluginInventory | None:
     else:
         manifest_type = located.manifest_type
         try:
-            text = located.read_text(encoding="utf-8-sig")
-            parsed = load_bounded_json(text) if manifest_syntax(manifest_type) == "json" else load_bounded_yaml(text)
-        except (PluginManifestPathError, StructuredDataError, ValueError, RecursionError):
+            parsed = parse_manifest_text(manifest_type, located.read_text(encoding="utf-8-sig"))
+        except (PluginManifestPathError, StructuredDataError, ValueError):
             parsed = None
         data = parsed if isinstance(parsed, dict) else None
         manifest_rel = located.manifest_filename

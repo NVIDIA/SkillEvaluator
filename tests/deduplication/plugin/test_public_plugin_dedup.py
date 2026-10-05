@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -265,3 +266,60 @@ def test_plugin_context_scan_skips_before_provider_work_above_skill_limit(
     assert result.metadata["actual_skills"] == MAX_PLUGIN_DEDUP_SKILLS + 1
     assert result.metadata["skipped"] is True
     assert result.warnings == [result.metadata["skip_reason"]]
+
+
+def test_skill_level_finding_points_at_the_bundled_skill_in_every_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Tier 2 finding about a whole bundled skill points at skills/foo, not skills/foo/foo."""
+    from click.testing import CliRunner
+
+    from skillevaluator.cli import cli
+    from skillevaluator.deduplication.intra_skill import intra_skill_validator
+
+    plugin = tmp_path / "demo-plugin"
+    (plugin / ".claude-plugin").mkdir(parents=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "demo-plugin", "version": "1.0.0", "description": "Demo plugin."}), encoding="utf-8"
+    )
+    skill = plugin / "skills" / "foo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: foo\ndescription: Use when you need foo.\n---\n\n## Section A\n"
+        + "alpha " * 60
+        + "\n\n## Section B\n"
+        + "bravo " * 60,
+        encoding="utf-8",
+    )
+    embedding_client = MagicMock()
+    embedding_client.return_value.embed.return_value = [[1.0, 0.0], [0.0, 1.0]]
+    monkeypatch.setattr(intra_skill_validator, "EmbeddingClient", embedding_client)
+    # Two chunks of two-dimensional vectors are 2 scalar comparisons, over a limit of 1.
+    monkeypatch.setattr(intra_skill_validator, "CONTENT_DEDUP_MAX_SCALAR_COMPARISONS", 1)
+    monkeypatch.setenv("SKILL_EVAL_EMBEDDING_PROVIDER", "nv_build")
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test")
+    out = tmp_path / "reports"
+
+    CliRunner().invoke(
+        cli,
+        ["validate", str(plugin), "--tiers", "1,2", "--checks", "schema", "-r", "json,sarif,markdown", "-o", str(out)],
+        catch_exceptions=False,
+    )
+
+    report = json.loads(next(path for path in out.glob("*.json") if not path.name.endswith(".sarif.json")).read_text())
+    [finding] = [
+        finding
+        for result in report["results"]
+        for finding in result["findings"]
+        if finding["check_name"] == "scalar_comparison_limit"
+    ]
+    assert finding["file_path"] == "[foo] ."
+    sarif = json.loads(next(out.glob("*.sarif.json")).read_text())
+    [located] = [
+        item for item in sarif["runs"][0]["results"] if item["properties"]["checkName"] == "scalar_comparison_limit"
+    ]
+    assert located["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "skills/foo"
+    assert located["properties"]["pluginComponent"]["path"] == "skills/foo"
+    [markdown] = [path for path in out.glob("*.md") if path.name != "BENCHMARK.md"]
+    assert "<code>[foo] .</code>" in markdown.read_text()

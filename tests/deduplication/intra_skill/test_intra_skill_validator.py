@@ -171,7 +171,8 @@ class TestIntraSkillValidatorValidate:
         assert result.passed is False
         finding = result.findings[0]
         assert finding.check_name == "scalar_comparison_limit"
-        assert finding.file_path == skill_dir.name
+        # A finding about the whole skill points at its root, relative to the skill like every Tier 2 path.
+        assert finding.file_path == "."
         assert finding.metadata == {
             "pair_count": 1,
             "vector_dimension": 2,
@@ -227,7 +228,7 @@ class TestIntraSkillValidatorValidate:
         assert result.passed is False
         assert result.findings[0].check_name == "llm_cluster_count_limit"
         assert result.findings[0].metadata == {"actual": 2, "limit": 1}
-        assert result.findings[0].file_path == skill_dir.name
+        assert result.findings[0].file_path == "."
         mock_llm.assert_not_called()
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")

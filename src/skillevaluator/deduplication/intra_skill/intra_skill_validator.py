@@ -58,6 +58,11 @@ _CONFIG_KV_RE = re.compile(r"^[\w.\-/]+\s*[=:]\s*\S")
 
 _REDUCE_SKILL_CONTENT = "Reduce or split the skill content before running Tier 2."
 
+# The path of a finding about the whole skill, such as a work limit. Like every
+# Tier 2 path it is relative to the skill directory, so it is the skill root:
+# a bundled skill's report path is then "skills/foo", not "skills/foo/foo".
+_SKILL_ROOT = "."
+
 # Collection errors raised for links, hard links, special files, or roots that
 # cannot be read safely. Size, count, and encoding limits are not included.
 _UNSAFE_INPUT_CHECKS = frozenset(
@@ -148,7 +153,6 @@ class IntraSkillValidator(ValidatorBase):
         The phases run in order and stop at the first one that cannot continue:
         collect, chunk, embed, cluster, prepare the LLM prompts, review.
         """
-        report_path = skill_path.name or "."
         result = ValidationResult(
             validator_name=self.name,
             validator_description=self.description,
@@ -157,13 +161,13 @@ class IntraSkillValidator(ValidatorBase):
         if collected is None:
             return result
         chunks = self._chunk(collected, result)
-        if chunks is None or not self._embed(chunks, result, report_path):
+        if chunks is None or not self._embed(chunks, result):
             return result
 
         logger.info("Clustering %d chunks (threshold: %.2f)...", len(chunks), self._threshold)
         clusters = build_clusters(chunks, self._threshold)
         logger.info("Found %d cluster(s)", len(clusters))
-        reviews = self._prepare_prompts(clusters, result, report_path)
+        reviews = self._prepare_prompts(clusters, result)
         if reviews is None:
             return result
         if not reviews:
@@ -238,7 +242,7 @@ class IntraSkillValidator(ValidatorBase):
             return None
         return chunks
 
-    def _embed(self, chunks: list[ContentChunk], result: ValidationResult, report_path: str) -> bool:
+    def _embed(self, chunks: list[ContentChunk], result: ValidationResult) -> bool:
         """Embed every chunk in batches; ``False`` on a provider error or above the scalar work limit."""
         logger.info("Embedding %d chunk(s) via the configured public provider...", len(chunks))
         pair_count = len(chunks) * (len(chunks) - 1) // 2
@@ -280,7 +284,7 @@ class IntraSkillValidator(ValidatorBase):
                                 "Tier 2 scalar comparison work exceeds the configured limit "
                                 f"({CONTENT_DEDUP_MAX_SCALAR_COMPARISONS})."
                             ),
-                            file_path=report_path,
+                            file_path=_SKILL_ROOT,
                             metadata={
                                 "pair_count": pair_count,
                                 "vector_dimension": vector_dimension,
@@ -302,7 +306,6 @@ class IntraSkillValidator(ValidatorBase):
         self,
         clusters: list[ContentCluster],
         result: ValidationResult,
-        report_path: str,
     ) -> list[tuple[ContentCluster, str]] | None:
         """Pair each cluster with its LLM prompt; ``None`` when a review limit is exceeded."""
         if len(clusters) > self._max_llm_clusters:
@@ -310,7 +313,7 @@ class IntraSkillValidator(ValidatorBase):
                 result,
                 "llm_cluster_count_limit",
                 f"Tier 2 found more than {self._max_llm_clusters} clusters requiring LLM review.",
-                file_path=report_path,
+                file_path=_SKILL_ROOT,
                 metadata={"actual": len(clusters), "limit": self._max_llm_clusters},
                 suggestion="Reduce duplicated content or split the skill before rerunning Tier 2.",
             )
@@ -324,7 +327,7 @@ class IntraSkillValidator(ValidatorBase):
                     result,
                     "llm_cluster_member_limit",
                     "A Tier 2 cluster exceeds the LLM member limit.",
-                    file_path=report_path,
+                    file_path=_SKILL_ROOT,
                     metadata={"actual": len(cluster.members), "limit": CONTENT_DEDUP_MAX_CLUSTER_MEMBERS},
                 )
                 return None
@@ -334,7 +337,7 @@ class IntraSkillValidator(ValidatorBase):
                     result,
                     "llm_prompt_size_limit",
                     "A Tier 2 cluster exceeds the LLM prompt character limit.",
-                    file_path=report_path,
+                    file_path=_SKILL_ROOT,
                     metadata={"actual": len(prompt), "limit": CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS},
                 )
                 return None
@@ -344,7 +347,7 @@ class IntraSkillValidator(ValidatorBase):
                     result,
                     "llm_total_prompt_size_limit",
                     "Tier 2 aggregate LLM prompt characters exceed the configured limit.",
-                    file_path=report_path,
+                    file_path=_SKILL_ROOT,
                     metadata={"actual": total_prompt_chars, "limit": CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS},
                 )
                 return None

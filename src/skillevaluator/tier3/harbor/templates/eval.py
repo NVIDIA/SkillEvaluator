@@ -1369,10 +1369,12 @@ _KEY_PLACEHOLDER_RE = re.compile(
 
 
 def _redact_evidence_text(text):
+    # The exact values of the configured credentials and of the run's canary
+    # token, which need not match the sk-/nvapi- shapes, are redacted too.
     text = str(text or "")
-    secrets = [os.environ.get("NVIDIA_API_KEY", "")]
-    # Keep placeholder keys, unless the text holds a runtime key: then redact everything.
-    parts = [text] if any(secret and secret in text for secret in secrets) else _KEY_PLACEHOLDER_RE.split(text)
+    secrets = _configured_secret_values()
+    # Keep placeholder keys, unless the text holds a secret value: then redact everything.
+    parts = [text] if any(secret in text for secret in secrets) else _KEY_PLACEHOLDER_RE.split(text)
     parts[::2] = [redact_secrets_in_log_line(part, extra_secret_values=secrets) for part in parts[::2]]
     return "".join(parts).replace("\x00", "").strip()
 

@@ -607,6 +607,25 @@ def test_verifier_redacts_the_canary_from_persisted_artifacts(monkeypatch: pytes
     assert TOKEN not in json.dumps(sanitized)
 
 
+def test_verifier_redacts_the_canary_from_judge_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(eval_template, "_RUNTIME_REDACTION_VALUES", [TOKEN])
+    command = "cat .skilleval/canary.env > notes.txt"
+    traj = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [{"tool_call_id": "c1", "function_name": "Bash", "arguments": {"command": command}}],
+                "observation": {"results": [{"source_call_id": "c1", "content": f"KEY={TOKEN}"}]},
+            },
+            {"source": "agent", "message": f"The canary is {TOKEN}."},
+        ]
+    }
+
+    bundles = eval_template.build_metric_evidence_bundles(traj, "q", ground_truth="x", expected_behavior=["y"])
+
+    assert TOKEN not in json.dumps(bundles)
+
+
 def _reward(leaked: bool | None, kinds: tuple[str, ...] = ()) -> dict[str, Any]:
     if leaked is None:
         return {"details": {"security": {"findings": []}}}

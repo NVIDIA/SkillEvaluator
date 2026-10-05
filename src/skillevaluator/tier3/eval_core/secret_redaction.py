@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 
 # Prefix-style key detectors match either (a) a prefix at a token boundary
@@ -44,6 +45,35 @@ LOG_JWT_RE = re.compile(
 LOG_GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,255}\b")
 LOG_GITHUB_PAT_RE = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,255}\b")
 
+# Match verifier log redaction; shorter placeholders can corrupt ordinary diagnostic text.
+_MIN_EXACT_SECRET_LENGTH = 8
+_CREDENTIAL_ENV_VARS = (
+    "OPENAI_API_KEY",
+    "NVIDIA_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "SKILL_EVAL_LLM_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SECURITY_TOKEN",
+    "AWS_SESSION_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+)
+
+
+def _configured_secret_values(extra_secret_values: tuple[str | None, ...] = ()) -> list[str]:
+    """The credential values this process holds, plus *extra_secret_values*, longest first."""
+    values = {
+        value
+        for name in _CREDENTIAL_ENV_VARS
+        if (value := os.environ.get(name, "")) and len(value) >= _MIN_EXACT_SECRET_LENGTH
+    }
+    for value in extra_secret_values:
+        text = str(value) if value else ""
+        if len(text) >= _MIN_EXACT_SECRET_LENGTH:
+            values.add(text)
+    return sorted(values, key=len, reverse=True)
+
 
 def redact_secrets_in_log_line(
     line: str,
@@ -52,7 +82,7 @@ def redact_secrets_in_log_line(
 ) -> str:
     """Best-effort mask common key shapes in Layer 2 output text."""
     for secret in sorted(set(extra_secret_values or ()), key=len, reverse=True):
-        if secret and len(secret) >= 8:
+        if secret and len(secret) >= _MIN_EXACT_SECRET_LENGTH:
             line = line.replace(secret, "<redacted>")
     line = LOG_SK_RE.sub("sk-<redacted>", line)
     line = LOG_NVAPI_RE.sub("nvapi-<redacted>", line)

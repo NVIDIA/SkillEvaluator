@@ -27,6 +27,7 @@ from skillevaluator.tier3.eval_core.atif_helpers import (
     _behavior_final_response_limit,
     _truncate_for_behavior,
 )
+from skillevaluator.tier3.eval_core.secret_redaction import _configured_secret_values
 
 logger = logging.getLogger(__name__)
 
@@ -37,20 +38,6 @@ DEFAULT_JUDGE_MODEL = CHAT_DEFAULT_OPENAI
 _ERROR_REDACTION_MARKER = "[REDACTED]"
 _JUDGE_ERROR_REASON_LIMIT = 512
 _JUDGE_TEXT_LIMIT = 512
-# Match verifier log redaction; shorter placeholders can corrupt ordinary diagnostic text.
-_MIN_EXACT_SECRET_LENGTH = 8
-_CREDENTIAL_ENV_VARS = (
-    "OPENAI_API_KEY",
-    "NVIDIA_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "SKILL_EVAL_LLM_API_KEY",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SECURITY_TOKEN",
-    "AWS_SESSION_TOKEN",
-    "AWS_BEARER_TOKEN_BEDROCK",
-    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
-)
 
 
 # ---------------------------------------------------------------------------
@@ -123,19 +110,6 @@ def _is_native_openai_chat_url(provider: str, request_url: str) -> bool:
         and "?" not in raw_url
         and "#" not in raw_url
     )
-
-
-def _configured_secret_values(extra_secret_values: tuple[str | None, ...] = ()) -> list[str]:
-    values = {
-        value
-        for name in _CREDENTIAL_ENV_VARS
-        if (value := os.environ.get(name, "")) and len(value) >= _MIN_EXACT_SECRET_LENGTH
-    }
-    for value in extra_secret_values:
-        text = str(value) if value else ""
-        if len(text) >= _MIN_EXACT_SECRET_LENGTH:
-            values.add(text)
-    return sorted(values, key=len, reverse=True)
 
 
 def _redact_configured_credentials(text: str, extra_secret_values: tuple[str | None, ...] = ()) -> str:

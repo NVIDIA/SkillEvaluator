@@ -13,6 +13,7 @@ host helper and on the Harbor verifier copy, and check the two copies agree.
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 from pathlib import Path
 
@@ -686,6 +687,29 @@ def test_runtime_key_is_redacted_even_when_it_looks_like_a_placeholder(copy, mon
 
     assert runtime_key not in redacted
     assert "sk-your-key-here" not in redacted
+
+
+@COPIES
+def test_configured_credentials_never_reach_the_judges(copy, monkeypatch):
+    # A credential value need not look like a key: its exact value is redacted wherever it shows.
+    credential = _fixture_secret("opaque", "-anthropic-", "credential")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", credential)
+    traj = {
+        "steps": [
+            _step(
+                _call("w1", "Write", {"file_path": "/workspace/.env", "content": f"KEY={credential}\n"}),
+                _call("b1", "Bash", {"command": f"echo {credential}"}),
+                results=("ok", f"{credential}\n"),
+            ),
+            {"source": "agent", "message": f"The key is {credential}."},
+        ]
+    }
+
+    bundles = copy.build_metric_evidence_bundles(traj, f"Use {credential}.", ground_truth="x", expected_behavior=["y"])
+
+    for metric, bundle in bundles.items():
+        assert credential not in json.dumps(bundle), metric
+        assert "<redacted>" in bundle["prompt_evidence"], metric
 
 
 def _parity_corpus() -> list[dict]:

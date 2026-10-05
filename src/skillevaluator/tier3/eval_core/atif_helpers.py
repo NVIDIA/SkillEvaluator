@@ -35,7 +35,7 @@ from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     normalized_tool_call_wrapper_observation as _tool_call_wrapper_observation,
 )
-from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
+from skillevaluator.tier3.eval_core.secret_redaction import _configured_secret_values, redact_secrets_in_log_line
 
 
 def get_all_tool_calls(traj: dict[str, Any]) -> list[dict[str, Any]]:
@@ -888,12 +888,12 @@ _KEY_PLACEHOLDER_RE = re.compile(
 
 
 def _redact_evidence_text(text: str) -> str:
-    # Mirror harbor/templates/eval.py: also redact the RUNTIME values of the
-    # API keys this process holds, which need not match sk-/nvapi- patterns.
+    # Mirror harbor/templates/eval.py: also redact the exact values of the
+    # configured credentials, which need not match the sk-/nvapi- shapes.
     text = str(text or "")
-    secrets = [os.environ.get("NVIDIA_API_KEY", "")]
-    # Keep placeholder keys, unless the text holds a runtime key: then redact everything.
-    parts = [text] if any(secret and secret in text for secret in secrets) else _KEY_PLACEHOLDER_RE.split(text)
+    secrets = _configured_secret_values()
+    # Keep placeholder keys, unless the text holds a secret value: then redact everything.
+    parts = [text] if any(secret in text for secret in secrets) else _KEY_PLACEHOLDER_RE.split(text)
     parts[::2] = [redact_secrets_in_log_line(part, extra_secret_values=secrets) for part in parts[::2]]
     return "".join(parts).replace("\x00", "").strip()
 

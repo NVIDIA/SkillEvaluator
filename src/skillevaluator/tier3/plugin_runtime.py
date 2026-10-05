@@ -43,9 +43,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from skillevaluator.plugin_components import summarize_coverage
+from skillevaluator.plugin_components import EVALUATED_COVERAGE_STATES, summarize_coverage
 from skillevaluator.tier3.mcp_proof import apply_in_agent_mcp_proof
-from skillevaluator.tier3.plugin_native import EVALUATED_COVERAGE_STATES, native_types_by_agent
+from skillevaluator.tier3.plugin_native import native_types_by_agent
 
 STATE_EXERCISED = "exercised"
 _ACTIVATION_PREFIX = {"skill": "skill", "mcp": "mcp", "agent": "subagent", "command": "command"}

@@ -80,10 +80,12 @@ from skillevaluator.plugin_component_risk import (
 from skillevaluator.plugin_formats import (
     CLAUDE_PROFILE,
     CODEX_PROFILE,
+    DEFAULT_SKILLS_DIR,
     PROFILES,
     FormatProfile,
     declared_value_replaces_default,
     normalized_component_manifest,
+    parse_manifest_text,
     profile_for,
 )
 
@@ -178,6 +180,10 @@ _TYPE_SUPPORT: dict[str, Support] = {
 MCP_JSON = PurePosixPath(".mcp.json")
 _ENV_TEMPLATE_SUFFIXES = frozenset({"example", "sample", "template", "dist", "defaults", "tmpl"})
 _MAX_ENV_FILE_FINDINGS = 20
+# Directory levels below the plugin root that the .env name walk descends.
+_ENV_SCAN_MAX_DEPTH = 32
+# Broad allow rules quoted in one plugin_settings_broad_allow message (the finding covers them all).
+_MAX_QUOTED_BROAD_ALLOW_RULES = 8
 _MANIFEST_PATHS = frozenset(PLUGIN_MANIFEST_RELATIVE_PATHS)
 # Agent Plugins client-extension namespace directory names (reverse-domain).
 _NAMESPACE_DIR_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$")
@@ -831,13 +837,13 @@ class _Builder:
 
         declared_default = False
         declared_value = self.manifest.get("skills") if self.manifest is not None else None
-        default_dir = self.profile.default_skills_dir or "skills"
+        default_dir = PurePosixPath(DEFAULT_SKILLS_DIR)
         if self.contained and self.manifest is not None:
             for raw in self._declared_values("skills", declared_value):
                 resolved = self._resolve_component("skill", "skills", raw, kinds=("dir",))
                 if resolved is None:
                     continue
-                if resolved.rel == PurePosixPath(default_dir):
+                if resolved.rel == default_dir:
                     declared_default = True
                     continue
                 self._declared_skill_dir(resolved.rel)
@@ -857,11 +863,11 @@ class _Builder:
             not manifests
             and declared_value is None
             and self.profile.root_skill_fallback
-            and self.reader.kind(PurePosixPath(default_dir)) == "missing"
+            and self.reader.kind(default_dir) == "missing"
         ):
             self._root_skill()
         for manifest in manifests[:PLUGIN_COMPONENT_MAX_ITEMS]:
-            skill_dir = PurePosixPath("skills") / manifest.relative_path.parent.as_posix()
+            skill_dir = default_dir / manifest.relative_path.parent.as_posix()
             origin: Origin = "declared+packaged" if declared_default else "packaged"
             component = self._add(
                 Component("skill", manifest.relative_path.parent.as_posix(), origin, skill_dir.as_posix(), "evaluated")
@@ -919,7 +925,7 @@ class _Builder:
             ):
                 continue  # hidden folders, VCS, virtualenv, package, and bytecode caches
             child = PurePosixPath(entry.name) if str(rel_dir) == "." else rel_dir / entry.name
-            if str(rel_dir) == "." and entry.name == "skills":
+            if str(rel_dir) == "." and entry.name == DEFAULT_SKILLS_DIR:
                 continue  # the default skills/ scan covers it
             if entry.is_symlink():
                 self.inventory.findings.append(
@@ -998,7 +1004,7 @@ class _Builder:
         Skills under ``skills/`` are reported by the bundled-skill validator, so
         they are not repeated here.
         """
-        if rel_dir.parts[:1] == ("skills",):
+        if rel_dir.parts[:1] == (DEFAULT_SKILLS_DIR,):
             return
         if _in_unscanned_folder(manifest_rel.parent):
             self.inventory.findings.append(_unscanned_skill_finding(self.reader, manifest_rel))
@@ -1662,7 +1668,7 @@ def _settings_findings(config: dict[str, Any], rel: str, display: str) -> list[F
                         Severity.HIGH,
                         "plugin_settings_broad_allow",
                         f"shipped settings '{rel}' pre-approves unrestricted tools or interpreter Bash rules "
-                        f"that run any command {broad[:8]}",
+                        f"that run any command {broad[:_MAX_QUOTED_BROAD_ALLOW_RULES]}",
                         display,
                         "Remove blanket allow rules such as Bash / Bash(*) / Bash(python3:*); scope permissions "
                         "to exact commands.",
@@ -1748,7 +1754,7 @@ def _scan_env_entries(
         if not is_dir:
             if is_env_file(entry.name):
                 hits.append(rel_dir / entry.name)
-        elif entry.name not in SCAN_EXCLUDED_DIRS and depth < 32:
+        elif entry.name not in SCAN_EXCLUDED_DIRS and depth < _ENV_SCAN_MAX_DEPTH:
             children.append(entry.name)
     return children, budget
 
@@ -1762,8 +1768,8 @@ def _find_env_files(root: Path) -> tuple[list[PurePosixPath], bool]:
     On POSIX every directory is opened relative to its parent descriptor with
     ``O_NOFOLLOW``, so a directory swapped for a symlink is never listed. The walk
     is depth-first and opens a subdirectory only after its previous sibling's
-    subtree is closed, so open descriptors grow with depth (at most 33), not with
-    the number of sibling directories.
+    subtree is closed, so open descriptors grow with depth (at most
+    ``_ENV_SCAN_MAX_DEPTH + 1``), not with the number of sibling directories.
     """
     hits: list[PurePosixPath] = []
     budget = CONTENT_DEDUP_MAX_DISCOVERED_PATHS
@@ -1824,35 +1830,9 @@ def _find_env_files(root: Path) -> tuple[list[PurePosixPath], bool]:
 # --------------------------------------------------------------------------- #
 # Public entry points                                                         #
 # --------------------------------------------------------------------------- #
-def manifest_rel_for(manifest_path: Path, root: Path) -> str:
-    """Root-relative POSIX spelling of a located manifest path."""
-    from skillevaluator.plugin_manifest import manifest_relative_path
-
-    relative = manifest_relative_path(manifest_path)
-    if relative is not None and len(relative.parts) > 1:
-        return relative.as_posix()
-    try:
-        return manifest_path.relative_to(root).as_posix()
-    except ValueError:
-        return manifest_path.name
-
-
 def parsed_additional_manifests(location: PluginManifestLocation) -> list[tuple[str, str, dict[str, Any]]]:
-    """``(manifest_type, manifest_rel, data)`` of each other supported manifest beside the selected one.
-
-    This is the ``additional`` argument of :func:`build_plugin_inventory`.
-    Each manifest is parsed for audits
-    (:meth:`~skillevaluator.plugin_manifest.PluginManifestCandidate.parse_for_audit`):
-    a client manifest over the read bound or not UTF-8 is read leniently, as
-    Tier 1 reads it, so its hooks and MCP servers are still checked; an unsafe
-    or unparseable one is left out (Tier 1 reports it).
-    """
-    parsed: list[tuple[str, str, dict[str, Any]]] = []
-    for candidate in location.additional:
-        data = candidate.parse_for_audit()
-        if data is not None:
-            parsed.append((candidate.manifest_type, candidate.manifest_filename, data))
-    return parsed
+    """Alias of :meth:`~skillevaluator.plugin_manifest.PluginManifestLocation.parsed_additional`, kept for importers."""
+    return location.parsed_additional()
 
 
 def plugin_inventory_for_root(root: Path) -> PluginInventory | None:
@@ -1863,7 +1843,6 @@ def plugin_inventory_for_root(root: Path) -> PluginInventory | None:
     :func:`build_plugin_inventory` adds the cross-client views. No policy is
     applied; the schema check reports every finding.
     """
-    from skillevaluator.plugin_formats import manifest_syntax
     from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
 
     try:
@@ -1876,13 +1855,12 @@ def plugin_inventory_for_root(root: Path) -> PluginInventory | None:
     else:
         manifest_type = located.manifest_type
         try:
-            text = located.read_text(encoding="utf-8-sig")
-            parsed = load_bounded_json(text) if manifest_syntax(manifest_type) == "json" else load_bounded_yaml(text)
-        except (PluginManifestPathError, StructuredDataError, ValueError, RecursionError):
+            parsed = parse_manifest_text(manifest_type, located.read_text(encoding="utf-8-sig"))
+        except (PluginManifestPathError, StructuredDataError, ValueError):
             parsed = None
         data = parsed if isinstance(parsed, dict) else None
-        manifest_rel = manifest_rel_for(located.path, located.root)
-        additional = parsed_additional_manifests(located)
+        manifest_rel = located.manifest_filename
+        additional = located.parsed_additional()
     return build_plugin_inventory(
         root,
         data,

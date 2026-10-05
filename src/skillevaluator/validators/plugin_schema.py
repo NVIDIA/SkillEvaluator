@@ -98,6 +98,8 @@ logger = get_logger(__name__)
 CATEGORY = "PLUGIN_SCHEMA"
 VALIDATOR_NAME = "Plugin Schema & Bundle References"
 MAX_PLUGIN_SCHEMA_FINDINGS = 100
+# Most severe first.
+_SEVERITY_ORDER = (Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO)
 
 
 def _schema_finding(
@@ -130,25 +132,34 @@ def _add_capped(
     file_path: Path | str,
     suggestion: str,
 ) -> None:
-    """Add the first ``MAX_PLUGIN_SCHEMA_FINDINGS`` findings, then one HIGH finding that counts the rest.
+    """Add the first ``MAX_PLUGIN_SCHEMA_FINDINGS`` findings, then one finding that counts the rest.
 
     The message reads "<source> produced <count> <noun>; only the first
-    <cap> are reported." The findings past the cap may include blocking ones,
-    so the truncation finding is HIGH.
+    <cap> are reported." The truncation finding takes the highest severity
+    among the findings past the cap, so it blocks exactly when one of them
+    would have: a blocking finding past the cap still fails validation, and
+    findings that are all LOW do not.
     """
     for finding in findings[:MAX_PLUGIN_SCHEMA_FINDINGS]:
         result.add_finding(finding)
-    if len(findings) > MAX_PLUGIN_SCHEMA_FINDINGS:
+    unreported = findings[MAX_PLUGIN_SCHEMA_FINDINGS:]
+    if unreported:
+        severity = min((finding.severity for finding in unreported), key=_SEVERITY_ORDER.index)
         result.add_finding(
             _schema_finding(
                 "schema_errors_truncated",
                 message=(
                     f"{source} produced {len(findings)} {noun}; only the first {MAX_PLUGIN_SCHEMA_FINDINGS} are "
-                    "reported."
+                    f"reported. The most severe of the {len(unreported)} not reported is {severity.value.upper()}."
                 ),
                 file_path=file_path,
                 suggestion=suggestion,
-                metadata={"actual": len(findings), "reported": MAX_PLUGIN_SCHEMA_FINDINGS},
+                severity=severity,
+                metadata={
+                    "actual": len(findings),
+                    "reported": MAX_PLUGIN_SCHEMA_FINDINGS,
+                    "highest_unreported_severity": severity.value,
+                },
             )
         )
 

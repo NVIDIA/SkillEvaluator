@@ -839,6 +839,43 @@ class TestHandoff:
         assert _signals(traj, case)["handoff"]["passed"] == 1
 
     @pytest.mark.parametrize(
+        ("headers", "passed"),
+        [
+            ("*** Add File: out/report.json\n+{}", 1),
+            ("*** Update File: out/report.json\n@@\n-a\n+b", 1),
+            ("*** Update File: draft.json\n*** Move to: out/report.json", 1),
+            ("*** Delete File: out/report.json", 0),
+            ("*** Update File: out/other.json\n@@\n-a\n+b\n*** Delete File: out/report.json", 0),
+            ("*** Delete File: out/report.json\n*** Add File: out/report.json\n+{}", 1),
+            ("*** Add File: out/report.json\n+{}\n*** Delete File: out/report.json", 1),
+        ],
+        ids=["add", "update", "move-to", "delete", "delete-beside-update", "delete-then-add", "add-then-delete"],
+    )
+    @pytest.mark.parametrize("form", ["tool", "shell"])
+    def test_a_patch_that_only_deletes_the_artifact_does_not_write_it(
+        self, headers: str, passed: int, form: str
+    ) -> None:
+        patch = f"*** Begin Patch\n{headers}\n*** End Patch"
+        call = (
+            _one("apply_patch", {"input": patch}, call_id="c2")
+            if form == "tool"
+            else _one("exec_command", {"cmd": f"apply_patch <<'EOF'\n{patch}\nEOF"}, call_id="c2")
+        )
+        traj = _traj(
+            _one("Skill", {"skill": "alpha"}),
+            call,
+            _one("Skill", {"skill": "beta"}, call_id="c3"),
+            _one("Read", {"file_path": "out/report.json"}, call_id="c4"),
+        )
+        case = {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "artifact": "out/report.json"}]}
+        handoff = _signals(traj, case)["handoff"]
+        assert handoff["passed"] == passed
+        if not passed:
+            assert [failure["detail"] for failure in handoff["failures"]] == [
+                "artifact was not written by the producer"
+            ]
+
+    @pytest.mark.parametrize(
         ("command", "passed"),
         [
             ("cd /workspace && apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: out/report.json\n+{}\nEOF", 1),

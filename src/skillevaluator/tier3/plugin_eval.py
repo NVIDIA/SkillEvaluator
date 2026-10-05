@@ -84,7 +84,6 @@ from skillevaluator.plugin_components import (
     PluginRootReader,
     build_plugin_inventory,
     coverage_row,
-    manifest_rel_for,
     mcp_pinning_summary,
     normalize_declared_path,
     parse_markdown,
@@ -111,7 +110,13 @@ from skillevaluator.plugin_dependencies import parse_canonical_ref as _parse_can
 from skillevaluator.plugin_dependencies import ref_label as _ref_label
 from skillevaluator.plugin_dependencies import ref_name as _ref_name
 from skillevaluator.plugin_dependencies import ref_source as _ref_source
-from skillevaluator.plugin_formats import manifest_syntax, normalized_component_manifest, profile_for
+from skillevaluator.plugin_formats import (
+    CLAUDE_PROFILE,
+    manifest_syntax,
+    normalized_component_manifest,
+    parse_manifest_text,
+    profile_for,
+)
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries, normalize_dataset_entries
 from skillevaluator.tier3.eval_core.plugin_signals import validate_plugin_case_fields
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
@@ -162,6 +167,10 @@ if TYPE_CHECKING:
 
     from skillevaluator.plugin_formats import FormatProfile
     from skillevaluator.plugin_manifest import PluginManifestLocation
+
+#: The generated package directory is ``<plugin><PLUGIN_EVAL_PACKAGE_SUFFIX>``; the Harbor
+#: runner strips the suffix to recognize the wrapper skill by the plugin's name.
+PLUGIN_EVAL_PACKAGE_SUFFIX = "-plugin-eval"
 
 # Shared with Harbor's runtime find_evals_file() and the report loader so a
 # dataset accepted/staged here is resolvable downstream.
@@ -498,7 +507,7 @@ class _LocatedPlugin:
 
     @property
     def manifest_rel(self) -> str:
-        return manifest_rel_for(self.location.path, self.location.root)
+        return self.location.manifest_filename
 
     @property
     def profile(self) -> FormatProfile:
@@ -527,9 +536,10 @@ def _locate_plugin(plugin_path: Path) -> _LocatedPlugin:
         location.secure_file.root,
         manifest,
         contained=location.contained,
-        manifest_rel=manifest_rel_for(location.path, location.root),
+        manifest_rel=location.manifest_filename,
         manifest_type=location.manifest_type,
-        additional=_additional_manifests(location),
+        # Inventoried, never staged, so coverage reports what only another client loads.
+        additional=location.parsed_additional(),
     )
     return _LocatedPlugin(location, manifest_text, manifest, name, description, inventory)
 
@@ -1261,23 +1271,6 @@ def write_plugin_provenance(run_dir: Path, provenance: dict[str, Any]) -> Path |
         return None
 
 
-def _additional_manifests(location: PluginManifestLocation) -> list[tuple[str, str, dict[str, Any] | None]]:
-    """Best-effort bounded parse of the other supported manifests in the root.
-
-    Their components are inventoried (never staged) so coverage reports them.
-    A client manifest over the 1 MiB read bound or not UTF-8 is read leniently,
-    like Tier 1 does, so its hooks and MCP servers still show in coverage. An
-    unsafe or unparseable additional manifest is skipped here; Tier 1 reports
-    it (``manifest_unsafe``, ``plugin_manifest_additional_invalid``).
-    """
-    parsed: list[tuple[str, str, dict[str, Any] | None]] = []
-    for candidate in location.additional:
-        data = candidate.parse_for_audit()
-        if data is not None:
-            parsed.append((candidate.manifest_type, candidate.manifest_filename, data))
-    return parsed
-
-
 def _stageable_component(component: Component, component_type: str) -> bool:
     return (
         component.type == component_type
@@ -1333,12 +1326,13 @@ def _manifest_location(plugin_path: Path) -> PluginManifestLocation:
 
 
 def _load_manifest_text(raw_text: str, manifest_path: Path, manifest_type: str) -> dict[str, Any]:
-    json_syntax = manifest_syntax(manifest_type) == "json"
+    syntax = manifest_syntax(manifest_type)
+    # The YAML parser skips a leading byte-order mark itself; the JSON parser does not.
+    text = raw_text.lstrip("\ufeff") if syntax == "json" else raw_text
     try:
-        data = load_bounded_json(raw_text.lstrip("\ufeff")) if json_syntax else load_bounded_yaml(raw_text)
+        data = parse_manifest_text(manifest_type, text)
     except StructuredDataError as exc:
-        syntax = "JSON" if json_syntax else "YAML"
-        raise ValueError(f"{manifest_path} is not valid bounded {syntax}: {exc}") from exc
+        raise ValueError(f"{manifest_path} is not valid bounded {syntax.upper()}: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError(f"{manifest_path} must contain a manifest object")
     return data
@@ -1815,14 +1809,18 @@ def _plugin_root_launch(server: dict[str, Any], *, root_prefixes: tuple[str, ...
 def _unstaged_root_mcp_json(manifest: dict[str, Any], plugin_root: Path) -> str | None:
     """Finding path of an ``agent_plugin.yaml`` plugin's implicit root ``.mcp.json``, or ``None``.
 
-    Mirrors :func:`~skillevaluator.plugin_components.collect_mcp_declarations`: the
+    Mirrors :func:`~skillevaluator.plugin_mcp.collect_mcp_declarations`: the
     root file is inventoried as the default ``mcp_json`` source (never staged for
     this manifest form) unless an ``mcpServers`` path names it explicitly -- then it
-    is a staged ``path_ref`` source whose findings must keep blocking.
+    is a staged ``path_ref`` source whose findings must keep blocking. Paths are
+    read with the Claude Code profile's placeholders, as the inventory reads this
+    manifest form: none, so ``${CLAUDE_PLUGIN_ROOT}/.mcp.json`` is a broken
+    placeholder path (blocking on its own), not an explicit name for the root file.
     """
     declared = manifest.get("mcpServers")
     entries = declared if isinstance(declared, list) else [declared]
-    if any(isinstance(entry, str) and normalize_declared_path(entry).rel == MCP_JSON for entry in entries):
+    prefixes = CLAUDE_PROFILE.manifest_path_prefixes
+    if any(isinstance(entry, str) and normalize_declared_path(entry, prefixes).rel == MCP_JSON for entry in entries):
         return None
     return PluginRootReader(plugin_root).display(MCP_JSON)
 
@@ -2140,7 +2138,7 @@ def _skip_reason(
 
 def _fresh_package_dir(stage_root: Path, plugin_name: str) -> Path:
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", plugin_name).strip("-._") or "plugin"
-    package_path = stage_root.expanduser().resolve() / f"{safe_name}-plugin-eval"
+    package_path = stage_root.expanduser().resolve() / f"{safe_name}{PLUGIN_EVAL_PACKAGE_SUFFIX}"
     if package_path.exists():
         raise ValueError(f"Plugin evaluation staging path already exists: {package_path}")
     package_path.mkdir(parents=True)

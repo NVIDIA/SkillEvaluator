@@ -137,7 +137,7 @@ def _plugin_signals_context(
     read through the adapter's bounded no-follow loader; case fields come from
     the staged task entries.
     """
-    from skillevaluator.tier3.plugin_eval import PLUGIN_MCP_SERVERS_FILENAME
+    from skillevaluator.tier3.plugin_eval import PLUGIN_EVAL_PACKAGE_SUFFIX, PLUGIN_MCP_SERVERS_FILENAME
 
     try:
         servers = _load_mcp_servers(evaluator_skill_path, PLUGIN_MCP_SERVERS_FILENAME)
@@ -151,7 +151,7 @@ def _plugin_signals_context(
         entries = []
     # The generated package directory is ``<plugin>-plugin-eval`` and its wrapper
     # SKILL.md is named after the plugin; neither is a member-skill selection.
-    wrapper_names = [skill_path.name, skill_path.name.removesuffix("-plugin-eval")]
+    wrapper_names = [skill_path.name, skill_path.name.removesuffix(PLUGIN_EVAL_PACKAGE_SUFFIX)]
     try:
         runtime_components = load_plugin_runtime_components(evaluator_skill_path)
     except (OSError, ValueError) as exc:
@@ -192,31 +192,13 @@ def _resolve_plugin_load_plan(
     A native decision needs the snapshot, and an adapter that would stage a
     component carrying a permission bypass refuses it. Under ``native`` either
     case raises :class:`PluginLoadError`; under ``auto`` that agent falls back to
-    the wrapper with the reason recorded.
+    the wrapper with the reason recorded
+    (:func:`~skillevaluator.tier3.plugin_native.apply_native_refusals`).
     """
-    from skillevaluator.tier3.plugin_native import (
-        PluginLoadError,
-        adapter_for,
-        native_refusal,
-        resolve_plugin_load,
-        wrapper_decision,
-    )
+    from skillevaluator.tier3.plugin_native import apply_native_refusals, resolve_plugin_load
 
-    decisions = dict(resolve_plugin_load(plugin_load, agents, env_mode=env_mode, task_source=task_source))
-    for agent, decision in list(decisions.items()):
-        if not decision.native:
-            continue
-        adapter = adapter_for(agent)
-        if native_plugin_source is None:
-            reason: str | None = "no native plugin snapshot was prepared for this run"
-        else:
-            reason = native_refusal(adapter, native_plugin_source) if adapter is not None else None
-        if reason is None:
-            continue
-        if plugin_load == "native":
-            raise PluginLoadError(f"--plugin-load native is not supported for {agent}: {reason}")
-        decisions[agent] = wrapper_decision(agent, f"auto: {reason}; using the generated wrapper")
-    return decisions
+    decisions = resolve_plugin_load(plugin_load, agents, env_mode=env_mode, task_source=task_source)
+    return apply_native_refusals(plugin_load, decisions, native_plugin_source)
 
 
 def _plugin_load_census_plan(
@@ -2280,7 +2262,7 @@ def _run_harbor_eval_impl(
     }
     with_agent_import_paths: dict[str, str] = {}
     if any(decision.native for decision in plugin_load_decisions.values()):
-        from skillevaluator.tier3.plugin_native import PluginLoadError, native_agent_import_path, wrapper_decision
+        from skillevaluator.tier3.plugin_native import PluginLoadError, native_agent_import_path, refuse_or_fall_back
 
         for agent, decision in list(plugin_load_decisions.items()):
             if not decision.native:
@@ -2288,10 +2270,12 @@ def _run_harbor_eval_impl(
             try:
                 with_agent_import_paths[agent] = native_agent_import_path(agent, agent_import_paths.get(agent))
             except PluginLoadError as exc:
-                if plugin_load == "native":
-                    reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=str(exc)))
-                    return {"error": [f"--plugin-load native is not supported for {agent}: {exc}"]}
-                plugin_load_decisions[agent] = wrapper_decision(agent, f"auto: {exc}; using the generated wrapper")
+                reason = str(exc)
+                try:
+                    plugin_load_decisions[agent] = refuse_or_fall_back(plugin_load, agent, reason)
+                except PluginLoadError as refusal:
+                    reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=reason))
+                    return {"error": [str(refusal)]}
     runtime_secret_values = set().union(
         *(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values())
     )

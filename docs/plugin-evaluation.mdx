@@ -2008,9 +2008,9 @@ into per-trial checks. They are heuristic and advisory.
     later step. It must not appear in any user or system message, because the
     consumer could then have copied it from the prompt.
   - `artifact`: a producer-attributed call must write the path, and a later
-    consumer-attributed call must read it. A relative path matches an observed
-    path that equals it or ends with `/<artifact>`; an absolute path must match
-    exactly.
+    consumer-attributed call must read it. An `apply_patch` that only deletes
+    the path does not write it. A relative path matches an observed path that
+    equals it or ends with `/<artifact>`; an absolute path must match exactly.
   - When a handoff sets both, both must hold.
 - **Conflict probes.** A probe passes when `must_use` was activated and
   `must_not_use` was not.

@@ -32,11 +32,13 @@ from skillevaluator.constants import (
     SCAN_EXCLUDED_DIRS,
 )
 from skillevaluator.models.result import Finding, Severity
-from skillevaluator.plugin_formats import CLAUDE_PROFILE, FormatProfile
+from skillevaluator.plugin_formats import CLAUDE_PROFILE, DEFAULT_SKILLS_DIR, FormatProfile
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, discover_secure_files, stat_is_link_or_reparse
 
 PLUGIN_CATEGORY = "PLUGIN_SCHEMA"
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+# A longer declared path is "invalid": no component path comes close, and it bounds the work per path.
+_MAX_DECLARED_PATH_CHARS = 4096
 
 
 # --------------------------------------------------------------------------- #
@@ -70,7 +72,7 @@ def normalize_declared_path(raw: str, root_prefixes: Iterable[str] = ("${CLAUDE_
     text = raw.strip()
     if not text:
         return DeclaredPath(raw, None, "empty")
-    if "\x00" in text or len(text) > 4096:
+    if "\x00" in text or len(text) > _MAX_DECLARED_PATH_CHARS:
         return DeclaredPath(raw, None, "invalid")
     normalized = text.replace("\\", "/")
     dot_relative = normalized in {".", "./"} or normalized.startswith("./")
@@ -346,7 +348,8 @@ def _in_unscanned_folder(rel: PurePosixPath) -> bool:
     """
     parts = rel.parts
     return any(
-        part in SCAN_ARTIFACT_DIRS and not (index == 1 and parts[0] == "skills") for index, part in enumerate(parts)
+        part in SCAN_ARTIFACT_DIRS and not (index == 1 and parts[0] == DEFAULT_SKILLS_DIR)
+        for index, part in enumerate(parts)
     )
 
 

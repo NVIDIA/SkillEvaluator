@@ -45,6 +45,7 @@ from skillevaluator.tier3.harbor.metrics import (
     average_metrics,
     dimension_scores,
     extract_custom_metrics,
+    finite_number,
     mark_not_applicable,
     metric_is_not_applicable,
     metric_set_for_reward,
@@ -3500,10 +3501,8 @@ def _read_job_json(job_dir: Path, relative_path: Path) -> Any:
 
 
 def _usage_counter(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    numeric = float(value)
-    return numeric if math.isfinite(numeric) and numeric >= 0 else None
+    """Return a usable token or cost counter; anything else, even an oversized integer, counts as missing."""
+    return finite_number(value, non_negative=True)
 
 
 def _sum_usage_counters(values: list[float | None]) -> float | None:

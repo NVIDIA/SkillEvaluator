@@ -605,6 +605,44 @@ def test_trial_usage_sums_native_multistep_fragments(tmp_path: Path) -> None:
     assert usage["first_turn_prompt_tokens"] == 100
 
 
+def test_oversized_usage_counter_is_missing_instead_of_aborting_collection(tmp_path: Path) -> None:
+    # json.loads turns a 400-digit counter into an int that float() cannot convert.
+    oversized = 10**400
+    jobs = tmp_path / "jobs"
+    _write_job(jobs, "with", dict.fromkeys(CASES, 0.9))
+    _write_job(jobs, "without", dict.fromkeys(CASES, 0.4))
+    job_dir = jobs / "demo-opencode-with"
+    trial_dir = job_dir / "case-1__attempt001"
+    trajectory_path = trial_dir / "agent" / "trajectory.json"
+    trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    trajectory["final_metrics"]["total_prompt_tokens"] = oversized
+    trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+    # The result.json fallback carries an oversized counter too.
+    (trial_dir / "result.json").write_text(
+        json.dumps({"agent_result": {"n_input_tokens": oversized, "n_output_tokens": 500}}), encoding="utf-8"
+    )
+
+    result = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs,
+        n_attempts=2,
+        expected_cases=len(CASES),
+        expected_case_ids=CASES,
+        expected_trials=2 * len(CASES),
+    )
+
+    assert _trial_usage(job_dir, {"_trial_root_name": "case-1__attempt001"}) == {
+        "cost_usd": 0.01,
+        "first_turn_prompt_tokens": 1_000,
+    }
+    cost = result["agents"]["opencode"]["cost"]["with_skill"]
+    assert cost["total_tokens"] is None
+    assert cost["total_usd"] == 0.12
+    assert stats.uncached_tokens({"prompt_tokens": oversized, "completion_tokens": 1}) is None
+
+
 # ---------------------------------------------------------------------------
 # Integration verdict and lift modes
 # ---------------------------------------------------------------------------

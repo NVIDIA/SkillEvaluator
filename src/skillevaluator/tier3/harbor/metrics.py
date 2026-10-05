@@ -114,16 +114,27 @@ _RESERVED_METADATA_KEYS = {
 RESERVED_METRIC_NAMES = frozenset(DEFAULT_METRICS) | _RESERVED_METADATA_KEYS
 
 
-def _finite_number(value: object) -> float | None:
+def finite_number(value: object, *, non_negative: bool = False) -> float | None:
+    """Return *value* as a finite float, or ``None`` when it is not a usable number.
+
+    Booleans, non-numbers, NaN, infinities and integers too large for a float
+    (``json.loads`` turns any long digit string into one) are rejected, as are
+    negative values when *non_negative* is set.
+    """
     if not isinstance(value, int | float) or isinstance(value, bool):
         return None
-    numeric = float(value)
-    return numeric if math.isfinite(numeric) else None
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(numeric) or (non_negative and numeric < 0):
+        return None
+    return numeric
 
 
 def metric_value(reward: dict[str, Any], metric: str) -> float | None:
     """Return a numeric metric value from a reward payload, if present."""
-    val = _finite_number(reward.get(metric))
+    val = finite_number(reward.get(metric))
     if val is not None:
         return val
 
@@ -132,7 +143,7 @@ def metric_value(reward: dict[str, Any], metric: str) -> float | None:
         raw = metrics.get(metric)
         if isinstance(raw, dict):
             raw = raw.get("score")
-        numeric = _finite_number(raw)
+        numeric = finite_number(raw)
         if numeric is not None:
             return numeric
 
@@ -155,7 +166,7 @@ def metric_is_not_applicable(reward: dict[str, Any], metric: str) -> bool:
     return (
         isinstance(detail, dict)
         and detail.get("status") == NOT_APPLICABLE_STATUS
-        and _finite_number(detail.get("score")) is None
+        and finite_number(detail.get("score")) is None
     )
 
 
@@ -230,7 +241,7 @@ def metric_set_for_reward(reward: dict[str, Any]) -> tuple[str, tuple[str, ...]]
         return DEFAULT_METRIC_SET, DEFAULT_METRICS
     if any(metric_value(reward, m) is not None for m in LEGACY_METRICS):
         return LEGACY_METRIC_SET, LEGACY_METRICS
-    if _finite_number(reward.get("overall")) is not None:
+    if finite_number(reward.get("overall")) is not None:
         return CUSTOM_ONLY_METRIC_SET, ()
     return DEFAULT_METRIC_SET, DEFAULT_METRICS
 
@@ -246,7 +257,7 @@ def metric_set_for_rewards(rewards: list[dict[str, Any]]) -> tuple[str, tuple[st
         return DEFAULT_METRIC_SET, DEFAULT_METRICS
     if any(any(metric_value(reward, m) is not None for m in LEGACY_METRICS) for reward in rewards):
         return LEGACY_METRIC_SET, LEGACY_METRICS
-    if any(_finite_number(reward.get("overall")) is not None for reward in rewards):
+    if any(finite_number(reward.get("overall")) is not None for reward in rewards):
         return CUSTOM_ONLY_METRIC_SET, ()
     return DEFAULT_METRIC_SET, DEFAULT_METRICS
 
@@ -296,7 +307,7 @@ def overall_score(reward: dict[str, Any]) -> float | None:
             return None
         return sum(values) / len(values)
 
-    return _finite_number(reward.get("overall"))
+    return finite_number(reward.get("overall"))
 
 
 def score_definition(metrics: tuple[str, ...] = DEFAULT_METRICS) -> str:
@@ -324,9 +335,9 @@ def dimension_scores(
         sources = {
             metric: weight
             for metric, weight in configured_sources.items()
-            if not (metric in not_applicable and _finite_number(scores.get(metric)) is None)
+            if not (metric in not_applicable and finite_number(scores.get(metric)) is None)
         }
-        if not sources or not all(_finite_number(scores.get(metric)) is not None for metric in sources):
+        if not sources or not all(finite_number(scores.get(metric)) is not None for metric in sources):
             continue
         total_weight = sum(sources.values())
         if total_weight <= 0:
@@ -354,7 +365,7 @@ def extract_custom_metrics(reward: dict[str, Any]) -> dict[str, float]:
                 continue
             if isinstance(value, dict):
                 value = value.get("score")
-            numeric = _finite_number(value)
+            numeric = finite_number(value)
             if numeric is not None:
                 custom[str(name)] = numeric
 
@@ -365,14 +376,14 @@ def extract_custom_metrics(reward: dict[str, Any]) -> dict[str, float]:
                 continue
             if isinstance(value, dict):
                 value = value.get("score")
-            numeric = _finite_number(value)
+            numeric = finite_number(value)
             if numeric is not None:
                 custom[str(name)] = numeric
 
     for name, value in reward.items():
         if name in RESERVED_METRIC_NAMES or name.startswith("_"):
             continue
-        numeric = _finite_number(value)
+        numeric = finite_number(value)
         if numeric is not None:
             custom[str(name)] = numeric
 

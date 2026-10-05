@@ -3,6 +3,7 @@
 
 """Tests for PluginSchemaValidator (bundle-reference plugin manifest validation)."""
 
+import json
 import os
 from pathlib import Path
 
@@ -241,6 +242,20 @@ skills:
 
         assert not result.passed
         assert any(f.check_name == "schema:name:missing" for f in result.findings)
+
+    @pytest.mark.parametrize("manifest_dir", [".claude-plugin", ".cursor-plugin"])
+    def test_declared_dependencies_count_only_component_fields(self, tmp_path: Path, manifest_dir: str):
+        """Regression: the Claude Code path counted keywords and skipped an mcpServers path."""
+        manifest = tmp_path / manifest_dir / "plugin.json"
+        manifest.parent.mkdir()
+        declared = {"keywords": ["a", "b"], "mcpServers": "./mcp.json", "commands": ["./c.md"]}
+        manifest.write_text(json.dumps({"name": "demo", **declared}), encoding="utf-8")
+        (tmp_path / "mcp.json").write_text('{"mcpServers": {}}', encoding="utf-8")
+        (tmp_path / "c.md").write_text("# C\n", encoding="utf-8")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert result.metadata["plugin"]["declared_dependencies"] == {"mcpServers": 1, "commands": 1}
 
     def test_deep_contained_json_produces_bounded_complexity_finding(self, tmp_path: Path):
         manifest = tmp_path / ".claude-plugin" / "plugin.json"

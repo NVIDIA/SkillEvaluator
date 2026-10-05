@@ -59,6 +59,8 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.plugin import PluginManifest
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.plugin_formats import (
+    CLAUDE_PROFILE,
+    FormatProfile,
     agent_plugins_schema_version,
     declared_value_replaces_default,
     manifest_syntax,
@@ -735,7 +737,7 @@ class PluginSchemaValidator(ValidatorBase):
         result.add_message(f"Plugin name: {name}")
         plugin_meta = result.metadata.setdefault("plugin", {})
         plugin_meta["name"] = name
-        declared = {key: len(value) for key, value in data.items() if isinstance(value, list)}
+        declared = self._declared_components(data, CLAUDE_PROFILE)
         if declared:
             plugin_meta["declared_dependencies"] = declared
         return data, readable
@@ -787,14 +789,25 @@ class PluginSchemaValidator(ValidatorBase):
         version = agent_plugins_schema_version(data.get("$schema"))
         if version is not None:
             plugin_meta["manifest_spec_version"] = version
-        declared = {
+        declared = self._declared_components(data, profile)
+        if declared:
+            plugin_meta["declared_dependencies"] = declared
+        return data, readable and not blocking
+
+    @staticmethod
+    def _declared_components(data: dict[str, Any], profile: FormatProfile) -> dict[str, int]:
+        """Count what a contained manifest declares in each of its format's component fields.
+
+        A list counts its entries; any other non-null value (a path or an inline
+        object) counts as one. ``$schema`` and ``extensions`` are read by the
+        inventory but declare no component, and other fields (``keywords``, ...)
+        are not components.
+        """
+        return {
             key: len(value) if isinstance(value, list) else 1
             for key, value in data.items()
             if key in profile.component_fields and key not in {"$schema", "extensions"} and value is not None
         }
-        if declared:
-            plugin_meta["declared_dependencies"] = declared
-        return data, readable and not blocking
 
     def _record_manifest_declarations(
         self, location: PluginManifestLocation, result: ValidationResult

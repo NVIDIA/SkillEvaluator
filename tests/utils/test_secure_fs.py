@@ -663,3 +663,135 @@ def test_directory_listing_stops_once_the_budget_cannot_fit(tmp_path: Path) -> N
     assert caught.value.code == "path_count_limit"
     assert caught.value.relative_path == "nested"
     assert caught.value.metadata == {"actual": 4, "limit": 3}
+
+
+def _read_descriptor(path: Path, max_bytes: int, **options: object) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        return secure_fs.read_bounded(descriptor, max_bytes, **options)
+    finally:
+        os.close(descriptor)
+
+
+def test_read_bounded_accepts_the_limit_and_refuses_one_byte_more(tmp_path: Path) -> None:
+    exact = tmp_path / "exact.bin"
+    exact.write_bytes(b"x" * 70_000)
+
+    assert _read_descriptor(exact, 70_000) == b"x" * 70_000
+    with pytest.raises(SecurePathError) as caught:
+        _read_descriptor(exact, 69_999, relative_path="nested/exact.bin")
+
+    assert caught.value.code == "file_size_limit"
+    assert caught.value.relative_path == "nested/exact.bin"
+    assert caught.value.metadata == {"actual_bytes": 70_000, "limit_bytes": 69_999}
+    with pytest.raises(ValueError, match="non-negative"):
+        _read_descriptor(exact, -1)
+
+
+def test_read_bounded_truncates_without_reading_past_the_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    large = tmp_path / "large.bin"
+    large.write_bytes(bytes(range(256)) * 1_000)
+    requested: list[int] = []
+    real_read = os.read
+
+    def recording_read(descriptor: int, count: int) -> bytes:
+        requested.append(count)
+        return real_read(descriptor, count)
+
+    monkeypatch.setattr(secure_fs.os, "read", recording_read)
+
+    assert _read_descriptor(large, 100_000, truncate=True) == (bytes(range(256)) * 1_000)[:100_000]
+    assert sum(requested) == 100_000
+    assert _read_descriptor(large, 0, truncate=True) == b""
+
+
+def test_secure_root_read_prefix_returns_the_start_of_an_oversize_file(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "manifest.json").write_text('{"name": "demo"}' + " " * 10_000)
+
+    with SecureRoot(root) as secure_root:
+        assert secure_root.read_prefix(Path("manifest.json"), 16) == b'{"name": "demo"}'
+        with pytest.raises(SecurePathError, match=r"exceeds the 16-byte limit"):
+            secure_root.read_bytes(Path("manifest.json"), 16)
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_secure_root_read_prefix_keeps_the_link_rules(tmp_path: Path, kind: str) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text("SECRET")
+    if kind == "symlink":
+        (root / "manifest.json").symlink_to(outside)
+    else:
+        os.link(outside, root / "manifest.json")
+
+    with SecureRoot(root) as secure_root, pytest.raises(SecurePathError, match=r"symlink|hard-linked"):
+        secure_root.read_prefix(Path("manifest.json"), 4)
+
+
+def test_secure_root_read_prefix_detects_a_file_changed_while_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "manifest.json"
+    target.write_text("SAFE-CONTENT")
+    real_read = os.read
+
+    def mutating_read(descriptor: int, count: int) -> bytes:
+        target.write_text("CHANGED-CONTENT-THAT-IS-LONGER")
+        return real_read(descriptor, count)
+
+    monkeypatch.setattr(secure_fs.os, "read", mutating_read)
+
+    with SecureRoot(root) as secure_root, pytest.raises(SecurePathError, match=r"changed"):
+        secure_root.read_prefix(Path("manifest.json"), 4)
+
+
+def test_secure_root_reads_a_hard_linked_file_only_when_allowed(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    store = tmp_path / "store.js"
+    store.write_text("console.log('hook')")
+    os.link(store, root / "hook.js")
+
+    with SecureRoot(root) as secure_root:
+        with pytest.raises(SecurePathError, match=r"hard-linked"):
+            secure_root.read_bytes(Path("hook.js"), 1024)
+        content, metadata = secure_root.read_bytes(Path("hook.js"), 1024, allow_hardlinks=True)
+
+    assert content == b"console.log('hook')"
+    assert metadata.st_nlink == 2
+
+
+def test_secure_root_read_checks_the_open_descriptor_once_before_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "guide.md").write_text("safe")
+    real_open = os.open
+    real_fstat = os.fstat
+    file_descriptors: list[int] = []
+    file_fstats: list[int] = []
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        descriptor = real_open(path, flags, mode) if dir_fd is None else real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == "guide.md":
+            file_descriptors.append(descriptor)
+        return descriptor
+
+    def tracked_fstat(descriptor: int):
+        if descriptor in file_descriptors:
+            file_fstats.append(descriptor)
+        return real_fstat(descriptor)
+
+    with SecureRoot(root) as secure_root:
+        monkeypatch.setattr(secure_fs.os, "open", tracked_open)
+        monkeypatch.setattr(secure_fs.os, "fstat", tracked_fstat)
+        assert secure_root.read_text(Path("guide.md"), 1024) == "safe"
+
+    # One snapshot when the file is opened and one after it is read.
+    assert len(file_fstats) == 2

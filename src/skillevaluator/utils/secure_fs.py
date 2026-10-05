@@ -19,8 +19,9 @@ import secrets
 import stat
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from types import SimpleNamespace
+from typing import Literal, NamedTuple
 
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _READLINK_SUPPORTS_DIR_FD = os.readlink in os.supports_dir_fd
@@ -168,6 +169,82 @@ def stat_is_link_or_reparse(metadata: os.stat_result) -> bool:
     """Return whether metadata identifies a symlink or Windows reparse point."""
     file_attributes = getattr(metadata, "st_file_attributes", 0)  # Windows only
     return stat.S_ISLNK(metadata.st_mode) or bool(file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def read_bounded(descriptor: int, max_bytes: int, *, truncate: bool = False, relative_path: str = ".") -> bytes:
+    """Read at most ``max_bytes`` bytes from an open descriptor, 64 KiB at a time.
+
+    With ``truncate`` the first ``max_bytes`` bytes are returned and the rest
+    of the file is never read. Otherwise one more byte is requested to detect
+    a larger file, which raises ``SecurePathError`` (``file_size_limit``,
+    naming ``relative_path``) after reading at most ``max_bytes + 1`` bytes.
+    """
+    if max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
+    limit = max_bytes if truncate else max_bytes + 1
+    chunks: list[bytes] = []
+    total = 0
+    while total < limit:
+        chunk = os.read(descriptor, min(65_536, limit - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    if total > max_bytes:
+        raise SecurePathError(
+            "file_size_limit",
+            f"Selected file exceeds the {max_bytes}-byte limit: {relative_path}",
+            relative_path=relative_path,
+            metadata={"actual_bytes": total, "limit_bytes": max_bytes},
+        )
+    return b"".join(chunks)
+
+
+LstatOutcome = Literal["ok", "missing", "not_dir", "link", "error"]
+
+
+class LstatWalk(NamedTuple):
+    """Where :func:`lstat_walk` stopped and what it saw there.
+
+    ``ok``: every component was inspected; ``metadata`` is the last one's
+    (``None`` for an empty path) and its type is left to the caller.
+    ``missing`` (``FileNotFoundError`` or ``NotADirectoryError``) and
+    ``error`` (any other ``OSError``) carry the exception in ``error``;
+    ``link`` (a symlink or reparse point) and ``not_dir`` (a component before
+    the last is not a directory) carry that component's ``metadata``.
+    ``failing_index`` is the index into ``relative.parts`` of the component
+    that stopped the walk.
+    """
+
+    outcome: LstatOutcome
+    metadata: os.stat_result | None
+    failing_index: int | None
+    error: OSError | None = None
+
+
+def lstat_walk(root: Path, relative: PurePath) -> LstatWalk:
+    """Inspect ``root / relative`` one component at a time with ``lstat``, never following a link.
+
+    The walk stops at the first component that is missing, cannot be
+    inspected, is a symlink or reparse point, or (before the last) is not a
+    directory, so nothing below a link is ever inspected.
+    """
+    current = root
+    metadata: os.stat_result | None = None
+    last_index = len(relative.parts) - 1
+    for index, part in enumerate(relative.parts):
+        current = current / part
+        try:
+            metadata = current.lstat()
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            return LstatWalk("missing", None, index, exc)
+        except OSError as exc:
+            return LstatWalk("error", None, index, exc)
+        if stat_is_link_or_reparse(metadata):
+            return LstatWalk("link", metadata, index)
+        if index < last_index and not stat.S_ISDIR(metadata.st_mode):
+            return LstatWalk("not_dir", metadata, index)
+    return LstatWalk("ok", metadata, None)
 
 
 def _absolute_no_resolve(path: Path) -> Path:
@@ -762,27 +839,16 @@ class SecureRoot:
         max_bytes: int,
         *,
         expected: os.stat_result | None = None,
+        allow_hardlinks: bool = False,
     ) -> tuple[bytes, os.stat_result]:
-        """Read one bounded regular single-link file without following redirects."""
-        if not self._entered:
-            raise SecurePathError("secure_open_unavailable", "Secure Tier 2 root context is not active.")
-        relative_path = _relative_path(relative_path)
-        if max_bytes < 0:
-            raise ValueError("max_bytes must be non-negative")
-        if os.name == "posix":
-            descriptor = self._open_posix(relative_path, expected)
-        elif os.name == "nt":
-            descriptor = self._open_windows(relative_path, expected)
-        else:
-            raise SecurePathError("secure_open_unavailable", "Secure no-follow reads are unavailable.")
+        """Read one bounded regular file without following redirects.
 
+        The file must have a single link unless ``allow_hardlinks`` is set, for
+        content that is only scanned, such as a file a package manager links
+        to its store. ``expected`` is the file's discovery snapshot.
+        """
+        descriptor, opened = self._open_file(relative_path, max_bytes, expected, allow_hardlinks=allow_hardlinks)
         try:
-            opened = os.fstat(descriptor)
-            # Windows discovery identity is revalidated with path ``lstat``
-            # inside ``_open_windows``; CRT descriptor identity fields are not
-            # comparable to that path-stat snapshot. POSIX uses one stat
-            # family for both phases and can compare directly here.
-            _validate_opened_file(opened, relative_path, expected if os.name == "posix" else None)
             if opened.st_size > max_bytes:
                 raise SecurePathError(
                     "file_size_limit",
@@ -790,24 +856,29 @@ class SecureRoot:
                     relative_path=relative_path.as_posix(),
                     metadata={"actual_bytes": opened.st_size, "limit_bytes": max_bytes},
                 )
-            chunks: list[bytes] = []
-            total = 0
-            while True:
-                chunk = os.read(descriptor, min(65_536, max_bytes + 1 - total))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-                if total > max_bytes:
-                    raise SecurePathError(
-                        "file_size_limit",
-                        f"Selected file exceeds the {max_bytes}-byte limit: {relative_path.as_posix()}",
-                        relative_path=relative_path.as_posix(),
-                        metadata={"actual_bytes": total, "limit_bytes": max_bytes},
-                    )
-            after = os.fstat(descriptor)
-            _validate_opened_file(after, relative_path, opened)
-            return b"".join(chunks), opened
+            content = read_bounded(descriptor, max_bytes, relative_path=relative_path.as_posix())
+            _validate_opened_file(os.fstat(descriptor), relative_path, opened, allow_hardlinks=allow_hardlinks)
+            return content, opened
+        finally:
+            os.close(descriptor)
+
+    def read_prefix(
+        self,
+        relative_path: Path,
+        max_bytes: int,
+        *,
+        expected: os.stat_result | None = None,
+    ) -> bytes:
+        """Read the first ``max_bytes`` bytes of one regular single-link file without following redirects.
+
+        A larger file is not an error, so an oversize file can still show what
+        it starts with. The file is opened and re-verified like :meth:`read_bytes`.
+        """
+        descriptor, opened = self._open_file(relative_path, max_bytes, expected)
+        try:
+            prefix = read_bounded(descriptor, max_bytes, truncate=True)
+            _validate_opened_file(os.fstat(descriptor), relative_path, opened)
+            return prefix
         finally:
             os.close(descriptor)
 
@@ -835,11 +906,44 @@ class SecureRoot:
             raise SecurePathError("unsafe_path", "Secure file belongs to a different Tier 2 root.")
         return self.read_text(file.relative_path, max_bytes, expected=file.metadata)
 
+    def _open_file(
+        self,
+        relative_path: Path,
+        max_bytes: int,
+        expected: os.stat_result | None,
+        *,
+        allow_hardlinks: bool = False,
+    ) -> tuple[int, os.stat_result]:
+        """Open one selected file for reading; return its descriptor and verified open-time metadata."""
+        if not self._entered:
+            raise SecurePathError("secure_open_unavailable", "Secure Tier 2 root context is not active.")
+        relative_path = _relative_path(relative_path)
+        if max_bytes < 0:
+            raise ValueError("max_bytes must be non-negative")
+        if os.name == "posix":
+            return self._open_posix_file(relative_path, expected, allow_hardlinks=allow_hardlinks)
+        if os.name == "nt":
+            return self._open_windows_file(relative_path, expected, allow_hardlinks=allow_hardlinks)
+        raise SecurePathError("secure_open_unavailable", "Secure no-follow reads are unavailable.")
+
     def _open_posix(self, relative_path: Path, expected: os.stat_result | None) -> int:
+        """Return only the descriptor of :meth:`_open_posix_file` (kept for ``plugin_manifest``)."""
+        return self._open_posix_file(relative_path, expected)[0]
+
+    def _open_windows(self, relative_path: Path, expected: os.stat_result | None) -> int:
+        """Return only the descriptor of :meth:`_open_windows_file` (kept for ``plugin_manifest``)."""
+        return self._open_windows_file(relative_path, expected)[0]
+
+    def _open_posix_file(
+        self,
+        relative_path: Path,
+        expected: os.stat_result | None,
+        *,
+        allow_hardlinks: bool = False,
+    ) -> tuple[int, os.stat_result]:
         if self._root_fd is None:
             raise SecurePathError("secure_open_unavailable", "Tier 2 root descriptor is unavailable.")
         directory_fd = os.dup(self._root_fd)
-        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
         file_flags = (
             os.O_RDONLY
             | os.O_NOFOLLOW
@@ -851,7 +955,7 @@ class SecureRoot:
         try:
             for component in relative_path.parts[:-1]:
                 try:
-                    child_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+                    child_fd = os.open(component, _posix_directory_flags(), dir_fd=directory_fd)
                 except OSError as exc:
                     raise SecurePathError(
                         "unsafe_path",
@@ -881,7 +985,7 @@ class SecureRoot:
                     f"Cannot inspect selected Tier 2 file securely: {relative_path.as_posix()}: {exc}",
                     relative_path=relative_path.as_posix(),
                 ) from exc
-            _validate_opened_file(before, relative_path, expected)
+            _validate_opened_file(before, relative_path, expected, allow_hardlinks=allow_hardlinks)
             try:
                 descriptor = os.open(relative_path.name, file_flags, dir_fd=directory_fd)
             except OSError as exc:
@@ -892,15 +996,24 @@ class SecureRoot:
                     relative_path=relative_path.as_posix(),
                 ) from exc
             try:
-                _validate_opened_file(os.fstat(descriptor), relative_path, before)
+                # Matching the pre-open snapshot, which matched ``expected``,
+                # makes the descriptor's metadata the verified read baseline.
+                opened = os.fstat(descriptor)
+                _validate_opened_file(opened, relative_path, before, allow_hardlinks=allow_hardlinks)
             except BaseException:
                 os.close(descriptor)
                 raise
-            return descriptor
+            return descriptor, opened
         finally:
             os.close(directory_fd)
 
-    def _open_windows(self, relative_path: Path, expected: os.stat_result | None) -> int:
+    def _open_windows_file(
+        self,
+        relative_path: Path,
+        expected: os.stat_result | None,
+        *,
+        allow_hardlinks: bool = False,
+    ) -> tuple[int, os.stat_result]:
         if not self._windows_root_handles:
             raise SecurePathError("secure_open_unavailable", "Tier 2 root handle is unavailable.")
 
@@ -943,7 +1056,7 @@ class SecureRoot:
                     f"Cannot inspect selected Tier 2 file securely: {relative_path.as_posix()}: {exc}",
                     relative_path=relative_path.as_posix(),
                 ) from exc
-            _validate_opened_file(before_open, relative_path, expected)
+            _validate_opened_file(before_open, relative_path, expected, allow_hardlinks=allow_hardlinks)
 
             native_file_handle = _windows_open_relative_handle(
                 parent_handle,
@@ -954,7 +1067,7 @@ class SecureRoot:
                 file_attributes=0,
                 create_options=_WINDOWS_FILE_OPEN_OPTIONS,
             )
-            _validate_windows_read_file_handle(native_file_handle, relative_path)
+            _validate_windows_read_file_handle(native_file_handle, relative_path, allow_hardlinks=allow_hardlinks)
             try:
                 after_open = declared_path.lstat()
             except OSError as exc:
@@ -963,15 +1076,17 @@ class SecureRoot:
                     f"Cannot revalidate selected Tier 2 file securely: {relative_path.as_posix()}: {exc}",
                     relative_path=relative_path.as_posix(),
                 ) from exc
-            _validate_opened_file(after_open, relative_path, before_open)
+            _validate_opened_file(after_open, relative_path, before_open, allow_hardlinks=allow_hardlinks)
             descriptor = msvcrt.open_osfhandle(
                 native_file_handle,
                 os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
             )
             native_file_handle = -1  # ownership transferred to the CRT descriptor
+            # CRT descriptor identity fields are not comparable to the path
+            # snapshots above, so this is the baseline for the post-read check.
             opened = os.fstat(descriptor)
-            _validate_opened_file(opened, relative_path, None)
-            return descriptor
+            _validate_opened_file(opened, relative_path, None, allow_hardlinks=allow_hardlinks)
+            return descriptor, opened
         except OSError as exc:
             if descriptor >= 0:
                 os.close(descriptor)
@@ -996,6 +1111,8 @@ def _validate_opened_file(
     metadata: os.stat_result,
     relative_path: Path,
     expected: os.stat_result | None,
+    *,
+    allow_hardlinks: bool = False,
 ) -> None:
     if stat_is_link_or_reparse(metadata):
         raise SecurePathError(
@@ -1005,7 +1122,7 @@ def _validate_opened_file(
         )
     if not stat.S_ISREG(metadata.st_mode):
         _raise_unsafe_file(relative_path)
-    if getattr(metadata, "st_nlink", 1) != 1:
+    if not allow_hardlinks and getattr(metadata, "st_nlink", 1) != 1:
         _raise_unsafe_file(relative_path, hardlink=True)
     if expected is not None and _snapshot_changed(metadata, expected):
         raise SecurePathError(
@@ -1039,7 +1156,7 @@ def _validate_directory_snapshot(
 
 
 def _open_absolute_directory_posix(path: Path) -> int:
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    flags = _posix_directory_flags()
     try:
         expected = path.lstat()
     except OSError as exc:
@@ -1201,19 +1318,19 @@ def _atomic_write_posix(path: Path, payload: bytes) -> None:
 
 
 def _validate_windows_parent_components(path: Path) -> None:
+    """Require every directory from the volume anchor to ``path``'s parent to be a real directory."""
     absolute = _absolute_no_resolve(path)
-    current = Path(absolute.anchor)
-    for component in absolute.parent.parts[1:]:
-        current /= component
-        try:
-            metadata = current.lstat()
-        except OSError as exc:
-            raise SecurePathError("path_access_error", f"Cannot inspect parent directory: {exc}") from exc
-        if stat_is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
-            raise SecurePathError(
-                "unsafe_path",
-                f"Path contains a symlink, junction, reparse point, or non-directory component: {current.name}",
-            )
+    parents = PurePath(*absolute.parent.parts[1:])
+    walk = lstat_walk(Path(absolute.anchor), parents)
+    if walk.error is not None:
+        raise SecurePathError("path_access_error", f"Cannot inspect parent directory: {walk.error}") from walk.error
+    if walk.outcome == "ok" and (walk.metadata is None or stat.S_ISDIR(walk.metadata.st_mode)):
+        return
+    component = parents.parts[-1 if walk.failing_index is None else walk.failing_index]
+    raise SecurePathError(
+        "unsafe_path",
+        f"Path contains a symlink, junction, reparse point, or non-directory component: {component}",
+    )
 
 
 @functools.cache
@@ -1671,8 +1788,13 @@ def _validate_windows_read_directory_handle(handle: int, relative_path: Path) ->
     return metadata
 
 
-def _validate_windows_read_file_handle(handle: int, relative_path: Path) -> _WindowsHandleMetadata:
-    """Require one selected Windows handle to be regular, single-link, and no-follow."""
+def _validate_windows_read_file_handle(
+    handle: int,
+    relative_path: Path,
+    *,
+    allow_hardlinks: bool = False,
+) -> _WindowsHandleMetadata:
+    """Require one selected Windows handle to be regular, no-follow, and single-link unless allowed."""
     metadata = _windows_handle_metadata(handle)
     if metadata.is_directory or metadata.is_reparse:
         raise SecurePathError(
@@ -1680,7 +1802,7 @@ def _validate_windows_read_file_handle(handle: int, relative_path: Path) -> _Win
             f"Refusing selected directory or reparse point: {relative_path.as_posix()}",
             relative_path=relative_path.as_posix(),
         )
-    if metadata.link_count != 1:
+    if not allow_hardlinks and metadata.link_count != 1:
         _raise_unsafe_file(relative_path, hardlink=True)
     return metadata
 

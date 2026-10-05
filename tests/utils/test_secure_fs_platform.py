@@ -5,7 +5,7 @@ import ctypes
 import os
 import stat
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -895,3 +895,103 @@ def test_windows_native_values_match_the_win32_definitions() -> None:
     assert secure_fs._WINDOWS_FILE_RENAME_INFORMATION == 10
     assert secure_fs._WINDOWS_FILE_DISPOSITION_INFO == 4
     assert sorted(secure_fs._WINDOWS_FILE_EXISTS_ERRORS) == [80, 183]
+
+
+def _tree_with_link(tmp_path: Path) -> Path:
+    root = tmp_path / "root"
+    (root / "skills" / "demo").mkdir(parents=True)
+    (root / "skills" / "demo" / "SKILL.md").write_text("demo")
+    (root / "README.md").write_text("readme")
+    (tmp_path / "outside").mkdir()
+    try:
+        (root / "linked").symlink_to(tmp_path / "outside", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    return root
+
+
+@pytest.mark.parametrize(
+    ("relative", "outcome", "failing_index", "metadata_of", "error"),
+    [
+        ("skills/demo/SKILL.md", "ok", None, "skills/demo/SKILL.md", None),
+        ("skills/demo", "ok", None, "skills/demo", None),
+        ("", "ok", None, None, None),
+        ("skills/missing/SKILL.md", "missing", 1, None, FileNotFoundError),
+        ("linked/SKILL.md", "link", 0, "linked", None),
+        ("README.md/SKILL.md", "not_dir", 0, "README.md", None),
+    ],
+)
+def test_lstat_walk_stops_at_the_first_unusable_component(
+    tmp_path: Path,
+    relative: str,
+    outcome: str,
+    failing_index: int | None,
+    metadata_of: str | None,
+    error: type[OSError] | None,
+) -> None:
+    root = _tree_with_link(tmp_path)
+
+    walk = secure_fs.lstat_walk(root, PurePosixPath(relative))
+
+    assert (walk.outcome, walk.failing_index) == (outcome, failing_index)
+    if metadata_of is None:
+        assert walk.metadata is None
+    else:
+        assert os.path.samestat(walk.metadata, (root / metadata_of).lstat())
+    if error is None:
+        assert walk.error is None
+    else:
+        assert isinstance(walk.error, error)
+
+
+def test_lstat_walk_inspects_each_component_in_order_and_never_below_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _tree_with_link(tmp_path)
+    inspected: list[str] = []
+    real_lstat = Path.lstat
+
+    def recording_lstat(path: Path) -> os.stat_result:
+        inspected.append(path.relative_to(root).as_posix())
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", recording_lstat)
+
+    assert secure_fs.lstat_walk(root, PurePosixPath("skills/demo/SKILL.md")).outcome == "ok"
+    assert secure_fs.lstat_walk(root, PurePosixPath("linked/deeper/SKILL.md")).outcome == "link"
+    assert inspected == ["skills", "skills/demo", "skills/demo/SKILL.md", "linked"]
+
+
+def test_lstat_walk_reports_an_unreadable_component_as_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    (root / "skills").mkdir(parents=True)
+    real_lstat = Path.lstat
+
+    def denied_lstat(path: Path) -> os.stat_result:
+        if path.name == "skills":
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", denied_lstat)
+
+    walk = secure_fs.lstat_walk(root, PurePosixPath("skills/demo"))
+
+    assert (walk.outcome, walk.metadata, walk.failing_index) == ("error", None, 0)
+    assert isinstance(walk.error, PermissionError)
+
+
+def test_windows_output_parents_must_be_real_directories(tmp_path: Path) -> None:
+    root = _tree_with_link(tmp_path)
+
+    secure_fs._validate_windows_parent_components(root / "skills" / "demo" / "cache.json")
+    with pytest.raises(secure_fs.SecurePathError, match=r"non-directory component: linked"):
+        secure_fs._validate_windows_parent_components(root / "linked" / "cache.json")
+    with pytest.raises(secure_fs.SecurePathError, match=r"non-directory component: README.md"):
+        secure_fs._validate_windows_parent_components(root / "README.md" / "nested" / "cache.json")
+    with pytest.raises(secure_fs.SecurePathError, match=r"non-directory component: README.md"):
+        secure_fs._validate_windows_parent_components(root / "README.md" / "cache.json")
+    with pytest.raises(secure_fs.SecurePathError) as missing:
+        secure_fs._validate_windows_parent_components(root / "absent" / "cache.json")
+    assert missing.value.code == "path_access_error"

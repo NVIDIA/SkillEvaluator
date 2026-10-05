@@ -118,6 +118,56 @@ def test_validate_accepts_direct_skill_manifest(tmp_path: Path) -> None:
     assert "No skills found" not in direct.output
 
 
+@pytest.mark.parametrize("target", [".", "SKILL.md"])
+def test_validate_reports_name_the_resolved_skill_root_not_the_lexical_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    skill = tmp_path / "sample"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: sample\ndescription: Report root fixture\n---\n", encoding="utf-8")
+
+    def validate_tier1(_path: Path, **_kwargs):
+        result = ValidationResult(validator_name="Schema")
+        finding = Finding(
+            category="SCHEMA",
+            severity=Severity.MEDIUM,
+            check_name="fixture",
+            message="Skill-relative finding",
+            file_path="SKILL.md",
+        )
+        result.add_structured_finding(finding, is_error=False)
+        return [result]
+
+    footer_targets: list[Path] = []
+    monkeypatch.setattr("skillevaluator.cli.run_validation", validate_tier1)
+    monkeypatch.setattr(
+        "skillevaluator.cli._finish_pipeline_view", lambda _view, **kwargs: footer_targets.append(kwargs["target_path"])
+    )
+    # Outside a Git checkout the reports fall back to the local path.
+    monkeypatch.setattr("skillevaluator.utils.helpers.resolve_git_remote_url", lambda _path: None)
+    monkeypatch.setattr("skillevaluator.utils.helpers.resolve_git_root", lambda _path: None)
+    monkeypatch.chdir(skill)
+    reports = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli, ["validate", target, "--tiers", "1", "--no-llm", "-r", "html", "-r", "sarif", "-o", str(reports)]
+    )
+
+    assert result.exit_code == 0, result.output
+    skill_root = skill.resolve()
+    html = next(reports.glob("*.html")).read_text(encoding="utf-8")
+    assert f"<strong>Target:</strong> {skill_root}</p>" in html
+    sarif = json.loads(next(reports.glob("*.sarif.json")).read_text(encoding="utf-8"))
+    uris = [
+        location["physicalLocation"]["artifactLocation"]["uri"]
+        for sarif_result in sarif["runs"][0]["results"]
+        for location in sarif_result.get("locations", [])
+    ]
+    # A manifest-file target used to become the scan root, giving "SKILL.md/SKILL.md".
+    assert uris == ["SKILL.md"]
+    assert footer_targets == [skill_root]
+
+
 def test_similarity_help_exposes_catalog_workflow_and_hides_legacy_cache_names() -> None:
     result = CliRunner().invoke(cli, ["similarity-check", "--help"])
 

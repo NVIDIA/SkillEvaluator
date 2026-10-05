@@ -2543,10 +2543,12 @@ def validate(
         CONTENT_TYPE_WORKFLOWS: "Workflow",
         CONTENT_TYPE_PLUGIN: "Plugin",
     }.get(resolved_type, "Skill")
-    target_display = resolve_git_remote_url(target_path) or str(target_path)
-    sarif_repository_root = resolve_git_root(target_path)
+    # Reports and the footer name the validated content root, not the lexical "." or manifest-file argument.
+    report_root = resolved_target.resolve()
+    target_display = resolve_git_remote_url(report_root) or str(report_root)
+    sarif_repository_root = resolve_git_root(report_root)
     if sarif_repository_root is None:
-        sarif_repository_root = target_path if target_path.is_dir() else target_path.parent
+        sarif_repository_root = report_root if report_root.is_dir() else report_root.parent
 
     # Quiet mode defaults the reports to html+json (the terminal shows only
     # the summary; the files carry the findings) and points at them from the
@@ -2565,7 +2567,7 @@ def validate(
             target_path=target_display,
             content_label=content_label,
             announce_paths=not quiet,
-            sarif_scan_root=target_path,
+            sarif_scan_root=report_root,
             sarif_repository_root=sarif_repository_root,
         )
     except ReportsNotWrittenError as exc:
@@ -2618,7 +2620,7 @@ def validate(
             output_dir=output_dir,
             basename=report_basename_value,
             report_formats=effective_formats,
-            target_path=target_path,
+            target_path=report_root,
             agent_eval=agent_eval,
         )
     if reports_error is not None:

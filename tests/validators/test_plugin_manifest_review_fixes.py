@@ -497,8 +497,9 @@ def test_unscanned_skills_past_the_reporting_cap_are_counted(tmp_path: Path) -> 
     assert len(findings) == 100
     [truncated] = [f for f in result.findings if f.check_name == "schema_errors_truncated"]
     assert truncated.severity == Severity.HIGH
-    assert truncated.metadata == {"actual": 105, "reported": 100}
+    assert truncated.metadata == {"actual": 105, "reported": 100, "highest_unreported_severity": "high"}
     assert "produced 105 findings; only the first 100 are reported" in truncated.message
+    assert "The most severe of the 5 not reported is HIGH." in truncated.message
 
 
 def test_manifest_field_error_past_the_reporting_cap_still_blocks(
@@ -516,9 +517,62 @@ def test_manifest_field_error_past_the_reporting_cap_still_blocks(
     result = _validate(root)
     assert "schema:name:pattern" not in _checks(result)  # past the cap: counted, not listed
     [truncated] = [f for f in result.findings if f.check_name == "schema_errors_truncated"]
-    assert truncated.metadata == {"actual": 101, "reported": 100}
+    # The 100 reported findings are MEDIUM; the one past the cap is HIGH, and so is the note that counts it.
+    assert truncated.severity == Severity.HIGH
+    assert truncated.metadata == {"actual": 101, "reported": 100, "highest_unreported_severity": "high"}
     assert "plugin_manifest" not in [detail.check_name for detail in result.success_details]
     assert not result.passed
+
+
+def test_low_findings_past_the_reporting_cap_do_not_fail_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Findings past the cap that are all LOW are counted by a LOW finding, not a blocking HIGH one."""
+    from skillevaluator.plugin_formats import ManifestIssue
+    from skillevaluator.validators import plugin_schema
+
+    issues = [ManifestIssue(f"field{index:03}", "unknown_field", "advisory", "note") for index in range(105)]
+    monkeypatch.setattr(plugin_schema, "validate_manifest_fields", lambda *_args, **_kwargs: issues)
+    root = _write(tmp_path / "p", {".codex-plugin/plugin.json": _CODEX})
+
+    result = _validate(root)
+    [truncated] = [f for f in result.findings if f.check_name == "schema_errors_truncated"]
+    assert truncated.severity == Severity.LOW
+    assert truncated.metadata == {"actual": 105, "reported": 100, "highest_unreported_severity": "low"}
+    assert "The most severe of the 5 not reported is LOW." in truncated.message
+    assert "plugin_manifest" in [detail.check_name for detail in result.success_details]
+    assert result.passed
+
+
+@pytest.mark.parametrize(
+    ("unreported", "expected"),
+    [
+        ([Severity.INFO], Severity.INFO),
+        ([Severity.LOW, Severity.LOW], Severity.LOW),
+        ([Severity.LOW, Severity.MEDIUM, Severity.INFO], Severity.MEDIUM),
+        ([Severity.LOW, Severity.HIGH, Severity.MEDIUM], Severity.HIGH),
+        ([Severity.HIGH, Severity.CRITICAL], Severity.CRITICAL),
+    ],
+)
+def test_reporting_cap_finding_takes_the_highest_unreported_severity(
+    unreported: list[Severity], expected: Severity
+) -> None:
+    """The finding that counts the findings past the cap is as severe as the worst of them, whatever is reported."""
+    from skillevaluator.validators.plugin_schema import MAX_PLUGIN_SCHEMA_FINDINGS, _add_capped, _schema_finding
+
+    severities = [Severity.CRITICAL] * MAX_PLUGIN_SCHEMA_FINDINGS + unreported
+    findings = [
+        _schema_finding(f"check{index}", message="m", file_path="f", suggestion="s", severity=severity)
+        for index, severity in enumerate(severities)
+    ]
+    result = ValidationResult(validator_name="test")
+
+    _add_capped(result, findings, source="Test", noun="findings", file_path="f", suggestion="s")
+
+    [truncated] = [f for f in result.findings if f.check_name == "schema_errors_truncated"]
+    assert truncated.severity == expected
+    assert truncated.metadata["highest_unreported_severity"] == expected.value
+    assert truncated.severity.is_error() == any(severity.is_error() for severity in unreported)
 
 
 def test_declared_component_in_an_unscanned_folder_is_high(tmp_path: Path) -> None:

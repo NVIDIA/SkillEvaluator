@@ -760,6 +760,12 @@ class DependencySecurityValidator(ValidatorBase):
 
     @staticmethod
     def _source_label(directory: Path, rel: PurePosixPath) -> str:
+        """The plugin-relative path of *rel* for messages and warnings.
+
+        Findings take *rel* itself: the plugin-tree walk rebases a bundled
+        skill's finding paths onto the skill directory, so a plugin-relative
+        finding path would name the skill directory twice.
+        """
         tree = active_plugin_tree()
         if tree is not None:
             try:
@@ -851,12 +857,26 @@ class DependencySecurityValidator(ValidatorBase):
                     continue
                 if unreadable:
                     result.add_message(f"{label}: audited in place of unreadable {', '.join(unreadable)}")
-                self._audit_npm_source(result, summary, label, data, lockfile=rel.name in eco.LOCKFILE_NAMES)
+                self._audit_npm_source(
+                    result,
+                    summary,
+                    label,
+                    data,
+                    lockfile=rel.name in eco.LOCKFILE_NAMES,
+                    file_path=rel.as_posix(),
+                )
                 break
         return result
 
     def _audit_npm_source(
-        self, result: ValidationResult, summary: dict[str, Any], label: str, data: Any, *, lockfile: bool
+        self,
+        result: ValidationResult,
+        summary: dict[str, Any],
+        label: str,
+        data: Any,
+        *,
+        lockfile: bool,
+        file_path: str,
     ) -> None:
         """Audit the exact pins of one parsed lockfile or ``package.json``; floating versions are unverified.
 
@@ -865,7 +885,7 @@ class DependencySecurityValidator(ValidatorBase):
         """
         declarations, total = eco.read_npm_declarations(data, lockfile=lockfile)
         result.add_message(f"Auditing {label} ({total} npm declaration(s))")
-        self._audit_npm_declarations(result, summary, label, declarations, total=total)
+        self._audit_npm_declarations(result, summary, label, declarations, total=total, file_path=file_path)
 
     def _audit_npm_declarations(
         self,
@@ -875,7 +895,9 @@ class DependencySecurityValidator(ValidatorBase):
         declarations: list[eco.NpmDeclaration],
         *,
         total: int,
+        file_path: str,
     ) -> None:
+        """Audit npm declarations; *label* names the source in messages, *file_path* in findings."""
         if total > len(declarations):
             self._record_unaudited(
                 result,
@@ -893,7 +915,7 @@ class DependencySecurityValidator(ValidatorBase):
                 eco.unverified_finding(
                     declaration.name,
                     declaration.raw,
-                    label,
+                    file_path,
                     ecosystem="npm",
                     role=declaration.role,
                     kind="npm version",
@@ -907,7 +929,7 @@ class DependencySecurityValidator(ValidatorBase):
         if not exact:
             eco.record_outcome(summary, None, declarations=len(declarations), audited=0, unverified=len(unverified))
             return
-        outcome = eco.audit_npm_pins([(name, version) for name, version in exact if version], source=label)
+        outcome = eco.audit_npm_pins([(name, version) for name, version in exact if version], source=file_path)
         self._apply_outcome(result, outcome, label, scan_name=NPM_AUDIT_SCAN)
         if outcome.unaudited:
             self._record_unaudited(
@@ -930,10 +952,11 @@ class DependencySecurityValidator(ValidatorBase):
         """Audit exact container images from MCP run commands (plugin root) and Dockerfiles."""
         result = ValidationResult()
         summary = self._summary.setdefault("container", eco.empty_ecosystem_summary())
-        images: list[tuple[eco.ImageDeclaration, str]] = []
+        # (image, label for messages, file path for findings); MCP images are only read at the plugin root.
+        images: list[tuple[eco.ImageDeclaration, str, str]] = []
         if is_plugin_tree_root(directory):
             for image, label in self._mcp_images(directory):
-                images.append((eco.image_declaration(image, "mcp"), label))
+                images.append((eco.image_declaration(image, "mcp"), label, label))
         try:
             dockerfiles = self._discover(directory, lambda relative: eco.is_dockerfile_name(relative.name))
         except (SecurePathError, ValueError) as exc:
@@ -965,10 +988,10 @@ class DependencySecurityValidator(ValidatorBase):
                     scan_name=CONTAINER_AUDIT_SCAN,
                 )
                 continue
-            images.extend((declaration, label) for declaration in eco.parse_dockerfile_images(text))
-        unique: dict[str, tuple[eco.ImageDeclaration, str]] = {}
-        for declaration, label in images:
-            unique.setdefault(declaration.image, (declaration, label))
+            images.extend((declaration, label, rel.as_posix()) for declaration in eco.parse_dockerfile_images(text))
+        unique: dict[str, tuple[eco.ImageDeclaration, str, str]] = {}
+        for declaration, label, file_path in images:
+            unique.setdefault(declaration.image, (declaration, label, file_path))
         if len(unique) > eco.MAX_IMAGES:
             self._record_unaudited(
                 result,
@@ -977,13 +1000,13 @@ class DependencySecurityValidator(ValidatorBase):
                 f"{len(unique)} container images found; only the first {eco.MAX_IMAGES} were audited",
                 scan_name=CONTAINER_AUDIT_SCAN,
             )
-        for declaration, label in list(unique.values())[: eco.MAX_IMAGES]:
+        for declaration, label, file_path in list(unique.values())[: eco.MAX_IMAGES]:
             if not declaration.exact:
                 result.add_finding(
                     eco.unverified_finding(
                         declaration.image,
                         declaration.image,
-                        label,
+                        file_path,
                         ecosystem="container",
                         role=declaration.role,
                         kind="container image",
@@ -994,7 +1017,7 @@ class DependencySecurityValidator(ValidatorBase):
             result.add_message(f"Auditing container image {declaration.image} ({label})")
             outcome = eco.audit_image(
                 declaration.image,
-                source=label,
+                source=file_path,
                 allowed_hosts=self.allowed_private_hosts,
                 resolve=self.resolve_endpoints,
             )
@@ -1073,7 +1096,7 @@ class DependencySecurityValidator(ValidatorBase):
         summary = self._summary.setdefault("npm", eco.empty_ecosystem_summary())
         for label, declarations in npm.items():
             result.add_message(f"Auditing {label} ({len(declarations)} npm package(s) an MCP runner installs)")
-            self._audit_npm_declarations(result, summary, label, declarations, total=len(declarations))
+            self._audit_npm_declarations(result, summary, label, declarations, total=len(declarations), file_path=label)
         for label, declarations in pypi.items():
             result.merge(self._audit_declarations(Path(label), declarations))
         return result

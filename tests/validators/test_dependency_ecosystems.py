@@ -352,6 +352,31 @@ def test_standalone_skill_audit_ignores_npm_and_images(tmp_path: Path, tools: di
     assert all(call == [] for call in (tool.calls for tool in tools.values()))
 
 
+def test_bundled_skill_npm_and_image_findings_name_the_skill_directory_once(
+    tmp_path: Path, tools: dict[str, FakeTool]
+) -> None:
+    """Regression: npm and image findings in a bundled skill pointed at skills/foo/skills/foo/package.json."""
+    tools["osv_scanner"].available = True
+    tools["osv_scanner"].responses = [_ok(OSV_REPORT, 1), _ok({"results": []})]
+    root = _bare_plugin(
+        tmp_path / "demo",
+        {
+            "skills/foo/SKILL.md": "---\nname: foo\ndescription: A bundled skill.\n---\nBody\n",
+            "skills/foo/package.json": {"dependencies": {"lodash": "4.17.20", "left-pad": "^1.3.0"}},
+            "skills/foo/Dockerfile": "FROM node:20.11.1\nFROM alpine:latest\n",
+        },
+    )
+    result = _dependency_result(root)
+    assert sorted((f.check_name, f.metadata["package_name"], f.file_path) for f in result.findings) == [
+        ("dependency-version-unverified", "alpine:latest", "[foo] skills/foo/Dockerfile"),
+        ("dependency-version-unverified", "left-pad", "[foo] skills/foo/package.json"),
+        ("npm-vulnerability", "lodash", "[foo] skills/foo/package.json"),
+    ]
+    assert [call["args"][-1] for call in tools["osv_scanner"].calls if call["args"][:2] == ["scan", "image"]] == [
+        "node:20.11.1"
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Never passes silently                                                       #
 # --------------------------------------------------------------------------- #

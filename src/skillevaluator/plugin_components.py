@@ -462,6 +462,13 @@ class _JsonSource(NamedTuple):
     config: Any  # the parsed config; None when the file could not be read or parsed safely
 
 
+class _ResolvedPath(NamedTuple):
+    """A declared component path that can be loaded (:meth:`_Builder._resolve_component`)."""
+
+    rel: PurePosixPath  # contained root-relative path
+    kind: str  # "file" or "dir"
+
+
 class _Builder:
     def __init__(
         self,
@@ -587,10 +594,21 @@ class _Builder:
 
     # -- declared paths and bounded reads ---------------------------------- #
     def _resolve_declared(
-        self, field_name: str, raw: Any, *, style: bool = True, profile: FormatProfile | None = None
+        self,
+        field_name: str,
+        raw: Any,
+        *,
+        kinds: tuple[str, ...] = ("file", "dir"),
+        wrong_kind_field: str | None = None,
+        style: bool = True,
+        profile: FormatProfile | None = None,
     ) -> tuple[DeclaredPath | None, str]:
-        """Normalize + classify one declared path; record findings. Returns (path, kind|problem).
+        """Normalize + classify one declared path and record its findings: ``(path, kind or problem)``.
 
+        The second value is the path's kind when it is one of ``kinds``, and
+        otherwise the problem: ``escape``, ``invalid``, ``missing``, or
+        ``unsafe``. A file where the field takes a folder (or the reverse) is
+        ``invalid``; its finding names ``wrong_kind_field`` when given.
         ``profile`` overrides the builder's format profile (the Codex rules of
         ``extensions["com.openai"]``).
         """
@@ -631,7 +649,39 @@ class _Builder:
                 _path_problem_finding(self.reader, field_name, declared, self.manifest_rel, "unsafe", declared.rel)
             )
             return declared, "unsafe"
+        if kind not in kinds:
+            self.inventory.findings.append(
+                _path_problem_finding(
+                    self.reader, wrong_kind_field or field_name, declared, self.manifest_rel, "invalid"
+                )
+            )
+            return declared, "invalid"
         return declared, kind
+
+    def _resolve_component(
+        self,
+        component_type: str,
+        field_name: str,
+        raw: Any,
+        *,
+        kinds: tuple[str, ...] = ("file", "dir"),
+        name: str | None = None,
+        wrong_kind_field: str | None = None,
+        style: bool = True,
+    ) -> _ResolvedPath | None:
+        """A declared component path that can be loaded, or ``None`` when it cannot.
+
+        A path that cannot be loaded gets its finding (:meth:`_resolve_declared`)
+        and a broken ``component_type`` component named ``name`` (by default
+        the declared value) in its place.
+        """
+        declared, kind = self._resolve_declared(
+            field_name, raw, kinds=kinds, wrong_kind_field=wrong_kind_field, style=style
+        )
+        if kind in kinds and declared is not None and declared.rel is not None:
+            return _ResolvedPath(declared.rel, kind)
+        self._broken(component_type, declared, raw if name is None else name, kind)
+        return None
 
     def _list_dir(
         self, component_type: str, rel_dir: PurePosixPath, suffixes: tuple[str, ...] | None
@@ -742,14 +792,9 @@ class _Builder:
                 name = f"inline[{index}]" if len(declared_values) > 1 else "inline"
                 yield _JsonSource(name, "declared", self.manifest_rel, raw)
                 continue
-            declared, kind = self._resolve_declared(field_name, raw, profile=profile)
-            if declared is None or declared.rel is None or kind != "file":
-                if kind == "dir" and declared is not None:
-                    self.inventory.findings.append(
-                        _path_problem_finding(self.reader, field_name, declared, self.manifest_rel, "invalid")
-                    )
-                    kind = "invalid"
-                self._broken(component_type, None, raw, kind)
+            declared, kind = self._resolve_declared(field_name, raw, kinds=("file",), profile=profile)
+            if kind != "file" or declared is None or declared.rel is None:
+                self._broken(component_type, None, raw, kind)  # a broken config source has no path
                 continue
             origin: Origin = "declared+packaged" if declared.rel == default else "declared"
             config = self._load_json(declared.rel, field_name)
@@ -764,20 +809,13 @@ class _Builder:
         default_dir = self.profile.default_skills_dir or "skills"
         if self.contained and self.manifest is not None:
             for raw in self._declared_values("skills", declared_value):
-                declared, kind = self._resolve_declared("skills", raw)
-                if declared is None or declared.rel is None or kind in {"escape", "invalid", "missing", "unsafe"}:
-                    self._broken("skill", declared, raw, kind)
+                resolved = self._resolve_component("skill", "skills", raw, kinds=("dir",))
+                if resolved is None:
                     continue
-                if kind != "dir":
-                    self.inventory.findings.append(
-                        _path_problem_finding(self.reader, "skills", declared, self.manifest_rel, "invalid")
-                    )
-                    self._broken("skill", declared, raw, "invalid")
-                    continue
-                if declared.rel == PurePosixPath(default_dir):
+                if resolved.rel == PurePosixPath(default_dir):
                     declared_default = True
                     continue
-                self._declared_skill_dir(declared.rel)
+                self._declared_skill_dir(resolved.rel)
         elif self.manifest is not None:
             for ref in _section_refs(self.manifest.get("skills")):
                 self._add(Component("skill", _ref_label(ref), "declared", None, "evaluated"))
@@ -958,16 +996,15 @@ class _Builder:
                 if isinstance(raw, str) and "::" in raw:
                     self._add(Component("rule", _ref_label(raw), "declared", None, "evaluated"))
                     continue
-                declared, kind = self._resolve_declared("rules", raw, style=False)
-                if declared is None or declared.rel is None or kind in {"escape", "invalid", "missing", "unsafe"}:
-                    self._broken("rule", declared, raw, kind)
+                resolved = self._resolve_component("rule", "rules", raw, style=False)
+                if resolved is None:
                     continue
-                if declared.rel == PurePosixPath(self.profile.default_rules_dir or "rules"):
+                if resolved.rel == PurePosixPath(self.profile.default_rules_dir or "rules"):
                     declared_default = True
-                elif kind == "dir":
-                    self._rule_dir(declared.rel, "declared")
+                elif resolved.kind == "dir":
+                    self._rule_dir(resolved.rel, "declared")
                 else:
-                    self._rule_file(declared.rel, "declared")
+                    self._rule_file(resolved.rel, "declared")
         elif self.manifest is not None and not self.contained:
             # Bundle-reference refs are inventoried by label only; resolving them
             # (and flagging dangling ones) is the dependency-resolution report's job.
@@ -1142,20 +1179,19 @@ class _Builder:
             self._command_map(declared_value)
             return
         for raw in self._declared_values(field_name, declared_value):
-            declared, kind = self._resolve_declared(field_name, raw)
-            if declared is None or declared.rel is None or kind in {"escape", "invalid", "missing", "unsafe"}:
-                self._broken(component_type, declared, raw, kind)
+            resolved = self._resolve_component(component_type, field_name, raw)
+            if resolved is None:
                 continue
+            rel = resolved.rel
             origin: Origin = (
                 "declared+packaged"
-                if default_dir is not None
-                and (declared.rel.parts[:1] == (default_dir,) or declared.rel == PurePosixPath(default_dir))
+                if default_dir is not None and (rel.parts[:1] == (default_dir,) or rel == PurePosixPath(default_dir))
                 else "declared"
             )
-            if kind == "dir":
-                self._markdown_dir(component_type, declared.rel, origin)
+            if resolved.kind == "dir":
+                self._markdown_dir(component_type, rel, origin)
             else:
-                self._markdown_file(component_type, declared.rel, origin)
+                self._markdown_file(component_type, rel, origin)
 
     def _markdown_dir(self, component_type: str, rel_dir: PurePosixPath, origin: Origin) -> None:
         for rel in self._list_dir(component_type, rel_dir, self._suffixes(component_type)) or []:
@@ -1200,18 +1236,19 @@ class _Builder:
                 )
                 self._privileges(component, {}, self.manifest_display, entry=entry)
                 continue
-            declared, kind = self._resolve_declared(f"commands[{command_name!r}].source", entry.get("source"))
-            if declared is None or declared.rel is None or kind != "file":
-                if kind == "dir" and declared is not None:
-                    self.inventory.findings.append(
-                        _path_problem_finding(self.reader, "commands", declared, self.manifest_rel, "invalid")
-                    )
-                    kind = "invalid"
-                self._broken("command", declared, str(command_name), kind)
+            resolved = self._resolve_component(
+                "command",
+                f"commands[{command_name!r}].source",
+                entry.get("source"),
+                kinds=("file",),
+                name=str(command_name),
+                wrong_kind_field="commands",
+            )
+            if resolved is None:
                 continue
-            text = self._read(declared.rel)
+            text = self._read(resolved.rel)
             component = self._add(
-                Component("command", str(command_name), "declared", declared.rel.as_posix(), "unsupported")
+                Component("command", str(command_name), "declared", resolved.rel.as_posix(), "unsupported")
             )
             if text is not None:
                 parsed = parse_markdown(text)
@@ -1222,7 +1259,7 @@ class _Builder:
                     len(parsed.body),
                     "always-on: description; on-demand: command body",
                 )
-                self._privileges(component, parsed.frontmatter, self.reader.display(declared.rel), entry=entry)
+                self._privileges(component, parsed.frontmatter, self.reader.display(resolved.rel), entry=entry)
             else:
                 self._privileges(component, {}, self.manifest_display, entry=entry)
 

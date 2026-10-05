@@ -359,6 +359,29 @@ def test_declared_component_path_problems_are_high(tmp_path: Path, field: str, v
     assert broken, "the finding must be attributed to the broken component"
 
 
+@pytest.mark.parametrize(
+    ("manifest", "field", "component"),
+    [
+        ({"skills": "./README.md"}, "skills", ("skill", "./README.md", "README.md")),
+        ({"commands": {"ship": {"source": "./cfg"}}}, "commands", ("command", "ship", "cfg")),
+        ({"hooks": "./cfg"}, "hooks", ("hook", "./cfg", None)),
+    ],
+    ids=["skills-file", "command-source-folder", "hooks-folder"],
+)
+def test_declared_path_of_the_wrong_kind_is_an_invalid_component(
+    tmp_path: Path, manifest: dict, field: str, component: tuple
+) -> None:
+    root = _plugin(tmp_path, manifest, {"README.md": "# Demo\n", "cfg/a.json": {}})
+    inventory = build_plugin_inventory(root, manifest, contained=True, manifest_rel=".claude-plugin/plugin.json")
+
+    [finding] = [finding for finding in inventory.findings if finding.check_name == "plugin_component_path_invalid"]
+    assert finding.severity == Severity.HIGH
+    assert finding.message.startswith(f"'{field}' entry ")
+    component_type, name, path = component
+    broken = [(row.type, row.name, row.path) for row in inventory.components if row.problem == "invalid"]
+    assert broken == [(component_type, name, path)]
+
+
 @_SKIP_SYMLINKS
 def test_symlinked_component_path_is_unsafe(tmp_path: Path) -> None:
     outside = tmp_path / "agent.md"

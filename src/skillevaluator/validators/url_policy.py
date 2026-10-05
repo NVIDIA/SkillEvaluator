@@ -270,10 +270,13 @@ def report_text(value: str, limit: int = MAX_REPORT_CHARS) -> str:
 
     Userinfo is removed from the whole text; only a window of twice the limit is
     redacted (the result keeps at most ``limit`` characters), because the
-    redaction patterns can take quadratic time on long unbroken input.
+    redaction patterns can take quadratic time on long unbroken input. Every
+    secret shape the inline-credential checks know (``ghp_…``, ``glpat-…``,
+    ``xoxb-…``, ...) is redacted, as well as what ``redact_sensitive_text`` covers.
     """
     text = _URL_USERINFO_RE.sub("//", " ".join(value.split()))
-    return redact_sensitive_text(text[: 2 * limit], max_len=limit)
+    window = _SECRET_VALUE_RE.sub("<redacted>", text[: 2 * limit])
+    return redact_sensitive_text(window, max_len=limit)
 
 
 def safe_url(url: str) -> str:

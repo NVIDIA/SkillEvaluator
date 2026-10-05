@@ -597,6 +597,19 @@ def test_http_hook_inline_credentials(tmp_path: Path) -> None:
     assert "zzz" not in json.dumps(result.metadata["plugin"]["hook_risk"])
 
 
+def test_hook_records_never_keep_a_token_from_the_command_line(tmp_path: Path) -> None:
+    """Regression: 'ghp_' and 'glpat-' tokens in a hook command were kept in its report target."""
+    github, gitlab = "ghp_" + "0123456789abcdefghij0123456789abcdef", "glpat-" + "a" * 24
+    command = f"gh auth login --with-token {github} && GITLAB={gitlab} ./sync.sh"
+    hooks = _hooks({"Stop": [{"hooks": [{"type": "command", "command": command}]}]})
+
+    result = _validate(_plugin(tmp_path, files={"hooks/hooks.json": hooks}))
+
+    dumped = json.dumps(result.metadata["plugin"]["hook_risk"])
+    assert github not in dumped and gitlab not in dumped
+    assert "gh auth login --with-token <redacted>" in _hook_rows(result)[0]["target"]
+
+
 def test_a_hook_flag_is_counted_once_however_many_findings_raise_it(tmp_path: Path) -> None:
     """Regression: URL credentials and a secret header listed 'inline_secret' twice, so by_flag counted 2."""
     hook = _http_hook("https://deploy:hunter2@hooks.example.com/x", headers={"X-Api-Key": "abcd1234secretvalue"})

@@ -7,7 +7,13 @@ from __future__ import annotations
 
 import pytest
 
-from skillevaluator.validators.url_policy import MAX_REPORT_CHARS, UrlCredentials, safe_url, url_credentials
+from skillevaluator.validators.url_policy import (
+    MAX_REPORT_CHARS,
+    UrlCredentials,
+    report_text,
+    safe_url,
+    url_credentials,
+)
 
 _TOKEN = "ghp_" + "0123456789abcdefghij0123456789abcdef"
 
@@ -71,3 +77,12 @@ def test_safe_url_shows_where_a_client_connects_without_credentials(url: str, sh
 
 def test_safe_url_is_bounded() -> None:
     assert len(safe_url("https://h.example/" + "a" * 10_000)) <= MAX_REPORT_CHARS
+
+
+def test_report_text_redacts_every_known_secret_shape() -> None:
+    text = report_text(
+        f"gh auth login --with-token {_TOKEN}; curl https://user:pw@h.example/x -H 'X: xoxb-1234567890abc'"
+    )
+
+    assert _TOKEN not in text and "xoxb-1234567890abc" not in text and "user:pw" not in text
+    assert text.startswith("gh auth login --with-token <redacted>;")

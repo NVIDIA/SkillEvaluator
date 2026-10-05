@@ -15,7 +15,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import click
 
@@ -1593,7 +1593,7 @@ def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) ->
 def _validate_catalog(
     ctx: click.Context,
     *,
-    resolved_target: Path,
+    skill_dirs: list[Path],
     output_dir: Path,
     workers: int = 1,
 ) -> None:
@@ -1609,15 +1609,6 @@ def _validate_catalog(
             "--previous-version applies to one skill and cannot be reused for a catalog; "
             "validate each skill separately with its own previous version"
         )
-
-    from skillevaluator.utils.helpers import find_skills_in_directory
-
-    try:
-        skill_dirs = sorted(
-            skill_dir for skill_dir in find_skills_in_directory(resolved_target) if skill_dir.parent == resolved_target
-        )
-    except ValueError as exc:
-        raise click.ClickException(f"Cannot discover catalog skills safely: {exc}") from exc
     if workers > 1:
         _validate_catalog_parallel(ctx, skill_dirs=skill_dirs, output_dir=output_dir, workers=workers)
         return
@@ -1814,6 +1805,119 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     if profile:
         profile_color = "cyan"
         console.print(f"Profile: [{profile_color}]{escape_markup(str(profile))}[/{profile_color}]")
+
+
+def _declared_target_is_link(target_path: Path) -> bool:
+    """Whether the validation target is a symlink or reparse point; a hard-linked or special one is refused."""
+    from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
+
+    try:
+        metadata = target_path.lstat()
+    except OSError as exc:
+        raise click.ClickException(f"Cannot inspect validation target safely: {exc}") from exc
+    is_link = stat_is_link_or_reparse(metadata)
+    if stat.S_ISREG(metadata.st_mode) and getattr(metadata, "st_nlink", 1) != 1:
+        raise click.UsageError(f"Validation target is a hard-linked file: {target_path.name or '.'}")
+    if not is_link and not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
+        raise click.UsageError(f"Validation target is not a regular file or directory: {target_path.name or '.'}")
+    return is_link
+
+
+def _has_regular_skill_manifest(directory: Path) -> bool:
+    """Whether *directory* holds a regular, single-link skill manifest, checked without following links."""
+    from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
+    from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
+
+    for manifest_name in SKILL_MANIFEST_VARIANTS:
+        try:
+            metadata = (directory / manifest_name).lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise click.ClickException(f"Cannot inspect validation target safely: {exc}") from exc
+        if (
+            not stat_is_link_or_reparse(metadata)
+            and stat.S_ISREG(metadata.st_mode)
+            and getattr(metadata, "st_nlink", 1) == 1
+        ):
+            return True
+    return False
+
+
+class _ValidateTarget(NamedTuple):
+    """The content ``validate`` runs on."""
+
+    content_type: str
+    root: Path
+    #: The direct child skills of a catalog (a directory of skills without a root manifest); otherwise empty.
+    catalog_skill_dirs: list[Path]
+
+
+def _resolve_validate_target(
+    target_path: Path,
+    *,
+    content_type: str,
+    detected_type: str,
+    declared_is_link: bool,
+    tier1_only: bool,
+) -> _ValidateTarget:
+    """Resolve the content type and root ``validate`` runs on, and the skills of a catalog.
+
+    A linked target root is followed only for a Tier 1-only run of a
+    directory, never when the target names a selected manifest; an
+    auto-detected type is then detected again on the resolved root. A
+    directory of skills without a regular root ``SKILL.md`` is a catalog, and
+    its direct child skills are returned so each one is validated as its own
+    job.
+    """
+    from skillevaluator.cli_core import detect_content_type, resolve_content_path
+    from skillevaluator.constants import (
+        CONTENT_TYPE_SKILL,
+        CONTENT_TYPE_UNKNOWN,
+        PLUGIN_CONTAINED_MANIFEST_FILE,
+        PLUGIN_MANIFEST_FILES,
+        RULES_FILE_EXTENSION,
+        SKILL_MANIFEST_VARIANTS,
+    )
+
+    resolved_type = detected_type
+    resolved_target = resolve_content_path(target_path, resolved_type)
+    if declared_is_link:
+        names_selected_manifest = (
+            target_path.name in SKILL_MANIFEST_VARIANTS
+            or target_path.name in PLUGIN_MANIFEST_FILES
+            # Any plugin.json: vendor-directory manifests and the Agent Plugins root manifest.
+            or target_path.name == PLUGIN_CONTAINED_MANIFEST_FILE
+            or target_path.suffix == RULES_FILE_EXTENSION
+        )
+        if names_selected_manifest or not tier1_only or not target_path.is_dir():
+            raise click.UsageError(
+                f"Validation target root is a symlink or reparse point (including a junction): "
+                f"{target_path.name or '.'}"
+            )
+        try:
+            resolved_target = target_path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise click.ClickException(f"Cannot resolve linked Tier 1 validation root safely: {exc}") from exc
+        if content_type == "auto":
+            resolved_type = detect_content_type(resolved_target)
+            resolved_target = resolve_content_path(resolved_target, resolved_type)
+
+    catalog_skill_dirs: list[Path] = []
+    if (
+        resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
+        and resolved_target.is_dir()
+        and not _has_regular_skill_manifest(resolved_target)
+    ):
+        from skillevaluator.utils.helpers import find_skills_in_directory
+
+        try:
+            discovered = find_skills_in_directory(resolved_target)
+        except ValueError as exc:
+            raise click.ClickException(f"Cannot discover validation target safely: {exc}") from exc
+        if resolved_target not in discovered:
+            catalog_skill_dirs = sorted(skill_dir for skill_dir in discovered if skill_dir.parent == resolved_target)
+    return _ValidateTarget(resolved_type, resolved_target, catalog_skill_dirs)
 
 
 @cli.command(epilog=_VALIDATE_EPILOG)
@@ -2281,42 +2385,19 @@ def validate(
         evaluator_container_revision,
     )
 
-    from skillevaluator.cli_core import detect_content_type, resolve_content_path
+    from skillevaluator.cli_core import detect_content_type
     from skillevaluator.constants import (
         CONTENT_TYPE_PLUGIN,
         CONTENT_TYPE_RULES,
         CONTENT_TYPE_SKILL,
-        CONTENT_TYPE_UNKNOWN,
         CONTENT_TYPE_WORKFLOWS,
-        PLUGIN_CONTAINED_MANIFEST_FILE,
-        PLUGIN_MANIFEST_FILES,
-        RULES_FILE_EXTENSION,
-        SKILL_MANIFEST_VARIANTS,
     )
     from skillevaluator.reporting import CLIReporter
     from skillevaluator.reporting.naming import REPORT_PREFIX
     from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url, resolve_git_root
-    from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
     from skillevaluator.validators.policy import apply_policy, resolve_policy
 
-    try:
-        declared_metadata = target_path.lstat()
-    except OSError as exc:
-        raise click.ClickException(f"Cannot inspect validation target safely: {exc}") from exc
-    declared_is_redirect = stat_is_link_or_reparse(declared_metadata)
-    declared_is_selected_manifest = (
-        target_path.name in SKILL_MANIFEST_VARIANTS
-        or target_path.name in PLUGIN_MANIFEST_FILES
-        # Any plugin.json: vendor-directory manifests and the Agent Plugins root manifest.
-        or target_path.name == PLUGIN_CONTAINED_MANIFEST_FILE
-        or target_path.suffix == RULES_FILE_EXTENSION
-    )
-    if stat.S_ISREG(declared_metadata.st_mode) and getattr(declared_metadata, "st_nlink", 1) != 1:
-        raise click.UsageError(f"Validation target is a hard-linked file: {target_path.name or '.'}")
-    if not declared_is_redirect and not (
-        stat.S_ISREG(declared_metadata.st_mode) or stat.S_ISDIR(declared_metadata.st_mode)
-    ):
-        raise click.UsageError(f"Validation target is not a regular file or directory: {target_path.name or '.'}")
+    declared_is_link = _declared_target_is_link(target_path)
 
     if external and profile and profile != "external":
         raise click.ClickException(f"--external conflicts with --profile {profile}; pass one or the other.")
@@ -2329,11 +2410,10 @@ def validate(
     block_on_dedup_effective = True if block_on_dedup is None else block_on_dedup
     block_on_agent_eval_effective = False if block_on_agent_eval is None else block_on_agent_eval
 
-    resolved_type = content_type if content_type != "auto" else detect_content_type(target_path)
-    resolved_target = resolve_content_path(target_path, resolved_type)
+    detected_type = content_type if content_type != "auto" else detect_content_type(target_path)
     # Only skills own an evals/ task source. Plugins, rules, and workflows can
     # still run Tier 3, but must bypass the skill-directory source preflight.
-    preflight_tier3_source = resolved_type == CONTENT_TYPE_SKILL
+    preflight_tier3_source = detected_type == CONTENT_TYPE_SKILL
 
     # Skill validation is the complete workflow. Keep the old flags as aliases,
     # while explicit disable flags and the authoritative --tiers selector still
@@ -2355,66 +2435,22 @@ def validate(
         agent_eval = "3" in selected
     autopilot = autopilot and agent_eval
 
-    run_tier2 = dedup and resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_PLUGIN)
-    run_tier3 = agent_eval and resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_PLUGIN)
-    if declared_is_redirect:
-        auto_non_tier1_requested = content_type == "auto" and (dedup or agent_eval)
-        if (
-            declared_is_selected_manifest
-            or run_tier2
-            or run_tier3
-            or auto_non_tier1_requested
-            or not target_path.is_dir()
-        ):
-            raise click.UsageError(
-                f"Validation target root is a symlink or reparse point (including a junction): "
-                f"{target_path.name or '.'}"
-            )
-        try:
-            resolved_target = target_path.resolve(strict=True)
-        except (OSError, RuntimeError) as exc:
-            raise click.ClickException(f"Cannot resolve linked Tier 1 validation root safely: {exc}") from exc
-        if content_type == "auto":
-            resolved_type = detect_content_type(resolved_target)
-            resolved_target = resolve_content_path(resolved_target, resolved_type)
-
+    run_tier2 = dedup and detected_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_PLUGIN)
+    run_tier3 = agent_eval and detected_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_PLUGIN)
+    resolved_type, resolved_target, catalog_skill_dirs = _resolve_validate_target(
+        target_path,
+        content_type=content_type,
+        detected_type=detected_type,
+        declared_is_link=declared_is_link,
+        # Auto-detection through the link could still turn Tier 2 or 3 on, so it counts as requesting them.
+        tier1_only=not (run_tier2 or run_tier3 or (content_type == "auto" and (dedup or agent_eval))),
+    )
     # A directory of skills (no root SKILL.md) is a catalog: run the pipeline
     # once per skill, each as its own job with its own reports.
-    discovered_skill_dirs: list[Path] = []
-    if resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN) and resolved_target.is_dir():
-        root_has_regular_manifest = False
-        for manifest_name in SKILL_MANIFEST_VARIANTS:
-            try:
-                manifest_metadata = (resolved_target / manifest_name).lstat()
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise click.ClickException(f"Cannot inspect validation target safely: {exc}") from exc
-            if (
-                not stat_is_link_or_reparse(manifest_metadata)
-                and stat.S_ISREG(manifest_metadata.st_mode)
-                and getattr(manifest_metadata, "st_nlink", 1) == 1
-            ):
-                root_has_regular_manifest = True
-                break
-
-        if root_has_regular_manifest:
-            discovered_skill_dirs = [resolved_target]
-        else:
-            from skillevaluator.utils.helpers import find_skills_in_directory
-
-            try:
-                discovered_skill_dirs = find_skills_in_directory(resolved_target)
-            except ValueError as exc:
-                raise click.ClickException(f"Cannot discover validation target safely: {exc}") from exc
-    if (
-        discovered_skill_dirs
-        and resolved_target not in discovered_skill_dirs
-        and any(skill_dir.parent == resolved_target for skill_dir in discovered_skill_dirs)
-    ):
+    if catalog_skill_dirs:
         _validate_catalog(
             click.get_current_context(),
-            resolved_target=resolved_target,
+            skill_dirs=catalog_skill_dirs,
             output_dir=output_dir,
             workers=workers,
         )

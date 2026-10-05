@@ -918,8 +918,9 @@ stages a server.
     package the runner installs must be exact, including each `uvx --with`
     requirement. The check and the dependency audit share one exact-version
     rule per ecosystem: an npm version such as `1.2.3`, `=1.2.3`, or `v1.2.3`,
-    and a PyPI `==` (or uv `@`) version that is a plain PEP 440 release, so
-    `===`, wildcards, and ranges are not exact. An image
+    and a PyPI `==` (or uv `@`) version in canonical PEP 440 form such as
+    `1.2.3`, `1.0rc1`, or `1.0.post1`. `===`, wildcards, ranges, and other
+    spellings are not exact. An image
     version tag counts as pinned, but a digest is stronger because tags can be
     moved. The
     recognized runners are `npx`, `bunx`, `pnpx`, `pnpm dlx`, `yarn dlx`,

@@ -11,6 +11,7 @@ from skillevaluator.validators.url_policy import (
     MAX_REPORT_CHARS,
     UrlCredentials,
     UserinfoRule,
+    has_secret_shape,
     report_text,
     safe_url,
     url_credentials,
@@ -94,3 +95,15 @@ def test_report_text_redacts_every_known_secret_shape() -> None:
 
     assert _TOKEN not in text and "xoxb-1234567890abc" not in text and "user:pw" not in text
     assert text.startswith("gh auth login --with-token <redacted>;")
+
+
+@pytest.mark.parametrize("prefix", ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"])
+def test_every_github_token_prefix_has_a_secret_shape(prefix: str) -> None:
+    token = prefix + "0123456789abcdefghij0123456789abcdef"
+    assert has_secret_shape(token)
+    assert url_credentials(f"https://h.example/mcp?q={token}", userinfo_rule="literal").query_keys == ("q",)
+
+
+def test_fine_grained_github_token_has_a_secret_shape() -> None:
+    assert has_secret_shape("github_pat_" + "11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz")
+    assert not has_secret_shape("github_pat_short")

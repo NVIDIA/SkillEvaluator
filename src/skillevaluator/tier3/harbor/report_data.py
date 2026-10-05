@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS, not_applicable_list
+from skillevaluator.tier3.harbor.stats import STATISTICS_BLOCKS
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +38,6 @@ _MAX_STAGED_PATHS_SCANNED = 32_768
 _MAX_DATASET_RECORDS = 4096
 _MAX_DIAGNOSTIC_REASONS = 8
 _INVALID_JSON = object()
-_STATISTICS_KEYS = (
-    "lift_uncertainty",
-    "reliability",
-    "cost",
-    "token_efficiency",
-    "context_cost_measured",
-    "integration_completeness",
-)
 
 __all__ = (
     "DATASET_SNAPSHOT_DIGEST_ALGORITHM",
@@ -628,9 +621,9 @@ def load_agent_data(
         if statistics_file.exists():
             statistics = _load_bounded_json(statistics_file, agent_diagnostics, artifact="statistics")
             if isinstance(statistics, dict):
-                for key in _STATISTICS_KEYS:
-                    if isinstance(statistics.get(key), dict):
-                        agent_info[key] = statistics[key]
+                for block in STATISTICS_BLOCKS:
+                    if isinstance(statistics.get(block), dict):
+                        agent_info[block] = statistics[block]
 
         for variant_key, variant_dir_name in (
             ("rewards", "with-skill"),

@@ -50,6 +50,17 @@ ARM_WITH = "with_skill"
 ARM_WITHOUT = "without_skill"
 ARM_SUM_OF_PARTS = "sum_of_parts"
 
+# The statistics blocks of one agent, in the order build_agent_statistics()
+# returns them. Each is persisted in statistics.json and in the agent's results.
+STATISTICS_BLOCKS = (
+    "lift_uncertainty",
+    "reliability",
+    "cost",
+    "token_efficiency",
+    "context_cost_measured",
+    "integration_completeness",
+)
+
 _SUCCEEDED = "succeeded"
 
 

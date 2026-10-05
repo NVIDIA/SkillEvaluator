@@ -12,6 +12,7 @@ import pytest
 from skillevaluator.utils import find_skills_in_directory, get_skill_name_from_path
 from skillevaluator.utils.helpers import (
     _ssh_to_https,
+    find_bundled_plugin_skill_manifests,
     git_origin_https_url,
     preferred_skill_manifests,
     resolve_git_remote_url,
@@ -170,6 +171,25 @@ class TestPreferredSkillManifests:
             "c/skill.md",
         ]
         assert preferred_skill_manifests([]) == []
+
+
+class TestFindBundledPluginSkillManifests:
+    """Bundled skill manifests found below one plugin skills folder."""
+
+    def test_every_identity_records_the_same_normalized_skills_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: a skill in skills/evals/ recorded the root as typed (relative), unlike its siblings."""
+        for folder in ("a", "evals", "versions/v2"):
+            (tmp_path / "plugin" / "skills" / folder).mkdir(parents=True)
+            (tmp_path / "plugin" / "skills" / folder / "SKILL.md").write_text("---\nname: x\n---\n")
+        monkeypatch.chdir(tmp_path)
+
+        manifests = find_bundled_plugin_skill_manifests(Path("plugin"))
+
+        assert [manifest.rel_path for manifest in manifests] == ["a/SKILL.md", "evals/SKILL.md", "versions/v2/SKILL.md"]
+        assert {manifest.root for manifest in manifests} == {tmp_path / "plugin" / "skills"}
+        assert all(manifest.path == manifest.root / manifest.relative_path for manifest in manifests)
 
 
 class TestSshToHttps:

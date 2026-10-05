@@ -158,8 +158,10 @@ def find_bundled_plugin_skill_manifests(plugin_root: Path, skills_dir: str = "sk
             raise ValueError(f"Plugin skills folder is a symlink, junction, or reparse point: {skills_dir}/{name}")
         if not stat.S_ISDIR(metadata.st_mode):
             continue
+        # Discovery records ``child`` normalized and absolute, so its parent is the skills folder
+        # in the form the identities found above record it.
         manifests.extend(
-            SecureFile(skills_root, child / found.relative_path, Path(name) / found.relative_path, found.metadata)
+            SecureFile(found.root.parent, found.path, Path(name) / found.relative_path, found.metadata)
             for found in _discover_skill_manifests(child)
         )
     return sorted(manifests, key=lambda manifest: manifest.relative_path.parent)

@@ -138,6 +138,82 @@ def test_uv_tool_run_reads_with_requirements_too() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# A runner's options end at the package it runs                               #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("config", "specs"),
+    [
+        ({"command": "npx", "args": ["-y", "some-mcp@1.2.3", "-p", "3000"]}, ("some-mcp@1.2.3",)),
+        ({"command": "npx", "args": ["-p", "a@1.0.0", "cmd", "--package", "b"]}, ("a@1.0.0",)),
+        ({"command": "bunx", "args": ["pkg@1.2.3", "--package=other"]}, ("pkg@1.2.3",)),
+        ({"command": "pnpx", "args": ["pkg@1.2.3", "-p", "3000"]}, ("pkg@1.2.3",)),
+        ({"command": "pnpm", "args": ["dlx", "pkg@1.2.3", "--package", "x"]}, ("pkg@1.2.3",)),
+        ({"command": "yarn", "args": ["dlx", "pkg@1.2.3", "-p", "x"]}, ("pkg@1.2.3",)),
+        ({"command": "uvx", "args": ["srv==1.0", "--with", "x", "--from", "y"]}, ("srv==1.0",)),
+        ({"command": "uv", "args": ["tool", "run", "srv==1.0", "--with=x"]}, ("srv==1.0",)),
+        ({"command": "uvx", "args": ["--from", "srv==1.0", "cmd", "--with", "x"]}, ("srv==1.0",)),
+        ({"command": "pipx", "args": ["run", "srv==1.0", "--spec", "other"]}, ("srv==1.0",)),
+        ({"command": "deno", "args": ["run", "npm:pkg@1.2.3", "-c", "x.json"]}, ("npm:pkg@1.2.3",)),
+        ({"command": "docker", "args": ["run", "-i", "img:1.2.3", "--name", "x", "-e", "Y=1"]}, ("img:1.2.3",)),
+        ({"command": "podman", "args": ["run", "--rm", "img:1.2.3", "-v", "/a:/b", "other:latest"]}, ("img:1.2.3",)),
+        ({"command": "nerdctl", "args": ["container", "run", "img:1.2.3", "-p", "80:80"]}, ("img:1.2.3",)),
+    ],
+)
+def test_arguments_after_the_package_belong_to_the_server(config: dict[str, Any], specs: tuple[str, ...]) -> None:
+    """Regression: a server's own "-p 3000" was read as npx's --package, and "--with x" as a uvx extra."""
+    invocation = parse_mcp_runner(config)
+    assert invocation is not None
+    assert invocation.specs == specs
+
+
+@pytest.mark.parametrize(
+    ("args", "specs"),
+    [
+        (["exec", "some-mcp", "-p", "other@1.0.0"], ("other@1.0.0",)),
+        (["exec", "--", "some-mcp", "-p", "3000"], ("some-mcp",)),
+    ],
+)
+def test_npm_exec_reads_its_options_until_the_separator(args: list[str], specs: tuple[str, ...]) -> None:
+    invocation = parse_mcp_runner({"command": "npm", "args": args})
+    assert invocation is not None
+    assert invocation.specs == specs
+
+
+def test_server_port_flag_keeps_an_exact_npx_package_pinned() -> None:
+    pin = classify_mcp_pinning({"command": "npx", "args": ["-y", "some-mcp@1.2.3", "-p", "3000"]})
+    assert (pin.status, pin.detail) == ("pinned", "npx: exact version 'some-mcp@1.2.3'")
+
+
+def _audited_versions(config: dict[str, Any]) -> list[str | None]:
+    """The exact version the audit finds for each package the runner installs (``None`` when floating)."""
+    invocation = parse_mcp_runner(config)
+    assert invocation is not None
+    if invocation.ecosystem == "pypi":
+        declarations = [_python_runner_declaration(spec) for spec in invocation.specs]
+    else:
+        declarations = [eco.npm_spec_declaration(spec, "mcp") for spec in invocation.npm_specs]
+    return [declaration.exact_version for declaration in declarations if declaration is not None]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "npx", "args": ["-y", "some-mcp@1.2.3", "-p", "3000"]},
+        {"command": "npx", "args": ["-y", "some-mcp", "-p", "3000"]},
+        {"command": "npx", "args": ["-p", "a@1.0.0", "cmd", "--package", "b"]},
+        {"command": "npm", "args": ["exec", "some-mcp", "-p", "other@1.0.0"]},
+        {"command": "uvx", "args": ["srv==1.0", "--with", "x"]},
+        {"command": "uvx", "args": ["--with", "x", "srv==1.0"]},
+        {"command": "pipx", "args": ["run", "srv==1.0", "--spec", "other"]},
+    ],
+)
+def test_runner_is_pinned_exactly_when_the_audit_finds_one_version_per_package(config: dict[str, Any]) -> None:
+    versions = _audited_versions(config)
+    assert versions
+    assert (classify_mcp_pinning(config).status == "pinned") == all(version is not None for version in versions)
+
+
+# --------------------------------------------------------------------------- #
 # One exact-version matcher per ecosystem                                     #
 # --------------------------------------------------------------------------- #
 def test_npm_equals_pin_is_pinned_like_the_audit_reads_it() -> None:
@@ -279,6 +355,31 @@ def _audit(root: Path, servers: dict[str, Any]) -> Any:
     (root / ".mcp.json").write_text(json.dumps({"mcpServers": servers}))
     [result] = run_validation(root, checks="dependency", content_type=CONTENT_TYPE_PLUGIN)
     return result
+
+
+@pytest.fixture
+def osv_scanner(monkeypatch: pytest.MonkeyPatch, pip_audit: _FakeTool) -> _FakeTool:
+    fake = _FakeTool("osv-scanner")
+    monkeypatch.setattr(Tools, "osv_scanner", fake)
+    return fake
+
+
+def test_server_arguments_are_never_audited_as_packages(
+    tmp_path: Path, pip_audit: _FakeTool, osv_scanner: _FakeTool
+) -> None:
+    """Regression: "-p 3000" was audited as npm package "3000" and the pinned server package was never audited."""
+    servers = {
+        "web": {"command": "npx", "args": ["-y", "some-mcp@1.2.3", "-p", "3000"]},
+        "py": {"command": "uvx", "args": ["srv==1.0", "--with", "x"]},
+    }
+    result = _audit(tmp_path / "demo", servers)
+
+    [npm_call] = osv_scanner.calls
+    packages = json.loads(npm_call["files"]["package-lock.json"])["packages"]
+    assert {key: value for key, value in packages.items() if key} == {"node_modules/some-mcp": {"version": "1.2.3"}}
+    [pip_call] = pip_audit.calls
+    assert pip_call["files"] == {"requirements-0.txt": "srv==1.0\n"}
+    assert not [f for f in result.findings if f.check_name == "dependency-version-unverified"]
 
 
 def test_audit_and_pinning_read_the_same_uvx_requirements(tmp_path: Path, pip_audit: _FakeTool) -> None:

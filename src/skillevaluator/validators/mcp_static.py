@@ -1050,7 +1050,9 @@ class RunnerInvocation:
       spec, a URL, or a local script;
     * ``container`` (``docker``, ``podman``, or ``nerdctl run``): the image.
 
-    ``specs`` is empty when the runner names no package or image.
+    A runner's options end at the package, command, module, or image it runs
+    (``npm exec`` reads them up to ``--``); later arguments belong to the
+    server. ``specs`` is empty when the runner names no package or image.
     """
 
     ecosystem: RunnerEcosystem
@@ -1133,10 +1135,24 @@ def _first_positional(tokens: list[str], value_flags: frozenset[str]) -> str | N
     return next((token for _index, token in _positionals(tokens, value_flags)), None)
 
 
-def _package_argument(args: list[str], flag: str, value_flags: frozenset[str]) -> str | None:
-    """The value of a runner's package flag (``--from``, ``--spec``), else its first positional argument."""
-    values = _flag_values(args, (flag,))
-    return values[0] if values else _first_positional(args, value_flags)
+def _runner_options(args: list[str], value_flags: frozenset[str]) -> tuple[list[str], str | None]:
+    """A runner's own options, and its first positional argument (the package or command it runs).
+
+    The runner reads options only up to that argument (or ``--``): every later
+    argument belongs to the server, so a server's ``-p 3000`` or ``--with x``
+    is never read as the runner's.
+    """
+    first = next(_positionals(args, value_flags), None)
+    if first is None:
+        return args, None
+    index, positional = first
+    return args[:index], positional
+
+
+def _package_argument(options: list[str], positional: str | None, flag: str) -> str | None:
+    """The value of a runner's package option (``--from``, ``--spec``), else its first positional argument."""
+    values = _flag_values(options, (flag,))
+    return values[0] if values else positional
 
 
 def _container_run_args(args: list[str]) -> list[str] | None:
@@ -1169,13 +1185,15 @@ def _runner_invocation(argv: list[str]) -> RunnerInvocation | None:
     if base in {"pnpm", "yarn"} and args[:1] == ["dlx"]:
         return _npm_invocation(f"{base} dlx", args[1:], _DLX_VALUE_FLAGS)
     if base == "npm" and args[:1] in (["exec"], ["x"]):
-        return _npm_invocation("npm exec", args[1:], _NPX_VALUE_FLAGS)
+        # Like every npm command, npm exec reads its options anywhere before "--".
+        return _npm_invocation("npm exec", args[1:], _NPX_VALUE_FLAGS, options_until_separator=True)
     if base == "uvx":
         return _uv_invocation("uvx", args)
     if base == "uv" and args[:2] in (["tool", "run"], ["tool", "x"]):
         return _uv_invocation("uv tool run", args[2:])
     if base == "pipx" and args[:1] == ["run"]:
-        spec = _package_argument(args[1:], "--spec", _PIPX_VALUE_FLAGS)
+        options, app = _runner_options(args[1:], _PIPX_VALUE_FLAGS)
+        spec = _package_argument(options, app, "--spec")
         return RunnerInvocation("pypi", "pipx run", () if spec is None else (spec,))
     if base == "deno" and args[:1] == ["run"]:
         module = _first_positional(args[1:], _DENO_VALUE_FLAGS)
@@ -1187,26 +1205,37 @@ def _runner_invocation(argv: list[str]) -> RunnerInvocation | None:
     return None
 
 
-def _npm_invocation(runner: str, args: list[str], value_flags: frozenset[str]) -> RunnerInvocation:
-    """An npm package runner: every ``-p``/``--package`` value, else the first positional argument."""
-    packages = _flag_values(args, ("-p", "--package"))
+def _npm_invocation(
+    runner: str, args: list[str], value_flags: frozenset[str], *, options_until_separator: bool = False
+) -> RunnerInvocation:
+    """An npm package runner: every ``-p``/``--package`` value, else the first positional argument.
+
+    The runner's options end at the package it runs, or, with
+    *options_until_separator*, at ``--``.
+    """
+    if options_until_separator:
+        options, spec = args, _first_positional(args, value_flags)
+    else:
+        options, spec = _runner_options(args, value_flags)
+    packages = _flag_values(options, ("-p", "--package"))
     if packages:
         return RunnerInvocation("npm", runner, tuple(packages))
-    spec = _first_positional(args, value_flags)
     return RunnerInvocation("npm", runner, () if spec is None else (spec,))
 
 
 def _uv_invocation(runner: str, args: list[str]) -> RunnerInvocation:
     """``uvx`` / ``uv tool run``: the ``--from`` requirement (else the command), then every ``--with`` requirement.
 
-    ``--with`` takes one or more comma-separated requirements, and uv installs
-    them next to the package. Without a command uv only lists the installed
-    tools, so it installs nothing.
+    Both options count only before the command; after it they are the
+    server's arguments. ``--with`` takes one or more comma-separated
+    requirements, and uv installs them next to the package. Without a command
+    uv only lists the installed tools, so it installs nothing.
     """
-    package = _package_argument(args, "--from", _UVX_VALUE_FLAGS)
+    options, command = _runner_options(args, _UVX_VALUE_FLAGS)
+    package = _package_argument(options, command, "--from")
     if package is None:
         return RunnerInvocation("pypi", runner, ())
-    extras = (item.strip() for value in _flag_values(args, ("--with",)) for item in value.split(","))
+    extras = (item.strip() for value in _flag_values(options, ("--with",)) for item in value.split(","))
     return RunnerInvocation("pypi", runner, (package, *(item for item in extras if item)))
 
 

@@ -730,16 +730,31 @@ def _judge_excerpt(text, limit):
     return f"{head_text[:head]}{_TRUNCATION_MARKER.format(len(text) - head - tail)}{tail_text[-tail:]}"
 
 
-def _append_section_with_budget(parts, title, body, max_chars, *, section_limit=None):
-    budget = max_chars if section_limit is None else min(max_chars, section_limit)
-    if budget <= len(title) + 2 or not str(body).strip():
-        return max_chars
-    excerpt = _judge_excerpt(body, budget - len(title) - 2)
-    if not excerpt:
-        return max_chars
-    section = f"{title}\n{excerpt}"
-    parts.append(section)
-    return max(0, max_chars - len(section) - 2)
+def _section_text(title, body, limit):
+    """*title* and the redacted head and tail of *body* in under *limit* chars (all of it with no limit),
+    or ``""`` when no body fits."""
+    if not str(body).strip() or (limit is not None and limit <= len(title) + 2):
+        return ""
+    excerpt = _redact_evidence_text(body) if limit is None else _judge_excerpt(body, limit - len(title) - 2)
+    return f"{title}\n{excerpt}" if excerpt else ""
+
+
+def _append_section_with_budget(parts, title, body, max_chars, *, section_limit=None, reserve=0):
+    """Append the section *title* with what fits of *body*; return ``(chars left, cut)``.
+
+    The section takes at most *section_limit* chars and what is left of
+    *max_chars* after *reserve* chars for later sections. ``cut`` says that
+    budget left the section out, or shorter than *section_limit* alone (or
+    no limit) would.
+    """
+    limit = max(0, max_chars - reserve)
+    if section_limit is not None:
+        limit = min(limit, section_limit)
+    section = _section_text(title, body, limit)
+    if section:
+        parts.append(section)
+        max_chars = max(0, max_chars - len(section) - 2)
+    return max_chars, limit != section_limit and section != _section_text(title, body, section_limit)
 
 
 def _section_room(title, body, section_limit):
@@ -1111,27 +1126,26 @@ def _even_share(lengths, room):
 
 
 def _fit_file_changes(entries, max_chars):
-    """Fit file changes into *max_chars*; also say whether any was cut or dropped.
+    """Fit file changes into *max_chars* (``None``: no budget); also say whether any was cut or dropped.
 
     Write bodies share the room evenly, and the latest write to each path gets
     what earlier writes to it leave. Each keeps at least ``_WRITE_BODY_CHARS``
-    before older writes shrink and drop.
+    before older writes shrink and drop; an earlier write to a path never gets
+    more, even without a budget.
     """
     sep = "\n\n"
-    full = sep.join(entry.text for entry in entries)
-    body_cut = any(entry.body_cut for entry in entries)
-    if max_chars is None:
-        return full, body_cut
     fixed = sum(len(entry.text) - len(entry.body) for entry in entries) + len(sep) * (len(entries) - 1)
     old_bodies = sum(min(len(entry.body), _WRITE_BODY_CHARS) for entry in entries if entry.rank < _RANK_KEEP)
     latest_bodies = [len(entry.body) for entry in entries if entry.rank >= _RANK_KEEP]
-    cap = max(_WRITE_BODY_CHARS, _even_share(latest_bodies, max_chars - fixed - old_bodies))
+    room = sum(latest_bodies) if max_chars is None else max_chars - fixed - old_bodies
+    cap = max(_WRITE_BODY_CHARS, _even_share(latest_bodies, room))
     fitted = []
     for entry in entries:
         body = _truncate_for_behavior(entry.body, cap if entry.rank >= _RANK_KEEP else _WRITE_BODY_CHARS)
         fitted.append(_Entry(_file_change_text(entry.head, body, entry.tail), entry.rank, entry.paths))
     text = _fit_entries(fitted, max_chars, sep=sep, stub_chars=_FILE_CHANGE_STUB_CHARS, noun="file changes")
-    return text, text != full or body_cut
+    full = sep.join(entry.text for entry in entries)
+    return text, text != full or any(entry.body_cut for entry in entries)
 
 
 def build_behavior_evidence(traj, question, max_chars=None, final_response_limit=None):
@@ -1153,15 +1167,17 @@ def build_behavior_evidence(traj, question, max_chars=None, final_response_limit
             max_chars = _behavior_check_budget()
         else:
             max_chars = max(_BEHAVIOR_EVIDENCE_MAX_CHARS, final_limit + _MIN_BEHAVIOR_HISTORY_HEADROOM)
-    return _behavior_evidence(traj, question, max_chars, final_limit, _file_change_entries(traj), {})
+    return _behavior_evidence(traj, question, max_chars, final_limit, _file_change_entries(traj))[0]
 
 
-def _behavior_evidence(traj, question, max_chars, final_limit, file_entries, histories):
-    """``build_behavior_evidence`` with built file changes; *histories* caches the tool history.
+def _behavior_evidence(traj, question, max_chars, final_limit, file_entries):
+    """``build_behavior_evidence`` with built file changes, as ``(text, truncated)``.
 
     The final response gets up to *final_limit* chars, but leaves the user
     request and the tool history up to ``_MIN_BEHAVIOR_HISTORY_HEADROOM``
     chars (at most half of what is left, and no more than they need).
+    ``truncated`` says *max_chars* cut or left out part of a section, or a
+    file change body was cut before.
     """
 
     # A final response limit of at least the history's message room shows the
@@ -1173,13 +1189,14 @@ def _behavior_evidence(traj, question, max_chars, final_limit, file_entries, his
     final_shown = bool(final.strip()) and final_limit > len(_SECTION_FINAL_RESPONSE) + 2
     final_rank = _RANK_MESSAGE if final_shown else _RANK_KEEP
 
+    histories = {}  # the tool history with and without write bodies, each built once
+
     def history_entries(write_bodies):
-        key = (write_bodies, final_chars, final_rank)
-        if key not in histories:
-            histories[key] = _history_entries(
+        if write_bodies not in histories:
+            histories[write_bodies] = _history_entries(
                 traj, question, write_bodies=write_bodies, final_chars=final_chars, final_rank=final_rank
             )
-        return histories[key]
+        return histories[write_bodies]
 
     def tail_room(write_bodies):
         """Room the user request and the whole tool history would take."""
@@ -1193,6 +1210,7 @@ def _behavior_evidence(traj, question, max_chars, final_limit, file_entries, his
     parts = []
     remaining = max_chars
     write_bodies = True
+    truncated = any(entry.body_cut for entry in file_entries)
 
     if file_entries:
         final_cap = min(final_limit, max(1, max_chars - min(_MIN_BEHAVIOR_HISTORY_HEADROOM, max_chars // 2)))
@@ -1206,33 +1224,40 @@ def _behavior_evidence(traj, question, max_chars, final_limit, file_entries, his
         # A long configured final response never pushes file changes out entirely.
         room = max(room, min(_BEHAVIOR_SECTION_CHARS, remaining // 3) - len(_SECTION_FILE_CHANGES) - 3)
         file_changes, _ = _fit_file_changes(file_entries, room)
-        remaining = _append_section_with_budget(parts, _SECTION_FILE_CHANGES, file_changes, remaining)
+        remaining, cut = _append_section_with_budget(parts, _SECTION_FILE_CHANGES, file_changes, remaining)
+        truncated = truncated or cut or file_changes != _fit_file_changes(file_entries, None)[0]
         write_bodies = not parts  # the history shows write bodies only when FILE CHANGES does not
 
     if final:
         headroom = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, remaining // 2, tail_room(write_bodies))
         if max_chars > final_limit:
             headroom = min(headroom, max(_BEHAVIOR_SECTION_CHARS, remaining - final_limit))
-        remaining = _append_section_with_budget(
+        remaining, cut = _append_section_with_budget(
             parts,
             _SECTION_FINAL_RESPONSE,
             final,
             remaining,
-            section_limit=min(final_limit, max(1, remaining - headroom)),
+            section_limit=final_limit,
+            reserve=headroom,
         )
+        truncated = truncated or cut
 
-    remaining = _append_section_with_budget(
+    remaining, cut = _append_section_with_budget(
         parts,
         _SECTION_USER_REQUEST,
         question,
         remaining,
         section_limit=_BEHAVIOR_SECTION_CHARS,
     )
+    truncated = truncated or cut
 
-    history_text = _fit_history(history_entries(write_bodies), remaining - len(_SECTION_COMPACT_TOOL_HISTORY) - 3)
-    remaining = _append_section_with_budget(parts, _SECTION_COMPACT_TOOL_HISTORY, history_text, remaining)
+    history = history_entries(write_bodies)
+    history_text = _fit_history(history, remaining - len(_SECTION_COMPACT_TOOL_HISTORY) - 3)
+    remaining, cut = _append_section_with_budget(parts, _SECTION_COMPACT_TOOL_HISTORY, history_text, remaining)
+    truncated = truncated or cut or history_text != _fit_history(history, None)
 
-    return "\n\n".join(parts)[:max_chars]
+    text = "\n\n".join(parts)
+    return text[:max_chars], truncated or len(text) > max_chars
 
 
 _METRIC_EVIDENCE_REF_METRICS = ("accuracy", "goal_accuracy", "behavior_check")
@@ -1774,11 +1799,7 @@ def build_metric_evidence_bundles(traj, question, *, ground_truth="", expected_b
     }
     # Leave room for the facts header so the judge never has to re-cut this.
     bc_budget = max(1, budgets["behavior_check"] - (len(facts_section) + 2 if facts_section else 0))
-    final_limit = _behavior_final_response_limit()
-    histories = {}
-    bc_text = _behavior_evidence(traj, question, bc_budget, final_limit, file_entries, histories)
-    bc_full = _behavior_evidence(traj, question, 10**9, final_limit, file_entries, histories)
-    bc_trunc = len(bc_full) > len(bc_text) or any(entry.body_cut for entry in file_entries)
+    bc_text, bc_trunc = _behavior_evidence(traj, question, bc_budget, _behavior_final_response_limit(), file_entries)
     bundles["behavior_check"] = {
         "prompt_evidence": _prepend_facts(bc_text),
         "evidence_refs": refs["behavior_check"],

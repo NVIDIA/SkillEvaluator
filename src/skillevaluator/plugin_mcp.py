@@ -29,6 +29,7 @@ from skillevaluator.plugin_formats import (
     declared_value_replaces_default,
 )
 from skillevaluator.plugin_paths import (
+    PLUGIN_CATEGORY,
     DeclaredPath,
     PluginRootReader,
     _path_problem_finding,
@@ -133,6 +134,11 @@ class McpCollection:
     def blocking_source_findings(self) -> list[Finding]:
         """Blocking config-source findings (the per-server checks run again at staging time)."""
         return [finding for finding in self.findings if finding.severity in (Severity.CRITICAL, Severity.HIGH)]
+
+    def add_broken_source(self, finding: Finding, ref: str, path: str | None, problem: str = "invalid") -> None:
+        """Record a declared config source that cannot be loaded, with the finding that says why."""
+        self.findings.append(finding)
+        self.broken_sources.append((ref, path, problem))
 
 
 def mcp_pinning_summary(declarations: Iterable[McpDeclaration]) -> dict[str, Any]:
@@ -247,12 +253,10 @@ def collect_mcp_declarations(
         if kind == "file":
             _load_mcp_file(reader, collection, default_rel, "mcp_json", default_rel.as_posix())
         elif kind in {"link", "special"}:
-            collection.findings.append(
-                _path_problem_finding(
-                    reader, "mcpServers", DeclaredPath(default_name, default_rel), manifest_rel, "unsafe", default_rel
-                )
+            finding = _path_problem_finding(
+                reader, "mcpServers", DeclaredPath(default_name, default_rel), manifest_rel, "unsafe", default_rel
             )
-            collection.broken_sources.append((default_name, default_rel.as_posix(), "unsafe"))
+            collection.add_broken_source(finding, default_name, default_rel.as_posix(), "unsafe")
 
     # 2. Declared shapes in order.
     for index, entry in enumerate(entries):
@@ -441,62 +445,27 @@ def _collect_path_ref(
     manifest_rel: str,
     profile: FormatProfile = CLAUDE_PROFILE,
 ) -> None:
-    manifest_display = reader.display(manifest_rel)
-    lowered = raw.strip().lower()
-    if lowered.startswith(("https://", "http://")):
-        shown = redacted_url(raw)  # reports and the inventory never carry userinfo or query credentials
-        if lowered.split("?", 1)[0].endswith(_MCP_BUNDLE_SUFFIXES):
-            collection.findings.append(
-                _plugin_finding(
-                    Severity.MEDIUM,
-                    "mcp_bundle_not_inspected",
-                    f"mcpServers references a remote MCP bundle {shown!r}; it is downloaded and executed at load time "
-                    "and its contents cannot be inspected statically",
-                    manifest_display,
-                    "Vendor the server into the plugin with a pinned version so its configuration can be reviewed.",
-                    category=MCP_CATEGORY,
-                )
-            )
-            if lowered.startswith("http://"):
-                # Code fetched over plaintext can be swapped in transit: block it like a plaintext url server,
-                # and record a broken source so Tier 3 staging fails closed.
-                collection.findings.append(
-                    _plugin_finding(
-                        Severity.HIGH,
-                        "mcp_url_insecure_scheme",
-                        f"mcpServers bundle {shown!r} is downloaded over plaintext http; the code it runs can be "
-                        "replaced in transit",
-                        manifest_display,
-                        "Serve the bundle over https:// or vendor it into the plugin.",
-                        category=MCP_CATEGORY,
-                    )
-                )
-                collection.broken_sources.append((shown, None, "invalid"))
-            else:
-                collection.bundles.append((shown, None))
-            return
-        collection.findings.append(
-            _plugin_finding(
-                Severity.HIGH,
-                "mcp_config_path_invalid",
-                f"mcpServers URL {shown!r} is not an .mcpb/.dxt bundle; only bundles may be referenced by URL",
-                manifest_display,
-                "Reference a './'-relative .json config file, an inline server map, or an .mcpb bundle.",
-                category=MCP_CATEGORY,
-            )
-        )
-        collection.broken_sources.append((shown, None, "invalid"))
-        return
+    """Collect one ``mcpServers`` string: a remote bundle URL, a ``.json`` config file, or a bundle file.
 
+    A reference that cannot be loaded is a broken source with a blocking finding.
+    """
+    if raw.strip().lower().startswith(("https://", "http://")):
+        _collect_url_ref(reader, collection, raw, manifest_rel)
+        return
     declared = normalize_declared_path(raw, profile.manifest_path_prefixes)
     if declared.problem is not None or declared.rel is None:
         problem = "escape" if declared.problem == "escape" else "invalid"
-        collection.findings.append(
-            _path_problem_finding(reader, "mcpServers", declared, manifest_rel, problem, reference=profile.reference)
+        finding = _path_problem_finding(
+            reader, "mcpServers", declared, manifest_rel, problem, reference=profile.reference
         )
-        collection.broken_sources.append((raw, None, problem))
+        collection.add_broken_source(finding, raw, None, problem)
         return
     rel = declared.rel
+    path = rel.as_posix()
+
+    def fail(finding: Finding, problem: str = "invalid") -> None:
+        collection.add_broken_source(finding, raw, path, problem)
+
     if profile.require_dot_relative and not declared.dot_relative:
         client = "Claude Code rejects" if profile is CLAUDE_PROFILE else f"the {profile.label} loader ignores"
         collection.findings.append(_style_finding(reader, "mcpServers", declared, manifest_rel, client=client))
@@ -504,38 +473,34 @@ def _collect_path_ref(
         collection.findings.append(unscanned)
     suffix = rel.suffix.lower()
     if suffix not in {".json", *_MCP_BUNDLE_SUFFIXES}:
-        collection.findings.append(
+        fail(
             _plugin_finding(
                 Severity.HIGH,
                 "mcp_config_path_invalid",
                 f"mcpServers path {raw!r} must name a .json config file or an .mcpb/.dxt bundle",
-                manifest_display,
+                reader.display(manifest_rel),
                 "Point mcpServers at a JSON file such as './.mcp.json'.",
                 category=MCP_CATEGORY,
             )
         )
-        collection.broken_sources.append((raw, rel.as_posix(), "invalid"))
         return
     kind = reader.kind(rel)
     if kind == "missing":
-        collection.findings.append(_path_problem_finding(reader, "mcpServers", declared, manifest_rel, "missing"))
-        collection.broken_sources.append((raw, rel.as_posix(), "missing"))
+        fail(_path_problem_finding(reader, "mcpServers", declared, manifest_rel, "missing"), "missing")
         return
     if kind in {"link", "special"}:
-        collection.findings.append(_path_problem_finding(reader, "mcpServers", declared, manifest_rel, "unsafe", rel))
-        collection.broken_sources.append((raw, rel.as_posix(), "unsafe"))
+        fail(_path_problem_finding(reader, "mcpServers", declared, manifest_rel, "unsafe", rel), "unsafe")
         return
     if kind != "file":
-        collection.findings.append(_path_problem_finding(reader, "mcpServers", declared, manifest_rel, "invalid"))
-        collection.broken_sources.append((raw, rel.as_posix(), "invalid"))
+        fail(_path_problem_finding(reader, "mcpServers", declared, manifest_rel, "invalid"))
         return
     if suffix in _MCP_BUNDLE_SUFFIXES:
-        collection.bundles.append((raw, rel.as_posix()))
+        collection.bundles.append((raw, path))
         collection.findings.append(
             _plugin_finding(
                 Severity.MEDIUM,
                 "mcp_bundle_not_inspected",
-                f"mcpServers references the MCP bundle '{rel.as_posix()}'; bundle contents are not inspected "
+                f"mcpServers references the MCP bundle '{path}'; bundle contents are not inspected "
                 "statically and are not staged for evaluation",
                 reader.display(rel),
                 "Declare the server as a .json config (command/url) so it can be validated and evaluated.",
@@ -543,130 +508,144 @@ def _collect_path_ref(
             )
         )
         return
-    source: McpSource = "path_ref"
-    _load_mcp_file(reader, collection, rel, source, raw)
+    _load_mcp_file(reader, collection, rel, "path_ref", raw)
+
+
+def _collect_url_ref(reader: PluginRootReader, collection: McpCollection, raw: str, manifest_rel: str) -> None:
+    """Collect one remote ``mcpServers`` reference; only an ``.mcpb``/``.dxt`` bundle may be named by URL.
+
+    The bundle is recorded but not inspected. One fetched over plaintext http
+    is a broken source with a blocking finding. Reports and the inventory
+    never carry the URL's userinfo or query credentials.
+    """
+    manifest_display = reader.display(manifest_rel)
+    shown = redacted_url(raw)
+    lowered = raw.strip().lower()
+
+    def fail(check: str, message: str, suggestion: str) -> None:
+        finding = _plugin_finding(Severity.HIGH, check, message, manifest_display, suggestion, category=MCP_CATEGORY)
+        collection.add_broken_source(finding, shown, None)
+
+    if not lowered.split("?", 1)[0].endswith(_MCP_BUNDLE_SUFFIXES):
+        fail(
+            "mcp_config_path_invalid",
+            f"mcpServers URL {shown!r} is not an .mcpb/.dxt bundle; only bundles may be referenced by URL",
+            "Reference a './'-relative .json config file, an inline server map, or an .mcpb bundle.",
+        )
+        return
+    collection.findings.append(
+        _plugin_finding(
+            Severity.MEDIUM,
+            "mcp_bundle_not_inspected",
+            f"mcpServers references a remote MCP bundle {shown!r}; it is downloaded and executed at load time "
+            "and its contents cannot be inspected statically",
+            manifest_display,
+            "Vendor the server into the plugin with a pinned version so its configuration can be reviewed.",
+            category=MCP_CATEGORY,
+        )
+    )
+    if lowered.startswith("http://"):
+        # Code fetched over plaintext can be swapped in transit: block it like a plaintext url server,
+        # and record a broken source so Tier 3 staging fails closed.
+        fail(
+            "mcp_url_insecure_scheme",
+            f"mcpServers bundle {shown!r} is downloaded over plaintext http; the code it runs can be replaced in "
+            "transit",
+            "Serve the bundle over https:// or vendor it into the plugin.",
+        )
+    else:
+        collection.bundles.append((shown, None))
 
 
 def _load_mcp_file(
     reader: PluginRootReader, collection: McpCollection, rel: PurePosixPath, source: McpSource, raw: str
 ) -> None:
+    """Collect the servers of one MCP config file; a file that cannot be used is a broken source."""
     display = reader.display(rel)
+    path = rel.as_posix()
+
+    def fail(
+        check: str, message: str, suggestion: str, *, problem: str = "invalid", category: str = MCP_CATEGORY
+    ) -> None:
+        finding = _plugin_finding(Severity.HIGH, check, message, display, suggestion, category=category)
+        collection.add_broken_source(finding, raw, path, problem)
+
     try:
         text = reader.read_text(rel, PLUGIN_CONFIG_MAX_BYTES, config=True)
     except SecurePathError as exc:
         if exc.code in {"file_size_limit", "total_size_limit"}:
-            problem = (
+            detail = (
                 f"exceeds the {PLUGIN_CONFIG_MAX_BYTES}-byte limit"
                 if exc.code == "file_size_limit"
                 else f"could not be read: {exc}"
             )
-            collection.findings.append(
-                _plugin_finding(
-                    Severity.HIGH,
-                    "mcp_config_file_too_large",
-                    f"MCP config '{rel.as_posix()}' {problem}",
-                    display,
-                    "Keep MCP config files small; declare only server entries.",
-                    category=MCP_CATEGORY,
-                )
+            fail(
+                "mcp_config_file_too_large",
+                f"MCP config '{path}' {detail}",
+                "Keep MCP config files small; declare only server entries.",
             )
-            collection.broken_sources.append((raw, rel.as_posix(), "invalid"))
         elif exc.code == "invalid_text_encoding":
-            collection.findings.append(
-                _plugin_finding(
-                    Severity.HIGH,
-                    "mcp_config_file_invalid",
-                    f"MCP config '{rel.as_posix()}' is not valid UTF-8",
-                    display,
-                    "Save the MCP config as UTF-8 JSON.",
-                    category=MCP_CATEGORY,
-                )
+            fail(
+                "mcp_config_file_invalid",
+                f"MCP config '{path}' is not valid UTF-8",
+                "Save the MCP config as UTF-8 JSON.",
             )
-            collection.broken_sources.append((raw, rel.as_posix(), "invalid"))
         else:
-            collection.findings.append(
-                _plugin_finding(
-                    Severity.HIGH,
-                    "plugin_component_path_unsafe",
-                    f"MCP config '{rel.as_posix()}' could not be read safely ({exc}); it was not followed",
-                    display,
-                    "Replace links and special files with one regular contained JSON file.",
-                )
+            fail(
+                "plugin_component_path_unsafe",
+                f"MCP config '{path}' could not be read safely ({exc}); it was not followed",
+                "Replace links and special files with one regular contained JSON file.",
+                problem="unsafe",
+                category=PLUGIN_CATEGORY,
             )
-            collection.broken_sources.append((raw, rel.as_posix(), "unsafe"))
         return
     try:
         data = load_bounded_json(text)
     except StructuredDataLimitError as exc:
-        collection.findings.append(
-            _plugin_finding(
-                Severity.HIGH,
-                "mcp_config_file_too_large",
-                f"MCP config '{rel.as_posix()}' exceeds structured-data complexity limits: {exc}",
-                display,
-                "Reduce nesting and collection sizes in the MCP config.",
-                category=MCP_CATEGORY,
-            )
+        fail(
+            "mcp_config_file_too_large",
+            f"MCP config '{path}' exceeds structured-data complexity limits: {exc}",
+            "Reduce nesting and collection sizes in the MCP config.",
         )
-        collection.broken_sources.append((raw, rel.as_posix(), "invalid"))
         return
     except StructuredDataError as exc:
-        collection.findings.append(
-            _plugin_finding(
-                Severity.HIGH,
-                "mcp_config_file_invalid",
-                f"MCP config '{rel.as_posix()}' is not valid JSON: {exc}",
-                display,
-                "Fix the JSON syntax of the MCP config.",
-                category=MCP_CATEGORY,
-            )
+        fail(
+            "mcp_config_file_invalid",
+            f"MCP config '{path}' is not valid JSON: {exc}",
+            "Fix the JSON syntax of the MCP config.",
         )
-        collection.broken_sources.append((raw, rel.as_posix(), "invalid"))
         return
     if isinstance(data, dict):
-        collection.file_schemas[rel.as_posix()] = data.get("$schema")
+        collection.file_schemas[path] = data.get("$schema")
     if isinstance(data, dict) and "mcpServers" in data:
         servers = data["mcpServers"]
         if not isinstance(servers, dict):
-            collection.findings.append(
-                _plugin_finding(
-                    Severity.HIGH,
-                    "mcp_servers_not_object",
-                    f"'mcpServers' in '{rel.as_posix()}' must be an object mapping server names to their config",
-                    display,
-                    'Use {"mcpServers": {"<name>": {"command"|"url": ...}}}.',
-                    category=MCP_CATEGORY,
-                )
+            fail(
+                "mcp_servers_not_object",
+                f"'mcpServers' in '{path}' must be an object mapping server names to their config",
+                'Use {"mcpServers": {"<name>": {"command"|"url": ...}}}.',
             )
-            collection.broken_sources.append((raw, rel.as_posix(), "invalid"))
             return
     elif isinstance(data, dict) and all(isinstance(value, dict) for value in data.values()):
         # Documented bare form: servers at the top level without the wrapper.
         servers = data
     else:
-        collection.findings.append(
-            _plugin_finding(
-                Severity.HIGH,
-                "mcp_config_file_invalid",
-                f"MCP config '{rel.as_posix()}' is neither {{\"mcpServers\": {{...}}}} nor a map of server objects",
-                display,
-                'Use {"mcpServers": {"<name>": {"command"|"url": ...}}} (or the same map without the wrapper).',
-                category=MCP_CATEGORY,
-            )
+        fail(
+            "mcp_config_file_invalid",
+            f"MCP config '{path}' is neither {{\"mcpServers\": {{...}}}} nor a map of server objects",
+            'Use {"mcpServers": {"<name>": {"command"|"url": ...}}} (or the same map without the wrapper).',
         )
-        collection.broken_sources.append((raw, rel.as_posix(), "invalid"))
         return
     if len(servers) > PLUGIN_COMPONENT_MAX_ITEMS:
         collection.findings.append(
             _plugin_finding(
                 Severity.HIGH,
                 "mcp_config_file_too_large",
-                f"MCP config '{rel.as_posix()}' declares {len(servers)} servers; only "
-                f"{PLUGIN_COMPONENT_MAX_ITEMS} are inspected",
+                f"MCP config '{path}' declares {len(servers)} servers; only {PLUGIN_COMPONENT_MAX_ITEMS} are inspected",
                 display,
                 "Reduce the number of MCP servers per config file.",
                 category=MCP_CATEGORY,
             )
         )
     for name, config in list(servers.items())[:PLUGIN_COMPONENT_MAX_ITEMS]:
-        collection.declarations.append(McpDeclaration(str(name), config, source, rel.as_posix()))
+        collection.declarations.append(McpDeclaration(str(name), config, source, path))

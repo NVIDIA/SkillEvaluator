@@ -165,7 +165,7 @@ Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALU
 
 ## The checks
 
-For `validate`, the default set is `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, and `lint`. The `dependency` check requires explicit selection with `--checks` (alias `--tier1-checks`) for `validate`; direct `tier1 PATH` includes it by default. For plugins, the opt-in `claude-validate` check compares the verdict with `claude plugin validate --strict`; see [Plugin Evaluation](plugin-evaluation.mdx#claude-plugin-validate-parity). Accepted check-name aliases include `code`/`code-risk` for `code-integrity`, `scripts`/`script-lint` for `lint`, `dependencies`/`deps`/`dependency-audit` for `dependency`, and `licence`/`license-check` for `license`.
+For `validate`, the default set is `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, and `lint`. The `dependency` check requires explicit selection with `--checks` (alias `--tier1-checks`) for `validate`; direct `tier1 PATH` includes it by default. For plugins, the opt-in `claude-validate` check compares the verdict and the manifest errors with `claude plugin validate`; see [Plugin Evaluation](plugin-evaluation.mdx#claude-plugin-validate-parity). Accepted check-name aliases include `code`/`code-risk` for `code-integrity`, `scripts`/`script-lint` for `lint`, `dependencies`/`deps`/`dependency-audit` for `dependency`, and `licence`/`license-check` for `license`.
 
 <AccordionGroup>
   <Accordion title="schema — frontmatter and repository governance">

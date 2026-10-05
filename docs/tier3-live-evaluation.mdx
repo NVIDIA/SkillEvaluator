@@ -78,6 +78,77 @@ skillevaluator tier3 ./my-skill --agents opencode --env-mode docker
 generation requires `--autopilot`. To prepare and review a fuller dataset before
 running, follow the steps below.
 
+## Harbor 0.24 compatibility
+
+The `tier3` extra installs Harbor 0.24.0, the supported Tier 3 backend for this
+release. The `[all]` extra includes `tier3`. Existing SkillEvaluator commands do
+not change: the public `--agents` and `--env-mode` options map built-in names and
+installed adapters to Harbor's unified `--agent` and `--env` selectors.
+
+The exact Harbor pin is deliberate: its CLI, Python models, result artifacts,
+and environment/agent subclass interfaces form one compatibility surface. This
+release targets stable Harbor 0.24.0 rather than unreleased `main`. Harbor stays
+behind the operator-selected `tier3` extra, so static Tier 1 installs do not pull
+it in. The shared LLM client window (`litellm>=1.92.0,<1.94.0.dev0`) admits
+patched 1.92 and 1.93 releases validated with this integration while excluding
+prerelease and as-yet unvalidated 1.94 behavior.
+
+Harbor converts each trial's raw agent log into the trajectory that grading,
+plugin signals, and the measured context cost read. Since Harbor 0.20 that
+conversion keeps three things older releases dropped:
+
+- Codex per-step token counts, so the measured first-turn context cost works
+  for Codex runs.
+- Claude Code subagent transcripts (`<session>/subagents/*.jsonl`), so the
+  steps and MCP calls a subagent makes are graded.
+- Parallel Codex tool calls from one model request, which stay in one step, so
+  a handoff between them is not mistaken for a sequential one.
+
+Harbor converts only the newest Codex rollout. When a Codex agent calls
+`spawn_agent`, the newest rollout is the subagent's, so on its own Harbor would
+grade the subagent's last message and drop the main agent's calls and tokens.
+SkillEvaluator runs every Codex agent, plain `codex` included, through its own
+Harbor Codex wrapper. The wrapper converts the main thread's rollout and adds
+each subagent's own steps as sidechain steps (`extra.is_sidechain`,
+`extra.agent_id`), never after the main agent's final answer. The subagent's
+prompt is not added as a user step; the main agent's `spawn_agent` call already
+shows it.
+
+The integration preserves SkillEvaluator's runtime and artifact contracts while
+using Harbor 0.24:
+
+- Installed Codex adapters merge existing user and MCP configuration before the
+  selected runtime provider and endpoint take precedence over conflicting route
+  keys.
+- Docker and local execution stream stdout and stderr through secret redaction
+  before Harbor callbacks receive them. Each command has a 16 MiB combined raw
+  stdout/stderr limit; exceeding it terminates the command process tree and
+  fails the trial instead of returning partial output.
+- The parent Harbor orchestration process has its own 16 MiB combined
+  stdout/stderr limit for the full job. Overflow or timeout terminates and reaps
+  the Harbor POSIX process group or Windows task tree while retaining only a
+  bounded, redacted diagnostic tail. A POSIX process that deliberately creates
+  a new session can escape process-group cleanup, so the host-side Harbor CLI,
+  configuration, and local-mode skills must be trusted. Run untrusted evaluated
+  workloads in Docker or another isolated Harbor backend instead of local mode.
+- Docker accepts Harbor stdin payloads and isolates main-container execution
+  from sidecar operations without placing environment values on Compose argv.
+  For NVIDIA Build, the credential reaches the trusted parent over stdin; each
+  main-container exec then uses a short-lived, container-only stdin handoff that
+  is removed before the requested command runs.
+- Native Windows main-container artifact transfer requires `tar` in the image
+  and accepts regular files and directories only. Links, junctions, hardlinks,
+  sparse files, special files, compressed streams, and unsafe or colliding
+  Windows path spellings fail closed before publication.
+- Generated tasks retain schema 1.3, which Harbor 0.24 accepts. User-owned native
+  tasks, including schema 1.4, are staged without a schema rewrite. Collection
+  accepts Harbor job, trial, reward, and ATIF v1.7 artifacts, including
+  single-step `step_results: null` and authoritative multi-step results.
+- Harbor 0.24's `stream` and `enable_environment_dir_upload` environment
+  options are reserved for the runtime policy and cannot be set with `--ek`.
+  Harbor 0.24 removed the `wandb` backend; use `--env-mode cwsandbox --ek
+  auth=wandb` instead.
+
 ## Prepare and review a fuller evaluation
 
 <Steps toc={true}>
@@ -316,12 +387,38 @@ explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
 ## Where agents run
 
-Docker is the default and needs only a running daemon. The same `--env-mode`
-flag also selects **local mode**, which runs the agent CLI directly on the
-host under an OS-sandbox policy, and 14 additional Harbor-native backends
-(such as `daytona`, `e2b`, and `modal`), each requiring the matching Harbor
-environment extra. The complete environment matrix, Docker resource tuning, local-mode
-safety controls, and workspace modes live in
+`--env-mode` selects one of 23 environment modes: 22 Harbor-native backends,
+including the default Docker backend, plus SkillEvaluator's **local mode**,
+which runs the agent CLI directly on the host under an OS-sandbox policy.
+Managed backends such as `daytona`, `e2b`, and `modal` require their mapped
+Harbor 0.24 extra; OpenShift, Apple Container, and Singularity instead use
+system CLIs and have no Harbor Python extra. These are selectable integration
+modes, not evidence that every managed backend was exercised end to end for
+this release. Harbor transport verification covers Docker and local;
+validate any managed backend's extra, credentials, infrastructure, and
+constructor settings with `doctor` and its Harbor preflight before relying on
+it.
+
+Harbor's `cua-cloud`, `opensandbox`, and `hf-sandbox` backends are not
+selectable because they cannot yet receive SkillEvaluator's complete generated
+task bundle through a trusted image or backend-native provisioning path.
+
+Environment kwargs are only for Harbor-native non-Docker backends. Pass
+non-secret constructor settings with the repeatable, operator-only
+`--environment-kwarg KEY=VALUE` / `--ek KEY=VALUE` option. Skill-owned
+`evals/config.yml` cannot set them. `docker` and `local` reject any environment
+kwargs. Fields owned by Harbor runtime policy are also reserved: resource
+overrides, mounts, network policy, extra Compose definitions, SkillEvaluator's
+own lifecycle fields (`delete`, `force_build`, `keep_containers`), and
+Kubernetes pod security are not exposed through this surface. Other
+backend-specific timeout and retention knobs remain operator-owned. Use the same
+eligible-backend flags with `doctor` and `health-check`; never pass secrets
+through constructor kwargs. GKE requires
+`cluster_name`, `region`, `namespace`, `registry_location`, and
+`registry_name`; ACK requires `namespace`; EC2 requires `region` plus `ami_id`
+for its default ephemeral launch mode or `instance_id` with
+`launch_mode=attach`. The complete environment/extra matrix, examples, Docker
+resource tuning, local-mode safety controls, and workspace modes live in
 [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
 <Warning>
@@ -339,8 +436,13 @@ cloud backend for untrusted code.
 
 Attached to `validate`, Tier 3 is advisory by default: its results appear in the
 combined reports without changing the exit code. Add `--block-on-agent-eval`
-to make its findings gate, including evidence that the selected YAML/JSON
-dataset or native Harbor source is missing or invalid. Autopilot is enabled
+to make it gate: a Tier 3 `FAIL` verdict, a confirmed Skill Lift regression (a
+lift of −0.10 or less whose whole interval is below zero), a skipped or
+`INCOMPLETE` run, and evidence that the selected YAML/JSON dataset or native
+Harbor source is missing or invalid then fail `validate`. A `NEUTRAL` verdict
+never does. The footer, the terminal summary and `BENCHMARK.md` call a gated run
+that never ran `FAIL`, and a partial plugin run `INCOMPLETE` unless its verdict
+is `FAIL` or it shows a confirmed regression. Autopilot is enabled
 by default for skills: it generates one starter case when no source exists and
 reuses valid existing sources unchanged. `--full` remains supported but is
 unnecessary. Use `--tiers 1,2` or `--no-tier3` to skip live evaluation;
@@ -394,8 +496,9 @@ engine. It evaluates locally available components only:
 
 Remote components are never fetched. Unresolved refs and provider-only MCP
 servers are recorded in plugin provenance. A partial run is reported as
-`INCOMPLETE`, never as a full pass; a plugin with nothing locally evaluable is
-reported as an honest advisory skip.
+`INCOMPLETE`, never as a full pass. A plugin with nothing locally evaluable is
+`INCOMPLETE` too when it declares components that could not be resolved, and
+an advisory skip only when it declares nothing to evaluate.
 
 Plugin provenance also lists every declared and packaged component in
 `component_coverage` with a `staged`, `not_staged`, `unsupported`,
@@ -413,18 +516,21 @@ Plugin baselines are controlled with `--lift-mode`:
 | `both` | Effectiveness plus a third, report-only sum-of-parts arm |
 
 Integration is only meaningful when the dataset contains composition evidence:
-at least one case with `cross_component: true` and two or more distinct
-`expected_skills`. Explicit `integration` fails as inconclusive when that
-evidence is absent. `both` preserves the valid effectiveness run and records
+at least one case with `cross_component: true` and two or more distinct member
+skills of the plugin in `expected_skills` (names that are not member skills do
+not count). Explicit `integration` is not run when that evidence is absent. `both` preserves the valid effectiveness run and records
 that Integration was skipped. Integration modes require the baseline and cannot
 be combined with `--skip-baseline`. Native Harbor-only sources remain valid for
 effectiveness but do not establish composition evidence by themselves.
 
 The Integration verdict classifies the plugin-minus-member-skills lift with
-±0.05 bands and records that band as `point_verdict`. It reports
+±0.05 bands and records that band as `point_verdict`. The reported verdict uses
+the whole paired case bootstrap 95% interval: real when it clears +0.05,
+negative when it stays below -0.05, and cosmetic when it lies inside the band,
+so a tight interval around zero is cosmetic, not inconclusive. It reports
 `inconclusive`, with a `reason`, when the two arms do not cover the same cases
 with the configured attempts, when fewer than five cases pair up, or when the
-paired case bootstrap 95% interval for the lift includes zero. When Integration
+interval crosses a band edge. When Integration
 was requested but not measured, for example after a `both` fallback, the
 report carries an explicit `inconclusive` block with `measured: false` rather
 than omitting it.
@@ -568,9 +674,15 @@ agent passes only when every dimension passes. The top-level Tier 3 verdict is:
 | Fail | Every successful agent has a dimension below 0.40 |
 
 Skill Lift is the signed difference between the with-skill result and the
-without-skill baseline. Its independent band is **PASS** at +0.05 or above,
-**NEUTRAL** between -0.10 and +0.05, and **FAIL** at -0.10 or below. Lift is
-diagnostic evidence and does not override the every-dimension gate. A
+without-skill baseline. The baseline has no skill to discover or route to, so
+it has no Discoverability or Efficiency score. Skill Lift therefore compares
+the two arms case by case on the dimensions both scored, so skill activation
+alone earns no lift; the full with-skill score that the verdict uses still
+covers every dimension. Its independent band is **PASS** at +0.05 or above,
+**NEUTRAL** between -0.10 and +0.05, and **FAIL** at -0.10 or below. The band
+never changes the every-dimension verdict. A FAIL-band lift whose interval lies
+wholly below zero is a confirmed regression: the report warns, `BENCHMARK.md`
+says FAIL, and `--block-on-agent-eval` fails `validate`. A
 report-only 95% interval from a paired, case-clustered bootstrap accompanies
 the lift; when that interval includes zero the report adds a warning, but the
 band is unchanged.
@@ -585,7 +697,9 @@ custom metrics are never re-labeled as standard dimensions.
 Missing metrics are never coerced to `0.0`: an unscored run reports an
 `overall_score` of `None`, averages omit unscored metrics, and the affected
 cells render **NO SCORE**. `compare` likewise ignores stored summaries whose
-`execution_status` is not `succeeded`.
+`execution_status` is not `succeeded`, shows no lift (N/A) for a metric the
+baseline recorded as not applicable, and computes its Overall lift only on the
+metrics both arms scored.
 
 The LLM judges need something to judge against: `accuracy` and
 `goal_accuracy` use the case's `ground_truth` (`expected_output` in the
@@ -604,6 +718,15 @@ applicable, such as Correctness when no case has a `ground_truth`, has no score.
 Because the gate needs every dimension, that agent's verdict is Neutral
 (inconclusive) rather than Pass or Fail. A missing metric without the
 verifier's not-applicable marker still leaves the trial unscored.
+
+The skill metrics follow the same rule in the no-skill baseline. That arm has
+no skill under test installed, so the verifier records `skill_execution` and
+`skill_efficiency` as not applicable there (unless it staged a skill the case
+could activate, such as an acceptable alternate). The baseline's summary lists
+them under `not_applicable_metrics`, reports show **N/A** for its
+Discoverability and Efficiency, and Skill Lift compares only the dimensions
+both arms scored. The pass@k lift does the same: it scores both arms' pass
+flags on the metrics both scored, while each arm's own pass@k is unchanged.
 
 The judges read evidence the verifier builds from the trajectory, not the raw
 trajectory. Every judge gets the agent's final answer and what it wrote: the

@@ -97,8 +97,9 @@ Efficiency=`skill_efficiency`. A format-only rollout must not silently accept a
 different dataset or agent/model.
 
 A dimension passes at 50%. The overall verdict passes only when every configured
-dimension passes for at least one supported agent; lift is diagnostic evidence
-and does not override that gate.
+dimension passes for at least one supported agent; lift never overrides that
+verdict, but a confirmed regression (a FAIL-band lift whose whole interval is
+below zero) makes the card FAIL.
 
 ## 5. Run the publication gate
 

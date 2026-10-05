@@ -759,7 +759,9 @@ class SecureRoot:
             ) from exc
 
     def read_file_text(self, file: SecureFile, max_bytes: int) -> str:
-        if file.root != self.root:
+        # Compare lexical absolute forms: a caller may record the same root
+        # relative to the working directory or with ``..`` components.
+        if _absolute_no_resolve(file.root) != self.root:
             raise SecurePathError("unsafe_path", "Secure file belongs to a different Tier 2 root.")
         return self.read_text(file.relative_path, max_bytes, expected=file.metadata)
 

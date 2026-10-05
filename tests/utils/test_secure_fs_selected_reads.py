@@ -77,3 +77,30 @@ def test_windows_selected_file_is_immutable_until_reader_handle_closes(tmp_path:
     selected.write_text("changed", encoding="utf-8")
     selected.unlink()
     assert not selected.exists()
+
+
+def test_secure_file_root_matches_its_lexical_absolute_spelling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "skills"
+    (root / "demo").mkdir(parents=True)
+    (root / "demo" / "SKILL.md").write_text("demo", encoding="utf-8")
+    other = tmp_path / "other"
+    other.mkdir()
+    [discovered] = secure_fs.discover_secure_files(
+        root, selected=lambda relative: relative.suffix == ".md", max_paths=10
+    )
+    monkeypatch.chdir(tmp_path)
+    relative_spelling = secure_fs.SecureFile(
+        Path("skills"), discovered.path, discovered.relative_path, discovered.metadata
+    )
+    dotted_spelling = secure_fs.SecureFile(
+        tmp_path / "other" / ".." / "skills", discovered.path, discovered.relative_path, discovered.metadata
+    )
+
+    with SecureRoot(root) as secure_root:
+        assert secure_root.read_file_text(relative_spelling, 64) == "demo"
+        assert secure_root.read_file_text(dotted_spelling, 64) == "demo"
+    with SecureRoot(other) as secure_root, pytest.raises(SecurePathError, match=r"different Tier 2 root"):
+        secure_root.read_file_text(relative_spelling, 64)

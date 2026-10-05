@@ -53,6 +53,7 @@ from skillevaluator.embedding.client import (
 from skillevaluator.embedding.extractor import (
     MAX_MANIFEST_BYTES,
     ContentEntry,
+    ExtractionBudget,
     discover_and_extract,
 )
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
@@ -293,7 +294,6 @@ class EmbeddingRegistry:
         from skillevaluator.deduplication.plugin.profile import (
             PluginProfileError,
             PluginSkillLimitError,
-            ProfileByteBudget,
             discover_plugin_roots,
             load_plugin_profile,
         )
@@ -306,7 +306,7 @@ class EmbeddingRegistry:
         if not plugin_roots:
             return build
         root_absolute = Path(os.path.abspath(os.fspath(root)))  # noqa: PTH100 - lexical, no-follow
-        budget = ProfileByteBudget()
+        budget = ExtractionBudget(max_entries=limit)
         pending_skills: list[tuple[RegistryEntry, str]] = []
         pending_plugins: list[tuple[PluginRegistryEntry, str]] = []
         selected = 0

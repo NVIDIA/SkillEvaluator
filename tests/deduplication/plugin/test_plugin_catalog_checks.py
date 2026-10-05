@@ -805,3 +805,61 @@ def test_plugin_dedup_scan_records_catalog_checks_without_a_catalog(plugins: Pat
     assert all(result.passed for result in results)
     assert results[2].metadata["plugin"]["catalog_skill_similarity"]["status"] == "skipped"
     assert results[3].metadata["plugin"]["inter_plugin_similarity"]["status"] == "skipped"
+
+
+def test_profile_reads_bundled_skill_manifests_without_rediscovering_them(
+    plugins: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.deduplication.plugin.profile import load_plugin_profile
+    from skillevaluator.embedding import extractor
+
+    monkeypatch.setattr(
+        extractor, "_discover", lambda *_args, **_kwargs: pytest.fail("a bundled skill was rediscovered")
+    )
+
+    profile = load_plugin_profile(plugins / "alpha")
+
+    assert [skill.entry.name for skill in profile.bundled_skills if skill.entry] == ["deploy-app", "gpu-check"]
+
+
+def test_profile_reads_skills_of_a_relative_plugin_root_and_its_scan_named_folders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.deduplication.plugin.profile import load_plugin_profile
+
+    plugin = _plugin(tmp_path, "alpha", "Deploy kubernetes cluster workloads", [("deploy-app", "Deploy apps")])
+    evals_skill = plugin / "skills" / "evals" / "grader"
+    evals_skill.mkdir(parents=True)
+    (evals_skill / "SKILL.md").write_text("---\nname: grader\ndescription: Grade runs\n---\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    profile = load_plugin_profile(Path("alpha"))
+
+    assert {skill.rel: skill.entry.name for skill in profile.bundled_skills if skill.entry} == {
+        "deploy-app": "deploy-app",
+        "evals/grader": "grader",
+    }
+
+
+def test_profile_budget_counts_bundled_skills_that_cannot_be_parsed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.deduplication.plugin.profile import load_plugin_profile
+    from skillevaluator.embedding import extractor
+    from skillevaluator.embedding.extractor import CollectionLimitError, ExtractionBudget
+
+    plugin = _plugin(tmp_path, "alpha", "Deploy kubernetes cluster workloads")
+    for name in ("one", "two"):
+        skill = plugin / "skills" / name
+        skill.mkdir(parents=True)
+        # A list-valued name fails field validation, so the comparison skips the skill.
+        (skill / "SKILL.md").write_text(
+            "---\nname: [not, a, string]\ndescription: d\n---\n" + "x" * 600, encoding="utf-8"
+        )
+
+    skipped = load_plugin_profile(plugin, budget=ExtractionBudget())
+    assert [skill.entry for skill in skipped.bundled_skills] == [None, None]
+
+    monkeypatch.setattr(extractor, "MAX_COLLECTION_BYTES", 1_000)
+    with pytest.raises(CollectionLimitError, match="total byte limit"):
+        load_plugin_profile(plugin, budget=ExtractionBudget())

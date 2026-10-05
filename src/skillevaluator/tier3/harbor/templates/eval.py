@@ -753,11 +753,16 @@ def _tool_write_body(args):
     return "\n\n".join(str(s) for s in snippets if str(s).strip())
 
 
-def _command_arg_text(value):
-    """A command argument as text. Codex can pass an argv list such as ``["bash", "-lc", script]``."""
+def _exec_command(args):
+    """``(key, command)``: the first of ``_BEHAVIOR_EXEC_COMMAND_KEYS`` set in *args*, as text, or ``("", "")``.
+
+    Codex can pass the command as an argv list such as ``["bash", "-lc", script]``.
+    """
+    key = next((key for key in _BEHAVIOR_EXEC_COMMAND_KEYS if args.get(key)), "")
+    value = args[key] if key else ""
     if isinstance(value, (list, tuple)):
-        return " ".join(str(part) for part in value)
-    return str(value or "")
+        return key, " ".join(str(part) for part in value)
+    return key, str(value)
 
 
 def _sed_in_place_files(words):
@@ -859,8 +864,7 @@ def _write_call_parts(fn, args):
                     break
         paths = [path] if path else _patch_file_paths(body)
     elif _tool_name_looks_like_exec(fn_lower):
-        key = next((key for key in _BEHAVIOR_EXEC_COMMAND_KEYS if args.get(key)), "")
-        command = _command_arg_text(args.get(key)) if key else ""
+        key, command = _exec_command(args)
         if not _command_looks_like_write(command):
             return None
         body = f"command:\n{command}"
@@ -1289,7 +1293,7 @@ def _tool_call_ref(step_idx, tc, *, kind):
         args = {}
     command = ""
     if _tool_name_looks_like_exec(fn.lower()):
-        command = _command_arg_text(args.get("command") or args.get("cmd") or args.get("code"))
+        _, command = _exec_command(args)
     path = _tool_file_path(args)
     if not path and command:
         path = _first_expected_artifact_path(command)
@@ -1345,19 +1349,9 @@ def _file_change_refs(traj):
     refs = []
     for step_idx, _, tc in _agent_tool_calls(traj):
         if len(refs) >= _METRIC_EVIDENCE_MAX_FILE_REFS:
-            return refs
-        fn = str(tc.get("function_name") or "")
-        fn_lower = fn.lower()
-        args = tc.get("arguments") or {}
-        if not isinstance(args, dict):
-            args = {}
-        command = _command_arg_text(args.get("command") or args.get("cmd") or args.get("code"))
-        is_write = _tool_name_looks_like_write(fn_lower) or (
-            _tool_name_looks_like_exec(fn_lower) and _command_looks_like_write(command)
-        )
-        if not is_write:
-            continue
-        refs.append(_tool_call_ref(step_idx, tc, kind="file_change"))
+            break
+        if _write_call_parts(str(tc.get("function_name") or ""), tc.get("arguments") or {}) is not None:
+            refs.append(_tool_call_ref(step_idx, tc, kind="file_change"))
     return refs
 
 
@@ -1639,7 +1633,7 @@ def build_verified_facts(traj, expected_behavior, ground_truth):
         args = tc.get("arguments") or {}
         if not isinstance(args, dict):
             continue
-        command = _command_arg_text(args.get("command") or args.get("cmd") or args.get("code"))
+        _, command = _exec_command(args)
         write = _write_call_parts(str(tc.get("function_name") or ""), args)
         write_body = write[1] if write else _tool_write_body(args)
         calls.append((idx, command, _tool_file_path(args), write_body))

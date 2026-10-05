@@ -111,6 +111,7 @@ from skillevaluator.plugin_dependencies import ref_label as _ref_label
 from skillevaluator.plugin_dependencies import ref_name as _ref_name
 from skillevaluator.plugin_dependencies import ref_source as _ref_source
 from skillevaluator.plugin_formats import (
+    CLAUDE_PROFILE,
     manifest_syntax,
     normalized_component_manifest,
     parse_manifest_text,
@@ -1807,11 +1808,15 @@ def _unstaged_root_mcp_json(manifest: dict[str, Any], plugin_root: Path) -> str 
     Mirrors :func:`~skillevaluator.plugin_components.collect_mcp_declarations`: the
     root file is inventoried as the default ``mcp_json`` source (never staged for
     this manifest form) unless an ``mcpServers`` path names it explicitly -- then it
-    is a staged ``path_ref`` source whose findings must keep blocking.
+    is a staged ``path_ref`` source whose findings must keep blocking. Paths are
+    read with the Claude Code profile's placeholders, as the inventory reads this
+    manifest form: none, so ``${CLAUDE_PLUGIN_ROOT}/.mcp.json`` is a broken
+    placeholder path (blocking on its own), not an explicit name for the root file.
     """
     declared = manifest.get("mcpServers")
     entries = declared if isinstance(declared, list) else [declared]
-    if any(isinstance(entry, str) and normalize_declared_path(entry).rel == MCP_JSON for entry in entries):
+    prefixes = CLAUDE_PROFILE.manifest_path_prefixes
+    if any(isinstance(entry, str) and normalize_declared_path(entry, prefixes).rel == MCP_JSON for entry in entries):
         return None
     return PluginRootReader(plugin_root).display(MCP_JSON)
 

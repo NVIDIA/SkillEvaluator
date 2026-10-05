@@ -443,6 +443,52 @@ def test_staged_root_mcp_json_still_fails_closed(tmp_path: Path) -> None:
         _prepare(bundle, tmp_path)
 
 
+def test_bundle_manifest_placeholder_path_fails_on_itself_not_on_the_root_mcp_json(tmp_path: Path) -> None:
+    # Claude Code expands no placeholder in manifest paths, so the inventory reads
+    # "${CLAUDE_PLUGIN_ROOT}/.mcp.json" as a broken path and the root .mcp.json as
+    # the implicit, never staged file. Preparation fails closed on the broken
+    # declaration, not on a file the plugin does not stage.
+    bundle = _bundle_plugin(tmp_path / "b", 'mcpServers: "${CLAUDE_PLUGIN_ROOT}/.mcp.json"\n')
+    (bundle / ".mcp.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="plugin_component_path_invalid"):
+        _prepare(bundle, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        None,
+        "./.mcp.json",
+        ".mcp.json",
+        ["./other.json", "./.mcp.json"],
+        "./other.json",
+        "${CLAUDE_PLUGIN_ROOT}/.mcp.json",
+        ["${CLAUDE_PLUGIN_ROOT}/.mcp.json"],
+    ],
+)
+def test_bundle_manifest_unstaged_root_mcp_json_agrees_with_the_inventory(
+    tmp_path: Path, declared: str | list[str] | None
+) -> None:
+    """The root .mcp.json is exempt from blocking exactly when the inventory loads it as the unstaged default."""
+    from skillevaluator.plugin_components import plugin_inventory_for_root
+    from skillevaluator.tier3.plugin_eval import _unstaged_root_mcp_json
+
+    tail = "" if declared is None else f"mcpServers: {json.dumps(declared)}\n"
+    root = _bundle_plugin(tmp_path / "b", tail)
+    (root / ".mcp.json").write_text(json.dumps({"local": _PINNED}), encoding="utf-8")
+    (root / "other.json").write_text(json.dumps({"other": _PINNED}), encoding="utf-8")
+    inventory = plugin_inventory_for_root(root)
+    assert inventory is not None
+    [root_file_source] = {
+        declaration.source for declaration in inventory.mcp.declarations if declaration.file == ".mcp.json"
+    }
+
+    unstaged = _unstaged_root_mcp_json({} if declared is None else {"mcpServers": declared}, root)
+
+    assert root_file_source in {"mcp_json", "path_ref"}
+    assert (unstaged is not None) == (root_file_source == "mcp_json")
+
+
 def test_bundle_manifest_url_servers_are_probe_targets_with_their_own_config(tmp_path: Path) -> None:
     """Probe targets come from the runnable servers and each server's own declared transport and headers."""
     root = _bundle_plugin(

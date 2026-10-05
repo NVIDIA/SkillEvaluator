@@ -1000,7 +1000,7 @@ class PluginSchemaValidator(ValidatorBase):
             alternative = ", or remove it if the plugin does not target that client"
         data: dict[str, Any] | None = None
         try:
-            parsed = load_bounded_json(manifest.read_lenient_text().removeprefix("﻿"))
+            parsed = load_bounded_json(manifest.read_lenient_text().removeprefix("\ufeff"))
         except PluginManifestPathError as exc:
             if not exc.content_error:
                 result.metadata["security_failure"] = True

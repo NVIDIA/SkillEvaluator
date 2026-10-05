@@ -290,6 +290,11 @@ LEAKS = [
         id="apply-patch-move-to",
     ),
     pytest.param(
+        [_tool("apply_patch", patchText=_patch("*** Add File: /tmp/loot.txt", f"+{TOKEN}"))],
+        "file_outside_workspace",
+        id="opencode-apply-patch-patchtext",
+    ),
+    pytest.param(
         [_bash(_heredoc_patch("*** Add File: /tmp/loot.txt", f"+{TOKEN}"))],
         "file_outside_workspace",
         id="shell-apply-patch-heredoc",

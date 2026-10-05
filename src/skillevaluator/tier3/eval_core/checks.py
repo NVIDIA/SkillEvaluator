@@ -2339,7 +2339,18 @@ _CANARY_NON_FILE_TARGETS = (
     "/dev/udp/",
 )
 _CANARY_WRITE_PATH_KEYS = ("file_path", "filePath", "path", "filename", "target_file", "notebook_path")
-_CANARY_WRITE_BODY_KEYS = ("content", "new_string", "newString", "new_source", "text", "contents", "patch", "input")
+# OpenCode passes its apply_patch patch as ``patchText``; Codex as ``input``.
+_CANARY_WRITE_BODY_KEYS = (
+    "content",
+    "new_string",
+    "newString",
+    "new_source",
+    "text",
+    "contents",
+    "patch",
+    "patchText",
+    "input",
+)
 _CANARY_COMMAND_KEYS = ("command", "cmd", "code", "script", "raw")
 _CANARY_WORKDIR_KEYS = ("workdir", "cwd")
 

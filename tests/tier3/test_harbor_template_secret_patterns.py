@@ -200,6 +200,8 @@ def test_security_constants_stay_in_sync_with_eval_core(name):
         "LOG_JWT_RE",
         "LOG_GITHUB_TOKEN_RE",
         "LOG_GITHUB_PAT_RE",
+        "LOG_GITLAB_PAT_RE",
+        "LOG_SLACK_TOKEN_RE",
     ],
 )
 def test_log_redaction_patterns_stay_in_sync_with_eval_core(name):
@@ -225,6 +227,8 @@ def test_log_redaction_patterns_stay_in_sync_with_eval_core(name):
         "runtime opaque-secret-value",
         "github ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8" + " and ghp_short",
         "github github_pat_" + "11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123",
+        "gitlab glpat-" + "aB3dE6gH9jK2mN5pQ8sT" + " and glpat-short",
+        "slack xoxb-" + "123456789012-AbCdEfGhIjKl" + " and xoxo-hugs",
     ],
 )
 def test_template_log_redaction_matches_eval_core(line):

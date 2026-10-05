@@ -221,10 +221,15 @@ LOG_JWT_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?=(?P<lead>(?:\b|[A-Za-z0-9_-]*?-)(?=eyJ)))(?P=lead)"
     r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"
 )
-# GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained (github_pat_) tokens.
-# Single bounded character classes keep both patterns linear.
-LOG_GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,255}\b")
-LOG_GITHUB_PAT_RE = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,255}\b")
+# GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained (github_pat_) tokens,
+# GitLab personal access tokens (glpat-), and Slack tokens (xoxa-/xoxb-/xoxp-/xoxr-/xoxs-).
+# Kept in sync with skillevaluator.utils.redaction, which this standalone verifier cannot
+# import -- see the drift guard in test_harbor_template_secret_patterns.py. Each pattern is
+# the prefix and one character class of at most 255 characters, so a scan stays linear.
+LOG_GITHUB_TOKEN_RE = re.compile(r"\b(?P<prefix>gh[pousr]_)[A-Za-z0-9]{36,255}\b")
+LOG_GITHUB_PAT_RE = re.compile(r"\b(?P<prefix>github_pat_)[A-Za-z0-9_]{22,255}\b")
+LOG_GITLAB_PAT_RE = re.compile(r"\b(?P<prefix>glpat-)[A-Za-z0-9_-]{20,255}")
+LOG_SLACK_TOKEN_RE = re.compile(r"\b(?P<prefix>xox[abprs]-)[A-Za-z0-9-]{10,255}")
 
 
 def redact_secrets_in_log_line(line, *, extra_secret_values=None):
@@ -235,8 +240,8 @@ def redact_secrets_in_log_line(line, *, extra_secret_values=None):
     line = LOG_SK_RE.sub("sk-<redacted>", line)
     line = LOG_NVAPI_RE.sub("nvapi-<redacted>", line)
     line = LOG_CRSR_RE.sub("crsr_<redacted>", line)
-    line = LOG_GITHUB_TOKEN_RE.sub(lambda match: match.group()[:4] + "<redacted>", line)
-    line = LOG_GITHUB_PAT_RE.sub("github_pat_<redacted>", line)
+    for pattern in (LOG_GITHUB_TOKEN_RE, LOG_GITHUB_PAT_RE, LOG_GITLAB_PAT_RE, LOG_SLACK_TOKEN_RE):
+        line = pattern.sub(r"\g<prefix><redacted>", line)
     line = OPENSHIFT_TOKEN_RE.sub("sha256~<redacted>", line)
     if "eyJ" not in line:  # every JWT match contains "eyJ"; skip the scan on ordinary lines
         return line

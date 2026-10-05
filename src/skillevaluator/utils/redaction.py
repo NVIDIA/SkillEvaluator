@@ -110,6 +110,18 @@ _JWT_RE = re.compile(
     rf"(?<!{_JWT_CHAR})(?P<lead>(?>(?:\b|{_JWT_CHAR}*?-)(?=eyJ)))"
     rf"eyJ{_JWT_CHAR}{{10,}}+\.eyJ{_JWT_CHAR}{{10,}}+\.{_JWT_CHAR}{{10,}}\b"
 )
+# Tokens whose prefix names their service: GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and
+# fine-grained (github_pat_) tokens, GitLab personal access tokens (glpat-), and Slack
+# tokens (xoxa-/xoxb-/xoxp-/xoxr-/xoxs-). Redaction keeps the ``prefix`` group. Each
+# pattern is the prefix and one character class of at most 255 characters, so a match
+# attempt reads a bounded number of characters and a scan stays linear in the text.
+# tier3/eval_core/secret_redaction.py redacts log lines with these patterns, and the
+# standalone Harbor verifier keeps a copy that a drift test pins.
+GITHUB_TOKEN_RE = re.compile(r"\b(?P<prefix>gh[pousr]_)[A-Za-z0-9]{36,255}\b")
+GITHUB_PAT_RE = re.compile(r"\b(?P<prefix>github_pat_)[A-Za-z0-9_]{22,255}\b")
+GITLAB_PAT_RE = re.compile(r"\b(?P<prefix>glpat-)[A-Za-z0-9_-]{20,255}")
+SLACK_TOKEN_RE = re.compile(r"\b(?P<prefix>xox[abprs]-)[A-Za-z0-9-]{10,255}")
+PREFIXED_TOKEN_PATTERNS = (GITHUB_TOKEN_RE, GITHUB_PAT_RE, GITLAB_PAT_RE, SLACK_TOKEN_RE)
 _REDACTIONS = (
     (_JWT_RE, r"\g<lead>jwt-<redacted>"),
     (re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}"), "aws-access-key-<redacted>"),
@@ -118,6 +130,7 @@ _REDACTIONS = (
     (re.compile(r"(?<![A-Za-z0-9_-])nvapi-[a-zA-Z0-9_-]{8,}"), "nvapi-<redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])crsr_[a-f0-9]{16,}"), "crsr_<redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])sha256~[A-Za-z0-9._~-]+"), "sha256~<redacted>"),
+    *((pattern, r"\g<prefix><redacted>") for pattern in PREFIXED_TOKEN_PATTERNS),
 )
 
 

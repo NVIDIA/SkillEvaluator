@@ -49,6 +49,7 @@ from urllib.parse import urlparse
 
 from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
 from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
+from skillevaluator.plugin_states import DEPENDENCY_STATES
 from skillevaluator.utils.helpers import git_origin_https_url, resolve_git_root
 from skillevaluator.utils.secure_fs import lstat_walk, stat_is_link_or_reparse
 from skillevaluator.utils.structured_data import require_bounded_string
@@ -71,7 +72,6 @@ CONTENT_ROOTS: dict[str, tuple[str, ...]] = {
 MAX_PLUGIN_MANIFEST_ITEMS = 256
 MAX_PLUGIN_MANIFEST_TEXT_CHARS = 16_384
 
-DEPENDENCY_STATES = ("provided", "referenced", "missing", "external", "unresolved")
 # Reported ref labels are truncated so a pathological ref cannot bloat reports.
 MAX_REF_LABEL_CHARS = 512
 

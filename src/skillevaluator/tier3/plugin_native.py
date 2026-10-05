@@ -49,14 +49,13 @@ from typing import Any, ClassVar
 from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES, PLUGIN_CONFIG_MAX_BYTES
 from skillevaluator.plugin_components import (
     COMPONENT_TYPES,
-    COVERAGE_STATE_RANK,
-    EVALUATED_COVERAGE_STATES,
     PluginInventory,
     PluginRootReader,
     normalize_declared_path,
     parse_markdown,
     summarize_coverage,
 )
+from skillevaluator.plugin_states import COVERAGE_STATE_RANK, EVALUATED_COVERAGE_STATES
 from skillevaluator.tier3.toml_utils import toml_quote
 from skillevaluator.tier3_environments import PLUGIN_LOAD_CHOICES
 from skillevaluator.utils.secure_fs import SecurePathError, read_bounded, stat_is_link_or_reparse

@@ -104,6 +104,11 @@ from skillevaluator.plugin_paths import (
     _unscanned_path_finding,
     normalize_declared_path,
 )
+from skillevaluator.plugin_states import (
+    COVERAGE_STATE_RANK,  # noqa: F401 - re-exported
+    COVERAGE_STATES,
+    EVALUATED_COVERAGE_STATES,
+)
 from skillevaluator.utils.secure_fs import SecurePathError, stat_is_link_or_reparse
 from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json, load_bounded_yaml
 from skillevaluator.validators.mcp_static import (
@@ -135,13 +140,6 @@ COMPONENT_TYPES: tuple[str, ...] = (
     "monitor",
     "settings",
 )
-# Tier 3 coverage states. Staging assigns one of COVERAGE_STATES to each component;
-# after the run the native load census ("loaded") and runtime evidence ("exercised")
-# can raise a row by rank, never lower it. A row in one of these ranked states counts
-# as evaluated.
-COVERAGE_STATES: tuple[str, ...] = ("staged", "not_staged", "unsupported", "unavailable", "invalid")
-COVERAGE_STATE_RANK: dict[str, int] = {"staged": 1, "loaded": 2, "exercised": 3}
-EVALUATED_COVERAGE_STATES: frozenset[str] = frozenset(COVERAGE_STATE_RANK)
 _TYPE_SUPPORT: dict[str, Support] = {
     "skill": "evaluated",
     "rule": "evaluated",

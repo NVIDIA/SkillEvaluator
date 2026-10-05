@@ -31,7 +31,9 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
 
-# The Tier 3 signal, runtime-evidence, and statistics producers are pure modules that import no reporting code.
+# The plugin state vocabularies and the Tier 3 signal, runtime-evidence, and statistics producers are
+# pure modules that import no reporting code.
+from skillevaluator.plugin_states import COVERAGE_STATES, DEPENDENCY_STATES, EVALUATED_COVERAGE_STATES
 from skillevaluator.tier3.eval_core.plugin_signals import COMPONENT_RULE_READ, COMPONENT_SUBAGENT
 from skillevaluator.tier3.eval_core.runtime_evidence import canary_leak_rate
 from skillevaluator.tier3.harbor.stats import STATISTICS_BLOCKS
@@ -52,11 +54,6 @@ _PATH_CHARS = 4096
 # How many names a sentence lists before it counts the rest as "(+N more)".
 _NAMES_IN_TEXT = 12
 
-DEPENDENCY_STATES = ("provided", "referenced", "missing", "external", "unresolved")
-COVERAGE_STATES = ("staged", "not_staged", "unsupported", "unavailable", "invalid")
-# Runtime coverage states set after a run; they rank above ``staged`` and count as evaluated.
-RUNTIME_COVERAGE_STATES = ("loaded", "exercised")
-EVALUATED_COVERAGE_STATES = frozenset({"staged", *RUNTIME_COVERAGE_STATES})
 SUPPORT_LABELS = {
     "evaluated": "Evaluated",
     "static_only": "Static only",

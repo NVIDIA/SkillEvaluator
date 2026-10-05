@@ -214,6 +214,42 @@ def test_runner_is_pinned_exactly_when_the_audit_finds_one_version_per_package(c
 
 
 # --------------------------------------------------------------------------- #
+# A runner named by a path with spaces                                        #
+# --------------------------------------------------------------------------- #
+_NPX_WITH_SPACES = "C:\\Program Files\\nodejs\\npx.cmd"
+_UVX_WITH_SPACES = "/opt/my tools/uvx"
+_DOCKER_WITH_SPACES = "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe"
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ({"command": _NPX_WITH_SPACES, "args": ["-y", "pkg@1.2.3"]}, ("npm", "npx", ("pkg@1.2.3",))),
+        ({"command": _UVX_WITH_SPACES, "args": ["--with", "foo", "pkg==1.0"]}, ("pypi", "uvx", ("pkg==1.0", "foo"))),
+        ({"command": _DOCKER_WITH_SPACES, "args": ["run", "img:1.2.3"]}, ("container", "docker run", ("img:1.2.3",))),
+        ({"command": "/usr/local/bin/npx -y pkg@1.2.3"}, ("npm", "npx", ("pkg@1.2.3",))),
+    ],
+)
+def test_runner_named_by_a_path_with_spaces_is_recognized(config: dict[str, Any], expected: tuple) -> None:
+    """Regression: "C:\\Program Files\\nodejs\\npx.cmd" was split into words, so no runner was recognized."""
+    invocation = parse_mcp_runner(config)
+    assert invocation is not None
+    assert (invocation.ecosystem, invocation.runner, invocation.specs) == expected
+
+
+def test_pinning_reads_a_runner_path_with_spaces() -> None:
+    assert classify_mcp_pinning({"command": _NPX_WITH_SPACES, "args": ["-y", "pkg@1.2.3"]}).status == "pinned"
+    floating = classify_mcp_pinning({"command": _UVX_WITH_SPACES, "args": ["--with", "foo", "pkg==1.0"]})
+    assert (floating.status, floating.detail) == (
+        "unpinned",
+        "uvx: package 'foo' has no version (resolves to the latest release)",
+    )
+    compose = classify_mcp_pinning({"command": _DOCKER_WITH_SPACES, "args": ["compose", "up"]})
+    assert (compose.status, compose.detail) == ("not_applicable", "docker invocation is not 'run'")
+    assert mcp_container_image({"command": _DOCKER_WITH_SPACES, "args": ["run", "-i", "img:1.2.3"]}) == "img:1.2.3"
+
+
+# --------------------------------------------------------------------------- #
 # One exact-version matcher per ecosystem                                     #
 # --------------------------------------------------------------------------- #
 def test_npm_equals_pin_is_pinned_like_the_audit_reads_it() -> None:
@@ -380,6 +416,20 @@ def test_server_arguments_are_never_audited_as_packages(
     [pip_call] = pip_audit.calls
     assert pip_call["files"] == {"requirements-0.txt": "srv==1.0\n"}
     assert not [f for f in result.findings if f.check_name == "dependency-version-unverified"]
+
+
+def test_audit_reads_runner_paths_with_spaces(tmp_path: Path, pip_audit: _FakeTool, osv_scanner: _FakeTool) -> None:
+    servers = {
+        "web": {"command": _NPX_WITH_SPACES, "args": ["-y", "lodash@4.17.20"]},
+        "py": {"command": _UVX_WITH_SPACES, "args": ["mcp-server-fetch==2024.11.25"]},
+    }
+    _audit(tmp_path / "demo", servers)
+
+    [npm_call] = osv_scanner.calls
+    packages = json.loads(npm_call["files"]["package-lock.json"])["packages"]
+    assert packages["node_modules/lodash"] == {"version": "4.17.20"}
+    [pip_call] = pip_audit.calls
+    assert pip_call["files"] == {"requirements-0.txt": "mcp-server-fetch==2024.11.25\n"}
 
 
 def test_audit_and_pinning_read_the_same_uvx_requirements(tmp_path: Path, pip_audit: _FakeTool) -> None:

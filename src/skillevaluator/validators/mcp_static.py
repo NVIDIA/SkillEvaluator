@@ -1010,6 +1010,10 @@ _DOCKER_VALUE_FLAGS = frozenset(
     }
 )
 _CONTAINER_RUNTIMES = frozenset({"docker", "podman", "nerdctl"})
+# Every command _runner_invocation reads as a package runner.
+_RUNNER_COMMANDS = frozenset(
+    {"npx", "bunx", "pnpx", "pnpm", "yarn", "npm", "uvx", "uv", "pipx", "deno", *_CONTAINER_RUNTIMES}
+)
 
 
 @dataclass(frozen=True)
@@ -1080,7 +1084,10 @@ def _command_basename(command: str) -> str:
 def _argv(config: Any) -> list[str] | None:
     """The argv a runnable MCP declaration runs, or ``None`` when it has no command.
 
-    A whole command line in ``command`` (``"npx -y pkg"``) is split into words,
+    A ``command`` whose whole string names a package runner is one executable,
+    possibly a path with spaces such as ``C:\\Program Files\\nodejs\\npx.cmd``
+    (``_validate_command`` reads a shell the same way). Any other command with
+    spaces is a whole command line (``"npx -y pkg"``) and is split into words,
     so it reads like the argv form.
     """
     if not isinstance(config, dict):
@@ -1090,6 +1097,8 @@ def _argv(config: Any) -> list[str] | None:
         return None
     raw_args = config.get("args")
     args = [str(arg) for arg in raw_args] if isinstance(raw_args, list) else []
+    if _command_basename(command) in _RUNNER_COMMANDS:
+        return [command, *args]
     return [*command.split(), *args]
 
 

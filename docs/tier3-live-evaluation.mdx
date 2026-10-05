@@ -79,7 +79,7 @@ using Harbor 0.24:
 - Installed Codex adapters merge existing user and MCP configuration before the
   selected runtime provider and endpoint take precedence over conflicting route
   keys.
-- Docker and local execution stream stdout and stderr through secret redaction
+- Docker, Kata, and local execution stream stdout and stderr through secret redaction
   before Harbor callbacks receive them. Each command has a 16 MiB combined raw
   stdout/stderr limit; exceeding it terminates the command process tree and
   fails the trial instead of returning partial output.
@@ -378,7 +378,7 @@ explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
 ## Where agents run
 
-`--env-mode` selects one of 24 environment modes: 23 Harbor-native backends,
+`--env-mode` selects one of 25 environment modes: 24 Harbor-native backends,
 including the default Docker backend, plus SkillEvaluator's **local mode**,
 which runs the agent CLI directly on the host under an OS-sandbox policy.
 Managed backends such as `daytona`, `e2b`, and `modal` require their mapped
@@ -386,12 +386,13 @@ Harbor 0.24 extra; OpenShift, Apple Container, and Singularity instead use
 system CLIs and have no Harbor Python extra. These are selectable integration
 modes, not evidence that every managed backend was exercised end to end for
 this release. Harbor 0.24 transport verification covers Docker and local;
-validate any managed backend's extra, credentials, infrastructure, and
+Kata mode reuses the Docker transport but has not been exercised on a KVM host.
+Validate any managed backend's extra, credentials, infrastructure, and
 constructor settings with `doctor` and its Harbor preflight before relying on
 it.
 
-Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `kata`, `runta`,
-`prime`, `mosaic`, and `smol` backends are not selectable because they cannot
+Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `runta`, `prime`,
+`mosaic`, and `smol` backends are not selectable because they cannot
 yet receive SkillEvaluator's complete generated task bundle through a trusted
 image or backend-native provisioning path.
 
@@ -399,7 +400,7 @@ Environment kwargs are only for Harbor-native non-Docker backends. Pass
 non-secret constructor settings with the repeatable, operator-only
 `--environment-kwarg KEY=VALUE` / `--ek KEY=VALUE` option. Skill-owned
 `evals/config.yml` cannot set them. `docker` and `local` reject any environment
-kwargs. Fields owned by Harbor runtime policy are also reserved: resource
+kwargs, and `kata` accepts only `kata_runtime` and `kata_dns`. Fields owned by Harbor runtime policy are also reserved: resource
 overrides, mounts, network policy, extra Compose definitions, SkillEvaluator's
 own lifecycle fields (`delete`, `force_build`, `keep_containers`), and
 Kubernetes pod security are not exposed through this surface. Other

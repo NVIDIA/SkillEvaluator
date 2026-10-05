@@ -689,7 +689,7 @@ def test_custom_agent_import_path_preserves_native_cloud_environment(env_mode: s
 
 
 def test_custom_agent_import_path_is_rejected_for_native_cloud() -> None:
-    with pytest.raises(ValueError, match="agent_import_path is supported only with --env docker or local"):
+    with pytest.raises(ValueError, match="agent_import_path is supported only with --env docker, kata, or local"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="codex",

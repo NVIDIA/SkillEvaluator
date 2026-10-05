@@ -300,7 +300,7 @@ Non-secret constructor kwargs are only for Harbor-native non-Docker backends.
 They are operator-only: use repeatable `--environment-kwarg KEY=VALUE` / `--ek
 KEY=VALUE` flags on `tier3 evaluate`, `doctor`, and `health-check`.
 Skill-owned `evals/config.yml` cannot set them. `docker` and `local` reject any
-environment kwargs. Harbor runtime-policy fields for resource overrides,
+environment kwargs, and `kata` accepts only `kata_runtime` and `kata_dns`. Harbor runtime-policy fields for resource overrides,
 mounts, networks, extra Compose definitions, SkillEvaluator's own lifecycle
 fields (`delete`, `force_build`, `keep_containers`), and Kubernetes pod security
 are reserved. Other backend-specific timeout and retention knobs remain

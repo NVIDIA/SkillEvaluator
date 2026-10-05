@@ -464,7 +464,6 @@ def test_registered_native_env_modes_are_supported_subset_of_pinned_harbor_relea
         "opensandbox",
         "hf-sandbox",
         "podman",
-        "kata",
         "runta",
         "prime",
         "mosaic",

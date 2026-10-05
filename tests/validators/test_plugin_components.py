@@ -21,6 +21,7 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_FILE_BYTES,
     CONTENT_DEDUP_MAX_TOTAL_BYTES,
     CONTENT_TYPE_PLUGIN,
+    PLUGIN_COMPONENT_MAX_ITEMS,
     PLUGIN_CONFIG_MAX_BYTES,
     PLUGIN_CURSOR_MANIFEST_TYPE,
 )
@@ -28,8 +29,10 @@ from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.plugin_component_risk import MAX_SCRIPT_BYTES, HookScriptUnreadable
 from skillevaluator.plugin_components import (
     COMPONENT_TYPES,
+    PluginRootReader,
     _Builder,
     build_plugin_inventory,
+    collect_mcp_declarations,
     is_env_file,
     normalize_declared_path,
     refresh_component_finding_counts,
@@ -191,6 +194,32 @@ def test_invalid_mcp_config_files_are_high(tmp_path: Path) -> None:
 def test_oversize_mcp_config_is_high(tmp_path: Path) -> None:
     root = _plugin(tmp_path, {"mcpServers": "./big.json"}, {"big.json": " " * (PLUGIN_CONFIG_MAX_BYTES + 1) + "{}"})
     assert _checks(_validate(root))["mcp_config_file_too_large"] == Severity.HIGH
+
+
+def test_mcp_config_past_the_structure_limits_is_a_broken_source(tmp_path: Path) -> None:
+    nested = "[" * 101 + "]" * 101
+    root = _plugin(tmp_path, {"mcpServers": "./deep.json"}, {"deep.json": nested})
+    collection = collect_mcp_declarations(
+        PluginRootReader(root), {"mcpServers": "./deep.json"}, contained=True, manifest_rel=".claude-plugin/plugin.json"
+    )
+    [finding] = collection.findings
+    assert (finding.check_name, finding.severity) == ("mcp_config_file_too_large", Severity.HIGH)
+    assert "complexity limits" in finding.message
+    assert collection.broken_sources == [("./deep.json", "deep.json", "invalid")]
+
+
+def test_mcp_config_read_after_the_config_budget_is_spent_is_a_broken_source(tmp_path: Path) -> None:
+    root = _plugin(tmp_path, {}, {"servers.json": {"mcpServers": {"fs": _PINNED_FS}}})
+    reader = PluginRootReader(root)
+    reader.config_bytes_read = CONTENT_DEDUP_MAX_TOTAL_BYTES
+    collection = collect_mcp_declarations(
+        reader, {"mcpServers": "./servers.json"}, contained=True, manifest_rel=".claude-plugin/plugin.json"
+    )
+    [finding] = collection.findings
+    assert (finding.check_name, finding.severity) == ("mcp_config_file_too_large", Severity.HIGH)
+    assert "could not be read" in finding.message
+    assert collection.broken_sources == [("./servers.json", "servers.json", "invalid")]
+    assert collection.declarations == []
 
 
 @_SKIP_SYMLINKS
@@ -693,6 +722,32 @@ def test_lsp_servers_past_the_item_cap_fail_closed(tmp_path: Path) -> None:
     result = _validate(_plugin(tmp_path, {}, {".lsp.json": servers}))
     assert _checks(result)["plugin_component_list_truncated"] == Severity.HIGH
     assert not result.passed
+
+
+def test_components_past_the_per_type_cap_are_listed_once_with_one_truncation_note(tmp_path: Path) -> None:
+    files = {f"commands/c{i:03d}.md": "---\ndescription: c\n---\nbody\n" for i in range(PLUGIN_COMPONENT_MAX_ITEMS + 2)}
+    root = _plugin(tmp_path, {}, files)
+    inventory = build_plugin_inventory(
+        root, {"name": "demo"}, contained=True, manifest_rel=".claude-plugin/plugin.json"
+    )
+    commands = inventory.of_type("command")
+    assert len(commands) == PLUGIN_COMPONENT_MAX_ITEMS
+    assert commands[-1].name == f"c{PLUGIN_COMPONENT_MAX_ITEMS - 1:03d}"
+    truncated = [finding for finding in inventory.findings if finding.check_name == "plugin_component_scan_truncated"]
+    assert [(finding.severity, "command" in finding.message) for finding in truncated] == [(Severity.LOW, True)]
+
+
+def test_a_subagent_reached_twice_gets_one_privilege_record(tmp_path: Path) -> None:
+    root = _plugin(
+        tmp_path,
+        {"agents": ["./agents/helper.md", "./agents/"]},
+        {"agents/helper.md": "---\nname: helper\ndescription: h\ntools: Bash\n---\nbody\n"},
+    )
+    inventory = build_plugin_inventory(
+        root, {"agents": ["./agents/helper.md", "./agents/"]}, contained=True, manifest_rel=".claude-plugin/plugin.json"
+    )
+    assert [(record.type, record.name) for record in inventory.privilege_records] == [("agent", "helper")]
+    assert [component.origin for component in inventory.of_type("agent")] == ["declared+packaged"]
 
 
 def test_command_map_past_the_item_cap_fail_closed(tmp_path: Path) -> None:

@@ -380,6 +380,12 @@ class MarkdownReporter(ReporterBase):
         if inventory:
             lines.append(f"### Component inventory ({inventory['total']})")
             lines.append("")
+            if inventory.get("broken"):
+                lines.append(
+                    f"> **{inventory['broken']} broken component(s):** the declaration is missing, escapes the "
+                    "plugin root, is a link, or is invalid, so the client cannot load it."
+                )
+                lines.append("")
             if inventory["unsupported_types"]:
                 unsupported = ", ".join(cell(name) for name in inventory["unsupported_types"])
                 lines.append(
@@ -468,8 +474,9 @@ class MarkdownReporter(ReporterBase):
         privileges = risk.get("privileges")
         if privileges:
             lines.append(
-                f"### Subagent and command privileges ({privileges['agents']} agents, "
-                f"{privileges['commands']} commands; {privileges['flagged']} flagged)"
+                f"### Subagent, command, and skill privileges ({privileges['agents']} agents, "
+                f"{privileges['commands']} commands, {privileges.get('skills', 0)} skills; "
+                f"{privileges['flagged']} flagged)"
             )
             lines.append("")
             lines.append("| Type | Name | Grants | Model | Permission mode | Invocation | Flags |")
@@ -523,7 +530,7 @@ class MarkdownReporter(ReporterBase):
             lines.append("")
             if parity["status"] == "compared":
                 lines.append(
-                    f"**claude plugin validate --strict:** {cell(parity['claude_verdict'])} "
+                    f"**claude plugin validate:** {cell(parity['claude_verdict'])} "
                     f"({parity['error_count']} errors, {parity['warning_count']} warnings) · "
                     f"**SkillEvaluator:** {cell(parity['skillevaluator_verdict'])} · "
                     f"**Agreement:** {cell(parity['agreement'])}"
@@ -614,10 +621,11 @@ class MarkdownReporter(ReporterBase):
                 names = ", ".join(f"{row['type']} {row['name']}" for row in coverage["staged_not_observed_rows"])
                 lines.append(f"Staged but not observed in any plugin trial: {cell(names)}")
                 lines.append("")
-            if coverage["not_staged_rows"]:
+            unevaluated_rows = [*coverage["not_staged_rows"], *coverage.get("not_loaded_rows", [])]
+            if unevaluated_rows:
                 lines.append("| Type | Component | State | Reason |")
                 lines.append("|------|-----------|-------|--------|")
-                for row in coverage["not_staged_rows"]:
+                for row in unevaluated_rows:
                     lines.append(
                         f"| {cell(row['type'])} | {cell(row['name'])} | {cell(row['state_label'])} "
                         f"| {cell(row['reason'])} |"
@@ -654,37 +662,71 @@ class MarkdownReporter(ReporterBase):
                     f"effective <code>{cell(modes['effective'])}</code>"
                 )
                 lines.append("")
-        if integration:
-            if integration["measured"]:
+        # One named Integration line per agent in a multi-agent run.
+        for entry in (integration or {}).get("per_agent") or ([integration] if integration else []):
+            scope = f"{cell(entry['agent'])} — " if entry.get("agent") and integration.get("per_agent") else ""
+            if entry["measured"]:
                 # The interval only: the CI summary starts with the estimate, which
                 # repeated the lift ("lift +0.12 +0.12 [...]").
-                ci = (
-                    f", {cell(integration['ci']['confidence'])} {cell(integration['ci']['interval'])}"
-                    if integration["ci"]
-                    else ""
-                )
+                ci = f", {cell(entry['ci']['confidence'])} {cell(entry['ci']['interval'])}" if entry["ci"] else ""
                 point = (
-                    f"; point estimate: {cell(integration['point_verdict_label'])}"
-                    if integration["point_verdict_label"]
-                    else ""
+                    f"; point estimate: {cell(entry['point_verdict_label'])}" if entry["point_verdict_label"] else ""
                 )
                 lines.append(
-                    f"**{cell(integration['verdict_label'])}:** plugin {integration['with_plugin']} vs "
-                    f"sum-of-parts {integration['sum_of_parts']} (lift {integration['integration_lift']}{ci}{point})"
+                    f"**{scope}{cell(entry['verdict_label'])}:** plugin {entry['with_plugin']} vs "
+                    f"sum-of-parts {entry['sum_of_parts']} (lift {entry['integration_lift']}{ci}{point})"
                 )
+                if entry["reason"]:
+                    lines.append(f"*{cell(entry['reason'])}*")
             else:
-                lines.append(f"**INCONCLUSIVE:** {cell(integration['reason'])}")
+                lines.append(f"**{scope}INCONCLUSIVE:** {cell(entry['reason'])}")
             lines.append("")
         statistics = view["statistics"]
         if statistics:
-            for row in statistics["primary"]["lift_ci"]:
-                warning = " — ⚠️ CI includes zero" if row["ci_includes_zero"] else ""
-                lines.append(
-                    f"- {cell(row['label'])}: {cell(row['summary'])}, precision {cell(row['precision'])}{warning}"
-                )
-            if statistics["primary"]["lift_ci"]:
+            # A multi-agent run lists every agent's intervals, each named, next to the named Integration lines.
+            scopes = statistics.get("scopes") or [statistics["primary"]]
+            named = len(scopes) > 1
+            for scope in scopes:
+                prefix = f"{cell(scope['label'])} — " if named else ""
+                for row in scope["lift_ci"]:
+                    warning = " — ⚠️ CI includes zero" if row["ci_includes_zero"] else ""
+                    partial = f" — {cell(row['partial_note'])}" if row.get("partial_note") else ""
+                    lines.append(
+                        f"- {prefix}{cell(row['label'])}: {cell(row['summary'])}, precision {cell(row['precision'])}"
+                        f"{warning}{partial}"
+                    )
+            if any(scope["lift_ci"] for scope in scopes):
                 lines.append("")
+        MarkdownReporter._render_tier3_mcp_calls(view, lines)
         MarkdownReporter._render_tier3_runtime_evidence(view, lines)
+
+    @staticmethod
+    def _render_tier3_mcp_calls(view: dict, lines: list[str]) -> None:
+        """Render each arm's MCP call outcomes: succeeded, failed, and unknown, per server and tool."""
+        cell = _markdown_table_cell
+        entries = [entry for entry in (view.get("signals") or {}).get("entries", []) if entry.get("mcp_calls")]
+        if not entries:
+            return
+        lines.append("### MCP Calls (advisory)")
+        lines.append("")
+        lines.append("| Agent · Arm | Server | Calls | Succeeded | Failed | Unknown | Success rate | Tools |")
+        lines.append("|-------------|--------|-------|-----------|--------|---------|--------------|-------|")
+        for entry in entries:
+            mcp = entry["mcp_calls"]
+            scope = cell(f"{entry['scope']} · {entry['arm_label']}")
+            rows = [
+                ("all servers", mcp, ""),
+                *((server["server"], server, server["tools"]) for server in mcp["servers"]),
+            ]
+            for server, counts, tools in rows:
+                lines.append(
+                    f"| {scope} | {cell(server)} | {cell(counts['total'])} | {cell(counts['succeeded'])} "
+                    f"| {cell(counts['failed'])} | {cell(counts['unknown'])} | {cell(counts['success_rate'])} "
+                    f"| {cell(tools)} |"
+                )
+        lines.append("")
+        lines.append("*The success rate is succeeded / (succeeded + failed); unknown calls are not in it.*")
+        lines.append("")
 
     @staticmethod
     def _render_tier3_runtime_evidence(view: dict, lines: list[str]) -> None:
@@ -699,12 +741,22 @@ class MarkdownReporter(ReporterBase):
             for entry in canary["entries"]:
                 lines.append(f"**{cell(entry['scope'])}:** {cell(entry['verdict'])}")
                 lines.append("")
-                lines.append("| Arm | Trials | Planted | Leaked | Leak rate | Sinks |")
-                lines.append("|-----|--------|---------|--------|-----------|-------|")
+                for label, key in (("Credential reads", "credential_verdict"), ("Protected writes", "write_verdict")):
+                    if entry.get(key):
+                        lines.append(f"- {label}: {cell(entry[key])}")
+                if entry.get("credential_verdict") or entry.get("write_verdict"):
+                    lines.append("")
+                lines.append(
+                    "| Arm | Trials | Planted | Leaked | Leak rate | Sinks | Credential reads | Protected writes |"
+                )
+                lines.append(
+                    "|-----|--------|---------|--------|-----------|-------|------------------|------------------|"
+                )
                 for row in entry["rows"]:
                     lines.append(
                         f"| {cell(row['arm_label'])} | {cell(row['trials'])} | {cell(row['planted'])} | "
-                        f"{cell(row['leaked'])} | {cell(row['leak_rate'])} | {cell(row['sinks'])} |"
+                        f"{cell(row['leaked'])} | {cell(row['leak_rate'])} | {cell(row['sinks'])} | "
+                        f"{cell(row['credential_cell'])} | {cell(row['write_cell'])} |"
                     )
                 lines.append("")
         hook_census = view.get("hook_census")

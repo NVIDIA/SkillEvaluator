@@ -121,7 +121,7 @@ def test_complete_plugin_card(tmp_path: Path) -> None:
     assert "- Plugin run: complete" in rendered
     assert "| Codex (Baseline → Plugin Uplift) |" in rendered
     assert (
-        "| Effectiveness (plugin vs. no plugin) | +30 points "
+        "| Plugin lift (plugin vs. no plugin) | +30 points "
         "| \\[-2, +55\\] points (95% CI); precision low; CI includes zero |"
     ) in rendered
     assert (
@@ -163,7 +163,7 @@ def test_integration_lift_mode_card_does_not_claim_an_effectiveness_result(tmp_p
     rendered = _render([tier1_plugin_result(), tier2_plugin_result(), tier3])
 
     assert (
-        "| Effectiveness (plugin vs. no plugin) | Not measured — lift mode integration compares against "
+        "| Plugin lift (plugin vs. no plugin) | Not measured — lift mode integration compares against "
         "sum-of-parts | Not measured |"
     ) in rendered
     assert (

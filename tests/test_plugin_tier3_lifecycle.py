@@ -142,7 +142,7 @@ def test_tier3_evaluate_plugin_command_uses_public_plugin_options(
 @pytest.mark.parametrize(
     ("arguments", "evidence_error", "expected"),
     [
-        (["--lift-mode", "integration"], "composition evidence is missing", "Integration is inconclusive"),
+        (["--lift-mode", "integration"], "composition evidence is missing", "Integration was not run"),
         (["--lift-mode", "both", "--skip-baseline"], None, "Integration requires a baseline"),
     ],
 )

@@ -95,6 +95,7 @@ _MAX_RAW_REWARD_FIELDS = 96
 _MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD = 128
 _MAX_UNPAIRED_CASE_IDS_IN_REPORT = 64
 _MAX_EMBEDDED_REPORT_BYTES = 2 * 1024 * 1024
+_MAX_JSON_SAFE_INTEGER = (1 << 53) - 1
 
 
 def _finite_float(value: object) -> float | None:
@@ -108,8 +109,21 @@ def _finite_float(value: object) -> float | None:
     return numeric if math.isfinite(numeric) else None
 
 
+def _token_counter(value: object) -> int | None:
+    """Return one browser-safe token count, preserving unavailable as null."""
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_JSON_SAFE_INTEGER
+        else None
+    )
+
+
 def _sanitize_json_numbers(value: Any) -> Any:
-    """Copy a canonical payload while replacing non-finite floats with JSON null."""
+    """Copy a payload while replacing numbers browsers cannot represent safely."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value if -_MAX_JSON_SAFE_INTEGER <= value <= _MAX_JSON_SAFE_INTEGER else None
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
@@ -566,11 +580,65 @@ def _validation_result_from_payload(payload: dict[str, Any] | None) -> Validatio
             result.passed = False
             result.metadata["execution_status"] = "skipped"
             result.metadata["skip_reason"] = _incomplete_skip_reason(plugin_provenance)
+        # A run fails its gate on a FAIL verdict or a confirmed Skill Lift regression,
+        # even when it is partial: the parts it did evaluate already failed, so it is
+        # FAIL rather than INCOMPLETE on every surface. ``validate`` counts this only
+        # with --block-on-agent-eval; without it the result stays advisory.
+        failures = _tier3_gate_failures(payload)
+        if failures:
+            result.metadata["tier3_gate_failures"] = [label for label, _detail in failures]
+        for label, detail in failures:
+            result.add_error(f"{label}: {detail}")
     else:
         errors = payload.get("execution_errors") or ["Tier 3 evaluation did not produce a complete scored run"]
         for error in errors:
             result.add_error(str(error))
     return result
+
+
+def _tier3_gate_failures(payload: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return ``(label, detail)`` for each reason a complete, scored Tier 3 run fails its gate.
+
+    A FAIL verdict fails it, and so does a confirmed Skill Lift regression (a
+    lift in the FAIL band whose interval lies wholly below zero). NEUTRAL never
+    does. The caller decides whether the gate counts toward the exit code
+    (``validate --block-on-agent-eval``).
+    """
+    reasons: list[tuple[str, str]] = []
+    if str(payload.get("verdict") or "").lower() == VERDICT_FAIL:
+        reasons.append(("Tier 3 verdict FAIL", _failing_dimensions_text(payload)))
+    band = payload.get("lift_band")
+    if isinstance(band, dict) and band.get("regression_confirmed") is True:
+        reasons.append(
+            (
+                "Tier 3 Skill Lift regression",
+                f"lift {_lift_band_text(band)} is at or below "
+                f"{_finite_float(band.get('fail_threshold')) or TIER3_LIFT_FAIL_THRESHOLD:+.2f} "
+                "with the whole interval below zero",
+            )
+        )
+    return reasons
+
+
+def _failing_dimensions_text(payload: dict[str, Any]) -> str:
+    """Name each scored agent's dimensions below the NEUTRAL threshold."""
+    parts: list[str] = []
+    agents = payload.get("agents") if isinstance(payload.get("agents"), dict) else {}
+    for name in sorted(agents):
+        agent = agents[name]
+        if not isinstance(agent, dict) or agent.get("execution_status") != "succeeded":
+            continue
+        low: list[str] = []
+        for dimension in agent.get("dimensions") or []:
+            if not isinstance(dimension, dict):
+                continue
+            score = _finite_float(dimension.get("with_skill", dimension.get("score")))
+            if score is not None and score < DIMENSION_VERDICT_NEUTRAL_THRESHOLD:
+                low.append(f"{dimension.get('id')} {score:.2f}")
+        if low:
+            parts.append(f"{name}: {', '.join(low)}")
+    rule = f"no scored agent kept every dimension at {DIMENSION_VERDICT_NEUTRAL_THRESHOLD:.2f} or above"
+    return f"{rule} ({'; '.join(parts)})" if parts else rule
 
 
 def render_agent_eval_html_report(
@@ -704,16 +772,22 @@ def build_agent_eval_payload(
     from skillevaluator.tier3.harbor.report_data import (
         build_dataset_snapshot,
         deduplicate_dataset_entries,
-        metrics_for_agents,
+        metrics_for_condition,
     )
 
-    metrics = metrics_for_agents(agents)
     report_budget = _ReportBudget(artifact_loading=_artifact_loading_reasons(agents, dataset))
     agent_payloads: dict[str, dict[str, Any]] = {}
     for name in sorted(agents):
         info = agents[name]
         model = _agent_model(name, info, run_config)
-        agent_payloads[name] = _build_agent(name, info, metrics, model)
+        agent_payloads[name] = _build_agent(
+            name,
+            info,
+            metrics_for_condition(info, "with_skill"),
+            metrics_for_condition(info, "without_skill"),
+            model,
+            sum_of_parts_baseline=_baseline_is_sum_of_parts(run_config, plugin_provenance),
+        )
 
     if not agent_payloads:
         return None
@@ -733,6 +807,7 @@ def build_agent_eval_payload(
             str(error) for agent in agent_payloads.values() for error in agent.get("execution_errors", []) if error
         )
     )
+    execution_error_details = _aggregate_execution_error_details(agent_payloads, len(execution_errors))
     statuses = [agent.get("execution_status") for agent in agent_payloads.values()]
     if statuses and all(status == "succeeded" for status in statuses):
         execution_status = "succeeded"
@@ -796,6 +871,7 @@ def build_agent_eval_payload(
         "verdict_policy": verdict_policy,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
+        **execution_error_details,
         "expected_attempts": sum(
             _as_nonnegative_int(agent.get("expected_attempts")) for agent in agent_payloads.values()
         ),
@@ -808,6 +884,7 @@ def build_agent_eval_payload(
 
     # Deterministic baselines render even when the LLM judge is unavailable, so
     # the Insights tab is never empty for a run that produced scores.
+    lift_band = _lift_band(best, run_config, plugin_provenance) if overall_score is not None else None
     if overall_score is None:
         failure_message = "; ".join(execution_errors) or "Tier 3 evaluation did not produce a complete scored run"
         deterministic_conclusions = [{"severity": "fail", "title": "Evaluation incomplete", "message": failure_message}]
@@ -820,6 +897,8 @@ def build_agent_eval_payload(
         lift_uncertainty_warning = _effectiveness_uncertainty_conclusion(best)
         if lift_uncertainty_warning is not None:
             deterministic_conclusions.append(lift_uncertainty_warning)
+        if (lift_band_warning := _lift_band_conclusion(lift_band)) is not None:
+            deterministic_conclusions.append(lift_band_warning)
     if plugin_provenance and plugin_provenance.get("partial"):
         deterministic_conclusions = [
             _plugin_incompleteness_conclusion(plugin_provenance),
@@ -852,6 +931,7 @@ def build_agent_eval_payload(
         "composite_lift": round(overall_lift, 4) if overall_lift is not None else None,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
+        **execution_error_details,
         "expected_attempts": summary["expected_attempts"],
         "scored_attempts": summary["scored_attempts"],
         "runtime_seconds": _finite_float(runtime_seconds) or 0.0,
@@ -893,6 +973,8 @@ def build_agent_eval_payload(
     }
     if harbor_summary:
         payload["harbor_viewer"] = harbor_summary
+    if lift_band is not None:
+        payload["lift_band"] = lift_band
     if plugin_provenance:
         payload["plugin_provenance"] = plugin_provenance
         summary["plugin_provenance"] = plugin_provenance
@@ -903,9 +985,7 @@ def build_agent_eval_payload(
         lift_modes = _plugin_lift_modes(run_config, plugin_provenance)
         payload["lift_mode_requested"] = lift_modes["requested"]
         payload["lift_mode_effective"] = lift_modes["effective"]
-    integration = _build_integration_report(best, run_config, plugin_provenance)
-    if integration is not None:
-        payload["integration"] = integration
+    _attach_integration_reports(payload, agent_payloads, best_agent, run_config, plugin_provenance)
     _attach_plugin_report_fields(payload, agents)
 
     _layer_llm_insights(
@@ -1013,6 +1093,11 @@ _REWARD_HEAVY_KEYS = frozenset({"details", "custom_details"})
 
 def _raw_trial_rewards(info: dict[str, Any], report_budget: _ReportBudget) -> list[dict[str, Any]]:
     """Return compact raw Harbor reward dicts (internal + verbose keys stripped)."""
+    from skillevaluator.tier3.harbor.metrics import (
+        RESERVED_METRIC_NAMES,
+        custom_metric_name_is_publishable,
+    )
+
     source_rewards = info.get("rewards") or []
     total_rewards = len(source_rewards)
     if report_budget.raw_rewards_remaining <= 0:
@@ -1038,6 +1123,12 @@ def _raw_trial_rewards(info: dict[str, Any], report_budget: _ReportBudget) -> li
                 break
             if key in {"custom_metrics", "metrics"} and isinstance(value, dict):
                 value = _bounded_raw_metric_mapping(value, report_budget)
+            elif key not in RESERVED_METRIC_NAMES:
+                candidate = value.get("score") if isinstance(value, dict) else value
+                custom_score_shape = isinstance(candidate, int | float) and not isinstance(candidate, bool)
+                if custom_score_shape and not custom_metric_name_is_publishable(key):
+                    report_budget.omit("raw_reward_fields")
+                    continue
             compact[key] = value
 
         rewards.append(compact)
@@ -1047,13 +1138,18 @@ def _raw_trial_rewards(info: dict[str, Any], report_budget: _ReportBudget) -> li
 
 def _bounded_raw_metric_mapping(value: dict[Any, Any], report_budget: _ReportBudget) -> dict[str, Any]:
     """Keep a deterministic representative slice of raw custom metric maps."""
+    from skillevaluator.tier3.harbor.metrics import (
+        RESERVED_METRIC_NAMES,
+        custom_metric_name_is_publishable,
+    )
+
     bounded: dict[str, Any] = {}
     candidates = list(islice(value.items(), _MAX_RAW_METRICS_PER_REWARD + 1))
     for raw_name, raw_value in sorted(candidates, key=lambda item: str(item[0])):
         if len(bounded) >= _MAX_RAW_METRICS_PER_REWARD:
             break
         name = str(raw_name)
-        if len(name) > 256 or name in bounded:
+        if name in bounded or (name not in RESERVED_METRIC_NAMES and not custom_metric_name_is_publishable(name)):
             continue
         bounded[name] = raw_value
     report_budget.omit("raw_metric_values", max(0, len(value) - len(bounded)))
@@ -1250,6 +1346,9 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
             "environment",
             "runtime_seconds",
             "execution_status",
+            "execution_error_details_total",
+            "execution_error_details_shown",
+            "execution_error_details_truncated",
             "expected_attempts",
             "scored_attempts",
         }
@@ -1258,6 +1357,12 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
     compact_summary["best_agent"] = str(summary.get("best_agent") or payload.get("best_agent") or "")[:256]
     compact_summary["agents_run"] = [str(name)[:256] for name in (summary.get("agents_run") or [])[:64]]
     compact_summary["execution_errors"] = [str(error)[:1024] for error in (summary.get("execution_errors") or [])[:16]]
+    compact_summary.update(
+        _aggregate_execution_error_details(
+            {"summary": summary},
+            len(compact_summary["execution_errors"]),
+        )
+    )
 
     provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
     compact = {
@@ -1273,6 +1378,9 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
         "composite_lift": payload.get("composite_lift"),
         "execution_status": payload.get("execution_status"),
         "execution_errors": compact_summary["execution_errors"],
+        "execution_error_details_total": compact_summary.get("execution_error_details_total", 0),
+        "execution_error_details_shown": compact_summary.get("execution_error_details_shown", 0),
+        "execution_error_details_truncated": compact_summary.get("execution_error_details_truncated", False),
         "expected_attempts": payload.get("expected_attempts", 0),
         "scored_attempts": payload.get("scored_attempts", 0),
         "runtime_seconds": payload.get("runtime_seconds", 0.0),
@@ -1318,15 +1426,127 @@ def _condition_quality_available(info: dict[str, Any], condition: str) -> bool:
     return status not in {"failed", "unknown", "skipped"}
 
 
+def _comparison_basis(
+    entry: object,
+    with_dimensions: dict[str, Any],
+    control_dimensions: dict[str, Any],
+    control_key: str,
+) -> dict[str, Any] | None:
+    """Return the two arm scores and the lift of one comparison on one shared basis.
+
+    The collector's paired statistics score both arms per case on the
+    dimensions both scored, so the headline, the arm scores next to it and the
+    interval agree. An arm without the skill has no Discoverability or
+    Efficiency, so comparing every dimension would credit skill activation
+    alone. Runs without those statistics fall back to the arm means of the
+    dimensions both arms scored.
+    """
+    if isinstance(entry, dict):
+        lift = _finite_float(entry.get("estimate"))
+        treatment = _finite_float(entry.get("treatment_score"))
+        control = _finite_float(entry.get("control_score"))
+        if lift is not None and treatment is not None and control is not None:
+            return {
+                "basis": str(entry.get("basis") or "shared_dimensions_case_weighted"),
+                "dimensions": [str(dim) for dim in entry.get("dimensions") or []],
+                "with_skill": round(treatment, 4),
+                control_key: round(control, 4),
+                "lift": round(lift, 4),
+                "n_cases": _as_nonnegative_int(entry.get("n_cases")),
+                "expected_cases": _as_nonnegative_int(entry.get("expected_cases")),
+                "partial": entry.get("partial") is True,
+            }
+    shared = [
+        dim_id
+        for dim_id in (*_DIMENSION_IDS, "overall")
+        if _finite_float(with_dimensions.get(dim_id)) is not None
+        and _finite_float(control_dimensions.get(dim_id)) is not None
+    ]
+    if not shared:
+        return None
+    treatment = _mean([with_dimensions[dim_id] for dim_id in shared])
+    control = _mean([control_dimensions[dim_id] for dim_id in shared])
+    if treatment is None or control is None:
+        return None
+    return {
+        "basis": "shared_dimensions_arm_means",
+        "dimensions": shared,
+        "with_skill": treatment,
+        control_key: control,
+        "lift": round(treatment - control, 4),
+        "n_cases": None,
+        "expected_cases": None,
+        "partial": False,
+    }
+
+
+def _lift_note(
+    info: dict[str, Any],
+    with_skill: float | None,
+    lift: float | None,
+    interval: object,
+    sum_of_parts_baseline: bool,
+) -> str | None:
+    """Why an agent with a with-skill score shows no Skill Lift, in a few words; ``None`` otherwise.
+
+    A baseline that ran and failed is not "no baseline", and the partial
+    interval over the cases both arms scored (*interval*) is not final.
+    """
+    if lift is not None or with_skill is None or sum_of_parts_baseline:
+        return None
+    notes: list[str] = []
+    conditions = info.get("conditions")
+    baseline = conditions.get("without_skill") if isinstance(conditions, dict) else None
+    if isinstance(baseline, dict) and baseline.get("execution_status") in {"failed", "unknown"}:
+        notes.append("baseline did not complete")
+    if isinstance(interval, dict) and interval.get("partial") is True:
+        paired = _as_nonnegative_int(interval.get("n_cases"))
+        notes.append(f"partial: {paired} of {_as_nonnegative_int(interval.get('expected_cases'))} cases, not final")
+    return "; ".join(notes) or "no baseline"
+
+
+def _agent_statistics(info: dict[str, Any], *, sum_of_parts_baseline: bool) -> dict[str, Any]:
+    """The collector's report-only statistics; a legacy members interval is filed under Integration."""
+    fields = {field: info[field] for field in _STATISTICS_FIELDS if isinstance(info.get(field), dict)}
+    uncertainty = fields.get("lift_uncertainty")
+    if sum_of_parts_baseline and isinstance(uncertainty, dict) and uncertainty.get("effectiveness"):
+        # Older runs filed the plugin-vs-member-skills interval as "effectiveness".
+        fields["lift_uncertainty"] = {
+            **uncertainty,
+            "effectiveness": None,
+            "integration": uncertainty.get("integration") or uncertainty["effectiveness"],
+        }
+    return fields
+
+
+def _baseline_is_sum_of_parts(run_config: dict[str, Any] | None, plugin_provenance: dict[str, Any] | None) -> bool:
+    """Whether the only baseline arm staged the member skills (legacy ``--lift-mode integration``)."""
+    if not _is_plugin_target(run_config) and not plugin_provenance:
+        return False
+    return _plugin_lift_modes(run_config, plugin_provenance)["effective"] == "integration"
+
+
 def _build_agent(
     name: str,
     info: dict[str, Any],
-    metrics: list[str],
+    with_metrics: list[str],
+    baseline_metrics: list[str],
     model: str | None,
+    *,
+    sum_of_parts_baseline: bool = False,
 ) -> dict[str, Any]:
+    """Assemble one agent's scores, lifts and statistics for the report payload.
+
+    With ``sum_of_parts_baseline`` (legacy ``--lift-mode integration``) the
+    baseline arm staged the plugin's member skills, so its comparison is the
+    Integration lift: ``lift`` (plugin vs. no plugin) stays ``None`` and the
+    member-skills score and lift fill ``sum_of_parts`` and ``integration_lift``.
+    """
     with_scores = info.get("with_skill") or {}
     without_scores = info.get("without_skill") or {}
     lift_data = info.get("lift") or {}
+    raw_uncertainty = info.get("lift_uncertainty")
+    uncertainty = raw_uncertainty if isinstance(raw_uncertainty, dict) else {}
     with_quality_available = _condition_quality_available(info, "with_skill")
     baseline_quality_available = _condition_quality_available(info, "without_skill")
     if not with_quality_available:
@@ -1336,27 +1556,78 @@ def _build_agent(
         # A lift needs a usable baseline arm; an engine lift from a failed arm is not one.
         lift_data = {}
 
-    evaluators = _build_evaluators(metrics, with_scores, without_scores, lift_data)
+    evaluators = _build_evaluators(with_metrics, with_scores, without_scores, lift_data)
     dimensions = _build_dimensions(
         with_scores,
         without_scores,
         info.get("dimensions_with_skill") or {},
         info.get("dimensions_without_skill") or {},
+        baseline_not_applicable=_arm_not_applicable(info, "without_skill") if baseline_quality_available else [],
     )
     with_not_applicable = _arm_not_applicable(info, "with_skill") if with_quality_available else []
-    not_applicable_evaluators = _not_applicable_evaluators(metrics, with_scores, with_not_applicable)
+    not_applicable_evaluators = _not_applicable_evaluators(with_metrics, with_scores, with_not_applicable)
     not_applicable_dimensions = _not_applicable_dimensions(dimensions, with_not_applicable)
     overall_ws = _mean([d["with_skill"] for d in dimensions])
-    overall_bl = _mean([d["baseline"] for d in dimensions])
-    if overall_ws is None and not metrics and with_quality_available:
+    with_dimensions = {str(d["id"]): d["with_skill"] for d in dimensions}
+    baseline_dimensions = {str(d["id"]): d["baseline"] for d in dimensions}
+    with_mixed_contract = with_quality_available and _condition_has_mixed_metric_contracts(
+        info,
+        flag="mixed_metric_contracts_with_skill",
+        rewards="rewards",
+    )
+    baseline_mixed_contract = baseline_quality_available and _condition_has_mixed_metric_contracts(
+        info,
+        flag="mixed_metric_contracts_without_skill",
+        rewards="rewards_baseline",
+    )
+    if with_mixed_contract or (overall_ws is None and not with_metrics and with_quality_available):
+        # Custom-only runs have no dimension mean. For mixed condition
+        # contracts, the dimension mean covers only standard rows and can
+        # overstate Harbor's logical attempt score used by pass@k. In both
+        # cases, prefer the collector-owned logical overall.
         overall_ws = _finite_float(info.get("overall_with_skill"))
         if overall_ws is None and info.get("rewards_complete") is not False:
             overall_ws = _logical_reward_mean(info.get("rewards"), "overall")
-    if overall_bl is None and not metrics and baseline_quality_available:
-        overall_bl = _finite_float(info.get("overall_without_skill"))
-        if overall_bl is None and info.get("rewards_baseline_complete") is not False:
-            overall_bl = _logical_reward_mean(info.get("rewards_baseline"), "overall")
-    overall_lift = round(overall_ws - overall_bl, 4) if overall_ws is not None and overall_bl is not None else None
+        with_dimensions = {"overall": overall_ws}
+    if baseline_mixed_contract or (
+        not baseline_metrics and baseline_quality_available and _mean(list(baseline_dimensions.values())) is None
+    ):
+        overall_without = _finite_float(info.get("overall_without_skill"))
+        if overall_without is None and info.get("rewards_baseline_complete") is not False:
+            overall_without = _logical_reward_mean(info.get("rewards_baseline"), "overall")
+        baseline_dimensions = {"overall": overall_without}
+    # A logical overall on one side compares only with the other side's overall.
+    if set(with_dimensions) == {"overall"} and "overall" not in baseline_dimensions:
+        baseline_dimensions = {"overall": _mean(list(baseline_dimensions.values()))}
+    elif set(baseline_dimensions) == {"overall"} and "overall" not in with_dimensions:
+        with_dimensions = {"overall": overall_ws}
+    # One lift on one basis: the dimensions both arms scored, case-weighted when
+    # the collector's paired statistics exist. The headline equals the interval
+    # estimate, and ``baseline`` is the no-skill score on that same basis.
+    effectiveness_basis = (
+        _comparison_basis(uncertainty.get("effectiveness"), with_dimensions, baseline_dimensions, "baseline")
+        if with_quality_available and baseline_quality_available and overall_ws is not None
+        else None
+    )
+    members_basis = None
+    if sum_of_parts_baseline:
+        # Older runs filed the plugin-vs-members interval under "effectiveness".
+        members_entry = uncertainty.get("integration") or uncertainty.get("effectiveness")
+        members_basis = (
+            _comparison_basis(members_entry, with_dimensions, baseline_dimensions, "sum_of_parts")
+            if with_quality_available and baseline_quality_available and overall_ws is not None
+            else None
+        )
+        effectiveness_basis = None
+    # A partial comparison keeps its interval (marked partial) but no final-looking headline.
+    overall_lift = effectiveness_basis["lift"] if effectiveness_basis and not effectiveness_basis["partial"] else None
+    # Without a comparison (the with-skill arm is unavailable) the baseline arm's
+    # own score still shows, so reports can tell the two failures apart.
+    overall_bl = (
+        effectiveness_basis["baseline"]
+        if effectiveness_basis
+        else (_mean(list(baseline_dimensions.values())) if baseline_quality_available else None)
+    )
 
     sum_of_parts_quality_available = _condition_quality_available(info, "sum_of_parts")
     sum_of_parts_scores = info.get("sum_of_parts") or {}
@@ -1369,19 +1640,38 @@ def _build_agent(
         {},
     )
     sum_of_parts_overall = _mean([dimension["with_skill"] for dimension in sum_of_parts_dimensions])
-    if sum_of_parts_overall is None and not metrics and sum_of_parts_quality_available:
+    sum_of_parts_by_dimension = {str(d["id"]): d["with_skill"] for d in sum_of_parts_dimensions}
+    if sum_of_parts_overall is None and not with_metrics and sum_of_parts_quality_available:
         sum_of_parts_overall = _finite_float(info.get("overall_sum_of_parts"))
         if sum_of_parts_overall is None and info.get("rewards_sum_of_parts_complete") is not False:
             sum_of_parts_overall = _logical_reward_mean(info.get("rewards_sum_of_parts"), "overall")
-    integration_lift = (
-        round(overall_ws - sum_of_parts_overall, 4)
-        if overall_ws is not None and sum_of_parts_overall is not None
+        sum_of_parts_by_dimension = {"overall": sum_of_parts_overall}
+    if set(with_dimensions) == {"overall"} and "overall" not in sum_of_parts_by_dimension:
+        sum_of_parts_by_dimension = {"overall": sum_of_parts_overall}
+    integration_basis = (
+        _comparison_basis(uncertainty.get("integration"), with_dimensions, sum_of_parts_by_dimension, "sum_of_parts")
+        if with_quality_available and sum_of_parts_quality_available and overall_ws is not None
         else None
     )
+    if sum_of_parts_baseline:
+        integration_basis = members_basis
+        sum_of_parts_overall = overall_bl
+    if integration_basis is not None:
+        sum_of_parts_overall = integration_basis["sum_of_parts"]
+        if sum_of_parts_baseline:
+            overall_bl = integration_basis["sum_of_parts"]
+    integration_lift = integration_basis["lift"] if integration_basis else None
 
-    trials = _normalize_trials(info.get("rewards") or [], metrics)
-    baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], metrics)
-    _attach_baseline_pairs(trials, baseline_trials, metrics)
+    trials = _normalize_trials(info.get("rewards") or [], with_metrics)
+    baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], baseline_metrics)
+    _attach_baseline_pairs(trials, baseline_trials, with_metrics)
+
+    execution_errors = (
+        [str(error) for error in info.get("execution_errors", [])]
+        if isinstance(info.get("execution_errors"), list)
+        else []
+    )
+    execution_error_details = _aggregate_execution_error_details({name: info}, len(execution_errors))
 
     return {
         "name": name,
@@ -1391,9 +1681,8 @@ def _build_agent(
             if info.get("execution_status") in {"succeeded", "failed", "skipped", "unknown"}
             else "unknown"
         ),
-        "execution_errors": [str(error) for error in info.get("execution_errors", [])]
-        if isinstance(info.get("execution_errors"), list)
-        else [],
+        "execution_errors": execution_errors,
+        **execution_error_details,
         "expected_attempts": _as_nonnegative_int(info.get("expected_attempts")),
         "scored_attempts": _as_nonnegative_int(info.get("scored_attempts")),
         "conditions": info.get("conditions", {}) if isinstance(info.get("conditions"), dict) else {},
@@ -1407,8 +1696,13 @@ def _build_agent(
         "lift": overall_lift,
         "sum_of_parts": sum_of_parts_overall,
         "integration_lift": integration_lift,
+        "lift_note": _lift_note(
+            info, overall_ws, overall_lift, uncertainty.get("effectiveness"), sum_of_parts_baseline
+        ),
+        # The comparable arm scores behind each lift (same dimensions, same cases).
+        "lift_basis": {"effectiveness": effectiveness_basis, "integration": integration_basis},
         "integration_completeness": info.get("integration_completeness") or {},
-        **{field: info[field] for field in _STATISTICS_FIELDS if isinstance(info.get(field), dict)},
+        **_agent_statistics(info, sum_of_parts_baseline=sum_of_parts_baseline),
         "num_trials": int(info.get("num_trials", 0) or 0),
         "num_trials_baseline": int(info.get("num_trials_baseline", len(baseline_trials)) or 0),
         "trials": trials,
@@ -1434,12 +1728,15 @@ def _attach_agent_report_details(
     when an alphabetically earlier agent has adversarial custom-metric
     cardinality.
     """
+    custom_with_skill = info.get("custom_with_skill")
+    custom_without_skill = info.get("custom_without_skill")
+    custom_lift = info.get("custom_lift")
     agent_payload["evaluator_cards"] = _evaluator_cards(
         agent_payload.get("evaluators", {}),
         rewards=info.get("rewards") or [],
-        custom_with_skill=info.get("custom_with_skill") or {},
-        custom_without_skill=info.get("custom_without_skill") or {},
-        custom_lift=info.get("custom_lift") or {},
+        custom_with_skill=custom_with_skill if isinstance(custom_with_skill, dict) else {},
+        custom_without_skill=custom_without_skill if isinstance(custom_without_skill, dict) else {},
+        custom_lift=custom_lift if isinstance(custom_lift, dict) else {},
         report_budget=report_budget,
     )
 
@@ -1521,7 +1818,19 @@ def _build_dimensions(
     without_scores: dict[str, Any],
     precomputed_with: dict[str, Any],
     precomputed_without: dict[str, Any],
+    *,
+    baseline_not_applicable: list[str] | None = None,
 ) -> list[dict[str, Any]]:
+    """Score each dimension in both arms.
+
+    *baseline_not_applicable* lists the metrics the baseline recorded as not
+    applicable. A dimension built only from them (Discoverability and
+    Efficiency in an arm without the skill) is flagged
+    ``baseline_not_applicable``, and its reasoning says so instead of "no
+    baseline run": the baseline ran, it just has nothing to score there.
+    """
+    from skillevaluator.tier3.harbor.metrics import dimension_is_not_applicable
+
     dimensions: list[dict[str, Any]] = []
     for dim_id in _DIMENSION_IDS:
         cfg = DIMENSION_MAPPING[dim_id]
@@ -1534,6 +1843,7 @@ def _build_dimensions(
         if ws is None and bl is None:
             continue
         lift = round(ws - bl, 4) if ws is not None and bl is not None else None
+        bl_not_applicable = bl is None and dimension_is_not_applicable(dim_id, baseline_not_applicable or [])
         entry = precomputed_with.get(dim_id) if isinstance(precomputed_with.get(dim_id), dict) else {}
         # Signals (the evaluators that actually fed this dimension) populate the
         # "Signals" column; reasoning bullets and a deterministic verdict fill
@@ -1542,21 +1852,25 @@ def _build_dimensions(
         explanation = entry.get("explanation")
         reasoning_bullets = entry.get("reasoning_bullets")
         if not reasoning_bullets and not explanation:
-            reasoning_bullets, explanation = _deterministic_reasoning(ws, bl, lift, signals, with_scores)
+            reasoning_bullets, explanation = _deterministic_reasoning(
+                ws, bl, lift, signals, with_scores, baseline_not_applicable=bl_not_applicable
+            )
         verdict = entry.get("verdict") or _deterministic_verdict(ws)
-        dimensions.append(
-            {
-                "id": dim_id,
-                "with_skill": round(ws, 4) if ws is not None else None,
-                "score": round(ws, 4) if ws is not None else None,
-                "baseline": round(bl, 4) if bl is not None else None,
-                "lift": lift,
-                "explanation": explanation,
-                "verdict": verdict,
-                "evaluators": signals,
-                "reasoning_bullets": reasoning_bullets or [],
-            }
-        )
+        dimension = {
+            "id": dim_id,
+            "with_skill": round(ws, 4) if ws is not None else None,
+            "score": round(ws, 4) if ws is not None else None,
+            "baseline": round(bl, 4) if bl is not None else None,
+            "lift": lift,
+            "explanation": explanation,
+            "verdict": verdict,
+            "evaluators": signals,
+            "reasoning_bullets": reasoning_bullets or [],
+        }
+        if bl_not_applicable:
+            # The baseline ran but has nothing to score here, so reports say N/A, not "not run".
+            dimension["baseline_not_applicable"] = True
+        dimensions.append(dimension)
     return dimensions
 
 
@@ -1583,6 +1897,8 @@ def _deterministic_reasoning(
     lift: float | None,
     signals: list[str],
     with_scores: dict[str, Any],
+    *,
+    baseline_not_applicable: bool = False,
 ) -> tuple[list[str], str]:
     """Build deterministic reasoning bullets for a dimension (SkillEvaluator parity).
 
@@ -1612,6 +1928,7 @@ def _deterministic_reasoning(
         baseline=numeric_baseline,
         lift=lift,
         parts=parts,
+        baseline_not_applicable=baseline_not_applicable,
     )
     return bullets, " ".join(bullets)
 
@@ -1648,9 +1965,13 @@ def _compact_evidence_refs(raw_refs: object) -> list[str]:
 
 def _custom_metric_value(reward: dict[str, Any], metric: str) -> float | None:
     """Read one custom metric without materializing every custom metric in a reward."""
-    from skillevaluator.tier3.harbor.metrics import RESERVED_METRIC_NAMES
+    from skillevaluator.tier3.harbor.metrics import (
+        RESERVED_METRIC_NAMES,
+        custom_metric_name_is_publishable,
+        score_value,
+    )
 
-    if metric in RESERVED_METRIC_NAMES:
+    if metric in RESERVED_METRIC_NAMES or not custom_metric_name_is_publishable(metric):
         return None
 
     numeric: float | None = None
@@ -1661,7 +1982,7 @@ def _custom_metric_value(reward: dict[str, Any], metric: str) -> float | None:
         value = source.get(metric)
         if isinstance(value, dict):
             value = value.get("score")
-        candidate = _finite_float(value)
+        candidate = score_value(value)
         if candidate is not None:
             numeric = candidate
     return numeric
@@ -1674,7 +1995,11 @@ def _bounded_custom_metric_names(
     limit: int,
 ) -> tuple[list[str], bool]:
     """Return a bounded custom-name sample and whether more names may exist."""
-    from skillevaluator.tier3.harbor.metrics import RESERVED_METRIC_NAMES
+    from skillevaluator.tier3.harbor.metrics import (
+        RESERVED_METRIC_NAMES,
+        custom_metric_name_is_publishable,
+        score_value,
+    )
 
     if limit <= 0:
         return [], False
@@ -1693,9 +2018,10 @@ def _bounded_custom_metric_names(
             value = raw_value.get("score") if isinstance(raw_value, dict) else raw_value
             if (
                 name not in RESERVED_METRIC_NAMES
+                and custom_metric_name_is_publishable(name)
                 and name not in excluded
                 and name not in seen
-                and _finite_float(value) is not None
+                and score_value(value) is not None
             ):
                 seen.add(name)
                 names.append(name)
@@ -1712,6 +2038,8 @@ def _metric_evidence(
     report_budget: _ReportBudget,
     sampling: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, metric_set_for_reward
+
     if report_budget.evidence_remaining <= 0:
         report_budget.omit("evidence_entries", len(rewards))
         return []
@@ -1729,11 +2057,19 @@ def _metric_evidence(
         scanned_trials += 1
         if not isinstance(reward, dict):
             continue
-        details = reward.get("details")
-        detail = details.get(metric) if isinstance(details, dict) else None
-        if not isinstance(detail, dict):
-            custom_details = reward.get("custom_details")
-            detail = custom_details.get(metric) if isinstance(custom_details, dict) else None
+        if metric in DEFAULT_METRICS and metric not in metric_set_for_reward(reward)[1]:
+            continue
+        custom_details = reward.get("custom_details")
+        custom_detail_is_authoritative = (
+            metric not in DEFAULT_METRICS and isinstance(custom_details, dict) and metric in custom_details
+        )
+        if custom_detail_is_authoritative:
+            detail = custom_details[metric]
+        else:
+            details = reward.get("details")
+            detail = details.get(metric) if isinstance(details, dict) else None
+            if not isinstance(detail, dict):
+                detail = custom_details.get(metric) if isinstance(custom_details, dict) else None
         if not isinstance(detail, dict):
             continue
 
@@ -1809,10 +2145,12 @@ def _metric_evidence(
 
 
 def _custom_metric_score(metric: str, configured: dict[str, Any], rewards: list[dict[str, Any]]) -> float | None:
+    from skillevaluator.tier3.harbor.metrics import score_value
+
     value = configured.get(metric)
     if isinstance(value, dict):
         value = value.get("score")
-    configured_score = _finite_float(value)
+    configured_score = score_value(value)
     if configured_score is not None:
         return configured_score
     values = [
@@ -1831,16 +2169,28 @@ def _discover_custom_metric_scores(
     report_budget: _ReportBudget,
 ) -> dict[str, float]:
     """Discover at most ``limit`` custom names and aggregate reward scores once."""
+    from skillevaluator.tier3.harbor.metrics import (
+        RESERVED_METRIC_NAMES,
+        custom_metric_name_is_publishable,
+    )
+
     if limit <= 0:
         report_budget.omit("evaluator_cards", len(custom_with_skill))
         report_budget.omit("custom_metric_discovery_trials", len(rewards))
         return {}
 
     candidates: dict[str, None] = {}
-    for raw_name in islice(iter(custom_with_skill), limit + 1):
+    for raw_name in islice(iter(custom_with_skill), _MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD):
         name = str(raw_name)
-        if name not in excluded and name not in candidates:
+        if (
+            name not in RESERVED_METRIC_NAMES
+            and custom_metric_name_is_publishable(name)
+            and name not in excluded
+            and name not in candidates
+        ):
             candidates[name] = None
+            if len(candidates) > limit:
+                break
 
     configured_total = len(custom_with_skill)
     if len(candidates) > limit:
@@ -1909,7 +2259,12 @@ def _evaluator_card(
         "with_skill": ws,
         "baseline": scores.get("baseline"),
         "lift": scores.get("lift"),
-        "status": "pass" if ws >= 0.8 else ("warn" if ws >= 0.6 else "fail"),
+        # The dimension verdict's thresholds, so a card never says FAIL beside a PASS dimension row.
+        "status": (
+            "pass"
+            if ws >= DIMENSION_VERDICT_PASS_THRESHOLD
+            else ("warn" if ws >= DIMENSION_VERDICT_NEUTRAL_THRESHOLD else "fail")
+        ),
         "evidence": _metric_evidence(metric, rewards, report_budget, evidence_sampling),
     }
     if evidence_sampling:
@@ -1971,14 +2326,20 @@ def _evaluator_cards(
 
 
 def _cases(info: dict[str, Any]) -> list[dict[str, Any]]:
+    from skillevaluator.tier3.harbor.metrics import overall_score
+    from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
+
     cases: list[dict[str, Any]] = []
-    for reward in info.get("rewards") or []:
-        if not isinstance(reward, dict):
+    rewards = [reward for reward in (info.get("rewards") or []) if isinstance(reward, dict)]
+    for group in logical_trial_reward_groups(rewards):
+        if not group:
             continue
+        reward = group[0]
+        group_is_consistent = _logical_group_entry_identity_is_consistent(group)
         cases.append(
             {
                 "entry_id": reward.get("entry_id"),
-                "overall": reward.get("overall"),
+                "overall": _complete_mean([overall_score(item) for item in group]) if group_is_consistent else None,
             }
         )
     return cases
@@ -2007,28 +2368,44 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
         NOT_APPLICABLE_REASONS,
         metric_is_not_applicable,
         metric_set_for_reward,
+        metric_set_for_rewards,
         metric_value,
+        overall_score,
     )
+    from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
 
     out: list[dict[str, Any]] = []
-    for reward in rewards:
-        if not isinstance(reward, dict):
+    reward_groups = logical_trial_reward_groups([reward for reward in rewards if isinstance(reward, dict)])
+    for group in reward_groups:
+        if not group:
             continue
+        reward = group[0]
+        is_multi_row = len(group) > 1
+        group_is_consistent = _logical_group_entry_identity_is_consistent(group)
         declared_metric_set = reward.get("metric_set") or reward.get("metric_set_version")
         standard_metric_sets = {DEFAULT_METRIC_SET, LEGACY_METRIC_SET}
-        metric_set, standard_metrics = metric_set_for_reward(reward)
-        is_declared_custom = bool(declared_metric_set) and str(declared_metric_set) not in standard_metric_sets
-        scores = {
-            m: numeric
-            for m in metrics
-            if not (is_declared_custom and m in {"skill_execution", "skill_routing"})
-            if (numeric := _finite_float(reward.get(m))) is not None
-        }
+        metric_set, standard_metrics = metric_set_for_rewards(group)
+        declared_metric_sets = [
+            str(value) for item in group if (value := item.get("metric_set") or item.get("metric_set_version"))
+        ]
+        is_declared_custom = len(declared_metric_sets) == len(group) and all(
+            value not in standard_metric_sets for value in declared_metric_sets
+        )
+        standard_rows = [(item, metric_set_for_reward(item)[1]) for item in group]
+        scores: dict[str, float] = {}
+        for metric in metrics:
+            if is_declared_custom and metric in {"skill_execution", "skill_routing"}:
+                continue
+            value = _complete_mean(
+                [metric_value(item, metric) for item, item_metrics in standard_rows if metric in item_metrics]
+            )
+            if value is not None:
+                scores[metric] = value
         trial: dict[str, Any] = {
             "trial_id": reward.get("trial_id"),
             "entry_id": reward.get("entry_id"),
             "scores": scores,
-            "overall": _finite_float(reward.get("overall")),
+            "overall": _complete_mean([overall_score(item) for item in group]) if group_is_consistent else None,
         }
         not_applicable = {
             metric: NOT_APPLICABLE_REASONS[metric]
@@ -2038,16 +2415,28 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
         if not_applicable:
             trial["not_applicable"] = not_applicable
         traj = reward.get("_traj")
-        if isinstance(traj, dict):
-            trial["steps"] = traj.get("steps")
-            trial["tokens"] = {
-                "prompt": traj.get("prompt_tokens", 0),
-                "completion": traj.get("completion_tokens", 0),
-                "cached": traj.get("cached_tokens", 0),
-            }
-        if reward.get("warnings"):
-            trial["warnings"] = list(reward["warnings"])
-        if reward.get("error_recovery"):
+        if not is_multi_row and isinstance(traj, dict):
+            steps = _token_counter(traj.get("steps"))
+            if steps is not None:
+                trial["steps"] = steps
+            prompt_tokens = _token_counter(traj.get("prompt_tokens"))
+            completion_tokens = _token_counter(traj.get("completion_tokens"))
+            cached_tokens = _token_counter(traj.get("cached_tokens"))
+            if prompt_tokens is not None and completion_tokens is not None:
+                trial["tokens"] = {
+                    "prompt": prompt_tokens,
+                    "completion": completion_tokens,
+                }
+                if cached_tokens is not None:
+                    trial["tokens"]["cached"] = cached_tokens
+        warnings = list(
+            dict.fromkeys(
+                str(warning) for item in group if isinstance(item.get("warnings"), list) for warning in item["warnings"]
+            )
+        )
+        if warnings:
+            trial["warnings"] = warnings
+        if not is_multi_row and reward.get("error_recovery"):
             trial["error_recovery"] = reward["error_recovery"]
         is_standard_reward = (
             (not declared_metric_set or str(declared_metric_set) in standard_metric_sets)
@@ -2055,7 +2444,7 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
             and "skill_execution" in standard_metrics
             and metric_value(reward, "skill_execution") is not None
         )
-        if is_standard_reward and reward.get("invocation_evidence_source") == "trajectory":
+        if not is_multi_row and is_standard_reward and reward.get("invocation_evidence_source") == "trajectory":
             for key in ("skill_invoked", "routing_passed"):
                 if type(reward.get(key)) is bool:
                     trial[key] = reward[key]
@@ -2707,7 +3096,7 @@ def _pass_threshold_from_policy(attempt_policy: dict[str, Any]) -> float:
         return 0.50
     try:
         numeric = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0.50
     return numeric if math.isfinite(numeric) else 0.50
 
@@ -2760,6 +3149,120 @@ def _verdict_from_lift(lift: float | None) -> str:
     if numeric <= TIER3_LIFT_FAIL_THRESHOLD:
         return VERDICT_FAIL
     return VERDICT_NEUTRAL
+
+
+def _integration_interval_verdict(uncertainty: dict[str, Any]) -> tuple[str, str | None]:
+    """Classify the Integration lift by where its whole interval lies relative to the +/-0.05 band.
+
+    "real" needs the interval to clear +0.05 and "negative" to stay below
+    -0.05. "cosmetic" is an equivalence claim: the whole interval lies inside
+    the band, so a tight tie around zero is cosmetic, not inconclusive.
+    Otherwise the interval cannot tell the bands apart and the reason says why.
+    """
+    low = _finite_float(uncertainty.get("ci_low"))
+    high = _finite_float(uncertainty.get("ci_high"))
+    ci_text = _ci_text(uncertainty) or "interval"
+    if low is None or high is None:
+        return INTEGRATION_VERDICT_INCONCLUSIVE, "The Integration lift has no interval to classify it."
+    if low >= _INTEGRATION_REAL_THRESHOLD:
+        return INTEGRATION_VERDICT_REAL, None
+    if high <= _INTEGRATION_NEGATIVE_THRESHOLD:
+        return INTEGRATION_VERDICT_NEGATIVE, None
+    if low > _INTEGRATION_NEGATIVE_THRESHOLD and high < _INTEGRATION_REAL_THRESHOLD:
+        return INTEGRATION_VERDICT_COSMETIC, None
+    band = (
+        f"{_INTEGRATION_REAL_THRESHOLD:+.2f}"
+        if high >= _INTEGRATION_REAL_THRESHOLD
+        else f"{_INTEGRATION_NEGATIVE_THRESHOLD:+.2f}"
+    )
+    if low <= 0.0 <= high:
+        return (
+            INTEGRATION_VERDICT_INCONCLUSIVE,
+            f"The paired case bootstrap {ci_text} for the Integration lift includes zero and reaches past {band}, "
+            "so it cannot tell a real or negative effect from no effect.",
+        )
+    effect = "a real" if high >= _INTEGRATION_REAL_THRESHOLD else "a negative"
+    return (
+        INTEGRATION_VERDICT_INCONCLUSIVE,
+        f"The paired case bootstrap {ci_text} for the Integration lift crosses the {band} band edge, "
+        f"so it cannot tell {effect} effect from cosmetic bundling.",
+    )
+
+
+def _lift_band(
+    agent: dict[str, Any],
+    run_config: dict[str, Any] | None,
+    plugin_provenance: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Place the headline Skill Lift (with versus without) in its PASS/NEUTRAL/FAIL band.
+
+    A lift at or below the FAIL threshold whose paired-case interval lies wholly
+    below zero is a confirmed regression: it adds a warning and fails
+    ``validate --block-on-agent-eval``. The dimension verdict is unchanged. An
+    Integration-only plugin run has no no-plugin arm (its lift compares the
+    plugin with its own parts, which stays advisory), so it gets no band.
+    """
+    plugin_run = _is_plugin_target(run_config) or bool(plugin_provenance)
+    if plugin_run and _plugin_lift_modes(run_config, plugin_provenance)["effective"] == "integration":
+        return None
+    lift = _finite_float(agent.get("lift"))
+    if lift is None:
+        return None
+    entry = _lift_uncertainty_entry(agent, "effectiveness") or {}
+    ci_low = _finite_float(entry.get("ci_low"))
+    ci_high = _finite_float(entry.get("ci_high"))
+    has_interval = ci_low is not None and ci_high is not None
+    verdict = _verdict_from_lift(lift)
+    return {
+        "verdict": verdict,
+        "lift": round(lift, 4),
+        "ci_low": ci_low if has_interval else None,
+        "ci_high": ci_high if has_interval else None,
+        "confidence": (_finite_float(entry.get("confidence")) or 0.95) if has_interval else None,
+        "pass_threshold": TIER3_LIFT_PASS_THRESHOLD,
+        "fail_threshold": TIER3_LIFT_FAIL_THRESHOLD,
+        "regression_confirmed": bool(verdict == VERDICT_FAIL and has_interval and ci_high < 0),
+    }
+
+
+def _lift_band_text(band: dict[str, Any]) -> str:
+    """``-0.20 (95% CI [-0.20, -0.19])``, or the lift alone when no interval was computed."""
+    text = f"{_as_float(band.get('lift')):+.2f}"
+    low, high = _finite_float(band.get("ci_low")), _finite_float(band.get("ci_high"))
+    if low is not None and high is not None:
+        confidence = _finite_float(band.get("confidence")) or 0.95
+        text += f" ({confidence:.0%} CI [{low:+.2f}, {high:+.2f}])"
+    return text
+
+
+def _lift_band_conclusion(band: dict[str, Any] | None) -> dict[str, str] | None:
+    """Warn when the Skill Lift is in the FAIL band; say whether the regression is confirmed."""
+    if not band or band.get("verdict") != VERDICT_FAIL:
+        return None
+    threshold = f"{_finite_float(band.get('fail_threshold')) or TIER3_LIFT_FAIL_THRESHOLD:+.2f}"
+    if band.get("regression_confirmed"):
+        return {
+            "severity": "fail",
+            "title": "Skill Lift regression",
+            "message": (
+                f"Skill Lift {_lift_band_text(band)} is in the FAIL band (at or below {threshold}) and the whole "
+                "interval is below zero: results were worse with it than without it. The dimension verdict is "
+                "unchanged; validate --block-on-agent-eval fails on this regression."
+            ),
+        }
+    reason = (
+        "its interval includes zero"
+        if band.get("ci_low") is not None and band.get("ci_high") is not None
+        else "no paired-case interval was computed"
+    )
+    return {
+        "severity": "warn",
+        "title": "Negative Skill Lift",
+        "message": (
+            f"Skill Lift {_lift_band_text(band)} is in the FAIL band (at or below {threshold}), but {reason}, "
+            "so the regression is not confirmed and does not gate. Add cases or attempts to confirm it."
+        ),
+    }
 
 
 def _integration_verdict(lift: float | None, *, complete: bool) -> str:
@@ -2854,15 +3357,50 @@ def _effectiveness_uncertainty_conclusion(best: dict[str, Any]) -> dict[str, str
     }
 
 
-def _integration_completeness_reason(completeness: dict[str, Any] | None) -> str:
-    """Explain why the per-case Integration completeness check failed."""
+_ARM_NAMES = {
+    "with_skill": "with-plugin arm",
+    "with_plugin": "with-plugin arm",
+    "without_skill": "no-plugin arm",
+    "sum_of_parts": "member-skills (sum-of-parts) arm",
+}
+
+
+# Legacy ``--lift-mode integration``: the only baseline arm stages the member skills.
+_LEGACY_ARM_NAMES = {**_ARM_NAMES, "without_skill": "member-skills baseline arm"}
+
+
+def _arm_name(arm: object, names: dict[str, str] | None = None) -> str:
+    return (names or _ARM_NAMES).get(str(arm), str(arm).replace("_", " "))
+
+
+def _paired_cases_note(uncertainty: dict[str, Any] | None) -> str:
+    """``"8 of 9 cases"`` for a partial interval, or ``""``."""
+    if not isinstance(uncertainty, dict) or uncertainty.get("partial") is not True:
+        return ""
+    paired = _as_nonnegative_int(uncertainty.get("n_cases"))
+    expected = _as_nonnegative_int(uncertainty.get("expected_cases"))
+    return f"{paired} of {expected} cases" if expected else f"{paired} cases"
+
+
+def _integration_completeness_reason(
+    completeness: dict[str, Any] | None,
+    uncertainty: dict[str, Any] | None = None,
+    *,
+    names: dict[str, str] | None = None,
+) -> str:
+    """Explain why the per-case Integration completeness check failed.
+
+    Names the arm that really failed, the missing cases and the attempt
+    shortfall, and how many paired cases the lift still used.
+    """
     base = "The plugin and member-skills arms did not cover the same expected cases with the configured attempts"
-    if not isinstance(completeness, dict):
-        return base + "."
     details: list[str] = []
+    completeness = completeness if isinstance(completeness, dict) else {}
     failed_arms = [str(arm) for arm in completeness.get("failed_arms") or []]
+    if not failed_arms and isinstance(uncertainty, dict):
+        failed_arms = [str(arm) for arm in uncertainty.get("failed_arms") or []]
     if failed_arms:
-        details.append("failed arm(s): " + ", ".join(failed_arms[:4]))
+        details.append("did not complete: " + ", ".join(_arm_name(arm, names) for arm in failed_arms[:4]))
     missing = [str(case) for case in completeness.get("missing_cases") or []]
     if missing:
         suffix = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
@@ -2870,12 +3408,38 @@ def _integration_completeness_reason(completeness: dict[str, Any] | None) -> str
     shortfall = [row for row in completeness.get("attempt_shortfall") or [] if isinstance(row, dict)]
     if shortfall:
         rows = [
-            f"{row.get('case')} {row.get('arm') or ''} {row.get('observed')}/{row.get('expected')}".replace("  ", " ")
+            f"{row.get('case')} ({_arm_name(row.get('arm'), names)}) {row.get('observed')}/{row.get('expected')}"
             for row in shortfall[:5]
         ]
         suffix = f" (+{len(shortfall) - 5} more)" if len(shortfall) > 5 else ""
         details.append("attempt shortfall: " + ", ".join(rows) + suffix)
-    return base + (": " + "; ".join(details) + "." if details else ".")
+    reason = base + (": " + "; ".join(details) + "." if details else ".")
+    pairs = _paired_cases_note(uncertainty)
+    if pairs:
+        reason += f" The lift shown uses the {pairs} both arms scored."
+    return reason
+
+
+def _integration_no_score_reason(
+    agent: dict[str, Any],
+    control_condition: str,
+    *,
+    names: dict[str, str] | None = None,
+) -> str:
+    """Name the arm that left the Integration comparison without a single scored pair."""
+    conditions = agent.get("conditions") if isinstance(agent.get("conditions"), dict) else {}
+    unscored = [
+        condition
+        for condition in ("with_skill", control_condition)
+        if isinstance(conditions.get(condition), dict)
+        and not _as_nonnegative_int(conditions[condition].get("scored_attempts"))
+    ]
+    if not unscored:
+        return _INTEGRATION_REASON_NO_SCORE
+    arms = " and the ".join(_arm_name(condition, names) for condition in unscored)
+    errors = [str(error) for error in conditions[unscored[0]].get("execution_errors") or [] if str(error).strip()]
+    cause = f" ({errors[0][:200]})" if errors else ""
+    return f"The {arms} produced no usable scored trial{cause}, so no case could be paired for the Integration lift."
 
 
 def _integration_block(
@@ -2933,10 +3497,12 @@ def _build_integration_report(
     ``inconclusive`` block with ``measured=False`` and a ``reason`` is returned
     instead of silently omitting the section.
 
-    A measured lift is classified by the +/-0.05 bands (``point_verdict``). The
-    advisory ``verdict`` is downgraded to ``inconclusive`` when the per-case
-    completeness check fails, when fewer than the minimum paired cases exist,
-    or when the paired case bootstrap interval includes zero.
+    A measured lift is classified by the +/-0.05 bands (``point_verdict``).
+    The advisory ``verdict`` uses the whole paired case bootstrap interval: real
+    when it clears +0.05, negative when it stays below -0.05, cosmetic when it
+    lies inside the band. It is ``inconclusive`` when the per-case completeness
+    check fails, when fewer than the minimum paired cases exist, or when the
+    interval crosses a band edge.
     """
     if not isinstance(run_config, dict) or not _is_plugin_target(run_config):
         return None
@@ -2968,38 +3534,64 @@ def _build_integration_report(
     if not components:
         return _unmeasured(_INTEGRATION_REASON_NO_COMPONENTS, [])
 
+    raw_bases = best.get("lift_basis")
+    bases = raw_bases if isinstance(raw_bases, dict) else {}
     with_plugin = _finite_float(best.get("with_skill"))
     if workspace.get("sum_of_parts_arm"):
+        control_condition = "sum_of_parts"
+        basis = bases.get("integration") if isinstance(bases.get("integration"), dict) else None
         sum_of_parts = _finite_float(best.get("sum_of_parts"))
         completeness = best.get("integration_completeness")
         complete = bool(isinstance(completeness, dict) and completeness.get("complete"))
         uncertainty = _lift_uncertainty_entry(best, "integration")
     elif workspace.get("baseline_includes_workspace_skills"):
         # Legacy two-arm Integration: the single baseline is the member-skills arm.
+        control_condition = "without_skill"
+        basis = bases.get("integration") if isinstance(bases.get("integration"), dict) else None
         sum_of_parts = _finite_float(best.get("baseline"))
+        if sum_of_parts is None:
+            sum_of_parts = _finite_float(best.get("sum_of_parts"))
         completeness = None
         complete = sum_of_parts is not None and with_plugin is not None
-        uncertainty = _lift_uncertainty_entry(best, "effectiveness")
+        # Older runs filed this interval under "effectiveness".
+        uncertainty = _lift_uncertainty_entry(best, "integration") or _lift_uncertainty_entry(best, "effectiveness")
     else:
         return _unmeasured(_INTEGRATION_REASON_NO_ARM, components)
+    names = _LEGACY_ARM_NAMES if control_condition == "without_skill" else _ARM_NAMES
 
-    lift = round(with_plugin - sum_of_parts, 4) if with_plugin is not None and sum_of_parts is not None else None
+    # The headline, both arm scores and the interval share one basis: the
+    # dimensions both arms scored, as case-weighted paired means. When one
+    # arm lost a trial, the paired statistics still carry the cases both
+    # arms scored; the lift is kept as a point estimate of a partial run.
+    if basis is not None:
+        with_plugin = _finite_float(basis.get("with_skill"))
+        lift = _finite_float(basis.get("lift"))
+    elif uncertainty is not None and _finite_float(uncertainty.get("treatment_score")) is not None:
+        with_plugin = _finite_float(uncertainty.get("treatment_score"))
+        sum_of_parts = _finite_float(uncertainty.get("control_score"))
+        lift = _finite_float(uncertainty.get("estimate"))
+    else:
+        lift = round(with_plugin - sum_of_parts, 4) if with_plugin is not None and sum_of_parts is not None else None
+    if uncertainty is not None and uncertainty.get("partial") is True:
+        complete = False
     point_verdict = _integration_verdict(lift, complete=True) if lift is not None else None
     verdict = point_verdict or INTEGRATION_VERDICT_INCONCLUSIVE
     reason: str | None = None
     if lift is None:
-        reason = _INTEGRATION_REASON_NO_SCORE
+        reason = _integration_no_score_reason(best, control_condition, names=names)
     elif not complete:
-        reason = _integration_completeness_reason(completeness if isinstance(completeness, dict) else None)
+        reason = _integration_completeness_reason(
+            completeness if isinstance(completeness, dict) else None,
+            uncertainty,
+            names=names,
+        )
     elif uncertainty is not None and uncertainty.get("precision") == "insufficient":
         reason = (
             f"Only {_as_nonnegative_int(uncertainty.get('n_cases'))} paired case(s); at least "
             f"{LIFT_CI_MIN_PAIRED_CASES} are needed for a usable interval on the Integration lift."
         )
-    elif uncertainty is not None and uncertainty.get("ci_includes_zero") is True:
-        reason = (
-            f"The paired case bootstrap {_ci_text(uncertainty) or 'interval'} for the Integration lift includes zero."
-        )
+    elif uncertainty is not None:
+        verdict, reason = _integration_interval_verdict(uncertainty)
     if reason is not None:
         verdict = INTEGRATION_VERDICT_INCONCLUSIVE
     return _integration_block(
@@ -3031,9 +3623,10 @@ def _agent_quality_verdict(agent: dict[str, Any]) -> str:
     for dimension_id in _DIMENSION_IDS:
         dimension = dimensions.get(dimension_id)
         value = (dimension or {}).get("with_skill", (dimension or {}).get("score"))
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
+        numeric = _finite_float(value)
+        if numeric is None:
             return VERDICT_NEUTRAL
-        scores.append(float(value))
+        scores.append(numeric)
 
     if any(score < DIMENSION_VERDICT_NEUTRAL_THRESHOLD for score in scores):
         return VERDICT_FAIL
@@ -3054,22 +3647,79 @@ def _overall_verdict_from_agents(agents: dict[str, dict[str, Any]]) -> str:
     return VERDICT_FAIL
 
 
+def _canonical_agent_rank(agent: dict[str, Any]) -> tuple[float, float] | None:
+    """Return the score/lift tuple used to rank one canonical agent payload."""
+    if agent.get("execution_status") != "succeeded":
+        return None
+    score = _finite_float(agent.get("with_skill"))
+    if score is None:
+        return None
+    return score, _as_float(agent.get("lift"))
+
+
+def _canonical_agent_rank_from_info(info: dict[str, Any]) -> tuple[float, float] | None:
+    """Build and rank raw Harbor agent data exactly as the canonical report does."""
+    from skillevaluator.tier3.harbor.report_data import metrics_for_condition
+
+    agent = _build_agent(
+        "",
+        info,
+        metrics_for_condition(info, "with_skill"),
+        metrics_for_condition(info, "without_skill"),
+        None,
+    )
+    return _canonical_agent_rank(agent)
+
+
+def _attach_integration_reports(
+    payload: dict[str, Any],
+    agents: dict[str, dict[str, Any]],
+    best_agent: str,
+    run_config: dict[str, Any] | None,
+    plugin_provenance: dict[str, Any] | None,
+) -> None:
+    """Give every agent its own named Integration block, and the run one for its Integration agent.
+
+    A multi-agent run compares each agent's plugin arm with that agent's
+    member-skills arm; one unnamed block from the best agent hid the others.
+    ``payload["integration"]`` stays the run-level block (the best agent's,
+    or the first agent with an Integration comparison) and names its agent.
+    """
+    primary = _integration_agent(agents, best_agent)
+    primary_name = next((name for name, agent in agents.items() if agent is primary), "")
+    for name, agent in agents.items():
+        block = _build_integration_report(agent, run_config, plugin_provenance)
+        if block is None:
+            continue
+        block["agent"] = name
+        agent["integration"] = block
+        if name == primary_name:
+            payload["integration"] = dict(block)
+
+
+def _integration_agent(agents: dict[str, dict[str, Any]], best_agent: str) -> dict[str, Any]:
+    """The agent whose Integration comparison the run-level block reports.
+
+    The best agent when there is one. Integration compares the with-plugin and
+    member-skills arms only, so an agent whose no-plugin baseline lost a trial
+    (and so is not "succeeded") still has a valid Integration comparison.
+    """
+    if best_agent and best_agent in agents:
+        return agents[best_agent]
+    for name in sorted(agents):
+        agent = agents[name]
+        if _lift_uncertainty_entry(agent, "integration") or _finite_float(agent.get("sum_of_parts")) is not None:
+            return agent
+    return next((agents[name] for name in sorted(agents)), {})
+
+
 def _pick_best_agent(agents: dict[str, dict[str, Any]]) -> str:
-    eligible = {
-        name: agent
-        for name, agent in agents.items()
-        if agent.get("execution_status") == "succeeded" and _finite_float(agent.get("with_skill")) is not None
-    }
+    eligible = {name: rank for name, agent in agents.items() if (rank := _canonical_agent_rank(agent)) is not None}
     if not eligible:
         return ""
     if len(eligible) == 1:
         return next(iter(eligible))
-
-    def _key(item: tuple[str, dict[str, Any]]) -> tuple[float, float]:
-        _name, agent = item
-        return (_as_float(agent.get("with_skill")), _as_float(agent.get("lift")))
-
-    return max(eligible.items(), key=_key)[0]
+    return max(eligible.items(), key=lambda item: item[1])[0]
 
 
 def _insights_from_dimensions(dimensions: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -3290,24 +3940,19 @@ _SIGNAL_REWARD_FIELDS = {
 
 
 def _top_argument_failures(rewards: object) -> list[dict[str, Any]]:
-    """Aggregate per-trial ``plugin_signals.arguments.failures`` into the most frequent failures."""
-    counts: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for reward in rewards[:_MAX_RAW_TRIAL_REWARDS_TOTAL] if isinstance(rewards, list) else []:
-        signals = reward.get("plugin_signals") if isinstance(reward, dict) else None
-        arguments = signals.get("arguments") if isinstance(signals, dict) else None
-        failures = arguments.get("failures") if isinstance(arguments, dict) else None
-        for failure in failures[:_MAX_SIGNAL_LIST_ITEMS] if isinstance(failures, list) else []:
-            if not isinstance(failure, dict):
-                continue
-            key = tuple(str(failure.get(field) or "")[:200] for field in ("tool", "arg", "rule"))
-            entry = counts.setdefault(
-                key,
-                {"tool": key[0], "arg": key[1], "rule": key[2], "detail": str(failure.get("detail") or "")[:300]},
-            )
-            entry["count"] = entry.get("count", 0) + 1
-    return sorted(counts.values(), key=lambda item: (-item["count"], item["tool"], item["arg"]))[
-        :_MAX_TOP_ARGUMENT_FAILURES
-    ]
+    """Aggregate per-trial ``plugin_signals.arguments.failures`` into the most frequent failures.
+
+    Every recorded failure row of the first ``_MAX_RAW_TRIAL_REWARDS_TOTAL``
+    rewards counts (the grader keeps at most 50 per trial). Only a fallback for
+    summaries without the collector's exact ``top_failures`` (older runs).
+    """
+    from skillevaluator.tier3.eval_core.plugin_signals import top_argument_failures
+
+    rows = rewards[:_MAX_RAW_TRIAL_REWARDS_TOTAL] if isinstance(rewards, list) else []
+    return top_argument_failures(
+        (reward.get("plugin_signals") for reward in rows if isinstance(reward, dict)),
+        limit=_MAX_TOP_ARGUMENT_FAILURES,
+    )
 
 
 def _attach_plugin_report_fields(payload: dict[str, Any], agents: dict[str, dict[str, Any]]) -> None:
@@ -3331,7 +3976,13 @@ def _attach_plugin_report_fields(payload: dict[str, Any], agents: dict[str, dict
         summaries = _bounded_report_copy(signals)
         for arm, summary in summaries.items():
             arguments = summary.get("arguments") if isinstance(summary, dict) else None
-            if isinstance(arguments, dict) and "failures" not in arguments and arm in _SIGNAL_REWARD_FIELDS:
+            if (
+                isinstance(arguments, dict)
+                and "failures" not in arguments
+                and not arguments.get("top_failures")
+                and arm in _SIGNAL_REWARD_FIELDS
+            ):
+                # The collector's exact counts win; the bounded rewards are only a fallback for older runs.
                 top = _top_argument_failures(raw_agent.get(_SIGNAL_REWARD_FIELDS[arm]))
                 if top:
                     arguments["top_failures"] = top
@@ -3478,11 +4129,7 @@ def _verdict_policy(attempt_policy: dict[str, Any]) -> dict[str, Any]:
     """Expose the distinct task-attempt, dimension, and overall-lift gates."""
     attempt_threshold = attempt_policy.get("pass_threshold")
     return {
-        "attempt_pass_threshold": (
-            float(attempt_threshold)
-            if isinstance(attempt_threshold, (int, float)) and not isinstance(attempt_threshold, bool)
-            else None
-        ),
+        "attempt_pass_threshold": _finite_float(attempt_threshold),
         "dimension_pass_threshold": DIMENSION_VERDICT_PASS_THRESHOLD,
         "dimension_neutral_threshold": DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
         "lift_pass_threshold": TIER3_LIFT_PASS_THRESHOLD,
@@ -3496,18 +4143,54 @@ def _mean(values: list[float]) -> float | None:
     return round(sum(numeric) / len(numeric), 4) if numeric else None
 
 
+def _complete_mean(values: list[Any]) -> float | None:
+    """Average values only when every expected constituent is finite."""
+    if not values:
+        return None
+    numeric = [_finite_float(value) for value in values]
+    if any(value is None for value in numeric):
+        return None
+    return round(sum(value for value in numeric if value is not None) / len(numeric), 4)
+
+
+def _logical_group_entry_identity_is_consistent(group: list[dict[str, Any]]) -> bool:
+    """Reject ambiguous multi-row trials whose physical rows claim different cases."""
+    if len(group) <= 1:
+        return True
+    entry_id = group[0].get("entry_id")
+    return isinstance(entry_id, str) and bool(entry_id) and all(item.get("entry_id") == entry_id for item in group)
+
+
+def _condition_has_mixed_metric_contracts(
+    info: dict[str, Any],
+    *,
+    flag: str,
+    rewards: str,
+) -> bool:
+    """Prefer collector-owned contract truth while retaining legacy inference."""
+    explicit = info.get(flag)
+    if isinstance(explicit, bool):
+        return explicit
+
+    from skillevaluator.tier3.harbor.metrics import rewards_have_mixed_metric_contracts
+
+    return rewards_have_mixed_metric_contracts(info.get(rewards))
+
+
 def _logical_reward_mean(rewards: Any, field: str) -> float | None:
     """Average a persisted reward field once per logical Harbor trial."""
     if not isinstance(rewards, list):
         return None
     from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
 
+    groups = logical_trial_reward_groups([reward for reward in rewards if isinstance(reward, dict)])
     group_means = [
-        group_mean
-        for group in logical_trial_reward_groups([reward for reward in rewards if isinstance(reward, dict)])
-        if (group_mean := _mean([reward.get(field) for reward in group])) is not None
+        _complete_mean([reward.get(field) for reward in group])
+        if _logical_group_entry_identity_is_consistent(group)
+        else None
+        for group in groups
     ]
-    return _mean(group_means)
+    return _complete_mean(group_means)
 
 
 def _as_float(value: Any) -> float:
@@ -3516,6 +4199,16 @@ def _as_float(value: Any) -> float:
 
 def _as_nonnegative_int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _aggregate_execution_error_details(
+    summaries: dict[str, dict[str, Any]],
+    displayed_count: int,
+) -> dict[str, Any]:
+    """Aggregate hidden diagnostic occurrences without duplicating display text."""
+    from skillevaluator.tier3.harbor.report_data import aggregate_execution_error_details
+
+    return aggregate_execution_error_details(summaries.values(), displayed_count)
 
 
 __all__ = [

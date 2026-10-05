@@ -187,11 +187,24 @@ def test_not_applicable_requires_the_explicit_verifier_marker() -> None:
     assert not metric_is_not_applicable(garbage, "goal_accuracy")
 
 
-def test_deterministic_metrics_can_never_be_not_applicable() -> None:
+def test_security_can_never_be_not_applicable() -> None:
+    reward = _merged((1.0, 1.0, 1.0, 1.0, 1.0, 1.0))
+    reward["security"] = None
+    reward["details"]["security"] = {"score": None, "status": "not_applicable"}
+
+    assert not metric_is_not_applicable(reward, "security")
+    assert overall_score(reward) is None
+
+
+def test_skill_metrics_are_not_applicable_only_with_the_verifier_marker() -> None:
+    # Proof H5: an arm without the skill records the skill metrics as N/A.
     reward = _merged((1.0, 1.0, 1.0, 1.0, 1.0, 1.0))
     reward["skill_execution"] = None
     reward["details"]["skill_execution"] = {"score": None, "status": "not_applicable"}
 
+    assert metric_is_not_applicable(reward, "skill_execution")
+    assert overall_score(reward) == pytest.approx(1.0)
+    del reward["details"]["skill_execution"]
     assert not metric_is_not_applicable(reward, "skill_execution")
     assert overall_score(reward) is None
 

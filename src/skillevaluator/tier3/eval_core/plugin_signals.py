@@ -154,6 +154,13 @@ MAX_COMPONENT_NAME_CHARS = 256
 # -- trajectory bounds ---------------------------------------------------------
 _MAX_STEPS = 10_000
 _MAX_CALLS = 4_000
+_MAX_STEP_RESULTS = 256
+_MAX_CONTENT_BLOCKS = 256
+# String leaves (and nesting depth) searched for an artifact path in MCP/subagent arguments.
+_MAX_STRING_LEAVES = 256
+_MAX_STRING_DEPTH = 8
+# List elements a ``contains`` argument check looks at.
+_MAX_CONTAINS_ITEMS = 1_024
 _MAX_OBSERVATION_CHARS = 64 * 1024
 _MAX_ARGS_TEXT_CHARS = 64 * 1024
 _MAX_ARGS_JSON_CHARS = 256 * 1024
@@ -173,6 +180,8 @@ _MAX_CALLED = 128
 _MAX_SERVER_TOOLS = 64
 _MAX_LABEL_CHARS = 256
 _MAX_DETAIL_CHARS = 240
+# How much of an unsupported dataset key a problem message quotes.
+_MAX_KEY_PREVIEW_CHARS = 64
 _MAX_PREVIEW_CHARS = 80
 _MAX_SCHEMA_ERRORS_PER_CALL = 5
 
@@ -206,21 +215,25 @@ _PATCH_TOOLS = frozenset({"apply_patch", "applypatch", "patch"})
 # Where harnesses put that body: Codex ``input``, OpenCode ``patchText``, Hermes
 # ``patch``, and ``raw`` for a tool input that was not a JSON object.
 _PATCH_BODY_KEYS = ("input", "patch", "patchText", "content", "raw")
-_WRITE_TOOLS = _PATCH_TOOLS | frozenset(
-    {
-        "write",
-        "write_file",
-        "create_file",
-        "edit",
-        "edit_file",
-        "multiedit",
-        "multi_edit",
-        "notebookedit",
-        "notebook_edit",
-        "str_replace_editor",
-        "str_replace_based_edit_tool",
-        "save_file",
-    }
+# Text editor tools: they write, except for their ``view`` command, which reads.
+_STR_REPLACE_EDITORS = frozenset({"str_replace_editor", "str_replace_based_edit_tool"})
+_WRITE_TOOLS = (
+    _PATCH_TOOLS
+    | _STR_REPLACE_EDITORS
+    | frozenset(
+        {
+            "write",
+            "write_file",
+            "create_file",
+            "edit",
+            "edit_file",
+            "multiedit",
+            "multi_edit",
+            "notebookedit",
+            "notebook_edit",
+            "save_file",
+        }
+    )
 )
 _PATH_ARG_KEYS = (
     "file_path",
@@ -238,6 +251,9 @@ _TOOL_NAME_SEPARATORS = ("__", ".", ":", "/")
 # ``mcp_<server>_<tool>`` with every character outside ``[A-Za-z0-9_]`` as ``_``;
 # Claude Code names plugin servers ``plugin_<plugin>_<server>``.
 _HERMES_NAME_RE = re.compile(r"[^a-z0-9_]")
+# Claude Code and OpenCode write a server name with every character outside ``[A-Za-z0-9_-]`` as ``_``.
+_SANITIZED_NAME_RE = re.compile(r"[^a-z0-9_-]")
+_MCP_PREFIX = "mcp__"
 _CLAUDE_PLUGIN_SERVER_PREFIX = "plugin_"
 # Harnesses that never name an MCP tool ``<server>_<tool>`` (only OpenCode does).
 _NO_BARE_MCP_PREFIX_AGENTS = frozenset({"claude-code", "codex", "hermes"})
@@ -278,6 +294,7 @@ _ARTIFACT_CONSUMER_VERBS = _FILE_READER_VERBS | frozenset(
 _SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "(", ")", ";;", "|&", ";&"})
 _OUTPUT_REDIRECTS = frozenset({">", ">>", ">|", "&>", "&>>", "1>", "2>"})
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_REPEATED_SLASHES_RE = re.compile(r"/{2,}")
 # ``<<EOF``/``<<-'EOF'``/``<<"EOF"`` (not ``<<<`` here-strings); the groups hold the delimiter.
 _HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)-?[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z_][A-Za-z0-9_]*))")
 _WRITE_VERB_RE = re.compile(
@@ -407,7 +424,7 @@ def _check_object(raw: Any, where: str, errors: _FieldErrors, allowed_keys: froz
     if not isinstance(raw, dict):
         errors.add(where, "must be an object")
         return False
-    unknown = sorted(str(key)[:64] for key in raw if key not in allowed_keys)
+    unknown = sorted(str(key)[:_MAX_KEY_PREVIEW_CHARS] for key in raw if key not in allowed_keys)
     if unknown:
         errors.add(where, f"unsupported keys: {', '.join(unknown)}")
         return False
@@ -522,7 +539,8 @@ def _check_schema(schema: Any, where: str, errors: _FieldErrors, *, depth: int, 
         if key not in _SCHEMA_KEYWORDS and key not in _SCHEMA_ANNOTATIONS:
             errors.add(
                 where,
-                f"unsupported JSON-Schema keyword {str(key)[:64]!r}; supported: {', '.join(sorted(_SCHEMA_KEYWORDS))}",
+                f"unsupported JSON-Schema keyword {str(key)[:_MAX_KEY_PREVIEW_CHARS]!r}; "
+                f"supported: {', '.join(sorted(_SCHEMA_KEYWORDS))}",
             )
             ok = False
     if "type" in schema:
@@ -1058,7 +1076,7 @@ def _content_parts(content: Any) -> list[str]:
     if isinstance(content, list):
         parts: list[str] = []
         size = 0
-        for block in content[:256]:
+        for block in content[:_MAX_CONTENT_BLOCKS]:
             if isinstance(block, dict) and isinstance(block.get("text"), str):
                 part = block["text"]
             elif isinstance(block, str):
@@ -1113,7 +1131,7 @@ def _observations(step: Mapping[str, Any]) -> list[_Result]:
     if not isinstance(results, list):
         return []
     entries: list[_Result] = []
-    for result in results[:256]:
+    for result in results[:_MAX_STEP_RESULTS]:
         if not isinstance(result, Mapping):
             continue
         parts = _content_parts(result.get("content"))
@@ -1201,7 +1219,7 @@ def _base_tool_name(fn: str) -> str:
 
 
 def _norm_server(value: str) -> str:
-    return re.sub(r"[^a-z0-9_-]", "_", value.casefold())
+    return _SANITIZED_NAME_RE.sub("_", value.casefold())
 
 
 def _server_spellings(server: str) -> tuple[str, ...]:
@@ -1265,8 +1283,8 @@ def _mcp_identity(fn: str, declared_mcp: Sequence[str], *, agent: str = "") -> t
     is left unattributed.
     """
     low = fn.casefold()
-    if low[:5] == "mcp__":
-        server, _, tool = fn[5:].partition("__")
+    if low.startswith(_MCP_PREFIX):
+        server, _, tool = fn[len(_MCP_PREFIX) :].partition("__")
         if not server:
             return None
         return match_declared_mcp_server(server, declared_mcp) or server, tool
@@ -1303,7 +1321,7 @@ def _first_string(args: Mapping[str, Any], keys: Sequence[str]) -> str:
 
 def _normalize_path(value: str) -> str:
     text = value.strip().strip("'\"").replace("\\", "/")
-    text = re.sub(r"/{2,}", "/", text)
+    text = _REPEATED_SLASHES_RE.sub("/", text)
     while text.startswith("./"):
         text = text[2:]
     return text.rstrip("/") if len(text) > 1 else text
@@ -1318,10 +1336,10 @@ def _path_args(args: Mapping[str, Any]) -> list[str]:
     return paths
 
 
-def _string_values(value: Any, *, limit: int = 256, depth: int = 0) -> list[str]:
+def _string_values(value: Any, *, limit: int = _MAX_STRING_LEAVES, depth: int = 0) -> list[str]:
     """Bounded list of string leaves in a JSON-ish value."""
     found: list[str] = []
-    if depth > 8:
+    if depth > _MAX_STRING_DEPTH:
         return found
     if isinstance(value, str):
         return [value[:_MAX_ARGS_TEXT_CHARS]]
@@ -1484,6 +1502,11 @@ def _shell_io(text: str, *, reader_verbs: frozenset[str]) -> tuple[list[str], li
     return reads, writes
 
 
+def _is_editor_view(fn_base: str, args: Mapping[str, Any]) -> bool:
+    """A text editor tool call running its ``view`` command (a read)."""
+    return fn_base in _STR_REPLACE_EDITORS and str(args.get("command") or "").casefold() == "view"
+
+
 def _member_manifest_match(path: str, members: Sequence[str]) -> str | None:
     normalized = _normalize_path(path).casefold()
     for member in members:
@@ -1497,9 +1520,10 @@ def _declared_skill_reads(fn_base: str, args: Mapping[str, Any], members: Sequen
     """The declared members whose ``SKILL.md`` this call reads, in order (every one in a chained shell command)."""
     if not members:
         return []
-    reads_file = fn_base in _READ_TOOLS or (is_mcp and bool(_READ_VERB_RE.search(fn_base)))
-    if fn_base in {"str_replace_editor", "str_replace_based_edit_tool"}:
-        reads_file = str(args.get("command") or "").casefold() == "view"
+    if fn_base in _STR_REPLACE_EDITORS:
+        reads_file = _is_editor_view(fn_base, args)
+    else:
+        reads_file = fn_base in _READ_TOOLS or (is_mcp and bool(_READ_VERB_RE.search(fn_base)))
     paths: list[str] = []
     if reads_file:
         paths = _path_args(args)
@@ -1631,7 +1655,7 @@ def _extract_calls(
             outer_id = str(raw.get("tool_call_id") or raw.get("id") or "")
             name = _tool_name(raw)
             server = (mcp_call_servers or {}).get(outer_id) if outer_id else None
-            if server and name and name[:5].casefold() != "mcp__":
+            if server and name and not name.casefold().startswith(_MCP_PREFIX):
                 # The harness log names the server this bare MCP tool name came from (Codex).
                 name = f"mcp__{server}__{name}"[:_MAX_LABEL_CHARS]
             prepared = {**raw, "function_name": name, "arguments": _arguments(raw)}
@@ -1999,7 +2023,9 @@ def _argument_failures(
         if isinstance(actual, str):
             found = needle in actual
         elif isinstance(actual, list):
-            found = any(item == needle or (isinstance(item, str) and needle in item) for item in actual[:1024])
+            found = any(
+                item == needle or (isinstance(item, str) and needle in item) for item in actual[:_MAX_CONTAINS_ITEMS]
+            )
         else:
             found = needle in (_bounded_json_text(actual, _MAX_ARGS_TEXT_CHARS) or "")
         if not found:
@@ -2169,9 +2195,7 @@ def _patch_targets(args: Mapping[str, Any]) -> list[str]:
 def _call_writes(call: _Call, artifact: str) -> bool:
     fn_base = call.fn_base
     if fn_base in _WRITE_TOOLS:
-        if fn_base in {"str_replace_editor", "str_replace_based_edit_tool"} and (
-            str(call.args.get("command") or "").casefold() == "view"
-        ):
+        if _is_editor_view(fn_base, call.args):
             return False
         if any(_path_matches(path, artifact) for path in _path_args(call.args)):
             return True
@@ -2191,13 +2215,9 @@ def _call_writes(call: _Call, artifact: str) -> bool:
 
 def _call_reads(call: _Call, artifact: str) -> bool:
     fn_base = call.fn_base
-    if (
-        fn_base in _READ_TOOLS
-        or (
-            fn_base in {"str_replace_editor", "str_replace_based_edit_tool"}
-            and str(call.args.get("command") or "").casefold() == "view"
-        )
-    ) and any(_path_matches(path, artifact) for path in _path_args(call.args)):
+    if (fn_base in _READ_TOOLS or _is_editor_view(fn_base, call.args)) and any(
+        _path_matches(path, artifact) for path in _path_args(call.args)
+    ):
         return True
     if call.is_shell:
         return any(_normalized_path_matches(path, artifact) for path in call.shell_paths.reads)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -401,6 +402,52 @@ def test_collector_credits_codex_mcp_calls_from_the_codex_logs(tmp_path: Path, l
     assert summary["mcp_calls"]["by_server"]["docs"]["succeeded"] == 1
     assert summary["activation_coverage"]["exercised"] == ["mcp:docs"]
     assert summary["tool_selection"]["recall"] == 1.0
+
+
+def test_codex_session_walk_lists_session_logs_in_order_without_following_links(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.collector import _codex_session_files
+
+    sessions = tmp_path / "agent" / "sessions"
+    for relative in ("2026/10/05/rollout-b.jsonl", "2026/10/04/rollout-a.jsonl", "top.jsonl", "notes.txt"):
+        _write(sessions / relative, SESSION_LOG)
+    outside = tmp_path / "outside"
+    _write(outside / "rollout-outside.jsonl", SESSION_LOG)
+    (sessions / "linked-dir").symlink_to(outside, target_is_directory=True)
+    (sessions / "linked.jsonl").symlink_to(outside / "rollout-outside.jsonl")
+
+    assert _codex_session_files(sessions) == [
+        sessions / "top.jsonl",
+        sessions / "2026" / "10" / "04" / "rollout-a.jsonl",
+        sessions / "2026" / "10" / "05" / "rollout-b.jsonl",
+    ]
+    linked_sessions = tmp_path / "linked-agent" / "sessions"
+    linked_sessions.parent.mkdir()
+    linked_sessions.symlink_to(sessions, target_is_directory=True)
+    assert _codex_session_files(linked_sessions) == []
+
+
+def test_codex_session_walk_stops_at_its_entry_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.harbor import collector
+
+    sessions = tmp_path / "agent" / "sessions"
+    for index in range(200):
+        (sessions / f"empty-{index:03d}").mkdir(parents=True)
+    _write(sessions / "zz" / "rollout.jsonl", SESSION_LOG)
+    assert collector._codex_session_files(sessions) == [sessions / "zz" / "rollout.jsonl"]
+
+    listed: list[str] = []
+    real_scandir = os.scandir
+
+    def counting_scandir(path: os.PathLike[str] | str):
+        listed.append(os.fspath(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(collector, "_CODEX_SESSION_WALK_ENTRIES", 64)
+    monkeypatch.setattr(collector.os, "scandir", counting_scandir)
+
+    # The root alone holds more entries than the budget, so nothing below it is listed.
+    assert collector._codex_session_files(sessions) == []
+    assert listed == [os.fspath(sessions)]
 
 
 # --------------------------------------------------------------------------- #

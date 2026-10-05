@@ -1624,6 +1624,84 @@ def test_generated_output_cleanup_refuses_symlink_escape(tmp_path: Path) -> None
     assert sentinel.read_text(encoding="utf-8") == "do not delete"
 
 
+def _write_sum_of_parts_run(jobs_dir: Path) -> None:
+    for variant, score in (("with", 0.9), ("sumofparts", 0.6)):
+        job_dir = jobs_dir / f"demo-opencode-{variant}"
+        _write_reward(job_dir, "case-001__attempt", _default_reward("case-001", score))
+        _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+
+def _collect_sum_of_parts(tmp_path: Path, *, sum_of_parts_arm: bool) -> dict[str, object]:
+    return collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=tmp_path / "jobs",
+        skip_baseline=True,
+        sum_of_parts_arm=sum_of_parts_arm,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+
+def test_rerun_without_sum_of_parts_arm_clears_its_stale_outputs(tmp_path: Path) -> None:
+    _write_sum_of_parts_run(tmp_path / "jobs")
+    agent_dir = tmp_path / "results" / "opencode"
+
+    first = _collect_sum_of_parts(tmp_path, sum_of_parts_arm=True)
+
+    assert first["agents"]["opencode"]["integration_lift"]
+    assert (agent_dir / "sum-of-parts" / "summary.json").is_file()
+    assert (agent_dir / "sum-of-parts" / "trials" / "case-001__attempt" / "reward.json").is_file()
+    assert (agent_dir / "integration_lift.json").is_file()
+
+    second = _collect_sum_of_parts(tmp_path, sum_of_parts_arm=False)
+
+    assert second["execution_status"] == "succeeded"
+    assert second["agents"]["opencode"]["integration_lift"] == {}
+    assert not (agent_dir / "sum-of-parts" / "summary.json").exists()
+    assert not (agent_dir / "sum-of-parts" / "trials").exists()
+    assert not (agent_dir / "integration_lift.json").exists()
+    reloaded = report_data.load_agent_data(tmp_path / "results")["opencode"]
+    assert reloaded["sum_of_parts"] == {}
+    assert reloaded["overall_sum_of_parts"] is None
+
+
+def test_generated_output_cleanup_refuses_symlinked_sum_of_parts_directory(tmp_path: Path) -> None:
+    _write_sum_of_parts_run(tmp_path / "jobs")
+    agent_dir = tmp_path / "results" / "opencode"
+    agent_dir.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "summary.json"
+    sentinel.write_text("do not replace", encoding="utf-8")
+    (agent_dir / "sum-of-parts").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlinked generated output directory"):
+        _collect_sum_of_parts(tmp_path, sum_of_parts_arm=True)
+
+    assert sentinel.read_text(encoding="utf-8") == "do not replace"
+    assert not (outside / "trials").exists()
+
+
+def test_integration_lift_write_does_not_follow_a_planted_symlink(tmp_path: Path) -> None:
+    _write_sum_of_parts_run(tmp_path / "jobs")
+    agent_dir = tmp_path / "results" / "opencode"
+    agent_dir.mkdir(parents=True)
+    sentinel = tmp_path / "outside-integration_lift.json"
+    sentinel.write_text("outside sentinel", encoding="utf-8")
+    (agent_dir / "integration_lift.json").symlink_to(sentinel)
+
+    _collect_sum_of_parts(tmp_path, sum_of_parts_arm=True)
+
+    assert sentinel.read_text(encoding="utf-8") == "outside sentinel"
+    generated = agent_dir / "integration_lift.json"
+    assert generated.is_file()
+    assert not generated.is_symlink()
+    assert json.loads(generated.read_text(encoding="utf-8"))["overall"]["delta"] == 0.3
+
+
 def test_reused_results_remove_omitted_agent_from_report_discovery(tmp_path: Path, monkeypatch) -> None:
     for agent, score in (("opencode", 0.2), ("claude-code", 0.1)):
         job_dir = tmp_path / "jobs" / f"demo-{agent}-with"

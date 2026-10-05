@@ -25,9 +25,9 @@ from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRICS,
     DIMENSION_DISPLAY,
     METRIC_DISPLAY,
-    NOT_APPLICABLE_ELIGIBLE_METRICS,
     dimension_is_not_applicable,
     finite_number,
+    not_applicable_list,
 )
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.tier3.harbor.runner import format_harbor_view_command
@@ -75,9 +75,7 @@ def _not_applicable_metrics(data: Mapping[str, Any], variant: str) -> frozenset[
         return frozenset()
     by_variant = data.get("not_applicable_metrics")
     raw = by_variant.get(variant) if isinstance(by_variant, Mapping) else None
-    if not isinstance(raw, list | tuple):
-        return frozenset()
-    return frozenset(metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric in raw)
+    return frozenset(not_applicable_list(raw))
 
 
 def _delta_cell(value: object) -> Text:

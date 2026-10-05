@@ -35,6 +35,7 @@ from skillevaluator.tier3.harbor.metrics import (
     dimension_scores,
     metric_is_not_applicable,
     not_applicable_counts,
+    not_applicable_list,
     not_applicable_metrics,
     overall_score,
 )
@@ -225,6 +226,14 @@ def test_arm_averages_and_counts_exclude_not_applicable_trials() -> None:
     }
     assert not_applicable_metrics(rewards, metrics) == ["behavior_check"]
     assert not_applicable_counts(rewards, metrics) == {"accuracy": 1, "goal_accuracy": 1, "behavior_check": 2}
+
+
+def test_stored_not_applicable_list_keeps_judged_metrics_in_canonical_order() -> None:
+    assert not_applicable_list(["behavior_check", "security", "accuracy", 7, None]) == ["accuracy", "behavior_check"]
+    assert not_applicable_list(("goal_accuracy",)) == ["goal_accuracy"]
+    assert not_applicable_list("accuracy") == []
+    assert not_applicable_list({"accuracy": True}) == []
+    assert not_applicable_list(None) == []
 
 
 def test_dimension_scores_renormalize_over_applicable_sources() -> None:

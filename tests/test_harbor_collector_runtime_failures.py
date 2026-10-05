@@ -6,16 +6,20 @@
 from __future__ import annotations
 
 import json
+import os
+from collections import Counter
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
+from skillevaluator.tier3.harbor import collector as collector_module
 from skillevaluator.tier3.harbor.collector import (
     _agent_runtime_failure_reason,
     collect_harbor_results,
 )
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
 
 
 def _write_complete_job_result(job_dir: Path, trial_names: list[str]) -> None:
@@ -569,6 +573,127 @@ def test_sum_of_parts_custom_only_overall_uses_logical_attempts(tmp_path: Path) 
     assert summary["overall_score"] == 0.7
 
 
+@pytest.mark.parametrize(
+    ("variant", "condition", "arm"),
+    [
+        ("with", "with-skill", "with_skill"),
+        ("without", "without-skill", "without_skill"),
+        ("sumofparts", "sum-of-parts", "sum_of_parts"),
+    ],
+)
+def test_every_arm_persists_an_invalid_score_trial_with_its_diagnostics(
+    tmp_path: Path,
+    variant: str,
+    condition: str,
+    arm: str,
+) -> None:
+    """An unscoreable trial keeps its redacted reward.json in every arm, sum-of-parts included."""
+    jobs_dir = tmp_path / "jobs"
+    trial_name = "case-001__attempt"
+    for job_variant in ("with", "without", "sumofparts"):
+        reward: dict[str, object] = {
+            "entry_id": "case-001",
+            "metric_set": DEFAULT_METRIC_SET,
+            **dict.fromkeys(DEFAULT_METRICS, 0.9),
+        }
+        if job_variant == variant:
+            reward["evaluation_status"] = "failed"
+            reward["evaluation_errors"] = {"accuracy": "judge timed out"}
+        job_dir = jobs_dir / f"demo-opencode-{job_variant}"
+        verifier = job_dir / trial_name / "verifier"
+        verifier.mkdir(parents=True)
+        (verifier / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+        _write_complete_job_result(job_dir, [trial_name])
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        sum_of_parts_arm=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    agent = results["agents"]["opencode"]
+    assert agent["conditions"][arm]["execution_status"] == "failed"
+    [failure] = agent["trial_failures"][arm]
+    assert failure["trial"] == trial_name
+    assert "accuracy: judge timed out" in failure["reason"]
+    trial_out = tmp_path / "results" / "opencode" / condition / "trials" / trial_name
+    persisted = json.loads((trial_out / "reward.json").read_text(encoding="utf-8"))
+    assert persisted["evaluation_status"] == "failed"
+    assert persisted["evaluation_errors"] == {"accuracy": "judge timed out"}
+    assert persisted["entry_id"] == "case-001"
+    assert not (trial_out / "failure.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("missing", "condition", "arm", "launch_errors", "job_failure"),
+    [
+        (
+            "with",
+            "with-skill",
+            "with_skill",
+            ["opencode with-skill Harbor run failed: model not found"],
+            "model not found",
+        ),
+        ("without", "without-skill", "without_skill", ["opencode without-skill Harbor run failed: quota"], "quota"),
+        (
+            "sumofparts",
+            "sum-of-parts",
+            "sum_of_parts",
+            None,
+            "Harbor job directory was not created: demo-opencode-sumofparts",
+        ),
+    ],
+)
+def test_every_arm_records_a_missing_harbor_job_the_same_way(
+    tmp_path: Path,
+    missing: str,
+    condition: str,
+    arm: str,
+    launch_errors: list[str] | None,
+    job_failure: str,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    trial_name = "case-001__attempt"
+    for variant in ("with", "without", "sumofparts"):
+        if variant == missing:
+            continue
+        job_dir = jobs_dir / f"demo-opencode-{variant}"
+        verifier = job_dir / trial_name / "verifier"
+        verifier.mkdir(parents=True)
+        reward = {"entry_id": "case-001", "metric_set": DEFAULT_METRIC_SET, **dict.fromkeys(DEFAULT_METRICS, 0.9)}
+        (verifier / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+        _write_complete_job_result(job_dir, [trial_name])
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        sum_of_parts_arm=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+        launch_errors=launch_errors,
+    )
+
+    agent = results["agents"]["opencode"]
+    assert agent["job_failures"][arm] == job_failure
+    assert agent["conditions"][arm]["execution_status"] == "failed"
+    assert agent["pass_at_k"][arm] == {}
+    condition_dir = tmp_path / "results" / "opencode" / condition
+    summary = json.loads((condition_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["job_failure"] == job_failure
+    assert summary["execution_status"] == "failed"
+    assert summary["execution_errors"][0] == job_failure
+    assert (summary["scores"], summary["metrics"], summary["num_trials"]) == ({}, [], 0)
+    assert not (condition_dir / "trials").exists()
+
+
 def test_unexpected_case_fails_execution_coverage(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     job_dir = jobs_dir / "demo-opencode-with"
@@ -658,6 +783,67 @@ def _collect(tmp_path: Path, **kwargs: object) -> dict[str, object]:
         jobs_dir=tmp_path / "jobs",
         **options,
     )
+
+
+def test_every_arm_persists_the_expected_case_id_of_a_result_derived_entry(tmp_path: Path) -> None:
+    """Saved trials resolve fallback case ids against the expected cases in every arm."""
+    jobs_dir = tmp_path / "jobs"
+    for variant, arm_suffix in (
+        ("with", "-with-skill"),
+        ("without", "-without-skill"),
+        ("sumofparts", "-without-skill"),
+    ):
+        _write_reward(
+            jobs_dir,
+            variant=variant,
+            case_id="case-a",
+            attempt=1,
+            score=1.0,
+            include_entry_id=False,
+            result_task_name=f"skillevaluator-case-a{arm_suffix}",
+        )
+    _write_variant_job_results(jobs_dir, ("with", "without", "sumofparts"))
+
+    result = _collect(tmp_path, n_attempts=1, expected_cases=1, expected_case_ids=["case-a"], sum_of_parts_arm=True)
+
+    assert result["execution_status"] == "succeeded"
+    agent = result["agents"]["opencode"]
+    for arm, condition in (
+        ("with_skill", "with-skill"),
+        ("without_skill", "without-skill"),
+        ("sum_of_parts", "sum-of-parts"),
+    ):
+        assert list(agent["pass_at_k"][arm]["cases"]) == ["case-a"]
+        reward_file = tmp_path / "results" / "opencode" / condition / "trials" / "case-a_attempt001" / "reward.json"
+        assert json.loads(reward_file.read_text(encoding="utf-8"))["entry_id"] == "case-a", condition
+
+
+def test_collection_reads_each_trial_finding_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Failure checks and judge sidecars are read once per trial, not once per check or reward row."""
+    jobs_dir = tmp_path / "jobs"
+    for variant in ("with", "without"):
+        for case_id in CASES:
+            _write_reward(jobs_dir, variant=variant, case_id=case_id, attempt=1, steps=("prepare", "finish"))
+    _write_variant_job_results(jobs_dir)
+    reads: Counter[tuple[str, str]] = Counter()
+
+    def counted(name: str) -> Any:
+        original = getattr(collector_module, name)
+
+        def wrapper(trial_dir: Path, *args: Any) -> Any:
+            reads[(name, os.fspath(trial_dir))] += 1
+            return original(trial_dir, *args)
+
+        return wrapper
+
+    for name in ("_agent_runtime_failure_reason", "_trial_failure_reason", "_judge_sidecar_findings"):
+        monkeypatch.setattr(collector_module, name, counted(name))
+
+    result = _collect(tmp_path, n_attempts=1)
+
+    assert result["execution_status"] == "succeeded"
+    assert len(reads) == 3 * 2 * len(CASES)  # each finding, for each trial of both arms
+    assert set(reads.values()) == {1}
 
 
 def test_stop_on_pass_does_not_report_intentionally_skipped_attempts(tmp_path: Path) -> None:

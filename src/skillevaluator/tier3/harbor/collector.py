@@ -18,7 +18,9 @@ import shutil
 import stat
 import sys
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +57,15 @@ from skillevaluator.tier3.harbor.metrics import (
     overall_score,
     score_definition,
 )
-from skillevaluator.tier3.harbor.stats import ArmObservations, TrialObservation, build_agent_statistics
+from skillevaluator.tier3.harbor.stats import (
+    ARM_SUM_OF_PARTS,
+    ARM_WITH,
+    ARM_WITHOUT,
+    STATISTICS_BLOCKS,
+    ArmObservations,
+    TrialObservation,
+    build_agent_statistics,
+)
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
 from skillevaluator.tier3.toml_utils import extract_toml_metadata_entry_id
 from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_data, redact_sensitive_text
@@ -83,15 +93,61 @@ AGENT_LOG_ARTIFACTS = (
     "opencode.txt",
     "hermes.txt",
 )
+
+
+@dataclass(frozen=True)
+class _ArmSpec:
+    """How one evaluation arm's Harbor job is named, staged and saved."""
+
+    # Arm key in results, statistics and plugin signals.
+    key: str
+    # Suffix of the arm's Harbor job name and of its staged task directory.
+    variant: str
+    # Results subdirectory holding the arm's summary.json and trials/.
+    directory: str
+    # ``variant`` recorded in the arm's saved trial artifacts.
+    trial_variant: str
+    # Dual-arm suffix carried by the arm's staged task names.
+    arm_suffix: str
+    # Summarize the hook census over every trial of the job, scored or not.
+    hook_census_every_trial: bool = False
+
+
+_WITH_SKILL_ARM = _ArmSpec(
+    key=ARM_WITH,
+    variant="with",
+    directory="with-skill",
+    trial_variant="with_skill",
+    arm_suffix="-with-skill",
+    # Plugin hooks run in every with-plugin trial, including unscored ones.
+    hook_census_every_trial=True,
+)
+_WITHOUT_SKILL_ARM = _ArmSpec(
+    key=ARM_WITHOUT,
+    variant="without",
+    directory="without-skill",
+    trial_variant="without_skill",
+    arm_suffix="-without-skill",
+)
+# The report-only sum-of-parts arm is staged with the baseline's dual-arm suffix.
+_SUM_OF_PARTS_ARM = _ArmSpec(
+    key=ARM_SUM_OF_PARTS,
+    variant="sumofparts",
+    directory="sum-of-parts",
+    trial_variant="sumofparts",
+    arm_suffix="-without-skill",
+)
+
 GENERATED_AGENT_ARTIFACTS = (
     "lift.json",
+    "integration_lift.json",
     "custom_lift.json",
     "pass_at_k_lift.json",
     "security_attribution.json",
     "findings.json",
     "statistics.json",
 )
-GENERATED_CONDITION_DIRS = ("with-skill", "without-skill")
+GENERATED_CONDITION_DIRS = tuple(arm.directory for arm in (_WITH_SKILL_ARM, _WITHOUT_SKILL_ARM, _SUM_OF_PARTS_ARM))
 GENERATED_ROOT_ARTIFACTS = ("attempt_policy.json", "comparison.json")
 _MAX_FAILED_JUDGE_SIDECARS = 64
 _MAX_FAILED_JUDGE_STEP_PATHS_SCANNED = 256
@@ -226,14 +282,14 @@ def _reset_agent_generated_outputs(agent_dir: Path, output_root: Path) -> None:
 
 
 def _find_job_dir(jobs_dir: Path, job_name: str) -> Path | None:
-    """Find a Harbor job directory by name."""
+    """Return the Harbor job directory named ``job_name``, if Harbor created it.
+
+    The runner passes ``--job-name`` to Harbor, so only an exact match is that
+    job. A partial match could pick another arm's job: ``<skill>-<agent>-with``
+    is a prefix of ``<skill>-<agent>-without`` and of stop-on-pass attempt jobs.
+    """
     candidate = jobs_dir / job_name
-    if candidate.exists():
-        return candidate
-    for d in sorted(jobs_dir.iterdir(), reverse=True):
-        if d.is_dir() and job_name in d.name:
-            return d
-    return None
+    return candidate if candidate.exists() else None
 
 
 def _safe_text(value: Any, *, max_len: int | None = 2048) -> str:
@@ -267,11 +323,17 @@ def _safe_evaluation_errors(value: Any) -> dict[str, str] | list[str] | str:
     return _safe_diagnostic_text(value, max_len=512)
 
 
-def _read_json(path: Path) -> Any:
-    """Read one bounded regular JSON file through an anchored no-follow root."""
+def _read_json(path: Path, *, root: Path | None = None) -> Any:
+    """Read one bounded regular JSON file through an anchored no-follow root, or return ``None``.
+
+    The read is anchored at *root* (default: the file's directory), and no path
+    component below it may be a link.
+    """
+    anchor = path.parent if root is None else root
     try:
-        with SecureRoot(path.parent) as secure_root:
-            raw, _metadata = secure_root.read_bytes(Path(path.name), DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES)
+        relative = path.relative_to(anchor)
+        with SecureRoot(anchor) as secure_root:
+            raw, _metadata = secure_root.read_bytes(relative, DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES)
         return json.loads(raw)
     except (SecurePathError, ValueError, OSError, RecursionError, UnicodeError):
         return None
@@ -606,10 +668,6 @@ def _agent_runtime_failure_reason(trial_dir: Path) -> str:
     return ""
 
 
-def _is_agent_runtime_failure_trial(trial_dir: Path) -> bool:
-    return bool(_agent_runtime_failure_reason(trial_dir))
-
-
 def _read_failed_judge_sidecar(
     path: Path,
     *,
@@ -722,16 +780,58 @@ def _failed_judge_sidecar_paths(trial_dir: Path) -> tuple[list[tuple[str, Path, 
     return sorted(candidates, key=lambda item: (item[0], item[1].as_posix())), scan_failure
 
 
+@dataclass(frozen=True)
+class _JudgeSidecarFindings:
+    """What one trial's verifier sidecars say, from one bounded no-follow scan.
+
+    Readers share one instance per trial and must not modify it.
+    """
+
+    # The failed-judge diagnostic that makes the trial unscoreable, if any.
+    failure_diagnostic: dict[str, Any] | None
+    # Judged metrics each readable sidecar recorded as N/A, keyed by step
+    # directory name ("" for the trial-root verifier). Empty when the scan was
+    # incomplete; the failure diagnostic then makes the trial unscoreable.
+    declared_not_applicable: dict[str, frozenset[str]]
+
+
+def _judge_sidecar_findings(trial_dir: Path) -> _JudgeSidecarFindings:
+    """Scan and read a trial's judge sidecars once, keeping only what collection uses."""
+    sidecar_paths, scan_failure = _failed_judge_sidecar_paths(trial_dir)
+    sidecars = [
+        (step_name, *_read_failed_judge_sidecar(path, trial_dir=trial_dir, expected=expected))
+        for step_name, path, expected in sidecar_paths
+    ]
+    declared_not_applicable: dict[str, frozenset[str]] = {}
+    if not scan_failure:
+        for step_name, sidecar, read_failure in sidecars:
+            if read_failure or sidecar is None:
+                continue
+            declared_not_applicable[step_name] = frozenset(
+                metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric_is_not_applicable(sidecar, metric)
+            )
+    return _JudgeSidecarFindings(
+        failure_diagnostic=_judge_failure_diagnostic(sidecars, scan_failure),
+        declared_not_applicable=declared_not_applicable,
+    )
+
+
 def _failed_judge_diagnostic(trial_dir: Path) -> dict[str, Any] | None:
-    """Project failed judge sidecars into one safe, intrinsically unscoreable record."""
+    """Project a trial's failed judge sidecars into one safe, intrinsically unscoreable record."""
+    return _judge_sidecar_findings(trial_dir).failure_diagnostic
+
+
+def _judge_failure_diagnostic(
+    sidecars: list[tuple[str, dict[str, Any] | None, str]],
+    scan_failure: str,
+) -> dict[str, Any] | None:
+    """Project read sidecars ``(step, sidecar, read failure)`` into one unscoreable record."""
     errors: dict[str, str] = {}
     entry_id = ""
-    sidecar_paths, scan_failure = _failed_judge_sidecar_paths(trial_dir)
     found_failure = bool(scan_failure)
     if scan_failure:
         errors["collector"] = scan_failure
-    for step_name, path, expected in sidecar_paths:
-        sidecar, read_failure = _read_failed_judge_sidecar(path, trial_dir=trial_dir, expected=expected)
+    for step_name, sidecar, read_failure in sidecars:
         if read_failure:
             found_failure = True
             errors.setdefault("collector", read_failure)
@@ -795,13 +895,13 @@ def _unsafe_trial_directory_reason(trial_dir: Path) -> str:
     return "Unsafe Harbor trial directory could not be inspected; trial was not scored"
 
 
-def _trial_failure_reason(trial_dir: Path) -> str:
+def _trial_failure_reason(trial_dir: Path, artifacts: _TrialArtifacts | None = None) -> str:
     """Return the failure recorded for any incomplete Harbor trial."""
     if unsafe_reason := _unsafe_trial_directory_reason(trial_dir):
         return unsafe_reason
     _, exception_reason = _trial_exception_details(trial_dir)
     if exception_reason:
-        if diagnostic := _failed_judge_diagnostic(trial_dir):
+        if diagnostic := _judge_findings(trial_dir, artifacts).failure_diagnostic:
             return _unscoreable_reward_reason(diagnostic)
         return exception_reason
     exception_file = trial_dir / "exception.txt"
@@ -812,12 +912,60 @@ def _trial_failure_reason(trial_dir: Path) -> str:
     reason = next((line for line in reversed(lines) if line), "")
     if not reason:
         return ""
-    if diagnostic := _failed_judge_diagnostic(trial_dir):
+    if diagnostic := _judge_findings(trial_dir, artifacts).failure_diagnostic:
         return _unscoreable_reward_reason(diagnostic)
     return f"HarborTrialError: {reason}"[:600]
 
 
-def _extract_trial_failures(job_dir: Path) -> list[dict[str, str]]:
+class _TrialArtifacts:
+    """Read-once findings about the trials of one Harbor job.
+
+    Collection consults each trial several times: its trial and agent-runtime
+    failures before extracting rewards and again for each reward row, its judge
+    sidecars for each reward merge, and its hook census for both the scored and
+    the every-trial summaries. A collected job no longer changes, so each
+    finding is read once through the same bounded no-follow readers. Only the
+    small findings are kept, never a parsed trajectory or log.
+    """
+
+    def __init__(self) -> None:
+        self._trial_failures: dict[Path, str] = {}
+        self._runtime_failures: dict[Path, str] = {}
+        self._judge_findings: dict[Path, _JudgeSidecarFindings] = {}
+        self._hook_censuses: dict[Path, dict[str, Any]] = {}
+
+    def trial_failure(self, trial_dir: Path) -> str:
+        if trial_dir not in self._trial_failures:
+            self._trial_failures[trial_dir] = _trial_failure_reason(trial_dir, self)
+        return self._trial_failures[trial_dir]
+
+    def runtime_failure(self, trial_dir: Path) -> str:
+        if trial_dir not in self._runtime_failures:
+            self._runtime_failures[trial_dir] = _agent_runtime_failure_reason(trial_dir)
+        return self._runtime_failures[trial_dir]
+
+    def unscoreable(self, trial_dir: Path) -> bool:
+        """Whether the trial or its agent runtime failed, so none of its rewards are scored."""
+        return bool(self.trial_failure(trial_dir) or self.runtime_failure(trial_dir))
+
+    def judge_findings(self, trial_dir: Path) -> _JudgeSidecarFindings:
+        if trial_dir not in self._judge_findings:
+            self._judge_findings[trial_dir] = _judge_sidecar_findings(trial_dir)
+        return self._judge_findings[trial_dir]
+
+    def hook_census(self, trial_root: Path) -> dict[str, Any]:
+        if trial_root not in self._hook_censuses:
+            self._hook_censuses[trial_root] = read_hook_census(trial_root)
+        return self._hook_censuses[trial_root]
+
+
+def _judge_findings(trial_dir: Path, artifacts: _TrialArtifacts | None) -> _JudgeSidecarFindings:
+    """The trial's judge sidecar findings, read once per collection when *artifacts* is given."""
+    return artifacts.judge_findings(trial_dir) if artifacts is not None else _judge_sidecar_findings(trial_dir)
+
+
+def _extract_trial_failures(job_dir: Path, artifacts: _TrialArtifacts | None = None) -> list[dict[str, str]]:
+    artifacts = artifacts or _TrialArtifacts()
     failures: list[dict[str, str]] = []
     for trial_dir in sorted(job_dir.iterdir()):
         kind, unsafe_reason = _inspect_trial_directory(trial_dir)
@@ -826,7 +974,7 @@ def _extract_trial_failures(job_dir: Path) -> list[dict[str, str]]:
             continue
         if kind != "directory":
             continue
-        reason = _trial_failure_reason(trial_dir)
+        reason = artifacts.trial_failure(trial_dir)
         if reason:
             failures.append({"trial": trial_dir.name, "reason": redact_sensitive_text(reason)})
     return failures
@@ -871,13 +1019,14 @@ def _can_preserve_partial_rewards(job_dir: Path, trial_failures: list[dict[str, 
     return len(failed_trials) >= errors
 
 
-def _extract_agent_runtime_failures(job_dir: Path) -> list[dict[str, str]]:
+def _extract_agent_runtime_failures(job_dir: Path, artifacts: _TrialArtifacts | None = None) -> list[dict[str, str]]:
+    artifacts = artifacts or _TrialArtifacts()
     failures: list[dict[str, str]] = []
     for trial_dir in sorted(job_dir.iterdir()):
         kind, _reason = _inspect_trial_directory(trial_dir)
         if kind != "directory":
             continue
-        reason = _agent_runtime_failure_reason(trial_dir)
+        reason = artifacts.runtime_failure(trial_dir)
         if reason:
             failures.append({"trial": trial_dir.name, "reason": redact_sensitive_text(reason)})
     return failures
@@ -1421,14 +1570,18 @@ def _merge_reward_sidecars(data: dict[str, Any], verifier_dir: Path) -> None:
             data.setdefault(key, value)
 
 
-def _merge_trial_evaluation_failures(data: dict[str, Any], trial_dir: Path) -> None:
+def _merge_trial_evaluation_failures(
+    data: dict[str, Any],
+    trial_dir: Path,
+    artifacts: _TrialArtifacts | None = None,
+) -> None:
     """Preserve judge-failure diagnostics when Harbor supplies an aggregate reward."""
     # Pure custom-only verifiers do not run the standard Tier-3 LLM judge and
     # must not inherit its sidecar scan limits merely because step directories
     # exist. Default and default-plus-custom rewards carry canonical metrics.
     if not _standard_reward_metrics(data):
         return
-    diagnostic = _failed_judge_diagnostic(trial_dir)
+    diagnostic = _judge_findings(trial_dir, artifacts).failure_diagnostic
     if diagnostic is None:
         return
 
@@ -1501,7 +1654,11 @@ def _physical_steps_layout_present(trial_root: Path) -> bool:
     return True
 
 
-def _constituent_default_reward_failure(result: dict[str, Any], trial_root: Path | None = None) -> str:
+def _constituent_default_reward_failure(
+    result: dict[str, Any],
+    trial_root: Path | None = None,
+    artifacts: _TrialArtifacts | None = None,
+) -> str:
     """Return a safe failure when a standard step reward cannot support its aggregate."""
     root_verifier = result.get("verifier_result")
     root_rewards = root_verifier.get("rewards") if isinstance(root_verifier, dict) else None
@@ -1593,7 +1750,7 @@ def _constituent_default_reward_failure(result: dict[str, Any], trial_root: Path
         raw_step_name = step.get("step_name")
         if trial_root is not None and isinstance(raw_step_name, str) and not missing.intersection(rewards):
             if declared_not_applicable is None:
-                declared_not_applicable = _declared_not_applicable_metrics(trial_root)
+                declared_not_applicable = _judge_findings(trial_root, artifacts).declared_not_applicable
             if missing <= declared_not_applicable.get(raw_step_name, frozenset()):
                 continue
 
@@ -1604,28 +1761,11 @@ def _constituent_default_reward_failure(result: dict[str, Any], trial_root: Path
     return ""
 
 
-def _declared_not_applicable_metrics(trial_dir: Path) -> dict[str, frozenset[str]]:
-    """Return the judged metrics each verifier sidecar recorded as N/A.
-
-    Keys are step directory names, with ``""`` for the trial-root verifier.
-    Reuses the bounded, no-follow sidecar scan; an incomplete scan declares
-    nothing (the judge-failure merge already makes that trial unscoreable).
-    """
-    sidecar_paths, scan_failure = _failed_judge_sidecar_paths(trial_dir)
-    if scan_failure:
-        return {}
-    declared: dict[str, frozenset[str]] = {}
-    for step_name, path, expected in sidecar_paths:
-        sidecar, read_failure = _read_failed_judge_sidecar(path, trial_dir=trial_dir, expected=expected)
-        if read_failure or sidecar is None:
-            continue
-        declared[step_name] = frozenset(
-            metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric_is_not_applicable(sidecar, metric)
-        )
-    return declared
-
-
-def _restore_not_applicable_markers(data: dict[str, Any], trial_dir: Path) -> None:
+def _restore_not_applicable_markers(
+    data: dict[str, Any],
+    trial_dir: Path,
+    artifacts: _TrialArtifacts | None = None,
+) -> None:
     """Carry verifier N/A markers onto a reward rebuilt from Harbor's numeric ``result.json``.
 
     A judged metric absent from the rebuilt reward becomes N/A only when every
@@ -1638,7 +1778,7 @@ def _restore_not_applicable_markers(data: dict[str, Any], trial_dir: Path) -> No
     absent = [metric for metric in metrics if metric in NOT_APPLICABLE_ELIGIBLE_METRICS and metric not in data]
     if not absent:
         return
-    declared = _declared_not_applicable_metrics(trial_dir)
+    declared = _judge_findings(trial_dir, artifacts).declared_not_applicable
     if not declared:
         return
     for metric in absent:
@@ -1650,9 +1790,10 @@ def _merge_constituent_default_reward_failure(
     data: dict[str, Any],
     result: dict[str, Any],
     trial_root: Path | None = None,
+    artifacts: _TrialArtifacts | None = None,
 ) -> None:
     """Make an aggregate unscoreable when one of its standard constituents is invalid."""
-    reason = _constituent_default_reward_failure(result, trial_root)
+    reason = _constituent_default_reward_failure(result, trial_root, artifacts)
     if not reason:
         return
     data["evaluation_status"] = "failed"
@@ -1739,8 +1880,14 @@ def _extract_rewards(
     *,
     arm_suffix: str = "",
     task_entry_id_map: Mapping[str, str] | None = None,
+    artifacts: _TrialArtifacts | None = None,
 ) -> list[dict[str, Any]]:
-    """Extract reward.json from all trials in a job directory."""
+    """Extract reward.json from all trials in a job directory.
+
+    Rewards of a failed trial, or of a trial whose agent runtime failed, are
+    never extracted.
+    """
+    artifacts = artifacts or _TrialArtifacts()
     rewards: list[dict[str, Any]] = []
     scored_trial_roots: set[Path] = set()
     authoritative_trial_roots: set[Path] = set()
@@ -1791,7 +1938,7 @@ def _extract_rewards(
     # single logical row first so both averages and pass@k use the same score.
     for result_file in sorted(job_dir.glob("*/result.json")):
         trial_dir = result_file.parent
-        if _trial_failure_reason(trial_dir) or _is_agent_runtime_failure_trial(trial_dir):
+        if artifacts.unscoreable(trial_dir):
             continue
         result = _read_json(result_file)
         if not isinstance(result, dict) or not isinstance(result.get("step_results"), list):
@@ -1802,9 +1949,9 @@ def _extract_rewards(
         data = _reward_from_harbor_result(result)
         if not data:
             continue
-        _merge_constituent_default_reward_failure(data, result, trial_dir)
-        _merge_trial_evaluation_failures(data, trial_dir)
-        _restore_not_applicable_markers(data, trial_dir)
+        _merge_constituent_default_reward_failure(data, result, trial_dir, artifacts)
+        _merge_trial_evaluation_failures(data, trial_dir, artifacts)
+        _restore_not_applicable_markers(data, trial_dir, artifacts)
         trial_name = str(result.get("trial_name") or trial_dir.name)
         data["_trial_name"] = trial_name
         data["_trial_root_name"] = trial_dir.name
@@ -1822,7 +1969,7 @@ def _extract_rewards(
         if reward_file.parent.name == "verifier":
             try:
                 trial_dir, trial_name, step_name = _reward_trial_context(reward_file)
-                if _trial_failure_reason(trial_dir) or _is_agent_runtime_failure_trial(trial_dir):
+                if artifacts.unscoreable(trial_dir):
                     continue
                 if trial_dir in authoritative_trial_roots:
                     continue
@@ -1831,13 +1978,7 @@ def _extract_rewards(
                     logger.warning("Ignoring invalid or oversized Harbor reward: %s", reward_file)
                     continue
                 _merge_reward_sidecars(data, reward_file.parent)
-                _merge_trial_evaluation_failures(data, trial_dir)
-                if _trial_failure_reason(trial_dir) or _is_agent_runtime_failure_trial(trial_dir):
-                    logger.debug(
-                        "Skipping reward for failed Harbor trial: %s",
-                        trial_dir,
-                    )
-                    continue
+                _merge_trial_evaluation_failures(data, trial_dir, artifacts)
                 data["_trial_name"] = trial_name
                 data["_trial_root_name"] = trial_dir.name
                 if arm_suffix:
@@ -1850,7 +1991,7 @@ def _extract_rewards(
                     result = _read_json(result_file)
                     if isinstance(result, dict):
                         parsed_result = result
-                        _merge_constituent_default_reward_failure(data, result, trial_dir)
+                        _merge_constituent_default_reward_failure(data, result, trial_dir, artifacts)
                         data["_started_at"] = result.get("started_at")
                 _populate_reward_entry_id(data, parsed_result, trial_name)
                 traj_file = _reward_trajectory_path(trial_dir, step_name)
@@ -1866,8 +2007,7 @@ def _extract_rewards(
         if (
             trial_dir in authoritative_trial_roots
             or trial_dir in scored_trial_roots
-            or _trial_failure_reason(trial_dir)
-            or _is_agent_runtime_failure_trial(trial_dir)
+            or artifacts.unscoreable(trial_dir)
         ):
             continue
         result = _read_json(result_file)
@@ -1876,9 +2016,9 @@ def _extract_rewards(
         data = _reward_from_harbor_result(result)
         if not data:
             continue
-        _merge_constituent_default_reward_failure(data, result, trial_dir)
-        _merge_trial_evaluation_failures(data, trial_dir)
-        _restore_not_applicable_markers(data, trial_dir)
+        _merge_constituent_default_reward_failure(data, result, trial_dir, artifacts)
+        _merge_trial_evaluation_failures(data, trial_dir, artifacts)
+        _restore_not_applicable_markers(data, trial_dir, artifacts)
         trial_name = str(result.get("trial_name") or trial_dir.name)
         data["_trial_name"] = trial_name
         data["_trial_root_name"] = trial_dir.name
@@ -2305,10 +2445,11 @@ def harbor_job_passed(job_dir: Path, pass_threshold: float) -> bool:
     step rewards are averaged only when Harbor did not persist one.
     """
     job_ok, _ = validate_harbor_job_result(job_dir / "result.json")
-    trial_failures = _extract_trial_failures(job_dir)
+    artifacts = _TrialArtifacts()
+    trial_failures = _extract_trial_failures(job_dir, artifacts)
     if not job_ok and not _can_preserve_partial_rewards(job_dir, trial_failures):
         return False
-    rewards, _ = _partition_scoreable_rewards(_extract_rewards(job_dir))
+    rewards, _ = _partition_scoreable_rewards(_extract_rewards(job_dir, artifacts=artifacts))
     return any(
         (score := _overall_score(reward)) is not None and score >= pass_threshold
         for reward in _logical_attempt_rewards(rewards)
@@ -3094,16 +3235,16 @@ def _can_restore_custom_metric_name(value: str) -> bool:
 
 def _restore_custom_metric_scores(source_reward: dict[str, Any], safe_reward: dict[str, Any]) -> None:
     """Restore only finite numeric values recognized by the custom-metric schema."""
-    for field in ("custom_metrics", "metrics"):
-        source_metrics = source_reward.get(field)
-        safe_metrics = safe_reward.get(field)
+    for metrics_key in ("custom_metrics", "metrics"):
+        source_metrics = source_reward.get(metrics_key)
+        safe_metrics = safe_reward.get(metrics_key)
         if not isinstance(source_metrics, dict) or not isinstance(safe_metrics, dict):
             continue
         for raw_name, raw_value in source_metrics.items():
             name = str(raw_name)
             if not _can_restore_custom_metric_name(name):
                 continue
-            score = extract_custom_metrics({field: {name: raw_value}}).get(name)
+            score = extract_custom_metrics({metrics_key: {name: raw_value}}).get(name)
             if score is None:
                 continue
             if isinstance(raw_value, dict):
@@ -3133,6 +3274,7 @@ def _plugin_signal_trajectory(trial_root: Path) -> dict[str, Any] | None:
 
 _CODEX_LOG_MAX_BYTES = 16 * 1024 * 1024
 _CODEX_SESSION_FILES = 8
+_CODEX_SESSION_WALK_ENTRIES = 4_096
 _CODEX_MCP_CALLS = 4_000
 _CODEX_SERVER_NAME_RE = re.compile(r"[^\x00-\x1f\x7f-\x9f]{1,128}")
 
@@ -3160,18 +3302,47 @@ def _codex_json_lines(path: Path) -> list[Any]:
     return events
 
 
-def _codex_session_files(sessions: Path) -> list[Path]:
-    found: list[Path] = []
-    if sessions.is_symlink():
-        return found
+def _is_real_directory(path: Path) -> bool:
     try:
-        for directory, subdirs, files in os.walk(sessions):
-            subdirs[:] = sorted(name for name in subdirs if not (Path(directory) / name).is_symlink())
-            found.extend(Path(directory) / name for name in sorted(files) if name.endswith(".jsonl"))
-            if len(found) >= _CODEX_SESSION_FILES:
-                break
+        metadata = path.lstat()
     except OSError:
+        return False
+    return not stat_is_link_or_reparse(metadata) and stat.S_ISDIR(metadata.st_mode)
+
+
+def _codex_session_files(sessions: Path) -> list[Path]:
+    """Return the first Codex session logs (``*.jsonl``) under ``<trial>/agent/sessions``.
+
+    The tree is agent-writable, so the walk never follows a link or reparse
+    point and lists at most ``_CODEX_SESSION_WALK_ENTRIES`` entries. It visits
+    names in sorted order, a directory's files before its subdirectories.
+    """
+    if not (_is_real_directory(sessions.parent) and _is_real_directory(sessions)):
         return []
+    found: list[Path] = []
+    budget = _CODEX_SESSION_WALK_ENTRIES
+    pending = [sessions]
+    while pending and budget > 0 and len(found) < _CODEX_SESSION_FILES:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(islice(iterator, budget), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        budget -= len(entries)
+        subdirectories: list[Path] = []
+        for entry in entries:
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat_is_link_or_reparse(metadata):
+                continue
+            if stat.S_ISDIR(metadata.st_mode):
+                subdirectories.append(Path(entry.path))
+            elif stat.S_ISREG(metadata.st_mode) and entry.name.endswith(".jsonl"):
+                found.append(Path(entry.path))
+        pending.extend(reversed(subdirectories))
     return found[:_CODEX_SESSION_FILES]
 
 
@@ -3233,6 +3404,7 @@ def _attach_plugin_signals(
     *,
     arm: str,
     expected_case_ids: list[str] | None,
+    artifacts: _TrialArtifacts | None = None,
 ) -> dict[str, Any] | None:
     """Attach report-only ``plugin_signals`` to scored rewards and return the arm summary.
 
@@ -3243,6 +3415,7 @@ def _attach_plugin_signals(
     """
     if context is None or job_dir is None or not context.arm_enabled(arm):
         return None
+    artifacts = artifacts or _TrialArtifacts()
     case_ids = set(expected_case_ids or [])
     groups: dict[str, list[dict[str, Any]]] = {}
     for reward in rewards:
@@ -3262,7 +3435,7 @@ def _attach_plugin_signals(
             subagent_aliases=context.aliases_for(arm),
         )
         # Hook census lines written by templates/hook_census.sh (native hook staging).
-        census = read_hook_census(job_dir / root)
+        census = artifacts.hook_census(job_dir / root)
         censuses.append(census)
         if signals is not None:
             signals["hook_census"] = census
@@ -3291,9 +3464,10 @@ def _arm_trial_roots(job_dir: Path | None) -> list[str]:
     return roots
 
 
-def _arm_hook_census(job_dir: Path | None) -> dict[str, Any]:
+def _arm_hook_census(job_dir: Path | None, artifacts: _TrialArtifacts | None = None) -> dict[str, Any]:
     """Hook census summary over every trial of one arm, including trials that were not scored."""
-    return summarize_hook_census([read_hook_census(job_dir / root) for root in _arm_trial_roots(job_dir)])
+    artifacts = artifacts or _TrialArtifacts()
+    return summarize_hook_census([artifacts.hook_census(job_dir / root) for root in _arm_trial_roots(job_dir)])
 
 
 def _trial_load_census(
@@ -3398,61 +3572,30 @@ def _save_trials(
     agent_model_source: str | None = None,
     expected_case_ids: list[str] | set[str] | None = None,
 ) -> None:
-    """Save per-trial reward.json and trajectory.json into the results directory."""
+    """Save each reward row's reward.json, Harbor artifacts and trajectory.json into the results directory.
+
+    Job trials without a reward row are saved as unscored trials.
+    """
     expected_id_set = _normalize_expected_case_id_set(expected_case_ids)
     trials_dir.mkdir(parents=True, exist_ok=True)
     for reward in rewards:
         trial_name, trial_root_name = _persisted_trial_name(reward)
         trial_out = trials_dir / trial_name
-        trial_out.mkdir(parents=True, exist_ok=True)
         trial_src = job_dir / trial_root_name if job_dir else None
-        src_traj = _reward_trajectory_path(trial_src, reward.get("_step_name")) if trial_src else None
-        merged_traj = (
-            _merged_step_trajectory(trial_src)
-            if trial_src and not reward.get("_step_name") and not (trial_src / "agent" / "trajectory.json").exists()
-            else None
+        _write_trial_reward(
+            reward,
+            trial_out,
+            trial_src,
+            trial_id=trial_root_name,
+            skill_name=skill_name,
+            agent=agent,
+            agent_model=agent_model,
+            agent_model_source=agent_model_source,
+            expected_id_set=expected_id_set,
         )
-        if merged_traj and "_trajectory_summary" not in reward:
-            reward["_trajectory_summary"] = _summarize_trajectory(merged_traj)
-        elif src_traj and src_traj.exists() and "_trajectory_summary" not in reward:
-            reward["_trajectory_summary"] = _summarize_trajectory_file(src_traj)
-
-        clean_reward = {k: v for k, v in reward.items() if not k.startswith("_")}
-        _add_trusted_invocation_evidence(clean_reward, reward, trial_src, skill_name)
-        # Persist the physical attempt identity so bounded report readers can keep
-        # fallback multi-step rows for diagnostics without weighting a logical
-        # Harbor trial once per step.  This also populates the canonical report's
-        # existing trial_id field instead of inventing a second report schema.
-        clean_reward["trial_id"] = trial_root_name
-        if not clean_reward.get("entry_id") or reward.get("_result_entry_id"):
-            clean_reward["entry_id"] = _entry_id(reward, expected_id_set)
-        clean_reward["agent"] = agent
-        if agent_model:
-            clean_reward["model"] = agent_model
-        if agent_model_source:
-            clean_reward["model_source"] = agent_model_source
-        if "evaluation_errors" in clean_reward:
-            clean_reward["evaluation_errors"] = _safe_evaluation_errors(clean_reward["evaluation_errors"])
-        diagnostic_reward = (
-            str(clean_reward.get("evaluation_status") or "").casefold() in {"error", "failed"}
-            or overall_score(clean_reward) is None
-        )
-        safe_reward = redact_sensitive_data(
-            clean_reward,
-            max_str_len=REWARD_DIAGNOSTIC_STRING_MAX_CHARS if diagnostic_reward else None,
-        )
-        _restore_custom_metric_scores(clean_reward, safe_reward)
-        (trial_out / "reward.json").write_text(json.dumps(safe_reward, indent=2), encoding="utf-8")
-
         if trial_src:
             _copy_trial_artifacts(trial_src, trial_out)
-        if merged_traj:
-            (trial_out / "trajectory.json").write_text(
-                json.dumps(redact_sensitive_data(merged_traj), indent=2),
-                encoding="utf-8",
-            )
-        elif src_traj and src_traj.exists():
-            _write_redacted_text_copy(src_traj, trial_out / "trajectory.json", source_root=trial_src)
+            _copy_trial_trajectory(trial_src, trial_out, reward.get("_step_name"))
 
     _save_unscored_trials(
         rewards,
@@ -3465,55 +3608,98 @@ def _save_trials(
     )
 
 
-def _summarize_trajectory_file(path: Path) -> dict[str, Any]:
-    """Return safe trajectory metadata without raw prompts, outputs, or arguments."""
-    data = _read_json(path)
-    if not isinstance(data, dict):
-        return {"readable": False}
+def _resave_trial_rewards(
+    rewards: list[dict[str, Any]],
+    trials_dir: Path,
+    job_dir: Path | None,
+    *,
+    skill_name: str,
+    agent: str,
+    agent_model: str | None = None,
+    agent_model_source: str | None = None,
+    expected_case_ids: list[str] | set[str] | None = None,
+) -> None:
+    """Rewrite the reward.json of reward rows that ``_save_trials`` saved, after the rows changed.
 
-    return _summarize_trajectory(data)
-
-
-def _summarize_trajectory(data: dict[str, Any]) -> dict[str, Any]:
-    """Return safe trajectory metadata without raw prompts, outputs, or arguments."""
-    steps = data.get("steps", [])
-    if not isinstance(steps, list):
-        return {"readable": True, "steps": 0, "tool_calls": 0, "tool_names": []}
-
-    tool_names: list[str] = []
-    tool_calls = 0
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        calls = step.get("tool_calls", [])
-        if not isinstance(calls, list):
-            continue
-        for call in calls:
-            if not isinstance(call, dict):
-                continue
-            tool_calls += 1
-            name = call.get("function_name") or call.get("name") or call.get("tool_name")
-            if name:
-                tool_names.append(str(name))
-
-    unique_tool_names = sorted(dict.fromkeys(tool_names))
-    return {
-        "readable": True,
-        "steps": len(steps),
-        "tool_calls": tool_calls,
-        "unique_tools": len(unique_tool_names),
-        "tool_names": unique_tool_names[:20],
-    }
+    The trials' Harbor artifacts and trajectories are already saved and do not change.
+    """
+    expected_id_set = _normalize_expected_case_id_set(expected_case_ids)
+    for reward in rewards:
+        trial_name, trial_root_name = _persisted_trial_name(reward)
+        _write_trial_reward(
+            reward,
+            trials_dir / trial_name,
+            job_dir / trial_root_name if job_dir else None,
+            trial_id=trial_root_name,
+            skill_name=skill_name,
+            agent=agent,
+            agent_model=agent_model,
+            agent_model_source=agent_model_source,
+            expected_id_set=expected_id_set,
+        )
 
 
-def _read_job_json(job_dir: Path, relative_path: Path) -> Any:
-    """Read one bounded JSON file anchored at the Harbor job root without following links."""
-    try:
-        with SecureRoot(job_dir) as secure_root:
-            raw, _metadata = secure_root.read_bytes(relative_path, DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES)
-        return json.loads(raw)
-    except (SecurePathError, ValueError, OSError, RecursionError, UnicodeError):
-        return None
+def _write_trial_reward(
+    reward: dict[str, Any],
+    trial_out: Path,
+    trial_src: Path | None,
+    *,
+    trial_id: str,
+    skill_name: str,
+    agent: str,
+    agent_model: str | None,
+    agent_model_source: str | None,
+    expected_id_set: set[str] | None,
+) -> None:
+    """Write one reward row's redacted reward.json, with trusted invocation evidence."""
+    trial_out.mkdir(parents=True, exist_ok=True)
+    clean_reward = {k: v for k, v in reward.items() if not k.startswith("_")}
+    _add_trusted_invocation_evidence(clean_reward, reward, trial_src, skill_name)
+    # Persist the physical attempt identity so bounded report readers can keep
+    # fallback multi-step rows for diagnostics without weighting a logical
+    # Harbor trial once per step.  This also populates the canonical report's
+    # existing trial_id field instead of inventing a second report schema.
+    clean_reward["trial_id"] = trial_id
+    if not clean_reward.get("entry_id") or reward.get("_result_entry_id"):
+        clean_reward["entry_id"] = _entry_id(reward, expected_id_set)
+    clean_reward["agent"] = agent
+    if agent_model:
+        clean_reward["model"] = agent_model
+    if agent_model_source:
+        clean_reward["model_source"] = agent_model_source
+    if "evaluation_errors" in clean_reward:
+        clean_reward["evaluation_errors"] = _safe_evaluation_errors(clean_reward["evaluation_errors"])
+    diagnostic_reward = (
+        str(clean_reward.get("evaluation_status") or "").casefold() in {"error", "failed"}
+        or overall_score(clean_reward) is None
+    )
+    safe_reward = redact_sensitive_data(
+        clean_reward,
+        max_str_len=REWARD_DIAGNOSTIC_STRING_MAX_CHARS if diagnostic_reward else None,
+    )
+    _restore_custom_metric_scores(clean_reward, safe_reward)
+    (trial_out / "reward.json").write_text(json.dumps(safe_reward, indent=2), encoding="utf-8")
+
+
+def _copy_trial_trajectory(trial_src: Path, trial_out: Path, step_name: str | None) -> None:
+    """Save a reward row's redacted ATIF trajectory as ``trajectory.json``.
+
+    A step row gets its step's trajectory. A whole-trial row of a native
+    multi-step trial without a root trajectory gets its step fragments merged.
+    ``_copy_trial_artifacts`` already copied the root agent trajectory.
+    """
+    root_trajectory = trial_src / "agent" / "trajectory.json"
+    if not step_name and not root_trajectory.exists():
+        merged = _merged_step_trajectory(trial_src)
+        if merged:
+            (trial_out / "trajectory.json").write_text(
+                json.dumps(redact_sensitive_data(merged), indent=2),
+                encoding="utf-8",
+            )
+            return
+    source = _reward_trajectory_path(trial_src, step_name)
+    if source != root_trajectory and source.exists():
+        _write_redacted_text_copy(source, trial_out / "trajectory.json", source_root=trial_src)
 
 
 def _usage_counter(value: Any) -> float | None:
@@ -3549,23 +3735,18 @@ def _trial_usage(job_dir: Path | None, reward: dict[str, Any]) -> dict[str, floa
     ``result.json`` ``agent_result``. Reads are bounded, no-follow and anchored
     at the job root. Missing counters are left out rather than guessed.
     """
-    trial_root_name = str(reward.get("_trial_root_name") or "")
-    if job_dir is None or not trial_root_name or Path(trial_root_name).name != trial_root_name:
+    trial_root_name = _safe_trial_path_component(reward.get("_trial_root_name"))
+    if job_dir is None or not trial_root_name:
         return {}
-    if trial_root_name in {".", ".."}:
-        return {}
+    trial_root = job_dir / trial_root_name
 
     trajectories: list[dict[str, Any]] = []
-    root_trajectory = _read_job_json(job_dir, Path(trial_root_name, "agent", "trajectory.json"))
+    root_trajectory = _read_json(trial_root / "agent" / "trajectory.json", root=job_dir)
     if isinstance(root_trajectory, dict):
         trajectories.append(root_trajectory)
     else:
-        for step_path in _ordered_step_trajectory_paths(job_dir / trial_root_name):
-            try:
-                relative = step_path.relative_to(job_dir)
-            except ValueError:
-                continue
-            step_trajectory = _read_job_json(job_dir, relative)
+        for step_path in _ordered_step_trajectory_paths(trial_root):
+            step_trajectory = _read_json(step_path, root=job_dir)
             if isinstance(step_trajectory, dict):
                 trajectories.append(step_trajectory)
 
@@ -3592,7 +3773,7 @@ def _trial_usage(job_dir: Path | None, reward: dict[str, Any]) -> dict[str, floa
 
     if "prompt_tokens" in usage and "cost_usd" in usage:
         return usage
-    result = _read_job_json(job_dir, Path(trial_root_name, "result.json"))
+    result = _read_json(trial_root / "result.json", root=job_dir)
     if not isinstance(result, dict):
         return usage
     contexts: list[dict[str, Any]] = []
@@ -3622,35 +3803,27 @@ def _trial_usage(job_dir: Path | None, reward: dict[str, Any]) -> dict[str, floa
     return usage
 
 
-def _arm_observations(
-    logical_rewards: list[dict[str, Any]],
-    job_dir: Path | None,
-    *,
-    execution: dict[str, Any],
-    pass_summary: dict[str, Any],
-    expected_case_ids: list[str] | None,
-    job_failure: str = "",
-) -> ArmObservations:
+def _arm_observations(arm: _CollectedArm, *, expected_case_ids: list[str] | None) -> ArmObservations:
     """Pair each logical attempt with its case id and usage for report-only statistics.
 
     Usage counters are only read for arms that completed, because statistics
     are never published for a failed arm.
     """
-    execution_status = str(execution.get("execution_status") or "unknown")
+    execution_status = str(arm.execution.get("execution_status") or "unknown")
     expected_ids = [str(case_id) for case_id in (expected_case_ids or []) if str(case_id)]
     expected_set = set(expected_ids) or None
     trials: list[TrialObservation] = []
-    for reward in sorted(logical_rewards, key=_attempt_sort_key):
+    for reward in sorted(arm.logical_rewards, key=_attempt_sort_key):
         case_id = _entry_id(reward, expected_set)
         if expected_set is not None and case_id not in expected_set:
             continue
-        usage = _trial_usage(job_dir, reward) if execution_status == "succeeded" else {}
+        usage = _trial_usage(arm.job_dir, reward) if execution_status == "succeeded" else {}
         trials.append(TrialObservation(case_id=case_id, reward=reward, usage=usage))
     return ArmObservations(
         execution_status=execution_status,
         trials=tuple(trials),
-        pass_summary=pass_summary or {},
-        job_failure=job_failure,
+        pass_summary=arm.pass_summary or {},
+        job_failure=arm.job_failure,
     )
 
 
@@ -3824,157 +3997,273 @@ def _aggregate_execution(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _collect_report_only_condition(
-    *,
-    skill_name: str,
-    agent: str,
-    variant: str,
-    directory_name: str,
-    output_dir: Path,
-    jobs_dir: Path,
-    n_attempts: int,
-    pass_threshold: float,
-    stop_on_pass: bool,
-    expected_cases: int | None,
-    expected_case_ids: list[str] | None,
-    expected_trials: int | None,
-    agent_model: str | None,
-    agent_model_source: str | None,
-    plugin_signals: PluginSignalsContext | None = None,
-) -> dict[str, Any]:
-    """Collect one advisory comparison arm without affecting run validity."""
-    job_name = f"{skill_name}-{agent}-{variant}"
-    job_dir = _find_job_dir(jobs_dir, job_name)
-    rewards: list[dict[str, Any]] = []
-    runtime_failures: list[dict[str, str]] = []
-    trial_failures: list[dict[str, str]] = []
-    job_failure = ""
-    if job_dir is not None:
-        job_ok, job_failure = validate_harbor_job_result(job_dir / "result.json", expected_trials=expected_trials)
-        runtime_failures = _extract_agent_runtime_failures(job_dir)
-        trial_failures = _extract_trial_failures(job_dir)
-        if job_ok or _can_preserve_partial_rewards(job_dir, trial_failures):
-            # Report-only arms are staged with the baseline's dual-arm suffix.
-            rewards = _extract_rewards(
-                job_dir,
-                arm_suffix="-without-skill",
-                task_entry_id_map=_staged_task_entry_id_map(
-                    output_dir,
-                    agent,
-                    variant,
-                    arm_suffix="-without-skill",
-                ),
-            )
-        rewards, invalid_score_failures = _partition_scoreable_rewards(rewards)
-        trial_failures.extend(invalid_score_failures)
-    else:
-        job_failure = f"Harbor job directory was not created: {job_name}"
+@dataclass(frozen=True)
+class _AgentCollection:
+    """Run settings shared by every arm collected for one agent."""
 
+    skill_name: str
+    agent: str
+    output_dir: Path
+    jobs_dir: Path
+    n_attempts: int
+    pass_threshold: float
+    stop_on_pass: bool
+    expected_cases: int | None
+    expected_case_ids: list[str] | None
+    expected_trials: int | None
+    agent_model: str | None
+    agent_model_source: str | None
+    launch_errors: list[str] | None
+    plugin_signals: PluginSignalsContext | None
+
+    def arm_dir(self, arm: _ArmSpec) -> Path:
+        return self.output_dir / self.agent / arm.directory
+
+    def execution_summary(
+        self,
+        rewards: list[dict[str, Any]],
+        *,
+        job_failure: str = "",
+        runtime_failures: list[dict[str, str]] | None = None,
+        reward_failures: list[dict[str, str]] | None = None,
+        skipped: bool = False,
+    ) -> dict[str, Any]:
+        return _condition_execution_summary(
+            rewards,
+            expected_case_ids=self.expected_case_ids,
+            expected_cases=self.expected_cases,
+            n_attempts=self.n_attempts,
+            job_failure=job_failure,
+            runtime_failures=runtime_failures,
+            reward_failures=reward_failures,
+            skipped=skipped,
+            stop_on_pass=self.stop_on_pass,
+            pass_threshold=self.pass_threshold,
+        )
+
+    def save_trials(self, arm: _ArmSpec, rewards: list[dict[str, Any]], job_dir: Path) -> None:
+        _save_trials(
+            rewards,
+            self.arm_dir(arm) / "trials",
+            job_dir,
+            skill_name=self.skill_name,
+            agent=self.agent,
+            variant=arm.trial_variant,
+            agent_model=self.agent_model,
+            agent_model_source=self.agent_model_source,
+            expected_case_ids=self.expected_case_ids,
+        )
+
+    def resave_trial_rewards(self, arm: _ArmSpec, rewards: list[dict[str, Any]], job_dir: Path) -> None:
+        _resave_trial_rewards(
+            rewards,
+            self.arm_dir(arm) / "trials",
+            job_dir,
+            skill_name=self.skill_name,
+            agent=self.agent,
+            agent_model=self.agent_model,
+            agent_model_source=self.agent_model_source,
+            expected_case_ids=self.expected_case_ids,
+        )
+
+    def write_summary(self, arm: _ArmSpec, summary: dict[str, Any]) -> None:
+        condition_dir = self.arm_dir(arm)
+        condition_dir.mkdir(parents=True, exist_ok=True)
+        (condition_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+
+@dataclass(frozen=True)
+class _CollectedArm:
+    """One arm's collected results. A failed or skipped arm publishes no scores."""
+
+    execution: dict[str, Any]
+    job_dir: Path | None = None
+    job_failure: str = ""
+    runtime_failures: list[dict[str, str]] = field(default_factory=list)
+    trial_failures: list[dict[str, str]] = field(default_factory=list)
+    # Scoreable reward rows, and the logical Harbor attempts they collapse to.
+    rewards: list[dict[str, Any]] = field(default_factory=list)
+    logical_rewards: list[dict[str, Any]] = field(default_factory=list)
+    metric_set: str = DEFAULT_METRIC_SET
+    metrics: tuple[str, ...] = DISPLAY_METRICS
+    scores: dict[str, float] = field(default_factory=dict)
+    not_applicable: list[str] = field(default_factory=list)
+    custom_scores: dict[str, float] = field(default_factory=dict)
+    overall_score: float | None = None
+    pass_summary: dict[str, Any] = field(default_factory=dict)
+    plugin_signals_summary: dict[str, Any] | None = None
+    canary_summary: dict[str, Any] | None = None
+    load_census: dict[str, Any] | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.execution.get("execution_status") == "succeeded"
+
+    @property
+    def dimensions(self) -> dict[str, dict[str, Any]]:
+        return dimension_scores(self.scores, self.not_applicable)
+
+
+def _collect_arm(
+    arm: _ArmSpec,
+    collection: _AgentCollection,
+    *,
+    load_census_plan: Mapping[str, Any] | None = None,
+) -> _CollectedArm:
+    """Collect one arm's Harbor job into ``<agent>/<arm directory>/``.
+
+    Every arm runs the same pipeline: validate the job, record runtime and
+    trial failures, extract rewards (a failed job keeps its rewards only when
+    every job error maps to a failed trial), set unscoreable rewards aside,
+    average the logical attempts, attach report-only evidence, then save every
+    collected trial and the arm's ``summary.json``. ``load_census_plan`` is the
+    with-plugin arm's native load census plan, if any.
+    """
+    job_name = f"{collection.skill_name}-{collection.agent}-{arm.variant}"
+    job_dir = _find_job_dir(collection.jobs_dir, job_name)
+    if job_dir is None:
+        return _collect_missing_arm(arm, collection, job_name)
+
+    job_ok, job_failure = validate_harbor_job_result(
+        job_dir / "result.json",
+        expected_trials=collection.expected_trials,
+    )
+    artifacts = _TrialArtifacts()
+    runtime_failures = _extract_agent_runtime_failures(job_dir, artifacts)
+    trial_failures = _extract_trial_failures(job_dir, artifacts)
+    collected_rewards: list[dict[str, Any]] = []
+    if job_ok or _can_preserve_partial_rewards(job_dir, trial_failures):
+        collected_rewards = _extract_rewards(
+            job_dir,
+            arm_suffix=arm.arm_suffix,
+            task_entry_id_map=_staged_task_entry_id_map(
+                collection.output_dir,
+                collection.agent,
+                arm.variant,
+                arm_suffix=arm.arm_suffix,
+            ),
+            artifacts=artifacts,
+        )
+    # Only scoreable rewards are averaged. Every collected reward is saved below,
+    # so an invalid-score trial keeps its redacted diagnostics.
+    rewards, invalid_score_failures = _partition_scoreable_rewards(collected_rewards)
+    trial_failures.extend(invalid_score_failures)
     logical_rewards = _logical_attempt_rewards(rewards)
     scores, metric_set, metrics = average_metrics(logical_rewards)
-    condition_not_applicable = not_applicable_metrics(logical_rewards, metrics)
-    custom_scores = average_custom_metrics(logical_rewards)
-    pass_summary = _pass_summary(
-        logical_rewards,
-        n_attempts=n_attempts,
-        pass_threshold=pass_threshold,
-        stop_on_pass=stop_on_pass,
-        expected_cases=expected_cases,
-        expected_case_ids=expected_case_ids,
-    )
-    execution = _condition_execution_summary(
+    execution = collection.execution_summary(
         rewards,
-        expected_case_ids=expected_case_ids,
-        expected_cases=expected_cases,
-        n_attempts=n_attempts,
         job_failure=job_failure,
         runtime_failures=runtime_failures,
         reward_failures=trial_failures,
-        stop_on_pass=stop_on_pass,
-        pass_threshold=pass_threshold,
     )
     if execution["execution_status"] == "succeeded":
-        overall_score = _average_overall(logical_rewards)
+        arm_not_applicable = not_applicable_metrics(logical_rewards, metrics)
+        arm_not_applicable_counts = not_applicable_counts(logical_rewards, metrics)
+        custom_scores = average_custom_metrics(logical_rewards)
+        pass_summary = _pass_summary(
+            logical_rewards,
+            n_attempts=collection.n_attempts,
+            pass_threshold=collection.pass_threshold,
+            stop_on_pass=collection.stop_on_pass,
+            expected_cases=collection.expected_cases,
+            expected_case_ids=collection.expected_case_ids,
+        )
+        arm_overall_score = _average_overall(logical_rewards)
     else:
         scores = {}
-        condition_not_applicable = []
+        arm_not_applicable = []
+        arm_not_applicable_counts = {}
         custom_scores = {}
         pass_summary = {}
-        overall_score = None
-    condition_dir = output_dir / agent / directory_name
-    canary_summary = summarize_canary(rewards)
+        arm_overall_score = None
+
+    load_census = _attach_load_census(rewards, job_dir, load_census_plan, agent=collection.agent)
     plugin_signals_summary = _attach_plugin_signals(
         rewards,
         job_dir,
-        plugin_signals,
-        arm=directory_name.replace("-", "_"),
-        expected_case_ids=expected_case_ids,
+        collection.plugin_signals,
+        arm=arm.key,
+        expected_case_ids=collection.expected_case_ids,
+        artifacts=artifacts,
     )
-    if job_dir is not None:
-        _save_trials(
-            rewards,
-            condition_dir / "trials",
-            job_dir,
-            skill_name=skill_name,
-            agent=agent,
-            variant=variant,
-            agent_model=agent_model,
-            agent_model_source=agent_model_source,
-        )
-    condition_dir.mkdir(parents=True, exist_ok=True)
-    (condition_dir / "summary.json").write_text(
-        json.dumps(
-            {
-                "agent": agent,
-                "model": agent_model,
-                "model_source": agent_model_source,
-                "scores": scores,
-                "not_applicable_metrics": condition_not_applicable,
-                "not_applicable_counts": (
-                    not_applicable_counts(logical_rewards, metrics)
-                    if execution["execution_status"] == "succeeded"
-                    else {}
-                ),
-                "custom_scores": custom_scores,
-                "overall_score": overall_score,
-                "metric_set": metric_set,
-                "metrics": list(metrics),
-                "dimensions": dimension_scores(scores, condition_not_applicable),
-                "num_trials": len(rewards),
-                "pass_at_k": pass_summary,
-                **execution,
-                "job_failure": job_failure,
-                "trial_failures": trial_failures,
-                **({"plugin_signals_summary": plugin_signals_summary} if plugin_signals_summary is not None else {}),
-                **({"canary_summary": canary_summary} if canary_summary is not None else {}),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+    if plugin_signals_summary is not None and arm.hook_census_every_trial:
+        plugin_signals_summary["hook_census"] = _arm_hook_census(job_dir, artifacts)
+    canary_summary = summarize_canary(rewards)
+    collection.save_trials(arm, collected_rewards, job_dir)
+    collection.write_summary(
+        arm,
+        {
+            "agent": collection.agent,
+            "model": collection.agent_model,
+            "model_source": collection.agent_model_source,
+            "scores": scores,
+            "not_applicable_metrics": arm_not_applicable,
+            "not_applicable_counts": arm_not_applicable_counts,
+            "custom_scores": custom_scores,
+            "overall_score": arm_overall_score,
+            "metric_set": metric_set,
+            "metrics": list(metrics),
+            "dimensions": dimension_scores(scores, arm_not_applicable),
+            "num_trials": len(rewards),
+            "pass_at_k": pass_summary,
+            **execution,
+            "job_failure": job_failure,
+            "trial_failures": trial_failures,
+            **({"plugin_signals_summary": plugin_signals_summary} if plugin_signals_summary is not None else {}),
+            **({"canary_summary": canary_summary} if canary_summary is not None else {}),
+        },
     )
-    return {
-        "scores": scores,
-        "not_applicable_metrics": condition_not_applicable,
-        "custom_scores": custom_scores,
-        "overall_score": overall_score,
-        "dimensions": dimension_scores(scores, condition_not_applicable),
-        "pass_at_k": pass_summary,
-        "execution": execution,
-        "runtime_failures": runtime_failures,
-        "trial_failures": trial_failures,
-        "job_failure": job_failure,
-        "num_trials": len(rewards),
-        "observations": _arm_observations(
-            logical_rewards,
-            job_dir,
-            execution=execution,
-            pass_summary=pass_summary,
-            expected_case_ids=expected_case_ids,
-            job_failure=job_failure,
-        ),
-        "plugin_signals_summary": plugin_signals_summary,
-        "canary_summary": canary_summary,
-    }
+    logger.debug("Agent %s %s: %d trials, scores=%s", collection.agent, arm.directory, len(rewards), scores)
+    return _CollectedArm(
+        execution=execution,
+        job_dir=job_dir,
+        job_failure=job_failure,
+        runtime_failures=runtime_failures,
+        trial_failures=trial_failures,
+        rewards=rewards,
+        logical_rewards=logical_rewards,
+        metric_set=metric_set,
+        metrics=metrics,
+        scores=scores,
+        not_applicable=arm_not_applicable,
+        custom_scores=custom_scores,
+        overall_score=arm_overall_score,
+        pass_summary=pass_summary,
+        plugin_signals_summary=plugin_signals_summary,
+        canary_summary=canary_summary,
+        load_census=load_census,
+    )
+
+
+def _collect_missing_arm(arm: _ArmSpec, collection: _AgentCollection, job_name: str) -> _CollectedArm:
+    """Record a failed arm whose Harbor job directory was never created."""
+    logger.warning("No Harbor job found for %s (%s)", job_name, arm.directory)
+    # The runner reports a failed launch as "<agent> <variant>-skill Harbor run failed: <detail>".
+    prefix = f"{collection.agent} {arm.variant}-skill Harbor run failed: "
+    job_failure = next(
+        (error.removeprefix(prefix) for error in (collection.launch_errors or []) if error.startswith(prefix)),
+        f"Harbor job directory was not created: {job_name}",
+    )
+    execution = collection.execution_summary([], job_failure=job_failure)
+    collection.write_summary(
+        arm,
+        {
+            "agent": collection.agent,
+            "model": collection.agent_model,
+            "model_source": collection.agent_model_source,
+            "scores": {},
+            "custom_scores": {},
+            "overall_score": None,
+            "metrics": [],
+            "dimensions": {},
+            "num_trials": 0,
+            "pass_at_k": {},
+            **execution,
+            "job_failure": job_failure,
+            "trial_failures": [],
+        },
+    )
+    return _CollectedArm(execution=execution, job_failure=job_failure)
 
 
 def collect_harbor_results(
@@ -4026,475 +4315,57 @@ def collect_harbor_results(
 
     _prepare_generated_outputs(output_dir, agents)
 
+    # A run without a baseline stages its with-skill tasks without a dual-arm suffix.
+    with_skill_arm = replace(_WITH_SKILL_ARM, arm_suffix="") if skip_baseline else _WITH_SKILL_ARM
     for agent in agents:
         model_info = agent_models.get(agent, {}) if agent_models else {}
-        agent_model = model_info.get("model")
-        agent_model_source = model_info.get("source")
+        collection = _AgentCollection(
+            skill_name=skill_name,
+            agent=agent,
+            output_dir=output_dir,
+            jobs_dir=jobs_dir,
+            n_attempts=n_attempts,
+            pass_threshold=pass_threshold,
+            stop_on_pass=stop_on_pass,
+            expected_cases=expected_cases,
+            expected_case_ids=expected_case_ids,
+            expected_trials=expected_trials,
+            agent_model=model_info.get("model"),
+            agent_model_source=model_info.get("source"),
+            launch_errors=launch_errors,
+            plugin_signals=plugin_signals,
+        )
         agent_dir = output_dir / agent
 
-        with_job_name = f"{skill_name}-{agent}-with"
-        with_job_dir = _find_job_dir(jobs_dir, with_job_name)
-
-        with_collected_rewards: list[dict[str, Any]] = []
-        with_rewards: list[dict[str, Any]] = []
-        with_logical_rewards: list[dict[str, Any]] = []
-        with_scores: dict[str, float] = {}
-        with_not_applicable: list[str] = []
-        with_custom_scores: dict[str, float] = {}
-        with_pass: dict[str, Any] = {}
-        with_runtime_failures: list[dict[str, str]] = []
-        with_trial_failures: list[dict[str, str]] = []
-        with_job_failure = ""
-        with_execution: dict[str, Any] = {}
-        with_plugin_signals: dict[str, Any] | None = None
-        with_canary: dict[str, Any] | None = None
-        with_load_census: dict[str, Any] | None = None
-
-        with_arm_suffix = "-with-skill" if not skip_baseline else ""
-        if with_job_dir:
-            with_job_ok, with_job_failure = validate_harbor_job_result(
-                with_job_dir / "result.json",
-                expected_trials=expected_trials,
-            )
-            with_runtime_failures = _extract_agent_runtime_failures(with_job_dir)
-            with_trial_failures = _extract_trial_failures(with_job_dir)
-            preserve_partial = _can_preserve_partial_rewards(with_job_dir, with_trial_failures)
-            with_task_entry_ids = _staged_task_entry_id_map(
-                output_dir,
-                agent,
-                "with",
-                arm_suffix=with_arm_suffix,
-            )
-            with_collected_rewards = (
-                _extract_rewards(
-                    with_job_dir,
-                    arm_suffix=with_arm_suffix,
-                    task_entry_id_map=with_task_entry_ids,
-                )
-                if with_job_ok or preserve_partial
-                else []
-            )
-            with_rewards, invalid_score_failures = _partition_scoreable_rewards(with_collected_rewards)
-            with_logical_rewards = _logical_attempt_rewards(with_rewards)
-            with_trial_failures.extend(invalid_score_failures)
-            with_scores, with_metric_set, with_metrics = average_metrics(with_logical_rewards)
-            with_not_applicable = not_applicable_metrics(with_logical_rewards, with_metrics)
-            all_results["metric_set"] = with_metric_set
-            all_results["metrics"] = list(with_metrics)
-            all_results["attempt_policy"]["score_definition"] = score_definition(with_metrics)
-            with_custom_scores = average_custom_metrics(with_logical_rewards)
-            with_pass = _pass_summary(
-                with_logical_rewards,
-                n_attempts=n_attempts,
-                pass_threshold=pass_threshold,
-                stop_on_pass=stop_on_pass,
-                expected_cases=expected_cases,
-                expected_case_ids=expected_case_ids,
-            )
-            with_execution = _condition_execution_summary(
-                with_rewards,
-                expected_case_ids=expected_case_ids,
-                expected_cases=expected_cases,
-                n_attempts=n_attempts,
-                job_failure=with_job_failure,
-                runtime_failures=with_runtime_failures,
-                reward_failures=with_trial_failures,
-                stop_on_pass=stop_on_pass,
-                pass_threshold=pass_threshold,
-            )
-            if with_execution["execution_status"] != "succeeded":
-                with_scores = {}
-                with_not_applicable = []
-                with_custom_scores = {}
-                with_pass = {}
-            with_overall_score = (
-                _average_overall(with_logical_rewards) if with_execution["execution_status"] == "succeeded" else None
-            )
-            with_load_census = _attach_load_census(
-                with_rewards, with_job_dir, (plugin_load_census or {}).get(agent), agent=agent
-            )
-            with_plugin_signals = _attach_plugin_signals(
-                with_rewards, with_job_dir, plugin_signals, arm="with_skill", expected_case_ids=expected_case_ids
-            )
-            if with_plugin_signals is not None:
-                # Hook runs from every with-plugin trial, scored or not.
-                with_plugin_signals["hook_census"] = _arm_hook_census(with_job_dir)
-            with_canary = summarize_canary(with_rewards)
-            _save_trials(
-                with_collected_rewards,
-                agent_dir / "with-skill" / "trials",
-                with_job_dir,
-                skill_name=skill_name,
-                agent=agent,
-                variant="with_skill",
-                agent_model=agent_model,
-                agent_model_source=agent_model_source,
-                expected_case_ids=expected_case_ids,
-            )
-            (agent_dir / "with-skill" / "summary.json").write_text(
-                json.dumps(
-                    {
-                        "agent": agent,
-                        "model": agent_model,
-                        "model_source": agent_model_source,
-                        "scores": with_scores,
-                        "not_applicable_metrics": with_not_applicable,
-                        "not_applicable_counts": (
-                            not_applicable_counts(with_logical_rewards, with_metrics)
-                            if with_execution["execution_status"] == "succeeded"
-                            else {}
-                        ),
-                        "custom_scores": with_custom_scores,
-                        "overall_score": with_overall_score,
-                        "metric_set": with_metric_set,
-                        "metrics": list(with_metrics),
-                        "dimensions": dimension_scores(with_scores, with_not_applicable),
-                        "num_trials": len(with_rewards),
-                        "pass_at_k": with_pass,
-                        **with_execution,
-                        "job_failure": with_job_failure,
-                        "trial_failures": with_trial_failures,
-                        **({"plugin_signals_summary": with_plugin_signals} if with_plugin_signals is not None else {}),
-                        **({"canary_summary": with_canary} if with_canary is not None else {}),
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-            logger.debug("Agent %s with-skill: %d trials, scores=%s", agent, len(with_rewards), with_scores)
+        with_skill = _collect_arm(with_skill_arm, collection, load_census_plan=(plugin_load_census or {}).get(agent))
+        if with_skill.job_dir is not None:
+            all_results["metric_set"] = with_skill.metric_set
+            all_results["metrics"] = list(with_skill.metrics)
+            all_results["attempt_policy"]["score_definition"] = score_definition(with_skill.metrics)
+        if skip_baseline:
+            without_skill = _CollectedArm(execution=collection.execution_summary([], skipped=True))
         else:
-            with_job_failure = f"No Harbor job found for {with_job_name}"
-            logger.warning("No Harbor job found for %s (with-skill)", with_job_name)
-            prefix = f"{agent} with-skill Harbor run failed: "
-            with_job_failure = next(
-                (error.removeprefix(prefix) for error in (launch_errors or []) if error.startswith(prefix)),
-                f"Harbor job directory was not created: {with_job_name}",
-            )
-            summary_dir = agent_dir / "with-skill"
-            summary_dir.mkdir(parents=True, exist_ok=True)
-            (summary_dir / "summary.json").write_text(
-                json.dumps(
-                    {
-                        "agent": agent,
-                        "model": agent_model,
-                        "model_source": agent_model_source,
-                        "scores": {},
-                        "custom_scores": {},
-                        "overall_score": None,
-                        "metric_set": DEFAULT_METRIC_SET,
-                        "metrics": list(DISPLAY_METRICS),
-                        "dimensions": {},
-                        "num_trials": 0,
-                        "pass_at_k": {},
-                        "job_failure": with_job_failure,
-                        "trial_failures": [],
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-
-        if not with_execution:
-            with_execution = _condition_execution_summary(
-                with_rewards,
-                expected_case_ids=expected_case_ids,
-                expected_cases=expected_cases,
-                n_attempts=n_attempts,
-                job_failure=with_job_failure,
-                runtime_failures=with_runtime_failures,
-                stop_on_pass=stop_on_pass,
-                pass_threshold=pass_threshold,
-            )
-        if with_job_dir is None:
-            summary_dir = agent_dir / "with-skill"
-            summary_dir.mkdir(parents=True, exist_ok=True)
-            (summary_dir / "summary.json").write_text(
-                json.dumps(
-                    {
-                        "agent": agent,
-                        "model": agent_model,
-                        "model_source": agent_model_source,
-                        "scores": {},
-                        "custom_scores": {},
-                        "overall_score": None,
-                        "metrics": [],
-                        "dimensions": {},
-                        "num_trials": 0,
-                        "pass_at_k": {},
-                        **with_execution,
-                        "job_failure": with_job_failure,
-                        "trial_failures": [],
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-
-        without_collected_rewards: list[dict[str, Any]] = []
-        without_rewards: list[dict[str, Any]] = []
-        without_logical_rewards: list[dict[str, Any]] = []
-        without_scores: dict[str, float] = {}
-        without_not_applicable: list[str] = []
-        without_custom_scores: dict[str, float] = {}
-        without_pass: dict[str, Any] = {}
-        without_runtime_failures: list[dict[str, str]] = []
-        without_trial_failures: list[dict[str, str]] = []
-        without_job_failure = ""
-        without_execution: dict[str, Any] = {}
-        without_job_dir: Path | None = None
-        without_plugin_signals: dict[str, Any] | None = None
-        without_canary: dict[str, Any] | None = None
-        if not skip_baseline:
-            without_job_name = f"{skill_name}-{agent}-without"
-            without_job_dir = _find_job_dir(jobs_dir, without_job_name)
-
-            if without_job_dir:
-                without_job_ok, without_job_failure = validate_harbor_job_result(
-                    without_job_dir / "result.json",
-                    expected_trials=expected_trials,
-                )
-                without_runtime_failures = _extract_agent_runtime_failures(without_job_dir)
-                without_trial_failures = _extract_trial_failures(without_job_dir)
-                preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
-                without_task_entry_ids = _staged_task_entry_id_map(
-                    output_dir,
-                    agent,
-                    "without",
-                    arm_suffix="-without-skill",
-                )
-                without_collected_rewards = (
-                    _extract_rewards(
-                        without_job_dir,
-                        arm_suffix="-without-skill",
-                        task_entry_id_map=without_task_entry_ids,
-                    )
-                    if without_job_ok or preserve_partial
-                    else []
-                )
-                without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
-                without_logical_rewards = _logical_attempt_rewards(without_rewards)
-                without_trial_failures.extend(invalid_score_failures)
-                without_scores, without_metric_set, without_metrics = average_metrics(without_logical_rewards)
-                without_not_applicable = not_applicable_metrics(without_logical_rewards, without_metrics)
-                without_custom_scores = average_custom_metrics(without_logical_rewards)
-                without_pass = _pass_summary(
-                    without_logical_rewards,
-                    n_attempts=n_attempts,
-                    pass_threshold=pass_threshold,
-                    stop_on_pass=stop_on_pass,
-                    expected_cases=expected_cases,
-                    expected_case_ids=expected_case_ids,
-                )
-                without_execution = _condition_execution_summary(
-                    without_rewards,
-                    expected_case_ids=expected_case_ids,
-                    expected_cases=expected_cases,
-                    n_attempts=n_attempts,
-                    job_failure=without_job_failure,
-                    runtime_failures=without_runtime_failures,
-                    reward_failures=without_trial_failures,
-                    stop_on_pass=stop_on_pass,
-                    pass_threshold=pass_threshold,
-                )
-                if without_execution["execution_status"] != "succeeded":
-                    without_scores = {}
-                    without_not_applicable = []
-                    without_custom_scores = {}
-                    without_pass = {}
-                without_overall_score = (
-                    _average_overall(without_logical_rewards)
-                    if without_execution["execution_status"] == "succeeded"
-                    else None
-                )
-                without_plugin_signals = _attach_plugin_signals(
-                    without_rewards,
-                    without_job_dir,
-                    plugin_signals,
-                    arm="without_skill",
-                    expected_case_ids=expected_case_ids,
-                )
-                without_canary = summarize_canary(without_rewards)
-                _save_trials(
-                    without_collected_rewards,
-                    agent_dir / "without-skill" / "trials",
-                    without_job_dir,
-                    skill_name=skill_name,
-                    agent=agent,
-                    variant="without_skill",
-                    agent_model=agent_model,
-                    agent_model_source=agent_model_source,
-                    expected_case_ids=expected_case_ids,
-                )
-                (agent_dir / "without-skill" / "summary.json").write_text(
-                    json.dumps(
-                        {
-                            "agent": agent,
-                            "model": agent_model,
-                            "model_source": agent_model_source,
-                            "scores": without_scores,
-                            "not_applicable_metrics": without_not_applicable,
-                            "not_applicable_counts": (
-                                not_applicable_counts(without_logical_rewards, without_metrics)
-                                if without_execution["execution_status"] == "succeeded"
-                                else {}
-                            ),
-                            "custom_scores": without_custom_scores,
-                            "overall_score": without_overall_score,
-                            "metric_set": without_metric_set,
-                            "metrics": list(without_metrics),
-                            "dimensions": dimension_scores(without_scores, without_not_applicable),
-                            "num_trials": len(without_rewards),
-                            "pass_at_k": without_pass,
-                            **without_execution,
-                            "job_failure": without_job_failure,
-                            "trial_failures": without_trial_failures,
-                            **({"canary_summary": without_canary} if without_canary is not None else {}),
-                            **(
-                                {"plugin_signals_summary": without_plugin_signals}
-                                if without_plugin_signals is not None
-                                else {}
-                            ),
-                        },
-                        indent=2,
-                    ),
-                    encoding="utf-8",
-                )
-                logger.debug(
-                    "Agent %s without-skill: %d trials, scores=%s",
-                    agent,
-                    len(without_rewards),
-                    without_scores,
-                )
-            else:
-                without_job_failure = f"No Harbor job found for {without_job_name}"
-                logger.warning("No Harbor job found for %s (without-skill)", without_job_name)
-                prefix = f"{agent} without-skill Harbor run failed: "
-                without_job_failure = next(
-                    (error.removeprefix(prefix) for error in (launch_errors or []) if error.startswith(prefix)),
-                    f"Harbor job directory was not created: {without_job_name}",
-                )
-                summary_dir = agent_dir / "without-skill"
-                summary_dir.mkdir(parents=True, exist_ok=True)
-                (summary_dir / "summary.json").write_text(
-                    json.dumps(
-                        {
-                            "agent": agent,
-                            "model": agent_model,
-                            "model_source": agent_model_source,
-                            "scores": {},
-                            "custom_scores": {},
-                            "overall_score": None,
-                            "metric_set": DEFAULT_METRIC_SET,
-                            "metrics": list(DISPLAY_METRICS),
-                            "dimensions": {},
-                            "num_trials": 0,
-                            "pass_at_k": {},
-                            "job_failure": without_job_failure,
-                            "trial_failures": [],
-                        },
-                        indent=2,
-                    ),
-                    encoding="utf-8",
-                )
-
-        if not without_execution:
-            without_execution = _condition_execution_summary(
-                without_rewards,
-                expected_case_ids=expected_case_ids,
-                expected_cases=expected_cases,
-                n_attempts=n_attempts,
-                job_failure=without_job_failure,
-                runtime_failures=without_runtime_failures,
-                skipped=skip_baseline,
-                stop_on_pass=stop_on_pass,
-                pass_threshold=pass_threshold,
-            )
-        if not skip_baseline and without_job_dir is None:
-            summary_dir = agent_dir / "without-skill"
-            summary_dir.mkdir(parents=True, exist_ok=True)
-            (summary_dir / "summary.json").write_text(
-                json.dumps(
-                    {
-                        "agent": agent,
-                        "model": agent_model,
-                        "model_source": agent_model_source,
-                        "scores": {},
-                        "custom_scores": {},
-                        "overall_score": None,
-                        "metrics": [],
-                        "dimensions": {},
-                        "num_trials": 0,
-                        "pass_at_k": {},
-                        **without_execution,
-                        "job_failure": without_job_failure,
-                        "trial_failures": [],
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-
-        sum_of_parts = {
-            "scores": {},
-            "not_applicable_metrics": [],
-            "custom_scores": {},
-            "overall_score": None,
-            "dimensions": {},
-            "pass_at_k": {},
-            "execution": {"execution_status": "skipped", "execution_errors": []},
-            "runtime_failures": [],
-            "trial_failures": [],
-            "job_failure": "",
-            "num_trials": 0,
-        }
+            without_skill = _collect_arm(_WITHOUT_SKILL_ARM, collection)
         if sum_of_parts_arm:
-            sum_of_parts = _collect_report_only_condition(
-                skill_name=skill_name,
-                agent=agent,
-                variant="sumofparts",
-                directory_name="sum-of-parts",
-                output_dir=output_dir,
-                jobs_dir=jobs_dir,
-                n_attempts=n_attempts,
-                pass_threshold=pass_threshold,
-                stop_on_pass=stop_on_pass,
-                expected_cases=expected_cases,
-                expected_case_ids=expected_case_ids,
-                expected_trials=expected_trials,
-                agent_model=agent_model,
-                agent_model_source=agent_model_source,
-                plugin_signals=plugin_signals,
-            )
+            sum_of_parts = _collect_arm(_SUM_OF_PARTS_ARM, collection)
+        else:
+            sum_of_parts = _CollectedArm(execution={"execution_status": "skipped", "execution_errors": []})
+        arms = {ARM_WITH: with_skill, ARM_WITHOUT: without_skill, ARM_SUM_OF_PARTS: sum_of_parts}
+
         integration_lift: dict[str, Any] = {}
-        if with_scores and sum_of_parts["scores"]:
+        if with_skill.scores and sum_of_parts.scores:
             integration_lift = _compute_lift(
-                with_scores,
-                sum_of_parts["scores"],
-                with_not_applicable=with_not_applicable,
-                without_not_applicable=sum_of_parts.get("not_applicable_metrics", []),
+                with_skill.scores,
+                sum_of_parts.scores,
+                with_not_applicable=with_skill.not_applicable,
+                without_not_applicable=sum_of_parts.not_applicable,
             )
             (agent_dir / "integration_lift.json").write_text(json.dumps(integration_lift, indent=2), encoding="utf-8")
-        arm_observations = {
-            "with_skill": _arm_observations(
-                with_logical_rewards,
-                with_job_dir,
-                execution=with_execution,
-                pass_summary=with_pass,
-                expected_case_ids=expected_case_ids,
-                job_failure=with_job_failure,
-            ),
-        }
+        arm_observations = {ARM_WITH: _arm_observations(with_skill, expected_case_ids=expected_case_ids)}
         if not skip_baseline:
-            arm_observations["without_skill"] = _arm_observations(
-                without_logical_rewards,
-                without_job_dir,
-                execution=without_execution,
-                pass_summary=without_pass,
-                expected_case_ids=expected_case_ids,
-                job_failure=without_job_failure,
-            )
-        if sum_of_parts_arm and isinstance(sum_of_parts.get("observations"), ArmObservations):
-            arm_observations["sum_of_parts"] = sum_of_parts["observations"]
+            arm_observations[ARM_WITHOUT] = _arm_observations(without_skill, expected_case_ids=expected_case_ids)
+        if sum_of_parts_arm:
+            arm_observations[ARM_SUM_OF_PARTS] = _arm_observations(sum_of_parts, expected_case_ids=expected_case_ids)
         statistics = build_agent_statistics(
             arm_observations,
             expected_case_ids=expected_case_ids,
@@ -4506,45 +4377,45 @@ def collect_harbor_results(
         # Keep the legacy per-arm execution snapshots next to the per-case
         # completeness verdict so earlier consumers still find them.
         integration_completeness = {
-            "with_plugin": with_execution,
-            "sum_of_parts": sum_of_parts["execution"],
+            "with_plugin": with_skill.execution,
+            "sum_of_parts": sum_of_parts.execution,
             **statistics.pop("integration_completeness"),
         }
         statistics["integration_completeness"] = integration_completeness
         (agent_dir / "statistics.json").write_text(json.dumps(statistics, indent=2), encoding="utf-8")
 
         lift: dict[str, Any] = {}
-        paired_execution_succeeded = (
-            with_execution.get("execution_status") == "succeeded"
-            and without_execution.get("execution_status") == "succeeded"
-        )
-        if paired_execution_succeeded and with_scores and without_scores:
+        paired_execution_succeeded = with_skill.succeeded and without_skill.succeeded
+        if paired_execution_succeeded and with_skill.scores and without_skill.scores:
             lift = _compute_lift(
-                with_scores,
-                without_scores,
-                with_not_applicable=with_not_applicable,
-                without_not_applicable=without_not_applicable,
+                with_skill.scores,
+                without_skill.scores,
+                with_not_applicable=with_skill.not_applicable,
+                without_not_applicable=without_skill.not_applicable,
             )
             (agent_dir / "lift.json").write_text(json.dumps(lift, indent=2), encoding="utf-8")
 
         custom_lift: dict[str, Any] = {}
+        no_standard_scores = not with_skill.scores and not without_skill.scores
         if (
             paired_execution_succeeded
-            and with_logical_rewards
-            and without_logical_rewards
-            and (with_custom_scores or without_custom_scores or (not with_scores and not without_scores))
+            and with_skill.logical_rewards
+            and without_skill.logical_rewards
+            and (with_skill.custom_scores or without_skill.custom_scores or no_standard_scores)
         ):
             custom_lift = _compute_custom_lift(
-                with_custom_scores,
-                without_custom_scores,
-                with_logical_rewards,
-                without_logical_rewards,
-                include_overall=not with_scores and not without_scores,
+                with_skill.custom_scores,
+                without_skill.custom_scores,
+                with_skill.logical_rewards,
+                without_skill.logical_rewards,
+                include_overall=no_standard_scores,
             )
             if custom_lift:
                 (agent_dir / "custom_lift.json").write_text(json.dumps(custom_lift, indent=2), encoding="utf-8")
 
         pass_lift: dict[str, Any] = {}
+        with_pass = with_skill.pass_summary
+        without_pass = without_skill.pass_summary
         if paired_execution_succeeded and with_pass and without_pass:
             pass_lift = {
                 "with_skill": with_pass.get("rate", 0.0),
@@ -4557,121 +4428,68 @@ def collect_harbor_results(
             (agent_dir / "pass_at_k_lift.json").write_text(json.dumps(pass_lift, indent=2), encoding="utf-8")
 
         security_attribution: dict[str, Any] = {}
-        attribution_execution_succeeded = with_execution.get("execution_status") == "succeeded" and (
-            skip_baseline or without_execution.get("execution_status") == "succeeded"
-        )
-        if attribution_execution_succeeded and with_rewards:
+        attribution_execution_succeeded = with_skill.succeeded and (skip_baseline or without_skill.succeeded)
+        if attribution_execution_succeeded and with_skill.rewards:
             security_attribution = _annotate_security_attribution(
-                with_rewards,
-                without_rewards,
+                with_skill.rewards,
+                without_skill.rewards,
                 baseline_run=not skip_baseline,
                 expected_case_ids=expected_case_ids,
             )
             (agent_dir / "security_attribution.json").write_text(
                 json.dumps(security_attribution, indent=2), encoding="utf-8"
             )
-            if with_job_dir:
-                _save_trials(
-                    with_rewards,
-                    agent_dir / "with-skill" / "trials",
-                    with_job_dir,
-                    skill_name=skill_name,
-                    agent=agent,
-                    variant="with_skill",
-                    agent_model=agent_model,
-                    agent_model_source=agent_model_source,
-                    expected_case_ids=expected_case_ids,
-                )
+            if with_skill.job_dir:
+                # Rewrite the with-skill reward.json files so each carries its attribution.
+                collection.resave_trial_rewards(with_skill_arm, with_skill.rewards, with_skill.job_dir)
 
-        agent_execution = _aggregate_execution([with_execution, without_execution])
+        agent_execution = _aggregate_execution([with_skill.execution, without_skill.execution])
         all_results["agents"][agent] = {
-            "model": agent_model,
-            "model_source": agent_model_source,
+            "model": collection.agent_model,
+            "model_source": collection.agent_model_source,
             "model_resolution": {
-                "model": agent_model,
-                "source": agent_model_source,
+                "model": collection.agent_model,
+                "source": collection.agent_model_source,
             },
-            "with_skill": with_scores,
-            "without_skill": without_scores,
-            "sum_of_parts": sum_of_parts["scores"],
-            "overall_sum_of_parts": sum_of_parts["overall_score"],
-            "custom_with_skill": with_custom_scores,
-            "custom_without_skill": without_custom_scores,
-            "custom_sum_of_parts": sum_of_parts["custom_scores"],
-            "dimensions_with_skill": dimension_scores(with_scores, with_not_applicable),
-            "dimensions_without_skill": dimension_scores(without_scores, without_not_applicable),
-            "dimensions_sum_of_parts": sum_of_parts["dimensions"],
-            "not_applicable_metrics": {
-                "with_skill": with_not_applicable,
-                "without_skill": without_not_applicable,
-                "sum_of_parts": sum_of_parts.get("not_applicable_metrics", []),
-            },
+            "with_skill": with_skill.scores,
+            "without_skill": without_skill.scores,
+            "sum_of_parts": sum_of_parts.scores,
+            "overall_sum_of_parts": sum_of_parts.overall_score,
+            "custom_with_skill": with_skill.custom_scores,
+            "custom_without_skill": without_skill.custom_scores,
+            "custom_sum_of_parts": sum_of_parts.custom_scores,
+            "dimensions_with_skill": with_skill.dimensions,
+            "dimensions_without_skill": without_skill.dimensions,
+            "dimensions_sum_of_parts": sum_of_parts.dimensions,
+            "not_applicable_metrics": {key: arm.not_applicable for key, arm in arms.items()},
             "lift": lift,
             "integration_lift": integration_lift,
-            "integration_completeness": integration_completeness,
-            "lift_uncertainty": statistics["lift_uncertainty"],
-            "reliability": statistics["reliability"],
-            "cost": statistics["cost"],
-            "token_efficiency": statistics["token_efficiency"],
-            "context_cost_measured": statistics["context_cost_measured"],
+            **{block: statistics[block] for block in STATISTICS_BLOCKS},
             "custom_lift": custom_lift,
-            "pass_at_k": {
-                "with_skill": with_pass,
-                "without_skill": without_pass,
-                "sum_of_parts": sum_of_parts["pass_at_k"],
-                "lift": pass_lift,
-            },
+            "pass_at_k": {**{key: arm.pass_summary for key, arm in arms.items()}, "lift": pass_lift},
             "security_attribution": security_attribution,
-            "agent_runtime_failures": {
-                "with_skill": with_runtime_failures,
-                "without_skill": without_runtime_failures,
-                "sum_of_parts": sum_of_parts["runtime_failures"],
-            },
-            "trial_failures": {
-                "with_skill": with_trial_failures,
-                "without_skill": without_trial_failures,
-                "sum_of_parts": sum_of_parts["trial_failures"],
-            },
-            "job_failures": {
-                "with_skill": with_job_failure,
-                "without_skill": without_job_failure,
-                "sum_of_parts": sum_of_parts["job_failure"],
-            },
-            "conditions": {
-                "with_skill": with_execution,
-                "without_skill": without_execution,
-                "sum_of_parts": sum_of_parts["execution"],
-            },
+            "agent_runtime_failures": {key: arm.runtime_failures for key, arm in arms.items()},
+            "trial_failures": {key: arm.trial_failures for key, arm in arms.items()},
+            "job_failures": {key: arm.job_failure for key, arm in arms.items()},
+            "conditions": {key: arm.execution for key, arm in arms.items()},
             **agent_execution,
-            "num_trials_with": len(with_rewards),
-            "num_trials_without": len(without_rewards) if not skip_baseline else 0,
-            "num_trials_sum_of_parts": sum_of_parts["num_trials"],
+            "num_trials_with": len(with_skill.rewards),
+            "num_trials_without": len(without_skill.rewards),
+            "num_trials_sum_of_parts": len(sum_of_parts.rewards),
             "output_dir": str(agent_dir.resolve()),
         }
-        canary = canary_arm_comparison(
-            {
-                "with_skill": with_canary,
-                "without_skill": without_canary,
-                "sum_of_parts": sum_of_parts.get("canary_summary"),
-            }
-        )
+        canary = canary_arm_comparison({key: arm.canary_summary for key, arm in arms.items()})
         if canary is not None:
             # Per-arm canary exfiltration results; the verifier already scored each leak.
             all_results["agents"][agent]["canary_summary"] = canary
         if plugin_signals is not None:
             # Report-only plugin component signals; never part of a score or verdict.
             all_results["agents"][agent]["plugin_signals_summary"] = {
-                arm: summary
-                for arm, summary in (
-                    ("with_skill", with_plugin_signals),
-                    ("without_skill", without_plugin_signals),
-                    ("sum_of_parts", sum_of_parts.get("plugin_signals_summary")),
-                )
-                if summary is not None
+                key: arm.plugin_signals_summary for key, arm in arms.items() if arm.plugin_signals_summary is not None
             }
-        if with_load_census is not None:
+        if with_skill.load_census is not None:
             # Report-only native load census (``--plugin-load native|auto``).
-            all_results["agents"][agent]["plugin_load_census"] = with_load_census
+            all_results["agents"][agent]["plugin_load_census"] = with_skill.load_census
 
     _write_generated_root_json(output_dir / "attempt_policy.json", output_dir, all_results["attempt_policy"])
 

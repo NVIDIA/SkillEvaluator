@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,7 @@ from skillevaluator.evaluation.tier3_report import (
 )
 from skillevaluator.tier3.harbor import stats
 from skillevaluator.tier3.harbor.collector import _trial_usage, collect_harbor_results
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS, LEGACY_METRIC_SET
 from skillevaluator.tier3.harbor.report_data import load_agent_data
 from skillevaluator.tier3.harbor.stats import ArmObservations, TrialObservation
 
@@ -131,6 +132,24 @@ def test_trial_quality_score_matches_dimension_mean_and_skips_na_metrics() -> No
     assert stats.trial_quality_score(reward) == pytest.approx(0.625)
     assert stats.trial_quality_score(_reward("case-1", None)) is None
     assert stats.trial_quality_score({"metric_set": "custom-only", "overall": 0.4}) == 0.4
+
+
+def test_trial_quality_score_scores_legacy_security_from_behavior_check() -> None:
+    reward = {
+        "metric_set": LEGACY_METRIC_SET,
+        "accuracy": 0.5,
+        "skill_execution": 1.0,
+        "goal_accuracy": 0.0,
+        "behavior_check": 1.0,
+        "skill_efficiency": 0.5,
+    }
+    # Dimensions: security 1.0 (behavior_check), correctness 0.5, discoverability 1.0,
+    # effectiveness 0.5, efficiency 0.5.
+    assert stats.trial_quality_score(reward) == pytest.approx(0.7)
+
+    # A legacy reward's stray security value is not part of its metric set.
+    reward["security"] = 0.0
+    assert stats.trial_quality_score(reward) == pytest.approx(0.7)
 
 
 @pytest.mark.parametrize(
@@ -466,6 +485,8 @@ def test_collector_emits_c4_statistics_for_every_arm(tmp_path: Path) -> None:
     assert completeness["with_plugin"]["execution_status"] == "succeeded"
 
     persisted = json.loads((tmp_path / "results" / "opencode" / "statistics.json").read_text(encoding="utf-8"))
+    assert tuple(persisted) == stats.STATISTICS_BLOCKS
+    assert {block: agent[block] for block in stats.STATISTICS_BLOCKS} == persisted
     assert persisted["lift_uncertainty"] == agent["lift_uncertainty"]
     assert persisted["integration_completeness"]["complete"] is True
     # Private usage counters never leak into persisted trial rewards.
@@ -474,6 +495,7 @@ def test_collector_emits_c4_statistics_for_every_arm(tmp_path: Path) -> None:
 
     loaded = load_agent_data(tmp_path / "results")["opencode"]
     assert loaded["reliability"] == agent["reliability"]
+    assert {block: loaded[block] for block in stats.STATISTICS_BLOCKS} == persisted
     payload = build_agent_eval_payload(
         "demo",
         {"opencode": loaded},
@@ -558,6 +580,20 @@ def test_trial_usage_falls_back_to_harbor_agent_result(tmp_path: Path) -> None:
     assert stats.uncached_tokens(usage) == 5_500
     assert _trial_usage(job_dir, {"_trial_root_name": "../escape"}) == {}
     assert _trial_usage(None, {"_trial_root_name": "case-1__attempt001"}) == {}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows file names cannot contain ':'")
+def test_trial_usage_skips_a_trial_root_name_that_saved_trials_refuse(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    trial_dir = job_dir / "case:1"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps({"agent_result": {"n_input_tokens": 10, "n_output_tokens": 5, "cost_usd": 0.1}}),
+        encoding="utf-8",
+    )
+
+    # Saved trials name such a root "unknown", so its usage is not attributed either.
+    assert _trial_usage(job_dir, {"_trial_root_name": "case:1"}) == {}
 
 
 def test_trial_usage_never_follows_a_symlinked_trajectory(tmp_path: Path) -> None:
@@ -870,4 +906,5 @@ def test_agent_statistics_of_an_effectiveness_only_run_have_nothing_incomplete()
         pass_threshold=0.5,
         sum_of_parts_requested=False,
     )
+    assert tuple(result) == stats.STATISTICS_BLOCKS
     assert result["integration_completeness"]["complete"] is None

@@ -245,6 +245,18 @@ def test_required_judge_deadline_interrupts_a_stalled_response_body(
     assert signal.getitimer(signal.ITIMER_REAL)[0] == 0
 
 
+def test_required_judge_reports_an_exhausted_budget_as_a_timeout(tmp_path: Path) -> None:
+    verifier = _load_verifier(tmp_path)
+
+    def judge():
+        raise verifier._JudgeBudgetExhausted("LLM judge time budget exhausted")
+
+    result = verifier._call_required_judge("accuracy", judge)
+
+    assert result["status"] == "error"
+    assert result["reason"] == "Required accuracy judge raised TimeoutError: LLM judge time budget exhausted"
+
+
 def test_required_judge_restores_alarm_handler_after_teardown_interrupt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

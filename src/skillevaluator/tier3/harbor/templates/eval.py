@@ -11218,7 +11218,9 @@ def _call_required_judge(metric, judge, *args, allow_not_applicable=False, **kwa
                 finally:
                     signal.signal(signal.SIGALRM, previous_alarm_handler)
     except Exception as exc:
-        result = _judge_error(f"Required {metric} judge raised {type(exc).__name__}: {exc}")
+        # The budget alarm raises a private TimeoutError subclass; report it as a TimeoutError.
+        error_name = "TimeoutError" if isinstance(exc, TimeoutError) else type(exc).__name__
+        result = _judge_error(f"Required {metric} judge raised {error_name}: {exc}")
     finally:
         _ACTIVE_JUDGE_DEADLINE.reset(token)
     return _normalize_required_judge_result(metric, result, allow_not_applicable=allow_not_applicable)

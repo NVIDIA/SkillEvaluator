@@ -152,20 +152,12 @@ def _trial_keys(trials: list[dict[str, Any]]) -> tuple[tuple[str, str], ...] | N
     counts: Counter[str] = Counter()
     keys = []
     implicit: set[str] = set()
-    seen_trials: dict[str, str] = {}
+    seen_trials: dict[str, tuple[str, str | None]] = {}
     for trial in trials:
         entry = trial.get("entry_id")
         if not isinstance(entry, str) or not entry:
             return None
         trial_id = str(trial.get("trial_id") or "")
-        if trial_id and trial_id in seen_trials:
-            if seen_trials[trial_id] != entry:
-                return None
-            # Fallback multi-step rewards share one physical attempt identity.
-            continue
-        if trial_id:
-            seen_trials[trial_id] = entry
-        counts[entry] += 1
         attempts = [trial[field] for field in ("attempt", "attempt_index") if trial.get(field) is not None]
         normalized_attempts = []
         for attempt in attempts:
@@ -183,6 +175,14 @@ def _trial_keys(trials: list[dict[str, Any]]) -> tuple[tuple[str, str], ...] | N
         matches = re.findall(r"(?:__|_|-)attempt[_-]?(\d+)(?=__|$)", trial_id)
         if attempt is None and matches:
             attempt = matches[-1].lstrip("0") or "0"
+        if trial_id and trial_id in seen_trials:
+            if seen_trials[trial_id] != (entry, attempt):
+                return None
+            # Fallback multi-step rewards share one consistent attempt identity.
+            continue
+        if trial_id:
+            seen_trials[trial_id] = (entry, attempt)
+        counts[entry] += 1
         if attempt is None:
             implicit.add(entry)
         keys.append((entry, str(attempt) if attempt is not None else f"ordinal:{counts[entry]}"))
@@ -272,6 +272,19 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                 status = details.get("execution_status") or agent.get("execution_status") or "unknown"
                 if not isinstance(status, str) or status not in {"succeeded", "failed", "unknown", "skipped"}:
                     status = "unknown"
+                invalid_counts = any(
+                    owner.get(key) is not None and _count(owner[key]) is None
+                    for owner, key in (
+                        (agent, count_field),
+                        (details, "expected_attempts"),
+                        (details, "scored_attempts"),
+                    )
+                )
+                if invalid_counts:
+                    output.warnings.append(
+                        f"{source}: {name}/{condition}: invalid trial coverage counts; "
+                        "measurements and comparisons are unavailable."
+                    )
                 declared = _count(agent.get(count_field))
                 if declared is None:
                     declared = len(trials)
@@ -290,6 +303,7 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                         output.warnings.append(notice)
                 complete = (
                     status == "succeeded"
+                    and not invalid_counts
                     and declared > 0
                     and len(trials) == declared
                     and keys is not None
@@ -312,6 +326,7 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                     if complete
                     else None,
                     "_complete": complete,
+                    "_invalid_counts": invalid_counts,
                     "_report_index": report_index,
                     "_agent_key": str(name),
                     "_trial_keys": keys,
@@ -325,7 +340,11 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                 _set_features(row, details, agent, report)
                 _set_usage(
                     row,
-                    [{} if str(trial.get("trial_id") or "") in ambiguous_ids else _usage(trial) for trial in trials],
+                    []
+                    if invalid_counts
+                    else [
+                        {} if str(trial.get("trial_id") or "") in ambiguous_ids else _usage(trial) for trial in trials
+                    ],
                     expected=declared + max(0, row["_expected_usage_trials"] - logical_count),
                 )
                 output.rows.append(row)
@@ -500,6 +519,16 @@ def _load_native(path: Path) -> DashboardData:
             condition_summary = _dict(_read_native_json(summary_path, path))
             row["model"] = str(condition_summary.get("model") or row["model"])
             _set_features(row, condition_summary, agent_config, run_config)
+            row["_invalid_counts"] |= any(
+                condition_summary.get(key) is not None and _count(condition_summary[key]) is None
+                for key in ("num_trials", "expected_attempts", "scored_attempts")
+            )
+        if row["_invalid_counts"]:
+            row["_complete"] = False
+            row["score"] = row["pass_rate"] = None
+            _set_usage(row, [], expected=row["_expected_usage_trials"])
+            output.warnings.append(f"{summary_path}: invalid trial coverage counts; measurements are unavailable.")
+            continue
         trials_dir = path / name / variant / "trials"
         usages_by_trial: dict[str, dict[str, Any]] = {}
         if not _safe_native_path(trials_dir, path):

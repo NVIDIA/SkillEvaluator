@@ -21,7 +21,7 @@ import streamlit as st
 from skillevaluator.reporting.dashboard_data import comparison_rows, load_dashboard_path, parse_dashboard_report
 
 _DIMENSIONS = ("skill", "model", "harness", "features")
-_MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+_MAX_UPLOAD_BYTES = 16_000_000
 _CONDITION_NAMES = {"with_skill": "With skill", "without_skill": "Without skill", "adverse": "Adverse skill"}
 _USAGE_METRICS = ("total_tokens", "prompt_tokens", "completion_tokens", "cached_tokens", "duration_seconds", "cost_usd")
 _PERFORMANCE_COLUMNS = (
@@ -263,7 +263,7 @@ def main(paths: list[str] | None = None) -> None:
         "Upload JSON reports",
         type=["json"],
         accept_multiple_files=True,
-        help="Use Tier 3 JSON reports or consolidated SkillEvaluator JSON reports, up to 16 MiB per file.",
+        help="Use Tier 3 JSON reports or consolidated SkillEvaluator JSON reports, up to 16 MB (16,000,000 bytes) per file.",
         key="report_uploads",
     )
     rows: list[dict[str, Any]] = []
@@ -284,7 +284,7 @@ def main(paths: list[str] | None = None) -> None:
     for index, uploaded in enumerate(uploads):
         contents = uploaded.getvalue()
         if len(contents) > _MAX_UPLOAD_BYTES:
-            warnings.append(f"{uploaded.name}: report exceeds 16 MiB. Upload a smaller evaluation report.")
+            warnings.append(f"{uploaded.name}: report exceeds 16 MB (16,000,000 bytes). Upload a smaller evaluation report.")
             continue
         try:
             payload = json.loads(contents)

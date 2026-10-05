@@ -375,6 +375,9 @@ skillevaluator dashboard
 From a checkout, use `uv run --extra dashboard skillevaluator dashboard ...`.
 The server runs at `http://127.0.0.1:8501`; use `--port 8502` for another port,
 `--no-browser` to suppress opening a browser, and Ctrl+C to stop it.
+Browser uploads accept up to 16 MB (16,000,000 bytes) per file. Local JSON files
+accept up to 16 MiB (16,777,216 bytes); larger files produce a notice while other
+valid reports remain available.
 
 Filter the sortable tables by skill, model, harness, recorded harness features,
 condition, and execution status. Download the visible performance or comparison

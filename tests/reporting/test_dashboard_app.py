@@ -185,7 +185,8 @@ def test_cyclic_input_path_does_not_hide_valid_report(tmp_path: Path) -> None:
         pytest.skip("Symlinks are unavailable on this host")
     app = _app([loop, valid])
     assert not app.exception
-    assert "cannot resolve" in app.warning[0].value
+    assert len(app.warning) == 1
+    assert str(loop) in app.warning[0].value
     assert len(app.dataframe[0].value) == 2
 
 

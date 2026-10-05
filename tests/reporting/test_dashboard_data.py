@@ -103,6 +103,38 @@ def test_canonical_missing_attempt_keeps_usage_totals_unknown() -> None:
     assert "tokens 1/2" in row["coverage"]
 
 
+@pytest.mark.parametrize("value", [True, -1, 1.5, "1"])
+@pytest.mark.parametrize("field", ["declared", "expected", "both_attempt_counts"])
+def test_present_invalid_coverage_counts_never_become_inferred_complete_counts(value: object, field: str) -> None:
+    report = _report()
+    agent = report["agents"]["claude-code"]
+    if field == "declared":
+        agent["num_trials"] = value
+    else:
+        agent["conditions"]["with_skill"]["expected_attempts"] = value
+        if field == "both_attempt_counts":
+            agent["conditions"]["with_skill"]["scored_attempts"] = value
+    data = parse_dashboard_report(report, "report.json")
+    assert data.rows[0]["score"] is None
+    assert data.rows[0]["total_tokens"] is None
+    assert data.rows[0]["duration_seconds"] is None
+    assert any("invalid trial coverage counts" in warning for warning in data.warnings)
+    comparison = comparison_rows(data.rows)[0]
+    assert comparison["comparison_status"] == "incomplete or mismatched coverage"
+    assert comparison["score_delta"] is None
+
+
+def test_unrecorded_legacy_coverage_counts_preserve_observed_trial_pairing() -> None:
+    report = _report()
+    agent = report["agents"]["claude-code"]
+    for field in ("num_trials", "num_trials_baseline"):
+        agent.pop(field)
+    for condition in agent["conditions"].values():
+        condition.pop("expected_attempts")
+        condition["scored_attempts"] = None
+    assert comparison_rows(parse_dashboard_report(report, "legacy.json").rows)[0]["comparison_status"] == "comparable"
+
+
 @pytest.mark.parametrize("mutation", ["failed", "missing_trial", "truncated", "different_case", "missing_attempt"])
 def test_incomplete_or_unmatched_arms_block_all_deltas(mutation: str) -> None:
     report = _report()
@@ -256,6 +288,28 @@ def test_multistep_rewards_keep_logical_scores_without_ambiguous_resource_sums()
     # or mirrors the same physical trial's trajectory.
     agent["trials"][1]["tokens"]["prompt"] = 10
     assert parse_dashboard_report(report, "report.json").rows[0]["total_tokens"] is None
+
+
+@pytest.mark.parametrize("conflict", ["different_attempt", "conflicting_fields", "invalid_attempt"])
+def test_duplicate_physical_trials_require_consistent_attempt_identity(conflict: str) -> None:
+    report = _report()
+    agent = report["agents"]["claude-code"]
+    for field, count in (("trials", "num_trials"), ("trials_baseline", "num_trials_baseline")):
+        agent[field][0]["attempt"] = 1
+        agent[field].append(copy.deepcopy(agent[field][0]))
+        agent[count] = 2
+    assert comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]["comparison_status"] == "comparable"
+    duplicate = agent["trials"][1]
+    if conflict == "different_attempt":
+        duplicate["attempt"] = 2
+    elif conflict == "conflicting_fields":
+        duplicate["attempt_index"] = 2
+    else:
+        duplicate["attempt"] = True
+    comparison = comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]
+    assert comparison["comparison_status"] == "incomplete or mismatched coverage"
+    assert comparison["score_delta"] is None
+    assert comparison["pass_rate_delta"] is None
 
 
 def test_explicit_adverse_row_has_no_invented_baseline_delta() -> None:
@@ -583,6 +637,26 @@ def test_native_different_condition_models_cannot_pair(tmp_path: Path) -> None:
     comparisons = comparison_rows(load_dashboard_path(run).rows)
     assert len(comparisons) == 2
     assert all(row["comparison_status"] == "missing condition" for row in comparisons)
+
+
+@pytest.mark.parametrize("value", [True, -1, 1.5, "1"])
+@pytest.mark.parametrize("field", ["num_trials", "expected_attempts", "scored_attempts"])
+def test_native_invalid_coverage_counts_cannot_be_hidden_by_canonical_normalization(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    run = tmp_path / "run"
+    _native_run(run)
+    summary_path = run / "opencode" / "with-skill" / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary[field] = value
+    summary_path.write_text(json.dumps(summary))
+    data = load_dashboard_path(run)
+    row = next(row for row in data.rows if row["condition"] == "with_skill")
+    assert row["score"] is None
+    assert row["total_tokens"] is None
+    assert row["duration_seconds"] is None
+    assert any("invalid trial coverage counts" in warning for warning in data.warnings)
+    assert comparison_rows(data.rows)[0]["score_delta"] is None
 
 
 @pytest.mark.parametrize("artifact", ["trials", "trajectory.json", "result.json", "reward.json"])

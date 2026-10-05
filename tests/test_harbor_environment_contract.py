@@ -85,6 +85,72 @@ def test_backend_kwargs_track_the_pinned_harbor_release() -> None:
     assert f"dind_image={json.dumps('docker:dind')}" in _environment_kwargs(tensorlake)
 
 
+@pytest.mark.parametrize(
+    ("env_mode", "name", "value"),
+    [
+        ("runta", "mode", "direct"),
+        ("mosaic", "volume", "shared-cache"),
+        ("mosaic", "persist", True),
+        ("mosaic", "enable_ssh", True),
+        ("mosaic", "build_args", {"BASE_IMAGE": "python:3.12"}),
+        ("mosaic", "build_target", "builder"),
+    ],
+)
+def test_runta_and_mosaic_isolation_controls_are_reserved(env_mode: str, name: str, value: object) -> None:
+    with pytest.raises(ValueError, match=rf"reserved for Harbor runtime policy: {name}"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="opencode",
+            job_name="reserved",
+            env_mode=env_mode,
+            environment_kwargs={name: value},
+        )
+
+
+@pytest.mark.parametrize(("env_mode", "name", "value"), [("runta", "token", "rt-123456"), ("mosaic", "secrets", ["s"])])
+def test_runta_and_mosaic_credentials_stay_in_the_host_environment(env_mode: str, name: str, value: object) -> None:
+    with pytest.raises(ValueError, match="secret-bearing"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="opencode",
+            job_name="credentials",
+            env_mode=env_mode,
+            environment_kwargs={name: value},
+        )
+
+
+def test_runta_and_mosaic_forward_operational_kwargs() -> None:
+    runta = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="opencode",
+        job_name="runta",
+        env_mode="runta",
+        environment_kwargs={"endpoint": "https://runta.example", "startup_timeout_sec": 300},
+    )
+    assert runta[runta.index("--env") + 1] == "runta"
+    assert _environment_kwargs(runta) == [f"endpoint={json.dumps('https://runta.example')}", "startup_timeout_sec=300"]
+
+    mosaic = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="opencode",
+        job_name="mosaic",
+        env_mode="mosaic",
+        environment_kwargs={"metadata": {"team": "evals"}, "replicas": 2, "ttl_seconds": 7200},
+    )
+    assert mosaic[mosaic.index("--env") + 1] == "mosaic"
+    assert _environment_kwargs(mosaic) == [
+        f"metadata={json.dumps({'team': 'evals'}, separators=(',', ':'))}",
+        "replicas=2",
+        "ttl_seconds=7200",
+    ]
+
+
+@pytest.mark.parametrize("env_mode", ["prime", "smol"])
+def test_harbor_backends_without_task_projection_stay_unexposed(env_mode: str) -> None:
+    assert env_mode not in runner.HARBOR_ENV_MODES
+    assert "Unsupported Harbor environment" in runner._check_prerequisites(env_mode=env_mode, agents=["opencode"])[0]
+
+
 def test_cwsandbox_prerequisites_require_sdk_and_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(runner.importlib.util, "find_spec", lambda name: None if name == "cwsandbox" else object())
     assert "harbor[cwsandbox]==0.24.0" in runner._cwsandbox_prerequisite_errors("cwsandbox")[0]

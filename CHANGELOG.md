@@ -27,6 +27,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 log converters now rebuild ATIF trajectories from OpenCode JSON streams
   (`opencode.txt`) and structured Codex tee logs (`codex.txt`) when
   `trajectory.json` is missing or empty.
+- `--env-mode runta` and `--env-mode mosaic` run Tier 3 trials on Harbor's Runta
+  and Mosaic backends. Runta's `mode` and Mosaic's `volume`, `persist`,
+  `enable_ssh`, `build_args`, and `build_target` kwargs are reserved because they
+  bypass the task image or let state and access outlive one isolated trial.
 
 ### Changed
 

@@ -127,7 +127,7 @@ Anthropic evaluator with `opencode` also does not support local mode.
 
 ## Where trials run
 
-SkillEvaluator exposes 24 environment modes: 23 Harbor-native backends,
+SkillEvaluator exposes 26 environment modes: 25 Harbor-native backends,
 including Docker, plus SkillEvaluator's own `local` host-execution mode.
 Docker is the default. The `tier3` extra installs base `harbor==0.24.0`; install
 the environment extra shown below when a managed backend needs one.
@@ -157,6 +157,8 @@ the environment extra shown below when a managed backend needs one.
 | `skypilot` | Harbor-native | `harbor[skypilot]==0.24.0` |
 | `hyperbrowser` | Harbor-native | `harbor[hyperbrowser]==0.24.0` |
 | `vercel` | Harbor-native | `harbor[vercel]==0.24.0` |
+| `runta` | Harbor-native | `harbor[runta]==0.24.0` |
+| `mosaic` | Harbor-native | `harbor[mosaic]==0.24.0` |
 | `local` | SkillEvaluator | Your machine, under an OS sandbox policy — see [Local mode](#local-mode). |
 
 <Tip>
@@ -173,12 +175,15 @@ authentication (`auth=wandb`), using `WANDB_API_KEY` or the netrc file that
 is rejected for both `cwsandbox` and `wandb`.
 
 Harbor 0.24 also defines `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`,
-`kata`, `runta`, `prime`, `mosaic`, and `smol`, but those backends are not
-exposed until SkillEvaluator can project the complete task bundle — skill,
-verifier, dependencies, and inputs — through a trusted image or
-backend-native provisioning path, with credentials and constructor options
-reviewed per backend. Selecting one of those names is rejected before a run
-starts.
+`kata`, `prime`, and `smol`, but those backends are not exposed until
+SkillEvaluator can project the complete task bundle — skill, verifier,
+dependencies, and inputs — through a trusted image or backend-native
+provisioning path, with credentials and constructor options reviewed per
+backend. Selecting one of those names is rejected before a run starts. Prime
+builds only Compose tasks and Smol runs only a published
+`[environment].docker_image`, while SkillEvaluator builds every task from its
+staged Dockerfile and rejects task-authored images, so neither can run
+SkillEvaluator tasks yet.
 
 ### Native backend constructor options
 
@@ -250,6 +255,20 @@ Harbor 0.24 Modal preflight requires `~/.modal.toml` or `MODAL_TOKEN_ID` plus
 `MODAL_CONFIG_PATH`, but Harbor's child-process preflight does not recognize a
 custom config path by itself; configure one of Harbor's supported credential
 forms before launching trials.
+
+Runta authenticates with `RUNTA_TOKEN` or the configuration file named by
+`RUNTA_CONFIG`, and Harbor's preflight requires one of them. Runta's `mode`
+kwarg is reserved: `mode=direct` runs commands in Runta's base runtime and
+ignores the task image, while Harbor's automatic selection builds the task's
+Dockerfile or Compose definition inside the runtime.
+
+Mosaic authenticates with `MOSAIC_API_TOKEN` or the credential that `mos login`
+stores, and reads `MOSAIC_REGISTRY_USERNAME` and `MOSAIC_REGISTRY_PASSWORD` for
+private base images. Mosaic's `volume`, `persist`, and `enable_ssh` kwargs are
+reserved because they let state or access outlive one isolated trial, and
+`build_args` and `build_target` are reserved because they can skip or alter
+evaluator-staged Dockerfile layers. Mosaic's `secrets` kwarg is rejected because
+it injects provider secrets into the agent's sandbox.
 
 Other eligible, backend-specific constructor options are forwarded after
 validation. Harbor acts only on options implemented by the selected backend;

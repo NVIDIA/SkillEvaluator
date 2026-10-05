@@ -889,6 +889,8 @@ _HARBOR_ENV_MODE_VARS = {
     ),
     "hyperbrowser": _DOCKER_HOST_ENV_VARS | frozenset({"HYPERBROWSER_API_KEY", "HYPERBROWSER_BASE_URL"}),
     "vercel": frozenset({"VERCEL_OIDC_TOKEN", "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID", "VERCEL_TOKEN"}),
+    "runta": frozenset({"RUNTA_CONFIG", "RUNTA_TOKEN"}),
+    "mosaic": frozenset({"MOSAIC_API_TOKEN", "MOSAIC_REGISTRY_PASSWORD", "MOSAIC_REGISTRY_USERNAME"}),
 }
 _BEDROCK_HOST_ENV_VARS = _AWS_HOST_ENV_VARS | {
     "AWS_BEARER_TOKEN_BEDROCK",
@@ -1124,7 +1126,14 @@ _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS: dict[str, frozenset[str]] = {
     "ec2": frozenset({"iam_instance_profile", "strict_host_key_checking"}),
     "gke": frozenset({"memory_limit_multiplier"}),
     "modal": frozenset({"volumes"}),
+    # Persistent volumes, persisted sandboxes, SSH access, and alternate build
+    # inputs would let state or access outlive one isolated trial or skip
+    # evaluator-staged Dockerfile layers.
+    "mosaic": frozenset({"build_args", "build_target", "enable_ssh", "persist", "volume"}),
     "openshift": frozenset({"service_account_name"}),
+    # Direct mode runs commands in Runta's base runtime and ignores the task
+    # image; Harbor's automatic selection honors the task's Dockerfile or Compose.
+    "runta": frozenset({"mode"}),
     "singularity": frozenset({"singularity_no_mount"}),
     "use-computer": frozenset({"resources"}),
     "vercel": frozenset({"ports"}),

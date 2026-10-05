@@ -443,7 +443,10 @@ Paths are plugin-root relative; `./` is conventional but not required. A
 declared field replaces default-folder discovery for its type. The defaults are
 `skills/`, `rules/` (`.md`, `.mdc`, and `.markdown` files), `agents/`,
 `commands/` (which also accepts `.txt`), `hooks/hooks.json`, and a root
-`mcp.json`. `${CURSOR_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_ROOT}` name the root. A
+`mcp.json`. `${CURSOR_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_ROOT}` name the root
+when `/` or nothing follows them. Cursor expands them as text, so
+`${CURSOR_PLUGIN_ROOT}servers.json` names a file beside the root (a HIGH
+`plugin_component_path_escape`). A
 root `SKILL.md` makes a single-skill plugin when no skills are declared and
 there is no `skills/` directory; it is inventoried but not staged. Cursor hooks list
 handlers directly under each event; the hook risk model reads each one as a
@@ -705,7 +708,7 @@ checks are skipped when a plugin bundles no skills.
 | Check | Severity | Flags |
 | --- | --- | --- |
 | `plugin_component_path_missing` | HIGH | A declared component path does not exist |
-| `plugin_component_path_escape` | HIGH | A declared path is absolute, home-relative, a drive letter, or uses `..` |
+| `plugin_component_path_escape` | HIGH | A declared path is absolute, home-relative, or a drive letter, uses `..`, or puts a name right after a root variable (`${CURSOR_PLUGIN_ROOT}servers.json` names a file beside the root) |
 | `plugin_component_path_unsafe` | HIGH | A path is, or passes through, a symlink, hard link, or special file. It is not followed |
 | `plugin_component_path_invalid` | HIGH | A declaration has the wrong shape for its field, such as a command map entry without exactly one of `source` or `content` |
 | `plugin_component_path_style` | MEDIUM | A contained-manifest path does not start with `./` |

@@ -82,9 +82,8 @@ TOTAL_TIMEOUT_S = 20.0
 
 NOT_REQUESTED_DETAIL = "host probe not requested (pass --probe-mcp to probe URL MCP servers)"
 _HEADER_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
-#: Valid ``--probe-mcp-env`` variable names (the same shape the header references use).
-ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# ``NAME``, ``NAME=HOST`` (only servers whose URL host is HOST) or ``NAME@SERVER`` (only that server).
+# A ``--probe-mcp-env`` value: ``NAME``, ``NAME=HOST`` (only servers whose URL host is HOST) or
+# ``NAME@SERVER`` (only that server). NAME has the shape of a header's ``${VAR}`` reference.
 _ENV_GRANT_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(?:=(.+)|@(.+))?")
 _GRANT_HOST_RE = re.compile(r"[a-z0-9._:-]{1,253}")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")

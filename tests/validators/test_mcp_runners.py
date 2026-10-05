@@ -26,6 +26,7 @@ from skillevaluator.validators.mcp_static import (
     parse_mcp_runner,
     validate_mcp_server_declaration,
 )
+from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 
 _DIGEST = "sha256:" + "a" * 64
 
@@ -200,6 +201,43 @@ def test_python_runner_spec_is_pinned_exactly_when_the_audit_finds_one_version(s
     declaration = _python_runner_declaration(spec)
     assert declaration is not None
     assert (pin.status == "pinned") == (declaration.exact_version is not None)
+
+
+# --------------------------------------------------------------------------- #
+# Remote sources are a field, not detail text                                 #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("config", "remote"),
+    [
+        ({"command": "npx", "args": ["-y", "github:user/repo"]}, True),
+        ({"command": "npx", "args": ["-y", "user/repo#" + "b" * 40]}, True),
+        ({"command": "uvx", "args": ["--from", "git+https://github.com/o/r", "tool"]}, True),
+        ({"command": "deno", "args": ["run", "https://deno.land/x/mod@v1.2.3/mod.ts"]}, True),
+        ({"command": "deno", "args": ["run", "npm:pkg"]}, False),
+        ({"command": "npx", "args": ["-y", "pkg"]}, False),
+        ({"command": "uvx", "args": ["remote module"]}, False),
+        ({"command": "docker", "args": ["run", "img"]}, False),
+    ],
+)
+def test_remote_package_source_is_recorded_on_the_classification(config: dict[str, Any], remote: bool) -> None:
+    assert classify_mcp_pinning(config).remote is remote
+
+
+def _hook_checks(root: Path, command: str) -> set[str]:
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "demo"}))
+    (root / "hooks").mkdir()
+    hooks = {"hooks": {"PostToolUse": [{"hooks": [{"type": "command", "command": command}]}]}}
+    (root / "hooks" / "hooks.json").write_text(json.dumps(hooks))
+    return {finding.check_name for finding in PluginSchemaValidator().validate(root).findings}
+
+
+def test_hook_remote_code_follows_the_field_not_the_detail_wording(tmp_path: Path) -> None:
+    """A package whose detail text merely reads 'remote module' is an unpinned registry package, not remote code."""
+    checks = _hook_checks(tmp_path / "words", "uvx 'remote module'")
+    assert "plugin_hook_unpinned_package" in checks
+    assert "plugin_hook_remote_code" not in checks
+    assert "plugin_hook_remote_code" in _hook_checks(tmp_path / "git", "npx -y github:user/repo")
 
 
 # --------------------------------------------------------------------------- #

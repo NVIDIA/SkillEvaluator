@@ -1014,10 +1014,15 @@ _CONTAINER_RUNTIMES = frozenset({"docker", "podman", "nerdctl"})
 
 @dataclass(frozen=True)
 class McpPinning:
-    """Static supply-chain pinning classification of one MCP declaration."""
+    """Static supply-chain pinning classification of one MCP declaration.
+
+    ``remote`` is set when the package comes from a git or URL spec, or a
+    remote module, rather than from a registry.
+    """
 
     status: PinStatus
     detail: str
+    remote: bool = False
 
     @property
     def pinned(self) -> bool | None:
@@ -1258,8 +1263,8 @@ def _classify_npm_spec(spec: str) -> McpPinning:
         return McpPinning("not_applicable", f"local package path {spec!r}")
     if is_remote_npm_spec(spec):
         if _GIT_SHA_RE.search(spec):
-            return McpPinning("pinned", f"git/URL spec pinned to a commit: {spec!r}")
-        return McpPinning("unpinned", f"git/URL/GitHub spec without a commit SHA: {spec!r}")
+            return McpPinning("pinned", f"git/URL spec pinned to a commit: {spec!r}", remote=True)
+        return McpPinning("unpinned", f"git/URL/GitHub spec without a commit SHA: {spec!r}", remote=True)
     _name, version = split_npm_spec(spec)
     if version is None:
         return McpPinning("unpinned", f"package {spec!r} has no version (resolves to the latest release)")
@@ -1274,8 +1279,8 @@ def _classify_python_spec(spec: str) -> McpPinning:
         return McpPinning("not_applicable", f"local package path {spec!r}")
     if is_remote_pypi_spec(spec):
         if _GIT_SHA_RE.search(spec) or "#sha256=" in spec:
-            return McpPinning("pinned", f"git/URL spec pinned to a commit or hash: {spec!r}")
-        return McpPinning("unpinned", f"git/URL spec without a commit SHA or hash: {spec!r}")
+            return McpPinning("pinned", f"git/URL spec pinned to a commit or hash: {spec!r}", remote=True)
+        return McpPinning("unpinned", f"git/URL spec without a commit SHA or hash: {spec!r}", remote=True)
     if exact_pypi_version(spec):
         return McpPinning("pinned", f"exact version {spec!r}")
     if any(marker in spec for marker in ("<", ">", "~", "!", "*", ",", "=", "@")):
@@ -1289,8 +1294,8 @@ def _classify_deno_module(module: str | None) -> McpPinning:
         return _prefixed("deno run: ", _classify_npm_spec(module.split(":", 1)[1]))
     if module and module.startswith(("http://", "https://")):
         if _DENO_EXACT_MODULE_RE.search(module):
-            return McpPinning("pinned", f"deno run: remote module pinned to an exact version: {module!r}")
-        return McpPinning("unpinned", f"deno run: remote module without an exact version: {module!r}")
+            return McpPinning("pinned", f"deno run: remote module pinned to an exact version: {module!r}", remote=True)
+        return McpPinning("unpinned", f"deno run: remote module without an exact version: {module!r}", remote=True)
     return McpPinning("not_applicable", "deno run of a local script")
 
 
@@ -1324,7 +1329,7 @@ def _classify_spec_list(specs: Iterable[str], classify: Any) -> McpPinning:
 
 
 def _prefixed(prefix: str, pin: McpPinning) -> McpPinning:
-    return McpPinning(pin.status, f"{prefix}{pin.detail}")
+    return McpPinning(pin.status, f"{prefix}{pin.detail}", pin.remote)
 
 
 def _classify_invocation(invocation: RunnerInvocation) -> McpPinning:

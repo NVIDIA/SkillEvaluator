@@ -2191,7 +2191,7 @@ def _package_runs(commands: list[str]) -> tuple[_PackageRun, ...]:
                 continue
             pin = classify_mcp_pinning({"command": runner, "args": words[index + 1 :]})
             if pin.status == "unpinned":
-                remote = "git/URL" in pin.detail or "remote module" in pin.detail
+                remote = pin.remote
                 runs.append(_PackageRun(_bounded(pin.detail, 160), remote))
                 if len(runs) >= MAX_OUTSIDE_REFS:
                     return tuple(runs)

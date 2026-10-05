@@ -118,6 +118,7 @@ from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_
 from skillevaluator.tier3.eval_core.plugin_signals import validate_plugin_case_fields
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
 from skillevaluator.tier3.harbor.secure_copy import UnsafeStagingError, copy_file_secure, copytree_secure
+from skillevaluator.tier3.plugin_native import foreign_root_var_re, plugin_root_var_names, to_claude_root
 from skillevaluator.utils.helpers import find_bundled_plugin_skills
 from skillevaluator.utils.secure_fs import (
     SecurePathError,
@@ -156,8 +157,6 @@ PLUGIN_RUNTIME_COMPONENTS_FILENAME = "plugin_runtime_components.json"
 # that point into the plugin tree. The wrapper runtime expands none of them and
 # never copies the plugin tree into the task environment, so an MCP server
 # launched through them cannot start there (see _launches_from_plugin_files).
-_CLAUDE_PLUGIN_VARS = ("CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA")
-_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _RELATIVE_PATH_PREFIXES = ("./", "../", ".\\", "..\\")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:/")
 # ``${user_config.<key>}`` values Claude Code fills from the plugin's userConfig.
@@ -166,27 +165,11 @@ _USER_CONFIG_REF_RE = re.compile(r"\$\{user_config\.([A-Za-z0-9_.-]+)\}")
 _ROOTED_PLACEHOLDER = "/plugin-root"
 
 
-def _plugin_root_var_names(root_prefixes: tuple[str, ...] = ()) -> tuple[str, ...]:
-    """Variable names that name the plugin root: the format's placeholders plus Claude Code's."""
-    names = {prefix.strip().removeprefix("$").removeprefix("{").removesuffix("}") for prefix in root_prefixes}
-    return tuple(sorted({name for name in names if _ENV_NAME_RE.fullmatch(name)} | set(_CLAUDE_PLUGIN_VARS)))
-
-
 @functools.lru_cache(maxsize=16)
 def _plugin_install_var_re(root_prefixes: tuple[str, ...] = ()) -> re.Pattern[str]:
     """Match a plugin-root variable, braced (``${PLUGIN_ROOT}``) or bare (``$PLUGIN_ROOT``)."""
-    names = "|".join(re.escape(name) for name in _plugin_root_var_names(root_prefixes))
+    names = "|".join(re.escape(name) for name in plugin_root_var_names(root_prefixes))
     return re.compile(r"\$\{?(?:" + names + r")\b")
-
-
-@functools.lru_cache(maxsize=16)
-def _foreign_root_var_re(root_prefixes: tuple[str, ...] = ()) -> re.Pattern[str] | None:
-    """Match a format's own root placeholder that Claude Code does not expand (``${PLUGIN_ROOT}``)."""
-    foreign = [name for name in _plugin_root_var_names(root_prefixes) if name not in _CLAUDE_PLUGIN_VARS]
-    if not foreign:
-        return None
-    names = "|".join(re.escape(name) for name in foreign)
-    return re.compile(r"\$\{(?:" + names + r")\}|\$(?:" + names + r")\b")
 
 
 @dataclass(frozen=True)
@@ -1694,16 +1677,10 @@ def _plugin_root_launch(server: dict[str, Any], *, root_prefixes: tuple[str, ...
         probe["args"] = [_rooted(arg) for arg in server["args"]]
     if _launches_from_plugin_files(probe, root_prefixes=root_prefixes):
         return None
-    foreign = _foreign_root_var_re(root_prefixes)
-
-    def _claude(value: Any) -> Any:
-        return (
-            foreign.sub(lambda _match: "${CLAUDE_PLUGIN_ROOT}", value) if foreign and isinstance(value, str) else value
-        )
-
-    rewritten = {key: _claude(value) for key, value in server.items() if key != "args"}
+    foreign = foreign_root_var_re(tuple(root_prefixes))
+    rewritten = {key: to_claude_root(value, foreign) for key, value in server.items() if key != "args"}
     if isinstance(server.get("args"), list):
-        rewritten["args"] = [_claude(arg) for arg in server["args"]]
+        rewritten["args"] = [to_claude_root(arg, foreign) for arg in server["args"]]
     return rewritten
 
 

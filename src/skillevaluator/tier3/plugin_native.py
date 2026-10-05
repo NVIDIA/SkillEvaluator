@@ -34,6 +34,7 @@ in :mod:`skillevaluator.tier3.harbor.native_agents`.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -547,8 +548,8 @@ CURSOR_TO_CLAUDE_HOOK_EVENTS: dict[str, tuple[str, str | None]] = {
     "stop": ("Stop", None),
 }
 CLAUDE_PLUGIN_ROOT_VAR = "${CLAUDE_PLUGIN_ROOT}"
-_CLAUDE_ROOT_VAR_NAMES = frozenset({"CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA"})
-_FOREIGN_ROOT_VAR_RE = re.compile(r"\$\{(?:CURSOR_PLUGIN_ROOT|PLUGIN_ROOT)\}|\$(?:CURSOR_PLUGIN_ROOT|PLUGIN_ROOT)\b")
+#: The install-time variables Claude Code expands when it loads a plugin.
+CLAUDE_ROOT_VAR_NAMES = frozenset({"CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA"})
 _ROOT_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _LEADING_WORD_RE = re.compile(r"(\s*)(\S+)")
 _RELATIVE_WORD_RE = re.compile(r"(^|\s)\./")
@@ -557,14 +558,38 @@ _PARENT_WORD_RE = re.compile(r"(^|\s)\.\./")
 _BARE_WORD_RE = re.compile(r"(^|[\s;&|(])([A-Za-z0-9_][A-Za-z0-9_./-]*)(?=$|[\s;&|)])")
 
 
-def _foreign_root_var_re(root_prefixes: Sequence[str]) -> re.Pattern[str] | None:
-    """Match a format's own plugin-root placeholder that Claude Code does not expand, braced or bare."""
+def plugin_root_var_names(root_prefixes: Sequence[str]) -> tuple[str, ...]:
+    """The variable names that name the plugin root: a format's own placeholders plus Claude Code's.
+
+    *root_prefixes* are the format's placeholders as written (``${PLUGIN_ROOT}``,
+    ``${CURSOR_PLUGIN_ROOT}``).
+    """
     names = {str(prefix).strip().removeprefix("$").removeprefix("{").removesuffix("}") for prefix in root_prefixes}
-    foreign = sorted(name for name in names if _ROOT_VAR_NAME_RE.fullmatch(name) and name not in _CLAUDE_ROOT_VAR_NAMES)
+    return tuple(sorted({name for name in names if _ROOT_VAR_NAME_RE.fullmatch(name)} | CLAUDE_ROOT_VAR_NAMES))
+
+
+@functools.lru_cache(maxsize=32)
+def foreign_root_var_re(root_prefixes: tuple[str, ...]) -> re.Pattern[str] | None:
+    """Match a format's own plugin-root placeholder that Claude Code does not expand, braced or bare.
+
+    ``None`` when every placeholder in *root_prefixes* is one Claude Code expands.
+    """
+    foreign = [name for name in plugin_root_var_names(root_prefixes) if name not in CLAUDE_ROOT_VAR_NAMES]
     if not foreign:
         return None
     alternatives = "|".join(re.escape(name) for name in foreign)
     return re.compile(r"\$\{(?:" + alternatives + r")\}|\$(?:" + alternatives + r")\b")
+
+
+def to_claude_root(value: Any, pattern: re.Pattern[str] | None) -> Any:
+    """A string with each *pattern* placeholder rewritten to ``${CLAUDE_PLUGIN_ROOT}``; other values unchanged."""
+    if pattern is None or not isinstance(value, str):
+        return value
+    return pattern.sub(lambda _match: CLAUDE_PLUGIN_ROOT_VAR, value)
+
+
+#: The Cursor and Agent Plugins root placeholders, rewritten in every translated Cursor hook command.
+_CURSOR_ROOT_VAR_RE = foreign_root_var_re(("${CURSOR_PLUGIN_ROOT}", "${PLUGIN_ROOT}"))
 
 
 def _plugin_file_checker(plugin_root: Path | None) -> Callable[[str], bool] | None:
@@ -598,9 +623,7 @@ def claude_root_command(
     that names a plugin file (``sh scripts/x.sh``, ``python3 hooks/x.py``).
     """
     root = f'"{CLAUDE_PLUGIN_ROOT_VAR}"/'
-    rewritten = _FOREIGN_ROOT_VAR_RE.sub(lambda _match: CLAUDE_PLUGIN_ROOT_VAR, command)
-    if foreign_root is not None:
-        rewritten = foreign_root.sub(lambda _match: CLAUDE_PLUGIN_ROOT_VAR, rewritten)
+    rewritten = to_claude_root(to_claude_root(command, _CURSOR_ROOT_VAR_RE), foreign_root)
     match = _LEADING_WORD_RE.match(rewritten)
     if match is not None:
         program = match.group(2)
@@ -636,13 +659,9 @@ def _claude_root_vars(handler: Any, foreign_root: re.Pattern[str]) -> Any:
     """Rewrite a format's plugin-root placeholder to ``${CLAUDE_PLUGIN_ROOT}`` in a command handler."""
     if not isinstance(handler, dict) or not isinstance(handler.get("command"), str):
         return handler
-
-    def _sub(value: Any) -> Any:
-        return foreign_root.sub(lambda _match: CLAUDE_PLUGIN_ROOT_VAR, value) if isinstance(value, str) else value
-
-    rewritten = {**handler, "command": _sub(handler["command"])}
+    rewritten = {**handler, "command": to_claude_root(handler["command"], foreign_root)}
     if isinstance(handler.get("args"), list):
-        rewritten["args"] = [_sub(arg) for arg in handler["args"]]
+        rewritten["args"] = [to_claude_root(arg, foreign_root) for arg in handler["args"]]
     return handler if rewritten == handler else rewritten
 
 
@@ -663,7 +682,7 @@ def wrap_hook_sources(sources: Sequence[NativeHookSource], *, plugin_root: Path 
     dropped: list[tuple[str, str]] = []
     plugin_file = _plugin_file_checker(plugin_root)
     for source in sources:
-        foreign_root = _foreign_root_var_re(source.root_prefixes)
+        foreign_root = foreign_root_var_re(tuple(source.root_prefixes))
         rebuilt: dict[tuple[str, int], dict[str, Any]] = {}
         order: list[tuple[str, int]] = []
         targets: dict[tuple[str, int], str] = {}

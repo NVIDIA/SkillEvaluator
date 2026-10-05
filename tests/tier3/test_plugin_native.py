@@ -37,6 +37,7 @@ from skillevaluator.tier3.plugin_native import (
     component_support_matrix,
     fallback_census,
     finalize_native_provenance,
+    foreign_root_var_re,
     hook_id,
     native_agent_import_path,
     normalize_census,
@@ -45,6 +46,7 @@ from skillevaluator.tier3.plugin_native import (
     refuse_or_fall_back,
     resolve_plugin_load,
     summarize_censuses,
+    to_claude_root,
     wrap_hook_handler,
     wrap_hook_sources,
 )
@@ -340,6 +342,18 @@ def test_wrapped_hooks_merge_sources_with_ids_that_match_the_static_hook_risk_ro
         "inline#Stop[0].hooks[0]",
     ]
     assert len(wrapped.config["hooks"]["Stop"]) == 2
+
+
+def test_a_formats_own_root_placeholder_is_rewritten_to_the_claude_root() -> None:
+    pattern = foreign_root_var_re(("${PLUGIN_ROOT}", "${CLAUDE_PLUGIN_ROOT}"))
+
+    assert to_claude_root("${PLUGIN_ROOT}/bin/x $PLUGIN_ROOT/y $PLUGIN_ROOTS", pattern) == (
+        "${CLAUDE_PLUGIN_ROOT}/bin/x ${CLAUDE_PLUGIN_ROOT}/y $PLUGIN_ROOTS"
+    )
+    assert to_claude_root(["${PLUGIN_ROOT}"], pattern) == ["${PLUGIN_ROOT}"]
+    # Claude Code expands its own variables, so a Claude-only format has nothing to rewrite.
+    assert foreign_root_var_re(("${CLAUDE_PLUGIN_ROOT}",)) is None
+    assert to_claude_root("${CLAUDE_PLUGIN_ROOT}/x", None) == "${CLAUDE_PLUGIN_ROOT}/x"
 
 
 def test_wrapped_hook_runs_through_the_census_script(tmp_path: Path) -> None:

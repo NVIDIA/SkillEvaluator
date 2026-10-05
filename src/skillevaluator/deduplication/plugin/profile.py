@@ -25,7 +25,6 @@ from skillevaluator.constants import (
     PLUGIN_CATALOG_MAX_MEMBER_CHARS,
     PLUGIN_CATALOG_MAX_MEMBERS,
     PLUGIN_CONTAINED_MANIFEST_FILE,
-    PLUGIN_CONTAINED_MANIFEST_TYPES,
     PLUGIN_MANIFEST_FILES,
     PLUGIN_NATIVE_MANIFEST_DIRS,
     SCAN_EXCLUDED_DIRS,
@@ -38,15 +37,11 @@ from skillevaluator.embedding.extractor import (
     ExtractionBudget,
     extract_skill_manifest,
 )
+from skillevaluator.plugin_formats import parse_manifest_text
 from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
 from skillevaluator.utils.helpers import find_bundled_plugin_skill_manifests
 from skillevaluator.utils.secure_fs import SecureFile, SecurePathError, SecureRoot, discover_secure_files
-from skillevaluator.utils.structured_data import (
-    StructuredDataError,
-    load_bounded_json,
-    load_bounded_yaml,
-    require_bounded_string,
-)
+from skillevaluator.utils.structured_data import StructuredDataError, require_bounded_string
 
 MAX_PLUGIN_MEMBERS = PLUGIN_CATALOG_MAX_MEMBERS
 MAX_PLUGIN_MEMBER_CHARS = PLUGIN_CATALOG_MAX_MEMBER_CHARS
@@ -141,11 +136,7 @@ def _load_manifest_data(plugin_root: Path, budget: ExtractionBudget | None) -> t
     if budget is not None:
         budget.consume_bytes(len(raw.encode("utf-8")))
     try:
-        data: Any = (
-            load_bounded_json(raw)
-            if located.manifest_type in PLUGIN_CONTAINED_MANIFEST_TYPES
-            else load_bounded_yaml(raw)
-        )
+        data: Any = parse_manifest_text(located.manifest_type, raw)
     except StructuredDataError as exc:
         raise PluginProfileError("Plugin manifest could not be parsed within structured-data limits") from exc
     if not isinstance(data, dict):

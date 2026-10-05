@@ -19,6 +19,7 @@ from typing import Any
 from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.tier3.eval_core.checks import (
     _APPLY_PATCH_COMMAND_RE,
+    _APPLY_PATCH_HEADER_RE,
     _FD_REDIRECT_TARGET_RE,
     _REDIRECT_TARGET_RE,
     _SED_IN_PLACE_FLAG_RE,
@@ -248,10 +249,8 @@ _WRITE_PATH_KEYS = ("file_path", "filePath", "path", "filename", "target_file", 
 _WRITE_BODY_KEYS = ("content", "contents", "new_string", "newString", "new_source", "patch", "patchText", "code")
 _APPLY_PATCH_BODY_KEYS = ("input", "raw", "value")
 _WRITE_MAX_EDITS = 5
-_PATCH_FILE_HEADER_RE = re.compile(
-    r"^[^\S\n]*\*\*\* (?:Add File|Update File|Delete File|Move to):[ \t]*([^\n]*)",
-    re.MULTILINE,
-)
+# The security extractor's drift-pinned apply_patch file headers.
+_PATCH_FILE_HEADER_RE = _APPLY_PATCH_HEADER_RE
 
 # What the judges see of each tool-history entry before any budget applies.
 _HISTORY_ARGS_CHARS = 200

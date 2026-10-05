@@ -31,6 +31,7 @@ from skillevaluator.reporting.plugin_sections import (
     component_for_path,
     coverage_view,
     is_plugin_payload,
+    split_display_prefix,
     statistics_view,
     tier3_plugin_view,
 )
@@ -235,6 +236,11 @@ def test_sarif_without_plugin_has_no_run_properties() -> None:
         ("./skills/loader/scripts/run.py", "loader"),
         ("/work/demo-plugin/hooks/pre.sh", "pre-commit"),
         ("[loader] skills/loader/SKILL.md", "loader"),
+        # A bundled skill's path relative to the skill, as Tier 2 reports it.
+        ("[loader] SKILL.md", "loader"),
+        # A file inside the skill, not the plugin's own hooks/pre.sh.
+        ("[loader] hooks/pre.sh", "loader"),
+        ("[loader] /work/demo-plugin/skills/loader/SKILL.md", "loader"),
         ("README.md", None),
         ("/elsewhere/skills/loader/SKILL.md", None),
         ("skills/loader-extra/SKILL.md", None),
@@ -246,6 +252,19 @@ def test_component_for_path_maps_findings_to_components(file_path: str, expected
     component = component_for_path(file_path, block)
 
     assert (component or {}).get("name") == expected
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("[loader] skills/loader/SKILL.md", ("loader", "skills/loader/SKILL.md")),
+        ("[a] [b] SKILL.md", ("a", "[b] SKILL.md")),
+        ("skills/loader/SKILL.md", (None, "skills/loader/SKILL.md")),
+        ("[draft]notes.md", (None, "[draft]notes.md")),
+    ],
+)
+def test_split_display_prefix_splits_only_the_merge_label(path: str, expected: tuple[str | None, str]) -> None:
+    assert split_display_prefix(path) == expected
 
 
 def test_html_tier1_plugin_section_renders_and_escapes() -> None:

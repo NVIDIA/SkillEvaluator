@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
@@ -21,6 +21,7 @@ from skillevaluator import __version__
 from skillevaluator.reporting.base import ReporterBase
 from skillevaluator.reporting.plugin_sections import (
     component_for_path,
+    finding_artifact_path,
     inventory_view,
     json_safe,
     pinning_view,
@@ -148,37 +149,6 @@ def _normalize_artifact_uri(
     return quote(normalized, safe="/:@%")
 
 
-def _artifact_file_path(file_path: str, plugin: dict[str, Any] | None) -> str:
-    """Drop the ``[skill] `` display prefix that bundled-skill findings carry.
-
-    ``ValidationResult.merge_with_prefix`` labels a bundled skill's findings
-    ``"[skill] <path>"``. That label is not part of the path: kept, it became
-    ``%5Bskill%5D%20/abs/path`` in SARIF, which points nowhere and leaks the
-    local path. A relative inner path is relative to the skill, so it is joined
-    to the skill's path from the plugin inventory when that is known.
-    """
-    if not (file_path.startswith("[") and "] " in file_path):
-        return file_path
-    skill, _separator, inner = file_path[1:].partition("] ")
-    inner = inner.strip()
-    if not inner:
-        return file_path
-    if Path(inner.replace("\\", "/")).is_absolute() or PureWindowsPath(inner).is_absolute():
-        return inner
-    inventory = (plugin or {}).get("component_inventory")
-    components = inventory.get("components") if isinstance(inventory, dict) else None
-    for component in components if isinstance(components, list) else []:
-        if (
-            isinstance(component, dict)
-            and component.get("type") == "skill"
-            and component.get("name") == skill
-            and isinstance(component.get("path"), str)
-            and component["path"]
-        ):
-            return f"{component['path'].rstrip('/')}/{inner.removeprefix('./')}"
-    return inner
-
-
 def _artifact_location(uri: str) -> dict[str, Any]:
     location: dict[str, Any] = {"uri": uri}
     if uri and not uri.startswith("/") and ":" not in uri.split("/", 1)[0]:
@@ -189,15 +159,14 @@ def _artifact_location(uri: str) -> dict[str, Any]:
 
 def _physical_location(
     finding: Finding,
+    artifact_path: str,
     workspace_root: Path | None,
     scan_root: Path | None = None,
-    plugin: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    if not finding.file_path:
+    if not artifact_path:
         return None
-    file_path = _artifact_file_path(finding.file_path, plugin)
     location: dict[str, Any] = {
-        "artifactLocation": _artifact_location(_normalize_artifact_uri(file_path, workspace_root, scan_root)),
+        "artifactLocation": _artifact_location(_normalize_artifact_uri(artifact_path, workspace_root, scan_root)),
     }
     start_line = _positive_start_line(finding.line_number)
     if start_line is not None:
@@ -208,12 +177,28 @@ def _physical_location(
     return {"physicalLocation": location}
 
 
+def _plugin_component(artifact_path: str, plugin: dict[str, Any], scan_root: Path | None) -> dict[str, str] | None:
+    """Return the inventory component a finding's file belongs to.
+
+    The plugin block records its root as typed (``.`` for ``validate .``),
+    which an absolute finding path cannot match. The scan root is the resolved
+    plugin root, so such a path is looked up relative to it instead.
+    """
+    component = component_for_path(artifact_path, plugin)
+    if component is not None or scan_root is None or not Path(artifact_path).is_absolute():
+        return component
+    try:
+        relative = _resolve_artifact_path(artifact_path, scan_root).relative_to(scan_root.resolve())
+    except ValueError:
+        return None
+    return component_for_path(relative.as_posix(), plugin)
+
+
 def _result_from_finding(
     finding: Finding,
     validator_name: str,
     workspace_root: Path | None,
     scan_root: Path | None = None,
-    plugin_component: dict[str, str] | None = None,
     plugin: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     severity = _finding_severity_value(finding)
@@ -224,7 +209,9 @@ def _result_from_finding(
     }
     if finding.suggestion:
         result["message"]["markdown"] = f"{finding.message}\n\n**Suggestion:** {finding.suggestion}"
-    location = _physical_location(finding, workspace_root, scan_root, plugin)
+    # Resolve the file the finding points at once, so its location and its plugin component agree.
+    artifact_path = finding_artifact_path(finding.file_path, plugin) if finding.file_path else ""
+    location = _physical_location(finding, artifact_path, workspace_root, scan_root)
     if location is not None:
         result["locations"] = [location]
     properties: dict[str, Any] = {
@@ -235,6 +222,7 @@ def _result_from_finding(
     }
     if finding.metadata:
         properties["metadata"] = finding.metadata
+    plugin_component = _plugin_component(artifact_path, plugin, scan_root) if plugin is not None else None
     if plugin_component:
         properties["pluginComponent"] = plugin_component
     result["properties"] = properties
@@ -505,10 +493,7 @@ class SARIFReporter(ReporterBase):
             for finding in result.findings:
                 rule = _rule_descriptor(finding, validator_name)
                 rules[rule["id"]] = rule
-                component = component_for_path(finding.file_path, plugin) if plugin is not None else None
-                sarif_results.append(
-                    _result_from_finding(finding, validator_name, workspace_root, scan_root, component, plugin)
-                )
+                sarif_results.append(_result_from_finding(finding, validator_name, workspace_root, scan_root, plugin))
         canary_results = _canary_results(results, plugin, workspace_root, scan_root)
         if canary_results:
             rules[CANARY_RULE_ID] = _CANARY_RULE

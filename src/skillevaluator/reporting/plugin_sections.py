@@ -659,34 +659,97 @@ def context_cost_view(value: object) -> dict[str, Any] | None:
     }
 
 
+def split_display_prefix(path: str) -> tuple[str | None, str]:
+    """Split the ``[skill] `` label off a bundled skill's finding path.
+
+    ``ValidationResult.merge_with_prefix`` writes a bundled skill's finding
+    paths as ``"[skill] <path>"``. Returns ``(skill, path)``, or ``(None,
+    path)`` unchanged when there is no label. Only the outermost label is
+    split off.
+    """
+    if path.startswith("[") and "] " in path:
+        skill, _separator, inner = path[1:].partition("] ")
+        return skill, inner
+    return None, path
+
+
+def _is_absolute(path: str) -> bool:
+    return PurePosixPath(path.replace("\\", "/")).is_absolute() or PureWindowsPath(path).is_absolute()
+
+
+def _inventory_components(block: object) -> list[Mapping[str, Any]]:
+    inventory = _mapping(_mapping(block).get("component_inventory"))
+    return [component for component in _sequence(inventory.get("components")) if isinstance(component, Mapping)]
+
+
+def _component_path(component: Mapping[str, Any]) -> str:
+    """Return a component's root-relative path with ``/`` separators."""
+    return text(component.get("path"), limit=4096).replace("\\", "/").removeprefix("./").rstrip("/")
+
+
+def _bundled_skill_dir(label: str, block: object) -> str | None:
+    """Return the root-relative directory of the bundled skill a finding label names."""
+    skills = [
+        (text(component.get("name")), _component_path(component))
+        for component in _inventory_components(block)
+        if component.get("type") == "skill"
+    ]
+    by_name = [path for name, path in skills if name == label and path]
+    if by_name:
+        return by_name[0]
+    # Folder walkers label a skill with its directory name ("bar" for skills/nested/bar).
+    by_directory = [path for _name, path in skills if path == label or path.endswith(f"/{label}")]
+    return by_directory[0] if len(by_directory) == 1 else None
+
+
+def finding_artifact_path(file_path: str, block: object) -> str:
+    """Return the file a finding points at: its path without the ``[skill] `` label.
+
+    Validators rebase a bundled skill's relative paths onto the plugin root
+    (``skills/foo/SKILL.md``), but some report them relative to the skill
+    (Tier 2 says ``SKILL.md``). A relative path that is not already inside the
+    labelled skill's directory is joined onto that directory, taken from the
+    plugin inventory in *block*. Absolute and unlabelled paths are returned
+    unchanged.
+    """
+    skill, inner = split_display_prefix(file_path)
+    inner = inner.strip()
+    if skill is None or not inner:
+        return file_path
+    if _is_absolute(inner):
+        return inner
+    skill_dir = _bundled_skill_dir(skill, block)
+    relative = inner.replace("\\", "/").removeprefix("./")
+    if skill_dir in (None, ".") or relative == skill_dir or relative.startswith(f"{skill_dir}/"):
+        return inner
+    return f"{skill_dir}/{relative}"
+
+
 def component_for_path(file_path: object, block: object) -> dict[str, str] | None:
     """Return the inventory component whose root-relative path contains *file_path*.
 
-    Findings carry either root-relative or absolute paths. Absolute paths are
-    made root-relative against the plugin root; the longest matching component
-    path wins, so a file inside ``skills/foo`` maps to that skill rather than
-    to a broader component.
+    Findings carry either root-relative or absolute paths, and a bundled
+    skill's findings carry a ``[skill] `` label (see
+    :func:`finding_artifact_path`). Absolute paths are made root-relative
+    against the plugin root; the longest matching component path wins, so a
+    file inside ``skills/foo`` maps to that skill rather than to a broader
+    component.
     """
-    raw = text(file_path, limit=4096)
     source = _mapping(block)
+    raw = finding_artifact_path(text(file_path, limit=4096), source)
     if not raw:
         return None
-    if raw.startswith("[") and "]" in raw:
-        raw = raw[raw.index("]") + 1 :].strip()
     normalized = raw.replace("\\", "/")
     root = text(source.get("root"), limit=4096).replace("\\", "/").rstrip("/")
     if root and (normalized == root or normalized.startswith(root + "/")):
         normalized = normalized[len(root) :].lstrip("/")
-    elif PurePosixPath(normalized).is_absolute() or PureWindowsPath(raw).is_absolute():
+    elif _is_absolute(raw):
         return None
     normalized = normalized.removeprefix("./")
     best: dict[str, str] | None = None
     best_length = -1
-    inventory = _mapping(source.get("component_inventory"))
-    for component in _sequence(inventory.get("components"))[: MAX_TABLE_ROWS * 5]:
-        if not isinstance(component, Mapping):
-            continue
-        component_path = text(component.get("path"), limit=4096).replace("\\", "/").removeprefix("./").rstrip("/")
+    for component in _inventory_components(source)[: MAX_TABLE_ROWS * 5]:
+        component_path = _component_path(component)
         if not component_path:
             continue
         contains = normalized == component_path or normalized.startswith(component_path + "/")

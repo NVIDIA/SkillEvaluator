@@ -42,7 +42,7 @@ from skillevaluator.reporting.base import (
     passes_required_gate,
 )
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
-from skillevaluator.reporting.plugin_sections import tier1_plugin_view, tier3_plugin_view
+from skillevaluator.reporting.plugin_sections import split_display_prefix, tier1_plugin_view, tier3_plugin_view
 from skillevaluator.utils.rich_markup import replace_unencodable
 
 if TYPE_CHECKING:
@@ -344,7 +344,7 @@ class HTMLReporter(ReporterBase):
         # Check for [prefix] pattern in any finding — indicates folder mode
         for r in results:
             for f in r.findings:
-                if f.file_path.startswith("[") and "]" in f.file_path:
+                if split_display_prefix(f.file_path)[0] is not None:
                     return None
 
         # Try to infer skill name from the first absolute file_path
@@ -503,10 +503,8 @@ class HTMLReporter(ReporterBase):
             for finding in result.findings:
                 # Extract skill name from file_path (e.g., "[skill-name] file.md")
                 file_path = finding.file_path
-                skill_name = None
-                if file_path.startswith("[") and "]" in file_path:
-                    skill_name = file_path[1 : file_path.index("]")]
-                else:
+                skill_name, clean_path = split_display_prefix(file_path)
+                if skill_name is None:
                     # Try to extract from path
                     parts = file_path.split("/")
                     if len(parts) > 0:
@@ -526,11 +524,6 @@ class HTMLReporter(ReporterBase):
 
                     skills[skill_name]["validators"][validator_name]["passed"] = False
                     skills[skill_name]["passed"] = False
-
-                    # Clean file_path: strip redundant [skill-name] prefix
-                    clean_path = file_path
-                    if file_path.startswith("[") and "] " in file_path:
-                        clean_path = file_path[file_path.index("] ") + 2 :]
 
                     # Strip absolute paths -- keep only path relative to skill dir
                     if "/" + skill_name + "/" in clean_path:
@@ -780,13 +773,12 @@ class HTMLReporter(ReporterBase):
 
                 # Handle prefixed success details from failed skills:
                 # check_name format: "[skill-name] author_format"
-                if detail.check_name.startswith("[") and "] author_format" in detail.check_name:
-                    sname = detail.check_name[1 : detail.check_name.index("]")]
-                    if sname in skills and sname not in skill_authors:
-                        msg = detail.message
-                        if ": " in msg:
-                            author = msg.split(": ", 1)[1]
-                            skill_authors[sname] = author
+                sname, check_name = split_display_prefix(detail.check_name)
+                if sname in skills and sname not in skill_authors and check_name == "author_format":
+                    msg = detail.message
+                    if ": " in msg:
+                        author = msg.split(": ", 1)[1]
+                        skill_authors[sname] = author
 
                 # Handle unprefixed author_format (single-skill runs):
                 # check_name is just "author_format" with author in message
@@ -805,11 +797,9 @@ class HTMLReporter(ReporterBase):
                     current_author = finding.metadata.get("current_author")
                     if current_author:
                         # Extract skill name from prefixed file_path "[skill-name] path"
-                        fp = finding.file_path
-                        if fp.startswith("[") and "]" in fp:
-                            sname = fp[1 : fp.index("]")]
-                            if sname in skills:
-                                skill_authors[sname] = current_author
+                        sname, _path = split_display_prefix(finding.file_path)
+                        if sname in skills:
+                            skill_authors[sname] = current_author
 
         # For single-skill runs, apply the unprefixed author to all skills
         # that don't already have an author assigned

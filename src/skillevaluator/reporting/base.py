@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 import click
 
 from skillevaluator.constants import PLUGIN_CATALOG_PLUGIN_SIMILARITY_KEY, PLUGIN_CATALOG_SKILL_SIMILARITY_KEY
-from skillevaluator.reporting.plugin_sections import completeness_view, plugin_block
+from skillevaluator.reporting.plugin_sections import completeness_view, plugin_block, split_display_prefix
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
 
 if TYPE_CHECKING:
@@ -385,12 +385,12 @@ def additional_errors(result: ValidationResult) -> list[str]:
     for finding in result.findings:
         # merge_with_prefix puts skill labels before legacy messages but inside
         # structured finding paths. Recognize both forms, including nested merges.
-        location = finding.location
         prefix = ""
-        while location.startswith("[") and "] " in location:
-            label, _, location = location.partition("] ")
-            prefix += label + "] "
+        skill, location = split_display_prefix(finding.location)
+        while skill is not None:
+            prefix += f"[{skill}] "
             represented.add(f"{prefix}{finding.tag} {finding.message} in {location}")
+            skill, location = split_display_prefix(location)
     return [error for error in result.errors if error not in represented]
 
 
@@ -561,7 +561,7 @@ class ReporterBase(ABC):
             if detail.check_name != "plugin_manifest" and not detail.check_name.startswith("[")
         ]
         for finding in plugin_result.findings:
-            file_path = finding.file_path or ""
-            if file_path.startswith("[") and "]" in file_path:
-                names.append(file_path[1 : file_path.index("]")])
+            skill, _path = split_display_prefix(finding.file_path or "")
+            if skill is not None:
+                names.append(skill)
         return list(dict.fromkeys(names))

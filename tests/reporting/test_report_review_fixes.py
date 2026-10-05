@@ -726,6 +726,69 @@ def test_sarif_bundled_skill_findings_get_repository_relative_uris(tmp_path: Pat
     ]
 
 
+def _validate_dot_plugin_result() -> ValidationResult:
+    """Tier 1 results for ``validate .`` in a plugin with skills/foo and hooks/hooks.json."""
+    result = ValidationResult(validator_name="Plugin Schema", validator_description="Tier 1 plugin validation")
+    result.metadata.update(
+        {
+            "manifest_type": "claude",
+            "plugin_mode": "bundle",
+            "plugin": {
+                "manifest_filename": ".claude-plugin/plugin.json",
+                # The root as typed: ``validate .``.
+                "root": ".",
+                "name": "demo",
+                "component_inventory": {
+                    "components": [
+                        {"type": "skill", "name": "foo", "path": "skills/foo", "support": "evaluated"},
+                        {
+                            "type": "hook",
+                            "name": "hooks/hooks.json",
+                            "path": "hooks/hooks.json",
+                            "support": "unsupported",
+                        },
+                    ]
+                },
+            },
+        }
+    )
+    return result
+
+
+def _finding(file_path: str, check_name: str) -> Finding:
+    return Finding(
+        category="SECURITY", severity=Severity.HIGH, check_name=check_name, message="issue", file_path=file_path
+    )
+
+
+def test_sarif_does_not_join_a_root_relative_bundled_skill_path_onto_the_skill(tmp_path: Path) -> None:
+    """Validators rebase bundled-skill paths onto the plugin root; Tier 2 reports them relative to the skill."""
+    result = _validate_dot_plugin_result()
+    for file_path, check in (
+        ("[foo] skills/foo/SKILL.md", "rebased"),
+        ("[foo] SKILL.md", "skill_relative"),
+        ("[foo] hooks/hooks.json", "skill_file_named_like_a_root_component"),
+        (str(tmp_path / "hooks" / "hooks.json"), "absolute_root_file"),
+    ):
+        result.add_finding(_finding(file_path, check))
+
+    document = _sarif([result], tmp_path)
+
+    located = {
+        item["properties"]["checkName"]: (
+            item["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            item["properties"].get("pluginComponent", {}).get("name"),
+        )
+        for item in document["runs"][0]["results"]
+    }
+    assert located == {
+        "rebased": ("skills/foo/SKILL.md", "foo"),
+        "skill_relative": ("skills/foo/SKILL.md", "foo"),
+        "skill_file_named_like_a_root_component": ("skills/foo/hooks/hooks.json", "foo"),
+        "absolute_root_file": ("hooks/hooks.json", "hooks/hooks.json"),
+    }
+
+
 def test_sarif_marks_a_failed_tier3_run_as_unsuccessful() -> None:
     result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Tier 3")
     result.metadata["agent_eval"] = {"execution_status": "failed", "execution_errors": ["harbor job crashed"]}

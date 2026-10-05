@@ -35,16 +35,30 @@ _WINDOWS_FILE_READ_DATA = 0x1
 _WINDOWS_FILE_TRAVERSE = 0x20
 _WINDOWS_FILE_READ_ATTRIBUTES = 0x80
 _WINDOWS_SYNCHRONIZE = 0x100000
+_WINDOWS_DELETE = 0x10000
+_WINDOWS_GENERIC_WRITE = 0x40000000
 _WINDOWS_SHARE_READ = 0x1
-_WINDOWS_SHARE_READ_WRITE = _WINDOWS_SHARE_READ | 0x2
+_WINDOWS_SHARE_WRITE = 0x2
+_WINDOWS_SHARE_READ_WRITE = _WINDOWS_SHARE_READ | _WINDOWS_SHARE_WRITE
 _WINDOWS_FILE_OPEN = 1
 _WINDOWS_FILE_CREATE = 2
 _WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x80
 _WINDOWS_FILE_DIRECTORY_FILE = 0x1
+_WINDOWS_FILE_WRITE_THROUGH = 0x2
 _WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT = 0x20
 _WINDOWS_FILE_NON_DIRECTORY_FILE = 0x40
 _WINDOWS_FILE_OPEN_FOR_BACKUP_INTENT = 0x00004000
 _WINDOWS_FILE_OPEN_REPARSE_POINT = 0x00200000
+# CreateFileW opens the volume anchor and the atomic writer's parent: an
+# existing directory, without following a reparse point.
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FLAG_BACKUP_SEMANTICS = 0x02000000
+_WINDOWS_DIRECTORY_HANDLE_FLAGS = _WINDOWS_FLAG_BACKUP_SEMANTICS | _WINDOWS_FILE_OPEN_REPARSE_POINT
+# Information classes for NtSetInformationFile and SetFileInformationByHandle.
+_WINDOWS_FILE_RENAME_INFORMATION = 10
+_WINDOWS_FILE_DISPOSITION_INFO = 4
+# ERROR_FILE_EXISTS and ERROR_ALREADY_EXISTS.
+_WINDOWS_FILE_EXISTS_ERRORS = frozenset({80, 183})
 _WINDOWS_OBJ_CASE_INSENSITIVE = 0x40
 _WINDOWS_OBJ_DONT_REPARSE = 0x1000
 _WINDOWS_OBJECT_ATTRIBUTES_FLAGS = _WINDOWS_OBJ_CASE_INSENSITIVE | _WINDOWS_OBJ_DONT_REPARSE
@@ -132,11 +146,28 @@ class _WindowsHandleMetadata:
     link_count: int
     last_write_time: int = 0
 
+    @property
+    def is_reparse(self) -> bool:
+        return bool(self.attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+    @property
+    def is_directory(self) -> bool:
+        return bool(self.attributes & stat.FILE_ATTRIBUTE_DIRECTORY)
+
+    @property
+    def is_plain_directory(self) -> bool:
+        """A directory that is not itself a reparse point (a junction or directory symlink is one)."""
+        return self.is_directory and not self.is_reparse
+
+    def same_identity(self, other: _WindowsHandleMetadata) -> bool:
+        """Whether both snapshots describe the same file: one volume and one file index."""
+        return self.volume_serial == other.volume_serial and self.file_id == other.file_id
+
 
 def stat_is_link_or_reparse(metadata: os.stat_result) -> bool:
     """Return whether metadata identifies a symlink or Windows reparse point."""
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return stat.S_ISLNK(metadata.st_mode) or bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
+    file_attributes = getattr(metadata, "st_file_attributes", 0)  # Windows only
+    return stat.S_ISLNK(metadata.st_mode) or bool(file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def _absolute_no_resolve(path: Path) -> Path:
@@ -536,8 +567,7 @@ def _walk_windows(root: Path, root_metadata: os.stat_result, admission: _Discove
     try:
         root_handles = _windows_open_anchored_directory_chain(root, expected=root_metadata)
         root_handle = root_handles[-1]
-        root_snapshot = _windows_handle_metadata(root_handle)
-        _validate_windows_read_directory_handle(root_handle, Path())
+        root_snapshot = _validate_windows_read_directory_handle(root_handle, Path())
         frames.append(_WindowsDirectoryFrame(root_handle, root, Path(), root_snapshot, owns_handle=False))
         while frames:
             frame = frames[-1]
@@ -607,16 +637,14 @@ def _admit_windows_entry(
             ) from exc
         _validate_windows_entry_snapshot(metadata, handle_metadata, relative)
 
-        is_reparse = bool(handle_metadata.attributes & 0x400)
-        is_directory = bool(handle_metadata.attributes & 0x10)
-        if is_directory:
-            if admission.admit_directory(relative, linked=is_reparse):
+        if handle_metadata.is_directory:
+            if admission.admit_directory(relative, linked=handle_metadata.is_reparse):
                 return name, handle_metadata
             return None
 
         # Read an alias target only while the entry handle pins the reparse point.
         alias_target = ""
-        if is_reparse and admission.allow_context_alias and relative.name == "CLAUDE.md":
+        if handle_metadata.is_reparse and admission.allow_context_alias and relative.name == "CLAUDE.md":
             try:
                 alias_target = os.readlink(path)  # noqa: PTH115
             except OSError as exc:
@@ -1464,7 +1492,7 @@ def _windows_open_discovery_handle(
             raise no_reparse_error from None
         try:
             metadata = _windows_handle_metadata(handle)
-            if not metadata.attributes & 0x400:
+            if not metadata.is_reparse:
                 raise no_reparse_error from None
             return handle, metadata
         except BaseException:
@@ -1483,17 +1511,12 @@ def _validate_windows_discovery_directory_snapshot(
     relative_path: Path,
     expected: _WindowsHandleMetadata,
 ) -> None:
-    directory_attribute = 0x10
-    reparse_attribute = 0x400
-    changed = (
-        metadata.attributes & reparse_attribute
-        or not metadata.attributes & directory_attribute
-        or metadata.volume_serial != expected.volume_serial
-        or metadata.file_id != expected.file_id
+    if (
+        not metadata.is_plain_directory
+        or not metadata.same_identity(expected)
         or metadata.size != expected.size
         or metadata.last_write_time != expected.last_write_time
-    )
-    if changed:
+    ):
         label = relative_path.as_posix()
         raise SecurePathError(
             "unsafe_path",
@@ -1507,22 +1530,18 @@ def _validate_windows_entry_snapshot(
     handle_metadata: _WindowsHandleMetadata,
     relative_path: Path,
 ) -> None:
-    handle_is_reparse = bool(handle_metadata.attributes & 0x400)
-    handle_is_directory = bool(handle_metadata.attributes & 0x10)
     # The native no-follow handle is authoritative for reparses. Python's
     # Windows ``lstat`` can report a junction or symlink with a different mode
     # and link count; the pinned reparse is rejected or exact-alias validated
     # immediately by the caller, without descent or target reads.
-    if handle_is_reparse:
+    if handle_metadata.is_reparse:
         return
-    changed = stat_is_link_or_reparse(metadata) != handle_is_reparse or (
-        stat.S_ISDIR(metadata.st_mode) != handle_is_directory
-    )
-    if getattr(metadata, "st_nlink", 1) != handle_metadata.link_count:
-        changed = True
-    if not handle_is_directory and metadata.st_size != handle_metadata.size:
-        changed = True
-    if changed:
+    if (
+        stat_is_link_or_reparse(metadata)
+        or stat.S_ISDIR(metadata.st_mode) != handle_metadata.is_directory
+        or getattr(metadata, "st_nlink", 1) != handle_metadata.link_count
+        or (not handle_metadata.is_directory and metadata.st_size != handle_metadata.size)
+    ):
         raise SecurePathError(
             "unsafe_path",
             f"Unsafe Tier 2 Windows entry changed while being inspected: {relative_path.as_posix()}",
@@ -1574,7 +1593,7 @@ def _windows_create_relative_file(parent_handle: int, name: str, *, access: int)
             _WINDOWS_FILE_NON_DIRECTORY_FILE
             | _WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT
             | _WINDOWS_FILE_OPEN_REPARSE_POINT
-            | 0x2  # FILE_WRITE_THROUGH
+            | _WINDOWS_FILE_WRITE_THROUGH
         ),
     )
 
@@ -1643,9 +1662,7 @@ def _verify_windows_handle_path(handle: int, expected: Path) -> None:
 def _validate_windows_read_directory_handle(handle: int, relative_path: Path) -> _WindowsHandleMetadata:
     """Require one opened Windows traversal component to be a plain directory."""
     metadata = _windows_handle_metadata(handle)
-    directory_attribute = 0x10
-    reparse_attribute = 0x400
-    if metadata.attributes & reparse_attribute or not metadata.attributes & directory_attribute:
+    if not metadata.is_plain_directory:
         raise SecurePathError(
             "unsafe_path",
             f"Tier 2 path contains a non-directory or reparse component: {relative_path.as_posix()}",
@@ -1657,9 +1674,7 @@ def _validate_windows_read_directory_handle(handle: int, relative_path: Path) ->
 def _validate_windows_read_file_handle(handle: int, relative_path: Path) -> _WindowsHandleMetadata:
     """Require one selected Windows handle to be regular, single-link, and no-follow."""
     metadata = _windows_handle_metadata(handle)
-    directory_attribute = 0x10
-    reparse_attribute = 0x400
-    if metadata.attributes & (directory_attribute | reparse_attribute):
+    if metadata.is_directory or metadata.is_reparse:
         raise SecurePathError(
             "unsafe_path",
             f"Refusing selected directory or reparse point: {relative_path.as_posix()}",
@@ -1687,8 +1702,8 @@ def _windows_open_anchored_directory_chain(
             anchor,
             access=_WINDOWS_DIRECTORY_READ_ACCESS,
             share=_WINDOWS_SHARE_READ_WRITE,
-            disposition=3,  # OPEN_EXISTING for CreateFileW
-            flags=0x02000000 | _WINDOWS_FILE_OPEN_REPARSE_POINT,  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+            disposition=_WINDOWS_OPEN_EXISTING,
+            flags=_WINDOWS_DIRECTORY_HANDLE_FLAGS,
         )
         handles.append(anchor_handle)
         _validate_windows_read_directory_handle(anchor_handle, anchor)
@@ -1725,17 +1740,19 @@ def _windows_open_anchored_directory_chain(
         raise
 
 
-def _validate_windows_parent_handle(handle: int, expected: Path, original: _WindowsHandleMetadata | None) -> None:
+def _validate_windows_parent_handle(
+    handle: int,
+    expected_path: Path,
+    original: _WindowsHandleMetadata | None = None,
+) -> _WindowsHandleMetadata:
+    """Require the held output parent to be a plain directory at its declared path, still ``original``."""
     metadata = _windows_handle_metadata(handle)
-    directory_attribute = 0x10
-    reparse_attribute = 0x400
-    if metadata.attributes & reparse_attribute or not metadata.attributes & directory_attribute:
+    if not metadata.is_plain_directory:
         raise SecurePathError("unsafe_path", "Output parent handle is a reparse point or non-directory.")
-    if original is not None and (
-        metadata.volume_serial != original.volume_serial or metadata.file_id != original.file_id
-    ):
+    if original is not None and not metadata.same_identity(original):
         raise SecurePathError("unsafe_path", "Output parent changed identity during the atomic write.")
-    _verify_windows_handle_path(handle, expected)
+    _verify_windows_handle_path(handle, expected_path)
+    return metadata
 
 
 def _validate_windows_regular_handle(
@@ -1745,9 +1762,7 @@ def _validate_windows_regular_handle(
     expected_size: int,
 ) -> _WindowsHandleMetadata:
     metadata = _windows_handle_metadata(handle)
-    directory_attribute = 0x10
-    reparse_attribute = 0x400
-    if metadata.attributes & (directory_attribute | reparse_attribute):
+    if metadata.is_directory or metadata.is_reparse:
         raise SecurePathError("unsafe_path", "Windows output handle is a directory or reparse point.")
     if metadata.link_count != 1:
         raise SecurePathError("unsafe_hardlink", "Windows output handle is hard-linked (link count > 1).")
@@ -1756,9 +1771,7 @@ def _validate_windows_regular_handle(
             "unsafe_path",
             f"Windows output size changed unexpectedly (expected {expected_size}, got {metadata.size}).",
         )
-    if expected is not None and (
-        metadata.volume_serial != expected.volume_serial or metadata.file_id != expected.file_id
-    ):
+    if expected is not None and not metadata.same_identity(expected):
         raise SecurePathError("unsafe_path", "Windows output changed identity during the atomic write.")
     return metadata
 
@@ -1818,10 +1831,6 @@ def _validate_windows_path_component(name: str, *, label: str) -> None:
         raise SecurePathError("unsafe_path", f"{label} has an unsafe Windows file name.")
 
 
-def _validate_windows_output_name(name: str) -> None:
-    _validate_windows_path_component(name, label="Destination")
-
-
 def _rename_windows_handle(
     descriptor: int,
     parent_handle: int,
@@ -1850,7 +1859,7 @@ def _rename_windows_handle(
             ctypes.byref(io_status),
             buffer,
             buffer_size,
-            10,  # FileRenameInformation
+            _WINDOWS_FILE_RENAME_INFORMATION,
         )
     )
     if status < 0:
@@ -1867,7 +1876,7 @@ def _mark_windows_handle_for_deletion(descriptor: int) -> None:
     # falling back to path cleanup that could delete an attacker-swapped name.
     _windows_api().set_file_information(
         msvcrt.get_osfhandle(descriptor),
-        4,  # FileDispositionInfo
+        _WINDOWS_FILE_DISPOSITION_INFO,
         ctypes.byref(disposition),
         ctypes.sizeof(disposition),
     )
@@ -1877,35 +1886,24 @@ def _atomic_write_windows(path: Path, payload: bytes) -> None:
     import msvcrt
 
     absolute = _absolute_no_resolve(path)
-    _validate_windows_output_name(absolute.name)
+    _validate_windows_path_component(absolute.name, label="Destination")
     _validate_windows_parent_components(absolute)
     before = _inspect_destination_windows(absolute)
 
-    file_read_attributes = 0x80
-    file_traverse = 0x20
-    synchronize = 0x100000
-    delete = 0x10000
-    generic_write = 0x40000000
-    share_read_write = 0x1 | 0x2
-    open_existing = 3
-    file_flag_open_reparse_point = 0x00200000
-    file_flag_backup_semantics = 0x02000000
-
     parent_handle = _windows_open_handle(
         absolute.parent,
-        access=file_read_attributes | file_traverse | synchronize,
+        access=_WINDOWS_DIRECTORY_READ_ACCESS,
         # Deliberately omit FILE_SHARE_DELETE so the held parent cannot be
         # renamed or removed between validation and handle-relative publish.
-        share=share_read_write,
-        disposition=open_existing,
-        flags=file_flag_backup_semantics | file_flag_open_reparse_point,
+        share=_WINDOWS_SHARE_READ_WRITE,
+        disposition=_WINDOWS_OPEN_EXISTING,
+        flags=_WINDOWS_DIRECTORY_HANDLE_FLAGS,
     )
     descriptor = -1
     temporary_path: Path | None = None
     publication_attempted = False
     try:
-        parent_metadata = _windows_handle_metadata(parent_handle)
-        _validate_windows_parent_handle(parent_handle, absolute.parent, parent_metadata)
+        parent_metadata = _validate_windows_parent_handle(parent_handle, absolute.parent)
         native_handle = -1
         for _attempt in range(128):
             temporary_path = absolute.parent / f".skillevaluator-{secrets.token_hex(8)}.tmp"
@@ -1913,10 +1911,12 @@ def _atomic_write_windows(path: Path, payload: bytes) -> None:
                 native_handle = _windows_create_relative_file(
                     parent_handle,
                     temporary_path.name,
-                    access=generic_write | file_read_attributes | delete | synchronize,
+                    access=(
+                        _WINDOWS_GENERIC_WRITE | _WINDOWS_FILE_READ_ATTRIBUTES | _WINDOWS_DELETE | _WINDOWS_SYNCHRONIZE
+                    ),
                 )
             except OSError as exc:
-                if exc.errno in {80, 183}:  # file already exists
+                if exc.errno in _WINDOWS_FILE_EXISTS_ERRORS:
                     continue
                 raise
             break

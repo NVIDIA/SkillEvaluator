@@ -83,13 +83,13 @@ def test_discovery_rejects_invalid_configured_depth(tmp_path: Path, max_depth: o
     ],
 )
 def test_windows_output_name_rejects_device_aliases_and_streams(name: str) -> None:
-    with pytest.raises(secure_fs.SecurePathError, match=r"unsafe Windows file name"):
-        secure_fs._validate_windows_output_name(name)
+    with pytest.raises(secure_fs.SecurePathError, match=r"Destination has an unsafe Windows file name"):
+        secure_fs._validate_windows_path_component(name, label="Destination")
 
 
 @pytest.mark.parametrize("name", ["cache.json", "a" * 255, "😀" * 127])
 def test_windows_output_name_accepts_valid_components(name: str) -> None:
-    secure_fs._validate_windows_output_name(name)
+    secure_fs._validate_windows_path_component(name, label="Destination")
 
 
 @pytest.mark.parametrize(
@@ -847,3 +847,51 @@ def test_windows_walker_consumes_the_path_budget_like_the_posix_walker(
     assert (windows.value.relative_path, windows.value.metadata) == (posix.value.relative_path, posix.value.metadata)
     assert windows.value.relative_path == "b-dir/z.md"
     assert handles.all_closed()
+
+
+@pytest.mark.parametrize(
+    ("attributes", "is_directory", "is_reparse", "is_plain_directory"),
+    [
+        (0x10, True, False, True),
+        (0x10 | 0x400, True, True, False),
+        (0x400, False, True, False),
+        (0x20, False, False, False),
+    ],
+    ids=["directory", "junction", "file-link", "regular-file"],
+)
+def test_windows_handle_metadata_names_its_attribute_bits(
+    attributes: int, is_directory: bool, is_reparse: bool, is_plain_directory: bool
+) -> None:
+    metadata = secure_fs._WindowsHandleMetadata(
+        attributes=attributes, volume_serial=7, file_id=11, size=0, link_count=1
+    )
+
+    assert (metadata.is_directory, metadata.is_reparse, metadata.is_plain_directory) == (
+        is_directory,
+        is_reparse,
+        is_plain_directory,
+    )
+    assert metadata.same_identity(secure_fs._WindowsHandleMetadata(0, 7, 11, 99, 2, 5))
+    assert not metadata.same_identity(secure_fs._WindowsHandleMetadata(attributes, 8, 11, 0, 1))
+    assert not metadata.same_identity(secure_fs._WindowsHandleMetadata(attributes, 7, 12, 0, 1))
+
+
+def test_windows_native_values_match_the_win32_definitions() -> None:
+    # FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE for directory handles.
+    assert secure_fs._WINDOWS_DIRECTORY_READ_ACCESS == 0x80 | 0x20 | 0x100000
+    # FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT for CreateFileW.
+    assert secure_fs._WINDOWS_DIRECTORY_HANDLE_FLAGS == 0x02000000 | 0x00200000
+    assert secure_fs._WINDOWS_OPEN_EXISTING == 3
+    # GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE for the writer's stage file.
+    stage_access = (
+        secure_fs._WINDOWS_GENERIC_WRITE
+        | secure_fs._WINDOWS_FILE_READ_ATTRIBUTES
+        | secure_fs._WINDOWS_DELETE
+        | secure_fs._WINDOWS_SYNCHRONIZE
+    )
+    assert stage_access == 0x40000000 | 0x80 | 0x10000 | 0x100000
+    # FILE_SHARE_DELETE (0x4) is never granted.
+    assert secure_fs._WINDOWS_SHARE_READ_WRITE == 0x1 | 0x2
+    assert secure_fs._WINDOWS_FILE_RENAME_INFORMATION == 10
+    assert secure_fs._WINDOWS_FILE_DISPOSITION_INFO == 4
+    assert sorted(secure_fs._WINDOWS_FILE_EXISTS_ERRORS) == [80, 183]

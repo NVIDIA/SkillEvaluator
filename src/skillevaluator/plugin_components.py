@@ -1824,19 +1824,6 @@ def _find_env_files(root: Path) -> tuple[list[PurePosixPath], bool]:
 # --------------------------------------------------------------------------- #
 # Public entry points                                                         #
 # --------------------------------------------------------------------------- #
-def manifest_rel_for(manifest_path: Path, root: Path) -> str:
-    """Root-relative POSIX spelling of a located manifest path."""
-    from skillevaluator.plugin_manifest import manifest_relative_path
-
-    relative = manifest_relative_path(manifest_path)
-    if relative is not None and len(relative.parts) > 1:
-        return relative.as_posix()
-    try:
-        return manifest_path.relative_to(root).as_posix()
-    except ValueError:
-        return manifest_path.name
-
-
 def parsed_additional_manifests(location: PluginManifestLocation) -> list[tuple[str, str, dict[str, Any]]]:
     """Alias of :meth:`~skillevaluator.plugin_manifest.PluginManifestLocation.parsed_additional`, kept for importers."""
     return location.parsed_additional()
@@ -1868,7 +1855,7 @@ def plugin_inventory_for_root(root: Path) -> PluginInventory | None:
         except (PluginManifestPathError, StructuredDataError, ValueError, RecursionError):
             parsed = None
         data = parsed if isinstance(parsed, dict) else None
-        manifest_rel = manifest_rel_for(located.path, located.root)
+        manifest_rel = located.manifest_filename
         additional = located.parsed_additional()
     return build_plugin_inventory(
         root,

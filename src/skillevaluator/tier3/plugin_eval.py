@@ -84,7 +84,6 @@ from skillevaluator.plugin_components import (
     PluginRootReader,
     build_plugin_inventory,
     coverage_row,
-    manifest_rel_for,
     mcp_pinning_summary,
     normalize_declared_path,
     parse_markdown,
@@ -498,7 +497,7 @@ class _LocatedPlugin:
 
     @property
     def manifest_rel(self) -> str:
-        return manifest_rel_for(self.location.path, self.location.root)
+        return self.location.manifest_filename
 
     @property
     def profile(self) -> FormatProfile:
@@ -527,7 +526,7 @@ def _locate_plugin(plugin_path: Path) -> _LocatedPlugin:
         location.secure_file.root,
         manifest,
         contained=location.contained,
-        manifest_rel=manifest_rel_for(location.path, location.root),
+        manifest_rel=location.manifest_filename,
         manifest_type=location.manifest_type,
         # Inventoried, never staged, so coverage reports what only another client loads.
         additional=location.parsed_additional(),

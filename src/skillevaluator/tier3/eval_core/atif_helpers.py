@@ -17,6 +17,15 @@ import re
 from typing import Any
 
 from skillevaluator.evidence import evidence_ref_identity
+from skillevaluator.tier3.eval_core.checks import (
+    _APPLY_PATCH_COMMAND_RE,
+    _FD_REDIRECT_TARGET_RE,
+    _REDIRECT_TARGET_RE,
+    _SED_IN_PLACE_FLAG_RE,
+    _SED_OPERANDS_RE,
+    _SHELL_WORD,
+    _TEE_OPERANDS_RE,
+)
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     iter_normalized_tool_calls as iter_tool_calls,
 )
@@ -225,12 +234,12 @@ _BEHAVIOR_EXEC_TOOLS = {
     "execute_code",
 }
 _BEHAVIOR_EXEC_COMMAND_KEYS = ("command", "cmd", "code")
-_BEHAVIOR_WRITE_COMMAND_MARKERS = ("tee ", "apply_patch")
-_BEHAVIOR_WRITE_REDIRECT_RE = re.compile(r"(?:^|[\s;])(?:>|>>)\s*(?![&0-9])[^&\s;|]+")
 _BEHAVIOR_PYTHON_WRITE_RE = re.compile(
     r"\b(?:write_text|write_bytes)\s*\(|\bopen\s*\([^)]*,\s*['\"][wa]",
     re.IGNORECASE,
 )
+# sed options that give the script, so every operand of a ``sed -i`` is a file it edits.
+_SED_SCRIPT_OPTIONS = ("-e", "--expression", "-f", "--file")
 _TOOL_NAME_SEPARATORS = (".", ":", "/", "__")
 # Harnesses name the written file and text differently: Claude Code uses
 # file_path, content, new_string, notebook_path, and new_source; OpenCode uses
@@ -243,7 +252,6 @@ _PATCH_FILE_HEADER_RE = re.compile(
     r"^[^\S\n]*\*\*\* (?:Add File|Update File|Delete File|Move to):[ \t]*([^\n]*)",
     re.MULTILINE,
 )
-_TEE_TARGET_RE = re.compile(r"(?<![\w.-])tee\s+(?:-a\s+|--append\s+)?([^\s;&|<>]+)")
 
 # What the judges see of each tool-history entry before any budget applies.
 _HISTORY_ARGS_CHARS = 200
@@ -382,10 +390,50 @@ def _command_arg_text(value: Any) -> str:
     return str(value or "")
 
 
+def _sed_in_place_files(words: list[str]) -> list[str]:
+    """The files a ``sed`` command line (its *words* after ``sed``) edits in place; none without ``-i``."""
+    if not any(_SED_IN_PLACE_FLAG_RE.fullmatch(word.lower()) for word in words):
+        return []
+    operands: list[str] = []
+    script_given = False  # by -e/-f, so the first operand is a file too
+    option_argument = False
+    for word in words:
+        if option_argument:
+            option_argument = False
+        elif word in _SED_SCRIPT_OPTIONS:
+            script_given = option_argument = True
+        elif word.startswith(("--expression=", "--file=")):
+            script_given = True
+        elif not word.startswith("-"):
+            operands.append(word)
+    return operands if script_given else operands[1:]
+
+
+def _shell_write_words(text: str) -> list[str]:
+    """Files *text* writes as a shell command: redirect targets, ``tee`` operands, and ``sed -i`` files.
+
+    Reads the command with the security extractor's patterns (``_shell_write_targets``)
+    but keeps each path as written, without its quotes. A device such as ``/dev/null``
+    is not a file change.
+    """
+    words = [
+        match.group(1)
+        for match in _REDIRECT_TARGET_RE.finditer(text)
+        if not _FD_REDIRECT_TARGET_RE.fullmatch(match.group(1))
+    ]
+    for match in _TEE_OPERANDS_RE.finditer(text):
+        words.extend(word for word in re.findall(_SHELL_WORD, match.group(1)) if not word.startswith("-"))
+    for match in _SED_OPERANDS_RE.finditer(text):
+        words.extend(_sed_in_place_files(re.findall(_SHELL_WORD, match.group(1))))
+    paths = (word.strip("'\"") for word in words)
+    return [path for path in paths if path and not path.startswith("/dev/")]
+
+
 def _command_looks_like_write(command: str) -> bool:
-    lower = command.lower()
-    return any(marker in lower for marker in _BEHAVIOR_WRITE_COMMAND_MARKERS) or bool(
-        _BEHAVIOR_WRITE_REDIRECT_RE.search(command) or _BEHAVIOR_PYTHON_WRITE_RE.search(command)
+    return bool(
+        _shell_write_words(command)
+        or _APPLY_PATCH_COMMAND_RE.search(command)
+        or _BEHAVIOR_PYTHON_WRITE_RE.search(command)
     )
 
 
@@ -402,6 +450,11 @@ def _tool_name_looks_like_write(fn_lower: str) -> bool:
     return not _tool_name_candidates(fn_lower).isdisjoint(_BEHAVIOR_WRITE_TOOLS)
 
 
+def _tool_name_looks_like_exec(fn_lower: str) -> bool:
+    """A shell or code tool, also under a namespace (``functions.exec_command``, ``mcp__shell__bash``)."""
+    return not _tool_name_candidates(fn_lower).isdisjoint(_BEHAVIOR_EXEC_TOOLS)
+
+
 def _patch_file_paths(text: str) -> list[str]:
     """Files an apply_patch body adds, updates, deletes, or moves to."""
     paths = (match.group(1).strip() for match in _PATCH_FILE_HEADER_RE.finditer(text))
@@ -409,16 +462,13 @@ def _patch_file_paths(text: str) -> list[str]:
 
 
 def _shell_write_paths(command: str) -> list[str]:
-    """Files a shell command writes through a redirect, ``tee``, or an apply_patch heredoc."""
+    """Files a shell command writes through a redirect, ``tee``, ``sed -i``, or an apply_patch heredoc."""
     # Read redirects only up to the end of the line that opens a heredoc, so a
     # quoted "> line" inside the heredoc body is not taken for a target.
     heredoc = command.find("<<")
     line_end = command.find("\n", heredoc) if heredoc >= 0 else -1
     head = command if line_end < 0 else command[:line_end]
-    targets = [match.group(0).lstrip(" \t\r\n\x0b\x0c;>") for match in _BEHAVIOR_WRITE_REDIRECT_RE.finditer(head)]
-    targets.extend(match.group(1) for match in _TEE_TARGET_RE.finditer(head))
-    paths = [target.strip("'\"") for target in targets]
-    return list(dict.fromkeys(path for path in (*paths, *_patch_file_paths(command)) if path))
+    return list(dict.fromkeys((*_shell_write_words(head), *_patch_file_paths(command))))
 
 
 def _write_call_parts(fn: str, args: Any) -> tuple[list[str], str, dict[str, Any]] | None:
@@ -438,7 +488,7 @@ def _write_call_parts(fn: str, args: Any) -> tuple[list[str], str, dict[str, Any
                     used.add(key)
                     break
         paths = [path] if path else _patch_file_paths(body)
-    elif fn_lower in _BEHAVIOR_EXEC_TOOLS:
+    elif _tool_name_looks_like_exec(fn_lower):
         key = next((key for key in _BEHAVIOR_EXEC_COMMAND_KEYS if args.get(key)), "")
         command = _command_arg_text(args.get(key)) if key else ""
         if not _command_looks_like_write(command):
@@ -923,7 +973,7 @@ def _tool_call_ref(step_idx: int, tc: dict[str, Any], *, kind: str) -> dict[str,
     if not isinstance(args, dict):
         args = {}
     command = ""
-    if fn.lower() in _BEHAVIOR_EXEC_TOOLS:
+    if _tool_name_looks_like_exec(fn.lower()):
         command = _command_arg_text(args.get("command") or args.get("cmd") or args.get("code"))
     path = _tool_file_path(args)
     if not path and command:
@@ -994,7 +1044,7 @@ def _file_change_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
                 args = {}
             command = _command_arg_text(args.get("command") or args.get("cmd") or args.get("code"))
             is_write = _tool_name_looks_like_write(fn_lower) or (
-                fn_lower in _BEHAVIOR_EXEC_TOOLS and _command_looks_like_write(command)
+                _tool_name_looks_like_exec(fn_lower) and _command_looks_like_write(command)
             )
             if not is_write:
                 continue

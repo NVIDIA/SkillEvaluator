@@ -266,6 +266,69 @@ def test_shell_writes_get_the_write_budget(copy, name, arguments):
     assert "FINAL_ROW" in file_changes
 
 
+def _single_call_trajectory(name: str, arguments: dict) -> dict:
+    return {"steps": [_step(_call("c1", name, arguments), results=("",)), {"source": "agent", "message": "Done."}]}
+
+
+@COPIES
+@pytest.mark.parametrize(
+    ("name", "arguments", "paths"),
+    [
+        ("Bash", {"command": "echo hi>Out.txt"}, "Out.txt"),
+        ("Bash", {"command": "cat notes.txt &> Log.txt"}, "Log.txt"),
+        ("Bash", {"command": "echo x >| Force.txt"}, "Force.txt"),
+        ("Bash", {"command": "sed -i 's/a/b/' Conf.ini"}, "Conf.ini"),
+        ("Bash", {"command": "sed -i -e 's/a/b/' -e 's/c/d/' A.cfg B.cfg"}, "A.cfg, B.cfg"),
+        ("Bash", {"command": "make 2>&1 | tee -a Build.log Copy.log"}, "Build.log, Copy.log"),
+        ("Bash", {"command": 'echo hi > "My Notes.txt"'}, "My Notes.txt"),
+        ("functions.exec_command", {"cmd": "echo hi > Out.txt"}, "Out.txt"),
+        ("mcp__shell__bash", {"command": "echo hi > Out.txt"}, "Out.txt"),
+    ],
+    ids=[
+        "glued-redirect",
+        "stdout-and-stderr",
+        "noclobber-override",
+        "sed-in-place",
+        "sed-in-place-scripts",
+        "every-tee-operand",
+        "quoted-path",
+        "codex-namespaced-exec",
+        "mcp-shell-tool",
+    ],
+)
+def test_shell_writes_are_read_like_the_security_extractor(copy, name, arguments, paths):
+    traj = _single_call_trajectory(name, arguments)
+
+    file_changes = copy.build_behavior_evidence(traj, "q").split("FINAL RESPONSE", 1)[0]
+    refs = copy.build_metric_evidence_refs(traj, "q", expected_behavior=["x"])["behavior_check"]
+
+    # Paths keep their case.
+    assert f"Path: {paths}\n" in file_changes
+    [ref] = [ref for ref in refs if ref["kind"] == "file_change"]
+    assert ref["excerpt"] == next(iter(arguments.values()))
+
+
+@COPIES
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest -q > /dev/null 2>&1",
+        "make 2>&1 | tee",
+        "echo the committee met",
+        "sed 's/a/b/' notes.txt",
+    ],
+    ids=["discarded-output", "tee-to-stdout", "tee-inside-a-word", "sed-without-in-place"],
+)
+def test_commands_that_write_no_file_are_not_file_changes(copy, command):
+    traj = _single_call_trajectory("Bash", {"command": command})
+
+    evidence = copy.build_behavior_evidence(traj, "q")
+    refs = copy.build_metric_evidence_refs(traj, "q", expected_behavior=["x"])["behavior_check"]
+
+    assert "FILE CHANGES" not in evidence
+    assert all(ref["kind"] != "file_change" for ref in refs)
+
+
 @COPIES
 def test_secret_in_a_write_body_is_redacted_for_the_judge(copy):
     key = _fake_key()

@@ -1823,7 +1823,10 @@ The security checks read the tool calls of Claude Code subagents too. Harbor's
 `trajectory.json` holds only the main session, so the verifier also reads each
 subagent's transcript (`sessions/projects/<project>/<session>/subagents/*.jsonl`)
 and the stream-json messages in `claude-code.txt` that carry a
-`parent_tool_use_id`, without counting a call twice.
+`parent_tool_use_id`, without counting a call twice. These reads are bounded:
+the first 64 transcripts in path order, 8 MiB of each file, and 2,048 calls.
+When a bound leaves part of the logs unread, the security details record
+`subagent_logs_truncated: true`.
 
 The token is redacted from every finding, every sink, and every other persisted
 verifier artifact, and canary evidence also goes through the same credential

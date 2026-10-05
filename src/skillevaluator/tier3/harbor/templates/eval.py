@@ -6780,24 +6780,33 @@ def check_canary(tool_calls, spec, *, read_files=False):
 # stream-json output marks subagent messages with a parent_tool_use_id.
 # Harbor's trajectory.json holds the main session only, so the security checks
 # fold in subagent tool calls from both places (deduplicated by tool_use id).
+# Every read is bounded. A directory lists at most _SUBAGENT_MAX_SCAN entries
+# and keeps the first _SUBAGENT_MAX_ENTRIES by name; the first
+# _SUBAGENT_MAX_FILES transcripts in path order are read, each up to
+# _SUBAGENT_MAX_BYTES, as is claude-code.txt.
+_SUBAGENT_MAX_SCAN = 4096
 _SUBAGENT_MAX_ENTRIES = 256
 _SUBAGENT_MAX_FILES = 64
 _SUBAGENT_MAX_BYTES = 8 * 1024 * 1024
 _SUBAGENT_MAX_CALLS = 2048
 
 
-def _read_regular_text(path, limit=_SUBAGENT_MAX_BYTES):
-    """Bounded, no-follow read of one regular file as text, or ``""``."""
+def _read_regular_text(path):
+    """Bounded, no-follow read of one regular file: ``(text, cut)``, or ``("", False)`` when it cannot be read.
+
+    ``cut`` says the file is longer than ``_SUBAGENT_MAX_BYTES``, so its end was not read.
+    """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(str(path), flags)
     except (OSError, ValueError):
-        return ""
+        return "", False
     chunks = []
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            return ""
-        remaining = limit
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            return "", False
+        remaining = _SUBAGENT_MAX_BYTES
         while remaining > 0:
             chunk = os.read(descriptor, min(remaining, 1 << 20))
             if not chunk:
@@ -6805,28 +6814,28 @@ def _read_regular_text(path, limit=_SUBAGENT_MAX_BYTES):
             chunks.append(chunk)
             remaining -= len(chunk)
     except OSError:
-        return ""
+        return "", False
     finally:
         os.close(descriptor)
-    return b"".join(chunks).decode("utf-8", errors="replace")
+    return b"".join(chunks).decode("utf-8", errors="replace"), info.st_size > _SUBAGENT_MAX_BYTES
 
 
 def _plain_children(path, *, directories):
-    """Up to ``_SUBAGENT_MAX_ENTRIES`` children of ``path`` that are not symlinks, sorted."""
+    """Children of ``path`` that are not symlinks (directories, or ``.jsonl`` names), the first
+    ``_SUBAGENT_MAX_ENTRIES`` by name. Of a directory with more entries than ``_SUBAGENT_MAX_SCAN``,
+    only that many are looked at."""
     children = []
     try:
-        for child in Path(path).iterdir():
-            if len(children) >= _SUBAGENT_MAX_ENTRIES:
-                break
-            children.append(child)
+        with os.scandir(path) as entries:
+            for listed, entry in enumerate(entries):
+                if listed >= _SUBAGENT_MAX_SCAN:
+                    break
+                child = Path(entry.path)
+                if not entry.is_symlink() and (entry.is_dir() if directories else child.suffix == ".jsonl"):
+                    children.append(child)
     except OSError:
         return []
-    children.sort()
-    return [
-        child
-        for child in children
-        if not child.is_symlink() and (child.is_dir() if directories else child.suffix == ".jsonl")
-    ]
+    return sorted(children)[:_SUBAGENT_MAX_ENTRIES]
 
 
 def _tool_result_text(content):
@@ -6838,10 +6847,13 @@ def _tool_result_text(content):
 
 
 def _collect_subagent_calls(text, *, marked_only, calls, results, seen):
-    """Tool calls from Claude Code JSONL events; ``marked_only`` keeps events with a ``parent_tool_use_id``."""
+    """Tool calls from Claude Code JSONL events; ``marked_only`` keeps events with a ``parent_tool_use_id``.
+
+    Returns whether ``_SUBAGENT_MAX_CALLS`` stopped the read before the end of *text*.
+    """
     for line in text.splitlines():
         if len(calls) >= _SUBAGENT_MAX_CALLS:
-            return
+            return True
         try:
             event = json.loads(line)
         except ValueError:
@@ -6865,10 +6877,16 @@ def _collect_subagent_calls(text, *, marked_only, calls, results, seen):
                 calls.append((call_id, {"action": str(block.get("name") or ""), "action_input": dict(arguments)}))
             elif block.get("type") == "tool_result" and block.get("tool_use_id"):
                 results[str(block["tool_use_id"])] = _tool_result_text(block.get("content"))
+    return False
 
 
 def subagent_tool_calls(traj, logs_dir):
-    """Tool calls Claude Code subagents made that ``traj`` does not already hold, as security-check dicts."""
+    """Tool calls Claude Code subagents made that ``traj`` does not already hold, as security-check dicts.
+
+    Returns ``(calls, truncated)``: ``truncated`` says a read limit left part of
+    the subagent logs unread (a file past ``_SUBAGENT_MAX_BYTES``, more than
+    ``_SUBAGENT_MAX_FILES`` transcripts, or more than ``_SUBAGENT_MAX_CALLS`` calls).
+    """
     seen = {
         str(tc.get("tool_call_id"))
         for step in (traj or {}).get("steps") or []
@@ -6882,11 +6900,15 @@ def subagent_tool_calls(traj, logs_dir):
     for project in _plain_children(Path(logs_dir) / "sessions" / "projects", directories=True):
         for session in _plain_children(project, directories=True):
             transcripts.extend(_plain_children(session / "subagents", directories=False))
+    truncated = len(transcripts) > _SUBAGENT_MAX_FILES
     for path in transcripts[:_SUBAGENT_MAX_FILES]:
-        _collect_subagent_calls(_read_regular_text(path), marked_only=False, calls=calls, results=results, seen=seen)
-    stream = _read_regular_text(Path(logs_dir) / "claude-code.txt")
-    _collect_subagent_calls(stream, marked_only=True, calls=calls, results=results, seen=seen)
-    return [{**call, "observation": results.get(call_id, ""), "subagent": True} for call_id, call in calls]
+        text, cut = _read_regular_text(path)
+        stopped = _collect_subagent_calls(text, marked_only=False, calls=calls, results=results, seen=seen)
+        truncated = truncated or cut or stopped
+    stream, cut = _read_regular_text(Path(logs_dir) / "claude-code.txt")
+    stopped = _collect_subagent_calls(stream, marked_only=True, calls=calls, results=results, seen=seen)
+    truncated = truncated or cut or stopped
+    return [{**call, "observation": results.get(call_id, ""), "subagent": True} for call_id, call in calls], truncated
 
 
 def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None, canary=None, canary_read_files=False):
@@ -11389,14 +11411,17 @@ def main():
     if canary is not None:
         _RUNTIME_REDACTION_VALUES.append(canary["token"])
     # Claude Code subagent actions live outside trajectory.json; the security checks read them too.
+    subagent_calls, subagent_logs_truncated = subagent_tool_calls(traj, AGENT_LOGS_DIR)
     security_result = check_security(
         traj,
-        tool_calls + subagent_tool_calls(traj, AGENT_LOGS_DIR),
+        tool_calls + subagent_calls,
         expected_skill,
         acceptable_skills,
         canary=canary,
         canary_read_files=True,
     )
+    if subagent_logs_truncated:
+        security_result["subagent_logs_truncated"] = True
     security_score = security_result["score"]
     details["security"] = security_result
 

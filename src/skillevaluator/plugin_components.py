@@ -80,6 +80,7 @@ from skillevaluator.plugin_component_risk import (
 from skillevaluator.plugin_formats import (
     CLAUDE_PROFILE,
     CODEX_PROFILE,
+    DEFAULT_SKILLS_DIR,
     PROFILES,
     FormatProfile,
     declared_value_replaces_default,
@@ -832,13 +833,13 @@ class _Builder:
 
         declared_default = False
         declared_value = self.manifest.get("skills") if self.manifest is not None else None
-        default_dir = self.profile.default_skills_dir or "skills"
+        default_dir = PurePosixPath(DEFAULT_SKILLS_DIR)
         if self.contained and self.manifest is not None:
             for raw in self._declared_values("skills", declared_value):
                 resolved = self._resolve_component("skill", "skills", raw, kinds=("dir",))
                 if resolved is None:
                     continue
-                if resolved.rel == PurePosixPath(default_dir):
+                if resolved.rel == default_dir:
                     declared_default = True
                     continue
                 self._declared_skill_dir(resolved.rel)
@@ -858,11 +859,11 @@ class _Builder:
             not manifests
             and declared_value is None
             and self.profile.root_skill_fallback
-            and self.reader.kind(PurePosixPath(default_dir)) == "missing"
+            and self.reader.kind(default_dir) == "missing"
         ):
             self._root_skill()
         for manifest in manifests[:PLUGIN_COMPONENT_MAX_ITEMS]:
-            skill_dir = PurePosixPath("skills") / manifest.relative_path.parent.as_posix()
+            skill_dir = default_dir / manifest.relative_path.parent.as_posix()
             origin: Origin = "declared+packaged" if declared_default else "packaged"
             component = self._add(
                 Component("skill", manifest.relative_path.parent.as_posix(), origin, skill_dir.as_posix(), "evaluated")
@@ -920,7 +921,7 @@ class _Builder:
             ):
                 continue  # hidden folders, VCS, virtualenv, package, and bytecode caches
             child = PurePosixPath(entry.name) if str(rel_dir) == "." else rel_dir / entry.name
-            if str(rel_dir) == "." and entry.name == "skills":
+            if str(rel_dir) == "." and entry.name == DEFAULT_SKILLS_DIR:
                 continue  # the default skills/ scan covers it
             if entry.is_symlink():
                 self.inventory.findings.append(
@@ -999,7 +1000,7 @@ class _Builder:
         Skills under ``skills/`` are reported by the bundled-skill validator, so
         they are not repeated here.
         """
-        if rel_dir.parts[:1] == ("skills",):
+        if rel_dir.parts[:1] == (DEFAULT_SKILLS_DIR,):
             return
         if _in_unscanned_folder(manifest_rel.parent):
             self.inventory.findings.append(_unscanned_skill_finding(self.reader, manifest_rel))

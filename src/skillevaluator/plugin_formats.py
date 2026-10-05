@@ -177,11 +177,6 @@ class FormatProfile:
     # MCP config dialect: how server entries are normalized before the static policy.
     mcp_dialect: Literal["claude", "codex", "agent_plugins"] = "claude"
 
-    @property
-    def default_skills_dir(self) -> str:
-        """:data:`DEFAULT_SKILLS_DIR`, the same for every format (kept for existing readers)."""
-        return DEFAULT_SKILLS_DIR
-
 
 _CLAUDE_COMPONENT_FIELDS = frozenset(
     {

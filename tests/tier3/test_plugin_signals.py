@@ -954,6 +954,28 @@ def test_invalid_case_fields_are_reported_and_dropped(field: str, value: Any, fr
     assert field not in plugin_case_spec(entry)
 
 
+@pytest.mark.parametrize(
+    ("pattern", "valid"),
+    [
+        (r"^\p{Lu}\w+$", True),  # a Unicode property: the regex engine runs it, ``re`` cannot compile it
+        ("[[:alpha:]", False),  # ``re`` reads a set of characters; the regex engine an unclosed POSIX class
+        ("(?a)a(?u)", False),  # the regex engine raises ValueError, not regex.error
+    ],
+)
+def test_patterns_are_validated_by_the_engine_that_runs_them(pattern: str, valid: bool) -> None:
+    entry = {"tool_arguments": [{"tool": "mcp__jira__create", "pattern": {"title": pattern}}]}
+    schema_entry = {"tool_arguments": [{"tool": "t", "schema": {"properties": {"title": {"pattern": pattern}}}}]}
+
+    for problems in (validate_plugin_case_fields(entry), validate_plugin_case_fields(schema_entry)):
+        if valid:
+            assert problems == []
+        else:
+            assert any("not a valid regular expression" in problem for problem in problems), problems
+    if valid:
+        traj = _traj(_one("mcp__jira__create", {"title": "Track"}))
+        assert _signals(traj, entry)["arguments"]["passed"] == 1
+
+
 def test_deeply_nested_schema_is_rejected() -> None:
     schema: dict[str, Any] = {"type": "object"}
     for _ in range(10):

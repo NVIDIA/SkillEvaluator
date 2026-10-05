@@ -459,9 +459,11 @@ def _check_regex(value: Any, where: str, errors: _FieldErrors) -> str | None:
     if len(value) > MAX_REGEX_CHARS:
         errors.add(where, f"must be at most {MAX_REGEX_CHARS} characters")
         return None
+    # Checked with the engine that runs it (see _regex_search): ``re`` rejects
+    # ``\p{L}``, which ``regex`` runs, and accepts ``[[:alpha:]``, which it does not.
     try:
-        re.compile(value)
-    except (re.error, RecursionError, OverflowError) as exc:
+        regex.compile(value)
+    except (regex.error, ValueError, RecursionError, OverflowError) as exc:
         errors.add(where, f"is not a valid regular expression ({exc})")
         return None
     return value

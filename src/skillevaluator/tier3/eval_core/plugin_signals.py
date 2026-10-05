@@ -905,7 +905,7 @@ def build_plugin_signals_context(
         cases=cases,
         baseline_has_members=bool(baseline_has_members),
         subagents=declared_subagents,
-        commands=_clean_names(str(name).lstrip("/") for name in commands if isinstance(name, str)),
+        commands=_clean_names(name.lstrip("/") for name in commands if isinstance(name, str)),
         subagent_aliases=_clean_aliases(subagent_aliases, declared_subagents),
     )
 
@@ -1667,8 +1667,8 @@ def _identities(
         name = (subagent_aliases or {}).get(name.casefold(), name)
         idents.append(_component_ident(COMPONENT_SUBAGENT, name, fn, fn, persist=_persistable_name(name, ())))
     elif low in _COMMAND_TOOLS:
-        command = _first_string(args, ("command", "name"))
-        name = command.split()[0].lstrip("/") if command.split() else ""
+        words = _first_string(args, ("command", "name")).split()
+        name = words[0].lstrip("/") if words else ""
         idents.append(_component_ident(COMPONENT_COMMAND, name, fn, fn, persist=_persistable_name(name, ())))
     if mcp is not None:
         idents.append(mcp)
@@ -2323,10 +2323,8 @@ def _handoff_value_failure(
     produced = next((call for call in producer_calls if call.observation and value in call.observation), None)
     if produced is None:
         return "value was not observed in producer output"
-    received = any(
-        call.seq != produced.seq and call.step_index > produced.step_index and value in call.args_text
-        for call in consumer_calls
-    )
+    # A call in a later step is never the producing call itself.
+    received = any(call.step_index > produced.step_index and value in call.args_text for call in consumer_calls)
     if not received:
         return "value did not reach consumer input after the producer produced it"
     return ""

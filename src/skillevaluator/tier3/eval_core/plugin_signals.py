@@ -1837,17 +1837,22 @@ def _ref_label(values: Sequence[str]) -> str:
     return _safe_text(" | ".join(values))
 
 
-def _attributed(refs: Sequence[_Ref], calls: Sequence[_Call]) -> list[_Call]:
-    """Calls matching ``refs`` directly or running in a matching skill/command window."""
+def _attributed(refs: Sequence[_Ref], calls: Sequence[_Call]) -> tuple[bool, list[_Call]]:
+    """Whether any call matches ``refs``, and the calls attributed to them.
+
+    A call is attributed when it matches ``refs`` directly or runs in the
+    window of a matching skill/command activation.
+    """
+    matched: set[int] = set()
     openers: set[int] = set()
     for call in calls:
-        if any(
-            ident.kind in {COMPONENT_SKILL, COMPONENT_COMMAND} and _ref_matches(ref, ident)
-            for ref in refs
-            for ident in call.idents
-        ):
-            openers.add(call.seq)
-    return [call for call in calls if _call_matches(refs, call) or (call.owner is not None and call.owner in openers)]
+        for ident in call.idents:
+            if any(_ref_matches(ref, ident) for ref in refs):
+                matched.add(call.seq)
+                if ident.kind in {COMPONENT_SKILL, COMPONENT_COMMAND}:
+                    openers.add(call.seq)
+    attributed = [call for call in calls if call.seq in matched or (call.owner is not None and call.owner in openers)]
+    return bool(matched), attributed
 
 
 def _is_wrapper(ident: _Ident, wrapper_skills: Sequence[str]) -> bool:
@@ -2325,14 +2330,12 @@ def _grade_handoff(calls: Sequence[_Call], spec: Mapping[str, Any], *, prompts: 
     failures: list[dict[str, str]] = []
     passed = 0
     for handoff in handoffs:
-        producer_refs = _refs(handoff["producer"])
-        consumer_refs = _refs(handoff["consumer"])
-        producer_calls = _attributed(producer_refs, calls)
-        consumer_calls = _attributed(consumer_refs, calls)
+        producer_activated, producer_calls = _attributed(_refs(handoff["producer"]), calls)
+        consumer_activated, consumer_calls = _attributed(_refs(handoff["consumer"]), calls)
         problems: list[str] = []
-        if not any(_call_matches(producer_refs, call) for call in calls):
+        if not producer_activated:
             problems.append("producer was not activated")
-        if not any(_call_matches(consumer_refs, call) for call in calls):
+        if not consumer_activated:
             problems.append("consumer was not activated")
         if not problems:
             if handoff.get("value") is not None:
@@ -2367,8 +2370,9 @@ def _grade_conflict(calls: Sequence[_Call], spec: Mapping[str, Any]) -> dict[str
     failures: list[dict[str, str]] = []
     passed = 0
     for probe in probes:
-        used = any(_call_matches(_refs(probe["must_use"]), call) for call in calls)
-        forbidden = any(_call_matches(_refs(probe["must_not_use"]), call) for call in calls)
+        must_use, must_not_use = _refs(probe["must_use"]), _refs(probe["must_not_use"])
+        used = any(_call_matches(must_use, call) for call in calls)
+        forbidden = any(_call_matches(must_not_use, call) for call in calls)
         if used and not forbidden:
             passed += 1
             continue

@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from skillevaluator.tier3.eval_core import plugin_signals
+from skillevaluator.tier3.eval_core import checks, plugin_signals
 from skillevaluator.tier3.eval_core.plugin_signals import (
     MAX_TOOL_PATTERNS,
     build_plugin_signals_context,
@@ -240,6 +240,34 @@ class TestClassifierCodexStyle:
         activations = detect_component_activations(traj, DECLARED)
 
         assert [a["tool"] for a in activations] == ["mcp__github__search_code", "mcp__jira__create_ticket"]
+
+
+class TestShellReadsAgainstTheScoredCheck:
+    """The report-only SKILL.md read detector is deliberately more lenient than the scored check."""
+
+    @staticmethod
+    def _credited(command: str) -> list[str]:
+        activations = _signals(_traj(_one("exec_command", {"cmd": command})))["activations"]
+        return [a["name"] for a in activations if a["type"] == "skill"]
+
+    @pytest.mark.parametrize("verb", sorted(checks._FILE_READ_VERBS))
+    def test_every_scored_reader_verb_credits_the_member(self, verb: str) -> None:
+        command = f"{verb} skills/alpha/SKILL.md"
+        assert checks._cmd_reads_skill_md(command)
+        assert self._credited(command) == ["alpha"]
+
+    @pytest.mark.parametrize(
+        "command",
+        ["sudo cat skills/alpha/SKILL.md", "bash -lc 'cat skills/alpha/SKILL.md'", "tac skills/alpha/SKILL.md"],
+    )
+    def test_lenient_reads_credit_the_member_but_not_the_score(self, command: str) -> None:
+        assert not checks._cmd_reads_skill_md(command)
+        assert self._credited(command) == ["alpha"]
+
+    def test_shell_variables_are_expanded_only_by_the_scored_check(self) -> None:
+        command = "D=skills/alpha; cat $D/SKILL.md"
+        assert checks._cmd_reads_skill_md(command)
+        assert self._credited(command) == []
 
 
 class TestOutcomeTriState:

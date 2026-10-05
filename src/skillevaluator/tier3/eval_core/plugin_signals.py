@@ -17,7 +17,9 @@ Each normalized tool call is mapped to zero or more component activations:
   tool (``Read``/``read_file``/``view``...), an MCP filesystem read, or a shell
   reader command (``cat``/``sed``/``head``...). Shell reads are recognized only
   when the manifest is an operand of a known reader verb, so ``rm``/``ls``/
-  ``grep``/``printf`` of the same path never count.
+  ``grep``/``printf`` of the same path never count. The scored skill-read check
+  is stricter (see ``_FILE_READER_VERBS``), so a read credited here may not
+  count toward a score.
 * ``mcp``      -- ``mcp__<server>__<tool>``; for *declared* runnable servers the
   ``<server>__<tool>``/``<server>.<tool>``/``<server>/<tool>`` spellings used by
   other agents, Hermes ``mcp_<server>_<tool>`` and OpenCode ``<server>_<tool>``
@@ -107,7 +109,7 @@ from typing import Any
 import regex
 
 from skillevaluator.tier3.eval_core.atif_helpers import _patch_file_paths
-from skillevaluator.tier3.eval_core.checks import _APPLY_PATCH_COMMAND_RE
+from skillevaluator.tier3.eval_core.checks import _APPLY_PATCH_COMMAND_RE, _FILE_READ_VERBS
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     MAPPED_OUTER_EXEC_OBSERVATION,
     normalize_tool_call,
@@ -276,9 +278,12 @@ _BUILTIN_TOOL_NAMES = (
 )
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 _SHELL_PREFIX_WORDS = frozenset({"sudo", "env", "time", "nohup", "command", "exec", "builtin", "nice"})
-_FILE_READER_VERBS = frozenset(
-    {"cat", "bat", "batcat", "less", "more", "head", "tail", "view", "nl", "sed", "awk", "xxd", "od", "tac"}
-)
+# Shell commands that read a SKILL.md: the scored check's reader verbs plus a few
+# more viewers. This report-only detector is deliberately more lenient than the
+# scored checks._cmd_reads_skill_md: it also looks past prefix words (``sudo``,
+# ``env``...) and into ``bash -c`` payloads. Unlike the scored check it does not
+# expand shell variables, so ``D=skills/x; cat $D/SKILL.md`` counts only there.
+_FILE_READER_VERBS = frozenset(_FILE_READ_VERBS) | frozenset({"batcat", "view", "xxd", "od", "tac"})
 _ARTIFACT_CONSUMER_VERBS = _FILE_READER_VERBS | frozenset(
     {"jq", "yq", "python", "python3", "node", "grep", "rg", "wc", "sort", "uniq", "cut", "diff", "cmp", "base64"}
 )

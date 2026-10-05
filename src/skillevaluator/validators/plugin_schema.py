@@ -34,6 +34,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.plugin import PluginManifest
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.validators.base import ValidatorBase
+from skillevaluator.validators.frontmatter_parser import format_validation_location
 
 logger = get_logger(__name__)
 
@@ -93,7 +94,7 @@ class PluginSchemaValidator(ValidatorBase):
             data = self._load_yaml(manifest_path, result)
             if data is not None:
                 try:
-                    manifest = PluginManifest(**data)
+                    manifest = PluginManifest.model_validate(data)
                 except ValidationError as exc:
                     self._add_validation_findings(exc, manifest_path, result)
                 else:
@@ -187,7 +188,7 @@ class PluginSchemaValidator(ValidatorBase):
     ) -> None:
         """Translate a pydantic ``ValidationError`` into structured findings."""
         for error in exc.errors():
-            location = ".".join(str(loc) for loc in error["loc"]) or "<root>"
+            location = format_validation_location(error) or "<root>"
             error_type = error.get("type", "value_error")
             check_name = f"schema:{location}:{error_type}"
             result.add_finding(

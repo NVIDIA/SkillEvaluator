@@ -97,6 +97,35 @@ description: unclosed quote
         assert result.passed, f"Expected validation to pass. Errors: {result.errors}"
         assert any("python-standards" in msg.lower() for msg in result.messages)
 
+    @pytest.mark.parametrize("key", ["123", "true", "false", "null", "2026-01-01"])
+    def test_non_string_frontmatter_key_returns_validation_error(self, validator, valid_rule_file, key):
+        content = valid_rule_file.read_text()
+        valid_rule_file.write_text(content.replace("---\n", f"---\n{key}: extra value\n", 1))
+
+        result = validator.validate(valid_rule_file)
+
+        assert not result.passed
+        assert any(f"Field '{key}': Keys should be strings" in error for error in result.errors)
+
+    def test_string_extra_frontmatter_key_is_preserved(self, validator, valid_rule_file):
+        content = valid_rule_file.read_text()
+        valid_rule_file.write_text(content.replace("---\n", '---\n"123": extra value\n', 1))
+
+        result = validator.validate(valid_rule_file)
+
+        assert result.passed, result.errors
+        assert result.metadata["frontmatter"].model_extra["123"] == "extra value"
+
+    @pytest.mark.parametrize("key", ["123", "true", "false", "null", "2026-01-01"])
+    def test_non_string_metadata_key_returns_validation_error(self, validator, valid_rule_file, key):
+        content = valid_rule_file.read_text()
+        valid_rule_file.write_text(content.replace("metadata:\n", f"metadata:\n  {key}: extra value\n", 1))
+
+        result = validator.validate(valid_rule_file)
+
+        assert not result.passed
+        assert any(f"Field 'metadata.{key}': Keys should be strings" in error for error in result.errors)
+
     def test_validate_missing_required_fields(
         self, validator: RulesSchemaValidator, invalid_rule_missing_required: Path
     ):

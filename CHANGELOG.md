@@ -46,11 +46,22 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Report non-string YAML keys as validation errors in skills, rules, workflows,
+  and plugin manifests instead of raising a `TypeError`, including frontmatter
+  `metadata` keys. Show boolean, null, and date keys in a readable YAML form.
 - Harbor ``result.json`` case ids now prefer canonical ``task_id.path`` metadata
   over repository-prefixed ``task_name`` values when resolving eval entries.
 - Codex log synthesis maps ``web_search`` action payloads and ``collab_tool_call``
   thread items into ATIF, and error-recovery checks recognize ``status=failed`` /
   ``exit_code=`` terminal evidence emitted by Codex converters.
+
+### Fixed
+
+- Tier 3 Harbor dual-arm evaluation propagates arm suffixes (`-with-skill`,
+  `-without-skill`) to `[task] name` in staged native `task.toml` files,
+  normalizes external repository and namespace prefixes, and commutatively
+  resolves canonical case IDs across attempt and arm suffix combinations
+  while preserving expected case IDs.
 
 ## 0.4.0 - 2026-09-30
 

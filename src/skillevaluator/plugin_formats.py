@@ -54,6 +54,7 @@ from skillevaluator.constants import (
     PLUGIN_CURSOR_MANIFEST_TYPE,
     PLUGIN_MANIFEST_TYPE,
 )
+from skillevaluator.utils.structured_data import load_bounded_json, load_bounded_yaml
 
 IssueLevel = Literal["error", "warning", "note"]
 
@@ -345,6 +346,19 @@ def declared_value_replaces_default(profile: FormatProfile, field_name: str, val
 def manifest_syntax(manifest_type: str) -> Literal["json", "yaml"]:
     """Every supported format is JSON except the bundle-reference YAML."""
     return "yaml" if manifest_type == PLUGIN_MANIFEST_TYPE else "json"
+
+
+def parse_manifest_text(manifest_type: str, text: str) -> Any:
+    """Parse manifest text with the bounded parser of its format's syntax (:func:`manifest_syntax`).
+
+    Raises :class:`~skillevaluator.utils.structured_data.StructuredDataError`
+    (a ``ValueError``) when the text does not parse or exceeds the
+    structured-data bounds; the bounded parsers report parser recursion that
+    way too.
+    """
+    if manifest_syntax(manifest_type) == "json":
+        return load_bounded_json(text)
+    return load_bounded_yaml(text)
 
 
 # --------------------------------------------------------------------------- #

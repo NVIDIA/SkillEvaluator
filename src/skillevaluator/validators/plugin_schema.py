@@ -63,8 +63,8 @@ from skillevaluator.plugin_formats import (
     FormatProfile,
     agent_plugins_schema_version,
     declared_value_replaces_default,
-    manifest_syntax,
     normalized_component_manifest,
+    parse_manifest_text,
     profile_for,
     validate_manifest_fields,
 )
@@ -900,8 +900,7 @@ class PluginSchemaValidator(ValidatorBase):
     @staticmethod
     def _best_effort_parse(manifest_type: str, read_text: Any) -> dict[str, Any] | None:
         try:
-            text = read_text(encoding="utf-8-sig")
-            data = load_bounded_json(text) if manifest_syntax(manifest_type) == "json" else load_bounded_yaml(text)
+            data = parse_manifest_text(manifest_type, read_text(encoding="utf-8-sig"))
         except (PluginManifestPathError, StructuredDataLimitError, StructuredDataSyntaxError, ValueError):
             return None
         return data if isinstance(data, dict) else None
@@ -935,11 +934,7 @@ class PluginSchemaValidator(ValidatorBase):
                 return self._parse_unreadable(candidate, problem, result)
         else:
             try:
-                data = (
-                    load_bounded_json(text)
-                    if manifest_syntax(candidate.manifest_type) == "json"
-                    else load_bounded_yaml(text)
-                )
+                data = parse_manifest_text(candidate.manifest_type, text)
             except (StructuredDataLimitError, StructuredDataSyntaxError, ValueError) as exc:
                 problem = f"could not be parsed: {exc}"
         if problem is None and not isinstance(data, dict):

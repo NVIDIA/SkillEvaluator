@@ -41,7 +41,11 @@ from skillevaluator.constants import (
     PLUGIN_NATIVE_MANIFEST_DIRS,
     SCAN_EXCLUDED_DIRS,
 )
-from skillevaluator.plugin_formats import AGENT_PLUGINS_SCHEMA_PREFIX, declares_agent_plugins_schema, manifest_syntax
+from skillevaluator.plugin_formats import (
+    AGENT_PLUGINS_SCHEMA_PREFIX,
+    declares_agent_plugins_schema,
+    parse_manifest_text,
+)
 from skillevaluator.utils.secure_fs import (
     SecureFile,
     SecurePathError,
@@ -49,7 +53,7 @@ from skillevaluator.utils.secure_fs import (
     discover_secure_files,
     stat_is_link_or_reparse,
 )
-from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json, load_bounded_yaml
+from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json
 
 _MANIFEST_TYPES_BY_PATH: dict[Path, str] = {
     Path(path): manifest_type for path, manifest_type in PLUGIN_MANIFEST_PRECEDENCE
@@ -224,19 +228,19 @@ class PluginManifestFile:
         and Tier 1 fails it closed); anything that still does not parse gives
         ``None``.
         """
-        syntax = manifest_syntax(self.manifest_type)
         try:
             text = self.read_text(encoding="utf-8-sig")
         except PluginManifestPathError as exc:
-            if not exc.content_error or syntax != "json" or self.manifest_type not in PLUGIN_CONTAINED_MANIFEST_TYPES:
+            # Only client (JSON) manifests are read leniently; agent_plugin.yaml/.yml is SkillEvaluator's own.
+            if not exc.content_error or self.manifest_type not in PLUGIN_CONTAINED_MANIFEST_TYPES:
                 return None
             try:
                 text = self.read_lenient_text().removeprefix("\ufeff")
             except PluginManifestPathError:
                 return None
         try:
-            data = load_bounded_json(text) if syntax == "json" else load_bounded_yaml(text)
-        except (StructuredDataError, ValueError, RecursionError):
+            data = parse_manifest_text(self.manifest_type, text)
+        except (StructuredDataError, ValueError):
             return None
         return data if isinstance(data, dict) else None
 
@@ -263,6 +267,22 @@ class PluginManifestLocation(PluginManifestFile):
     def contained(self) -> bool:
         """Whether the selected manifest describes a contained plugin."""
         return self.manifest_type in PLUGIN_CONTAINED_MANIFEST_TYPES
+
+    def parsed_additional(self) -> list[tuple[str, str, dict[str, Any]]]:
+        """``(manifest_type, manifest_filename, data)`` of each additional manifest a client can read.
+
+        Each one is parsed with :meth:`~PluginManifestFile.parse_for_audit`, so
+        an oversize or non-UTF-8 client manifest is read leniently, and an
+        unsafe or unparseable one is left out (Tier 1 reports it). The rows
+        are the ``additional`` argument of
+        :func:`~skillevaluator.plugin_components.build_plugin_inventory`.
+        """
+        parsed: list[tuple[str, str, dict[str, Any]]] = []
+        for candidate in self.additional:
+            data = candidate.parse_for_audit()
+            if data is not None:
+                parsed.append((candidate.manifest_type, candidate.manifest_filename, data))
+        return parsed
 
 
 _AGENT_PLUGINS_RELATIVE = Path(PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE)

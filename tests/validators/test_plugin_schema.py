@@ -136,6 +136,26 @@ class TestPluginSchemaValidator:
         assert not result.passed
         assert result.metadata["security_failure"] is True
 
+    @pytest.mark.parametrize("key", ["123", "true", "false", "null", "2026-01-01"])
+    def test_non_string_key_returns_validation_finding(self, tmp_path, key):
+        manifest = _write_manifest(tmp_path, f"{key}: extra value\n{_VALID_MANIFEST}")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert not result.passed
+        finding = next(finding for finding in result.findings if finding.check_name == f"schema:{key}:invalid_key")
+        assert finding.message == f"Field '{key}': Keys should be strings"
+        assert finding.file_path == str(manifest)
+
+    def test_quoted_unknown_key_remains_an_extra_field_error(self, tmp_path):
+        _write_manifest(tmp_path, f'"true": extra value\n{_VALID_MANIFEST}')
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert not result.passed
+        assert any(finding.check_name == "schema:true:extra_forbidden" for finding in result.findings)
+        assert not any("invalid_key" in finding.check_name for finding in result.findings)
+
     def test_valid_manifest_passes_with_metadata(self, tmp_path: Path):
         _write_manifest(tmp_path, _VALID_MANIFEST)
         result = PluginSchemaValidator().validate(tmp_path)

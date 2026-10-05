@@ -82,6 +82,7 @@ from skillevaluator.utils.structured_data import (
     require_bounded_string,
 )
 from skillevaluator.validators.base import ValidatorBase
+from skillevaluator.validators.frontmatter_parser import format_validation_location
 from skillevaluator.validators.mcp_static import CATEGORY as MCP_CATEGORY
 
 if TYPE_CHECKING:
@@ -417,7 +418,7 @@ class PluginSchemaValidator(ValidatorBase):
             return None
 
         try:
-            manifest = PluginManifest(**data)
+            manifest = PluginManifest.model_validate(data)
         except ValidationError as exc:
             self._add_validation_findings(exc, manifest_path, result)
             return None
@@ -580,7 +581,7 @@ class PluginSchemaValidator(ValidatorBase):
         """Translate a Pydantic validation error into structured findings."""
         errors = exc.errors()
         for error in errors[:MAX_PLUGIN_SCHEMA_FINDINGS]:
-            location = ".".join(str(loc) for loc in error["loc"]) or "<root>"
+            location = format_validation_location(error) or "<root>"
             error_type = error.get("type", "value_error")
             result.add_finding(
                 Finding(

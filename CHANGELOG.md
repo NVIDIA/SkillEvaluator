@@ -97,6 +97,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Report non-string YAML keys as validation errors in skills, rules, workflows,
+  and plugin manifests instead of raising a `TypeError`, including frontmatter
+  `metadata` keys. Show boolean, null, and date keys in a readable YAML form.
 - Harbor ``result.json`` case ids now prefer canonical ``task_id.path`` metadata
   over repository-prefixed ``task_name`` values when resolving eval entries.
 - Codex log synthesis maps ``web_search`` action payloads and ``collab_tool_call``

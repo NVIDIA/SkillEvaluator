@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterator
 from typing import Any
 
 from skillevaluator.evidence import evidence_ref_identity
@@ -111,6 +112,14 @@ def get_agent_text(traj: dict[str, Any]) -> str:
             if isinstance(msg, str) and msg.strip():
                 parts.append(msg)
     return "\n".join(parts)
+
+
+def _agent_tool_calls(traj: dict[str, Any]) -> Iterator[tuple[int, dict[str, Any], dict[str, Any]]]:
+    """``(step index, step, tool call)`` for each normalized tool call of the agent's steps, in order."""
+    for step_index, step in enumerate(traj.get("steps", [])):
+        if step.get("source") == "agent":
+            for _, tool_call in iter_tool_calls({"steps": [step]}):
+                yield step_index, step, tool_call
 
 
 def get_final_response(traj: dict[str, Any]) -> str:
@@ -694,26 +703,23 @@ def _file_change_entries(traj: dict[str, Any]) -> list[list[Any]]:
     """
     body_max = _write_body_max_chars()
     entries: list[list[Any]] = []
-    for step in traj.get("steps", []):
-        if step.get("source") != "agent":
+    for _, step, tc in _agent_tool_calls(traj):
+        fn = str(tc.get("function_name") or "")
+        write = _write_call_parts(fn, tc.get("arguments") or {})
+        if write is None:
             continue
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            fn = str(tc.get("function_name") or "")
-            write = _write_call_parts(fn, tc.get("arguments") or {})
-            if write is None:
-                continue
-            paths, body, _ = write
-            if not body and not paths:
-                continue
+        paths, body, _ = write
+        if not body and not paths:
+            continue
 
-            head = f"Agent called: {_judge_excerpt(fn, _HISTORY_ARGS_CHARS)}"
-            if paths:
-                head = f"{head}\nPath: {_judge_excerpt(', '.join(paths), _HISTORY_ARGS_CHARS)}"
-            shown = _judge_excerpt(body, body_max)
-            obs = _judge_excerpt(_tool_call_observation(step, tc), _WRITE_RESULT_CHARS)
-            tail = f"Tool returned: {obs}" if obs else ""
-            text = _file_change_text(head, shown, tail)
-            entries.append([text, _RANK_KEEP, tuple(paths), head, shown, tail, len(body) > body_max])
+        head = f"Agent called: {_judge_excerpt(fn, _HISTORY_ARGS_CHARS)}"
+        if paths:
+            head = f"{head}\nPath: {_judge_excerpt(', '.join(paths), _HISTORY_ARGS_CHARS)}"
+        shown = _judge_excerpt(body, body_max)
+        obs = _judge_excerpt(_tool_call_observation(step, tc), _WRITE_RESULT_CHARS)
+        tail = f"Tool returned: {obs}" if obs else ""
+        text = _file_change_text(head, shown, tail)
+        entries.append([text, _RANK_KEEP, tuple(paths), head, shown, tail, len(body) > body_max])
     _demote_superseded_writes(entries)
     return entries
 
@@ -994,13 +1000,10 @@ def _tool_call_ref(step_idx: int, tc: dict[str, Any], *, kind: str) -> dict[str,
 
 def _tool_call_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
-    for step_idx, step in enumerate(traj.get("steps", [])):
-        if step.get("source") != "agent":
-            continue
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
-                return refs
-            refs.append(_tool_call_ref(step_idx, tc, kind="tool_call"))
+    for step_idx, _, tc in _agent_tool_calls(traj):
+        if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
+            return refs
+        refs.append(_tool_call_ref(step_idx, tc, kind="tool_call"))
     return refs
 
 
@@ -1030,24 +1033,21 @@ def _tool_observation_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _file_change_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
-    for step_idx, step in enumerate(traj.get("steps", [])):
-        if step.get("source") != "agent":
+    for step_idx, _, tc in _agent_tool_calls(traj):
+        if len(refs) >= _METRIC_EVIDENCE_MAX_FILE_REFS:
+            return refs
+        fn = str(tc.get("function_name") or "")
+        fn_lower = fn.lower()
+        args = tc.get("arguments") or {}
+        if not isinstance(args, dict):
+            args = {}
+        command = _command_arg_text(args.get("command") or args.get("cmd") or args.get("code"))
+        is_write = _tool_name_looks_like_write(fn_lower) or (
+            _tool_name_looks_like_exec(fn_lower) and _command_looks_like_write(command)
+        )
+        if not is_write:
             continue
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            if len(refs) >= _METRIC_EVIDENCE_MAX_FILE_REFS:
-                return refs
-            fn = str(tc.get("function_name") or "")
-            fn_lower = fn.lower()
-            args = tc.get("arguments") or {}
-            if not isinstance(args, dict):
-                args = {}
-            command = _command_arg_text(args.get("command") or args.get("cmd") or args.get("code"))
-            is_write = _tool_name_looks_like_write(fn_lower) or (
-                _tool_name_looks_like_exec(fn_lower) and _command_looks_like_write(command)
-            )
-            if not is_write:
-                continue
-            refs.append(_tool_call_ref(step_idx, tc, kind="file_change"))
+        refs.append(_tool_call_ref(step_idx, tc, kind="file_change"))
     return refs
 
 
@@ -1358,17 +1358,14 @@ def build_verified_facts(
     # 2. Read each tool call's checkable text once: command/cmd/code, the
     # file-path argument, and the written body.
     calls: list[tuple[int, str, str, str]] = []
-    for idx, step in enumerate(traj.get("steps", [])):
-        if step.get("source") != "agent":
+    for idx, _, tc in _agent_tool_calls(traj):
+        args = tc.get("arguments") or {}
+        if not isinstance(args, dict):
             continue
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            args = tc.get("arguments") or {}
-            if not isinstance(args, dict):
-                continue
-            command = _command_arg_text(args.get("command") or args.get("cmd") or args.get("code"))
-            write = _write_call_parts(str(tc.get("function_name") or ""), args)
-            write_body = write[1] if write else _tool_write_body(args)
-            calls.append((idx, command, _tool_file_path(args), write_body))
+        command = _command_arg_text(args.get("command") or args.get("cmd") or args.get("code"))
+        write = _write_call_parts(str(tc.get("function_name") or ""), args)
+        write_body = write[1] if write else _tool_write_body(args)
+        calls.append((idx, command, _tool_file_path(args), write_body))
 
     # 3. Scan the calls for each token
     facts: list[dict[str, Any]] = []
@@ -1535,20 +1532,17 @@ def extract_tool_calls_as_dicts(traj: dict[str, Any]) -> list[dict[str, Any]]:
     format consumed by ``eval_core.checks``.
     """
     result: list[dict[str, Any]] = []
-    for step in traj.get("steps", []):
-        if step.get("source") != "agent":
-            continue
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            call = {
-                "action": tc.get("function_name", ""),
-                "action_input": tc.get("arguments") or {},
-                "observation": _tool_call_observation(step, tc),
-            }
-            if status := tc.get("_atif_normalization_status"):
-                call["normalization_status"] = status
-            if status := tc.get("_atif_observation_status"):
-                call["observation_status"] = status
-            if wrapper_observation := _tool_call_wrapper_observation(step, tc):
-                call["wrapper_observation"] = wrapper_observation
-            result.append(call)
+    for _, step, tc in _agent_tool_calls(traj):
+        call = {
+            "action": tc.get("function_name", ""),
+            "action_input": tc.get("arguments") or {},
+            "observation": _tool_call_observation(step, tc),
+        }
+        if status := tc.get("_atif_normalization_status"):
+            call["normalization_status"] = status
+        if status := tc.get("_atif_observation_status"):
+            call["observation_status"] = status
+        if wrapper_observation := _tool_call_wrapper_observation(step, tc):
+            call["wrapper_observation"] = wrapper_observation
+        result.append(call)
     return result

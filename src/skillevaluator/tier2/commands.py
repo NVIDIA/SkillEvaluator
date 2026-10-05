@@ -242,6 +242,9 @@ def run_plugin_skill_context_dedup(
             # Unsafe skill content is returned, not raised, as a result marked
             # security_failure; _make_advisory keeps that result blocking.
             skill_result = validator.validate(skill_dir)
+        except SecurePathError as exc:
+            # An unsafe path that still escapes validate() stays blocking too.
+            skill_result = _unsafe_plugin_result(exc)
         except Exception as exc:
             skill_result = ValidationResult(
                 validator_name="Context Deduplication",

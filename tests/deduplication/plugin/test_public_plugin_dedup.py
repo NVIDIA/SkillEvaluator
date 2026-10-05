@@ -129,6 +129,37 @@ def test_hard_linked_bundled_skill_file_is_a_blocking_security_failure(tmp_path:
     assert result.findings[0].severity == Severity.CRITICAL
 
 
+def test_plugin_context_scan_keeps_a_raised_unsafe_path_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier2 import commands
+    from skillevaluator.utils.secure_fs import SecurePathError
+
+    plugin = tmp_path / "plugin"
+    skill = plugin / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: d\n---\n# Demo\n", encoding="utf-8")
+
+    class UnsafePathValidator:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def validate(self, _skill_dir: Path) -> ValidationResult:
+            raise SecurePathError("path_identity_changed", "Path changed while reading: SKILL.md")
+
+    monkeypatch.setattr(commands, "IntraSkillValidator", UnsafePathValidator)
+
+    [result] = run_plugin_skill_context_dedup(plugin)
+
+    assert not result.passed
+    assert result.metadata["security_failure"] is True
+    assert result.metadata["execution_status"] == "failed"
+    assert [(finding.check_name, finding.severity) for finding in result.findings] == [
+        ("unsafe_plugin_filesystem", Severity.HIGH)
+    ]
+
+
 def test_plugin_context_scan_caps_findings_once_and_keeps_plain_notes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -392,6 +392,10 @@ to prompt plus completion tokens. No pricing estimates or new agent evaluations
 are performed. Adverse conditions and harness features are displayed when
 explicitly recorded; the dashboard does not run these experiments.
 
+Canonical JSON can omit resource ownership for multi-step trials. When several
+reward rows share one physical trial, the dashboard keeps their usage totals
+unavailable and shows a notice. Open the retained run directory to recover
+totals from authoritative step results.
 
 ### Recorded harness features
 

@@ -311,7 +311,7 @@ def main(paths: list[str] | None = None) -> None:
     summary[1].metric("Skills", skill_count)
     summary[2].metric("Condition rows", len(performance_rows))
     summary[3].metric("Scored rows", scored_count)
-    st.caption("Blank cells mean the report did not record that measurement. Unknown settings remain labeled unknown.")
+    st.caption("Blank cells mean a measurement is missing, incomplete, or ambiguous. Unknown settings remain labeled unknown.")
     performance_tab, comparison_tab = st.tabs(["Performance", "With vs without skill"])
     with performance_tab:
         _show_performance(performance_rows)

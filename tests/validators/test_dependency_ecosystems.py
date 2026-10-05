@@ -677,3 +677,48 @@ def test_one_failed_pip_audit_batch_counts_only_the_audited_pins(
         1,
         ["pip-audit"],
     )
+
+
+def test_failed_pip_audit_batch_keeps_the_vulnerabilities_of_the_batch_that_ran(
+    tmp_path: Path, tools: dict[str, FakeTool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = {
+        "dependencies": [
+            {"name": "numpy", "version": "1.26.4", "vulns": [{"id": "PYSEC-0000-1", "fix_versions": ["1.26.5"]}]}
+        ]
+    }
+    _fake_pip_audit(monkeypatch, _ok(report), ToolResult(False, "", "", -1, "pip-audit timed out after 180 seconds"))
+    requirements = "numpy==1.26.4; python_version < '3.13'\nnumpy==2.1.0; python_version >= '3.13'\n"
+    result = _dependency_result(_bare_plugin(tmp_path / "demo", {"requirements.txt": requirements}))
+    python = _summary(result, "python")
+    assert (python["status"], python["audited"], python["vulnerabilities"]["high"]) == ("incomplete", 1, 1)
+    assert python["errors"] == ["requirements.txt: pip-audit timed out after 180 seconds"]
+
+
+def test_one_source_reports_a_repeated_pip_audit_error_once(
+    tmp_path: Path, tools: dict[str, FakeTool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    offline = ToolResult(True, "", "ERROR: network unreachable\n", 1)
+    _fake_pip_audit(monkeypatch, offline, offline)
+    requirements = "numpy==1.26.4; python_version < '3.13'\nnumpy==2.1.0; python_version >= '3.13'\n"
+    result = _dependency_result(_bare_plugin(tmp_path / "demo", {"requirements.txt": requirements}))
+    python = _summary(result, "python")
+    assert (python["status"], python["audited"], python["scanners"]) == ("incomplete", 0, [])
+    assert python["errors"] == ["requirements.txt: pip-audit failed: ERROR: network unreachable"]
+
+
+def test_conflicting_pins_are_split_into_batches_that_name_each_package_once() -> None:
+    pins = [("a", "1.0.0"), ("b", "2.0.0"), ("a", "3.0.0"), ("a", "1.0.0"), ("a", "4.0.0")]
+    assert eco.split_conflicting_pins(pins) == [{"a": "1.0.0", "b": "2.0.0"}, {"a": "3.0.0"}, {"a": "4.0.0"}]
+
+
+def test_incomplete_outcome_counts_audited_packages_only_when_partial() -> None:
+    outcome = eco.AuditOutcome(scanner="pip-audit", status="incomplete", error="x: timed out")
+    outcome.count(Severity.HIGH)
+    whole = eco.empty_ecosystem_summary()
+    eco.record_outcome(whole, outcome, declarations=2, audited=1, unverified=0)
+    partial = eco.empty_ecosystem_summary()
+    eco.record_outcome(partial, outcome, declarations=2, audited=1, unverified=0, partial=True)
+    assert (whole["status"], whole["audited"], whole["vulnerabilities"]["high"]) == ("incomplete", 0, 0)
+    assert (partial["status"], partial["audited"], partial["vulnerabilities"]["high"]) == ("incomplete", 1, 1)
+    assert whole["errors"] == partial["errors"] == ["x: timed out"]

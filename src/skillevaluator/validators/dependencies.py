@@ -437,11 +437,6 @@ class DependencySecurityValidator(ValidatorBase):
         unverified: list[DependencyDeclaration] = []
         for declaration in declarations:
             (exact if declaration.audit_line else unverified).append(declaration)
-        python_summary = self._summary.get("python")
-        if python_summary is not None:
-            python_summary["sources"] += 1
-            python_summary["declarations"] += len(declarations)
-            python_summary["unverified"] += len(unverified)
 
         for declaration in unverified[:MAX_UNVERIFIED_FINDINGS_PER_FILE]:
             result.add_finding(
@@ -461,91 +456,75 @@ class DependencySecurityValidator(ValidatorBase):
                 "declaration(s) not listed individually"
             )
 
-        if not exact:
+        outcome: eco.AuditOutcome | None = None
+        audited = 0
+        if exact:
+            outcome, audited = self._audit_exact_pins(result, source, exact)
+        else:
             result.add_message(f"{source}: no exactly pinned dependencies to audit")
-            if python_summary is not None and python_summary["status"] == "not_found":
-                python_summary["status"] = "no_exact"
-            return result
+        eco.record_outcome(
+            self._summary.setdefault("python", eco.empty_ecosystem_summary()),
+            outcome,
+            declarations=len(declarations),
+            audited=audited,
+            unverified=len(unverified),
+            partial=True,
+        )
+        if outcome is not None and outcome.status == "incomplete" and active_plugin_tree() is not None:
+            # A plugin run never passes without evidence, as for the npm and container
+            # audits; standalone skills keep the warning.
+            result.mark_scan_incomplete(PIP_AUDIT_SCAN)
+        return result
 
+    def _audit_exact_pins(
+        self, result: ValidationResult, source: str, exact: list[DependencyDeclaration]
+    ) -> tuple[eco.AuditOutcome, int]:
+        """Audit exact pins with pip-audit (and Safety); return the outcome and how many pins pip-audit audited.
+
+        A batch that produced no evidence (pip-audit missing, timeout, offline,
+        crash, no JSON report) makes the outcome INCOMPLETE with its error; the
+        batches that ran keep their evidence.
+        """
+        outcome = eco.AuditOutcome()
         batches = self._exact_batches(exact)
+        audited_lines: set[str] = set()
+        errors: list[str] = []
         with tempfile.TemporaryDirectory(prefix="skillevaluator-pip-audit-") as temp_dir:
             audit_files = self._write_audit_files(Path(temp_dir), batches)
             if Tools.pip_audit.is_available:
-                audited_lines: set[str] = set()
-                errors: list[str] = []
                 for lines, audit_file in zip(batches, audit_files, strict=True):
-                    batch_result, error = self._run_pip_audit_on_file(audit_file, source=source, cwd=Path(temp_dir))
+                    batch_result, error = self._run_pip_audit_on_file(
+                        audit_file, source=source, cwd=Path(temp_dir), outcome=outcome
+                    )
                     result.merge(batch_result)
                     if error is None:
                         audited_lines.update(lines)
                     else:
                         errors.append(error)
-                audited = sum(1 for declaration in exact if declaration.audit_line in audited_lines)
-                self._record_pip_audit(result, python_summary, source, audited=audited, errors=errors)
             else:
                 error = f"pip-audit not installed. {Tools.pip_audit.get_install_hint()}"
                 result.add_warning(error)
-                if active_plugin_tree() is not None:
-                    # A plugin run never passes without evidence, as for the npm and container audits.
-                    self._record_pip_audit(result, python_summary, source, audited=0, errors=[error])
-                elif python_summary is not None:
-                    python_summary["status"] = "unavailable"
+                errors.append(error)
 
             if self.use_safety and Tools.safety.is_available:
                 for audit_file in audit_files:
                     result.merge(self._run_safety(audit_file))
-        return result
-
-    @staticmethod
-    def _record_pip_audit(
-        result: ValidationResult,
-        python_summary: dict[str, Any] | None,
-        source: str,
-        *,
-        audited: int,
-        errors: list[str],
-    ) -> None:
-        """Fold one source's pip-audit evidence into the Python summary.
-
-        A batch that produced no evidence (timeout, offline, crash, no JSON
-        report) makes the Python status ``incomplete`` with the error, never
-        ``audited``. In a plugin run the scan is marked INCOMPLETE as well, as
-        for the npm and container audits; standalone skills keep the warning.
-        """
-        if python_summary is not None:
-            python_summary["audited"] += audited
-            if audited and PIP_AUDIT_SCAN not in python_summary["scanners"]:
-                python_summary["scanners"].append(PIP_AUDIT_SCAN)
-            if errors:
-                python_summary["status"] = "incomplete"
-                for error in errors:
-                    if len(python_summary["errors"]) < 8:
-                        python_summary["errors"].append(f"{source}: {error}"[:300])
-            elif python_summary["status"] in {"not_found", "no_exact"}:
-                python_summary["status"] = "audited"
-        if errors and active_plugin_tree() is not None:
-            result.mark_scan_incomplete(PIP_AUDIT_SCAN)
+        if audited_lines:
+            outcome.scanner = PIP_AUDIT_SCAN
+        if errors:
+            outcome.status = "incomplete"
+            outcome.error = f"{source}: {'; '.join(dict.fromkeys(errors))}"
+        return outcome, sum(1 for declaration in exact if declaration.audit_line in audited_lines)
 
     @staticmethod
     def _exact_batches(exact: list[DependencyDeclaration]) -> list[list[str]]:
-        """Group exact pins so no batch names one package twice.
+        """Group exact pins into ``name==version`` batches that name each package once.
 
         ``pip-audit --no-deps`` rejects duplicate package names with different
         pins (e.g. marker-split pins); each conflicting pin gets its own batch.
         """
-        batches: list[dict[str, str]] = []
-        for declaration in exact:
-            line = declaration.audit_line
-            if line is None or declaration.name is None:
-                continue
-            for batch in batches:
-                existing = batch.get(declaration.name)
-                if existing is None or existing == line:
-                    batch[declaration.name] = line
-                    break
-            else:
-                batches.append({declaration.name: line})
-        return [sorted(batch.values()) for batch in batches]
+        pins = [(declaration.name, declaration.audit_line) for declaration in exact if declaration.audit_line]
+        return [sorted(batch.values()) for batch in eco.split_conflicting_pins(pins)]
 
     @staticmethod
     def _write_audit_files(temp_dir: Path, batches: list[list[str]]) -> list[Path]:
@@ -558,13 +537,14 @@ class DependencySecurityValidator(ValidatorBase):
         return files
 
     def _run_pip_audit_on_file(
-        self, audit_file: Path, *, source: str, cwd: Path
+        self, audit_file: Path, *, source: str, cwd: Path, outcome: eco.AuditOutcome
     ) -> tuple[ValidationResult, str | None]:
         """Run pip-audit on a normalized pinned requirements file.
 
         ``--no-deps --disable-pip`` audits exactly the listed pins without
         creating a virtual environment, invoking pip, or building packages.
-        Returns the result and, when the run produced no evidence, the error.
+        Vulnerabilities are tallied on *outcome*. Returns the result and, when
+        the run produced no evidence, the error.
         """
         result = ValidationResult()
         tool_result = Tools.pip_audit.run(
@@ -587,15 +567,15 @@ class DependencySecurityValidator(ValidatorBase):
             error = tool_result.error_message
         elif tool_result.exit_code != 0 and parse_json_output(tool_result.stdout) is None:
             detail = (tool_result.stderr or "").strip().splitlines()
-            reason = detail[-1][:300] if detail else f"exit code {tool_result.exit_code}"
+            reason = detail[-1][: eco.MAX_ERROR_CHARS] if detail else f"exit code {tool_result.exit_code}"
             error = f"pip-audit failed: {reason}"
-        elif not self._process_pip_audit(tool_result.stdout, result, source):
+        elif not self._process_pip_audit(tool_result.stdout, result, source, outcome):
             error = "pip-audit produced no JSON report"
         if error is not None:
             result.add_warning(f"{source}: {error}")
         return result, error
 
-    def _process_pip_audit(self, output: str, result: ValidationResult, source: str) -> bool:
+    def _process_pip_audit(self, output: str, result: ValidationResult, source: str, outcome: eco.AuditOutcome) -> bool:
         """Parse pip-audit output and report vulnerabilities; ``False`` when there is no report."""
         data = parse_json_output(output, on_error="No known vulnerabilities found")
         if data is None:
@@ -622,6 +602,7 @@ class DependencySecurityValidator(ValidatorBase):
                 vuln_count += 1
                 self._report_vulnerability(
                     result,
+                    outcome,
                     pkg_name=pkg_name,
                     pkg_version=pkg_version,
                     vuln_id=vuln.get("id", "Unknown"),
@@ -679,6 +660,7 @@ class DependencySecurityValidator(ValidatorBase):
     def _report_vulnerability(
         self,
         result: ValidationResult,
+        outcome: eco.AuditOutcome,
         *,
         pkg_name: str,
         pkg_version: str,
@@ -686,14 +668,10 @@ class DependencySecurityValidator(ValidatorBase):
         fix_versions: list[str],
         severity: Severity,
     ) -> None:
-        """Report a single vulnerability finding."""
+        """Report a single vulnerability finding and tally it on *outcome*."""
         fix_hint = f" -> upgrade to {fix_versions[0]}" if fix_versions else ""
         message = f"{pkg_name}=={pkg_version}: {vuln_id}{fix_hint}"
-        python_summary = self._summary.get("python")
-        if python_summary is not None:
-            vulnerabilities = python_summary["vulnerabilities"]
-            vulnerabilities[severity.value] = vulnerabilities.get(severity.value, 0) + 1
-
+        outcome.count(severity)
         result.add_finding(
             tag="CVE",
             severity=severity,
@@ -781,7 +759,7 @@ class DependencySecurityValidator(ValidatorBase):
             text = raw.decode("utf-8-sig")
             return (_load_npm_lockfile(text) if lockfile else load_bounded_json(text)), None
         except (SecurePathError, StructuredDataError, OSError, UnicodeError, ValueError) as exc:
-            return None, str(exc)[:300]
+            return None, str(exc)[: eco.MAX_ERROR_CHARS]
 
     def _record_unaudited(
         self,

@@ -53,6 +53,10 @@ MAX_NPM_PACKAGES = 5_000
 MAX_IMAGES = 32
 MAX_VULN_FINDINGS_PER_SOURCE = 200
 MAX_UNVERIFIED_PER_SOURCE = 100
+# An ecosystem summary keeps at most MAX_SUMMARY_ERRORS scanner errors, and an
+# error message is cut to MAX_ERROR_CHARS.
+MAX_SUMMARY_ERRORS = 8
+MAX_ERROR_CHARS = 300
 NPM_AUDIT_TIMEOUT = 180
 OSV_TIMEOUT = 300
 IMAGE_SCAN_TIMEOUT = 600
@@ -327,9 +331,13 @@ class AuditOutcome:
     # Exact pins past MAX_NPM_PACKAGES that were not audited; the caller records them as INCOMPLETE.
     unaudited: int = 0
 
+    def count(self, severity: Severity) -> None:
+        """Tally one vulnerability of ``severity``."""
+        self.vulnerabilities[severity.value] = self.vulnerabilities.get(severity.value, 0) + 1
+
     def add(self, finding: Finding) -> None:
-        severity = finding.severity.value
-        self.vulnerabilities[severity] = self.vulnerabilities.get(severity, 0) + 1
+        """Tally one vulnerability and keep its finding (the first ``MAX_VULN_FINDINGS_PER_SOURCE``)."""
+        self.count(finding.severity)
         if len(self.findings) < MAX_VULN_FINDINGS_PER_SOURCE:
             self.findings.append(finding)
         else:
@@ -476,7 +484,7 @@ def parse_npm_audit_output(data: Any, pins: dict[str, str], *, source: str, outc
         return "npm audit produced no JSON report"
     error = data.get("error")
     if isinstance(error, dict):
-        return str(error.get("summary") or error.get("code") or "npm audit failed")[:300]
+        return str(error.get("summary") or error.get("code") or "npm audit failed")[:MAX_ERROR_CHARS]
     vulnerabilities = data.get("vulnerabilities")
     if isinstance(vulnerabilities, dict):
         for name, entry in vulnerabilities.items():
@@ -595,16 +603,22 @@ def parse_trivy_output(data: Any, *, image: str, source: str, outcome: AuditOutc
 # --------------------------------------------------------------------------- #
 # Runners                                                                     #
 # --------------------------------------------------------------------------- #
-def _npm_batches(pins: Iterable[tuple[str, str]]) -> list[dict[str, str]]:
-    """Group exact pins so no batch names one package twice."""
+def split_conflicting_pins(pins: Iterable[tuple[str, str]]) -> list[dict[str, str]]:
+    """Group ``(package, pin)`` pairs so no group pins one package twice.
+
+    Scanners that audit a flat set of pins (a synthesized npm lockfile,
+    ``pip-audit --no-deps``) reject one package pinned to two versions, as
+    marker-split or per-directory pins can be, so each conflicting pin goes to
+    the first group that does not pin its package yet.
+    """
     batches: list[dict[str, str]] = []
-    for name, version in pins:
+    for package, pin in pins:
         for batch in batches:
-            if batch.get(name) in (None, version):
-                batch[name] = version
+            if batch.get(package) in (None, pin):
+                batch[package] = pin
                 break
         else:
-            batches.append({name: version})
+            batches.append({package: pin})
     return batches
 
 
@@ -660,7 +674,7 @@ def _run_osv_lockfile(tool: ExternalTool, lockfile: Path, *, source: str, outcom
     data = parse_json_output(run.stdout)
     if run.exit_code not in (0, 1) or not isinstance(data, dict):
         detail = (run.stderr or "").strip().splitlines()
-        return f"osv-scanner failed: {detail[-1][:300] if detail else f'exit code {run.exit_code}'}"
+        return f"osv-scanner failed: {detail[-1][:MAX_ERROR_CHARS] if detail else f'exit code {run.exit_code}'}"
     parse_osv_output(data, ecosystem="npm", source=source, check=NPM_VULN_CHECK, outcome=outcome)
     return None
 
@@ -679,7 +693,9 @@ def _run_npm_audit(
     data = parse_json_output(run.stdout)
     if not isinstance(data, dict):
         detail = (run.stderr or "").strip().splitlines()
-        reason = f"exit code {run.exit_code}: {detail[-1][:300]}" if detail else f"exit code {run.exit_code}"
+        reason = (
+            f"exit code {run.exit_code}: {detail[-1][:MAX_ERROR_CHARS]}" if detail else f"exit code {run.exit_code}"
+        )
         return f"npm audit produced no JSON report ({reason})"
     return parse_npm_audit_output(data, pins, source=source, outcome=outcome)
 
@@ -711,7 +727,7 @@ def audit_npm_pins(pins: list[tuple[str, str]], *, source: str) -> AuditOutcome:
         attempt = AuditOutcome(scanner=label)
         failed: str | None = None
         with tempfile.TemporaryDirectory(prefix="skillevaluator-npm-audit-") as temp_dir:
-            for index, batch in enumerate(_npm_batches(unique)):
+            for index, batch in enumerate(split_conflicting_pins(unique)):
                 batch_dir = Path(temp_dir) / f"batch-{index}"
                 batch_dir.mkdir()
                 lockfile = _write_npm_project(batch_dir, batch)
@@ -858,11 +874,15 @@ def record_outcome(
     audited: int,
     unverified: int,
     new_source: bool = True,
+    partial: bool = False,
 ) -> None:
     """Fold one source's evidence into an ecosystem summary (status: audited, incomplete, no_exact).
 
     ``new_source=False`` adds to the source already counted (for example, the
-    packages of a lockfile that were past the audit cap).
+    packages of a lockfile that were past the audit cap). An INCOMPLETE
+    outcome adds no audited packages or vulnerabilities unless ``partial`` is
+    set: pip-audit audits a source in batches, and the batches that ran keep
+    their evidence when another batch fails.
     """
     if new_source:
         summary["sources"] += 1
@@ -876,9 +896,10 @@ def record_outcome(
         summary["scanners"].append(outcome.scanner)
     if outcome.status == "incomplete":
         summary["status"] = "incomplete"
-        if outcome.error and len(summary["errors"]) < 8:
-            summary["errors"].append(outcome.error[:300])
-        return
+        if outcome.error and len(summary["errors"]) < MAX_SUMMARY_ERRORS:
+            summary["errors"].append(outcome.error[:MAX_ERROR_CHARS])
+        if not partial:
+            return
     summary["audited"] += audited
     for key, value in outcome.vulnerabilities.items():
         summary["vulnerabilities"][key] = summary["vulnerabilities"].get(key, 0) + value

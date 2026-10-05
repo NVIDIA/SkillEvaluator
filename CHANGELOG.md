@@ -39,6 +39,14 @@ All notable changes to SkillEvaluator are documented in this file.
   thread items into ATIF, and error-recovery checks recognize ``status=failed`` /
   ``exit_code=`` terminal evidence emitted by Codex converters.
 
+### Fixed
+
+- Tier 3 Harbor dual-arm evaluation propagates arm suffixes (`-with-skill`,
+  `-without-skill`) to `[task] name` in staged native `task.toml` files,
+  normalizes external repository and namespace prefixes, and commutatively
+  resolves canonical case IDs across attempt and arm suffix combinations
+  while preserving expected case IDs.
+
 ## 0.4.0 - 2026-09-30
 
 ### Fixed

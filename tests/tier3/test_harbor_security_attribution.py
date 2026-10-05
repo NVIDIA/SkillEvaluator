@@ -83,3 +83,25 @@ def test_security_attribution_avoids_skill_blame_without_baseline():
     finding = with_rewards[0]["details"]["security"]["findings"][0]
     assert finding["attribution"] == "unknown_no_baseline"
     assert summary["unknown_no_baseline"] == 1
+
+
+def test_security_attribution_preserves_distinct_authored_ids_without_expected_set():
+    """Verify authored IDs like case-1-with-skill and skillevaluator-case-1 do not collapse onto case-1."""
+    with_rewards = [
+        _reward("case-1", []),
+        _reward("case-1-with-skill", [_finding(target_skill_used_before=True)]),
+        _reward("skillevaluator-case-1", [_finding(target_skill_used_before=True)]),
+    ]
+    without_rewards = [
+        _reward("case-1", [_finding()]),
+        _reward("case-1-with-skill", []),
+        _reward("skillevaluator-case-1", []),
+    ]
+
+    summary = _annotate_security_attribution(with_rewards, without_rewards)
+
+    assert with_rewards[1]["details"]["security"]["findings"][0]["attribution"] == "likely_skill_related"
+    assert with_rewards[2]["details"]["security"]["findings"][0]["attribution"] == "likely_skill_related"
+    assert summary["likely_skill_related"] == 2
+    assert summary["likely_baseline_prompt_or_environment"] == 0
+    assert set(summary["cases"]) == {"case-1", "case-1-with-skill", "skillevaluator-case-1"}

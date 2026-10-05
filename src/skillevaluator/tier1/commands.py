@@ -33,6 +33,7 @@ from skillevaluator.validators.dependencies import DependencySecurityValidator
 from skillevaluator.validators.hygiene import HygieneValidator
 from skillevaluator.validators.license import LicenseValidator
 from skillevaluator.validators.plugin_schema import CATEGORY as PLUGIN_SCHEMA_CATEGORY
+from skillevaluator.validators.plugin_schema import VALIDATOR_NAME as PLUGIN_SCHEMA_VALIDATOR_NAME
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.plugin_tree import plugin_tree_scope
 from skillevaluator.validators.policy import ValidationPolicy, apply_policy
@@ -343,7 +344,7 @@ def run_validation(
             skillevaluator_manifest_verdict,
         )
 
-        verdict = skillevaluator_manifest_verdict(results, PluginSchemaValidator().name)
+        verdict = skillevaluator_manifest_verdict(results, PLUGIN_SCHEMA_VALIDATOR_NAME)
         v = ClaudePluginValidateParity()
         return [v.validate(target_path, skillevaluator_verdict=verdict)]
 

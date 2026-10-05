@@ -96,6 +96,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 CATEGORY = "PLUGIN_SCHEMA"
+VALIDATOR_NAME = "Plugin Schema & Bundle References"
 MAX_PLUGIN_SCHEMA_FINDINGS = 100
 
 
@@ -244,7 +245,7 @@ class PluginSchemaValidator(ValidatorBase):
 
     @property
     def name(self) -> str:
-        return "Plugin Schema & Bundle References"
+        return VALIDATOR_NAME
 
     @property
     def description(self) -> str:

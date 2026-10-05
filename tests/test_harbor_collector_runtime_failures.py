@@ -625,6 +625,64 @@ def test_every_arm_persists_an_invalid_score_trial_with_its_diagnostics(
     assert not (trial_out / "failure.json").exists()
 
 
+@pytest.mark.parametrize(
+    ("missing", "condition", "arm", "launch_errors", "job_failure"),
+    [
+        ("without", "without-skill", "without_skill", ["opencode without-skill Harbor run failed: quota"], "quota"),
+        (
+            "sumofparts",
+            "sum-of-parts",
+            "sum_of_parts",
+            None,
+            "Harbor job directory was not created: demo-opencode-sumofparts",
+        ),
+    ],
+)
+def test_every_arm_records_a_missing_harbor_job_the_same_way(
+    tmp_path: Path,
+    missing: str,
+    condition: str,
+    arm: str,
+    launch_errors: list[str] | None,
+    job_failure: str,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    trial_name = "case-001__attempt"
+    for variant in ("with", "without", "sumofparts"):
+        if variant == missing:
+            continue
+        job_dir = jobs_dir / f"demo-opencode-{variant}"
+        verifier = job_dir / trial_name / "verifier"
+        verifier.mkdir(parents=True)
+        reward = {"entry_id": "case-001", "metric_set": DEFAULT_METRIC_SET, **dict.fromkeys(DEFAULT_METRICS, 0.9)}
+        (verifier / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+        _write_complete_job_result(job_dir, [trial_name])
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        sum_of_parts_arm=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+        launch_errors=launch_errors,
+    )
+
+    agent = results["agents"]["opencode"]
+    assert agent["job_failures"][arm] == job_failure
+    assert agent["conditions"][arm]["execution_status"] == "failed"
+    assert agent["pass_at_k"][arm] == {}
+    condition_dir = tmp_path / "results" / "opencode" / condition
+    summary = json.loads((condition_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["job_failure"] == job_failure
+    assert summary["execution_status"] == "failed"
+    assert summary["execution_errors"][0] == job_failure
+    assert (summary["scores"], summary["metrics"], summary["num_trials"]) == ({}, [], 0)
+    assert not (condition_dir / "trials").exists()
+
+
 def test_unexpected_case_fails_execution_coverage(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     job_dir = jobs_dir / "demo-opencode-with"

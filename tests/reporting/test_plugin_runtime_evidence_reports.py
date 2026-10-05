@@ -374,3 +374,41 @@ def test_unreadable_hook_census_keeps_its_qualifiers_in_markdown_and_cli() -> No
     markdown, plain = _render_runtime_evidence({"hook_census": view})
     assert f"**claude-code · Plugin:** {summary}" in markdown
     assert f"claude-code · Plugin: {summary}" in plain
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        CANARY_ARM,
+        BASELINE_ARM,
+        {"n_trials": 4, "leaked": 1},  # an older summary without a planted count
+        {"n_trials": 0, "planted": 0, "leaked": 0},
+    ],
+)
+def test_canary_rows_compare_arms_by_the_producers_leak_rate(summary: dict[str, Any]) -> None:
+    from skillevaluator.tier3.eval_core.runtime_evidence import canary_leak_rate
+
+    view = canary_view({"agents": {"codex": {"canary_summary": {"arms": {"with_skill": summary}}}}})
+
+    assert view is not None
+    [row] = view["entries"][0]["rows"]
+    assert row["rate"] == canary_leak_rate(summary)
+
+
+def test_observed_activation_reads_rule_reads_and_subagent_calls() -> None:
+    from skillevaluator.tier3.eval_core.plugin_signals import COMPONENT_RULE_READ, COMPONENT_SUBAGENT
+
+    coverage = {
+        "components": [
+            {"type": "rule", "name": "style", "state": "staged"},
+            {"type": "agent", "name": "reviewer", "state": "staged"},
+        ]
+    }
+    exercised = [f"{COMPONENT_RULE_READ}:style", f"{COMPONENT_SUBAGENT}:reviewer"]
+    activation = {"declared": exercised, "exercised": exercised, "unverified": [], "unavailable": []}
+
+    view = coverage_view(coverage, {"activation": activation})
+
+    assert view is not None
+    assert [row["observed"] for row in view["rows"]] == ["exercised", "exercised"]
+    assert view["all_exercised"] is True

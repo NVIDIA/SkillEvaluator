@@ -31,6 +31,9 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
 
+# The Tier 3 signal and runtime-evidence producers are pure modules that import no reporting code.
+from skillevaluator.tier3.eval_core.plugin_signals import COMPONENT_RULE_READ, COMPONENT_SUBAGENT
+from skillevaluator.tier3.eval_core.runtime_evidence import canary_leak_rate
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 MAX_TABLE_ROWS = 200
@@ -1178,7 +1181,8 @@ def _coverage_state_class(state: str) -> str:
     return "fail" if state in {"invalid", "unavailable"} else "warn"
 
 
-_ACTIVATION_TYPE_ALIASES = {"rule": ("rule", "rule_read"), "agent": ("agent", "subagent")}
+# Plugin signals record a rule read and a subagent call under their own activation types.
+_ACTIVATION_TYPE_ALIASES = {"rule": ("rule", COMPONENT_RULE_READ), "agent": ("agent", COMPONENT_SUBAGENT)}
 
 
 def _observed_activation(row: Mapping[str, Any], activation: Mapping[str, Any]) -> str:
@@ -2246,7 +2250,6 @@ def _canary_arm_row(arm: str, summary: Mapping[str, Any], *, sum_of_parts_baseli
     planted_label = str(planted if planted is not None else "n/a")
     if confirmed or missing:
         planted_label = f"{confirmed} ({missing} missing)" if missing else str(confirmed)
-    denominator = planted or trials or 0
     return {
         "arm": arm,
         "arm_label": arm_label(arm, sum_of_parts_baseline=sum_of_parts_baseline),
@@ -2255,8 +2258,9 @@ def _canary_arm_row(arm: str, summary: Mapping[str, Any], *, sum_of_parts_baseli
         "decoy_missing": missing,
         "leaked": leaked,
         "leak_rate": fmt_rate(summary.get("leak_rate")),
-        "rate": leaked / denominator if denominator else 0.0,
-        "of": denominator,
+        # The producer's attribution compares these rates; give it the counts this row shows.
+        "rate": canary_leak_rate({"leaked": leaked, "planted": planted, "n_trials": trials}),
+        "of": planted or trials or 0,
         "read_back_truncated": count(summary.get("read_back_truncated")) or 0,
         "sinks": ", ".join(sink_labels) or "none",
         "status_class": "fail" if leaked else ("warn" if missing else "ok"),

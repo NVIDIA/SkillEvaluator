@@ -16,7 +16,6 @@ from skillevaluator.constants import (
     SIMILARITY_DEFAULT_THRESHOLD,
 )
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
-from skillevaluator.deduplication.utils.skill_collector import SkillCollectionError
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.tier1.commands import emit_reports
@@ -240,9 +239,9 @@ def run_plugin_skill_context_dedup(
     for skill_dir in skill_dirs:
         skill_name = skill_dir.relative_to(skills_root).as_posix()
         try:
+            # Unsafe skill content is returned, not raised, as a result marked
+            # security_failure; _make_advisory keeps that result blocking.
             skill_result = validator.validate(skill_dir)
-        except (SecurePathError, SkillCollectionError) as exc:
-            skill_result = _unsafe_plugin_result(exc)
         except Exception as exc:
             skill_result = ValidationResult(
                 validator_name="Context Deduplication",

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -104,6 +105,28 @@ def test_plugin_context_scan_rejects_linked_skills_root(tmp_path: Path) -> None:
     scan_results = run_plugin_dedup_scan(plugin, run_context=False)
     assert any(result.metadata.get("security_failure") for result in scan_results)
     assert any(not result.passed for result in scan_results)
+
+
+def test_hard_linked_bundled_skill_file_is_a_blocking_security_failure(tmp_path: Path) -> None:
+    plugin = tmp_path / "plugin"
+    skill = plugin / "skills" / "foo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: foo\ndescription: d\n---\n# Foo\n", encoding="utf-8")
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside notes\n", encoding="utf-8")
+    try:
+        os.link(outside, skill / "ref.md")
+    except OSError as exc:
+        pytest.skip(f"hard links unavailable: {exc}")
+
+    [result] = run_plugin_skill_context_dedup(plugin)
+
+    assert not result.passed
+    assert result.metadata["security_failure"] is True
+    assert result.metadata["execution_status"] == "failed"
+    assert result.metadata["optional"] is False
+    assert [finding.check_name for finding in result.findings] == ["unsafe_hardlink"]
+    assert result.findings[0].severity == Severity.CRITICAL
 
 
 def test_plugin_context_scan_caps_single_skill_llm_budget_at_cluster_limit(

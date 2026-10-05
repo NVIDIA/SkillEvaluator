@@ -59,7 +59,7 @@ import tempfile
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import yaml
 
@@ -784,24 +784,32 @@ _TIER3_COVERAGE_NOTE = (
 _WRAPPER_RULE_REASON = "rule embedded in the generated wrapper SKILL.md"
 
 
+class _NativeArm(NamedTuple):
+    """One native with-plugin arm: its adapter, that adapter's component modes, and what it stages here."""
+
+    adapter_id: str
+    modes: dict[str, str]
+    #: The component types this arm stages natively from this plugin.
+    types: frozenset[str]
+
+
 @dataclass(frozen=True)
 class _ArmStaging:
     """How the with-plugin arms stage the plugin, for the coverage reasons.
 
-    ``native`` maps each native arm's agent to its adapter id, its component
-    modes, and the component types it stages from this plugin; ``wrapper``
-    lists the arms that load the generated wrapper (empty for a wrapper run,
-    where every arm does).
+    ``native`` maps each native arm's agent to its :class:`_NativeArm`;
+    ``wrapper`` lists the arms that load the generated wrapper (empty for a
+    wrapper run, where every arm does).
     """
 
-    native: dict[str, tuple[str, dict[str, str], frozenset[str]]]
+    native: dict[str, _NativeArm]
     wrapper: tuple[str, ...]
 
     def native_for(self, component_type: str) -> list[str]:
-        return sorted(agent for agent, (_id, _modes, types) in self.native.items() if component_type in types)
+        return sorted(agent for agent, arm in self.native.items() if component_type in arm.types)
 
     def wrapper_rule_arms(self) -> list[str]:
-        wrapped = [agent for agent, (_id, modes, _types) in self.native.items() if modes.get("rule") == "wrapper"]
+        wrapped = [agent for agent, arm in self.native.items() if arm.modes.get("rule") == "wrapper"]
         return sorted([*self.wrapper, *wrapped])
 
 
@@ -813,7 +821,7 @@ def _arm_staging(
         return _ArmStaging(native={}, wrapper=())
     if plan is None:
         return None
-    native: dict[str, tuple[str, dict[str, str], frozenset[str]]] = {}
+    native: dict[str, _NativeArm] = {}
     wrapper: list[str] = []
     for agent, decision in plan.items():
         adapter = adapter_for(agent) if decision.native else None
@@ -821,7 +829,7 @@ def _arm_staging(
             wrapper.append(agent)
             continue
         types = frozenset(native_component_types(adapter, source))
-        native[agent] = (adapter.adapter_id, adapter.component_modes(), types)
+        native[agent] = _NativeArm(adapter.adapter_id, adapter.component_modes(), types)
     return _ArmStaging(native=native, wrapper=tuple(sorted(wrapper)))
 
 
@@ -865,13 +873,13 @@ def _other_type_row(component: Component, staging: _ArmStaging | None) -> dict[s
         hint = f"; --plugin-load native stages them for {', '.join(capable)}"
         return coverage_row(component, "unsupported", wrapper_note + hint)
     others = [f"{agent} ({wrapper_note})" for agent in staging.wrapper]
-    for agent, (adapter_id, modes, types) in sorted(staging.native.items()):
-        if kind in types:
+    for agent, arm in sorted(staging.native.items()):
+        if kind in arm.types:
             continue
-        if modes.get(kind) == "native":
-            others.append(f"{agent} (its native adapter ({adapter_id}) found nothing of this type to load)")
+        if arm.modes.get(kind) == "native":
+            others.append(f"{agent} (its native adapter ({arm.adapter_id}) found nothing of this type to load)")
         else:
-            others.append(f"{agent} (unsupported by the {agent} native adapter ({adapter_id}))")
+            others.append(f"{agent} (unsupported by the {agent} native adapter ({arm.adapter_id}))")
     native = staging.native_for(kind)
     if not native:
         return coverage_row(component, "unsupported", "not staged for " + "; ".join(others))

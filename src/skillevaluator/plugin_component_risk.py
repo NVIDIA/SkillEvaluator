@@ -39,7 +39,7 @@ import shlex
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import unquote, urlparse, urlsplit
 
 from skillevaluator.constants import (
@@ -701,15 +701,52 @@ def plugin_mcp_tool_prefix(plugin_name: str, server: str) -> str:
     return f"mcp__plugin_{''.join(plugin_name.split())}_{''.join(server.split())}".lower()
 
 
-def _disallows_all_mcp(disallowed: list[str] | None, write_servers: Iterable[str], plugin_name: str | None) -> bool:
-    entries = {"".join(entry.split()).lower() for entry in disallowed or []}
-    if "mcp__*" in entries or "mcp__*__*" in entries:
+def _disallows_all_mcp(disallowed: set[str], write_servers: Iterable[str], plugin_name: str | None) -> bool:
+    """Whether ``disallowedTools`` entries (whitespace removed, lower-cased) deny every one of the servers' tools."""
+    if "mcp__*" in disallowed or "mcp__*__*" in disallowed:
         return True
     servers = list(write_servers)
     if not servers or not plugin_name or not plugin_name.strip():
         return False
     prefixes = [plugin_mcp_tool_prefix(plugin_name, server) for server in servers]
-    return all(prefix in entries or f"{prefix}__*" in entries for prefix in prefixes)
+    return all(prefix in disallowed or f"{prefix}__*" in disallowed for prefix in prefixes)
+
+
+class _ModeRisk(NamedTuple):
+    """What a subagent's ``permissionMode`` value does: its record flag and finding."""
+
+    flag: str
+    severity: Severity
+    check: str
+    effect: str
+    suggestion: str
+
+
+# Subagent permission modes that skip permission prompts. Claude Code ignores permissionMode for plugin
+# subagents, but it applies if the file is copied into a project.
+_PERMISSION_MODE_RISKS: dict[str, _ModeRisk] = {
+    "bypassPermissions": _ModeRisk(
+        "bypass_permissions",
+        Severity.HIGH,
+        "plugin_agent_bypass_permissions",
+        "skips every permission prompt",
+        "Remove permissionMode from the subagent.",
+    ),
+    "acceptEdits": _ModeRisk(
+        "accept_edits",
+        Severity.MEDIUM,
+        "plugin_agent_accept_edits",
+        "auto-accepts file edits and filesystem commands",
+        "Remove permissionMode from the subagent, or let the user choose the mode.",
+    ),
+    "auto": _ModeRisk(
+        "auto_mode",
+        Severity.MEDIUM,
+        "plugin_agent_auto_mode",
+        "lets a classifier approve tool calls without a prompt",
+        "Remove permissionMode from the subagent, or let the user choose the mode.",
+    ),
+}
 
 
 def analyze_agent(
@@ -781,7 +818,7 @@ def analyze_agent(
                     component=component,
                 )
             )
-    elif write_capable_mcp and not _disallows_all_mcp(disallowed_tools, write_capable_mcp, plugin_name):
+    elif write_capable_mcp and not _disallows_all_mcp(disallowed, write_capable_mcp, plugin_name):
         record.flags.append("inherits_all_tools_with_write_mcp")
         servers = ", ".join(write_capable_mcp[:8])
         example = (
@@ -803,47 +840,20 @@ def analyze_agent(
                 extra={"mcp_servers": write_capable_mcp[:32]},
             )
         )
-    elif record.inherits_all_tools:
+    else:
         record.flags.append("inherits_all_tools")
 
-    mode = (record.permission_mode or "").strip()
-    if mode == "bypassPermissions":
-        record.flags.append("bypass_permissions")
+    risk = _PERMISSION_MODE_RISKS.get((record.permission_mode or "").strip())
+    if risk is not None:
+        record.flags.append(risk.flag)
         findings.append(
             component_finding(
-                Severity.HIGH,
-                "plugin_agent_bypass_permissions",
-                f"subagent '{name}' sets permissionMode: bypassPermissions, which skips every permission prompt "
-                "(Claude Code ignores permissionMode for plugin subagents, but it applies if the file is copied "
-                "into a project)",
+                risk.severity,
+                risk.check,
+                f"subagent '{name}' sets permissionMode: {record.permission_mode}, which {risk.effect} (Claude Code "
+                "ignores permissionMode for plugin subagents, but it applies if the file is copied into a project)",
                 file_path,
-                "Remove permissionMode from the subagent.",
-                component=component,
-            )
-        )
-    elif mode == "acceptEdits":
-        record.flags.append("accept_edits")
-        findings.append(
-            component_finding(
-                Severity.MEDIUM,
-                "plugin_agent_accept_edits",
-                f"subagent '{name}' sets permissionMode: acceptEdits, which auto-accepts file edits and filesystem "
-                "commands (ignored for plugin subagents, but it applies if the file is copied into a project)",
-                file_path,
-                "Remove permissionMode from the subagent, or let the user choose the mode.",
-                component=component,
-            )
-        )
-    elif mode == "auto":
-        record.flags.append("auto_mode")
-        findings.append(
-            component_finding(
-                Severity.MEDIUM,
-                "plugin_agent_auto_mode",
-                f"subagent '{name}' sets permissionMode: auto, which lets a classifier approve tool calls without "
-                "a prompt (ignored for plugin subagents, but it applies if the file is copied into a project)",
-                file_path,
-                "Remove permissionMode from the subagent, or let the user choose the mode.",
+                risk.suggestion,
                 component=component,
             )
         )

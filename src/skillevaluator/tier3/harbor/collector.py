@@ -3572,57 +3572,30 @@ def _save_trials(
     agent_model_source: str | None = None,
     expected_case_ids: list[str] | set[str] | None = None,
 ) -> None:
-    """Save per-trial reward.json and trajectory.json into the results directory."""
+    """Save each reward row's reward.json, Harbor artifacts and trajectory.json into the results directory.
+
+    Job trials without a reward row are saved as unscored trials.
+    """
     expected_id_set = _normalize_expected_case_id_set(expected_case_ids)
     trials_dir.mkdir(parents=True, exist_ok=True)
     for reward in rewards:
         trial_name, trial_root_name = _persisted_trial_name(reward)
         trial_out = trials_dir / trial_name
-        trial_out.mkdir(parents=True, exist_ok=True)
         trial_src = job_dir / trial_root_name if job_dir else None
-        src_traj = _reward_trajectory_path(trial_src, reward.get("_step_name")) if trial_src else None
-        merged_traj = (
-            _merged_step_trajectory(trial_src)
-            if trial_src and not reward.get("_step_name") and not (trial_src / "agent" / "trajectory.json").exists()
-            else None
+        _write_trial_reward(
+            reward,
+            trial_out,
+            trial_src,
+            trial_id=trial_root_name,
+            skill_name=skill_name,
+            agent=agent,
+            agent_model=agent_model,
+            agent_model_source=agent_model_source,
+            expected_id_set=expected_id_set,
         )
-
-        clean_reward = {k: v for k, v in reward.items() if not k.startswith("_")}
-        _add_trusted_invocation_evidence(clean_reward, reward, trial_src, skill_name)
-        # Persist the physical attempt identity so bounded report readers can keep
-        # fallback multi-step rows for diagnostics without weighting a logical
-        # Harbor trial once per step.  This also populates the canonical report's
-        # existing trial_id field instead of inventing a second report schema.
-        clean_reward["trial_id"] = trial_root_name
-        if not clean_reward.get("entry_id") or reward.get("_result_entry_id"):
-            clean_reward["entry_id"] = _entry_id(reward, expected_id_set)
-        clean_reward["agent"] = agent
-        if agent_model:
-            clean_reward["model"] = agent_model
-        if agent_model_source:
-            clean_reward["model_source"] = agent_model_source
-        if "evaluation_errors" in clean_reward:
-            clean_reward["evaluation_errors"] = _safe_evaluation_errors(clean_reward["evaluation_errors"])
-        diagnostic_reward = (
-            str(clean_reward.get("evaluation_status") or "").casefold() in {"error", "failed"}
-            or overall_score(clean_reward) is None
-        )
-        safe_reward = redact_sensitive_data(
-            clean_reward,
-            max_str_len=REWARD_DIAGNOSTIC_STRING_MAX_CHARS if diagnostic_reward else None,
-        )
-        _restore_custom_metric_scores(clean_reward, safe_reward)
-        (trial_out / "reward.json").write_text(json.dumps(safe_reward, indent=2), encoding="utf-8")
-
         if trial_src:
             _copy_trial_artifacts(trial_src, trial_out)
-        if merged_traj:
-            (trial_out / "trajectory.json").write_text(
-                json.dumps(redact_sensitive_data(merged_traj), indent=2),
-                encoding="utf-8",
-            )
-        elif src_traj and src_traj.exists():
-            _write_redacted_text_copy(src_traj, trial_out / "trajectory.json", source_root=trial_src)
+            _copy_trial_trajectory(trial_src, trial_out, reward.get("_step_name"))
 
     _save_unscored_trials(
         rewards,
@@ -3633,6 +3606,100 @@ def _save_trials(
         agent_model=agent_model,
         agent_model_source=agent_model_source,
     )
+
+
+def _resave_trial_rewards(
+    rewards: list[dict[str, Any]],
+    trials_dir: Path,
+    job_dir: Path | None,
+    *,
+    skill_name: str,
+    agent: str,
+    agent_model: str | None = None,
+    agent_model_source: str | None = None,
+    expected_case_ids: list[str] | set[str] | None = None,
+) -> None:
+    """Rewrite the reward.json of reward rows that ``_save_trials`` saved, after the rows changed.
+
+    The trials' Harbor artifacts and trajectories are already saved and do not change.
+    """
+    expected_id_set = _normalize_expected_case_id_set(expected_case_ids)
+    for reward in rewards:
+        trial_name, trial_root_name = _persisted_trial_name(reward)
+        _write_trial_reward(
+            reward,
+            trials_dir / trial_name,
+            job_dir / trial_root_name if job_dir else None,
+            trial_id=trial_root_name,
+            skill_name=skill_name,
+            agent=agent,
+            agent_model=agent_model,
+            agent_model_source=agent_model_source,
+            expected_id_set=expected_id_set,
+        )
+
+
+def _write_trial_reward(
+    reward: dict[str, Any],
+    trial_out: Path,
+    trial_src: Path | None,
+    *,
+    trial_id: str,
+    skill_name: str,
+    agent: str,
+    agent_model: str | None,
+    agent_model_source: str | None,
+    expected_id_set: set[str] | None,
+) -> None:
+    """Write one reward row's redacted reward.json, with trusted invocation evidence."""
+    trial_out.mkdir(parents=True, exist_ok=True)
+    clean_reward = {k: v for k, v in reward.items() if not k.startswith("_")}
+    _add_trusted_invocation_evidence(clean_reward, reward, trial_src, skill_name)
+    # Persist the physical attempt identity so bounded report readers can keep
+    # fallback multi-step rows for diagnostics without weighting a logical
+    # Harbor trial once per step.  This also populates the canonical report's
+    # existing trial_id field instead of inventing a second report schema.
+    clean_reward["trial_id"] = trial_id
+    if not clean_reward.get("entry_id") or reward.get("_result_entry_id"):
+        clean_reward["entry_id"] = _entry_id(reward, expected_id_set)
+    clean_reward["agent"] = agent
+    if agent_model:
+        clean_reward["model"] = agent_model
+    if agent_model_source:
+        clean_reward["model_source"] = agent_model_source
+    if "evaluation_errors" in clean_reward:
+        clean_reward["evaluation_errors"] = _safe_evaluation_errors(clean_reward["evaluation_errors"])
+    diagnostic_reward = (
+        str(clean_reward.get("evaluation_status") or "").casefold() in {"error", "failed"}
+        or overall_score(clean_reward) is None
+    )
+    safe_reward = redact_sensitive_data(
+        clean_reward,
+        max_str_len=REWARD_DIAGNOSTIC_STRING_MAX_CHARS if diagnostic_reward else None,
+    )
+    _restore_custom_metric_scores(clean_reward, safe_reward)
+    (trial_out / "reward.json").write_text(json.dumps(safe_reward, indent=2), encoding="utf-8")
+
+
+def _copy_trial_trajectory(trial_src: Path, trial_out: Path, step_name: str | None) -> None:
+    """Save a reward row's redacted ATIF trajectory as ``trajectory.json``.
+
+    A step row gets its step's trajectory. A whole-trial row of a native
+    multi-step trial without a root trajectory gets its step fragments merged.
+    ``_copy_trial_artifacts`` already copied the root agent trajectory.
+    """
+    root_trajectory = trial_src / "agent" / "trajectory.json"
+    if not step_name and not root_trajectory.exists():
+        merged = _merged_step_trajectory(trial_src)
+        if merged:
+            (trial_out / "trajectory.json").write_text(
+                json.dumps(redact_sensitive_data(merged), indent=2),
+                encoding="utf-8",
+            )
+            return
+    source = _reward_trajectory_path(trial_src, step_name)
+    if source != root_trajectory and source.exists():
+        _write_redacted_text_copy(source, trial_out / "trajectory.json", source_root=trial_src)
 
 
 def _usage_counter(value: Any) -> float | None:
@@ -3982,6 +4049,18 @@ class _AgentCollection:
             skill_name=self.skill_name,
             agent=self.agent,
             variant=arm.trial_variant,
+            agent_model=self.agent_model,
+            agent_model_source=self.agent_model_source,
+            expected_case_ids=self.expected_case_ids,
+        )
+
+    def resave_trial_rewards(self, arm: _ArmSpec, rewards: list[dict[str, Any]], job_dir: Path) -> None:
+        _resave_trial_rewards(
+            rewards,
+            self.arm_dir(arm) / "trials",
+            job_dir,
+            skill_name=self.skill_name,
+            agent=self.agent,
             agent_model=self.agent_model,
             agent_model_source=self.agent_model_source,
             expected_case_ids=self.expected_case_ids,
@@ -4361,8 +4440,8 @@ def collect_harbor_results(
                 json.dumps(security_attribution, indent=2), encoding="utf-8"
             )
             if with_skill.job_dir:
-                # Save the with-skill trials again so each reward.json carries its attribution.
-                collection.save_trials(with_skill_arm, with_skill.rewards, with_skill.job_dir)
+                # Rewrite the with-skill reward.json files so each carries its attribution.
+                collection.resave_trial_rewards(with_skill_arm, with_skill.rewards, with_skill.job_dir)
 
         agent_execution = _aggregate_execution([with_skill.execution, without_skill.execution])
         all_results["agents"][agent] = {

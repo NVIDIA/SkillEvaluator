@@ -38,6 +38,7 @@ and ``.env`` files are checked, and ``metadata['plugin']`` gains
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -64,6 +65,7 @@ from skillevaluator.plugin_formats import (
     FormatProfile,
     agent_plugins_schema_version,
     declared_value_replaces_default,
+    manifest_syntax,
     normalized_component_manifest,
     parse_manifest_text,
     profile_for,
@@ -82,7 +84,6 @@ from skillevaluator.utils.structured_data import (
     StructuredDataLimitError,
     StructuredDataSyntaxError,
     load_bounded_json,
-    load_bounded_yaml,
     require_bounded_string,
 )
 from skillevaluator.validators.base import ValidatorBase
@@ -127,6 +128,70 @@ def _unsafe_read_finding(manifest: PluginManifestFile, exc: PluginManifestPathEr
         file_path=manifest.declared_path,
         suggestion="Replace links/hardlinks/special manifests with one regular file inside the plugin root.",
     )
+
+
+@dataclass(frozen=True)
+class _ManifestSyntax:
+    """How the selected manifest of one syntax is read, and the findings its load problems produce."""
+
+    encoding: str
+    # Clients read their JSON manifests whatever the size or encoding, so such a
+    # manifest is read again leniently; SkillEvaluator's own YAML is not.
+    read_leniently: bool
+    # How messages name the manifest, and the name of its syntax.
+    subject: str
+    language: str
+    complexity_suggestion: str
+    invalid_check: str
+    invalid_suggestion: str
+    not_mapping_check: str
+    not_mapping_message: str
+    not_mapping_suggestion: str
+
+
+# Keyed by plugin_formats.manifest_syntax; "{filename}" is the manifest's root-relative path.
+_MANIFEST_SYNTAXES: dict[str, _ManifestSyntax] = {
+    "yaml": _ManifestSyntax(
+        # The YAML parser skips a leading byte-order mark itself.
+        encoding="utf-8",
+        read_leniently=False,
+        subject="Plugin manifest",
+        language="YAML",
+        complexity_suggestion="Reduce manifest nesting, collection sizes, or YAML aliases.",
+        invalid_check="manifest_invalid_yaml",
+        invalid_suggestion="Fix the YAML syntax in the plugin manifest.",
+        not_mapping_check="manifest_not_mapping",
+        not_mapping_message="Plugin manifest must be a non-empty YAML mapping.",
+        not_mapping_suggestion="Populate the manifest with at least name, author, and a dependency.",
+    ),
+    "json": _ManifestSyntax(
+        encoding="utf-8-sig",
+        read_leniently=True,
+        subject="Contained plugin manifest",
+        language="JSON",
+        complexity_suggestion="Reduce JSON nesting or collection sizes in {filename}.",
+        invalid_check="manifest_invalid_json",
+        invalid_suggestion="Fix the JSON syntax in {filename}.",
+        not_mapping_check="manifest_not_object",
+        not_mapping_message="Contained plugin manifest must be a non-empty JSON object.",
+        not_mapping_suggestion="Populate {filename} with at least a non-empty 'name'.",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class _LoadedManifest:
+    """The selected manifest, read and parsed once per validation (see ``_load_manifest``)."""
+
+    # The mapping the strict, bounded read parsed to, even an empty one or one
+    # that fails validation; None when the strict read or parse failed. The
+    # manifest declaration row and the bundle-reference inventory use it.
+    parsed: dict[str, Any] | None = None
+    # What validation continues with: the strict mapping when it is not empty,
+    # or, after manifest_unreadable, what the lenient read of a client manifest
+    # parsed to (readable is then False). None after any other load problem.
+    data: dict[str, Any] | None = None
+    readable: bool = False
 
 
 class PluginSchemaValidator(ValidatorBase):
@@ -197,24 +262,29 @@ class PluginSchemaValidator(ValidatorBase):
         self._stamp_manifest_metadata(located.manifest_filename, root, manifest_type, result)
         self._report_case_variants(located, result)
 
+        loaded = self._load_manifest(located, result)
         validated_manifest: dict[str, Any] | None = None
         contained_data: dict[str, Any] | None = None
         manifest_valid = True
         if manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE:
-            contained_data, manifest_valid = self._validate_contained_manifest(located, result)
+            contained_data, manifest_valid = self._validate_contained_manifest(located, loaded, result)
         elif manifest_type in PLUGIN_CONTAINED_MANIFEST_TYPES:
-            contained_data, manifest_valid = self._validate_native_manifest(located, result)
+            contained_data, manifest_valid = self._validate_native_manifest(located, loaded, result)
         else:
-            validated_manifest = self._validate_bundle_manifest(located, result)
+            validated_manifest = self._validate_bundle_manifest(located, loaded, result)
 
         # A manifest error must not hide problems in skills bundled alongside it.
         replaced_by = self._skills_dir_replaced_by(manifest_type, contained_data)
         self._validate_in_plugin_skills(root, result, replaced_by=replaced_by)
         if validated_manifest is not None:
             self._resolve_dependencies(located, validated_manifest, result)
-        additional = self._record_manifest_declarations(located, result)
+        additional = self._record_manifest_declarations(located, loaded.parsed, result)
         inventory = self._inventory_components(
-            located, contained_data, result, additional, manifest_valid=manifest_valid
+            located,
+            contained_data if located.contained else loaded.parsed,
+            result,
+            additional,
+            manifest_valid=manifest_valid,
         )
         self._validate_inventory_skills(inventory, root, result)
         return result
@@ -250,7 +320,7 @@ class PluginSchemaValidator(ValidatorBase):
     def _inventory_components(
         self,
         location: PluginManifestLocation,
-        contained_data: dict[str, Any] | None,
+        manifest: dict[str, Any] | None,
         result: ValidationResult,
         additional: list[tuple[str, str, dict[str, Any] | None]] | None = None,
         *,
@@ -258,6 +328,8 @@ class PluginSchemaValidator(ValidatorBase):
     ) -> PluginInventory:
         """Inventory declared + packaged components and run the static component checks.
 
+        ``manifest`` is the selected manifest's data: what validation accepted
+        for a contained manifest, the parsed mapping for ``agent_plugin.yaml``.
         Adds the MCP (all ``mcpServers`` forms and the root ``.mcp.json``),
         component-path, shipped-settings, and ``.env`` findings, then stamps
         ``component_inventory`` / ``mcp`` / ``context_cost`` into
@@ -269,7 +341,6 @@ class PluginSchemaValidator(ValidatorBase):
         from skillevaluator.plugin_components import attribute_findings, build_plugin_inventory
 
         contained = location.contained
-        manifest = contained_data if contained else self._bundle_manifest_data(location)
         root = location.secure_file.root
         allowed_hosts = self.policy.mcp_allowed_private_hosts if self.policy is not None else ()
         hook_allowed_urls = self.policy.hook_allowed_urls if self.policy is not None else ()
@@ -310,7 +381,7 @@ class PluginSchemaValidator(ValidatorBase):
                     metadata={"actual": len(findings), "reported": MAX_PLUGIN_SCHEMA_FINDINGS},
                 )
             )
-        if contained and contained_data is not None:
+        if contained and manifest is not None:
             blocking_mcp = [
                 finding
                 for finding in findings
@@ -397,15 +468,6 @@ class PluginSchemaValidator(ValidatorBase):
         return EndpointChecker().check(targets)
 
     @staticmethod
-    def _bundle_manifest_data(location: PluginManifestLocation) -> dict[str, Any] | None:
-        """Best-effort bounded re-parse of ``agent_plugin.yaml`` for the inventory."""
-        try:
-            data = load_bounded_yaml(location.read_text())
-        except (PluginManifestPathError, StructuredDataLimitError, StructuredDataSyntaxError, ValueError):
-            return None
-        return data if isinstance(data, dict) else None
-
-    @staticmethod
     def _stamp_manifest_metadata(
         manifest_filename: str,
         root: Path,
@@ -426,7 +488,7 @@ class PluginSchemaValidator(ValidatorBase):
         }
 
     def _validate_bundle_manifest(
-        self, location: PluginManifestLocation, result: ValidationResult
+        self, location: PluginManifestLocation, loaded: _LoadedManifest, result: ValidationResult
     ) -> dict[str, Any] | None:
         """Validate a bundle-reference manifest against ``PluginManifest``.
 
@@ -434,7 +496,7 @@ class PluginSchemaValidator(ValidatorBase):
         refs can be classified, else ``None``.
         """
         manifest_path = location.path
-        data = self._load_yaml(location, result)
+        data = loaded.data
         if data is None:
             return None
 
@@ -530,66 +592,84 @@ class PluginSchemaValidator(ValidatorBase):
         plugin_meta["dependency_resolution"] = resolution.to_metadata()
         plugin_meta["dependency_status_counts"] = counts
 
-    def _load_yaml(self, location: PluginManifestLocation, result: ValidationResult) -> dict | None:
-        """Parse manifest YAML, recording a finding on failure."""
-        manifest_path = location.path
+    def _load_manifest(self, location: PluginManifestLocation, result: ValidationResult) -> _LoadedManifest:
+        """Read and parse the selected manifest once, recording a HIGH finding for each problem.
+
+        A link, special file, or changed inode is ``manifest_unsafe`` and a
+        security failure. A manifest that is not UTF-8 or is over the manifest
+        size bound is ``manifest_unreadable``. A client (JSON) manifest is then
+        parsed leniently, as the clients that load it read it, so what it
+        declares is still inventoried; only when even that parse yields nothing
+        is it also a security failure, so a policy override cannot pass a plugin
+        whose declared components were never checked. ``agent_plugin.yaml`` is
+        not read leniently, so for it that is a security failure at once. Then
+        the manifest must parse within the structured-data bounds to a
+        non-empty mapping.
+        """
+        syntax = _MANIFEST_SYNTAXES[manifest_syntax(location.manifest_type)]
+        filename = location.manifest_filename
         try:
-            raw = location.read_text()
+            raw = location.read_text(encoding=syntax.encoding)
         except PluginManifestPathError as exc:
-            if exc.content_error:
-                # The YAML manifest is not read leniently, so nothing it declares is
-                # checked: a policy override must not turn this finding into a pass.
+            if not exc.content_error:
                 result.metadata["security_failure"] = True
-                filename = location.manifest_filename
+                result.add_finding(_unsafe_read_finding(location, exc, subject="plugin manifest"))
+                return _LoadedManifest()
+            problem = self._content_problem(exc)
+            data: dict[str, Any] | None = None
+            if syntax.read_leniently:
+                data, _status = self._parse_unreadable(location, problem, result, selected=True)
+            else:
                 result.add_finding(
                     _schema_finding(
                         "manifest_unreadable",
-                        message=f"Plugin manifest {filename} {self._content_problem(exc)}.",
-                        file_path=manifest_path,
-                        suggestion=f"Save {filename} as UTF-8 YAML under {CONTENT_DEDUP_MAX_FILE_BYTES} bytes.",
+                        message=f"{syntax.subject} {filename} {problem}.",
+                        file_path=location.path,
+                        suggestion=(
+                            f"Save {filename} as UTF-8 {syntax.language} under {CONTENT_DEDUP_MAX_FILE_BYTES} bytes."
+                        ),
                         metadata={"manifest_filename": filename},
                     )
                 )
-                return None
-            result.metadata["security_failure"] = True
-            result.add_finding(_unsafe_read_finding(location, exc, subject="plugin manifest"))
-            return None
+            if data is None:
+                result.metadata["security_failure"] = True
+            return _LoadedManifest(data=data)
 
         try:
-            data = load_bounded_yaml(raw)
+            parsed = parse_manifest_text(location.manifest_type, raw)
         except StructuredDataLimitError as exc:
             result.add_finding(
                 _schema_finding(
                     "manifest_complexity_limit",
-                    message=f"Plugin manifest exceeds structured-data complexity limits: {exc}",
-                    file_path=manifest_path,
-                    suggestion="Reduce manifest nesting, collection sizes, or YAML aliases.",
+                    message=f"{syntax.subject} exceeds structured-data complexity limits: {exc}",
+                    file_path=location.path,
+                    suggestion=syntax.complexity_suggestion.format(filename=filename),
                 )
             )
-            return None
+            return _LoadedManifest()
         except StructuredDataSyntaxError as exc:
             result.add_finding(
                 _schema_finding(
-                    "manifest_invalid_yaml",
-                    message=f"Plugin manifest is not valid YAML: {exc}",
-                    file_path=manifest_path,
-                    suggestion="Fix the YAML syntax in the plugin manifest.",
+                    syntax.invalid_check,
+                    message=f"{syntax.subject} is not valid {syntax.language}: {exc}",
+                    file_path=location.path,
+                    suggestion=syntax.invalid_suggestion.format(filename=filename),
                 )
             )
-            return None
+            return _LoadedManifest()
 
-        if not data or not isinstance(data, dict):
+        mapping = parsed if isinstance(parsed, dict) else None
+        if not mapping:
             result.add_finding(
                 _schema_finding(
-                    "manifest_not_mapping",
-                    message="Plugin manifest must be a non-empty YAML mapping.",
-                    file_path=manifest_path,
-                    suggestion="Populate the manifest with at least name, author, and a dependency.",
+                    syntax.not_mapping_check,
+                    message=syntax.not_mapping_message,
+                    file_path=location.path,
+                    suggestion=syntax.not_mapping_suggestion.format(filename=filename),
                 )
             )
-            return None
-
-        return data
+            return _LoadedManifest(parsed=mapping)
+        return _LoadedManifest(parsed=mapping, data=mapping, readable=True)
 
     def _add_validation_findings(
         self,
@@ -628,69 +708,8 @@ class PluginSchemaValidator(ValidatorBase):
                 )
             )
 
-    def _load_contained_json(
-        self, location: PluginManifestLocation, result: ValidationResult
-    ) -> tuple[dict[str, Any] | None, bool]:
-        """Read and parse a contained JSON manifest; record a HIGH finding on failure.
-
-        Returns ``(data, readable)``. A manifest that is not UTF-8 or is over the
-        manifest size bound is HIGH ``manifest_unreadable``. It is then parsed
-        leniently, as the clients that load it read it, so ``data`` can still be
-        inventoried while ``readable`` is ``False``. Only when even the lenient
-        parse yields nothing is it also a security failure, so a policy override
-        cannot pass a plugin whose declared components were never checked.
-        """
-        manifest_path = location.path
-        filename = location.manifest_filename
-        try:
-            raw = location.read_text(encoding="utf-8-sig")
-        except PluginManifestPathError as exc:
-            if exc.content_error:
-                data, _status = self._parse_unreadable(location, self._content_problem(exc), result, selected=True)
-                if data is None:
-                    result.metadata["security_failure"] = True
-                return data, False
-            result.metadata["security_failure"] = True
-            result.add_finding(_unsafe_read_finding(location, exc, subject="plugin manifest"))
-            return None, False
-
-        try:
-            data: Any = load_bounded_json(raw)
-        except StructuredDataLimitError as exc:
-            result.add_finding(
-                _schema_finding(
-                    "manifest_complexity_limit",
-                    message=f"Contained plugin manifest exceeds structured-data complexity limits: {exc}",
-                    file_path=manifest_path,
-                    suggestion=f"Reduce JSON nesting or collection sizes in {filename}.",
-                )
-            )
-            return None, False
-        except StructuredDataSyntaxError as exc:
-            result.add_finding(
-                _schema_finding(
-                    "manifest_invalid_json",
-                    message=f"Contained plugin manifest is not valid JSON: {exc}",
-                    file_path=manifest_path,
-                    suggestion=f"Fix the JSON syntax in {filename}.",
-                )
-            )
-            return None, False
-
-        if not isinstance(data, dict) or not data:
-            result.add_finding(
-                _schema_finding(
-                    "manifest_not_object",
-                    message="Contained plugin manifest must be a non-empty JSON object.",
-                    file_path=manifest_path,
-                    suggestion=f"Populate {filename} with at least a non-empty 'name'.",
-                )
-            )
-            return None, False
-        return data, True
-
     def _validate_contained_manifest(
-        self, location: PluginManifestLocation, result: ValidationResult
+        self, location: PluginManifestLocation, loaded: _LoadedManifest, result: ValidationResult
     ) -> tuple[dict[str, Any] | None, bool]:
         """Shallow-validate a contained ``.claude-plugin/plugin.json`` file.
 
@@ -700,7 +719,7 @@ class PluginSchemaValidator(ValidatorBase):
         could only be read leniently (``manifest_unreadable``).
         """
         manifest_path = location.path
-        data, readable = self._load_contained_json(location, result)
+        data = loaded.data
         if data is None:
             return None, False
 
@@ -726,10 +745,10 @@ class PluginSchemaValidator(ValidatorBase):
         declared = self._declared_components(data, CLAUDE_PROFILE)
         if declared:
             plugin_meta["declared_dependencies"] = declared
-        return data, readable
+        return data, loaded.readable
 
     def _validate_native_manifest(
-        self, location: PluginManifestLocation, result: ValidationResult
+        self, location: PluginManifestLocation, loaded: _LoadedManifest, result: ValidationResult
     ) -> tuple[dict[str, Any] | None, bool]:
         """Validate an Agent Plugins v1, Codex, or Cursor manifest against its format's required fields.
 
@@ -740,7 +759,7 @@ class PluginSchemaValidator(ValidatorBase):
         for a manifest that could only be read leniently (``manifest_unreadable``).
         ``None`` means the manifest could not be read or parsed.
         """
-        data, readable = self._load_contained_json(location, result)
+        data = loaded.data
         if data is None:
             return None, False
         profile = profile_for(location.manifest_type)
@@ -778,7 +797,7 @@ class PluginSchemaValidator(ValidatorBase):
         declared = self._declared_components(data, profile)
         if declared:
             plugin_meta["declared_dependencies"] = declared
-        return data, readable and not blocking
+        return data, loaded.readable and not blocking
 
     @staticmethod
     def _declared_components(data: dict[str, Any], profile: FormatProfile) -> dict[str, int]:
@@ -796,9 +815,14 @@ class PluginSchemaValidator(ValidatorBase):
         }
 
     def _record_manifest_declarations(
-        self, location: PluginManifestLocation, result: ValidationResult
+        self, location: PluginManifestLocation, selected_data: dict[str, Any] | None, result: ValidationResult
     ) -> list[tuple[str, str, dict[str, Any] | None]]:
         """Record every supported manifest in the root and flag name/version conflicts.
+
+        ``selected_data`` is what the strict read of the selected manifest
+        parsed to (``_LoadedManifest.parsed``), so a selected manifest that
+        could only be read leniently shows no name or version here and is not
+        compared.
 
         Returns the parsed additional manifests for the inventory merge. An
         additional manifest that cannot be parsed or fails its required fields
@@ -810,7 +834,6 @@ class PluginSchemaValidator(ValidatorBase):
         failure. A ``.codex-plugin/plugin.json`` beside a root Agent Plugins
         manifest is validated as the documented Codex overlay.
         """
-        selected_data = self._best_effort_parse(location.manifest_type, location.read_text)
         rows: list[dict[str, Any]] = [
             self._declaration_row(location.manifest_type, location.manifest_filename, selected_data, selected=True)
         ]
@@ -873,14 +896,6 @@ class PluginSchemaValidator(ValidatorBase):
                 ),
             )
         return additional
-
-    @staticmethod
-    def _best_effort_parse(manifest_type: str, read_text: Any) -> dict[str, Any] | None:
-        try:
-            data = parse_manifest_text(manifest_type, read_text(encoding="utf-8-sig"))
-        except (PluginManifestPathError, StructuredDataLimitError, StructuredDataSyntaxError, ValueError):
-            return None
-        return data if isinstance(data, dict) else None
 
     def _parse_additional(
         self, candidate: PluginManifestCandidate, result: ValidationResult, *, overlay: bool = False

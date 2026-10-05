@@ -409,17 +409,18 @@ class PluginSchemaValidator(ValidatorBase):
 
     @staticmethod
     def _resolve_endpoints(
-        inventory: Any,
+        inventory: PluginInventory,
         root: Path,
         allowed_hosts: tuple[str, ...],
         hook_allowed_urls: tuple[str, ...],
     ) -> tuple[dict[str, Any], list[Finding]]:
         """Opt-in DNS + single-HEAD redirect checks for MCP ``url`` servers and HTTP hooks.
 
-        MCP servers come from the selected manifest and from every additional
-        manifest (merged into the inventory as components with ``declared_by``),
-        because the client that loads an additional manifest connects to its
-        servers too. A server is checked once per ``(name, url)``.
+        MCP servers are every server some client may start
+        (:meth:`~skillevaluator.plugin_components.PluginInventory.all_mcp_declarations`):
+        the selected manifest's, and those only an additional manifest or
+        another client's default files declare, because the client that loads
+        them connects to them too. A server is checked once per ``(name, url)``.
         """
         from skillevaluator.plugin_component_risk import hook_allowlist_hosts
         from skillevaluator.plugin_components import PluginRootReader
@@ -427,16 +428,8 @@ class PluginSchemaValidator(ValidatorBase):
 
         reader = PluginRootReader(root)
         targets: list[EndpointTarget] = []
-        declarations = [
-            *inventory.mcp.effective,
-            *(
-                component.mcp
-                for component in inventory.components
-                if component.type == "mcp" and component.declared_by and component.mcp is not None
-            ),
-        ]
         seen_servers: set[tuple[str, str]] = set()
-        for declaration in declarations:
+        for declaration in inventory.all_mcp_declarations():
             config = declaration.config
             if not (isinstance(config, dict) and isinstance(config.get("url"), str) and config["url"].strip()):
                 continue

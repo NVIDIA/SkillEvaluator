@@ -28,7 +28,6 @@ make the ecosystem INCOMPLETE.
 
 from __future__ import annotations
 
-import json
 import re
 import tempfile
 import tomllib
@@ -43,13 +42,7 @@ from skillevaluator.constants import (
     SCAN_EXCLUDED_DIRS,
 )
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, discover_secure_files, secure_read_path_text
-from skillevaluator.utils.structured_data import (
-    MAX_STRUCTURED_DEPTH,
-    StructuredDataError,
-    StructuredDataSyntaxError,
-    load_bounded_json,
-    preflight_json_structure,
-)
+from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json
 from skillevaluator.utils.tool_runner import Severity, Tools, cvss_to_severity, parse_json_output
 from skillevaluator.validators import dependency_ecosystems as eco
 from skillevaluator.validators.base import ValidationResult, ValidatorBase
@@ -86,6 +79,9 @@ MAX_ECOSYSTEM_FILES = 64
 MAX_LOCKFILE_BYTES = 8 * 1024 * 1024
 MAX_LOCKFILE_COLLECTION_ITEMS = 4 * eco.MAX_NPM_PACKAGES
 MAX_LOCKFILE_TOKENS = 2_000_000
+# A parsed JSON document has at most one more value or key than it has preflight
+# tokens, so this graph budget refuses no lockfile that the token budget admits.
+MAX_LOCKFILE_NODES = MAX_LOCKFILE_TOKENS + 1
 # ``incomplete_scans`` names of the plugin CVE audit.
 PIP_AUDIT_SCAN = "pip-audit"
 NPM_AUDIT_SCAN = "npm-audit"
@@ -266,30 +262,6 @@ def _parse_poetry_declaration(name: str, constraint: object) -> DependencyDeclar
         package = parse_dependency_declaration(name, line_number=None, role="poetry")
         return DependencyDeclaration(f"{name} {text}", package.name, None, "poetry", None)
     return declaration
-
-
-def _reject_json_constant(value: str) -> object:
-    raise StructuredDataSyntaxError(f"Input is not strict JSON ({value})")
-
-
-def _load_npm_lockfile(text: str) -> Any:
-    """Parse an npm lockfile under lockfile-sized bounds.
-
-    The text is lexically bounded (depth, collection size, token count, string
-    length) before ``json.loads`` materializes it. Raises
-    :class:`~skillevaluator.utils.structured_data.StructuredDataError` (or
-    ``ValueError``) when the lockfile is over a bound or is not strict JSON.
-    """
-    preflight_json_structure(
-        text,
-        max_depth=MAX_STRUCTURED_DEPTH,
-        max_tokens=MAX_LOCKFILE_TOKENS,
-        max_collection_items=MAX_LOCKFILE_COLLECTION_ITEMS,
-    )
-    try:
-        return json.loads(text, parse_constant=_reject_json_constant)
-    except json.JSONDecodeError as exc:
-        raise StructuredDataSyntaxError(f"Input is not valid JSON: {exc}") from exc
 
 
 def _python_runner_declaration(spec: str) -> DependencyDeclaration | None:
@@ -807,7 +779,15 @@ class DependencySecurityValidator(ValidatorBase):
                     Path(*rel.parts), MAX_LOCKFILE_BYTES if lockfile else MAX_DEPENDENCY_FILE_BYTES
                 )
             text = raw.decode("utf-8-sig")
-            return (_load_npm_lockfile(text) if lockfile else load_bounded_json(text)), None
+            if not lockfile:
+                return load_bounded_json(text), None
+            data = load_bounded_json(
+                text,
+                max_tokens=MAX_LOCKFILE_TOKENS,
+                max_collection_items=MAX_LOCKFILE_COLLECTION_ITEMS,
+                max_nodes=MAX_LOCKFILE_NODES,
+            )
+            return data, None
         except (SecurePathError, StructuredDataError, OSError, UnicodeError, ValueError) as exc:
             return None, str(exc)[: eco.MAX_ERROR_CHARS]
 

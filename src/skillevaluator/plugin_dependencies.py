@@ -99,7 +99,11 @@ def parse_canonical_ref(ref: Any) -> tuple[str, str, str, str] | None:
     :func:`~skillevaluator.models.plugin._validate_canonical_ref` validator. A ref
     that is not a confidently-parseable 4-segment canonical ID returns ``None``.
     """
-    canonical = normalize_ref(ref)
+    return _split_canonical(normalize_ref(ref))
+
+
+def _split_canonical(canonical: str | None) -> tuple[str, str, str, str] | None:
+    """Split a :func:`normalize_ref` result into ``(source, repo, kind, name)`` (see :func:`parse_canonical_ref`)."""
     if not canonical:
         return None
     segments = canonical.split("::")
@@ -220,7 +224,11 @@ def ref_name(ref: Any) -> str | None:
 
 def ref_label(ref: Any) -> str:
     """Return a stable, human-readable label for reporting a ref."""
-    canonical = normalize_ref(ref)
+    return _ref_label_from(ref, normalize_ref(ref))
+
+
+def _ref_label_from(ref: Any, canonical: str | None) -> str:
+    """:func:`ref_label` of a ref whose :func:`normalize_ref` result is ``canonical``."""
     if canonical:
         return canonical
     name = ref_name(ref)
@@ -421,16 +429,35 @@ def classify_ref(
     bundled_by_leaf: Mapping[str, str] | None = None,
 ) -> DependencyRow:
     """Classify one ``skills``/``rules`` reference (``kind``) without network access."""
+    return _classify_ref(
+        ref,
+        kind=kind,
+        plugin_real=plugin_root.expanduser().resolve(),
+        identity=identity,
+        bundled_by_leaf=bundled_by_leaf,
+    )
+
+
+def _classify_ref(
+    ref: Any,
+    *,
+    kind: str,
+    plugin_real: Path,
+    identity: RepositoryIdentity,
+    bundled_by_leaf: Mapping[str, str] | None,
+) -> DependencyRow:
+    """:func:`classify_ref` for a plugin root that is already resolved (``plugin_real``)."""
     hints = bundled_by_leaf if kind == "skills" and bundled_by_leaf else {}
+    canonical = normalize_ref(ref)
     try:
-        label = ref_label(ref)
+        label = _ref_label_from(ref, canonical)
         leaf = ref_name(ref)
     except ValueError as exc:
         return DependencyRow("<invalid reference>", "unresolved", None, f"invalid reference: {exc}")
     if len(label) > MAX_REF_LABEL_CHARS:
         label = label[: MAX_REF_LABEL_CHARS - 3] + "..."
 
-    parsed = parse_canonical_ref(ref)
+    parsed = _split_canonical(canonical)
     if parsed is None:
         return DependencyRow(
             label, "unresolved", None, "not a canonical <source>::<owner/repo>::<kind>::<name> reference"
@@ -470,7 +497,6 @@ def classify_ref(
         return DependencyRow(label, "unresolved", None, f"unsafe reference path '{ref_kind}/{name}'")
 
     relative = Path(ref_kind) / relative_name
-    plugin_real = plugin_root.expanduser().resolve()
     target = identity.clone_root / relative
     # Outside the plugin root a ref may only reach a recognized content root
     # (never .git/, secrets/, ...); inside it, any bundled path is eligible.
@@ -536,13 +562,14 @@ def classify_plugin_dependencies(
     bundled_by_leaf: dict[str, str] = {}
     for bundled in bundled_skills:
         bundled_by_leaf.setdefault(bundled.rsplit("/", 1)[-1], bundled)
+    plugin_real = plugin_root.expanduser().resolve()
     sections: dict[str, tuple[DependencyRow, ...]] = {}
     for kind in ("skills", "rules"):
         sections[kind] = tuple(
-            classify_ref(
+            _classify_ref(
                 ref,
                 kind=kind,
-                plugin_root=plugin_root,
+                plugin_real=plugin_real,
                 identity=identity,
                 bundled_by_leaf=bundled_by_leaf,
             )

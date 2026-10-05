@@ -1293,7 +1293,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
     stage_member_skills = False
     #: The plugin root is copied, so MCP servers that launch from plugin files start here.
     copies_plugin_tree = True
-    plugin_dir = f"{NATIVE_ROOT}/claude-code/plugin"
+    #: Where the staged plugin lives in the bundle, and so in the container (``plugin_dir``).
+    bundle_dir = "native/claude-code/plugin"
+    plugin_dir = f"{CONTAINER_ROOT}/{bundle_dir}"
 
     def plugin_name(self, source: NativePluginSource) -> str:
         return plugin_slug(source.plugin_name)
@@ -1392,19 +1394,31 @@ class ClaudeCodeAdapter(HarnessAdapter):
 
     def build(self, source: NativePluginSource) -> NativeBundle:
         bundle = self._base_bundle()
-        base = "native/claude-code/plugin"
-        slug = self.plugin_name(source)
-        checks: list[CensusCheck] = []
         # The plugin root is copied (secure copy, evals/ and unsupported files
         # excluded) so hook scripts and other plugin-relative files resolve.
-        bundle.plugin_tree = base
+        bundle.plugin_tree = self.bundle_dir
+        bundle.harness = {"kind": "claude-code-init", "plugin": self.plugin_name(source)}
         manifest = self.manifest(source)
+        checks: list[CensusCheck] = []
+        not_loaded: list[tuple[str, str, str]] = []
+        self._stage_skills(bundle, source, checks)
+        self._stage_mcp_servers(bundle, source, checks)
+        self._stage_hooks(bundle, source, checks, not_loaded)
+        self._stage_texts(bundle, source, manifest, checks)
+        bundle.generated[f"{self.bundle_dir}/.claude-plugin/plugin.json"] = json.dumps(manifest, indent=2) + "\n"
+        self._stage_plugin_configs(bundle, source, checks)
+        setup_lines = self._stage_rules(bundle, source, checks, not_loaded)
+        return self._finish(bundle, source, setup_lines=setup_lines, checks=checks, not_loaded=not_loaded)
+
+    def _stage_skills(self, bundle: NativeBundle, source: NativePluginSource, checks: list[CensusCheck]) -> None:
+        """Copy the member skills Claude Code would not read where they are, and list every loaded skill."""
+        slug = self.plugin_name(source)
         # Census targets come from what the staged plugin actually loads. Claude Code
         # names each one ``<plugin>:<skill dir>``, member skill or not.
         for name, rel, copy_from in self.staged_skills(source):
             bundle.skill_aliases.append(f"{slug}:{PurePosixPath(rel).name}")
             if copy_from is not None:
-                bundle.trees.append((copy_from, f"{base}/{rel}"))
+                bundle.trees.append((copy_from, f"{self.bundle_dir}/{rel}"))
             checks.append(
                 CensusCheck(
                     "skill",
@@ -1416,13 +1430,19 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     harness_name=PurePosixPath(rel).name,
                 )
             )
-        # Runnable servers plus the ones that launch from the copied plugin files
-        # (Claude Code expands ${CLAUDE_PLUGIN_ROOT} for them), with their env/headers.
+
+    def _stage_mcp_servers(self, bundle: NativeBundle, source: NativePluginSource, checks: list[CensusCheck]) -> None:
+        """Write the staged ``.mcp.json``.
+
+        It holds the runnable servers plus the ones that launch from the copied
+        plugin files (Claude Code expands ``${CLAUDE_PLUGIN_ROOT}`` for them),
+        with their env/headers.
+        """
         servers = {
             _redacted(str(server["name"])): _mcp_entry_claude(server, source.mcp_declared.get(str(server["name"])))
             for server in (*source.mcp_servers, *source.plugin_file_mcp_servers)
         }
-        bundle.generated[f"{base}/.mcp.json"] = json.dumps({"mcpServers": servers}, indent=2) + "\n"
+        bundle.generated[f"{self.bundle_dir}/.mcp.json"] = json.dumps({"mcpServers": servers}, indent=2) + "\n"
         checks.extend(
             CensusCheck(
                 "mcp",
@@ -1434,12 +1454,19 @@ class ClaudeCodeAdapter(HarnessAdapter):
             )
             for name in servers
         )
+
+    def _stage_hooks(
+        self,
+        bundle: NativeBundle,
+        source: NativePluginSource,
+        checks: list[CensusCheck],
+        not_loaded: list[tuple[str, str, str]],
+    ) -> None:
+        """Merge every hook source into one census-wrapped ``hooks/hooks.json``, with one listing per source."""
         wrapped = wrap_hook_sources(source.hooks, plugin_root=source.plugin_root)
-        bundle.generated[f"{base}/hooks/hooks.json"] = json.dumps(wrapped.config, indent=2) + "\n"
+        bundle.generated[f"{self.bundle_dir}/hooks/hooks.json"] = json.dumps(wrapped.config, indent=2) + "\n"
         for owner, _event, identifier in wrapped.ids:
             bundle.hook_ids.setdefault(owner, []).append(identifier)
-        bundle.harness = {"kind": "claude-code-init", "plugin": slug}
-        not_loaded: list[tuple[str, str, str]] = []
         for hook in source.hooks:
             identifiers = [identifier for owner, _event, identifier in wrapped.ids if owner == hook.name]
             dropped = [event for owner, event in wrapped.dropped if owner == hook.name]
@@ -1475,13 +1502,25 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     label="plugin-dir hooks listing",
                 )
             )
+
+    def _stage_texts(
+        self,
+        bundle: NativeBundle,
+        source: NativePluginSource,
+        manifest: dict[str, Any],
+        checks: list[CensusCheck],
+    ) -> None:
+        """List the subagents, commands, and output styles; an inline command becomes a staged file.
+
+        The inline command's ``commands`` map entry in *manifest* (the staged
+        ``plugin.json``) is pointed at that file.
+        """
         commands = manifest.get("commands")
         for text in source.texts:
             rel = text.rel
             if rel is None:
-                # An inline command-map entry becomes a staged file the map points to.
                 rel = f"commands/{safe_name(text.name)}.md"
-                bundle.generated[f"{base}/{rel}"] = text.text
+                bundle.generated[f"{self.bundle_dir}/{rel}"] = text.text
                 if isinstance(commands, dict) and isinstance(commands.get(text.name), dict):
                     entry = {key: value for key, value in commands[text.name].items() if key != "content"}
                     entry["source"] = f"./{rel}"
@@ -1498,9 +1537,14 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     harness_name=command_name if text.type == "command" else "",
                 )
             )
-        bundle.generated[f"{base}/.claude-plugin/plugin.json"] = json.dumps(manifest, indent=2) + "\n"
+
+    def _stage_plugin_configs(
+        self, bundle: NativeBundle, source: NativePluginSource, checks: list[CensusCheck]
+    ) -> None:
+        """Write the applied ``settings.json`` and ``.lsp.json``, and list them and ``bin/``."""
         if source.settings:
-            bundle.generated[f"{base}/{_PLUGIN_SETTINGS_FILE}"] = json.dumps(dict(source.settings), indent=2) + "\n"
+            settings = json.dumps(dict(source.settings), indent=2) + "\n"
+            bundle.generated[f"{self.bundle_dir}/{_PLUGIN_SETTINGS_FILE}"] = settings
             checks.append(
                 CensusCheck(
                     "settings",
@@ -1511,7 +1555,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 )
             )
         if source.lsp_servers:
-            bundle.generated[f"{base}/.lsp.json"] = json.dumps(dict(source.lsp_servers), indent=2) + "\n"
+            bundle.generated[f"{self.bundle_dir}/.lsp.json"] = json.dumps(dict(source.lsp_servers), indent=2) + "\n"
             checks.extend(
                 CensusCheck(
                     "lsp",
@@ -1525,28 +1569,41 @@ class ClaudeCodeAdapter(HarnessAdapter):
             )
         if ("bin", "bin") in source.other:
             checks.append(CensusCheck("bin", "bin", "dir", f"{self.plugin_dir}/bin", label="plugin-dir listing"))
-        setup_lines: list[str] = []
-        if source.rules:
-            rules_dir = f"skilleval-{slug}"
-            setup_lines.append(': "${CLAUDE_CONFIG_DIR:=$HOME/.claude}"')
-            destinations: dict[str, str] = {}
-            for name, content in source.rules:
-                staged, reason = _claude_user_rule(name, content)
-                if staged is None:
-                    not_loaded.append(("rule", name, reason or "not a Claude Code user rule"))
-                    continue
-                file_name = _claude_rule_file_name(name)
-                if file_name in destinations:
-                    raise ValueError(
-                        f"Refusing to stage plugin rules natively: '{destinations[file_name]}' and '{name}' would "
-                        f"both be staged as rules/{file_name}"
-                    )
-                destinations[file_name] = name
-                bundle.generated[f"native/claude-code/rules/{file_name}"] = staged
-                dest = f"$CLAUDE_CONFIG_DIR/rules/{rules_dir}/{file_name}"
-                setup_lines.append(f'skilleval_copy "{NATIVE_ROOT}/claude-code/rules/{file_name}" "{dest}"')
-                checks.append(CensusCheck("rule", name, "file", dest, label="user rules listing"))
-        return self._finish(bundle, source, setup_lines=setup_lines, checks=checks, not_loaded=not_loaded)
+
+    def _stage_rules(
+        self,
+        bundle: NativeBundle,
+        source: NativePluginSource,
+        checks: list[CensusCheck],
+        not_loaded: list[tuple[str, str, str]],
+    ) -> list[str]:
+        """Stage each rule as a Claude Code user rule; return the setup lines that copy them into place.
+
+        The rules go to ``$CLAUDE_CONFIG_DIR/rules/skilleval-<plugin>/``, one file
+        per rule. Two rules that would share a file name fail staging.
+        """
+        if not source.rules:
+            return []
+        rules_dir = f"skilleval-{self.plugin_name(source)}"
+        setup_lines = [': "${CLAUDE_CONFIG_DIR:=$HOME/.claude}"']
+        destinations: dict[str, str] = {}
+        for name, content in source.rules:
+            staged, reason = _claude_user_rule(name, content)
+            if staged is None:
+                not_loaded.append(("rule", name, reason or "not a Claude Code user rule"))
+                continue
+            file_name = _claude_rule_file_name(name)
+            if file_name in destinations:
+                raise ValueError(
+                    f"Refusing to stage plugin rules natively: '{destinations[file_name]}' and '{name}' would "
+                    f"both be staged as rules/{file_name}"
+                )
+            destinations[file_name] = name
+            bundle.generated[f"native/claude-code/rules/{file_name}"] = staged
+            dest = f"$CLAUDE_CONFIG_DIR/rules/{rules_dir}/{file_name}"
+            setup_lines.append(f'skilleval_copy "{NATIVE_ROOT}/claude-code/rules/{file_name}" "{dest}"')
+            checks.append(CensusCheck("rule", name, "file", dest, label="user rules listing"))
+        return setup_lines
 
 
 def _check_codex_mcp_toml(text: str, servers: Sequence[Mapping[str, Any]]) -> None:

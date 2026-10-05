@@ -19,6 +19,7 @@ import math
 import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 from skillevaluator.constants import (
@@ -30,7 +31,13 @@ from skillevaluator.constants import (
     LIFT_CI_MIN_PAIRED_CASES,
     TOKEN_EFFICIENCY_HALF_LIFE,
 )
-from skillevaluator.tier3.harbor.metrics import finite_number, metric_set_for_reward, metric_value, overall_score
+from skillevaluator.tier3.harbor.metrics import (
+    finite_number,
+    metric_set_for_reward,
+    metric_value,
+    overall_score,
+    weighted_dimension_score,
+)
 
 LIFT_UNCERTAINTY_METHOD = "paired_case_bootstrap"
 CONTEXT_COST_METHOD = "paired_first_turn_prompt_tokens"
@@ -93,19 +100,6 @@ def _round(value: float | None, digits: int = 4) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def _weighted_score(reward: dict[str, Any], evaluators: Sequence[str], weights: Sequence[Any]) -> float | None:
-    numerator = 0.0
-    denominator = 0.0
-    for evaluator, weight in zip(evaluators, weights, strict=False):
-        value = metric_value(reward, evaluator)
-        numeric_weight = finite_number(weight)
-        if value is None or numeric_weight is None:
-            continue
-        numerator += value * numeric_weight
-        denominator += numeric_weight
-    return numerator / denominator if denominator > 0 else None
-
-
 def trial_quality_score(reward: Mapping[str, Any]) -> float | None:
     """Return one trial's score on the same basis as the reported lift.
 
@@ -120,15 +114,10 @@ def trial_quality_score(reward: Mapping[str, Any]) -> float | None:
     _, active_metrics = metric_set_for_reward(payload)
     if not active_metrics:
         return overall_score(payload)
+    value_of = partial(metric_value, payload)
     dimension_values: list[float] = []
     for config in DIMENSION_MAPPING.values():
-        evaluators = list(config.get("evaluators") or [])
-        weights = list(config.get("weights") or [])
-        fallback = list(config.get("fallback_evaluators") or [])
-        if fallback and not any(evaluator in active_metrics for evaluator in evaluators):
-            evaluators = fallback
-            weights = list(config.get("fallback_weights") or [])
-        value = _weighted_score(payload, evaluators, weights)
+        value = weighted_dimension_score(value_of, config, active_metrics=active_metrics)
         if value is not None:
             dimension_values.append(value)
     if dimension_values:

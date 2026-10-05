@@ -20,7 +20,7 @@ from skillevaluator.evaluation.tier3_report import (
 )
 from skillevaluator.tier3.harbor import stats
 from skillevaluator.tier3.harbor.collector import _trial_usage, collect_harbor_results
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS, LEGACY_METRIC_SET
 from skillevaluator.tier3.harbor.report_data import load_agent_data
 from skillevaluator.tier3.harbor.stats import ArmObservations, TrialObservation
 
@@ -131,6 +131,24 @@ def test_trial_quality_score_matches_dimension_mean_and_skips_na_metrics() -> No
     assert stats.trial_quality_score(reward) == pytest.approx(0.625)
     assert stats.trial_quality_score(_reward("case-1", None)) is None
     assert stats.trial_quality_score({"metric_set": "custom-only", "overall": 0.4}) == 0.4
+
+
+def test_trial_quality_score_scores_legacy_security_from_behavior_check() -> None:
+    reward = {
+        "metric_set": LEGACY_METRIC_SET,
+        "accuracy": 0.5,
+        "skill_execution": 1.0,
+        "goal_accuracy": 0.0,
+        "behavior_check": 1.0,
+        "skill_efficiency": 0.5,
+    }
+    # Dimensions: security 1.0 (behavior_check), correctness 0.5, discoverability 1.0,
+    # effectiveness 0.5, efficiency 0.5.
+    assert stats.trial_quality_score(reward) == pytest.approx(0.7)
+
+    # A legacy reward's stray security value is not part of its metric set.
+    reward["security"] = 0.0
+    assert stats.trial_quality_score(reward) == pytest.approx(0.7)
 
 
 @pytest.mark.parametrize(

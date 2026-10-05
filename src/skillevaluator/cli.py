@@ -389,6 +389,37 @@ def _effective_report_formats(report_formats: tuple[str, ...], *, quiet: bool) -
     return report_formats
 
 
+def _content_relative_finding_paths(results: list[ValidationResult], validated: Path, content_root: Path) -> None:
+    """Make finding paths built from a relative target relative to the content root.
+
+    Validators get the target as typed. For ``validate sample``, some join it
+    into their paths ("sample/SKILL.md", relative to the working directory)
+    while others report paths relative to the content root ("SKILL.md"), so the
+    reports mixed both and SARIF, which reads a relative path against the
+    content root, pointed "sample/SKILL.md" nowhere. Each path that starts with
+    the typed target is rewritten as ``validate .`` would report it, unless it
+    names an existing entry under the content root (a skill "examples" with its
+    own "examples/" folder). A bundled skill's ``"[skill] "`` label is kept.
+    """
+    prefix = validated.parts
+    if validated.is_absolute() or not prefix:
+        return  # absolute paths are already unambiguous; "." has no prefix
+    for result in results:
+        for finding in result.findings:
+            label, path = "", finding.file_path or ""
+            if path.startswith("[") and "] " in path:
+                skill, _separator, path = path.partition("] ")
+                label = f"{skill}] "
+            parts = Path(path).parts
+            if parts[: len(prefix)] != prefix:
+                continue
+            # A path relative to the content root never starts with "..", so only a
+            # target without ".." can be ambiguous.
+            if ".." not in prefix and (content_root / path).exists(follow_symlinks=False):
+                continue
+            finding.file_path = label + str(Path(*parts[len(prefix) :]))
+
+
 def _record_validate_json_report(report_name: str | None) -> None:
     _validate_json_report_var.set(report_name)
 
@@ -2545,6 +2576,7 @@ def validate(
     }.get(resolved_type, "Skill")
     # Reports and the footer name the validated content root, not the lexical "." or manifest-file argument.
     report_root = resolved_target.resolve()
+    _content_relative_finding_paths(results, resolved_target, report_root)
     target_display = resolve_git_remote_url(report_root) or str(report_root)
     sarif_repository_root = resolve_git_root(report_root)
     if sarif_repository_root is None:

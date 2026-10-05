@@ -162,6 +162,17 @@ def _discover(
     )
 
 
+def _preferred_skill_manifests(files: list[SecureFile]) -> list[SecureFile]:
+    """Keep one manifest per skill folder (``SKILL.md`` over ``skill.md``), ordered by folder."""
+    by_folder: dict[Path, dict[str, SecureFile]] = {}
+    for file in files:
+        by_folder.setdefault(file.relative_path.parent, {})[file.relative_path.name] = file
+    return [
+        next(variants[name] for name in SKILL_MANIFEST_VARIANTS if name in variants)
+        for _folder, variants in sorted(by_folder.items(), key=lambda item: item[0].as_posix())
+    ]
+
+
 def extract_from_skill(skill_dir: Path) -> ContentEntry | None:
     """Extract one regular SKILL.md/skill.md without following redirects."""
     files = _discover(
@@ -169,15 +180,14 @@ def extract_from_skill(skill_dir: Path) -> ContentEntry | None:
         selected=lambda relative: len(relative.parts) == 1 and relative.name in SKILL_MANIFEST_VARIANTS,
         max_depth=1,
     )
-    by_name = {file.relative_path.name: file for file in files}
-    selected_file = next((by_name[name] for name in SKILL_MANIFEST_VARIANTS if name in by_name), None)
-    if selected_file is None:
+    manifests = _preferred_skill_manifests(files)
+    if not manifests:
         logger.debug("No SKILL.md found in %s", skill_dir)
         return None
     with SecureRoot(skill_dir) as secure_root:
         return _extract_secure_file(
             secure_root,
-            selected_file,
+            manifests[0],
             name_field="name",
             description_field="description",
             content_type=CONTENT_TYPE_SKILL,
@@ -255,13 +265,7 @@ def discover_and_extract(
 
     files = _discover(root, selected=selector)
     if content_type == CONTENT_TYPE_SKILL:
-        grouped: dict[Path, dict[str, SecureFile]] = {}
-        for file in files:
-            grouped.setdefault(file.relative_path.parent, {})[file.relative_path.name] = file
-        files = [
-            next(variants[name] for name in SKILL_MANIFEST_VARIANTS if name in variants)
-            for _directory, variants in sorted(grouped.items(), key=lambda item: item[0].as_posix())
-        ]
+        files = _preferred_skill_manifests(files)
 
     budget = _ExtractionBudget(max_entries=max_entries)
     entries: list[ContentEntry] = []

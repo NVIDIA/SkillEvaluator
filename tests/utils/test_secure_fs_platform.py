@@ -1,14 +1,39 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import ctypes
 import os
 import stat
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from skillevaluator.utils import secure_fs
+
+_NATIVE_FUNCTIONS = (
+    "create_file",
+    "close_handle",
+    "get_file_information",
+    "get_final_path",
+    "set_file_information",
+    "nt_create_file",
+    "nt_set_information_file",
+    "rtl_nt_status_to_dos_error",
+)
+
+
+def _fake_windows_api(**functions: object) -> SimpleNamespace:
+    """A stand-in for the bound native functions; any call not supplied fails the test."""
+
+    def unexpected(*_args: object) -> object:
+        raise AssertionError("unexpected native Windows call")
+
+    return SimpleNamespace(
+        invalid_handle=ctypes.c_void_p(-1).value,
+        **{name: functions.get(name, unexpected) for name in _NATIVE_FUNCTIONS},
+    )
 
 
 @pytest.mark.parametrize("max_depth", [True, 0, -1, 65, 1.5])
@@ -520,3 +545,146 @@ def test_windows_atomic_write_cleans_unpublished_stage_by_handle(
 
     assert not destination.exists()
     assert list(tmp_path.glob(".skillevaluator-*.tmp")) == []
+
+
+def test_windows_structures_are_defined_once_per_process() -> None:
+    assert secure_fs._windows_types() is secure_fs._windows_types()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the native API binds only on Windows")
+def test_windows_native_api_is_unavailable_off_windows() -> None:
+    with pytest.raises(OSError, match="unavailable"):
+        secure_fs._windows_api()
+    with pytest.raises(OSError, match="unavailable"):
+        secure_fs.windows_final_path(0)
+
+
+def test_windows_relative_open_reuses_structures_and_keeps_its_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def nt_create_file(handle_ref, access, attributes_ref, io_status_ref, *arguments):
+        _allocation, file_attributes, share, disposition, create_options, _ea_buffer, _ea_length = arguments
+        attributes = attributes_ref._obj
+        calls.append(
+            {
+                "access": access,
+                "file_attributes": file_attributes,
+                "share": share,
+                "disposition": disposition,
+                "create_options": create_options,
+                "root": attributes.RootDirectory,
+                "object_flags": attributes.Attributes,
+                "name": attributes.ObjectName.contents.Buffer,
+                "types": (type(attributes), type(attributes.ObjectName.contents), type(io_status_ref._obj)),
+            }
+        )
+        handle_ref._obj.value = 456
+        return 0
+
+    monkeypatch.setattr(secure_fs, "_windows_api", lambda: _fake_windows_api(nt_create_file=nt_create_file))
+
+    def open_component() -> int:
+        return secure_fs._windows_open_relative_handle(
+            123,
+            "SKILL.md",
+            access=secure_fs._WINDOWS_FILE_READ_ACCESS,
+            share=secure_fs._WINDOWS_SHARE_READ,
+            disposition=secure_fs._WINDOWS_FILE_OPEN,
+            file_attributes=0,
+            create_options=secure_fs._WINDOWS_FILE_OPEN_OPTIONS,
+        )
+
+    assert open_component() == 456
+    # ctypes.POINTER caches each structure class for the life of the process,
+    # so repeated opens must not define new classes.
+    pointer_cache = getattr(ctypes, "_pointer_type_cache", None)
+    cached_pointer_types = None if pointer_cache is None else len(pointer_cache)
+    for _ in range(50):
+        assert open_component() == 456
+
+    if pointer_cache is not None:
+        assert len(pointer_cache) == cached_pointer_types
+    assert all(call == calls[0] for call in calls)
+    types = secure_fs._windows_types()
+    assert calls[0] == {
+        "access": secure_fs._WINDOWS_FILE_READ_ACCESS,
+        "file_attributes": 0,
+        "share": secure_fs._WINDOWS_SHARE_READ,
+        "disposition": secure_fs._WINDOWS_FILE_OPEN,
+        "create_options": secure_fs._WINDOWS_FILE_OPEN_OPTIONS,
+        "root": 123,
+        "object_flags": secure_fs._WINDOWS_OBJECT_ATTRIBUTES_FLAGS,
+        "name": "SKILL.md",
+        "types": (types.ObjectAttributes, types.UnicodeString, types.IoStatusBlock),
+    }
+
+
+def test_windows_relative_open_reports_the_ntstatus_as_a_win32_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    status_object_name_not_found = -1073741772  # 0xC0000034 as a signed NTSTATUS
+    monkeypatch.setattr(
+        secure_fs,
+        "_windows_api",
+        lambda: _fake_windows_api(
+            nt_create_file=lambda *_args: status_object_name_not_found,
+            rtl_nt_status_to_dos_error=lambda status: 2 if status == status_object_name_not_found else 0,
+        ),
+    )
+
+    with pytest.raises(OSError, match="missing") as caught:
+        secure_fs._windows_open_relative_handle(
+            123,
+            "missing",
+            access=secure_fs._WINDOWS_DIRECTORY_READ_ACCESS,
+            share=secure_fs._WINDOWS_SHARE_READ_WRITE,
+            disposition=secure_fs._WINDOWS_FILE_OPEN,
+            file_attributes=0,
+            create_options=secure_fs._WINDOWS_DIRECTORY_OPEN_OPTIONS,
+        )
+
+    assert caught.value.errno == 2
+
+
+def test_windows_handle_metadata_reads_identity_size_links_and_write_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    def get_file_information(handle, information_ref) -> int:
+        assert handle == 9
+        information = information_ref._obj
+        assert type(information) is secure_fs._windows_types().ByHandleFileInformation
+        information.dwFileAttributes = 0x10
+        information.dwVolumeSerialNumber = 7
+        information.nFileIndexHigh, information.nFileIndexLow = 1, 2
+        information.nFileSizeHigh, information.nFileSizeLow = 3, 4
+        information.nNumberOfLinks = 1
+        information.ftLastWriteTime.dwHighDateTime, information.ftLastWriteTime.dwLowDateTime = 5, 6
+        return 1
+
+    monkeypatch.setattr(secure_fs, "_windows_api", lambda: _fake_windows_api(get_file_information=get_file_information))
+
+    assert secure_fs._windows_handle_metadata(9) == secure_fs._WindowsHandleMetadata(
+        attributes=0x10,
+        volume_serial=7,
+        file_id=(1 << 32) | 2,
+        size=(3 << 32) | 4,
+        link_count=1,
+        last_write_time=(5 << 32) | 6,
+    )
+
+
+@pytest.mark.parametrize(
+    ("native", "expected"),
+    [
+        ("\\\\?\\C:\\skills\\demo", "C:\\skills\\demo"),
+        ("\\\\?\\UNC\\server\\share\\demo", "\\\\server\\share\\demo"),
+        ("C:\\skills\\demo", "C:\\skills\\demo"),
+    ],
+)
+def test_windows_final_path_drops_the_extended_length_prefix(
+    monkeypatch: pytest.MonkeyPatch, native: str, expected: str
+) -> None:
+    def get_final_path(handle, buffer, size, flags) -> int:
+        assert (handle, size, flags) == (5, len(buffer), 0)
+        buffer.value = native
+        return len(native)
+
+    monkeypatch.setattr(secure_fs, "_windows_api", lambda: _fake_windows_api(get_final_path=get_final_path))
+
+    assert str(secure_fs._windows_final_path_from_handle(5)) == expected

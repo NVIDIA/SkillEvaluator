@@ -13,12 +13,14 @@ type, link-count, size, and containment checks around the open.
 from __future__ import annotations
 
 import errno
+import functools
 import os
 import secrets
 import stat
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _READLINK_SUPPORTS_DIR_FD = os.readlink in os.supports_dir_fd
@@ -1151,33 +1153,92 @@ def _validate_windows_parent_components(path: Path) -> None:
             )
 
 
-def _windows_kernel32():
-    if os.name != "nt":
-        raise OSError("Windows handle operations are unavailable on this platform")
-    import ctypes
+@functools.cache
+def _windows_types() -> SimpleNamespace:
+    """ctypes structures for the native Windows calls, defined once per process.
 
-    return ctypes.WinDLL("kernel32", use_last_error=True)
-
-
-def _windows_raise_last_error(message: str) -> OSError:
-    import ctypes
-
-    error = ctypes.get_last_error()
-    return OSError(error, message)
-
-
-def _windows_open_handle(
-    path: Path,
-    *,
-    access: int,
-    share: int,
-    disposition: int,
-    flags: int,
-) -> int:
+    ``ctypes.POINTER`` keeps every structure class it is given for the life of
+    the process, so structures defined inside each call would accumulate.
+    """
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = _windows_kernel32()
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", wintypes.LPWSTR),
+        ]
+
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", ctypes.POINTER(UnicodeString)),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", wintypes.LPVOID),
+            ("SecurityQualityOfService", wintypes.LPVOID),
+        ]
+
+    class IoStatusValue(ctypes.Union):
+        _fields_ = [("Status", wintypes.LONG), ("Pointer", wintypes.LPVOID)]  # noqa: RUF012
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("Value", IoStatusValue), ("Information", ctypes.c_size_t)]
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    class FileRenameInfo(ctypes.Structure):
+        _fields_ = [
+            ("ReplaceIfExists", wintypes.BOOLEAN),
+            ("RootDirectory", wintypes.HANDLE),
+            ("FileNameLength", wintypes.DWORD),
+            ("FileName", wintypes.WCHAR * 1),
+        ]
+
+    class FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("DeleteFile", ctypes.c_ubyte)]
+
+    return SimpleNamespace(
+        UnicodeString=UnicodeString,
+        ObjectAttributes=ObjectAttributes,
+        IoStatusBlock=IoStatusBlock,
+        ByHandleFileInformation=ByHandleFileInformation,
+        FileRenameInfo=FileRenameInfo,
+        FileDispositionInfo=FileDispositionInfo,
+    )
+
+
+@functools.cache
+def _windows_api() -> SimpleNamespace:
+    """Native Windows functions with their prototypes, bound once per process.
+
+    The private kernel32 handle uses ``use_last_error`` so that
+    ``ctypes.get_last_error()`` reports the failed call's own error, and its
+    prototypes never touch the process-wide ``ctypes.windll`` functions. The
+    ntdll calls return an NTSTATUS instead.
+    """
+    if os.name != "nt":
+        raise OSError("Windows handle operations are unavailable on this platform")
+    import ctypes
+    from ctypes import wintypes
+
+    types = _windows_types()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+
     create_file = kernel32.CreateFileW
     create_file.argtypes = [
         wintypes.LPCWSTR,
@@ -1189,10 +1250,90 @@ def _windows_open_handle(
         wintypes.HANDLE,
     ]
     create_file.restype = wintypes.HANDLE
-    handle = create_file(os.fspath(path), access, share, None, disposition, flags, None)
-    invalid_handle = ctypes.c_void_p(-1).value
-    if handle == invalid_handle:
-        raise _windows_raise_last_error(f"Cannot open Windows filesystem handle: {path}")
+
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    get_file_information = kernel32.GetFileInformationByHandle
+    get_file_information.argtypes = [wintypes.HANDLE, ctypes.POINTER(types.ByHandleFileInformation)]
+    get_file_information.restype = wintypes.BOOL
+
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    get_final_path.restype = wintypes.DWORD
+
+    set_file_information = kernel32.SetFileInformationByHandle
+    set_file_information.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    set_file_information.restype = wintypes.BOOL
+
+    nt_create_file = ntdll.NtCreateFile
+    nt_create_file.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        ctypes.POINTER(types.ObjectAttributes),
+        ctypes.POINTER(types.IoStatusBlock),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.LPVOID,
+        wintypes.ULONG,
+    ]
+    nt_create_file.restype = wintypes.LONG
+
+    nt_set_information_file = ntdll.NtSetInformationFile
+    nt_set_information_file.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(types.IoStatusBlock),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.c_int,
+    ]
+    nt_set_information_file.restype = wintypes.LONG
+
+    rtl_nt_status_to_dos_error = ntdll.RtlNtStatusToDosError
+    rtl_nt_status_to_dos_error.argtypes = [wintypes.LONG]
+    rtl_nt_status_to_dos_error.restype = wintypes.ULONG
+
+    return SimpleNamespace(
+        invalid_handle=ctypes.c_void_p(-1).value,
+        create_file=create_file,
+        close_handle=close_handle,
+        get_file_information=get_file_information,
+        get_final_path=get_final_path,
+        set_file_information=set_file_information,
+        nt_create_file=nt_create_file,
+        nt_set_information_file=nt_set_information_file,
+        rtl_nt_status_to_dos_error=rtl_nt_status_to_dos_error,
+    )
+
+
+def _windows_last_error(message: str) -> OSError:
+    """Return an ``OSError`` for the kernel32 call that just failed on this thread."""
+    import ctypes
+
+    return OSError(ctypes.get_last_error(), message)
+
+
+def _windows_nt_status_error(status: int, message: str) -> OSError:
+    """Return an ``OSError`` with the Win32 error code for a failed NTSTATUS."""
+    return OSError(int(_windows_api().rtl_nt_status_to_dos_error(status)), message)
+
+
+def _windows_open_handle(
+    path: Path,
+    *,
+    access: int,
+    share: int,
+    disposition: int,
+    flags: int,
+) -> int:
+    api = _windows_api()
+    handle = api.create_file(os.fspath(path), access, share, None, disposition, flags, None)
+    if handle == api.invalid_handle:
+        raise _windows_last_error(f"Cannot open Windows filesystem handle: {path}")
     return int(handle)
 
 
@@ -1212,66 +1353,26 @@ def _windows_open_relative_handle(
     from ctypes import wintypes
 
     _validate_windows_path_component(name, label="Anchored path component")
-
-    class _UnicodeString(ctypes.Structure):
-        _fields_ = [
-            ("Length", wintypes.USHORT),
-            ("MaximumLength", wintypes.USHORT),
-            ("Buffer", wintypes.LPWSTR),
-        ]
-
-    class _ObjectAttributes(ctypes.Structure):
-        _fields_ = [
-            ("Length", wintypes.ULONG),
-            ("RootDirectory", wintypes.HANDLE),
-            ("ObjectName", ctypes.POINTER(_UnicodeString)),
-            ("Attributes", wintypes.ULONG),
-            ("SecurityDescriptor", wintypes.LPVOID),
-            ("SecurityQualityOfService", wintypes.LPVOID),
-        ]
-
-    class _IoStatusValue(ctypes.Union):
-        _fields_ = [("Status", wintypes.LONG), ("Pointer", wintypes.LPVOID)]  # noqa: RUF012
-
-    class _IoStatusBlock(ctypes.Structure):
-        _fields_ = [("Value", _IoStatusValue), ("Information", ctypes.c_size_t)]
-
+    types = _windows_types()
     encoded_name = name.encode("utf-16-le")
     name_buffer = ctypes.create_unicode_buffer(name)
-    unicode_name = _UnicodeString(
+    unicode_name = types.UnicodeString(
         Length=len(encoded_name),
         MaximumLength=len(encoded_name) + ctypes.sizeof(wintypes.WCHAR),
         Buffer=ctypes.cast(name_buffer, wintypes.LPWSTR),
     )
-    object_attributes = _ObjectAttributes(
-        Length=ctypes.sizeof(_ObjectAttributes),
+    object_attributes = types.ObjectAttributes(
+        Length=ctypes.sizeof(types.ObjectAttributes),
         RootDirectory=parent_handle,
         ObjectName=ctypes.pointer(unicode_name),
         Attributes=object_attributes_flags,
         SecurityDescriptor=None,
         SecurityQualityOfService=None,
     )
-    io_status = _IoStatusBlock()
+    io_status = types.IoStatusBlock()
     handle = wintypes.HANDLE()
-
-    ntdll = ctypes.WinDLL("ntdll")
-    nt_create_file = ntdll.NtCreateFile
-    nt_create_file.argtypes = [
-        ctypes.POINTER(wintypes.HANDLE),
-        wintypes.DWORD,
-        ctypes.POINTER(_ObjectAttributes),
-        ctypes.POINTER(_IoStatusBlock),
-        wintypes.LPVOID,
-        wintypes.ULONG,
-        wintypes.ULONG,
-        wintypes.ULONG,
-        wintypes.ULONG,
-        wintypes.LPVOID,
-        wintypes.ULONG,
-    ]
-    nt_create_file.restype = wintypes.LONG
     status = int(
-        nt_create_file(
+        _windows_api().nt_create_file(
             ctypes.byref(handle),
             access,
             ctypes.byref(object_attributes),
@@ -1286,11 +1387,7 @@ def _windows_open_relative_handle(
         )
     )
     if status < 0:
-        rtl_status_to_error = ntdll.RtlNtStatusToDosError
-        rtl_status_to_error.argtypes = [wintypes.LONG]
-        rtl_status_to_error.restype = wintypes.ULONG
-        error = int(rtl_status_to_error(status))
-        raise OSError(error, f"Cannot open anchored Windows path component: {name}")
+        raise _windows_nt_status_error(status, f"Cannot open anchored Windows path component: {name}")
     if not handle.value:
         raise OSError("NtCreateFile succeeded without returning a file handle")
     return int(handle.value)
@@ -1456,41 +1553,16 @@ def _windows_create_relative_file(parent_handle: int, name: str, *, access: int)
 
 
 def _windows_close_handle(handle: int) -> None:
-    from ctypes import wintypes
-
-    kernel32 = _windows_kernel32()
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = [wintypes.HANDLE]
-    close_handle.restype = wintypes.BOOL
-    if not close_handle(handle):
-        raise _windows_raise_last_error("Cannot close Windows filesystem handle")
+    if not _windows_api().close_handle(handle):
+        raise _windows_last_error("Cannot close Windows filesystem handle")
 
 
 def _windows_handle_metadata(handle: int) -> _WindowsHandleMetadata:
     import ctypes
-    from ctypes import wintypes
 
-    class _ByHandleFileInformation(ctypes.Structure):
-        _fields_ = [
-            ("dwFileAttributes", wintypes.DWORD),
-            ("ftCreationTime", wintypes.FILETIME),
-            ("ftLastAccessTime", wintypes.FILETIME),
-            ("ftLastWriteTime", wintypes.FILETIME),
-            ("dwVolumeSerialNumber", wintypes.DWORD),
-            ("nFileSizeHigh", wintypes.DWORD),
-            ("nFileSizeLow", wintypes.DWORD),
-            ("nNumberOfLinks", wintypes.DWORD),
-            ("nFileIndexHigh", wintypes.DWORD),
-            ("nFileIndexLow", wintypes.DWORD),
-        ]
-
-    kernel32 = _windows_kernel32()
-    get_information = kernel32.GetFileInformationByHandle
-    get_information.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ByHandleFileInformation)]
-    get_information.restype = wintypes.BOOL
-    information = _ByHandleFileInformation()
-    if not get_information(handle, ctypes.byref(information)):
-        raise _windows_raise_last_error("Cannot inspect open Windows filesystem handle")
+    information = _windows_types().ByHandleFileInformation()
+    if not _windows_api().get_file_information(handle, ctypes.byref(information)):
+        raise _windows_last_error("Cannot inspect open Windows filesystem handle")
     return _WindowsHandleMetadata(
         attributes=int(information.dwFileAttributes),
         volume_serial=int(information.dwVolumeSerialNumber),
@@ -1504,22 +1576,31 @@ def _windows_handle_metadata(handle: int) -> _WindowsHandleMetadata:
 
 def _windows_final_path_from_handle(handle: int) -> Path:
     import ctypes
-    from ctypes import wintypes
 
-    kernel32 = _windows_kernel32()
-    get_final_path = kernel32.GetFinalPathNameByHandleW
-    get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
-    get_final_path.restype = wintypes.DWORD
     buffer = ctypes.create_unicode_buffer(32768)
-    length = get_final_path(handle, buffer, len(buffer), 0)
+    length = _windows_api().get_final_path(handle, buffer, len(buffer), 0)
     if length == 0 or length >= len(buffer):
-        raise _windows_raise_last_error("Cannot resolve opened Windows filesystem handle")
+        raise _windows_last_error("Cannot resolve opened Windows filesystem handle")
     value = buffer.value
     if value.startswith("\\\\?\\UNC\\"):
         value = "\\\\" + value[8:]
     elif value.startswith("\\\\?\\"):
         value = value[4:]
     return Path(value)
+
+
+def windows_final_path(descriptor: int) -> Path:
+    """Return the final path of an open CRT descriptor on Windows.
+
+    The extended-length prefix is removed, so the result compares with an
+    ordinary absolute path. Raises ``OSError`` on other platforms or when the
+    handle cannot be resolved.
+    """
+    if os.name != "nt":
+        raise OSError("Windows handle verification is unavailable on this platform")
+    import msvcrt
+
+    return _windows_final_path_from_handle(msvcrt.get_osfhandle(descriptor))
 
 
 def _verify_windows_handle_path(handle: int, expected: Path) -> None:
@@ -1728,47 +1809,22 @@ def _rename_windows_handle(
     replace: bool,
 ) -> None:
     import ctypes
-    from ctypes import wintypes
+    import msvcrt
 
-    class _FileRenameInfo(ctypes.Structure):
-        _fields_ = [
-            ("ReplaceIfExists", wintypes.BOOLEAN),
-            ("RootDirectory", wintypes.HANDLE),
-            ("FileNameLength", wintypes.DWORD),
-            ("FileName", wintypes.WCHAR * 1),
-        ]
-
-    class _IoStatusValue(ctypes.Union):
-        _fields_ = [("Status", wintypes.LONG), ("Pointer", wintypes.LPVOID)]  # noqa: RUF012
-
-    class _IoStatusBlock(ctypes.Structure):
-        _fields_ = [("Value", _IoStatusValue), ("Information", ctypes.c_size_t)]
-
+    types = _windows_types()
     encoded_name = destination_name.encode("utf-16-le")
-    filename_offset = _FileRenameInfo.FileName.offset
-    buffer_size = max(ctypes.sizeof(_FileRenameInfo), filename_offset + len(encoded_name))
+    filename_offset = types.FileRenameInfo.FileName.offset
+    buffer_size = max(ctypes.sizeof(types.FileRenameInfo), filename_offset + len(encoded_name))
     buffer = ctypes.create_string_buffer(buffer_size)
-    information = ctypes.cast(buffer, ctypes.POINTER(_FileRenameInfo)).contents
+    information = ctypes.cast(buffer, ctypes.POINTER(types.FileRenameInfo)).contents
     information.ReplaceIfExists = int(replace)
     information.RootDirectory = parent_handle
     information.FileNameLength = len(encoded_name)
     ctypes.memmove(ctypes.addressof(buffer) + filename_offset, encoded_name, len(encoded_name))
 
-    import msvcrt
-
-    io_status = _IoStatusBlock()
-    ntdll = ctypes.WinDLL("ntdll")
-    set_information = ntdll.NtSetInformationFile
-    set_information.argtypes = [
-        wintypes.HANDLE,
-        ctypes.POINTER(_IoStatusBlock),
-        wintypes.LPVOID,
-        wintypes.ULONG,
-        ctypes.c_int,
-    ]
-    set_information.restype = wintypes.LONG
+    io_status = types.IoStatusBlock()
     status = int(
-        set_information(
+        _windows_api().nt_set_information_file(
             msvcrt.get_osfhandle(descriptor),
             ctypes.byref(io_status),
             buffer,
@@ -1777,30 +1833,18 @@ def _rename_windows_handle(
         )
     )
     if status < 0:
-        rtl_status_to_error = ntdll.RtlNtStatusToDosError
-        rtl_status_to_error.argtypes = [wintypes.LONG]
-        rtl_status_to_error.restype = wintypes.ULONG
-        error = int(rtl_status_to_error(status))
-        raise OSError(error, "Cannot rename Windows output through its parent handle")
+        raise _windows_nt_status_error(status, "Cannot rename Windows output through its parent handle")
 
 
 def _mark_windows_handle_for_deletion(descriptor: int) -> None:
     """Best-effort handle-only cleanup for an unpublished Windows stage."""
     import ctypes
     import msvcrt
-    from ctypes import wintypes
 
-    class _FileDispositionInfo(ctypes.Structure):
-        _fields_ = [("DeleteFile", ctypes.c_ubyte)]
-
-    kernel32 = _windows_kernel32()
-    set_information = kernel32.SetFileInformationByHandle
-    set_information.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
-    set_information.restype = wintypes.BOOL
-    disposition = _FileDispositionInfo(DeleteFile=1)
+    disposition = _windows_types().FileDispositionInfo(DeleteFile=1)
     # Failure is deliberately non-fatal: leaving the held orphan is safer than
     # falling back to path cleanup that could delete an attacker-swapped name.
-    set_information(
+    _windows_api().set_file_information(
         msvcrt.get_osfhandle(descriptor),
         4,  # FileDispositionInfo
         ctypes.byref(disposition),
@@ -1913,11 +1957,3 @@ def _atomic_write_windows(path: Path, payload: bytes) -> None:
                 os.close(descriptor)
         finally:
             _windows_close_handle(parent_handle)
-
-
-def _windows_final_path(descriptor: int) -> Path:
-    if os.name != "nt":
-        raise OSError("Windows handle verification is unavailable on this platform")
-    import msvcrt
-
-    return _windows_final_path_from_handle(msvcrt.get_osfhandle(descriptor))

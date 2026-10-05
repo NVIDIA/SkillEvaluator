@@ -32,6 +32,7 @@ from skillevaluator.validators.code_risk import CodeRiskValidator
 from skillevaluator.validators.dependencies import DependencySecurityValidator
 from skillevaluator.validators.hygiene import HygieneValidator
 from skillevaluator.validators.license import LicenseValidator
+from skillevaluator.validators.plugin_schema import CATEGORY as PLUGIN_SCHEMA_CATEGORY
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.plugin_tree import plugin_tree_scope
 from skillevaluator.validators.policy import ValidationPolicy, apply_policy
@@ -157,6 +158,31 @@ def enabled_check_lineup(checks: str | None) -> list[str]:
     return ordered + sorted(enabled - set(ordered))
 
 
+def _fail_closed_result(
+    validator_name: str,
+    validator_description: str,
+    *,
+    check_name: str,
+    message: str,
+    file_path: str,
+    suggestion: str,
+) -> ValidationResult:
+    """A result with one HIGH ``PLUGIN_SCHEMA`` finding that is a security failure, so the run stops with it."""
+    result = ValidationResult(validator_name=validator_name, validator_description=validator_description)
+    result.add_finding(
+        Finding(
+            category=PLUGIN_SCHEMA_CATEGORY,
+            severity=Severity.HIGH,
+            check_name=check_name,
+            message=message,
+            file_path=file_path,
+            suggestion=suggestion,
+        )
+    )
+    result.metadata["security_failure"] = True
+    return result
+
+
 def _unsafe_plugin_tree_results(
     target_path: Path,
     exc: ValueError,
@@ -164,11 +190,12 @@ def _unsafe_plugin_tree_results(
     include_schema: bool,
     policy: ValidationPolicy | None,
     repo_root: Path | None,
+    resolve_endpoints: bool,
 ) -> list[ValidationResult]:
     """Return the fail-closed results for a plugin tree that cannot be scanned safely."""
     results: list[ValidationResult] = []
     if include_schema:
-        validator = PluginSchemaValidator(policy=policy, repo_root=repo_root)
+        validator = _schema_validator_for(CONTENT_TYPE_PLUGIN, policy, repo_root, resolve_endpoints=resolve_endpoints)
         results.append(_as_result(validator.name, validator.description, validator.validate, target_path))
     code = getattr(exc, "code", None)
     relative_path = getattr(exc, "relative_path", None)
@@ -176,14 +203,10 @@ def _unsafe_plugin_tree_results(
         reason = f"the plugin tree exceeds the {PLUGIN_TREE_MAX_DISCOVERED_PATHS}-entry limit for whole-plugin scans"
     else:
         reason = str(exc)
-    tree_result = ValidationResult(
-        validator_name="Plugin Tree Security",
-        validator_description="Verify the whole plugin tree is regular, contained, and link-free before scanning it",
-    )
-    tree_result.add_finding(
-        Finding(
-            category="PLUGIN_SCHEMA",
-            severity=Severity.HIGH,
+    results.append(
+        _fail_closed_result(
+            "Plugin Tree Security",
+            "Verify the whole plugin tree is regular, contained, and link-free before scanning it",
             check_name="unsafe_plugin_filesystem",
             message=f"Refusing to scan the plugin tree: {reason}",
             file_path=relative_path if relative_path and relative_path != "." else "<plugin-root>",
@@ -193,8 +216,6 @@ def _unsafe_plugin_tree_results(
             ),
         )
     )
-    tree_result.metadata["security_failure"] = True
-    results.append(tree_result)
     return results
 
 
@@ -271,26 +292,20 @@ def run_validation(
             bundled_skill_dirs = find_bundled_plugin_skills(target_path)
         except ValueError as exc:
             if "schema" in enabled:
-                validator = PluginSchemaValidator(
-                    policy=policy, repo_root=repo_root, resolve_endpoints=resolve_endpoints
+                validator = _schema_validator_for(
+                    CONTENT_TYPE_PLUGIN, policy, repo_root, resolve_endpoints=resolve_endpoints
                 )
                 return [_as_result(validator.name, validator.description, validator.validate, target_path)]
-            security_result = ValidationResult(
-                validator_name="Plugin Bundle Security",
-                validator_description="Securely discover skills bundled inside the plugin",
-            )
-            security_result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
+            return [
+                _fail_closed_result(
+                    "Plugin Bundle Security",
+                    "Securely discover skills bundled inside the plugin",
                     check_name="bundled_skill_path_unsafe",
                     message=f"Could not securely discover bundled skills: {exc}",
                     file_path="<plugin-skills>",
                     suggestion="Replace linked or special bundled-skill paths with regular contained directories.",
                 )
-            )
-            security_result.metadata["security_failure"] = True
-            return [security_result]
+            ]
         if enabled & PLUGIN_TREE_CHECKS:
             # Whole-plugin scanners also read root-owned content (scripts/,
             # hooks/, .mcp.json, ...), so the entire tree must pass the same
@@ -306,6 +321,7 @@ def run_validation(
                         include_schema="schema" in enabled,
                         policy=policy,
                         repo_root=repo_root,
+                        resolve_endpoints=resolve_endpoints,
                     ),
                     content_type,
                 )

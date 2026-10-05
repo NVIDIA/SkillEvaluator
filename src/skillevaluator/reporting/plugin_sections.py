@@ -50,6 +50,10 @@ SUPPORT_LABELS = {
     "static_only": "Static only",
     "unsupported": "Unsupported",
 }
+# Display classes are ok / warn / fail / neutral; every reporter maps them to its own styling.
+_SUPPORT_CLASSES = {"evaluated": "ok", "unsupported": "fail"}
+_DEPENDENCY_STATE_CLASSES = {"provided": "ok", "referenced": "ok", "missing": "fail"}
+_PLUGIN_STATUSES = {"passed": ("PASSED", "ok"), "failed": ("FAILED", "fail"), "incomplete": ("INCOMPLETE", "warn")}
 COVERAGE_LABELS = {
     "staged": "Staged",
     "not_staged": "Not staged",
@@ -286,6 +290,7 @@ def tier1_plugin_view(
     bundled, bundled_omitted = _names(source.get("bundled_skills") if bundled_skills is None else bundled_skills)
     # Tier 1 runs have no Tier 3 coverage, so no unsupported type counts as staged here.
     unsupported = unsupported_type_split(source)
+    status_label, status_class = _PLUGIN_STATUSES.get(status or "", ("", "neutral"))
     return {
         "name": text(source.get("name")),
         "manifest_type": text(source.get("manifest_type")),
@@ -293,7 +298,8 @@ def tier1_plugin_view(
         "manifest_filename": text(source.get("manifest_filename")),
         "manifest_declarations": manifest_declarations_view(source.get("manifest_declarations")),
         "status": status or "",
-        "status_label": {"passed": "PASSED", "failed": "FAILED", "incomplete": "INCOMPLETE"}.get(status or "", ""),
+        "status_label": status_label,
+        "status_class": status_class,
         "declared_dependencies": _declared_dependencies(source.get("declared_dependencies")),
         "dependencies": dependency_view(source),
         "bundled_skills": bundled,
@@ -441,11 +447,13 @@ def dependency_view(block: object) -> dict[str, Any] | None:
             total_rows += 1
             if len(rows) >= MAX_TABLE_ROWS:
                 continue
+            state = text(entry.get("state"), limit=32) or "unknown"
             rows.append(
                 {
                     "kind": text(kind, limit=32).rstrip("s") or "ref",
                     "ref": text(entry.get("ref")),
-                    "state": text(entry.get("state"), limit=32) or "unknown",
+                    "state": state,
+                    "state_class": _DEPENDENCY_STATE_CLASSES.get(state, "neutral"),
                     "path": text(entry.get("path")),
                     "reason": text(entry.get("reason")),
                 }
@@ -496,6 +504,7 @@ def inventory_view(
                 "path": text(component.get("path")),
                 "support": support,
                 "support_label": SUPPORT_LABELS.get(support, support or "unknown"),
+                "support_class": _SUPPORT_CLASSES.get(support, "neutral"),
                 "findings": count(component.get("findings")) or 0,
             }
         )
@@ -1058,13 +1067,16 @@ def completeness_view(provenance: object) -> dict[str, Any] | None:
         if note
     ]
     sidecar_reason = sidecar_error_reason(source)
+    partial = source.get("partial") is True or bool(deferred) or bool(sidecar_reason)
     return {
-        "partial": source.get("partial") is True or bool(deferred) or bool(sidecar_reason),
+        "partial": partial,
         "counts": counts,
         "names": {key: _names(value)[0] for key, value in lists.items()},
         "sidecar_error": text(source.get("sidecar_error"), limit=64) if sidecar_reason else "",
         # Whether something was actually deferred; a run can be INCOMPLETE only because it did not complete.
         "deferred": bool(deferred),
+        "status_text": "INCOMPLETE" if partial else "Complete",
+        "status_class": "fail" if partial else "ok",
         "run_notes": run_notes,
         "reason": sidecar_reason or _incomplete_reason(run_notes, deferred),
     }
@@ -1110,6 +1122,7 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
             "path": text(component.get("path")),
             "state": state,
             "state_label": COVERAGE_LABELS.get(state, state),
+            "state_class": _coverage_state_class(state),
             "staged": state in EVALUATED_COVERAGE_STATES,
             "reason": text(component.get("reason")),
             "observed": "",
@@ -1161,6 +1174,12 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
         "note": STAGED_IS_NOT_VERIFIED,
         "activation": activation,
     }
+
+
+def _coverage_state_class(state: str) -> str:
+    if state in EVALUATED_COVERAGE_STATES:
+        return "ok"
+    return "fail" if state in {"invalid", "unavailable"} else "warn"
 
 
 _ACTIVATION_TYPE_ALIASES = {"rule": ("rule", "rule_read"), "agent": ("agent", "subagent")}
@@ -1269,6 +1288,8 @@ def integration_view(
         "verdict": verdict,
         "verdict_label": verdict_label,
         "verdict_class": verdict_class,
+        # An Integration that was not measured reads in capitals: INCONCLUSIVE.
+        "status_text": verdict_label if measured else verdict_label.upper(),
         "point_verdict_label": point_label,
         "reason": reason,
         "with_plugin": fmt_score(integration.get("with_plugin")),
@@ -1609,17 +1630,23 @@ def _check_row(label: str, section: Mapping[str, Any], passed_key: str, total_ke
     passed = section.get(passed_key)
     total = section.get(total_key)
     rate = _rate(section, "pass_rate", "satisfaction_rate", numerator=passed_key, denominator=total_key)
+    n_scored = fmt_count(section.get("n_scored"))
     return {
         "name": label,
         "applicable": applicable,
         "passed": fmt_count(passed),
         "total": fmt_count(total),
         "rate": fmt_rate(rate),
-        "n_scored": fmt_count(section.get("n_scored")),
+        "n_scored": n_scored,
         "label": (
             NOT_CONFIGURED if not applicable else f"{fmt_count(passed)}/{fmt_count(total)} passed ({fmt_rate(rate)})"
         ),
+        "detail": _scored_trials(n_scored) if applicable else "",
     }
+
+
+def _scored_trials(n_scored: str) -> str:
+    return f"{n_scored} trial(s) scored" if n_scored != "n/a" else ""
 
 
 def _signal_failures(arguments: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -1666,6 +1693,29 @@ def _signal_mcp(mcp_calls: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _tool_selection_view(tool_selection: Mapping[str, Any]) -> dict[str, Any]:
+    applicable = _scored(tool_selection)
+    precision = fmt_rate(tool_selection.get("precision"))
+    recall = fmt_rate(tool_selection.get("recall"))
+    f1 = fmt_rate(tool_selection.get("f1"))
+    decoy_calls = fmt_count(tool_selection.get("decoy_calls"))
+    decoy_call_rate = fmt_rate(tool_selection.get("decoy_call_rate"))
+    n_scored = fmt_count(tool_selection.get("n_scored"))
+    decoys = f"{decoy_calls} decoy call(s) ({decoy_call_rate} of calls)"
+    scored = _scored_trials(n_scored)
+    return {
+        "applicable": applicable,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "decoy_calls": decoy_calls,
+        "decoy_call_rate": decoy_call_rate,
+        "n_scored": n_scored,
+        "result": f"{precision} / {recall} / {f1}" if applicable else NOT_CONFIGURED,
+        "detail": (f"{decoys}; {scored}" if scored else decoys) if applicable else "",
+    }
+
+
 def _signal_entry(
     scope: str,
     arm: str,
@@ -1680,11 +1730,17 @@ def _signal_entry(
 
     argument_view = None
     if arguments:
+        applicable = _scored(arguments)
+        checked = fmt_count(arguments.get("checked"))
+        passed = fmt_count(arguments.get("passed"))
+        pass_rate = fmt_rate(_rate(arguments, "pass_rate", numerator="passed", denominator="checked"))
         argument_view = {
-            "applicable": _scored(arguments),
-            "checked": fmt_count(arguments.get("checked")),
-            "passed": fmt_count(arguments.get("passed")),
-            "pass_rate": fmt_rate(_rate(arguments, "pass_rate", numerator="passed", denominator="checked")),
+            "applicable": applicable,
+            "checked": checked,
+            "passed": passed,
+            "pass_rate": pass_rate,
+            "result": f"{pass_rate} pass rate" if applicable else NOT_CONFIGURED,
+            "detail": f"{passed}/{checked} checks passed" if applicable else "",
             "failures": _signal_failures(arguments),
         }
 
@@ -1717,19 +1773,7 @@ def _signal_entry(
         "n_trials": fmt_count(summary.get("n_trials")),
         "n_missing_trajectory": missing or 0,
         "activations_per_trial": fmt_count(activations.get("mean_per_trial")) if activations else "",
-        "tool_selection": (
-            {
-                "applicable": _scored(tool_selection),
-                "precision": fmt_rate(tool_selection.get("precision")),
-                "recall": fmt_rate(tool_selection.get("recall")),
-                "f1": fmt_rate(tool_selection.get("f1")),
-                "decoy_calls": fmt_count(tool_selection.get("decoy_calls")),
-                "decoy_call_rate": fmt_rate(tool_selection.get("decoy_call_rate")),
-                "n_scored": fmt_count(tool_selection.get("n_scored")),
-            }
-            if tool_selection
-            else None
-        ),
+        "tool_selection": _tool_selection_view(tool_selection) if tool_selection else None,
         "arguments": argument_view,
         "mcp_calls": _signal_mcp(_mapping(summary.get("mcp_calls"))),
         "checks": checks,
@@ -1907,6 +1951,7 @@ def privileges_view(value: object) -> dict[str, Any] | None:
             grants = _tool_list_label(row.get("allowed_tools")) or "none pre-approved"
             invocable = row.get("model_invocable")
             invocation = "user and model" if invocable is True else "user only" if invocable is False else ""
+        risky = any(flag not in _BENIGN_PRIVILEGE_FLAGS for flag in raw_flags)
         rows.append(
             {
                 "type": component_type,
@@ -1917,7 +1962,8 @@ def privileges_view(value: object) -> dict[str, Any] | None:
                 "permission_mode": text(row.get("permission_mode"), limit=32),
                 "invocation": invocation,
                 "flags": _flag_labels(raw_flags, _PRIVILEGE_FLAG_LABELS),
-                "risky": any(flag not in _BENIGN_PRIVILEGE_FLAGS for flag in raw_flags),
+                "risky": risky,
+                "flag_class": "warn" if risky else "neutral",
             }
         )
     rows.sort(key=lambda row: (not row["risky"], row["type"], row["name"]))
@@ -1940,13 +1986,16 @@ def validator_parity_view(value: object) -> dict[str, Any] | None:
     agree = block.get("agree")
     errors, errors_omitted = _names(block.get("errors"), limit=20)
     warnings, warnings_omitted = _names(block.get("warnings"), limit=20)
+    agreement_class = "ok" if agree is True else "warn" if agree is False else "neutral"
     return {
         "status": status,
         "status_label": _PARITY_STATUS_LABELS.get(status, status.replace("_", " ").title()),
+        # Agreement colours the status only when the two validators were compared.
+        "status_class": agreement_class if status == "compared" else "neutral",
         "claude_verdict": text(block.get("claude_verdict"), limit=32) or "n/a",
         "skillevaluator_verdict": text(block.get("skillevaluator_verdict"), limit=32) or "unknown",
         "agreement": "agree" if agree is True else "disagree" if agree is False else "n/a",
-        "agreement_class": "ok" if agree is True else "warn" if agree is False else "neutral",
+        "agreement_class": agreement_class,
         "error_count": count(block.get("error_count")) if count(block.get("error_count")) is not None else len(errors),
         "warning_count": (
             count(block.get("warning_count")) if count(block.get("warning_count")) is not None else len(warnings)
@@ -2435,10 +2484,12 @@ def plugin_load_view(payload: object, *, context: _Tier3Context | None = None) -
         )
         trials = count(census.get("trials"))
         unverified = _mapping(provenance.get("native_load_unverified")).get(str(agent))
+        mode = text(entry.get("mode"), limit=16) or "unknown"
         rows.append(
             {
                 "agent": text(agent, limit=64),
-                "mode": text(entry.get("mode"), limit=16) or "unknown",
+                "mode": mode,
+                "mode_class": "ok" if mode == "native" else "warn",
                 "adapter": text(entry.get("adapter"), limit=64),
                 "reason": text(entry.get("reason")),
                 "native": grouped["native"],
@@ -2463,4 +2514,10 @@ def plugin_load_view(payload: object, *, context: _Tier3Context | None = None) -
         )
     if not rows:
         return None
-    return {"requested": text(plan.get("requested"), limit=16) or "wrapper", "agents": rows, "note": PLUGIN_LOAD_NOTE}
+    requested = text(plan.get("requested"), limit=16) or "wrapper"
+    return {
+        "requested": requested,
+        "requested_class": "warn" if requested == "wrapper" else "ok",
+        "agents": rows,
+        "note": PLUGIN_LOAD_NOTE,
+    }

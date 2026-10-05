@@ -2499,8 +2499,10 @@ def native_load_unverified(summary: Mapping[str, Any]) -> str | None:
     return None
 
 
-_STATE_RANK = {"staged": 1, "loaded": 2, "exercised": 3}
-_EVALUATED_STATES = frozenset(_STATE_RANK)
+#: Coverage states in which the with-plugin arm had the component, from the weakest evidence to the
+#: strongest: staged for it, loaded by the harness, exercised at runtime. A row is never downgraded.
+COVERAGE_STATE_RANK = {"staged": 1, "loaded": 2, "exercised": 3}
+EVALUATED_COVERAGE_STATES = frozenset(COVERAGE_STATE_RANK)
 
 
 def _coverage_names(row: Mapping[str, Any]) -> set[str]:
@@ -2513,7 +2515,8 @@ def _coverage_names(row: Mapping[str, Any]) -> set[str]:
     return {name for name in names if name}
 
 
-def _native_types_by_agent(plugin_load: Mapping[str, Any] | None) -> dict[str, set[str]]:
+def native_types_by_agent(plugin_load: Any) -> dict[str, set[str]]:
+    """The component types each native with-plugin arm loads natively, from the ``plugin_load`` provenance."""
     by_agent = plugin_load.get("by_agent") if isinstance(plugin_load, Mapping) else None
     result: dict[str, set[str]] = {}
     for agent, entry in (by_agent or {}).items() if isinstance(by_agent, Mapping) else ():
@@ -2542,7 +2545,7 @@ def apply_load_census(
     """
     if not isinstance(coverage, Mapping):
         return None if coverage is None else dict(coverage)
-    native_types = _native_types_by_agent(plugin_load)
+    native_types = native_types_by_agent(plugin_load)
     hits: dict[str, dict[tuple[str, str], list[tuple[str, str]]]] = {"loaded": {}, LISTED_KEY: {}, "not_loaded": {}}
     for agent, summary in summaries.items():
         types = native_types.get(str(agent), set())
@@ -2578,11 +2581,11 @@ def apply_load_census(
         note = ""
         if found := lookup("loaded"):
             agents = ", ".join(sorted({agent for agent, _detail in found}))
-            new_state = "loaded" if _STATE_RANK.get(state, 0) < _STATE_RANK["loaded"] else state
+            new_state = "loaded" if COVERAGE_STATE_RANK.get(state, 0) < COVERAGE_STATE_RANK["loaded"] else state
             note = f"loaded natively by {agents} (load census, harness evidence: {found[0][1]})"
         elif found := lookup(LISTED_KEY):
             agents = ", ".join(sorted({agent for agent, _detail in found}))
-            new_state = "staged" if _STATE_RANK.get(state, 0) < _STATE_RANK["staged"] else state
+            new_state = "staged" if COVERAGE_STATE_RANK.get(state, 0) < COVERAGE_STATE_RANK["staged"] else state
             staged = f"staged natively for {agents}"
             # A row the resolved plan already marked staged for these agents keeps one copy of that phrase.
             old_reason = str(row.get("reason") or "")
@@ -2597,7 +2600,7 @@ def apply_load_census(
             old = str(row.get("reason") or "")
             # A promotion replaces an old "not staged" reason; a not-loaded note keeps the reason it adds to.
             promoted = new_state != state
-            row["reason"] = f"{old}; {note}" if old and (state in _EVALUATED_STATES or not promoted) else note
+            row["reason"] = f"{old}; {note}" if old and (state in EVALUATED_COVERAGE_STATES or not promoted) else note
             row["state"] = new_state
         rows.append(row)
     return summarize_coverage(rows)

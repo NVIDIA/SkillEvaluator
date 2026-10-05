@@ -2057,8 +2057,11 @@ def _grade_arguments(calls: Sequence[_Call], spec: Mapping[str, Any]) -> dict[st
     }
 
 
+_OUTCOME_KEYS = ("total", "succeeded", "failed", "unknown")
+
+
 def _outcome_counts() -> dict[str, Any]:
-    return {"total": 0, "succeeded": 0, "failed": 0, "unknown": 0}
+    return dict.fromkeys(_OUTCOME_KEYS, 0)
 
 
 def _count_outcome(bucket: dict[str, Any], succeeded: bool | None) -> None:
@@ -2071,6 +2074,21 @@ def _count_outcome(bucket: dict[str, Any], succeeded: bool | None) -> None:
         bucket["unknown"] += 1
 
 
+def _server_bucket(by_server: dict[str, dict[str, Any]], server: str) -> dict[str, Any]:
+    """The outcome counts and tool labels of ``server``, added empty the first time."""
+    return by_server.setdefault(server, {**_outcome_counts(), "tools": []})
+
+
+def _add_server_tool(bucket: dict[str, Any], label: str) -> None:
+    if label not in bucket["tools"] and len(bucket["tools"]) < _MAX_SERVER_TOOLS:
+        bucket["tools"].append(label)
+
+
+def _success_rate(counts: Mapping[str, Any]) -> float | None:
+    """``succeeded / (succeeded + failed)``: a call whose outcome is unknown counts as neither."""
+    return _ratio(counts["succeeded"], counts["succeeded"] + counts["failed"])
+
+
 def _grade_mcp_calls(calls: Sequence[_Call]) -> dict[str, Any]:
     """Outcome counts across every MCP call (any server), with a per-server breakdown.
 
@@ -2080,21 +2098,13 @@ def _grade_mcp_calls(calls: Sequence[_Call]) -> dict[str, Any]:
     totals = _outcome_counts()
     by_server: dict[str, dict[str, Any]] = {}
     for call in calls:
-        ident = call.mcp
-        if ident is None:
+        if call.mcp is None:
             continue
+        bucket = _server_bucket(by_server, _safe_text(call.mcp.server or ""))
         _count_outcome(totals, call.succeeded)
-        server = _safe_text(ident.server or "")
-        bucket = by_server.setdefault(server, {**_outcome_counts(), "tools": []})
         _count_outcome(bucket, call.succeeded)
-        label = _safe_text(ident.label)
-        if label not in bucket["tools"] and len(bucket["tools"]) < _MAX_SERVER_TOOLS:
-            bucket["tools"].append(label)
-    return {
-        **totals,
-        "success_rate": _ratio(totals["succeeded"], totals["succeeded"] + totals["failed"]),
-        "by_server": by_server,
-    }
+        _add_server_tool(bucket, _safe_text(call.mcp.label))
+    return {**totals, "success_rate": _success_rate(totals), "by_server": by_server}
 
 
 def _first_seq(refs: Sequence[_Ref], calls: Sequence[_Call]) -> int | None:
@@ -2431,7 +2441,7 @@ def _summarize_mcp(signals: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         block = item.get("mcp_calls")
         if not isinstance(block, Mapping):
             continue
-        for key in ("total", "succeeded", "failed", "unknown"):
+        for key in _OUTCOME_KEYS:
             totals[key] += _int(block.get(key))
         servers = block.get("by_server")
         if not isinstance(servers, Mapping):
@@ -2439,19 +2449,15 @@ def _summarize_mcp(signals: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         for server, counts in servers.items():
             if not isinstance(counts, Mapping):
                 continue
-            bucket = by_server.setdefault(str(server), {**_outcome_counts(), "tools": []})
-            for key in ("total", "succeeded", "failed", "unknown"):
+            bucket = _server_bucket(by_server, str(server))
+            for key in _OUTCOME_KEYS:
                 bucket[key] += _int(counts.get(key))
             for tool in counts.get("tools") or ():
-                if isinstance(tool, str) and tool not in bucket["tools"] and len(bucket["tools"]) < _MAX_SERVER_TOOLS:
-                    bucket["tools"].append(tool)
+                if isinstance(tool, str):
+                    _add_server_tool(bucket, tool)
     for bucket in by_server.values():
-        bucket["success_rate"] = _ratio(bucket["succeeded"], bucket["succeeded"] + bucket["failed"])
-    return {
-        **totals,
-        "success_rate": _ratio(totals["succeeded"], totals["succeeded"] + totals["failed"]),
-        "by_server": by_server,
-    }
+        bucket["success_rate"] = _success_rate(bucket)
+    return {**totals, "success_rate": _success_rate(totals), "by_server": by_server}
 
 
 def _summarize_coverage(signals: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

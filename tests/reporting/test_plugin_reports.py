@@ -887,3 +887,12 @@ def test_component_index_places_a_folder_walker_label_only_when_it_is_unambiguou
     assert index.artifact_path("[x] SKILL.md") == "SKILL.md"
     assert (index.component("[nested/bar] SKILL.md") or {}).get("path") == "skills/nested/bar"
     assert (index.component("/work/p/skills/b/x/run.py") or {}).get("name") == "b/x"
+
+
+def test_report_state_vocabularies_match_their_producers() -> None:
+    """The reporting leaf re-declares these lists rather than import the producers (which load the validators)."""
+    from skillevaluator import plugin_components, plugin_dependencies
+    from skillevaluator.reporting import plugin_sections
+
+    assert plugin_sections.DEPENDENCY_STATES == plugin_dependencies.DEPENDENCY_STATES
+    assert plugin_sections.COVERAGE_STATES == plugin_components.COVERAGE_STATES

@@ -142,15 +142,20 @@ class McpCollection:
 
 
 def mcp_pinning_summary(declarations: Iterable[McpDeclaration]) -> dict[str, Any]:
-    """C1 ``mcp.pinning`` / C2 ``mcp_pinning``: counts plus ``pinned / (pinned + unpinned)``.
+    """C1 ``mcp.pinning`` / C2 ``mcp_pinning`` of ``declarations`` (see :func:`summarize_pinning`)."""
+    return summarize_pinning(declaration.pinning() for declaration in declarations)
+
+
+def summarize_pinning(pins: Iterable[McpPinning]) -> dict[str, Any]:
+    """Counts of classified MCP pins plus ``pinned / (pinned + unpinned)``.
 
     ``ratio`` is ``None`` when no declaration runs a package (nothing to pin).
     """
     counts = {"pinned": 0, "unpinned": 0, "not_applicable": 0}
     total = 0
-    for declaration in declarations:
+    for pin in pins:
         total += 1
-        counts[declaration.pinning().status] += 1
+        counts[pin.status] += 1
     applicable = counts["pinned"] + counts["unpinned"]
     return {
         "total": total,

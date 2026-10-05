@@ -33,6 +33,7 @@ import dataclasses
 import math
 import os
 import re
+from collections import Counter
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -101,7 +102,8 @@ from skillevaluator.plugin_mcp import (
     _load_mcp_file,  # noqa: F401 - re-exported
     _normalize_dialect,  # noqa: F401 - re-exported
     collect_mcp_declarations,
-    mcp_pinning_summary,
+    mcp_pinning_summary,  # noqa: F401 - re-exported
+    summarize_pinning,
 )
 from skillevaluator.plugin_paths import (
     _WINDOWS_DRIVE_RE,  # noqa: F401 - re-exported
@@ -289,20 +291,20 @@ class PluginInventory:
         }
 
     def mcp_summary(self) -> dict[str, Any]:
-        servers: list[dict[str, Any]] = []
-        for declaration in self.mcp.effective:
-            pin = declaration.pinning()
-            servers.append(
-                {
-                    "name": declaration.name,
-                    "source": declaration.source,
-                    "kind": declaration.kind,
-                    "transport": declaration.transport,
-                    "pinned": pin.pinned,
-                    "pin_detail": pin.detail,
-                }
-            )
-        return {"servers": servers, "pinning": mcp_pinning_summary(self.mcp.effective)}
+        effective = self.mcp.effective
+        pins = [declaration.pinning() for declaration in effective]
+        servers = [
+            {
+                "name": declaration.name,
+                "source": declaration.source,
+                "kind": declaration.kind,
+                "transport": declaration.transport,
+                "pinned": pin.pinned,
+                "pin_detail": pin.detail,
+            }
+            for declaration, pin in zip(effective, pins, strict=True)
+        ]
+        return {"servers": servers, "pinning": summarize_pinning(pins)}
 
     def context_cost(self, *, extra_rows: Iterable[CostRow] = (), extra_notes: Iterable[str] = ()) -> dict[str, Any]:
         rows = [component.cost for component in self.components if component.cost is not None]
@@ -512,7 +514,11 @@ class _Builder:
             relative_scripts=relative_hook_scripts,
         )
         self._keys: dict[tuple[str, str, str], Component] = {}
+        self._type_counts: Counter[str] = Counter()  # components listed per type, for the per-type cap
         self._truncated: set[str] = set()
+        self._privilege_keys: set[tuple[str, str, str | None]] = set()
+        # Runnable MCP servers without a declared read-only mode; mcp() sets them for the subagent checks.
+        self._write_capable_servers: list[str] = []
 
     def build(self) -> PluginInventory:
         self.skills()
@@ -543,7 +549,7 @@ class _Builder:
             if existing.origin != component.origin:
                 existing.origin = "declared+packaged"
             return existing
-        if len(self.inventory.of_type(component.type)) >= PLUGIN_COMPONENT_MAX_ITEMS:
+        if self._type_counts[component.type] >= PLUGIN_COMPONENT_MAX_ITEMS:
             if component.type not in self._truncated:
                 self._truncated.add(component.type)
                 self.inventory.findings.append(
@@ -558,6 +564,7 @@ class _Builder:
                 )
             return component
         self._keys[key] = component
+        self._type_counts[component.type] += 1
         self.inventory.components.append(component)
         return component
 
@@ -1075,7 +1082,14 @@ class _Builder:
         sources_by_name: dict[str, set[str]] = {}
         for declaration in collection.declarations:
             sources_by_name.setdefault(declaration.name, set()).add(declaration.source)
-        for declaration in collection.effective:
+        effective = collection.effective
+        # Tool lists are unknown statically, so any runnable server without a read-only mode may write.
+        self._write_capable_servers = [
+            declaration.name
+            for declaration in effective
+            if declaration.runnable and not mcp_server_is_read_only(declaration.config)
+        ]
+        for declaration in effective:
             if declaration.source == "mcp_json" and not self.contained:
                 support: Support = "static_only"
             else:
@@ -1282,8 +1296,7 @@ class _Builder:
         source_file: str | None = None,
         **kwargs: Any,
     ) -> None:
-        key = (component.type, component.name, component.path)
-        if any((r.type, r.name, r.path) == key for r in self.inventory.privilege_records):
+        if (component.type, component.name, component.path) in self._privilege_keys:
             return
         if component.type == "agent":
             plugin_name = self.manifest.get("name") if self.manifest is not None else None
@@ -1292,7 +1305,7 @@ class _Builder:
                 component.path,
                 frontmatter,
                 display,
-                write_capable_mcp=self._write_capable_mcp(),
+                write_capable_mcp=self._write_capable_servers,
                 plugin_name=plugin_name if isinstance(plugin_name, str) else None,
             )
         elif component.type == "command":
@@ -1302,18 +1315,11 @@ class _Builder:
         else:
             return
         self.inventory.privilege_records.append(record)
+        self._privilege_keys.add((record.type, record.name, record.path))
         self.inventory.findings.extend(findings)
         if component.type in {"command", "skill"} and "hooks" in frontmatter:
             file = source_file or component.path or self.manifest_rel
             self._frontmatter_hooks(frontmatter.get("hooks"), file, display)
-
-    def _write_capable_mcp(self) -> list[str]:
-        """Runnable MCP servers without a declared read-only mode (tool lists are unknown statically)."""
-        return [
-            declaration.name
-            for declaration in self.inventory.mcp.effective
-            if declaration.runnable and not mcp_server_is_read_only(declaration.config)
-        ]
 
     def _frontmatter_hooks(self, config: Any, file: str, display: str) -> None:
         """Hooks in a skill's or command's frontmatter: Claude Code registers them while it is active."""

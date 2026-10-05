@@ -612,7 +612,7 @@ def test_an_unscored_trial_that_never_launched_does_not_downgrade_the_census(tmp
 
 
 def test_a_native_arm_with_no_census_in_any_trial_is_incomplete(tmp_path: Path, package) -> None:
-    from skillevaluator.evaluation.tier3_report import _incomplete_skip_reason
+    from skillevaluator.evaluation.tier3_report import incomplete_reason
     from skillevaluator.reporting.markdown import MarkdownReporter
     from skillevaluator.reporting.plugin_sections import tier3_plugin_view
 
@@ -628,7 +628,7 @@ def test_a_native_arm_with_no_census_in_any_trial_is_incomplete(tmp_path: Path, 
 
     assert provenance["partial"] is True
     assert "no load census in any of 2" in provenance["native_load_unverified"]["claude-code"]
-    assert _incomplete_skip_reason(provenance).startswith("INCOMPLETE: claude-code: no load census")
+    assert incomplete_reason(provenance).startswith("INCOMPLETE: claude-code: no load census")
     view = tier3_plugin_view({"plugin_provenance": provenance})
     assert view is not None and view["partial"]
     lines: list[str] = []

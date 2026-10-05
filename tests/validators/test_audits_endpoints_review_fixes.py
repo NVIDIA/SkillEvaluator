@@ -908,6 +908,14 @@ def test_registry_names_are_resolved_and_classified_with_resolve_endpoints(
     assert len(tools["grype"].calls) == 2
 
 
+def test_a_registry_port_that_int_cannot_read_does_not_raise() -> None:
+    """Regression: classifying a registry read its port first, and int() refuses the digit '²'."""
+    problem, trusted = eco.image_registry_problem("localhost:\u00b2/team/app:1.0.0")
+
+    assert problem is not None and "is a loopback address" in problem
+    assert not trusted
+
+
 # --------------------------------------------------------------------------- #
 # Packages that MCP package runners install                                  #
 # --------------------------------------------------------------------------- #

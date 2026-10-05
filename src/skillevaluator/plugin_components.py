@@ -59,6 +59,7 @@ from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.plugin_component_risk import (
     CLAUDE_HOOKS,
+    MAX_QUOTED_ENTRIES,
     MAX_SCRIPT_BYTES,
     MONITOR_EVENT,
     MONITOR_HOOKS,
@@ -74,7 +75,6 @@ from skillevaluator.plugin_component_risk import (
     hook_risk_summary,
     is_broad_allow_rule,
     mcp_server_is_read_only,
-    permission_mode_flag_issues,
     privilege_summary,
 )
 from skillevaluator.plugin_formats import (
@@ -88,30 +88,14 @@ from skillevaluator.plugin_formats import (
     parse_manifest_text,
     profile_for,
 )
-
-# The MCP collection and the root-bounded reads moved to plugin_mcp and plugin_paths;
-# the names marked "re-exported" stay importable from here for existing callers.
 from skillevaluator.plugin_mcp import (
-    _CODEX_UNAPPLIED_MCP_FIELDS,  # noqa: F401 - re-exported
-    _HTTP_TYPE_ALIASES,  # noqa: F401 - re-exported
-    _MCP_BUNDLE_SUFFIXES,  # noqa: F401 - re-exported
     McpCollection,
     McpDeclaration,
-    McpSource,  # noqa: F401 - re-exported
-    _codex_headers,  # noqa: F401 - re-exported
-    _collect_path_ref,  # noqa: F401 - re-exported
-    _is_inline_secret,  # noqa: F401 - re-exported
-    _load_mcp_file,  # noqa: F401 - re-exported
-    _normalize_dialect,  # noqa: F401 - re-exported
     collect_mcp_declarations,
-    mcp_pinning_summary,  # noqa: F401 - re-exported
     summarize_pinning,
 )
 from skillevaluator.plugin_paths import (
-    _WINDOWS_DRIVE_RE,  # noqa: F401 - re-exported
-    PLUGIN_CATEGORY,  # noqa: F401 - re-exported
     DeclaredPath,
-    PathKind,  # noqa: F401 - re-exported
     PluginRootReader,
     _in_unscanned_folder,
     _path_problem_finding,
@@ -120,18 +104,19 @@ from skillevaluator.plugin_paths import (
     _unscanned_path_finding,
     normalize_declared_path,
 )
+from skillevaluator.plugin_states import (
+    COVERAGE_STATE_RANK,  # noqa: F401 - re-exported
+    COVERAGE_STATES,
+    EVALUATED_COVERAGE_STATES,
+)
 from skillevaluator.utils.secure_fs import SecurePathError, stat_is_link_or_reparse
 from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json, load_bounded_yaml
 from skillevaluator.validators.mcp_static import (
     OverrideIssue,
     env_override_issues,
-    permission_bypass_issues,
-)
-from skillevaluator.validators.mcp_static import (
-    _validate_command as mcp_validate_command,
-)
-from skillevaluator.validators.mcp_static import (
-    _validate_pinning as mcp_validate_pinning,
+    permission_flag_issues,
+    validate_mcp_command,
+    validate_mcp_pinning,
 )
 
 if TYPE_CHECKING:
@@ -155,13 +140,6 @@ COMPONENT_TYPES: tuple[str, ...] = (
     "monitor",
     "settings",
 )
-# Tier 3 coverage states. Staging assigns one of COVERAGE_STATES to each component;
-# after the run the native load census ("loaded") and runtime evidence ("exercised")
-# can raise a row by rank, never lower it. A row in one of these ranked states counts
-# as evaluated.
-COVERAGE_STATES: tuple[str, ...] = ("staged", "not_staged", "unsupported", "unavailable", "invalid")
-COVERAGE_STATE_RANK: dict[str, int] = {"staged": 1, "loaded": 2, "exercised": 3}
-EVALUATED_COVERAGE_STATES: frozenset[str] = frozenset(COVERAGE_STATE_RANK)
 _TYPE_SUPPORT: dict[str, Support] = {
     "skill": "evaluated",
     "rule": "evaluated",
@@ -182,8 +160,6 @@ _ENV_TEMPLATE_SUFFIXES = frozenset({"example", "sample", "template", "dist", "de
 _MAX_ENV_FILE_FINDINGS = 20
 # Directory levels below the plugin root that the .env name walk descends.
 _ENV_SCAN_MAX_DEPTH = 32
-# Broad allow rules quoted in one plugin_settings_broad_allow message (the finding covers them all).
-_MAX_QUOTED_BROAD_ALLOW_RULES = 8
 _MANIFEST_PATHS = frozenset(PLUGIN_MANIFEST_RELATIVE_PATHS)
 # Agent Plugins client-extension namespace directory names (reverse-domain).
 _NAMESPACE_DIR_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$")
@@ -419,8 +395,8 @@ def _lsp_command_findings(name: str, server: dict[str, Any], file_path: str) -> 
     if not isinstance(server.get("command"), str):
         return []
     raw: list[Finding] = []
-    mcp_validate_command(name, server, file_path, raw)
-    mcp_validate_pinning(name, server, file_path, raw)
+    validate_mcp_command(name, server, file_path, raw)
+    validate_mcp_pinning(name, server, file_path, raw)
     prefix = f"mcpServers['{name}']: "
     return [
         _plugin_finding(
@@ -1157,7 +1133,7 @@ class _Builder:
         if config is not None:
             self.inventory.findings.extend(
                 _override_findings(
-                    [*permission_bypass_issues(config), *permission_mode_flag_issues(config)],
+                    permission_flag_issues(config),
                     self.reader.display(rel),
                     where=f"hooks ({name})",
                     component=("hook", name),
@@ -1359,7 +1335,7 @@ class _Builder:
         source = f"{file}#hooks"
         self.inventory.findings.extend(
             _override_findings(
-                [*permission_bypass_issues(config), *permission_mode_flag_issues(config)],
+                permission_flag_issues(config),
                 display,
                 where=f"hooks ({source})",
                 component=("hook", source),
@@ -1388,7 +1364,7 @@ class _Builder:
                 component = ("lsp", str(server_name))
                 self.inventory.findings.extend(
                     _override_findings(
-                        [*permission_bypass_issues(server), *permission_mode_flag_issues(server)],
+                        permission_flag_issues(server),
                         display,
                         where=where,
                         component=component,
@@ -1435,7 +1411,7 @@ class _Builder:
                 self._monitor_command(monitor_name, entry, rel)
             self.inventory.findings.extend(
                 _override_findings(
-                    [*permission_bypass_issues(entries), *permission_mode_flag_issues(entries)],
+                    permission_flag_issues(entries),
                     self.reader.display(rel),
                     where=f"monitors ({name})",
                 )
@@ -1668,7 +1644,7 @@ def _settings_findings(config: dict[str, Any], rel: str, display: str) -> list[F
                         Severity.HIGH,
                         "plugin_settings_broad_allow",
                         f"shipped settings '{rel}' pre-approves unrestricted tools or interpreter Bash rules "
-                        f"that run any command {broad[:_MAX_QUOTED_BROAD_ALLOW_RULES]}",
+                        f"that run any command {broad[:MAX_QUOTED_ENTRIES]}",
                         display,
                         "Remove blanket allow rules such as Bash / Bash(*) / Bash(python3:*); scope permissions "
                         "to exact commands.",
@@ -1685,11 +1661,7 @@ def _settings_findings(config: dict[str, Any], rel: str, display: str) -> list[F
             )
         )
     findings.extend(_override_findings(env_override_issues(config.get("env")), display, where=rel))
-    findings.extend(
-        _override_findings(
-            [*permission_bypass_issues(config), *permission_mode_flag_issues(config)], display, where=rel
-        )
-    )
+    findings.extend(_override_findings(permission_flag_issues(config), display, where=rel))
     return findings
 
 

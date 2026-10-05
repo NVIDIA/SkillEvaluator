@@ -265,41 +265,36 @@ def image_registry_problem(
     also resolved, and every answer is classified the same way.
     """
     from skillevaluator.validators import endpoint_resolution as er
-    from skillevaluator.validators.mcp_static import classify_endpoint_host, host_is_allowlisted
 
     registry = image_registry(image)
     if registry is None:
         return None, False
     host, _colon, port_text = registry.rpartition(":") if ":" in registry else (registry, "", "")
-    allowed = tuple(allowed_hosts)
-    static = classify_endpoint_host(host)
-    if static is not None:
-        if static.kind == "metadata":
-            return f"registry {registry} is a cloud instance-metadata endpoint, which is never contacted", False
-        if not host_is_allowlisted(static, allowed):
-            return (
-                f"registry {registry} is a {static.reason} address; allow it with mcp.allowed_private_hosts "
-                "to audit images from it",
-                False,
-            )
-        return None, True
-    if not resolve:
-        return None, False
+    port = int(port_text) if port_text.isdecimal() else 443  # isdigit() also admits '²', which int() refuses
     try:
-        addresses = er._resolve(host, int(port_text) if port_text.isdigit() else 443, er.DNS_TIMEOUT_SECONDS)
+        verdict = er.classify_host(host, port, allowed_hosts, resolve=er.dns_resolver() if resolve else None)
     except (OSError, UnicodeError) as exc:
         return f"registry host {host!r} could not be resolved ({type(exc).__name__})", False
-    non_public = er._classify_addresses(addresses)
-    blocked = er.blocked_address(host, non_public, allowed)
+    blocked = verdict.blocked
+    if verdict.static is not None:
+        if blocked is None:
+            return None, True
+        if blocked[0] == "metadata":
+            return f"registry {registry} is a cloud instance-metadata endpoint, which is never contacted", False
+        return (
+            f"registry {registry} is a {verdict.static.reason} address; allow it with mcp.allowed_private_hosts "
+            "to audit images from it",
+            False,
+        )
     if blocked is not None and blocked[0] == "metadata":
         return f"registry {registry} resolves to a cloud instance-metadata address ({blocked[2]})", False
     if blocked is not None:
         return (
-            f"registry {registry} resolves to {er._where(blocked)} ({blocked[2] or 'unclassified'}); allow it with "
-            "mcp.allowed_private_hosts to audit images from it",
+            f"registry {registry} resolves to {er.describe_address(blocked)} ({blocked[2] or 'unclassified'}); "
+            "allow it with mcp.allowed_private_hosts to audit images from it",
             False,
         )
-    return None, bool(non_public)
+    return None, bool(verdict.non_public)
 
 
 def is_dockerfile_name(name: str) -> bool:

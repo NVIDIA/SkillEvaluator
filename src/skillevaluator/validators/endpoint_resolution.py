@@ -45,7 +45,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from skillevaluator.models.result import Finding, Severity
-from skillevaluator.plugin_component_risk import PLUGIN_CATEGORY, component_finding
+from skillevaluator.plugin_component_risk import component_finding
+from skillevaluator.plugin_paths import PLUGIN_CATEGORY
 from skillevaluator.validators.mcp_static import (
     EndpointClass,
     HostAllowlist,
@@ -246,9 +247,12 @@ def blocked_address(
     return None
 
 
-def _where(blocked: tuple[str, str, str | None]) -> str:
-    """``a <reason> address`` for a finding message (the reason alone for an over-long answer)."""
-    return f"a {blocked[1]} address" if blocked[2] is not None else blocked[1]
+def describe_address(row: tuple[str, str, str | None]) -> str:
+    """``a <reason> address`` for a non-public ``(kind, reason, address)`` row in a finding message.
+
+    The row that stands for an over-long answer has no address; its reason is used alone.
+    """
+    return f"a {row[1]} address" if row[2] is not None else row[1]
 
 
 @dataclass(frozen=True)
@@ -564,7 +568,7 @@ class EndpointChecker:
                         target,
                         Severity.MEDIUM,
                         "endpoint_resolves_private",
-                        f"host {host!r} of {display_url!r} resolves to {_where(blocked)}"
+                        f"host {host!r} of {display_url!r} resolves to {describe_address(blocked)}"
                         + (
                             f" ({blocked[2]}); the public-looking name targets a non-public network"
                             if blocked[2]
@@ -675,7 +679,7 @@ class EndpointChecker:
                     target,
                     Severity.MEDIUM,
                     "endpoint_redirect_private",
-                    f"{safe_url(url)!r} redirects to {_where(blocked)} ({display!r})",
+                    f"{safe_url(url)!r} redirects to {describe_address(blocked)} ({display!r})",
                     "Use an endpoint that does not redirect into a non-public network, or allow the host in the "
                     "validation policy.",
                 )

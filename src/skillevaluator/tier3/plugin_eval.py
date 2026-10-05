@@ -84,7 +84,6 @@ from skillevaluator.plugin_components import (
     PluginRootReader,
     build_plugin_inventory,
     coverage_row,
-    mcp_pinning_summary,
     normalize_declared_path,
     parse_markdown,
     problem_reason,
@@ -117,6 +116,7 @@ from skillevaluator.plugin_formats import (
     parse_manifest_text,
     profile_for,
 )
+from skillevaluator.plugin_mcp import mcp_pinning_summary
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries, normalize_dataset_entries
 from skillevaluator.tier3.eval_core.plugin_signals import validate_plugin_case_fields
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line

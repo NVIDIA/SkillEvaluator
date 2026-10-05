@@ -33,8 +33,10 @@ from skillevaluator.constants import (
 )
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.plugin_formats import CLAUDE_PROFILE, DEFAULT_SKILLS_DIR, FormatProfile
-from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, discover_secure_files, stat_is_link_or_reparse
+from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, discover_secure_files, lstat_walk
 
+# The category of every plugin schema and component finding; a policy overlay changes a severity with
+# PLUGIN_SCHEMA.<check>.
 PLUGIN_CATEGORY = "PLUGIN_SCHEMA"
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 # A longer declared path is "invalid": no component path comes close, and it bounds the work per path.
@@ -121,26 +123,18 @@ class PluginRootReader:
         """
         if not rel.parts or str(rel) == ".":
             return "dir"
-        current = self.root
-        parts = rel.parts
-        for index, part in enumerate(parts):
-            current = current / part
-            try:
-                metadata = current.lstat()
-            except (FileNotFoundError, NotADirectoryError):
-                return "missing"
-            except OSError:
-                return "special"
-            if stat_is_link_or_reparse(metadata):
-                return "link"
-            if index < len(parts) - 1 and not stat.S_ISDIR(metadata.st_mode):
-                return "missing"
-            if index == len(parts) - 1:
-                if stat.S_ISDIR(metadata.st_mode):
-                    return "dir"
-                if stat.S_ISREG(metadata.st_mode):
-                    return "file" if allow_hard_links or getattr(metadata, "st_nlink", 1) == 1 else "special"
-                return "special"
+        walk = lstat_walk(self.root, rel)
+        if walk.outcome in ("missing", "not_dir"):
+            return "missing"
+        if walk.outcome == "link":
+            return "link"
+        metadata = walk.metadata
+        if walk.outcome == "error" or metadata is None:
+            return "special"
+        if stat.S_ISDIR(metadata.st_mode):
+            return "dir"
+        if stat.S_ISREG(metadata.st_mode):
+            return "file" if allow_hard_links or getattr(metadata, "st_nlink", 1) == 1 else "special"
         return "special"
 
     def _read_bytes(self, rel: PurePosixPath, max_bytes: int, *, config: bool = False) -> bytes:

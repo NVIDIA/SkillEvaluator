@@ -103,26 +103,31 @@ def _preflight_yaml(raw: str) -> None:
         raise StructuredDataSyntaxError("Input is not valid YAML") from exc
 
 
-def _validate_graph(value: object) -> None:
+def _validate_graph(
+    value: object,
+    *,
+    max_nodes: int = MAX_STRUCTURED_NODES,
+    max_collection_items: int = MAX_STRUCTURED_COLLECTION_ITEMS,
+) -> None:
     stack: list[tuple[object, int]] = [(value, 0)]
     visits = 0
     while stack:
         current, depth = stack.pop()
         visits += 1
-        if visits > MAX_STRUCTURED_NODES:
-            raise _limit(f"expanded node or edge count exceeds {MAX_STRUCTURED_NODES}")
+        if visits > max_nodes:
+            raise _limit(f"expanded node or edge count exceeds {max_nodes}")
         if depth > MAX_STRUCTURED_DEPTH:
             raise _limit(f"expanded nesting depth exceeds {MAX_STRUCTURED_DEPTH}")
 
         if isinstance(current, Mapping):
-            if len(current) > MAX_STRUCTURED_COLLECTION_ITEMS:
-                raise _limit(f"mapping size exceeds {MAX_STRUCTURED_COLLECTION_ITEMS}")
+            if len(current) > max_collection_items:
+                raise _limit(f"mapping size exceeds {max_collection_items}")
             for key, item in current.items():
                 stack.append((item, depth + 1))
                 stack.append((key, depth + 1))
         elif isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
-            if len(current) > MAX_STRUCTURED_COLLECTION_ITEMS:
-                raise _limit(f"sequence size exceeds {MAX_STRUCTURED_COLLECTION_ITEMS}")
+            if len(current) > max_collection_items:
+                raise _limit(f"sequence size exceeds {max_collection_items}")
             stack.extend((item, depth + 1) for item in current)
         elif isinstance(current, (str, bytes, bytearray)) and len(current) > MAX_STRUCTURED_SCALAR_CHARS:
             raise _limit(f"scalar length exceeds {MAX_STRUCTURED_SCALAR_CHARS}")
@@ -141,8 +146,8 @@ def load_bounded_yaml(raw: str) -> Any:
     return value
 
 
-def _reject_json_constant(_value: str) -> object:
-    raise StructuredDataSyntaxError("Input is not strict JSON")
+def _reject_json_constant(value: str) -> object:
+    raise StructuredDataSyntaxError(f"Input is not strict JSON ({value})")
 
 
 # One preflight step: a whole string (an unterminated one runs to the end of
@@ -287,9 +292,22 @@ def preflight_json_structure(
     preflight.run(raw, position, len(raw))
 
 
-def load_bounded_json(raw: str) -> Any:
-    """Parse strict JSON and validate its expanded object graph iteratively."""
-    preflight_json_structure(raw)
+def load_bounded_json(
+    raw: str,
+    *,
+    max_tokens: int = MAX_STRUCTURED_NODES,
+    max_collection_items: int = MAX_STRUCTURED_COLLECTION_ITEMS,
+    max_nodes: int = MAX_STRUCTURED_NODES,
+) -> Any:
+    """Parse strict JSON and validate its expanded object graph iteratively.
+
+    The lexical preflight (:func:`preflight_json_structure`) allows
+    ``max_tokens`` tokens; the parsed graph allows ``max_nodes`` values and
+    keys; both allow ``max_collection_items`` items in one array or object. A
+    caller with larger documents (npm lockfiles) raises them. A syntax error
+    names the parser's reason and position, or the rejected constant (``NaN``).
+    """
+    preflight_json_structure(raw, max_tokens=max_tokens, max_collection_items=max_collection_items)
     try:
         value = json.loads(raw, parse_constant=_reject_json_constant)
     except StructuredDataSyntaxError:
@@ -297,8 +315,8 @@ def load_bounded_json(raw: str) -> Any:
     except (RecursionError, OverflowError) as exc:
         raise _limit("JSON parser recursion or numeric range") from exc
     except (json.JSONDecodeError, ValueError) as exc:
-        raise StructuredDataSyntaxError("Input is not valid JSON") from exc
-    _validate_graph(value)
+        raise StructuredDataSyntaxError(f"Input is not valid JSON: {exc}") from exc
+    _validate_graph(value, max_nodes=max_nodes, max_collection_items=max_collection_items)
     return value
 
 

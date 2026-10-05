@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
+import textwrap
 from copy import deepcopy
 from pathlib import Path
 
@@ -889,10 +892,29 @@ def test_component_index_places_a_folder_walker_label_only_when_it_is_unambiguou
     assert (index.component("/work/p/skills/b/x/run.py") or {}).get("name") == "b/x"
 
 
-def test_report_state_vocabularies_match_their_producers() -> None:
-    """The reporting leaf re-declares these lists rather than import the producers (which load the validators)."""
-    from skillevaluator import plugin_components, plugin_dependencies
+def test_report_state_vocabularies_are_the_producers() -> None:
+    """Reports and producers share one definition, in plugin_states."""
+    from skillevaluator import plugin_components, plugin_dependencies, plugin_states
     from skillevaluator.reporting import plugin_sections
 
-    assert plugin_sections.DEPENDENCY_STATES == plugin_dependencies.DEPENDENCY_STATES
-    assert plugin_sections.COVERAGE_STATES == plugin_components.COVERAGE_STATES
+    assert plugin_sections.DEPENDENCY_STATES is plugin_dependencies.DEPENDENCY_STATES is plugin_states.DEPENDENCY_STATES
+    assert plugin_sections.COVERAGE_STATES is plugin_components.COVERAGE_STATES is plugin_states.COVERAGE_STATES
+    assert plugin_sections.EVALUATED_COVERAGE_STATES is plugin_components.EVALUATED_COVERAGE_STATES
+
+
+def test_report_state_vocabularies_load_no_validators() -> None:
+    """plugin_states imports nothing, so the reporting leaf still loads no producer or validator."""
+    code = textwrap.dedent(
+        """
+        import sys
+        import skillevaluator.plugin_states
+        print(sorted(name for name in sys.modules if name.startswith("skillevaluator")))
+        import skillevaluator.reporting.plugin_sections
+        heavy = ("skillevaluator.plugin_components", "skillevaluator.plugin_dependencies", "skillevaluator.validators")
+        print(sorted(name for name in sys.modules if name.startswith(heavy)))
+        """
+    )
+    completed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == ["['skillevaluator', 'skillevaluator.plugin_states']", "[]"]

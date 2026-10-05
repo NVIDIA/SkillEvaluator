@@ -121,3 +121,27 @@ def test_require_bounded_string_enforces_length_and_nonempty() -> None:
     with pytest.raises(ValueError, match=r"field.*non-empty"):
         require_bounded_string("   ", "field", max_chars=32)
     assert require_bounded_string(" safe ", "field", max_chars=32) == " safe "
+
+
+def test_bounded_json_syntax_errors_name_the_parser_reason_and_the_constant() -> None:
+    """The shared loader words syntax errors as the npm lockfile loader it replaced did."""
+    with pytest.raises(StructuredDataSyntaxError, match=r"^Input is not valid JSON: Expecting value: line 1 column 1"):
+        load_bounded_json("name: yaml-only")
+    with pytest.raises(StructuredDataSyntaxError, match=r"^Input is not strict JSON \(NaN\)$"):
+        load_bounded_json("[NaN]")
+
+
+def test_bounded_json_limit_overrides_apply_to_the_preflight_and_the_parsed_graph() -> None:
+    wide = "[" + ",".join(["1"] * 2_000) + "]"
+    with pytest.raises(StructuredDataLimitError, match=r"collection size exceeds 1024"):
+        load_bounded_json(wide)
+    assert len(load_bounded_json(wide, max_collection_items=2_000)) == 2_000
+
+    with pytest.raises(StructuredDataLimitError, match=r"token count exceeds 1000"):
+        load_bounded_json(wide, max_tokens=1_000, max_collection_items=2_000)
+
+    # 600 one-item arrays: 1,200 preflight tokens (opening brackets and separators), 1,201 parsed values.
+    nested = "[" + ",".join(["[1]"] * 600) + "]"
+    assert len(load_bounded_json(nested, max_nodes=1_201)) == 600
+    with pytest.raises(StructuredDataLimitError, match=r"node or edge count exceeds 1200"):
+        load_bounded_json(nested, max_nodes=1_200)

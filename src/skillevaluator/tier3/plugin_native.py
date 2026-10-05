@@ -49,17 +49,16 @@ from typing import Any, ClassVar
 from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES, PLUGIN_CONFIG_MAX_BYTES
 from skillevaluator.plugin_components import (
     COMPONENT_TYPES,
-    COVERAGE_STATE_RANK,
-    EVALUATED_COVERAGE_STATES,
     PluginInventory,
     PluginRootReader,
     normalize_declared_path,
     parse_markdown,
     summarize_coverage,
 )
+from skillevaluator.plugin_states import COVERAGE_STATE_RANK, EVALUATED_COVERAGE_STATES
 from skillevaluator.tier3.toml_utils import toml_quote
 from skillevaluator.tier3_environments import PLUGIN_LOAD_CHOICES
-from skillevaluator.utils.secure_fs import SecurePathError, stat_is_link_or_reparse
+from skillevaluator.utils.secure_fs import SecurePathError, read_bounded, stat_is_link_or_reparse
 from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json
 
 #: Build-context directory (inside a task's ``environment/``) copied to ``/skilleval``.
@@ -2335,19 +2334,12 @@ def read_harness_log_prefix(path: Path, max_bytes: int = MAX_HARNESS_LOG_PREFIX_
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             return None
-        chunks: list[bytes] = []
-        remaining = max_bytes
-        while remaining > 0:
-            chunk = os.read(descriptor, min(65_536, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
+        prefix = read_bounded(descriptor, max_bytes, truncate=True)
     except OSError:
         return None
     finally:
         os.close(descriptor)
-    return b"".join(chunks).decode("utf-8", errors="replace")
+    return prefix.decode("utf-8", errors="replace")
 
 
 def claude_init_event(text: str) -> dict[str, Any] | None:

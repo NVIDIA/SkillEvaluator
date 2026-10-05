@@ -40,6 +40,7 @@ from skillevaluator.reporting.console_ui import (
     summarize_tier3,
 )
 from skillevaluator.reporting.naming import report_basename
+from skillevaluator.reporting.plugin_sections import split_display_prefix
 
 # Tier 1 (static validation) is the base install surface and is safe to import
 # eagerly. Tier 2 (embeddings/LLM) and Tier 3 (Harbor and its environments)
@@ -407,10 +408,8 @@ def _content_relative_finding_paths(results: list[ValidationResult], validated: 
         return  # absolute paths are already unambiguous; "." has no prefix
     for result in results:
         for finding in result.findings:
-            label, path = "", finding.file_path or ""
-            if path.startswith("[") and "] " in path:
-                skill, _separator, path = path.partition("] ")
-                label = f"{skill}] "
+            skill, path = split_display_prefix(finding.file_path or "")
+            label = "" if skill is None else f"[{skill}] "
             parts = Path(path).parts
             if parts[: len(prefix)] != prefix:
                 continue
@@ -1041,8 +1040,8 @@ def _incomplete_plugin_agent_eval_result(
     run left no usable results.
     """
     from skillevaluator.evaluation.tier3_report import (
-        _incomplete_skip_reason,
         advisory_skip_result,
+        incomplete_reason,
         refresh_plugin_run_report,
     )
 
@@ -1061,7 +1060,7 @@ def _incomplete_plugin_agent_eval_result(
         return advisory_skip_result(message, skill_name=plugin_dir.name)
     result.passed = False
     result.metadata["execution_status"] = "skipped"
-    result.metadata["skip_reason"] = _incomplete_skip_reason(provenance or {"execution_incomplete": message})
+    result.metadata["skip_reason"] = incomplete_reason(provenance or {"execution_incomplete": message})
     result.metadata.update(metadata)
     run_dir = _engine_run_dir(engine_result)
     if run_dir is not None:
@@ -3461,7 +3460,7 @@ def evaluate_plugin(
 
     from skillevaluator.cli_core import resolve_plugin_path
     from skillevaluator.evaluation import EvaluationService
-    from skillevaluator.evaluation.tier3_report import _incomplete_skip_reason, refresh_plugin_run_report
+    from skillevaluator.evaluation.tier3_report import incomplete_reason, refresh_plugin_run_report
     from skillevaluator.tier3.harbor.progress import create_progress_reporter
     from skillevaluator.tier3.plugin_eval import prepare_plugin_eval_package
 
@@ -3584,7 +3583,7 @@ def evaluate_plugin(
             if failure:
                 raise click.ClickException(f"Tier 3 plugin evaluation did not complete: {failure}")
             if provenance and provenance.get("partial"):
-                raise click.ClickException(_incomplete_skip_reason(provenance))
+                raise click.ClickException(incomplete_reason(provenance))
     except click.ClickException:
         raise
     except Exception as exc:

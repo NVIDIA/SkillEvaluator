@@ -49,8 +49,9 @@ from urllib.parse import urlparse
 
 from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
 from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
+from skillevaluator.plugin_states import DEPENDENCY_STATES
 from skillevaluator.utils.helpers import git_origin_https_url, resolve_git_root
-from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
+from skillevaluator.utils.secure_fs import lstat_walk, stat_is_link_or_reparse
 from skillevaluator.utils.structured_data import require_bounded_string
 
 # Canonical dependency-ref sources. These mirror ``PluginSelector.source`` in
@@ -71,7 +72,6 @@ CONTENT_ROOTS: dict[str, tuple[str, ...]] = {
 MAX_PLUGIN_MANIFEST_ITEMS = 256
 MAX_PLUGIN_MANIFEST_TEXT_CHARS = 16_384
 
-DEPENDENCY_STATES = ("provided", "referenced", "missing", "external", "unresolved")
 # Reported ref labels are truncated so a pathological ref cannot bloat reports.
 MAX_REF_LABEL_CHARS = 512
 
@@ -331,22 +331,20 @@ def probe_repository_path(clone_root: Path, relative: Path, *, want_skill_dir: b
     metadata-only, point-in-time label: nothing is read, copied, or staged on
     the strength of it (Tier 3 staging re-verifies with its own secure copy).
     """
-    current = clone_root
-    metadata = None
-    for index, part in enumerate(relative.parts):
-        current = current / part
-        so_far = Path(*relative.parts[: index + 1]).as_posix()
-        metadata, error = _lstat(current)
-        if error is not None:
-            return _Probe("error", f"cannot inspect '{so_far}': {error}")
-        if metadata is None:
+    walk = lstat_walk(clone_root, relative)
+    if walk.failing_index is not None:
+        so_far = Path(*relative.parts[: walk.failing_index + 1]).as_posix()
+        if walk.outcome == "error":
+            return _Probe("error", f"cannot inspect '{so_far}': {walk.error}")
+        if walk.outcome == "missing":
             return _Probe("absent", f"'{so_far}' does not exist")
-        if stat_is_link_or_reparse(metadata):
+        if walk.outcome == "link":
             return _Probe("link", f"'{so_far}' is a symlink or reparse point")
-        if index < len(relative.parts) - 1 and not stat.S_ISDIR(metadata.st_mode):
-            return _Probe("absent", f"'{so_far}' is not a directory")
+        return _Probe("absent", f"'{so_far}' is not a directory")
+    metadata = walk.metadata
     if metadata is None:
         return _Probe("absent", "empty reference path")
+    current = clone_root / relative
 
     if want_skill_dir:
         if not stat.S_ISDIR(metadata.st_mode):

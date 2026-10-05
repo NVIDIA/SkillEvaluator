@@ -23,6 +23,7 @@ from skillevaluator.utils.secure_fs import (
     MAX_SECURE_DIRECTORY_DEPTH,
     SecureFile,
     discover_secure_files,
+    lstat_walk,
     stat_is_link_or_reparse,
 )
 
@@ -115,20 +116,17 @@ def _plugin_skills_root(plugin_root: Path, skills_dir: str = "skills") -> Path |
     declared folder such as ``my-skills``). Every component is checked without
     following links.
     """
-    skills_root = plugin_root
-    for part in PurePosixPath(skills_dir).parts:
-        skills_root = skills_root / part
-        try:
-            metadata = skills_root.lstat()
-        except FileNotFoundError:
-            return None
-        except OSError as exc:
-            raise ValueError(f"Cannot inspect plugin skills safely: {exc}") from exc
-        if stat_is_link_or_reparse(metadata):
-            raise ValueError(f"Plugin skills folder is a symlink, junction, or reparse point: {skills_dir}")
-        if not stat.S_ISDIR(metadata.st_mode):
-            return None
-    return skills_root
+    relative = PurePosixPath(skills_dir)
+    walk = lstat_walk(plugin_root, relative)
+    if isinstance(walk.error, FileNotFoundError):
+        return None
+    if walk.error is not None:  # NotADirectoryError (a part was replaced meanwhile) or another OSError
+        raise ValueError(f"Cannot inspect plugin skills safely: {walk.error}") from walk.error
+    if walk.outcome == "link":
+        raise ValueError(f"Plugin skills folder is a symlink, junction, or reparse point: {skills_dir}")
+    if walk.outcome == "not_dir" or (walk.metadata is not None and not stat.S_ISDIR(walk.metadata.st_mode)):
+        return None
+    return plugin_root.joinpath(*relative.parts)
 
 
 def find_bundled_plugin_skill_manifests(plugin_root: Path, skills_dir: str = "skills") -> list[SecureFile]:
@@ -160,8 +158,10 @@ def find_bundled_plugin_skill_manifests(plugin_root: Path, skills_dir: str = "sk
             raise ValueError(f"Plugin skills folder is a symlink, junction, or reparse point: {skills_dir}/{name}")
         if not stat.S_ISDIR(metadata.st_mode):
             continue
+        # Discovery records ``child`` normalized and absolute, so its parent is the skills folder
+        # in the form the identities found above record it.
         manifests.extend(
-            SecureFile(skills_root, child / found.relative_path, Path(name) / found.relative_path, found.metadata)
+            SecureFile(found.root.parent, found.path, Path(name) / found.relative_path, found.metadata)
             for found in _discover_skill_manifests(child)
         )
     return sorted(manifests, key=lambda manifest: manifest.relative_path.parent)

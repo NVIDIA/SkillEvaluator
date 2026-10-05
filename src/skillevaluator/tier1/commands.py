@@ -24,6 +24,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.plugin_formats import DEFAULT_SKILLS_DIR
+from skillevaluator.plugin_paths import PLUGIN_CATEGORY
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
 from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
@@ -33,7 +34,6 @@ from skillevaluator.validators.code_risk import CodeRiskValidator
 from skillevaluator.validators.dependencies import DependencySecurityValidator
 from skillevaluator.validators.hygiene import HygieneValidator
 from skillevaluator.validators.license import LicenseValidator
-from skillevaluator.validators.plugin_schema import CATEGORY as PLUGIN_SCHEMA_CATEGORY
 from skillevaluator.validators.plugin_schema import VALIDATOR_NAME as PLUGIN_SCHEMA_VALIDATOR_NAME
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.plugin_tree import plugin_tree_scope
@@ -173,7 +173,7 @@ def _fail_closed_result(
     result = ValidationResult(validator_name=validator_name, validator_description=validator_description)
     result.add_finding(
         Finding(
-            category=PLUGIN_SCHEMA_CATEGORY,
+            category=PLUGIN_CATEGORY,
             severity=Severity.HIGH,
             check_name=check_name,
             message=message,
@@ -558,21 +558,19 @@ def _verified_skill_dirs_outside_tree_walk(plugin_root: Path) -> list[Path]:
     """
     from skillevaluator.plugin_components import client_skill_dirs_outside_tree_scans
     from skillevaluator.utils.helpers import verify_plugin_tree
-    from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
+    from skillevaluator.utils.secure_fs import lstat_walk
 
     verified: list[Path] = []
     for relative in client_skill_dirs_outside_tree_scans(plugin_root):
-        current = plugin_root
-        for part in relative.parts:
-            current = current / part
-            try:
-                metadata = current.lstat()
-            except OSError as exc:
-                raise ValueError(f"Cannot inspect plugin skill folder safely: {relative}: {exc}") from exc
-            if stat_is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
-                raise ValueError(f"Plugin skill folder is not a regular directory: {relative}")
-        verify_plugin_tree(current)
-        verified.append(plugin_root.joinpath(*relative.parts))
+        walk = lstat_walk(plugin_root, relative)
+        if walk.error is not None:
+            raise ValueError(f"Cannot inspect plugin skill folder safely: {relative}: {walk.error}") from walk.error
+        # Every part, the folder included, must be a directory that is not a link.
+        if walk.outcome != "ok" or (walk.metadata is not None and not stat.S_ISDIR(walk.metadata.st_mode)):
+            raise ValueError(f"Plugin skill folder is not a regular directory: {relative}")
+        folder = plugin_root.joinpath(*relative.parts)
+        verify_plugin_tree(folder)
+        verified.append(folder)
     return verified
 
 

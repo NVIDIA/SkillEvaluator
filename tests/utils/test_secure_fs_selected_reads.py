@@ -52,7 +52,8 @@ def test_windows_selected_file_handle_denies_concurrent_write_and_delete(
         SimpleNamespace(open_osfhandle=lambda _handle, flags: opened_flags.append(flags) or 300),
     )
 
-    assert root._open_windows(Path("summary.json"), None) == 300
+    descriptor, _metadata = root._open_windows_file(Path("summary.json"), None)
+    assert descriptor == 300
     assert captured["share"] == 0x1  # FILE_SHARE_READ only
     assert int(opened_flags[0]) & 0x8000  # O_BINARY
 
@@ -65,7 +66,7 @@ def test_windows_selected_file_is_immutable_until_reader_handle_closes(tmp_path:
     selected.write_text("original", encoding="utf-8")
 
     with SecureRoot(root) as secure_root:
-        descriptor = secure_root._open_windows(Path("summary.json"), selected.lstat())
+        descriptor, _metadata = secure_root._open_windows_file(Path("summary.json"), selected.lstat())
         try:
             with pytest.raises(OSError):
                 selected.write_text("changed", encoding="utf-8")

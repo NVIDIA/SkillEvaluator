@@ -926,14 +926,6 @@ class SecureRoot:
             return self._open_windows_file(relative_path, expected, allow_hardlinks=allow_hardlinks)
         raise SecurePathError("secure_open_unavailable", "Secure no-follow reads are unavailable.")
 
-    def _open_posix(self, relative_path: Path, expected: os.stat_result | None) -> int:
-        """Return only the descriptor of :meth:`_open_posix_file` (kept for ``plugin_manifest``)."""
-        return self._open_posix_file(relative_path, expected)[0]
-
-    def _open_windows(self, relative_path: Path, expected: os.stat_result | None) -> int:
-        """Return only the descriptor of :meth:`_open_windows_file` (kept for ``plugin_manifest``)."""
-        return self._open_windows_file(relative_path, expected)[0]
-
     def _open_posix_file(
         self,
         relative_path: Path,

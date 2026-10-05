@@ -48,14 +48,14 @@ from skillevaluator.constants import (
     PLUGIN_CURSOR_MANIFEST_TYPE,
 )
 from skillevaluator.models.result import Finding, Severity
+from skillevaluator.plugin_paths import PLUGIN_CATEGORY
 from skillevaluator.validators.mcp_static import (
     TRUTHY_VALUES,
     EndpointClass,
     HostAllowlist,
-    OverrideIssue,
     classify_endpoint_host,
     classify_mcp_pinning,
-    permission_flag_issues,
+    parse_mcp_runner,
 )
 from skillevaluator.validators.url_policy import (
     DEFAULT_PORTS,
@@ -70,9 +70,6 @@ from skillevaluator.validators.url_policy import (
 
 # Report text: whitespace collapsed, URL userinfo removed, credentials redacted, length bounded.
 _bounded = report_text
-
-# The category of every plugin component finding; a policy overlay changes a severity with PLUGIN_SCHEMA.<check>.
-PLUGIN_CATEGORY = "PLUGIN_SCHEMA"
 
 # Documented Claude Code hook events (hooks reference). Unknown events are still
 # recorded, with the ``unknown_event`` flag, because newer releases add events.
@@ -133,6 +130,8 @@ MAX_RUN_SITES = 2048
 MAX_TOOL_ENTRIES = 256
 MAX_MATCHER_CHARS = 256
 MAX_OUTSIDE_REFS = 5
+# Tool grants, allow rules, or server names one finding message quotes (the finding covers them all).
+MAX_QUOTED_ENTRIES = 8
 
 _WILDCARD_TOOLS = frozenset({"*", "*(*)", "mcp__*", "mcp__*__*"})
 # Claude Code reads a matcher of only these characters as an exact tool name or '|' list, not a regex.
@@ -305,7 +304,6 @@ _MAX_DIR_DEPTH = 8
 _PLUGIN_DATA_REFS: tuple[str, ...] = ("$CLAUDE_PLUGIN_DATA",)
 # Package runners that fetch and run a package (the MCP pinning classifier decides each one).
 _RUNNER_HINT_RE = re.compile(r"\b(?:npx|bunx|pnpx|pnpm|yarn|npm|uvx|uv|pipx|deno)\b", re.IGNORECASE)
-_RUNNER_NAMES = frozenset({"npx", "bunx", "pnpx", "pnpm", "yarn", "npm", "uvx", "uv", "pipx", "deno"})
 _COMMAND_PREFIX_WORDS = frozenset(
     {"sudo", "doas", "env", "exec", "command", "nohup", "nice", "time", "then", "do", "else", "if", "!", "(", "{"}
 )
@@ -579,15 +577,6 @@ def is_broad_allow_rule(rule: str) -> bool:
 PERMISSIVE_PERMISSION_MODES: frozenset[str] = frozenset({"acceptEdits", "auto"})
 
 
-def permission_mode_flag_issues(value: Any) -> list[OverrideIssue]:
-    """The MEDIUM part of :func:`~skillevaluator.validators.mcp_static.permission_flag_issues`.
-
-    ``--permission-mode acceptEdits`` or ``auto`` (in any letter case) in any config string or argv list. A
-    caller that also needs the permission-bypass flags gets both from one ``permission_flag_issues`` walk.
-    """
-    return [issue for issue in permission_flag_issues(value) if issue.concept == "permission_mode_flag"]
-
-
 def _bash_grant_label(entry: str) -> str:
     if bash_rule_risk(entry) == "interpreter":
         return (
@@ -817,7 +806,7 @@ def analyze_agent(
                 component_finding(
                     Severity.MEDIUM,
                     "plugin_agent_wildcard_tools",
-                    f"subagent '{name}' lists a wildcard tool grant ({', '.join(wildcards[:8])})",
+                    f"subagent '{name}' lists a wildcard tool grant ({', '.join(wildcards[:MAX_QUOTED_ENTRIES])})",
                     file_path,
                     "List the specific tools the subagent needs instead of a wildcard.",
                     component=component,
@@ -825,7 +814,7 @@ def analyze_agent(
             )
     elif write_capable_mcp and not _disallows_all_mcp(disallowed, write_capable_mcp, plugin_name):
         record.flags.append("inherits_all_tools_with_write_mcp")
-        servers = ", ".join(write_capable_mcp[:8])
+        servers = ", ".join(write_capable_mcp[:MAX_QUOTED_ENTRIES])
         example = (
             plugin_mcp_tool_prefix(plugin_name, write_capable_mcp[0])
             if plugin_name and plugin_name.strip()
@@ -945,7 +934,8 @@ def _analyze_allowed_tools(
             component_finding(
                 Severity.MEDIUM,
                 f"plugin_{kind}_wildcard_tools",
-                f"{kind} '{name}' pre-approves a wildcard tool grant ({', '.join(wildcards[:8])}); {invocation}",
+                f"{kind} '{name}' pre-approves a wildcard tool grant ({', '.join(wildcards[:MAX_QUOTED_ENTRIES])}); "
+                f"{invocation}",
                 file_path,
                 f"List the specific tools the {kind} needs in allowed-tools instead of a wildcard.",
                 component=component,
@@ -2189,14 +2179,14 @@ def _package_runs(commands: list[str]) -> tuple[_PackageRun, ...]:
                 index += 1
             if index >= len(words):
                 continue
-            runner = words[index]
-            base = runner.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe").removesuffix(".cmd")
-            if base not in _RUNNER_NAMES:
-                continue
-            pin = classify_mcp_pinning({"command": runner, "args": words[index + 1 :]})
+            # The stage is read like an MCP server command, so its runner and pin match the MCP checks.
+            declaration = {"command": words[index], "args": words[index + 1 :]}
+            invocation = parse_mcp_runner(declaration)
+            if invocation is None or invocation.ecosystem == "container":
+                continue  # not a package runner (a container run is not one; see _RUNNER_HINT_RE)
+            pin = classify_mcp_pinning(declaration)
             if pin.status == "unpinned":
-                remote = pin.remote
-                runs.append(_PackageRun(_bounded(pin.detail, 160), remote))
+                runs.append(_PackageRun(_bounded(pin.detail, 160), pin.remote))
                 if len(runs) >= MAX_OUTSIDE_REFS:
                     return tuple(runs)
     return tuple(runs)

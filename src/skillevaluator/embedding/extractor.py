@@ -27,6 +27,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.embedding.limits import validate_max_entries
 from skillevaluator.logging_config import get_logger
+from skillevaluator.utils.helpers import preferred_skill_manifests
 from skillevaluator.utils.secure_fs import SecureFile, SecureRoot, discover_secure_files
 from skillevaluator.utils.structured_data import (
     StructuredDataLimitError,
@@ -204,14 +205,12 @@ def _discover(
 
 
 def _preferred_skill_manifests(files: list[SecureFile]) -> list[SecureFile]:
-    """Keep one manifest per skill folder (``SKILL.md`` over ``skill.md``), ordered by folder."""
-    by_folder: dict[Path, dict[str, SecureFile]] = {}
-    for file in files:
-        by_folder.setdefault(file.relative_path.parent, {})[file.relative_path.name] = file
-    return [
-        next(variants[name] for name in SKILL_MANIFEST_VARIANTS if name in variants)
-        for _folder, variants in sorted(by_folder.items(), key=lambda item: item[0].as_posix())
-    ]
+    """Keep one manifest per skill folder (``SKILL.md`` over ``skill.md``), ordered by the folder's POSIX path.
+
+    Extraction keeps that string order (``a-b`` before ``a/b``) rather than the
+    part-by-part order :func:`~skillevaluator.utils.helpers.preferred_skill_manifests` returns.
+    """
+    return sorted(preferred_skill_manifests(files), key=lambda file: file.relative_path.parent.as_posix())
 
 
 def extract_from_skill(skill_dir: Path) -> ContentEntry | None:

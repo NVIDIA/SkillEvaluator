@@ -763,33 +763,36 @@ def _with_report_integration(result: Mapping[str, Any]) -> Mapping[str, Any]:
     The engine result has no ``integration`` block: the reports build it from
     the per-agent scores, the run config and the plugin provenance. Without it
     the CLI said Integration "recorded no sum-of-parts comparison" right above a
-    measured Integration lift. This builds it with the same payload builder the
-    reports use, so the CLI and the reports agree.
+    measured Integration lift. This builds the block the report for this run
+    carries (:func:`~skillevaluator.evaluation.tier3_report.integration_report_for`),
+    so the CLI and the reports agree.
     """
     from skillevaluator.reporting.plugin_sections import is_plugin_payload
 
     if isinstance(result.get("integration"), Mapping) or not is_plugin_payload(result):
         return result
-    agents = result.get("agents")
-    if not isinstance(agents, Mapping):
-        return result
+    raw_agents = result.get("agents")
+    agents = (
+        {str(name): dict(agent) for name, agent in raw_agents.items() if isinstance(agent, Mapping)}
+        if isinstance(raw_agents, Mapping)
+        else {}
+    )
+    if not agents:
+        return result  # without agents the report carries no Integration block either
     run_config = result.get("run_config")
     provenance = result.get("plugin_provenance")
     try:
-        from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+        from skillevaluator.evaluation.tier3_report import integration_report_for
 
-        payload = build_agent_eval_payload(
-            str(result.get("skill_name") or "plugin"),
-            {str(name): dict(agent) for name, agent in agents.items() if isinstance(agent, Mapping)},
-            run_config=dict(run_config) if isinstance(run_config, Mapping) else None,
-            plugin_provenance=dict(provenance) if isinstance(provenance, Mapping) else None,
-            use_llm_judge=False,
+        integration = integration_report_for(
+            agents,
+            dict(run_config) if isinstance(run_config, Mapping) else None,
+            dict(provenance) if isinstance(provenance, Mapping) else None,
         )
     except Exception:  # advisory block: never break the run summary
         logging.getLogger(__name__).debug("Integration block for the run summary skipped", exc_info=True)
         return result
-    integration = (payload or {}).get("integration")
-    if not isinstance(integration, Mapping):
+    if integration is None:
         return result
     return {**result, "integration": integration}
 

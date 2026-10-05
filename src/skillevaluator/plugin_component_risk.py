@@ -49,10 +49,11 @@ from skillevaluator.constants import (
 )
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.validators.mcp_static import (
+    EndpointClass,
+    HostAllowlist,
     OverrideIssue,
     classify_endpoint_host,
     classify_mcp_pinning,
-    host_is_allowlisted,
     permission_flag_issues,
 )
 from skillevaluator.validators.url_policy import (
@@ -2219,47 +2220,50 @@ def hook_url_entry_problem(entry: str) -> str | None:
     return None
 
 
-def _url_under_prefix(url: str, entry: str) -> bool:
-    """Whether ``url`` is under the ``hooks.allowed_urls`` URL prefix ``entry``.
+_UrlParts = tuple[str, str, int | None, str]
 
-    Scheme, host, and effective port must be equal (so ``https://hooks.example.com``
-    does not admit ``https://hooks.example.com.evil.net`` or
-    ``https://hooks.example.com@evil.net``), and the path must be the entry's
-    path or below it on a ``/`` segment boundary (``/hooks`` admits
-    ``/hooks/x`` but not ``/hooksx``). An entry without a path admits every path;
-    an entry with userinfo, a query, or a fragment admits nothing.
-    """
-    if hook_url_entry_problem(entry) is not None:
-        return False
-    target = _url_parts(url)
-    prefix = _url_parts(entry)
-    if target is None or prefix is None or target[:3] != prefix[:3]:
+
+@dataclass(frozen=True)
+class _HookUrlAllowlist:
+    """``hooks.allowed_urls``, parsed once: URL prefixes, and host patterns read like ``mcp.allowed_private_hosts``."""
+
+    # Usable URL prefixes as _url_parts; an entry with userinfo, a query, or a fragment admits nothing.
+    prefixes: tuple[_UrlParts, ...] = ()
+    hosts: HostAllowlist = field(default_factory=HostAllowlist)
+
+    @classmethod
+    def from_entries(cls, entries: Iterable[str]) -> _HookUrlAllowlist:
+        prefixes: list[_UrlParts] = []
+        hosts: list[str] = []
+        for raw in entries:
+            entry = raw.strip()
+            if "://" not in entry:
+                hosts.append(entry)
+            elif hook_url_entry_problem(entry) is None and (parts := _url_parts(entry)) is not None:
+                prefixes.append(parts)
+        return cls(tuple(prefixes), HostAllowlist.from_entries(hosts))
+
+    def matches(self, url: str, host: str | None, endpoint: EndpointClass | None) -> bool:
+        """Whether a hook may post to ``url``, whose client host is ``host`` and static class ``endpoint``.
+
+        A URL prefix needs the same scheme, host, and effective port (so
+        ``https://hooks.example.com`` does not admit ``https://hooks.example.com.evil.net``
+        or ``https://hooks.example.com@evil.net``), and the path must be the
+        prefix's path or below it on a ``/`` segment boundary (``/hooks`` admits
+        ``/hooks/x`` but not ``/hooksx``); a prefix without a path admits every
+        path. A host pattern never admits a cloud metadata host.
+        """
+        target = _url_parts(url) if self.prefixes else None
+        if target is not None and any(_url_is_under(target, prefix) for prefix in self.prefixes):
+            return True
+        return host is not None and self.hosts.allows_host(host, endpoint)
+
+
+def _url_is_under(target: _UrlParts, prefix: _UrlParts) -> bool:
+    if target[:3] != prefix[:3]:
         return False
     base = prefix[3].rstrip("/")
     return not base or target[3] == base or target[3].startswith(base + "/")
-
-
-def _url_matches_allowlist(url: str, host: str | None, allowed: Iterable[str]) -> bool:
-    for raw in allowed:
-        entry = raw.strip()
-        if not entry:
-            continue
-        if "://" in entry:
-            if _url_under_prefix(url, entry):
-                return True
-            continue
-        if host is None:
-            continue
-        endpoint = classify_endpoint_host(host)
-        if endpoint is not None and endpoint.kind == "metadata":
-            continue
-        candidate = host.strip().lower().rstrip(".")
-        pattern = entry.lower().rstrip(".")
-        if pattern == candidate or (pattern.startswith("*.") and candidate.endswith(pattern[1:])):
-            return True
-        if endpoint is not None and host_is_allowlisted(endpoint, [entry]):
-            return True
-    return False
 
 
 def hook_allowlist_hosts(allowed_urls: Iterable[str]) -> list[str]:
@@ -2522,7 +2526,11 @@ class HookAnalyzer:
     ) -> None:
         self.read_script = read_script
         self.hook_allowed_urls = tuple(hook_allowed_urls)
-        self.allowed_private_hosts = (*tuple(allowed_private_hosts), *hook_allowlist_hosts(self.hook_allowed_urls))
+        self._allowed_urls = _HookUrlAllowlist.from_entries(self.hook_allowed_urls)
+        # Private hosts a hook may post to: mcp.allowed_private_hosts and the hosts hooks.allowed_urls names.
+        self._private_hosts = HostAllowlist.from_entries(
+            (*allowed_private_hosts, *hook_allowlist_hosts(self.hook_allowed_urls))
+        )
         self.root_refs = _plugin_root_refs(root_prefixes)
         self._root_ref_re = re.compile(
             "(?:"
@@ -3100,7 +3108,7 @@ class HookAnalyzer:
                         "Reference the secret as $VAR and list it in allowedEnvVars; never inline a credential.",
                     )
                     break
-        allowlisted = bool(self.hook_allowed_urls) and _url_matches_allowlist(client_url, host, self.hook_allowed_urls)
+        allowlisted = bool(self.hook_allowed_urls) and self._allowed_urls.matches(client_url, host, endpoint)
         if endpoint is not None and endpoint.kind == "metadata":
             site.report(
                 "metadata_endpoint",
@@ -3109,7 +3117,7 @@ class HookAnalyzer:
                 f"the http handler targets a cloud instance-metadata endpoint {record.target!r}",
                 "Remove the instance-metadata endpoint; it can never be allowlisted.",
             )
-        elif endpoint is not None and not allowlisted and not host_is_allowlisted(endpoint, self.allowed_private_hosts):
+        elif endpoint is not None and not allowlisted and not self._private_hosts.allows(endpoint):
             site.report(
                 "private_endpoint",
                 Severity.MEDIUM,

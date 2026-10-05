@@ -24,7 +24,7 @@ import pytest
 
 from skillevaluator.constants import CONTENT_TYPE_PLUGIN
 from skillevaluator.models.result import Severity, ValidationResult
-from skillevaluator.plugin_component_risk import _url_matches_allowlist
+from skillevaluator.plugin_component_risk import _HookUrlAllowlist
 from skillevaluator.tier1.commands import run_validation
 from skillevaluator.utils.tool_runner import ExternalTool, ToolResult, Tools
 from skillevaluator.validators import dependency_ecosystems as eco
@@ -385,7 +385,8 @@ def test_clean_hook_urls_are_unchanged(tmp_path: Path) -> None:
 
 def test_hook_allowlist_and_report_url_use_the_clients_reading() -> None:
     url = "https://hooks.example.com/hooks/x\\..\\..\\admin"
-    assert _url_matches_allowlist(url, "hooks.example.com", ["https://hooks.example.com/hooks"]) is False
+    allowed = _HookUrlAllowlist.from_entries(["https://hooks.example.com/hooks"])
+    assert allowed.matches(url, "hooks.example.com", None) is False
     assert safe_url("https://evil.net\\.example.com/x") == "https://evil.net/.example.com/x"
 
 

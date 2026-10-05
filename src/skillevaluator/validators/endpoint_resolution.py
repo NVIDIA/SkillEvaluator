@@ -49,10 +49,10 @@ from skillevaluator.validators.mcp_static import (
 )
 from skillevaluator.validators.mcp_static import (
     EndpointClass,
+    HostAllowlist,
     classify_endpoint_address,
     classify_endpoint_host,
     endpoint_client_host,
-    host_is_allowlisted,
 )
 from skillevaluator.validators.url_policy import safe_url, whatwg_url
 
@@ -220,26 +220,25 @@ def _worst_kind(non_public: list[tuple[str, str, str | None]]) -> str:
     return "private" if non_public else "public"
 
 
-def _address_allowed(host: str, reason: str, address: str | None, allowed_hosts: Iterable[str]) -> bool:
+def _address_allowed(host: str, reason: str, address: str | None, allowed: HostAllowlist) -> bool:
     parsed = None
     if address is not None:
         try:
             parsed = ipaddress.ip_address(address)
         except ValueError:
             parsed = None
-    endpoint = EndpointClass("private", reason, host.lower().rstrip("."), parsed)
-    return host_is_allowlisted(endpoint, allowed_hosts)
+    return allowed.allows(EndpointClass("private", reason, host.lower().rstrip("."), parsed))
 
 
 def blocked_address(
-    host: str, non_public: list[tuple[str, str, str | None]], allowed_hosts: Iterable[str]
+    host: str, non_public: list[tuple[str, str, str | None]], allowed_hosts: HostAllowlist | Iterable[str]
 ) -> tuple[str, str, str | None] | None:
     """The metadata address, else the first non-public address the allowlist does not cover, else ``None``.
 
     Every answer is checked: a client may connect to any of them, and the answer order is attacker-chosen.
     Metadata addresses are never allowlisted.
     """
-    allowed = tuple(allowed_hosts)
+    allowed = HostAllowlist.of(allowed_hosts)
     for row in non_public:
         if row[0] == "metadata":
             return row

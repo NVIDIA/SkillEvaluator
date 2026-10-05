@@ -23,6 +23,7 @@ well-known names only: DNS resolution and HTTP redirects are never evaluated.
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import itertools
 import re
@@ -480,7 +481,7 @@ def _validate_url(
     config: dict[str, Any],
     file_path: str,
     findings: list[Finding],
-    allowed_private_hosts: Iterable[str] = (),
+    allowed_private_hosts: HostAllowlist,
 ) -> None:
     url = config.get("url")
     if not isinstance(url, str) or not url.strip():
@@ -1239,6 +1240,7 @@ _DOT_LOOKALIKES = str.maketrans({chr(0x3002): ".", chr(0xFF0E): ".", chr(0xFF61)
 _ENDPOINT_STATIC_NOTE = "static check only: DNS resolution and HTTP redirects are not evaluated"
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 
 @dataclass(frozen=True)
@@ -1430,40 +1432,77 @@ def classify_endpoint_host(host: str) -> EndpointClass | None:
     )
 
 
-def host_is_allowlisted(endpoint: EndpointClass, allowed_hosts: Iterable[str]) -> bool:
+@dataclass(frozen=True)
+class HostAllowlist:
+    """Host policy entries (``mcp.allowed_private_hosts``, the hosts ``hooks.allowed_urls`` names), parsed once.
+
+    Entries are host names, ``*.suffix`` wildcards, IP literals, or CIDR networks
+    (e.g. ``10.0.0.0/8``), normalized the way WHATWG clients read a host. Cloud
+    metadata endpoints are never allowed.
+    """
+
+    # Exact host names and IP literals, matched by equality.
+    names: frozenset[str] = frozenset()
+    # '.corp.example' for '*.corp.example': hosts below it match, the bare suffix does not.
+    suffixes: tuple[str, ...] = ()
+    # IP literal and CIDR entries, matched against a host's address (and an IPv4 address embedded in it).
+    networks: tuple[IPNetwork, ...] = ()
+
+    @classmethod
+    def from_entries(cls, entries: Iterable[str]) -> HostAllowlist:
+        names: set[str] = set()
+        suffixes: list[str] = []
+        networks: list[IPNetwork] = []
+        for raw in entries:
+            entry = _normalize_host(raw) if isinstance(raw, str) else ""
+            if entry.startswith("*."):
+                suffixes.append(entry[1:])
+            elif entry:
+                names.add(entry)
+                with contextlib.suppress(ValueError):  # a host name, not an IP literal or network
+                    networks.append(ipaddress.ip_network(entry, strict=False))
+        return cls(frozenset(names), tuple(dict.fromkeys(suffixes)), tuple(dict.fromkeys(networks)))
+
+    @classmethod
+    def of(cls, entries: HostAllowlist | Iterable[str]) -> HostAllowlist:
+        """``entries`` itself when already parsed, else parsed from policy strings."""
+        return entries if isinstance(entries, HostAllowlist) else cls.from_entries(entries)
+
+    def allows(self, endpoint: EndpointClass) -> bool:
+        """Whether an entry covers a non-public endpoint, by its host name or by a network holding its address."""
+        if endpoint.kind == "metadata":
+            return False
+        if endpoint.host in self.names or endpoint.host.endswith(self.suffixes):
+            return True
+        candidates = [] if endpoint.address is None else [endpoint.address, _embedded_ipv4(endpoint.address)]
+        return any(
+            candidate is not None and candidate.version == network.version and candidate in network
+            for candidate in candidates
+            for network in self.networks
+        )
+
+    def allows_host(self, host: str, endpoint: EndpointClass | None) -> bool:
+        """Whether an entry covers ``host``, whose static class is ``endpoint`` (``None`` when it looks public).
+
+        A public-looking host matches by name only, so a public IP literal entry
+        admits exactly that literal; a non-public host is checked by :meth:`allows`.
+        """
+        if endpoint is not None:
+            return self.allows(endpoint)
+        normalized = _normalize_host(host)
+        return bool(normalized) and (normalized in self.names or normalized.endswith(self.suffixes))
+
+
+def host_is_allowlisted(endpoint: EndpointClass, allowed_hosts: HostAllowlist | Iterable[str]) -> bool:
     """True when a policy entry allows this private host.
 
     Entries are exact host names, ``*.suffix`` wildcards, IP literals, or CIDR
     networks (e.g. ``10.0.0.0/8``). Cloud metadata endpoints are never allowlisted.
     """
-    if endpoint.kind == "metadata":
-        return False
-    candidates: list[IPAddress] = []
-    if endpoint.address is not None:
-        candidates.append(endpoint.address)
-        inner = _embedded_ipv4(endpoint.address)
-        if inner is not None:
-            candidates.append(inner)
-    for raw in allowed_hosts:
-        if not isinstance(raw, str):
-            continue
-        entry = _normalize_host(raw)
-        if not entry:
-            continue
-        if entry.startswith("*.") and endpoint.host.endswith(entry[1:]):
-            return True
-        if entry == endpoint.host:
-            return True
-        try:
-            network = ipaddress.ip_network(entry, strict=False)
-        except ValueError:
-            continue
-        if any(candidate.version == network.version and candidate in network for candidate in candidates):
-            return True
-    return False
+    return HostAllowlist.of(allowed_hosts).allows(endpoint)
 
 
-def host_name_is_allowlisted(host: str, allowed_hosts: Iterable[str]) -> bool:
+def host_name_is_allowlisted(host: str, allowed_hosts: HostAllowlist | Iterable[str]) -> bool:
     """True when a policy entry names this host (exact name or ``*.suffix``).
 
     Only host names match here: IP literals and CIDR entries are checked against
@@ -1471,18 +1510,9 @@ def host_name_is_allowlisted(host: str, allowed_hosts: Iterable[str]) -> bool:
     names are never allowlisted.
     """
     normalized = _normalize_host(host)
-    if not normalized or normalized in _METADATA_HOSTNAMES:
+    if not normalized or _parse_host_address(normalized)[0] is not None:
         return False
-    address, _encoded = _parse_host_address(normalized)
-    if address is not None:
-        return False
-    for raw in allowed_hosts:
-        if not isinstance(raw, str):
-            continue
-        entry = _normalize_host(raw)
-        if entry and (entry == normalized or (entry.startswith("*.") and normalized.endswith(entry[1:]))):
-            return True
-    return False
+    return HostAllowlist.of(allowed_hosts).allows_host(normalized, classify_endpoint_host(normalized))
 
 
 def _validate_endpoint(
@@ -1491,7 +1521,7 @@ def _validate_endpoint(
     host: str | None,
     file_path: str,
     findings: list[Finding],
-    allowed_private_hosts: Iterable[str],
+    allowed_private_hosts: HostAllowlist,
 ) -> None:
     if not host:
         return
@@ -1513,7 +1543,7 @@ def _validate_endpoint(
             )
         )
         return
-    if host_is_allowlisted(endpoint, allowed_private_hosts):
+    if allowed_private_hosts.allows(endpoint):
         return
     findings.append(
         _finding(
@@ -1903,13 +1933,15 @@ def validate_mcp_server_declaration(
     config: Any,
     file_path: str,
     *,
-    allowed_private_hosts: Iterable[str] = (),
+    allowed_private_hosts: HostAllowlist | Iterable[str] = (),
 ) -> list[Finding]:
     """Statically validate one contained ``mcpServers`` entry (``name`` -> config).
 
     ``allowed_private_hosts`` comes from the validation policy
     (``mcp.allowed_private_hosts``) and suppresses ``mcp_endpoint_private`` for
-    intended private hosts; cloud metadata endpoints are never allowlisted.
+    intended private hosts; cloud metadata endpoints are never allowlisted. A
+    caller that validates many servers can parse it once with
+    :meth:`HostAllowlist.from_entries` and pass that.
     """
     findings: list[Finding] = []
 
@@ -1977,7 +2009,7 @@ def validate_mcp_server_declaration(
         _validate_command(name, config, file_path, findings)
         _validate_pinning(name, config, file_path, findings)
     if has_url:
-        _validate_url(name, config, file_path, findings, allowed_private_hosts)
+        _validate_url(name, config, file_path, findings, HostAllowlist.of(allowed_private_hosts))
     if has_provider and not (has_command or has_url):
         provider = config.get("provider")
         if not isinstance(provider, str) or not provider.strip():

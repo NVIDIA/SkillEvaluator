@@ -15,7 +15,7 @@ import pytest
 from skillevaluator.models.result import Severity, ValidationResult
 from skillevaluator.plugin_component_risk import (
     _fetches_remote_code,
-    _url_matches_allowlist,
+    _HookUrlAllowlist,
     hook_allowlist_hosts,
     matcher_scope,
     mcp_server_is_read_only,
@@ -551,7 +551,18 @@ def test_http_hook_allowlist_policy(tmp_path: Path) -> None:
     ],
 )
 def test_hook_url_allowlist_compares_parsed_urls(entry: str, url: str, allowed: bool) -> None:
-    assert _url_matches_allowlist(url, urlparse(url).hostname, [entry]) is allowed
+    assert _HookUrlAllowlist.from_entries([entry]).matches(url, urlparse(url).hostname, None) is allowed
+
+
+def test_hook_host_patterns_match_the_host_clients_connect_to(tmp_path: Path) -> None:
+    # Node posts 'https://\uff48\uff4f\uff4f\uff4b\uff53.example.com/' to hooks.example.com (IDNA maps full-width letters).
+    url = "https://\uff48\uff4f\uff4f\uff4b\uff53.example.com/x"
+    root = _plugin(tmp_path, files={"hooks/hooks.json": _http_hook(url)})
+
+    result = _validate(root, ValidationPolicy(hook_allowed_urls=("hooks.example.com",)))
+
+    assert "plugin_hook_http_url_not_allowed" not in _checks(result)
+    assert _HookUrlAllowlist.from_entries(["*.example.com"]).matches(url, urlparse(url).hostname, None)
 
 
 def test_unusable_hook_url_entries_imply_no_allowed_host() -> None:

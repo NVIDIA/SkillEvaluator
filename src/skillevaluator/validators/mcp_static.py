@@ -79,23 +79,6 @@ _SHELL_INLINE_PROGRAM_FLAG_RE = re.compile(r"[-+][A-Za-z]*c[A-Za-z]*")
 # '--init-file file', and '-o name' / '-O name' (also '+o', '+O', and inside a
 # cluster such as '-eo pipefail').
 _SHELL_VALUE_LONG_OPTIONS: frozenset[str] = frozenset({"--rcfile", "--init-file"})
-# fish runs a program from '-c' / '--command' and from '-C' / '--init-command' (before its
-# script), and its '-d', '-o', '-f', '-p' (and their long forms) take a value.
-_FISH_INLINE_PROGRAM_LONG_OPTIONS: tuple[str, ...] = ("command", "init-command")
-_FISH_VALUE_LETTERS = frozenset("dofp")
-_FISH_VALUE_LONG_OPTIONS: tuple[str, ...] = (
-    "debug",
-    "debug-output",
-    "debug-stack-frames",
-    "features",
-    "profile",
-    "profile-startup",
-)
-# env options (GNU and BSD) whose value is the rest of the word or the next argument; '-S' /
-# '--split-string' also splits its value into the arguments env reads next.
-_ENV_VALUE_LETTERS = frozenset("uCPaLU")
-_ENV_VALUE_LONG_OPTIONS: tuple[str, ...] = ("unset", "chdir", "argv0")
-_ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_]\w*=")
 # Floating / non-pinned version markers (supply-chain drift risk).
 _FLOATING_MARKERS: tuple[str, ...] = ("@latest", "@main", "@master", "@head", "@next", "@canary", ":latest", ":main")
 # A marker counts only when it is attached to a package or image name ("pkg@latest",
@@ -356,6 +339,25 @@ def _check_command(server: _ServerFindings, config: dict[str, Any]) -> None:
             "program string",
             "Invoke the server binary directly instead of wrapping it in a shell '-c' string.",
         )
+
+
+# fish runs a program from '-c' / '--command' and from '-C' / '--init-command' (before its
+# script), and its '-d', '-o', '-f', '-p' (and their long forms) take a value.
+_FISH_INLINE_PROGRAM_LONG_OPTIONS: tuple[str, ...] = ("command", "init-command")
+_FISH_VALUE_LETTERS = frozenset("dofp")
+_FISH_VALUE_LONG_OPTIONS: tuple[str, ...] = (
+    "debug",
+    "debug-output",
+    "debug-stack-frames",
+    "features",
+    "profile",
+    "profile-startup",
+)
+# env options (GNU and BSD) whose value is the rest of the word or the next argument; '-S' /
+# '--split-string' also splits its value into the arguments env reads next.
+_ENV_VALUE_LETTERS = frozenset("uCPaLU")
+_ENV_VALUE_LONG_OPTIONS: tuple[str, ...] = ("unset", "chdir", "argv0")
+_ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_]\w*=")
 
 
 def _shell_invocation(command: str, args: list[str]) -> tuple[str, list[str]] | None:

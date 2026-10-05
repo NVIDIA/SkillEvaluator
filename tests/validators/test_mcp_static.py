@@ -85,6 +85,22 @@ def test_command_shell_interpreter_dash_c_is_blocked() -> None:
         {"command": "bash", "args": ["--rcfile", "x", "-c", "startserver"]},
         {"command": "bash", "args": ["--init-file", "x", "-c", "startserver"]},
         {"command": "C:\\Program Files\\Git\\bin\\bash.exe", "args": ["-l", "-c", "startserver"]},
+        # Through an env wrapper: its options, NAME=value assignments, and -S string are looked through.
+        {"command": "env", "args": ["bash", "-c", "startserver"]},
+        {"command": "/usr/bin/env", "args": ["-i", "PATH=/bin", "sh", "-c", "startserver"]},
+        {"command": "env -u HOME bash -lc startserver"},
+        {"command": "env", "args": ["-S", "bash -c 'startserver'"]},
+        {"command": "env", "args": ["--split-string=sh -c startserver"]},
+        {"command": "env", "args": ["--", "env", "A=1", "bash", "-c", "startserver"]},
+        {"command": "C:\\Program Files\\Git\\usr\\bin\\env.exe", "args": ["bash", "-c", "startserver"]},
+        # fish also runs '-C' / '--init-command', and spells '-c' as '--command' (abbreviations included).
+        {"command": "fish", "args": ["-C", "startserver"]},
+        {"command": "fish", "args": ["--command", "startserver"]},
+        {"command": "fish", "args": ["--init-command=startserver", "script.fish"]},
+        {"command": "fish", "args": ["--comm", "startserver"]},
+        {"command": "fish", "args": ["-d", "3", "-c", "startserver"]},
+        {"command": "fish", "args": ["-d", "-c", "startserver"]},
+        {"command": "env", "args": ["fish", "-l", "-C", "startserver"]},
     ],
 )
 def test_command_shell_inline_program_forms_are_blocked(config) -> None:
@@ -105,6 +121,13 @@ def test_command_shell_inline_program_forms_are_blocked(config) -> None:
         {"command": "bash", "args": ["--", "server.sh", "-c"]},
         {"command": "node", "args": ["--config", "x"]},
         {"command": "python", "args": ["-c", "print(1)"]},
+        {"command": "env", "args": ["node", "server.js"]},
+        {"command": "env", "args": ["-u", "-c", "node", "server.js"]},
+        {"command": "env", "args": ["bash", "server.sh", "-c"]},
+        {"command": "fish", "args": ["script.fish", "-C", "x"]},
+        {"command": "fish", "args": ["-o", "log.txt", "script.fish", "-c"]},
+        # bash's '-C' is noclobber, not a program.
+        {"command": "bash", "args": ["-C", "script.sh"]},
     ],
 )
 def test_command_without_shell_inline_program_is_not_dangerous_form(config) -> None:

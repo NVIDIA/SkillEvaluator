@@ -26,8 +26,9 @@ from __future__ import annotations
 import ipaddress
 import itertools
 import re
+import shlex
 import unicodedata
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import unquote, urlparse, urlunparse
@@ -75,6 +76,23 @@ _SHELL_INLINE_PROGRAM_FLAG_RE = re.compile(r"[-+][A-Za-z]*c[A-Za-z]*")
 # '--init-file file', and '-o name' / '-O name' (also '+o', '+O', and inside a
 # cluster such as '-eo pipefail').
 _SHELL_VALUE_LONG_OPTIONS: frozenset[str] = frozenset({"--rcfile", "--init-file"})
+# fish runs a program from '-c' / '--command' and from '-C' / '--init-command' (before its
+# script), and its '-d', '-o', '-f', '-p' (and their long forms) take a value.
+_FISH_INLINE_PROGRAM_LONG_OPTIONS: tuple[str, ...] = ("command", "init-command")
+_FISH_VALUE_LETTERS = frozenset("dofp")
+_FISH_VALUE_LONG_OPTIONS: tuple[str, ...] = (
+    "debug",
+    "debug-output",
+    "debug-stack-frames",
+    "features",
+    "profile",
+    "profile-startup",
+)
+# env options (GNU and BSD) whose value is the rest of the word or the next argument; '-S' /
+# '--split-string' also splits its value into the arguments env reads next.
+_ENV_VALUE_LETTERS = frozenset("uCPaLU")
+_ENV_VALUE_LONG_OPTIONS: tuple[str, ...] = ("unset", "chdir", "argv0")
+_ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_]\w*=")
 # Floating / non-pinned version markers (supply-chain drift risk).
 _FLOATING_MARKERS: tuple[str, ...] = ("@latest", "@main", "@master", "@head", "@next", "@canary", ":latest", ":main")
 # A marker counts only when it is attached to a package or image name ("pkg@latest",
@@ -335,17 +353,8 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
             )
 
     # Shell interpreter invoked with an inline program string (`sh -c "..."`, `bash -lc "..."`).
-    command_words = command.split()
-    shell_args: list[str] | None = None
-    if _command_basename(command) in _SHELL_INTERPRETERS:
-        # 'command' names only the shell, possibly as a path with spaces such as
-        # "C:\Program Files\Git\bin\bash.exe", so every shell option is in 'args'.
-        shell_args = arg_list
-    elif _command_basename(command_words[0]) in _SHELL_INTERPRETERS:
-        # A whole command line in 'command' ("bash -c node") is read argv-style, as
-        # classify_mcp_pinning does.
-        shell_args = [*command_words[1:], *arg_list]
-    if shell_args is not None and _shell_runs_inline_program(shell_args):
+    shell = _shell_invocation(command, arg_list)
+    if shell is not None and _shell_runs_inline_program(shell[1], shell=shell[0]):
         findings.append(
             _finding(
                 Severity.CRITICAL,
@@ -358,26 +367,120 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
         )
 
 
-def _shell_runs_inline_program(shell_args: list[str]) -> bool:
+def _shell_invocation(command: str, args: list[str]) -> tuple[str, list[str]] | None:
+    """``(shell, its arguments)`` when an MCP command runs a shell interpreter, else ``None``.
+
+    'command' may name only the program, possibly as a path with spaces such as
+    "C:\\Program Files\\Git\\bin\\bash.exe", so every option is in 'args'; or it may hold a
+    whole command line ("bash -c node"), which is read argv-style as classify_mcp_pinning
+    does. An ``env`` wrapper is looked through: its options, ``NAME=value`` assignments,
+    and ``-S`` string (``env -i PATH=/bin bash -c ...``, ``/usr/bin/env -S "sh -c ..."``).
+    """
+    if _command_basename(command) in _SHELL_INTERPRETERS | {"env"}:
+        argv = [command, *args]
+    else:
+        argv = [*command.split(), *args]
+    while argv and _command_basename(argv[0]) == "env":
+        argv = _env_command(argv[1:])
+    if argv and _command_basename(argv[0]) in _SHELL_INTERPRETERS:
+        return _command_basename(argv[0]), argv[1:]
+    return None
+
+
+def _env_command(words: list[str]) -> list[str]:
+    """The command line ``env`` runs, given env's arguments: ``env -u X A=1 sh -c y`` runs ``sh -c y``."""
+    index = 0
+    while index < len(words):
+        word = words[index]
+        index += 1
+        if word == "--":
+            break
+        if word == "-" or _ENV_ASSIGNMENT_RE.match(word):  # '-' is the old spelling of '-i'
+            continue
+        if not word.startswith("-"):
+            return words[index - 1 :]
+        takes_value, splits, value = _env_option(word)
+        if takes_value and value is None and index < len(words):
+            value = words[index]
+            index += 1
+        if splits and value:
+            # -S splits its value into arguments that env reads in its place, options and all.
+            words, index = [*_split_words(value), *words[index:]], 0
+    return words[index:]
+
+
+def _env_option(word: str) -> tuple[bool, bool, str | None]:
+    """``(takes a value, splits the value into arguments, the value attached to the word)`` for an env option."""
+    if word.startswith("--"):
+        # GNU env accepts any unambiguous prefix of a long option ('--split' for '--split-string').
+        name, equals, attached = word[2:].partition("=")
+        splits = bool(name) and "split-string".startswith(name)
+        takes_value = splits or (bool(name) and any(option.startswith(name) for option in _ENV_VALUE_LONG_OPTIONS))
+        return takes_value, splits, (attached if equals else None)
+    for position, letter in enumerate(word[1:], start=1):
+        if letter == "S" or letter in _ENV_VALUE_LETTERS:
+            return True, letter == "S", word[position + 1 :] or None
+    return False, False, None
+
+
+def _split_words(text: str) -> list[str]:
+    """Shell words of ``text`` (quotes removed); whitespace split when the quoting is unbalanced."""
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
+
+
+def _shell_runs_inline_program(shell_args: list[str], *, shell: str = "sh") -> bool:
     """Return whether a shell's arguments select an inline program string ('-c').
 
     A shell reads options only until its first operand (the script it runs) or an
     end-of-options marker ('--' or '-'). Later arguments belong to the script, so
-    a script's own '-config' or '-recursive' is not the shell's '-c'.
+    a script's own '-config' or '-recursive' is not the shell's '-c'. fish also runs
+    a program from '-C' / '--init-command' and spells '-c' as '--command'; its
+    arguments are read both ways, so the fish reading can only flag more.
     """
+    if _selects_inline_program(shell_args, _shell_option):
+        return True
+    return shell == "fish" and _selects_inline_program(shell_args, _fish_option)
+
+
+def _selects_inline_program(shell_args: list[str], read_option: Callable[[str], tuple[bool, bool]]) -> bool:
+    """Whether a shell's options, read one by one with ``read_option``, include an inline-program option."""
     index = 0
     while index < len(shell_args):
         arg = shell_args[index].strip()
         if arg in {"-", "--"} or not arg.startswith(("-", "+")):
             return False
-        if _SHELL_INLINE_PROGRAM_FLAG_RE.fullmatch(arg):
+        inline, takes_value = read_option(arg)
+        if inline:
             return True
-        if arg.startswith("--"):
-            takes_value = arg in _SHELL_VALUE_LONG_OPTIONS
-        else:
-            takes_value = "o" in arg or "O" in arg
         index += 2 if takes_value else 1
     return False
+
+
+def _shell_option(arg: str) -> tuple[bool, bool]:
+    """``(runs an inline program, takes the next argument as its value)`` for one sh/bash/zsh/dash/ksh option."""
+    if _SHELL_INLINE_PROGRAM_FLAG_RE.fullmatch(arg):
+        return True, False
+    if arg.startswith("--"):
+        return False, arg in _SHELL_VALUE_LONG_OPTIONS
+    return False, "o" in arg or "O" in arg
+
+
+def _fish_option(arg: str) -> tuple[bool, bool]:
+    """``(runs an inline program, takes the next argument as its value)`` for one fish option."""
+    if arg.startswith("--"):
+        # fish accepts any unambiguous prefix of a long option; an ambiguous one is an error, flagged anyway.
+        name, equals, _value = arg[2:].partition("=")
+        if name and any(option.startswith(name) for option in _FISH_INLINE_PROGRAM_LONG_OPTIONS):
+            return True, False
+        return False, not equals and bool(name) and any(option.startswith(name) for option in _FISH_VALUE_LONG_OPTIONS)
+    letters = arg[1:]
+    if "c" in letters or "C" in letters:
+        return True, False
+    # In a cluster, a value option takes the rest of the word, or the next argument when it ends the word.
+    return False, letters[-1:] in _FISH_VALUE_LETTERS
 
 
 def _validate_url(

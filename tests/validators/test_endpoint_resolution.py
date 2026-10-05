@@ -190,6 +190,61 @@ def test_time_budget_skips_remaining_endpoints() -> None:
     assert [f.check_name for f in findings] == ["endpoint_resolution_incomplete"]
 
 
+def test_a_redirect_target_needs_time_only_when_it_must_be_resolved() -> None:
+    now = [0.0]
+    network = _FakeNetwork({"mcp.example.com": ["93.184.216.34"], "next.example.com": ["93.184.216.35"]})
+
+    def checker(location: str) -> EndpointChecker:
+        def head(*_args: object) -> HeadResult:
+            now[0] += 100.0  # the HEAD uses up the whole budget
+            return HeadResult(302, location)
+
+        now[0] = 0.0
+        return EndpointChecker(resolver=network.resolve, head=head, budget=10.0, clock=lambda: now[0])
+
+    summary, _findings = checker("https://next.example.com/x").check([_target("https://mcp.example.com/mcp")])
+    assert summary["endpoints"][0]["redirect"]["classification"] == "skipped"
+    assert "next.example.com" not in network.resolved
+    assert summary["incomplete"] is True
+
+    summary, findings = checker("http://169.254.169.254/latest").check([_target("https://mcp.example.com/mcp")])
+    assert summary["endpoints"][0]["redirect"]["classification"] == "metadata"
+    assert "endpoint_redirect_metadata" in {finding.check_name for finding in findings}
+
+
+def test_classify_host_resolves_only_public_looking_names() -> None:
+    lookups: list[tuple[str, int]] = []
+
+    def resolve(host: str, port: int) -> list[str]:
+        lookups.append((host, port))
+        return ["93.184.216.34", "10.0.0.5"]
+
+    loopback = er.classify_host("127.0.0.1", 443, (), resolve=resolve)
+    assert (loopback.classification, loopback.blocked) == ("private", ("private", "loopback", "127.0.0.1"))
+    assert er.classify_host("127.0.0.1", 443, ("127.0.0.0/8",), resolve=resolve).blocked is None
+    assert lookups == []
+
+    resolved = er.classify_host("mcp.example.com", 8443, (), resolve=resolve)
+    assert lookups == [("mcp.example.com", 8443)]
+    assert resolved.static is None
+    assert resolved.addresses == ("93.184.216.34", "10.0.0.5")
+    assert (resolved.classification, resolved.blocked) == ("private", ("private", "private (RFC 1918)", "10.0.0.5"))
+    assert er.classify_host("mcp.example.com", 443, ("10.0.0.0/8",), resolve=resolve).blocked is None
+    assert er.classify_host("mcp.example.com", 443, ()).classification == "public"  # no resolver: never looked up
+
+
+def test_dns_resolver_looks_names_up_through_the_module_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, int, float]] = []
+
+    def resolve(host: str, port: int, timeout: float) -> list[str]:
+        seen.append((host, port, timeout))
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(er, "_resolve", resolve)
+    assert er.classify_host("h.example", 443, (), resolve=er.dns_resolver(1.5)).addresses == ("93.184.216.34",)
+    assert seen == [("h.example", 443, 1.5)]
+
+
 # --------------------------------------------------------------------------- #
 # Plugin schema integration                                                   #
 # --------------------------------------------------------------------------- #

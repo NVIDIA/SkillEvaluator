@@ -24,7 +24,7 @@ import pytest
 
 from skillevaluator.constants import CONTENT_TYPE_PLUGIN
 from skillevaluator.models.result import Severity, ValidationResult
-from skillevaluator.plugin_component_risk import _url_matches_allowlist, safe_url
+from skillevaluator.plugin_component_risk import _HookUrlAllowlist
 from skillevaluator.tier1.commands import run_validation
 from skillevaluator.utils.tool_runner import ExternalTool, ToolResult, Tools
 from skillevaluator.validators import dependency_ecosystems as eco
@@ -33,6 +33,7 @@ from skillevaluator.validators.endpoint_resolution import EndpointChecker, Endpo
 from skillevaluator.validators.mcp_static import classify_endpoint_address
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.policy import ValidationPolicy, load_policy_file
+from skillevaluator.validators.url_policy import safe_url
 
 
 class _FakeTool:
@@ -296,7 +297,7 @@ def test_hook_urls_read_the_same_host_and_path_as_node(url: str, node_host: str,
     import posixpath
     from urllib.parse import urlsplit
 
-    from skillevaluator.validators.mcp_static import whatwg_url
+    from skillevaluator.validators.url_policy import whatwg_url
 
     parsed = urlsplit(whatwg_url(url))
     assert parsed.hostname == node_host
@@ -384,7 +385,8 @@ def test_clean_hook_urls_are_unchanged(tmp_path: Path) -> None:
 
 def test_hook_allowlist_and_report_url_use_the_clients_reading() -> None:
     url = "https://hooks.example.com/hooks/x\\..\\..\\admin"
-    assert _url_matches_allowlist(url, "hooks.example.com", ["https://hooks.example.com/hooks"]) is False
+    allowed = _HookUrlAllowlist.from_entries(["https://hooks.example.com/hooks"])
+    assert allowed.matches(url, "hooks.example.com", None) is False
     assert safe_url("https://evil.net\\.example.com/x") == "https://evil.net/.example.com/x"
 
 
@@ -821,7 +823,7 @@ def test_redirect_locations_are_classified_where_node_would_follow_them(
 def test_whatwg_url_resolves_to_the_host_node_uses(location: str, node_host: str, expected: str) -> None:
     from urllib.parse import urlsplit
 
-    from skillevaluator.validators.mcp_static import whatwg_url
+    from skillevaluator.validators.url_policy import whatwg_url
 
     resolved = urlsplit(whatwg_url(location, "https://pub.example/mcp"))
     assert _canonical_host(resolved.hostname or "") == _canonical_host(node_host)

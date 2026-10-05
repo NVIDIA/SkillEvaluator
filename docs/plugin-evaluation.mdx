@@ -719,7 +719,7 @@ checks are skipped when a plugin bundles no skills.
 | `plugin_settings_permission_mode` | MEDIUM | Shipped settings set `permissions.defaultMode` to `acceptEdits` or `auto` |
 | `plugin_settings_auto_approve` | MEDIUM | Shipped settings set `enableAllProjectMcpServers` |
 | `plugin_permission_bypass_flag` | HIGH | A hook, LSP server, monitor, or settings file contains an agent permission-bypass flag or option, the same forms as `mcp_permission_bypass_flag`. That includes Codex's `--dangerously-bypass-hook-trust`, `--ask-for-approval never` (`-a never`), and `-c approval_policy=never`. The short `-a never` and the `-c` / `--config` overrides count only after a `codex` command in the same string or argv, so `grep -a never file` is not flagged |
-| `plugin_permission_mode_flag` | MEDIUM | A hook, LSP server, monitor, or settings file passes `--permission-mode auto` or `--permission-mode acceptEdits` to an agent CLI |
+| `plugin_permission_mode_flag` | MEDIUM | A hook, LSP server, monitor, or settings file passes `--permission-mode auto` or `--permission-mode acceptEdits` (in any letter case) to an agent CLI |
 | `plugin_lsp_command_*`, `plugin_lsp_unpinned_package` | as for MCP | An `.lsp.json` server's `command` and `args` get the MCP stdio command checks: a shell `-c` program (`plugin_lsp_command_dangerous_form`, CRITICAL), shell metacharacters, inline credentials, floating versions, and unpinned package runners |
 | `plugin_permission_bypass_scan_truncated` | HIGH | A hook, LSP server, monitor, or settings config is too large to scan completely for bypass flags |
 | `plugin_env_code_injection` | HIGH | Settings or LSP `env` preloads code (`LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, or `NODE_OPTIONS` with `--require`, `-r`, `--import`, `--loader`, or `--experimental-loader`) |
@@ -781,7 +781,10 @@ with totals by flag, event, and handler type. Handlers listed directly under an
 event, the flat shape Cursor and Agent Plugins client extensions such as
 `com.cursor/` and `com.github.copilot/` use, are read as one-handler matcher
 groups. User information is removed from every target and URL in the reports,
-even when the URL does not parse.
+even when the URL does not parse, and a value shaped like a known token
+(`ghp_…`, `glpat-…`, `xoxb-…`, `sk-…`, a JWT, or a private key) is shown as
+`<redacted>`, also inside a URL path. MCP command findings never echo an
+argument that holds a credential.
 
 Each client's own hook semantics apply. Claude Code and Codex use the events
 and outputs above. Cursor (and an Agent Plugins `com.cursor/` namespace) adds
@@ -913,7 +916,7 @@ stages a server.
     | Check | Severity | Flags |
     | --- | --- | --- |
     | `mcp_command_shell_metacharacters` | CRITICAL | `;`, `\|`, `&`, a backtick, `$(`, `<(`, `>(`, `<`, `>`, or a newline in `command` or `args`. MCP commands run argv-style, not through a shell |
-    | `mcp_command_dangerous_form` | CRITICAL | A shell interpreter (`sh`, `bash`, `zsh`, `dash`, `ksh`, or `fish`) invoked with `-c` (or `+c`), alone or in a short-option cluster such as `-lc`. Only the shell's own options count: arguments after the script path or `--` belong to the script, so `bash server.sh -config x.yml` is not flagged |
+    | `mcp_command_dangerous_form` | CRITICAL | A shell interpreter (`sh`, `bash`, `zsh`, `dash`, `ksh`, or `fish`) invoked with `-c` (or `+c`), alone or in a short-option cluster such as `-lc`, or fish with `-C`, `--command`, or `--init-command`. An `env` wrapper is looked through (`env -i PATH=/bin bash -c …`, `env -S "sh -c …"`). Only the shell's own options count: arguments after the script path or `--` belong to the script, so `bash server.sh -config x.yml` is not flagged |
     | `mcp_command_inline_secret` | CRITICAL | A credential-named flag with a literal value, or an argument shaped like a known secret or a `Bearer`/`Basic` credential |
     | `mcp_command_disables_tls` | CRITICAL | `--insecure`, `-k`, `--no-check-certificate`, `--tls-no-verify`, `--ssl-no-verify`, or `--no-verify-tls` |
     | `mcp_command_floating_version` | HIGH | A floating marker on a package or image name: `@latest`, `@main`, `@master`, `@head`, `@next`, `@canary`, `:latest`, or `:main`. An npm scope such as `@nextcloud/` is not a marker |
@@ -942,7 +945,7 @@ stages a server.
     | Check | Severity | Flags |
     | --- | --- | --- |
     | `mcp_inline_secret` | CRITICAL | An `env` or `headers` value that is a literal credential rather than a `$VAR` or `${VAR}` reference |
-    | `mcp_url_inline_secret` | CRITICAL | Credentials in the URL's user information or a credential-named query parameter |
+    | `mcp_url_inline_secret` | CRITICAL | Credentials in the URL: any user information (even `${VAR}`, because clients send it with every request), a credential-named query parameter with a literal value, or a query value shaped like a known secret under any name (`?q=sk-…`). HTTP hooks use the same URL rules |
     | `mcp_insecure_tls_env` | CRITICAL | `NODE_TLS_REJECT_UNAUTHORIZED=0`, `PYTHONHTTPSVERIFY=0`, or a truthy `GIT_SSL_NO_VERIFY`, `CURL_INSECURE`, `SSL_NO_VERIFY`, `TLS_INSECURE`, or `SSL_VERIFY_NONE` |
     | `mcp_insecure_flag` | CRITICAL | `insecure: true` |
     | `mcp_insecure_tls_config` | CRITICAL | A `tls` or `ssl` block with `rejectUnauthorized: false` or `verify: false` |

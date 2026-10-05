@@ -285,11 +285,45 @@ def test_url_findings_never_echo_userinfo_or_query_credentials(url: str, check: 
     assert repr(shown) in next(f for f in findings if f.check_name == check).message
 
 
+def test_url_findings_show_a_bounded_url_where_clients_connect() -> None:
+    """Regression: MCP messages printed the whole path, and urllib's reading of 'https:user:pw@host'."""
+    long_path = "https://10.0.0.5/" + "a" * 5_000
+    [private] = validate_mcp_server_declaration("s", {"url": long_path}, "p.json")
+    assert len(private.message) < 600
+
+    findings = validate_mcp_server_declaration("s", {"url": "https:admin:hunter2@evil.example/mcp"}, "p.json")
+    secret = next(f for f in findings if f.check_name == "mcp_url_inline_secret")
+    assert "'https://evil.example/mcp'" in secret.message
+    assert "hunter2" not in secret.message
+
+
 @pytest.mark.parametrize("url", [f"https://user:{_URL_SECRET}@[::1/mcp", "https://[bad/mcp?x=1"])
 def test_unparseable_url_authority_is_a_finding_not_a_crash(url: str) -> None:
     findings = validate_mcp_server_declaration("s", {"url": url}, "p.json")
     assert _checks(findings)["mcp_url_malformed_authority"] == Severity.HIGH
     assert all(_URL_SECRET not in f.message for f in findings)
+
+
+@pytest.mark.parametrize(
+    ("host", "loopback"),
+    [
+        ("localhost", True),
+        ("api.localhost", True),
+        ("127.9.9.9", True),
+        ("0x7f.1", True),
+        ("[::1]", True),
+        ("::ffff:127.0.0.1", True),
+        ("2002:7f00:1::", True),
+        ("10.0.0.1", False),
+        ("0.0.0.0", False),
+        ("fe80::1", False),
+        ("169.254.169.254", False),
+    ],
+)
+def test_endpoint_class_marks_loopback_hosts(host: str, loopback: bool) -> None:
+    endpoint = classify_endpoint_host(host)
+    assert endpoint is not None
+    assert endpoint.is_loopback is loopback
 
 
 def test_plaintext_url_still_reports_endpoint_class() -> None:

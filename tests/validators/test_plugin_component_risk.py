@@ -14,16 +14,16 @@ import pytest
 
 from skillevaluator.models.result import Severity, ValidationResult
 from skillevaluator.plugin_component_risk import (
-    _fetches_remote_code,
-    _url_matches_allowlist,
+    _HookUrlAllowlist,
+    _shell_facts,
     hook_allowlist_hosts,
     matcher_scope,
     mcp_server_is_read_only,
     parse_tool_list,
-    safe_url,
 )
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.policy import ValidationPolicy, apply_policy
+from skillevaluator.validators.url_policy import safe_url
 
 _PINNED_FS = {"command": "npx", "args": ["-y", "@scope/fs@1.2.3"]}
 
@@ -366,7 +366,7 @@ def test_remote_code_hooks_are_critical(tmp_path: Path, command: str) -> None:
     ],
 )
 def test_remote_code_forms(command: str) -> None:
-    assert _fetches_remote_code(command)
+    assert _shell_facts(command).remote_code
 
 
 @pytest.mark.parametrize(
@@ -382,7 +382,7 @@ def test_remote_code_forms(command: str) -> None:
     ],
 )
 def test_benign_downloads_are_not_remote_code(command: str) -> None:
-    assert not _fetches_remote_code(command)
+    assert not _shell_facts(command).remote_code
 
 
 def test_remote_code_in_a_referenced_script_is_found(tmp_path: Path) -> None:
@@ -551,7 +551,18 @@ def test_http_hook_allowlist_policy(tmp_path: Path) -> None:
     ],
 )
 def test_hook_url_allowlist_compares_parsed_urls(entry: str, url: str, allowed: bool) -> None:
-    assert _url_matches_allowlist(url, urlparse(url).hostname, [entry]) is allowed
+    assert _HookUrlAllowlist.from_entries([entry]).matches(url, urlparse(url).hostname, None) is allowed
+
+
+def test_hook_host_patterns_match_the_host_clients_connect_to(tmp_path: Path) -> None:
+    # Node posts 'https://\uff48\uff4f\uff4f\uff4b\uff53.example.com/' to hooks.example.com (IDNA maps full-width letters).
+    url = "https://\uff48\uff4f\uff4f\uff4b\uff53.example.com/x"
+    root = _plugin(tmp_path, files={"hooks/hooks.json": _http_hook(url)})
+
+    result = _validate(root, ValidationPolicy(hook_allowed_urls=("hooks.example.com",)))
+
+    assert "plugin_hook_http_url_not_allowed" not in _checks(result)
+    assert _HookUrlAllowlist.from_entries(["*.example.com"]).matches(url, urlparse(url).hostname, None)
 
 
 def test_unusable_hook_url_entries_imply_no_allowed_host() -> None:
@@ -595,6 +606,30 @@ def test_http_hook_inline_credentials(tmp_path: Path) -> None:
     result = _validate(root)
     assert "plugin_hook_inline_secret" in _checks(result)
     assert "zzz" not in json.dumps(result.metadata["plugin"]["hook_risk"])
+
+
+def test_hook_records_never_keep_a_token_from_the_command_line(tmp_path: Path) -> None:
+    """Regression: 'ghp_' and 'glpat-' tokens in a hook command were kept in its report target."""
+    github, gitlab = "ghp_" + "0123456789abcdefghij0123456789abcdef", "glpat-" + "a" * 24
+    command = f"gh auth login --with-token {github} && GITLAB={gitlab} ./sync.sh"
+    hooks = _hooks({"Stop": [{"hooks": [{"type": "command", "command": command}]}]})
+
+    result = _validate(_plugin(tmp_path, files={"hooks/hooks.json": hooks}))
+
+    dumped = json.dumps(result.metadata["plugin"]["hook_risk"])
+    assert github not in dumped and gitlab not in dumped
+    assert "gh auth login --with-token <redacted>" in _hook_rows(result)[0]["target"]
+
+
+def test_a_hook_flag_is_counted_once_however_many_findings_raise_it(tmp_path: Path) -> None:
+    """Regression: URL credentials and a secret header listed 'inline_secret' twice, so by_flag counted 2."""
+    hook = _http_hook("https://deploy:hunter2@hooks.example.com/x", headers={"X-Api-Key": "abcd1234secretvalue"})
+    result = _validate(_plugin(tmp_path, files={"hooks/hooks.json": hook}))
+
+    secrets = [f for f in result.findings if f.check_name == "plugin_hook_inline_secret"]
+    assert [f.severity for f in secrets] == [Severity.CRITICAL, Severity.CRITICAL]
+    assert _hook_rows(result)[0]["risk_flags"].count("inline_secret") == 1
+    assert result.metadata["plugin"]["hook_risk"]["counts"]["by_flag"]["inline_secret"] == 1
 
 
 @pytest.mark.parametrize(

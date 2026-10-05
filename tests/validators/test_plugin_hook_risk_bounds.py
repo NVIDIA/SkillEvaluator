@@ -23,10 +23,12 @@ from skillevaluator.plugin_component_risk import (
     HookAnalyzer,
     HookScriptUnreadable,
     _allow_shapes,
-    _fetches_remote_code,
+    _compiled_matcher,
     _matcher_scope,
+    _shell_facts,
     iter_hook_handlers,
     matcher_scope,
+    matcher_sensitive_tools,
     parse_tool_list,
 )
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
@@ -87,7 +89,7 @@ def test_redos_matchers_are_classified_quickly() -> None:
 def test_remote_code_scan_is_linear_on_padded_scripts() -> None:
     start = time.perf_counter()
     for payload in ("curl ", "iex ", "bash $(", "python3.", "curl -o a | ", "'"):
-        _fetches_remote_code((payload * (MAX_SCRIPT_BYTES // len(payload)))[: MAX_SCRIPT_BYTES - 10])
+        _shell_facts((payload * (MAX_SCRIPT_BYTES // len(payload)))[: MAX_SCRIPT_BYTES - 10])
     assert time.perf_counter() - start < 3.0
 
 
@@ -314,3 +316,12 @@ def test_padded_command_allowed_tools_still_flag_unrestricted_bash(tmp_path: Pat
     assert _checks(result)["plugin_command_unrestricted_bash"] == Severity.HIGH
     [row] = result.metadata["plugin"]["privileges"]["components"]
     assert len(row["allowed_tools"]) == MAX_TOOL_ENTRIES
+
+
+def test_a_matcher_regex_is_parsed_once_for_its_scope_and_its_sensitive_tools() -> None:
+    for cached in (_compiled_matcher, _matcher_scope, matcher_sensitive_tools):
+        cached.cache_clear()
+
+    assert matcher_scope("(Write|Edit)x?") == "narrow"
+    assert matcher_sensitive_tools("(Write|Edit)x?") == ("Write", "Edit", "MultiEdit", "NotebookEdit")
+    assert _compiled_matcher.cache_info().misses == 1

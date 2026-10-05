@@ -23,20 +23,33 @@ well-known names only: DNS resolution and HTTP redirects are never evaluated.
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import itertools
 import re
+import shlex
 import unicodedata
-from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass, field
 from typing import Any, Literal
-from urllib.parse import parse_qs, unquote, urljoin, urlparse, urlunparse
+from urllib.parse import unquote, urlparse
 
 import idna
 
 from skillevaluator.models.plugin import MCP_NAME_PATTERN
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.utils.structured_data import MAX_STRUCTURED_NODES
+from skillevaluator.validators.url_policy import (
+    has_secret_shape,
+    is_credential_name,
+    is_env_reference,
+    looks_like_inline_secret,
+    report_text,
+    safe_url,
+    url_ambiguities,
+    url_credentials,
+    whatwg_url,
+)
 
 CATEGORY = "MCP_DECLARATION"
 
@@ -55,7 +68,7 @@ _MCP_NAME_RE = re.compile(MCP_NAME_PATTERN)
 # Shell metacharacters that enable command chaining, substitution, or redirection.
 # MCP stdio commands are exec'd argv-style (not through a shell), so these have no
 # legitimate purpose in a command/arg and indicate injection or shell smuggling.
-_SHELL_METACHAR_RE = re.compile(r"[;&|`\n\r]|\$\(|<\(|>\(|&&|\|\||[<>]")
+_SHELL_METACHAR_RE = re.compile(r"[;&|`\n\r<>]|\$\(")
 # Interpreters invoked with an inline program string execute arbitrary code.
 _SHELL_INTERPRETERS: frozenset[str] = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
 # A shell's inline-program flag: '-c' alone or inside a short-option cluster
@@ -78,51 +91,18 @@ _FLOATING_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Values that switch an environment or command-line setting on.
+TRUTHY_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 # Command flags that disable TLS/cert verification.
 _INSECURE_TLS_FLAGS: frozenset[str] = frozenset(
     {"--insecure", "-k", "--no-check-certificate", "--tls-no-verify", "--ssl-no-verify", "--no-verify-tls"}
 )
 
-# env-var reference forms that are acceptable in place of an inline secret.
-_ENV_REF_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$|^\$[A-Za-z_][A-Za-z0-9_]*$")
-# env keys that name a credential -- their value must be a reference, never a literal.
-# The auth/bearer/token alternatives are suffix-anchored so benign config keys that
-# merely contain those substrings -- AUTH_TYPE, OAUTH_CLIENT_ID, BEARER_FORMAT,
-# TOKEN_ENDPOINT, TOKEN_TYPE, TOKEN_ISSUER -- are not misread as credentials, while
-# real credential keys (CLIENT_SECRET, AUTH_TOKEN, ACCESS_TOKEN, TOKEN_SECRET) match.
-_SECRET_KEY_RE = re.compile(
-    r"(?i)(secret|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key|credential"
-    r"|bearer[_-]?token|auth[_-](?:key|token|secret|pass(?:word)?)"
-    r"|token(?:[_-](?:secret|key|value|id))?$)"
-)
-# Inline HTTP auth-scheme credential carried in a value (e.g. an Authorization
-# header): "Bearer <token>" / "Basic <base64>" with a real payload. Anchored with a
-# minimum payload length so a "${ENV}" reference or benign prose never matches; this
-# keeps Authorization-style inline secrets covered without keying on the header name.
-_INLINE_AUTH_SCHEME_RE = re.compile(r"(?i)^(?:bearer|basic)\s+[A-Za-z0-9+/._=~-]{12,}$")
-# Known inline-secret value shapes. Only ``search`` truthiness is used.
-#
-# The JWT-like alternative starts only where a run of token characters starts
-# and scans to the run's first ``eyJ`` without ever stepping past one. A later
-# ``eyJ`` in the same run has fewer characters before the run ends, so it can
-# never match when the first one does not. A plain ``eyJ...`` alternative was
-# tried at every ``eyJ`` and scanned to the end of the run each time, which is
-# quadratic on a long ``eyJeyJ...`` value (about 1 s per 64 KB value).
-_SECRET_VALUE_RE = re.compile(
-    r"(sk-[A-Za-z0-9]{16,}"
-    r"|ghp_[A-Za-z0-9]{20,}"
-    r"|glpat-[A-Za-z0-9_-]{20,}"
-    r"|AKIA[0-9A-Z]{16}"
-    r"|xox[baprs]-[A-Za-z0-9-]{10,}"
-    r"|nvapi-[A-Za-z0-9_-]{16,}"
-    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
-    r"|(?<![A-Za-z0-9_-])(?:(?!eyJ)[A-Za-z0-9_-])*eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"
-)
 
-
-def _finding(
+def mcp_finding(
     severity: Severity, check_name: str, message: str, file_path: str, suggestion: str, *, name: str | None = None
 ) -> Finding:
+    """An ``MCP_DECLARATION`` finding; with ``name``, the message starts with ``mcpServers['<name>']: ``."""
     return Finding(
         category=CATEGORY,
         severity=severity,
@@ -135,34 +115,16 @@ def _finding(
     )
 
 
-def _is_env_reference(value: str) -> bool:
-    """True when *value* is an ``$VAR`` / ``${VAR}`` env reference (not a literal)."""
-    return bool(_ENV_REF_RE.match(value.strip()))
+@dataclass
+class _ServerFindings:
+    """Where findings about one ``mcpServers`` entry go; each message starts with ``mcpServers['<name>']: ``."""
 
+    name: str | None
+    file_path: str
+    findings: list[Finding] = field(default_factory=list)
 
-def _looks_like_inline_secret(key: str, value: str) -> bool:
-    """True when an env/header value is an inline credential rather than a reference."""
-    v = value.strip()
-    if not v or _is_env_reference(v):
-        return False
-    if _SECRET_VALUE_RE.search(v):
-        return True
-    # An inline HTTP auth-scheme credential ("Bearer <token>" / "Basic <base64>"),
-    # independent of the key name -- covers Authorization-style headers.
-    if _INLINE_AUTH_SCHEME_RE.match(v):
-        return True
-    # A credential-named key whose value is a non-empty, non-reference literal.
-    return bool(_SECRET_KEY_RE.search(str(key)))
-
-
-def is_env_reference(value: str) -> bool:
-    """Public alias: ``True`` when *value* is a pure ``$VAR`` / ``${VAR}`` reference."""
-    return _is_env_reference(value)
-
-
-def looks_like_inline_secret(key: str, value: str) -> bool:
-    """Public alias: ``True`` when a keyed value is an inline credential rather than a reference."""
-    return _looks_like_inline_secret(key, value)
+    def report(self, severity: Severity, check_name: str, message: str, suggestion: str) -> None:
+        self.findings.append(mcp_finding(severity, check_name, message, self.file_path, suggestion, name=self.name))
 
 
 def _credential_flag_name(token: str) -> str | None:
@@ -170,143 +132,29 @@ def _credential_flag_name(token: str) -> str | None:
 
     Handles ``--api-key`` / ``--api-key=VALUE`` (and short ``-x`` / ``-x=VALUE``)
     forms. The flag name (leading dashes stripped) is matched against the same
-    credential vocabulary used for env keys (:data:`_SECRET_KEY_RE`).
+    credential vocabulary used for env keys (:func:`~skillevaluator.validators.url_policy.is_credential_name`).
     """
     if not token.startswith("-"):
         return None
     flag = token.lstrip("-").split("=", 1)[0]
-    return flag if flag and _SECRET_KEY_RE.search(flag) else None
+    return flag if flag and is_credential_name(flag) else None
 
 
-# Everything after 'scheme:' (and any slashes or backslashes) through the last '@'
-# before the path: userinfo to urllib, and to WHATWG clients, which also read
-# 'https:user:pw@host' and 'https://user:pw\@host' as carrying it.
-_URL_USERINFO_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*:[/\\]*)[^/?#]*@")
+# The old name of url_policy.safe_url, still imported by plugin_components.
+redacted_url = safe_url
 
 
-def redacted_url(url: str) -> str:
-    """URL for finding messages: scheme, host, port, and path only.
-
-    Userinfo, parameters, query, and fragment are dropped so an inline credential
-    is never echoed into reports or CI logs, however the authority is written.
-    """
-    try:
-        parsed = urlparse(_URL_USERINFO_RE.sub(r"\1", url.strip(), count=1))
-    except ValueError:  # e.g. an unbalanced '[' in the authority
-        return "<unparseable URL>"
-    return urlunparse((parsed.scheme, parsed.netloc.rpartition("@")[2], parsed.path, "", "", ""))
-
-
-# --------------------------------------------------------------------------- #
-# WHATWG URL reading                                                          #
-# --------------------------------------------------------------------------- #
-# Node (Claude Code http hooks, MCP SDK fetch), Rust's url crate, and browsers
-# parse URLs with the WHATWG URL Standard. For its "special" schemes it reads a
-# backslash as '/', skips any run of slashes after 'scheme:', and drops tabs and
-# line breaks, where urllib.parse does not. Policy decisions must read the URL
-# the way the client that connects to it does.
-_WHATWG_SPECIAL_SCHEMES = frozenset({"http", "https", "ws", "wss", "ftp"})
-_C0_CONTROL_OR_SPACE = "".join(chr(code) for code in range(0x21))
-# Edge characters that both urllib (str.strip) and WHATWG clients (C0 control or space) drop.
-_ASCII_EDGE_WHITESPACE = "".join(char for char in _C0_CONTROL_OR_SPACE if char.isspace())
-_TAB_OR_NEWLINE_RE = re.compile(r"[\t\n\r]")
-_URL_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):")
-
-
-def _special_scheme_slashes(text: str) -> str:
-    """Read ``\\`` as ``/`` before the query or fragment, as WHATWG does for special schemes."""
-    cut = min((index for index in (text.find("?"), text.find("#")) if index != -1), default=len(text))
-    return text[:cut].replace("\\", "/") + text[cut:]
-
-
-def _url_scheme(text: str) -> str | None:
-    match = _URL_SCHEME_RE.match(text)
-    return match.group(1).lower() if match else None
-
-
-def whatwg_url(url: str, base: str | None = None) -> str:
-    """The absolute URL a WHATWG client resolves ``url`` (against ``base``) to, in a form urllib reads the same way.
-
-    For http(s), ws(s), and ftp URLs the result has ``scheme://`` followed by the
-    authority the client connects to, so ``urlsplit(result).hostname`` is the host
-    Node would use: ``https://evil.net\\.example.com/`` reads as host ``evil.net``,
-    and ``http:169.254.169.254/`` as host ``169.254.169.254``. Other schemes, and a
-    relative URL without a base, come back with only the WHATWG trimming applied.
-    """
-    text = _TAB_OR_NEWLINE_RE.sub("", url.strip(_C0_CONTROL_OR_SPACE))
-    base_url = whatwg_url(base) if base is not None else None
-    base_scheme = _url_scheme(base_url) if base_url is not None else None
-    scheme = _url_scheme(text)
-    if scheme is not None:
-        if scheme not in _WHATWG_SPECIAL_SCHEMES:
-            return text
-        rest = _special_scheme_slashes(text[len(scheme) + 1 :])
-        if base_url is not None and scheme == base_scheme and not rest.startswith("//"):
-            # Same special scheme as the base and no authority: a relative reference.
-            return urljoin(base_url, rest)
-        # Any run of '/' and '\' after a special scheme introduces the authority.
-        return f"{scheme}://{rest.lstrip('/')}"
-    if base_url is None:
-        return text
-    if base_scheme in _WHATWG_SPECIAL_SCHEMES:
-        text = _special_scheme_slashes(text)
-        if text.startswith("//"):
-            # Any run of '/' and '\' starts the authority; urljoin would keep the base host for '///host'.
-            return f"{base_scheme}://{text.lstrip('/')}"
-    return urljoin(base_url, text)
-
-
-def url_ambiguities(url: str, *, percent_in_host: bool = False) -> list[str]:
-    """Why urllib and a WHATWG client (Node, MCP SDKs) could read ``url`` differently, or as different text.
-
-    Flags whitespace or control characters inside the URL (only leading and
-    trailing ASCII whitespace is allowed, which both readings strip; a NUL,
-    U+2028, or no-break space at either end still counts), and invisible
-    format characters such as a zero-width space anywhere (WHATWG drops some of
-    them from a host name, urllib keeps them). For http(s), ws(s), and ftp URLs
-    it also flags a backslash before the query, a scheme not followed by
-    exactly ``//`` (WHATWG skips any run of slashes, so ``https:///host``
-    connects to ``host``), and (with ``percent_in_host``) percent-encoding in
-    the host, which WHATWG decodes before it connects.
-    """
-    text = url.strip()
-    problems: list[str] = []
-    inner = url.strip(_ASCII_EDGE_WHITESPACE)
-    if any(char.isspace() or unicodedata.category(char) == "Cc" for char in inner):
-        problems.append("whitespace or a control character")
-    if any(unicodedata.category(char) == "Cf" for char in url):
-        problems.append("an invisible format character (such as a zero-width space)")
-    trimmed = _TAB_OR_NEWLINE_RE.sub("", text.strip(_C0_CONTROL_OR_SPACE))
-    scheme = _url_scheme(trimmed)
-    if scheme not in _WHATWG_SPECIAL_SCHEMES:
-        return problems
-    rest = trimmed[len(scheme) + 1 :]
-    cut = min((index for index in (rest.find("?"), rest.find("#")) if index != -1), default=len(rest))
-    if "\\" in rest[:cut]:
-        problems.append("a backslash, which clients read as '/'")
-    if not rest.startswith("//"):
-        problems.append(f"no '//' after '{scheme}:'")
-    elif rest[2:3] in {"/", "\\"}:
-        problems.append(f"more than two slashes after '{scheme}:'")
-    if percent_in_host:
-        authority = re.split(r"[/\\?#]", rest.lstrip("/\\"), maxsplit=1)[0]
-        if "%" in authority.rpartition("@")[2]:
-            problems.append("percent-encoding in the host")
-    return problems
-
-
-def _client_reading(parsed: Any) -> str:
+def _client_reading(url: str) -> str:
     """How WHATWG clients read an ambiguous URL, for messages: no userinfo, query, or fragment."""
     try:
+        parsed = urlparse(whatwg_url(url))
         host = parsed.hostname
-        port = parsed.port
+        _ = parsed.port  # property access raises ValueError on a malformed port
     except ValueError:  # e.g. 'https://user:password\@host' is host 'user' with port 'password'
         return "reject it as invalid"
     if not host:
         return "find no host in it"
-    display_host = f"[{host}]" if ":" in host else host
-    shown = f"{parsed.scheme}://{display_host}{f':{port}' if port else ''}{parsed.path}"
-    return f"read it as {shown!r}"
+    return f"read it as {safe_url(url)!r}"
 
 
 def _safe_hostname(parsed: Any) -> str | None:
@@ -316,38 +164,32 @@ def _safe_hostname(parsed: Any) -> str | None:
         return None
 
 
-def _check_url_inline_secrets(name: str, url: str, parsed: Any, file_path: str, findings: list[Finding]) -> None:
-    """Flag inline credentials embedded in a URL's userinfo or query string."""
-    try:
-        username, password = parsed.username, parsed.password
-    except ValueError:  # malformed netloc / port
-        username = password = None
-    if (password and not _is_env_reference(password)) or (username and not _is_env_reference(username)):
-        findings.append(
-            _finding(
-                Severity.CRITICAL,
-                "mcp_url_inline_secret",
-                f"url embeds inline userinfo credentials: {redacted_url(url)!r} (userinfo withheld); only "
-                "${ENV} references are allowed",
-                file_path,
-                'Remove user:password@ from the URL; pass credentials by reference (e.g. header "${MY_TOKEN}").',
-                name=name,
-            )
+def _check_url_inline_secrets(server: _ServerFindings, url: str, *, ambiguous: bool = False) -> None:
+    """Flag credentials written into a URL's userinfo or query string.
+
+    The URL is read as written and, when it is ``ambiguous``, also the way WHATWG
+    clients read it: they find userinfo that urllib does not see, for example in
+    ``https:user:password@host``. A client sends any userinfo it finds, so even a
+    ``${VAR}`` user name or password counts.
+    """
+    readings = [url_credentials(url.strip(), any_userinfo=True)]
+    if ambiguous:
+        readings.append(url_credentials(whatwg_url(url), any_userinfo=True))
+    if any(reading.userinfo for reading in readings):
+        server.report(
+            Severity.CRITICAL,
+            "mcp_url_inline_secret",
+            f"url embeds userinfo credentials: {safe_url(url)!r} (userinfo withheld)",
+            'Remove user:password@ from the URL; pass credentials by reference (e.g. header "${MY_TOKEN}").',
         )
-    for key, values in parse_qs(parsed.query, keep_blank_values=True).items():
-        if not _SECRET_KEY_RE.search(key):
-            continue
-        if any(v and not _is_env_reference(v) for v in values):
-            findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "mcp_url_inline_secret",
-                    f"url query parameter {key!r} carries an inline credential; only ${{ENV}} references are allowed",
-                    file_path,
-                    "Do not put credentials in the URL query string; reference a secret handle/env var instead.",
-                    name=name,
-                )
-            )
+    for key in dict.fromkeys(key for reading in readings for key in reading.query_keys):
+        shown = "<redacted>" if has_secret_shape(key) else key[:64]
+        server.report(
+            Severity.CRITICAL,
+            "mcp_url_inline_secret",
+            f"url query parameter {shown!r} carries an inline credential; only ${{ENV}} references are allowed",
+            "Do not put credentials in the URL query string; reference a secret handle/env var instead.",
+        )
 
 
 def _is_insecure_tls_env(key: str, value: str) -> bool:
@@ -361,8 +203,13 @@ def _is_insecure_tls_env(key: str, value: str) -> bool:
         # absent) and any other value keep verification ON -- flagging those is a FP.
         return v == "0"
     if k in {"GIT_SSL_NO_VERIFY", "CURL_INSECURE", "SSL_NO_VERIFY", "TLS_INSECURE", "SSL_VERIFY_NONE"}:
-        return v in {"1", "true", "yes", "on"}
+        return v in TRUTHY_VALUES
     return False
+
+
+def _shown(text: str) -> str:
+    """A command token or command line for messages: bounded and redacted, withheld whole when shaped like a secret."""
+    return "<value withheld>" if has_secret_shape(text) else report_text(text, 120)
 
 
 def _iter_command_tokens(config: dict[str, Any]) -> list[str]:
@@ -376,68 +223,73 @@ def _iter_command_tokens(config: dict[str, Any]) -> list[str]:
     return tokens
 
 
-def _validate_command(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+def validate_mcp_command(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+    """Append the stdio command findings for one server's ``command`` and ``args`` to ``findings``.
+
+    Shell metacharacters, a shell's inline program (``-c``), inline credentials,
+    flags that disable TLS, and floating versions. Messages start with
+    ``mcpServers['<name>']: ``.
+    """
+    _check_command(_ServerFindings(name, file_path, findings), config)
+
+
+def validate_mcp_pinning(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+    """Append a MEDIUM ``mcp_unpinned_package`` finding to ``findings`` when a package runner is not pinned.
+
+    Not when ``findings`` already holds this server's blocking floating-version
+    finding (from :func:`validate_mcp_command`), so a call after it never
+    reports the same package twice.
+    """
+    _check_pinning(_ServerFindings(name, file_path, findings), config)
+
+
+# The names plugin_components imports.
+_validate_command = validate_mcp_command
+_validate_pinning = validate_mcp_pinning
+
+
+def _check_command(server: _ServerFindings, config: dict[str, Any]) -> None:
     command = config.get("command")
     if not isinstance(command, str) or not command.strip():
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_command_empty",
-                "runnable MCP 'command' must be a non-empty string",
-                file_path,
-                "Set 'command' to the server executable (argv-style, no shell string).",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_command_empty",
+            "runnable MCP 'command' must be a non-empty string",
+            "Set 'command' to the server executable (argv-style, no shell string).",
         )
         return
 
     args = config.get("args")
     if args is not None and not isinstance(args, list):
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_args_not_list",
-                "runnable MCP 'args' must be a list of strings",
-                file_path,
-                "Express command arguments as a JSON array of strings.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_args_not_list",
+            "runnable MCP 'args' must be a list of strings",
+            "Express command arguments as a JSON array of strings.",
         )
 
     tokens = _iter_command_tokens(config)
     for token in tokens:
         if _SHELL_METACHAR_RE.search(token):
-            findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "mcp_command_shell_metacharacters",
-                    f"command token contains shell metacharacters: {token!r}",
-                    file_path,
-                    "Remove shell operators (; | & ` $() < >). MCP commands run argv-style, not via a shell.",
-                    name=name,
-                )
+            server.report(
+                Severity.CRITICAL,
+                "mcp_command_shell_metacharacters",
+                f"command token contains shell metacharacters: {_shown(token)!r}",
+                "Remove shell operators (; | & ` $() < >). MCP commands run argv-style, not via a shell.",
             )
         if token in _INSECURE_TLS_FLAGS:
-            findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "mcp_command_disables_tls",
-                    f"command disables TLS/certificate verification: {token!r}",
-                    file_path,
-                    "Remove insecure-TLS flags; do not disable certificate verification.",
-                    name=name,
-                )
+            server.report(
+                Severity.CRITICAL,
+                "mcp_command_disables_tls",
+                f"command disables TLS/certificate verification: {_shown(token)!r}",
+                "Remove insecure-TLS flags; do not disable certificate verification.",
             )
         if _FLOATING_MARKER_RE.search(token):
-            findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "mcp_command_floating_version",
-                    f"command token uses a floating (unpinned) version: {token!r}",
-                    file_path,
-                    "Pin the referenced package/image to an exact version, not latest/main.",
-                    name=name,
-                )
+            server.report(
+                Severity.HIGH,
+                "mcp_command_floating_version",
+                f"command token uses a floating (unpinned) version: {_shown(token)!r}",
+                "Pin the referenced package/image to an exact version, not latest/main.",
             )
 
     # Inline credentials carried in command arguments. A credential-named flag
@@ -458,106 +310,184 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
                 value, value_idx = arg_list[idx + 1], idx + 1
             else:
                 value, value_idx = "", -1
-            if value and not _is_env_reference(value):
-                findings.append(
-                    _finding(
-                        Severity.CRITICAL,
-                        "mcp_command_inline_secret",
-                        f"command argument {flag!r} carries an inline credential; only ${{ENV}} references are allowed",
-                        file_path,
-                        'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
-                        name=name,
-                    )
+            if value and not is_env_reference(value):
+                server.report(
+                    Severity.CRITICAL,
+                    "mcp_command_inline_secret",
+                    f"command argument {flag!r} carries an inline credential; only ${{ENV}} references are allowed",
+                    'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
                 )
                 flagged_value_idx = value_idx
             continue
         if idx == flagged_value_idx:
             continue  # already reported as the preceding flag's value
-        stripped = token.strip()
-        if (
-            stripped
-            and not _is_env_reference(stripped)
-            and (_SECRET_VALUE_RE.search(stripped) or _INLINE_AUTH_SCHEME_RE.match(stripped))
-        ):
-            findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "mcp_command_inline_secret",
-                    f"command argument contains an inline credential: {token!r}",
-                    file_path,
-                    'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
-                    name=name,
-                )
+        if has_secret_shape(token):
+            server.report(
+                Severity.CRITICAL,
+                "mcp_command_inline_secret",
+                f"command argument args[{idx}] contains an inline credential (value withheld)",
+                'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
             )
 
     # Shell interpreter invoked with an inline program string (`sh -c "..."`, `bash -lc "..."`).
-    command_words = command.split()
-    shell_args: list[str] | None = None
-    if _command_basename(command) in _SHELL_INTERPRETERS:
-        # 'command' names only the shell, possibly as a path with spaces such as
-        # "C:\Program Files\Git\bin\bash.exe", so every shell option is in 'args'.
-        shell_args = arg_list
-    elif _command_basename(command_words[0]) in _SHELL_INTERPRETERS:
-        # A whole command line in 'command' ("bash -c node") is read argv-style, as
-        # classify_mcp_pinning does.
-        shell_args = [*command_words[1:], *arg_list]
-    if shell_args is not None and _shell_runs_inline_program(shell_args):
-        findings.append(
-            _finding(
-                Severity.CRITICAL,
-                "mcp_command_dangerous_form",
-                f"command invokes a shell interpreter with '-c' ({command!r}); this executes an arbitrary program string",
-                file_path,
-                "Invoke the server binary directly instead of wrapping it in a shell '-c' string.",
-                name=name,
-            )
+    shell = _shell_invocation(command, arg_list)
+    if shell is not None and _shell_runs_inline_program(shell[1], shell=shell[0]):
+        server.report(
+            Severity.CRITICAL,
+            "mcp_command_dangerous_form",
+            f"command invokes a shell interpreter with '-c' ({_shown(command)!r}); this executes an arbitrary "
+            "program string",
+            "Invoke the server binary directly instead of wrapping it in a shell '-c' string.",
         )
 
 
-def _shell_runs_inline_program(shell_args: list[str]) -> bool:
+# fish runs a program from '-c' / '--command' and from '-C' / '--init-command' (before its
+# script), and its '-d', '-o', '-f', '-p' (and their long forms) take a value.
+_FISH_INLINE_PROGRAM_LONG_OPTIONS: tuple[str, ...] = ("command", "init-command")
+_FISH_VALUE_LETTERS = frozenset("dofp")
+_FISH_VALUE_LONG_OPTIONS: tuple[str, ...] = (
+    "debug",
+    "debug-output",
+    "debug-stack-frames",
+    "features",
+    "profile",
+    "profile-startup",
+)
+# env options (GNU and BSD) whose value is the rest of the word or the next argument; '-S' /
+# '--split-string' also splits its value into the arguments env reads next.
+_ENV_VALUE_LETTERS = frozenset("uCPaLU")
+_ENV_VALUE_LONG_OPTIONS: tuple[str, ...] = ("unset", "chdir", "argv0")
+_ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_]\w*=")
+
+
+def _shell_invocation(command: str, args: list[str]) -> tuple[str, list[str]] | None:
+    """``(shell, its arguments)`` when an MCP command runs a shell interpreter, else ``None``.
+
+    'command' may name only the program, possibly as a path with spaces such as
+    "C:\\Program Files\\Git\\bin\\bash.exe", so every option is in 'args'; or it may hold a
+    whole command line ("bash -c node"), which is read argv-style as classify_mcp_pinning
+    does. An ``env`` wrapper is looked through: its options, ``NAME=value`` assignments,
+    and ``-S`` string (``env -i PATH=/bin bash -c ...``, ``/usr/bin/env -S "sh -c ..."``).
+    """
+    if _command_basename(command) in _SHELL_INTERPRETERS | {"env"}:
+        argv = [command, *args]
+    else:
+        argv = [*command.split(), *args]
+    while argv and _command_basename(argv[0]) == "env":
+        argv = _env_command(argv[1:])
+    if argv and _command_basename(argv[0]) in _SHELL_INTERPRETERS:
+        return _command_basename(argv[0]), argv[1:]
+    return None
+
+
+def _env_command(words: list[str]) -> list[str]:
+    """The command line ``env`` runs, given env's arguments: ``env -u X A=1 sh -c y`` runs ``sh -c y``."""
+    index = 0
+    while index < len(words):
+        word = words[index]
+        index += 1
+        if word == "--":
+            break
+        if word == "-" or _ENV_ASSIGNMENT_RE.match(word):  # '-' is the old spelling of '-i'
+            continue
+        if not word.startswith("-"):
+            return words[index - 1 :]
+        takes_value, splits, value = _env_option(word)
+        if takes_value and value is None and index < len(words):
+            value = words[index]
+            index += 1
+        if splits and value:
+            # -S splits its value into arguments that env reads in its place, options and all.
+            words, index = [*_split_words(value), *words[index:]], 0
+    return words[index:]
+
+
+def _env_option(word: str) -> tuple[bool, bool, str | None]:
+    """``(takes a value, splits the value into arguments, the value attached to the word)`` for an env option."""
+    if word.startswith("--"):
+        # GNU env accepts any unambiguous prefix of a long option ('--split' for '--split-string').
+        name, equals, attached = word[2:].partition("=")
+        splits = bool(name) and "split-string".startswith(name)
+        takes_value = splits or (bool(name) and any(option.startswith(name) for option in _ENV_VALUE_LONG_OPTIONS))
+        return takes_value, splits, (attached if equals else None)
+    for position, letter in enumerate(word[1:], start=1):
+        if letter == "S" or letter in _ENV_VALUE_LETTERS:
+            return True, letter == "S", word[position + 1 :] or None
+    return False, False, None
+
+
+def _split_words(text: str) -> list[str]:
+    """Shell words of ``text`` (quotes removed); whitespace split when the quoting is unbalanced."""
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
+
+
+def _shell_runs_inline_program(shell_args: list[str], *, shell: str = "sh") -> bool:
     """Return whether a shell's arguments select an inline program string ('-c').
 
     A shell reads options only until its first operand (the script it runs) or an
     end-of-options marker ('--' or '-'). Later arguments belong to the script, so
-    a script's own '-config' or '-recursive' is not the shell's '-c'.
+    a script's own '-config' or '-recursive' is not the shell's '-c'. fish also runs
+    a program from '-C' / '--init-command' and spells '-c' as '--command'; its
+    arguments are read both ways, so the fish reading can only flag more.
     """
+    if _selects_inline_program(shell_args, _shell_option):
+        return True
+    return shell == "fish" and _selects_inline_program(shell_args, _fish_option)
+
+
+def _selects_inline_program(shell_args: list[str], read_option: Callable[[str], tuple[bool, bool]]) -> bool:
+    """Whether a shell's options, read one by one with ``read_option``, include an inline-program option."""
     index = 0
     while index < len(shell_args):
         arg = shell_args[index].strip()
         if arg in {"-", "--"} or not arg.startswith(("-", "+")):
             return False
-        if _SHELL_INLINE_PROGRAM_FLAG_RE.fullmatch(arg):
+        inline, takes_value = read_option(arg)
+        if inline:
             return True
-        if arg.startswith("--"):
-            takes_value = arg in _SHELL_VALUE_LONG_OPTIONS
-        else:
-            takes_value = "o" in arg or "O" in arg
         index += 2 if takes_value else 1
     return False
 
 
-def _validate_url(
-    name: str,
-    config: dict[str, Any],
-    file_path: str,
-    findings: list[Finding],
-    allowed_private_hosts: Iterable[str] = (),
-) -> None:
+def _shell_option(arg: str) -> tuple[bool, bool]:
+    """``(runs an inline program, takes the next argument as its value)`` for one sh/bash/zsh/dash/ksh option."""
+    if _SHELL_INLINE_PROGRAM_FLAG_RE.fullmatch(arg):
+        return True, False
+    if arg.startswith("--"):
+        return False, arg in _SHELL_VALUE_LONG_OPTIONS
+    return False, "o" in arg or "O" in arg
+
+
+def _fish_option(arg: str) -> tuple[bool, bool]:
+    """``(runs an inline program, takes the next argument as its value)`` for one fish option."""
+    if arg.startswith("--"):
+        # fish accepts any unambiguous prefix of a long option; an ambiguous one is an error, flagged anyway.
+        name, equals, _value = arg[2:].partition("=")
+        if name and any(option.startswith(name) for option in _FISH_INLINE_PROGRAM_LONG_OPTIONS):
+            return True, False
+        return False, not equals and bool(name) and any(option.startswith(name) for option in _FISH_VALUE_LONG_OPTIONS)
+    letters = arg[1:]
+    if "c" in letters or "C" in letters:
+        return True, False
+    # In a cluster, a value option takes the rest of the word, or the next argument when it ends the word.
+    return False, letters[-1:] in _FISH_VALUE_LETTERS
+
+
+def _check_url(server: _ServerFindings, config: dict[str, Any], allowed_private_hosts: HostAllowlist) -> None:
     url = config.get("url")
     if not isinstance(url, str) or not url.strip():
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_url_empty",
-                "runnable MCP 'url' must be a non-empty string",
-                file_path,
-                "Set 'url' to the server endpoint using a secure https:// (or wss://) URL.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_url_empty",
+            "runnable MCP 'url' must be a non-empty string",
+            "Set 'url' to the server endpoint using a secure https:// (or wss://) URL.",
         )
         return
 
-    shown = redacted_url(url)  # messages never echo userinfo or query credentials
+    shown = safe_url(url)  # messages never echo userinfo or query credentials
     try:
         # ``raw`` is how urllib (and Python clients) read the text; ``parsed`` is how
         # WHATWG clients (Node and Rust MCP clients) read it. They differ only for an
@@ -565,47 +495,32 @@ def _validate_url(
         raw = urlparse(url.strip())
         parsed = urlparse(whatwg_url(url))
     except ValueError:  # e.g. an unbalanced '[' in the authority
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_url_malformed_authority",
-                "url could not be parsed (malformed authority)",
-                file_path,
-                "Use a valid host[:port] authority, e.g. https://host:443/path.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_url_malformed_authority",
+            "url could not be parsed (malformed authority)",
+            "Use a valid host[:port] authority, e.g. https://host:443/path.",
         )
         return
     problems = url_ambiguities(url)
     if problems:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_url_malformed_authority",
-                f"url contains {', and '.join(problems)}, so MCP clients and URL parsers disagree on where it "
-                f"points: {shown!r} (WHATWG clients {_client_reading(parsed)})",
-                file_path,
-                "Write the URL with '//' after the scheme and without backslashes, whitespace, or control "
-                "characters, e.g. https://host/path.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_url_malformed_authority",
+            f"url contains {', and '.join(problems)}, so MCP clients and URL parsers disagree on where it "
+            f"points; WHATWG clients (Node, the MCP SDKs) {_client_reading(url)}",
+            "Write the URL with '//' after the scheme and without backslashes, whitespace, or control "
+            "characters, e.g. https://host/path.",
         )
     scheme = (parsed.scheme or "").lower()
     # Inline credentials in userinfo/query are persisted verbatim; check them
     # independent of the scheme (secure https URLs are the common case).
-    found = len(findings)
-    _check_url_inline_secrets(name, url, raw, file_path, findings)
-    if problems and len(findings) == found:
-        # WHATWG clients read userinfo urllib does not see, e.g. in 'https:user:password@host'.
-        _check_url_inline_secrets(name, url, parsed, file_path, findings)
+    _check_url_inline_secrets(server, url, ambiguous=bool(problems))
     if problems:
         # A Python client may still connect where urllib reads the host: classify that one too.
-        try:
-            raw_host = raw.hostname
-        except ValueError:
-            raw_host = None
+        raw_host = _safe_hostname(raw)
         if raw_host and raw_host != _safe_hostname(parsed):
-            _validate_endpoint(name, url, raw_host, file_path, findings, allowed_private_hosts)
+            _check_endpoint(server, url, raw_host, allowed_private_hosts)
     if scheme in ALLOWED_MCP_URL_SCHEMES:
         # A secure scheme alone is not a usable endpoint: require a host to connect
         # to, and reject a malformed authority/port. Otherwise a URL like "https://"
@@ -614,87 +529,59 @@ def _validate_url(
             host = parsed.hostname
             _ = parsed.port  # property access raises ValueError on a malformed port
         except ValueError:
-            findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "mcp_url_malformed_authority",
-                    f"url has a malformed authority/port: {shown!r}",
-                    file_path,
-                    "Use a valid host[:port] authority, e.g. https://host:443/path.",
-                    name=name,
-                )
+            server.report(
+                Severity.HIGH,
+                "mcp_url_malformed_authority",
+                f"url has a malformed authority/port: {shown!r}",
+                "Use a valid host[:port] authority, e.g. https://host:443/path.",
             )
             return
         if not host:
-            findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "mcp_url_no_host",
-                    f"url uses scheme {scheme!r} but has no host to connect to: {shown!r}",
-                    file_path,
-                    "Provide a full endpoint with a hostname, e.g. https://host[:port]/path.",
-                    name=name,
-                )
+            server.report(
+                Severity.HIGH,
+                "mcp_url_no_host",
+                f"url uses scheme {scheme!r} but has no host to connect to: {shown!r}",
+                "Provide a full endpoint with a hostname, e.g. https://host[:port]/path.",
             )
-        _validate_endpoint(name, url, host, file_path, findings, allowed_private_hosts)
+        _check_endpoint(server, url, host, allowed_private_hosts)
         return
     if scheme in _INSECURE_URL_SCHEMES:
         # Plaintext endpoints are blocked below; still report where they point.
-        try:
-            insecure_host = parsed.hostname
-        except ValueError:
-            insecure_host = None
-        _validate_endpoint(name, url, insecure_host, file_path, findings, allowed_private_hosts)
+        _check_endpoint(server, url, _safe_hostname(parsed), allowed_private_hosts)
     if scheme in _DANGEROUS_URL_SCHEMES or scheme == "":
-        findings.append(
-            _finding(
-                Severity.CRITICAL,
-                "mcp_url_dangerous_scheme",
-                f"url uses a dangerous/invalid scheme {scheme or '(none)'!r}: {shown!r}",
-                file_path,
-                "Use a secure https:// or wss:// endpoint; file/data/javascript/ftp schemes are not permitted.",
-                name=name,
-            )
+        server.report(
+            Severity.CRITICAL,
+            "mcp_url_dangerous_scheme",
+            f"url uses a dangerous/invalid scheme {scheme or '(none)'!r}: {shown!r}",
+            "Use a secure https:// or wss:// endpoint; file/data/javascript/ftp schemes are not permitted.",
         )
     elif scheme in _INSECURE_URL_SCHEMES:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_url_insecure_scheme",
-                f"url uses an insecure plaintext scheme {scheme!r}: {shown!r}",
-                file_path,
-                "Use https:// (or wss://) so the MCP transport is encrypted.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_url_insecure_scheme",
+            f"url uses an insecure plaintext scheme {scheme!r}: {shown!r}",
+            "Use https:// (or wss://) so the MCP transport is encrypted.",
         )
     else:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_url_scheme_not_allowed",
-                f"url scheme {scheme!r} is not an allowed MCP scheme: {shown!r}",
-                file_path,
-                f"Use one of the allowed secure schemes: {', '.join(sorted(ALLOWED_MCP_URL_SCHEMES))}.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_url_scheme_not_allowed",
+            f"url scheme {scheme!r} is not an allowed MCP scheme: {shown!r}",
+            f"Use one of the allowed secure schemes: {', '.join(sorted(ALLOWED_MCP_URL_SCHEMES))}.",
         )
 
 
-def _validate_env_and_headers(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+def _check_env_and_headers(server: _ServerFindings, config: dict[str, Any]) -> None:
     for section in ("env", "headers"):
         block = config.get(section)
         if block is None:
             continue
         if not isinstance(block, dict):
-            findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "mcp_env_not_object",
-                    f"'{section}' must be an object mapping names to reference values",
-                    file_path,
-                    f"Express '{section}' as a JSON object of key -> value.",
-                    name=name,
-                )
+            server.report(
+                Severity.HIGH,
+                "mcp_env_not_object",
+                f"'{section}' must be an object mapping names to reference values",
+                f"Express '{section}' as a JSON object of key -> value.",
             )
             continue
         # NON-BLOCKING advisory: the evaluation runtime applies command+args (stdio)
@@ -703,59 +590,43 @@ def _validate_env_and_headers(name: str, config: dict[str, Any], file_path: str,
         # launched MCP server (use task-level environment / CI credential injection
         # instead). The inline-secret / insecure-TLS checks below still run, so a raw
         # credential declared here is still caught and blocks.
-        findings.append(
-            _finding(
-                Severity.LOW,
-                "mcp_field_ignored",
-                f"'{section}' is not applied by the evaluation runtime and will be ignored; "
-                "a Tier 3 run of this server is reported INCOMPLETE",
-                file_path,
-                f"Remove '{section}' or rely on task-level environment / CI credential injection; "
-                "the runtime applies command+args (stdio) and url (http/sse) only.",
-                name=name,
-            )
+        server.report(
+            Severity.LOW,
+            "mcp_field_ignored",
+            f"'{section}' is not applied by the evaluation runtime and will be ignored; "
+            "a Tier 3 run of this server is reported INCOMPLETE",
+            f"Remove '{section}' or rely on task-level environment / CI credential injection; "
+            "the runtime applies command+args (stdio) and url (http/sse) only.",
         )
         for key, value in block.items():
             if not isinstance(value, str):
                 continue
             if _is_insecure_tls_env(key, value):
-                findings.append(
-                    _finding(
-                        Severity.CRITICAL,
-                        "mcp_insecure_tls_env",
-                        f"'{section}.{key}' disables TLS/certificate verification",
-                        file_path,
-                        "Do not disable TLS verification via environment variables.",
-                        name=name,
-                    )
+                server.report(
+                    Severity.CRITICAL,
+                    "mcp_insecure_tls_env",
+                    f"'{section}.{key}' disables TLS/certificate verification",
+                    "Do not disable TLS verification via environment variables.",
                 )
-            if _looks_like_inline_secret(key, value):
-                findings.append(
-                    _finding(
-                        Severity.CRITICAL,
-                        "mcp_inline_secret",
-                        f"'{section}.{key}' contains an inline credential; only ${{ENV}} references are allowed",
-                        file_path,
-                        'Reference a secret handle/env var (e.g. "${MY_TOKEN}"); never inline a raw secret.',
-                        name=name,
-                    )
+            if looks_like_inline_secret(key, value):
+                server.report(
+                    Severity.CRITICAL,
+                    "mcp_inline_secret",
+                    f"'{section}.{key}' contains an inline credential; only ${{ENV}} references are allowed",
+                    'Reference a secret handle/env var (e.g. "${MY_TOKEN}"); never inline a raw secret.',
                 )
 
 
-def _validate_transport(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+def _check_transport(server: _ServerFindings, config: dict[str, Any]) -> None:
     raw = config.get("transport", config.get("type"))
     if raw is None:
         return
     if not isinstance(raw, str) or raw.strip().lower() not in ALLOWED_MCP_TRANSPORTS:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_transport_invalid",
-                f"transport {raw!r} is not one of {sorted(ALLOWED_MCP_TRANSPORTS)}",
-                file_path,
-                f"Set transport to one of: {', '.join(sorted(ALLOWED_MCP_TRANSPORTS))}.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_transport_invalid",
+            f"transport {raw!r} is not one of {sorted(ALLOWED_MCP_TRANSPORTS)}",
+            f"Set transport to one of: {', '.join(sorted(ALLOWED_MCP_TRANSPORTS))}.",
         )
         return
 
@@ -765,15 +636,11 @@ def _validate_transport(name: str, config: dict[str, Any], file_path: str, findi
     # against the exact lowercase "stdio"/"http"/"sse" and the persist path writes
     # it verbatim, so a value Tier 1 accepts must be the exact form Harbor accepts.
     if literal != canonical:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_transport_bad_casing",
-                f"transport {raw!r} must be lowercase {canonical!r}; Harbor's transport literal is case-sensitive",
-                file_path,
-                f"Use the exact lowercase transport literal {canonical!r}.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_transport_bad_casing",
+            f"transport {raw!r} must be lowercase {canonical!r}; Harbor's transport literal is case-sensitive",
+            f"Use the exact lowercase transport literal {canonical!r}.",
         )
 
     # Kind <-> transport consistency: a stdio server is launched from a 'command';
@@ -782,56 +649,40 @@ def _validate_transport(name: str, config: dict[str, Any], file_path: str, findi
     has_command = "command" in config
     has_url = "url" in config
     if has_command and not has_url and canonical != "stdio":
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_transport_kind_mismatch",
-                f"command (stdio) server declares transport {raw!r}; a command server must use transport 'stdio'",
-                file_path,
-                "Set transport to 'stdio' (or omit it) for command-based MCP servers.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_transport_kind_mismatch",
+            f"command (stdio) server declares transport {raw!r}; a command server must use transport 'stdio'",
+            "Set transport to 'stdio' (or omit it) for command-based MCP servers.",
         )
     elif has_url and not has_command and canonical not in {"http", "sse"}:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_transport_kind_mismatch",
-                f"url server declares transport {raw!r}; a url server must use transport 'http' or 'sse'",
-                file_path,
-                "Set transport to 'http' or 'sse' for url-based MCP servers.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_transport_kind_mismatch",
+            f"url server declares transport {raw!r}; a url server must use transport 'http' or 'sse'",
+            "Set transport to 'http' or 'sse' for url-based MCP servers.",
         )
 
 
-def _validate_insecure_tls_config(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+def _check_insecure_tls_config(server: _ServerFindings, config: dict[str, Any]) -> None:
     """Reject config keys that turn off TLS/certificate verification."""
     if config.get("insecure") is True:
-        findings.append(
-            _finding(
-                Severity.CRITICAL,
-                "mcp_insecure_flag",
-                "'insecure: true' disables endpoint security",
-                file_path,
-                "Remove 'insecure'; connect over a verified TLS endpoint.",
-                name=name,
-            )
+        server.report(
+            Severity.CRITICAL,
+            "mcp_insecure_flag",
+            "'insecure: true' disables endpoint security",
+            "Remove 'insecure'; connect over a verified TLS endpoint.",
         )
     for section in ("tls", "ssl"):
         block = config.get(section)
         if not isinstance(block, dict):
             continue
         if block.get("rejectUnauthorized") is False or block.get("verify") is False:
-            findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "mcp_insecure_tls_config",
-                    f"'{section}' disables certificate verification (rejectUnauthorized/verify = false)",
-                    file_path,
-                    "Do not disable certificate verification; use a valid certificate chain.",
-                    name=name,
-                )
+            server.report(
+                Severity.CRITICAL,
+                "mcp_insecure_tls_config",
+                f"'{section}' disables certificate verification (rejectUnauthorized/verify = false)",
+                "Do not disable certificate verification; use a valid certificate chain.",
             )
 
 
@@ -1552,6 +1403,7 @@ _DOT_LOOKALIKES = str.maketrans({chr(0x3002): ".", chr(0xFF0E): ".", chr(0xFF61)
 _ENDPOINT_STATIC_NOTE = "static check only: DNS resolution and HTTP redirects are not evaluated"
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 
 @dataclass(frozen=True)
@@ -1563,6 +1415,8 @@ class EndpointClass:
     host: str
     address: IPAddress | None = None
     encoded: bool = False
+    # The host is this machine (a loopback name, 127.0.0.0/8, or ::1), so traffic to it stays local.
+    is_loopback: bool = False
 
 
 def _bare_host(host: str) -> str:
@@ -1721,52 +1575,97 @@ def classify_endpoint_host(host: str) -> EndpointClass | None:
     if normalized in _METADATA_HOSTNAMES:
         return EndpointClass("metadata", "cloud instance-metadata", normalized, encoded=name_encoded)
     if normalized in _LOOPBACK_HOSTNAMES or normalized.endswith(".localhost"):
-        return EndpointClass("private", "loopback", normalized, encoded=name_encoded)
+        return EndpointClass("private", "loopback", normalized, encoded=name_encoded, is_loopback=True)
     address, encoded = _parse_host_address(normalized)
     if address is None:
         return None
     found, embedded = _classify_address(address)
-    encoded = encoded or name_encoded or embedded
     if found is None:
         return None
     kind, reason = found
-    return EndpointClass(kind, reason, normalized, address, encoded)
+    # An embedded IPv4 address (mapped, 6to4, Teredo, NAT64, compatible) decides for the IPv6 literal.
+    decided_by = _embedded_ipv4(address) if embedded else address
+    return EndpointClass(
+        kind,
+        reason,
+        normalized,
+        address,
+        encoded or name_encoded or embedded,
+        is_loopback=decided_by is not None and decided_by.is_loopback,
+    )
 
 
-def host_is_allowlisted(endpoint: EndpointClass, allowed_hosts: Iterable[str]) -> bool:
+@dataclass(frozen=True)
+class HostAllowlist:
+    """Host policy entries (``mcp.allowed_private_hosts``, the hosts ``hooks.allowed_urls`` names), parsed once.
+
+    Entries are host names, ``*.suffix`` wildcards, IP literals, or CIDR networks
+    (e.g. ``10.0.0.0/8``), normalized the way WHATWG clients read a host. Cloud
+    metadata endpoints are never allowed.
+    """
+
+    # Exact host names and IP literals, matched by equality.
+    names: frozenset[str] = frozenset()
+    # '.corp.example' for '*.corp.example': hosts below it match, the bare suffix does not.
+    suffixes: tuple[str, ...] = ()
+    # IP literal and CIDR entries, matched against a host's address (and an IPv4 address embedded in it).
+    networks: tuple[IPNetwork, ...] = ()
+
+    @classmethod
+    def from_entries(cls, entries: Iterable[str]) -> HostAllowlist:
+        names: set[str] = set()
+        suffixes: list[str] = []
+        networks: list[IPNetwork] = []
+        for raw in entries:
+            entry = _normalize_host(raw) if isinstance(raw, str) else ""
+            if entry.startswith("*."):
+                suffixes.append(entry[1:])
+            elif entry:
+                names.add(entry)
+                with contextlib.suppress(ValueError):  # a host name, not an IP literal or network
+                    networks.append(ipaddress.ip_network(entry, strict=False))
+        return cls(frozenset(names), tuple(dict.fromkeys(suffixes)), tuple(dict.fromkeys(networks)))
+
+    @classmethod
+    def of(cls, entries: HostAllowlist | Iterable[str]) -> HostAllowlist:
+        """``entries`` itself when already parsed, else parsed from policy strings."""
+        return entries if isinstance(entries, HostAllowlist) else cls.from_entries(entries)
+
+    def allows(self, endpoint: EndpointClass) -> bool:
+        """Whether an entry covers a non-public endpoint, by its host name or by a network holding its address."""
+        if endpoint.kind == "metadata":
+            return False
+        if endpoint.host in self.names or endpoint.host.endswith(self.suffixes):
+            return True
+        candidates = [] if endpoint.address is None else [endpoint.address, _embedded_ipv4(endpoint.address)]
+        return any(
+            candidate is not None and candidate.version == network.version and candidate in network
+            for candidate in candidates
+            for network in self.networks
+        )
+
+    def allows_host(self, host: str, endpoint: EndpointClass | None) -> bool:
+        """Whether an entry covers ``host``, whose static class is ``endpoint`` (``None`` when it looks public).
+
+        A public-looking host matches by name only, so a public IP literal entry
+        admits exactly that literal; a non-public host is checked by :meth:`allows`.
+        """
+        if endpoint is not None:
+            return self.allows(endpoint)
+        normalized = _normalize_host(host)
+        return bool(normalized) and (normalized in self.names or normalized.endswith(self.suffixes))
+
+
+def host_is_allowlisted(endpoint: EndpointClass, allowed_hosts: HostAllowlist | Iterable[str]) -> bool:
     """True when a policy entry allows this private host.
 
     Entries are exact host names, ``*.suffix`` wildcards, IP literals, or CIDR
     networks (e.g. ``10.0.0.0/8``). Cloud metadata endpoints are never allowlisted.
     """
-    if endpoint.kind == "metadata":
-        return False
-    candidates: list[IPAddress] = []
-    if endpoint.address is not None:
-        candidates.append(endpoint.address)
-        inner = _embedded_ipv4(endpoint.address)
-        if inner is not None:
-            candidates.append(inner)
-    for raw in allowed_hosts:
-        if not isinstance(raw, str):
-            continue
-        entry = _normalize_host(raw)
-        if not entry:
-            continue
-        if entry.startswith("*.") and endpoint.host.endswith(entry[1:]):
-            return True
-        if entry == endpoint.host:
-            return True
-        try:
-            network = ipaddress.ip_network(entry, strict=False)
-        except ValueError:
-            continue
-        if any(candidate.version == network.version and candidate in network for candidate in candidates):
-            return True
-    return False
+    return HostAllowlist.of(allowed_hosts).allows(endpoint)
 
 
-def host_name_is_allowlisted(host: str, allowed_hosts: Iterable[str]) -> bool:
+def host_name_is_allowlisted(host: str, allowed_hosts: HostAllowlist | Iterable[str]) -> bool:
     """True when a policy entry names this host (exact name or ``*.suffix``).
 
     Only host names match here: IP literals and CIDR entries are checked against
@@ -1774,61 +1673,37 @@ def host_name_is_allowlisted(host: str, allowed_hosts: Iterable[str]) -> bool:
     names are never allowlisted.
     """
     normalized = _normalize_host(host)
-    if not normalized or normalized in _METADATA_HOSTNAMES:
+    if not normalized or _parse_host_address(normalized)[0] is not None:
         return False
-    address, _encoded = _parse_host_address(normalized)
-    if address is not None:
-        return False
-    for raw in allowed_hosts:
-        if not isinstance(raw, str):
-            continue
-        entry = _normalize_host(raw)
-        if entry and (entry == normalized or (entry.startswith("*.") and normalized.endswith(entry[1:]))):
-            return True
-    return False
+    return HostAllowlist.of(allowed_hosts).allows_host(normalized, classify_endpoint_host(normalized))
 
 
-def _validate_endpoint(
-    name: str,
-    url: str,
-    host: str | None,
-    file_path: str,
-    findings: list[Finding],
-    allowed_private_hosts: Iterable[str],
-) -> None:
+def _check_endpoint(server: _ServerFindings, url: str, host: str | None, allowed_private_hosts: HostAllowlist) -> None:
     if not host:
         return
     endpoint = classify_endpoint_host(host)
     if endpoint is None:
         return
     encoded = f" (encoded as {host!r})" if endpoint.encoded else ""
-    shown = redacted_url(url)  # never echo userinfo or query credentials
+    shown = safe_url(url)  # never echo userinfo or query credentials
     if endpoint.kind == "metadata":
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_endpoint_metadata",
-                f"url targets a {endpoint.reason} endpoint{encoded}: {shown!r}; an MCP client pointed here "
-                f"can expose instance credentials ({_ENDPOINT_STATIC_NOTE})",
-                file_path,
-                "Remove the instance-metadata endpoint; MCP servers must never target cloud metadata services.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_endpoint_metadata",
+            f"url targets a {endpoint.reason} endpoint{encoded}: {shown!r}; an MCP client pointed here "
+            f"can expose instance credentials ({_ENDPOINT_STATIC_NOTE})",
+            "Remove the instance-metadata endpoint; MCP servers must never target cloud metadata services.",
         )
         return
-    if host_is_allowlisted(endpoint, allowed_private_hosts):
+    if allowed_private_hosts.allows(endpoint):
         return
-    findings.append(
-        _finding(
-            Severity.MEDIUM,
-            "mcp_endpoint_private",
-            f"url host is a {endpoint.reason} address{encoded}: {shown!r}; the endpoint is not publicly "
-            f"reachable and may target local services ({_ENDPOINT_STATIC_NOTE})",
-            file_path,
-            "Use a public HTTPS endpoint, or allow this intended private host through the validation policy "
-            "(mcp.allowed_private_hosts).",
-            name=name,
-        )
+    server.report(
+        Severity.MEDIUM,
+        "mcp_endpoint_private",
+        f"url host is a {endpoint.reason} address{encoded}: {shown!r}; the endpoint is not publicly "
+        f"reachable and may target local services ({_ENDPOINT_STATIC_NOTE})",
+        "Use a public HTTPS endpoint, or allow this intended private host through the validation policy "
+        "(mcp.allowed_private_hosts).",
     )
 
 
@@ -1846,58 +1721,73 @@ _BYPASS_FLAG_RE = re.compile(
     r"(?<![\w-])(" + "|".join(re.escape(flag) for flag in PERMISSION_BYPASS_FLAGS) + r")(?![\w-])",
     re.IGNORECASE,
 )
-# Option/value pairs with the same effect: Claude Code's permission mode, Gemini
-# CLI's approval mode, and Codex CLI's sandbox and approval policy (long and short option).
-PERMISSION_BYPASS_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("--permission-mode", "bypassPermissions"),
-    ("--approval-mode", "yolo"),
-    ("--sandbox", "danger-full-access"),
-    ("-s", "danger-full-access"),
-    ("--ask-for-approval", "never"),
-    ("-a", "never"),
+
+
+@dataclass(frozen=True)
+class _OptionRisk:
+    """What an agent-CLI option value does: the issue it raises, and whether only Codex reads it."""
+
+    concept: Literal["permission_bypass_flag", "permission_mode_flag"]
+    severity: Severity
+    # '-a' is a common short option and '-c' / '--config' a common flag, so '-a never' and the config
+    # overrides count only after a codex command in the same string or argv ('grep -a never f' is not Codex).
+    codex_only: bool = False
+
+
+_BYPASS = _OptionRisk("permission_bypass_flag", Severity.HIGH)
+_CODEX_BYPASS = _OptionRisk("permission_bypass_flag", Severity.HIGH, codex_only=True)
+_PERMISSIVE_MODE = _OptionRisk("permission_mode_flag", Severity.MEDIUM)
+# Agent-CLI options and the values that disable approvals or the sandbox (bypass) or let the launched agent
+# approve some tool calls without a prompt (permissive mode): Claude Code's permission mode, Gemini CLI's approval
+# mode, and Codex CLI's sandbox and approval policy (long and short option). Options and values match in any
+# letter case and are reported as written here.
+_OPTION_VALUE_RISKS: dict[str, dict[str, _OptionRisk]] = {
+    "--permission-mode": {"bypassPermissions": _BYPASS, "acceptEdits": _PERMISSIVE_MODE, "auto": _PERMISSIVE_MODE},
+    "--approval-mode": {"yolo": _BYPASS},
+    "--sandbox": {"danger-full-access": _BYPASS},
+    "-s": {"danger-full-access": _BYPASS},
+    "--ask-for-approval": {"never": _BYPASS},
+    "-a": {"never": _CODEX_BYPASS},
+}
+# The same table by lower-case option and value, with the flag each value reports ("--permission-mode auto").
+_OPTION_VALUES: dict[str, dict[str, tuple[str, _OptionRisk]]] = {
+    option.lower(): {value.lower(): (f"{option} {value}", risk) for value, risk in values.items()}
+    for option, values in _OPTION_VALUE_RISKS.items()
+}
+# Each option in one string: "--opt value", "--opt=value", or a quoted value.
+_OPTION_VALUE_RES: tuple[tuple[re.Pattern[str], dict[str, tuple[str, _OptionRisk]]], ...] = tuple(
+    (
+        re.compile(
+            rf"(?<![\w-]){re.escape(option)}(?:=|\s+)[\"']?(?P<value>{'|'.join(map(re.escape, values))})(?![\w-])",
+            re.IGNORECASE,
+        ),
+        _OPTION_VALUES[option.lower()],
+    )
+    for option, values in _OPTION_VALUE_RISKS.items()
 )
-# Codex CLI config overrides with the same effect: '-c approval_policy=never',
+# Codex CLI config overrides with the bypass effect: '-c approval_policy=never',
 # '--config sandbox_mode="danger-full-access"'.
 PERMISSION_BYPASS_CONFIG: tuple[tuple[str, str], ...] = (
     ("approval_policy", "never"),
     ("sandbox_mode", "danger-full-access"),
 )
-# '-a' is a common short option and '-c' / '--config' a common flag, so '-a never' and the config
-# overrides count only after a codex command in the same string or argv ('grep -a never f' is not Codex).
-_CODEX_ONLY_OPTIONS = frozenset({"-a"})
 _CODEX_COMMAND_RE = re.compile(r"(?<![\w.-])codex(?:\.exe|\.cmd)?(?![\w.-])|\$\{?CODEX\w*", re.IGNORECASE)
 _BYPASS_CONFIG_OPTIONS = frozenset({"-c", "--config"})
+# A config override as the argv value after '-c', and anywhere in one string.
 _BYPASS_CONFIG_VALUE_RES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (f"-c {key}={value}", re.compile(rf"^[\"']?{key}\s*=\s*[\"']?{re.escape(value)}[\"']?$", re.IGNORECASE))
     for key, value in PERMISSION_BYPASS_CONFIG
 )
-# In one string: "--opt value", "--opt=value", or a quoted value; the last item is True for a Codex-only form.
-_BYPASS_OPTION_RES: tuple[tuple[str, re.Pattern[str], bool], ...] = (
-    *(
-        (
-            f"{option} {value}",
-            re.compile(rf"(?<![\w-]){re.escape(option)}(?:=|\s+)[\"']?{re.escape(value)}(?![\w-])", re.IGNORECASE),
-            option in _CODEX_ONLY_OPTIONS,
-        )
-        for option, value in PERMISSION_BYPASS_OPTIONS
-    ),
-    *(
-        (
-            f"-c {key}={value}",
-            re.compile(
-                rf"(?<![\w-])(?:-c|--config)(?:=|\s+)[\"']?{key}\s*=\s*[\"']?{re.escape(value)}(?![\w-])",
-                re.IGNORECASE,
-            ),
-            True,
-        )
-        for key, value in PERMISSION_BYPASS_CONFIG
-    ),
+_BYPASS_CONFIG_TEXT_RES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (
+        f"-c {key}={value}",
+        re.compile(
+            rf"(?<![\w-])(?:-c|--config)(?:=|\s+)[\"']?{key}\s*=\s*[\"']?{re.escape(value)}(?![\w-])",
+            re.IGNORECASE,
+        ),
+    )
+    for key, value in PERMISSION_BYPASS_CONFIG
 )
-# Split across adjacent argv tokens: option -> (value, reported flag, Codex-only).
-_BYPASS_OPTION_VALUES: dict[str, tuple[str, str, bool]] = {
-    option.lower(): (value.lower(), f"{option} {value}", option in _CODEX_ONLY_OPTIONS)
-    for option, value in PERMISSION_BYPASS_OPTIONS
-}
 # Keys whose values are prose, never executed config -- documentation mentions of
 # a flag are not flagged.
 _DOC_KEYS = frozenset({"description", "title", "summary", "notes", "note", "comment", "comments", "help"})
@@ -1939,6 +1829,7 @@ class OverrideIssue:
     concept: Literal[
         "permission_bypass_flag",
         "permission_bypass_scan_truncated",
+        "permission_mode_flag",
         "env_code_injection",
         "env_traffic_redirect",
         "auto_approve",
@@ -1980,74 +1871,70 @@ class _ConfigWalk:
                     stack.append((f"{path}[{index}]", child))
 
 
-def iter_config_strings(value: Any, *, skip_doc_keys: bool = True) -> Iterator[tuple[str, str]]:
-    """Yield ``(json_path, string)`` for string leaves of a config value (bounded, iterative)."""
-    for path, node in _ConfigWalk(value, skip_doc_keys=skip_doc_keys):
-        if isinstance(node, str):
-            yield path, node
-
-
 def _codex_hit(text: str, start: int) -> bool:
     """Whether a codex command comes before ``start`` in ``text``."""
     return _CODEX_COMMAND_RE.search(text, 0, start) is not None
 
 
-def _bypass_hits(path: str, node: Any) -> Iterator[tuple[str, str]]:
-    """Yield ``(json_path, flag)`` for bypass flags in a string or split across argv tokens."""
+def _flag_hits(path: str, node: Any) -> Iterator[tuple[str, str, _OptionRisk]]:
+    """Yield ``(json_path, flag, risk)`` for permission flags in a string or split across argv tokens."""
     if isinstance(node, str):
         for match in _BYPASS_FLAG_RE.finditer(node):
-            yield path, match.group(1).lower()
-        for label, pattern, codex_only in _BYPASS_OPTION_RES:
-            if any(not codex_only or _codex_hit(node, hit.start()) for hit in pattern.finditer(node)):
-                yield path, label
+            yield path, match.group(1).lower(), _BYPASS
+        for pattern, values in _OPTION_VALUE_RES:
+            for match in pattern.finditer(node):
+                flag, risk = values[match.group("value").lower()]
+                if not risk.codex_only or _codex_hit(node, match.start()):
+                    yield path, flag, risk
+        for flag, pattern in _BYPASS_CONFIG_TEXT_RES:
+            if any(_codex_hit(node, match.start()) for match in pattern.finditer(node)):
+                yield path, flag, _CODEX_BYPASS
     elif isinstance(node, list):
-        yield from _argv_bypass_hits(path, node, codex=False)
+        yield from _argv_flag_hits(path, node, codex=False)
     elif isinstance(node, dict):
         # {"command": "codex", "args": ["-a", "never"]}: the args follow a codex command.
         command, args = node.get("command"), node.get("args")
         if isinstance(command, str) and isinstance(args, list) and _CODEX_COMMAND_RE.search(command):
-            yield from _argv_bypass_hits(f"{path}.args" if path else "args", args, codex=True)
+            yield from _argv_flag_hits(f"{path}.args" if path else "args", args, codex=True)
 
 
-def _argv_bypass_hits(path: str, argv: list[Any], *, codex: bool) -> Iterator[tuple[str, str]]:
-    """Bypass options split across adjacent argv tokens (``["--sandbox", "danger-full-access"]``); the
-    Codex-only forms count only after a codex token, or when ``codex`` says the argv belongs to one."""
+def _argv_flag_hits(path: str, argv: list[Any], *, codex: bool) -> Iterator[tuple[str, str, _OptionRisk]]:
+    """Options split across adjacent argv tokens (``["--sandbox", "danger-full-access"]``); the Codex-only
+    forms count only after a codex token, or when ``codex`` says the argv belongs to one."""
     for index, (option, value) in enumerate(itertools.pairwise(argv)):
         if isinstance(option, str) and _CODEX_COMMAND_RE.search(option):
             codex = True
         if not isinstance(option, str) or not isinstance(value, str):
             continue
-        expected = _BYPASS_OPTION_VALUES.get(option.strip().lower())
-        if expected is not None and value.strip().strip("\"'").lower() == expected[0] and (codex or not expected[2]):
-            yield f"{path}[{index}]", expected[1]
-        if codex and option.strip().lower() in _BYPASS_CONFIG_OPTIONS:
-            for label, pattern in _BYPASS_CONFIG_VALUE_RES:
+        name = option.strip().lower()
+        found = _OPTION_VALUES.get(name, {}).get(value.strip().strip("\"'").lower())
+        if found is not None and (codex or not found[1].codex_only):
+            flag, risk = found
+            yield f"{path}[{index}]", flag, risk
+        if codex and name in _BYPASS_CONFIG_OPTIONS:
+            for flag, pattern in _BYPASS_CONFIG_VALUE_RES:
                 if pattern.match(value.strip()):
-                    yield f"{path}[{index}]", label
+                    yield f"{path}[{index}]", flag, _CODEX_BYPASS
 
 
-def permission_bypass_issues(value: Any) -> list[OverrideIssue]:
-    """Find agent-CLI permission-bypass flags in any config/command string or argv list.
+def permission_flag_issues(value: Any) -> list[OverrideIssue]:
+    """Find agent-CLI permission flags in any config/command string or argv list, in one bounded walk.
 
-    A config too large to walk completely is itself a HIGH issue (fail closed).
+    Flags and options that disable approvals or the sandbox (``--dangerously-skip-permissions``,
+    ``--yolo``, ``--permission-mode bypassPermissions``, ``--sandbox danger-full-access``, Codex's
+    ``-a never`` and ``-c approval_policy=never``) are HIGH ``permission_bypass_flag`` issues;
+    ``--permission-mode acceptEdits`` and ``auto`` are MEDIUM ``permission_mode_flag`` issues. Options
+    and values match in any letter case. A config too large to walk completely adds a HIGH
+    ``permission_bypass_scan_truncated`` issue last (fail closed).
     """
     issues: list[OverrideIssue] = []
     seen: set[tuple[str, str]] = set()
     walk = _ConfigWalk(value)
     for node_path, node in walk:
-        for path, flag in _bypass_hits(node_path, node):
-            if (path, flag) in seen:
-                continue
-            seen.add((path, flag))
-            where = f" in '{path}'" if path else ""
-            issues.append(
-                OverrideIssue(
-                    "permission_bypass_flag",
-                    Severity.HIGH,
-                    f"agent-CLI permission-bypass flag {flag!r}{where} disables tool-approval prompts or sandboxing",
-                    "Remove the permission-bypass flag; plugins must not disable the host agent's approvals or sandbox.",
-                )
-            )
+        for path, flag, risk in _flag_hits(node_path, node):
+            if (path, flag) not in seen:
+                seen.add((path, flag))
+                issues.append(_permission_flag_issue(flag, path, risk))
     if not walk.complete:
         issues.append(
             OverrideIssue(
@@ -2059,6 +1946,29 @@ def permission_bypass_issues(value: Any) -> list[OverrideIssue]:
             )
         )
     return issues
+
+
+def _permission_flag_issue(flag: str, path: str, risk: _OptionRisk) -> OverrideIssue:
+    if risk.concept == "permission_mode_flag":
+        return OverrideIssue(
+            "permission_mode_flag",
+            risk.severity,
+            f"agent-CLI flag {flag!r}{f' in {path!r}' if path else ''} lets the launched agent approve some tool "
+            "calls without a prompt",
+            "Remove the flag; let the user choose the permission mode of any agent CLI the plugin launches.",
+        )
+    where = f" in '{path}'" if path else ""
+    return OverrideIssue(
+        "permission_bypass_flag",
+        risk.severity,
+        f"agent-CLI permission-bypass flag {flag!r}{where} disables tool-approval prompts or sandboxing",
+        "Remove the permission-bypass flag; plugins must not disable the host agent's approvals or sandbox.",
+    )
+
+
+def permission_bypass_issues(value: Any) -> list[OverrideIssue]:
+    """The HIGH part of :func:`permission_flag_issues`: permission-bypass flags, and a scan that stopped early."""
+    return [issue for issue in permission_flag_issues(value) if issue.concept != "permission_mode_flag"]
 
 
 def _is_passthrough(key: str, value: str) -> bool:
@@ -2133,36 +2043,33 @@ def auto_approve_issues(config: Any) -> list[OverrideIssue]:
     return issues
 
 
-def _append_override_findings(name: str, issues: list[OverrideIssue], file_path: str, findings: list[Finding]) -> None:
-    for issue in issues:
-        check = "mcp_auto_approve" if issue.concept == "auto_approve" else f"mcp_{issue.concept}"
-        findings.append(_finding(issue.severity, check, issue.message, file_path, issue.suggestion, name=name))
-
-
-def _validate_overrides(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+def _check_overrides(server: _ServerFindings, config: dict[str, Any]) -> None:
     """Permission-bypass flags anywhere in the entry, dangerous env, and auto-approve keys."""
-    _append_override_findings(name, permission_bypass_issues(config), file_path, findings)
-    _append_override_findings(name, env_override_issues(config.get("env")), file_path, findings)
-    _append_override_findings(name, auto_approve_issues(config), file_path, findings)
+    for issue in (
+        *permission_bypass_issues(config),
+        *env_override_issues(config.get("env")),
+        *auto_approve_issues(config),
+    ):
+        check = "mcp_auto_approve" if issue.concept == "auto_approve" else f"mcp_{issue.concept}"
+        server.report(issue.severity, check, issue.message, issue.suggestion)
 
 
-def _validate_pinning(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+def _check_pinning(server: _ServerFindings, config: dict[str, Any]) -> None:
     pin = classify_mcp_pinning(config)
     if pin.status != "unpinned":
         return
     # A floating marker (@latest, :latest, ...) already raised the blocking
     # mcp_command_floating_version finding for this entry; do not double-report.
-    if any(f.check_name == "mcp_command_floating_version" and f.metadata.get("mcp_server") == name for f in findings):
+    if any(
+        f.check_name == "mcp_command_floating_version" and f.metadata.get("mcp_server") == server.name
+        for f in server.findings
+    ):
         return
-    findings.append(
-        _finding(
-            Severity.MEDIUM,
-            "mcp_unpinned_package",
-            f"package runner is not pinned to an exact version ({pin.detail}); each launch may fetch different code",
-            file_path,
-            "Pin an exact version (pkg@1.2.3, pkg==1.2.3, --from pkg==1.2.3, image:1.2.3 or image@sha256:...).",
-            name=name,
-        )
+    server.report(
+        Severity.MEDIUM,
+        "mcp_unpinned_package",
+        f"package runner is not pinned to an exact version ({pin.detail}); each launch may fetch different code",
+        "Pin an exact version (pkg@1.2.3, pkg==1.2.3, --from pkg==1.2.3, image:1.2.3 or image@sha256:...).",
     )
 
 
@@ -2171,19 +2078,21 @@ def validate_mcp_server_declaration(
     config: Any,
     file_path: str,
     *,
-    allowed_private_hosts: Iterable[str] = (),
+    allowed_private_hosts: HostAllowlist | Iterable[str] = (),
 ) -> list[Finding]:
     """Statically validate one contained ``mcpServers`` entry (``name`` -> config).
 
     ``allowed_private_hosts`` comes from the validation policy
     (``mcp.allowed_private_hosts``) and suppresses ``mcp_endpoint_private`` for
-    intended private hosts; cloud metadata endpoints are never allowlisted.
+    intended private hosts; cloud metadata endpoints are never allowlisted. A
+    caller that validates many servers can parse it once with
+    :meth:`HostAllowlist.from_entries` and pass that.
     """
     findings: list[Finding] = []
 
     if not isinstance(name, str) or not _MCP_NAME_RE.match(name.strip()):
         findings.append(
-            _finding(
+            mcp_finding(
                 Severity.HIGH,
                 "mcp_name_invalid",
                 f"MCP server name {name!r} must start with an alphanumeric and use only letters, digits, '.', '_', '-'",
@@ -2195,16 +2104,13 @@ def validate_mcp_server_declaration(
         if not isinstance(name, str):
             return findings
 
+    server = _ServerFindings(name, file_path, findings)
     if not isinstance(config, dict):
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_config_not_object",
-                "MCP server config must be a JSON object",
-                file_path,
-                "Express the MCP server config as an object with command/url/provider.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_config_not_object",
+            "MCP server config must be a JSON object",
+            "Express the MCP server config as an object with command/url/provider.",
         )
         return findings
 
@@ -2214,110 +2120,38 @@ def validate_mcp_server_declaration(
     declared_kinds = sum((has_command, has_url, has_provider))
 
     if declared_kinds == 0:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_missing_kind",
-                "MCP server must declare a 'command' (stdio), a 'url' (http/sse), or a 'provider'",
-                file_path,
-                "Add a runnable command/url, or declare a public provider identifier.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_missing_kind",
+            "MCP server must declare a 'command' (stdio), a 'url' (http/sse), or a 'provider'",
+            "Add a runnable command/url, or declare a public provider identifier.",
         )
     elif declared_kinds > 1:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_kind_invalid",
-                "MCP server must declare exactly one of 'command', 'url', or 'provider'",
-                file_path,
-                "Choose one runnable or provider-only MCP form.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_kind_invalid",
+            "MCP server must declare exactly one of 'command', 'url', or 'provider'",
+            "Choose one runnable or provider-only MCP form.",
         )
 
-    _validate_transport(name, config, file_path, findings)
-    _validate_insecure_tls_config(name, config, file_path, findings)
-    _validate_env_and_headers(name, config, file_path, findings)
-    _validate_overrides(name, config, file_path, findings)
+    _check_transport(server, config)
+    _check_insecure_tls_config(server, config)
+    _check_env_and_headers(server, config)
+    _check_overrides(server, config)
 
     if has_command:
-        _validate_command(name, config, file_path, findings)
-        _validate_pinning(name, config, file_path, findings)
+        _check_command(server, config)
+        _check_pinning(server, config)
     if has_url:
-        _validate_url(name, config, file_path, findings, allowed_private_hosts)
+        _check_url(server, config, HostAllowlist.of(allowed_private_hosts))
     if has_provider and not (has_command or has_url):
         provider = config.get("provider")
         if not isinstance(provider, str) or not provider.strip():
-            findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "mcp_provider_invalid",
-                    "provider must be a non-empty string",
-                    file_path,
-                    "Set a public provider identifier.",
-                    name=name,
-                )
-            )
-
-    return findings
-
-
-def validate_contained_mcp_servers(
-    mcp_servers: Any,
-    file_path: str,
-    *,
-    allowed_private_hosts: Iterable[str] = (),
-) -> list[Finding]:
-    """Statically validate an in-memory ``.claude-plugin/plugin.json`` ``mcpServers`` value.
-
-    Accepts every documented Claude Code form without touching the filesystem:
-    an inline server map, a path string, or an array mixing both. Inline maps
-    (top-level or array elements) are validated here; path strings name JSON
-    config files that :func:`skillevaluator.plugin_components.collect_mcp_declarations`
-    reads through the bounded, no-follow plugin-root reader. Returns a (possibly
-    empty) list of findings; an absent or empty value yields none.
-    """
-    if mcp_servers is None:
-        return []
-    if isinstance(mcp_servers, str):
-        return []
-    if isinstance(mcp_servers, list):
-        findings: list[Finding] = []
-        for index, entry in enumerate(mcp_servers):
-            if isinstance(entry, str):
-                continue
-            if isinstance(entry, dict):
-                findings.extend(
-                    validate_contained_mcp_servers(entry, file_path, allowed_private_hosts=allowed_private_hosts)
-                )
-                continue
-            findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "mcp_servers_entry_invalid",
-                    f"mcpServers[{index}] must be a config-file path string or an inline server map "
-                    f"(got {type(entry).__name__})",
-                    file_path,
-                    'Use "./path/to/servers.json" or {"<name>": {"command"|"url": ...}} for each array entry.',
-                )
-            )
-        return findings
-    if not isinstance(mcp_servers, dict):
-        return [
-            _finding(
+            server.report(
                 Severity.HIGH,
-                "mcp_servers_not_object",
-                "'mcpServers' must be an inline server map, a config-file path string, or an array of those "
-                f"(got {type(mcp_servers).__name__})",
-                file_path,
-                'Express mcpServers as {"<name>": {"command"|"url"|"provider": ...}}, "./.mcp.json", '
-                "or an array mixing both.",
+                "mcp_provider_invalid",
+                "provider must be a non-empty string",
+                "Set a public provider identifier.",
             )
-        ]
-    findings = []
-    for name, config in mcp_servers.items():
-        findings.extend(
-            validate_mcp_server_declaration(name, config, file_path, allowed_private_hosts=allowed_private_hosts)
-        )
+
     return findings

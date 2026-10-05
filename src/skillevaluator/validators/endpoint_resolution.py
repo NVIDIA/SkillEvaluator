@@ -54,7 +54,7 @@ from skillevaluator.validators.mcp_static import (
     endpoint_client_host,
     host_is_allowlisted,
 )
-from skillevaluator.validators.url_policy import whatwg_url
+from skillevaluator.validators.url_policy import safe_url, whatwg_url
 
 DNS_TIMEOUT_SECONDS = 3.0
 HEAD_TIMEOUT_SECONDS = 5.0
@@ -254,12 +254,6 @@ def _where(blocked: tuple[str, str, str | None]) -> str:
     return f"a {blocked[1]} address" if blocked[2] is not None else blocked[1]
 
 
-def _safe_url(url: str) -> str:
-    from skillevaluator.plugin_component_risk import safe_url
-
-    return safe_url(url)
-
-
 @dataclass
 class _Run:
     """Bookkeeping for one :meth:`EndpointChecker.check` call."""
@@ -366,7 +360,7 @@ class EndpointChecker:
         return {
             "kind": target.kind,
             "name": target.name,
-            "url": _safe_url(target.url),
+            "url": safe_url(target.url),
             "status": "skipped",
             "reason": f"time budget of {self.budget:.0f}s exhausted",
         }
@@ -434,7 +428,7 @@ class EndpointChecker:
     def _classify(self, target: EndpointTarget, run: _Run) -> tuple[dict[str, Any], list[Finding], _Pending | None]:
         """Parse, classify statically, and resolve one endpoint; return the ``HEAD`` to send, if any."""
         findings: list[Finding] = []
-        display_url = _safe_url(target.url)
+        display_url = safe_url(target.url)
         row: dict[str, Any] = {"kind": target.kind, "name": target.name, "url": display_url}
         try:
             # Read the URL the way the client that connects to it does (WHATWG).
@@ -538,7 +532,7 @@ class EndpointChecker:
             )
         except (OSError, ssl.SSLError, http.client.HTTPException, ValueError) as exc:
             head = HeadResult(None, None, f"{type(exc).__name__}: {str(exc)[:160]}")
-        row["head"] = {"status": head.status, "location": _safe_url(head.location) if head.location else None}
+        row["head"] = {"status": head.status, "location": safe_url(head.location) if head.location else None}
         if head.error:
             row["head"]["error"] = head.error
             row["status"] = "head_failed"
@@ -555,7 +549,7 @@ class EndpointChecker:
         base = whatwg_url(url).split("?", 1)[0].split("#", 1)[0]
         # Resolve the Location the way a WHATWG client (fetch) follows it, so '\\' or 'http:host' cannot hide it.
         absolute = whatwg_url(location, base)
-        display = _safe_url(absolute)
+        display = safe_url(absolute)
         redirect: dict[str, Any] = {"url": display}
         row["redirect"] = redirect
         try:
@@ -573,7 +567,7 @@ class EndpointChecker:
                     target,
                     Severity.MEDIUM,
                     "endpoint_redirect_insecure_scheme",
-                    f"{_safe_url(url)!r} redirects from {scheme} to plaintext {new_scheme} ({display!r})",
+                    f"{safe_url(url)!r} redirects from {scheme} to plaintext {new_scheme} ({display!r})",
                     "Serve the endpoint over https without a downgrade redirect.",
                 )
             )
@@ -608,7 +602,7 @@ class EndpointChecker:
                     target,
                     Severity.HIGH,
                     "endpoint_redirect_metadata",
-                    f"{_safe_url(url)!r} redirects to a cloud instance-metadata endpoint ({display!r})",
+                    f"{safe_url(url)!r} redirects to a cloud instance-metadata endpoint ({display!r})",
                     "Remove the endpoint; a redirect to an instance-metadata service is never allowed.",
                 )
             )
@@ -618,7 +612,7 @@ class EndpointChecker:
                     target,
                     Severity.MEDIUM,
                     "endpoint_redirect_private",
-                    f"{_safe_url(url)!r} redirects to {_where(blocked)} ({display!r})",
+                    f"{safe_url(url)!r} redirects to {_where(blocked)} ({display!r})",
                     "Use an endpoint that does not redirect into a non-public network, or allow the host in the "
                     "validation policy.",
                 )

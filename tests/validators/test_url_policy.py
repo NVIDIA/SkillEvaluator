@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from skillevaluator.validators.url_policy import UrlCredentials, url_credentials
+from skillevaluator.validators.url_policy import MAX_REPORT_CHARS, UrlCredentials, safe_url, url_credentials
 
 _TOKEN = "ghp_" + "0123456789abcdefghij0123456789abcdef"
 
@@ -51,3 +51,23 @@ def test_url_credentials_is_false_when_the_url_carries_none() -> None:
     assert not url_credentials("https://h.example/x?page=2", any_userinfo=True)
     assert not UrlCredentials()
     assert UrlCredentials(query_keys=("token",))
+
+
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        ("https://admin:hunter2@hooks.example.com/x?token=abc#frag", "https://hooks.example.com/x"),
+        ("https:admin:hunter2@evil.example/mcp", "https://evil.example/mcp"),
+        ("https://evil.net\\.example.com/x", "https://evil.net/.example.com/x"),
+        ("https://[::1]:8443/mcp", "https://[::1]:8443/mcp"),
+        ("https://admin:hunter2@h.example:99999/x", "https://h.example:99999/x"),
+        (f"https://hooks.example.com/notify/{_TOKEN}/x", "https://hooks.example.com/notify/<redacted>/x"),
+        (f"https://h.example:bad/{_TOKEN}", "https://h.example:bad/<redacted>"),
+    ],
+)
+def test_safe_url_shows_where_a_client_connects_without_credentials(url: str, shown: str) -> None:
+    assert safe_url(url) == shown
+
+
+def test_safe_url_is_bounded() -> None:
+    assert len(safe_url("https://h.example/" + "a" * 10_000)) <= MAX_REPORT_CHARS

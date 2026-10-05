@@ -31,7 +31,7 @@ import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import unquote, urlparse, urlunparse
+from urllib.parse import unquote, urlparse
 
 import idna
 
@@ -43,6 +43,7 @@ from skillevaluator.validators.url_policy import (
     is_credential_name,
     is_env_reference,
     looks_like_inline_secret,
+    safe_url,
     url_ambiguities,
     url_credentials,
     whatwg_url,
@@ -139,37 +140,21 @@ def _credential_flag_name(token: str) -> str | None:
     return flag if flag and is_credential_name(flag) else None
 
 
-# Everything after 'scheme:' (and any slashes or backslashes) through the last '@'
-# before the path: userinfo to urllib, and to WHATWG clients, which also read
-# 'https:user:pw@host' and 'https://user:pw\@host' as carrying it.
-_URL_USERINFO_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*:[/\\]*)[^/?#]*@")
+# The old name of url_policy.safe_url, still imported by plugin_components.
+redacted_url = safe_url
 
 
-def redacted_url(url: str) -> str:
-    """URL for finding messages: scheme, host, port, and path only.
-
-    Userinfo, parameters, query, and fragment are dropped so an inline credential
-    is never echoed into reports or CI logs, however the authority is written.
-    """
-    try:
-        parsed = urlparse(_URL_USERINFO_RE.sub(r"\1", url.strip(), count=1))
-    except ValueError:  # e.g. an unbalanced '[' in the authority
-        return "<unparseable URL>"
-    return urlunparse((parsed.scheme, parsed.netloc.rpartition("@")[2], parsed.path, "", "", ""))
-
-
-def _client_reading(parsed: Any) -> str:
+def _client_reading(url: str) -> str:
     """How WHATWG clients read an ambiguous URL, for messages: no userinfo, query, or fragment."""
     try:
+        parsed = urlparse(whatwg_url(url))
         host = parsed.hostname
-        port = parsed.port
+        _ = parsed.port  # property access raises ValueError on a malformed port
     except ValueError:  # e.g. 'https://user:password\@host' is host 'user' with port 'password'
         return "reject it as invalid"
     if not host:
         return "find no host in it"
-    display_host = f"[{host}]" if ":" in host else host
-    shown = f"{parsed.scheme}://{display_host}{f':{port}' if port else ''}{parsed.path}"
-    return f"read it as {shown!r}"
+    return f"read it as {safe_url(url)!r}"
 
 
 def _safe_hostname(parsed: Any) -> str | None:
@@ -197,7 +182,7 @@ def _check_url_inline_secrets(
             _finding(
                 Severity.CRITICAL,
                 "mcp_url_inline_secret",
-                f"url embeds userinfo credentials: {redacted_url(url)!r} (userinfo withheld)",
+                f"url embeds userinfo credentials: {safe_url(url)!r} (userinfo withheld)",
                 file_path,
                 'Remove user:password@ from the URL; pass credentials by reference (e.g. header "${MY_TOKEN}").',
                 name=name,
@@ -504,7 +489,7 @@ def _validate_url(
         )
         return
 
-    shown = redacted_url(url)  # messages never echo userinfo or query credentials
+    shown = safe_url(url)  # messages never echo userinfo or query credentials
     try:
         # ``raw`` is how urllib (and Python clients) read the text; ``parsed`` is how
         # WHATWG clients (Node and Rust MCP clients) read it. They differ only for an
@@ -530,7 +515,7 @@ def _validate_url(
                 Severity.HIGH,
                 "mcp_url_malformed_authority",
                 f"url contains {', and '.join(problems)}, so MCP clients and URL parsers disagree on where it "
-                f"points: {shown!r} (WHATWG clients {_client_reading(parsed)})",
+                f"points; WHATWG clients (Node, the MCP SDKs) {_client_reading(url)}",
                 file_path,
                 "Write the URL with '//' after the scheme and without backslashes, whitespace, or control "
                 "characters, e.g. https://host/path.",
@@ -1497,7 +1482,7 @@ def _validate_endpoint(
     if endpoint is None:
         return
     encoded = f" (encoded as {host!r})" if endpoint.encoded else ""
-    shown = redacted_url(url)  # never echo userinfo or query credentials
+    shown = safe_url(url)  # never echo userinfo or query credentials
     if endpoint.kind == "metadata":
         findings.append(
             _finding(

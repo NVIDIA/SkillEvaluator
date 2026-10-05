@@ -24,7 +24,7 @@ import pytest
 
 from skillevaluator.constants import CONTENT_TYPE_PLUGIN
 from skillevaluator.models.result import Severity, ValidationResult
-from skillevaluator.plugin_component_risk import _url_matches_allowlist, safe_url
+from skillevaluator.plugin_component_risk import _url_matches_allowlist
 from skillevaluator.tier1.commands import run_validation
 from skillevaluator.utils.tool_runner import ExternalTool, ToolResult, Tools
 from skillevaluator.validators import dependency_ecosystems as eco
@@ -33,6 +33,7 @@ from skillevaluator.validators.endpoint_resolution import EndpointChecker, Endpo
 from skillevaluator.validators.mcp_static import classify_endpoint_address
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.policy import ValidationPolicy, load_policy_file
+from skillevaluator.validators.url_policy import safe_url
 
 
 class _FakeTool:

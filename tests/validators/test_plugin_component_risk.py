@@ -20,10 +20,10 @@ from skillevaluator.plugin_component_risk import (
     matcher_scope,
     mcp_server_is_read_only,
     parse_tool_list,
-    safe_url,
 )
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.policy import ValidationPolicy, apply_policy
+from skillevaluator.validators.url_policy import safe_url
 
 _PINNED_FS = {"command": "npx", "args": ["-y", "@scope/fs@1.2.3"]}
 

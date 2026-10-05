@@ -48,7 +48,6 @@ from skillevaluator.constants import (
     PLUGIN_CURSOR_MANIFEST_TYPE,
 )
 from skillevaluator.models.result import Finding, Severity
-from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.validators.mcp_static import (
     OverrideIssue,
     classify_endpoint_host,
@@ -59,10 +58,15 @@ from skillevaluator.validators.mcp_static import (
 from skillevaluator.validators.url_policy import (
     is_env_reference,
     looks_like_inline_secret,
+    report_text,
+    safe_url,
     url_ambiguities,
     url_credentials,
     whatwg_url,
 )
+
+# Report text: whitespace collapsed, URL userinfo removed, credentials redacted, length bounded.
+_bounded = report_text
 
 CATEGORY = "PLUGIN_SCHEMA"
 
@@ -124,7 +128,6 @@ MAX_SCRIPT_REFERENCES = 256
 MAX_RUN_SITES = 2048
 MAX_TOOL_ENTRIES = 256
 MAX_MATCHER_CHARS = 256
-MAX_TARGET_CHARS = 200
 MAX_OUTSIDE_REFS = 5
 
 _WILDCARD_TOOLS = frozenset({"*", "*(*)", "mcp__*", "mcp__*__*"})
@@ -172,8 +175,6 @@ _DANGEROUS_BASH_PREFIXES: tuple[str, ...] = (
 # 'python -m pkg.module *' is the one option-prefixed interpreter rule Claude Code treats as scoped.
 _PYTHON_DOTTED_MODULE_RE = re.compile(r"-m\s+\w+\.[\w.]+(?:\s*:|\s+)")
 _ENV_REF_ANYWHERE_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
-# 'user:password@' in a URL authority (through its last '@'); scrubbed from every text a report shows.
-_URL_USERINFO_RE = re.compile(r"//[^/?#\s]*@")
 _URL_IN_TEXT_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^\s'\"`<>]{1,2048}")
 
 # Hook output that approves a tool call or a permission request: Claude Code's and Codex's shapes
@@ -472,17 +473,6 @@ def _finding(
         suggestion=suggestion,
         metadata=metadata,
     )
-
-
-def _bounded(value: str, limit: int = MAX_TARGET_CHARS) -> str:
-    """Report text: whitespace collapsed, URL ``user:password@`` removed, credentials redacted, length bounded.
-
-    Userinfo is removed from the whole text; only a window of twice the limit is
-    redacted (the result keeps at most ``limit`` characters), because the
-    redaction patterns can take quadratic time on long unbroken input.
-    """
-    text = _URL_USERINFO_RE.sub("//", " ".join(value.split()))
-    return redact_sensitive_text(text[: 2 * limit], max_len=limit)
 
 
 # --------------------------------------------------------------------------- #
@@ -2289,34 +2279,6 @@ def hook_allowlist_hosts(allowed_urls: Iterable[str]) -> list[str]:
         elif entry:
             hosts.append(entry)
     return hosts
-
-
-def safe_url(url: str) -> str:
-    """A URL for reports: no userinfo, query, or fragment; bounded (also for a URL that does not parse).
-
-    An http(s) or ws(s) URL is shown the way a WHATWG client (Node) reads it, so
-    the report names the host a client would actually contact.
-    """
-    try:
-        parsed = urlparse(whatwg_url(url))
-        host = parsed.hostname or ""
-        port = f":{parsed.port}" if parsed.port else ""
-    except ValueError:
-        return _unparsed_url(url)
-    if not parsed.scheme or not host:
-        return _unparsed_url(url)
-    display_host = f"[{host}]" if ":" in host else host
-    return _bounded(f"{parsed.scheme}://{display_host}{port}{parsed.path}")
-
-
-def _unparsed_url(url: str) -> str:
-    """A malformed URL for reports: the query, fragment, and userinfo (through the authority's last ``@``) removed."""
-    text = url.strip().split("#", 1)[0].split("?", 1)[0]
-    prefix, slashes, rest = text.partition("//")
-    if not slashes:
-        prefix, rest = "", text
-    authority, slash, path = rest.partition("/")
-    return _bounded(f"{prefix}{slashes}{authority.rpartition('@')[2]}{slash}{path}")
 
 
 def _command_url_credentials(text: str) -> bool:

@@ -285,6 +285,18 @@ def test_url_findings_never_echo_userinfo_or_query_credentials(url: str, check: 
     assert repr(shown) in next(f for f in findings if f.check_name == check).message
 
 
+def test_url_findings_show_a_bounded_url_where_clients_connect() -> None:
+    """Regression: MCP messages printed the whole path, and urllib's reading of 'https:user:pw@host'."""
+    long_path = "https://10.0.0.5/" + "a" * 5_000
+    [private] = validate_mcp_server_declaration("s", {"url": long_path}, "p.json")
+    assert len(private.message) < 600
+
+    findings = validate_mcp_server_declaration("s", {"url": "https:admin:hunter2@evil.example/mcp"}, "p.json")
+    secret = next(f for f in findings if f.check_name == "mcp_url_inline_secret")
+    assert "'https://evil.example/mcp'" in secret.message
+    assert "hunter2" not in secret.message
+
+
 @pytest.mark.parametrize("url", [f"https://user:{_URL_SECRET}@[::1/mcp", "https://[bad/mcp?x=1"])
 def test_unparseable_url_authority_is_a_finding_not_a_crash(url: str) -> None:
     findings = validate_mcp_server_declaration("s", {"url": url}, "p.json")

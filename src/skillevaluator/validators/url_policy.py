@@ -20,7 +20,9 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from urllib.parse import parse_qs, unquote, urljoin
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
+
+from skillevaluator.utils.redaction import redact_sensitive_text
 
 # --------------------------------------------------------------------------- #
 # Inline credentials                                                          #
@@ -252,3 +254,56 @@ def url_ambiguities(url: str, *, percent_in_host: bool = False) -> list[str]:
         if "%" in authority.rpartition("@")[2]:
             problems.append("percent-encoding in the host")
     return problems
+
+
+# --------------------------------------------------------------------------- #
+# URLs and other text in reports                                              #
+# --------------------------------------------------------------------------- #
+# Longest text (a URL, a command line) one report field shows.
+MAX_REPORT_CHARS = 200
+# 'user:password@' in a URL authority (through its last '@'); scrubbed from every text a report shows.
+_URL_USERINFO_RE = re.compile(r"//[^/?#\s]*@")
+
+
+def report_text(value: str, limit: int = MAX_REPORT_CHARS) -> str:
+    """Report text: whitespace collapsed, URL ``user:password@`` removed, credentials redacted, length bounded.
+
+    Userinfo is removed from the whole text; only a window of twice the limit is
+    redacted (the result keeps at most ``limit`` characters), because the
+    redaction patterns can take quadratic time on long unbroken input.
+    """
+    text = _URL_USERINFO_RE.sub("//", " ".join(value.split()))
+    return redact_sensitive_text(text[: 2 * limit], max_len=limit)
+
+
+def safe_url(url: str) -> str:
+    """A URL for reports: no userinfo, query, or fragment; bounded (also for a URL that does not parse).
+
+    An http(s), ws(s), or ftp URL is shown the way a WHATWG client (Node, the MCP
+    SDKs) reads it, so the report names the host a client would actually contact.
+    A path segment shaped like a secret is shown as ``<redacted>``.
+    """
+    try:
+        parsed = urlparse(whatwg_url(url))
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+    except ValueError:
+        return _unparsed_url(url)
+    if not parsed.scheme or not host:
+        return _unparsed_url(url)
+    display_host = f"[{host}]" if ":" in host else host
+    return report_text(f"{parsed.scheme}://{display_host}{port}{_redacted_path(parsed.path)}")
+
+
+def _unparsed_url(url: str) -> str:
+    """A malformed URL for reports: the query, fragment, and userinfo (through the authority's last ``@``) removed."""
+    text = url.strip().split("#", 1)[0].split("?", 1)[0]
+    prefix, slashes, rest = text.partition("//")
+    if not slashes:
+        prefix, rest = "", text
+    authority, slash, path = rest.partition("/")
+    return report_text(f"{prefix}{slashes}{authority.rpartition('@')[2]}{slash}{_redacted_path(path)}")
+
+
+def _redacted_path(path: str) -> str:
+    return "/".join("<redacted>" if has_secret_shape(segment) else segment for segment in path.split("/"))

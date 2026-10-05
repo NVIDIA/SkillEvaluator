@@ -588,7 +588,7 @@ def declared_plugin_paths(value: Any) -> list[PurePosixPath]:
     """The root-relative paths a ``plugin.json`` path field declares (one path or a list of them).
 
     Each path is normalized like the Tier 1 inventory does
-    (:func:`~skillevaluator.plugin_components.normalize_declared_path`): a path
+    (:func:`~skillevaluator.plugin_paths.normalize_declared_path`): a path
     that escapes the plugin root (absolute, home-relative, or through ``..``),
     one under another placeholder, and the plugin root itself are skipped.
     """

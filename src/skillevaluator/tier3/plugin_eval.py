@@ -1805,7 +1805,7 @@ def _plugin_root_launch(server: dict[str, Any], *, root_prefixes: tuple[str, ...
 def _unstaged_root_mcp_json(manifest: dict[str, Any], plugin_root: Path) -> str | None:
     """Finding path of an ``agent_plugin.yaml`` plugin's implicit root ``.mcp.json``, or ``None``.
 
-    Mirrors :func:`~skillevaluator.plugin_components.collect_mcp_declarations`: the
+    Mirrors :func:`~skillevaluator.plugin_mcp.collect_mcp_declarations`: the
     root file is inventoried as the default ``mcp_json`` source (never staged for
     this manifest form) unless an ``mcpServers`` path names it explicitly -- then it
     is a staged ``path_ref`` source whose findings must keep blocking. Paths are

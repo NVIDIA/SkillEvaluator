@@ -324,14 +324,14 @@ class MarkdownReporter(ReporterBase):
 
     def _render_plugin_section(self, results: list[ValidationResult], plugin: dict, lines: list[str]) -> None:
         """Render the Tier 1 plugin block: manifest, dependencies, components, MCP, context."""
-        view = (
-            tier1_plugin_view(
-                plugin,
-                status=self._plugin_status(results),
-                bundled_skills=self._plugin_child_names(results),
-            )
-            or {}
+        view = tier1_plugin_view(
+            plugin,
+            status=self._plugin_status(results),
+            bundled_skills=self._plugin_child_names(results),
         )
+        if view is None:
+            # An empty plugin block has nothing to show; the HTML report omits the section too.
+            return
         cell = _markdown_table_cell
         status = {"failed": "❌ FAILED", "incomplete": "⚠️ INCOMPLETE", "passed": "✅ PASSED"}.get(view["status"], "")
         lines.append("## Plugin")

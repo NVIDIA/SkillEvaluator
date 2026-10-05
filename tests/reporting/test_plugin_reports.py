@@ -181,6 +181,16 @@ def test_markdown_without_plugin_has_no_plugin_section() -> None:
     assert "## Plugin" not in markdown
 
 
+def test_markdown_with_an_empty_plugin_block_has_no_plugin_section() -> None:
+    result = ValidationResult(validator_name="Schema Check", validator_description="Tier 1", metadata={"plugin": {}})
+    result.add_success("schema", "valid")
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+
+    assert "## Plugin" not in markdown
+    assert "## Results" in markdown
+
+
 def test_sarif_run_and_results_carry_plugin_context(tmp_path: Path) -> None:
     results = [tier1_plugin_result(), tier2_plugin_result(), _tier3_result(tmp_path)]
     document = json.loads(SARIFReporter(include_timestamp=False).render_all(results))

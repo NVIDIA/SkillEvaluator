@@ -417,7 +417,10 @@ def _content_relative_finding_paths(results: list[ValidationResult], validated: 
             # target without ".." can be ambiguous.
             if ".." not in prefix and (content_root / path).exists(follow_symlinks=False):
                 continue
-            finding.file_path = label + str(Path(*parts[len(prefix) :]))
+            # Keep the path's own separator: str(Path(...)) would turn a "/" path
+            # into "\\" on Windows, so reports and SARIF would mix both styles.
+            separator = "\\" if "\\" in path and "/" not in path else "/"
+            finding.file_path = label + (separator.join(parts[len(prefix) :]) or ".")
 
 
 def _record_validate_json_report(report_name: str | None) -> None:

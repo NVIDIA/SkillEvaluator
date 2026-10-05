@@ -1250,6 +1250,8 @@ class EndpointClass:
     host: str
     address: IPAddress | None = None
     encoded: bool = False
+    # The host is this machine (a loopback name, 127.0.0.0/8, or ::1), so traffic to it stays local.
+    is_loopback: bool = False
 
 
 def _bare_host(host: str) -> str:
@@ -1408,16 +1410,24 @@ def classify_endpoint_host(host: str) -> EndpointClass | None:
     if normalized in _METADATA_HOSTNAMES:
         return EndpointClass("metadata", "cloud instance-metadata", normalized, encoded=name_encoded)
     if normalized in _LOOPBACK_HOSTNAMES or normalized.endswith(".localhost"):
-        return EndpointClass("private", "loopback", normalized, encoded=name_encoded)
+        return EndpointClass("private", "loopback", normalized, encoded=name_encoded, is_loopback=True)
     address, encoded = _parse_host_address(normalized)
     if address is None:
         return None
     found, embedded = _classify_address(address)
-    encoded = encoded or name_encoded or embedded
     if found is None:
         return None
     kind, reason = found
-    return EndpointClass(kind, reason, normalized, address, encoded)
+    # An embedded IPv4 address (mapped, 6to4, Teredo, NAT64, compatible) decides for the IPv6 literal.
+    decided_by = _embedded_ipv4(address) if embedded else address
+    return EndpointClass(
+        kind,
+        reason,
+        normalized,
+        address,
+        encoded or name_encoded or embedded,
+        is_loopback=decided_by is not None and decided_by.is_loopback,
+    )
 
 
 def host_is_allowlisted(endpoint: EndpointClass, allowed_hosts: Iterable[str]) -> bool:

@@ -3079,7 +3079,7 @@ class HookAnalyzer:
                 "Use an https:// URL with a host.",
             )
             return
-        if scheme == "http" and not (endpoint is not None and endpoint.reason == "loopback"):
+        if scheme == "http" and not (endpoint is not None and endpoint.is_loopback):
             site.report(
                 "insecure_scheme",
                 Severity.HIGH,

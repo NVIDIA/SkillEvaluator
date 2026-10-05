@@ -304,6 +304,28 @@ def test_unparseable_url_authority_is_a_finding_not_a_crash(url: str) -> None:
     assert all(_URL_SECRET not in f.message for f in findings)
 
 
+@pytest.mark.parametrize(
+    ("host", "loopback"),
+    [
+        ("localhost", True),
+        ("api.localhost", True),
+        ("127.9.9.9", True),
+        ("0x7f.1", True),
+        ("[::1]", True),
+        ("::ffff:127.0.0.1", True),
+        ("2002:7f00:1::", True),
+        ("10.0.0.1", False),
+        ("0.0.0.0", False),
+        ("fe80::1", False),
+        ("169.254.169.254", False),
+    ],
+)
+def test_endpoint_class_marks_loopback_hosts(host: str, loopback: bool) -> None:
+    endpoint = classify_endpoint_host(host)
+    assert endpoint is not None
+    assert endpoint.is_loopback is loopback
+
+
 def test_plaintext_url_still_reports_endpoint_class() -> None:
     checks = _checks(validate_mcp_server_declaration("s", {"url": "http://169.254.169.254/"}, "p.json"))
     assert checks["mcp_url_insecure_scheme"] == Severity.HIGH

@@ -3431,11 +3431,8 @@ def _lexical_path_components(value):
 
 
 def _is_apply_patch_action(action_lower):
-    name = action_lower.strip()
-    return any(
-        name == tool or name.endswith((f"__{tool}", f".{tool}", f"/{tool}", f":{tool}"))
-        for tool in ("apply_patch", "applypatch")
-    )
+    """The tool is ``apply_patch`` or ``applypatch``, also under a namespace (``functions.apply_patch``)."""
+    return not _tool_name_candidates(action_lower.strip()).isdisjoint(_APPLY_PATCH_TOOLS)
 
 
 def _string_argument(value):

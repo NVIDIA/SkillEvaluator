@@ -339,11 +339,16 @@ _SHELL_STATUS_LINE_RE = re.compile(
 # A shell tool's error line about a file (``cat: <dir>/SKILL.md: Permission denied``).
 _SHELL_ERROR_LINE_RE = re.compile(r"[\w./+-]+:\s")
 # A result that came back as a runtime/transport failure rather than an answer.
-# A 4xx/5xx status counts only at the start of a line ("403: forbidden",
-# "Error: 500 - boom", "HTTP/1.1 404 - x"), so issue numbers, file:line
-# references and totals inside a successful answer are not failures.
+# A 4xx/5xx status counts at the start of a line ("403: forbidden", "Error: 500
+# - boom", "HTTP/1.1 404 - x"), after a request line ("GET /repos/x: 404 - Not
+# Found"), or after a space later on a line that names an error ("Request failed
+# with status 404: Not Found", "Error calling tool: 404: not found"). Issue
+# numbers, file:line references and totals inside a successful answer are not
+# failures. Each gap is bounded, so a long line is scanned in linear time.
 _FAILED_CALL_RE = re.compile(
     r"(?:^[ \t]*(?:(?:error|http/\d(?:\.\d)?|status(?:[ _]code)?)[ \t:=]*)?[45]\d{2}\b[ \t]*[:\-])"
+    r"|(?:^[ \t]*(?:get|head|post|put|patch|delete|options)[ \t]+\S{1,200}[ \t]+[45]\d{2}\b[ \t]*[:\-])"
+    r"|(?:\b(?:error|failed|status(?:[ _]code)?)\b[^\n]{0,80}?[ \t][45]\d{2}\b[ \t]*[:\-])"
     r"|<tool_use_error>"
     r"|\bmcp error\b"
     r"|\bpermission denied\b"

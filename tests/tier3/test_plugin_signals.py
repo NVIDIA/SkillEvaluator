@@ -221,6 +221,10 @@ class TestOutcomeTriState:
             "500: boom",
             "HTTP/1.1 404 - Not Found",
             "Done.\nstatus code 502: bad gateway",
+            # A status after an error word or a request line, not at the start of the line.
+            "Request failed with status 404: Not Found",
+            "Error calling tool: 404: not found",
+            "GET /repos/x: 404 - Not Found",
         ],
     )
     def test_failure_markers_mark_failure(self, content: str) -> None:
@@ -229,7 +233,12 @@ class TestOutcomeTriState:
 
     @pytest.mark.parametrize(
         "content",
-        ["Open issues:\n#451 - Crash", "Found in src/app.py:404: def handler()", "Total: 500 - all good"],
+        [
+            "Open issues:\n#451 - Crash",
+            "Found in src/app.py:404: def handler()",
+            "Total: 500 - all good",
+            "The error handler is in src/app.py:404: def handler()",
+        ],
     )
     def test_status_like_numbers_inside_a_successful_answer_are_not_failures(self, content: str) -> None:
         traj = _traj(_one("mcp__github__x", content=content))

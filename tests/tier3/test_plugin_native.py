@@ -540,6 +540,45 @@ def test_claude_code_plugin_copy_skips_datasets_when_the_evals_source_is_the_plu
     assert "evals.json" not in files
 
 
+@pytest.mark.parametrize(
+    ("name", "content", "always_on", "claude_rule"),
+    [
+        ("plain.md", "  Indented first line.\n", "Indented first line.", "  Indented first line.\n"),
+        ("always.mdc", "---\nalwaysApply: true\n---\nBody\n", "Body", "Body\n"),
+        (
+            "scoped.mdc",
+            "---\nglobs: '*.py, *.ts'\n---\nBody\n",
+            None,
+            '---\npaths:\n  - "*.py"\n  - "*.ts"\n---\n\nBody\n',
+        ),
+        (
+            "both.md",
+            "---\npaths: [src/**]\nglobs: '*.py'\n---\nBody\n",
+            None,
+            '---\npaths:\n  - "src/**"\n---\n\nBody\n',
+        ),
+        ("no-patterns.md", "---\nglobs: ','\n---\nBody\n", "Body", "Body\n"),
+        ("no-patterns.mdc", "---\nglobs: ','\n---\nBody\n", None, None),
+        ("requested.mdc", "---\ndescription: Use for releases\n---\nBody\n", None, None),
+    ],
+)
+def test_every_rules_channel_classifies_a_rule_the_same_way(
+    name: str, content: str, always_on: str | None, claude_rule: str | None
+) -> None:
+    """An always-on rules channel and Claude Code user rules agree on which rules are scoped or on request."""
+    from skillevaluator.tier3.plugin_native import _always_on_rule, _claude_user_rule
+
+    always_on_body, always_on_reason = _always_on_rule(name, content)
+    claude_body, claude_reason = _claude_user_rule(name, content)
+
+    assert (always_on_body, claude_body) == (always_on, claude_rule)
+    if name.startswith("scoped"):
+        assert always_on_reason is not None and "matching *.py, *.ts" in always_on_reason
+    if name.startswith("requested"):
+        assert always_on_reason is not None and always_on_reason.startswith("agent-requested rule")
+        assert claude_reason is not None and claude_reason.startswith("agent-requested rule")
+
+
 def test_claude_code_setup_copies_rules_and_census_lists_the_plugin_dir(tmp_path: Path, native_source) -> None:
     bundle, _lines, _staging = _stage(tmp_path, "claude-code", native_source)
     root = tmp_path / "container"

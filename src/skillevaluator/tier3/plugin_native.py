@@ -1071,72 +1071,90 @@ def _is_true(value: Any) -> bool:
     return value is True or (isinstance(value, str) and value.strip().casefold() == "true")
 
 
-def _always_on_rule(name: str, content: str) -> tuple[str | None, str | None]:
-    """Return ``(body, None)`` for a rule that applies to every task, or ``(None, reason)``.
-
-    The frontmatter is never staged. A Cursor rule is always on only with
-    ``alwaysApply: true``; ``globs`` (or Claude ``paths``) scope it to matching
-    files, and without either it is agent-requested or manual. A rule with no
-    frontmatter stays always on.
-    """
-    lines = content.splitlines()
-    if not lines or lines[0].strip() != "---" or not any(line.strip() == "---" for line in lines[1:]):
-        return content.strip(), None
-    parsed = parse_markdown(content)
-    meta = parsed.frontmatter
-    if _is_true(meta.get("alwaysApply")):
-        return parsed.body.strip(), None
-    scope = meta.get("globs") or meta.get("paths")
-    if scope:
-        shown = ", ".join(str(item) for item in scope) if isinstance(scope, list) else str(scope)
-        return None, (
-            f"scoped rule (applies only to files matching {shown[:80]}); this harness has only an always-on "
-            "rules channel, so it is not staged"
-        )
-    if "alwaysApply" in meta or name.casefold().endswith(".mdc"):
-        kind = "agent-requested" if parsed.description else "manual"
-        return None, (
-            f"{kind} rule (alwaysApply is not true); this harness has only an always-on rules channel, "
-            "so it is not staged"
-        )
-    return parsed.body.strip(), None
-
-
 def _rule_globs(scope: Any) -> list[str]:
     """Cursor ``globs`` or Claude ``paths``: a list, or a comma-separated string, of glob patterns."""
     items = scope if isinstance(scope, list) else str(scope).split(",")
     return [text for item in items if (text := str(item).strip())][:64]
 
 
-def _claude_user_rule(name: str, content: str) -> tuple[str | None, str | None]:
-    """The staged Claude Code user rule for one plugin rule, or ``(None, reason)``.
+@dataclass(frozen=True)
+class _RuleActivation:
+    """When a plugin rule applies, read from its frontmatter (which is never staged).
 
-    Claude Code loads a user rule on every task unless its frontmatter has
-    ``paths``, so a rule's scope must be expressed that way. A rule with no
-    frontmatter or ``alwaysApply: true`` is always on (its frontmatter is not
-    staged). Cursor ``globs`` (or Claude ``paths``) become ``paths``. A Cursor
-    agent-requested or manual rule has no Claude Code equivalent and is not
-    staged.
+    ``body`` is the rule without its frontmatter (stripped when there was one).
+    ``globs`` are the file patterns a scoped rule applies to. ``on_request``
+    names a rule that is neither always on nor scoped: ``agent-requested`` (it
+    has a description) or ``manual``.
+    """
+
+    body: str
+    globs: tuple[str, ...] = ()
+    on_request: str | None = None
+
+
+def _rule_activation(name: str, content: str) -> _RuleActivation:
+    """Classify one plugin rule as always on, scoped to file patterns, or applied on request.
+
+    A rule with no frontmatter, or with ``alwaysApply: true``, is always on.
+    Claude ``paths`` or Cursor ``globs`` (a list, or a comma-separated string)
+    scope it to matching files. Otherwise a rule that sets ``alwaysApply``, or
+    a Cursor ``.mdc`` rule, is agent-requested or manual; any other rule is
+    always on.
     """
     lines = content.splitlines()
     if not lines or lines[0].strip() != "---" or not any(line.strip() == "---" for line in lines[1:]):
-        return content.rstrip() + "\n", None
+        return _RuleActivation(content)
     parsed = parse_markdown(content)
     meta = parsed.frontmatter
     body = parsed.body.strip()
     if _is_true(meta.get("alwaysApply")):
-        return body + "\n", None
-    patterns = _rule_globs(meta.get("paths") or meta.get("globs") or [])
-    if patterns:
-        listed = "".join(f"  - {json.dumps(pattern)}\n" for pattern in patterns)
-        return f"---\npaths:\n{listed}---\n\n{body}\n", None
+        return _RuleActivation(body)
+    globs = _rule_globs(meta.get("paths") or meta.get("globs") or [])
+    if globs:
+        return _RuleActivation(body, globs=tuple(globs))
     if "alwaysApply" in meta or name.casefold().endswith(".mdc"):
-        kind = "agent-requested" if parsed.description else "manual"
+        return _RuleActivation(body, on_request="agent-requested" if parsed.description else "manual")
+    return _RuleActivation(body)
+
+
+def _always_on_rule(name: str, content: str) -> tuple[str | None, str | None]:
+    """Return ``(body, None)`` for a rule that applies to every task, or ``(None, reason)``.
+
+    For harnesses whose only rules channel is always on: a scoped,
+    agent-requested, or manual rule is not staged.
+    """
+    rule = _rule_activation(name, content)
+    if rule.globs:
         return None, (
-            f"{kind} rule (alwaysApply is not true); Claude Code user rules are always on or scoped by paths, "
+            f"scoped rule (applies only to files matching {', '.join(rule.globs)[:80]}); this harness has only an "
+            "always-on rules channel, so it is not staged"
+        )
+    if rule.on_request:
+        return None, (
+            f"{rule.on_request} rule (alwaysApply is not true); this harness has only an always-on rules channel, "
             "so it is not staged"
         )
-    return body + "\n", None
+    return rule.body.strip(), None
+
+
+def _claude_user_rule(name: str, content: str) -> tuple[str | None, str | None]:
+    """The staged Claude Code user rule for one plugin rule, or ``(None, reason)``.
+
+    Claude Code loads a user rule on every task unless its frontmatter has
+    ``paths``, so a scoped rule is staged with its patterns as ``paths``. A
+    Cursor agent-requested or manual rule has no Claude Code equivalent and is
+    not staged.
+    """
+    rule = _rule_activation(name, content)
+    if rule.globs:
+        listed = "".join(f"  - {json.dumps(pattern)}\n" for pattern in rule.globs)
+        return f"---\npaths:\n{listed}---\n\n{rule.body}\n", None
+    if rule.on_request:
+        return None, (
+            f"{rule.on_request} rule (alwaysApply is not true); Claude Code user rules are always on or scoped by "
+            "paths, so it is not staged"
+        )
+    return rule.body.rstrip() + "\n", None
 
 
 def _staged_rules(source: NativePluginSource) -> tuple[list[tuple[str, str]], list[tuple[str, str, str]]]:

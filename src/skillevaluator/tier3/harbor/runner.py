@@ -137,7 +137,7 @@ def _plugin_signals_context(
     read through the adapter's bounded no-follow loader; case fields come from
     the staged task entries.
     """
-    from skillevaluator.tier3.plugin_eval import PLUGIN_MCP_SERVERS_FILENAME
+    from skillevaluator.tier3.plugin_eval import PLUGIN_EVAL_PACKAGE_SUFFIX, PLUGIN_MCP_SERVERS_FILENAME
 
     try:
         servers = _load_mcp_servers(evaluator_skill_path, PLUGIN_MCP_SERVERS_FILENAME)
@@ -151,7 +151,7 @@ def _plugin_signals_context(
         entries = []
     # The generated package directory is ``<plugin>-plugin-eval`` and its wrapper
     # SKILL.md is named after the plugin; neither is a member-skill selection.
-    wrapper_names = [skill_path.name, skill_path.name.removesuffix("-plugin-eval")]
+    wrapper_names = [skill_path.name, skill_path.name.removesuffix(PLUGIN_EVAL_PACKAGE_SUFFIX)]
     try:
         runtime_components = load_plugin_runtime_components(evaluator_skill_path)
     except (OSError, ValueError) as exc:

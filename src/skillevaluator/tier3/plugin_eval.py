@@ -168,6 +168,10 @@ if TYPE_CHECKING:
     from skillevaluator.plugin_formats import FormatProfile
     from skillevaluator.plugin_manifest import PluginManifestLocation
 
+#: The generated package directory is ``<plugin><PLUGIN_EVAL_PACKAGE_SUFFIX>``; the Harbor
+#: runner strips the suffix to recognize the wrapper skill by the plugin's name.
+PLUGIN_EVAL_PACKAGE_SUFFIX = "-plugin-eval"
+
 # Shared with Harbor's runtime find_evals_file() and the report loader so a
 # dataset accepted/staged here is resolvable downstream.
 _EVAL_DATASET_NAMES = tuple(f"evals{extension}" for extension in DATASET_EXTENSIONS)
@@ -2134,7 +2138,7 @@ def _skip_reason(
 
 def _fresh_package_dir(stage_root: Path, plugin_name: str) -> Path:
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", plugin_name).strip("-._") or "plugin"
-    package_path = stage_root.expanduser().resolve() / f"{safe_name}-plugin-eval"
+    package_path = stage_root.expanduser().resolve() / f"{safe_name}{PLUGIN_EVAL_PACKAGE_SUFFIX}"
     if package_path.exists():
         raise ValueError(f"Plugin evaluation staging path already exists: {package_path}")
     package_path.mkdir(parents=True)

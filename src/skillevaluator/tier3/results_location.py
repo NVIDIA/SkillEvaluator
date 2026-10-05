@@ -197,7 +197,7 @@ def _read_stable_bytes(
         stable_metadata = opened
     else:
         # Windows path ``lstat`` and CRT descriptor ``fstat`` expose
-        # incompatible identity fields. ``SecureRoot._open_windows`` pins the
+        # incompatible identity fields. ``SecureRoot._open_windows_file`` pins the
         # native handle and validates the declared name before the read, so the
         # caller completes that proof with same-family path snapshots here.
         if _node_fingerprint(after) != _node_fingerprint(before) or len(raw) != after.st_size:

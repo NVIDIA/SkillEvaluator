@@ -721,6 +721,7 @@ def _run_agent_eval_or_skip(
             timeout_multiplier=timeout_multiplier,
             harbor_keep_jobs=harbor_keep_jobs,
             agent_runtime_preflight=agent_runtime_preflight,
+            evaluated_source=evaluated_source,
             progress_reporter=progress_reporter,
             lift_mode=lift_mode,
             repo_root=repo_root,
@@ -1001,6 +1002,7 @@ def _run_plugin_agent_eval(
     timeout_multiplier: float | None = None,
     harbor_keep_jobs: bool = False,
     agent_runtime_preflight: bool | None = None,
+    evaluated_source: dict[str, str] | None = None,
     progress_reporter=None,
     lift_mode: str = "effectiveness",
     repo_root: Path | None = None,
@@ -1089,6 +1091,7 @@ def _run_plugin_agent_eval(
                 timeout_multiplier=timeout_multiplier,
                 harbor_keep_jobs=harbor_keep_jobs,
                 agent_runtime_preflight=agent_runtime_preflight,
+                evaluated_source=evaluated_source,
             )
             service = EvaluationService()
             if progress_reporter is not None:
@@ -3362,7 +3365,7 @@ def evaluate_plugin(
     try:
         with tempfile.TemporaryDirectory(prefix="skillevaluator-plugin-eval-") as temp_dir:
             prepared = prepare_plugin_eval_package(
-                plugin_path,
+                plugin_dir,
                 stage_root=Path(temp_dir),
                 evals_source=evals_source,
                 include_skills=include_skills,

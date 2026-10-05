@@ -390,6 +390,38 @@ def _check_description(raw: Mapping[str, Any], where: str, errors: _FieldErrors)
     return True
 
 
+def _check_list(value: Any, where: str, errors: _FieldErrors, *, items: str, limit: int, unit: str) -> list[Any] | None:
+    """``value`` if it is a list of at most ``limit`` entries; otherwise the problem is recorded."""
+    if not isinstance(value, list):
+        errors.add(where, f"must be a list of {items}")
+        return None
+    if len(value) > limit:
+        errors.add(where, f"must list at most {limit} {unit}")
+        return None
+    return value
+
+
+def _check_object(raw: Any, where: str, errors: _FieldErrors, allowed_keys: frozenset[str]) -> bool:
+    """Whether ``raw`` is an object with no keys outside ``allowed_keys``; otherwise the problem is recorded."""
+    if not isinstance(raw, dict):
+        errors.add(where, "must be an object")
+        return False
+    unknown = sorted(str(key)[:64] for key in raw if key not in allowed_keys)
+    if unknown:
+        errors.add(where, f"unsupported keys: {', '.join(unknown)}")
+        return False
+    return True
+
+
+def _is_name(value: Any) -> bool:
+    """An argument or property name: a non-empty string of at most ``MAX_ARGUMENT_NAME_CHARS``."""
+    return isinstance(value, str) and 0 < len(value) <= MAX_ARGUMENT_NAME_CHARS
+
+
+def _is_name_list(value: Any) -> bool:
+    return isinstance(value, list) and len(value) <= MAX_ARGUMENT_NAMES and all(_is_name(item) for item in value)
+
+
 def _check_ref_string(value: Any, where: str, errors: _FieldErrors) -> str | None:
     if not isinstance(value, str) or not value.strip():
         errors.add(where, "must be a non-empty string")
@@ -428,14 +460,11 @@ def _check_ref_alternatives(value: Any, where: str, errors: _FieldErrors) -> lis
 
 
 def _check_tool_patterns(value: Any, where: str, errors: _FieldErrors) -> list[str] | None:
-    if not isinstance(value, list):
-        errors.add(where, "must be a list of tool refs")
-        return None
-    if len(value) > MAX_TOOL_PATTERNS:
-        errors.add(where, f"must list at most {MAX_TOOL_PATTERNS} tool refs")
+    items = _check_list(value, where, errors, items="tool refs", limit=MAX_TOOL_PATTERNS, unit="tool refs")
+    if items is None:
         return None
     patterns: list[str] = []
-    for index, item in enumerate(value):
+    for index, item in enumerate(items):
         ref = _check_ref_string(item, f"{where}[{index}]", errors)
         if ref is None:
             return None
@@ -505,15 +534,9 @@ def _check_schema(schema: Any, where: str, errors: _FieldErrors, *, depth: int, 
         ):
             errors.add(f"{where}.type", f"must be one of {', '.join(sorted(_SCHEMA_TYPES))} or a list of them")
             ok = False
-    if "required" in schema:
-        required = schema["required"]
-        if (
-            not isinstance(required, list)
-            or len(required) > MAX_ARGUMENT_NAMES
-            or not all(isinstance(item, str) and 0 < len(item) <= MAX_ARGUMENT_NAME_CHARS for item in required)
-        ):
-            errors.add(f"{where}.required", "must be a list of property names")
-            ok = False
+    if "required" in schema and not _is_name_list(schema["required"]):
+        errors.add(f"{where}.required", "must be a list of property names")
+        ok = False
     if "enum" in schema:
         enum = schema["enum"]
         if not isinstance(enum, list) or not enum or len(enum) > MAX_ENUM_ITEMS:
@@ -542,7 +565,7 @@ def _check_schema(schema: Any, where: str, errors: _FieldErrors, *, depth: int, 
             ok = False
         else:
             for name, sub in properties.items():
-                if not isinstance(name, str) or not name or len(name) > MAX_ARGUMENT_NAME_CHARS:
+                if not _is_name(name):
                     errors.add(f"{where}.properties", "property names must be non-empty short strings")
                     ok = False
                     continue
@@ -560,7 +583,7 @@ def _check_arg_mapping(value: Any, where: str, errors: _FieldErrors, *, kind: st
         return None
     parsed: dict[str, Any] = {}
     for name, item in value.items():
-        if not isinstance(name, str) or not name or len(name) > MAX_ARGUMENT_NAME_CHARS:
+        if not _is_name(name):
             errors.add(where, "argument names must be non-empty strings")
             return None
         item_where = f"{where}.{name}"
@@ -579,21 +602,13 @@ def _check_arg_mapping(value: Any, where: str, errors: _FieldErrors, *, kind: st
 
 
 def _parse_tool_arguments(value: Any, where: str, errors: _FieldErrors) -> list[dict[str, Any]] | None:
-    if not isinstance(value, list):
-        errors.add(where, "must be a list of argument rules")
-        return None
-    if len(value) > MAX_ARGUMENT_RULES:
-        errors.add(where, f"must list at most {MAX_ARGUMENT_RULES} rules")
+    items = _check_list(value, where, errors, items="argument rules", limit=MAX_ARGUMENT_RULES, unit="rules")
+    if items is None:
         return None
     rules: list[dict[str, Any]] = []
-    for index, raw in enumerate(value):
+    for index, raw in enumerate(items):
         rule_where = f"{where}[{index}]"
-        if not isinstance(raw, dict):
-            errors.add(rule_where, "must be an object")
-            return None
-        unknown = sorted(str(key)[:64] for key in raw if key not in _ARGUMENT_RULE_KEYS)
-        if unknown:
-            errors.add(rule_where, f"unsupported keys: {', '.join(unknown)}")
+        if not _check_object(raw, rule_where, errors, _ARGUMENT_RULE_KEYS):
             return None
         tool = _check_ref_string(raw.get("tool"), f"{rule_where}.tool", errors)
         if tool is None or not _check_description(raw, rule_where, errors):
@@ -601,11 +616,7 @@ def _parse_tool_arguments(value: Any, where: str, errors: _FieldErrors) -> list[
         rule: dict[str, Any] = {"tool": tool}
         if "required" in raw:
             required = raw["required"]
-            if (
-                not isinstance(required, list)
-                or len(required) > MAX_ARGUMENT_NAMES
-                or not all(isinstance(item, str) and 0 < len(item) <= MAX_ARGUMENT_NAME_CHARS for item in required)
-            ):
+            if not _is_name_list(required):
                 errors.add(f"{rule_where}.required", "must be a list of argument names")
                 return None
             if required:
@@ -628,14 +639,11 @@ def _parse_tool_arguments(value: Any, where: str, errors: _FieldErrors) -> list[
 
 
 def _parse_expected_order(value: Any, where: str, errors: _FieldErrors) -> list[list[list[str]]] | None:
-    if not isinstance(value, list):
-        errors.add(where, "must be a list of [before, after] edges")
-        return None
-    if len(value) > MAX_ORDER_EDGES:
-        errors.add(where, f"must list at most {MAX_ORDER_EDGES} edges")
+    items = _check_list(value, where, errors, items="[before, after] edges", limit=MAX_ORDER_EDGES, unit="edges")
+    if items is None:
         return None
     edges: list[list[list[str]]] = []
-    for index, edge in enumerate(value):
+    for index, edge in enumerate(items):
         edge_where = f"{where}[{index}]"
         if not isinstance(edge, list) or len(edge) != 2:
             errors.add(edge_where, "must be a two-item [before, after] list")
@@ -649,21 +657,13 @@ def _parse_expected_order(value: Any, where: str, errors: _FieldErrors) -> list[
 
 
 def _parse_handoffs(value: Any, where: str, errors: _FieldErrors) -> list[dict[str, Any]] | None:
-    if not isinstance(value, list):
-        errors.add(where, "must be a list of handoff objects")
-        return None
-    if len(value) > MAX_HANDOFFS:
-        errors.add(where, f"must list at most {MAX_HANDOFFS} handoffs")
+    items = _check_list(value, where, errors, items="handoff objects", limit=MAX_HANDOFFS, unit="handoffs")
+    if items is None:
         return None
     handoffs: list[dict[str, Any]] = []
-    for index, raw in enumerate(value):
+    for index, raw in enumerate(items):
         item_where = f"{where}[{index}]"
-        if not isinstance(raw, dict):
-            errors.add(item_where, "must be an object")
-            return None
-        unknown = sorted(str(key)[:64] for key in raw if key not in _HANDOFF_KEYS)
-        if unknown:
-            errors.add(item_where, f"unsupported keys: {', '.join(unknown)}")
+        if not _check_object(raw, item_where, errors, _HANDOFF_KEYS):
             return None
         producer = _check_ref_alternatives(raw.get("producer"), f"{item_where}.producer", errors)
         consumer = _check_ref_alternatives(raw.get("consumer"), f"{item_where}.consumer", errors)
@@ -701,22 +701,14 @@ def _parse_handoffs(value: Any, where: str, errors: _FieldErrors) -> list[dict[s
 
 
 def _parse_conflict_probes(value: Any, where: str, errors: _FieldErrors) -> list[dict[str, Any]] | None:
-    if not isinstance(value, list):
-        errors.add(where, "must be a list of probe objects")
-        return None
-    if len(value) > MAX_CONFLICT_PROBES:
-        errors.add(where, f"must list at most {MAX_CONFLICT_PROBES} probes")
+    items = _check_list(value, where, errors, items="probe objects", limit=MAX_CONFLICT_PROBES, unit="probes")
+    if items is None:
         return None
     probes: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    for index, raw in enumerate(value):
+    for index, raw in enumerate(items):
         item_where = f"{where}[{index}]"
-        if not isinstance(raw, dict):
-            errors.add(item_where, "must be an object")
-            return None
-        unknown = sorted(str(key)[:64] for key in raw if key not in _PROBE_KEYS)
-        if unknown:
-            errors.add(item_where, f"unsupported keys: {', '.join(unknown)}")
+        if not _check_object(raw, item_where, errors, _PROBE_KEYS):
             return None
         probe_id = raw.get("id")
         if not isinstance(probe_id, str) or not probe_id.strip() or len(probe_id) > MAX_PROBE_ID_CHARS:

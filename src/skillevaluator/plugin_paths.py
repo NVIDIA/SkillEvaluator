@@ -35,6 +35,8 @@ from skillevaluator.models.result import Finding, Severity
 from skillevaluator.plugin_formats import CLAUDE_PROFILE, DEFAULT_SKILLS_DIR, FormatProfile
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, discover_secure_files, stat_is_link_or_reparse
 
+# The category of every plugin schema and component finding; a policy overlay changes a severity with
+# PLUGIN_SCHEMA.<check>.
 PLUGIN_CATEGORY = "PLUGIN_SCHEMA"
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 # A longer declared path is "invalid": no component path comes close, and it bounds the work per path.

@@ -48,6 +48,7 @@ from skillevaluator.constants import (
     PLUGIN_CURSOR_MANIFEST_TYPE,
 )
 from skillevaluator.models.result import Finding, Severity
+from skillevaluator.plugin_paths import PLUGIN_CATEGORY
 from skillevaluator.validators.mcp_static import (
     TRUTHY_VALUES,
     EndpointClass,
@@ -69,9 +70,6 @@ from skillevaluator.validators.url_policy import (
 
 # Report text: whitespace collapsed, URL userinfo removed, credentials redacted, length bounded.
 _bounded = report_text
-
-# The category of every plugin component finding; a policy overlay changes a severity with PLUGIN_SCHEMA.<check>.
-PLUGIN_CATEGORY = "PLUGIN_SCHEMA"
 
 # Documented Claude Code hook events (hooks reference). Unknown events are still
 # recorded, with the ``unknown_event`` flag, because newer releases add events.

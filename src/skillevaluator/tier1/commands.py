@@ -24,6 +24,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.plugin_formats import DEFAULT_SKILLS_DIR
+from skillevaluator.plugin_paths import PLUGIN_CATEGORY
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
 from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
@@ -33,7 +34,6 @@ from skillevaluator.validators.code_risk import CodeRiskValidator
 from skillevaluator.validators.dependencies import DependencySecurityValidator
 from skillevaluator.validators.hygiene import HygieneValidator
 from skillevaluator.validators.license import LicenseValidator
-from skillevaluator.validators.plugin_schema import CATEGORY as PLUGIN_SCHEMA_CATEGORY
 from skillevaluator.validators.plugin_schema import VALIDATOR_NAME as PLUGIN_SCHEMA_VALIDATOR_NAME
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.plugin_tree import plugin_tree_scope
@@ -173,7 +173,7 @@ def _fail_closed_result(
     result = ValidationResult(validator_name=validator_name, validator_description=validator_description)
     result.add_finding(
         Finding(
-            category=PLUGIN_SCHEMA_CATEGORY,
+            category=PLUGIN_CATEGORY,
             severity=Severity.HIGH,
             check_name=check_name,
             message=message,

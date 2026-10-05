@@ -45,7 +45,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from skillevaluator.models.result import Finding, Severity
-from skillevaluator.plugin_component_risk import PLUGIN_CATEGORY, component_finding
+from skillevaluator.plugin_component_risk import component_finding
+from skillevaluator.plugin_paths import PLUGIN_CATEGORY
 from skillevaluator.validators.mcp_static import (
     EndpointClass,
     HostAllowlist,

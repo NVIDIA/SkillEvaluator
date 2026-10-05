@@ -79,6 +79,7 @@ from skillevaluator.plugin_manifest import (
     canonical_manifest_relative,
     locate_plugin_manifest,
 )
+from skillevaluator.plugin_paths import PLUGIN_CATEGORY
 from skillevaluator.utils.secure_fs import SecurePathError
 from skillevaluator.utils.structured_data import (
     StructuredDataLimitError,
@@ -95,7 +96,6 @@ if TYPE_CHECKING:
     from skillevaluator.validators.policy import ValidationPolicy
 
 logger = get_logger(__name__)
-CATEGORY = "PLUGIN_SCHEMA"
 VALIDATOR_NAME = "Plugin Schema & Bundle References"
 MAX_PLUGIN_SCHEMA_FINDINGS = 100
 # Most severe first.
@@ -113,7 +113,7 @@ def _schema_finding(
 ) -> Finding:
     """One ``PLUGIN_SCHEMA`` finding, HIGH unless *severity* says otherwise."""
     return Finding(
-        category=CATEGORY,
+        category=PLUGIN_CATEGORY,
         severity=severity,
         check_name=check_name,
         message=message,

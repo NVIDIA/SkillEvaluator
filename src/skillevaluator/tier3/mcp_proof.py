@@ -52,7 +52,7 @@ from urllib.parse import urlsplit
 from skillevaluator.tier3.eval_core.plugin_signals import match_declared_mcp_server
 from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.rich_markup import strip_terminal_controls
-from skillevaluator.validators.mcp_static import classify_endpoint_host, host_is_allowlisted, host_name_is_allowlisted
+from skillevaluator.validators.mcp_static import HostAllowlist, classify_endpoint_host, host_name_is_allowlisted
 
 STATUS_DECLARED = "declared"
 STATUS_REACHABLE_HOST = "reachable-host"
@@ -256,7 +256,7 @@ def _header_note(missing: list[str], withheld: list[str], sent: list[str] | None
     return note
 
 
-def _address_policy(address: str, allowed_private_hosts: Iterable[str], *, name_allowed: bool, label: str) -> bool:
+def _address_policy(address: str, allowlist: HostAllowlist, *, name_allowed: bool, label: str) -> bool:
     """Return True for an allowed private address; raise for a refused one; False when public.
 
     ``name_allowed`` is True when the URL's host name itself is allowlisted, which
@@ -267,7 +267,7 @@ def _address_policy(address: str, allowed_private_hosts: Iterable[str], *, name_
         return False
     if endpoint.kind == "metadata":
         raise _ProbeRefused(STATUS_DECLARED, f"not probed: {label} is a cloud metadata endpoint (never probed)")
-    if name_allowed or host_is_allowlisted(endpoint, allowed_private_hosts):
+    if name_allowed or allowlist.allows(endpoint):
         return True
     raise _ProbeRefused(
         STATUS_DECLARED,
@@ -308,7 +308,7 @@ def _resolve_within(
 def _check_endpoint(
     url: str,
     transport: str,
-    allowed_private_hosts: Iterable[str],
+    allowed_private_hosts: HostAllowlist | Iterable[str],
     resolver: Callable[[str, int], Iterable[str]],
     resolve_timeout: float | None = None,
 ) -> tuple[str, tuple[str, ...]]:
@@ -344,6 +344,7 @@ def _check_endpoint(
         literal = True
     except ValueError:
         literal = False
+    allowlist = HostAllowlist.of(allowed_private_hosts)
     label = f"host {host!r}"
     if literal:
         checked = [(host.strip("[]"), label)]
@@ -352,7 +353,7 @@ def _check_endpoint(
         endpoint = classify_endpoint_host(host)
         if endpoint is not None and endpoint.kind == "metadata":
             raise _ProbeRefused(STATUS_DECLARED, f"not probed: {label} is a cloud metadata endpoint (never probed)")
-        name_allowed = host_name_is_allowlisted(host, allowed_private_hosts)
+        name_allowed = host_name_is_allowlisted(host, allowlist)
         try:
             addresses = _resolve_within(resolver, host, port or (443 if scheme == "https" else 80), resolve_timeout)
             addresses = addresses[:MAX_RESOLVED_ADDRESSES]
@@ -364,8 +365,7 @@ def _check_endpoint(
             raise _ProbeRefused(STATUS_UNREACHABLE, "DNS resolution returned no addresses")
         checked = [(str(address), f"{label} (resolved address {address})") for address in addresses]
     private = [
-        _address_policy(address, allowed_private_hosts, name_allowed=name_allowed, label=where)
-        for address, where in checked
+        _address_policy(address, allowlist, name_allowed=name_allowed, label=where) for address, where in checked
     ]
     if scheme == "http" and not all(private):
         raise _ProbeRefused(STATUS_DECLARED, "not probed: plaintext http is probed only for allowlisted private hosts")
@@ -604,7 +604,7 @@ async def _probe_session(
 def probe_mcp_server(
     target: Mapping[str, Any],
     *,
-    allowed_private_hosts: Iterable[str] = (),
+    allowed_private_hosts: HostAllowlist | Iterable[str] = (),
     expand_env: Iterable[str | EnvGrant] = (),
     environ: Mapping[str, str] | None = None,
     resolver: Callable[[str, int], Iterable[str]] | None = None,
@@ -620,13 +620,12 @@ def probe_mcp_server(
     ``total_timeout`` bounds the whole probe, DNS lookup included.
     """
     url = str(target.get("url") or "")
-    allowed = tuple(allowed_private_hosts)
     started = time.monotonic()
     try:
         kind, addresses = _check_endpoint(
             url,
             str(target.get("transport") or ""),
-            allowed,
+            allowed_private_hosts,
             resolver or _default_resolver,
             resolve_timeout=total_timeout,
         )
@@ -668,14 +667,14 @@ def probe_mcp_server(
 def probe_mcp_servers(
     targets: Iterable[Mapping[str, Any]],
     *,
-    allowed_private_hosts: Iterable[str] = (),
+    allowed_private_hosts: HostAllowlist | Iterable[str] = (),
     expand_env: Iterable[str | EnvGrant] = (),
     environ: Mapping[str, str] | None = None,
     resolver: Callable[[str, int], Iterable[str]] | None = None,
     total_timeout: float = TOTAL_TIMEOUT_S,
 ) -> dict[str, Any]:
     """Probe every author-supplied URL MCP server (bounded to 32 servers)."""
-    allowed = tuple(allowed_private_hosts)
+    allowed = HostAllowlist.of(allowed_private_hosts)
     opted_in = tuple(parse_env_grant(value) for value in expand_env)
     proof: dict[str, Any] = {}
     for target in list(targets)[:MAX_PROBE_SERVERS]:

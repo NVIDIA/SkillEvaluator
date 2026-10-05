@@ -982,6 +982,11 @@ class HookRecord:
     # Raw http handler URL for the opt-in endpoint resolution; never serialized.
     url: str | None = field(default=None, repr=False)
 
+    def add_flag(self, flag: str) -> None:
+        """Record a risk flag; each flag is listed (and counted in the summary) once per handler."""
+        if flag not in self.risk_flags:
+            self.risk_flags.append(flag)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -2357,6 +2362,38 @@ class HookAnalysis:
     findings: list[Finding] = field(default_factory=list)
 
 
+@dataclass
+class _HookSite:
+    """One hook handler under analysis: its record, where its findings go, and what it may approve."""
+
+    record: HookRecord
+    analysis: HookAnalysis
+    # The message prefix that locates the handler: "hook PreToolUse (matcher 'Bash') in hooks/hooks.json".
+    where: str
+    # The file path findings show.
+    display: str
+    dialect: HookDialect
+    # What an approval hook can approve (HookAnalyzer._scope): all, bash, scoped, or narrow; None for other events.
+    scope: str | None
+    # The write, fetch, or MCP tools a "scoped" approval hook covers.
+    scoped_tools: tuple[str, ...] = ()
+
+    def report(self, flag: str, severity: Severity, check: str, message: str, suggestion: str) -> None:
+        """Flag the handler (each flag once) and add a finding attributed to it."""
+        self.record.add_flag(flag)
+        self.analysis.findings.append(
+            _finding(
+                severity,
+                check,
+                f"{self.where}: {message}",
+                self.display,
+                suggestion,
+                component=("hook", self.record.source),
+                extra={"hook_id": self.record.id, "hook_event": self.record.event},
+            )
+        )
+
+
 @dataclass(frozen=True)
 class _ScriptEvidence:
     """What one plugin script a hook runs does; each script is read and scanned once."""
@@ -2752,8 +2789,7 @@ class HookAnalyzer:
         self._index_runs(record, facts)
         if other is None or other is record:
             return None, truncated
-        if "remote_code" not in other.risk_flags:
-            other.risk_flags.append("remote_code")  # the other half of the pair runs remote code too
+        other.add_flag("remote_code")  # the other half of the pair runs remote code too
         return other.id, truncated
 
     def _cross_hit(self, fact: _ShellFacts) -> HookRecord | None:
@@ -2797,7 +2833,6 @@ class HookAnalyzer:
         truncated: list[str] = []
         for event, group_index, matcher, handler_index, handler in iter_hook_handlers(config, truncated):
             hook_id = f"{source}#{event}[{group_index}].hooks[{handler_index}]"
-            component = ("hook", source)
             if not isinstance(handler, dict):
                 analysis.records.append(HookRecord(hook_id, source, file, event, matcher, "invalid", "", ["invalid"]))
                 continue
@@ -2805,49 +2840,42 @@ class HookAnalyzer:
             handler_type = raw_type if isinstance(raw_type, str) and raw_type in HANDLER_TYPES else "unknown"
             record = HookRecord(hook_id, source, file, event, matcher, handler_type, "")
             if event not in dialect.events:
-                record.risk_flags.append("unknown_event")
-            extra = {"hook_id": hook_id, "hook_event": event}
+                record.add_flag("unknown_event")
             monitor = dialect is MONITOR_HOOKS
             where = "monitor command" if monitor else f"hook {event}"
             if matcher:
                 where += f" (matcher {matcher[:60]!r})"
             where += f" in {source}"
             scope, scoped_tools = self._scope(dialect, event, matcher)
+            site = _HookSite(record, analysis, where, display, dialect, scope, scoped_tools)
 
             if handler_type == "command":
-                self._command_hook(
-                    handler, record, analysis, where, display, component, extra, scope, scoped_tools, dialect
-                )
+                self._command_hook(handler, site)
             elif handler_type == "http":
-                self._http_hook(handler, record, analysis, where, display, component, extra, scope)
+                self._http_hook(handler, site)
             elif handler_type == "mcp_tool":
                 server = handler.get("server") if isinstance(handler.get("server"), str) else ""
                 tool = handler.get("tool") if isinstance(handler.get("tool"), str) else ""
                 record.target = _bounded(f"{server}/{tool}")
                 if scope in {"all", "bash"}:
-                    self._remote_approval(record, analysis, where, display, component, extra, "an MCP tool")
+                    self._remote_approval(site, "an MCP tool")
             elif handler_type in {"prompt", "agent"}:
                 prompt = handler.get("prompt") if isinstance(handler.get("prompt"), str) else ""
                 record.target = _bounded(prompt, 80)
 
             if event in dialect.context_events and handler_type in {"command", "http", "mcp_tool"}:
-                record.risk_flags.append("context_injection")
                 injected = (
                     "every line the monitor prints is sent to the model while it runs"
                     if monitor
                     else f"the {handler_type} handler's output is injected into the agent's context on every {event}"
                 )
-                analysis.findings.append(
-                    _finding(
-                        Severity.LOW,
-                        "plugin_hook_context_injection",
-                        f"{where}: {injected}",
-                        display,
-                        "Review what the hook emits; keep injected context minimal and never derived from untrusted "
-                        "remote content.",
-                        component=component,
-                        extra=extra,
-                    )
+                site.report(
+                    "context_injection",
+                    Severity.LOW,
+                    "plugin_hook_context_injection",
+                    injected,
+                    "Review what the hook emits; keep injected context minimal and never derived from untrusted "
+                    "remote content.",
                 )
             analysis.records.append(record)
         if truncated:
@@ -2910,87 +2938,60 @@ class HookAnalyzer:
             )
         )
 
-    def _command_hook(
-        self,
-        handler: dict[str, Any],
-        record: HookRecord,
-        analysis: HookAnalysis,
-        where: str,
-        display: str,
-        component: tuple[str, str],
-        extra: dict[str, Any],
-        scope: str | None,
-        scoped_tools: tuple[str, ...] = (),
-        dialect: HookDialect = CLAUDE_HOOKS,
-    ) -> None:
-        text = _command_text(handler, dialect.command_keys)
+    def _command_hook(self, handler: dict[str, Any], site: _HookSite) -> None:
+        record = site.record
+        text = _command_text(handler, site.dialect.command_keys)
         record.target = _bounded(text)
-        tokens = _command_tokens(handler, dialect.command_keys)
+        tokens = _command_tokens(handler, site.dialect.command_keys)
         scripts, unanalyzed, found_script = self._script_evidence(tokens)
         facts = [_shell_facts(text), *scripts]
         local = any(fact.remote_code for fact in facts) or self._runs_download(facts)
         other, others_truncated = self._cross_handler_download(record, facts)
         if local or other is not None:
-            record.risk_flags.append("remote_code")
             how = (
                 "fetches remote content and executes it (for example 'curl ... | sh')"
                 if local
                 else f"runs a file that another hook ({_bounded(str(other), 120)}) downloads, or downloads a file "
                 "that hook runs"
             )
-            analysis.findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "plugin_hook_remote_code",
-                    f"{where}: the command {how}, so the code that runs is not part of the reviewed plugin",
-                    display,
-                    "Ship the script inside the plugin and run it from ${CLAUDE_PLUGIN_ROOT}; never pipe downloads "
-                    "into an interpreter or run downloaded files.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "remote_code",
+                Severity.CRITICAL,
+                "plugin_hook_remote_code",
+                f"the command {how}, so the code that runs is not part of the reviewed plugin",
+                "Ship the script inside the plugin and run it from ${CLAUDE_PLUGIN_ROOT}; never pipe downloads "
+                "into an interpreter or run downloaded files.",
             )
         else:
-            self._unshipped_code(facts, record, analysis, where, display, component, extra)
+            self._unshipped_code(facts, site)
             if others_truncated or any(fact.runs_truncated for fact in facts):
                 unanalyzed.append(
                     f"it or another hook runs more than {MAX_RUN_SITES} distinct files, so not every run was "
                     "matched against the plugin's downloads"
                 )
-        self._auto_approve(facts, record, analysis, where, display, component, extra, scope, scoped_tools, dialect)
-        if scope in {"all", "bash", "scoped"} and not found_script and self._names_root(text):
+        self._auto_approve(facts, site)
+        if site.scope in {"all", "bash", "scoped"} and not found_script and self._names_root(text):
             unanalyzed.append("it names the plugin root, but no plugin script it runs could be found and read")
         if unanalyzed:
             # HIGH, not lower: an unread script can hide an auto-approval (HIGH) or remote code (CRITICAL).
-            record.risk_flags.append("script_unanalyzed")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_script_unanalyzed",
-                    f"{where}: the command runs plugin scripts that were not analyzed ({'; '.join(unanalyzed[:5])}), "
-                    "so an auto-approval or remote code in them would go unreported",
-                    display,
-                    "Ship hook scripts as regular files (no symlinks) under ${CLAUDE_PLUGIN_ROOT}, run them by "
-                    "their ${CLAUDE_PLUGIN_ROOT} path, and keep their number and size small; review the script, "
-                    "then override with severity_overrides PLUGIN_SCHEMA.plugin_hook_script_unanalyzed if intended.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "script_unanalyzed",
+                Severity.HIGH,
+                "plugin_hook_script_unanalyzed",
+                f"the command runs plugin scripts that were not analyzed ({'; '.join(unanalyzed[:5])}), so an "
+                "auto-approval or remote code in them would go unreported",
+                "Ship hook scripts as regular files (no symlinks) under ${CLAUDE_PLUGIN_ROOT}, run them by "
+                "their ${CLAUDE_PLUGIN_ROOT} path, and keep their number and size small; review the script, "
+                "then override with severity_overrides PLUGIN_SCHEMA.plugin_hook_script_unanalyzed if intended.",
             )
         if _command_url_credentials(text):
-            record.risk_flags.append("inline_secret")
-            analysis.findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "plugin_hook_inline_secret",
-                    f"{where}: the command embeds a credential in a URL (user:password@ or a credential query "
-                    "parameter)",
-                    display,
-                    "Remove the credential from the hook command; read it from an environment variable or a "
-                    "credential helper when the hook runs.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "inline_secret",
+                Severity.CRITICAL,
+                "plugin_hook_inline_secret",
+                "the command embeds a credential in a URL (user:password@ or a credential query parameter)",
+                "Remove the credential from the hook command; read it from an environment variable or a "
+                "credential helper when the hook runs.",
             )
         outside = []
         for token in tokens:
@@ -2998,160 +2999,89 @@ class HookAnalyzer:
             if reason and len(outside) < MAX_OUTSIDE_REFS:
                 outside.append(f"{_bounded(token, 80)} ({reason})")
         if outside:
-            record.risk_flags.append("outside_root")
-            analysis.findings.append(
-                _finding(
-                    Severity.MEDIUM,
-                    "plugin_hook_outside_root",
-                    f"{where}: the command references files outside the plugin root: {'; '.join(outside)}",
-                    display,
-                    "Reference bundled files through ${CLAUDE_PLUGIN_ROOT}; do not read or execute files the "
-                    "plugin does not ship.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "outside_root",
+                Severity.MEDIUM,
+                "plugin_hook_outside_root",
+                f"the command references files outside the plugin root: {'; '.join(outside)}",
+                "Reference bundled files through ${CLAUDE_PLUGIN_ROOT}; do not read or execute files the "
+                "plugin does not ship.",
             )
 
-    def _unshipped_code(
-        self,
-        facts: list[_ShellFacts],
-        record: HookRecord,
-        analysis: HookAnalysis,
-        where: str,
-        display: str,
-        component: tuple[str, str],
-        extra: dict[str, Any],
-    ) -> None:
+    @staticmethod
+    def _unshipped_code(facts: list[_ShellFacts], site: _HookSite) -> None:
         """MEDIUM findings for code a hook runs that the plugin does not ship (and that is not remote code)."""
         packages = [package for fact in facts for package in fact.packages]
         if packages:
-            record.risk_flags.append("unpinned_package")
             details = "; ".join(dict.fromkeys(package.detail for package in packages[:3]))
-            analysis.findings.append(
-                _finding(
-                    Severity.MEDIUM,
-                    "plugin_hook_unpinned_package",
-                    f"{where}: the command runs a package that is not pinned to an exact version ({details}); "
-                    "each run may fetch different code",
-                    display,
-                    "Pin the package to an exact version (pkg@1.2.3, pkg==1.2.3), or ship the code in the plugin.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "unpinned_package",
+                Severity.MEDIUM,
+                "plugin_hook_unpinned_package",
+                f"the command runs a package that is not pinned to an exact version ({details}); each run may "
+                "fetch different code",
+                "Pin the package to an exact version (pkg@1.2.3, pkg==1.2.3), or ship the code in the plugin.",
             )
         unshipped = sorted({path for fact in facts for path in fact.unshipped_runs})
         if unshipped:
-            record.risk_flags.append("unshipped_code")
             shown = ", ".join(_bounded(path, 80) for path in unshipped[:MAX_OUTSIDE_REFS])
-            analysis.findings.append(
-                _finding(
-                    Severity.MEDIUM,
-                    "plugin_hook_runs_unshipped_code",
-                    f"{where}: the command runs code from the plugin's data directory ({shown}); the plugin does "
-                    "not ship that code, so it was not reviewed",
-                    display,
-                    "Run code the plugin ships under ${CLAUDE_PLUGIN_ROOT}; keep ${CLAUDE_PLUGIN_DATA} for data.",
-                    component=component,
-                    extra=extra,
-                )
-            )
-
-    def _auto_approve(
-        self,
-        facts: list[_ShellFacts],
-        record: HookRecord,
-        analysis: HookAnalysis,
-        where: str,
-        display: str,
-        component: tuple[str, str],
-        extra: dict[str, Any],
-        scope: str | None,
-        scoped_tools: tuple[str, ...],
-        dialect: HookDialect,
-    ) -> None:
-        shapes = frozenset().union(*(fact.allow_shapes for fact in facts))
-        if scope is None or not shapes & set(dialect.allow_shapes):
-            return
-        record.risk_flags.append("auto_approve")
-        if scope in {"all", "bash"}:
-            target = "every tool call" if scope == "all" else "shell commands"
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_auto_approve",
-                    f"{where}: the command emits an allow decision for {target}, which skips the user's "
-                    "permission prompt",
-                    display,
-                    "Do not auto-approve tool calls from a plugin hook; narrow the matcher and return 'ask' or "
-                    "no decision.",
-                    component=component,
-                    extra=extra,
-                )
-            )
-        elif scope == "scoped":
-            analysis.findings.append(
-                _finding(
-                    Severity.MEDIUM,
-                    "plugin_hook_auto_approve_scoped",
-                    f"{where}: the command emits an allow decision for {', '.join(scoped_tools)}, which skips the "
-                    "user's permission prompt for file writes, web fetches, or MCP tool calls (and, for edits, the "
-                    "working-directory limit that acceptEdits keeps)",
-                    display,
-                    "Do not auto-approve write, fetch, or MCP tool calls from a plugin hook; return 'ask' or no "
-                    "decision.",
-                    component=component,
-                    extra=extra,
-                )
-            )
-
-    def _remote_approval(
-        self,
-        record: HookRecord,
-        analysis: HookAnalysis,
-        where: str,
-        display: str,
-        component: tuple[str, str],
-        extra: dict[str, Any],
-        decider: str,
-    ) -> None:
-        record.risk_flags.append("remote_approval")
-        analysis.findings.append(
-            _finding(
+            site.report(
+                "unshipped_code",
                 Severity.MEDIUM,
-                "plugin_hook_remote_approval",
-                f"{where}: {decider} decides this broad-matcher approval hook, so it can return "
-                "permissionDecision: allow for tool calls without a user prompt",
-                display,
-                "Narrow the matcher, or keep approval decisions in reviewed plugin code.",
-                component=component,
-                extra=extra,
+                "plugin_hook_runs_unshipped_code",
+                f"the command runs code from the plugin's data directory ({shown}); the plugin does not ship that "
+                "code, so it was not reviewed",
+                "Run code the plugin ships under ${CLAUDE_PLUGIN_ROOT}; keep ${CLAUDE_PLUGIN_DATA} for data.",
             )
+
+    @staticmethod
+    def _auto_approve(facts: list[_ShellFacts], site: _HookSite) -> None:
+        shapes = frozenset().union(*(fact.allow_shapes for fact in facts))
+        if site.scope is None or not shapes & set(site.dialect.allow_shapes):
+            return
+        site.record.add_flag("auto_approve")  # also for a narrow matcher, which gets no finding
+        if site.scope in {"all", "bash"}:
+            target = "every tool call" if site.scope == "all" else "shell commands"
+            site.report(
+                "auto_approve",
+                Severity.HIGH,
+                "plugin_hook_auto_approve",
+                f"the command emits an allow decision for {target}, which skips the user's permission prompt",
+                "Do not auto-approve tool calls from a plugin hook; narrow the matcher and return 'ask' or "
+                "no decision.",
+            )
+        elif site.scope == "scoped":
+            site.report(
+                "auto_approve",
+                Severity.MEDIUM,
+                "plugin_hook_auto_approve_scoped",
+                f"the command emits an allow decision for {', '.join(site.scoped_tools)}, which skips the user's "
+                "permission prompt for file writes, web fetches, or MCP tool calls (and, for edits, the "
+                "working-directory limit that acceptEdits keeps)",
+                "Do not auto-approve write, fetch, or MCP tool calls from a plugin hook; return 'ask' or no decision.",
+            )
+
+    @staticmethod
+    def _remote_approval(site: _HookSite, decider: str) -> None:
+        site.report(
+            "remote_approval",
+            Severity.MEDIUM,
+            "plugin_hook_remote_approval",
+            f"{decider} decides this broad-matcher approval hook, so it can return permissionDecision: allow for "
+            "tool calls without a user prompt",
+            "Narrow the matcher, or keep approval decisions in reviewed plugin code.",
         )
 
-    def _http_hook(
-        self,
-        handler: dict[str, Any],
-        record: HookRecord,
-        analysis: HookAnalysis,
-        where: str,
-        display: str,
-        component: tuple[str, str],
-        extra: dict[str, Any],
-        scope: str | None,
-    ) -> None:
+    def _http_hook(self, handler: dict[str, Any], site: _HookSite) -> None:
+        record = site.record
         url = handler.get("url")
         if not isinstance(url, str) or not url.strip():
-            record.risk_flags.append("invalid_url")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_http_url_invalid",
-                    f"{where}: the http handler has no 'url'",
-                    display,
-                    "Set 'url' to the https:// endpoint that receives the hook input.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "invalid_url",
+                Severity.HIGH,
+                "plugin_hook_http_url_invalid",
+                "the http handler has no 'url'",
+                "Set 'url' to the https:// endpoint that receives the hook input.",
             )
             return
         record.target = safe_url(url)
@@ -3162,160 +3092,108 @@ class HookAnalyzer:
         client_url = whatwg_url(url)
         problems = url_ambiguities(url, percent_in_host=True)
         if problems:
-            record.risk_flags.append("invalid_url")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_http_url_invalid",
-                    f"{where}: the http handler url contains {', and '.join(problems)}, so URL parsers disagree on "
-                    f"where it points; Claude Code posts to {record.target!r}",
-                    display,
-                    "Write the URL as a plain https://host/path without backslashes, whitespace, control "
-                    "characters, or percent-encoding in the host.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "invalid_url",
+                Severity.HIGH,
+                "plugin_hook_http_url_invalid",
+                f"the http handler url contains {', and '.join(problems)}, so URL parsers disagree on where it "
+                f"points; Claude Code posts to {record.target!r}",
+                "Write the URL as a plain https://host/path without backslashes, whitespace, control "
+                "characters, or percent-encoding in the host.",
             )
         # Read from the URL text, so credentials are flagged even when the authority is malformed. Both
         # readings count: any userinfo Claude Code would send, and a literal password or token in the
         # raw text (committed with the plugin even when a backslash moves it out of the client's userinfo).
         if url_credentials(client_url, any_userinfo=True) or url_credentials(record.url, any_userinfo=False):
-            record.risk_flags.append("inline_secret")
-            analysis.findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "plugin_hook_inline_secret",
-                    f"{where}: the http handler url embeds credentials (user:password or a credential query parameter)",
-                    display,
-                    "Remove credentials from the URL; pass them through headers with $VAR interpolation and "
-                    "allowedEnvVars.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "inline_secret",
+                Severity.CRITICAL,
+                "plugin_hook_inline_secret",
+                "the http handler url embeds credentials (user:password or a credential query parameter)",
+                "Remove credentials from the URL; pass them through headers with $VAR interpolation and "
+                "allowedEnvVars.",
             )
         try:
             parsed = urlparse(client_url)
             host = parsed.hostname
             _ = parsed.port
         except ValueError:
-            if "invalid_url" not in record.risk_flags:
-                record.risk_flags.append("invalid_url")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_http_url_invalid",
-                    f"{where}: the http handler url has a malformed authority: {record.target!r}",
-                    display,
-                    "Use a valid https://host[:port]/path URL.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "invalid_url",
+                Severity.HIGH,
+                "plugin_hook_http_url_invalid",
+                f"the http handler url has a malformed authority: {record.target!r}",
+                "Use a valid https://host[:port]/path URL.",
             )
             return
         scheme = (parsed.scheme or "").lower()
         endpoint = classify_endpoint_host(host) if host else None
         if scheme not in {"http", "https"} or not host:
-            if "invalid_url" not in record.risk_flags:
-                record.risk_flags.append("invalid_url")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_http_url_invalid",
-                    f"{where}: the http handler url {record.target!r} must be an http(s) URL with a host",
-                    display,
-                    "Use an https:// URL with a host.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "invalid_url",
+                Severity.HIGH,
+                "plugin_hook_http_url_invalid",
+                f"the http handler url {record.target!r} must be an http(s) URL with a host",
+                "Use an https:// URL with a host.",
             )
             return
         if scheme == "http" and not (endpoint is not None and endpoint.reason == "loopback"):
-            record.risk_flags.append("insecure_scheme")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_http_insecure_scheme",
-                    f"{where}: hook input (tool arguments, prompts) is posted over plaintext http to {record.target!r}",
-                    display,
-                    "Use https:// for any non-loopback hook endpoint.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "insecure_scheme",
+                Severity.HIGH,
+                "plugin_hook_http_insecure_scheme",
+                f"hook input (tool arguments, prompts) is posted over plaintext http to {record.target!r}",
+                "Use https:// for any non-loopback hook endpoint.",
             )
         headers = handler.get("headers")
         if isinstance(headers, dict):
             # Every header is read: the hook config is already size-bounded, and a cap would hide a later secret.
             for key, value in headers.items():
                 if isinstance(value, str) and _header_secret(str(key), value):
-                    record.risk_flags.append("inline_secret")
-                    analysis.findings.append(
-                        _finding(
-                            Severity.CRITICAL,
-                            "plugin_hook_inline_secret",
-                            f"{where}: header '{key}' carries an inline credential",
-                            display,
-                            "Reference the secret as $VAR and list it in allowedEnvVars; never inline a credential.",
-                            component=component,
-                            extra=extra,
-                        )
+                    site.report(
+                        "inline_secret",
+                        Severity.CRITICAL,
+                        "plugin_hook_inline_secret",
+                        f"header '{key}' carries an inline credential",
+                        "Reference the secret as $VAR and list it in allowedEnvVars; never inline a credential.",
                     )
                     break
         allowlisted = bool(self.hook_allowed_urls) and _url_matches_allowlist(client_url, host, self.hook_allowed_urls)
         if endpoint is not None and endpoint.kind == "metadata":
-            record.risk_flags.append("metadata_endpoint")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_http_endpoint_metadata",
-                    f"{where}: the http handler targets a cloud instance-metadata endpoint {record.target!r}",
-                    display,
-                    "Remove the instance-metadata endpoint; it can never be allowlisted.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "metadata_endpoint",
+                Severity.HIGH,
+                "plugin_hook_http_endpoint_metadata",
+                f"the http handler targets a cloud instance-metadata endpoint {record.target!r}",
+                "Remove the instance-metadata endpoint; it can never be allowlisted.",
             )
         elif endpoint is not None and not allowlisted and not host_is_allowlisted(endpoint, self.allowed_private_hosts):
-            record.risk_flags.append("private_endpoint")
-            analysis.findings.append(
-                _finding(
-                    Severity.MEDIUM,
-                    "plugin_hook_http_endpoint_private",
-                    f"{where}: the http handler targets a {endpoint.reason} address {record.target!r} (static check "
-                    "only: DNS resolution and redirects are evaluated only with --resolve-endpoints)",
-                    display,
-                    "Allow the intended host through hooks.allowed_urls or mcp.allowed_private_hosts in the policy.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "private_endpoint",
+                Severity.MEDIUM,
+                "plugin_hook_http_endpoint_private",
+                f"the http handler targets a {endpoint.reason} address {record.target!r} (static check only: DNS "
+                "resolution and redirects are evaluated only with --resolve-endpoints)",
+                "Allow the intended host through hooks.allowed_urls or mcp.allowed_private_hosts in the policy.",
             )
         if self.hook_allowed_urls and not allowlisted and not (endpoint is not None and endpoint.kind == "metadata"):
-            record.risk_flags.append("not_allowlisted")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_http_url_not_allowed",
-                    f"{where}: the http handler url {record.target!r} is not in the policy's hooks.allowed_urls",
-                    display,
-                    "Point the hook at an allowed endpoint, or add the endpoint to hooks.allowed_urls.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "not_allowlisted",
+                Severity.HIGH,
+                "plugin_hook_http_url_not_allowed",
+                f"the http handler url {record.target!r} is not in the policy's hooks.allowed_urls",
+                "Point the hook at an allowed endpoint, or add the endpoint to hooks.allowed_urls.",
             )
         elif not self.hook_allowed_urls:
-            record.risk_flags.append("remote_endpoint")
-            analysis.findings.append(
-                _finding(
-                    Severity.MEDIUM,
-                    "plugin_hook_http_endpoint",
-                    f"{where}: hook input (tool arguments, prompts, file paths) is posted to {record.target!r}",
-                    display,
-                    "Review the endpoint; allow it explicitly with hooks.allowed_urls in the validation policy.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "remote_endpoint",
+                Severity.MEDIUM,
+                "plugin_hook_http_endpoint",
+                f"hook input (tool arguments, prompts, file paths) is posted to {record.target!r}",
+                "Review the endpoint; allow it explicitly with hooks.allowed_urls in the validation policy.",
             )
-        if scope in {"all", "bash"}:
-            self._remote_approval(record, analysis, where, display, component, extra, "a remote HTTP endpoint")
+        if site.scope in {"all", "bash"}:
+            self._remote_approval(site, "a remote HTTP endpoint")
 
 
 def hook_risk_summary(records: Iterable[HookRecord]) -> dict[str, Any]:

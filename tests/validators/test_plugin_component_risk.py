@@ -597,6 +597,17 @@ def test_http_hook_inline_credentials(tmp_path: Path) -> None:
     assert "zzz" not in json.dumps(result.metadata["plugin"]["hook_risk"])
 
 
+def test_a_hook_flag_is_counted_once_however_many_findings_raise_it(tmp_path: Path) -> None:
+    """Regression: URL credentials and a secret header listed 'inline_secret' twice, so by_flag counted 2."""
+    hook = _http_hook("https://deploy:hunter2@hooks.example.com/x", headers={"X-Api-Key": "abcd1234secretvalue"})
+    result = _validate(_plugin(tmp_path, files={"hooks/hooks.json": hook}))
+
+    secrets = [f for f in result.findings if f.check_name == "plugin_hook_inline_secret"]
+    assert [f.severity for f in secrets] == [Severity.CRITICAL, Severity.CRITICAL]
+    assert _hook_rows(result)[0]["risk_flags"].count("inline_secret") == 1
+    assert result.metadata["plugin"]["hook_risk"]["counts"]["by_flag"]["inline_secret"] == 1
+
+
 @pytest.mark.parametrize(
     "url",
     [

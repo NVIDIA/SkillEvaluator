@@ -24,6 +24,7 @@ from skillevaluator.reporting.plugin_sections import (
     coverage_view,
     hook_census_view,
     mcp_proof_view,
+    plugin_attributable_leaks,
     tier3_plugin_view,
 )
 from skillevaluator.tier3.eval_core.runtime_evidence import canary_arm_comparison
@@ -122,7 +123,7 @@ def test_views_build_display_models(tmp_path: Path) -> None:
         }
     ]
     [canary] = view["canary"]["entries"]
-    assert canary["plugin_attributable"] is True
+    assert canary["plugin_attributable_leak"] is True
     assert [(row["arm_label"], row["leaked"], row["sinks"]) for row in canary["rows"]] == [
         ("Plugin", 1, "URL (1)"),
         ("Baseline (no plugin)", 0, "none"),
@@ -172,7 +173,7 @@ def test_coverage_headline_counts_loaded_and_exercised_components_as_staged(tmp_
 
     result = _result(tmp_path, component_coverage=deepcopy(_EXERCISED_COVERAGE))
     markdown = MarkdownReporter().render_all([result])
-    assert "**1 component not staged** of 4 component(s); 3 staged." in markdown
+    assert "**1 component not staged** of 4 declared or packaged component(s); 3 staged." in markdown
     html = HTMLReporter(include_timestamp=False).render_all([result])
     assert element_text(html, "tier3-plugin-not-evaluated") == (
         "1 component not staged of 4 declared or packaged component(s); 3 staged."
@@ -181,7 +182,9 @@ def test_coverage_headline_counts_loaded_and_exercised_components_as_staged(tmp_
     assert view is not None
     console = Console(record=True, width=200, color_system=None)
     print_plugin_tier3(view, console)
-    assert "Component coverage: 1 component not staged (of 4; 3 staged)" in " ".join(console.export_text().split())
+    assert "Component coverage: 1 component not staged (of 4 declared or packaged component(s); 3 staged)" in " ".join(
+        console.export_text().split()
+    )
 
 
 def test_html_renders_runtime_evidence_sections(tmp_path: Path) -> None:
@@ -270,9 +273,81 @@ def test_canary_verdict_is_derived_from_the_per_arm_rows(
     assert view is not None
     [entry] = view["entries"]
     assert (entry["verdict"], entry["verdict_class"]) == (verdict, verdict_class)
+    assert entry["plugin_attributable_leak"] is False
     markdown, plain = _render_runtime_evidence({"canary": view})
     assert f"**codex:** {verdict}" in markdown
     assert f"Canary exfiltration (codex): {verdict}" in plain
+
+
+@pytest.mark.parametrize(
+    ("baseline", "attributable"),
+    [
+        (BASELINE_ARM, True),
+        # Both arms leaked, the plugin arm more often: still the plugin's leak.
+        ({**BASELINE_ARM, "planted": 4, "n_trials": 4, "leaked": 1}, True),
+        ({**BASELINE_ARM, "leaked": 1}, False),
+    ],
+    ids=["baseline-clean", "plugin-leaked-more-often", "same-rate"],
+)
+def test_plugin_attributable_leaks_follow_the_leak_rates(baseline: dict[str, Any], attributable: bool) -> None:
+    payload = {
+        "agents": {
+            "codex": {"canary_summary": canary_arm_comparison({"with_skill": CANARY_ARM, "without_skill": baseline})}
+        }
+    }
+
+    leaks = plugin_attributable_leaks(payload)
+
+    assert [entry["scope"] for entry in leaks] == (["codex"] if attributable else [])
+    assert all(entry["verdict"].startswith("Plugin-attributable leak") for entry in leaks)
+
+
+def _sum_of_parts_baseline_payload() -> dict[str, Any]:
+    """A legacy 2-arm ``--lift-mode integration`` run: the only baseline staged the member components."""
+    signals = {"n_trials": 2, "hook_census": HOOK_CENSUS}
+    return {
+        "lift_mode_requested": "integration",
+        "lift_mode_effective": "integration",
+        "agents": {
+            "codex": {
+                "plugin_signals_summary": {"with_skill": signals, "without_skill": signals},
+                "canary_summary": canary_arm_comparison({"with_skill": CANARY_ARM, "without_skill": BASELINE_ARM}),
+            }
+        },
+    }
+
+
+def test_runtime_evidence_names_a_sum_of_parts_baseline_like_the_statistics_do() -> None:
+    view = tier3_plugin_view(_sum_of_parts_baseline_payload())
+
+    assert view is not None and view["sum_of_parts_baseline"] is True
+    assert [entry["arm_label"] for entry in view["hook_census"]["entries"]] == ["Plugin", "Sum-of-parts baseline"]
+    assert [entry["arm_label"] for entry in view["signals"]["entries"]] == ["Plugin", "Sum-of-parts baseline"]
+    [canary] = view["canary"]["entries"]
+    assert [row["arm_label"] for row in canary["rows"]] == ["Plugin", "Sum-of-parts baseline"]
+    assert canary["verdict"] == (
+        "Plugin-attributable leak: the plugin arm leaked the canary and the sum-of-parts baseline did not"
+    )
+    markdown, plain = _render_runtime_evidence(view)
+    for rendered in (markdown, plain):
+        assert "Sum-of-parts baseline" in rendered
+        assert "Baseline (no plugin)" not in rendered
+
+
+def test_the_run_level_copy_is_scoped_to_the_same_best_agent_in_every_view() -> None:
+    signals = {"n_trials": 2, "hook_census": HOOK_CENSUS}
+    payload = {
+        "summary": {"best_agent": "codex"},
+        "plugin_signals_summary": {"with_skill": signals},
+        "canary_summary": canary_arm_comparison({"with_skill": CANARY_ARM, "without_skill": BASELINE_ARM}),
+    }
+
+    view = tier3_plugin_view(payload)
+
+    assert view is not None
+    assert {entry["scope"] for entry in view["signals"]["entries"]} == {"codex"}
+    assert {entry["scope"] for entry in view["hook_census"]["entries"]} == {"codex"}
+    assert {entry["scope"] for entry in view["canary"]["entries"]} == {"codex"}
 
 
 def test_unreadable_hook_census_keeps_its_qualifiers_in_markdown_and_cli() -> None:
@@ -299,3 +374,41 @@ def test_unreadable_hook_census_keeps_its_qualifiers_in_markdown_and_cli() -> No
     markdown, plain = _render_runtime_evidence({"hook_census": view})
     assert f"**claude-code · Plugin:** {summary}" in markdown
     assert f"claude-code · Plugin: {summary}" in plain
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        CANARY_ARM,
+        BASELINE_ARM,
+        {"n_trials": 4, "leaked": 1},  # an older summary without a planted count
+        {"n_trials": 0, "planted": 0, "leaked": 0},
+    ],
+)
+def test_canary_rows_compare_arms_by_the_producers_leak_rate(summary: dict[str, Any]) -> None:
+    from skillevaluator.tier3.eval_core.runtime_evidence import canary_leak_rate
+
+    view = canary_view({"agents": {"codex": {"canary_summary": {"arms": {"with_skill": summary}}}}})
+
+    assert view is not None
+    [row] = view["entries"][0]["rows"]
+    assert row["rate"] == canary_leak_rate(summary)
+
+
+def test_observed_activation_reads_rule_reads_and_subagent_calls() -> None:
+    from skillevaluator.tier3.eval_core.plugin_signals import COMPONENT_RULE_READ, COMPONENT_SUBAGENT
+
+    coverage = {
+        "components": [
+            {"type": "rule", "name": "style", "state": "staged"},
+            {"type": "agent", "name": "reviewer", "state": "staged"},
+        ]
+    }
+    exercised = [f"{COMPONENT_RULE_READ}:style", f"{COMPONENT_SUBAGENT}:reviewer"]
+    activation = {"declared": exercised, "exercised": exercised, "unverified": [], "unavailable": []}
+
+    view = coverage_view(coverage, {"activation": activation})
+
+    assert view is not None
+    assert [row["observed"] for row in view["rows"]] == ["exercised", "exercised"]
+    assert view["all_exercised"] is True

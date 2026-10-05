@@ -22,7 +22,7 @@ from skillevaluator.constants import (
     TIER3_LIFT_PASS_THRESHOLD,
 )
 from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
-from skillevaluator.reporting.plugin_sections import inventory_view, statically_checked_types, tier3_plugin_view
+from skillevaluator.reporting.plugin_sections import STAGING_CAVEAT, number, tier3_plugin_view, unsupported_type_split
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 from skillevaluator.utils.rich_markup import strip_terminal_controls
@@ -345,8 +345,8 @@ class BenchmarkReporter(ReporterBase):
         overall_row = ["Overall"]
         overall_row.extend(
             _score_transition_values(
-                _number(agent.get("baseline")),
-                _number(agent.get("with_skill", agent.get("overall_score"))),
+                number(agent.get("baseline")),
+                number(agent.get("with_skill", agent.get("overall_score"))),
             )
             for agent in agents.values()
         )
@@ -508,15 +508,15 @@ class BenchmarkReporter(ReporterBase):
     ) -> None:
         policy = _mapping((ae or {}).get("verdict_policy"))
         attempt_policy = _mapping((ae or {}).get("attempt_policy"))
-        attempt_threshold = _number(policy.get("attempt_pass_threshold", attempt_policy.get("pass_threshold")))
-        dimension_pass = _number(policy.get("dimension_pass_threshold")) or DIMENSION_VERDICT_PASS_THRESHOLD
+        attempt_threshold = number(policy.get("attempt_pass_threshold", attempt_policy.get("pass_threshold")))
+        dimension_pass = number(policy.get("dimension_pass_threshold")) or DIMENSION_VERDICT_PASS_THRESHOLD
         dimension_neutral = (
-            _number(policy.get("dimension_neutral_threshold"))
+            number(policy.get("dimension_neutral_threshold"))
             if policy.get("dimension_neutral_threshold") is not None
             else DIMENSION_VERDICT_NEUTRAL_THRESHOLD
         )
-        lift_pass = _number(policy.get("lift_pass_threshold"))
-        lift_fail = _number(policy.get("lift_fail_threshold"))
+        lift_pass = number(policy.get("lift_pass_threshold"))
+        lift_fail = number(policy.get("lift_fail_threshold"))
         if lift_pass is None:
             lift_pass = TIER3_LIFT_PASS_THRESHOLD
         if lift_fail is None:
@@ -723,9 +723,8 @@ class BenchmarkReporter(ReporterBase):
                 "- adds value as a coordinated plugin beyond its individual components (Integration, when measured).",
                 "",
                 (
-                    "A plugin evaluation demonstrates only what it staged and exercised. Files staged ≠ components "
-                    "loaded ≠ behavior verified, so the coverage and exclusion sections below state what this run "
-                    "did not evaluate."
+                    f"A plugin evaluation demonstrates only what it staged and exercised. {STAGING_CAVEAT} The "
+                    "coverage and exclusion sections below state what this run did not evaluate."
                 ),
                 "",
             ]
@@ -749,7 +748,7 @@ class BenchmarkReporter(ReporterBase):
         statistics = (view or {}).get("statistics")
         lift_ci = {row["kind"]: row for row in statistics["primary"]["lift_ci"]} if statistics else {}
         summary = _mapping((ae or {}).get("summary"))
-        overall_lift = _number((ae or {}).get("overall_lift", summary.get("overall_lift")))
+        overall_lift = number((ae or {}).get("overall_lift", summary.get("overall_lift")))
         sum_of_parts_baseline = bool(view and view["sum_of_parts_baseline"])
         if sum_of_parts_baseline:
             # The only baseline staged the member components individually, so the
@@ -768,7 +767,8 @@ class BenchmarkReporter(ReporterBase):
         if integration and integration["measured"]:
             lift = integration.get("lift_value")
             result = f"{integration['verdict_label']}, {_format_points(lift) if lift is not None else 'lift n/a'}"
-            uncertainty = _ci_label(integration.get("ci") or lift_ci.get("integration"))
+            # The view's Integration interval already falls back to the statistics block.
+            uncertainty = _ci_label(integration.get("ci"))
         elif integration:
             result = f"INCONCLUSIVE — {integration['reason']}"
             uncertainty = "Not measured"
@@ -826,7 +826,7 @@ class BenchmarkReporter(ReporterBase):
             return
         lines.extend(["## Canary Exfiltration", ""])
         for entry in canary["entries"]:
-            marker = "**CRITICAL:** " if entry.get("verdict_class") == "fail" else ""
+            marker = "**CRITICAL:** " if entry["plugin_attributable_leak"] else ""
             lines.append(
                 f"- {_publication_safe_inline(entry['scope'], private_labels)}: "
                 f"{marker}{_publication_safe_inline(entry['verdict'], private_labels)}"
@@ -852,17 +852,14 @@ class BenchmarkReporter(ReporterBase):
                 ]
             )
             return
-        observed = (
-            f"; {_md_cell(coverage['observed_headline'], private_labels)}" if coverage["observed_headline"] else ""
-        )
         lines.extend(
             [
                 (
-                    f"**{_md_cell(coverage['headline'], private_labels)}** of {coverage['total']} declared or "
-                    f"packaged component(s); {coverage['staged']} staged{observed}."
+                    f"**{_md_cell(coverage['headline'], private_labels)}** "
+                    f"{_md_cell(coverage['detail'], private_labels)}."
                 ),
                 "",
-                f"Files staged ≠ components loaded ≠ behavior verified. {_md_cell(coverage['note'], private_labels)}",
+                f"{coverage['caveat']} {_md_cell(coverage['note'], private_labels)}",
                 "",
                 "| Component | Type | State | Reason |",
                 "|---|---|---|---|",
@@ -876,16 +873,6 @@ class BenchmarkReporter(ReporterBase):
         if coverage["omitted"]:
             lines.append(f"| {coverage['omitted']} more component(s) | | | |")
         lines.append("")
-        if coverage["not_staged_rows"]:
-            lines.extend(["Not staged:", ""])
-            for row in coverage["not_staged_rows"]:
-                reason = f" — {_publication_safe_inline(row['reason'], private_labels)}" if row["reason"] else ""
-                lines.append(
-                    f"- {_publication_safe_inline(row['type'], private_labels)} "
-                    f"{_publication_safe_inline(row['name'], private_labels)} "
-                    f"({_publication_safe_inline(row['state_label'], private_labels)}){reason}"
-                )
-            lines.append("")
         if coverage["staged_not_observed_rows"]:
             lines.extend(["Staged but not observed in any plugin trial:", ""])
             lines.extend(
@@ -905,27 +892,17 @@ class BenchmarkReporter(ReporterBase):
     ) -> None:
         lines.extend(["## Provenance and Excluded Behavior", ""])
         excluded = list((view or {}).get("excluded") or [])
-        inventory = inventory_view(plugin.get("component_inventory"))
-        if inventory and inventory["unsupported_types"]:
-            # A type is evaluated when a Tier 3 row of that type was staged, loaded
-            # or exercised (native loading), and checked when Tier 1 has
-            # static-risk rows for it. Only the rest is excluded outright.
-            coverage = (view or {}).get("coverage") or {}
-            runtime_types = {row["type"] for row in coverage.get("rows") or [] if row.get("staged")}
-            static_types = statically_checked_types(plugin)
-            remaining = [name for name in inventory["unsupported_types"] if name not in runtime_types]
-            static_only = [name for name in remaining if name in static_types]
-            not_evaluated = [name for name in remaining if name not in static_types]
-            if static_only:
-                excluded.append(
-                    "Runtime behavior of these component types was not evaluated (Tier 3 does not stage them in "
-                    "wrapper mode); Tier 1 checks them statically: " + ", ".join(static_only)
-                )
-            if not_evaluated:
-                excluded.append(
-                    "Tier 3 does not stage these component types in wrapper mode, and no check evaluates them: "
-                    + ", ".join(not_evaluated)
-                )
+        unsupported = unsupported_type_split(plugin, (view or {}).get("coverage"))
+        if unsupported["static_only"]:
+            excluded.append(
+                "Runtime behavior of these component types was not evaluated (Tier 3 does not stage them in "
+                "wrapper mode); Tier 1 checks them statically: " + ", ".join(unsupported["static_only"])
+            )
+        if unsupported["unevaluated"]:
+            excluded.append(
+                "Tier 3 does not stage these component types in wrapper mode, and no check evaluates them: "
+                + ", ".join(unsupported["unevaluated"])
+            )
         completeness = (view or {}).get("completeness")
         if not completeness:
             lines.append(
@@ -1091,7 +1068,7 @@ def _agent_dimension_scores(agent: dict[str, Any]) -> list[float] | None:
         if dimension is None:
             return None
         value = dimension.get("with_skill") if "with_skill" in dimension else dimension.get("score")
-        score = _number(value)
+        score = number(value)
         if score is None or not 0.0 <= score <= 1.0:
             return None
         scores.append(score)
@@ -1414,13 +1391,6 @@ def _nonnegative_int(value: object) -> int:
         return 0
 
 
-def _number(value: object) -> float | None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
-
-
 def _agent_dimension(agent: dict[str, Any], dim_id: str) -> dict[str, Any] | None:
     for dimension in agent.get("dimensions") or []:
         if isinstance(dimension, dict) and dimension.get("id") == dim_id:
@@ -1431,8 +1401,8 @@ def _agent_dimension(agent: dict[str, Any], dim_id: str) -> dict[str, Any] | Non
 def _score_transition(dimension: dict[str, Any] | None) -> str:
     if not dimension:
         return "Not available"
-    baseline = _number(dimension.get("baseline"))
-    score = _number(dimension.get("with_skill", dimension.get("score")))
+    baseline = number(dimension.get("baseline"))
+    score = number(dimension.get("with_skill", dimension.get("score")))
     return _score_transition_values(baseline, score)
 
 

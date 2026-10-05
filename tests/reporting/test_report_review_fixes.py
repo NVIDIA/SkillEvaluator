@@ -215,9 +215,7 @@ HOOK_RISK = {
     ],
     "counts": {"total": 1, "flagged": 1},
 }
-UNSUPPORTED_NOTE = (
-    "Tier 3 does not stage these types in wrapper mode; Tier 1 checks hooks, subagents and commands statically."
-)
+UNSUPPORTED_NOTE = "Tier 3 does not stage these types in wrapper mode; Tier 1 checks hooks statically."
 
 
 def _tier1_with_hook_risk(*, hook_risk: bool = True) -> ValidationResult:
@@ -286,6 +284,40 @@ def test_benchmark_lists_a_hook_nothing_checks_as_not_evaluated(tmp_path: Path) 
     card = _card([_tier1_with_hook_risk(hook_risk=False), _tier3_with_hook_state(tmp_path, "unsupported")])
 
     assert any("no check evaluates them: hook" in line for line in _excluded_lines(card))
+
+
+def test_markdown_does_not_claim_a_static_check_the_benchmark_says_did_not_run(tmp_path: Path) -> None:
+    """Without hook-risk rows, Markdown said Tier 1 checked hooks while BENCHMARK.md said nothing evaluated them."""
+    tier1 = _tier1_with_hook_risk(hook_risk=False)
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([tier1])
+    card = _card([tier1, _tier3_with_hook_state(tmp_path, "unsupported")])
+
+    assert (
+        "**Unsupported component types present:** hook. "
+        "Tier 3 does not stage these types in wrapper mode, and SkillEvaluator only lists them."
+    ) in markdown
+    assert "Tier 1 checks" not in markdown
+    assert any("no check evaluates them: hook" in line for line in _excluded_lines(card))
+
+
+def test_unsupported_type_split_names_only_the_types_tier1_checked() -> None:
+    from skillevaluator.reporting.plugin_sections import unsupported_type_split, unsupported_types_note
+
+    block = tier1_plugin_result().metadata["plugin"]
+    block["component_inventory"]["unsupported_types_present"] = ["hook", "agent", "lsp"]
+    block["privileges"] = {"components": [{"type": "agent", "name": "reviewer", "path": "agents/reviewer.md"}]}
+    coverage = {"rows": [{"type": "lsp", "staged": True}]}
+
+    tier1_split = unsupported_type_split(block)
+    tier3_split = unsupported_type_split(block, coverage)
+
+    assert tier1_split == {"static_only": ["agent"], "unevaluated": ["hook", "lsp"]}
+    assert tier3_split == {"static_only": ["agent"], "unevaluated": ["hook"]}
+    assert unsupported_types_note(tier1_split) == (
+        "Tier 3 does not stage these types in wrapper mode; Tier 1 checks subagents statically and only lists "
+        "hook, lsp."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -726,6 +758,69 @@ def test_sarif_bundled_skill_findings_get_repository_relative_uris(tmp_path: Pat
     ]
 
 
+def _validate_dot_plugin_result() -> ValidationResult:
+    """Tier 1 results for ``validate .`` in a plugin with skills/foo and hooks/hooks.json."""
+    result = ValidationResult(validator_name="Plugin Schema", validator_description="Tier 1 plugin validation")
+    result.metadata.update(
+        {
+            "manifest_type": "claude",
+            "plugin_mode": "bundle",
+            "plugin": {
+                "manifest_filename": ".claude-plugin/plugin.json",
+                # The root as typed: ``validate .``.
+                "root": ".",
+                "name": "demo",
+                "component_inventory": {
+                    "components": [
+                        {"type": "skill", "name": "foo", "path": "skills/foo", "support": "evaluated"},
+                        {
+                            "type": "hook",
+                            "name": "hooks/hooks.json",
+                            "path": "hooks/hooks.json",
+                            "support": "unsupported",
+                        },
+                    ]
+                },
+            },
+        }
+    )
+    return result
+
+
+def _finding(file_path: str, check_name: str) -> Finding:
+    return Finding(
+        category="SECURITY", severity=Severity.HIGH, check_name=check_name, message="issue", file_path=file_path
+    )
+
+
+def test_sarif_does_not_join_a_root_relative_bundled_skill_path_onto_the_skill(tmp_path: Path) -> None:
+    """Validators rebase bundled-skill paths onto the plugin root; Tier 2 reports them relative to the skill."""
+    result = _validate_dot_plugin_result()
+    for file_path, check in (
+        ("[foo] skills/foo/SKILL.md", "rebased"),
+        ("[foo] SKILL.md", "skill_relative"),
+        ("[foo] hooks/hooks.json", "skill_file_named_like_a_root_component"),
+        (str(tmp_path / "hooks" / "hooks.json"), "absolute_root_file"),
+    ):
+        result.add_finding(_finding(file_path, check))
+
+    document = _sarif([result], tmp_path)
+
+    located = {
+        item["properties"]["checkName"]: (
+            item["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            item["properties"].get("pluginComponent", {}).get("name"),
+        )
+        for item in document["runs"][0]["results"]
+    }
+    assert located == {
+        "rebased": ("skills/foo/SKILL.md", "foo"),
+        "skill_relative": ("skills/foo/SKILL.md", "foo"),
+        "skill_file_named_like_a_root_component": ("skills/foo/hooks/hooks.json", "foo"),
+        "absolute_root_file": ("hooks/hooks.json", "hooks/hooks.json"),
+    }
+
+
 def test_sarif_marks_a_failed_tier3_run_as_unsuccessful() -> None:
     result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Tier 3")
     result.metadata["agent_eval"] = {"execution_status": "failed", "execution_errors": ["harbor job crashed"]}
@@ -836,6 +931,34 @@ def test_sarif_skips_a_canary_leak_the_baseline_also_had(tmp_path: Path) -> None
     assert not [r for r in document["runs"][0]["results"] if r["ruleId"] == "AGENT_EVAL/canary_exfiltration"]
 
 
+def test_sarif_canary_rule_covers_a_plugin_arm_that_leaked_more_often(tmp_path: Path) -> None:
+    """Both arms leaked, the plugin arm more often: the rule must not claim the baseline never leaked."""
+    result = _canary_run(tmp_path, baseline_leaked=1)
+    arms = result.metadata["agent_eval"]["agents"]["codex"]["canary_summary"]["arms"]
+    arms["with_skill"]["leaked"] = 2
+
+    document = _sarif([tier1_plugin_result(), result])
+
+    run = document["runs"][0]
+    [canary] = [r for r in run["results"] if r["ruleId"] == "AGENT_EVAL/canary_exfiltration"]
+    assert "more often than the baseline (2 of 2 vs 1 of 2)" in canary["message"]["text"]
+    [rule] = [rule for rule in run["tool"]["driver"]["rules"] if rule["id"] == "AGENT_EVAL/canary_exfiltration"]
+    description = rule["fullDescription"]["text"]
+    assert "the no-plugin baseline did not" not in description
+    assert "leaked more often than the baseline arm, including when the baseline did not leak" in description
+
+
+def test_sarif_canary_message_names_a_sum_of_parts_baseline(tmp_path: Path) -> None:
+    result = _canary_run(tmp_path, baseline_leaked=0)
+    payload = result.metadata["agent_eval"]
+    payload["lift_mode_requested"] = payload["lift_mode_effective"] = "integration"
+
+    document = _sarif([tier1_plugin_result(), result])
+
+    [canary] = [r for r in document["runs"][0]["results"] if r["ruleId"] == "AGENT_EVAL/canary_exfiltration"]
+    assert "the plugin arm leaked the canary and the sum-of-parts baseline did not" in canary["message"]["text"]
+
+
 @pytest.mark.parametrize(("baseline_leaked", "critical"), [(0, 1), (1, 0)])
 def test_json_counts_a_plugin_attributable_canary_leak_as_critical(
     tmp_path: Path, baseline_leaked: int, critical: int
@@ -873,7 +996,7 @@ def test_cli_prints_the_tier3_plugin_block_for_a_passing_agent_eval(tmp_path: Pa
 
     assert "[AGENT_EVAL] Tier 3 plugin evaluation" in plain
     assert "Verdict: FAIL" in plain
-    assert "Component coverage: 0 components not staged (of 4; 4 staged" in plain
+    assert "Component coverage: 0 components not staged (of 4 declared or packaged component(s); 4 staged" in plain
     assert "Plugin signals (advisory" in plain
     assert plain.count("Verdict: FAIL") == 1
 

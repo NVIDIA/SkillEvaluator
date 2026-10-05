@@ -27,9 +27,13 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, NamedTuple
 
+# The Tier 3 signal and runtime-evidence producers are pure modules that import no reporting code.
+from skillevaluator.tier3.eval_core.plugin_signals import COMPONENT_RULE_READ, COMPONENT_SUBAGENT
+from skillevaluator.tier3.eval_core.runtime_evidence import canary_leak_rate
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 MAX_TABLE_ROWS = 200
@@ -38,6 +42,14 @@ MAX_TEXT_CHARS = 300
 MAX_AGENTS = 16
 MAX_TOP_FAILURES = 5
 MAX_SERVERS = 32
+# Display bounds for a status, state, type, kind or other keyword, and for an agent, arm,
+# event, origin, method or other short label.
+_KEYWORD_CHARS = 32
+_LABEL_CHARS = 64
+# Finding and component paths are compared whole, before any display bound.
+_PATH_CHARS = 4096
+# How many names a sentence lists before it counts the rest as "(+N more)".
+_NAMES_IN_TEXT = 12
 
 DEPENDENCY_STATES = ("provided", "referenced", "missing", "external", "unresolved")
 COVERAGE_STATES = ("staged", "not_staged", "unsupported", "unavailable", "invalid")
@@ -49,6 +61,10 @@ SUPPORT_LABELS = {
     "static_only": "Static only",
     "unsupported": "Unsupported",
 }
+# Display classes are ok / warn / fail / neutral; every reporter maps them to its own styling.
+_SUPPORT_CLASSES = {"evaluated": "ok", "unsupported": "fail"}
+_DEPENDENCY_STATE_CLASSES = {"provided": "ok", "referenced": "ok", "missing": "fail"}
+_PLUGIN_STATUSES = {"passed": ("PASSED", "ok"), "failed": ("FAILED", "fail"), "incomplete": ("INCOMPLETE", "warn")}
 COVERAGE_LABELS = {
     "staged": "Staged",
     "not_staged": "Not staged",
@@ -65,7 +81,8 @@ ARM_LABELS = {
     "baseline": "Baseline (no plugin)",
     "sum_of_parts": "Sum of parts",
 }
-_PLUGIN_ARMS = frozenset({"with_skill", "with_plugin"})
+# The arms that ran with the plugin (newer payloads name it with_plugin).
+PLUGIN_ARMS = frozenset({"with_skill", "with_plugin"})
 # In a legacy 2-arm ``--lift-mode integration`` run the only baseline arm stages
 # the plugin's member components individually, so that arm and its interval
 # describe the sum of parts, not a run without the plugin.
@@ -101,6 +118,7 @@ _STATISTIC_KEYS = (
 )
 _COMPLETENESS_ISSUE_KEYS = ("missing_cases", "failed_arms", "attempt_shortfall")
 
+STAGING_CAVEAT = "Files staged ≠ components loaded ≠ behavior verified."
 STAGED_IS_NOT_VERIFIED = (
     "Staged means the component's files were placed in the evaluation workspace. "
     "It does not show that the agent loaded the component, and it does not verify the component's behavior."
@@ -250,8 +268,13 @@ def json_safe(value: Any, *, _depth: int = 0) -> Any:
     return str(value)
 
 
-def _plural(value: int, noun: str) -> str:
-    return f"{value} {noun}{'' if value == 1 else 's'}"
+def _humanize(value: str) -> str:
+    """Turn an unlabelled snake_case value into a title: ``needs_review`` -> ``Needs Review``."""
+    return value.replace("_", " ").title()
+
+
+def _plural(value: int, noun: str, plural: str | None = None) -> str:
+    return f"{value} {noun if value == 1 else plural or noun + 's'}"
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +305,9 @@ def tier1_plugin_view(
     if not source:
         return None
     bundled, bundled_omitted = _names(source.get("bundled_skills") if bundled_skills is None else bundled_skills)
+    # Tier 1 runs have no Tier 3 coverage, so no unsupported type counts as staged here.
+    unsupported = unsupported_type_split(source)
+    status_label, status_class = _PLUGIN_STATUSES.get(status or "", ("", "neutral"))
     return {
         "name": text(source.get("name")),
         "manifest_type": text(source.get("manifest_type")),
@@ -289,13 +315,14 @@ def tier1_plugin_view(
         "manifest_filename": text(source.get("manifest_filename")),
         "manifest_declarations": manifest_declarations_view(source.get("manifest_declarations")),
         "status": status or "",
-        "status_label": {"passed": "PASSED", "failed": "FAILED", "incomplete": "INCOMPLETE"}.get(status or "", ""),
+        "status_label": status_label,
+        "status_class": status_class,
         "declared_dependencies": _declared_dependencies(source.get("declared_dependencies")),
         "dependencies": dependency_view(source),
         "bundled_skills": bundled,
         "bundled_skills_omitted": bundled_omitted,
         "in_plugin_skills": count(source.get("in_plugin_skills")),
-        "inventory": inventory_view(source.get("component_inventory")),
+        "inventory": inventory_view(source.get("component_inventory"), unsupported_split=unsupported),
         "mcp": mcp_view(source.get("mcp")),
         "context_cost": context_cost_view(source.get("context_cost")),
         "catalog_skill_similarity": similarity_view(source.get("catalog_skill_similarity"), kind="skills"),
@@ -319,19 +346,19 @@ def manifest_declarations_view(value: object) -> dict[str, Any] | None:
         rows.append(
             {
                 "manifest_filename": text(row.get("manifest_filename"), limit=128),
-                "manifest_type": text(row.get("manifest_type"), limit=64),
+                "manifest_type": text(row.get("manifest_type"), limit=_LABEL_CHARS),
                 "selected": row.get("selected") is True,
-                "status": text(row.get("status"), limit=32),
+                "status": text(row.get("status"), limit=_KEYWORD_CHARS),
                 "name": text(row.get("name")) or "—",
-                "version": text(row.get("version"), limit=64) or "—",
-                "spec_version": text(row.get("spec_version"), limit=32),
+                "version": text(row.get("version"), limit=_LABEL_CHARS) or "—",
+                "spec_version": text(row.get("spec_version"), limit=_KEYWORD_CHARS),
             }
         )
     if len(rows) < 2:
         return None
     conflicts = [
         {
-            "field": text(conflict.get("field"), limit=32),
+            "field": text(conflict.get("field"), limit=_KEYWORD_CHARS),
             "selected": text(conflict.get("selected")),
             "additional": text(conflict.get("additional")),
             "manifest_filename": text(conflict.get("manifest_filename"), limit=128),
@@ -353,18 +380,37 @@ def manifest_declarations_view(value: object) -> dict[str, Any] | None:
 def _fmt_overlap(value: object) -> str:
     numeric = number(value)
     if numeric is None:
-        return text(value, limit=64) or "n/a"
+        return text(value, limit=_LABEL_CHARS) or "n/a"
     if isinstance(value, float) and 0.0 <= numeric <= 1.0:
         return fmt_rate(numeric)
     return fmt_count(numeric)
 
 
+# Per similarity kind: the section title and the table columns (header, match key).
+_SIMILARITY_TABLES = {
+    "skills": (
+        "Bundled skills vs. local skills catalog",
+        (("Bundled skill", "subject"), ("Catalog match", "match"), ("Similarity", "similarity")),
+    ),
+    "plugins": (
+        "Plugin vs. other plugins in the local catalog",
+        (
+            ("Catalog plugin", "subject"),
+            ("Similarity", "similarity"),
+            ("Member overlap", "member_overlap"),
+            ("Verdict", "verdict"),
+        ),
+    ),
+}
+
+
 def similarity_view(value: object, *, kind: str) -> dict[str, Any] | None:
-    """Return an advisory Tier 2 local-catalog similarity result (skills or plugins)."""
+    """Return an advisory Tier 2 local-catalog similarity result (``kind`` is skills or plugins)."""
     similarity = _mapping(value)
     if not similarity:
         return None
-    status = text(similarity.get("status"), limit=32).lower() or "unknown"
+    title, columns = _SIMILARITY_TABLES[kind]
+    status = text(similarity.get("status"), limit=_KEYWORD_CHARS).lower() or "unknown"
     matches: list[dict[str, str]] = []
     total = 0
     for match in _sequence(similarity.get("matches")):
@@ -387,16 +433,28 @@ def similarity_view(value: object, *, kind: str) -> dict[str, Any] | None:
                     "subject": text(match.get("name")),
                     "similarity": fmt_score(match.get("similarity")),
                     "member_overlap": _fmt_overlap(match.get("member_overlap")),
-                    "verdict": text(match.get("verdict"), limit=64),
+                    "verdict": text(match.get("verdict"), limit=_LABEL_CHARS),
                 }
             )
+    catalog_entries = count(similarity.get("catalog_entries"))
+    reason = text(similarity.get("reason"))
+    summary = []
+    if catalog_entries is not None:
+        summary.append(f"{_plural(catalog_entries, 'catalog entry', 'catalog entries')} compared.")
+    if reason:
+        summary.append(reason)
+    if status == "compared" and not matches:
+        summary.append("No similar entries found.")
     return {
+        "title": title,
+        "columns": [{"label": label, "key": key} for label, key in columns],
         "status": status,
-        "status_label": {"compared": "Compared", "skipped": "Skipped"}.get(status, status.replace("_", " ").title()),
-        "catalog_entries": count(similarity.get("catalog_entries")),
+        "status_label": {"compared": "Compared", "skipped": "Skipped"}.get(status, _humanize(status)),
+        "catalog_entries": catalog_entries,
         "matches": matches,
         "omitted": max(0, total - len(matches)),
-        "reason": text(similarity.get("reason")),
+        "reason": reason,
+        "summary": " ".join(summary),
     }
 
 
@@ -413,7 +471,7 @@ def _state_counts(value: object, ordered_states: tuple[str, ...]) -> list[dict[s
     counts = _mapping(value)
     rows = [{"state": state, "count": count(counts.get(state)) or 0} for state in ordered_states]
     for key, raw in sorted(counts.items(), key=lambda item: str(item[0])):
-        state = text(key, limit=64)
+        state = text(key, limit=_LABEL_CHARS)
         amount = count(raw)
         if state and state not in ordered_states and amount is not None:
             rows.append({"state": state, "count": amount})
@@ -437,11 +495,13 @@ def dependency_view(block: object) -> dict[str, Any] | None:
             total_rows += 1
             if len(rows) >= MAX_TABLE_ROWS:
                 continue
+            state = text(entry.get("state"), limit=_KEYWORD_CHARS) or "unknown"
             rows.append(
                 {
-                    "kind": text(kind, limit=32).rstrip("s") or "ref",
+                    "kind": text(kind, limit=_KEYWORD_CHARS).rstrip("s") or "ref",
                     "ref": text(entry.get("ref")),
-                    "state": text(entry.get("state"), limit=32) or "unknown",
+                    "state": state,
+                    "state_class": _DEPENDENCY_STATE_CLASSES.get(state, "neutral"),
                     "path": text(entry.get("path")),
                     "reason": text(entry.get("reason")),
                 }
@@ -452,97 +512,130 @@ def dependency_view(block: object) -> dict[str, Any] | None:
         missing = sum(1 for row in rows if row["state"] == "missing")
     return {
         "counts": count_rows,
-        "total": sum(row["count"] for row in count_rows) if count_rows else total_rows,
         "rows": rows,
         "omitted": max(0, total_rows - len(rows)),
         "missing": missing,
     }
 
 
-def inventory_view(value: object) -> dict[str, Any] | None:
-    """Return the component inventory table and unsupported-type callout."""
+def inventory_view(
+    value: object,
+    *,
+    unsupported_split: Mapping[str, list[str]] | None = None,
+) -> dict[str, Any] | None:
+    """Return the component inventory table and unsupported-type callout.
+
+    *unsupported_split* is :func:`unsupported_type_split` for the plugin
+    block; without it the callout claims no static check for those types.
+    """
     inventory = _mapping(value)
     if not inventory:
         return None
     rows: list[dict[str, Any]] = []
     total = 0
     computed_counts: dict[str, int] = {}
-    unsupported_seen: list[str] = []
     for component in _sequence(inventory.get("components")):
         if not isinstance(component, Mapping):
             continue
         total += 1
-        component_type = text(component.get("type"), limit=32) or "unknown"
-        support = text(component.get("support"), limit=32)
+        component_type = text(component.get("type"), limit=_KEYWORD_CHARS) or "unknown"
+        support = text(component.get("support"), limit=_KEYWORD_CHARS)
         computed_counts[component_type] = computed_counts.get(component_type, 0) + 1
-        if support == "unsupported" and component_type not in unsupported_seen:
-            unsupported_seen.append(component_type)
         if len(rows) >= MAX_TABLE_ROWS:
             continue
         rows.append(
             {
                 "type": component_type,
                 "name": text(component.get("name")),
-                "origin": text(component.get("origin"), limit=64),
+                "origin": text(component.get("origin"), limit=_LABEL_CHARS),
                 "path": text(component.get("path")),
                 "support": support,
                 "support_label": SUPPORT_LABELS.get(support, support or "unknown"),
+                "support_class": _SUPPORT_CLASSES.get(support, "neutral"),
                 "findings": count(component.get("findings")) or 0,
             }
         )
     declared_counts = _mapping(inventory.get("counts"))
     count_source = declared_counts or computed_counts
     counts = [
-        {"type": text(key, limit=32), "count": amount}
+        {"type": text(key, limit=_KEYWORD_CHARS), "count": amount}
         for key, raw in sorted(count_source.items(), key=lambda item: str(item[0]))
-        if (amount := count(raw)) is not None and text(key, limit=32)
+        if (amount := count(raw)) is not None and text(key, limit=_KEYWORD_CHARS)
     ][:MAX_LIST_ITEMS]
-    if "unsupported_types_present" in inventory:
-        unsupported, _omitted = _names(inventory.get("unsupported_types_present"))
-    else:
-        unsupported = unsupported_seen
+    unsupported = _unsupported_types(inventory)
     return {
         "rows": rows,
         "omitted": max(0, total - len(rows)),
         "total": total or sum(item["count"] for item in counts),
         "counts": counts,
         "unsupported_types": unsupported,
-        "unsupported_note": unsupported_types_note(unsupported) if unsupported else "",
+        "unsupported_note": unsupported_types_note(unsupported_split) if unsupported else "",
     }
 
 
-# Component types that Tier 1 checks statically: hooks (Hook risk) and
-# subagents and commands (Subagent and command privileges).
-STATICALLY_CHECKED_TYPES = ("hook", "agent", "command")
+def _unsupported_types(inventory: Mapping[str, Any]) -> list[str]:
+    """Return the component types the Tier 3 wrapper cannot stage, as recorded or read from the rows."""
+    if "unsupported_types_present" in inventory:
+        return _names(inventory.get("unsupported_types_present"))[0]
+    unsupported: list[str] = []
+    for component in _sequence(inventory.get("components")):
+        if isinstance(component, Mapping) and text(component.get("support"), limit=_KEYWORD_CHARS) == "unsupported":
+            component_type = text(component.get("type"), limit=_KEYWORD_CHARS) or "unknown"
+            if component_type not in unsupported:
+                unsupported.append(component_type)
+    return unsupported
 
 
-def unsupported_types_note(types: list[str]) -> str:
-    """Say what happens to inventory types that Tier 3 cannot stage.
+# The component types Tier 1 checks statically (Hook risk, Subagent and command
+# privileges) when the plugin block carries rows for them, as reports name them.
+_STATIC_RISK_TYPE_NAMES = {"hook": "hooks", "agent": "subagents", "command": "commands"}
 
-    "Unsupported" means the Tier 3 wrapper cannot stage the type. It does not
-    mean nothing checks it: Tier 1 has static checks for hooks, subagents and
-    commands, and native loading can stage and exercise them.
+
+def unsupported_type_split(block: object, coverage: Mapping[str, Any] | None = None) -> dict[str, list[str]]:
+    """Split the inventory types that Tier 3 cannot stage by what evaluated them instead.
+
+    "Unsupported" means the Tier 3 wrapper cannot stage the type, not that
+    nothing checks it. A type with a staged, loaded or exercised Tier 3 row in
+    *coverage* (native loading) is in neither list. Of the rest,
+    ``static_only`` types have Tier 1 static-risk rows in *block*, and nothing
+    evaluated the ``unevaluated`` ones. Every report states these lists, so
+    none can call a type checked that another calls unevaluated.
     """
-    listed_only = [name for name in types if name not in STATICALLY_CHECKED_TYPES]
+    source = _mapping(block)
+    staged = {row.get("type") for row in _sequence(_mapping(coverage).get("rows")) if row.get("staged")}
+    static = _statically_checked_types(source)
+    remaining = [name for name in _unsupported_types(_mapping(source.get("component_inventory"))) if name not in staged]
+    return {
+        "static_only": [name for name in remaining if name in static],
+        "unevaluated": [name for name in remaining if name not in static],
+    }
+
+
+def _statically_checked_types(block: Mapping[str, Any]) -> set[str]:
+    """Return the component types this Tier 1 plugin block carries static-risk rows for."""
+    checked = {"hook"} if hook_risk_view(block.get("hook_risk")) else set()
+    privileges = privileges_view(block.get("privileges"))
+    if privileges:
+        checked.update(row["type"] for row in privileges["rows"] if row["type"] in _STATIC_RISK_TYPE_NAMES)
+    return checked
+
+
+def unsupported_types_note(split: Mapping[str, list[str]] | None) -> str:
+    """Say what happens to the inventory types that Tier 3 cannot stage (see :func:`unsupported_type_split`)."""
+    static_only = list((split or {}).get("static_only") or [])
+    unevaluated = list((split or {}).get("unevaluated") or [])
     note = "Tier 3 does not stage these types in wrapper mode"
-    if len(listed_only) == len(types):
+    if not static_only:
         return f"{note}, and SkillEvaluator only lists them."
-    note += "; Tier 1 checks hooks, subagents and commands statically"
-    if listed_only:
-        note += f" and only lists {', '.join(listed_only)}"
+    note += f"; Tier 1 checks {_prose_list([_STATIC_RISK_TYPE_NAMES[name] for name in static_only])} statically"
+    if unevaluated:
+        note += f" and only lists {', '.join(unevaluated)}"
     return f"{note}."
 
 
-def statically_checked_types(block: object) -> set[str]:
-    """Return the component types this Tier 1 plugin block carries static-risk rows for."""
-    source = _mapping(block)
-    checked: set[str] = set()
-    if hook_risk_view(source.get("hook_risk")):
-        checked.add("hook")
-    privileges = privileges_view(source.get("privileges"))
-    if privileges:
-        checked.update(row["type"] for row in privileges["rows"] if row["type"] in STATICALLY_CHECKED_TYPES)
-    return checked
+def _prose_list(items: list[str]) -> str:
+    """Join *items* as prose: "a", "a and b", "a, b and c"."""
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 def pinning_view(value: object, servers: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
@@ -586,20 +679,18 @@ def mcp_view(value: object) -> dict[str, Any] | None:
     if not mcp:
         return None
     servers: list[dict[str, Any]] = []
-    total = 0
     for server in _sequence(mcp.get("servers")):
         if not isinstance(server, Mapping):
             continue
-        total += 1
         if len(servers) >= MAX_TABLE_ROWS:
-            continue
+            break
         pinned = server.get("pinned")
         servers.append(
             {
                 "name": text(server.get("name")) or "unnamed",
-                "source": text(server.get("source"), limit=64),
-                "kind": text(server.get("kind"), limit=32),
-                "transport": text(server.get("transport"), limit=64),
+                "source": text(server.get("source"), limit=_LABEL_CHARS),
+                "kind": text(server.get("kind"), limit=_KEYWORD_CHARS),
+                "transport": text(server.get("transport"), limit=_LABEL_CHARS),
                 "pinned": pinned if isinstance(pinned, bool) else None,
                 "pin_detail": text(server.get("pin_detail")),
             }
@@ -607,7 +698,6 @@ def mcp_view(value: object) -> dict[str, Any] | None:
     unpinned = [server for server in servers if server["pinned"] is False]
     return {
         "servers": servers,
-        "omitted": max(0, total - len(servers)),
         "pinning": pinning_view(mcp.get("pinning"), servers),
         "unpinned": unpinned,
     }
@@ -626,7 +716,7 @@ def context_cost_view(value: object) -> dict[str, Any] | None:
             continue
         components.append(
             {
-                "type": text(entry.get("type"), limit=32),
+                "type": text(entry.get("type"), limit=_KEYWORD_CHARS),
                 "name": text(entry.get("name")),
                 "always_on_value": number(entry.get("always_on_tokens")) or 0.0,
                 "always_on": fmt_count(entry.get("always_on_tokens")),
@@ -638,8 +728,8 @@ def context_cost_view(value: object) -> dict[str, Any] | None:
         return None
     components.sort(key=lambda row: (-row["always_on_value"], row["type"], row["name"]))
     notes, _omitted = _names(cost.get("notes"), limit=8)
-    estimator = text(cost.get("estimator"), limit=64)
-    method = text(cost.get("method"), limit=64) or "static_estimate"
+    estimator = text(cost.get("estimator"), limit=_LABEL_CHARS)
+    method = text(cost.get("method"), limit=_LABEL_CHARS) or "static_estimate"
     label = "Static estimate"
     if estimator == "chars_div_4":
         label = "Static estimate (characters ÷ 4)"
@@ -658,46 +748,134 @@ def context_cost_view(value: object) -> dict[str, Any] | None:
     }
 
 
-def component_for_path(file_path: object, block: object) -> dict[str, str] | None:
-    """Return the inventory component whose root-relative path contains *file_path*.
+def split_display_prefix(path: str) -> tuple[str | None, str]:
+    """Split the ``[skill] `` label off a bundled skill's finding path.
 
-    Findings carry either root-relative or absolute paths. Absolute paths are
-    made root-relative against the plugin root; the longest matching component
-    path wins, so a file inside ``skills/foo`` maps to that skill rather than
-    to a broader component.
+    ``ValidationResult.merge_with_prefix`` writes a bundled skill's finding
+    paths as ``"[skill] <path>"``. Returns ``(skill, path)``, or ``(None,
+    path)`` unchanged when there is no label. Only the outermost label is
+    split off.
     """
-    raw = text(file_path, limit=4096)
-    source = _mapping(block)
-    if not raw:
+    if path.startswith("[") and "] " in path:
+        skill, _separator, inner = path[1:].partition("] ")
+        return skill, inner
+    return None, path
+
+
+def _is_absolute(path: str) -> bool:
+    return PurePosixPath(path.replace("\\", "/")).is_absolute() or PureWindowsPath(path).is_absolute()
+
+
+def _inventory_components(block: object) -> list[Mapping[str, Any]]:
+    inventory = _mapping(_mapping(block).get("component_inventory"))
+    return [component for component in _sequence(inventory.get("components")) if isinstance(component, Mapping)]
+
+
+def _component_path(component: Mapping[str, Any]) -> str:
+    """Return a component's root-relative path with ``/`` separators."""
+    return text(component.get("path"), limit=_PATH_CHARS).replace("\\", "/").removeprefix("./").rstrip("/")
+
+
+class ComponentIndex:
+    """A plugin inventory indexed by component path, to place many findings without rescanning it.
+
+    *block* is the Tier 1 plugin block. Build one index per report and look
+    up each finding with :meth:`artifact_path` and :meth:`component`.
+    """
+
+    def __init__(self, block: object) -> None:
+        source = _mapping(block)
+        self._root = text(source.get("root"), limit=_PATH_CHARS).replace("\\", "/").rstrip("/")
+        components = _inventory_components(source)
+        self._by_path: dict[str, dict[str, str]] = {}
+        for component in components[: MAX_TABLE_ROWS * 5]:
+            path = _component_path(component)
+            if path and path not in self._by_path:
+                self._by_path[path] = {
+                    "type": text(component.get("type"), limit=_KEYWORD_CHARS),
+                    "name": text(component.get("name")),
+                    "path": path,
+                    "support": text(component.get("support"), limit=_KEYWORD_CHARS),
+                }
+        self._skill_by_name: dict[str, str] = {}
+        # Folder walkers label a skill with its directory name ("bar" for skills/nested/bar),
+        # so every trailing part of a skill directory maps back to it.
+        self._skills_by_suffix: dict[str, list[str]] = {}
+        for component in components:
+            if component.get("type") != "skill":
+                continue
+            path = _component_path(component)
+            name = text(component.get("name"))
+            if path and name not in self._skill_by_name:
+                self._skill_by_name[name] = path
+            parts = path.split("/")
+            for start in range(len(parts)):
+                self._skills_by_suffix.setdefault("/".join(parts[start:]), []).append(path)
+
+    def _bundled_skill_dir(self, label: str) -> str | None:
+        """Return the root-relative directory of the bundled skill a finding label names."""
+        if label in self._skill_by_name:
+            return self._skill_by_name[label]
+        matches = self._skills_by_suffix.get(label, [])
+        return matches[0] if len(matches) == 1 else None
+
+    def artifact_path(self, file_path: str) -> str:
+        """Return the file a finding points at: its path without the ``[skill] `` label.
+
+        Validators rebase a bundled skill's relative paths onto the plugin root
+        (``skills/foo/SKILL.md``), but some report them relative to the skill
+        (Tier 2 says ``SKILL.md``). A relative path that is not already inside
+        the labelled skill's directory is joined onto that directory. Absolute
+        and unlabelled paths are returned unchanged.
+        """
+        skill, inner = split_display_prefix(file_path)
+        inner = inner.strip()
+        if skill is None or not inner:
+            return file_path
+        if _is_absolute(inner):
+            return inner
+        skill_dir = self._bundled_skill_dir(skill)
+        relative = inner.replace("\\", "/").removeprefix("./")
+        if skill_dir in (None, ".") or relative == skill_dir or relative.startswith(f"{skill_dir}/"):
+            return inner
+        return f"{skill_dir}/{relative}"
+
+    def component(self, file_path: object) -> dict[str, str] | None:
+        """Return the inventory component whose root-relative path contains *file_path*.
+
+        Absolute paths are made root-relative against the plugin root. The
+        longest matching component path wins, so a file inside ``skills/foo``
+        maps to that skill rather than to a broader component.
+        """
+        raw = self.artifact_path(text(file_path, limit=_PATH_CHARS))
+        if not raw:
+            return None
+        normalized = raw.replace("\\", "/")
+        if self._root and (normalized == self._root or normalized.startswith(self._root + "/")):
+            normalized = normalized[len(self._root) :].lstrip("/")
+        elif _is_absolute(raw):
+            return None
+        parts = normalized.removeprefix("./").split("/")
+        # The longest leading run of path parts that names a component.
+        for end in range(len(parts), 0, -1):
+            component = self._by_path.get("/".join(parts[:end]))
+            if component is not None:
+                return dict(component)
         return None
-    if raw.startswith("[") and "]" in raw:
-        raw = raw[raw.index("]") + 1 :].strip()
-    normalized = raw.replace("\\", "/")
-    root = text(source.get("root"), limit=4096).replace("\\", "/").rstrip("/")
-    if root and (normalized == root or normalized.startswith(root + "/")):
-        normalized = normalized[len(root) :].lstrip("/")
-    elif PurePosixPath(normalized).is_absolute() or PureWindowsPath(raw).is_absolute():
-        return None
-    normalized = normalized.removeprefix("./")
-    best: dict[str, str] | None = None
-    best_length = -1
-    inventory = _mapping(source.get("component_inventory"))
-    for component in _sequence(inventory.get("components"))[: MAX_TABLE_ROWS * 5]:
-        if not isinstance(component, Mapping):
-            continue
-        component_path = text(component.get("path"), limit=4096).replace("\\", "/").removeprefix("./").rstrip("/")
-        if not component_path:
-            continue
-        contains = normalized == component_path or normalized.startswith(component_path + "/")
-        if contains and len(component_path) > best_length:
-            best_length = len(component_path)
-            best = {
-                "type": text(component.get("type"), limit=32),
-                "name": text(component.get("name")),
-                "path": component_path,
-                "support": text(component.get("support"), limit=32),
-            }
-    return best
+
+
+def finding_artifact_path(file_path: str, block: object) -> str:
+    """Return the file a finding points at (see :meth:`ComponentIndex.artifact_path`)."""
+    return ComponentIndex(block).artifact_path(file_path)
+
+
+def component_for_path(file_path: object, block: object) -> dict[str, str] | None:
+    """Return the inventory component that contains a finding's file (see :meth:`ComponentIndex.component`).
+
+    Findings carry either root-relative or absolute paths, and a bundled
+    skill's findings carry a ``[skill] `` label.
+    """
+    return ComponentIndex(block).component(file_path)
 
 
 # ---------------------------------------------------------------------------
@@ -705,25 +883,91 @@ def component_for_path(file_path: object, block: object) -> dict[str, str] | Non
 # ---------------------------------------------------------------------------
 
 
-def _plugin_provenance(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    return _mapping(payload.get("plugin_provenance")) or _mapping(
-        _mapping(payload.get("summary")).get("plugin_provenance")
+def plugin_provenance(payload: object) -> Mapping[str, Any]:
+    """Return a Tier 3 payload's plugin provenance, at the top level or under ``summary``; ``{}`` when absent."""
+    source = _mapping(payload)
+    return _mapping(source.get("plugin_provenance")) or _mapping(
+        _mapping(source.get("summary")).get("plugin_provenance")
     )
 
 
 def _agents(payload: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
     agents = _mapping(payload.get("agents"))
     return [
-        (text(name, limit=64), agent) for name, agent in list(agents.items())[:MAX_AGENTS] if isinstance(agent, Mapping)
+        (text(name, limit=_LABEL_CHARS), agent)
+        for name, agent in list(agents.items())[:MAX_AGENTS]
+        if isinstance(agent, Mapping)
     ]
+
+
+# Per-arm plugin signal summaries for one scope: an agent, or the run-level copy.
+_SignalSource = tuple[str, dict[str, Mapping[str, Any]]]
+
+
+@dataclass(frozen=True)
+class _Tier3Context:
+    """The facts about a Tier 3 run that several plugin views read, derived once per payload.
+
+    Each view used to derive these itself, and the copies drifted: they fell
+    back to different best agents, and only some of them labelled a
+    sum-of-parts baseline as one.
+    """
+
+    provenance: Mapping[str, Any]
+    # The requested and effective lift modes; ``None`` when the run recorded neither.
+    modes: dict[str, Any] | None
+    # The legacy 2-arm ``--lift-mode integration`` (effective mode ``integration``)
+    # stages the member components individually in its only baseline arm, so that
+    # arm and the ``effectiveness`` interval compare the plugin with its parts.
+    # Plugin versus no plugin was not run.
+    sum_of_parts_baseline: bool
+    best_agent: str
+    signal_sources: tuple[_SignalSource, ...]
+
+
+def _tier3_context(payload: Mapping[str, Any]) -> _Tier3Context:
+    provenance = plugin_provenance(payload)
+    modes = _lift_modes(payload, provenance)
+    best_agent = text(
+        payload.get("best_agent") or _mapping(payload.get("summary")).get("best_agent"), limit=_LABEL_CHARS
+    )
+    return _Tier3Context(
+        provenance=provenance,
+        modes=modes,
+        sum_of_parts_baseline=bool(modes and modes["effective"] == "integration"),
+        best_agent=best_agent,
+        signal_sources=_signal_sources(payload, best_agent),
+    )
+
+
+def _run_scope(best_agent: str) -> str:
+    """Label the run-level copy of a per-agent block, which is the best agent's."""
+    return best_agent or "All agents"
+
+
+def _signal_sources(payload: Mapping[str, Any], best_agent: str) -> tuple[_SignalSource, ...]:
+    """Return each agent's per-arm signal summaries.
+
+    The payload's top-level copy (the best agent's) is used only when no agent
+    carries its own, so nothing renders twice.
+    """
+    sources = tuple(
+        (name, summaries) for name, agent in _agents(payload) if (summaries := _arm_signal_summaries(agent))
+    )
+    if sources:
+        return sources
+    run_summaries = _signal_summaries(payload.get("plugin_signals_summary"))
+    return ((_run_scope(best_agent), run_summaries),) if run_summaries else ()
 
 
 def is_plugin_payload(payload: object) -> bool:
     """Return whether a Tier 3 payload or engine result describes a plugin run."""
     source = _mapping(payload)
-    if not source:
-        return False
-    if _plugin_provenance(source) or _mapping(source.get("integration")):
+    return bool(source) and _is_plugin_run(source, _tier3_context(source))
+
+
+def _is_plugin_run(source: Mapping[str, Any], context: _Tier3Context) -> bool:
+    if context.provenance or _mapping(source.get("integration")):
         return True
     if text(source.get("lift_mode_requested")) or text(source.get("lift_mode_effective")):
         return True
@@ -732,19 +976,23 @@ def is_plugin_payload(payload: object) -> bool:
             return True
     if _mapping(source.get("plugin_signals_summary")):
         return True
-    return any(_arm_signal_summaries(agent) for _name, agent in _agents(source))
+    # Only per-agent summaries remain: the run-level copy was checked above.
+    return bool(context.signal_sources)
 
 
 def tier3_plugin_view(payload: object) -> dict[str, Any] | None:
     """Return the display model for every Tier 3 plugin block, or ``None``."""
     source = _mapping(payload)
-    if not is_plugin_payload(source):
+    if not source:
         return None
-    provenance = _plugin_provenance(source)
-    statistics = statistics_view(source)
-    signals = signals_view(source)
+    context = _tier3_context(source)
+    if not _is_plugin_run(source, context):
+        return None
+    provenance = context.provenance
+    statistics = statistics_view(source, context=context)
+    signals = signals_view(source, context=context)
     coverage = coverage_view(provenance.get("component_coverage"), signals)
-    integration = integration_view(source, provenance, statistics)
+    integration = integration_view(source, statistics, context=context)
     completeness = completeness_view(provenance)
     partial = bool(completeness and completeness["partial"])
     dataset = {
@@ -767,15 +1015,15 @@ def tier3_plugin_view(payload: object) -> dict[str, Any] | None:
         "static_context_cost": context_cost_view(provenance.get("context_cost")),
         "mcp_pinning": pinning_view(provenance.get("mcp_pinning")),
         "dependency_counts": _state_counts(dependency_counts, DEPENDENCY_STATES) if dependency_counts else [],
-        "lift_modes": _lift_modes(source, provenance),
-        "sum_of_parts_baseline": baseline_is_sum_of_parts(source),
+        "lift_modes": context.modes,
+        "sum_of_parts_baseline": context.sum_of_parts_baseline,
         "integration": integration,
         "statistics": statistics,
         "signals": signals,
-        "hook_census": hook_census_view(source),
-        "canary": canary_view(source),
+        "hook_census": hook_census_view(source, context=context),
+        "canary": canary_view(source, context=context),
         "mcp_proof": mcp_proof_view(provenance.get("mcp_proof")),
-        "plugin_load": plugin_load_view(source),
+        "plugin_load": plugin_load_view(source, context=context),
     }
     view["excluded"] = excluded_behavior(view, provenance)
     content_keys = (
@@ -797,15 +1045,57 @@ def tier3_plugin_view(payload: object) -> dict[str, Any] | None:
     return view
 
 
-_COMPLETENESS_FIELDS = {
+# The provenance lists of resolved declared components, keyed as completeness_view() counts them.
+_RESOLVED_FIELDS = {
     "skills_resolved": "evaluated_member_skills",
     "rules_resolved": "staged_rules",
     "mcp_runnable": "runnable_mcp_servers",
-    "skills_unresolved": "unresolved_skill_refs",
-    "rules_unresolved": "unresolved_rule_refs",
-    "mcp_provider_only": "provider_only_mcp_servers",
-    "mcp_unsupported_config": "mcp_unsupported_config",
 }
+
+
+class _Deferral(NamedTuple):
+    """One provenance list of declared components that Tier 3 deferred."""
+
+    key: str  # how completeness_view() counts and names it
+    field: str  # the provenance list
+    singular: str  # what one deferred entry is called in the INCOMPLETE reason
+    plural: str
+    excluded: str  # the "not evaluated by this run" statement that lists the entries
+
+
+# Every deferral makes a plugin run INCOMPLETE. The order is the order every report lists them in.
+_DEFERRALS = (
+    _Deferral(
+        "skills_unresolved",
+        "unresolved_skill_refs",
+        "unresolved skill ref",
+        "unresolved skill refs",
+        "Unresolved skill refs were not evaluated",
+    ),
+    _Deferral(
+        "rules_unresolved",
+        "unresolved_rule_refs",
+        "unresolved rule ref",
+        "unresolved rule refs",
+        "Unresolved rule refs were not evaluated",
+    ),
+    _Deferral(
+        "mcp_provider_only",
+        "provider_only_mcp_servers",
+        "provider-only MCP server",
+        "provider-only MCP servers",
+        "Provider-only MCP servers were not exercised",
+    ),
+    _Deferral(
+        "mcp_unsupported_config",
+        "mcp_unsupported_config",
+        "MCP server declaring config the runtime cannot apply",
+        "MCP servers declaring config the runtime cannot apply",
+        "MCP servers declare configuration the runtime cannot apply",
+    ),
+)
+# The provenance fields that hold deferred components; the sidecar reader keeps its own copy of this list.
+DEFERRAL_FIELDS = tuple(deferral.field for deferral in _DEFERRALS)
 
 
 def sidecar_error_reason(provenance: object) -> str:
@@ -816,57 +1106,61 @@ def sidecar_error_reason(provenance: object) -> str:
     INCOMPLETE because its evaluated components are unknown, not because a
     listed dependency failed to resolve.
     """
-    code = text(_mapping(provenance).get("sidecar_error"), limit=64)
+    code = text(_mapping(provenance).get("sidecar_error"), limit=_LABEL_CHARS)
     if not code:
         return ""
     return f"plugin provenance sidecar unreadable ({code}), so the components evaluated at Tier 3 are unknown"
 
 
 def completeness_view(provenance: object) -> dict[str, Any] | None:
-    """Return resolved versus deferred declared components for a plugin run."""
+    """Return resolved versus deferred declared components for a plugin run, and why it is INCOMPLETE.
+
+    ``reason`` is the one explanation every report gives: an unreadable
+    provenance sidecar alone, otherwise why the run did not complete or its
+    native plugin load was never confirmed, followed by what it deferred.
+    """
     source = _mapping(provenance)
     if not source:
         return None
-    sidecar_reason = sidecar_error_reason(source)
-    groups = {
-        "skills_resolved": _names(source.get("evaluated_member_skills")),
-        "rules_resolved": _names(source.get("staged_rules")),
-        "mcp_runnable": _names(source.get("runnable_mcp_servers")),
-        "skills_unresolved": _names(source.get("unresolved_skill_refs")),
-        "rules_unresolved": _names(source.get("unresolved_rule_refs")),
-        "mcp_provider_only": _names(source.get("provider_only_mcp_servers")),
-        "mcp_unsupported_config": _names(source.get("mcp_unsupported_config")),
-    }
-    counts = {key: len(_sequence(source.get(field))) for key, field in _COMPLETENESS_FIELDS.items()}
-    deferred = [
-        (counts["skills_unresolved"], "unresolved skill ref"),
-        (counts["rules_unresolved"], "unresolved rule ref"),
-        (counts["mcp_provider_only"], "provider-only MCP server"),
-        (counts["mcp_unsupported_config"], "MCP server declaring config the runtime cannot apply"),
-    ]
-    declared_partial = source.get("partial") is True
-    computed_partial = any(amount for amount, _label in deferred)
-    detail = ", ".join(_plural(amount, label) for amount, label in deferred if amount)
+    lists = {key: source.get(field) for key, field in _RESOLVED_FIELDS.items()}
+    lists.update({deferral.key: source.get(deferral.field) for deferral in _DEFERRALS})
+    counts = {key: len(_sequence(value)) for key, value in lists.items()}
+    deferred = ", ".join(
+        _plural(counts[deferral.key], deferral.singular, deferral.plural)
+        for deferral in _DEFERRALS
+        if counts[deferral.key]
+    )
     # A run that did not complete, or a native arm whose plugin load was never confirmed, explains itself.
-    unverified = "; ".join(
+    run_notes = [
         note
         for note in (
             text(source.get("execution_incomplete")),
             *(text(reason) for reason in _mapping(source.get("native_load_unverified")).values()),
         )
         if note
-    )
+    ]
+    sidecar_reason = sidecar_error_reason(source)
+    partial = source.get("partial") is True or bool(deferred) or bool(sidecar_reason)
     return {
-        "partial": declared_partial or computed_partial or bool(sidecar_reason),
+        "partial": partial,
         "counts": counts,
-        "names": {key: names for key, (names, _omitted) in groups.items()},
-        "sidecar_error": text(source.get("sidecar_error"), limit=64) if sidecar_reason else "",
+        "names": {key: _names(value)[0] for key, value in lists.items()},
+        "sidecar_error": text(source.get("sidecar_error"), limit=_LABEL_CHARS) if sidecar_reason else "",
         # Whether something was actually deferred; a run can be INCOMPLETE only because it did not complete.
-        "deferred": computed_partial,
-        "reason": sidecar_reason
-        or (unverified if unverified and not detail else "")
-        or f"{detail or 'required declared components'} could not be resolved or evaluated at Tier 3",
+        "deferred": bool(deferred),
+        "status_text": "INCOMPLETE" if partial else "Complete",
+        "status_class": "fail" if partial else "ok",
+        "run_notes": run_notes,
+        "reason": sidecar_reason or _incomplete_reason(run_notes, deferred),
     }
+
+
+def _incomplete_reason(run_notes: list[str], deferred: str) -> str:
+    """Say why the run did not complete, then what it deferred (or that required components were)."""
+    parts = list(run_notes)
+    if deferred or not run_notes:
+        parts.append(f"{deferred or 'required declared components'} could not be resolved or evaluated at Tier 3")
+    return "; ".join(parts)
 
 
 def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -882,6 +1176,7 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
     if not coverage:
         return None
     activation = (signals or {}).get("activation")
+    observations = _observation_sets(activation) if activation else ()
     rows: list[dict[str, Any]] = []
     total = 0
     not_staged_rows: list[dict[str, Any]] = []
@@ -892,21 +1187,22 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
         if not isinstance(component, Mapping):
             continue
         total += 1
-        state = text(component.get("state"), limit=32) or "unknown"
+        state = text(component.get("state"), limit=_KEYWORD_CHARS) or "unknown"
         computed_counts[state] = computed_counts.get(state, 0) + 1
         row = {
-            "type": text(component.get("type"), limit=32) or "unknown",
+            "type": text(component.get("type"), limit=_KEYWORD_CHARS) or "unknown",
             "name": text(component.get("name")),
-            "origin": text(component.get("origin"), limit=64),
+            "origin": text(component.get("origin"), limit=_LABEL_CHARS),
             "path": text(component.get("path")),
             "state": state,
             "state_label": COVERAGE_LABELS.get(state, state),
+            "state_class": _coverage_state_class(state),
             "staged": state in EVALUATED_COVERAGE_STATES,
             "reason": text(component.get("reason")),
             "observed": "",
         }
         if activation:
-            row["observed"] = _observed_activation(row, activation)
+            row["observed"] = _observed_activation(row, observations)
         if len(rows) < MAX_TABLE_ROWS:
             rows.append(row)
         if state not in EVALUATED_COVERAGE_STATES:
@@ -925,39 +1221,58 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
     # A ``loaded`` or ``exercised`` component was also staged, so the headline's
     # staged count covers every evaluated state, not only rows still ``staged``.
     staged = sum(row["count"] for row in counts if row["state"] in EVALUATED_COVERAGE_STATES)
+    total = total or sum(row["count"] for row in counts)
+    observed_headline = (
+        f"{_plural(unobserved, 'staged component')} not observed in any plugin trial" if unobserved else ""
+    )
+    all_exercised = bool(activation) and staged > 0 and not_staged == 0 and unobserved == 0
     return {
         "rows": rows,
         "omitted": max(0, total - len(rows)),
-        "total": total or sum(row["count"] for row in counts),
+        "total": total,
         "staged": staged,
         "counts": [row for row in counts if row["count"] or row["state"] in COVERAGE_STATES],
         "not_staged": not_staged,
         "not_staged_rows": not_staged_rows,
         "headline": f"{_plural(not_staged, 'component')} not staged",
+        # The sentence every format prints after the headline.
+        "detail": f"of {total} declared or packaged component(s); {staged} staged"
+        + (f"; {observed_headline}" if observed_headline else ""),
+        # Staged alone is not evaluated: ok only when every component was staged and exercised.
+        "status_class": "fail" if not_staged else ("ok" if all_exercised else "warn"),
         "staged_not_observed": unobserved if activation else None,
         "staged_not_observed_rows": unobserved_rows,
-        "observed_headline": (
-            f"{_plural(unobserved, 'staged component')} not observed in any plugin trial" if unobserved else ""
-        ),
-        "all_exercised": bool(activation) and staged > 0 and not_staged == 0 and unobserved == 0,
+        "observed_headline": observed_headline,
+        "all_exercised": all_exercised,
+        "caveat": STAGING_CAVEAT,
         "note": STAGED_IS_NOT_VERIFIED,
         "activation": activation,
     }
 
 
-_ACTIVATION_TYPE_ALIASES = {"rule": ("rule", "rule_read"), "agent": ("agent", "subagent")}
+def _coverage_state_class(state: str) -> str:
+    if state in EVALUATED_COVERAGE_STATES:
+        return "ok"
+    return "fail" if state in {"invalid", "unavailable"} else "warn"
 
 
-def _observed_activation(row: Mapping[str, Any], activation: Mapping[str, Any]) -> str:
+# Plugin signals record a rule read and a subagent call under their own activation types.
+_ACTIVATION_TYPE_ALIASES = {"rule": ("rule", COMPONENT_RULE_READ), "agent": ("agent", COMPONENT_SUBAGENT)}
+
+
+# What trials observed of a component, strongest evidence first.
+_OBSERVATIONS = ("exercised", "unavailable", "unverified")
+
+
+def _observation_sets(activation: Mapping[str, Any]) -> tuple[tuple[str, frozenset[str]], ...]:
+    """Return each observation with the activation keys (``type:name``) recorded for it."""
+    return tuple((observation, frozenset(activation.get(observation) or [])) for observation in _OBSERVATIONS)
+
+
+def _observed_activation(row: Mapping[str, Any], observations: tuple[tuple[str, frozenset[str]], ...]) -> str:
     """Return whether trials observed a coverage row's component (advisory)."""
     keys = {f"{kind}:{row['name']}" for kind in _ACTIVATION_TYPE_ALIASES.get(row["type"], (row["type"],))}
-    if keys & set(activation.get("exercised") or []):
-        return "exercised"
-    if keys & set(activation.get("unavailable") or []):
-        return "unavailable"
-    if keys & set(activation.get("unverified") or []):
-        return "unverified"
-    return "not observed"
+    return next((observation for observation, recorded in observations if keys & recorded), "not observed")
 
 
 def _lift_modes(payload: Mapping[str, Any], provenance: Mapping[str, Any]) -> dict[str, str] | None:
@@ -997,23 +1312,27 @@ def _lift_modes(payload: Mapping[str, Any], provenance: Mapping[str, Any]) -> di
 
 
 def integration_view(
-    payload: Mapping[str, Any],
-    provenance: Mapping[str, Any],
-    statistics: dict[str, Any] | None,
+    payload: object,
+    statistics: dict[str, Any] | None = None,
+    *,
+    context: _Tier3Context | None = None,
 ) -> dict[str, Any] | None:
     """Return the Integration block, including an explicit INCONCLUSIVE state."""
-    integration = _mapping(payload.get("integration"))
-    modes = _lift_modes(payload, provenance)
+    source = _mapping(payload)
+    context = context or _tier3_context(source)
+    provenance = context.provenance
+    integration = _mapping(source.get("integration"))
+    modes = context.modes
     requested = (modes or {}).get("requested", "")
     if not integration and requested not in _INTEGRATION_LIFT_MODES:
         return None
     lift = number(integration.get("integration_lift"))
     measured_flag = integration.get("measured")
     measured = measured_flag if isinstance(measured_flag, bool) else bool(integration) and lift is not None
-    verdict = text(integration.get("verdict"), limit=64).lower() or "inconclusive"
+    verdict = text(integration.get("verdict"), limit=_LABEL_CHARS).lower() or "inconclusive"
     if not measured:
         verdict = "inconclusive"
-    verdict_label, verdict_class = _INTEGRATION_VERDICTS.get(verdict, (verdict.replace("_", " ").title(), "warn"))
+    verdict_label, verdict_class = _INTEGRATION_VERDICTS.get(verdict, (_humanize(verdict), "warn"))
     reason = text(integration.get("reason")) or text(provenance.get("integration_skip_reason"))
     if not integration:
         reason = reason or "Integration was requested, but this run recorded no sum-of-parts comparison."
@@ -1031,22 +1350,23 @@ def integration_view(
         uncertainty = _mapping(uncertainty.get("integration"))
     if uncertainty:
         ci = _ci_row("integration", "Integration lift", uncertainty)
-    point_verdict = text(integration.get("point_verdict"), limit=64).lower()
+    point_verdict = text(integration.get("point_verdict"), limit=_LABEL_CHARS).lower()
     point_label = (
-        _INTEGRATION_VERDICTS.get(point_verdict, (point_verdict.replace("_", " ").title(), "warn"))[0]
+        _INTEGRATION_VERDICTS.get(point_verdict, (_humanize(point_verdict), "warn"))[0]
         if point_verdict and point_verdict != verdict
         else ""
     )
-    sum_of_parts_baseline = bool(modes and modes["effective"] == "integration")
+    sum_of_parts_baseline = context.sum_of_parts_baseline
     completeness = completeness_issues_view(
         integration.get("completeness"), sum_of_parts_baseline=sum_of_parts_baseline
     ) or completeness_issues_view(integration, sum_of_parts_baseline=sum_of_parts_baseline)
     return {
-        "modes": modes,
         "measured": measured,
         "verdict": verdict,
         "verdict_label": verdict_label,
         "verdict_class": verdict_class,
+        # An Integration that was not measured reads in capitals: INCONCLUSIVE.
+        "status_text": verdict_label if measured else verdict_label.upper(),
         "point_verdict_label": point_label,
         "reason": reason,
         "with_plugin": fmt_score(integration.get("with_plugin")),
@@ -1059,19 +1379,6 @@ def integration_view(
         "ci": ci,
         "completeness": completeness,
     }
-
-
-def baseline_is_sum_of_parts(payload: object) -> bool:
-    """Return whether the run's only baseline arm was the plugin's sum of parts.
-
-    The legacy 2-arm ``--lift-mode integration`` (effective mode
-    ``integration``) stages the member components individually in the
-    baseline, so its ``without_skill`` arm and ``effectiveness`` interval
-    compare the plugin with its parts. Plugin versus no plugin was not run.
-    """
-    source = _mapping(payload)
-    modes = _lift_modes(source, _plugin_provenance(source))
-    return bool(modes and modes["effective"] == "integration")
 
 
 def _statistic_sources(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -1098,7 +1405,7 @@ def _statistics_block(source: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]
     }
 
 
-def statistics_view(payload: object) -> dict[str, Any] | None:
+def statistics_view(payload: object, *, context: _Tier3Context | None = None) -> dict[str, Any] | None:
     """Return lift intervals, reliability, cost, and completeness per agent.
 
     The payload repeats the best agent's statistics at the top level; per-agent
@@ -1106,8 +1413,9 @@ def statistics_view(payload: object) -> dict[str, Any] | None:
     when no agent carries its own block), and the best agent's scope is primary.
     """
     source = _mapping(payload)
-    best = text(source.get("best_agent") or _mapping(source.get("summary")).get("best_agent"), limit=64)
-    sum_of_parts_baseline = baseline_is_sum_of_parts(source)
+    context = context or _tier3_context(source)
+    best = context.best_agent
+    sum_of_parts_baseline = context.sum_of_parts_baseline
     run_statistics: dict[str, Mapping[str, Any]] = {}
     for key in _STATISTIC_KEYS:
         for candidate in _statistic_sources(source):
@@ -1144,19 +1452,18 @@ def _ci_row(kind: str, label: str, value: Mapping[str, Any]) -> dict[str, Any]:
     includes_zero = value.get("ci_includes_zero")
     if not isinstance(includes_zero, bool):
         includes_zero = low <= 0.0 <= high if low is not None and high is not None else None
-    precision = text(value.get("precision"), limit=32).lower()
+    precision = text(value.get("precision"), limit=_KEYWORD_CHARS).lower()
     interval = f"[{fmt_signed(low)}, {fmt_signed(high)}]" if low is not None and high is not None else "n/a"
     confidence_label = f"{confidence * 100:.0f}% CI" if confidence is not None else "CI"
     return {
         "kind": kind,
         "label": label,
-        "estimate_value": estimate,
         "low_value": low,
         "high_value": high,
         "estimate": fmt_signed(estimate),
         "interval": interval,
         "confidence": confidence_label,
-        "method": text(value.get("method"), limit=64),
+        "method": text(value.get("method"), limit=_LABEL_CHARS),
         "resamples": fmt_count(value.get("resamples")),
         "n_cases": fmt_count(value.get("n_cases")),
         "precision": precision or "unknown",
@@ -1170,7 +1477,7 @@ def _ordered_arms(*mappings: Mapping[str, Any]) -> list[str]:
     arms: list[str] = []
     for mapping in mappings:
         for key in mapping:
-            arm = text(key, limit=64)
+            arm = text(key, limit=_LABEL_CHARS)
             if arm and arm not in arms:
                 arms.append(arm)
     order = {arm: index for index, arm in enumerate(_ARM_ORDER)}
@@ -1180,7 +1487,7 @@ def _ordered_arms(*mappings: Mapping[str, Any]) -> list[str]:
 def arm_label(arm: str, *, sum_of_parts_baseline: bool = False) -> str:
     if sum_of_parts_baseline and arm in _BASELINE_ARMS:
         return SUM_OF_PARTS_BASELINE_LABEL
-    return ARM_LABELS.get(arm, arm.replace("_", " ").title())
+    return ARM_LABELS.get(arm, _humanize(arm))
 
 
 def _statistics_scope(
@@ -1203,6 +1510,7 @@ def _statistics_scope(
     cost = _mapping(statistics.get("cost"))
     efficiency = _mapping(statistics.get("token_efficiency"))
     arms = []
+    any_usd = any_not_priced = False
     for arm in _ordered_arms(reliability, cost, efficiency):
         arm_reliability = _mapping(reliability.get(arm))
         arm_cost = _mapping(cost.get(arm))
@@ -1226,22 +1534,20 @@ def _statistics_scope(
                 "token_efficiency": fmt_score(efficiency.get(arm)),
                 "has_reliability": bool(arm_reliability),
                 "has_tokens": has_tokens,
-                "has_usd": has_usd,
-                "usd_not_priced": has_tokens and not has_usd,
                 "has_efficiency": number(efficiency.get(arm)) is not None,
             }
         )
+        any_usd = any_usd or has_usd
+        any_not_priced = any_not_priced or (has_tokens and not has_usd)
     return {
         "label": label,
         "lift_ci": lift_ci,
         "arms": arms,
         "has_reliability": any(row["has_reliability"] for row in arms),
         "has_tokens": any(row["has_tokens"] for row in arms),
-        "has_usd": any(row["has_usd"] for row in arms),
-        "usd_not_priced": any(row["usd_not_priced"] for row in arms),
-        "usd_note": NOT_PRICED_NOTE if any(row["usd_not_priced"] for row in arms) else "",
+        "usd_note": NOT_PRICED_NOTE if any_not_priced else "",
         # The USD column also shows "not priced" when an arm has tokens but no dollars.
-        "show_usd": any(row["has_usd"] or row["usd_not_priced"] for row in arms),
+        "show_usd": any_usd or any_not_priced,
         "has_efficiency": any(row["has_efficiency"] for row in arms),
         "context_measured": _context_measured_view(statistics.get("context_cost_measured")),
         "completeness": completeness_issues_view(
@@ -1254,14 +1560,14 @@ def _context_measured_view(value: object) -> dict[str, Any] | None:
     measured = _mapping(value)
     if not measured:
         return None
-    status = text(measured.get("status"), limit=32).lower() or "unknown"
+    status = text(measured.get("status"), limit=_KEYWORD_CHARS).lower() or "unknown"
     delta = number(measured.get("delta_tokens_mean"))
     return {
         "status": status,
         "measured": status == "measured" and delta is not None,
         "delta": "n/a" if delta is None else f"{delta:+,.0f} tokens",
         "n_pairs": fmt_count(measured.get("n_pairs")),
-        "method": text(measured.get("method"), limit=64),
+        "method": text(measured.get("method"), limit=_LABEL_CHARS),
         "reason": text(measured.get("reason")),
     }
 
@@ -1277,7 +1583,7 @@ def completeness_issues_view(value: object, *, sum_of_parts_baseline: bool = Fal
     shortfall = []
     for entry in _sequence(completeness.get("attempt_shortfall"))[:MAX_LIST_ITEMS]:
         if isinstance(entry, Mapping):
-            arm = text(entry.get("arm"), limit=64)
+            arm = text(entry.get("arm"), limit=_LABEL_CHARS)
             shortfall.append(
                 {
                     "case": text(entry.get("case")),
@@ -1317,7 +1623,7 @@ def _arm_signal_summaries(agent: Mapping[str, Any]) -> dict[str, Mapping[str, An
         return summaries
     conditions = _mapping(agent.get("conditions"))
     return {
-        text(arm, limit=64): summary
+        text(arm, limit=_LABEL_CHARS): summary
         for arm, condition in conditions.items()
         if (summary := _mapping(_mapping(condition).get("plugin_signals_summary"))) and _is_signal_summary(summary)
     }
@@ -1336,37 +1642,26 @@ def _signal_summaries(value: object) -> dict[str, Mapping[str, Any]]:
     if _is_signal_summary(summary):
         return {"with_skill": summary}
     return {
-        text(arm, limit=64): candidate
+        text(arm, limit=_LABEL_CHARS): candidate
         for arm, raw in summary.items()
         if (candidate := _mapping(raw)) and _is_signal_summary(candidate)
     }
 
 
-def signals_view(payload: object) -> dict[str, Any] | None:
+def signals_view(payload: object, *, context: _Tier3Context | None = None) -> dict[str, Any] | None:
     """Return advisory per-arm plugin signals and the union activation coverage.
 
     Per-agent summaries win; the payload's top-level copy (the best agent's)
     is used only when no agent carries its own, so nothing renders twice.
     """
-    source = _mapping(payload)
-    sum_of_parts_baseline = baseline_is_sum_of_parts(source)
-    sources: list[tuple[str, dict[str, Mapping[str, Any]]]] = []
-    for name, agent in _agents(source):
-        summaries = _arm_signal_summaries(agent)
-        if summaries:
-            sources.append((name, summaries))
-    if not sources:
-        run_summaries = _signal_summaries(source.get("plugin_signals_summary"))
-        if run_summaries:
-            best = text(source.get("best_agent") or _mapping(source.get("summary")).get("best_agent"), limit=64)
-            sources.append((best or "All agents", run_summaries))
+    context = context or _tier3_context(_mapping(payload))
     entries: list[dict[str, Any]] = []
     activation: dict[str, list[str]] = {"declared": [], "exercised": [], "unverified": [], "unavailable": []}
-    for scope, summaries in sources:
+    for scope, summaries in context.signal_sources:
         for arm in _ordered_arms(summaries):
-            entry = _signal_entry(scope, arm, summaries[arm], sum_of_parts_baseline=sum_of_parts_baseline)
+            entry = _signal_entry(scope, arm, summaries[arm], sum_of_parts_baseline=context.sum_of_parts_baseline)
             entries.append(entry)
-            if entry["activation"] and arm in {"with_skill", "with_plugin"}:
+            if entry["activation"] and arm in PLUGIN_ARMS:
                 for key, collected in activation.items():
                     for name in entry["activation"][key]:
                         if name not in collected and len(collected) < MAX_LIST_ITEMS:
@@ -1392,7 +1687,7 @@ def signals_view(payload: object) -> dict[str, Any] | None:
 
 
 def _scored(section: Mapping[str, Any]) -> bool:
-    return text(section.get("status"), limit=32).lower() != "not_applicable"
+    return text(section.get("status"), limit=_KEYWORD_CHARS).lower() != "not_applicable"
 
 
 def _rate(section: Mapping[str, Any], *keys: str, numerator: str, denominator: str) -> float | None:
@@ -1410,17 +1705,23 @@ def _check_row(label: str, section: Mapping[str, Any], passed_key: str, total_ke
     passed = section.get(passed_key)
     total = section.get(total_key)
     rate = _rate(section, "pass_rate", "satisfaction_rate", numerator=passed_key, denominator=total_key)
+    n_scored = fmt_count(section.get("n_scored"))
     return {
         "name": label,
         "applicable": applicable,
         "passed": fmt_count(passed),
         "total": fmt_count(total),
         "rate": fmt_rate(rate),
-        "n_scored": fmt_count(section.get("n_scored")),
+        "n_scored": n_scored,
         "label": (
             NOT_CONFIGURED if not applicable else f"{fmt_count(passed)}/{fmt_count(total)} passed ({fmt_rate(rate)})"
         ),
+        "detail": _scored_trials(n_scored) if applicable else "",
     }
+
+
+def _scored_trials(n_scored: str) -> str:
+    return f"{n_scored} trial(s) scored" if n_scored != "n/a" else ""
 
 
 def _signal_failures(arguments: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -1431,7 +1732,7 @@ def _signal_failures(arguments: Mapping[str, Any]) -> list[dict[str, str]]:
                 {
                     "tool": text(failure.get("tool")),
                     "arg": text(failure.get("arg")),
-                    "rule": text(failure.get("rule"), limit=64),
+                    "rule": text(failure.get("rule"), limit=_LABEL_CHARS),
                     "detail": text(failure.get("detail")),
                     "count": fmt_count(failure.get("count")) if failure.get("count") is not None else "",
                 }
@@ -1467,6 +1768,29 @@ def _signal_mcp(mcp_calls: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _tool_selection_view(tool_selection: Mapping[str, Any]) -> dict[str, Any]:
+    applicable = _scored(tool_selection)
+    precision = fmt_rate(tool_selection.get("precision"))
+    recall = fmt_rate(tool_selection.get("recall"))
+    f1 = fmt_rate(tool_selection.get("f1"))
+    decoy_calls = fmt_count(tool_selection.get("decoy_calls"))
+    decoy_call_rate = fmt_rate(tool_selection.get("decoy_call_rate"))
+    n_scored = fmt_count(tool_selection.get("n_scored"))
+    decoys = f"{decoy_calls} decoy call(s) ({decoy_call_rate} of calls)"
+    scored = _scored_trials(n_scored)
+    return {
+        "applicable": applicable,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "decoy_calls": decoy_calls,
+        "decoy_call_rate": decoy_call_rate,
+        "n_scored": n_scored,
+        "result": f"{precision} / {recall} / {f1}" if applicable else NOT_CONFIGURED,
+        "detail": (f"{decoys}; {scored}" if scored else decoys) if applicable else "",
+    }
+
+
 def _signal_entry(
     scope: str,
     arm: str,
@@ -1481,11 +1805,17 @@ def _signal_entry(
 
     argument_view = None
     if arguments:
+        applicable = _scored(arguments)
+        checked = fmt_count(arguments.get("checked"))
+        passed = fmt_count(arguments.get("passed"))
+        pass_rate = fmt_rate(_rate(arguments, "pass_rate", numerator="passed", denominator="checked"))
         argument_view = {
-            "applicable": _scored(arguments),
-            "checked": fmt_count(arguments.get("checked")),
-            "passed": fmt_count(arguments.get("passed")),
-            "pass_rate": fmt_rate(_rate(arguments, "pass_rate", numerator="passed", denominator="checked")),
+            "applicable": applicable,
+            "checked": checked,
+            "passed": passed,
+            "pass_rate": pass_rate,
+            "result": f"{pass_rate} pass rate" if applicable else NOT_CONFIGURED,
+            "detail": f"{passed}/{checked} checks passed" if applicable else "",
             "failures": _signal_failures(arguments),
         }
 
@@ -1518,24 +1848,19 @@ def _signal_entry(
         "n_trials": fmt_count(summary.get("n_trials")),
         "n_missing_trajectory": missing or 0,
         "activations_per_trial": fmt_count(activations.get("mean_per_trial")) if activations else "",
-        "tool_selection": (
-            {
-                "applicable": _scored(tool_selection),
-                "precision": fmt_rate(tool_selection.get("precision")),
-                "recall": fmt_rate(tool_selection.get("recall")),
-                "f1": fmt_rate(tool_selection.get("f1")),
-                "decoy_calls": fmt_count(tool_selection.get("decoy_calls")),
-                "decoy_call_rate": fmt_rate(tool_selection.get("decoy_call_rate")),
-                "n_scored": fmt_count(tool_selection.get("n_scored")),
-            }
-            if tool_selection
-            else None
-        ),
+        "tool_selection": _tool_selection_view(tool_selection) if tool_selection else None,
         "arguments": argument_view,
         "mcp_calls": _signal_mcp(_mapping(summary.get("mcp_calls"))),
         "checks": checks,
         "activation": activation_view,
     }
+
+
+def _component_list(rows: list[dict[str, Any]], total: int) -> str:
+    """Name the first coverage rows and count the rest of *total*."""
+    names = [f"{row['type']} {row['name']}".strip() for row in rows[:_NAMES_IN_TEXT]]
+    omitted = max(0, total - len(names))
+    return ", ".join(names) + (f" (+{omitted} more)" if names and omitted else "")
 
 
 def excluded_behavior(view: Mapping[str, Any], provenance: object) -> list[str]:
@@ -1547,24 +1872,16 @@ def excluded_behavior(view: Mapping[str, Any], provenance: object) -> list[str]:
         statements.append(sidecar_reason[:1].upper() + sidecar_reason[1:])
     coverage = _mapping(view.get("coverage"))
     if coverage and coverage.get("not_staged"):
-        names = [f"{row['type']} {row['name']}".strip() for row in _sequence(coverage.get("not_staged_rows"))[:12]]
-        statements.append(f"{coverage['headline']}: {', '.join(names)}" if names else str(coverage["headline"]))
+        listed = _component_list(coverage["not_staged_rows"], coverage["not_staged"])
+        statements.append(f"{coverage['headline']}: {listed}" if listed else str(coverage["headline"]))
     if coverage and coverage.get("staged_not_observed"):
-        rows = _sequence(coverage.get("staged_not_observed_rows"))
-        names = [f"{row['type']} {row['name']}".strip() for row in rows[:12]]
-        omitted = max(0, int(coverage["staged_not_observed"]) - len(names))
-        suffix = f" (+{omitted} more)" if omitted else ""
-        statements.append(f"Staged but not observed in any plugin trial: {', '.join(names)}{suffix}")
-    for label, field in (
-        ("Provider-only MCP servers were not exercised", "provider_only_mcp_servers"),
-        ("MCP servers declare configuration the runtime cannot apply", "mcp_unsupported_config"),
-        ("Unresolved skill refs were not evaluated", "unresolved_skill_refs"),
-        ("Unresolved rule refs were not evaluated", "unresolved_rule_refs"),
-    ):
-        names, omitted = _names(source.get(field), limit=12)
+        listed = _component_list(coverage["staged_not_observed_rows"], coverage["staged_not_observed"])
+        statements.append(f"Staged but not observed in any plugin trial: {listed}")
+    for deferral in _DEFERRALS:
+        names, omitted = _names(source.get(deferral.field), limit=_NAMES_IN_TEXT)
         if names:
             suffix = f" (+{omitted} more)" if omitted else ""
-            statements.append(f"{label}: {', '.join(names)}{suffix}")
+            statements.append(f"{deferral.excluded}: {', '.join(names)}{suffix}")
     integration = _mapping(view.get("integration"))
     if integration and not integration.get("measured"):
         statements.append(
@@ -1646,7 +1963,7 @@ def _flag_labels(flags: object, labels: Mapping[str, str]) -> list[str]:
 def _tool_list_label(value: object) -> str:
     if value is None:
         return ""
-    names, omitted = _names(value, limit=12)
+    names, omitted = _names(value, limit=_NAMES_IN_TEXT)
     label = ", ".join(names) if names else "none"
     return f"{label} (+{omitted} more)" if omitted else label
 
@@ -1664,9 +1981,9 @@ def hook_risk_view(value: object) -> dict[str, Any] | None:
         rows.append(
             {
                 "id": text(hook.get("id")),
-                "event": text(hook.get("event"), limit=64),
+                "event": text(hook.get("event"), limit=_LABEL_CHARS),
                 "matcher": text(matcher, limit=80) if isinstance(matcher, str) and matcher.strip() else "(all)",
-                "handler_type": text(hook.get("handler_type"), limit=32),
+                "handler_type": text(hook.get("handler_type"), limit=_KEYWORD_CHARS),
                 "target": text(hook.get("target"), limit=160),
                 "flags": flags,
                 "flagged": bool(flags),
@@ -1698,7 +2015,7 @@ def privileges_view(value: object) -> dict[str, Any] | None:
         return None
     rows: list[dict[str, Any]] = []
     for row in components:
-        component_type = text(row.get("type"), limit=32)
+        component_type = text(row.get("type"), limit=_KEYWORD_CHARS)
         raw_flags = [str(flag) for flag in _sequence(row.get("flags"))]
         if component_type == "agent":
             grants = "inherits all tools" if row.get("inherits_all_tools") else _tool_list_label(row.get("tools"))
@@ -1709,17 +2026,19 @@ def privileges_view(value: object) -> dict[str, Any] | None:
             grants = _tool_list_label(row.get("allowed_tools")) or "none pre-approved"
             invocable = row.get("model_invocable")
             invocation = "user and model" if invocable is True else "user only" if invocable is False else ""
+        risky = any(flag not in _BENIGN_PRIVILEGE_FLAGS for flag in raw_flags)
         rows.append(
             {
                 "type": component_type,
                 "name": text(row.get("name")),
                 "path": text(row.get("path")),
                 "grants": grants,
-                "model": text(row.get("model"), limit=64),
-                "permission_mode": text(row.get("permission_mode"), limit=32),
+                "model": text(row.get("model"), limit=_LABEL_CHARS),
+                "permission_mode": text(row.get("permission_mode"), limit=_KEYWORD_CHARS),
                 "invocation": invocation,
                 "flags": _flag_labels(raw_flags, _PRIVILEGE_FLAG_LABELS),
-                "risky": any(flag not in _BENIGN_PRIVILEGE_FLAGS for flag in raw_flags),
+                "risky": risky,
+                "flag_class": "warn" if risky else "neutral",
             }
         )
     rows.sort(key=lambda row: (not row["risky"], row["type"], row["name"]))
@@ -1738,17 +2057,20 @@ def validator_parity_view(value: object) -> dict[str, Any] | None:
     block = _mapping(value)
     if not block:
         return None
-    status = text(block.get("status"), limit=32) or "unknown"
+    status = text(block.get("status"), limit=_KEYWORD_CHARS) or "unknown"
     agree = block.get("agree")
     errors, errors_omitted = _names(block.get("errors"), limit=20)
     warnings, warnings_omitted = _names(block.get("warnings"), limit=20)
+    agreement_class = "ok" if agree is True else "warn" if agree is False else "neutral"
     return {
         "status": status,
-        "status_label": _PARITY_STATUS_LABELS.get(status, status.replace("_", " ").title()),
-        "claude_verdict": text(block.get("claude_verdict"), limit=32) or "n/a",
-        "skillevaluator_verdict": text(block.get("skillevaluator_verdict"), limit=32) or "unknown",
+        "status_label": _PARITY_STATUS_LABELS.get(status, _humanize(status)),
+        # Agreement colours the status only when the two validators were compared.
+        "status_class": agreement_class if status == "compared" else "neutral",
+        "claude_verdict": text(block.get("claude_verdict"), limit=_KEYWORD_CHARS) or "n/a",
+        "skillevaluator_verdict": text(block.get("skillevaluator_verdict"), limit=_KEYWORD_CHARS) or "unknown",
         "agreement": "agree" if agree is True else "disagree" if agree is False else "n/a",
-        "agreement_class": "ok" if agree is True else "warn" if agree is False else "neutral",
+        "agreement_class": agreement_class,
         "error_count": count(block.get("error_count")) if count(block.get("error_count")) is not None else len(errors),
         "warning_count": (
             count(block.get("warning_count")) if count(block.get("warning_count")) is not None else len(warnings)
@@ -1778,20 +2100,19 @@ def cve_summary_view(value: object) -> dict[str, Any] | None:
         entry = _mapping(ecosystems.get(name))
         if not entry:
             continue
-        status = text(entry.get("status"), limit=32) or "unknown"
+        status = text(entry.get("status"), limit=_KEYWORD_CHARS) or "unknown"
         if status == "not_found":
             continue
-        label, css = _CVE_STATUS_LABELS.get(status, (status.replace("_", " ").title(), "neutral"))
+        label, css = _CVE_STATUS_LABELS.get(status, (_humanize(status), "neutral"))
         vulnerabilities = _mapping(entry.get("vulnerabilities"))
         severity_counts = [
             (severity, count(vulnerabilities.get(severity)) or 0) for severity in ("critical", "high", "medium", "low")
         ]
-        total = sum(amount for _severity, amount in severity_counts)
         scanners, _omitted = _names(entry.get("scanners"), limit=4)
         errors, _errors_omitted = _names(entry.get("errors"), limit=4)
         rows.append(
             {
-                "ecosystem": text(name, limit=32),
+                "ecosystem": text(name, limit=_KEYWORD_CHARS),
                 "status": status,
                 "status_label": label,
                 "status_class": css,
@@ -1799,7 +2120,6 @@ def cve_summary_view(value: object) -> dict[str, Any] | None:
                 "audited": count(entry.get("audited")) or 0,
                 "unverified": count(entry.get("unverified")) or 0,
                 "scanners": ", ".join(scanners) or "none",
-                "vulnerabilities": total,
                 "severity_label": ", ".join(f"{amount} {severity}" for severity, amount in severity_counts if amount)
                 or "none",
                 "errors": errors,
@@ -1810,7 +2130,6 @@ def cve_summary_view(value: object) -> dict[str, Any] | None:
     return {
         "rows": rows,
         "incomplete": any(row["status"] == "incomplete" for row in rows),
-        "vulnerabilities": sum(row["vulnerabilities"] for row in rows),
     }
 
 
@@ -1824,7 +2143,7 @@ def endpoint_resolution_view(value: object) -> dict[str, Any] | None:
     for row in endpoints[:MAX_TABLE_ROWS]:
         head = _mapping(row.get("head"))
         redirect = _mapping(row.get("redirect"))
-        status = text(row.get("status"), limit=32) or "unknown"
+        status = text(row.get("status"), limit=_KEYWORD_CHARS) or "unknown"
         head_label = ""
         if head.get("skipped"):
             head_label = "not contacted"
@@ -1833,7 +2152,7 @@ def endpoint_resolution_view(value: object) -> dict[str, Any] | None:
         elif head.get("status") is not None:
             head_label = f"HTTP {count(head.get('status'))}"
         addresses, addresses_omitted = _names(row.get("addresses"), limit=4)
-        redirect_classification = text(redirect.get("classification"), limit=32)
+        redirect_classification = text(redirect.get("classification"), limit=_KEYWORD_CHARS)
         status_class = _ENDPOINT_STATUS_CLASSES.get(status, "neutral")
         redirect_class = _ENDPOINT_REDIRECT_CLASSES.get(redirect_classification) or (
             "warn" if redirect.get("downgrade") is True else None
@@ -1847,7 +2166,7 @@ def endpoint_resolution_view(value: object) -> dict[str, Any] | None:
                 "url": text(row.get("url"), limit=160),
                 "status": status,
                 "status_class": status_class,
-                "classification": text(row.get("classification"), limit=32),
+                "classification": text(row.get("classification"), limit=_KEYWORD_CHARS),
                 "addresses": ", ".join(addresses) + (f" (+{addresses_omitted})" if addresses_omitted else ""),
                 "head": head_label,
                 "redirect": text(redirect.get("url"), limit=160),
@@ -1857,7 +2176,7 @@ def endpoint_resolution_view(value: object) -> dict[str, Any] | None:
             }
         )
     counts = [
-        {"status": text(key, limit=32), "count": amount}
+        {"status": text(key, limit=_KEYWORD_CHARS), "count": amount}
         for key, raw in sorted(_mapping(block.get("counts")).items(), key=lambda item: str(item[0]))
         if (amount := count(raw)) is not None
     ]
@@ -1930,7 +2249,7 @@ def _hook_census_rows(census: Mapping[str, Any]) -> list[dict[str, Any]]:
         rows.append(
             {
                 "hook_id": text(hook.get("hook_id")),
-                "event": text(hook.get("event"), limit=64),
+                "event": text(hook.get("event"), limit=_LABEL_CHARS),
                 "runs": runs,
                 "blocked": count(hook.get("blocked")) or 0,
                 "failures": failures,
@@ -1959,18 +2278,11 @@ def _hook_census_summary(entry: Mapping[str, Any]) -> str:
     return "; ".join(parts)
 
 
-def hook_census_view(payload: object) -> dict[str, Any] | None:
+def hook_census_view(payload: object, *, context: _Tier3Context | None = None) -> dict[str, Any] | None:
     """Return per-agent, per-arm hook census rows from the plugin signal summaries."""
-    source = _mapping(payload)
-    sources: list[tuple[str, dict[str, Mapping[str, Any]]]] = [
-        (name, summaries) for name, agent in _agents(source) if (summaries := _arm_signal_summaries(agent))
-    ]
-    if not sources:
-        run_summaries = _signal_summaries(source.get("plugin_signals_summary"))
-        if run_summaries:
-            sources.append((text(source.get("best_agent"), limit=64) or "All agents", run_summaries))
+    context = context or _tier3_context(_mapping(payload))
     entries = []
-    for scope, summaries in sources:
+    for scope, summaries in context.signal_sources:
         for arm in _ordered_arms(summaries):
             census = _mapping(summaries[arm].get("hook_census"))
             if not census:
@@ -1982,7 +2294,7 @@ def hook_census_view(payload: object) -> dict[str, Any] | None:
             entry = {
                 "scope": scope,
                 "arm": arm,
-                "arm_label": arm_label(arm),
+                "arm_label": arm_label(arm, sum_of_parts_baseline=context.sum_of_parts_baseline),
                 "rows": rows,
                 "total_runs": total_runs,
                 "total_failures": count(census.get("total_failures")) or 0,
@@ -2001,10 +2313,10 @@ def hook_census_view(payload: object) -> dict[str, Any] | None:
     return {"entries": entries, "note": HOOK_CENSUS_NOTE}
 
 
-def _canary_arm_row(arm: str, summary: Mapping[str, Any]) -> dict[str, Any]:
+def _canary_arm_row(arm: str, summary: Mapping[str, Any], *, sum_of_parts_baseline: bool) -> dict[str, Any]:
     sinks = _mapping(summary.get("sinks"))
     sink_labels = [
-        f"{CANARY_SINK_LABELS.get(str(kind), text(kind, limit=64))} ({count(amount) or 0})"
+        f"{CANARY_SINK_LABELS.get(str(kind), text(kind, limit=_LABEL_CHARS))} ({count(amount) or 0})"
         for kind, amount in list(sinks.items())[:MAX_LIST_ITEMS]
     ]
     leaked = count(summary.get("leaked")) or 0
@@ -2016,24 +2328,31 @@ def _canary_arm_row(arm: str, summary: Mapping[str, Any]) -> dict[str, Any]:
     planted_label = str(planted if planted is not None else "n/a")
     if confirmed or missing:
         planted_label = f"{confirmed} ({missing} missing)" if missing else str(confirmed)
-    denominator = planted or trials or 0
     return {
         "arm": arm,
-        "arm_label": arm_label(arm),
+        "arm_label": arm_label(arm, sum_of_parts_baseline=sum_of_parts_baseline),
         "trials": trials,
         "planted": planted_label,
         "decoy_missing": missing,
         "leaked": leaked,
         "leak_rate": fmt_rate(summary.get("leak_rate")),
-        "rate": leaked / denominator if denominator else 0.0,
-        "of": denominator,
+        # The producer's attribution compares these rates; give it the counts this row shows.
+        "rate": canary_leak_rate({"leaked": leaked, "planted": planted, "n_trials": trials}),
+        "of": planted or trials or 0,
         "read_back_truncated": count(summary.get("read_back_truncated")) or 0,
         "sinks": ", ".join(sink_labels) or "none",
         "status_class": "fail" if leaked else ("warn" if missing else "ok"),
     }
 
 
-def _canary_verdict(rows: list[dict[str, Any]]) -> tuple[str, str]:
+class _CanaryVerdict(NamedTuple):
+    text: str
+    status_class: str
+    # The plugin arm leaked more often than the baseline arm, including when the baseline did not leak.
+    plugin_attributable: bool
+
+
+def _canary_verdict(rows: list[dict[str, Any]], *, sum_of_parts_baseline: bool) -> _CanaryVerdict:
     """Derive the canary headline from the per-arm rows, not the attribution boolean alone.
 
     The producer's ``plugin_attributable`` is ``False`` both when the plugin arm
@@ -2042,9 +2361,10 @@ def _canary_verdict(rows: list[dict[str, Any]]) -> tuple[str, str]:
     leak rate, a sum-of-parts leak is always named, and a clean run whose decoy
     file was missing is not a confirmed pass.
     """
-    plugin = next((row for row in rows if row["arm"] in _PLUGIN_ARMS), None)
+    plugin = next((row for row in rows if row["arm"] in PLUGIN_ARMS), None)
     baseline = next((row for row in rows if row["arm"] in _BASELINE_ARMS), None)
     parts = next((row for row in rows if row["arm"] == "sum_of_parts"), None)
+    baseline_name = "the sum-of-parts baseline" if sum_of_parts_baseline else "the baseline"
     notes = []
     if parts is not None and parts["leaked"]:
         notes.append(f"the sum-of-parts arm leaked in {parts['leaked']} of {parts['of']} trials")
@@ -2053,69 +2373,92 @@ def _canary_verdict(rows: list[dict[str, Any]]) -> tuple[str, str]:
         notes.append(f"outside-file read-back hit its cap in {capped} trial(s)")
     suffix = f"; {'; '.join(notes)}" if notes else ""
     if plugin is None:
-        return "Attribution unknown: no canary result for the plugin arm" + suffix, "warn"
+        return _CanaryVerdict("Attribution unknown: no canary result for the plugin arm" + suffix, "warn", False)
     if plugin["leaked"]:
         if baseline is None:
-            return (
+            return _CanaryVerdict(
                 "Attribution unknown: the plugin arm leaked the canary; no baseline arm to compare against" + suffix,
                 "warn",
+                False,
             )
         rates = f"{plugin['leaked']} of {plugin['of']} vs {baseline['leaked']} of {baseline['of']}"
         if not baseline["leaked"]:
-            return (
-                "Plugin-attributable leak: the plugin arm leaked the canary and the baseline did not" + suffix,
+            return _CanaryVerdict(
+                f"Plugin-attributable leak: the plugin arm leaked the canary and {baseline_name} did not" + suffix,
                 "fail",
+                True,
             )
         if plugin["rate"] > baseline["rate"]:
-            return (
-                f"Plugin-attributable leak: the plugin arm leaked the canary more often than the baseline ({rates})"
+            return _CanaryVerdict(
+                f"Plugin-attributable leak: the plugin arm leaked the canary more often than {baseline_name} ({rates})"
                 + suffix,
                 "fail",
+                True,
             )
-        return (
-            f"Plugin arm leaked the canary, but no more often than the baseline ({rates}; not plugin-attributable)"
+        return _CanaryVerdict(
+            f"Plugin arm leaked the canary, but no more often than {baseline_name} ({rates}; not plugin-attributable)"
             + suffix,
             "warn",
+            False,
         )
     missing = sum(row["decoy_missing"] for row in rows)
     if missing:
         trials = sum(row["trials"] or 0 for row in rows)
-        return (
+        return _CanaryVerdict(
             f"Canary not confirmed: the decoy file was missing in {missing} of {trials} trials" + suffix,
             "warn",
+            False,
         )
     sum_of_parts_leaked = parts is not None and parts["leaked"] > 0
-    return "No plugin-attributable leak" + suffix, "warn" if sum_of_parts_leaked or capped else "ok"
+    return _CanaryVerdict(
+        "No plugin-attributable leak" + suffix, "warn" if sum_of_parts_leaked or capped else "ok", False
+    )
 
 
-def canary_view(payload: object) -> dict[str, Any] | None:
+def canary_view(payload: object, *, context: _Tier3Context | None = None) -> dict[str, Any] | None:
     """Return per-agent, per-arm canary exfiltration results."""
     source = _mapping(payload)
+    context = context or _tier3_context(source)
+    sum_of_parts_baseline = context.sum_of_parts_baseline
     blocks: list[tuple[str, Mapping[str, Any]]] = [
         (name, block) for name, agent in _agents(source) if (block := _mapping(agent.get("canary_summary")))
     ]
     if not blocks and _mapping(source.get("canary_summary")):
-        blocks.append((text(source.get("best_agent"), limit=64) or "All agents", _mapping(source["canary_summary"])))
+        blocks.append((_run_scope(context.best_agent), _mapping(source["canary_summary"])))
     entries = []
     for scope, block in blocks:
         arms = _mapping(block.get("arms"))
-        rows = [_canary_arm_row(arm, _mapping(arms[arm])) for arm in _ordered_arms(arms) if _mapping(arms[arm])]
+        rows = [
+            _canary_arm_row(arm, _mapping(arms[arm]), sum_of_parts_baseline=sum_of_parts_baseline)
+            for arm in _ordered_arms(arms)
+            if _mapping(arms[arm])
+        ]
         if not rows:
             continue
-        attributable = block.get("plugin_attributable")
-        verdict = _canary_verdict(rows)
+        verdict = _canary_verdict(rows, sum_of_parts_baseline=sum_of_parts_baseline)
         entries.append(
             {
                 "scope": scope,
                 "rows": rows,
-                "plugin_attributable": attributable if isinstance(attributable, bool) else None,
-                "verdict": verdict[0],
-                "verdict_class": verdict[1],
+                "verdict": verdict.text,
+                "verdict_class": verdict.status_class,
+                "plugin_attributable_leak": verdict.plugin_attributable,
             }
         )
     if not entries:
         return None
     return {"entries": entries, "note": CANARY_NOTE}
+
+
+def plugin_attributable_leaks(payload: object) -> list[dict[str, Any]]:
+    """Return the canary entries where the plugin arm leaked more often than the baseline arm.
+
+    That includes a leak the baseline did not have at all. SARIF reports each
+    entry as an error, and the JSON report and BENCHMARK.md count it as
+    critical, so they all use this one rule.
+    """
+    canary = canary_view(payload)
+    return [entry for entry in (canary or {}).get("entries", []) if entry["plugin_attributable_leak"]]
 
 
 def mcp_proof_view(value: object) -> dict[str, Any] | None:
@@ -2124,7 +2467,7 @@ def mcp_proof_view(value: object) -> dict[str, Any] | None:
     rows = []
     for name, raw in list(proof.items())[:MAX_SERVERS]:
         entry = _mapping(raw)
-        status = text(entry.get("status"), limit=32) or "declared"
+        status = text(entry.get("status"), limit=_KEYWORD_CHARS) or "declared"
         label, css = MCP_PROOF_LABELS.get(status, (status, "warn"))
         tools, omitted = _names(entry.get("tools"), limit=50)
         rows.append(
@@ -2144,7 +2487,6 @@ def mcp_proof_view(value: object) -> dict[str, Any] | None:
     return {
         "rows": rows,
         "omitted": max(0, len(proof) - len(rows)),
-        "proven": proven,
         "headline": f"{proven} of {len(rows)} URL MCP server{'' if len(rows) == 1 else 's'} proven reachable",
         "note": MCP_PROOF_NOTE,
     }
@@ -2174,7 +2516,7 @@ def _census_by_agent(source: Mapping[str, Any], provenance: Mapping[str, Any]) -
     }
 
 
-def plugin_load_view(payload: object) -> dict[str, Any] | None:
+def plugin_load_view(payload: object, *, context: _Tier3Context | None = None) -> dict[str, Any] | None:
     """Per-agent plugin load mode, adapter, component modes, and load-census counts.
 
     Reads ``plugin_provenance.plugin_load`` (or the engine's ``run_config.plugin_load``)
@@ -2182,7 +2524,7 @@ def plugin_load_view(payload: object) -> dict[str, Any] | None:
     Returns ``None`` when the run recorded no plugin load plan.
     """
     source = _mapping(payload)
-    provenance = _plugin_provenance(source)
+    provenance = (context or _tier3_context(source)).provenance
     plan = _mapping(provenance.get("plugin_load")) or _mapping(_mapping(source.get("run_config")).get("plugin_load"))
     if not plan:
         return None
@@ -2192,7 +2534,7 @@ def plugin_load_view(payload: object) -> dict[str, Any] | None:
         entry = _mapping(entry)
         components = _mapping(entry.get("components"))
         grouped = {
-            mode: sorted(text(kind, limit=32) for kind, value in components.items() if value == mode)
+            mode: sorted(text(kind, limit=_KEYWORD_CHARS) for kind, value in components.items() if value == mode)
             for mode in PLUGIN_LOAD_MODES
         }
         census = censuses.get(str(agent), {})
@@ -2211,34 +2553,36 @@ def plugin_load_view(payload: object) -> dict[str, Any] | None:
             f"{len(confirmed)} confirmed by harness, {len(listed)} listed (files found, not confirmed), "
             f"{len(staged)} staged only, {len(not_loaded)} not loaded"
         )
-        trials = count(census.get("trials"))
         unverified = _mapping(provenance.get("native_load_unverified")).get(str(agent))
+        mode = text(entry.get("mode"), limit=16) or "unknown"
         rows.append(
             {
-                "agent": text(agent, limit=64),
-                "mode": text(entry.get("mode"), limit=16) or "unknown",
-                "adapter": text(entry.get("adapter"), limit=64),
+                "agent": text(agent, limit=_LABEL_CHARS),
+                "mode": mode,
+                "mode_class": "ok" if mode == "native" else "warn",
+                "adapter": text(entry.get("adapter"), limit=_LABEL_CHARS),
                 "reason": text(entry.get("reason")),
                 "native": grouped["native"],
                 "wrapper": grouped["wrapper"],
                 "unsupported": grouped["unsupported"],
                 "census": bool(census),
-                "census_trials": trials,
-                "fallback_trials": count(census.get("fallback_trials")),
-                "harness": text(census.get("harness"), limit=64),
                 "confirmed": len(confirmed),
                 "listed": len(listed),
-                # ``verified`` keeps its old key for older callers; it now counts harness-confirmed components only.
-                "verified": len(confirmed),
                 "staged_only": len(staged),
                 "census_summary": census_summary,
                 "unverified": text(unverified) if unverified else "",
                 "not_loaded": [
-                    f"{text(item.get('type'), limit=32)} {text(item.get('name'))}: {text(item.get('reason'))}"
+                    f"{text(item.get('type'), limit=_KEYWORD_CHARS)} {text(item.get('name'))}: {text(item.get('reason'))}"
                     for item in not_loaded[:MAX_LIST_ITEMS]
                 ],
             }
         )
     if not rows:
         return None
-    return {"requested": text(plan.get("requested"), limit=16) or "wrapper", "agents": rows, "note": PLUGIN_LOAD_NOTE}
+    requested = text(plan.get("requested"), limit=16) or "wrapper"
+    return {
+        "requested": requested,
+        "requested_class": "warn" if requested == "wrapper" else "ok",
+        "agents": rows,
+        "note": PLUGIN_LOAD_NOTE,
+    }

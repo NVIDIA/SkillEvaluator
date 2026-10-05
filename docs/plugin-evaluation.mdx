@@ -96,7 +96,9 @@ Reports make the gaps explicit instead of letting them read as a pass:
   `evaluated`, `static_only`, or `unsupported`, and lists the component types
   that Tier 3 does not stage in wrapper mode in `unsupported_types_present`.
   Tier 1 still checks hooks, subagents and commands statically (Hook risk and
-  Subagent and command privileges).
+  Subagent and command privileges). Every report names an unsupported type as
+  statically checked only when that run has Hook risk or privilege rows for it,
+  and says that nothing evaluated the rest.
 - **Tier 3** records a coverage state and a reason for every component. When a
   declared skill, rule, or MCP server that the plugin needs could not be
   evaluated, the run is **INCOMPLETE**, never a full pass. See
@@ -2223,6 +2225,9 @@ declared component that the run needs could not be evaluated:
 
 The score then reflects only the resolved components. The report leads with an
 "Evaluation INCOMPLETE" conclusion that counts what was and was not evaluated.
+Every report and the `INCOMPLETE: ...` message give the same reason: why the
+run did not complete or why a native plugin load is unconfirmed, followed by the
+deferred components. An unreadable provenance sidecar is reported on its own.
 The Tier 3 result is not marked as passed, so with `--block-on-agent-eval` it
 fails `validate`. `evaluate-plugin` writes its results and then exits 1 with an
 `INCOMPLETE: ...` message.

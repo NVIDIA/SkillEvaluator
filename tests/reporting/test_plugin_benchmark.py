@@ -69,7 +69,7 @@ def _tier3(*, partial: bool, integration: dict[str, Any] | None = None, coverage
         result.passed = False
         result.metadata["execution_status"] = "skipped"
         result.metadata["skip_reason"] = (
-            "INCOMPLETE: 1 unresolved skill ref(s) could not be resolved/evaluated at Tier 3"
+            "INCOMPLETE: 1 unresolved skill ref, 1 provider-only MCP server could not be resolved or evaluated at Tier 3"
         )
     result.metadata["gating"] = {"tier": 3, "blocking": False}
     return result
@@ -190,7 +190,10 @@ def test_partial_plugin_card_is_incomplete_and_lists_excluded_behavior(tmp_path:
     assert "- Plugin run: INCOMPLETE (partial)" in rendered
     assert "| Integration (plugin vs. its own parts) | INCONCLUSIVE — No cross-component case completed. |" in rendered
     assert "**2 components not staged** of 4 declared or packaged component(s); 2 staged." in rendered
-    assert "- mcp docs (Unavailable) — provider-only MCP server" in rendered
+    assert "| docs | mcp | Unavailable | provider-only MCP server |" in rendered
+    # The coverage table and the excluded list already name each component that was not staged.
+    assert "Not staged:" not in rendered
+    assert "- 2 components not staged: mcp docs, hook pre-commit" in rendered
     assert "- Status: **INCOMPLETE** — 1 unresolved skill ref, 1 provider-only MCP server" in rendered
     assert "- Provider-only MCP servers were not exercised: docs" in rendered
     assert "- Unresolved skill refs were not evaluated: github::org/repo::skills::remote" in rendered
@@ -274,3 +277,15 @@ def test_validate_writes_plugin_benchmark_card(monkeypatch: pytest.MonkeyPatch, 
     card = output / "BENCHMARK.md"
     assert card.is_file(), outcome.output
     assert card.read_text(encoding="utf-8").startswith("# Plugin Benchmark: demo-plugin\n")
+
+
+def test_card_treats_an_overflowing_score_as_missing(tmp_path: Path) -> None:
+    tier3 = _tier3(partial=False, integration=_MEASURED_INTEGRATION)
+    payload = tier3.metadata["agent_eval"]
+    payload["overall_lift"] = 10**400
+    payload["agents"]["codex"]["baseline"] = 10**400
+
+    rendered = _render([tier1_plugin_result(), tier3])
+
+    assert "| Effectiveness (plugin vs. no plugin) | Not available |" in rendered
+    assert _gate(tmp_path, rendered) == []

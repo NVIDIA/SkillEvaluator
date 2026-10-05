@@ -39,10 +39,12 @@ from skillevaluator.plugin_components import (
     collect_mcp_declarations,
     is_env_file,
     normalize_declared_path,
+    parsed_additional_manifests,
     refresh_component_finding_counts,
     summarize_coverage,
 )
 from skillevaluator.plugin_formats import CLAUDE_PROFILE
+from skillevaluator.plugin_manifest import locate_plugin_manifest
 from skillevaluator.tier1.commands import run_validation
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.policy import ValidationPolicy
@@ -1138,3 +1140,21 @@ def test_coverage_vocabulary_ranks_runtime_states_above_staged() -> None:
     summary = summarize_coverage(rows)
     assert summary["not_evaluated"] == len(COVERAGE_STATES) - 1
     assert summary["counts"] == {**dict.fromkeys(COVERAGE_STATES, 1), "loaded": 1, "exercised": 1}
+
+
+def test_parsed_additional_manifests_skips_the_ones_that_do_not_parse(tmp_path: Path) -> None:
+    root = _plugin(
+        tmp_path,
+        {},
+        {".cursor-plugin/plugin.json": {"name": "demo", "agents": "./agents/"}, ".codex-plugin/plugin.json": "{oops"},
+    )
+    located = locate_plugin_manifest(root)
+    assert located is not None
+    assert located.manifest_filename == ".claude-plugin/plugin.json"
+    assert {candidate.manifest_filename for candidate in located.additional} == {
+        ".codex-plugin/plugin.json",
+        ".cursor-plugin/plugin.json",
+    }
+    assert parsed_additional_manifests(located) == [
+        (PLUGIN_CURSOR_MANIFEST_TYPE, ".cursor-plugin/plugin.json", {"name": "demo", "agents": "./agents/"})
+    ]

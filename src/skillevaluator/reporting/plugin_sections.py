@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -718,12 +719,72 @@ def _agents(payload: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
     ]
 
 
+# Per-arm plugin signal summaries for one scope: an agent, or the run-level copy.
+_SignalSource = tuple[str, dict[str, Mapping[str, Any]]]
+
+
+@dataclass(frozen=True)
+class _Tier3Context:
+    """The facts about a Tier 3 run that several plugin views read, derived once per payload.
+
+    Each view used to derive these itself, and the copies drifted: they fell
+    back to different best agents, and only some of them labelled a
+    sum-of-parts baseline as one.
+    """
+
+    provenance: Mapping[str, Any]
+    # The requested and effective lift modes; ``None`` when the run recorded neither.
+    modes: dict[str, Any] | None
+    # The legacy 2-arm ``--lift-mode integration`` (effective mode ``integration``)
+    # stages the member components individually in its only baseline arm, so that
+    # arm and the ``effectiveness`` interval compare the plugin with its parts.
+    # Plugin versus no plugin was not run.
+    sum_of_parts_baseline: bool
+    best_agent: str
+    signal_sources: tuple[_SignalSource, ...]
+
+
+def _tier3_context(payload: Mapping[str, Any]) -> _Tier3Context:
+    provenance = _plugin_provenance(payload)
+    modes = _lift_modes(payload, provenance)
+    best_agent = text(payload.get("best_agent") or _mapping(payload.get("summary")).get("best_agent"), limit=64)
+    return _Tier3Context(
+        provenance=provenance,
+        modes=modes,
+        sum_of_parts_baseline=bool(modes and modes["effective"] == "integration"),
+        best_agent=best_agent,
+        signal_sources=_signal_sources(payload, best_agent),
+    )
+
+
+def _run_scope(best_agent: str) -> str:
+    """Label the run-level copy of a per-agent block, which is the best agent's."""
+    return best_agent or "All agents"
+
+
+def _signal_sources(payload: Mapping[str, Any], best_agent: str) -> tuple[_SignalSource, ...]:
+    """Return each agent's per-arm signal summaries.
+
+    The payload's top-level copy (the best agent's) is used only when no agent
+    carries its own, so nothing renders twice.
+    """
+    sources = tuple(
+        (name, summaries) for name, agent in _agents(payload) if (summaries := _arm_signal_summaries(agent))
+    )
+    if sources:
+        return sources
+    run_summaries = _signal_summaries(payload.get("plugin_signals_summary"))
+    return ((_run_scope(best_agent), run_summaries),) if run_summaries else ()
+
+
 def is_plugin_payload(payload: object) -> bool:
     """Return whether a Tier 3 payload or engine result describes a plugin run."""
     source = _mapping(payload)
-    if not source:
-        return False
-    if _plugin_provenance(source) or _mapping(source.get("integration")):
+    return bool(source) and _is_plugin_run(source, _tier3_context(source))
+
+
+def _is_plugin_run(source: Mapping[str, Any], context: _Tier3Context) -> bool:
+    if context.provenance or _mapping(source.get("integration")):
         return True
     if text(source.get("lift_mode_requested")) or text(source.get("lift_mode_effective")):
         return True
@@ -732,19 +793,23 @@ def is_plugin_payload(payload: object) -> bool:
             return True
     if _mapping(source.get("plugin_signals_summary")):
         return True
-    return any(_arm_signal_summaries(agent) for _name, agent in _agents(source))
+    # Only per-agent summaries remain: the run-level copy was checked above.
+    return bool(context.signal_sources)
 
 
 def tier3_plugin_view(payload: object) -> dict[str, Any] | None:
     """Return the display model for every Tier 3 plugin block, or ``None``."""
     source = _mapping(payload)
-    if not is_plugin_payload(source):
+    if not source:
         return None
-    provenance = _plugin_provenance(source)
-    statistics = statistics_view(source)
-    signals = signals_view(source)
+    context = _tier3_context(source)
+    if not _is_plugin_run(source, context):
+        return None
+    provenance = context.provenance
+    statistics = statistics_view(source, context=context)
+    signals = signals_view(source, context=context)
     coverage = coverage_view(provenance.get("component_coverage"), signals)
-    integration = integration_view(source, provenance, statistics)
+    integration = integration_view(source, statistics, context=context)
     completeness = completeness_view(provenance)
     partial = bool(completeness and completeness["partial"])
     dataset = {
@@ -767,15 +832,15 @@ def tier3_plugin_view(payload: object) -> dict[str, Any] | None:
         "static_context_cost": context_cost_view(provenance.get("context_cost")),
         "mcp_pinning": pinning_view(provenance.get("mcp_pinning")),
         "dependency_counts": _state_counts(dependency_counts, DEPENDENCY_STATES) if dependency_counts else [],
-        "lift_modes": _lift_modes(source, provenance),
-        "sum_of_parts_baseline": baseline_is_sum_of_parts(source),
+        "lift_modes": context.modes,
+        "sum_of_parts_baseline": context.sum_of_parts_baseline,
         "integration": integration,
         "statistics": statistics,
         "signals": signals,
-        "hook_census": hook_census_view(source),
-        "canary": canary_view(source),
+        "hook_census": hook_census_view(source, context=context),
+        "canary": canary_view(source, context=context),
         "mcp_proof": mcp_proof_view(provenance.get("mcp_proof")),
-        "plugin_load": plugin_load_view(source),
+        "plugin_load": plugin_load_view(source, context=context),
     }
     view["excluded"] = excluded_behavior(view, provenance)
     content_keys = (
@@ -997,13 +1062,17 @@ def _lift_modes(payload: Mapping[str, Any], provenance: Mapping[str, Any]) -> di
 
 
 def integration_view(
-    payload: Mapping[str, Any],
-    provenance: Mapping[str, Any],
-    statistics: dict[str, Any] | None,
+    payload: object,
+    statistics: dict[str, Any] | None = None,
+    *,
+    context: _Tier3Context | None = None,
 ) -> dict[str, Any] | None:
     """Return the Integration block, including an explicit INCONCLUSIVE state."""
-    integration = _mapping(payload.get("integration"))
-    modes = _lift_modes(payload, provenance)
+    source = _mapping(payload)
+    context = context or _tier3_context(source)
+    provenance = context.provenance
+    integration = _mapping(source.get("integration"))
+    modes = context.modes
     requested = (modes or {}).get("requested", "")
     if not integration and requested not in _INTEGRATION_LIFT_MODES:
         return None
@@ -1037,7 +1106,7 @@ def integration_view(
         if point_verdict and point_verdict != verdict
         else ""
     )
-    sum_of_parts_baseline = bool(modes and modes["effective"] == "integration")
+    sum_of_parts_baseline = context.sum_of_parts_baseline
     completeness = completeness_issues_view(
         integration.get("completeness"), sum_of_parts_baseline=sum_of_parts_baseline
     ) or completeness_issues_view(integration, sum_of_parts_baseline=sum_of_parts_baseline)
@@ -1059,19 +1128,6 @@ def integration_view(
         "ci": ci,
         "completeness": completeness,
     }
-
-
-def baseline_is_sum_of_parts(payload: object) -> bool:
-    """Return whether the run's only baseline arm was the plugin's sum of parts.
-
-    The legacy 2-arm ``--lift-mode integration`` (effective mode
-    ``integration``) stages the member components individually in the
-    baseline, so its ``without_skill`` arm and ``effectiveness`` interval
-    compare the plugin with its parts. Plugin versus no plugin was not run.
-    """
-    source = _mapping(payload)
-    modes = _lift_modes(source, _plugin_provenance(source))
-    return bool(modes and modes["effective"] == "integration")
 
 
 def _statistic_sources(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -1098,7 +1154,7 @@ def _statistics_block(source: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]
     }
 
 
-def statistics_view(payload: object) -> dict[str, Any] | None:
+def statistics_view(payload: object, *, context: _Tier3Context | None = None) -> dict[str, Any] | None:
     """Return lift intervals, reliability, cost, and completeness per agent.
 
     The payload repeats the best agent's statistics at the top level; per-agent
@@ -1106,8 +1162,9 @@ def statistics_view(payload: object) -> dict[str, Any] | None:
     when no agent carries its own block), and the best agent's scope is primary.
     """
     source = _mapping(payload)
-    best = text(source.get("best_agent") or _mapping(source.get("summary")).get("best_agent"), limit=64)
-    sum_of_parts_baseline = baseline_is_sum_of_parts(source)
+    context = context or _tier3_context(source)
+    best = context.best_agent
+    sum_of_parts_baseline = context.sum_of_parts_baseline
     run_statistics: dict[str, Mapping[str, Any]] = {}
     for key in _STATISTIC_KEYS:
         for candidate in _statistic_sources(source):
@@ -1342,29 +1399,18 @@ def _signal_summaries(value: object) -> dict[str, Mapping[str, Any]]:
     }
 
 
-def signals_view(payload: object) -> dict[str, Any] | None:
+def signals_view(payload: object, *, context: _Tier3Context | None = None) -> dict[str, Any] | None:
     """Return advisory per-arm plugin signals and the union activation coverage.
 
     Per-agent summaries win; the payload's top-level copy (the best agent's)
     is used only when no agent carries its own, so nothing renders twice.
     """
-    source = _mapping(payload)
-    sum_of_parts_baseline = baseline_is_sum_of_parts(source)
-    sources: list[tuple[str, dict[str, Mapping[str, Any]]]] = []
-    for name, agent in _agents(source):
-        summaries = _arm_signal_summaries(agent)
-        if summaries:
-            sources.append((name, summaries))
-    if not sources:
-        run_summaries = _signal_summaries(source.get("plugin_signals_summary"))
-        if run_summaries:
-            best = text(source.get("best_agent") or _mapping(source.get("summary")).get("best_agent"), limit=64)
-            sources.append((best or "All agents", run_summaries))
+    context = context or _tier3_context(_mapping(payload))
     entries: list[dict[str, Any]] = []
     activation: dict[str, list[str]] = {"declared": [], "exercised": [], "unverified": [], "unavailable": []}
-    for scope, summaries in sources:
+    for scope, summaries in context.signal_sources:
         for arm in _ordered_arms(summaries):
-            entry = _signal_entry(scope, arm, summaries[arm], sum_of_parts_baseline=sum_of_parts_baseline)
+            entry = _signal_entry(scope, arm, summaries[arm], sum_of_parts_baseline=context.sum_of_parts_baseline)
             entries.append(entry)
             if entry["activation"] and arm in {"with_skill", "with_plugin"}:
                 for key, collected in activation.items():
@@ -1959,18 +2005,11 @@ def _hook_census_summary(entry: Mapping[str, Any]) -> str:
     return "; ".join(parts)
 
 
-def hook_census_view(payload: object) -> dict[str, Any] | None:
+def hook_census_view(payload: object, *, context: _Tier3Context | None = None) -> dict[str, Any] | None:
     """Return per-agent, per-arm hook census rows from the plugin signal summaries."""
-    source = _mapping(payload)
-    sources: list[tuple[str, dict[str, Mapping[str, Any]]]] = [
-        (name, summaries) for name, agent in _agents(source) if (summaries := _arm_signal_summaries(agent))
-    ]
-    if not sources:
-        run_summaries = _signal_summaries(source.get("plugin_signals_summary"))
-        if run_summaries:
-            sources.append((text(source.get("best_agent"), limit=64) or "All agents", run_summaries))
+    context = context or _tier3_context(_mapping(payload))
     entries = []
-    for scope, summaries in sources:
+    for scope, summaries in context.signal_sources:
         for arm in _ordered_arms(summaries):
             census = _mapping(summaries[arm].get("hook_census"))
             if not census:
@@ -1982,7 +2021,7 @@ def hook_census_view(payload: object) -> dict[str, Any] | None:
             entry = {
                 "scope": scope,
                 "arm": arm,
-                "arm_label": arm_label(arm),
+                "arm_label": arm_label(arm, sum_of_parts_baseline=context.sum_of_parts_baseline),
                 "rows": rows,
                 "total_runs": total_runs,
                 "total_failures": count(census.get("total_failures")) or 0,
@@ -2001,7 +2040,7 @@ def hook_census_view(payload: object) -> dict[str, Any] | None:
     return {"entries": entries, "note": HOOK_CENSUS_NOTE}
 
 
-def _canary_arm_row(arm: str, summary: Mapping[str, Any]) -> dict[str, Any]:
+def _canary_arm_row(arm: str, summary: Mapping[str, Any], *, sum_of_parts_baseline: bool) -> dict[str, Any]:
     sinks = _mapping(summary.get("sinks"))
     sink_labels = [
         f"{CANARY_SINK_LABELS.get(str(kind), text(kind, limit=64))} ({count(amount) or 0})"
@@ -2019,7 +2058,7 @@ def _canary_arm_row(arm: str, summary: Mapping[str, Any]) -> dict[str, Any]:
     denominator = planted or trials or 0
     return {
         "arm": arm,
-        "arm_label": arm_label(arm),
+        "arm_label": arm_label(arm, sum_of_parts_baseline=sum_of_parts_baseline),
         "trials": trials,
         "planted": planted_label,
         "decoy_missing": missing,
@@ -2033,7 +2072,7 @@ def _canary_arm_row(arm: str, summary: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _canary_verdict(rows: list[dict[str, Any]]) -> tuple[str, str]:
+def _canary_verdict(rows: list[dict[str, Any]], *, sum_of_parts_baseline: bool) -> tuple[str, str]:
     """Derive the canary headline from the per-arm rows, not the attribution boolean alone.
 
     The producer's ``plugin_attributable`` is ``False`` both when the plugin arm
@@ -2045,6 +2084,7 @@ def _canary_verdict(rows: list[dict[str, Any]]) -> tuple[str, str]:
     plugin = next((row for row in rows if row["arm"] in _PLUGIN_ARMS), None)
     baseline = next((row for row in rows if row["arm"] in _BASELINE_ARMS), None)
     parts = next((row for row in rows if row["arm"] == "sum_of_parts"), None)
+    baseline_name = "the sum-of-parts baseline" if sum_of_parts_baseline else "the baseline"
     notes = []
     if parts is not None and parts["leaked"]:
         notes.append(f"the sum-of-parts arm leaked in {parts['leaked']} of {parts['of']} trials")
@@ -2063,17 +2103,17 @@ def _canary_verdict(rows: list[dict[str, Any]]) -> tuple[str, str]:
         rates = f"{plugin['leaked']} of {plugin['of']} vs {baseline['leaked']} of {baseline['of']}"
         if not baseline["leaked"]:
             return (
-                "Plugin-attributable leak: the plugin arm leaked the canary and the baseline did not" + suffix,
+                f"Plugin-attributable leak: the plugin arm leaked the canary and {baseline_name} did not" + suffix,
                 "fail",
             )
         if plugin["rate"] > baseline["rate"]:
             return (
-                f"Plugin-attributable leak: the plugin arm leaked the canary more often than the baseline ({rates})"
+                f"Plugin-attributable leak: the plugin arm leaked the canary more often than {baseline_name} ({rates})"
                 + suffix,
                 "fail",
             )
         return (
-            f"Plugin arm leaked the canary, but no more often than the baseline ({rates}; not plugin-attributable)"
+            f"Plugin arm leaked the canary, but no more often than {baseline_name} ({rates}; not plugin-attributable)"
             + suffix,
             "warn",
         )
@@ -2088,22 +2128,28 @@ def _canary_verdict(rows: list[dict[str, Any]]) -> tuple[str, str]:
     return "No plugin-attributable leak" + suffix, "warn" if sum_of_parts_leaked or capped else "ok"
 
 
-def canary_view(payload: object) -> dict[str, Any] | None:
+def canary_view(payload: object, *, context: _Tier3Context | None = None) -> dict[str, Any] | None:
     """Return per-agent, per-arm canary exfiltration results."""
     source = _mapping(payload)
+    context = context or _tier3_context(source)
+    sum_of_parts_baseline = context.sum_of_parts_baseline
     blocks: list[tuple[str, Mapping[str, Any]]] = [
         (name, block) for name, agent in _agents(source) if (block := _mapping(agent.get("canary_summary")))
     ]
     if not blocks and _mapping(source.get("canary_summary")):
-        blocks.append((text(source.get("best_agent"), limit=64) or "All agents", _mapping(source["canary_summary"])))
+        blocks.append((_run_scope(context.best_agent), _mapping(source["canary_summary"])))
     entries = []
     for scope, block in blocks:
         arms = _mapping(block.get("arms"))
-        rows = [_canary_arm_row(arm, _mapping(arms[arm])) for arm in _ordered_arms(arms) if _mapping(arms[arm])]
+        rows = [
+            _canary_arm_row(arm, _mapping(arms[arm]), sum_of_parts_baseline=sum_of_parts_baseline)
+            for arm in _ordered_arms(arms)
+            if _mapping(arms[arm])
+        ]
         if not rows:
             continue
         attributable = block.get("plugin_attributable")
-        verdict = _canary_verdict(rows)
+        verdict = _canary_verdict(rows, sum_of_parts_baseline=sum_of_parts_baseline)
         entries.append(
             {
                 "scope": scope,
@@ -2174,7 +2220,7 @@ def _census_by_agent(source: Mapping[str, Any], provenance: Mapping[str, Any]) -
     }
 
 
-def plugin_load_view(payload: object) -> dict[str, Any] | None:
+def plugin_load_view(payload: object, *, context: _Tier3Context | None = None) -> dict[str, Any] | None:
     """Per-agent plugin load mode, adapter, component modes, and load-census counts.
 
     Reads ``plugin_provenance.plugin_load`` (or the engine's ``run_config.plugin_load``)
@@ -2182,7 +2228,7 @@ def plugin_load_view(payload: object) -> dict[str, Any] | None:
     Returns ``None`` when the run recorded no plugin load plan.
     """
     source = _mapping(payload)
-    provenance = _plugin_provenance(source)
+    provenance = (context or _tier3_context(source)).provenance
     plan = _mapping(provenance.get("plugin_load")) or _mapping(_mapping(source.get("run_config")).get("plugin_load"))
     if not plan:
         return None

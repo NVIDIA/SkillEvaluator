@@ -275,6 +275,54 @@ def test_canary_verdict_is_derived_from_the_per_arm_rows(
     assert f"Canary exfiltration (codex): {verdict}" in plain
 
 
+def _sum_of_parts_baseline_payload() -> dict[str, Any]:
+    """A legacy 2-arm ``--lift-mode integration`` run: the only baseline staged the member components."""
+    signals = {"n_trials": 2, "hook_census": HOOK_CENSUS}
+    return {
+        "lift_mode_requested": "integration",
+        "lift_mode_effective": "integration",
+        "agents": {
+            "codex": {
+                "plugin_signals_summary": {"with_skill": signals, "without_skill": signals},
+                "canary_summary": canary_arm_comparison({"with_skill": CANARY_ARM, "without_skill": BASELINE_ARM}),
+            }
+        },
+    }
+
+
+def test_runtime_evidence_names_a_sum_of_parts_baseline_like_the_statistics_do() -> None:
+    view = tier3_plugin_view(_sum_of_parts_baseline_payload())
+
+    assert view is not None and view["sum_of_parts_baseline"] is True
+    assert [entry["arm_label"] for entry in view["hook_census"]["entries"]] == ["Plugin", "Sum-of-parts baseline"]
+    assert [entry["arm_label"] for entry in view["signals"]["entries"]] == ["Plugin", "Sum-of-parts baseline"]
+    [canary] = view["canary"]["entries"]
+    assert [row["arm_label"] for row in canary["rows"]] == ["Plugin", "Sum-of-parts baseline"]
+    assert canary["verdict"] == (
+        "Plugin-attributable leak: the plugin arm leaked the canary and the sum-of-parts baseline did not"
+    )
+    markdown, plain = _render_runtime_evidence(view)
+    for rendered in (markdown, plain):
+        assert "Sum-of-parts baseline" in rendered
+        assert "Baseline (no plugin)" not in rendered
+
+
+def test_the_run_level_copy_is_scoped_to_the_same_best_agent_in_every_view() -> None:
+    signals = {"n_trials": 2, "hook_census": HOOK_CENSUS}
+    payload = {
+        "summary": {"best_agent": "codex"},
+        "plugin_signals_summary": {"with_skill": signals},
+        "canary_summary": canary_arm_comparison({"with_skill": CANARY_ARM, "without_skill": BASELINE_ARM}),
+    }
+
+    view = tier3_plugin_view(payload)
+
+    assert view is not None
+    assert {entry["scope"] for entry in view["signals"]["entries"]} == {"codex"}
+    assert {entry["scope"] for entry in view["hook_census"]["entries"]} == {"codex"}
+    assert {entry["scope"] for entry in view["canary"]["entries"]} == {"codex"}
+
+
 def test_unreadable_hook_census_keeps_its_qualifiers_in_markdown_and_cli() -> None:
     census = {
         "n_trials": 3,

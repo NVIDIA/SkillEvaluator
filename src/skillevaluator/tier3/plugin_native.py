@@ -2542,7 +2542,9 @@ def apply_load_census(
     Harness evidence (``loaded``) promotes a row to ``loaded``. A listing alone
     (``listed``) promotes a row to ``staged`` at most. A ``not_loaded`` entry
     adds its reason. Precedence is ``exercised`` > ``loaded`` > ``staged``: a
-    row is never downgraded. Notes are appended to the existing reason, so an
+    row is never downgraded. A listed row whose ``native_agents`` (recorded by
+    the resolved plan) already cover the listing agents does not repeat that
+    it is staged natively for them. Notes are appended to the existing reason, so an
     earlier note (for example an INCOMPLETE MCP note) survives, also on a row
     that stays unsupported; a row promoted from an unevaluated state gets the
     census note in place of the old "not staged" reason.
@@ -2588,13 +2590,13 @@ def apply_load_census(
             new_state = "loaded" if COVERAGE_STATE_RANK.get(state, 0) < COVERAGE_STATE_RANK["loaded"] else state
             note = f"loaded natively by {agents} (load census, harness evidence: {found[0][1]})"
         elif found := lookup(LISTED_KEY):
-            agents = ", ".join(sorted({agent for agent, _detail in found}))
+            listed_by = sorted({agent for agent, _detail in found})
             new_state = "staged" if COVERAGE_STATE_RANK.get(state, 0) < COVERAGE_STATE_RANK["staged"] else state
-            staged = f"staged natively for {agents}"
-            # A row the resolved plan already marked staged for these agents keeps one copy of that phrase.
-            old_reason = str(row.get("reason") or "")
-            planned = (staged, f"staged as a native rule for {agents}")
-            prefix = "" if any(phrase in old_reason for phrase in planned) else f"{staged}; "
+            # A row the resolved plan already staged natively for these agents (its
+            # native_agents) says so in its reason; the note does not repeat it.
+            planned = row.get("native_agents")
+            planned_for = set(planned) if isinstance(planned, list) else set()
+            prefix = "" if planned_for.issuperset(listed_by) else f"staged natively for {', '.join(listed_by)}; "
             note = f"{prefix}the load census listed it ({found[0][1]}) but the harness did not confirm it was loaded"
         elif found := lookup("not_loaded"):
             agents = ", ".join(sorted({agent for agent, _detail in found}))

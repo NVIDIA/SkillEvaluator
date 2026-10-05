@@ -849,6 +849,17 @@ def _rule_reason(staging: _ArmStaging | None, wrapper_reason: str = _WRAPPER_RUL
     return reason
 
 
+def _natively_staged(row: dict[str, Any], agents: list[str]) -> dict[str, Any]:
+    """Record on a coverage row the agents whose native arm stages it.
+
+    The load census compares these agents, never the reason text, to tell
+    whether the plan already said the row is staged natively for them.
+    """
+    if agents:
+        row["native_agents"] = agents
+    return row
+
+
 def _native_capable_agents(component_type: str) -> list[str]:
     return sorted(
         agent
@@ -888,7 +899,7 @@ def _other_type_row(component: Component, staging: _ArmStaging | None) -> dict[s
     reason = "staged natively for " + ", ".join(native)
     if others:
         reason += "; not staged for " + "; ".join(others)
-    return coverage_row(component, "staged", reason)
+    return _natively_staged(coverage_row(component, "staged", reason), native)
 
 
 _SKIPPED_PACKAGE_NOTE = "the plugin package was skipped (nothing locally evaluable)"
@@ -1031,15 +1042,16 @@ def _rule_row(
     arm_staging: _ArmStaging | None,
 ) -> dict[str, Any]:
     """Coverage row of one rule: staged (natively or in the wrapper), unavailable, or not staged."""
+    native_agents = arm_staging.native_for("rule") if arm_staging is not None else []
     if component.path is None:
         if component.name in unresolved_refs:
             return coverage_row(component, "unavailable", "remote rule reference is not resolvable offline")
         if skipped:
             return coverage_row(component, "not_staged", _SKIPPED_PACKAGE_NOTE)
-        reason = _rule_reason(arm_staging, "embedded in the wrapper")
-        return coverage_row(component, "staged", f"rule reference resolved and {reason}")
+        reason = f"rule reference resolved and {_rule_reason(arm_staging, 'embedded in the wrapper')}"
+        return _natively_staged(coverage_row(component, "staged", reason), native_agents)
     if {component.name, PurePosixPath(component.path).name, component.path.removeprefix("rules/")} & staged_rule_names:
-        return coverage_row(component, "staged", _rule_reason(arm_staging))
+        return _natively_staged(coverage_row(component, "staged", _rule_reason(arm_staging)), native_agents)
     return coverage_row(
         component,
         "not_staged",

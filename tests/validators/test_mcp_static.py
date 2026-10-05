@@ -65,6 +65,43 @@ def test_command_shell_interpreter_dash_c_is_blocked() -> None:
     assert "mcp_command_dangerous_form" in _checks(findings)
 
 
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "bash.exe", "args": ["-c", "startserver"]},
+        {"command": "C:\\Program Files\\Git\\bin\\bash.exe", "args": ["-c", "startserver"]},
+        {"command": "bash", "args": ["-lc", "startserver"]},
+        {"command": "zsh", "args": ["-ec", "startserver"]},
+        {"command": "sh", "args": ["-xc", "startserver"]},
+        {"command": "bash -c startserver"},
+        {"command": "bash -l", "args": ["-c", "startserver"]},
+    ],
+)
+def test_command_shell_inline_program_forms_are_blocked(config) -> None:
+    findings = validate_contained_mcp_servers({"s": config}, "p.json")
+    assert "mcp_command_dangerous_form" in _checks(findings)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "bash", "args": ["script.sh"]},
+        {"command": "bash", "args": ["--rcfile", "x", "script.sh"]},
+        {"command": "node", "args": ["--config", "x"]},
+        {"command": "python", "args": ["-c", "print(1)"]},
+    ],
+)
+def test_command_without_shell_inline_program_is_not_dangerous_form(config) -> None:
+    findings = validate_contained_mcp_servers({"s": config}, "p.json")
+    assert "mcp_command_dangerous_form" not in _checks(findings)
+
+
+@pytest.mark.parametrize("args", [5, True, 1.5])
+def test_shell_command_with_non_list_args_reports_args_not_list(args) -> None:
+    findings = validate_contained_mcp_servers({"s": {"command": "bash", "args": args}}, "p.json")
+    assert _checks(findings) == {"mcp_args_not_list"}
+
+
 def test_command_floating_version_blocked() -> None:
     findings = validate_contained_mcp_servers({"s": {"command": "npx", "args": ["-y", "some-server@latest"]}}, "p.json")
     assert "mcp_command_floating_version" in _checks(findings)

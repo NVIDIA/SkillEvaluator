@@ -58,6 +58,9 @@ _MCP_NAME_RE = re.compile(MCP_NAME_PATTERN)
 _SHELL_METACHAR_RE = re.compile(r"[;&|`\n\r]|\$\(|<\(|>\(|&&|\|\||[<>]")
 # Interpreters invoked with an inline program string execute arbitrary code.
 _SHELL_INTERPRETERS: frozenset[str] = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
+# A shell's inline-program flag: '-c' alone or inside a short-option cluster
+# ('-lc', '-ec', '-xc'). Long options such as '--config' never match.
+_SHELL_INLINE_PROGRAM_FLAG_RE = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
 # Floating / non-pinned version markers (supply-chain drift risk).
 _FLOATING_MARKERS: tuple[str, ...] = ("@latest", "@main", "@master", "@head", "@next", "@canary", ":latest", ":main")
 
@@ -474,9 +477,17 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
                 )
             )
 
-    # Shell interpreter invoked with an inline program string (`sh -c "..."`).
-    base = command.strip().split("/")[-1].split("\\")[-1].lower()
-    if base in _SHELL_INTERPRETERS and any(str(a).strip() == "-c" for a in (args or [])):
+    # Shell interpreter invoked with an inline program string (`sh -c "..."`, `bash -lc "..."`).
+    # A whole command line in 'command' ("bash -c node") is read argv-style, as
+    # classify_mcp_pinning does.
+    command_words = command.split()
+    runs_shell = (
+        _command_basename(command_words[0]) in _SHELL_INTERPRETERS
+        # An unsplit path with spaces, e.g. "C:\Program Files\Git\bin\bash.exe".
+        or _command_basename(command) in _SHELL_INTERPRETERS
+    )
+    shell_args = [*command_words[1:], *arg_list]
+    if runs_shell and any(_SHELL_INLINE_PROGRAM_FLAG_RE.fullmatch(arg.strip()) for arg in shell_args):
         findings.append(
             _finding(
                 Severity.CRITICAL,

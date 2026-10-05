@@ -362,7 +362,7 @@ class EmbeddingRegistry:
                             description=skill.entry.description,
                             path=skill_path,
                             content_type=CONTENT_TYPE_SKILL,
-                            content_fingerprint=_fingerprint(skill.entry.embedding_text),
+                            content_fingerprint=content_fingerprint(skill.entry.embedding_text),
                         ),
                         skill.entry.embedding_text,
                     )
@@ -521,7 +521,9 @@ class EmbeddingRegistry:
                     path=relative_path,
                     content_type=entry.content_type,
                     entry_id=entry_id,
-                    content_fingerprint=_fingerprint(entry.full_text if self._full_body else entry.embedding_text),
+                    content_fingerprint=content_fingerprint(
+                        entry.full_text if self._full_body else entry.embedding_text
+                    ),
                 )
             )
 
@@ -903,7 +905,8 @@ class EmbeddingRegistry:
         self.load_catalog(cache_path)
 
 
-def _fingerprint(text: str) -> str:
+def content_fingerprint(text: str) -> str:
+    """Return the SHA-256 hex digest that identifies an entry's embedded text in a catalog."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 

@@ -26,7 +26,6 @@ Tier 2 plugin orchestration caps their severity at MEDIUM.
 
 from __future__ import annotations
 
-import hashlib
 from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -43,7 +42,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.deduplication.plugin.profile import BundledSkill, PluginProfile, member_overlap
 from skillevaluator.deduplication.result_status import mark_advisory_skip
-from skillevaluator.embedding.registry import classify
+from skillevaluator.embedding.registry import classify, content_fingerprint
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 
 if TYPE_CHECKING:
@@ -153,7 +152,7 @@ class _SelfSkillIdentity:
         text = skill.entry.embedding_text if skill.entry is not None else ""
         return cls(
             paths=frozenset({skill.rel, relative}),
-            fingerprint=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            fingerprint=content_fingerprint(text),
         )
 
     def matches(self, entry: RegistryEntry) -> bool:
@@ -391,13 +390,9 @@ def check_catalog_plugins(
     for entry, similarity in registry.score_plugin_text(profile.embedding_text):
         if entry.entry_id in self_ids:
             continue
+        # A positive overlap threshold already implies at least one shared member.
         overlap = member_overlap(profile.members, entry.members)
-        shared = bool(set(profile.members) & set(entry.members))
-        if (
-            similarity >= threshold
-            or (shared and overlap >= INTER_PLUGIN_MEMBER_OVERLAP_THRESHOLD)
-            or _same_name(profile, entry)
-        ):
+        if similarity >= threshold or overlap >= INTER_PLUGIN_MEMBER_OVERLAP_THRESHOLD or _same_name(profile, entry):
             candidates.append((entry, similarity, overlap))
     # Name collisions first, so the top-k cut never drops one.
     candidates.sort(key=lambda item: (not _same_name(profile, item[0]), -item[1], -item[2], item[0].path))

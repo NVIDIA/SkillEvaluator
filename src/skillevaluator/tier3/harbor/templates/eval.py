@@ -643,6 +643,27 @@ _RANK_OLD_WRITE = 2  # a write to a path the agent wrote again later
 _RANK_KEEP = 3  # the final answer and the latest write to each path
 
 
+class _Entry(NamedTuple):
+    """One line of evidence: its text, its fitting rank (a ``_RANK_*``), and the files it writes."""
+
+    text: str
+    rank: int
+    paths: tuple[str, ...] = ()
+
+
+class _FileChange(NamedTuple):
+    """A FILE CHANGES entry: ``text`` joins the call line and paths (``head``), the written ``body``, and the
+    tool result (``tail``). ``body_cut`` says the body was already cut to ``_write_body_max_chars()``."""
+
+    text: str
+    rank: int
+    paths: tuple[str, ...]
+    head: str
+    body: str
+    tail: str
+    body_cut: bool
+
+
 def _final_response_index(steps):
     """Index of the final response: the last agent step with a non-empty message, or ``None``."""
     for index in range(len(steps) - 1, -1, -1):
@@ -879,11 +900,11 @@ def _demote_superseded_writes(entries):
     """Rank a write below the latest write to each of its paths."""
     last_writer = {}
     for index, entry in enumerate(entries):
-        for path in entry[2]:
+        for path in entry.paths:
             last_writer[path] = index
     for index, entry in enumerate(entries):
-        if entry[2] and all(last_writer[path] != index for path in entry[2]):
-            entry[1] = _RANK_OLD_WRITE
+        if entry.paths and all(last_writer[path] != index for path in entry.paths):
+            entries[index] = entry._replace(rank=_RANK_OLD_WRITE)
 
 
 def _history_call_entry(tc, write_bodies):
@@ -895,17 +916,17 @@ def _history_call_entry(tc, write_bodies):
         # Without write bodies (FILE CHANGES shows them), a write is a short line like any other call.
         shown = _judge_excerpt(json.dumps(args, default=str), _HISTORY_ARGS_CHARS)
         note = " [written content is under FILE CHANGES]" if write is not None else ""
-        return [f"Agent called: {name}({shown}){note}", _RANK_LOW, ()]
+        return _Entry(f"Agent called: {name}({shown}){note}", _RANK_LOW)
     paths, body, other_args = write
     shown = _judge_excerpt(json.dumps(other_args, default=str), _HISTORY_ARGS_CHARS) if other_args else ""
     text = f"Agent called: {name}({shown})"
     if body:
         text = f"{text}\n{_judge_excerpt(body, _WRITE_BODY_CHARS)}"
-    return [text, _RANK_KEEP, tuple(paths)]
+    return _Entry(text, _RANK_KEEP, tuple(paths))
 
 
 def _history_entries(traj, question, *, write_bodies=True, final_chars=_HISTORY_MESSAGE_CHARS, final_rank=_RANK_KEEP):
-    """``[text, rank, written paths]`` per history line, in trajectory order.
+    """An ``_Entry`` per history line, in trajectory order.
 
     Without *write_bodies*, write calls are short lines ranked like other tool
     calls, for evidence that shows the bodies under FILE CHANGES. The final
@@ -913,7 +934,7 @@ def _history_entries(traj, question, *, write_bodies=True, final_chars=_HISTORY_
     under FINAL RESPONSE passes less, and a lower rank so the history's copy
     shrinks before skill calls and test runs are dropped.
     """
-    entries = [[f"User: {_judge_excerpt(question, _HISTORY_MESSAGE_CHARS)}", _RANK_MESSAGE, ()]]
+    entries = [_Entry(f"User: {_judge_excerpt(question, _HISTORY_MESSAGE_CHARS)}", _RANK_MESSAGE)]
     steps = traj.get("steps", [])
     final_index = _final_response_index(steps)
     final_listed = False
@@ -923,7 +944,7 @@ def _history_entries(traj, question, *, write_bodies=True, final_chars=_HISTORY_
 
         reasoning = _judge_excerpt(step.get("reasoning_content"), _HISTORY_REASONING_CHARS)
         if reasoning:
-            entries.append([f"Agent reasoning: {reasoning}", _RANK_LOW, ()])
+            entries.append(_Entry(f"Agent reasoning: {reasoning}", _RANK_LOW))
 
         for _, tc in iter_tool_calls({"steps": [step]}):
             entries.append(_history_call_entry(tc, write_bodies))
@@ -931,7 +952,7 @@ def _history_entries(traj, question, *, write_bodies=True, final_chars=_HISTORY_
         for result in (step.get("observation") or {}).get("results") or []:
             content = _judge_excerpt(result.get("content") if isinstance(result, dict) else "", _HISTORY_RESULT_CHARS)
             if content:
-                entries.append([f"Tool returned: {content}", _RANK_LOW, ()])
+                entries.append(_Entry(f"Tool returned: {content}", _RANK_LOW))
 
         msg = step.get("message") or ""
         if isinstance(msg, str) and msg.strip() and not step.get("tool_calls"):
@@ -939,11 +960,11 @@ def _history_entries(traj, question, *, write_bodies=True, final_chars=_HISTORY_
             final_listed = final_listed or is_final
             rank = final_rank if is_final else _RANK_MESSAGE
             limit = final_chars if is_final else _HISTORY_MESSAGE_CHARS
-            entries.append([f"Agent: {_judge_excerpt(msg, limit)}", rank, ()])
+            entries.append(_Entry(f"Agent: {_judge_excerpt(msg, limit)}", rank))
 
     if final_index is not None and not final_listed:
         final = _judge_excerpt(steps[final_index].get("message"), final_chars)
-        entries.append([f"Agent final answer: {final}", final_rank, ()])
+        entries.append(_Entry(f"Agent final answer: {final}", final_rank))
     _demote_superseded_writes(entries)
     return entries
 
@@ -965,7 +986,7 @@ def _render_entries(texts, dropped, sep, noun):
 
 
 def _fit_entries(entries, max_chars, *, sep, stub_chars, noun, middle_first=False, exact_shrink=False):
-    """Join ``[text, rank, ...]`` entries, fitting them into *max_chars* by rank.
+    """Join the text of *entries*, fitting them into *max_chars* by rank.
 
     Over budget, entries below ``_RANK_KEEP`` shrink to *stub_chars*, lowest rank
     and oldest first (with *middle_first*, the middle of the list first, so both
@@ -976,12 +997,12 @@ def _fit_entries(entries, max_chars, *, sep, stub_chars, noun, middle_first=Fals
     (the final answer, or the latest write) is cut only by the last-resort
     head-and-tail cut of the whole text.
     """
-    texts = [str(entry[0]) for entry in entries]
+    texts = [entry.text for entry in entries]
     if max_chars is None:
         return sep.join(texts)
     if max_chars <= 0 or not texts:
         return ""
-    ranks = [entry[1] for entry in entries]
+    ranks = [entry.rank for entry in entries]
     dropped = [False] * len(texts)
     marker_cost = len(_OMITTED_MARKER.format(len(texts), noun)) + len(sep)
     total = sum(len(text) for text in texts) + len(sep) * (len(texts) - 1)
@@ -1037,7 +1058,7 @@ def _write_body_max_chars():
 
 
 def _file_change_entries(traj):
-    """``[text, rank, written paths, head, body, tail, body cut]`` per write call, in trajectory order.
+    """A ``_FileChange`` per write call, in trajectory order.
 
     ``body`` keeps up to ``_write_body_max_chars()``; ``_fit_file_changes`` sizes it to the room.
     """
@@ -1058,8 +1079,17 @@ def _file_change_entries(traj):
         shown = _judge_excerpt(body, body_max)
         obs = _judge_excerpt(_tool_call_observation(step, tc), _WRITE_RESULT_CHARS)
         tail = f"Tool returned: {obs}" if obs else ""
-        text = _file_change_text(head, shown, tail)
-        entries.append([text, _RANK_KEEP, tuple(paths), head, shown, tail, len(body) > body_max])
+        entries.append(
+            _FileChange(
+                text=_file_change_text(head, shown, tail),
+                rank=_RANK_KEEP,
+                paths=tuple(paths),
+                head=head,
+                body=shown,
+                tail=tail,
+                body_cut=len(body) > body_max,
+            )
+        )
     _demote_superseded_writes(entries)
     return entries
 
@@ -1086,19 +1116,20 @@ def _fit_file_changes(entries, max_chars):
     before older writes shrink and drop.
     """
     sep = "\n\n"
-    full = sep.join(str(entry[0]) for entry in entries)
+    full = sep.join(entry.text for entry in entries)
+    body_cut = any(entry.body_cut for entry in entries)
     if max_chars is None:
-        return full, any(entry[6] for entry in entries)
-    fixed = sum(len(entry[0]) - len(entry[4]) for entry in entries) + len(sep) * (len(entries) - 1)
-    old_bodies = sum(min(len(entry[4]), _WRITE_BODY_CHARS) for entry in entries if entry[1] < _RANK_KEEP)
-    latest_bodies = [len(entry[4]) for entry in entries if entry[1] >= _RANK_KEEP]
+        return full, body_cut
+    fixed = sum(len(entry.text) - len(entry.body) for entry in entries) + len(sep) * (len(entries) - 1)
+    old_bodies = sum(min(len(entry.body), _WRITE_BODY_CHARS) for entry in entries if entry.rank < _RANK_KEEP)
+    latest_bodies = [len(entry.body) for entry in entries if entry.rank >= _RANK_KEEP]
     cap = max(_WRITE_BODY_CHARS, _even_share(latest_bodies, max_chars - fixed - old_bodies))
     fitted = []
     for entry in entries:
-        body = _truncate_for_behavior(entry[4], cap if entry[1] >= _RANK_KEEP else _WRITE_BODY_CHARS)
-        fitted.append([_file_change_text(entry[3], body, entry[5]), entry[1], entry[2]])
+        body = _truncate_for_behavior(entry.body, cap if entry.rank >= _RANK_KEEP else _WRITE_BODY_CHARS)
+        fitted.append(_Entry(_file_change_text(entry.head, body, entry.tail), entry.rank, entry.paths))
     text = _fit_entries(fitted, max_chars, sep=sep, stub_chars=_FILE_CHANGE_STUB_CHARS, noun="file changes")
-    return text, text != full or any(entry[6] for entry in entries)
+    return text, text != full or body_cut
 
 
 def build_behavior_evidence(traj, question, max_chars=None, final_response_limit=None):
@@ -1762,7 +1793,7 @@ def build_metric_evidence_bundles(traj, question, *, ground_truth="", expected_b
     histories = {}
     bc_text = _behavior_evidence(traj, question, bc_budget, final_limit, file_entries, histories)
     bc_full = _behavior_evidence(traj, question, 10**9, final_limit, file_entries, histories)
-    bc_trunc = len(bc_full) > len(bc_text) or any(entry[6] for entry in file_entries)
+    bc_trunc = len(bc_full) > len(bc_text) or any(entry.body_cut for entry in file_entries)
     bundles["behavior_check"] = {
         "prompt_evidence": _prepend_facts(bc_text),
         "evidence_refs": refs["behavior_check"],

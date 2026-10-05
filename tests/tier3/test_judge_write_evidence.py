@@ -939,9 +939,9 @@ def test_history_shrinks_an_entry_only_as_far_as_the_budget_needs(copy):
     # A history 50 chars over budget cut a 1,000-char tool result down to a
     # 160-char short line and left the rest of the room empty.
     entries = [
-        ["User: Fix the build.", copy._RANK_MESSAGE, ()],
-        ["Tool returned: " + "a" * 1000, copy._RANK_LOW, ()],
-        ["Agent: Fixed it.", copy._RANK_KEEP, ()],
+        copy._Entry("User: Fix the build.", copy._RANK_MESSAGE),
+        copy._Entry("Tool returned: " + "a" * 1000, copy._RANK_LOW),
+        copy._Entry("Agent: Fixed it.", copy._RANK_KEEP),
     ]
     full = copy._fit_history(entries, None)
 

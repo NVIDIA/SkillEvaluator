@@ -8470,3 +8470,66 @@ def test_invalid_exec_environment_fails_without_serializing_value(
 
     assert message in str(caught.value)
     assert _SENTINEL not in str(caught.value)
+
+
+def test_secure_docker_stays_on_the_docker_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    from harbor.environments.docker.runtime import DOCKER_RUNTIME
+    from harbor.environments.podman import PodmanEnvironment
+
+    podman_runtime = PodmanEnvironment.runtime()
+    assert podman_runtime is not DOCKER_RUNTIME
+    monkeypatch.setattr(DockerEnvironment, "runtime", classmethod(lambda _cls: podman_runtime))
+
+    assert SkillEvaluatorDockerEnvironment.runtime() is DOCKER_RUNTIME
+    assert SkillEvaluatorSecureDockerEnvironment.runtime() is DOCKER_RUNTIME
+
+
+def test_secure_docker_disables_ssh_streaming_and_gpu_reservations(tmp_path: Path) -> None:
+    environment = _initialized_secure_docker_environment(tmp_path)
+
+    assert environment.capabilities.stream is False
+    assert environment.capabilities.gpus is False
+    assert environment.capabilities.docker_compose is True
+    with pytest.raises(ValueError):
+        SkillEvaluatorSecureDockerEnvironment(
+            environment_dir=environment.environment_dir,
+            environment_name="secure-stream-test",
+            session_id="secure-stream-test",
+            trial_paths=TrialPaths(tmp_path / "stream-trial"),
+            task_env_config=EnvironmentConfig(),
+            stream=True,
+        )
+
+
+@pytest.mark.parametrize("kind", ["file", "dir"])
+def test_secure_docker_main_downloads_use_compose_copy_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    from harbor.environments.docker.docker_unix import UnixOps
+
+    environment = _initialized_secure_docker_environment(tmp_path)
+    commands: list[tuple[str, ...]] = []
+
+    async def create_subprocess(*args: object, **_kwargs: object) -> _BufferedComposeProcess:
+        commands.append(tuple(str(argument) for argument in args))
+        return _BufferedComposeProcess(stdout=b"")
+
+    async def raw_engine_copy(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("main-container downloads must not fall back to raw docker cp")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    monkeypatch.setattr(UnixOps, "_download_via_engine_cp", raw_engine_copy, raising=False)
+
+    if kind == "file":
+        asyncio.run(environment.download_file("/app/result.txt", tmp_path / "result.txt"))
+    else:
+        asyncio.run(environment.download_dir("/app/output", tmp_path / "output"))
+
+    copy_commands = [command for command in commands if "cp" in command]
+    assert len(copy_commands) == 1
+    assert Path(copy_commands[0][0]).name == "docker"
+    assert copy_commands[0][1] == "compose"
+    assert copy_commands[0][copy_commands[0].index("cp") + 2].startswith(f"{MAIN_SERVICE_NAME}:")
+    assert not any(Path(command[0]).name == "docker" and command[1] in {"cp", "ps"} for command in commands)

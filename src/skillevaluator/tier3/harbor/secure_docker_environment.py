@@ -32,7 +32,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 import yaml
 from harbor.environments.base import (
@@ -43,6 +43,7 @@ from harbor.environments.base import (
     ServiceOperationsUnsupportedError,
 )
 from harbor.environments.docker.docker import DockerEnvironment, _sanitize_docker_compose_project_name
+from harbor.environments.docker.runtime import DOCKER_RUNTIME, ContainerRuntime
 
 from skillevaluator.tier3.harbor.progress import secret_values_from_environment
 from skillevaluator.tier3.harbor.secure_copy import (
@@ -57,6 +58,9 @@ from skillevaluator.tier3.harbor.sensitive_stdin import (
 )
 from skillevaluator.tier3.harbor.stream_redaction import CommandOutputByteBudget
 from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
+
+if TYPE_CHECKING:
+    from harbor.environments.capabilities import EnvironmentCapabilities
 
 SECURE_DOCKER_ENV_IMPORT_PATH = (
     "skillevaluator.tier3.harbor.secure_docker_environment:SkillEvaluatorSecureDockerEnvironment"
@@ -1293,6 +1297,24 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         """Reject unsupported Compose inputs before Docker mutates a project."""
         self._compose_model_metadata()
         await super().start(force_build)
+
+    @classmethod
+    def runtime(cls) -> ContainerRuntime:
+        """Stay on Docker: the hardened Compose runner and containment use the Docker CLI."""
+        return DOCKER_RUNTIME
+
+    @property
+    def capabilities(self) -> EnvironmentCapabilities:
+        """Disable SSH streaming and GPU device reservations, which bypass the hardened runner."""
+        return super().capabilities.model_copy(update={"stream": False, "gpus": False})
+
+    async def download_file(self, source_path: str, target_path: Path | str) -> None:
+        """Download from the main container without Harbor's raw ``docker cp`` fallback."""
+        await self.service_download_file(source_path, target_path, service=None)
+
+    async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
+        """Download from the main container without Harbor's raw ``docker cp`` fallback."""
+        await self.service_download_dir(source_dir, target_dir, service=None)
 
     @staticmethod
     async def _collect_streamed_output(

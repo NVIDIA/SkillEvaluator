@@ -722,3 +722,44 @@ def test_incomplete_outcome_counts_audited_packages_only_when_partial() -> None:
     assert (whole["status"], whole["audited"], whole["vulnerabilities"]["high"]) == ("incomplete", 0, 0)
     assert (partial["status"], partial["audited"], partial["vulnerabilities"]["high"]) == ("incomplete", 1, 1)
     assert whole["errors"] == partial["errors"] == ["x: timed out"]
+
+
+def test_each_directory_is_walked_once_for_npm_manifests_and_dockerfiles(
+    tmp_path: Path, tools: dict[str, FakeTool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    walked: list[str] = []
+    discover = DependencySecurityValidator._discover
+
+    def _counting(directory: Path, selected: Any) -> list:
+        walked.append(Path(directory).name)
+        return discover(directory, selected)
+
+    monkeypatch.setattr(DependencySecurityValidator, "_discover", staticmethod(_counting))
+    tools["osv_scanner"].available = True
+    root = _bare_plugin(
+        tmp_path / "demo",
+        {
+            "skills/foo/SKILL.md": "---\nname: foo\ndescription: A bundled skill.\n---\nBody\n",
+            "skills/foo/package.json": {"dependencies": {"lodash": "4.17.20"}},
+            "Dockerfile": "FROM node:20.11.1\n",
+        },
+    )
+    result = _dependency_result(root)
+    assert sorted(walked) == ["demo", "foo"]
+    assert (_summary(result, "npm")["audited"], _summary(result, "container")["audited"]) == (1, 1)
+
+
+def test_dockerfile_discovery_failure_still_audits_the_npm_manifests(
+    tmp_path: Path, tools: dict[str, FakeTool]
+) -> None:
+    """A directory named like a Dockerfile fails Dockerfile discovery only; the npm audit still runs."""
+    tools["osv_scanner"].available = True
+    root = _bare_plugin(
+        tmp_path / "demo",
+        {"server/package.json": {"dependencies": {"lodash": "4.17.20"}}, "Dockerfile/README.md": "not a Dockerfile\n"},
+    )
+    result = _dependency_result(root)
+    assert result.incomplete_scans == ["container-image-audit"]
+    assert "Dockerfile discovery failed" in _summary(result, "container")["errors"][0]
+    npm = _summary(result, "npm")
+    assert (npm["status"], npm["audited"]) == ("audited", 1)

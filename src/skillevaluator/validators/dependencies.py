@@ -32,8 +32,9 @@ import json
 import re
 import tempfile
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from skillevaluator.constants import (
@@ -110,6 +111,25 @@ class DependencyDeclaration:
         if self.name is None or self.exact_version is None:
             return None
         return f"{self.name}=={self.exact_version}"
+
+
+@dataclass(frozen=True)
+class _Discovered:
+    """The files one ecosystem audits below a directory, or why they could not be discovered."""
+
+    files: tuple[PurePosixPath, ...] = ()
+    error: str | None = None
+
+
+_NPM_MANIFEST_NAMES = frozenset({eco.PACKAGE_JSON, *eco.LOCKFILE_NAMES})
+
+
+def _is_npm_manifest(relative: PurePath) -> bool:
+    return relative.name in _NPM_MANIFEST_NAMES
+
+
+def _is_dockerfile(relative: PurePath) -> bool:
+    return eco.is_dockerfile_name(relative.name)
 
 
 def canonicalize_package_name(name: str) -> str:
@@ -343,10 +363,11 @@ class DependencySecurityValidator(ValidatorBase):
         """Audit dependencies for a single skill directory (plus npm and images inside a plugin)."""
         result = self._audit_python(skill_path)
         if active_plugin_tree() is not None and skill_path.is_dir():
-            result.merge(self._audit_npm(skill_path))
+            npm_manifests, dockerfiles = self._discover_ecosystem_files(skill_path)
+            result.merge(self._audit_npm(skill_path, npm_manifests))
             if is_plugin_tree_root(skill_path):
                 result.merge(self._audit_mcp_packages(skill_path))
-            result.merge(self._audit_containers(skill_path))
+            result.merge(self._audit_containers(skill_path, dockerfiles))
         return result
 
     def _audit_python(self, skill_path: Path) -> ValidationResult:
@@ -729,6 +750,30 @@ class DependencySecurityValidator(ValidatorBase):
             found.append(PurePosixPath(*parts))
         return sorted(found)
 
+    def _discover_ecosystem_files(self, directory: Path) -> tuple[_Discovered, _Discovered]:
+        """The npm manifests and the Dockerfiles below *directory*, found in one no-follow walk.
+
+        Discovery fails closed on a selected entry that is not a single regular
+        file (a directory named ``Dockerfile``, a hard-linked ``package.json``),
+        and such a failure belongs to one ecosystem. After any failure each
+        ecosystem is therefore discovered on its own, so the other is still
+        audited.
+        """
+        try:
+            found = self._discover(directory, lambda relative: _is_npm_manifest(relative) or _is_dockerfile(relative))
+        except (SecurePathError, ValueError):
+            return self._discover_one(directory, _is_npm_manifest), self._discover_one(directory, _is_dockerfile)
+        return (
+            _Discovered(tuple(rel for rel in found if _is_npm_manifest(rel))),
+            _Discovered(tuple(rel for rel in found if _is_dockerfile(rel))),
+        )
+
+    def _discover_one(self, directory: Path, selected: Callable[[PurePath], bool]) -> _Discovered:
+        try:
+            return _Discovered(tuple(self._discover(directory, selected)))
+        except (SecurePathError, ValueError) as exc:
+            return _Discovered(error=str(exc))
+
     @staticmethod
     def _source_label(directory: Path, rel: PurePosixPath) -> str:
         """The plugin-relative path of *rel* for messages and warnings.
@@ -779,7 +824,7 @@ class DependencySecurityValidator(ValidatorBase):
         self._apply_outcome(result, outcome, label, scan_name=scan_name)
         eco.record_outcome(summary, outcome, declarations=declarations, audited=0, unverified=0, new_source=new_source)
 
-    def _audit_npm(self, directory: Path) -> ValidationResult:
+    def _audit_npm(self, directory: Path, discovered: _Discovered) -> ValidationResult:
         """Audit exact npm pins from lockfiles (or package.json when a directory has no lockfile).
 
         A manifest that cannot be read or parsed within its bounds makes the npm
@@ -788,15 +833,13 @@ class DependencySecurityValidator(ValidatorBase):
         """
         result = ValidationResult()
         summary = self._summary.setdefault("npm", eco.empty_ecosystem_summary())
-        names = {eco.PACKAGE_JSON, *eco.LOCKFILE_NAMES}
-        try:
-            manifests = self._discover(directory, lambda relative: relative.name in names)
-        except (SecurePathError, ValueError) as exc:
+        if discovered.error is not None:
             label = self._source_label(directory, PurePosixPath())
             self._record_unaudited(
-                result, summary, label, f"npm manifest discovery failed: {exc}", scan_name=NPM_AUDIT_SCAN
+                result, summary, label, f"npm manifest discovery failed: {discovered.error}", scan_name=NPM_AUDIT_SCAN
             )
             return result
+        manifests = list(discovered.files)
         if len(manifests) > MAX_ECOSYSTEM_FILES:
             self._record_unaudited(
                 result,
@@ -919,7 +962,7 @@ class DependencySecurityValidator(ValidatorBase):
             unverified=len(unverified),
         )
 
-    def _audit_containers(self, directory: Path) -> ValidationResult:
+    def _audit_containers(self, directory: Path, discovered: _Discovered) -> ValidationResult:
         """Audit exact container images from MCP run commands (plugin root) and Dockerfiles."""
         result = ValidationResult()
         summary = self._summary.setdefault("container", eco.empty_ecosystem_summary())
@@ -928,14 +971,16 @@ class DependencySecurityValidator(ValidatorBase):
         if is_plugin_tree_root(directory):
             for image, label in self._mcp_images(directory):
                 images.append((eco.image_declaration(image, "mcp"), label, label))
-        try:
-            dockerfiles = self._discover(directory, lambda relative: eco.is_dockerfile_name(relative.name))
-        except (SecurePathError, ValueError) as exc:
+        if discovered.error is not None:
             label = self._source_label(directory, PurePosixPath())
             self._record_unaudited(
-                result, summary, label, f"Dockerfile discovery failed: {exc}", scan_name=CONTAINER_AUDIT_SCAN
+                result,
+                summary,
+                label,
+                f"Dockerfile discovery failed: {discovered.error}",
+                scan_name=CONTAINER_AUDIT_SCAN,
             )
-            dockerfiles = []
+        dockerfiles = list(discovered.files)
         if len(dockerfiles) > MAX_ECOSYSTEM_FILES:
             self._record_unaudited(
                 result,

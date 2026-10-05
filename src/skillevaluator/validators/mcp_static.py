@@ -30,7 +30,7 @@ import re
 import shlex
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
@@ -129,6 +129,18 @@ def _finding(
     )
 
 
+@dataclass
+class _ServerFindings:
+    """Where findings about one ``mcpServers`` entry go; each message starts with ``mcpServers['<name>']: ``."""
+
+    name: str | None
+    file_path: str
+    findings: list[Finding] = field(default_factory=list)
+
+    def report(self, severity: Severity, check_name: str, message: str, suggestion: str) -> None:
+        self.findings.append(_finding(severity, check_name, message, self.file_path, suggestion, name=self.name))
+
+
 def _credential_flag_name(token: str) -> str | None:
     """Return the flag name when *token* is a credential-bearing option flag.
 
@@ -166,9 +178,7 @@ def _safe_hostname(parsed: Any) -> str | None:
         return None
 
 
-def _check_url_inline_secrets(
-    name: str, url: str, file_path: str, findings: list[Finding], *, ambiguous: bool = False
-) -> None:
+def _check_url_inline_secrets(server: _ServerFindings, url: str, *, ambiguous: bool = False) -> None:
     """Flag credentials written into a URL's userinfo or query string.
 
     The URL is read as written and, when it is ``ambiguous``, also the way WHATWG
@@ -180,27 +190,19 @@ def _check_url_inline_secrets(
     if ambiguous:
         readings.append(url_credentials(whatwg_url(url), any_userinfo=True))
     if any(reading.userinfo for reading in readings):
-        findings.append(
-            _finding(
-                Severity.CRITICAL,
-                "mcp_url_inline_secret",
-                f"url embeds userinfo credentials: {safe_url(url)!r} (userinfo withheld)",
-                file_path,
-                'Remove user:password@ from the URL; pass credentials by reference (e.g. header "${MY_TOKEN}").',
-                name=name,
-            )
+        server.report(
+            Severity.CRITICAL,
+            "mcp_url_inline_secret",
+            f"url embeds userinfo credentials: {safe_url(url)!r} (userinfo withheld)",
+            'Remove user:password@ from the URL; pass credentials by reference (e.g. header "${MY_TOKEN}").',
         )
     for key in dict.fromkeys(key for reading in readings for key in reading.query_keys):
         shown = "<redacted>" if has_secret_shape(key) else key[:64]
-        findings.append(
-            _finding(
-                Severity.CRITICAL,
-                "mcp_url_inline_secret",
-                f"url query parameter {shown!r} carries an inline credential; only ${{ENV}} references are allowed",
-                file_path,
-                "Do not put credentials in the URL query string; reference a secret handle/env var instead.",
-                name=name,
-            )
+        server.report(
+            Severity.CRITICAL,
+            "mcp_url_inline_secret",
+            f"url query parameter {shown!r} carries an inline credential; only ${{ENV}} references are allowed",
+            "Do not put credentials in the URL query string; reference a secret handle/env var instead.",
         )
 
 
@@ -235,68 +237,73 @@ def _iter_command_tokens(config: dict[str, Any]) -> list[str]:
     return tokens
 
 
-def _validate_command(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+def validate_mcp_command(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+    """Append the stdio command findings for one server's ``command`` and ``args`` to ``findings``.
+
+    Shell metacharacters, a shell's inline program (``-c``), inline credentials,
+    flags that disable TLS, and floating versions. Messages start with
+    ``mcpServers['<name>']: ``.
+    """
+    _check_command(_ServerFindings(name, file_path, findings), config)
+
+
+def validate_mcp_pinning(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+    """Append a MEDIUM ``mcp_unpinned_package`` finding to ``findings`` when a package runner is not pinned.
+
+    Not when ``findings`` already holds this server's blocking floating-version
+    finding (from :func:`validate_mcp_command`), so a call after it never
+    reports the same package twice.
+    """
+    _check_pinning(_ServerFindings(name, file_path, findings), config)
+
+
+# The names plugin_components imports.
+_validate_command = validate_mcp_command
+_validate_pinning = validate_mcp_pinning
+
+
+def _check_command(server: _ServerFindings, config: dict[str, Any]) -> None:
     command = config.get("command")
     if not isinstance(command, str) or not command.strip():
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_command_empty",
-                "runnable MCP 'command' must be a non-empty string",
-                file_path,
-                "Set 'command' to the server executable (argv-style, no shell string).",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_command_empty",
+            "runnable MCP 'command' must be a non-empty string",
+            "Set 'command' to the server executable (argv-style, no shell string).",
         )
         return
 
     args = config.get("args")
     if args is not None and not isinstance(args, list):
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_args_not_list",
-                "runnable MCP 'args' must be a list of strings",
-                file_path,
-                "Express command arguments as a JSON array of strings.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_args_not_list",
+            "runnable MCP 'args' must be a list of strings",
+            "Express command arguments as a JSON array of strings.",
         )
 
     tokens = _iter_command_tokens(config)
     for token in tokens:
         if _SHELL_METACHAR_RE.search(token):
-            findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "mcp_command_shell_metacharacters",
-                    f"command token contains shell metacharacters: {_shown(token)!r}",
-                    file_path,
-                    "Remove shell operators (; | & ` $() < >). MCP commands run argv-style, not via a shell.",
-                    name=name,
-                )
+            server.report(
+                Severity.CRITICAL,
+                "mcp_command_shell_metacharacters",
+                f"command token contains shell metacharacters: {_shown(token)!r}",
+                "Remove shell operators (; | & ` $() < >). MCP commands run argv-style, not via a shell.",
             )
         if token in _INSECURE_TLS_FLAGS:
-            findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "mcp_command_disables_tls",
-                    f"command disables TLS/certificate verification: {_shown(token)!r}",
-                    file_path,
-                    "Remove insecure-TLS flags; do not disable certificate verification.",
-                    name=name,
-                )
+            server.report(
+                Severity.CRITICAL,
+                "mcp_command_disables_tls",
+                f"command disables TLS/certificate verification: {_shown(token)!r}",
+                "Remove insecure-TLS flags; do not disable certificate verification.",
             )
         if _FLOATING_MARKER_RE.search(token):
-            findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "mcp_command_floating_version",
-                    f"command token uses a floating (unpinned) version: {_shown(token)!r}",
-                    file_path,
-                    "Pin the referenced package/image to an exact version, not latest/main.",
-                    name=name,
-                )
+            server.report(
+                Severity.HIGH,
+                "mcp_command_floating_version",
+                f"command token uses a floating (unpinned) version: {_shown(token)!r}",
+                "Pin the referenced package/image to an exact version, not latest/main.",
             )
 
     # Inline credentials carried in command arguments. A credential-named flag
@@ -318,45 +325,33 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
             else:
                 value, value_idx = "", -1
             if value and not is_env_reference(value):
-                findings.append(
-                    _finding(
-                        Severity.CRITICAL,
-                        "mcp_command_inline_secret",
-                        f"command argument {flag!r} carries an inline credential; only ${{ENV}} references are allowed",
-                        file_path,
-                        'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
-                        name=name,
-                    )
+                server.report(
+                    Severity.CRITICAL,
+                    "mcp_command_inline_secret",
+                    f"command argument {flag!r} carries an inline credential; only ${{ENV}} references are allowed",
+                    'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
                 )
                 flagged_value_idx = value_idx
             continue
         if idx == flagged_value_idx:
             continue  # already reported as the preceding flag's value
         if has_secret_shape(token):
-            findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "mcp_command_inline_secret",
-                    f"command argument args[{idx}] contains an inline credential (value withheld)",
-                    file_path,
-                    'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
-                    name=name,
-                )
+            server.report(
+                Severity.CRITICAL,
+                "mcp_command_inline_secret",
+                f"command argument args[{idx}] contains an inline credential (value withheld)",
+                'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
             )
 
     # Shell interpreter invoked with an inline program string (`sh -c "..."`, `bash -lc "..."`).
     shell = _shell_invocation(command, arg_list)
     if shell is not None and _shell_runs_inline_program(shell[1], shell=shell[0]):
-        findings.append(
-            _finding(
-                Severity.CRITICAL,
-                "mcp_command_dangerous_form",
-                f"command invokes a shell interpreter with '-c' ({_shown(command)!r}); this executes an arbitrary "
-                "program string",
-                file_path,
-                "Invoke the server binary directly instead of wrapping it in a shell '-c' string.",
-                name=name,
-            )
+        server.report(
+            Severity.CRITICAL,
+            "mcp_command_dangerous_form",
+            f"command invokes a shell interpreter with '-c' ({_shown(command)!r}); this executes an arbitrary "
+            "program string",
+            "Invoke the server binary directly instead of wrapping it in a shell '-c' string.",
         )
 
 
@@ -476,24 +471,14 @@ def _fish_option(arg: str) -> tuple[bool, bool]:
     return False, letters[-1:] in _FISH_VALUE_LETTERS
 
 
-def _validate_url(
-    name: str,
-    config: dict[str, Any],
-    file_path: str,
-    findings: list[Finding],
-    allowed_private_hosts: HostAllowlist,
-) -> None:
+def _check_url(server: _ServerFindings, config: dict[str, Any], allowed_private_hosts: HostAllowlist) -> None:
     url = config.get("url")
     if not isinstance(url, str) or not url.strip():
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_url_empty",
-                "runnable MCP 'url' must be a non-empty string",
-                file_path,
-                "Set 'url' to the server endpoint using a secure https:// (or wss://) URL.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_url_empty",
+            "runnable MCP 'url' must be a non-empty string",
+            "Set 'url' to the server endpoint using a secure https:// (or wss://) URL.",
         )
         return
 
@@ -505,35 +490,27 @@ def _validate_url(
         raw = urlparse(url.strip())
         parsed = urlparse(whatwg_url(url))
     except ValueError:  # e.g. an unbalanced '[' in the authority
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_url_malformed_authority",
-                "url could not be parsed (malformed authority)",
-                file_path,
-                "Use a valid host[:port] authority, e.g. https://host:443/path.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_url_malformed_authority",
+            "url could not be parsed (malformed authority)",
+            "Use a valid host[:port] authority, e.g. https://host:443/path.",
         )
         return
     problems = url_ambiguities(url)
     if problems:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_url_malformed_authority",
-                f"url contains {', and '.join(problems)}, so MCP clients and URL parsers disagree on where it "
-                f"points; WHATWG clients (Node, the MCP SDKs) {_client_reading(url)}",
-                file_path,
-                "Write the URL with '//' after the scheme and without backslashes, whitespace, or control "
-                "characters, e.g. https://host/path.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_url_malformed_authority",
+            f"url contains {', and '.join(problems)}, so MCP clients and URL parsers disagree on where it "
+            f"points; WHATWG clients (Node, the MCP SDKs) {_client_reading(url)}",
+            "Write the URL with '//' after the scheme and without backslashes, whitespace, or control "
+            "characters, e.g. https://host/path.",
         )
     scheme = (parsed.scheme or "").lower()
     # Inline credentials in userinfo/query are persisted verbatim; check them
     # independent of the scheme (secure https URLs are the common case).
-    _check_url_inline_secrets(name, url, file_path, findings, ambiguous=bool(problems))
+    _check_url_inline_secrets(server, url, ambiguous=bool(problems))
     if problems:
         # A Python client may still connect where urllib reads the host: classify that one too.
         try:
@@ -541,7 +518,7 @@ def _validate_url(
         except ValueError:
             raw_host = None
         if raw_host and raw_host != _safe_hostname(parsed):
-            _validate_endpoint(name, url, raw_host, file_path, findings, allowed_private_hosts)
+            _check_endpoint(server, url, raw_host, allowed_private_hosts)
     if scheme in ALLOWED_MCP_URL_SCHEMES:
         # A secure scheme alone is not a usable endpoint: require a host to connect
         # to, and reject a malformed authority/port. Otherwise a URL like "https://"
@@ -550,29 +527,21 @@ def _validate_url(
             host = parsed.hostname
             _ = parsed.port  # property access raises ValueError on a malformed port
         except ValueError:
-            findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "mcp_url_malformed_authority",
-                    f"url has a malformed authority/port: {shown!r}",
-                    file_path,
-                    "Use a valid host[:port] authority, e.g. https://host:443/path.",
-                    name=name,
-                )
+            server.report(
+                Severity.HIGH,
+                "mcp_url_malformed_authority",
+                f"url has a malformed authority/port: {shown!r}",
+                "Use a valid host[:port] authority, e.g. https://host:443/path.",
             )
             return
         if not host:
-            findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "mcp_url_no_host",
-                    f"url uses scheme {scheme!r} but has no host to connect to: {shown!r}",
-                    file_path,
-                    "Provide a full endpoint with a hostname, e.g. https://host[:port]/path.",
-                    name=name,
-                )
+            server.report(
+                Severity.HIGH,
+                "mcp_url_no_host",
+                f"url uses scheme {scheme!r} but has no host to connect to: {shown!r}",
+                "Provide a full endpoint with a hostname, e.g. https://host[:port]/path.",
             )
-        _validate_endpoint(name, url, host, file_path, findings, allowed_private_hosts)
+        _check_endpoint(server, url, host, allowed_private_hosts)
         return
     if scheme in _INSECURE_URL_SCHEMES:
         # Plaintext endpoints are blocked below; still report where they point.
@@ -580,57 +549,41 @@ def _validate_url(
             insecure_host = parsed.hostname
         except ValueError:
             insecure_host = None
-        _validate_endpoint(name, url, insecure_host, file_path, findings, allowed_private_hosts)
+        _check_endpoint(server, url, insecure_host, allowed_private_hosts)
     if scheme in _DANGEROUS_URL_SCHEMES or scheme == "":
-        findings.append(
-            _finding(
-                Severity.CRITICAL,
-                "mcp_url_dangerous_scheme",
-                f"url uses a dangerous/invalid scheme {scheme or '(none)'!r}: {shown!r}",
-                file_path,
-                "Use a secure https:// or wss:// endpoint; file/data/javascript/ftp schemes are not permitted.",
-                name=name,
-            )
+        server.report(
+            Severity.CRITICAL,
+            "mcp_url_dangerous_scheme",
+            f"url uses a dangerous/invalid scheme {scheme or '(none)'!r}: {shown!r}",
+            "Use a secure https:// or wss:// endpoint; file/data/javascript/ftp schemes are not permitted.",
         )
     elif scheme in _INSECURE_URL_SCHEMES:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_url_insecure_scheme",
-                f"url uses an insecure plaintext scheme {scheme!r}: {shown!r}",
-                file_path,
-                "Use https:// (or wss://) so the MCP transport is encrypted.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_url_insecure_scheme",
+            f"url uses an insecure plaintext scheme {scheme!r}: {shown!r}",
+            "Use https:// (or wss://) so the MCP transport is encrypted.",
         )
     else:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_url_scheme_not_allowed",
-                f"url scheme {scheme!r} is not an allowed MCP scheme: {shown!r}",
-                file_path,
-                f"Use one of the allowed secure schemes: {', '.join(sorted(ALLOWED_MCP_URL_SCHEMES))}.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_url_scheme_not_allowed",
+            f"url scheme {scheme!r} is not an allowed MCP scheme: {shown!r}",
+            f"Use one of the allowed secure schemes: {', '.join(sorted(ALLOWED_MCP_URL_SCHEMES))}.",
         )
 
 
-def _validate_env_and_headers(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+def _check_env_and_headers(server: _ServerFindings, config: dict[str, Any]) -> None:
     for section in ("env", "headers"):
         block = config.get(section)
         if block is None:
             continue
         if not isinstance(block, dict):
-            findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "mcp_env_not_object",
-                    f"'{section}' must be an object mapping names to reference values",
-                    file_path,
-                    f"Express '{section}' as a JSON object of key -> value.",
-                    name=name,
-                )
+            server.report(
+                Severity.HIGH,
+                "mcp_env_not_object",
+                f"'{section}' must be an object mapping names to reference values",
+                f"Express '{section}' as a JSON object of key -> value.",
             )
             continue
         # NON-BLOCKING advisory: the evaluation runtime applies command+args (stdio)
@@ -639,59 +592,43 @@ def _validate_env_and_headers(name: str, config: dict[str, Any], file_path: str,
         # launched MCP server (use task-level environment / CI credential injection
         # instead). The inline-secret / insecure-TLS checks below still run, so a raw
         # credential declared here is still caught and blocks.
-        findings.append(
-            _finding(
-                Severity.LOW,
-                "mcp_field_ignored",
-                f"'{section}' is not applied by the evaluation runtime and will be ignored; "
-                "a Tier 3 run of this server is reported INCOMPLETE",
-                file_path,
-                f"Remove '{section}' or rely on task-level environment / CI credential injection; "
-                "the runtime applies command+args (stdio) and url (http/sse) only.",
-                name=name,
-            )
+        server.report(
+            Severity.LOW,
+            "mcp_field_ignored",
+            f"'{section}' is not applied by the evaluation runtime and will be ignored; "
+            "a Tier 3 run of this server is reported INCOMPLETE",
+            f"Remove '{section}' or rely on task-level environment / CI credential injection; "
+            "the runtime applies command+args (stdio) and url (http/sse) only.",
         )
         for key, value in block.items():
             if not isinstance(value, str):
                 continue
             if _is_insecure_tls_env(key, value):
-                findings.append(
-                    _finding(
-                        Severity.CRITICAL,
-                        "mcp_insecure_tls_env",
-                        f"'{section}.{key}' disables TLS/certificate verification",
-                        file_path,
-                        "Do not disable TLS verification via environment variables.",
-                        name=name,
-                    )
+                server.report(
+                    Severity.CRITICAL,
+                    "mcp_insecure_tls_env",
+                    f"'{section}.{key}' disables TLS/certificate verification",
+                    "Do not disable TLS verification via environment variables.",
                 )
             if looks_like_inline_secret(key, value):
-                findings.append(
-                    _finding(
-                        Severity.CRITICAL,
-                        "mcp_inline_secret",
-                        f"'{section}.{key}' contains an inline credential; only ${{ENV}} references are allowed",
-                        file_path,
-                        'Reference a secret handle/env var (e.g. "${MY_TOKEN}"); never inline a raw secret.',
-                        name=name,
-                    )
+                server.report(
+                    Severity.CRITICAL,
+                    "mcp_inline_secret",
+                    f"'{section}.{key}' contains an inline credential; only ${{ENV}} references are allowed",
+                    'Reference a secret handle/env var (e.g. "${MY_TOKEN}"); never inline a raw secret.',
                 )
 
 
-def _validate_transport(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+def _check_transport(server: _ServerFindings, config: dict[str, Any]) -> None:
     raw = config.get("transport", config.get("type"))
     if raw is None:
         return
     if not isinstance(raw, str) or raw.strip().lower() not in ALLOWED_MCP_TRANSPORTS:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_transport_invalid",
-                f"transport {raw!r} is not one of {sorted(ALLOWED_MCP_TRANSPORTS)}",
-                file_path,
-                f"Set transport to one of: {', '.join(sorted(ALLOWED_MCP_TRANSPORTS))}.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_transport_invalid",
+            f"transport {raw!r} is not one of {sorted(ALLOWED_MCP_TRANSPORTS)}",
+            f"Set transport to one of: {', '.join(sorted(ALLOWED_MCP_TRANSPORTS))}.",
         )
         return
 
@@ -701,15 +638,11 @@ def _validate_transport(name: str, config: dict[str, Any], file_path: str, findi
     # against the exact lowercase "stdio"/"http"/"sse" and the persist path writes
     # it verbatim, so a value Tier 1 accepts must be the exact form Harbor accepts.
     if literal != canonical:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_transport_bad_casing",
-                f"transport {raw!r} must be lowercase {canonical!r}; Harbor's transport literal is case-sensitive",
-                file_path,
-                f"Use the exact lowercase transport literal {canonical!r}.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_transport_bad_casing",
+            f"transport {raw!r} must be lowercase {canonical!r}; Harbor's transport literal is case-sensitive",
+            f"Use the exact lowercase transport literal {canonical!r}.",
         )
 
     # Kind <-> transport consistency: a stdio server is launched from a 'command';
@@ -718,56 +651,40 @@ def _validate_transport(name: str, config: dict[str, Any], file_path: str, findi
     has_command = "command" in config
     has_url = "url" in config
     if has_command and not has_url and canonical != "stdio":
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_transport_kind_mismatch",
-                f"command (stdio) server declares transport {raw!r}; a command server must use transport 'stdio'",
-                file_path,
-                "Set transport to 'stdio' (or omit it) for command-based MCP servers.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_transport_kind_mismatch",
+            f"command (stdio) server declares transport {raw!r}; a command server must use transport 'stdio'",
+            "Set transport to 'stdio' (or omit it) for command-based MCP servers.",
         )
     elif has_url and not has_command and canonical not in {"http", "sse"}:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_transport_kind_mismatch",
-                f"url server declares transport {raw!r}; a url server must use transport 'http' or 'sse'",
-                file_path,
-                "Set transport to 'http' or 'sse' for url-based MCP servers.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_transport_kind_mismatch",
+            f"url server declares transport {raw!r}; a url server must use transport 'http' or 'sse'",
+            "Set transport to 'http' or 'sse' for url-based MCP servers.",
         )
 
 
-def _validate_insecure_tls_config(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+def _check_insecure_tls_config(server: _ServerFindings, config: dict[str, Any]) -> None:
     """Reject config keys that turn off TLS/certificate verification."""
     if config.get("insecure") is True:
-        findings.append(
-            _finding(
-                Severity.CRITICAL,
-                "mcp_insecure_flag",
-                "'insecure: true' disables endpoint security",
-                file_path,
-                "Remove 'insecure'; connect over a verified TLS endpoint.",
-                name=name,
-            )
+        server.report(
+            Severity.CRITICAL,
+            "mcp_insecure_flag",
+            "'insecure: true' disables endpoint security",
+            "Remove 'insecure'; connect over a verified TLS endpoint.",
         )
     for section in ("tls", "ssl"):
         block = config.get(section)
         if not isinstance(block, dict):
             continue
         if block.get("rejectUnauthorized") is False or block.get("verify") is False:
-            findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "mcp_insecure_tls_config",
-                    f"'{section}' disables certificate verification (rejectUnauthorized/verify = false)",
-                    file_path,
-                    "Do not disable certificate verification; use a valid certificate chain.",
-                    name=name,
-                )
+            server.report(
+                Severity.CRITICAL,
+                "mcp_insecure_tls_config",
+                f"'{section}' disables certificate verification (rejectUnauthorized/verify = false)",
+                "Do not disable certificate verification; use a valid certificate chain.",
             )
 
 
@@ -1515,14 +1432,7 @@ def host_name_is_allowlisted(host: str, allowed_hosts: HostAllowlist | Iterable[
     return HostAllowlist.of(allowed_hosts).allows_host(normalized, classify_endpoint_host(normalized))
 
 
-def _validate_endpoint(
-    name: str,
-    url: str,
-    host: str | None,
-    file_path: str,
-    findings: list[Finding],
-    allowed_private_hosts: HostAllowlist,
-) -> None:
+def _check_endpoint(server: _ServerFindings, url: str, host: str | None, allowed_private_hosts: HostAllowlist) -> None:
     if not host:
         return
     endpoint = classify_endpoint_host(host)
@@ -1531,31 +1441,23 @@ def _validate_endpoint(
     encoded = f" (encoded as {host!r})" if endpoint.encoded else ""
     shown = safe_url(url)  # never echo userinfo or query credentials
     if endpoint.kind == "metadata":
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_endpoint_metadata",
-                f"url targets a {endpoint.reason} endpoint{encoded}: {shown!r}; an MCP client pointed here "
-                f"can expose instance credentials ({_ENDPOINT_STATIC_NOTE})",
-                file_path,
-                "Remove the instance-metadata endpoint; MCP servers must never target cloud metadata services.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_endpoint_metadata",
+            f"url targets a {endpoint.reason} endpoint{encoded}: {shown!r}; an MCP client pointed here "
+            f"can expose instance credentials ({_ENDPOINT_STATIC_NOTE})",
+            "Remove the instance-metadata endpoint; MCP servers must never target cloud metadata services.",
         )
         return
     if allowed_private_hosts.allows(endpoint):
         return
-    findings.append(
-        _finding(
-            Severity.MEDIUM,
-            "mcp_endpoint_private",
-            f"url host is a {endpoint.reason} address{encoded}: {shown!r}; the endpoint is not publicly "
-            f"reachable and may target local services ({_ENDPOINT_STATIC_NOTE})",
-            file_path,
-            "Use a public HTTPS endpoint, or allow this intended private host through the validation policy "
-            "(mcp.allowed_private_hosts).",
-            name=name,
-        )
+    server.report(
+        Severity.MEDIUM,
+        "mcp_endpoint_private",
+        f"url host is a {endpoint.reason} address{encoded}: {shown!r}; the endpoint is not publicly "
+        f"reachable and may target local services ({_ENDPOINT_STATIC_NOTE})",
+        "Use a public HTTPS endpoint, or allow this intended private host through the validation policy "
+        "(mcp.allowed_private_hosts).",
     )
 
 
@@ -1895,36 +1797,33 @@ def auto_approve_issues(config: Any) -> list[OverrideIssue]:
     return issues
 
 
-def _append_override_findings(name: str, issues: list[OverrideIssue], file_path: str, findings: list[Finding]) -> None:
-    for issue in issues:
-        check = "mcp_auto_approve" if issue.concept == "auto_approve" else f"mcp_{issue.concept}"
-        findings.append(_finding(issue.severity, check, issue.message, file_path, issue.suggestion, name=name))
-
-
-def _validate_overrides(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+def _check_overrides(server: _ServerFindings, config: dict[str, Any]) -> None:
     """Permission-bypass flags anywhere in the entry, dangerous env, and auto-approve keys."""
-    _append_override_findings(name, permission_bypass_issues(config), file_path, findings)
-    _append_override_findings(name, env_override_issues(config.get("env")), file_path, findings)
-    _append_override_findings(name, auto_approve_issues(config), file_path, findings)
+    for issue in (
+        *permission_bypass_issues(config),
+        *env_override_issues(config.get("env")),
+        *auto_approve_issues(config),
+    ):
+        check = "mcp_auto_approve" if issue.concept == "auto_approve" else f"mcp_{issue.concept}"
+        server.report(issue.severity, check, issue.message, issue.suggestion)
 
 
-def _validate_pinning(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+def _check_pinning(server: _ServerFindings, config: dict[str, Any]) -> None:
     pin = classify_mcp_pinning(config)
     if pin.status != "unpinned":
         return
     # A floating marker (@latest, :latest, ...) already raised the blocking
     # mcp_command_floating_version finding for this entry; do not double-report.
-    if any(f.check_name == "mcp_command_floating_version" and f.metadata.get("mcp_server") == name for f in findings):
+    if any(
+        f.check_name == "mcp_command_floating_version" and f.metadata.get("mcp_server") == server.name
+        for f in server.findings
+    ):
         return
-    findings.append(
-        _finding(
-            Severity.MEDIUM,
-            "mcp_unpinned_package",
-            f"package runner is not pinned to an exact version ({pin.detail}); each launch may fetch different code",
-            file_path,
-            "Pin an exact version (pkg@1.2.3, pkg==1.2.3, --from pkg==1.2.3, image:1.2.3 or image@sha256:...).",
-            name=name,
-        )
+    server.report(
+        Severity.MEDIUM,
+        "mcp_unpinned_package",
+        f"package runner is not pinned to an exact version ({pin.detail}); each launch may fetch different code",
+        "Pin an exact version (pkg@1.2.3, pkg==1.2.3, --from pkg==1.2.3, image:1.2.3 or image@sha256:...).",
     )
 
 
@@ -1959,16 +1858,13 @@ def validate_mcp_server_declaration(
         if not isinstance(name, str):
             return findings
 
+    server = _ServerFindings(name, file_path, findings)
     if not isinstance(config, dict):
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_config_not_object",
-                "MCP server config must be a JSON object",
-                file_path,
-                "Express the MCP server config as an object with command/url/provider.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_config_not_object",
+            "MCP server config must be a JSON object",
+            "Express the MCP server config as an object with command/url/provider.",
         )
         return findings
 
@@ -1978,50 +1874,38 @@ def validate_mcp_server_declaration(
     declared_kinds = sum((has_command, has_url, has_provider))
 
     if declared_kinds == 0:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_missing_kind",
-                "MCP server must declare a 'command' (stdio), a 'url' (http/sse), or a 'provider'",
-                file_path,
-                "Add a runnable command/url, or declare a public provider identifier.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_missing_kind",
+            "MCP server must declare a 'command' (stdio), a 'url' (http/sse), or a 'provider'",
+            "Add a runnable command/url, or declare a public provider identifier.",
         )
     elif declared_kinds > 1:
-        findings.append(
-            _finding(
-                Severity.HIGH,
-                "mcp_kind_invalid",
-                "MCP server must declare exactly one of 'command', 'url', or 'provider'",
-                file_path,
-                "Choose one runnable or provider-only MCP form.",
-                name=name,
-            )
+        server.report(
+            Severity.HIGH,
+            "mcp_kind_invalid",
+            "MCP server must declare exactly one of 'command', 'url', or 'provider'",
+            "Choose one runnable or provider-only MCP form.",
         )
 
-    _validate_transport(name, config, file_path, findings)
-    _validate_insecure_tls_config(name, config, file_path, findings)
-    _validate_env_and_headers(name, config, file_path, findings)
-    _validate_overrides(name, config, file_path, findings)
+    _check_transport(server, config)
+    _check_insecure_tls_config(server, config)
+    _check_env_and_headers(server, config)
+    _check_overrides(server, config)
 
     if has_command:
-        _validate_command(name, config, file_path, findings)
-        _validate_pinning(name, config, file_path, findings)
+        _check_command(server, config)
+        _check_pinning(server, config)
     if has_url:
-        _validate_url(name, config, file_path, findings, HostAllowlist.of(allowed_private_hosts))
+        _check_url(server, config, HostAllowlist.of(allowed_private_hosts))
     if has_provider and not (has_command or has_url):
         provider = config.get("provider")
         if not isinstance(provider, str) or not provider.strip():
-            findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "mcp_provider_invalid",
-                    "provider must be a non-empty string",
-                    file_path,
-                    "Set a public provider identifier.",
-                    name=name,
-                )
+            server.report(
+                Severity.HIGH,
+                "mcp_provider_invalid",
+                "provider must be a non-empty string",
+                "Set a public provider identifier.",
             )
 
     return findings

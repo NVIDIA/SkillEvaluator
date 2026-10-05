@@ -17,7 +17,11 @@ import pytest
 
 from skillevaluator.models.result import Severity
 from skillevaluator.plugin_components import PluginRootReader, collect_mcp_declarations
-from skillevaluator.validators.mcp_static import validate_mcp_server_declaration
+from skillevaluator.validators.mcp_static import (
+    validate_mcp_command,
+    validate_mcp_pinning,
+    validate_mcp_server_declaration,
+)
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 
 
@@ -140,6 +144,19 @@ def test_command_without_shell_inline_program_is_not_dangerous_form(config) -> N
 def test_shell_command_with_non_list_args_reports_args_not_list(args) -> None:
     findings = validate_mcp_server_declaration("s", {"command": "bash", "args": args}, "p.json")
     assert _checks(findings) == {"mcp_args_not_list"}
+
+
+def test_public_command_and_pinning_checks_report_into_one_list() -> None:
+    findings: list = []
+    floating = {"command": "npx", "args": ["-y", "pkg@latest"]}
+    validate_mcp_command("s", floating, "p.json", findings)
+    validate_mcp_pinning("s", floating, "p.json", findings)
+    assert [f.check_name for f in findings] == ["mcp_command_floating_version"]  # reported once, not also unpinned
+    assert findings[0].message.startswith("mcpServers['s']: ")
+
+    findings = []
+    validate_mcp_pinning("s", {"command": "npx", "args": ["-y", "pkg"]}, "p.json", findings)
+    assert [(f.check_name, f.metadata) for f in findings] == [("mcp_unpinned_package", {"mcp_server": "s"})]
 
 
 def test_command_floating_version_blocked() -> None:

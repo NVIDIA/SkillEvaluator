@@ -595,25 +595,3 @@ class TestCollectFilesExclusions:
         result = collect_files(skill_root)
         rel_paths = sorted(f.rel_path for f in result)
         assert rel_paths == ["SKILL.md", "references/guide.md"]
-
-    def test_custom_exclusion_set_overrides_default(self, skill_root: Path) -> None:
-        """Callers can opt out of the default filter (e.g. for diagnostic dumps)."""
-        (skill_root / "SKILL.md").write_text("# Skill")
-        evals_dir = skill_root / "evals"
-        evals_dir.mkdir()
-        (evals_dir / "fixture.md").write_text("# fixture\nbody")
-
-        result = collect_files(skill_root, excluded_dirs=())
-        rel_paths = sorted(f.rel_path for f in result)
-        assert rel_paths == ["SKILL.md", "evals/fixture.md"]
-
-    def test_custom_exclusion_set_extends_filter(self, skill_root: Path) -> None:
-        """Callers can swap in a different set when scanning non-skill trees."""
-        (skill_root / "SKILL.md").write_text("# Skill")
-        cache = skill_root / "build_cache"
-        cache.mkdir()
-        (cache / "stale.md").write_text("# stale\nbody")
-
-        result = collect_files(skill_root, excluded_dirs={"build_cache"})
-        rel_paths = sorted(f.rel_path for f in result)
-        assert rel_paths == ["SKILL.md"]

@@ -1899,6 +1899,13 @@ def _judge_error(error_reason, **metadata):
 NOT_APPLICABLE_STATUS = "not_applicable"
 _NO_GROUND_TRUTH_REASON = "N/A: no ground_truth defined for this eval case"
 _NO_EXPECTED_BEHAVIOR_REASON = "N/A: no expected_behavior defined for this eval case"
+# The LLM-judged metrics, in judging order: the entry field each judges
+# against, and why it is N/A when the case leaves that field empty.
+_JUDGED_METRICS = {
+    "accuracy": ("ground_truth", _NO_GROUND_TRUTH_REASON),
+    "goal_accuracy": ("ground_truth", _NO_GROUND_TRUTH_REASON),
+    "behavior_check": ("expected_behavior", _NO_EXPECTED_BEHAVIOR_REASON),
+}
 
 
 def _judge_not_applicable(reason, **metadata):
@@ -11276,12 +11283,8 @@ def main():
         # so one crashed trial cannot turn an arm's N/A judge metric into 0.0.
         judge_scores = {}
         judge_details = {}
-        for metric, reference, na_reason in (
-            ("accuracy", entry.get("ground_truth", ""), _NO_GROUND_TRUTH_REASON),
-            ("goal_accuracy", entry.get("ground_truth", ""), _NO_GROUND_TRUTH_REASON),
-            ("behavior_check", entry.get("expected_behavior", []), _NO_EXPECTED_BEHAVIOR_REASON),
-        ):
-            if _has_judge_reference(reference):
+        for metric, (field, na_reason) in _JUDGED_METRICS.items():
+            if _has_judge_reference(entry.get(field)):
                 judge_scores[metric] = 0
             else:
                 judge_scores[metric] = None
@@ -11409,41 +11412,18 @@ def main():
         traj, question, ground_truth=ground_truth, expected_behavior=expected_behavior
     )
 
-    # ── Eval 4: accuracy (LLM judge) ─────────────────────────────────────
-    acc_result = _call_required_judge(
-        "accuracy",
-        judge_accuracy,
-        question,
-        ground_truth,
-        bundles["accuracy"]["prompt_evidence"],
-        allow_not_applicable=not _has_judge_reference(ground_truth),
-    )
-    acc_score = acc_result["score"]
-    details["accuracy"] = acc_result
-
-    # ── Eval 5: goal_accuracy (RAGAS or custom LLM judge) ────────────────
-    ga_result = _call_required_judge(
-        "goal_accuracy",
-        judge_goal_accuracy,
-        question,
-        ground_truth,
-        bundles["goal_accuracy"]["prompt_evidence"],
-        tool_summary="",
-        allow_not_applicable=not _has_judge_reference(ground_truth),
-    )
-    ga_score = ga_result["score"]
-    details["goal_accuracy"] = ga_result
-
-    # ── Eval 6: behavior_check (LLM judge) ───────────────────────────────
-    bc_result = _call_required_judge(
-        "behavior_check",
-        judge_behavior_check,
-        bundles["behavior_check"]["prompt_evidence"],
-        expected_behavior,
-        allow_not_applicable=not _has_judge_reference(expected_behavior),
-    )
-    bc_score = bc_result["score"]
-    details["behavior_check"] = bc_result
+    # ── Evals 4-6: accuracy, goal_accuracy, behavior_check (LLM judges) ──
+    # goal_accuracy uses RAGAS when the provider allows, else a custom prompt.
+    judge_calls = {
+        "accuracy": (judge_accuracy, question, ground_truth, bundles["accuracy"]["prompt_evidence"]),
+        "goal_accuracy": (judge_goal_accuracy, question, ground_truth, bundles["goal_accuracy"]["prompt_evidence"]),
+        "behavior_check": (judge_behavior_check, bundles["behavior_check"]["prompt_evidence"], expected_behavior),
+    }
+    for metric, (field, _) in _JUDGED_METRICS.items():
+        judge, *args = judge_calls[metric]
+        details[metric] = _call_required_judge(
+            metric, judge, *args, allow_not_applicable=not _has_judge_reference(entry.get(field))
+        )
 
     # persist refs + omission metadata onto the metric details
     attach_metric_evidence_refs(details, {m: bundles[m]["evidence_refs"] for m in bundles})
@@ -11456,9 +11436,7 @@ def main():
         "security": security_score,
         "skill_execution": se_score,
         "skill_efficiency": sef_score,
-        "accuracy": acc_score,
-        "goal_accuracy": ga_score,
-        "behavior_check": bc_score,
+        **{metric: details[metric]["score"] for metric in _JUDGED_METRICS},
         "metric_set": DEFAULT_METRIC_SET,
         "entry_id": entry.get("id"),
         "has_skill": entry.get("has_skill", True),
@@ -11467,9 +11445,7 @@ def main():
     }
 
     judge_errors = {
-        metric: details[metric]["reason"]
-        for metric in ("accuracy", "goal_accuracy", "behavior_check")
-        if details[metric].get("status") == "error"
+        metric: details[metric]["reason"] for metric in _JUDGED_METRICS if details[metric].get("status") == "error"
     }
     if judge_errors:
         result["evaluation_status"] = "failed"
@@ -11491,7 +11467,7 @@ def main():
 
     logger.info(
         "Scores: security=%s skill_exec=%s efficiency=%s accuracy=%s goal=%s behavior=%s overall=%s",
-        *(_format_log_score(value) for value in (security_score, se_score, sef_score, acc_score, ga_score, bc_score)),
+        *(_format_log_score(result[metric]) for metric in DISPLAY_METRICS),
         _format_log_score(overall),
     )
 

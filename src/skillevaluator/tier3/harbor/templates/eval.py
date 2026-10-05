@@ -2288,6 +2288,10 @@ _JUDGE_WALL_TIME_BUDGET_SEC = 180.0
 _ACTIVE_JUDGE_DEADLINE: ContextVar[float | None] = ContextVar("active_judge_deadline", default=None)
 
 
+class _JudgeBudgetExhausted(TimeoutError):
+    """A required judge spent its wall-time budget; unlike a read timeout, it is never retried."""
+
+
 class EvalRetryConfig(NamedTuple):
     """Represent bounded retry and backoff settings for direct verifier LLM calls."""
 
@@ -2324,7 +2328,7 @@ def _remaining_judge_timeout(timeout):
         return timeout
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise TimeoutError("LLM judge time budget exhausted")
+        raise _JudgeBudgetExhausted("LLM judge time budget exhausted")
     return min(timeout, remaining)
 
 
@@ -2403,7 +2407,7 @@ def _compute_bounded_retry_delay(retry_after_str, *, attempt, base_delay, max_de
     sleep_duration = min(delay, max_delay)
     deadline = _ACTIVE_JUDGE_DEADLINE.get()
     if deadline is not None and time.monotonic() + sleep_duration >= deadline:
-        raise TimeoutError("LLM judge time budget exhausted before retry") from error
+        raise _JudgeBudgetExhausted("LLM judge time budget exhausted before retry") from error
     return sleep_duration
 
 
@@ -2462,7 +2466,7 @@ def _is_transient_judge_error(error):
     if _is_certificate_failure(error):
         return False
     cause = error.reason if isinstance(error, urllib.error.URLError) else error
-    if isinstance(cause, TimeoutError) and "LLM judge time budget exhausted" in str(cause):
+    if isinstance(cause, _JudgeBudgetExhausted):
         return False
     if isinstance(error, urllib.error.URLError) and not isinstance(cause, OSError):
         return "timed out" in str(cause).lower()
@@ -2690,7 +2694,7 @@ _RETRIABLE_BOTOCORE_EXCEPTION_NAMES = frozenset(
 
 def _classify_bedrock_retry_error(error):
     """Return (is_retriable, status_label, retry_after_str) for a Bedrock Converse exception."""
-    if isinstance(error, TimeoutError) and "LLM judge time budget exhausted" in str(error):
+    if isinstance(error, _JudgeBudgetExhausted):
         return False, type(error).__name__, None
     if isinstance(error, (FileNotFoundError, IsADirectoryError, NotADirectoryError, PermissionError)):
         return False, type(error).__name__, None
@@ -11191,7 +11195,7 @@ def _call_required_judge(metric, judge, *args, allow_not_applicable=False, **kwa
                     previous_alarm_handler = signal.getsignal(signal.SIGALRM)
 
                     def _raise_judge_timeout(_signum, _frame):
-                        raise TimeoutError("LLM judge time budget exhausted")
+                        raise _JudgeBudgetExhausted("LLM judge time budget exhausted")
 
                     signal.signal(signal.SIGALRM, _raise_judge_timeout)
                     try:

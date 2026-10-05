@@ -973,12 +973,21 @@ def _botocore_cert_error(*, chained: bool) -> BaseException:
             id="chained-cert",
         ),
         pytest.param(urllib.error.URLError("unknown url type: ftp"), False, id="url-not-network"),
-        pytest.param(TimeoutError("LLM judge time budget exhausted"), False, id="budget-exhausted"),
         pytest.param(ValueError("bad json"), False, id="value-error"),
     ],
 )
 def test_the_verifier_judge_classifies_transient_errors(verifier, error: BaseException, transient: bool) -> None:
     assert verifier._is_transient_judge_error(error) is transient
+
+
+def test_the_verifier_judge_never_retries_once_its_time_budget_is_spent(verifier) -> None:
+    exhausted = verifier._JudgeBudgetExhausted("LLM judge time budget exhausted")
+
+    assert verifier._is_transient_judge_error(exhausted) is False
+    assert verifier._is_transient_judge_error(urllib.error.URLError(exhausted)) is False
+    assert verifier._classify_bedrock_retry_error(exhausted)[0] is False
+    # The type decides, not the message: a read timeout is retried whatever it says.
+    assert verifier._is_transient_judge_error(TimeoutError("LLM judge time budget exhausted")) is True
 
 
 @pytest.mark.parametrize(

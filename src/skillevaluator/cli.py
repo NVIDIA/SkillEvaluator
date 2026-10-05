@@ -40,6 +40,7 @@ from skillevaluator.reporting.console_ui import (
     summarize_tier3,
 )
 from skillevaluator.reporting.naming import report_basename
+from skillevaluator.reporting.plugin_sections import split_display_prefix
 
 # Tier 1 (static validation) is the base install surface and is safe to import
 # eagerly. Tier 2 (embeddings/LLM) and Tier 3 (Harbor and its environments)
@@ -407,10 +408,8 @@ def _content_relative_finding_paths(results: list[ValidationResult], validated: 
         return  # absolute paths are already unambiguous; "." has no prefix
     for result in results:
         for finding in result.findings:
-            label, path = "", finding.file_path or ""
-            if path.startswith("[") and "] " in path:
-                skill, _separator, path = path.partition("] ")
-                label = f"{skill}] "
+            skill, path = split_display_prefix(finding.file_path or "")
+            label = "" if skill is None else f"[{skill}] "
             parts = Path(path).parts
             if parts[: len(prefix)] != prefix:
                 continue

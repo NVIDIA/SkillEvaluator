@@ -87,30 +87,14 @@ from skillevaluator.plugin_formats import (
     parse_manifest_text,
     profile_for,
 )
-
-# The MCP collection and the root-bounded reads moved to plugin_mcp and plugin_paths;
-# the names marked "re-exported" stay importable from here for existing callers.
 from skillevaluator.plugin_mcp import (
-    _CODEX_UNAPPLIED_MCP_FIELDS,  # noqa: F401 - re-exported
-    _HTTP_TYPE_ALIASES,  # noqa: F401 - re-exported
-    _MCP_BUNDLE_SUFFIXES,  # noqa: F401 - re-exported
     McpCollection,
     McpDeclaration,
-    McpSource,  # noqa: F401 - re-exported
-    _codex_headers,  # noqa: F401 - re-exported
-    _collect_path_ref,  # noqa: F401 - re-exported
-    _is_inline_secret,  # noqa: F401 - re-exported
-    _load_mcp_file,  # noqa: F401 - re-exported
-    _normalize_dialect,  # noqa: F401 - re-exported
     collect_mcp_declarations,
-    mcp_pinning_summary,  # noqa: F401 - re-exported
     summarize_pinning,
 )
 from skillevaluator.plugin_paths import (
-    _WINDOWS_DRIVE_RE,  # noqa: F401 - re-exported
-    PLUGIN_CATEGORY,  # noqa: F401 - re-exported
     DeclaredPath,
-    PathKind,  # noqa: F401 - re-exported
     PluginRootReader,
     _in_unscanned_folder,
     _path_problem_finding,

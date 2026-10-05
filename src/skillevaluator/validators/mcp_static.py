@@ -114,9 +114,10 @@ _INSECURE_TLS_FLAGS: frozenset[str] = frozenset(
 )
 
 
-def _finding(
+def mcp_finding(
     severity: Severity, check_name: str, message: str, file_path: str, suggestion: str, *, name: str | None = None
 ) -> Finding:
+    """An ``MCP_DECLARATION`` finding; with ``name``, the message starts with ``mcpServers['<name>']: ``."""
     return Finding(
         category=CATEGORY,
         severity=severity,
@@ -138,7 +139,7 @@ class _ServerFindings:
     findings: list[Finding] = field(default_factory=list)
 
     def report(self, severity: Severity, check_name: str, message: str, suggestion: str) -> None:
-        self.findings.append(_finding(severity, check_name, message, self.file_path, suggestion, name=self.name))
+        self.findings.append(mcp_finding(severity, check_name, message, self.file_path, suggestion, name=self.name))
 
 
 def _credential_flag_name(token: str) -> str | None:
@@ -1846,7 +1847,7 @@ def validate_mcp_server_declaration(
 
     if not isinstance(name, str) or not _MCP_NAME_RE.match(name.strip()):
         findings.append(
-            _finding(
+            mcp_finding(
                 Severity.HIGH,
                 "mcp_name_invalid",
                 f"MCP server name {name!r} must start with an alphanumeric and use only letters, digits, '.', '_', '-'",

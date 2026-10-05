@@ -69,7 +69,8 @@ from skillevaluator.validators.url_policy import (
 # Report text: whitespace collapsed, URL userinfo removed, credentials redacted, length bounded.
 _bounded = report_text
 
-CATEGORY = "PLUGIN_SCHEMA"
+# The category of every plugin component finding; a policy overlay changes a severity with PLUGIN_SCHEMA.<check>.
+PLUGIN_CATEGORY = "PLUGIN_SCHEMA"
 
 # Documented Claude Code hook events (hooks reference). Unknown events are still
 # recorded, with the ``unknown_event`` flag, because newer releases add events.
@@ -452,21 +453,24 @@ class HookScriptUnreadable(Exception):
     """
 
 
-def _finding(
+def component_finding(
     severity: Severity,
     check_name: str,
     message: str,
     file_path: str,
     suggestion: str,
     *,
-    component: tuple[str, str],
+    component: tuple[str, str] | None,
     extra: dict[str, Any] | None = None,
 ) -> Finding:
-    metadata: dict[str, Any] = {"plugin_component": {"type": component[0], "name": component[1]}}
+    """A ``PLUGIN_SCHEMA`` finding attributed to a plugin ``component`` (``(type, name)``) in its metadata."""
+    metadata: dict[str, Any] = {}
+    if component is not None:
+        metadata["plugin_component"] = {"type": component[0], "name": component[1]}
     if extra:
         metadata.update(extra)
     return Finding(
-        category=CATEGORY,
+        category=PLUGIN_CATEGORY,
         severity=severity,
         check_name=check_name,
         message=message,
@@ -752,7 +756,7 @@ def analyze_agent(
             else "omits 'tools', so it inherits every tool, including unrestricted Bash"
         )
         findings.append(
-            _finding(
+            component_finding(
                 Severity.LOW,
                 "plugin_agent_unrestricted_bash",
                 f"subagent '{name}' {grant}; it can ask to run any shell command (the session's permission "
@@ -768,7 +772,7 @@ def analyze_agent(
         if wildcards:
             record.flags.append("wildcard_tools")
             findings.append(
-                _finding(
+                component_finding(
                     Severity.MEDIUM,
                     "plugin_agent_wildcard_tools",
                     f"subagent '{name}' lists a wildcard tool grant ({', '.join(wildcards[:8])})",
@@ -786,7 +790,7 @@ def analyze_agent(
             else "mcp__plugin_<plugin>_<server>"
         )
         findings.append(
-            _finding(
+            component_finding(
                 Severity.MEDIUM,
                 "plugin_agent_inherits_all_tools",
                 f"subagent '{name}' omits 'tools', so it inherits every tool, including the tools of the plugin's "
@@ -806,7 +810,7 @@ def analyze_agent(
     if mode == "bypassPermissions":
         record.flags.append("bypass_permissions")
         findings.append(
-            _finding(
+            component_finding(
                 Severity.HIGH,
                 "plugin_agent_bypass_permissions",
                 f"subagent '{name}' sets permissionMode: bypassPermissions, which skips every permission prompt "
@@ -820,7 +824,7 @@ def analyze_agent(
     elif mode == "acceptEdits":
         record.flags.append("accept_edits")
         findings.append(
-            _finding(
+            component_finding(
                 Severity.MEDIUM,
                 "plugin_agent_accept_edits",
                 f"subagent '{name}' sets permissionMode: acceptEdits, which auto-accepts file edits and filesystem "
@@ -833,7 +837,7 @@ def analyze_agent(
     elif mode == "auto":
         record.flags.append("auto_mode")
         findings.append(
-            _finding(
+            component_finding(
                 Severity.MEDIUM,
                 "plugin_agent_auto_mode",
                 f"subagent '{name}' sets permissionMode: auto, which lets a classifier approve tool calls without "
@@ -908,7 +912,7 @@ def _analyze_allowed_tools(
         if is_unrestricted_bash(tool):
             record.flags.append("unrestricted_bash")
             findings.append(
-                _finding(
+                component_finding(
                     Severity.HIGH,
                     f"plugin_{kind}_unrestricted_bash",
                     f"{kind} '{name}' pre-approves {_bash_grant_label(tool)} in allowed-tools, so any shell "
@@ -923,7 +927,7 @@ def _analyze_allowed_tools(
     if wildcards:
         record.flags.append("wildcard_tools")
         findings.append(
-            _finding(
+            component_finding(
                 Severity.MEDIUM,
                 f"plugin_{kind}_wildcard_tools",
                 f"{kind} '{name}' pre-approves a wildcard tool grant ({', '.join(wildcards[:8])}); {invocation}",
@@ -2328,7 +2332,7 @@ class _HookSite:
         """Flag the handler (each flag once) and add a finding attributed to it."""
         self.record.add_flag(flag)
         self.analysis.findings.append(
-            _finding(
+            component_finding(
                 severity,
                 check,
                 f"{self.where}: {message}",
@@ -2868,7 +2872,7 @@ class HookAnalyzer:
             )
         )
         analysis.findings.append(
-            _finding(
+            component_finding(
                 Severity.HIGH,
                 "plugin_hook_scan_truncated",
                 f"hooks in {source}: {reason}; the handlers past the static scan limits were not analyzed, so padding "

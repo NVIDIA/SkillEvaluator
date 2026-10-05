@@ -45,15 +45,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 from skillevaluator.models.result import Finding, Severity
-from skillevaluator.validators.mcp_static import (
-    CATEGORY as MCP_CATEGORY,
-)
+from skillevaluator.plugin_component_risk import PLUGIN_CATEGORY, component_finding
 from skillevaluator.validators.mcp_static import (
     EndpointClass,
     HostAllowlist,
     classify_endpoint_address,
     classify_endpoint_host,
     endpoint_client_host,
+    mcp_finding,
 )
 from skillevaluator.validators.url_policy import safe_url, whatwg_url
 
@@ -64,7 +63,6 @@ MAX_ENDPOINTS = 64
 # Every DNS answer up to this many is classified; a longer answer is treated as non-public.
 MAX_ADDRESSES = 64
 USER_AGENT = "skillevaluator-endpoint-check"
-PLUGIN_CATEGORY = "PLUGIN_SCHEMA"
 # ``incomplete_scans`` name when endpoints were left unchecked.
 INCOMPLETE_SCAN = "endpoint-resolution"
 _DEFAULT_PORTS = {"http": 80, "ws": 80, "https": 443, "wss": 443}
@@ -464,27 +462,19 @@ class EndpointChecker:
         )
 
     # -- one endpoint ------------------------------------------------------- #
-    def _finding(
-        self, target: EndpointTarget, severity: Severity, check: str, message: str, suggestion: str
-    ) -> Finding:
+    @staticmethod
+    def _finding(target: EndpointTarget, severity: Severity, check: str, message: str, suggestion: str) -> Finding:
+        """An MCP server finding (like the static MCP checks), or a hook finding (like the static hook checks)."""
         if target.kind == "mcp":
-            category = MCP_CATEGORY
-            metadata: dict[str, Any] = {"mcp_server": target.name}
-            prefix = f"mcpServers['{target.name}']: "
-        else:
-            category = PLUGIN_CATEGORY
-            metadata = {"hook_id": target.name}
-            if target.component is not None:
-                metadata["plugin_component"] = {"type": target.component[0], "name": target.component[1]}
-            prefix = f"hook {target.name}: "
-        return Finding(
-            category=category,
-            severity=severity,
-            check_name=check,
-            message=prefix + message,
-            file_path=target.file_path,
-            suggestion=suggestion,
-            metadata=metadata,
+            return mcp_finding(severity, check, message, target.file_path, suggestion, name=target.name)
+        return component_finding(
+            severity,
+            check,
+            f"hook {target.name}: {message}",
+            target.file_path,
+            suggestion,
+            component=target.component,
+            extra={"hook_id": target.name},
         )
 
     def _lookup(self, host: str, port: int, run: _Run, *, needs_budget: bool = False) -> list[str]:

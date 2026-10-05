@@ -195,6 +195,41 @@ class TestClassifierCodexStyle:
             ("mcp__jira__create_ticket", None),
         ]
 
+    @pytest.mark.parametrize(
+        "fn", ["mcp__fs__get_document", "fs__get_document", "fs.get_document", "mcp_fs_get_document", "fs_get_document"]
+    )
+    def test_every_spelling_of_a_declared_server_read_credits_the_member(self, fn: str) -> None:
+        traj = _traj(_one(fn, {"path": "/workspace/skills/alpha/SKILL.md"}, "# alpha"))
+
+        activations = _signals(traj, declared={**DECLARED, "mcp": ["fs"]})["activations"]
+
+        assert [(a["type"], a["name"], a["tool"]) for a in activations] == [
+            ("mcp", "fs", "mcp__fs__get_document"),
+            ("skill", "alpha", f"{fn}:skill-md-read"),
+        ]
+
+    @pytest.mark.parametrize("fn", ["mcp__fs__bash", "fs__bash"])
+    def test_mcp_tool_named_like_a_shell_is_not_parsed_as_one(self, fn: str) -> None:
+        traj = _traj(_one(fn, {"command": "cat skills/alpha/SKILL.md"}))
+
+        activations = _signals(traj, declared={**DECLARED, "mcp": ["fs"]})["activations"]
+
+        assert [(a["type"], a["name"]) for a in activations] == [("mcp", "fs")]
+
+    @pytest.mark.parametrize("fn", ["mcp__fs__edit_file", "mcp_fs_edit_file"])
+    def test_every_spelling_of_an_mcp_edit_tool_writes_the_artifact(self, fn: str) -> None:
+        traj = _traj(
+            _one("Skill", {"skill": "alpha"}),
+            _one(fn, {"path": "out/report.json", "edits": []}, call_id="c2"),
+            _one("Skill", {"skill": "beta"}, call_id="c3"),
+            _one("Read", {"file_path": "out/report.json"}, call_id="c4"),
+        )
+        case = {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "artifact": "out/report.json"}]}
+
+        signals = _signals(traj, case, declared={**DECLARED, "mcp": ["fs"]})
+
+        assert signals["handoff"]["passed"] == 1
+
     def test_declared_server_alternate_spellings_are_canonicalized(self) -> None:
         traj = _traj(
             _one("github.search_code", {"q": "x"}),

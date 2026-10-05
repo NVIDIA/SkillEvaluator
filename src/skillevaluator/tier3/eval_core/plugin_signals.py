@@ -961,16 +961,39 @@ class _Ident:
 
 @dataclass
 class _Call:
+    """One normalized tool call.
+
+    ``mcp`` is the call's MCP identity, however the harness spelled the tool
+    name, and ``fn_base`` is the bare tool name: the MCP tool's for an MCP
+    call, so every spelling of one MCP call is treated alike.
+    """
+
     seq: int
     step_index: int
     fn: str
+    fn_base: str
     args: dict[str, Any]
-    observation: str | None
-    succeeded: bool | None
     idents: list[_Ident]
+    mcp: _Ident | None = None
+    observation: str | None = None
+    succeeded: bool | None = None
     owner: int | None = None
     _args_text: str | None = None
     _shell_paths: tuple[list[str], list[str]] | None = None
+
+    @property
+    def is_shell(self) -> bool:
+        """A local shell call (an MCP tool named like a shell is still an MCP call)."""
+        return self.fn_base in _SHELL_TOOLS and self.mcp is None
+
+    @property
+    def is_content_read(self) -> bool:
+        """A skill load or a plain file read: its result is file or skill text, not a status message."""
+        if self.mcp is not None:
+            return False
+        if self.fn.casefold() in _SKILL_TOOLS or any(ident.kind == COMPONENT_SKILL for ident in self.idents):
+            return True
+        return self.fn_base in _READ_TOOLS
 
     @property
     def args_text(self) -> str:
@@ -992,9 +1015,8 @@ class _Call:
         if self._shell_paths is None:
             reads: dict[str, None] = {}
             writes: dict[str, None] = {}
-            fn_base = _base_tool_name(self.fn)
-            if fn_base in _SHELL_TOOLS and not any(ident.kind == COMPONENT_MCP for ident in self.idents):
-                for text in _shell_texts(fn_base, self.args):
+            if self.is_shell:
+                for text in _shell_texts(self.fn_base, self.args):
                     text_reads, text_writes = _shell_io(text, reader_verbs=_ARTIFACT_CONSUMER_VERBS)
                     if _APPLY_PATCH_COMMAND_RE.search(text):
                         # A shell ``apply_patch <<'EOF'`` (Codex) writes the files its patch headers name.
@@ -1486,11 +1508,10 @@ def _member_manifest_match(path: str, members: Sequence[str]) -> str | None:
     return None
 
 
-def _declared_skill_reads(fn: str, fn_base: str, args: Mapping[str, Any], members: Sequence[str]) -> list[str]:
+def _declared_skill_reads(fn_base: str, args: Mapping[str, Any], members: Sequence[str], *, is_mcp: bool) -> list[str]:
     """The declared members whose ``SKILL.md`` this call reads, in order (every one in a chained shell command)."""
     if not members:
         return []
-    is_mcp = fn[:5].casefold() == "mcp__"
     reads_file = fn_base in _READ_TOOLS or (is_mcp and bool(_READ_VERB_RE.search(fn_base)))
     if fn_base in {"str_replace_editor", "str_replace_based_edit_tool"}:
         reads_file = str(args.get("command") or "").casefold() == "view"
@@ -1536,16 +1557,34 @@ def _persistable_name(name: str, members: Sequence[str]) -> bool:
     return any(member.casefold() == folded for member in members)
 
 
+def _mcp_ident(fn: str, declared_mcp: Sequence[str], *, agent: str) -> _Ident | None:
+    """The MCP identity of a call named ``fn``, labeled ``mcp__<server>__<tool>`` (see :func:`_mcp_identity`)."""
+    identity = _mcp_identity(fn, declared_mcp, agent=agent)
+    if identity is None:
+        return None
+    server, tool = identity
+    canonical = f"mcp__{server}__{tool}" if tool else f"mcp__{server}"
+    return _Ident(
+        label=canonical,
+        kind=COMPONENT_MCP,
+        name=server,
+        fn=fn,
+        server=server,
+        tool=tool,
+        tool_label=canonical,
+    )
+
+
 def _identities(
     fn: str,
+    fn_base: str,
+    mcp: _Ident | None,
     args: Mapping[str, Any],
     declared: Mapping[str, Sequence[str]],
     *,
-    agent: str = "",
     subagent_aliases: Mapping[str, str] | None = None,
 ) -> list[_Ident]:
     low = fn.casefold()
-    fn_base = _base_tool_name(fn)
     idents: list[_Ident] = []
     if low in _SKILL_TOOLS:
         name = _first_string(args, ("skill", "name", "command"))
@@ -1565,23 +1604,11 @@ def _identities(
         command = _first_string(args, ("command", "name"))
         name = command.split()[0].lstrip("/") if command.split() else ""
         idents.append(_component_ident(COMPONENT_COMMAND, name, fn, fn, persist=_persistable_name(name, ())))
-    mcp = _mcp_identity(fn, declared.get(COMPONENT_MCP) or (), agent=agent)
     if mcp is not None:
-        server, tool = mcp
-        canonical = f"mcp__{server}__{tool}" if tool else f"mcp__{server}"
-        idents.append(
-            _Ident(
-                label=canonical,
-                kind=COMPONENT_MCP,
-                name=server,
-                fn=fn,
-                server=server,
-                tool=tool,
-                tool_label=canonical,
-            )
-        )
+        idents.append(mcp)
     if not any(ident.kind in {COMPONENT_SKILL, COMPONENT_COMMAND} for ident in idents):
-        for member in _declared_skill_reads(fn, fn_base, args, declared.get(COMPONENT_SKILL) or ()):
+        members = declared.get(COMPONENT_SKILL) or ()
+        for member in _declared_skill_reads(fn_base, args, members, is_mcp=mcp is not None):
             idents.append(_component_ident(COMPONENT_SKILL, member, fn, f"{fn}:skill-md-read"))
     if not idents:
         idents.append(_Ident(label=fn, kind=None, name=fn, fn=fn, tool_label=fn))
@@ -1594,15 +1621,6 @@ def _trajectory_agent(trajectory: Mapping[str, Any]) -> str:
     return name.strip()[:_MAX_LABEL_CHARS] if isinstance(name, str) else ""
 
 
-def _is_content_read(fn: str, idents: Sequence[_Ident]) -> bool:
-    """A skill load or a plain file read: its result is file or skill text, not a status message."""
-    if any(ident.kind == COMPONENT_MCP for ident in idents):
-        return False
-    if fn.casefold() in _SKILL_TOOLS or any(ident.kind == COMPONENT_SKILL for ident in idents):
-        return True
-    return _base_tool_name(fn) in _READ_TOOLS
-
-
 def _extract_calls(
     trajectory: Mapping[str, Any],
     declared: Mapping[str, Sequence[str]],
@@ -1613,6 +1631,7 @@ def _extract_calls(
     if not isinstance(steps, list):
         return None
     agent = _trajectory_agent(trajectory)
+    declared_mcp = declared.get(COMPONENT_MCP) or ()
     calls: list[_Call] = []
     owner: int | None = None
     for step_index, step in enumerate(steps[:_MAX_STEPS]):
@@ -1646,24 +1665,26 @@ def _extract_calls(
                 fn = str(tool_call.get("function_name") or "")[:_MAX_LABEL_CHARS]
                 args = tool_call.get("arguments")
                 args = args if isinstance(args, dict) else {}
-                idents = _identities(fn, args, declared, agent=agent, subagent_aliases=subagent_aliases)
-                shell = _base_tool_name(fn) in _SHELL_TOOLS and not any(ident.kind == COMPONENT_MCP for ident in idents)
-                observation, succeeded = _outcome(correlated, shell=shell, content_read=_is_content_read(fn, idents))
+                mcp = _mcp_ident(fn, declared_mcp, agent=agent)
+                fn_base = _base_tool_name(mcp.tool if mcp is not None and mcp.tool else fn)
+                idents = _identities(fn, fn_base, mcp, args, declared, subagent_aliases=subagent_aliases)
                 seq = len(calls)
                 if any(ident.kind in {COMPONENT_SKILL, COMPONENT_COMMAND} for ident in idents):
                     owner = seq
-                calls.append(
-                    _Call(
-                        seq=seq,
-                        step_index=step_index,
-                        fn=fn,
-                        args=args,
-                        observation=observation,
-                        succeeded=succeeded,
-                        idents=idents,
-                        owner=owner,
-                    )
+                call = _Call(
+                    seq=seq,
+                    step_index=step_index,
+                    fn=fn,
+                    fn_base=fn_base,
+                    args=args,
+                    idents=idents,
+                    mcp=mcp,
+                    owner=owner,
                 )
+                call.observation, call.succeeded = _outcome(
+                    correlated, shell=call.is_shell, content_read=call.is_content_read
+                )
+                calls.append(call)
     return calls
 
 
@@ -2085,7 +2106,7 @@ def grade_mcp_calls(calls: Sequence[_Call]) -> dict[str, Any]:
     totals = _outcome_counts()
     by_server: dict[str, dict[str, Any]] = {}
     for call in calls:
-        ident = next((item for item in call.idents if item.kind == COMPONENT_MCP), None)
+        ident = call.mcp
         if ident is None:
             continue
         _count_outcome(totals, call.succeeded)
@@ -2140,10 +2161,6 @@ def _path_matches(observed: str, artifact: str) -> bool:
     return _normalized_path_matches(_normalize_path(observed), artifact)
 
 
-def _is_mcp_call(call: _Call) -> bool:
-    return any(ident.kind == COMPONENT_MCP for ident in call.idents)
-
-
 def _patch_targets(args: Mapping[str, Any]) -> list[str]:
     """Paths named by the file headers of an apply_patch body (``Add``/``Update``/``Delete File``, ``Move to``)."""
     paths: list[str] = []
@@ -2155,7 +2172,7 @@ def _patch_targets(args: Mapping[str, Any]) -> list[str]:
 
 
 def _call_writes(call: _Call, artifact: str) -> bool:
-    fn_base = _base_tool_name(call.fn)
+    fn_base = call.fn_base
     if fn_base in _WRITE_TOOLS:
         if fn_base in {"str_replace_editor", "str_replace_based_edit_tool"} and (
             str(call.args.get("command") or "").casefold() == "view"
@@ -2164,12 +2181,11 @@ def _call_writes(call: _Call, artifact: str) -> bool:
         if any(_path_matches(path, artifact) for path in _path_args(call.args)):
             return True
         return fn_base in _PATCH_TOOLS and any(_path_matches(path, artifact) for path in _patch_targets(call.args))
-    if fn_base in _SHELL_TOOLS and not _is_mcp_call(call):
+    if call.is_shell:
         return any(_normalized_path_matches(path, artifact) for path in call.shell_paths[1])
-    ident = next((item for item in call.idents if item.kind == COMPONENT_MCP), None)
-    if ident is None:
+    if call.mcp is None:
         return False
-    tool = (ident.tool or "").casefold()
+    tool = (call.mcp.tool or "").casefold()
     for key, value in call.args.items():
         if not isinstance(value, str) or not _path_matches(value, artifact):
             continue
@@ -2179,7 +2195,7 @@ def _call_writes(call: _Call, artifact: str) -> bool:
 
 
 def _call_reads(call: _Call, artifact: str) -> bool:
-    fn_base = _base_tool_name(call.fn)
+    fn_base = call.fn_base
     if (
         fn_base in _READ_TOOLS
         or (
@@ -2188,9 +2204,9 @@ def _call_reads(call: _Call, artifact: str) -> bool:
         )
     ) and any(_path_matches(path, artifact) for path in _path_args(call.args)):
         return True
-    if fn_base in _SHELL_TOOLS and not _is_mcp_call(call):
+    if call.is_shell:
         return any(_normalized_path_matches(path, artifact) for path in call.shell_paths[0])
-    if any(ident.kind in {COMPONENT_MCP, COMPONENT_SUBAGENT} for ident in call.idents):
+    if call.mcp is not None or any(ident.kind == COMPONENT_SUBAGENT for ident in call.idents):
         return any(
             _path_matches(token, artifact)
             for value in _string_values(call.args)

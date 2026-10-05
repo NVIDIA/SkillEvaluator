@@ -441,7 +441,7 @@ def test_lockfile_larger_than_the_manifest_budget_is_audited(tmp_path: Path, too
     ("lockfile", "limits", "reason"),
     [
         (b'{"lockfileVersion": 3, "packages": {', {}, "not valid JSON"),
-        (b'{"lockfileVersion": 3, "name": "caf\xe9"}', {}, "can't decode"),
+        (b'{"lockfileVersion": 3, "name": "caf\xe9"}', {}, "not valid UTF-8"),
         (json.dumps(_lockfile(3)).encode(), {"MAX_LOCKFILE_BYTES": 64}, "64-byte limit"),
         (json.dumps(_lockfile(20)).encode(), {"MAX_LOCKFILE_COLLECTION_ITEMS": 10}, "collection size exceeds 10"),
     ],
@@ -609,7 +609,9 @@ def test_mcp_file_shared_by_two_manifests_lists_its_image_once(tmp_path: Path) -
         tmp_path / "demo",
         {".codex-plugin/plugin.json": {"name": "demo"}, ".mcp.json": {"mcpServers": {"db": _DOCKER_SERVER}}},
     )
-    assert DependencySecurityValidator()._mcp_images(root) == [(_IMAGE, ".mcp.json (mcpServers['db'])")]
+    assert DependencySecurityValidator()._mcp_images(root) == [
+        (_IMAGE, ".mcp.json (mcpServers['db'])", ".mcp.json", "db")
+    ]
 
 
 def _fake_pip_audit(monkeypatch: pytest.MonkeyPatch, *responses: ToolResult) -> FakeTool:

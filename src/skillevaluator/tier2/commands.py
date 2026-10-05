@@ -259,13 +259,10 @@ def run_plugin_skill_context_dedup(
                     file_path=str(skill_dir),
                 )
             )
+        # merge_with_prefix already adds the per-severity counts.
         aggregate.merge_with_prefix(_make_advisory(skill_result), skill_name)
         aggregate.summary.files_scanned += skill_result.summary.files_scanned
         aggregate.summary.checks_performed += skill_result.summary.checks_performed
-        aggregate.summary.critical_count += skill_result.summary.critical_count
-        aggregate.summary.high_count += skill_result.summary.high_count
-        aggregate.summary.medium_count += skill_result.summary.medium_count
-        aggregate.summary.low_count += skill_result.summary.low_count
         if skill_result.metadata.get("security_failure"):
             aggregate.metadata.update(
                 {

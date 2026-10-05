@@ -50,6 +50,13 @@ NPM_AUDIT_TIMEOUT = 180
 OSV_TIMEOUT = 300
 IMAGE_SCAN_TIMEOUT = 600
 LOCKFILE_NAMES = ("package-lock.json", "npm-shrinkwrap.json")
+# Lockfiles of other JavaScript package managers. They pin exact versions the npm audit cannot read, so a
+# directory with one and no npm lockfile makes the npm audit INCOMPLETE instead of passing silently.
+UNSUPPORTED_LOCKFILE_NAMES = ("yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb")
+# Public npm registry hosts. A lockfile package resolved from one of them (or bundled inside such a
+# package) needs no existence check; any other pin is checked against the public registry.
+PUBLIC_NPM_REGISTRY_HOSTS = frozenset({"registry.npmjs.org", "registry.yarnpkg.com"})
+NOT_AUDITED_CHECK = "dependency-not-audited"
 PACKAGE_JSON = "package.json"
 SEVERITY_KEYS = ("critical", "high", "medium", "low", "info")
 
@@ -78,6 +85,13 @@ class NpmDeclaration:
     raw: str
     role: str
     exact_version: str | None
+    # ``not_from_registry``: a lockfile package resolved from a git, file, or path source, so a public
+    # advisory audit cannot speak for it. ``needs_registry_check``: nothing shows the pin came from the
+    # public npm registry (a package.json or MCP runner pin, a lockfile entry with no resolved URL or
+    # integrity hash, or one resolved from another host), so the audit asks the registry whether it
+    # exists, as pip-audit asks PyPI.
+    not_from_registry: str | None = None
+    needs_registry_check: bool = True
 
 
 @dataclass(frozen=True)
@@ -138,7 +152,11 @@ def _package_json_entries(data: Any) -> Iterator[NpmDeclaration]:
 
 
 def _package_lock_entries(data: Any) -> Iterator[NpmDeclaration]:
-    """Every resolved package; the input is already bounded (lockfile byte, token, and collection caps)."""
+    """Every resolved package; the input is already bounded (lockfile byte, token, and collection caps).
+
+    Workspace and linked packages (v2/v3 keys outside ``node_modules/``) are the
+    plugin's own code, not registry packages, so they are not declarations.
+    """
     if not isinstance(data, dict):
         return
     packages = data.get("packages")
@@ -146,13 +164,16 @@ def _package_lock_entries(data: Any) -> Iterator[NpmDeclaration]:
         for key, entry in packages.items():
             if not key or not isinstance(entry, dict) or entry.get("link") is True:
                 continue
+            if "node_modules/" not in key:
+                continue
             name = entry.get("name") if isinstance(entry.get("name"), str) else key.rsplit("node_modules/", 1)[-1]
             version = entry.get("version")
             if not isinstance(version, str):
                 continue
             exact = exact_npm_version(version) if _NPM_NAME_RE.match(name) else None
             role = "lockfile:dev" if entry.get("dev") is True else "lockfile"
-            yield NpmDeclaration(name, f"{name}@{version}"[:200], role, exact)
+            problem, check = lockfile_entry_source(entry)
+            yield NpmDeclaration(name, f"{name}@{version}"[:200], role, exact, problem, check)
         return
     stack: list[tuple[str, Any]] = list(_items(data.get("dependencies")))
     while stack:
@@ -162,8 +183,39 @@ def _package_lock_entries(data: Any) -> Iterator[NpmDeclaration]:
         version = entry.get("version")
         if isinstance(version, str):
             exact = exact_npm_version(version) if _NPM_NAME_RE.match(name) else None
-            yield NpmDeclaration(name, f"{name}@{version}"[:200], "lockfile", exact)
+            problem, check = lockfile_entry_source(entry)
+            yield NpmDeclaration(name, f"{name}@{version}"[:200], "lockfile", exact, problem, check)
         stack.extend(_items(entry.get("dependencies")))
+
+
+def lockfile_entry_source(entry: dict[str, Any]) -> tuple[str | None, bool]:
+    """Where a lockfile package came from, offline: ``(not_from_registry reason, needs_registry_check)``.
+
+    A package resolved from the public npm registry, bundled inside another
+    package's tarball, or carrying an integrity hash with no ``resolved`` URL
+    (npm can leave the URL out) came from a registry. A git, file, or path
+    source never did, so the public audit cannot speak for it. Anything else
+    (no URL and no integrity hash, as in a hand-written lockfile, or another
+    host) is checked against the public registry before it counts as audited.
+    """
+    if entry.get("inBundle") is True or entry.get("bundled") is True:
+        return None, False
+    resolved = entry.get("resolved")
+    if not isinstance(resolved, str) or not resolved.strip():
+        integrity = entry.get("integrity")
+        return None, not (isinstance(integrity, str) and integrity.strip())
+    import urllib.parse
+
+    try:
+        parsed = urllib.parse.urlsplit(resolved.strip())
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return None, True
+    scheme = parsed.scheme.lower()
+    if scheme in {"http", "https"}:
+        return None, host not in PUBLIC_NPM_REGISTRY_HOSTS
+    source = scheme.split("+", 1)[0] if scheme else "local path"
+    return f"the lockfile entry resolves from a {source[:20]} source, not a registry", False
 
 
 def _items(value: Any) -> list[tuple[str, Any]]:
@@ -229,11 +281,14 @@ def mcp_runner_packages(config: Any) -> tuple[str, list[str]] | None:
 
     Uses the argv parsing of the MCP pinning classifier
     (:func:`~skillevaluator.validators.mcp_static.classify_mcp_pinning`), so a
-    flag value is never mistaken for the package: ``npx``, ``bunx``, ``pnpx``,
-    ``pnpm dlx``, ``yarn dlx``, ``npm exec``, and ``deno run npm:`` give npm specs
-    (every ``-p``/``--package`` value, else the first positional); ``uvx``,
-    ``uv tool run``, and ``pipx run`` give PyPI specs (``--from``/``--spec``, else
-    the first positional, plus every ``uvx --with`` requirement).
+    flag value is never mistaken for the package, and launch wrappers (``cmd
+    /c``, ``env X=1``, ``timeout``, ``sudo``, ``sh -c``) are looked through the
+    same way: ``npx``, ``bunx``, ``pnpx``, ``bun x``, ``pnpm dlx`` (with
+    ``--package`` before or after ``dlx``), ``yarn dlx``, ``npm exec``, and
+    ``deno run npm:`` give npm specs (every ``-p``/``--package`` value, else the
+    first positional); ``uvx``, ``uv tool run``, ``uv run --with``, and ``pipx
+    run`` give PyPI specs (``--from``/``--spec``, else the first positional,
+    plus every ``--with`` requirement).
     """
     from skillevaluator.validators import mcp_static as ms
 
@@ -244,30 +299,58 @@ def mcp_runner_packages(config: Any) -> tuple[str, list[str]] | None:
         return None
     raw_args = config.get("args")
     args = [str(arg) for arg in raw_args] if isinstance(raw_args, list) else []
-    parts = command.split()
-    if len(parts) > 1:
-        command, args = parts[0], [*parts[1:], *args]
-    base = ms._command_basename(command)
-    if base in {"npx", "bunx", "pnpx"} or (base in {"pnpm", "yarn"} and args[:1] == ["dlx"]):
-        rest = args[1:] if base in {"pnpm", "yarn"} else args
-        return "npm", _npm_runner_specs(rest, ms._NPX_VALUE_FLAGS if base == "npx" else ms._DLX_VALUE_FLAGS)
-    if base == "npm" and args[:1] in (["exec"], ["x"]):
-        return "npm", _npm_runner_specs(args[1:], ms._NPX_VALUE_FLAGS)
+    argv = ms.unwrap_launch_command(ms._launch_argv(command, args))
+    if not argv:
+        return None
+    base, args = ms._command_basename(argv[0]), argv[1:]
+    if base in {"npx", "bunx", "pnpx"}:
+        return "npm", _npm_runner_specs(args, ms._NPX_VALUE_FLAGS if base == "npx" else ms._DLX_VALUE_FLAGS)
+    if base == "bun":
+        sub, rest = ms._subcommand(args, ms._DLX_VALUE_FLAGS)
+        return ("npm", _npm_runner_specs(rest, ms._DLX_VALUE_FLAGS)) if sub == "x" else None
+    if base in {"pnpm", "yarn"}:
+        sub, rest = ms._subcommand(args, ms._DLX_VALUE_FLAGS)
+        if sub != "dlx":
+            return None
+        # '--package' may come before 'dlx' ('pnpm --package=@scope/pkg dlx bin').
+        before = args[: len(args) - len(rest) - 1]
+        packages = ms._flag_values(before, ("-p", "--package"))
+        return "npm", packages or _npm_runner_specs(rest, ms._DLX_VALUE_FLAGS)
+    if base == "npm":
+        sub, rest = ms._subcommand(args, ms._NPM_GLOBAL_VALUE_FLAGS)
+        return ("npm", _npm_runner_specs(rest, ms._NPX_VALUE_FLAGS)) if sub in {"exec", "x"} else None
     if base == "deno" and args[:1] == ["run"]:
         spec = ms._first_positional(args[1:], ms._DENO_VALUE_FLAGS)
         return ("npm", [spec[4:]]) if spec and spec.startswith("npm:") else None
-    if base == "uvx" or (base == "uv" and args[:2] in (["tool", "run"], ["tool", "x"])):
-        rest = args if base == "uvx" else args[2:]
-        from_values = ms._flag_values(rest, ("--from",))
-        spec = from_values[0] if from_values else ms._first_positional(rest, ms._UVX_VALUE_FLAGS)
-        extra = [item.strip() for value in ms._flag_values(rest, ("--with",)) for item in value.split(",")]
-        return "pypi", [item for item in (spec, *extra) if item]
+    if base == "uvx":
+        return "pypi", _uv_tool_specs(args)
+    if base == "uv":
+        sub, rest = ms._subcommand(args, ms._UV_RUN_VALUE_FLAGS)
+        if sub == "tool":
+            tool_sub, tool_rest = ms._subcommand(rest, ms._UVX_VALUE_FLAGS)
+            return ("pypi", _uv_tool_specs(tool_rest)) if tool_sub in {"run", "x"} else None
+        if sub == "run":
+            # 'uv run' runs the project environment; '--with' adds packages resolved on every run.
+            options = [*args[: len(args) - len(rest) - 1], *rest[: ms._skip_options(rest, ms._UV_RUN_VALUE_FLAGS)]]
+            extra = [item.strip() for value in ms._flag_values(options, ("--with",)) for item in value.split(",")]
+            return ("pypi", [item for item in extra if item]) if extra else None
+        return None
     if base == "pipx" and args[:1] == ["run"]:
         rest = args[1:]
         spec_values = ms._flag_values(rest, ("--spec",))
         spec = spec_values[0] if spec_values else ms._first_positional(rest, ms._PIPX_VALUE_FLAGS)
         return ("pypi", [spec]) if spec else None
     return None
+
+
+def _uv_tool_specs(rest: list[str]) -> list[str]:
+    """``uvx`` / ``uv tool run``: the tool spec (``--from``, else the first positional) and every ``--with``."""
+    from skillevaluator.validators import mcp_static as ms
+
+    from_values = ms._flag_values(rest, ("--from",))
+    spec = from_values[0] if from_values else ms._first_positional(rest, ms._UVX_VALUE_FLAGS)
+    extra = [item.strip() for value in ms._flag_values(rest, ("--with",)) for item in value.split(",")]
+    return [item for item in (spec, *extra) if item]
 
 
 def _npm_runner_specs(tokens: list[str], value_flags: frozenset[str]) -> list[str]:
@@ -434,6 +517,32 @@ def unverified_finding(
     )
 
 
+def npm_not_audited_finding(declaration: NpmDeclaration, source: str, reason: str | None = None) -> Finding:
+    """An exact npm pin the public audit cannot speak for (not from a registry, or unknown to it)."""
+    reason = reason or declaration.not_from_registry or "it did not come from a registry"
+    return Finding(
+        category="DEPENDENCY",
+        severity=Severity.MEDIUM,
+        check_name=NOT_AUDITED_CHECK,
+        message=(
+            f"{declaration.name}@{declaration.exact_version}: not audited ({reason[:160]}); "
+            "vulnerability applicability was not asserted"
+        ),
+        file_path=source,
+        suggestion=(
+            "Check the package name and version. A private, internal, or git package needs its own vulnerability audit."
+        ),
+        metadata={
+            "ecosystem": "npm",
+            "package_name": declaration.name,
+            "package_version": declaration.exact_version,
+            "dependency_role": declaration.role,
+            "resolution_status": "not_audited",
+            "skip_reason": reason[:300],
+        },
+    )
+
+
 def _severity_from_word(value: Any) -> Severity | None:
     if isinstance(value, str):
         return _SEVERITY_WORDS.get(value.strip().lower())
@@ -480,6 +589,287 @@ def _vuln_finding(
             "scanner": scanner,
         },
     )
+
+
+# --------------------------------------------------------------------------- #
+# Advisory severity (pip-audit and Safety report none)                         #
+# --------------------------------------------------------------------------- #
+OSV_API_URL_ENV = "SKILLEVALUATOR_OSV_API_URL"
+DEFAULT_OSV_API_URL = "https://api.osv.dev/v1/vulns/"
+ADVISORY_LOOKUP_TIMEOUT = 10
+# Wall-clock budget for all advisory lookups in one run (each lookup also has its own timeout).
+ADVISORY_LOOKUP_BUDGET = 30.0
+MAX_ADVISORY_LOOKUPS = 64
+MAX_ADVISORY_RECORD_BYTES = 2 * 1024 * 1024
+_ADVISORY_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{1,15}-[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+# CVSS v3 base metric weights (FIRST CVSS v3.1 specification, section 7.4).
+_CVSS3_WEIGHTS: dict[str, dict[str, float]] = {
+    "AV": {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.2},
+    "AC": {"L": 0.77, "H": 0.44},
+    "UI": {"N": 0.85, "R": 0.62},
+    "C": {"H": 0.56, "L": 0.22, "N": 0.0},
+    "I": {"H": 0.56, "L": 0.22, "N": 0.0},
+    "A": {"H": 0.56, "L": 0.22, "N": 0.0},
+}
+_CVSS3_PRIVILEGES = {"U": {"N": 0.85, "L": 0.62, "H": 0.27}, "C": {"N": 0.85, "L": 0.68, "H": 0.5}}
+
+
+@dataclass(frozen=True)
+class AdvisorySeverity:
+    """A severity taken from advisory data, or ``None`` with the reason it is unknown."""
+
+    severity: Severity | None
+    source: str
+
+
+def cvss3_base_score(vector: str) -> float | None:
+    """CVSS v3.0/v3.1 base score of a vector such as ``CVSS:3.1/AV:N/AC:L/...``, or ``None`` when malformed."""
+    parts = vector.strip().split("/")
+    if not parts or not parts[0].startswith("CVSS:3"):
+        return None
+    metrics: dict[str, str] = {}
+    for part in parts[1:]:
+        key, _sep, value = part.partition(":")
+        metrics.setdefault(key, value)
+    try:
+        scope = metrics["S"]
+        privileges = _CVSS3_PRIVILEGES[scope][metrics["PR"]]
+        weights = {key: _CVSS3_WEIGHTS[key][metrics[key]] for key in _CVSS3_WEIGHTS}
+    except KeyError:
+        return None
+    iss = 1 - (1 - weights["C"]) * (1 - weights["I"]) * (1 - weights["A"])
+    impact = 6.42 * iss if scope == "U" else 7.52 * (iss - 0.029) - 3.25 * (iss - 0.02) ** 15
+    if impact <= 0:
+        return 0.0
+    exploitability = 8.22 * weights["AV"] * weights["AC"] * privileges * weights["UI"]
+    raw = impact + exploitability if scope == "U" else 1.08 * (impact + exploitability)
+    # CVSS v3.1 Roundup: the smallest one-decimal number >= raw, free of float noise.
+    whole = round(min(raw, 10.0) * 100_000)
+    return whole / 100_000 if whole % 10_000 == 0 else (whole // 10_000 + 1) / 10.0
+
+
+def severity_from_osv_record(record: Any) -> Severity | None:
+    """The severity an OSV record states: the GitHub advisory severity, else its CVSS v3 base score."""
+    if not isinstance(record, dict):
+        return None
+    database = record.get("database_specific")
+    if isinstance(database, dict):
+        word = _severity_from_word(database.get("severity"))
+        if word is not None:
+            return word
+    scores = [
+        score
+        for entry in record.get("severity") or []
+        if isinstance(entry, dict) and str(entry.get("type", "")).upper() == "CVSS_V3"
+        for score in (cvss3_base_score(str(entry.get("score") or "")),)
+        if score is not None
+    ]
+    if scores:
+        return cvss_to_severity(max(scores)) if max(scores) > 0 else Severity.INFO
+    return None
+
+
+class LookupTurnedOff(ValueError):
+    """An online lookup is turned off by its environment variable (every later call would say the same)."""
+
+
+def _osv_api_url() -> str | None:
+    """The OSV ``/v1/vulns/`` endpoint, or ``None`` when the lookup is turned off."""
+    value = os.environ.get(OSV_API_URL_ENV, DEFAULT_OSV_API_URL).strip()
+    if value.lower() in {"", "off", "none", "0"}:
+        return None
+    if not value.startswith("https://"):
+        return None
+    return value if value.endswith("/") else value + "/"
+
+
+def fetch_osv_record(vuln_id: str) -> Any:
+    """Fetch one public OSV advisory by id (bounded read). Raises ``OSError``/``ValueError`` on failure."""
+    import urllib.parse
+    import urllib.request
+
+    base = _osv_api_url()
+    if base is None:
+        raise LookupTurnedOff(f"advisory lookups are turned off ({OSV_API_URL_ENV})")
+    request = urllib.request.Request(
+        base + urllib.parse.quote(vuln_id, safe=""),
+        headers={"Accept": "application/json", "User-Agent": "skillevaluator-dependency-audit"},
+    )
+    with urllib.request.urlopen(request, timeout=ADVISORY_LOOKUP_TIMEOUT) as response:
+        body = response.read(MAX_ADVISORY_RECORD_BYTES + 1)
+    if len(body) > MAX_ADVISORY_RECORD_BYTES:
+        raise ValueError("advisory record is too large")
+    return json.loads(body.decode("utf-8"))
+
+
+def _is_network_failure(exc: BaseException) -> bool:
+    """True when the advisory service itself is unreachable or unhealthy, not just one id.
+
+    A 404 (or any other 4xx) is about one id; a timeout, a refused or dropped
+    connection, a DNS or TLS failure, or a 5xx/429 answer means every later
+    lookup in this run would fail (or wait) the same way.
+    """
+    import socket
+    import urllib.error
+
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code == 429 or exc.code >= 500
+    return isinstance(exc, (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError))
+
+
+class BoundedLookups:
+    """The per-run bound of an online lookup service: a count cap, a time budget, and a fail-fast stop.
+
+    At most ``limit`` calls run, within ``budget`` seconds of the first one.
+    The first network failure (timeout, unreachable host, 5xx) stops every
+    later call in the run, so a blocked service costs one timeout, not one per
+    key. Each call gives ``(value, None)`` or ``(None, reason)``.
+    """
+
+    def __init__(self, *, limit: int, budget: float, what: str, clock: Any = None) -> None:
+        import time
+
+        self._limit = limit
+        self._budget = budget
+        self._what = what
+        self._clock = clock or time.monotonic
+        self._cache: dict[Any, tuple[Any, str | None]] = {}
+        self._calls = 0
+        self._started: float | None = None
+        self._dead: str | None = None
+
+    def get(self, key: Any, call: Any) -> tuple[Any, str | None]:
+        if key in self._cache:
+            return self._cache[key]
+        if self._dead is not None:
+            return None, self._dead
+        if self._calls >= self._limit:
+            return None, f"more than {self._limit} {self._what} in this run"
+        now = self._clock()
+        if self._started is None:
+            self._started = now
+        elif now - self._started >= self._budget:
+            self._dead = f"{self._what} ran past the {self._budget:g} s budget for this run"
+            return None, self._dead
+        self._calls += 1
+        try:
+            entry: tuple[Any, str | None] = (call(), None)
+        except Exception as exc:  # network, HTTP, JSON: the answer stays unknown
+            reason = f"{type(exc).__name__}: {str(exc)[:120]}" if str(exc) else type(exc).__name__
+            if isinstance(exc, LookupTurnedOff):
+                reason = str(exc)[:160]
+            if isinstance(exc, LookupTurnedOff) or _is_network_failure(exc):
+                # Do not wait on the same dead service once per key; later keys get the same reason.
+                self._dead = reason
+            entry = (None, reason)
+        self._cache[key] = entry
+        return entry
+
+
+class AdvisorySeverityLookup:
+    """Per-run, bounded lookup of advisory severities in the public OSV database.
+
+    pip-audit and Safety report vulnerability ids but no severity. The lookup
+    reads the GitHub advisory (a ``GHSA-`` id or alias) first, whose record
+    carries the reviewed severity, then the other ids. Only public advisory
+    ids leave the host. At most ``MAX_ADVISORY_LOOKUPS`` records are fetched
+    per run, within ``ADVISORY_LOOKUP_BUDGET`` seconds, and the first network
+    failure stops the rest (:class:`BoundedLookups`). An id that cannot be
+    looked up gives ``severity=None`` and the reason, so the caller can say
+    the severity is unknown.
+    """
+
+    def __init__(self, fetch: Any = None, *, clock: Any = None) -> None:
+        self._fetch = fetch
+        self._lookups = BoundedLookups(
+            limit=MAX_ADVISORY_LOOKUPS, budget=ADVISORY_LOOKUP_BUDGET, what="advisory lookups", clock=clock
+        )
+
+    def _record(self, vuln_id: str) -> tuple[Any, str | None]:
+        fetch = self._fetch or fetch_osv_record
+        return self._lookups.get(vuln_id, lambda: fetch(vuln_id))
+
+    def severity(self, ids: Iterable[str]) -> AdvisorySeverity:
+        candidates = [str(item) for item in ids if isinstance(item, str) and _ADVISORY_ID_RE.match(str(item))]
+        ordered = list(dict.fromkeys([*(i for i in candidates if i.startswith("GHSA-")), *candidates]))
+        errors: list[str] = []
+        for vuln_id in ordered[:3]:
+            record, error = self._record(vuln_id)
+            if error is not None:
+                errors.append(error)
+                continue
+            severity = severity_from_osv_record(record)
+            if severity is not None:
+                return AdvisorySeverity(severity, f"osv:{vuln_id}")
+        if errors:
+            return AdvisorySeverity(None, f"advisory lookup failed ({errors[0]})")
+        return AdvisorySeverity(None, "the advisory states no severity" if ordered else "no advisory id")
+
+
+# --------------------------------------------------------------------------- #
+# npm registry existence check (npm audit and OSV-Scanner say nothing about    #
+# a package the registry does not know)                                       #
+# --------------------------------------------------------------------------- #
+NPM_REGISTRY_URL_ENV = "SKILLEVALUATOR_NPM_REGISTRY_URL"
+DEFAULT_NPM_REGISTRY_URL = "https://registry.npmjs.org/"
+MAX_NPM_REGISTRY_LOOKUPS = 64
+NPM_REGISTRY_LOOKUP_BUDGET = 30.0
+
+
+def _npm_registry_url() -> str | None:
+    """The public npm registry base URL, or ``None`` when the existence check is turned off."""
+    value = os.environ.get(NPM_REGISTRY_URL_ENV, DEFAULT_NPM_REGISTRY_URL).strip()
+    if value.lower() in {"", "off", "none", "0"} or not value.startswith("https://"):
+        return None
+    return value if value.endswith("/") else value + "/"
+
+
+def fetch_npm_version(name: str, version: str) -> bool:
+    """Whether the public npm registry has ``name@version`` (``False`` on 404). Raises on any other failure."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    base = _npm_registry_url()
+    if base is None:
+        raise LookupTurnedOff(f"npm registry lookups are turned off ({NPM_REGISTRY_URL_ENV})")
+    request = urllib.request.Request(
+        base + urllib.parse.quote(name, safe="@") + "/" + urllib.parse.quote(version, safe=""),
+        headers={"Accept": "application/json", "User-Agent": "skillevaluator-dependency-audit"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=ADVISORY_LOOKUP_TIMEOUT) as response:
+            response.read(64 * 1024)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return False
+        raise
+    return True
+
+
+class NpmRegistryCheck:
+    """Per-run, bounded check that exact npm pins exist on the public registry.
+
+    npm audit and OSV-Scanner match advisories by name and version and say
+    nothing about a package the registry does not know (a private or internal
+    package, or a version that was never published), so such a pin would look
+    audited and clean. As pip-audit does with PyPI, the audit asks the registry
+    first, for pins with no evidence that they came from it. Only the name and
+    version leave the host, as for npm audit itself. The check is bounded like
+    the advisory lookup (:class:`BoundedLookups`).
+    """
+
+    def __init__(self, fetch: Any = None, *, clock: Any = None) -> None:
+        self._fetch = fetch
+        self._lookups = BoundedLookups(
+            limit=MAX_NPM_REGISTRY_LOOKUPS, budget=NPM_REGISTRY_LOOKUP_BUDGET, what="npm registry lookups", clock=clock
+        )
+
+    def exists(self, name: str, version: str) -> tuple[bool | None, str | None]:
+        """``(True|False, None)`` when the registry answered, else ``(None, reason)``."""
+        fetch = self._fetch or fetch_npm_version
+        value, error = self._lookups.get((name, version), lambda: bool(fetch(name, version)))
+        return (None, error) if error is not None else (bool(value), None)
 
 
 # --------------------------------------------------------------------------- #
@@ -916,7 +1306,7 @@ def record_outcome(
     unverified: int,
     new_source: bool = True,
 ) -> None:
-    """Fold one source's evidence into an ecosystem summary (status: audited, incomplete, no_exact).
+    """Fold one source's evidence into an ecosystem summary (status: audited, incomplete, no_exact, unverified).
 
     ``new_source=False`` adds to the source already counted (for example, the
     packages of a lockfile that were past the audit cap).
@@ -939,5 +1329,5 @@ def record_outcome(
     summary["audited"] += audited
     for key, value in outcome.vulnerabilities.items():
         summary["vulnerabilities"][key] = summary["vulnerabilities"].get(key, 0) + value
-    if summary["status"] in {"not_found", "no_exact"}:
+    if summary["status"] in {"not_found", "no_exact"} or (summary["status"] == "unverified" and audited):
         summary["status"] = "audited"

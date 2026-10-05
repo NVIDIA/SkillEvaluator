@@ -158,12 +158,17 @@ def test_pinned_vulnerability_is_reported_once(tmp_path: Path, pip_audit_availab
         }
     )
 
-    with patch.object(Tools.pip_audit, "run", side_effect=_RecordingPipAudit(stdout=stdout, exit_code=1)):
+    advisory = {"id": "PYSEC-2020-96", "database_specific": {"severity": "HIGH"}}
+    with (
+        patch.object(Tools.pip_audit, "run", side_effect=_RecordingPipAudit(stdout=stdout, exit_code=1)),
+        patch("skillevaluator.validators.dependency_ecosystems.fetch_osv_record", return_value=advisory),
+    ):
         result = DependencySecurityValidator(use_safety=False).validate(skill)
 
     assert not result.passed
+    # A structured finding (policy, SARIF and BENCHMARK.md see it), with the advisory's severity.
     assert [e for e in result.errors if "PYSEC-2020-96" in e] == [
-        "[CVE-HIGH] pyyaml==5.3: PYSEC-2020-96 -> upgrade to 5.3.1"
+        "[DEPENDENCY-HIGH] pyyaml==5.3: PYSEC-2020-96 -> upgrade to 5.3.1 in pyproject.toml"
     ]
     assert any("pyproject.toml: Found 1 vulnerability(ies)" in m for m in result.messages)
 

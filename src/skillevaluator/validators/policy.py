@@ -496,7 +496,8 @@ def apply_policy(
                 finding.severity = new_severity
                 changed = True
         if changed:
-            result.recalculate_from_findings()
+            # Plain-string errors (no Finding behind them) are not policy-addressable; keep them.
+            result.recalculate_from_findings(keep_legacy=True)
         if security_failure:
             result.passed = False
             result.metadata["execution_status"] = "failed"

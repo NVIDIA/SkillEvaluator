@@ -131,8 +131,10 @@ def test_catalog_layout_classifies_each_state_and_gates_missing(tmp_path: Path) 
     }
     assert all(f.severity == Severity.HIGH for f in missing)
     assert not result.passed
-    # Only the missing refs produce findings; the other states are advisory.
-    assert {f.check_name for f in result.findings} == {"plugin_dependency_missing"}
+    # Only the missing refs block. The ref the gate could not check gets a non-blocking finding (proof L8).
+    assert {f.check_name for f in result.findings} == {"plugin_dependency_missing", "plugin_dependency_unverified"}
+    [unverified] = [f for f in result.findings if f.check_name == "plugin_dependency_unverified"]
+    assert (unverified.severity, unverified.metadata["ref"]) == (Severity.MEDIUM, f"github::{REPO}::docs::guide")
 
 
 @requires_git

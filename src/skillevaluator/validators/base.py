@@ -315,8 +315,10 @@ class ValidatorBase(ABC):
         root is then validated once while file walkers and staged scanner
         views exclude every bundled-skill subtree, so root-owned content
         (``scripts/``, ``hooks/``, ``.mcp.json``, ...) is covered without
-        scanning a skill's files twice. The root pass always runs, even after
-        a CRITICAL skill finding stops the skill loop.
+        scanning a skill's files twice. Every bundled skill is validated: a
+        CRITICAL finding in one skill does not stop the audit of the others,
+        because each skill ships separately and a later skill's findings would
+        otherwise never be reported.
         """
         result = ValidationResult()
         skill_dirs = plugin_tree.skill_dirs
@@ -331,8 +333,7 @@ class ValidatorBase(ABC):
             relative_dir = plugin_relative_dir(skill_dir)
             if relative_dir is not None:
                 rebase_relative_finding_paths(skill_result, relative_dir)
-            if self._merge_skill_result(result, skill_result, skill_dir.name):
-                break
+            self._merge_skill_result(result, skill_result, skill_dir.name)
 
         result.merge(single_skill_validator(plugin_tree.root))
         return result
@@ -341,7 +342,10 @@ class ValidatorBase(ABC):
     def _merge_skill_result(result: ValidationResult, skill_result: ValidationResult, skill_name: str) -> bool:
         """Merge one skill's result into a folder result.
 
-        Returns True when a CRITICAL finding should stop the folder walk.
+        A passing skill keeps its non-blocking findings and warnings (MEDIUM,
+        LOW, INFO), prefixed with the skill name like a failing skill's; its
+        checks are recorded in one success row. Returns True when a CRITICAL
+        finding should stop a folder walk (a plugin tree never stops).
         """
         if skill_result.passed:
             # Collect detailed check information from the skill result
@@ -360,6 +364,8 @@ class ValidatorBase(ABC):
                 checks=check_details,
                 total_checks=len(check_details),
             )
+            if skill_result.findings or skill_result.warnings or skill_result.incomplete_scans:
+                result.merge_with_prefix(skill_result, skill_name, include_success_details=False)
         else:
             result.merge_with_prefix(skill_result, skill_name)
 

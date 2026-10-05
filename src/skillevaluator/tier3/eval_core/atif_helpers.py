@@ -686,27 +686,29 @@ def _fit_entries(
             total += marker_cost
         dropped[index] = True
 
+    def needed(index: int) -> int:
+        """The size the entry can shrink to and leave the text as long as the budget allows."""
+        return max(stub_chars, len(texts[index]) - (total - max_chars))
+
     order = list(range(len(texts)))
     if middle_first:
         order.sort(key=lambda index: abs(2 * index - len(texts) + 1))
-    for action in (shrink, drop):
-        for rank in range(_RANK_KEEP):
-            for index in order:
-                if total <= max_chars:
-                    break
-                if ranks[index] == rank:
-                    if action is shrink:
-                        floor = stub_chars
-                        if exact_shrink:
-                            floor = max(stub_chars, len(texts[index]) - (total - max_chars))
-                        shrink(index, floor)
-                    else:
-                        drop(index)
+    # Entries below the top rank, lowest rank first: shrink them, then drop them.
+    lower = [index for rank in range(_RANK_KEEP) for index in order if ranks[index] == rank]
+    for index in lower:
+        if total <= max_chars:
+            break
+        shrink(index, needed(index) if exact_shrink else stub_chars)
+    for index in lower:
+        if total <= max_chars:
+            break
+        drop(index)
+    # Then the older top-rank entries; the newest is left to the last-resort cut.
     keepers = [index for index in range(len(texts)) if ranks[index] >= _RANK_KEEP][:-1]
     for index in keepers:
         if total <= max_chars:
             break
-        shrink(index, max(stub_chars, len(texts[index]) - (total - max_chars)))
+        shrink(index, needed(index))
     for index in keepers:
         if total <= max_chars:
             break

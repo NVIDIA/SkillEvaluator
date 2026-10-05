@@ -73,6 +73,37 @@ def _features(*owners: dict[str, Any]) -> str:
     return "unknown"
 
 
+def _is_native_result(value: dict[str, Any]) -> bool:
+    return any(
+        isinstance(_dict(agent).get("with_skill"), dict) or isinstance(_dict(agent).get("without_skill"), dict)
+        for agent in _dict(value.get("agents")).values()
+    )
+
+
+def _trial_coverage_truncated(marker: dict[str, Any]) -> bool:
+    if not marker.get("truncated"):
+        return False
+    if marker.get("artifact_loading"):
+        return True
+    omitted = _dict(marker.get("omitted"))
+    # These budgets affect diagnostics, not the normalized trial population.
+    # Non-best detail pruning is checked per agent against its declared counts.
+    diagnostics = {
+        "raw_trial_rewards",
+        "raw_detail_fields",
+        "raw_reward_fields",
+        "raw_metric_values",
+        "unpaired_case_ids",
+        "comparison_payloads",
+        "evidence_entries",
+        "evaluator_cards",
+        "insight_items",
+        "custom_metric_discovery_trials",
+        "non_best_agent_details",
+    }
+    return not omitted or any(section not in diagnostics for section in omitted)
+
+
 def _payloads(value: Any, depth: int = 0):
     """Prefer authoritative per-validator results over a top-level Tier 3 mirror."""
     if depth > 32:
@@ -123,9 +154,9 @@ def _trial_keys(trials: list[dict[str, Any]]) -> tuple[tuple[str, str], ...] | N
         attempt = trial.get("attempt") or trial.get("attempt_index")
         # Native canonical reports omit attempt numbers, but Harbor trial IDs
         # carry __attemptN when attempts are repeated.
-        match = re.search(r"(?:__|_)attempt[_-]?(\d+)(?:__|$)", trial_id)
-        if attempt is None and match:
-            attempt = int(match.group(1))
+        matches = re.findall(r"(?:__|_|-)attempt[_-]?(\d+)(?=__|$)", trial_id)
+        if attempt is None and matches:
+            attempt = int(matches[-1])
         if attempt is None:
             implicit.add(entry)
         keys.append((entry, str(attempt) if attempt is not None else f"ordinal:{counts[entry]}"))
@@ -171,6 +202,12 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
     """Normalize canonical Tier 3, validate-report, and embedded catalog JSON."""
     output = DashboardData()
     for report in _payloads(payload):
+        if _is_native_result(report):
+            output.warnings.append(
+                f"{source}: native engine JSON needs its retained run directory for trial data; "
+                "load the retained directory or a canonical Tier 3 report."
+            )
+            continue
         summary = _dict(report.get("summary"))
         provenance = _dict(report.get("provenance"))
         run_id = str(report.get("run_id") or summary.get("run_id") or "")
@@ -179,8 +216,14 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
         if not run_id:
             run_id = str(report.get("evaluated_at") or summary.get("evaluated_at") or "unknown")
         truncation = _dict(report.get("report_truncation")) or _dict(report.get("truncation"))
+        coverage_truncated = _trial_coverage_truncated(truncation)
         if truncation.get("truncated"):
-            output.warnings.append(f"{source}: report details are truncated; comparisons are unavailable.")
+            message = (
+                "trial data may be truncated; comparisons are unavailable."
+                if coverage_truncated
+                else "diagnostic details are truncated; complete trial coverage is checked separately."
+            )
+            output.warnings.append(f"{source}: {message}")
         for name, value in _dict(report.get("agents")).items():
             agent = _dict(value)
             if not agent:
@@ -210,13 +253,22 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                 scored = _count(details.get("scored_attempts"))
                 keys = _trial_keys(trials)
                 logical_count = len(keys) if keys is not None else declared
+                physical_counts = Counter(str(trial["trial_id"]) for trial in trials if trial.get("trial_id"))
+                ambiguous_ids = {trial_id for trial_id, count in physical_counts.items() if count > 1}
+                if ambiguous_ids:
+                    notice = (
+                        f"{source}: canonical multi-step resource ownership is ambiguous; "
+                        "usage totals are unavailable. Load the retained run directory for authoritative step measurements."
+                    )
+                    if notice not in output.warnings:
+                        output.warnings.append(notice)
                 complete = (
                     status == "succeeded"
                     and declared > 0
                     and len(trials) == declared
                     and keys is not None
                     and len(set(keys)) == len(keys)
-                    and not truncation.get("truncated")
+                    and not coverage_truncated
                     and (scored is None or scored == logical_count)
                     and (expected is None or scored == expected)
                 )
@@ -238,10 +290,18 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                     "_trial_keys": keys,
                     "_dataset_digest": report.get("dataset_digest") or summary.get("dataset_digest"),
                     "_attempt_policy": report.get("attempt_policy"),
+                    "_expected_usage_trials": max(
+                        logical_count, expected or 0, scored or 0, declared if len(trials) != declared else 0
+                    ),
+                    "_ambiguous_trial_ids": tuple(sorted(ambiguous_ids)),
                 }
-                _set_usage(row, [_usage(trial) for trial in trials], expected=declared)
+                _set_usage(
+                    row,
+                    [{} if str(trial.get("trial_id") or "") in ambiguous_ids else _usage(trial) for trial in trials],
+                    expected=declared + max(0, row["_expected_usage_trials"] - logical_count),
+                )
                 output.rows.append(row)
-    if not output.rows:
+    if not output.rows and not output.warnings:
         output.warnings.append(f"{source}: no supported Tier 3 agent results found.")
     return output
 
@@ -314,7 +374,7 @@ def _duration(result: dict[str, Any]) -> float | None:
         return None
 
 
-def _native_usage(trial_dir: Path) -> dict[str, Any]:
+def _native_usage(trial_dir: Path, *, require_steps: bool = False) -> dict[str, Any]:
     trajectory = _dict(_read_json(trial_dir / "trajectory.json")) if (trial_dir / "trajectory.json").is_file() else {}
     final = _dict(trajectory.get("final_metrics"))
     result = _dict(_read_json(trial_dir / "result.json")) if (trial_dir / "result.json").is_file() else {}
@@ -331,6 +391,8 @@ def _native_usage(trial_dir: Path) -> dict[str, Any]:
     # Constituent steps own their measured cost and execution time. The root
     # may also mirror a step, so never add both the root and constituent values.
     steps = result.get("step_results")
+    if require_steps and not (isinstance(steps, list) and steps):
+        return {"_resource_scope_valid": False}
     constituents = steps if isinstance(steps, list) and steps else [result]
     if isinstance(steps, list) and steps:
 
@@ -344,6 +406,7 @@ def _native_usage(trial_dir: Path) -> dict[str, Any]:
     durations = [_duration(_dict(step)) for step in constituents]
     costs = [_measurement(_dict(_dict(step).get("agent_result")).get("cost_usd")) for step in constituents]
     return {
+        "_resource_scope_valid": True,
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": prompt + completion if prompt is not None and completion is not None else None,
@@ -370,6 +433,7 @@ def _load_native(path: Path) -> DashboardData:
         run_config = _dict(_read_json(path / "run_config.json"))
     canonical["dashboard_metadata"] = run_config.get("dashboard_metadata")
     output = parse_dashboard_report(canonical, str(path))
+    unresolved_scope = False
     for row in output.rows:
         # The report's agent keys identify repeated harness occurrences on disk.
         agents = _dict(canonical.get("agents"))
@@ -395,20 +459,32 @@ def _load_native(path: Path) -> DashboardData:
                     reward = _dict(_read_json(trial_dir / "reward.json"))
                     physical_id = str(reward.get("trial_id") or trial_dir.name)
                     if physical_id not in usages_by_trial:
-                        usages_by_trial[physical_id] = _native_usage(trial_dir)
+                        usages_by_trial[physical_id] = _native_usage(
+                            trial_dir, require_steps=physical_id in row["_ambiguous_trial_ids"]
+                        )
+                        unresolved_scope |= usages_by_trial[physical_id].get("_resource_scope_valid") is False
                 except (OSError, ValueError, RecursionError) as exc:
                     output.warnings.append(f"{trial_dir}: cannot read usage: {exc}")
                     usages_by_trial[trial_dir.name] = {}
-        _set_usage(row, list(usages_by_trial.values()))
+        _set_usage(row, list(usages_by_trial.values()), expected=row["_expected_usage_trials"])
+    if not unresolved_scope:
+        output.warnings = [
+            warning for warning in output.warnings if "canonical multi-step resource ownership" not in warning
+        ]
     return output
 
 
-def _load_report_file(path: Path) -> DashboardData:
+def _load_report_file(path: Path, ancestors: frozenset[Path] = frozenset()) -> DashboardData:
+    path = path.resolve()
+    if path in ancestors or len(ancestors) >= 16:
+        return DashboardData(warnings=[f"{path}: cyclic or excessively nested catalog reference skipped."])
+    if path.name == "result.json" and (path.parent / "run_config.json").is_file():
+        return _load_native(path.parent)
     payload = _read_json(path)
     data = parse_dashboard_report(payload, str(path))
-    if data.rows or not isinstance(payload, dict) or not isinstance(payload.get("skills"), list):
+    if not isinstance(payload, dict) or not isinstance(payload.get("skills"), list):
         return data
-    output = DashboardData()
+    output = DashboardData(rows=data.rows, warnings=data.warnings if data.rows else [])
     for entry in payload["skills"][:_MAX_FILES]:
         entry = _dict(entry)
         report_dir, report_name = entry.get("report_dir"), entry.get("json_report")
@@ -417,8 +493,8 @@ def _load_report_file(path: Path) -> DashboardData:
         try:
             report_path = (path.parent / report_dir / report_name).resolve()
             report_path.relative_to(path.parent.resolve())
-            report = parse_dashboard_report(_read_json(report_path), str(report_path))
-        except (OSError, ValueError, RecursionError) as exc:
+            report = _load_report_file(report_path, ancestors | {path})
+        except (OSError, ValueError, RecursionError, TypeError, AttributeError) as exc:
             output.warnings.append(f"{path}: cannot load catalog report: {exc}")
             continue
         output.rows.extend(report.rows)
@@ -442,7 +518,7 @@ def load_dashboard_path(path: Path) -> DashboardData:
     if path.is_file():
         try:
             return _load_report_file(path)
-        except (OSError, ValueError, RecursionError) as exc:
+        except (OSError, ValueError, RecursionError, TypeError, AttributeError) as exc:
             return DashboardData(warnings=[f"{path}: cannot read report: {exc}"])
     if not path.is_dir():
         return DashboardData(warnings=[f"Dashboard input does not exist: {path}"])
@@ -458,7 +534,7 @@ def load_dashboard_path(path: Path) -> DashboardData:
         if "result.json" in filenames and "run_config.json" in filenames:
             try:
                 data = _load_native(root)
-            except (OSError, ValueError, RecursionError) as exc:
+            except (OSError, ValueError, RecursionError, TypeError, AttributeError) as exc:
                 data = DashboardData(warnings=[f"{root}: cannot load retained run: {exc}"])
             subdirectories.clear()
             output.rows.extend(data.rows)

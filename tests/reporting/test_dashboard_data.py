@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -92,6 +93,16 @@ def test_partial_missing_metrics_never_become_zero_or_partial_total() -> None:
     assert "cost 0/1" in data.rows[0]["coverage"]
 
 
+def test_canonical_missing_attempt_keeps_usage_totals_unknown() -> None:
+    report = _report()
+    agent = report["agents"]["claude-code"]
+    agent["conditions"]["with_skill"].update(expected_attempts=2, scored_attempts=1, execution_status="failed")
+    row = parse_dashboard_report(report, "report.json").rows[0]
+    assert row["total_tokens"] is None
+    assert row["duration_seconds"] is None
+    assert "tokens 1/2" in row["coverage"]
+
+
 @pytest.mark.parametrize("mutation", ["failed", "missing_trial", "truncated", "different_case", "missing_attempt"])
 def test_incomplete_or_unmatched_arms_block_all_deltas(mutation: str) -> None:
     report = _report()
@@ -175,7 +186,7 @@ def test_repeated_attempts_require_recorded_identity_and_match_exact_set() -> No
     assert comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]["score_delta"] is None
 
 
-def test_multistep_rewards_count_logical_attempt_once_and_sum_resources() -> None:
+def test_multistep_rewards_keep_logical_scores_without_ambiguous_resource_sums() -> None:
     report = _report()
     agent = report["agents"]["claude-code"]
     for field, count_field in (("trials", "num_trials"), ("trials_baseline", "num_trials_baseline")):
@@ -183,8 +194,17 @@ def test_multistep_rewards_count_logical_attempt_once_and_sum_resources() -> Non
         agent[count_field] = 2
     data = parse_dashboard_report(report, "report.json")
     assert data.rows[0]["trials"] == 1
-    assert data.rows[0]["total_tokens"] == 300
-    assert comparison_rows(data.rows)[0]["score_delta"] == pytest.approx(0.2)
+    assert data.rows[0]["total_tokens"] is None
+    assert data.rows[0]["duration_seconds"] is None
+    assert data.rows[0]["cost_usd"] is None
+    assert any("resource ownership is ambiguous" in warning for warning in data.warnings)
+    comparison = comparison_rows(data.rows)[0]
+    assert comparison["score_delta"] == pytest.approx(0.2)
+    assert comparison["total_tokens_delta"] is None
+    # Different counters do not establish whether each row measures one step
+    # or mirrors the same physical trial's trajectory.
+    agent["trials"][1]["tokens"]["prompt"] = 10
+    assert parse_dashboard_report(report, "report.json").rows[0]["total_tokens"] is None
 
 
 def test_explicit_adverse_row_has_no_invented_baseline_delta() -> None:
@@ -196,6 +216,26 @@ def test_explicit_adverse_row_has_no_invented_baseline_delta() -> None:
     assert [row["condition"] for row in data.rows] == ["with_skill", "without_skill", "adverse"]
     assert data.rows[2]["score"] == 0.2
     assert len(comparison_rows(data.rows)) == 1
+
+
+@pytest.mark.parametrize("omitted", ["evidence_entries", "raw_trial_rewards", "non_best_agent_details"])
+def test_diagnostic_truncation_preserves_complete_trial_comparisons(omitted: str) -> None:
+    report = _report()
+    report["report_truncation"] = {"truncated": True, "omitted": {omitted: 50}}
+    data = parse_dashboard_report(report, "report.json")
+    assert data.warnings
+    assert data.rows[0]["score"] == 0.8
+    assert comparison_rows(data.rows)[0]["comparison_status"] == "comparable"
+
+
+def test_artifact_loading_truncation_blocks_comparisons() -> None:
+    report = _report()
+    report["report_truncation"] = {
+        "truncated": True,
+        "omitted": {"evidence_entries": 50},
+        "artifact_loading": [{"code": "trial_limit", "artifact": "with-skill", "limit": 512}],
+    }
+    assert comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]["score_delta"] is None
 
 
 def test_bad_input_is_diagnostic_and_directory_skips_symlinks(tmp_path: Path) -> None:
@@ -296,6 +336,98 @@ def test_native_results_use_real_usage_and_prune_nested_mirrors(tmp_path: Path) 
     comparison = comparison_rows(data.rows)[0]
     assert comparison["comparison_status"] == "comparable"
     assert comparison["total_tokens_delta"] == 100
+    assert load_dashboard_path(run / "result.json").rows == load_dashboard_path(run).rows
+
+
+def test_catalog_native_and_mixed_references_are_loaded_without_cycles(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _native_run(run)
+    index = tmp_path / "catalog.json"
+    reference = {"report_dir": "run", "json_report": "result.json"}
+    index.write_text(json.dumps({"skills": [reference]}))
+    assert load_dashboard_path(index).rows == load_dashboard_path(run).rows
+    index.write_text(json.dumps({"skills": [{"tier3": _report()}, reference]}))
+    assert len(load_dashboard_path(index).rows) == 4
+    index.write_text(json.dumps({"skills": [reference, {"report_dir": ".", "json_report": "catalog.json"}]}))
+    data = load_dashboard_path(index)
+    assert len(data.rows) == 2
+    assert any("cyclic" in warning for warning in data.warnings)
+
+
+def test_uploaded_native_engine_json_needs_retained_artifacts() -> None:
+    raw_result = {
+        "skill_name": "native-skill",
+        "run_id": "native-run",
+        "agents": {
+            "opencode": {
+                "with_skill": {"security": 0.8},
+                "without_skill": {"security": 0.6},
+                "num_trials_with": 1,
+                "num_trials_without": 1,
+            }
+        },
+    }
+    data = parse_dashboard_report(raw_result, "result.json")
+    assert data.rows == []
+    assert any("retained run directory" in warning for warning in data.warnings)
+
+
+@pytest.mark.parametrize("malformation", ["summary_status", "run_config_agents"])
+def test_malformed_native_schema_is_diagnostic_and_preserves_other_sources(tmp_path: Path, malformation: str) -> None:
+    run = tmp_path / "bad-run"
+    _native_run(run)
+    if malformation == "summary_status":
+        path = run / "opencode" / "with-skill" / "summary.json"
+        summary = json.loads(path.read_text())
+        summary["execution_status"] = ["succeeded"]
+        path.write_text(json.dumps(summary))
+    else:
+        (run / "run_config.json").write_text(json.dumps({"agents": [{"agent": "opencode"}]}))
+    assert load_dashboard_path(run / "result.json").warnings
+    (tmp_path / "valid.json").write_text(json.dumps(_report()))
+    data = load_dashboard_path(tmp_path)
+    assert len(data.rows) == 2
+    assert {row["skill"] for row in data.rows} == {"calculator"}
+    assert data.warnings
+
+
+def test_native_missing_attempt_does_not_publish_partial_usage_as_total(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _native_run(run)
+    for variant in ("with-skill", "without-skill"):
+        summary_path = run / "opencode" / variant / "summary.json"
+        summary = json.loads(summary_path.read_text())
+        summary.update(num_trials=2, expected_attempts=2, scored_attempts=2)
+        summary_path.write_text(json.dumps(summary))
+    data = load_dashboard_path(run)
+    assert all(row["score"] is None and row["total_tokens"] is None for row in data.rows)
+    assert all(row["duration_seconds"] is None for row in data.rows)
+    assert all("tokens 1/2" in row["coverage"] and "time 1/2" in row["coverage"] for row in data.rows)
+
+
+def test_native_generated_stop_on_pass_names_preserve_attempt_sets(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _native_run(run)
+    for variant, label in (("with-skill", "with"), ("without-skill", "without")):
+        condition = run / "opencode" / variant
+        first_name = f"demo-opencode-{label}-case-a-attempt001__case-a__random1"
+        second_name = f"demo-opencode-{label}-case-a-attempt002__case-a__random2"
+        original = condition / "trials" / "case-a__random"
+        first = original.rename(original.with_name(first_name))
+        second = first.with_name(second_name)
+        shutil.copytree(first, second)
+        for trial_dir in (first, second):
+            reward_path = trial_dir / "reward.json"
+            reward = json.loads(reward_path.read_text())
+            reward["trial_id"] = trial_dir.name
+            reward_path.write_text(json.dumps(reward))
+        summary_path = condition / "summary.json"
+        summary = json.loads(summary_path.read_text())
+        summary.update(num_trials=2, expected_attempts=2, scored_attempts=2)
+        summary_path.write_text(json.dumps(summary))
+    data = load_dashboard_path(run)
+    assert all(row["trials"] == 2 and row["score"] == 0.8 for row in data.rows)
+    assert comparison_rows(data.rows)[0]["comparison_status"] == "comparable"
 
 
 def test_native_different_condition_models_cannot_pair(tmp_path: Path) -> None:
@@ -332,3 +464,41 @@ def test_multistep_native_cost_time_and_tokens_require_every_step(tmp_path: Path
     assert row["prompt_tokens"] is None
     assert row["total_tokens"] is None
     assert row["cost_usd"] is None
+
+
+def test_native_duplicate_reward_rows_require_authoritative_step_scope(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _native_run(run)
+    condition = run / "opencode" / "with-skill"
+    first = condition / "trials" / "case-a__random"
+    second = first.with_name("case-a__random__finish")
+    shutil.copytree(first, second)
+    summary_path = condition / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["num_trials"] = 2
+    summary_path.write_text(json.dumps(summary))
+    for trial_dir in (first, second):
+        result_path = trial_dir / "result.json"
+        result = json.loads(result_path.read_text())
+        step = {
+            "step_name": "prepare",
+            "agent_result": {"n_input_tokens": 50, "n_output_tokens": 5, "n_cache_tokens": 0, "cost_usd": 0.1},
+            "agent_execution": result["agent_execution"],
+        }
+        result["step_results"] = [step, {**copy.deepcopy(step), "step_name": "finish"}]
+        result_path.write_text(json.dumps(result))
+    row = load_dashboard_path(run).rows[0]
+    assert row["score"] == 0.8
+    assert row["total_tokens"] == 110
+    assert row["duration_seconds"] == 20
+    assert row["cost_usd"] == pytest.approx(0.2)
+    for trial_dir in (first, second):
+        result_path = trial_dir / "result.json"
+        result = json.loads(result_path.read_text())
+        result.pop("step_results")
+        result_path.write_text(json.dumps(result))
+    data = load_dashboard_path(run)
+    assert data.rows[0]["score"] == 0.8
+    assert data.rows[0]["total_tokens"] is None
+    assert data.rows[0]["duration_seconds"] is None
+    assert any("resource ownership is ambiguous" in warning for warning in data.warnings)

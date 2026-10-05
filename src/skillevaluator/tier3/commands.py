@@ -37,7 +37,7 @@ from skillevaluator.tier3.harbor import (
     HARBOR_AGENTS_SUPPORTED,
     canonical_agent_name,
 )
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS, NOT_APPLICABLE_ELIGIBLE_METRICS
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS, not_applicable_list
 from skillevaluator.tier3.harbor.progress import (
     NullProgressReporter,
     ProgressEvent,
@@ -1178,9 +1178,7 @@ def _summary_scores(data: dict[str, Any], *, allow_missing_status: bool = False)
 def _summary_not_applicable(data: Any) -> frozenset[str]:
     """Judged metrics a summary recorded as not applicable for its whole arm."""
     raw = data.get("not_applicable_metrics") if isinstance(data, dict) else None
-    if not isinstance(raw, list):
-        return frozenset()
-    return frozenset(metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric in raw)
+    return frozenset(not_applicable_list(raw))
 
 
 def _display_metrics(agent_with: dict[str, dict[str, float]]) -> tuple[tuple[str, ...], tuple[str, ...]]:

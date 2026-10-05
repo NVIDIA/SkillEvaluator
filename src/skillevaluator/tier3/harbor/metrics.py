@@ -188,6 +188,16 @@ def not_applicable_metrics(
     ]
 
 
+def not_applicable_list(raw: object) -> list[str]:
+    """Return the judged metrics a stored ``not_applicable_metrics`` list names, in canonical order.
+
+    A value that is not a list or tuple, and any name that cannot be N/A, is ignored.
+    """
+    if not isinstance(raw, list | tuple):
+        return []
+    return [metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric in raw]
+
+
 def not_applicable_counts(
     rewards: list[dict[str, Any]],
     metrics: tuple[str, ...] | list[str] | None = None,

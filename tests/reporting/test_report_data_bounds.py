@@ -73,6 +73,62 @@ def test_normal_agent_artifacts_are_loaded_without_truncation_marker(tmp_path: P
     assert "_report_truncation" not in agents["codex"]
 
 
+@pytest.mark.parametrize(
+    ("metrics", "expected_tokens", "expected_total", "native_total"),
+    [
+        ({}, {"prompt": None, "completion": None, "cached": None}, None, 22),
+        ({"total_prompt_tokens": 12}, {"prompt": 12, "completion": None, "cached": None}, None, 14),
+        (
+            {"total_prompt_tokens": 0, "total_completion_tokens": 0, "total_cached_tokens": 0},
+            {"prompt": 0, "completion": 0, "cached": 0},
+            0,
+            0,
+        ),
+        (
+            {"total_prompt_tokens": 10, "total_completion_tokens": 4, "total_cached_tokens": 2},
+            {"prompt": 10, "completion": 4, "cached": 2},
+            14,
+            14,
+        ),
+    ],
+)
+def test_missing_token_measurements_stay_unknown_in_canonical_exports(
+    tmp_path: Path, metrics: dict, expected_tokens: dict, expected_total: int | None, native_total: int
+) -> None:
+    from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory
+    from skillevaluator.reporting import HTMLReporter, JSONReporter
+    from skillevaluator.reporting.dashboard_data import load_dashboard_path, parse_dashboard_report
+
+    agent_dir = tmp_path / "codex"
+    _write_summary(agent_dir)
+    _write_trial(
+        agent_dir,
+        "case-001__1",
+        {"entry_id": "case-001", "trial_id": "case-001__1", "accuracy": 1.0},
+        {"steps": [], "final_metrics": metrics},
+    )
+    (tmp_path / "result.json").write_text(json.dumps({"skill_name": "token-measurements"}), encoding="utf-8")
+    (tmp_path / "run_config.json").write_text(
+        json.dumps({"agents": {"codex": {"agent": "codex", "model": "test-model"}}}), encoding="utf-8"
+    )
+    # Retained engine counters can recover usage even when an exported
+    # trajectory has no counters. The canonical export must not invent zeros.
+    (agent_dir / "with-skill" / "trials" / "case-001__1" / "result.json").write_text(
+        json.dumps({"agent_result": {"n_input_tokens": 20, "n_output_tokens": 2}}), encoding="utf-8"
+    )
+
+    result = agent_eval_result_from_directory(Path("token-measurements"), tmp_path, use_llm_judge=False)
+    assert result is not None
+    canonical = result.metadata["agent_eval"]
+    assert canonical["agents"]["codex"]["trials"][0]["tokens"] == expected_tokens
+    exported = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert exported["results"][0]["tier3"]["agents"]["codex"]["trials"][0]["tokens"] == expected_tokens
+    assert parse_dashboard_report(exported, "report.json").rows[0]["total_tokens"] == expected_total
+    assert load_dashboard_path(tmp_path).rows[0]["total_tokens"] == native_total
+    # Existing HTML token consumers accept null counters without an exception.
+    assert "tier3-full" in HTMLReporter(include_timestamp=False).render_all([result])
+
+
 def test_agent_directory_symlink_is_not_discovered(tmp_path: Path) -> None:
     outside_agent = tmp_path / "outside" / "codex"
     _write_summary(outside_agent)

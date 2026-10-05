@@ -263,13 +263,22 @@ def main(paths: list[str] | None = None) -> None:
         "Upload JSON reports",
         type=["json"],
         accept_multiple_files=True,
-        help="Use Tier 3 JSON reports or consolidated SkillEvaluator JSON reports.",
+        help="Use Tier 3 JSON reports or consolidated SkillEvaluator JSON reports, up to 16 MiB per file.",
         key="report_uploads",
     )
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
-    for path in dict.fromkeys(str(Path(path).expanduser().resolve()) for path in (paths or [])):
-        data = load_dashboard_path(Path(path))
+    seen_paths: set[Path] = set()
+    for supplied_path in paths or []:
+        try:
+            path = Path(supplied_path).expanduser().resolve()
+        except (OSError, ValueError, RuntimeError) as exc:
+            warnings.append(f"{supplied_path}: cannot resolve dashboard input: {exc}")
+            continue
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        data = load_dashboard_path(path)
         rows.extend(data.rows)
         warnings.extend(data.warnings)
     for index, uploaded in enumerate(uploads):

@@ -136,6 +136,57 @@ def test_disjoint_runs_features_and_duplicate_conditions_cannot_pair() -> None:
     assert duplicate["score_delta"] is None
 
 
+@pytest.mark.parametrize("scope", ["reports", "agents"])
+def test_status_filter_cannot_pair_different_report_or_agent_occurrences(scope: str) -> None:
+    first, second = _report(), _report()
+    first_agent = first["agents"]["claude-code"]
+    second_agent = second["agents"]["claude-code"]
+    first_agent["conditions"]["without_skill"]["execution_status"] = "failed"
+    second_agent["conditions"]["with_skill"]["execution_status"] = "failed"
+    if scope == "reports":
+        payload = [first, second]
+    else:
+        first["agents"]["second-occurrence"] = second_agent
+        payload = first
+    rows = [row for row in parse_dashboard_report(payload, "combined.json").rows if row["status"] == "succeeded"]
+    comparisons = comparison_rows(rows)
+    assert len(comparisons) == 2
+    assert all(row["comparison_status"] == "missing condition" for row in comparisons)
+    assert all(row["score_delta"] is None for row in comparisons)
+
+
+def test_display_identical_feature_labels_cannot_pair_different_configurations() -> None:
+    report = _report()
+    conditions = report["agents"]["claude-code"]["conditions"]
+    conditions["with_skill"]["dashboard_metadata"] = {"harness_features": ["memory, rules"]}
+    conditions["without_skill"]["dashboard_metadata"] = {"harness_features": ["memory", "rules"]}
+    rows = parse_dashboard_report(report, "report.json").rows
+    assert rows[0]["features"] == rows[1]["features"]
+    assert all(row["comparison_status"] == "missing condition" for row in comparison_rows(rows))
+
+
+def test_zero_attempt_identity_and_conflicting_attempt_fields() -> None:
+    report = _report()
+    agent = report["agents"]["claude-code"]
+    agent["trials"][0]["attempt"] = 0
+    agent["trials_baseline"][0]["attempt"] = "000"
+    assert comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]["comparison_status"] == "comparable"
+    agent["trials"][0]["attempt_index"] = 2
+    agent["trials_baseline"][0]["attempt"] = 2
+    comparison = comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]
+    assert comparison["comparison_status"] == "incomplete or mismatched coverage"
+    assert comparison["score_delta"] is None
+
+
+def test_long_numeric_attempt_suffix_is_normalized_without_integer_conversion() -> None:
+    report = _report()
+    agent = report["agents"]["claude-code"]
+    for field in ("trials", "trials_baseline"):
+        agent[field][0]["trial_id"] = "case-a__attempt" + "9" * 5000
+    comparison = comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]
+    assert comparison["comparison_status"] == "comparable"
+
+
 def test_zero_baseline_and_nonfinite_values() -> None:
     report = _report()
     agent = report["agents"]["claude-code"]
@@ -354,6 +405,98 @@ def test_catalog_native_and_mixed_references_are_loaded_without_cycles(tmp_path:
     assert any("cyclic" in warning for warning in data.warnings)
 
 
+def test_nested_catalog_references_load_each_report_once(tmp_path: Path) -> None:
+    (tmp_path / "report.json").write_text(json.dumps(_report()))
+    reference = {"report_dir": ".", "json_report": "report.json"}
+    (tmp_path / "child.json").write_text(json.dumps({"skills": [reference] * 10}))
+    child = {"report_dir": ".", "json_report": "child.json"}
+    index = tmp_path / "catalog.json"
+    index.write_text(json.dumps({"skills": [child] * 10}))
+    data = load_dashboard_path(index)
+    assert len(data.rows) == 2
+    assert comparison_rows(data.rows)[0]["comparison_status"] == "comparable"
+    assert not data.warnings
+
+
+def test_catalog_file_budget_is_shared_across_nested_references(tmp_path: Path, monkeypatch) -> None:
+    from skillevaluator.reporting import dashboard_data
+
+    monkeypatch.setattr(dashboard_data, "_MAX_FILES", 3)
+    index = tmp_path / "catalog.json"
+    (tmp_path / "one.json").write_text(json.dumps(_report()))
+    second = _report()
+    second["skill_name"] = "second-skill"
+    (tmp_path / "two.json").write_text(json.dumps(second))
+    (tmp_path / "child.json").write_text(
+        json.dumps({"skills": [{"report_dir": ".", "json_report": name} for name in ("one.json", "two.json")]})
+    )
+    index.write_text(json.dumps({"skills": [{"report_dir": ".", "json_report": "child.json"}]}))
+    data = load_dashboard_path(index)
+    assert len(data.rows) == 2
+    assert any("catalog limit" in warning for warning in data.warnings)
+
+
+def test_directory_enumeration_stops_before_materializing_all_entries(tmp_path: Path, monkeypatch) -> None:
+    from skillevaluator.reporting import dashboard_data
+
+    real_scandir = dashboard_data.os.scandir
+    scanned = []
+
+    class CountingScanner:
+        def __enter__(self):
+            self.scanner = real_scandir(tmp_path)
+            return self
+
+        def __exit__(self, *args):
+            self.scanner.close()
+
+        def __iter__(self):
+            for entry in self.scanner:
+                scanned.append(entry.name)
+                yield entry
+
+    for index in range(20):
+        (tmp_path / f"report-{index}.json").write_text(json.dumps(_report()))
+    monkeypatch.setattr(dashboard_data, "_MAX_PATHS", 4)
+    monkeypatch.setattr(dashboard_data.os, "scandir", lambda _path: CountingScanner())
+    data = load_dashboard_path(tmp_path)
+    assert len(scanned) == 5
+    assert len(data.rows) == 8
+    assert any("discovery limit" in warning for warning in data.warnings)
+
+
+def test_directory_file_budget_counts_malformed_reports(tmp_path: Path, monkeypatch) -> None:
+    from skillevaluator.reporting import dashboard_data
+
+    monkeypatch.setattr(dashboard_data, "_MAX_FILES", 3)
+    for index in range(20):
+        (tmp_path / f"broken-{index}.json").write_text("{")
+    data = load_dashboard_path(tmp_path)
+    assert sum("cannot read report" in warning for warning in data.warnings) == 3
+    assert any("file limit" in warning for warning in data.warnings)
+
+
+def test_cyclic_input_catalog_and_native_symlinks_are_diagnostics(tmp_path: Path) -> None:
+    loop = tmp_path / "loop.json"
+    try:
+        loop.symlink_to(loop)
+    except OSError:
+        pytest.skip("Symlinks are unavailable on this host")
+    assert load_dashboard_path(loop).warnings
+    index = tmp_path / "catalog.json"
+    index.write_text(json.dumps({"skills": [{"report_dir": ".", "json_report": "loop.json"}]}))
+    assert load_dashboard_path(index).warnings
+    run = tmp_path / "run"
+    _native_run(run)
+    trials = run / "opencode" / "with-skill" / "trials"
+    shutil.rmtree(trials)
+    trials.symlink_to(trials, target_is_directory=True)
+    data = load_dashboard_path(run)
+    assert data.rows
+    assert any("symlink" in warning for warning in data.warnings)
+    assert next(row for row in data.rows if row["condition"] == "with_skill")["total_tokens"] is None
+
+
 def test_uploaded_native_engine_json_needs_retained_artifacts() -> None:
     raw_result = {
         "skill_name": "native-skill",
@@ -440,6 +583,25 @@ def test_native_different_condition_models_cannot_pair(tmp_path: Path) -> None:
     comparisons = comparison_rows(load_dashboard_path(run).rows)
     assert len(comparisons) == 2
     assert all(row["comparison_status"] == "missing condition" for row in comparisons)
+
+
+@pytest.mark.parametrize("artifact", ["trials", "trajectory.json", "result.json", "reward.json"])
+def test_native_usage_rejects_intermediate_directory_and_file_symlinks(tmp_path: Path, artifact: str) -> None:
+    run = tmp_path / "run"
+    _native_run(run)
+    trials = run / "opencode" / "with-skill" / "trials"
+    target = trials if artifact == "trials" else trials / "case-a__random" / artifact
+    outside = tmp_path / ("outside-trials" if artifact == "trials" else artifact)
+    target.rename(outside)
+    try:
+        target.symlink_to(outside, target_is_directory=artifact == "trials")
+    except OSError:
+        pytest.skip("Symlinks are unavailable on this host")
+    data = load_dashboard_path(run)
+    row = next(row for row in data.rows if row["condition"] == "with_skill")
+    assert row["total_tokens"] is None
+    assert row["duration_seconds"] is None
+    assert any("symlink" in warning for warning in data.warnings)
 
 
 def test_multistep_native_cost_time_and_tokens_require_every_step(tmp_path: Path) -> None:

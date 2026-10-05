@@ -47,6 +47,7 @@ def test_launch_uses_loopback_and_literal_absolute_paths(tmp_path: Path, monkeyp
     assert command[:3] == [sys.executable, "-m", "streamlit"]
     assert "--server.address=127.0.0.1" in command
     assert "--server.port=8517" in command
+    assert "--server.maxUploadSize=16" in command
     assert "--server.headless=true" in command
     assert "--browser.gatherUsageStats=false" in command
     assert command[-2:] == ["--", str(report.resolve())]

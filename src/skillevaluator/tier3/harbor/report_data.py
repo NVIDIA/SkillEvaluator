@@ -641,9 +641,9 @@ def load_agent_data(
                             steps = trajectory.get("steps", [])
                             reward["_traj"] = {
                                 "steps": len(steps) if isinstance(steps, list) else 0,
-                                "prompt_tokens": final_metrics.get("total_prompt_tokens", 0),
-                                "completion_tokens": final_metrics.get("total_completion_tokens", 0),
-                                "cached_tokens": final_metrics.get("total_cached_tokens", 0),
+                                "prompt_tokens": final_metrics.get("total_prompt_tokens"),
+                                "completion_tokens": final_metrics.get("total_completion_tokens"),
+                                "cached_tokens": final_metrics.get("total_cached_tokens"),
                             }
                     trial_list.append(reward)
             else:

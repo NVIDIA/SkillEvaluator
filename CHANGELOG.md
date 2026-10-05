@@ -33,6 +33,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Preserve missing Tier 3 token counters as `null` in canonical JSON exports
+  instead of reporting unmeasured usage as zero.
 - Report non-string YAML keys as validation errors in skills, rules, workflows,
   and plugin manifests instead of raising a `TypeError`, including frontmatter
   `metadata` keys. Show boolean, null, and date keys in a readable YAML form.

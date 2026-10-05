@@ -160,6 +160,35 @@ def test_bad_report_does_not_hide_other_results(tmp_path: Path) -> None:
     assert len(app.dataframe[0].value) == 2
 
 
+def test_status_filter_does_not_pair_arms_from_separate_embedded_reports(tmp_path: Path) -> None:
+    path = _write_report(tmp_path / "combined.json", baseline_status="failed")
+    first = json.loads(path.read_text())
+    second = json.loads(path.read_text())
+    second["agents"]["opencode"]["conditions"]["with_skill"]["execution_status"] = "failed"
+    second["agents"]["opencode"]["conditions"]["without_skill"]["execution_status"] = "succeeded"
+    path.write_text(json.dumps([first, second]))
+    app = _app([path])
+    app.multiselect(key="filter_status").set_value(["succeeded"]).run()
+    assert not app.exception
+    comparisons = app.dataframe[1].value
+    assert len(comparisons) == 2
+    assert comparisons["comparison_status"].tolist() == ["missing condition", "missing condition"]
+    assert comparisons["score_delta"].isna().all()
+
+
+def test_cyclic_input_path_does_not_hide_valid_report(tmp_path: Path) -> None:
+    valid = _write_report(tmp_path / "valid.json")
+    loop = tmp_path / "loop.json"
+    try:
+        loop.symlink_to(loop)
+    except OSError:
+        pytest.skip("Symlinks are unavailable on this host")
+    app = _app([loop, valid])
+    assert not app.exception
+    assert "cannot resolve" in app.warning[0].value
+    assert len(app.dataframe[0].value) == 2
+
+
 @pytest.mark.parametrize(
     ("view", "measured_column"),
     [

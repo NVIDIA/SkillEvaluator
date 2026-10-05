@@ -1794,9 +1794,9 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
         if isinstance(traj, dict):
             trial["steps"] = traj.get("steps")
             trial["tokens"] = {
-                "prompt": traj.get("prompt_tokens", 0),
-                "completion": traj.get("completion_tokens", 0),
-                "cached": traj.get("cached_tokens", 0),
+                "prompt": traj.get("prompt_tokens"),
+                "completion": traj.get("completion_tokens"),
+                "cached": traj.get("cached_tokens"),
             }
         if reward.get("warnings"):
             trial["warnings"] = list(reward["warnings"])

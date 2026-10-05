@@ -26,6 +26,7 @@ def launch_dashboard(paths: tuple[Path, ...], *, port: int = 8501, no_browser: b
         str(app),
         "--server.address=127.0.0.1",
         f"--server.port={port}",
+        "--server.maxUploadSize=16",
         f"--server.headless={str(no_browser).lower()}",
         "--browser.gatherUsageStats=false",
         "--theme.primaryColor=#76b900",

@@ -386,6 +386,9 @@ the same run and require successful conditions with matching trial coverage.
 
 Missing measurements stay unavailable: older JSON reports may contain token
 counts without time or cost, and cost is shown only when recorded in USD.
+Some older exports encoded missing token counters as zero. Open their retained
+run directories to recover recorded counters, or regenerate the canonical JSON
+with this version to preserve missing measurements as `null`.
 For retained runs, duration measures agent execution rather than the entire
 evaluation workflow. Cached tokens are shown separately and are not added again
 to prompt plus completion tokens. No pricing estimates or new agent evaluations

@@ -34,6 +34,7 @@ import yaml
 
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity, ValidationResult
+from skillevaluator.validators.url_policy import safe_url
 
 logger = get_logger(__name__)
 
@@ -243,7 +244,7 @@ def _coerce_hook_allowed_urls(value: Any, source: str) -> tuple[str, ...]:
     A URL entry with userinfo, a query, or a fragment is kept, so the allowlist
     stays enforced, but it matches no hook URL, and a warning is logged.
     """
-    from skillevaluator.plugin_component_risk import hook_url_entry_problem, safe_url
+    from skillevaluator.plugin_component_risk import hook_url_entry_problem
 
     entries = _coerce_string_list(
         value, "hooks.allowed_urls", source, max_entries=MAX_HOOK_ALLOWED_URLS, max_length=2048

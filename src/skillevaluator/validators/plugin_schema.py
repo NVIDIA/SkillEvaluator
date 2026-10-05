@@ -266,7 +266,7 @@ class PluginSchemaValidator(ValidatorBase):
         """
         # Imported lazily: plugin_components imports validators.mcp_static, and the
         # validators package imports this module at package-import time.
-        from skillevaluator.plugin_components import attribute_findings, build_plugin_inventory, manifest_rel_for
+        from skillevaluator.plugin_components import attribute_findings, build_plugin_inventory
 
         contained = location.contained
         manifest = contained_data if contained else self._bundle_manifest_data(location)
@@ -277,7 +277,7 @@ class PluginSchemaValidator(ValidatorBase):
             root,
             manifest,
             contained=contained,
-            manifest_rel=manifest_rel_for(location.path, location.root),
+            manifest_rel=location.manifest_filename,
             allowed_private_hosts=allowed_hosts,
             hook_allowed_urls=hook_allowed_urls,
             manifest_type=location.manifest_type,

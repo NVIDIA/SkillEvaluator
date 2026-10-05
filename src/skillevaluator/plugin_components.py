@@ -148,7 +148,13 @@ COMPONENT_TYPES: tuple[str, ...] = (
     "monitor",
     "settings",
 )
+# Tier 3 coverage states. Staging assigns one of COVERAGE_STATES to each component;
+# after the run the native load census ("loaded") and runtime evidence ("exercised")
+# can raise a row by rank, never lower it. A row in one of these ranked states counts
+# as evaluated.
 COVERAGE_STATES: tuple[str, ...] = ("staged", "not_staged", "unsupported", "unavailable", "invalid")
+COVERAGE_STATE_RANK: dict[str, int] = {"staged": 1, "loaded": 2, "exercised": 3}
+EVALUATED_COVERAGE_STATES: frozenset[str] = frozenset(COVERAGE_STATE_RANK)
 _TYPE_SUPPORT: dict[str, Support] = {
     "skill": "evaluated",
     "rule": "evaluated",
@@ -2271,9 +2277,7 @@ def summarize_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "components": rows,
         "counts": counts,
-        # ``loaded`` (native load census) and ``exercised`` (runtime evidence)
-        # rank above ``staged``; they are set after the run.
-        "not_evaluated": sum(1 for row in rows if row["state"] not in {"staged", "loaded", "exercised"}),
+        "not_evaluated": sum(1 for row in rows if row["state"] not in EVALUATED_COVERAGE_STATES),
     }
 
 

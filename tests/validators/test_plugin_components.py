@@ -30,6 +30,9 @@ from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.plugin_component_risk import MAX_SCRIPT_BYTES, HookScriptUnreadable
 from skillevaluator.plugin_components import (
     COMPONENT_TYPES,
+    COVERAGE_STATE_RANK,
+    COVERAGE_STATES,
+    EVALUATED_COVERAGE_STATES,
     PluginRootReader,
     _Builder,
     build_plugin_inventory,
@@ -37,6 +40,7 @@ from skillevaluator.plugin_components import (
     is_env_file,
     normalize_declared_path,
     refresh_component_finding_counts,
+    summarize_coverage,
 )
 from skillevaluator.plugin_formats import CLAUDE_PROFILE
 from skillevaluator.tier1.commands import run_validation
@@ -1125,3 +1129,12 @@ def test_padded_or_non_utf8_hook_scripts_are_still_analyzed(
     root = _plugin(tmp_path, {}, {"hooks/hooks.json": {"hooks": {event: [{"hooks": [handler]}]}}})
     (root / "a.sh").write_bytes(script)
     assert check in _checks(_validate(root))
+
+
+def test_coverage_vocabulary_ranks_runtime_states_above_staged() -> None:
+    assert sorted(EVALUATED_COVERAGE_STATES) == ["exercised", "loaded", "staged"]
+    assert COVERAGE_STATE_RANK["staged"] < COVERAGE_STATE_RANK["loaded"] < COVERAGE_STATE_RANK["exercised"]
+    rows = [{"state": state} for state in (*COVERAGE_STATES, "loaded", "exercised")]
+    summary = summarize_coverage(rows)
+    assert summary["not_evaluated"] == len(COVERAGE_STATES) - 1
+    assert summary["counts"] == {**dict.fromkeys(COVERAGE_STATES, 1), "loaded": 1, "exercised": 1}

@@ -6,17 +6,16 @@
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 import pytest
 
-from skillevaluator.tier3.eval_core import plugin_signals
+from skillevaluator.tier3.eval_core import checks, plugin_signals
 from skillevaluator.tier3.eval_core.plugin_signals import (
     MAX_TOOL_PATTERNS,
     build_plugin_signals_context,
     compute_plugin_signals,
-    detect_component_activations,
+    match_declared_mcp_server,
     plugin_case_spec,
     summarize_plugin_signals,
     validate_plugin_case_fields,
@@ -52,6 +51,23 @@ def _signals(traj: dict[str, Any], case: dict[str, Any] | None = None, **kwargs:
     return signals
 
 
+def _activations(traj: dict[str, Any]) -> list[dict[str, Any]]:
+    return _signals(traj)["activations"]
+
+
+def _record_regex_timeouts(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record the deadline of every dataset-pattern search (a search without one fails)."""
+    timeouts: list[float] = []
+    search = plugin_signals.regex.search
+
+    def search_with_deadline(pattern: str, text: str, *, timeout: float) -> Any:
+        timeouts.append(timeout)
+        return search(pattern, text, timeout=timeout)
+
+    monkeypatch.setattr(plugin_signals.regex, "search", search_with_deadline)
+    return timeouts
+
+
 def _codex_exec(source: str, call_id: str = "exec-1") -> dict[str, Any]:
     return {"tool_call_id": call_id, "function_name": "exec", "arguments": {"input": source}}
 
@@ -71,7 +87,7 @@ class TestClassifierClaudeStyle:
             _one("Read", {"file_path": "/workspace/data.csv"}, "a,b", call_id="c5"),
         )
 
-        activations = detect_component_activations(traj, DECLARED)
+        activations = _activations(traj)
 
         assert activations == [
             {"type": "skill", "name": "alpha", "tool": "Skill", "server": None, "step_index": 1, "succeeded": True},
@@ -108,18 +124,18 @@ class TestClassifierClaudeStyle:
             _one("Read", {"file_path": "/workspace/skills/beta/SKILL.md.bak"}, "# old", call_id="c3"),
         )
 
-        activations = detect_component_activations(traj, DECLARED)
+        activations = _activations(traj)
 
         assert [(a["type"], a["name"], a["tool"]) for a in activations] == [("skill", "beta", "Read:skill-md-read")]
 
     def test_ordinary_tools_are_not_activations(self) -> None:
         traj = _traj(_one("Bash", {"command": "ls"}), _one("Write", {"file_path": "x"}, call_id="c2"))
-        assert detect_component_activations(traj, DECLARED) == []
+        assert _activations(traj) == []
 
     def test_mcp_filesystem_read_of_member_manifest_is_both_mcp_and_skill(self) -> None:
         traj = _traj(_one("mcp__filesystem__read_file", {"path": "/workspace/skills/alpha/SKILL.md"}, "# alpha"))
 
-        activations = detect_component_activations(traj, DECLARED)
+        activations = _activations(traj)
 
         assert [(a["type"], a["name"]) for a in activations] == [("mcp", "filesystem"), ("skill", "alpha")]
 
@@ -131,7 +147,7 @@ class TestClassifierCodexStyle:
             _one("shell", {"command": "FOO=1 cat skills/beta/SKILL.md | head"}, call_id="c2"),
         )
 
-        activations = detect_component_activations(traj, DECLARED)
+        activations = _activations(traj)
 
         assert [(a["name"], a["tool"]) for a in activations] == [
             ("alpha", "exec_command:skill-md-read"),
@@ -152,7 +168,7 @@ class TestClassifierCodexStyle:
     )
     def test_non_read_or_undeclared_shell_mentions_do_not_count(self, command: str) -> None:
         traj = _traj(_one("exec_command", {"cmd": command}))
-        assert detect_component_activations(traj, DECLARED) == []
+        assert _activations(traj) == []
 
     @pytest.mark.parametrize(
         "command",
@@ -164,18 +180,18 @@ class TestClassifierCodexStyle:
         ],
     )
     def test_multiline_script_with_a_stray_quote_still_credits_the_read(self, command: str) -> None:
-        (activation,) = detect_component_activations(_traj(_one("exec_command", {"cmd": command})), DECLARED)
+        (activation,) = _activations(_traj(_one("exec_command", {"cmd": command})))
         assert (activation["type"], activation["name"]) == ("skill", "alpha")
 
     def test_heredoc_body_is_data_not_a_manifest_read(self) -> None:
         command = "cat > notes.md <<EOF\ncat skills/alpha/SKILL.md\nEOF\nls"
-        assert detect_component_activations(_traj(_one("exec_command", {"cmd": command})), DECLARED) == []
+        assert _activations(_traj(_one("exec_command", {"cmd": command}))) == []
 
     def test_native_exec_wrapper_is_normalized_and_mapped_observation_is_used(self) -> None:
         source = 'const r = await tools.mcp__github__list_issues({repo: "o/r"});\ntext(JSON.stringify(r));'
         traj = _traj(_step([_codex_exec(source)], [_res("exec-1", "[1, 2]")]))
 
-        (activation,) = detect_component_activations(traj, DECLARED)
+        (activation,) = _activations(traj)
 
         assert activation["tool"] == "mcp__github__list_issues"
         assert activation["succeeded"] is True
@@ -188,12 +204,47 @@ class TestClassifierCodexStyle:
         )
         traj = _traj(_step([_codex_exec(source)], [_res("exec-1", "403: forbidden")]))
 
-        activations = detect_component_activations(traj, DECLARED)
+        activations = _activations(traj)
 
         assert [(a["tool"], a["succeeded"]) for a in activations] == [
             ("mcp__github__list_issues", None),
             ("mcp__jira__create_ticket", None),
         ]
+
+    @pytest.mark.parametrize(
+        "fn", ["mcp__fs__get_document", "fs__get_document", "fs.get_document", "mcp_fs_get_document", "fs_get_document"]
+    )
+    def test_every_spelling_of_a_declared_server_read_credits_the_member(self, fn: str) -> None:
+        traj = _traj(_one(fn, {"path": "/workspace/skills/alpha/SKILL.md"}, "# alpha"))
+
+        activations = _signals(traj, declared={**DECLARED, "mcp": ["fs"]})["activations"]
+
+        assert [(a["type"], a["name"], a["tool"]) for a in activations] == [
+            ("mcp", "fs", "mcp__fs__get_document"),
+            ("skill", "alpha", f"{fn}:skill-md-read"),
+        ]
+
+    @pytest.mark.parametrize("fn", ["mcp__fs__bash", "fs__bash"])
+    def test_mcp_tool_named_like_a_shell_is_not_parsed_as_one(self, fn: str) -> None:
+        traj = _traj(_one(fn, {"command": "cat skills/alpha/SKILL.md"}))
+
+        activations = _signals(traj, declared={**DECLARED, "mcp": ["fs"]})["activations"]
+
+        assert [(a["type"], a["name"]) for a in activations] == [("mcp", "fs")]
+
+    @pytest.mark.parametrize("fn", ["mcp__fs__edit_file", "mcp_fs_edit_file"])
+    def test_every_spelling_of_an_mcp_edit_tool_writes_the_artifact(self, fn: str) -> None:
+        traj = _traj(
+            _one("Skill", {"skill": "alpha"}),
+            _one(fn, {"path": "out/report.json", "edits": []}, call_id="c2"),
+            _one("Skill", {"skill": "beta"}, call_id="c3"),
+            _one("Read", {"file_path": "out/report.json"}, call_id="c4"),
+        )
+        case = {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "artifact": "out/report.json"}]}
+
+        signals = _signals(traj, case, declared={**DECLARED, "mcp": ["fs"]})
+
+        assert signals["handoff"]["passed"] == 1
 
     def test_declared_server_alternate_spellings_are_canonicalized(self) -> None:
         traj = _traj(
@@ -202,15 +253,88 @@ class TestClassifierCodexStyle:
             _one("slack.post", {"text": "x"}, call_id="c3"),
         )
 
-        activations = detect_component_activations(traj, DECLARED)
+        activations = _activations(traj)
 
         assert [a["tool"] for a in activations] == ["mcp__github__search_code", "mcp__jira__create_ticket"]
+
+
+class TestMcpServerNames:
+    @pytest.mark.parametrize(
+        ("observed", "declared", "expected"),
+        [
+            ("GitHub", ["github", "jira"], "github"),
+            ("my_docs", ["my.docs", "my_docs"], "my_docs"),  # an exact name beats another server's spelling
+            ("my_docs", ["my.docs"], "my.docs"),
+            ("my_docs", ["my.docs", "my-docs"], None),  # a spelling two servers share credits neither
+            ("plugin_demo-plugin_docs", ["docs"], "docs"),
+            ("plugin_demo_my_docs", ["my.docs"], "my.docs"),
+            ("plugin_a_b_team_docs", ["team_docs", "docs"], "team_docs"),  # the longest declared suffix
+            ("plugin_x_y_my_docs", ["my.docs", "my-docs"], None),
+            ("plugin_", ["docs"], None),
+            ("slack", ["github"], None),
+            ("github", [], None),
+        ],
+    )
+    def test_observed_server_names_map_to_one_declared_server(
+        self, observed: str, declared: list[str], expected: str | None
+    ) -> None:
+        assert match_declared_mcp_server(observed, declared) == expected
+
+    @pytest.mark.parametrize(
+        ("agent", "fn", "servers", "tool"),
+        [
+            ("claude-code", "my.docs__search", ["my.docs", "my"], "mcp__my.docs__search"),  # the longest prefix wins
+            ("claude-code", "my_docs__search", ["my.docs", "my-docs"], "mcp__my_docs__search"),
+            ("hermes", "mcp_my_docs_search", ["my.docs", "my-docs"], "mcp__my_docs__search"),
+            ("opencode", "github_team.list", ["github", "github_team"], "mcp__github_team__list"),
+            ("opencode", "docs_search", ["docs"], "mcp__docs__search"),
+            ("codex", "docs_search", ["docs"], None),  # only OpenCode names MCP tools <server>_<tool>
+            ("opencode", "web_search", ["web"], None),  # a built-in tool, not the web server's
+            ("claude-code", "mcp__plugin_demo_my_docs__get", ["my.docs"], "mcp__my.docs__get"),
+        ],
+    )
+    def test_tool_names_map_to_declared_servers(
+        self, agent: str, fn: str, servers: list[str], tool: str | None
+    ) -> None:
+        traj = {**_traj(_one(fn)), "agent": {"name": agent}}
+
+        activations = _signals(traj, declared={"skill": [], "mcp": servers})["activations"]
+
+        assert [a["tool"] for a in activations if a["type"] == "mcp"] == ([tool] if tool else [])
+
+
+class TestShellReadsAgainstTheScoredCheck:
+    """The report-only SKILL.md read detector is deliberately more lenient than the scored check."""
+
+    @staticmethod
+    def _credited(command: str) -> list[str]:
+        activations = _signals(_traj(_one("exec_command", {"cmd": command})))["activations"]
+        return [a["name"] for a in activations if a["type"] == "skill"]
+
+    @pytest.mark.parametrize("verb", sorted(checks._FILE_READ_VERBS))
+    def test_every_scored_reader_verb_credits_the_member(self, verb: str) -> None:
+        command = f"{verb} skills/alpha/SKILL.md"
+        assert checks._cmd_reads_skill_md(command)
+        assert self._credited(command) == ["alpha"]
+
+    @pytest.mark.parametrize(
+        "command",
+        ["sudo cat skills/alpha/SKILL.md", "bash -lc 'cat skills/alpha/SKILL.md'", "tac skills/alpha/SKILL.md"],
+    )
+    def test_lenient_reads_credit_the_member_but_not_the_score(self, command: str) -> None:
+        assert not checks._cmd_reads_skill_md(command)
+        assert self._credited(command) == ["alpha"]
+
+    def test_shell_variables_are_expanded_only_by_the_scored_check(self) -> None:
+        command = "D=skills/alpha; cat $D/SKILL.md"
+        assert checks._cmd_reads_skill_md(command)
+        assert self._credited(command) == []
 
 
 class TestOutcomeTriState:
     def test_structured_error_flag_marks_failure(self) -> None:
         traj = _traj(_one("mcp__github__x", content="{}", is_error=True))
-        assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is False
+        assert _activations(traj)[0]["succeeded"] is False
 
     @pytest.mark.parametrize(
         "content",
@@ -229,7 +353,7 @@ class TestOutcomeTriState:
     )
     def test_failure_markers_mark_failure(self, content: str) -> None:
         traj = _traj(_one("mcp__github__x", content=content))
-        assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is False
+        assert _activations(traj)[0]["succeeded"] is False
 
     @pytest.mark.parametrize(
         "content",
@@ -242,16 +366,16 @@ class TestOutcomeTriState:
     )
     def test_status_like_numbers_inside_a_successful_answer_are_not_failures(self, content: str) -> None:
         traj = _traj(_one("mcp__github__x", content=content))
-        assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is True
+        assert _activations(traj)[0]["succeeded"] is True
 
     def test_failure_marker_mid_way_through_a_long_successful_body_is_ignored(self) -> None:
         # Scanning is bounded: each block's head and the result's tail, not the middle.
         traj = _traj(_one("mcp__github__x", content="x" * 5000 + " permission denied " + "y" * 5000))
-        assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is True
+        assert _activations(traj)[0]["succeeded"] is True
 
     def test_failure_marker_at_the_end_of_a_long_body_marks_failure(self) -> None:
         traj = _traj(_one("mcp__github__x", content="x" * 2100 + "\n401 - Unauthorized"))
-        assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is False
+        assert _activations(traj)[0]["succeeded"] is False
 
     def test_error_block_after_a_long_first_block_marks_failure(self) -> None:
         content = [
@@ -260,17 +384,17 @@ class TestOutcomeTriState:
             {"type": "text", "text": "z" * 3000},
         ]
         traj = _traj(_one("mcp__github__x", content=content))
-        assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is False
+        assert _activations(traj)[0]["succeeded"] is False
 
     def test_missing_sibling_file_does_not_fail_a_shell_manifest_read(self) -> None:
         output = "cat: skills/alpha/REFERENCE.md: No such file or directory\n---\nname: alpha\n---\n"
         traj = _traj(_one("exec_command", {"cmd": "cat skills/alpha/SKILL.md skills/alpha/REFERENCE.md"}, output))
-        assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is True
+        assert _activations(traj)[0]["succeeded"] is True
 
     @pytest.mark.parametrize("fn", ["Read", "mcp__github__read_file"])
     def test_missing_file_still_fails_mcp_and_file_read_tools(self, fn: str) -> None:
         traj = _traj(_one(fn, {"file_path": "skills/beta/SKILL.md"}, "Error: file does not exist"))
-        assert {a["succeeded"] for a in detect_component_activations(traj, DECLARED)} == {False}
+        assert {a["succeeded"] for a in _activations(traj)} == {False}
 
     def test_sibling_result_never_proves_success(self) -> None:
         traj = _traj(
@@ -279,23 +403,23 @@ class TestOutcomeTriState:
                 [_res("c2", "files")],
             )
         )
-        assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is None
+        assert _activations(traj)[0]["succeeded"] is None
 
     def test_idless_result_is_used_only_for_single_call_steps(self) -> None:
         single = _traj(_step([_tc("mcp__github__x", call_id="")], [{"content": "ok"}]))
         multi = _traj(
             _step([_tc("mcp__github__x", call_id=""), _tc("mcp__jira__y", call_id="")], [{"content": "ok"}]),
         )
-        assert detect_component_activations(single, DECLARED)[0]["succeeded"] is True
-        assert [a["succeeded"] for a in detect_component_activations(multi, DECLARED)] == [None, None]
+        assert _activations(single)[0]["succeeded"] is True
+        assert [a["succeeded"] for a in _activations(multi)] == [None, None]
 
     def test_empty_correlated_body_is_unknown(self) -> None:
         traj = _traj(_one("mcp__github__x", content="  "))
-        assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is None
+        assert _activations(traj)[0]["succeeded"] is None
 
     def test_string_arguments_are_decoded(self) -> None:
         traj = _traj(_step([{"tool_call_id": "c1", "function_name": "Skill", "arguments": '{"skill": "beta"}'}]))
-        assert detect_component_activations(traj, DECLARED)[0]["name"] == "beta"
+        assert _activations(traj)[0]["name"] == "beta"
 
 
 def test_unreadable_trajectory_yields_none() -> None:
@@ -503,14 +627,18 @@ class TestArguments:
         ],
         ids=["nested-quantifier", "overlapping-alternation", "adjacent-quantifiers-at-subject-cap"],
     )
-    def test_backtracking_pattern_fails_fast_instead_of_hanging(self, pattern: str, subject: str) -> None:
+    def test_backtracking_pattern_fails_fast_instead_of_hanging(
+        self, monkeypatch: pytest.MonkeyPatch, pattern: str, subject: str
+    ) -> None:
+        timeouts = _record_regex_timeouts(monkeypatch)
         traj = _traj(_one("Bash", {"command": subject}))
         case = {"tool_arguments": [{"tool": "Bash", "pattern": {"command": pattern}}]}
 
-        started = time.monotonic()
         block = _signals(traj, case)["arguments"]
 
-        assert time.monotonic() - started < 1.0
+        # The search ran under the per-check deadline, so it could not hang.
+        assert timeouts
+        assert all(0 < timeout <= plugin_signals._PATTERN_TIMEOUT_SECONDS for timeout in timeouts)
         assert (block["checked"], block["passed"]) == (1, 0)
         (failure,) = block["failures"]
         assert failure["detail"] in {
@@ -521,13 +649,15 @@ class TestArguments:
     def test_pattern_checks_share_one_time_budget_per_trial(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(plugin_signals, "_PATTERN_TIMEOUT_SECONDS", 0.05)
         monkeypatch.setattr(plugin_signals, "_PATTERN_BUDGET_SECONDS", 0.2)
+        timeouts = _record_regex_timeouts(monkeypatch)
         steps = [_one("Bash", {"command": "a" * 60 + "!"}, call_id=f"c{index}") for index in range(20)]
         case = {"tool_arguments": [{"tool": "Bash", "pattern": {"command": "(a|aa)+$"}}]}
 
-        started = time.monotonic()
         block = _signals(_traj(*steps), case)["arguments"]
 
-        assert time.monotonic() - started < 1.0
+        # Each search that timed out spent its share of the 0.2 s budget, so the
+        # later checks failed without searching at all.
+        assert 0 < len(timeouts) < 20
         assert (block["checked"], block["passed"]) == (20, 0)
         assert {failure["detail"] for failure in block["failures"]} == {"pattern check timed out"}
 
@@ -674,6 +804,59 @@ class TestHandoff:
             "detail": "artifact was not read by the consumer after the producer wrote it",
         }
 
+    @pytest.mark.parametrize(
+        ("fn", "args"),
+        [
+            ("apply_patch", {"input": "*** Begin Patch\n  *** Add File: out/report.json\n+{}\n*** End Patch"}),
+            (
+                "apply_patch",
+                {"input": "*** Begin Patch\n*** Update File: draft.json\n*** Move to: out/report.json\n*** End Patch"},
+            ),
+            ("apply_patch", {"patchText": "*** Begin Patch\n*** Add File: out/report.json\n+{}\n*** End Patch"}),
+            ("apply_patch", {"raw": "*** Begin Patch\n*** Add File: out/report.json\n+{}\n*** End Patch"}),
+            ("applypatch", {"input": "*** Begin Patch\n*** Add File: out/report.json\n+{}\n*** End Patch"}),
+            ("patch", {"mode": "patch", "patch": "*** Begin Patch\n*** Update File: out/report.json\n*** End Patch"}),
+            ("patch", {"mode": "replace", "path": "out/report.json", "old_string": "a", "new_string": "b"}),
+        ],
+        ids=[
+            "indented-header",
+            "move-to",
+            "opencode-patch-text",
+            "raw-input",
+            "applypatch",
+            "hermes-patch",
+            "hermes-replace",
+        ],
+    )
+    def test_patch_tool_writes_count_as_artifact_writes(self, fn: str, args: dict[str, Any]) -> None:
+        traj = _traj(
+            _one("Skill", {"skill": "alpha"}),
+            _one(fn, args, call_id="c2"),
+            _one("Skill", {"skill": "beta"}, call_id="c3"),
+            _one("Read", {"file_path": "out/report.json"}, call_id="c4"),
+        )
+        case = {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "artifact": "out/report.json"}]}
+        assert _signals(traj, case)["handoff"]["passed"] == 1
+
+    @pytest.mark.parametrize(
+        ("command", "passed"),
+        [
+            ("cd /workspace && apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: out/report.json\n+{}\nEOF", 1),
+            # A header-like line in a file that is not a patch names no write.
+            ("cat > notes.md <<'EOF'\n*** Add File: out/report.json\nEOF", 0),
+        ],
+        ids=["shell-apply-patch", "plain-heredoc"],
+    )
+    def test_shell_apply_patch_headers_count_as_artifact_writes(self, command: str, passed: int) -> None:
+        traj = _traj(
+            _one("Skill", {"skill": "alpha"}),
+            _one("exec_command", {"cmd": command}, call_id="c2"),
+            _one("Skill", {"skill": "beta"}, call_id="c3"),
+            _one("Read", {"file_path": "out/report.json"}, call_id="c4"),
+        )
+        case = {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "artifact": "out/report.json"}]}
+        assert _signals(traj, case)["handoff"]["passed"] == passed
+
     def test_mcp_consumer_receiving_the_artifact_path_counts_as_a_read(self) -> None:
         traj = _traj(
             _one("Skill", {"skill": "alpha"}),
@@ -687,6 +870,17 @@ class TestHandoff:
         case = {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "value": "x"}]}
         (failure,) = _signals(_traj(), case)["handoff"]["failures"]
         assert failure["detail"] == "producer was not activated; consumer was not activated"
+
+    def test_prompts_are_read_only_when_a_handoff_checks_a_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        reads: list[int] = []
+        prompt_texts = plugin_signals._prompt_texts
+        monkeypatch.setattr(plugin_signals, "_prompt_texts", lambda traj: reads.append(1) or prompt_texts(traj))
+        traj = _traj(_one("Skill", {"skill": "alpha"}))
+
+        _signals(traj, {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "artifact": "a.json"}]})
+        assert reads == []
+        _signals(traj, {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "value": "v"}]})
+        assert reads == [1]
 
 
 class TestConflict:
@@ -725,6 +919,37 @@ class TestActivationCoverage:
             "unverified": ["skill:beta"],
             "unavailable": ["mcp:jira"],
         }
+
+    def test_every_spelling_and_namespace_credits_the_declared_component(self) -> None:
+        traj = _traj(
+            _one("Skill", {"skill": "ALPHA"}),
+            _one("Skill", {"skill": "demo:deploy"}, call_id="c2"),
+            _one("Task", {"subagent_type": "Reviewer"}, call_id="c3"),
+            _one("my_docs__search", content="connection refused", call_id="c4"),
+            _one("mcp__plugin_demo_my_docs__search", content="403: forbidden", call_id="c5"),
+            _one("mcp__tracker__list", content="500: down", call_id="c6"),
+            _one("tracker.get", content="ok", call_id="c7"),
+        )
+        declared = {
+            "skill": ["Alpha", "alpha", "beta"],
+            "mcp": ["my.docs", "tracker"],
+            "subagent": ["reviewer"],
+            "command": ["deploy"],
+        }
+
+        block = _signals(traj, declared=declared)["activation_coverage"]
+
+        assert block["exercised"] == [
+            "skill:Alpha",
+            "skill:alpha",
+            "mcp:my.docs",
+            "mcp:tracker",
+            "subagent:reviewer",
+            "command:deploy",
+        ]
+        assert block["unverified"] == ["skill:beta"]
+        # Every my.docs call failed; one tracker call worked.
+        assert block["unavailable"] == ["mcp:my.docs"]
 
     def test_no_declared_components(self) -> None:
         block = _signals(_traj(_one("Skill", {"skill": "alpha"})), declared=None)["activation_coverage"]
@@ -866,6 +1091,28 @@ def test_invalid_case_fields_are_reported_and_dropped(field: str, value: Any, fr
     assert field not in plugin_case_spec(entry)
 
 
+@pytest.mark.parametrize(
+    ("pattern", "valid"),
+    [
+        (r"^\p{Lu}\w+$", True),  # a Unicode property: the regex engine runs it, ``re`` cannot compile it
+        ("[[:alpha:]", False),  # ``re`` reads a set of characters; the regex engine an unclosed POSIX class
+        ("(?a)a(?u)", False),  # the regex engine raises ValueError, not regex.error
+    ],
+)
+def test_patterns_are_validated_by_the_engine_that_runs_them(pattern: str, valid: bool) -> None:
+    entry = {"tool_arguments": [{"tool": "mcp__jira__create", "pattern": {"title": pattern}}]}
+    schema_entry = {"tool_arguments": [{"tool": "t", "schema": {"properties": {"title": {"pattern": pattern}}}}]}
+
+    for problems in (validate_plugin_case_fields(entry), validate_plugin_case_fields(schema_entry)):
+        if valid:
+            assert problems == []
+        else:
+            assert any("not a valid regular expression" in problem for problem in problems), problems
+    if valid:
+        traj = _traj(_one("mcp__jira__create", {"title": "Track"}))
+        assert _signals(traj, entry)["arguments"]["passed"] == 1
+
+
 def test_deeply_nested_schema_is_rejected() -> None:
     schema: dict[str, Any] = {"type": "object"}
     for _ in range(10):
@@ -932,7 +1179,7 @@ class TestUntrustedTrajectoryContent:
         ]
         assert [f["tool"] for f in signals["arguments"]["failures"]] == ["Skill:<non-name>", "Skill:Release Notes"]
 
-    def test_adversarial_text_for_the_redactor_does_not_stall_collection(self) -> None:
+    def test_adversarial_text_for_the_redactor_does_not_stall_collection(self, monkeypatch: pytest.MonkeyPatch) -> None:
         payload = "a." * 32_768  # quadratic for the credential redactor's assignment patterns
         traj = _traj(
             _one("Skill", {"skill": payload}),
@@ -948,10 +1195,20 @@ class TestUntrustedTrajectoryContent:
             ]
         }
 
-        started = time.monotonic()
+        redacted: list[int] = []
+        redact = plugin_signals.redact_sensitive_text
+
+        def recording_redact(text: str, **kwargs: Any) -> str:
+            redacted.append(len(text))
+            return redact(text, **kwargs)
+
+        monkeypatch.setattr(plugin_signals, "redact_sensitive_text", recording_redact)
+
         signals = _signals(traj, case)
 
-        assert time.monotonic() - started < 1.0
+        # The redactor only ever sees a bounded window (4 x 256 + 256 characters), never the payload.
+        assert redacted
+        assert max(redacted) <= 4 * plugin_signals._MAX_LABEL_CHARS + 256
         assert len(signals["arguments"]["failures"]) == 4
 
     def test_unhashable_step_source_is_ignored(self) -> None:

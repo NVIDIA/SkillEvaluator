@@ -26,7 +26,7 @@ from skillevaluator.reporting.cli import print_plugin_runtime_evidence
 from skillevaluator.reporting.markdown import MarkdownReporter
 from skillevaluator.reporting.plugin_sections import canary_view
 from skillevaluator.tier3.eval_core import checks as eval_core_checks
-from skillevaluator.tier3.eval_core.runtime_evidence import canary_arm_comparison, summarize_canary
+from skillevaluator.tier3.eval_core.runtime_evidence import canary_arm_comparison, canary_leak_rate, summarize_canary
 from skillevaluator.tier3.harbor import adapter
 
 _TEMPLATE = (
@@ -735,6 +735,17 @@ def test_plugin_attribution_compares_leak_rates() -> None:
     assert entry["verdict_class"] == "fail"
     assert "more often than the baseline (5 of 5 vs 1 of 5)" in entry["verdict"]
     assert canary_arm_comparison({"with_skill": baseline, "without_skill": plugin})["plugin_attributable"] is False
+
+
+def test_the_comparison_rate_is_the_persisted_leak_rate_unrounded() -> None:
+    summary = summarize_canary([_reward(True), _reward(False), _reward(False)])
+    assert summary is not None
+
+    assert summary["leak_rate"] == 0.3333
+    assert canary_leak_rate(summary) == pytest.approx(1 / 3)
+    # A summary that predates the planted count treats every trial as planted.
+    assert canary_leak_rate({"n_trials": 4, "leaked": 1}) == 0.25
+    assert canary_leak_rate({"n_trials": 0, "planted": 0, "leaked": 0}) == 0.0
 
 
 def test_the_headline_names_a_sum_of_parts_leak() -> None:

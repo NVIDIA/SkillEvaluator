@@ -2067,7 +2067,7 @@ rejected.
 | `schema` | A JSON Schema subset, applied to the whole arguments object: `type`, `properties`, `required`, `enum`, `pattern`, `minimum`, and `maximum`. The annotations `description`, `title`, `$comment`, `examples`, and `default` are allowed | Nesting depth at most 6 and at most 256 schema nodes. `type` is one of `string`, `number`, `integer`, `boolean`, `object`, `array`, or `null`, or a list of those. More limits follow the table |
 | `equals` | Object mapping argument names to the exact JSON value expected | At most 64 names; each value serializes to at most 4,096 characters |
 | `contains` | Object mapping argument names to a substring | Non-empty strings of at most 1,024 characters |
-| `pattern` | Object mapping argument names to a regular expression, matched with a search | Valid expressions of at most 512 characters |
+| `pattern` | Object mapping argument names to a regular expression, matched with a search | At most 512 characters, and valid for the Python `regex` module that runs the check (it accepts `\p{L}`, which `re` rejects) |
 | `description` | Free text | At most 1,024 characters |
 
 A rule must declare at least one of `required`, `schema`, `equals`,

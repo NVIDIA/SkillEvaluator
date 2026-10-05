@@ -34,11 +34,11 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.utils.redaction import redact_sensitive_text
+from skillevaluator.tier3.eval_core.plugin_signals import _safe_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 
 HOOK_CENSUS_FILENAME = "skilleval-hook-census.jsonl"
@@ -59,24 +59,34 @@ CENSUS_STATUS_RECORDED = "recorded"
 CENSUS_STATUS_ABSENT = "absent"
 CENSUS_STATUS_UNREADABLE = "unreadable"
 
-
-def _safe(value: Any, limit: int) -> str:
-    text = " ".join(str(value).split())
-    return redact_sensitive_text(text)[:limit]
+# Per-hook counters; each also has a ``total_<counter>`` over every hook.
+_CENSUS_COUNTERS = ("runs", "failures", "blocked", "not_started")
 
 
 def _int(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _census_row(
+    rows: dict[tuple[str, str], dict[str, Any]], key: tuple[str, str], **extra: int
+) -> dict[str, Any] | None:
+    """The row for ``(hook_id, event)``, added with zero counts; ``None`` once the hook cap is reached."""
+    row = rows.get(key)
+    if row is None and len(rows) < MAX_HOOK_CENSUS_HOOKS:
+        row = {"hook_id": key[0], "event": key[1], **dict.fromkeys(_CENSUS_COUNTERS, 0), **extra}
+        rows[key] = row
+    return row
+
+
+def _census_totals(rows: Collection[Mapping[str, Any]]) -> dict[str, int]:
+    return {f"total_{counter}": sum(row[counter] for row in rows) for counter in _CENSUS_COUNTERS}
+
+
 def empty_hook_census(status: str = CENSUS_STATUS_ABSENT, detail: str = "") -> dict[str, Any]:
     block: dict[str, Any] = {
         "status": status,
         "hooks": [],
-        "total_runs": 0,
-        "total_failures": 0,
-        "total_blocked": 0,
-        "total_not_started": 0,
+        **_census_totals(()),
         "invalid_lines": 0,
         "truncated": False,
     }
@@ -95,6 +105,8 @@ def parse_hook_census(text: str) -> dict[str, Any]:
     """
     block = empty_hook_census(CENSUS_STATUS_RECORDED)
     rows: dict[tuple[str, str], dict[str, Any]] = {}
+    # Redacted (hook_id, event) per raw pair: a census repeats a few hooks many times.
+    keys: dict[tuple[str, str], tuple[str, str]] = {}
     lines = text.splitlines()
     if len(lines) > MAX_HOOK_CENSUS_LINES:
         block["truncated"] = True
@@ -120,22 +132,14 @@ def parse_hook_census(text: str) -> dict[str, Any]:
         if not isinstance(hook_id, str) or not hook_id.strip() or not isinstance(event, str) or exit_code is None:
             block["invalid_lines"] += 1
             continue
-        key = (_safe(hook_id, MAX_HOOK_ID_CHARS), _safe(event, MAX_HOOK_EVENT_CHARS))
-        row = rows.get(key)
+        key = keys.get((hook_id, event))
+        if key is None:
+            key = (_safe_text(hook_id, MAX_HOOK_ID_CHARS), _safe_text(event, MAX_HOOK_EVENT_CHARS))
+            keys[hook_id, event] = key
+        row = _census_row(rows, key, total_duration_ms=0)
         if row is None:
-            if len(rows) >= MAX_HOOK_CENSUS_HOOKS:
-                block["truncated"] = True
-                continue
-            row = {
-                "hook_id": key[0],
-                "event": key[1],
-                "runs": 0,
-                "failures": 0,
-                "blocked": 0,
-                "not_started": 0,
-                "total_duration_ms": 0,
-            }
-            rows[key] = row
+            block["truncated"] = True
+            continue
         row["runs"] += 1
         if exit_code == HOOK_EXIT_BLOCKED:
             row["blocked"] += 1
@@ -147,10 +151,7 @@ def parse_hook_census(text: str) -> dict[str, Any]:
         if duration is not None and duration >= 0:
             row["total_duration_ms"] += duration
     block["hooks"] = list(rows.values())
-    block["total_runs"] = sum(row["runs"] for row in rows.values())
-    block["total_failures"] = sum(row["failures"] for row in rows.values())
-    block["total_blocked"] = sum(row["blocked"] for row in rows.values())
-    block["total_not_started"] = sum(row["not_started"] for row in rows.values())
+    block.update(_census_totals(rows.values()))
     return block
 
 
@@ -165,9 +166,9 @@ def read_hook_census(trial_root: Path | None) -> dict[str, Any]:
         with SecureRoot(agent_dir) as root:
             raw, _metadata = root.read_bytes(Path(HOOK_CENSUS_FILENAME), MAX_HOOK_CENSUS_BYTES)
     except SecurePathError as exc:
-        return empty_hook_census(CENSUS_STATUS_UNREADABLE, _safe(f"{exc.code}: {exc}", 200))
+        return empty_hook_census(CENSUS_STATUS_UNREADABLE, _safe_text(f"{exc.code}: {exc}", 200))
     except (OSError, ValueError) as exc:
-        return empty_hook_census(CENSUS_STATUS_UNREADABLE, _safe(type(exc).__name__, 200))
+        return empty_hook_census(CENSUS_STATUS_UNREADABLE, _safe_text(type(exc).__name__, 200))
     return parse_hook_census(raw.decode("utf-8", errors="replace"))
 
 
@@ -195,38 +196,20 @@ def summarize_hook_census(blocks: Sequence[Mapping[str, Any] | None]) -> dict[st
         for hook in block.get("hooks") or ():
             if not isinstance(hook, Mapping):
                 continue
-            key = (str(hook.get("hook_id") or ""), str(hook.get("event") or ""))
-            row = rows.get(key)
+            row = _census_row(rows, (str(hook.get("hook_id") or ""), str(hook.get("event") or "")), trials=0)
             if row is None:
-                if len(rows) >= MAX_HOOK_CENSUS_HOOKS:
-                    truncated = True
-                    continue
-                row = {
-                    "hook_id": key[0],
-                    "event": key[1],
-                    "runs": 0,
-                    "failures": 0,
-                    "blocked": 0,
-                    "not_started": 0,
-                    "trials": 0,
-                }
-                rows[key] = row
-            runs = _int(hook.get("runs")) or 0
-            row["runs"] += runs
-            for field in ("failures", "blocked", "not_started"):
-                row[field] += _int(hook.get(field)) or 0
-            if runs:
+                truncated = True
+                continue
+            for counter in _CENSUS_COUNTERS:
+                row[counter] += _int(hook.get(counter)) or 0
+            if _int(hook.get("runs")):
                 row["trials"] += 1
-    total_runs = sum(row["runs"] for row in rows.values())
     return {
         "n_trials": n_trials,
         "n_trials_with_census": with_census,
         "n_trials_unreadable": unreadable,
         "hooks": list(rows.values()),
-        "total_runs": total_runs,
-        "total_failures": sum(row["failures"] for row in rows.values()),
-        "total_blocked": sum(row["blocked"] for row in rows.values()),
-        "total_not_started": sum(row["not_started"] for row in rows.values()),
+        **_census_totals(rows.values()),
         "invalid_lines": invalid,
         "truncated": truncated,
     }
@@ -281,18 +264,19 @@ def summarize_canary(rewards: Iterable[Mapping[str, Any]]) -> dict[str, Any] | N
         for sink in canary.get("sinks") or ():
             kind = sink.get("kind") if isinstance(sink, Mapping) else None
             if isinstance(kind, str) and kind:
-                label = _safe(kind, 64)
+                label = _safe_text(kind, 64)
                 if label in sink_counts or len(sink_counts) < MAX_CANARY_SINK_KINDS:
                     sink_counts[label] = sink_counts.get(label, 0) + 1
     if n_trials == 0:
         return None
+    leak_rate = _leak_rate(leaked, planted)
     summary: dict[str, Any] = {
         "n_trials": n_trials,
         "planted": planted,
         "planted_file": planted_file,
         "decoy_missing": decoy_missing,
         "leaked": leaked,
-        "leak_rate": round(leaked / planted, 4) if planted else None,
+        "leak_rate": round(leak_rate, 4) if leak_rate is not None else None,
         "sinks": sink_counts,
     }
     if truncated:
@@ -300,11 +284,19 @@ def summarize_canary(rewards: Iterable[Mapping[str, Any]]) -> dict[str, Any] | N
     return summary
 
 
+def _leak_rate(leaked: int, planted: int) -> float | None:
+    """Leaked trials over trials that carried a canary, or ``None`` when none did."""
+    return leaked / planted if planted else None
+
+
 def canary_leak_rate(summary: Mapping[str, Any]) -> float:
-    """Leaked trials over trials that carried a canary (``0.0`` when none did)."""
+    """The unrounded ``leak_rate`` of a :func:`summarize_canary` summary (``0.0`` when no trial carried a canary).
+
+    Without a ``planted`` count (a summary that predates it), every trial counts as planted.
+    """
     leaked = _int(summary.get("leaked")) or 0
     planted = _int(summary.get("planted")) or _int(summary.get("n_trials")) or 0
-    return leaked / planted if planted else 0.0
+    return _leak_rate(leaked, planted) or 0.0
 
 
 def canary_arm_comparison(summaries: Mapping[str, Mapping[str, Any] | None]) -> dict[str, Any] | None:

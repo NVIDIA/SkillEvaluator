@@ -407,11 +407,7 @@ class PluginSchemaValidator(ValidatorBase):
             suggestion="Fix the reported plugin component and MCP declaration errors, then rerun validation.",
         )
         if contained and manifest is not None:
-            blocking_mcp = [
-                finding
-                for finding in findings
-                if finding.category == MCP_CATEGORY and finding.severity in (Severity.CRITICAL, Severity.HIGH)
-            ]
+            blocking_mcp = any(finding.category == MCP_CATEGORY and finding.severity.is_error() for finding in findings)
             if not blocking_mcp and manifest_valid:
                 name = result.metadata.get("plugin", {}).get("name", "")
                 if location.manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE:
@@ -793,7 +789,7 @@ class PluginSchemaValidator(ValidatorBase):
             for issue in validate_manifest_fields(location.manifest_type, data)
         ]
         # Over every problem, including any past the reporting cap.
-        blocking = any(finding.severity is Severity.HIGH for finding in findings)
+        blocking = any(finding.severity.is_error() for finding in findings)
         _add_capped(
             result,
             findings,
@@ -1245,7 +1241,7 @@ def _advisory_result(skill_result: ValidationResult, note: str) -> ValidationRes
     """Copy a skill result with blocking findings lowered to MEDIUM and errors kept as warnings."""
     advisory = ValidationResult()
     for finding in skill_result.findings:
-        blocking = finding.severity in (Severity.CRITICAL, Severity.HIGH)
+        blocking = finding.severity.is_error()
         advisory.add_finding(
             Finding(
                 category=finding.category,

@@ -199,6 +199,12 @@ def decode_manifest_leniently(raw: bytes) -> str:
     return raw.decode(json.detect_encoding(raw), errors="replace")
 
 
+def _read_lenient_manifest(secure_file: SecureFile, declared_path: Path, *, max_bytes: int) -> str:
+    """Read a discovered manifest inode up to ``max_bytes`` and decode it leniently."""
+    raw = _read_secure_manifest_bytes(secure_file, declared_path, max_bytes=max_bytes)
+    return decode_manifest_leniently(raw)
+
+
 @dataclass(frozen=True)
 class PluginManifestCandidate:
     """An additional supported manifest found beside the selected one."""
@@ -229,8 +235,7 @@ class PluginManifestCandidate:
         or encoding is still read this way to check what it declares. Link,
         special-file, and identity-change problems still raise.
         """
-        raw = _read_secure_manifest_bytes(self.secure_file, self.declared_path, max_bytes=max_bytes)
-        return decode_manifest_leniently(raw)
+        return _read_lenient_manifest(self.secure_file, self.declared_path, max_bytes=max_bytes)
 
     def parse_for_audit(self) -> dict[str, Any] | None:
         """What a client reads from this manifest, for checks that must see every component (``None`` if unusable).
@@ -294,6 +299,10 @@ class PluginManifestLocation:
     def read_text(self, *, encoding: str = "utf-8", max_bytes: int = CONTENT_DEDUP_MAX_FILE_BYTES) -> str:
         """Read the discovered inode through the anchored plugin root descriptor."""
         return _read_secure_manifest(self.secure_file, self.declared_path, encoding=encoding, max_bytes=max_bytes)
+
+    def read_lenient_text(self, *, max_bytes: int = CONTENT_DEDUP_MAX_TOTAL_BYTES) -> str:
+        """Read the discovered inode leniently, like :meth:`PluginManifestCandidate.read_lenient_text`."""
+        return _read_lenient_manifest(self.secure_file, self.declared_path, max_bytes=max_bytes)
 
 
 _AGENT_PLUGINS_RELATIVE = Path(PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE)

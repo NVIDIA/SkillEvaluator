@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from skillevaluator.deduplication.intra_skill import intra_skill_validator
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
 from skillevaluator.deduplication.intra_skill.semantic_clustering import ContentCluster
+from skillevaluator.deduplication.utils import skill_collector
 from skillevaluator.deduplication.utils.chunker import ContentChunk
 from skillevaluator.embedding.client import SimilarityConfigError
 from skillevaluator.inference import LLMClientError, LLMVerdict
@@ -96,6 +100,39 @@ class TestIntraSkillValidatorValidate:
         assert finding.file_path == "references/outside.md"
         assert finding.suggestion is not None
         assert "replace" in finding.suggestion.lower()
+
+    def test_hard_linked_file_is_marked_as_security_failure(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        outside = tmp_path / "outside.md"
+        outside.write_text("# Outside notes\n")
+        try:
+            os.link(outside, skill_dir / "notes.md")
+        except OSError as exc:
+            pytest.skip(f"hard links unavailable: {exc}")
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.passed is False
+        assert [finding.check_name for finding in result.findings] == ["unsafe_hardlink"]
+        assert result.findings[0].severity == Severity.CRITICAL
+        assert result.metadata["security_failure"] is True
+        assert result.metadata["execution_status"] == "failed"
+        assert result.metadata["optional"] is False
+
+    def test_collection_limit_is_not_a_security_failure(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_FILES", 1)
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("# Skill\n")
+        (skill_dir / "notes.md").write_text("# Notes\n")
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.passed is False
+        assert [finding.check_name for finding in result.findings] == ["file_count_limit"]
+        assert result.findings[0].severity == Severity.CRITICAL
+        assert "security_failure" not in result.metadata
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
     def test_chunk_limit_fails_before_embedding(self, mock_embed, tmp_path: Path, monkeypatch) -> None:

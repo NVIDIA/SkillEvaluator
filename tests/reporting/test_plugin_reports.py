@@ -181,6 +181,16 @@ def test_markdown_without_plugin_has_no_plugin_section() -> None:
     assert "## Plugin" not in markdown
 
 
+def test_markdown_with_an_empty_plugin_block_has_no_plugin_section() -> None:
+    result = ValidationResult(validator_name="Schema Check", validator_description="Tier 1", metadata={"plugin": {}})
+    result.add_success("schema", "valid")
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+
+    assert "## Plugin" not in markdown
+    assert "## Results" in markdown
+
+
 def test_sarif_run_and_results_carry_plugin_context(tmp_path: Path) -> None:
     results = [tier1_plugin_result(), tier2_plugin_result(), _tier3_result(tmp_path)]
     document = json.loads(SARIFReporter(include_timestamp=False).render_all(results))
@@ -542,6 +552,22 @@ def test_html_tier3_escapes_untrusted_plugin_strings(tmp_path: Path) -> None:
 
     assert HOSTILE not in html
     assert "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;" in (html or "")
+
+
+def test_html_tier3_verdict_card_of_a_partial_plugin_run_is_warn_toned(tmp_path: Path) -> None:
+    result = _tier3_result(tmp_path)
+    assert result.metadata["agent_eval"]["verdict"] == "pass"
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+
+    card = re.search(
+        r'<div class="dashboard-card ([^"]*)">\s*<h3 class="dashboard-card-title">Verdict</h3>\s*'
+        r'<p class="dashboard-card-value">([^<]*)</p>',
+        html,
+    )
+    assert card is not None
+    # The raw verdict passes, but a partial run reads INCOMPLETE and must not be colored as a success.
+    assert card.groups() == ("warning", "INCOMPLETE")
 
 
 def test_complete_plugin_run_reports_complete_and_no_incomplete_callout(tmp_path: Path) -> None:

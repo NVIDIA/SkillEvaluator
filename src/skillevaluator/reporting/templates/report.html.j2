@@ -238,6 +238,7 @@
         .dashboard-card-subtitle { font-size: 0.75rem; color: var(--text-secondary); margin: 0.25rem 0 0 0; }
         .dashboard-card.success .dashboard-card-value { color: var(--success-color); }
         .dashboard-card.danger .dashboard-card-value { color: var(--danger-color); }
+        .dashboard-card.warning .dashboard-card-value { color: var(--warning-color); }
         .progress-bar {
             width: 100%; height: 6px;
             background: var(--border-color);
@@ -1279,6 +1280,11 @@
     {% set tier3_skip_message = tier3_provenance_data.get('message') or 'Live evaluation did not run.' %}
     {%- from "plugin_sections.html.j2" import tier1_plugin_section, tier3_incomplete_callout, tier3_coverage_section, tier3_completeness_section, integration_section, lift_modes_line, statistics_section, signals_section, hook_census_section, canary_section, mcp_proof_section, tier3_plugin_load_section %}
     {%- set tier3_plugin_incomplete = has_tier3 and tier3_plugin and tier3_plugin.partial and not tier3_is_skipped %}
+    {#- Displayed Tier 3 verdict and tone (skipped, warn, pass or fail) for the tier card and the dashboard: a
+        partial plugin run reads INCOMPLETE in the warn tone even when its raw verdict is pass. #}
+    {%- set tier3_verdict = ((tier3.verdict or 'unknown') | lower) if has_tier3 else 'unknown' %}
+    {%- set tier3_display_verdict = 'SKIPPED' if tier3_is_skipped else ('INCOMPLETE' if tier3_plugin_incomplete else tier3_verdict | upper) %}
+    {%- set tier3_tone = 'skipped' if tier3_is_skipped else ('warn' if tier3_plugin_incomplete else ('pass' if tier3_verdict == 'pass' else ('fail' if tier3_verdict == 'fail' else 'warn'))) %}
     <div class="main-header">
         <div class="header-content">
             <div class="logo-section">
@@ -1447,10 +1453,7 @@
                 </div>
                 {% endif %}
                 {% if has_tier3 %}
-                {% set tier3_verdict = (tier3.verdict or 'unknown') | lower %}
-                {% set tier3_display_verdict = 'SKIPPED' if tier3_is_skipped else ('INCOMPLETE' if tier3_plugin_incomplete else tier3_verdict | upper) %}
-                {% set t3_class = 'skipped' if tier3_is_skipped else ('warn' if tier3_plugin_incomplete else ('pass' if tier3_verdict == 'pass' else ('fail' if tier3_verdict == 'fail' else 'warn'))) %}
-                <div class="tier-card {{ t3_class }}{% if initial_tab == 'tier3' %} active{% endif %}"
+                <div class="tier-card {{ tier3_tone }}{% if initial_tab == 'tier3' %} active{% endif %}"
                      role="button"
                      tabindex="0"
                      data-target-tab="tier3"
@@ -2365,9 +2368,9 @@
             </div>
             {% endif %}
             <div class="dashboard">
-                <div class="dashboard-card {{ 'success' if tier3.verdict == 'pass' else ('danger' if tier3.verdict == 'fail' else '') }}">
+                <div class="dashboard-card {{ {'pass': 'success', 'fail': 'danger', 'warn': 'warning'}.get(tier3_tone, '') }}">
                     <h3 class="dashboard-card-title">Verdict</h3>
-                    <p class="dashboard-card-value">{{ 'SKIPPED' if tier3_is_skipped else ('INCOMPLETE' if tier3_plugin_incomplete else (tier3.verdict or 'unknown') | upper) }}</p>
+                    <p class="dashboard-card-value">{{ tier3_display_verdict }}</p>
                     <p class="dashboard-card-subtitle">{{ 'Partial plugin run; not a pass' if tier3_plugin_incomplete else 'Evaluation outcome' }}</p>
                 </div>
                 <div class="dashboard-card">

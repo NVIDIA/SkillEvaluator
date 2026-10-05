@@ -30,7 +30,7 @@ from skillevaluator.constants import (
     LIFT_CI_MIN_PAIRED_CASES,
     TOKEN_EFFICIENCY_HALF_LIFE,
 )
-from skillevaluator.tier3.harbor.metrics import metric_set_for_reward, metric_value, overall_score
+from skillevaluator.tier3.harbor.metrics import finite_number, metric_set_for_reward, metric_value, overall_score
 
 LIFT_UNCERTAINTY_METHOD = "paired_case_bootstrap"
 CONTEXT_COST_METHOD = "paired_first_turn_prompt_tokens"
@@ -80,18 +80,6 @@ class ArmObservations:
 # ---------------------------------------------------------------------------
 
 
-def _finite(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    numeric = float(value)
-    return numeric if math.isfinite(numeric) else None
-
-
-def _non_negative(value: Any) -> float | None:
-    numeric = _finite(value)
-    return numeric if numeric is not None and numeric >= 0 else None
-
-
 def _mean(values: Sequence[float]) -> float | None:
     return math.fsum(values) / len(values) if values else None
 
@@ -110,7 +98,7 @@ def _weighted_score(reward: dict[str, Any], evaluators: Sequence[str], weights: 
     denominator = 0.0
     for evaluator, weight in zip(evaluators, weights, strict=False):
         value = metric_value(reward, evaluator)
-        numeric_weight = _finite(weight)
+        numeric_weight = finite_number(weight)
         if value is None or numeric_weight is None:
             continue
         numerator += value * numeric_weight
@@ -267,7 +255,7 @@ def reliability_summary(pass_summary: Mapping[str, Any], *, stop_on_pass: bool) 
                 all_passed += 1
         pass_hat_k = round(all_passed / n_cases, 4)
     return {
-        "pass_at_k": _finite(pass_summary.get("rate")),
+        "pass_at_k": finite_number(pass_summary.get("rate")),
         "pass_hat_k": pass_hat_k,
         "k": k,
         "n_cases": n_cases,
@@ -285,11 +273,11 @@ def uncached_tokens(usage: Mapping[str, Any]) -> float | None:
     Prompt counters include cached tokens (ATIF ``total_prompt_tokens`` and
     Harbor ``n_input_tokens`` both do), so cached tokens are subtracted.
     """
-    prompt = _non_negative(usage.get("prompt_tokens"))
-    completion = _non_negative(usage.get("completion_tokens"))
+    prompt = finite_number(usage.get("prompt_tokens"), non_negative=True)
+    completion = finite_number(usage.get("completion_tokens"), non_negative=True)
     if prompt is None or completion is None:
         return None
-    cached = _non_negative(usage.get("cached_tokens")) or 0.0
+    cached = finite_number(usage.get("cached_tokens"), non_negative=True) or 0.0
     return max(prompt - cached, 0.0) + completion
 
 
@@ -321,7 +309,7 @@ def arm_cost(trials: Sequence[TrialObservation], *, successes: int) -> dict[str,
         if token_counts and all(value is not None for value in token_counts)
         else None
     )
-    costs = [_non_negative(trial.usage.get("cost_usd")) for trial in trials]
+    costs = [finite_number(trial.usage.get("cost_usd"), non_negative=True) for trial in trials]
     total_usd = (
         round(math.fsum(value for value in costs if value is not None), 6)
         if costs and all(value is not None for value in costs)
@@ -345,7 +333,7 @@ def _case_first_turn_tokens(trials: Sequence[TrialObservation]) -> tuple[dict[st
     by_case: dict[str, list[float]] = {}
     complete = True
     for trial in trials:
-        tokens = _non_negative(trial.usage.get("first_turn_prompt_tokens"))
+        tokens = finite_number(trial.usage.get("first_turn_prompt_tokens"), non_negative=True)
         if tokens is None:
             complete = False
             continue

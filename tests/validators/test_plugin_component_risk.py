@@ -438,6 +438,12 @@ def test_context_injection_hooks_are_low(tmp_path: Path) -> None:
         ("/etc/passwd", True),
         ("${CLAUDE_PLUGIN_ROOT}/scripts/x.sh", False),
         ("/usr/bin/env", False),
+        ("../x", True),
+        ("a/../../x", True),
+        ("a\\..\\..\\x", True),
+        ("--file=../x", True),
+        ("./a/../b", False),
+        ("a/..", False),
     ],
 )
 def test_hooks_referencing_files_outside_the_plugin_root(tmp_path: Path, token: str, expected: bool) -> None:

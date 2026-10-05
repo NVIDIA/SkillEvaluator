@@ -28,6 +28,7 @@ from skillevaluator.plugin_components import (
     COMPONENT_TYPES,
     _Builder,
     build_plugin_inventory,
+    is_env_file,
     normalize_declared_path,
     refresh_component_finding_counts,
 )
@@ -699,6 +700,22 @@ def test_shipped_env_files_are_medium_without_values(tmp_path: Path) -> None:
     findings = [f for f in _validate(root).findings if f.check_name == "plugin_env_file_shipped"]
     assert sorted(Path(f.file_path).relative_to(root).as_posix() for f in findings) == [".env", "sub/.env.production"]
     assert all(f.severity == Severity.MEDIUM and "supersecretvalue" not in f.message for f in findings)
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        (".env", True),
+        (".ENV", True),
+        (".Env.local", True),
+        (".env.PRODUCTION", True),
+        (".env.example", False),
+        (".ENV.EXAMPLE", False),
+        (".env.local.Sample", False),
+    ],
+)
+def test_is_env_file_ignores_letter_case(name: str, expected: bool) -> None:
+    assert is_env_file(name) is expected
 
 
 # --------------------------------------------------------------------------- #

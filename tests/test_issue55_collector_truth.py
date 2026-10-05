@@ -583,6 +583,26 @@ def test_single_step_harbor_null_step_results_keeps_custom_reward_scoreable(tmp_
     assert agent["pass_at_k"]["with_skill"]["rate"] == 1.0
 
 
+def test_oversized_integer_rewards_are_unscored_instead_of_aborting_collection() -> None:
+    # json.loads turns a long digit string into an int that float() cannot hold.
+    oversized = 10**400
+
+    reward = collector_module._reward_from_harbor_result({"verifier_result": {"rewards": {"reward": oversized}}})
+    step_rewards = collector_module._harbor_result_rewards(
+        {
+            "step_results": [
+                {"verifier_result": {"rewards": {"overall": oversized}}},
+                {"verifier_result": {"rewards": {"overall": 0.5}}},
+            ]
+        }
+    )
+
+    assert reward is not None
+    assert overall_score(reward) is None
+    assert step_rewards is not None
+    assert step_rewards["overall"] == float("inf")
+
+
 @pytest.mark.parametrize("invalid_steps", [{}, "malformed-steps"], ids=("mapping", "string"))
 def test_authoritative_default_aggregate_rejects_malformed_step_results_container(
     tmp_path: Path,

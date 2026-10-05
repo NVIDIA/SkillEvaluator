@@ -65,9 +65,98 @@ def test_command_shell_interpreter_dash_c_is_blocked() -> None:
     assert "mcp_command_dangerous_form" in _checks(findings)
 
 
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "bash.exe", "args": ["-c", "startserver"]},
+        {"command": "C:\\Program Files\\Git\\bin\\bash.exe", "args": ["-c", "startserver"]},
+        {"command": "bash", "args": ["-lc", "startserver"]},
+        {"command": "zsh", "args": ["-ec", "startserver"]},
+        {"command": "sh", "args": ["-xc", "startserver"]},
+        {"command": "bash -c startserver"},
+        {"command": "bash -l", "args": ["-c", "startserver"]},
+        {"command": "bash", "args": ["-l", "-c", "startserver"]},
+        {"command": "bash", "args": ["+c", "startserver"]},
+        # Option values are skipped, not mistaken for the script operand.
+        {"command": "bash", "args": ["-o", "pipefail", "-c", "startserver"]},
+        {"command": "bash", "args": ["-eo", "pipefail", "-c", "startserver"]},
+        {"command": "bash", "args": ["-O", "extglob", "-c", "startserver"]},
+        {"command": "bash", "args": ["--rcfile", "x", "-c", "startserver"]},
+        {"command": "bash", "args": ["--init-file", "x", "-c", "startserver"]},
+        {"command": "C:\\Program Files\\Git\\bin\\bash.exe", "args": ["-l", "-c", "startserver"]},
+    ],
+)
+def test_command_shell_inline_program_forms_are_blocked(config) -> None:
+    findings = validate_contained_mcp_servers({"s": config}, "p.json")
+    assert "mcp_command_dangerous_form" in _checks(findings)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "bash", "args": ["script.sh"]},
+        {"command": "bash", "args": ["--rcfile", "x", "script.sh"]},
+        # The script's own arguments are not shell options.
+        {"command": "bash", "args": ["server.sh", "-config", "x.yml"]},
+        {"command": "bash", "args": ["run.sh", "--watch", "-recursive"]},
+        {"command": "bash server.sh", "args": ["-c", "x"]},
+        {"command": "bash", "args": ["-o", "pipefail", "server.sh", "-c"]},
+        {"command": "bash", "args": ["--", "server.sh", "-c"]},
+        {"command": "node", "args": ["--config", "x"]},
+        {"command": "python", "args": ["-c", "print(1)"]},
+    ],
+)
+def test_command_without_shell_inline_program_is_not_dangerous_form(config) -> None:
+    findings = validate_contained_mcp_servers({"s": config}, "p.json")
+    assert "mcp_command_dangerous_form" not in _checks(findings)
+
+
+@pytest.mark.parametrize("args", [5, True, 1.5])
+def test_shell_command_with_non_list_args_reports_args_not_list(args) -> None:
+    findings = validate_contained_mcp_servers({"s": {"command": "bash", "args": args}}, "p.json")
+    assert _checks(findings) == {"mcp_args_not_list"}
+
+
 def test_command_floating_version_blocked() -> None:
     findings = validate_contained_mcp_servers({"s": {"command": "npx", "args": ["-y", "some-server@latest"]}}, "p.json")
     assert "mcp_command_floating_version" in _checks(findings)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "npx", "args": ["-y", "@scope/pkg@next"]},
+        {"command": "npx", "args": ["-y", "pkg@latest-beta"]},
+        {"command": "npx", "args": ["-p", "a@latest,b", "a"]},
+        {"command": "npx -y PKG@LATEST"},
+        {"command": "uvx", "args": ["--from=pkg@main", "pkg"]},
+        {"command": "uvx", "args": ["--from", "pkg[cli]@latest", "pkg"]},
+        {"command": "docker", "args": ["run", "-i", "img:latest"]},
+        {"command": "docker", "args": ["run", "-i", "${IMAGE}:main"]},
+    ],
+)
+def test_command_floating_marker_on_a_package_or_image_is_blocked(config) -> None:
+    assert "mcp_command_floating_version" in _checks(validate_contained_mcp_servers({"s": config}, "p.json"))
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "@nextcloud/mcp-server@1.2.3",
+        "@headlessui/react@2.0.0",
+        "@mainstay/mcp@1.0.0",
+        "@next-auth/mcp@1.0.0",
+        "@canary/mcp@1.0.0",
+        "@latest/mcp@1.0.0",
+    ],
+)
+def test_exact_scoped_package_whose_scope_starts_like_a_marker_passes(spec) -> None:
+    for config in (
+        {"command": "npx", "args": ["-y", spec]},
+        {"command": "npx", "args": [f"--package={spec}", "mcp"]},
+        {"command": f"npx -y {spec}"},
+    ):
+        assert validate_contained_mcp_servers({"s": config}, "p.json") == [], config
 
 
 def test_command_insecure_tls_flag_blocked() -> None:

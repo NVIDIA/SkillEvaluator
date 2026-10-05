@@ -5,9 +5,10 @@
 
 Only link, special-file, identity-change, and containment problems fail closed
 as security failures. A root ``plugin.json`` that is not UTF-8 or is oversize
-decides the Agent Plugins opt-in instead of failing discovery, and an
-additional client manifest with such content is a HIGH finding (clients
-without SkillEvaluator's limits still load it) that is not a security failure.
+decides the Agent Plugins opt-in instead of failing discovery, and a client
+manifest with such content, selected or additional, is a HIGH finding (clients
+without SkillEvaluator's limits still load it) that is not a security failure,
+unless it is the selected manifest and nothing could be parsed from it.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import pytest
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_FILE_BYTES,
+    CONTENT_DEDUP_MAX_TOTAL_BYTES,
     CONTENT_TYPE_PLUGIN,
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
     PLUGIN_CONTAINED_MANIFEST_TYPE,
@@ -28,6 +30,7 @@ from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugi
 from skillevaluator.tier1.commands import run_validation
 from skillevaluator.validators import plugin_schema
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
+from skillevaluator.validators.policy import ValidationPolicy, apply_policy
 
 _AP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
 _OVERSIZE = "x" * (CONTENT_DEDUP_MAX_FILE_BYTES + 16)
@@ -74,17 +77,18 @@ def test_legacy_root_plugin_json_content_does_not_fail_a_claude_plugin(tmp_path:
 
 
 @pytest.mark.parametrize(
-    ("manifest", "check"),
+    ("manifest", "checks"),
     [
-        (_agent_plugins("utf-16"), "manifest_unsafe"),  # not UTF-8: a decode error
-        (_agent_plugins("latin-1"), "manifest_unsafe"),
+        # Not UTF-8: a decode error. The lenient read still checks the fields: 'café' is not a valid name.
+        (_agent_plugins("utf-16"), {"manifest_unreadable", "schema:name:pattern"}),
+        (_agent_plugins("latin-1"), {"manifest_unreadable", "schema:name:pattern"}),
         # ASCII-only UTF-16 without a BOM is valid UTF-8 (with NULs), so it decodes and then fails as JSON.
-        (json.dumps({"$schema": _AP_SCHEMA, "name": "demo"}).encode("utf-16-be"), "manifest_invalid_json"),
+        (json.dumps({"$schema": _AP_SCHEMA, "name": "demo"}).encode("utf-16-be"), {"manifest_invalid_json"}),
     ],
     ids=["utf-16", "latin-1", "utf-16-be-ascii"],
 )
 def test_sole_root_manifest_declaring_the_schema_reports_its_encoding(
-    tmp_path: Path, manifest: bytes, check: str
+    tmp_path: Path, manifest: bytes, checks: set[str]
 ) -> None:
     """A non-UTF-8 root plugin.json whose bytes name the schema is still selected, and its problem reported."""
     root = _write(tmp_path / "p", {"plugin.json": manifest})
@@ -94,7 +98,8 @@ def test_sole_root_manifest_declaring_the_schema_reports_its_encoding(
     assert located.manifest_type == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE
     result = PluginSchemaValidator().validate(root)
     assert not result.passed
-    assert _checks(result) == {check: Severity.HIGH}
+    assert _checks(result) == dict.fromkeys(checks, Severity.HIGH)
+    assert "security_failure" not in result.metadata
 
 
 def test_directly_named_root_manifest_reports_its_encoding(tmp_path: Path) -> None:
@@ -108,8 +113,11 @@ def test_directly_named_root_manifest_reports_its_encoding(tmp_path: Path) -> No
     assert raised.value.reason == "encoding"
     assert raised.value.content_error
     result = PluginSchemaValidator().validate(root / "plugin.json")
-    assert _checks(result) == {"manifest_unsafe": Severity.HIGH}
-    assert "cannot be decoded" in result.findings[0].message
+    checks = _checks(result)
+    assert checks.pop("manifest_unreadable") == Severity.HIGH
+    # Read leniently, the legacy manifest then fails the Agent Plugins fields.
+    assert checks == {"schema:$schema:missing": Severity.HIGH, "schema:name:pattern": Severity.HIGH}
+    assert "is not valid UTF-8 text" in result.findings[0].message
 
 
 def test_root_manifest_escaping_the_schema_in_latin1_is_still_agent_plugins(tmp_path: Path) -> None:
@@ -217,3 +225,119 @@ def test_additional_manifest_that_changes_after_discovery_stays_high(
     assert _checks(result) == {"manifest_unsafe": Severity.HIGH}
     assert result.metadata["security_failure"] is True
     assert "swapped-after-discovery" not in json.dumps(result.metadata["plugin"]["manifest_declarations"])
+
+
+# --------------------------------------------------------------------------- #
+# Selected manifest (PluginSchemaValidator._load_contained_json, _load_yaml)  #
+# --------------------------------------------------------------------------- #
+_LATIN1_CLAUDE = json.dumps(
+    {"name": "demo", "description": "caf\xe9", "mcpServers": {"evil": {"type": "http", "url": "http://mcp.invalid/"}}},
+    ensure_ascii=False,
+).encode("latin-1")
+
+
+def test_non_utf8_selected_manifest_is_unreadable_and_its_server_is_still_checked(tmp_path: Path) -> None:
+    """Regression: a Latin-1 selected manifest was 'unsafe links' (a security failure) and never inventoried."""
+    root = _write(tmp_path / "p", {".claude-plugin/plugin.json": _LATIN1_CLAUDE})
+
+    result = PluginSchemaValidator().validate(root)
+    assert _checks(result) == {"manifest_unreadable": Severity.HIGH, "mcp_url_insecure_scheme": Severity.HIGH}
+    assert "security_failure" not in result.metadata
+    assert not result.passed
+    [finding] = [f for f in result.findings if f.check_name == "manifest_unreadable"]
+    assert "is not valid UTF-8 text" in finding.message
+    assert "read leniently" in finding.message
+    components = result.metadata["plugin"]["component_inventory"]["components"]
+    assert [row["name"] for row in components if row["type"] == "mcp"] == ["evil"]
+    assert "plugin_manifest" not in [detail.check_name for detail in result.success_details]
+
+
+def test_unreadable_selected_manifest_fails_tier1_without_stopping_later_checks(tmp_path: Path) -> None:
+    root = _write(tmp_path / "p", {".claude-plugin/plugin.json": _LATIN1_CLAUDE})
+
+    results = run_validation(root, checks="schema,unicode", content_type=CONTENT_TYPE_PLUGIN)
+    assert [result.validator_name for result in results] == [
+        "Plugin Schema & Bundle References",
+        "Unicode Smuggling Detection",
+    ]
+    assert not results[0].passed
+
+
+_LATIN1_BUNDLE = "name: caf\xe9\nauthor:\n  email: a@example.com\n".encode("latin-1")
+
+
+def test_non_utf8_bundle_manifest_is_unreadable_not_unsafe(tmp_path: Path) -> None:
+    root = _write(tmp_path / "p", {"agent_plugin.yaml": _LATIN1_BUNDLE})
+
+    result = PluginSchemaValidator().validate(root)
+    assert _checks(result) == {"manifest_unreadable": Severity.HIGH}
+    # agent_plugin.yaml is not read leniently, so nothing it declares was checked.
+    assert result.metadata["security_failure"] is True
+    assert not result.passed
+
+
+_UNREADABLE_SELECTED = {
+    # Over the lenient bound: not even a lenient read parses it.
+    "claude-over-lenient-bound": {
+        ".claude-plugin/plugin.json": b'{"name": "demo"' + b" " * CONTENT_DEDUP_MAX_TOTAL_BYTES + b"}"
+    },
+    "agent-plugins-over-lenient-bound": {
+        "plugin.json": b'{"name": "demo"' + b" " * CONTENT_DEDUP_MAX_TOTAL_BYTES + b"}"
+    },
+    "bundle-latin-1": {"agent_plugin.yaml": _LATIN1_BUNDLE},
+}
+
+
+@pytest.mark.parametrize("files", list(_UNREADABLE_SELECTED.values()), ids=list(_UNREADABLE_SELECTED))
+def test_policy_cannot_pass_a_selected_manifest_that_nothing_was_parsed_from(
+    tmp_path: Path, files: dict[str, bytes]
+) -> None:
+    """Regression: a policy override downgraded manifest_unreadable, and no declared component had been checked."""
+    root = _write(tmp_path / "p", files)
+    policy = ValidationPolicy(severity_overrides={"PLUGIN_SCHEMA.manifest_unreadable": Severity.LOW})
+
+    [result] = apply_policy([PluginSchemaValidator().validate(root)], policy)
+    assert _checks(result) == {"manifest_unreadable": Severity.HIGH}
+    assert result.metadata["security_failure"] is True
+    assert not result.passed
+
+
+def test_selected_manifest_that_nothing_was_parsed_from_stops_tier1(tmp_path: Path) -> None:
+    root = _write(tmp_path / "p", {"agent_plugin.yaml": _LATIN1_BUNDLE})
+
+    results = run_validation(root, checks="schema,unicode", content_type=CONTENT_TYPE_PLUGIN)
+    assert [result.validator_name for result in results] == ["Plugin Schema & Bundle References"]
+    assert not results[0].passed
+
+
+def test_policy_can_downgrade_a_selected_manifest_that_was_read_leniently(tmp_path: Path) -> None:
+    latin1 = json.dumps({"name": "demo", "description": "caf\xe9"}, ensure_ascii=False).encode("latin-1")
+    root = _write(tmp_path / "p", {".claude-plugin/plugin.json": latin1})
+    policy = ValidationPolicy(severity_overrides={"PLUGIN_SCHEMA.manifest_unreadable": Severity.LOW})
+
+    [result] = apply_policy([PluginSchemaValidator().validate(root)], policy)
+    assert _checks(result) == {"manifest_unreadable": Severity.LOW}
+    assert "security_failure" not in result.metadata
+    assert result.passed
+
+
+def test_selected_manifest_replaced_by_a_link_after_discovery_stays_a_security_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"name": "outside-canary"}))
+    root = _write(tmp_path / "p", {".claude-plugin/plugin.json": {"name": "demo"}})
+    manifest = root / ".claude-plugin" / "plugin.json"
+    real_locate = plugin_schema.locate_plugin_manifest
+
+    def locate_then_link(path: Path):
+        located = real_locate(path)
+        manifest.unlink()
+        manifest.symlink_to(outside)
+        return located
+
+    monkeypatch.setattr(plugin_schema, "locate_plugin_manifest", locate_then_link)
+    result = PluginSchemaValidator().validate(root)
+    assert _checks(result) == {"manifest_unsafe": Severity.HIGH}
+    assert result.metadata["security_failure"] is True
+    assert "outside-canary" not in json.dumps(result.metadata["plugin"])

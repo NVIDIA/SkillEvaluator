@@ -118,6 +118,130 @@ def test_validate_accepts_direct_skill_manifest(tmp_path: Path) -> None:
     assert "No skills found" not in direct.output
 
 
+@pytest.mark.parametrize("target", [".", "SKILL.md"])
+def test_validate_reports_name_the_resolved_skill_root_not_the_lexical_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    skill = tmp_path / "sample"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: sample\ndescription: Report root fixture\n---\n", encoding="utf-8")
+
+    def validate_tier1(_path: Path, **_kwargs):
+        result = ValidationResult(validator_name="Schema")
+        finding = Finding(
+            category="SCHEMA",
+            severity=Severity.MEDIUM,
+            check_name="fixture",
+            message="Skill-relative finding",
+            file_path="SKILL.md",
+        )
+        result.add_structured_finding(finding, is_error=False)
+        return [result]
+
+    footer_targets: list[Path] = []
+    monkeypatch.setattr("skillevaluator.cli.run_validation", validate_tier1)
+    monkeypatch.setattr(
+        "skillevaluator.cli._finish_pipeline_view", lambda _view, **kwargs: footer_targets.append(kwargs["target_path"])
+    )
+    # Outside a Git checkout the reports fall back to the local path.
+    monkeypatch.setattr("skillevaluator.utils.helpers.resolve_git_remote_url", lambda _path: None)
+    monkeypatch.setattr("skillevaluator.utils.helpers.resolve_git_root", lambda _path: None)
+    monkeypatch.chdir(skill)
+    reports = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli, ["validate", target, "--tiers", "1", "--no-llm", "-r", "html", "-r", "sarif", "-o", str(reports)]
+    )
+
+    assert result.exit_code == 0, result.output
+    skill_root = skill.resolve()
+    html = next(reports.glob("*.html")).read_text(encoding="utf-8")
+    assert f"<strong>Target:</strong> {skill_root}</p>" in html
+    sarif = json.loads(next(reports.glob("*.sarif.json")).read_text(encoding="utf-8"))
+    uris = [
+        location["physicalLocation"]["artifactLocation"]["uri"]
+        for sarif_result in sarif["runs"][0]["results"]
+        for location in sarif_result.get("locations", [])
+    ]
+    # A manifest-file target used to become the scan root, giving "SKILL.md/SKILL.md".
+    assert uris == ["SKILL.md"]
+    assert footer_targets == [skill_root]
+
+
+def test_validate_sarif_uris_of_a_relative_target_are_relative_to_the_skill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: `validate skills/sample` gave URIs "SKILL.md" and "skills/sample/SKILL.md" for one file."""
+    skill = tmp_path / "skills" / "sample"
+    skill.mkdir(parents=True)
+    aws_key = "AKIA" + "IOSFODNN7EXAMPLE"
+    (skill / "SKILL.md").write_text(
+        f"---\nname: sample\ndescription: Relative target fixture\n---\n# Sample\n\nUse key {aws_key}.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("skillevaluator.utils.helpers.resolve_git_remote_url", lambda _path: None)
+    monkeypatch.setattr("skillevaluator.utils.helpers.resolve_git_root", lambda _path: None)
+    monkeypatch.chdir(tmp_path)
+    reports = tmp_path / "reports"
+
+    CliRunner().invoke(
+        cli, ["validate", "skills/sample", "--tiers", "1", "--no-llm", "-r", "sarif", "-o", str(reports)]
+    )
+
+    sarif = json.loads(next(reports.glob("*.sarif.json")).read_text(encoding="utf-8"))
+    results = sarif["runs"][0]["results"]
+    uris = {
+        location["physicalLocation"]["artifactLocation"]["uri"]
+        for sarif_result in results
+        for location in sarif_result.get("locations", [])
+    }
+    # Both the secret (reported relative to the skill) and the schema findings
+    # (built from the typed target) point at the skill's SKILL.md.
+    assert {sarif_result["ruleId"].split("/")[0] for sarif_result in results} >= {"PII-Scan", "QUALITY"}
+    assert uris == {"SKILL.md"}
+
+
+def test_content_relative_finding_paths_rewrite_only_paths_built_from_the_target(tmp_path: Path) -> None:
+    from skillevaluator.cli import _content_relative_finding_paths
+
+    def run(validated: Path, content_root: Path, file_paths: list[str]) -> list[str]:
+        result = ValidationResult(validator_name="Schema")
+        for file_path in file_paths:
+            result.add_finding(Finding("SCHEMA", Severity.MEDIUM, "fixture", "message", file_path))
+        _content_relative_finding_paths([result], validated, content_root)
+        return [finding.file_path for finding in result.findings]
+
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    paths = {
+        "sample/SKILL.md": "SKILL.md",
+        "sample": ".",
+        "SKILL.md": "SKILL.md",
+        "[foo] sample/skills/foo/SKILL.md": "[foo] skills/foo/SKILL.md",
+        "other/SKILL.md": "other/SKILL.md",
+    }
+    assert run(Path("sample"), sample, list(paths)) == list(paths.values())
+    # "." and absolute targets already give unambiguous paths.
+    assert run(Path(), sample, ["SKILL.md"]) == ["SKILL.md"]
+    assert run(sample, sample, [str(sample / "SKILL.md")]) == [str(sample / "SKILL.md")]
+
+    # A skill "examples" with its own examples/ folder: a path relative to the
+    # skill that starts with the target is kept, because it exists there.
+    examples = tmp_path / "examples"
+    (examples / "examples").mkdir(parents=True)
+    (examples / "examples" / "demo.md").write_text("demo", encoding="utf-8")
+    assert run(Path("examples"), examples, ["examples/demo.md", "examples/SKILL.md"]) == [
+        "examples/demo.md",
+        "SKILL.md",
+    ]
+    # A target with ".." is never ambiguous, although joined to the content root it names the same file.
+    (examples / "SKILL.md").write_text("skill", encoding="utf-8")
+    assert run(Path("../examples"), examples, ["../examples/SKILL.md", "../examples/examples/demo.md"]) == [
+        "SKILL.md",
+        "examples/demo.md",
+    ]
+
+
 def test_similarity_help_exposes_catalog_workflow_and_hides_legacy_cache_names() -> None:
     result = CliRunner().invoke(cli, ["similarity-check", "--help"])
 

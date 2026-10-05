@@ -124,6 +124,8 @@ _REPO_CONTEXT_IGNORE_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 _NATIVE_SOURCE_IGNORE_NAMES = ("results", "__pycache__", ".git", GENERATED_OUTPUT_MARKER)
 _NATIVE_SOURCE_IGNORE = shutil.ignore_patterns(*_NATIVE_SOURCE_IGNORE_NAMES)
 _PATH_DESCRIPTOR_IDENTITIES_COMPARABLE = os.name == "posix"
+# Narrower than the templates ``plugin_components.is_env_file`` allows: a linked
+# repository's ``.env.defaults`` and ``.env.tmpl`` stay out of the repo context.
 _REPO_CONTEXT_PUBLIC_ENV_SUFFIXES = (".dist", ".example", ".sample", ".template")
 _REPO_CONTEXT_SENSITIVE_NAMES = {
     ".git-credentials",

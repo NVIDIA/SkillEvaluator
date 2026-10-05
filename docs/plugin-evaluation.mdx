@@ -141,11 +141,17 @@ Clients read a manifest of any size, so a root `plugin.json` larger than the
 1 MiB manifest limit is still parsed whole, up to 8 MiB. Whitespace before
 `$schema` or escaped slashes (`https:\/\/agent-plugins.org\/...`) do not hide
 the opt-in. A file that does not parse counts when it names the schema host,
-and a file over 8 MiB always counts. Such a file is the Agent Plugins manifest,
-and as the selected manifest it fails HIGH `manifest_unsafe` because it cannot
-be read. Auto-detection uses the same rule, so such a folder stays a plugin
+and a file over 8 MiB always counts. Such a file is the Agent Plugins manifest.
+As the selected manifest it fails HIGH `manifest_unreadable`, like any selected
+manifest that is not UTF-8 or is larger than 1 MiB. A JSON one is then read
+leniently, as an unreadable additional manifest is (see below), so what it
+declares is still checked. When nothing can be parsed from the selected
+manifest, even leniently (`agent_plugin.yaml` is never read leniently), none of
+the components it declares are checked. Then `severity_overrides` cannot lower
+`manifest_unreadable`, and Tier 1 stops after the schema check, as for an unsafe
+manifest. Auto-detection uses the same rule, so such a folder stays a plugin
 instead of becoming a skill. Only a linked, hard-linked, special, or changed
-file fails discovery.
+file fails discovery or fails as `manifest_unsafe`.
 
 Clients open fixed manifest paths. On a case-insensitive filesystem, such as
 the macOS default, a client that opens `.codex-plugin/plugin.json` reads
@@ -900,10 +906,10 @@ stages a server.
     | Check | Severity | Flags |
     | --- | --- | --- |
     | `mcp_command_shell_metacharacters` | CRITICAL | `;`, `\|`, `&`, a backtick, `$(`, `<(`, `>(`, `<`, `>`, or a newline in `command` or `args`. MCP commands run argv-style, not through a shell |
-    | `mcp_command_dangerous_form` | CRITICAL | A shell interpreter (`sh`, `bash`, `zsh`, `dash`, `ksh`, or `fish`) invoked with `-c` |
+    | `mcp_command_dangerous_form` | CRITICAL | A shell interpreter (`sh`, `bash`, `zsh`, `dash`, `ksh`, or `fish`) invoked with `-c` (or `+c`), alone or in a short-option cluster such as `-lc`. Only the shell's own options count: arguments after the script path or `--` belong to the script, so `bash server.sh -config x.yml` is not flagged |
     | `mcp_command_inline_secret` | CRITICAL | A credential-named flag with a literal value, or an argument shaped like a known secret or a `Bearer`/`Basic` credential |
     | `mcp_command_disables_tls` | CRITICAL | `--insecure`, `-k`, `--no-check-certificate`, `--tls-no-verify`, `--ssl-no-verify`, or `--no-verify-tls` |
-    | `mcp_command_floating_version` | HIGH | A floating marker: `@latest`, `@main`, `@master`, `@head`, `@next`, `@canary`, `:latest`, or `:main` |
+    | `mcp_command_floating_version` | HIGH | A floating marker on a package or image name: `@latest`, `@main`, `@master`, `@head`, `@next`, `@canary`, `:latest`, or `:main`. An npm scope such as `@nextcloud/` is not a marker |
     | `mcp_unpinned_package` | MEDIUM | A package runner without an exact version. Not reported again when a floating marker already raised the HIGH finding |
 
     A server is **pinned** when a package runner fetches an exact version:
@@ -1291,7 +1297,9 @@ stages the with-plugin arm the way each harness loads plugins instead; see
   `mcpServers` forms and root `.mcp.json`. They are written to a with-plugin-only
   MCP file, so they never reach a baseline arm. Each declaration first passes
   the blocking Tier 1 MCP checks. A raw inline credential is never written to
-  the staged file. MCP servers in the dataset's own
+  the staged file. That file, `evals/environment/plugin_mcp_servers.toml`, is
+  generated, so an evals source that already contains it fails staging. MCP
+  servers in the dataset's own
   `evals/environment/mcp_servers.toml` are task environment and are shared by
   every arm. A server launched from plugin files (a `command`, `args`, or `cwd`
   that uses `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}`, the manifest

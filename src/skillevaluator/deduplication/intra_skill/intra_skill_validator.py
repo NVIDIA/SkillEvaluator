@@ -54,6 +54,19 @@ logger = logging.getLogger(__name__)
 _COMMENT_PREFIXES = ("#", ";", "//", "--", "!")
 _CONFIG_KV_RE = re.compile(r"^[\w.\-/]+\s*[=:]\s*\S")
 
+# Collection errors raised for links, hard links, special files, or roots that
+# cannot be read safely. Size, count, and encoding limits are not included.
+_UNSAFE_INPUT_CHECKS = frozenset(
+    {
+        "invalid_root",
+        "path_access_error",
+        "secure_open_unavailable",
+        "unsafe_hardlink",
+        "unsafe_path",
+        "unsafe_root",
+    }
+)
+
 
 def _is_comment_or_config_line(line: str) -> bool:
     """Return True for comment lines or simple ``key=value``/``key: value`` config lines."""
@@ -149,6 +162,17 @@ class IntraSkillValidator(ValidatorBase):
                     metadata=e.metadata,
                 )
             )
+            if e.check_name in _UNSAFE_INPUT_CHECKS:
+                # Unsafe input means the check could not run safely. Callers
+                # that cap deduplication findings as advisory (plugin Tier 2)
+                # must keep this result blocking.
+                result.metadata.update(
+                    {
+                        "security_failure": True,
+                        "execution_status": "failed",
+                        "optional": False,
+                    }
+                )
             return result
         logger.info("Collected %d file(s)", len(collected))
         result.add_success(

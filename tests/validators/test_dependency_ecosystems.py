@@ -147,6 +147,15 @@ def test_image_refs_that_look_like_flags_are_never_exact() -> None:
     assert eco.image_declaration("ghcr.io/org/img:1.2.3", "mcp").exact is True
 
 
+def test_unverified_finding_for_another_ecosystem_gets_the_default_suggestion() -> None:
+    """Regression: an ecosystem without its own suggestion raised KeyError."""
+    finding = eco.unverified_finding("serde", "^1", "Cargo.toml", ecosystem="cargo", role="runtime", kind="crate")
+    assert finding.severity == Severity.INFO
+    assert finding.check_name == eco.UNVERIFIED_CHECK_NAME
+    assert finding.suggestion == eco._DEFAULT_UNVERIFIED_SUGGESTION
+    assert finding.metadata["ecosystem"] == "cargo"
+
+
 def test_npm_audit_parser_skips_transitive_via_entries() -> None:
     outcome = eco.AuditOutcome(scanner="npm audit")
     error = eco.parse_npm_audit_output(NPM_AUDIT_REPORT, {"lodash": "4.17.20"}, source="package.json", outcome=outcome)
@@ -350,6 +359,31 @@ def test_standalone_skill_audit_ignores_npm_and_images(tmp_path: Path, tools: di
     assert not result.is_incomplete
     assert "plugin" not in result.metadata
     assert all(call == [] for call in (tool.calls for tool in tools.values()))
+
+
+def test_bundled_skill_npm_and_image_findings_name_the_skill_directory_once(
+    tmp_path: Path, tools: dict[str, FakeTool]
+) -> None:
+    """Regression: npm and image findings in a bundled skill pointed at skills/foo/skills/foo/package.json."""
+    tools["osv_scanner"].available = True
+    tools["osv_scanner"].responses = [_ok(OSV_REPORT, 1), _ok({"results": []})]
+    root = _bare_plugin(
+        tmp_path / "demo",
+        {
+            "skills/foo/SKILL.md": "---\nname: foo\ndescription: A bundled skill.\n---\nBody\n",
+            "skills/foo/package.json": {"dependencies": {"lodash": "4.17.20", "left-pad": "^1.3.0"}},
+            "skills/foo/Dockerfile": "FROM node:20.11.1\nFROM alpine:latest\n",
+        },
+    )
+    result = _dependency_result(root)
+    assert sorted((f.check_name, f.metadata["package_name"], f.file_path) for f in result.findings) == [
+        ("dependency-version-unverified", "alpine:latest", "[foo] skills/foo/Dockerfile"),
+        ("dependency-version-unverified", "left-pad", "[foo] skills/foo/package.json"),
+        ("npm-vulnerability", "lodash", "[foo] skills/foo/package.json"),
+    ]
+    assert [call["args"][-1] for call in tools["osv_scanner"].calls if call["args"][:2] == ["scan", "image"]] == [
+        "node:20.11.1"
+    ]
 
 
 # --------------------------------------------------------------------------- #

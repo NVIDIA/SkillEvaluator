@@ -2373,6 +2373,10 @@ def _write_plugin_mcp_servers_toml(evals_dir: Path, servers: list[dict[str, Any]
     Kept distinct from ``mcp_servers.toml`` (the shared task environment) so the
     adapter stages it for the with-plugin arm only, never the baseline.
 
+    The file name is reserved for SkillEvaluator. The staged evals may be a copy
+    of the plugin's own ``evals/``, and an authored copy of this file would skip
+    the MCP safety checks and redaction, so its presence fails staging.
+
     Strings are TOML basic strings (``toml_quote``), not JSON: ``json.dumps``
     writes an emoji as a surrogate-pair escape and leaves DEL raw, and TOML
     rejects both. The text is parsed back before it is written, so a value TOML
@@ -2382,13 +2386,17 @@ def _write_plugin_mcp_servers_toml(evals_dir: Path, servers: list[dict[str, Any]
 
     from skillevaluator.tier3.toml_utils import toml_quote
 
+    env_dir = evals_dir / "environment"
+    mcp_file = env_dir / PLUGIN_MCP_SERVERS_FILENAME
+    if os.path.lexists(mcp_file):
+        raise ValueError(
+            f"Refusing evals source that provides environment/{PLUGIN_MCP_SERVERS_FILENAME}: SkillEvaluator "
+            "generates that file from the plugin's validated MCP servers. Declare plugin servers in the plugin "
+            "manifest, or shared task servers in environment/mcp_servers.toml."
+        )
     if not servers:
         return
-    env_dir = evals_dir / "environment"
     env_dir.mkdir(parents=True, exist_ok=True)
-    mcp_file = env_dir / PLUGIN_MCP_SERVERS_FILENAME
-    if mcp_file.exists():
-        return
 
     def toml_value(raw: Any) -> str:
         # Manifests may reference secret handles/env names; never emit a raw

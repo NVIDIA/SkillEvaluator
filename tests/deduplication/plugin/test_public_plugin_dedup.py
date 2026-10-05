@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 from skillevaluator.deduplication.plugin.intra_plugin_validator import IntraPluginValidator
 from skillevaluator.deduplication.plugin.ref_utils import find_duplicate_refs, normalize_ref
-from skillevaluator.models.result import Severity
+from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.tier2.commands import run_plugin_dedup_scan, run_plugin_skill_context_dedup
 
 
@@ -103,6 +105,130 @@ def test_plugin_context_scan_rejects_linked_skills_root(tmp_path: Path) -> None:
     scan_results = run_plugin_dedup_scan(plugin, run_context=False)
     assert any(result.metadata.get("security_failure") for result in scan_results)
     assert any(not result.passed for result in scan_results)
+
+
+def test_hard_linked_bundled_skill_file_is_a_blocking_security_failure(tmp_path: Path) -> None:
+    plugin = tmp_path / "plugin"
+    skill = plugin / "skills" / "foo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: foo\ndescription: d\n---\n# Foo\n", encoding="utf-8")
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside notes\n", encoding="utf-8")
+    try:
+        os.link(outside, skill / "ref.md")
+    except OSError as exc:
+        pytest.skip(f"hard links unavailable: {exc}")
+
+    [result] = run_plugin_skill_context_dedup(plugin)
+
+    assert not result.passed
+    assert result.metadata["security_failure"] is True
+    assert result.metadata["execution_status"] == "failed"
+    assert result.metadata["optional"] is False
+    assert [finding.check_name for finding in result.findings] == ["unsafe_hardlink"]
+    assert result.findings[0].severity == Severity.CRITICAL
+
+
+def test_plugin_context_scan_keeps_a_raised_unsafe_path_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier2 import commands
+    from skillevaluator.utils.secure_fs import SecurePathError
+
+    plugin = tmp_path / "plugin"
+    skill = plugin / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: d\n---\n# Demo\n", encoding="utf-8")
+
+    class UnsafePathValidator:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def validate(self, _skill_dir: Path) -> ValidationResult:
+            raise SecurePathError("path_identity_changed", "Path changed while reading: SKILL.md")
+
+    monkeypatch.setattr(commands, "IntraSkillValidator", UnsafePathValidator)
+
+    [result] = run_plugin_skill_context_dedup(plugin)
+
+    assert not result.passed
+    assert result.metadata["security_failure"] is True
+    assert result.metadata["execution_status"] == "failed"
+    assert [(finding.check_name, finding.severity) for finding in result.findings] == [
+        ("unsafe_plugin_filesystem", Severity.HIGH)
+    ]
+
+
+def test_plugin_context_scan_caps_findings_once_and_keeps_plain_notes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier2 import commands
+
+    plugin = tmp_path / "plugin"
+    skill = plugin / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: d\n---\n# Demo\n", encoding="utf-8")
+    skill_result = ValidationResult(validator_name="Context Deduplication")
+    skill_result.add_finding(Finding("DUPLICATE", Severity.HIGH, "duplicate", "Repeated instructions", "SKILL.md"))
+    skill_result.add_warning("Optional provider note")
+    skill_result.add_error("LLM analysis did not complete for 1 of 2 content clusters")
+
+    class FixedResultValidator:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def validate(self, _skill_dir: Path) -> ValidationResult:
+            return skill_result
+
+    monkeypatch.setattr(commands, "IntraSkillValidator", FixedResultValidator)
+
+    [result] = run_plugin_skill_context_dedup(plugin)
+
+    assert result.passed
+    assert result.metadata["advisory_tier2"] is True
+    assert [finding.severity for finding in result.findings] == [Severity.MEDIUM]
+    assert result.errors == []
+    assert result.warnings == [
+        "[demo] [DUPLICATE-MEDIUM] Repeated instructions in SKILL.md",
+        "[demo] Optional provider note",
+        "[demo] LLM analysis did not complete for 1 of 2 content clusters",
+    ]
+    assert result.summary.warnings == 3
+    assert result.summary.errors == 0
+    assert result.summary.high_count == 0
+    assert result.summary.medium_count == 1
+
+
+def test_plugin_context_scan_caps_single_skill_llm_budget_at_cluster_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.constants import CONTENT_DEDUP_MAX_LLM_CLUSTERS, MAX_PLUGIN_DEDUP_LLM_CALLS
+    from skillevaluator.deduplication.intra_skill import intra_skill_validator
+
+    assert MAX_PLUGIN_DEDUP_LLM_CALLS > CONTENT_DEDUP_MAX_LLM_CLUSTERS
+    plugin = tmp_path / "plugin"
+    skill = plugin / "skills" / "only"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: only\ndescription: d\n---\n## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200,
+        encoding="utf-8",
+    )
+    embedding_client = MagicMock()
+    embedding_client.return_value.embed.return_value = [[1.0, 0.0], [0.0, 1.0]]
+    llm_client = MagicMock()
+    monkeypatch.setattr(intra_skill_validator, "EmbeddingClient", embedding_client)
+    monkeypatch.setattr(intra_skill_validator, "LLMClient", llm_client)
+
+    [result] = run_plugin_skill_context_dedup(plugin)
+
+    assert result.passed
+    assert result.findings == []
+    assert result.metadata["max_llm_calls"] == CONTENT_DEDUP_MAX_LLM_CLUSTERS
+    embedding_client.return_value.embed.assert_called_once()
+    llm_client.assert_not_called()
 
 
 def test_plugin_context_scan_skips_before_provider_work_above_skill_limit(

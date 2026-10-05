@@ -38,6 +38,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import tomllib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -54,7 +55,7 @@ from skillevaluator.plugin_components import (
 )
 from skillevaluator.tier3.toml_utils import toml_quote
 from skillevaluator.tier3_environments import PLUGIN_LOAD_CHOICES
-from skillevaluator.utils.secure_fs import SecurePathError
+from skillevaluator.utils.secure_fs import SecurePathError, stat_is_link_or_reparse
 from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json, load_bounded_yaml
 
 DEFAULT_PLUGIN_LOAD = "wrapper"
@@ -2197,16 +2198,19 @@ def read_harness_log_prefix(path: Path, max_bytes: int = MAX_HARNESS_LOG_PREFIX_
     """Read at most ``max_bytes`` from the start of a harness log without following links.
 
     Harness logs can be large; the startup event this module needs is near the
-    top, so a prefix is enough. ``None`` for a missing, linked, or special file.
+    top, so a prefix is enough. ``None`` for a missing, linked, or special file,
+    including one whose parent is not a directory; ``SecurePathError`` when the
+    path cannot be inspected for another reason, such as a permission error.
     """
-    import os
-    import stat
-
-    from skillevaluator.utils.secure_fs import is_link_or_reparse
-
     try:
-        if is_link_or_reparse(path):
-            return None
+        metadata = path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        raise SecurePathError("path_access_error", f"Cannot inspect path safely: {path.name}: {exc}") from exc
+    if stat_is_link_or_reparse(metadata):
+        return None
+    try:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
         descriptor = os.open(path, flags)
     except OSError:

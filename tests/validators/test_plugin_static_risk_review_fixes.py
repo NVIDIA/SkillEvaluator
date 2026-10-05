@@ -596,6 +596,13 @@ def test_lsp_servers_get_stdio_command_form_checks(tmp_path: Path) -> None:
     assert not result.passed
 
 
+def test_lsp_server_with_non_list_args_is_reported_not_crashed(tmp_path: Path) -> None:
+    lsp = {"py": {"command": "bash", "args": 5, "extensionToLanguage": {".py": "python"}}}
+    result = _validate(_claude(tmp_path, {".lsp.json": lsp}))
+    assert _checks(result)["plugin_lsp_args_not_list"] == Severity.HIGH
+    assert not result.passed
+
+
 def test_plain_lsp_servers_pass(tmp_path: Path) -> None:
     lsp = {"py": {"command": "pyright-langserver", "args": ["--stdio"], "extensionToLanguage": {".py": "python"}}}
     result = _validate(_claude(tmp_path, {".lsp.json": lsp}))

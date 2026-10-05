@@ -398,6 +398,20 @@ def test_claude_code_stages_a_plugin_dir_with_wrapped_hooks_and_no_eval_data(tmp
     _assert_no_bypass(bundle)
 
 
+def test_claude_code_plugin_copy_skips_env_files_in_any_letter_case(tmp_path: Path) -> None:
+    plugin = _contained_plugin(tmp_path)
+    # One name per directory: a case-insensitive filesystem cannot hold .env and .ENV side by side.
+    _write(plugin / "scripts" / ".ENV", "TOKEN=do-not-copy\n")
+    _write(plugin / "config" / ".Env.local", "TOKEN=do-not-copy\n")
+    _write(plugin / "config" / ".env.example", "TOKEN=\n")
+    _write(plugin / "templates" / ".ENV.EXAMPLE", "TOKEN=\n")
+    package = prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage", plugin_load="native")
+    bundle, _, _ = _stage(tmp_path, "claude-code", package.native_source)
+    files = _files(bundle / "native" / "claude-code" / "plugin")
+    assert {"scripts/.ENV", "config/.Env.local"}.isdisjoint(files)
+    assert {"config/.env.example", "templates/.ENV.EXAMPLE"} <= files
+
+
 def test_claude_code_plugin_copy_skips_results_generated_output_and_the_evals_source(tmp_path: Path) -> None:
     """Grading data inside the plugin root never reaches the with-plugin image through the native copy."""
     from skillevaluator.tier3.output_provenance import mark_generated_output_root
@@ -721,6 +735,61 @@ def test_malformed_or_linked_census_files_are_ignored(tmp_path: Path) -> None:
     link.symlink_to(good)
     assert read_census_file(link) is None
     assert read_census_file(good) == {"agent": "codex", "mode": "native", "loaded": [], "listed": [], "not_loaded": []}
+
+
+def test_missing_or_linked_harness_logs_read_as_none(tmp_path: Path) -> None:
+    from skillevaluator.tier3.plugin_native import read_harness_log_prefix
+
+    assert read_harness_log_prefix(tmp_path / "agent" / "claude-code.txt") is None
+    log = tmp_path / "claude-code.txt"
+    log.write_text('{"type": "system"}\n', encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(log)
+    assert read_harness_log_prefix(link) is None
+    assert read_harness_log_prefix(log) == '{"type": "system"}\n'
+
+
+def test_harness_log_under_a_non_directory_reads_as_none(tmp_path: Path) -> None:
+    from skillevaluator.tier3.plugin_native import read_harness_log_prefix
+
+    (tmp_path / "agent").write_text("not a directory", encoding="utf-8")
+    assert read_harness_log_prefix(tmp_path / "agent" / "claude-code.txt") is None
+
+
+def test_collector_keeps_a_claude_census_when_the_harness_log_cannot_be_inspected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.tier3 import plugin_native
+    from skillevaluator.tier3.harbor.collector import _trial_load_census
+    from skillevaluator.utils.secure_fs import SecurePathError
+
+    def inaccessible(path: Path, *args: Any, **kwargs: Any) -> str | None:
+        raise SecurePathError("path_access_error", f"Cannot inspect path safely: {path.name}: Permission denied")
+
+    monkeypatch.setattr(plugin_native, "read_harness_log_prefix", inaccessible)
+    trial = tmp_path / "job" / "trial-1"
+    census = {"agent": "claude-code", "mode": "native", "loaded": [], "not_loaded": []}
+    _write(trial / "agent" / "skilleval-load-census.json", json.dumps(census))
+    declared = [{"type": "skill", "name": "alpha"}]
+    plan = {"mode": "native", "declared": declared, "harness": {"kind": "claude-code-init", "plugin": "p"}}
+
+    result = _trial_load_census(trial, plan, agent="claude-code", mode="native", declared=declared)
+    assert result == {"agent": "claude-code", "mode": "native", "loaded": [], "listed": [], "not_loaded": []}
+
+
+def test_collector_keeps_a_claude_census_when_the_harness_log_is_missing(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.collector import _attach_load_census
+
+    job = tmp_path / "job"
+    census = {"agent": "claude-code", "mode": "native", "loaded": [], "not_loaded": []}
+    _write(job / "trial-1" / "agent" / "skilleval-load-census.json", json.dumps(census))
+    plan = {
+        "mode": "native",
+        "declared": [{"type": "skill", "name": "alpha"}],
+        "harness": {"kind": "claude-code-init", "plugin": "release-helper"},
+    }
+    summary = _attach_load_census([{"_trial_root_name": "trial-1"}], job, plan, agent="claude-code")
+    assert summary["trials"] == 1 and summary["fallback_trials"] == 0
 
 
 def _coverage(*rows: dict[str, Any]) -> dict[str, Any]:

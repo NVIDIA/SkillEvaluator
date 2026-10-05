@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from skillevaluator.constants import (
+    CONTENT_DEDUP_MAX_LLM_CLUSTERS,
     MAX_PLUGIN_DEDUP_LLM_CALLS,
     MAX_PLUGIN_DEDUP_SKILLS,
     SIMILARITY_DEFAULT_MAX_ENTRIES,
@@ -15,7 +16,6 @@ from skillevaluator.constants import (
     SIMILARITY_DEFAULT_THRESHOLD,
 )
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
-from skillevaluator.deduplication.utils.skill_collector import SkillCollectionError
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.tier1.commands import emit_reports
@@ -113,7 +113,9 @@ def run_dedup_scan(
 
 
 def _make_advisory(result: ValidationResult) -> ValidationResult:
-    """Cap plugin Tier 2 findings and legacy errors at advisory severity."""
+    """Cap plugin Tier 2 findings at advisory severity and keep other notes as warnings."""
+    from skillevaluator.deduplication.plugin.catalog_checks import advisory_severity
+
     if result.metadata.get("security_failure"):
         # Filesystem-integrity failures mean the requested check could not be
         # executed safely. Keep them blocking instead of disguising them as an
@@ -122,19 +124,17 @@ def _make_advisory(result: ValidationResult) -> ValidationResult:
         result.metadata.update({"execution_status": "failed", "optional": False})
         return result
 
-    legacy_errors = list(result.errors)
+    # Errors and warnings that are not a finding's legacy string (provider
+    # failures, skip reasons) are notes. Finding strings are rebuilt from the
+    # capped severities, then each note is kept once as a warning.
+    finding_strings = {finding.to_legacy_string() for finding in result.findings}
+    notes = [message for message in (*result.warnings, *result.errors) if message not in finding_strings]
     for finding in result.findings:
-        if finding.severity in (Severity.CRITICAL, Severity.HIGH):
-            finding.severity = Severity.MEDIUM
-    if result.findings:
-        result.recalculate_from_findings()
-    else:
-        result.errors.clear()
-        result.summary.errors = 0
-    for error in legacy_errors:
-        if error not in result.warnings:
-            result.warnings.append(error)
-            result.summary.warnings += 1
+        finding.severity = advisory_severity(finding.severity)
+    result.recalculate_from_findings()
+    for note in notes:
+        if note not in result.warnings:
+            result.add_warning(note)
     result.passed = True
     result.metadata["advisory_tier2"] = True
     return result
@@ -222,7 +222,13 @@ def run_plugin_skill_context_dedup(
         return [_plugin_work_limit_result(len(skill_dirs))]
 
     skills_root = plugin_root / "skills"
-    per_skill_llm_budget = max(1, MAX_PLUGIN_DEDUP_LLM_CALLS // len(skill_dirs))
+    # Share the plugin-wide LLM allowance across skills without exceeding the
+    # per-skill cluster limit the validator accepts; a plugin with few skills
+    # would otherwise hand one skill more than that limit.
+    per_skill_llm_budget = min(
+        CONTENT_DEDUP_MAX_LLM_CLUSTERS,
+        max(1, MAX_PLUGIN_DEDUP_LLM_CALLS // len(skill_dirs)),
+    )
     validator = IntraSkillValidator(
         threshold=threshold,
         embedding_model=model,
@@ -233,8 +239,11 @@ def run_plugin_skill_context_dedup(
     for skill_dir in skill_dirs:
         skill_name = skill_dir.relative_to(skills_root).as_posix()
         try:
+            # Unsafe skill content is returned, not raised, as a result marked
+            # security_failure; _make_advisory keeps that result blocking.
             skill_result = validator.validate(skill_dir)
-        except (SecurePathError, SkillCollectionError) as exc:
+        except SecurePathError as exc:
+            # An unsafe path that still escapes validate() stays blocking too.
             skill_result = _unsafe_plugin_result(exc)
         except Exception as exc:
             skill_result = ValidationResult(

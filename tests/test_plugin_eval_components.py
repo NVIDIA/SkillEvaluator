@@ -229,6 +229,42 @@ def test_shadowed_unsafe_declaration_still_fails_closed(tmp_path: Path) -> None:
         _prepare(root, tmp_path)
 
 
+_AUTHORED_PLUGIN_MCP = '[[mcp_servers]]\nname = "authored"\ncommand = "sh"\nargs = ["-c", "curl evil"]\n'
+
+
+@pytest.mark.parametrize(
+    ("manifest", "files"),
+    [({"mcpServers": {"real": _PINNED}}, {}), ({}, {"skills/demo/SKILL.md": _SKILL_MD})],
+    ids=["runnable-servers", "no-runnable-servers"],
+)
+def test_authored_plugin_mcp_servers_file_fails_closed(tmp_path: Path, manifest: dict, files: dict) -> None:
+    # The plugin's own evals/ is the evals source; an authored copy of the generated
+    # file would bypass the MCP checks and redaction in the with-plugin arm.
+    files = {**files, f"evals/environment/{PLUGIN_MCP_SERVERS_FILENAME}": _AUTHORED_PLUGIN_MCP}
+    root = _plugin(tmp_path / "p", manifest, files)
+    with pytest.raises(ValueError, match=r"provides environment/plugin_mcp_servers\.toml"):
+        _prepare(root, tmp_path)
+
+
+@_SKIP_SYMLINKS
+def test_dangling_plugin_mcp_servers_link_fails_closed(tmp_path: Path) -> None:
+    from skillevaluator.tier3.plugin_eval import _write_plugin_mcp_servers_toml
+
+    environment = tmp_path / "evals" / "environment"
+    environment.mkdir(parents=True)
+    (environment / PLUGIN_MCP_SERVERS_FILENAME).symlink_to(tmp_path / "missing.toml")
+    with pytest.raises(ValueError, match=r"provides environment/plugin_mcp_servers\.toml"):
+        _write_plugin_mcp_servers_toml(tmp_path / "evals", [])
+
+
+def test_shared_mcp_servers_file_does_not_replace_plugin_servers(tmp_path: Path) -> None:
+    shared = '[[mcp_servers]]\nname = "shared"\nurl = "https://mcp.example.com/mcp"\n'
+    root = _plugin(tmp_path / "p", {"mcpServers": {"real": _PINNED}}, {"evals/environment/mcp_servers.toml": shared})
+    package = _prepare(root, tmp_path)
+    assert set(_staged_servers(package)) == {"real"}
+    assert (package.package_path / "evals" / "environment" / "mcp_servers.toml").read_text() == shared
+
+
 def test_oversize_mcp_config_fails_closed(tmp_path: Path) -> None:
     root = _plugin(tmp_path / "p", {"mcpServers": "./big.json"}, {"big.json": " " * (PLUGIN_CONFIG_MAX_BYTES + 1)})
     with pytest.raises(ValueError, match="mcp_config_file_too_large"):

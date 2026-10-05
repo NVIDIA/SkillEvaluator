@@ -184,7 +184,8 @@ def test_oversize_agent_plugins_root_is_a_plugin_and_fails(tmp_path: Path) -> No
     result = _validate(root)
     checks = _checks(result)
     assert not result.passed
-    assert checks["manifest_unsafe"] == Severity.HIGH  # the oversize selected manifest cannot be read
+    assert checks["manifest_unreadable"] == Severity.HIGH  # the oversize selected manifest is over the read bound
+    assert "security_failure" not in result.metadata
     assert checks["mcp_url_insecure_scheme"] == Severity.HIGH  # mcp.json is still checked
 
 
@@ -247,7 +248,7 @@ def test_oversize_agent_plugins_root_opts_in_wherever_the_schema_is(tmp_path: Pa
     result = _validate(root)
     checks = _checks(result)
     assert not result.passed
-    assert checks["manifest_unsafe"] == Severity.HIGH
+    assert checks["manifest_unreadable"] == Severity.HIGH
     assert checks["mcp_url_insecure_scheme"] == Severity.HIGH
 
 
@@ -262,7 +263,8 @@ def test_root_plugin_json_over_the_lenient_bound_fails_closed(tmp_path: Path) ->
     assert located.manifest_type == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE
     result = _validate(root)
     assert not result.passed
-    assert _checks(result)["manifest_unsafe"] == Severity.HIGH
+    assert _checks(result)["manifest_unreadable"] == Severity.HIGH
+    assert "could not be parsed even leniently" in result.findings[0].message
 
 
 # --------------------------------------------------------------------------- #

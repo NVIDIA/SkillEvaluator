@@ -141,11 +141,13 @@ Clients read a manifest of any size, so a root `plugin.json` larger than the
 1 MiB manifest limit is still parsed whole, up to 8 MiB. Whitespace before
 `$schema` or escaped slashes (`https:\/\/agent-plugins.org\/...`) do not hide
 the opt-in. A file that does not parse counts when it names the schema host,
-and a file over 8 MiB always counts. Such a file is the Agent Plugins manifest,
-and as the selected manifest it fails HIGH `manifest_unsafe` because it cannot
-be read. Auto-detection uses the same rule, so such a folder stays a plugin
-instead of becoming a skill. Only a linked, hard-linked, special, or changed
-file fails discovery.
+and a file over 8 MiB always counts. Such a file is the Agent Plugins manifest.
+As the selected manifest it fails HIGH `manifest_unreadable`, like any selected
+manifest that is not UTF-8 or is larger than 1 MiB. A JSON one is then read
+leniently, as an unreadable additional manifest is (see below), so what it
+declares is still checked. Auto-detection uses the same rule, so such a folder
+stays a plugin instead of becoming a skill. Only a linked, hard-linked,
+special, or changed file fails discovery or fails as a security check.
 
 Clients open fixed manifest paths. On a case-insensitive filesystem, such as
 the macOS default, a client that opens `.codex-plugin/plugin.json` reads

@@ -295,6 +295,11 @@ class PluginManifestLocation:
         """Read the discovered inode through the anchored plugin root descriptor."""
         return _read_secure_manifest(self.secure_file, self.declared_path, encoding=encoding, max_bytes=max_bytes)
 
+    def read_lenient_text(self, *, max_bytes: int = CONTENT_DEDUP_MAX_TOTAL_BYTES) -> str:
+        """Read the discovered inode leniently, like :meth:`PluginManifestCandidate.read_lenient_text`."""
+        raw = _read_secure_manifest_bytes(self.secure_file, self.declared_path, max_bytes=max_bytes)
+        return decode_manifest_leniently(raw)
+
 
 _AGENT_PLUGINS_RELATIVE = Path(PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE)
 # The schema host as it appears in the raw bytes of UTF-8 (and ASCII-compatible

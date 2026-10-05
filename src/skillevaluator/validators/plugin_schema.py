@@ -176,7 +176,7 @@ class PluginSchemaValidator(ValidatorBase):
         contained_data: dict[str, Any] | None = None
         manifest_valid = True
         if manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE:
-            contained_data = self._validate_contained_manifest(located, result)
+            contained_data, manifest_valid = self._validate_contained_manifest(located, result)
         elif manifest_type in PLUGIN_CONTAINED_MANIFEST_TYPES:
             contained_data, manifest_valid = self._validate_native_manifest(located, result)
         else:
@@ -517,6 +517,20 @@ class PluginSchemaValidator(ValidatorBase):
         try:
             raw = location.read_text()
         except PluginManifestPathError as exc:
+            if exc.content_error:
+                filename = location.manifest_filename
+                result.add_finding(
+                    Finding(
+                        category="PLUGIN_SCHEMA",
+                        severity=Severity.HIGH,
+                        check_name="manifest_unreadable",
+                        message=f"Plugin manifest {filename} {self._content_problem(exc)}.",
+                        file_path=str(manifest_path),
+                        suggestion=f"Save {filename} as UTF-8 YAML under {CONTENT_DEDUP_MAX_FILE_BYTES} bytes.",
+                        metadata={"manifest_filename": filename},
+                    )
+                )
+                return None
             result.metadata["security_failure"] = True
             result.add_finding(
                 Finding(
@@ -613,13 +627,24 @@ class PluginSchemaValidator(ValidatorBase):
                 )
             )
 
-    def _load_contained_json(self, location: PluginManifestLocation, result: ValidationResult) -> dict[str, Any] | None:
-        """Read and parse a contained JSON manifest; record a HIGH finding on failure."""
+    def _load_contained_json(
+        self, location: PluginManifestLocation, result: ValidationResult
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Read and parse a contained JSON manifest; record a HIGH finding on failure.
+
+        Returns ``(data, readable)``. A manifest that is not UTF-8 or is over the
+        manifest size bound is HIGH ``manifest_unreadable`` but not a security
+        failure. It is then parsed leniently, as the clients that load it read
+        it, so ``data`` can still be inventoried while ``readable`` is ``False``.
+        """
         manifest_path = location.path
         filename = location.manifest_filename
         try:
             raw = location.read_text(encoding="utf-8-sig")
         except PluginManifestPathError as exc:
+            if exc.content_error:
+                data, _status = self._parse_unreadable(location, self._content_problem(exc), result, selected=True)
+                return data, False
             result.metadata["security_failure"] = True
             result.add_finding(
                 Finding(
@@ -631,7 +656,7 @@ class PluginSchemaValidator(ValidatorBase):
                     suggestion="Replace links/hardlinks/special manifests with one regular file inside the plugin root.",
                 )
             )
-            return None
+            return None, False
 
         try:
             data: Any = load_bounded_json(raw)
@@ -646,7 +671,7 @@ class PluginSchemaValidator(ValidatorBase):
                     suggestion=f"Reduce JSON nesting or collection sizes in {filename}.",
                 )
             )
-            return None
+            return None, False
         except StructuredDataSyntaxError as exc:
             result.add_finding(
                 Finding(
@@ -658,7 +683,7 @@ class PluginSchemaValidator(ValidatorBase):
                     suggestion=f"Fix the JSON syntax in {filename}.",
                 )
             )
-            return None
+            return None, False
 
         if not isinstance(data, dict) or not data:
             result.add_finding(
@@ -671,21 +696,23 @@ class PluginSchemaValidator(ValidatorBase):
                     suggestion=f"Populate {filename} with at least a non-empty 'name'.",
                 )
             )
-            return None
-        return data
+            return None, False
+        return data, True
 
     def _validate_contained_manifest(
         self, location: PluginManifestLocation, result: ValidationResult
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, bool]:
         """Shallow-validate a contained ``.claude-plugin/plugin.json`` file.
 
-        Returns the parsed manifest when it is a JSON object with a valid name, for
-        the component inventory; ``None`` after any blocking manifest error.
+        Returns ``(parsed manifest, valid)``. The manifest is returned when it is
+        a JSON object with a valid name, for the component inventory; ``None``
+        after any other blocking manifest error. ``valid`` is ``False`` when it
+        could only be read leniently (``manifest_unreadable``).
         """
         manifest_path = location.path
-        data = self._load_contained_json(location, result)
+        data, readable = self._load_contained_json(location, result)
         if data is None:
-            return None
+            return None, False
 
         try:
             name = require_bounded_string(data.get("name"), "Contained plugin name", max_chars=NAME_MAX_LENGTH)
@@ -700,7 +727,7 @@ class PluginSchemaValidator(ValidatorBase):
                     suggestion="Add a 'name' string to .claude-plugin/plugin.json.",
                 )
             )
-            return None
+            return None, False
 
         # Runnable MCP servers (every mcpServers form plus the root .mcp.json) get
         # blocking, network-free static validation in _inventory_components, which
@@ -711,7 +738,7 @@ class PluginSchemaValidator(ValidatorBase):
         declared = {key: len(value) for key, value in data.items() if isinstance(value, list)}
         if declared:
             plugin_meta["declared_dependencies"] = declared
-        return data
+        return data, readable
 
     def _validate_native_manifest(
         self, location: PluginManifestLocation, result: ValidationResult
@@ -721,10 +748,11 @@ class PluginSchemaValidator(ValidatorBase):
         Returns ``(parsed manifest, valid)``. The parsed manifest is returned
         even after a HIGH field error, so its declared component paths and MCP
         servers are still inventoried and statically checked; ``valid`` is
-        ``False`` then, and no manifest success row is recorded. ``None`` means
-        the manifest could not be read or parsed.
+        ``False`` then, and no manifest success row is recorded. The same holds
+        for a manifest that could only be read leniently (``manifest_unreadable``).
+        ``None`` means the manifest could not be read or parsed.
         """
-        data = self._load_contained_json(location, result)
+        data, readable = self._load_contained_json(location, result)
         if data is None:
             return None, False
         profile = profile_for(location.manifest_type)
@@ -766,7 +794,7 @@ class PluginSchemaValidator(ValidatorBase):
         }
         if declared:
             plugin_meta["declared_dependencies"] = declared
-        return data, not blocking
+        return data, readable and not blocking
 
     def _record_manifest_declarations(
         self, location: PluginManifestLocation, result: ValidationResult
@@ -881,11 +909,7 @@ class PluginSchemaValidator(ValidatorBase):
                 )
                 return None, "unsafe"
             # A regular file that is not UTF-8 or is over the size bound is invalid content, not an unsafe path.
-            problem = (
-                f"is not valid UTF-8 text ({exc.__cause__})"
-                if exc.reason == "encoding"
-                else f"is larger than the {CONTENT_DEDUP_MAX_FILE_BYTES}-byte manifest read limit"
-            )
+            problem = self._content_problem(exc)
             if candidate.manifest_type in PLUGIN_CONTAINED_MANIFEST_TYPES:
                 return self._parse_unreadable(candidate, problem, result)
         else:
@@ -928,20 +952,38 @@ class PluginSchemaValidator(ValidatorBase):
         return data, "parsed"
 
     @staticmethod
+    def _content_problem(exc: PluginManifestPathError) -> str:
+        """Why a safely discovered manifest file cannot be read strictly: its encoding or its size."""
+        if exc.reason == "encoding":
+            return f"is not valid UTF-8 text ({exc.__cause__})"
+        return f"is larger than the {CONTENT_DEDUP_MAX_FILE_BYTES}-byte manifest read limit"
+
+    @staticmethod
     def _parse_unreadable(
-        candidate: PluginManifestCandidate, problem: str, result: ValidationResult
+        manifest: PluginManifestLocation | PluginManifestCandidate,
+        problem: str,
+        result: ValidationResult,
+        *,
+        selected: bool = False,
     ) -> tuple[dict[str, Any] | None, str]:
         """HIGH for a client manifest over the size bound or not UTF-8, then a lenient parse.
 
         Clients do not share SkillEvaluator's 1 MiB bound or its strict UTF-8
         decoding: Codex reads a manifest of any size, and Claude Code reads a
         Latin-1 one. So the manifest is read again with a larger bound and
-        replacement characters, and what it declares is merged into the
-        inventory and checked like any other additional manifest.
+        replacement characters, and what it declares is inventoried and
+        checked like any readable manifest. The finding is
+        ``manifest_unreadable`` for the selected manifest and
+        ``plugin_manifest_additional_unreadable`` for an additional one.
         """
+        if selected:
+            subject, check_name, alternative = "Plugin manifest", "manifest_unreadable", ""
+        else:
+            subject, check_name = "Additional manifest", "plugin_manifest_additional_unreadable"
+            alternative = ", or remove it if the plugin does not target that client"
         data: dict[str, Any] | None = None
         try:
-            parsed = load_bounded_json(candidate.read_lenient_text().removeprefix("﻿"))
+            parsed = load_bounded_json(manifest.read_lenient_text().removeprefix("﻿"))
         except PluginManifestPathError as exc:
             if not exc.content_error:
                 result.metadata["security_failure"] = True
@@ -950,8 +992,8 @@ class PluginSchemaValidator(ValidatorBase):
                         category="PLUGIN_SCHEMA",
                         severity=Severity.HIGH,
                         check_name="manifest_unsafe",
-                        message=f"Could not securely read additional plugin manifest: {exc}",
-                        file_path=str(candidate.declared_path),
+                        message=f"Could not securely read {subject.lower()}: {exc}",
+                        file_path=str(manifest.declared_path),
                         suggestion=(
                             "Replace links/hardlinks/special manifests with one regular file inside the plugin root."
                         ),
@@ -972,17 +1014,17 @@ class PluginSchemaValidator(ValidatorBase):
             Finding(
                 category="PLUGIN_SCHEMA",
                 severity=Severity.HIGH,
-                check_name="plugin_manifest_additional_unreadable",
+                check_name=check_name,
                 message=(
-                    f"Additional manifest {candidate.manifest_filename} {problem.rstrip('.')}. Clients without this "
+                    f"{subject} {manifest.manifest_filename} {problem.rstrip('.')}. Clients without this "
                     f"limit still load it. {checked}."
                 ),
-                file_path=str(candidate.declared_path),
+                file_path=str(manifest.declared_path),
                 suggestion=(
-                    f"Save {candidate.manifest_filename} as UTF-8 JSON under {CONTENT_DEDUP_MAX_FILE_BYTES} bytes, or "
-                    "remove it if the plugin does not target that client."
+                    f"Save {manifest.manifest_filename} as UTF-8 JSON under {CONTENT_DEDUP_MAX_FILE_BYTES} bytes"
+                    f"{alternative}."
                 ),
-                metadata={"manifest_filename": candidate.manifest_filename},
+                metadata={"manifest_filename": manifest.manifest_filename},
             )
         )
         return data, "unreadable"

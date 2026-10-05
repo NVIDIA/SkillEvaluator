@@ -78,12 +78,14 @@ result.
   not appear in any user/system message, since then the consumer could have
   taken it from the prompt rather than from the producer.
 * ``artifact``: a producer-attributed call must write the path (write/edit
-  tools, the file headers of an ``apply_patch`` body, shell redirects/``tee``/
-  ``cp``/``mv``/``touch``, or an MCP tool whose name or argument key says it
-  writes), and a later consumer-attributed call must read it (read tools,
-  shell readers/interpreters, or an MCP/subagent call whose arguments name the
-  path). Relative artifact paths match an observed path equal to it or ending
-  with ``/<artifact>``; absolute ones must match exactly.
+  tools, the ``Add File``/``Update File``/``Move to`` headers of an
+  ``apply_patch`` body, shell redirects/``tee``/``cp``/``mv``/``touch``, or an
+  MCP tool whose name or argument key says it writes; a patch that only
+  deletes the path does not write it), and a later consumer-attributed call
+  must read it (read tools, shell readers/interpreters, or an MCP/subagent
+  call whose arguments name the path). Relative artifact paths match an
+  observed path equal to it or ending with ``/<artifact>``; absolute ones must
+  match exactly.
 * When both are given, both must hold.
 
 Trajectory content is untrusted: step, call, text and regex-subject sizes are
@@ -215,6 +217,8 @@ _PATCH_TOOLS = frozenset({"apply_patch", "applypatch", "patch"})
 # Where harnesses put that body: Codex ``input``, OpenCode ``patchText``, Hermes
 # ``patch``, and ``raw`` for a tool input that was not a JSON object.
 _PATCH_BODY_KEYS = ("input", "patch", "patchText", "content", "raw")
+# An apply_patch "*** Delete File:" header line, spelled as atif_helpers._patch_file_paths reads headers.
+_PATCH_DELETE_HEADER_RE = re.compile(r"^[^\S\n]*\*\*\* Delete File:[^\n]*", re.MULTILINE)
 # Text editor tools: they write, except for their ``view`` command, which reads.
 _STR_REPLACE_EDITORS = frozenset({"str_replace_editor", "str_replace_based_edit_tool"})
 _WRITE_TOOLS = (
@@ -1047,7 +1051,7 @@ class _Call:
                 text_reads, text_writes = _shell_io(text, reader_verbs=_ARTIFACT_CONSUMER_VERBS)
                 if _APPLY_PATCH_COMMAND_RE.search(text):
                     # A shell ``apply_patch <<'EOF'`` (Codex) writes the files its patch headers name.
-                    text_writes.extend(_patch_file_paths(text))
+                    text_writes.extend(_patch_written_paths(text))
                 reads.update(dict.fromkeys(_normalize_path(path) for path in text_reads))
                 writes.update(dict.fromkeys(_normalize_path(path) for path in text_writes))
         return _ShellPaths(list(reads), list(writes))
@@ -2267,13 +2271,23 @@ def _path_matches(observed: str, artifact: str) -> bool:
     return _normalized_path_matches(_normalize_path(observed), artifact)
 
 
+def _patch_written_paths(text: str) -> list[str]:
+    """Files an apply_patch body writes: the ``Add File``, ``Update File`` and ``Move to`` headers.
+
+    A file the patch only deletes is not written, so its ``Delete File``
+    header is dropped before the headers are read. A file the patch deletes
+    and adds again is still written.
+    """
+    return _patch_file_paths(_PATCH_DELETE_HEADER_RE.sub("", text))
+
+
 def _patch_targets(args: Mapping[str, Any]) -> list[str]:
-    """Paths named by the file headers of an apply_patch body (``Add``/``Update``/``Delete File``, ``Move to``)."""
+    """Paths an apply_patch tool call writes (see :func:`_patch_written_paths`)."""
     paths: list[str] = []
     for key in _PATCH_BODY_KEYS:
         body = args.get(key)
         if isinstance(body, str):
-            paths.extend(_patch_file_paths(body[:_MAX_ARGS_TEXT_CHARS]))
+            paths.extend(_patch_written_paths(body[:_MAX_ARGS_TEXT_CHARS]))
     return paths
 
 

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 import pytest
@@ -54,6 +53,19 @@ def _signals(traj: dict[str, Any], case: dict[str, Any] | None = None, **kwargs:
 
 def _activations(traj: dict[str, Any]) -> list[dict[str, Any]]:
     return _signals(traj)["activations"]
+
+
+def _record_regex_timeouts(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record the deadline of every dataset-pattern search (a search without one fails)."""
+    timeouts: list[float] = []
+    search = plugin_signals.regex.search
+
+    def search_with_deadline(pattern: str, text: str, *, timeout: float) -> Any:
+        timeouts.append(timeout)
+        return search(pattern, text, timeout=timeout)
+
+    monkeypatch.setattr(plugin_signals.regex, "search", search_with_deadline)
+    return timeouts
 
 
 def _codex_exec(source: str, call_id: str = "exec-1") -> dict[str, Any]:
@@ -615,14 +627,18 @@ class TestArguments:
         ],
         ids=["nested-quantifier", "overlapping-alternation", "adjacent-quantifiers-at-subject-cap"],
     )
-    def test_backtracking_pattern_fails_fast_instead_of_hanging(self, pattern: str, subject: str) -> None:
+    def test_backtracking_pattern_fails_fast_instead_of_hanging(
+        self, monkeypatch: pytest.MonkeyPatch, pattern: str, subject: str
+    ) -> None:
+        timeouts = _record_regex_timeouts(monkeypatch)
         traj = _traj(_one("Bash", {"command": subject}))
         case = {"tool_arguments": [{"tool": "Bash", "pattern": {"command": pattern}}]}
 
-        started = time.monotonic()
         block = _signals(traj, case)["arguments"]
 
-        assert time.monotonic() - started < 1.0
+        # The search ran under the per-check deadline, so it could not hang.
+        assert timeouts
+        assert all(0 < timeout <= plugin_signals._PATTERN_TIMEOUT_SECONDS for timeout in timeouts)
         assert (block["checked"], block["passed"]) == (1, 0)
         (failure,) = block["failures"]
         assert failure["detail"] in {
@@ -633,13 +649,15 @@ class TestArguments:
     def test_pattern_checks_share_one_time_budget_per_trial(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(plugin_signals, "_PATTERN_TIMEOUT_SECONDS", 0.05)
         monkeypatch.setattr(plugin_signals, "_PATTERN_BUDGET_SECONDS", 0.2)
+        timeouts = _record_regex_timeouts(monkeypatch)
         steps = [_one("Bash", {"command": "a" * 60 + "!"}, call_id=f"c{index}") for index in range(20)]
         case = {"tool_arguments": [{"tool": "Bash", "pattern": {"command": "(a|aa)+$"}}]}
 
-        started = time.monotonic()
         block = _signals(_traj(*steps), case)["arguments"]
 
-        assert time.monotonic() - started < 1.0
+        # Each search that timed out spent its share of the 0.2 s budget, so the
+        # later checks failed without searching at all.
+        assert 0 < len(timeouts) < 20
         assert (block["checked"], block["passed"]) == (20, 0)
         assert {failure["detail"] for failure in block["failures"]} == {"pattern check timed out"}
 
@@ -1161,7 +1179,7 @@ class TestUntrustedTrajectoryContent:
         ]
         assert [f["tool"] for f in signals["arguments"]["failures"]] == ["Skill:<non-name>", "Skill:Release Notes"]
 
-    def test_adversarial_text_for_the_redactor_does_not_stall_collection(self) -> None:
+    def test_adversarial_text_for_the_redactor_does_not_stall_collection(self, monkeypatch: pytest.MonkeyPatch) -> None:
         payload = "a." * 32_768  # quadratic for the credential redactor's assignment patterns
         traj = _traj(
             _one("Skill", {"skill": payload}),
@@ -1177,10 +1195,20 @@ class TestUntrustedTrajectoryContent:
             ]
         }
 
-        started = time.monotonic()
+        redacted: list[int] = []
+        redact = plugin_signals.redact_sensitive_text
+
+        def recording_redact(text: str, **kwargs: Any) -> str:
+            redacted.append(len(text))
+            return redact(text, **kwargs)
+
+        monkeypatch.setattr(plugin_signals, "redact_sensitive_text", recording_redact)
+
         signals = _signals(traj, case)
 
-        assert time.monotonic() - started < 1.0
+        # The redactor only ever sees a bounded window (4 x 256 + 256 characters), never the payload.
+        assert redacted
+        assert max(redacted) <= 4 * plugin_signals._MAX_LABEL_CHARS + 256
         assert len(signals["arguments"]["failures"]) == 4
 
     def test_unhashable_step_source_is_ignored(self) -> None:

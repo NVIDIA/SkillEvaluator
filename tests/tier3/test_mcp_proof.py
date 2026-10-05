@@ -458,7 +458,8 @@ def test_in_agent_evidence_upgrades_and_never_downgrades() -> None:
     assert upgraded["docs"]["status"] == "used-successfully"
     assert upgraded["docs"]["tools"] == ["search"]
     assert "host probe: ok" in upgraded["docs"]["detail"]
-    assert upgraded["tracker"]["status"] == "reachable-in-agent"
+    # Called, but nothing succeeded: not proof that the server is reachable (proof M30).
+    assert upgraded["tracker"]["status"] == "called-no-success"
     assert upgraded["idle"] == proof["idle"]
     assert apply_in_agent_mcp_proof(upgraded, None) == upgraded
 

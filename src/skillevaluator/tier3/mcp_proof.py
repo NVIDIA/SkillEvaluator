@@ -24,10 +24,17 @@ included, runs under one deadline, and a transport error that the ``mcp``
 client only logs (an oversized body, an off-origin SSE endpoint) ends the
 probe at once.
 
-After the run, :func:`apply_in_agent_mcp_proof` upgrades each server from the
-with-plugin arm's ``plugin_signals_summary.mcp_calls.by_server``:
-``reachable-in-agent`` when the agent called it, ``used-successfully`` when at
-least one call succeeded.
+After the run, :func:`apply_in_agent_mcp_proof` updates each server from the
+with-plugin arm's ``plugin_signals_summary.mcp_calls.by_server`` and each
+agent's ``plugin_load_census``: ``used-successfully`` when at least one call
+succeeded; otherwise ``not-loaded-in-agent`` when the harness reported that the
+server failed to load or never listed it in every scored trial (the collector's
+per-trial ``mcp_load`` tally tells a flaky load from a server that never
+loaded), and ``called-no-success`` when the agent called it but no call
+succeeded. Only a successful call or a successful
+host ``initialize`` (``reachable-host``, not contradicted in the agent) proves
+a server reachable; a failed call never turns ``unreachable`` into anything
+else.
 
 The result is ``provenance["mcp_proof"] = {"<server>": {"status", "tools",
 "detail"}}``. It is advisory: a runnable URL server that stays unproven never
@@ -37,6 +44,7 @@ changes the ``INCOMPLETE`` rule or any score.
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -49,7 +57,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
-from skillevaluator.tier3.eval_core.plugin_signals import match_declared_mcp_server
+from skillevaluator.tier3.eval_core.plugin_signals import match_declared_mcp_server, sanitize_input_schema
 from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 from skillevaluator.validators.mcp_static import classify_endpoint_host, host_is_allowlisted, host_name_is_allowlisted
@@ -58,17 +66,28 @@ STATUS_DECLARED = "declared"
 STATUS_REACHABLE_HOST = "reachable-host"
 STATUS_UNREACHABLE = "unreachable"
 STATUS_UNSUPPORTED = "unsupported"
-STATUS_REACHABLE_IN_AGENT = "reachable-in-agent"
+STATUS_CALLED_NO_SUCCESS = "called-no-success"
+STATUS_NOT_LOADED_IN_AGENT = "not-loaded-in-agent"
 STATUS_USED_SUCCESSFULLY = "used-successfully"
+#: Written by older releases for "called, nothing succeeded"; read as ``called-no-success``.
+STATUS_REACHABLE_IN_AGENT = "reachable-in-agent"
 MCP_PROOF_STATUSES = (
     STATUS_DECLARED,
     STATUS_REACHABLE_HOST,
     STATUS_UNREACHABLE,
     STATUS_UNSUPPORTED,
-    STATUS_REACHABLE_IN_AGENT,
+    STATUS_CALLED_NO_SUCCESS,
+    STATUS_NOT_LOADED_IN_AGENT,
     STATUS_USED_SUCCESSFULLY,
 )
-_STATUS_RANK = {status: rank for rank, status in enumerate(MCP_PROOF_STATUSES)}
+#: Statuses that prove a server reachable: a successful host initialize or a successful agent call.
+PROVEN_STATUSES = frozenset({STATUS_REACHABLE_HOST, STATUS_USED_SUCCESSFULLY})
+# Statuses the agent's own evidence may replace when no call succeeded. A host
+# failure (unreachable, unsupported) stays: a failed call proves nothing more.
+_AGENT_REPLACEABLE = frozenset(
+    {STATUS_DECLARED, STATUS_REACHABLE_HOST, STATUS_CALLED_NO_SUCCESS, STATUS_REACHABLE_IN_AGENT}
+)
+_COUNT_KEYS = ("total", "succeeded", "failed", "unknown")
 
 MAX_PROBE_TOOLS = 50
 MAX_PROBE_SERVERS = 32
@@ -76,6 +95,9 @@ MAX_RESOLVED_ADDRESSES = 32
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_DETAIL_CHARS = 300
 MAX_TOOL_NAME_CHARS = 128
+#: Largest kept tool ``inputSchema`` (serialized), and the budget for all servers' schemas in one run.
+MAX_INPUT_SCHEMA_CHARS = 2048
+MAX_INPUT_SCHEMAS_CHARS = 128 * 1024
 CONNECT_TIMEOUT_S = 5.0
 READ_TIMEOUT_S = 10.0
 TOTAL_TIMEOUT_S = 20.0
@@ -197,6 +219,23 @@ def _detail(text: Any) -> str:
 
 def _entry(status: str, detail: str, tools: Iterable[str] = ()) -> dict[str, Any]:
     return {"status": status, "tools": list(tools)[:MAX_PROBE_TOOLS], "detail": _detail(detail)}
+
+
+def _input_schema(raw: Any) -> dict[str, Any] | None:
+    """A tool's ``inputSchema`` cut to the subset argument checks run, or ``None`` when nothing is left to check.
+
+    A schema that only says the arguments are an object checks nothing and is
+    dropped, and so is one whose kept part serializes to more than
+    ``MAX_INPUT_SCHEMA_CHARS``.
+    """
+    schema = sanitize_input_schema(raw)
+    if not schema or set(schema) == {"type"}:
+        return None
+    try:
+        size = len(json.dumps(schema, sort_keys=True, allow_nan=False))
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return schema if size <= MAX_INPUT_SCHEMA_CHARS else None
 
 
 def declared_mcp_proof(targets: Iterable[Mapping[str, Any]], detail: str = NOT_REQUESTED_DETAIL) -> dict[str, Any]:
@@ -545,7 +584,7 @@ def _quiet_mcp_logs(abort: _ProbeAbort) -> Iterator[None]:
 
 async def _probe_session(
     url: str, kind: str, headers: dict[str, str], *, addresses: tuple[str, ...], total_timeout: float
-) -> list[str]:
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
     import anyio
     from mcp import ClientSession
     from mcp.client.sse import sse_client
@@ -595,11 +634,16 @@ async def _probe_session(
         if abort.reason and (scope.cancelled_caught or listed is None):
             raise _ProbeFailed(abort.reason)
     names: list[str] = []
+    schemas: dict[str, dict[str, Any]] = {}
     for tool in getattr(listed, "tools", None) or []:
         name = getattr(tool, "name", None)
         if isinstance(name, str) and name and len(names) < MAX_PROBE_TOOLS:
-            names.append(_detail(name)[:MAX_TOOL_NAME_CHARS])
-    return names
+            safe = _detail(name)[:MAX_TOOL_NAME_CHARS]
+            names.append(safe)
+            schema = _input_schema(getattr(tool, "inputSchema", None))
+            if schema is not None and safe == name:
+                schemas[name] = schema
+    return names, schemas
 
 
 def probe_mcp_server(
@@ -652,7 +696,9 @@ def probe_mcp_server(
     if remaining <= 0:
         return _entry(STATUS_UNREACHABLE, f"{kind} probe failed: timed out after {total_timeout:g}s")
     try:
-        tools = anyio.run(lambda: _probe_session(url, kind, headers, addresses=addresses, total_timeout=remaining))
+        tools, schemas = anyio.run(
+            lambda: _probe_session(url, kind, headers, addresses=addresses, total_timeout=remaining)
+        )
     except BaseException as exc:
         if isinstance(exc, KeyboardInterrupt | SystemExit):
             raise
@@ -663,7 +709,10 @@ def probe_mcp_server(
         if isinstance(cause, TimeoutError):
             message = f"timed out after {total_timeout:g}s"
         return _entry(STATUS_UNREACHABLE, f"{kind} probe failed: {type(cause).__name__}: {message}{note}")
-    return _entry(STATUS_REACHABLE_HOST, f"initialize and tools/list succeeded over {kind}{note}", tools)
+    entry = _entry(STATUS_REACHABLE_HOST, f"initialize and tools/list succeeded over {kind}{note}", tools)
+    if schemas:
+        entry["input_schemas"] = schemas
+    return entry
 
 
 def probe_mcp_servers(
@@ -722,7 +771,7 @@ def _with_plugin_mcp_servers(
             target = match_declared_mcp_server(str(server), names)
             if target is None:
                 continue
-            bucket = totals.setdefault(target, {"total": 0, "succeeded": 0})
+            bucket = totals.setdefault(target, dict.fromkeys(_COUNT_KEYS, 0))
             for key in bucket:
                 value = counts.get(key)
                 if isinstance(value, int) and not isinstance(value, bool):
@@ -730,36 +779,237 @@ def _with_plugin_mcp_servers(
     return totals
 
 
+#: Key of the with-plugin arm's per-server load tally (``{server: {"loaded", "trials"}}``) in its
+#: ``plugin_signals_summary``, written by the collector from each scored trial's load census.
+MCP_LOAD_KEY = "mcp_load"
+
+
+def _census_load(
+    engine_result: Mapping[str, Any] | None,
+) -> tuple[set[str], dict[str, str], dict[str, tuple[int, int]]]:
+    """What the load census says about each MCP server, over every agent.
+
+    Returns ``(servers some agent's harness loaded in every trial, server ->
+    why an agent did not load it in some trial, server -> (trials that loaded
+    or listed it, trials whose census said either way))``. The census summary
+    keeps a component's weakest trial, so one flaky trial puts a server in
+    ``not_loaded``; the per-trial counts (the with-plugin arm's ``mcp_load``
+    tally) tell a flaky load from a server that never loaded.
+    """
+    loaded: set[str] = set()
+    not_loaded: dict[str, str] = {}
+    trials: dict[str, tuple[int, int]] = {}
+    agents = engine_result.get("agents") if isinstance(engine_result, Mapping) else None
+    for agent_name, agent in agents.items() if isinstance(agents, Mapping) else ():
+        if not isinstance(agent, Mapping):
+            continue
+        census = agent.get("plugin_load_census")
+        if isinstance(census, Mapping):
+            for entry in census.get("loaded") or ():
+                if isinstance(entry, Mapping) and entry.get("type") == "mcp" and isinstance(entry.get("name"), str):
+                    loaded.add(entry["name"])
+            for entry in census.get("not_loaded") or ():
+                if isinstance(entry, Mapping) and entry.get("type") == "mcp" and isinstance(entry.get("name"), str):
+                    reason = str(entry.get("reason") or "not loaded")
+                    not_loaded.setdefault(entry["name"], f"{agent_name}: {reason}")
+        summaries = agent.get("plugin_signals_summary")
+        arm = summaries.get("with_skill") if isinstance(summaries, Mapping) else None
+        tally = arm.get(MCP_LOAD_KEY) if isinstance(arm, Mapping) else None
+        for server, counts in tally.items() if isinstance(tally, Mapping) else ():
+            if not isinstance(server, str) or not isinstance(counts, Mapping):
+                continue
+            found, seen = counts.get("loaded"), counts.get("trials")
+            if not all(isinstance(value, int) and not isinstance(value, bool) for value in (found, seen)):
+                continue
+            if 0 <= found <= seen:
+                before = trials.get(server, (0, 0))
+                trials[server] = (before[0] + found, before[1] + seen)
+    return loaded, not_loaded, trials
+
+
+def _calls_detail(counts: Mapping[str, int]) -> str:
+    return (
+        f"agent made {counts['total']} call(s): {counts['succeeded']} succeeded, {counts['failed']} failed, "
+        f"{counts['unknown']} unknown, in the with-plugin arm"
+    )
+
+
+_HOST_DETAIL_MARK = "; host probe"
+
+
+def _with_host_detail(agent_detail: str, entry: Mapping[str, Any]) -> str:
+    """``<agent detail>; host probe: <pre-run detail>`` (the pre-run part kept once on a re-run)."""
+    host = str(entry.get("detail") or "")
+    if _HOST_DETAIL_MARK in host:
+        host = host.split(_HOST_DETAIL_MARK, 1)[1]
+        host = host[2:] if host.startswith(": ") else f"host probe{host}"
+    if not host:
+        return _detail(agent_detail)
+    separator = "; " if host.startswith("host probe") else "; host probe: "
+    return _detail(f"{agent_detail}{separator}{host}")
+
+
 def apply_in_agent_mcp_proof(mcp_proof: Mapping[str, Any], engine_result: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Upgrade each server's status from with-plugin MCP call evidence (never downgrades)."""
+    """Update each server's status from the with-plugin arm's MCP calls and load census.
+
+    * At least one successful call: ``used-successfully``, whatever the host probe said.
+    * Otherwise, when an agent's load census says the harness did not load the
+      server (its init reported it failed, or never listed it), no agent's
+      census confirmed it, and no scored trial loaded or listed it:
+      ``not-loaded-in-agent``. A server that loaded in some trials keeps its
+      status (or becomes ``called-no-success``) with a "not loaded in N of M
+      trials" note.
+    * Otherwise, when the agent called it but nothing succeeded:
+      ``called-no-success``.
+
+    Only ``declared`` and ``reachable-host`` (and an earlier in-agent status)
+    are replaced without a successful call; ``unreachable`` and ``unsupported``
+    stay, because a failed call proves no more than the host probe did.
+    """
     calls = _with_plugin_mcp_servers(engine_result, mcp_proof)
+    loaded, not_loaded, load_trials = _census_load(engine_result)
     upgraded: dict[str, Any] = {}
     for name, raw in mcp_proof.items():
         entry = dict(raw) if isinstance(raw, Mapping) else _entry(STATUS_DECLARED, "")
-        counts = calls.get(str(name))
+        server = str(name)
+        counts = calls.get(server) or dict.fromkeys(_COUNT_KEYS, 0)
         status = entry.get("status")
-        rank = _STATUS_RANK.get(status, -1) if isinstance(status, str) else -1
-        if counts and counts["total"] > 0:
-            host_detail = str(entry.get("detail") or "")
-            new_status = STATUS_USED_SUCCESSFULLY if counts["succeeded"] > 0 else STATUS_REACHABLE_IN_AGENT
-            if _STATUS_RANK[new_status] > rank:
-                entry["status"] = new_status
-                agent_detail = (
-                    f"agent made {counts['total']} call(s), {counts['succeeded']} succeeded, in the with-plugin arm"
-                )
-                entry["detail"] = _detail(f"{agent_detail}; host probe: {host_detail}" if host_detail else agent_detail)
-        upgraded[str(name)] = entry
+        found, seen = load_trials.get(server, (0, 0))
+        missed_some = status in _AGENT_REPLACEABLE and server in not_loaded and server not in loaded
+        if counts["succeeded"] > 0:
+            if status != STATUS_USED_SUCCESSFULLY:
+                entry["status"] = STATUS_USED_SUCCESSFULLY
+                entry["detail"] = _with_host_detail(_calls_detail(counts), entry)
+        elif missed_some and found == 0:
+            agent_detail = f"not loaded in the with-plugin arm ({not_loaded[server]})"
+            if counts["total"]:
+                agent_detail = f"{agent_detail}; {_calls_detail(counts)}"
+            entry["status"] = STATUS_NOT_LOADED_IN_AGENT
+            entry["detail"] = _with_host_detail(agent_detail, entry)
+        elif missed_some:
+            # Loaded in some trials: a flaky load, not a server the agent never had.
+            missed = seen - found
+            note = (
+                f"not loaded in {missed} of {seen} with-plugin trial(s) ({not_loaded[server]})"
+                if missed
+                else f"not loaded in a with-plugin trial that was not scored ({not_loaded[server]})"
+            )
+            if counts["total"] > 0:
+                entry["status"] = STATUS_CALLED_NO_SUCCESS
+                note = f"{_calls_detail(counts)}; {note}"
+            entry["detail"] = _with_host_detail(note, entry)
+        elif status in _AGENT_REPLACEABLE and counts["total"] > 0:
+            entry["status"] = STATUS_CALLED_NO_SUCCESS
+            entry["detail"] = _with_host_detail(_calls_detail(counts), entry)
+        upgraded[server] = entry
     return upgraded
 
 
+#: Key under which the probed tool input schemas ride in the package's plugin runtime components file.
+INPUT_SCHEMAS_COMPONENT_KEY = "mcp_input_schemas"
+
+
+def _compact_json(value: Any) -> str:
+    """``value`` as the compact ASCII JSON the runtime components file is written in (one char per byte)."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def mcp_input_schemas(
+    mcp_proof: Mapping[str, Any] | None, *, budget: int = MAX_INPUT_SCHEMAS_CHARS
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """``{server: {tool: schema}}`` from a proof's host probes, at most ``budget`` bytes of compact JSON in all.
+
+    Each kept tool is counted as written: its schema, its quoted name and the
+    separators, plus each kept server's quoted name and braces.
+    """
+    schemas: dict[str, dict[str, dict[str, Any]]] = {}
+    budget = min(budget, MAX_INPUT_SCHEMAS_CHARS) - 2
+    for server, entry in list((mcp_proof or {}).items())[:MAX_PROBE_SERVERS]:
+        tools = entry.get("input_schemas") if isinstance(entry, Mapping) else None
+        if not isinstance(server, str) or not isinstance(tools, Mapping):
+            continue
+        for tool, raw in list(tools.items())[:MAX_PROBE_TOOLS]:
+            schema = _input_schema(raw) if isinstance(tool, str) and tool else None
+            if schema is None:
+                continue
+            size = len(_compact_json(tool)) + len(_compact_json(schema)) + 2
+            if server not in schemas:
+                size += len(_compact_json(server)) + 4
+            if size > budget:
+                return schemas
+            budget -= size
+            schemas.setdefault(server, {})[tool] = schema
+    return schemas
+
+
+def write_mcp_input_schemas(package_path: Any, mcp_proof: Mapping[str, Any] | None) -> bool:
+    """Record the probed tool input schemas in the prepared package for argument checks.
+
+    They are merged into ``evals/environment/plugin_runtime_components.json``,
+    which the runner reads through the evaluator snapshot. The file is written
+    as compact JSON, and the schemas only get the room the file's size limit
+    leaves after the declared subagents, commands and aliases: too many
+    schemas drop schemas, never the rest of the file. Returns whether any
+    schema was written.
+    """
+    from pathlib import Path
+
+    from skillevaluator.tier3.harbor.adapter import _MAX_PLUGIN_RUNTIME_COMPONENTS_BYTES
+    from skillevaluator.tier3.plugin_eval import PLUGIN_RUNTIME_COMPONENTS_FILENAME
+
+    if package_path is None:
+        return False
+    env_dir = Path(package_path) / "evals" / "environment"
+    target = env_dir / PLUGIN_RUNTIME_COMPONENTS_FILENAME
+    data: dict[str, Any] = {"subagents": [], "commands": []}
+    if target.is_file() and not target.is_symlink():
+        try:
+            loaded = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+            loaded = None
+        if isinstance(loaded, dict):
+            data = loaded
+    data.pop(INPUT_SCHEMAS_COMPONENT_KEY, None)
+    try:
+        rest = len(_compact_json(data))
+    except (TypeError, ValueError, RecursionError):
+        return False
+    room = _MAX_PLUGIN_RUNTIME_COMPONENTS_BYTES - rest - len(_compact_json(INPUT_SCHEMAS_COMPONENT_KEY)) - 2
+    schemas = mcp_input_schemas(mcp_proof, budget=room)
+    if not schemas:
+        return False
+    payload = _compact_json({**data, INPUT_SCHEMAS_COMPONENT_KEY: schemas})
+    if len(payload) > _MAX_PLUGIN_RUNTIME_COMPONENTS_BYTES:
+        return False
+    env_dir.mkdir(parents=True, exist_ok=True)
+    target.write_text(payload, encoding="utf-8")
+    return True
+
+
+def load_mcp_input_schemas(skill_path: Any) -> dict[str, dict[str, dict[str, Any]]]:
+    """The probed tool input schemas recorded in a package (through the evaluator snapshot), re-checked."""
+    from skillevaluator.tier3.harbor.adapter import _read_plugin_runtime_components
+
+    data = _read_plugin_runtime_components(skill_path)
+    raw = data.get(INPUT_SCHEMAS_COMPONENT_KEY) if isinstance(data, dict) else None
+    if not isinstance(raw, Mapping):
+        return {}
+    return mcp_input_schemas({server: {"input_schemas": tools} for server, tools in raw.items()})
+
+
 __all__ = [
+    "MCP_LOAD_KEY",
     "MCP_PROOF_STATUSES",
     "NOT_REQUESTED_DETAIL",
+    "PROVEN_STATUSES",
     "EnvGrant",
     "apply_in_agent_mcp_proof",
     "declared_mcp_proof",
+    "load_mcp_input_schemas",
+    "mcp_input_schemas",
     "parse_env_grant",
     "planned_env_sends",
     "probe_mcp_server",
     "probe_mcp_servers",
+    "write_mcp_input_schemas",
 ]

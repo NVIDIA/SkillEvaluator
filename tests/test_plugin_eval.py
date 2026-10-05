@@ -418,7 +418,8 @@ mcp:
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match=r"args\[0\].*string|args.*strings"):
+    # An agent_plugin.yaml mcp entry takes only name and provider, as the Tier 1 schema says (proof M37).
+    with pytest.raises(ValueError, match=r"name and provider.*unsupported keys: args, command"):
         prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
 
 

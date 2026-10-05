@@ -169,10 +169,10 @@ def test_bundle_manifest_plugin_file_launch_is_not_staged(tmp_path: Path) -> Non
     )
     (root / "skills" / "alpha" / "SKILL.md").write_text("---\nname: alpha\ndescription: A\n---\nA\n")
     (root / "skills" / "alpha" / "evals" / "evals.json").write_text(json.dumps([{"id": "c", "prompt": "p"}]))
-    package = _prepare(root, tmp_path)
-    assert package.runnable_mcp_servers == ()
-    assert package.provenance()["partial"] is True
-    assert package.provenance()["mcp_unsupported_config"] == ["local"]
+    # agent_plugin.yaml mcp entries take only name and provider, as the Tier 1 schema says (proof M37),
+    # so a runnable entry is refused before anything is staged.
+    with pytest.raises(ValueError, match="name and provider"):
+        _prepare(root, tmp_path)
 
 
 def test_working_directory_and_absolute_paths_stay_runnable(tmp_path: Path) -> None:
@@ -342,7 +342,7 @@ def test_provenance_reports_coverage_cost_and_pinning(tmp_path: Path) -> None:
         assert set(row) == {"type", "name", "origin", "path", "state", "reason"} and row["reason"]
     assert provenance["mcp_pinning"] == {"total": 3, "pinned": 1, "unpinned": 1, "not_applicable": 1, "ratio": 0.5}
     cost = provenance["context_cost"]
-    assert cost["method"] == "static_estimate" and cost["estimator"] == "chars_div_4"
+    assert cost["method"] == "static_estimate" and cost["estimator"] == "chars_div_4_cjk"
     assert cost["always_on_tokens"] > 0 and cost["on_demand_tokens"] > 0
     assert any("wrapper SKILL.md" in note for note in cost["notes"])
     # Unsupported types are reported, not gated: 'partial' still reflects only the

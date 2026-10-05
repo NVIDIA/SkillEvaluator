@@ -1893,6 +1893,17 @@ def _extract_rewards(
     return rewards
 
 
+def _reward_float(value: int | float) -> float:
+    """Convert a numeric reward; an integer too large for a float is non-finite, not a crash.
+
+    Non-finite rewards are later reported as unscored trials, like NaN or infinity.
+    """
+    try:
+        return float(value)
+    except OverflowError:
+        return math.inf
+
+
 def _reward_from_harbor_result(result: dict[str, Any]) -> dict[str, Any] | None:
     harbor_rewards = _harbor_result_rewards(result)
     if not harbor_rewards:
@@ -1903,7 +1914,7 @@ def _reward_from_harbor_result(result: dict[str, Any]) -> dict[str, Any] | None:
     for key, value in harbor_rewards.items():
         if not isinstance(value, int | float) or isinstance(value, bool):
             continue
-        score = float(value)
+        score = _reward_float(value)
         if key in DEFAULT_METRICS:
             data[key] = score
         elif key == "overall":
@@ -1947,7 +1958,7 @@ def _harbor_result_rewards(result: dict[str, Any]) -> dict[str, Any] | None:
     aggregated: dict[str, Any] = {}
     for key in sorted({str(key) for rewards in step_reward_rows for key in rewards}):
         values = [
-            float(rewards[key])
+            _reward_float(rewards[key])
             for rewards in step_reward_rows
             if isinstance(rewards.get(key), int | float) and not isinstance(rewards.get(key), bool)
         ]

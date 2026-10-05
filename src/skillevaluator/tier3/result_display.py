@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import io
 import logging
-import math
 import os
 import re
 from collections.abc import Mapping
@@ -28,23 +27,17 @@ from skillevaluator.tier3.harbor.metrics import (
     METRIC_DISPLAY,
     NOT_APPLICABLE_ELIGIBLE_METRICS,
     dimension_is_not_applicable,
+    finite_number,
 )
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.tier3.harbor.runner import format_harbor_view_command
 
 
 def _number(value: object, *, signed: bool = False) -> str:
-    numeric = _finite_number(value)
+    numeric = finite_number(value)
     if numeric is None:
         return "-"
     return f"{numeric:+.3f}" if signed else f"{numeric:.3f}"
-
-
-def _finite_number(value: object) -> float | None:
-    if not isinstance(value, int | float) or isinstance(value, bool):
-        return None
-    numeric = float(value)
-    return numeric if math.isfinite(numeric) else None
 
 
 def _score_style(score: float) -> str:
@@ -62,7 +55,7 @@ def _score_bar(score: float) -> str:
 
 
 def _score_cell(value: object, *, unavailable: str = "NO SCORE") -> tuple[Text, Text]:
-    numeric = _finite_number(value)
+    numeric = finite_number(value)
     if numeric is None:
         return Text(unavailable, style="dim"), Text("")
     style = _score_style(numeric)
@@ -88,7 +81,7 @@ def _not_applicable_metrics(data: Mapping[str, Any], variant: str) -> frozenset[
 
 
 def _delta_cell(value: object) -> Text:
-    numeric = _finite_number(value)
+    numeric = finite_number(value)
     if numeric is None:
         return Text("NO SCORE", style="dim")
     style = "green" if numeric > 0 else "red" if numeric < 0 else "dim"
@@ -121,7 +114,7 @@ def _default_with_skill_overall(data: Mapping[str, Any]) -> float | None:
     not_applicable = _not_applicable_metrics(data, "with_skill")
     values: list[float] = []
     for metric in DEFAULT_METRICS:
-        value = _finite_number(scores.get(metric))
+        value = finite_number(scores.get(metric))
         if value is None:
             if metric in not_applicable:
                 continue
@@ -145,7 +138,7 @@ def _custom_only_with_skill_overall(data: Mapping[str, Any]) -> float | None:
         if not isinstance(attempts, list) or not attempts:
             return None
         for attempt in attempts:
-            score = _finite_number(attempt.get("score")) if isinstance(attempt, Mapping) else None
+            score = finite_number(attempt.get("score")) if isinstance(attempt, Mapping) else None
             if score is None:
                 return None
             scores.append(score)
@@ -170,7 +163,7 @@ def _with_skill_overall(data: Mapping[str, Any], metric_set: object) -> float | 
     lift = data.get("lift")
     overall = lift.get("overall") if isinstance(lift, Mapping) else None
     persisted = overall.get("with_skill") if isinstance(overall, Mapping) else None
-    return _finite_number(persisted)
+    return finite_number(persisted)
 
 
 def _unavailable_or_skipped(value: object, *, baseline_skipped: bool) -> str:
@@ -437,8 +430,8 @@ def _render_agent_scores(
     for metric in metrics:
         with_value = with_scores.get(metric) if with_usable else None
         baseline_value = baseline_scores.get(metric) if baseline_usable else None
-        with_na = metric in with_not_applicable and _finite_number(with_value) is None
-        baseline_na = metric in baseline_not_applicable and _finite_number(baseline_value) is None
+        with_na = metric in with_not_applicable and finite_number(with_value) is None
+        baseline_na = metric in baseline_not_applicable and finite_number(baseline_value) is None
         label = Text(METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()), style="bold")
         with_score, with_bar = _not_applicable_cell() if with_na else _score_cell(with_value)
         row: list[Text] = [label, with_score, with_bar]
@@ -446,7 +439,7 @@ def _render_agent_scores(
             persisted = lift.get(metric) if isinstance(lift.get(metric), Mapping) else {}
             delta = (
                 persisted.get("delta")
-                if _finite_number(with_value) is not None and _finite_number(baseline_value) is not None
+                if finite_number(with_value) is not None and finite_number(baseline_value) is not None
                 else None
             )
             baseline_score, baseline_bar = _not_applicable_cell() if baseline_na else _score_cell(baseline_value)
@@ -476,7 +469,7 @@ def _render_agent_scores(
                 persisted = custom_lift.get(metric) if isinstance(custom_lift.get(metric), Mapping) else {}
                 delta = (
                     persisted.get("delta")
-                    if _finite_number(with_value) is not None and _finite_number(baseline_value) is not None
+                    if finite_number(with_value) is not None and finite_number(baseline_value) is not None
                     else None
                 )
                 baseline_score, baseline_bar = _score_cell(baseline_value)
@@ -491,13 +484,13 @@ def _render_agent_scores(
     overall = lift.get("overall") if isinstance(lift.get("overall"), Mapping) else {}
     with_overall = overall.get("with_skill") if with_usable else None
     baseline_overall = overall.get("without_skill") if baseline_usable else None
-    if show_baseline and (_finite_number(with_overall) is not None or _finite_number(baseline_overall) is not None):
+    if show_baseline and (finite_number(with_overall) is not None or finite_number(baseline_overall) is not None):
         table.add_section()
         with_score, with_bar = _score_cell(with_overall)
         baseline_score, baseline_bar = _score_cell(baseline_overall)
         delta = (
             overall.get("delta")
-            if _finite_number(with_overall) is not None and _finite_number(baseline_overall) is not None
+            if finite_number(with_overall) is not None and finite_number(baseline_overall) is not None
             else None
         )
         table.add_row(
@@ -549,7 +542,7 @@ def _render_agent_scores(
     if (
         with_usable
         and baseline_usable
-        and all(_finite_number(value) is not None for value in (with_overall, baseline_overall, overall.get("delta")))
+        and all(finite_number(value) is not None for value in (with_overall, baseline_overall, overall.get("delta")))
     ):
         headline = Text("OVERALL SKILL LIFT   ", style="bold")
         headline.append_text(_delta_cell(overall["delta"]))
@@ -612,8 +605,8 @@ def _render_dimensions(
                 if _condition_usable(data, "without_skill") and isinstance(baseline_dimension, Mapping)
                 else None
             )
-            with_numeric = _finite_number(with_score)
-            baseline_numeric = _finite_number(baseline_score)
+            with_numeric = finite_number(with_score)
+            baseline_numeric = finite_number(baseline_score)
             with_na = with_numeric is None and dimension_is_not_applicable(
                 dimension, _not_applicable_metrics(data, "with_skill")
             )
@@ -825,7 +818,7 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
     warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
     display_status = "degraded" if status == "succeeded" and warnings else status
     duration = result.get("duration_seconds")
-    if _finite_number(duration) is not None:
+    if finite_number(duration) is not None:
         console.print(f"Time: {float(duration):.1f}s")
 
     agents = result.get("agents")

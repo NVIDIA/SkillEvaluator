@@ -36,7 +36,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES, SCAN_EXCLUDED_DIRS
+from skillevaluator.constants import (
+    CONTENT_DEDUP_MAX_FILE_BYTES,
+    PLUGIN_TREE_MAX_DISCOVERED_PATHS,
+    SCAN_EXCLUDED_DIRS,
+)
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, discover_secure_files, secure_read_path_text
 from skillevaluator.utils.structured_data import (
     MAX_STRUCTURED_DEPTH,
@@ -63,13 +67,11 @@ if TYPE_CHECKING:
 
 # Dependency manifests are read through a bounded, no-follow secure read.
 MAX_DEPENDENCY_FILE_BYTES = CONTENT_DEDUP_MAX_FILE_BYTES
-# Per-file cap on individual ``dependency-version-unverified`` findings; the
-# remainder is summarized in one message so a huge manifest cannot flood reports.
-MAX_UNVERIFIED_FINDINGS_PER_FILE = 100
 UNVERIFIED_CHECK_NAME = eco.UNVERIFIED_CHECK_NAME
-# Bounded discovery of npm manifests and Dockerfiles below one scanned directory.
+# At most this many npm manifests and Dockerfiles below one scanned directory are
+# audited. Their discovery walk is bounded like the whole-plugin walk that runs
+# before it (PLUGIN_TREE_MAX_DISCOVERED_PATHS).
 MAX_ECOSYSTEM_FILES = 64
-MAX_ECOSYSTEM_DISCOVERED_PATHS = 20_000
 # npm lockfiles list every installed package, so they get lockfile-sized bounds
 # (a larger byte cap and collection/token budgets that cover MAX_NPM_PACKAGES)
 # instead of the 1,024-entry budget of load_bounded_json. A lockfile over these
@@ -438,7 +440,7 @@ class DependencySecurityValidator(ValidatorBase):
         for declaration in declarations:
             (exact if declaration.audit_line else unverified).append(declaration)
 
-        for declaration in unverified[:MAX_UNVERIFIED_FINDINGS_PER_FILE]:
+        for declaration in unverified[: eco.MAX_UNVERIFIED_PER_SOURCE]:
             result.add_finding(
                 eco.unverified_finding(
                     declaration.name or declaration.raw[:80],
@@ -450,9 +452,9 @@ class DependencySecurityValidator(ValidatorBase):
                     line_number=declaration.line_number,
                 )
             )
-        if len(unverified) > MAX_UNVERIFIED_FINDINGS_PER_FILE:
+        if len(unverified) > eco.MAX_UNVERIFIED_PER_SOURCE:
             result.add_message(
-                f"{source}: {len(unverified) - MAX_UNVERIFIED_FINDINGS_PER_FILE} more unpinned "
+                f"{source}: {len(unverified) - eco.MAX_UNVERIFIED_PER_SOURCE} more unpinned "
                 "declaration(s) not listed individually"
             )
 
@@ -716,7 +718,7 @@ class DependencySecurityValidator(ValidatorBase):
             directory,
             selected=selected,
             excluded_dirs=SCAN_EXCLUDED_DIRS,
-            max_paths=MAX_ECOSYSTEM_DISCOVERED_PATHS,
+            max_paths=PLUGIN_TREE_MAX_DISCOVERED_PATHS,
             allow_context_alias=False,
         )
         found: list[PurePosixPath] = []

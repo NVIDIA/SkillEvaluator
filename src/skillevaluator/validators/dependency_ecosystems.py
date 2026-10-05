@@ -52,6 +52,8 @@ CONTAINER_VULN_CHECK = "container-vulnerability"
 MAX_NPM_PACKAGES = 5_000
 MAX_IMAGES = 32
 MAX_VULN_FINDINGS_PER_SOURCE = 200
+# Per-source cap on individual dependency-version-unverified findings; the rest are
+# summarized in one message, so a huge manifest cannot flood reports.
 MAX_UNVERIFIED_PER_SOURCE = 100
 # An ecosystem summary keeps at most MAX_SUMMARY_ERRORS scanner errors, and an
 # error message is cut to MAX_ERROR_CHARS.

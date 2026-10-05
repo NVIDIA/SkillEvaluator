@@ -120,6 +120,38 @@ def _schema_finding(
     )
 
 
+def _add_capped(
+    result: ValidationResult,
+    findings: list[Finding],
+    *,
+    source: str,
+    noun: str,
+    file_path: Path | str,
+    suggestion: str,
+) -> None:
+    """Add the first ``MAX_PLUGIN_SCHEMA_FINDINGS`` findings, then one HIGH finding that counts the rest.
+
+    The message reads "<source> produced <count> <noun>; only the first
+    <cap> are reported." The findings past the cap may include blocking ones,
+    so the truncation finding is HIGH.
+    """
+    for finding in findings[:MAX_PLUGIN_SCHEMA_FINDINGS]:
+        result.add_finding(finding)
+    if len(findings) > MAX_PLUGIN_SCHEMA_FINDINGS:
+        result.add_finding(
+            _schema_finding(
+                "schema_errors_truncated",
+                message=(
+                    f"{source} produced {len(findings)} {noun}; only the first {MAX_PLUGIN_SCHEMA_FINDINGS} are "
+                    "reported."
+                ),
+                file_path=file_path,
+                suggestion=suggestion,
+                metadata={"actual": len(findings), "reported": MAX_PLUGIN_SCHEMA_FINDINGS},
+            )
+        )
+
+
 def _unsafe_read_finding(manifest: PluginManifestFile, exc: PluginManifestPathError, *, subject: str) -> Finding:
     """HIGH ``manifest_unsafe``: the discovered *subject* is now a link, a special file, or another inode."""
     return _schema_finding(
@@ -366,21 +398,14 @@ class PluginSchemaValidator(ValidatorBase):
                 from skillevaluator.validators.endpoint_resolution import INCOMPLETE_SCAN
 
                 result.mark_scan_incomplete(INCOMPLETE_SCAN)
-        for finding in findings[:MAX_PLUGIN_SCHEMA_FINDINGS]:
-            result.add_finding(finding)
-        if len(findings) > MAX_PLUGIN_SCHEMA_FINDINGS:
-            result.add_finding(
-                _schema_finding(
-                    "schema_errors_truncated",
-                    message=(
-                        f"Plugin component validation produced {len(findings)} findings; only the first "
-                        f"{MAX_PLUGIN_SCHEMA_FINDINGS} are reported."
-                    ),
-                    file_path=location.path,
-                    suggestion="Fix the reported plugin component and MCP declaration errors, then rerun validation.",
-                    metadata={"actual": len(findings), "reported": MAX_PLUGIN_SCHEMA_FINDINGS},
-                )
-            )
+        _add_capped(
+            result,
+            findings,
+            source="Plugin component validation",
+            noun="findings",
+            file_path=location.path,
+            suggestion="Fix the reported plugin component and MCP declaration errors, then rerun validation.",
+        )
         if contained and manifest is not None:
             blocking_mcp = [
                 finding
@@ -671,11 +696,11 @@ class PluginSchemaValidator(ValidatorBase):
         result: ValidationResult,
     ) -> None:
         """Translate a Pydantic validation error into structured findings."""
-        errors = exc.errors()
-        for error in errors[:MAX_PLUGIN_SCHEMA_FINDINGS]:
+        findings: list[Finding] = []
+        for error in exc.errors():
             location = format_validation_location(error) or "<root>"
             error_type = error.get("type", "value_error")
-            result.add_finding(
+            findings.append(
                 _schema_finding(
                     f"schema:{location}:{error_type}",
                     message=f"Field '{location}': {error['msg']}",
@@ -687,19 +712,14 @@ class PluginSchemaValidator(ValidatorBase):
                     ),
                 )
             )
-        if len(errors) > MAX_PLUGIN_SCHEMA_FINDINGS:
-            result.add_finding(
-                _schema_finding(
-                    "schema_errors_truncated",
-                    message=(
-                        f"Plugin schema produced {len(errors)} errors; only the first "
-                        f"{MAX_PLUGIN_SCHEMA_FINDINGS} are reported."
-                    ),
-                    file_path=manifest_path,
-                    suggestion="Fix the reported schema errors, then rerun validation.",
-                    metadata={"actual": len(errors), "reported": MAX_PLUGIN_SCHEMA_FINDINGS},
-                )
-            )
+        _add_capped(
+            result,
+            findings,
+            source="Plugin schema",
+            noun="errors",
+            file_path=manifest_path,
+            suggestion="Fix the reported schema errors, then rerun validation.",
+        )
 
     def _validate_contained_manifest(
         self, location: PluginManifestLocation, loaded: _LoadedManifest, result: ValidationResult
@@ -756,29 +776,32 @@ class PluginSchemaValidator(ValidatorBase):
         if data is None:
             return None, False
         profile = profile_for(location.manifest_type)
-        blocking = False
         severities = {"error": Severity.HIGH, "warning": Severity.MEDIUM, "note": Severity.LOW}
-        issues = validate_manifest_fields(location.manifest_type, data)
-        for issue in issues[:MAX_PLUGIN_SCHEMA_FINDINGS]:
-            severity = severities[issue.level]
-            blocking = blocking or severity is Severity.HIGH
-            check_name = (
-                "plugin_manifest_unknown_field"
-                if issue.error == "unknown_field" and "." not in issue.field
-                else f"schema:{issue.field}:{issue.error}"
+        findings = [
+            _schema_finding(
+                (
+                    "plugin_manifest_unknown_field"
+                    if issue.error == "unknown_field" and "." not in issue.field
+                    else f"schema:{issue.field}:{issue.error}"
+                ),
+                message=issue.message,
+                file_path=location.path,
+                suggestion=issue.suggestion or f"Fix {location.manifest_filename} to satisfy the {profile.reference}.",
+                severity=severities[issue.level],
+                metadata={"manifest_type": location.manifest_type, "field": issue.field},
             )
-            result.add_finding(
-                _schema_finding(
-                    check_name,
-                    message=issue.message,
-                    file_path=location.path,
-                    suggestion=(
-                        issue.suggestion or f"Fix {location.manifest_filename} to satisfy the {profile.reference}."
-                    ),
-                    severity=severity,
-                    metadata={"manifest_type": location.manifest_type, "field": issue.field},
-                )
-            )
+            for issue in validate_manifest_fields(location.manifest_type, data)
+        ]
+        # Over every problem, including any past the reporting cap.
+        blocking = any(finding.severity is Severity.HIGH for finding in findings)
+        _add_capped(
+            result,
+            findings,
+            source=f"{profile.label} manifest validation",
+            noun="findings",
+            file_path=location.path,
+            suggestion=f"Fix the reported {location.manifest_filename} field problems, then rerun validation.",
+        )
         plugin_meta = result.metadata.setdefault("plugin", {})
         name = data.get("name")
         if isinstance(name, str) and name.strip():
@@ -1104,22 +1127,31 @@ class PluginSchemaValidator(ValidatorBase):
 
     @staticmethod
     def _report_unscanned_skills(unscanned: list[Any], root: Path, result: ValidationResult) -> None:
-        for rel in unscanned[:MAX_PLUGIN_SCHEMA_FINDINGS]:
-            result.add_finding(
-                _schema_finding(
-                    "plugin_skill_in_unscanned_folder",
-                    message=(
-                        f"'{rel}' is a skill inside a folder that Tier 1 scans skip (evals/, results/, versions/). "
-                        "Codex searches skills/ recursively and loads it, but SkillEvaluator does not check it"
-                    ),
-                    file_path=root / str(rel),
-                    suggestion=(
-                        "Move evaluation output and version snapshots out of the plugin (for Tier 3 results, use "
-                        "--results-dir or SKILLEVALUATOR_RESULTS_DIR), or give a real skill a different folder name."
-                    ),
-                    metadata={"path": str(rel)},
-                )
+        suggestion = (
+            "Move evaluation output and version snapshots out of the plugin (for Tier 3 results, use "
+            "--results-dir or SKILLEVALUATOR_RESULTS_DIR), or give a real skill a different folder name."
+        )
+        findings = [
+            _schema_finding(
+                "plugin_skill_in_unscanned_folder",
+                message=(
+                    f"'{rel}' is a skill inside a folder that Tier 1 scans skip (evals/, results/, versions/). "
+                    "Codex searches skills/ recursively and loads it, but SkillEvaluator does not check it"
+                ),
+                file_path=root / str(rel),
+                suggestion=suggestion,
+                metadata={"path": str(rel)},
             )
+            for rel in unscanned
+        ]
+        _add_capped(
+            result,
+            findings,
+            source="The search for skills in folders that Tier 1 scans skip",
+            noun="findings",
+            file_path=root / DEFAULT_SKILLS_DIR,
+            suggestion=suggestion,
+        )
 
     def _validate_one_skill(
         self,

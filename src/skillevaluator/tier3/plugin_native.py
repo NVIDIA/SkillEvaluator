@@ -49,6 +49,8 @@ from typing import Any, ClassVar
 from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES, PLUGIN_CONFIG_MAX_BYTES
 from skillevaluator.plugin_components import (
     COMPONENT_TYPES,
+    COVERAGE_STATE_RANK,
+    EVALUATED_COVERAGE_STATES,
     PluginInventory,
     PluginRootReader,
     normalize_declared_path,
@@ -2558,12 +2560,6 @@ def native_load_unverified(summary: Mapping[str, Any]) -> str | None:
     if summary.get("plugin_missing_trials") == trials:
         return f"{agent}: the harness did not load the plugin in any of {trials} with-plugin trial(s)"
     return None
-
-
-#: Coverage states in which the with-plugin arm had the component, from the weakest evidence to the
-#: strongest: staged for it, loaded by the harness, exercised at runtime. A row is never downgraded.
-COVERAGE_STATE_RANK = {"staged": 1, "loaded": 2, "exercised": 3}
-EVALUATED_COVERAGE_STATES = frozenset(COVERAGE_STATE_RANK)
 
 
 def _coverage_names(row: Mapping[str, Any]) -> set[str]:

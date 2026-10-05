@@ -3924,6 +3924,7 @@ def _collect_report_only_condition(
             variant=variant,
             agent_model=agent_model,
             agent_model_source=agent_model_source,
+            expected_case_ids=expected_case_ids,
         )
     condition_dir.mkdir(parents=True, exist_ok=True)
     (condition_dir / "summary.json").write_text(

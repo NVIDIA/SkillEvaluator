@@ -716,6 +716,39 @@ def _collect(tmp_path: Path, **kwargs: object) -> dict[str, object]:
     )
 
 
+def test_every_arm_persists_the_expected_case_id_of_a_result_derived_entry(tmp_path: Path) -> None:
+    """Saved trials resolve fallback case ids against the expected cases in every arm."""
+    jobs_dir = tmp_path / "jobs"
+    for variant, arm_suffix in (
+        ("with", "-with-skill"),
+        ("without", "-without-skill"),
+        ("sumofparts", "-without-skill"),
+    ):
+        _write_reward(
+            jobs_dir,
+            variant=variant,
+            case_id="case-a",
+            attempt=1,
+            score=1.0,
+            include_entry_id=False,
+            result_task_name=f"skillevaluator-case-a{arm_suffix}",
+        )
+    _write_variant_job_results(jobs_dir, ("with", "without", "sumofparts"))
+
+    result = _collect(tmp_path, n_attempts=1, expected_cases=1, expected_case_ids=["case-a"], sum_of_parts_arm=True)
+
+    assert result["execution_status"] == "succeeded"
+    agent = result["agents"]["opencode"]
+    for arm, condition in (
+        ("with_skill", "with-skill"),
+        ("without_skill", "without-skill"),
+        ("sum_of_parts", "sum-of-parts"),
+    ):
+        assert list(agent["pass_at_k"][arm]["cases"]) == ["case-a"]
+        reward_file = tmp_path / "results" / "opencode" / condition / "trials" / "case-a_attempt001" / "reward.json"
+        assert json.loads(reward_file.read_text(encoding="utf-8"))["entry_id"] == "case-a", condition
+
+
 def test_stop_on_pass_does_not_report_intentionally_skipped_attempts(tmp_path: Path) -> None:
     for variant in ("with", "without"):
         for case_id in CASES:

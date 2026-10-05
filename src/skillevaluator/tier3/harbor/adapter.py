@@ -54,7 +54,7 @@ from skillevaluator.tier3.output_provenance import (
     validate_provenance_key_outside,
     write_generated_output_marker,
 )
-from skillevaluator.tier3.toml_utils import toml_quote
+from skillevaluator.tier3.toml_utils import extract_toml_metadata_entry_id, toml_quote
 from skillevaluator.utils.process_environment import child_process_env
 from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
@@ -212,6 +212,22 @@ _COMPOSE_ALLOWED_VOLUME_KEYS = frozenset({"labels"})
 _VERIFIER_JUDGE_MODEL_ENV_VARS = frozenset({"LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"})
 _VERIFIER_JUDGE_FALLBACK_ENV_VARS = frozenset({"LLM_JUDGE_FALLBACK_MODELS"})
 _VERIFIER_JUDGE_CONTROL_ENV_VARS = _VERIFIER_JUDGE_MODEL_ENV_VARS | _VERIFIER_JUDGE_FALLBACK_ENV_VARS
+_VERIFIER_BUDGET_ENV_VARS = frozenset(
+    {
+        "SKILL_EVAL_ACCURACY_BUDGET",
+        "SKILL_EVAL_BEHAVIOR_CHECK_BUDGET",
+        "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT",
+        "SKILL_EVAL_GOAL_ACCURACY_BUDGET",
+    }
+)
+_VERIFIER_RETRY_ENV_VARS = frozenset(
+    {
+        "SKILL_EVAL_LLM_JUDGE_BUDGET_SEC",
+        "SKILL_EVAL_LLM_MAX_RETRIES",
+        "SKILL_EVAL_LLM_RETRY_BASE_DELAY",
+        "SKILL_EVAL_LLM_RETRY_MAX_DELAY",
+    }
+)
 _VERIFIER_PROVIDER_ENV_VARS = frozenset(
     {
         "SKILL_EVAL_LLM_PROVIDER",
@@ -286,6 +302,8 @@ _VERIFIER_PROVIDER_ENV_VARS = frozenset(
         "AWS_USE_FIPS_ENDPOINT",
         "AWS_WEB_IDENTITY_TOKEN_FILE",
         "BOTOCORE_TCP_KEEPALIVE",
+        *_VERIFIER_BUDGET_ENV_VARS,
+        *_VERIFIER_RETRY_ENV_VARS,
     }
 )
 _RUNTIME_PROCESS_CONTROL_ENV_NAMES = frozenset(
@@ -1924,6 +1942,7 @@ def _write_task_toml(
     pre_agent_setup: list[str] | None = None,
     task_resources: dict[str, int] | None = None,
     agent_workdir: str | None = None,
+    arm_suffix: str = "",
 ) -> None:
     entry_id = entry.get("id", "unknown")
     expected_skill = entry.get("expected_skill") or "none"
@@ -1933,16 +1952,19 @@ def _write_task_toml(
         raise TypeError("expected_skill must be a string before Harbor TOML serialization")
     if not isinstance(docker_image, str):
         raise TypeError("docker_image must be a string before Harbor TOML serialization")
+    if not isinstance(arm_suffix, str):
+        raise TypeError("arm_suffix must be a string before Harbor TOML serialization")
     docker_image_line = f"docker_image = {_toml_quote(docker_image)}\n" if docker_image else ""
     cpus = _task_resource_value(task_resources, "cpus", 2)
     memory_mb = _task_resource_value(task_resources, "memory_mb", 4096)
     storage_mb = _task_resource_value(task_resources, "storage_mb", 2048)
     workdir_line = f"workdir = {_toml_quote(agent_workdir)}\n" if agent_workdir else ""
 
+    task_name = f"nvidia/skillevaluator-{entry_id}{arm_suffix}"
     content = f"""schema_version = "1.3"
 
 [task]
-name = {_toml_quote(f"nvidia/skillevaluator-{entry_id}")}
+name = {_toml_quote(task_name)}
 description = {_toml_quote(f"Skill evaluation task for {expected_skill}")}
 
 [metadata]
@@ -2506,10 +2528,11 @@ def _resolve_docker_source_variables(source: str, defaults: dict[str, str | None
         def _replace(match: re.Match[str]) -> str:
             nonlocal changed
             name = match.group("braced") or match.group("plain")
-            if name not in defaults or defaults[name] is None:
+            value = defaults.get(name) if name is not None else None
+            if value is None:
                 return match.group(0)
             changed = True
-            return defaults[name]
+            return value
 
         updated = _DOCKER_VARIABLE_RE.sub(_replace, resolved)
         resolved = updated
@@ -2566,7 +2589,7 @@ def _dockerfile_resolved_build_context_sources(
             raise ValueError(f"Cannot safely parse custom Dockerfile ENV: {payload}") from exc
         pairs: list[tuple[str, str]] = []
         if assignments and all("=" in assignment for assignment in assignments):
-            pairs = [tuple(assignment.split("=", 1)) for assignment in assignments]
+            pairs = [(key, val) for key, _, val in (assignment.partition("=") for assignment in assignments)]
         elif len(assignments) >= 2:
             pairs = [(assignments[0], " ".join(assignments[1:]))]
         if not pairs:
@@ -4384,16 +4407,305 @@ def _native_source_path_is_ignored(path: Path, native_dir: Path) -> bool:
 
 
 def _native_entry_id(task_dir: Path) -> str:
+    """Resolve and validate the canonical case ID for a native Harbor task directory."""
     task_toml = task_dir / "task.toml"
     try:
-        import tomllib
-
         data = tomllib.loads(task_toml.read_text(encoding="utf-8"))
     except Exception:
         return task_dir.name
     metadata = data.get("metadata", {}) if isinstance(data, dict) else {}
     raw_entry_id = metadata.get("entry_id", task_dir.name) if isinstance(metadata, dict) else task_dir.name
     return validate_case_id(raw_entry_id)
+
+
+_TOML_DOUBLE_QUOTE = '"'
+_TOML_SINGLE_QUOTE = "'"
+_TOML_MULTILINE_DOUBLE_QUOTE = '"""'
+_TOML_MULTILINE_SINGLE_QUOTE = "'''"
+_TOML_STRING_DELIMITERS = (
+    _TOML_MULTILINE_DOUBLE_QUOTE,
+    _TOML_MULTILINE_SINGLE_QUOTE,
+    _TOML_DOUBLE_QUOTE,
+    _TOML_SINGLE_QUOTE,
+)
+_TOML_ESCAPE_PAIR_LEN = 2  # backslash + escaped character
+_TOML_DOTTED_KEY_PATTERN = (
+    r"""(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[A-Za-z0-9_-]+)"""
+    r"""(?:[ \t]*\.[ \t]*(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[A-Za-z0-9_-]+))*"""
+)
+_TOML_TABLE_HEADER_RE = re.compile(rf"\[(\[?)[ \t]*({_TOML_DOTTED_KEY_PATTERN})[ \t]*\]\]?[ \t]*(?:#[^\r\n]*)?\r?$")
+_TOML_KEY_ASSIGN_RE = re.compile(rf"({_TOML_DOTTED_KEY_PATTERN})[ \t]*=")
+
+
+@dataclass(frozen=True)
+class _TomlTableHeader:
+    """Represent a top-level [table] or [[array_of_tables]] header in a TOML document."""
+
+    is_array_table: bool
+    table_parts: tuple[str, ...]
+    line_start: int
+    line_end: int
+
+
+@dataclass(frozen=True)
+class _TomlKeyAssignment:
+    """Represent a key = value assignment at top level or inside an inline table."""
+
+    current_table: tuple[str, ...]
+    scope_stack: tuple[tuple[str, tuple[str, ...]], ...]
+    key_parts: tuple[str, ...]
+    full_path: tuple[str, ...]
+    key_start: int
+    val_start: int
+
+
+def _skip_toml_string_literal(content: str, start: int) -> int:
+    """Return index immediately after the TOML string literal starting at *start*."""
+    n = len(content)
+    for delimiter in _TOML_STRING_DELIMITERS:
+        if not content.startswith(delimiter, start):
+            continue
+        delim_len = len(delimiter)
+        quote_char = delimiter[0]
+        supports_escapes = quote_char == _TOML_DOUBLE_QUOTE
+        is_multiline = delim_len > 1
+
+        i = start + delim_len
+        while i < n:
+            if supports_escapes and content[i] == "\\":
+                i += _TOML_ESCAPE_PAIR_LEN
+                continue
+            if content.startswith(delimiter, i):
+                i += delim_len
+                if is_multiline:
+                    while i < n and content[i] == quote_char:
+                        i += 1
+                return i
+            i += 1
+        return n
+    return start
+
+
+def _parse_toml_dotted_key(raw: str) -> tuple[str, ...]:
+    """Parse a TOML key or table path into unquoted, escape-decoded segment names."""
+    try:
+        parsed = tomllib.loads(f"{raw} = 1")
+    except Exception:
+        return ()
+    parts: list[str] = []
+    curr: object = parsed
+    while isinstance(curr, dict) and len(curr) == 1:
+        key, curr = next(iter(curr.items()))
+        parts.append(key)
+    return tuple(parts)
+
+
+def _iter_toml_constructs(content: str) -> Iterable[_TomlTableHeader | _TomlKeyAssignment]:
+    """Yield top-level table headers and key assignments (including inside inline tables)."""
+    n = len(content)
+    i = 0
+    current_table: tuple[str, ...] = ()
+    scope_stack: list[tuple[str, tuple[str, ...]]] = []
+    at_key_position = True
+
+    while i < n:
+        while i < n and content[i] in " \t":
+            i += 1
+        if i >= n:
+            break
+        if content[i] in "\r\n":
+            i += 1
+            if not scope_stack:
+                at_key_position = True
+            continue
+        if content[i] == "#":
+            while i < n and content[i] != "\n":
+                i += 1
+            continue
+
+        if not scope_stack and at_key_position and content[i] == "[":
+            line_end = content.find("\n", i)
+            if line_end == -1:
+                line_end = n
+            line = content[i:line_end]
+            header_match = _TOML_TABLE_HEADER_RE.match(line)
+            if header_match:
+                is_array_table, raw_table = header_match.groups()
+                table_parts = _parse_toml_dotted_key(raw_table)
+                yield _TomlTableHeader(
+                    is_array_table=bool(is_array_table),
+                    table_parts=table_parts,
+                    line_start=i,
+                    line_end=line_end,
+                )
+                current_table = (f"[[{'.'.join(table_parts)}]]",) if is_array_table else table_parts
+                i = line_end + 1
+                at_key_position = True
+                continue
+
+        if at_key_position and (not scope_stack or scope_stack[-1][0] == "table"):
+            key_match = _TOML_KEY_ASSIGN_RE.match(content, i)
+            if key_match:
+                raw_lhs = key_match.group(1)
+                key_parts = _parse_toml_dotted_key(raw_lhs)
+                base_path = scope_stack[-1][1] if scope_stack else current_table
+                full_path = (*base_path, *key_parts)
+                val_start = key_match.end()
+                while val_start < n and content[val_start] in " \t":
+                    val_start += 1
+                yield _TomlKeyAssignment(
+                    current_table=current_table,
+                    scope_stack=tuple(scope_stack),
+                    key_parts=key_parts,
+                    full_path=full_path,
+                    key_start=i,
+                    val_start=val_start,
+                )
+                if val_start < n and content[val_start] == "{":
+                    scope_stack.append(("table", full_path))
+                    i = val_start + 1
+                    at_key_position = True
+                    continue
+                if val_start < n and content[val_start] == "[":
+                    scope_stack.append(("array", ()))
+                    i = val_start + 1
+                    at_key_position = False
+                    continue
+                i = val_start
+                at_key_position = False
+                continue
+
+        ch = content[i]
+        if ch in "\"'":
+            i = _skip_toml_string_literal(content, i)
+            at_key_position = False
+        elif ch in "{[":
+            scope_stack.append(("array", ()))
+            i += 1
+            at_key_position = False
+        elif ch in "}]":
+            if scope_stack:
+                scope_stack.pop()
+            i += 1
+            at_key_position = False
+        elif ch == ",":
+            i += 1
+            at_key_position = bool(scope_stack and scope_stack[-1][0] == "table")
+        else:
+            i += 1
+            at_key_position = False
+
+
+def _find_toml_table_key_value_span(content: str, target_table: str, target_key: str) -> tuple[int, int] | None:
+    """Return the (start, end) character span of a string value for [target_table].target_key."""
+    for construct in _iter_toml_constructs(content):
+        if (
+            isinstance(construct, _TomlKeyAssignment)
+            and construct.full_path == (target_table, target_key)
+            and construct.val_start < len(content)
+            and content[construct.val_start] in "\"'"
+        ):
+            val_end = _skip_toml_string_literal(content, construct.val_start)
+            return construct.val_start, val_end
+    return None
+
+
+def _ensure_native_metadata_entry_id(content: str, entry_id: str) -> str:
+    """Ensure [metadata].entry_id is present in a native task.toml document."""
+    quoted_id = _toml_quote(entry_id)
+    n = len(content)
+    first_metadata_subtable_start: int | None = None
+
+    for construct in _iter_toml_constructs(content):
+        if isinstance(construct, _TomlTableHeader):
+            if not construct.is_array_table and construct.table_parts == ("metadata",):
+                insert_pos = construct.line_end + 1 if construct.line_end < n else n
+                prefix = content[:insert_pos]
+                if not prefix.endswith("\n"):
+                    prefix += "\n"
+                return f"{prefix}entry_id = {quoted_id}\n{content[insert_pos:]}"
+            if (
+                first_metadata_subtable_start is None
+                and len(construct.table_parts) >= 2
+                and construct.table_parts[0] == "metadata"
+            ):
+                first_metadata_subtable_start = construct.line_start
+        elif isinstance(construct, _TomlKeyAssignment):
+            if construct.full_path == ("metadata",) and construct.val_start < n and content[construct.val_start] == "{":
+                brace_pos = construct.val_start + 1
+                probe = brace_pos
+                while probe < n and content[probe] in " \t\r\n":
+                    probe += 1
+                if probe < n and content[probe] == "}":
+                    return f"{content[:brace_pos]} entry_id = {quoted_id} {content[brace_pos:]}"
+                return f"{content[:brace_pos]} entry_id = {quoted_id},{content[brace_pos:]}"
+            if (
+                not construct.scope_stack
+                and not construct.current_table
+                and len(construct.full_path) >= 2
+                and construct.full_path[0] == "metadata"
+            ):
+                return (
+                    f"{content[: construct.key_start]}metadata.entry_id = {quoted_id}\n{content[construct.key_start :]}"
+                )
+
+    if first_metadata_subtable_start is not None:
+        prefix = content[:first_metadata_subtable_start]
+        if prefix and not prefix.endswith("\n"):
+            prefix += "\n"
+        return f"{prefix}[metadata]\nentry_id = {quoted_id}\n\n{content[first_metadata_subtable_start:]}"
+
+    suffix = "" if content.endswith("\n") else "\n"
+    return f"{content}{suffix}\n[metadata]\nentry_id = {quoted_id}\n"
+
+
+def _append_native_task_name_suffix(
+    task_dir: Path,
+    arm_suffix: str,
+    *,
+    entry_id: str | None = None,
+) -> None:
+    """Append dual-arm suffix to [task] name in a native task's task.toml."""
+    if not arm_suffix:
+        return
+    task_toml = task_dir / "task.toml"
+    if not task_toml.exists():
+        return
+    try:
+        content = task_toml.read_text(encoding="utf-8")
+        data = tomllib.loads(content)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return
+
+    task_table = data.get("task")
+    if not isinstance(task_table, dict):
+        return
+    old_name = task_table.get("name")
+    if not isinstance(old_name, str):
+        return
+
+    new_name = f"{old_name}{arm_suffix}"
+    span = _find_toml_table_key_value_span(content, "task", "name")
+    if span is None:
+        raise ValueError(f"Cannot update [task].name in native Harbor task config: {task_toml}")
+    val_start, val_end = span
+    new_content = f"{content[:val_start]}{_toml_quote(new_name)}{content[val_end:]}"
+
+    existing_entry_id = extract_toml_metadata_entry_id(data)
+    effective_entry_id = entry_id or existing_entry_id or task_dir.name
+    if effective_entry_id and existing_entry_id is None:
+        new_content = _ensure_native_metadata_entry_id(new_content, effective_entry_id)
+
+    try:
+        updated_data = tomllib.loads(new_content)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"Updated native Harbor task config is invalid TOML: {task_toml}") from exc
+    if updated_data.get("task", {}).get("name") != new_name:
+        raise ValueError(f"Failed to update [task].name in native Harbor task config: {task_toml}")
+    if effective_entry_id and extract_toml_metadata_entry_id(updated_data) != effective_entry_id:
+        raise ValueError(f"Failed to record [metadata].entry_id in native Harbor task config: {task_toml}")
+    if new_content != content:
+        task_toml.write_text(new_content, encoding="utf-8")
 
 
 def _environment_reference_names(value: object) -> set[str]:
@@ -4919,6 +5231,7 @@ def _ensure_skill_evaluator_verifier_env(task_dir: Path, *, verifier_env: dict[s
 
 
 def _ensure_environment_env(task_dir: Path, runtime_env: dict[str, str]) -> None:
+    """Ensure staged native tasks populate [environment.env] with runtime environment variables."""
     runtime_env = {**runtime_env, **_EVALUATOR_MANAGED_RUNTIME_ENV}
 
     def update(data: dict[str, Any]) -> None:
@@ -5099,12 +5412,15 @@ def _stage_native_harbor_tasks_into(
     task_resources: dict[str, int] | None = None,
     agent_workdir: str | None = None,
     baseline_aliases_prevalidated: bool = False,
+    arm_suffix: str = "",
 ) -> list[Path]:
     """Build native Harbor tasks inside a private, caller-owned directory.
 
     The source tree is copied first and all SkillEvaluator injections happen only in the
     staged result directory.
     """
+    if not isinstance(arm_suffix, str):
+        raise TypeError("arm_suffix must be a string before staging native Harbor tasks")
     _validate_runtime_discovery_env(runtime_env)
     _validate_runtime_loader_env(runtime_env)
     evals_dir = evaluator_skill_path / "evals"
@@ -5132,6 +5448,7 @@ def _stage_native_harbor_tasks_into(
             runtime_env=runtime_env,
             verifier_env=verifier_env,
         )
+    validate_case_ids(_native_entry_id(path) for path in source_task_dirs)
     _ = task_resources
     _ = agent_workdir
 
@@ -5162,6 +5479,7 @@ def _stage_native_harbor_tasks_into(
         baseline_aliases_prevalidated = True
     for task_dir in task_dirs:
         entry_id = _native_entry_id(task_dir)
+        _append_native_task_name_suffix(task_dir, arm_suffix, entry_id=entry_id)
         native_agent_workdir = _native_task_workdir(
             task_dir,
             with_skill=with_skill,
@@ -5314,9 +5632,13 @@ def stage_native_harbor_tasks(
     agent_workdir: str | None = None,
     evaluator_skill_path: Path | None = None,
     _baseline_alias_validation: _BaselineAliasValidation | None = None,
+    arm_suffix: str = "",
 ) -> list[Path]:
     """Stage native tasks privately, then publish one exact output snapshot."""
     _reject_baseline_pre_agent_setup(with_skill=with_skill, pre_agent_setup=pre_agent_setup)
+
+    if not isinstance(arm_suffix, str):
+        raise TypeError("arm_suffix must be a string before staging native Harbor tasks")
 
     if evaluator_skill_path is None:
         with private_evaluator_skill_snapshot(skill_path, task_source="native_harbor") as private_skill_path:
@@ -5339,6 +5661,7 @@ def stage_native_harbor_tasks(
                 agent_workdir=agent_workdir,
                 evaluator_skill_path=private_skill_path,
                 _baseline_alias_validation=_baseline_alias_validation,
+                arm_suffix=arm_suffix,
             )
 
     baseline_aliases_prevalidated = False
@@ -5405,6 +5728,7 @@ def stage_native_harbor_tasks(
             task_resources=task_resources,
             agent_workdir=agent_workdir,
             baseline_aliases_prevalidated=baseline_aliases_prevalidated,
+            arm_suffix=arm_suffix,
         )
         relative_tasks = [task.relative_to(private_output) for task in private_tasks]
         if output_requires_provenance:
@@ -5463,6 +5787,7 @@ def _generate_harbor_tasks_into(
     task_resources: dict[str, int] | None = None,
     agent_workdir: str | None = None,
     baseline_aliases_prevalidated: bool = False,
+    arm_suffix: str = "",
 ) -> list[Path]:
     """Generate Harbor task directories inside a private output directory.
 
@@ -5495,6 +5820,8 @@ def _generate_harbor_tasks_into(
     Returns:
         List of generated task directory paths.
     """
+    if not isinstance(arm_suffix, str):
+        raise TypeError("arm_suffix must be a string before generating Harbor tasks")
     _validate_runtime_discovery_env(runtime_env)
     _validate_runtime_loader_env(runtime_env)
     agent_workdir = _validated_agent_workdir(agent_workdir)
@@ -5559,6 +5886,7 @@ def _generate_harbor_tasks_into(
             pre_agent_setup=pre_agent_setup,
             task_resources=task_resources,
             agent_workdir=agent_workdir,
+            arm_suffix=arm_suffix,
         )
         _copy_verifier(task_dir)
         custom_grader = _copy_custom_grader(task_dir, skill_path, grading_mode, evals_dir=evals_dir)
@@ -5994,9 +6322,13 @@ def generate_harbor_tasks(
     agent_workdir: str | None = None,
     evaluator_skill_path: Path | None = None,
     _baseline_alias_validation: _BaselineAliasValidation | None = None,
+    arm_suffix: str = "",
 ) -> list[Path]:
     """Generate tasks from one private evals snapshot, then publish exactly."""
     _reject_baseline_pre_agent_setup(with_skill=with_skill, pre_agent_setup=pre_agent_setup)
+
+    if not isinstance(arm_suffix, str):
+        raise TypeError("arm_suffix must be a string before generating Harbor tasks")
 
     if evaluator_skill_path is None:
         if find_evals_file(skill_path) is None:
@@ -6021,6 +6353,7 @@ def generate_harbor_tasks(
                 agent_workdir=agent_workdir,
                 evaluator_skill_path=private_skill_path,
                 _baseline_alias_validation=_baseline_alias_validation,
+                arm_suffix=arm_suffix,
             )
     if find_evals_file(evaluator_skill_path) is None:
         raise FileNotFoundError(f"No evals dataset found in {evaluator_skill_path / 'evals'}")
@@ -6089,6 +6422,7 @@ def generate_harbor_tasks(
             task_resources=task_resources,
             agent_workdir=agent_workdir,
             baseline_aliases_prevalidated=baseline_aliases_prevalidated,
+            arm_suffix=arm_suffix,
         )
         relative_tasks = [task.relative_to(private_output) for task in private_tasks]
         if output_requires_provenance:

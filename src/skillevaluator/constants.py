@@ -6,7 +6,7 @@
 Based on SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md, HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specifications.
 """
 
-from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI
+from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, EMBEDDING_DEFAULT_NVIDIA
 
 # =============================================================================
 # SKILLS CONSTANTS
@@ -236,7 +236,7 @@ SIMILARITY_LOW_THRESHOLD = 0.50  # LOOSELY_RELATED
 SIMILARITY_DEFAULT_THRESHOLD = 0.75
 
 # Embedding model configuration
-SIMILARITY_DEFAULT_MODEL = "nvidia/nv-embed-v1"
+SIMILARITY_DEFAULT_MODEL = EMBEDDING_DEFAULT_NVIDIA
 SIMILARITY_CHUNK_SIZE = 512  # tokens per chunk for full-body mode
 SIMILARITY_CHUNK_OVERLAP = 64  # token overlap between chunks
 
@@ -267,6 +267,14 @@ CONTENT_DEDUP_MAX_FILE_BYTES = 1 * 1024 * 1024
 CONTENT_DEDUP_MAX_TOTAL_BYTES = 8 * 1024 * 1024
 CONTENT_DEDUP_MAX_CHUNKS = 512
 CONTENT_DEDUP_MAX_LLM_CLUSTERS = 50
+
+# Collection-wide similarity budgets are independent of a single skill's file limit.
+SIMILARITY_DEFAULT_MAX_ENTRIES = 1_024
+SIMILARITY_MAX_ENTRIES = 5_000
+# Allow directories, manifests, and supporting paths at the maximum entry count,
+# without raising the independent per-skill content-deduplication path ceiling.
+SIMILARITY_MAX_DISCOVERED_PATHS = 4 * SIMILARITY_MAX_ENTRIES
+SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS = 128_000_000
 
 CONTENT_DEDUP_LLM_DEFAULT_MODEL = "azure/anthropic/claude-opus-4-8"
 CONTENT_DEDUP_LLM_TEMPERATURE = 0.1

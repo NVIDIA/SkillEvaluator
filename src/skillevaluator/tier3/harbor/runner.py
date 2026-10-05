@@ -38,11 +38,15 @@ from uuid import uuid4
 from skillevaluator import __version__
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import (
+    CHAT_DEFAULT_ANTHROPIC,
+    CHAT_DEFAULT_NVIDIA,
+    GATEWAY_AGENT_DEFAULT_MODELS,
     ProviderConfig,
     ProviderConfigurationError,
     _normalize_anthropic_base_url,
     resolve_llm_provider,
 )
+from skillevaluator.source_identity import normalized_evaluated_source
 from skillevaluator.tier3.case_ids import validate_case_ids
 from skillevaluator.tier3.evals_config import (
     MAX_HARBOR_TIMEOUT_MULTIPLIER,
@@ -54,8 +58,10 @@ from skillevaluator.tier3.evals_config import (
 from skillevaluator.tier3.harbor.adapter import (
     _RUNTIME_PROCESS_CONTROL_ENV_NAMES,
     _RUNTIME_PROCESS_CONTROL_ENV_PREFIXES,
+    _VERIFIER_BUDGET_ENV_VARS,
     _VERIFIER_JUDGE_CONTROL_ENV_VARS,
     _VERIFIER_JUDGE_MODEL_ENV_VARS,
+    _VERIFIER_RETRY_ENV_VARS,
     _native_entry_id,
     _prevalidate_baseline_skill_candidates,
     build_eval_base_image,
@@ -75,6 +81,7 @@ from skillevaluator.tier3.harbor.collector import (
 )
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_definition
 from skillevaluator.tier3.harbor.progress import (
+    MIN_EXACT_SECRET_CHARS,
     NullProgressReporter,
     ProgressEvent,
     ProgressReporter,
@@ -573,7 +580,11 @@ def _persist_dataset_truth(run_dir: Path, *, fallback_task_ids: list[str]) -> di
 
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
-_NVIDIA_BUILD_BRIDGED_AGENT_DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b"
+_NVIDIA_BUILD_AGENT_DEFAULT_MODEL = CHAT_DEFAULT_NVIDIA
+_GATEWAY_CODEX_IMPORT_PATH = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayCodex"
+# The OpenAI-compatible gateway Codex wrapper only routes the stock agent to the
+# operator's gateway, so it is the one custom agent allowed on Harbor-native backends.
+_NATIVE_BACKEND_AGENT_IMPORT_PATHS = frozenset({_GATEWAY_CODEX_IMPORT_PATH})
 _HARBOR_RUN_OUTPUT_MAX_BYTES = MAX_COMMAND_OUTPUT_BYTES
 _HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS = 16 * 1024
 _HARBOR_RUN_OUTPUT_READ_BYTES = 64 * 1024
@@ -1091,7 +1102,11 @@ def build_harbor_run_command(
     if env_mode not in HARBOR_ENV_MODES:
         raise ValueError(f"env_mode must be one of: {', '.join(sorted(HARBOR_ENV_MODES))}")
     timeout_multiplier = _validated_timeout_multiplier(timeout_multiplier)
-    if agent_import_path and env_mode not in {"docker", ENV_MODE_LOCAL}:
+    if (
+        agent_import_path
+        and env_mode not in {"docker", ENV_MODE_LOCAL}
+        and agent_import_path not in _NATIVE_BACKEND_AGENT_IMPORT_PATHS
+    ):
         raise ValueError("agent_import_path is supported only with --env docker or local")
     validated_environment_kwargs = validate_environment_kwargs(
         dict(environment_kwargs or {}),
@@ -1154,7 +1169,7 @@ def build_harbor_run_command(
             command.extend(["--agent", agent])
         command.extend(["--env", SECURE_DOCKER_ENV_IMPORT_PATH])
     else:
-        command.extend(["--agent", agent, "--env", env_mode])
+        command.extend(["--agent", agent_import_path or agent, "--env", env_mode])
     for name, value in sorted(validated_environment_kwargs.items()):
         command.extend(["--ek", encode_environment_kwarg(name, value)])
     if jobs_dir is not None:
@@ -1187,7 +1202,11 @@ def _provider_environment(config: ProviderConfig) -> dict[str, str]:
         "SKILL_EVAL_LLM_MODEL": config.model,
     }
     environment.update(
-        {name: value for name in _VERIFIER_JUDGE_CONTROL_ENV_VARS if (value := os.environ.get(name, "").strip())}
+        {
+            name: value
+            for name in (_VERIFIER_JUDGE_CONTROL_ENV_VARS | _VERIFIER_BUDGET_ENV_VARS | _VERIFIER_RETRY_ENV_VARS)
+            if (value := os.environ.get(name, "").strip())
+        }
     )
     if config.provider == "anthropic":
         environment["ANTHROPIC_API_KEY"] = config.api_key or ""
@@ -1281,7 +1300,7 @@ def _validate_agent_provider_credentials(
                     "AWS_BEARER_TOKEN_BEDROCK for the agent environment."
                 ]
 
-        if provider.provider in {"openai", "openai-compatible"} and "claude-code" in agents:
+        if provider.provider == "openai" and "claude-code" in agents:
             if not agent_runtime_env.get("ANTHROPIC_API_KEY", "").strip():
                 return [
                     "claude-code with the OpenAI evaluator provider requires an independent ANTHROPIC_API_KEY "
@@ -1827,6 +1846,24 @@ def _independent_anthropic_agent_credentials() -> dict[str, str]:
     return credentials
 
 
+def _gateway_anthropic_agent_credentials(provider: ProviderConfig) -> dict[str, str]:
+    """Use a shared gateway unless the operator selected a separate Claude route.
+
+    A standalone Anthropic key keeps its native endpoint, so a native key is
+    never silently sent to the shared gateway. An explicit base URL without a
+    separate key selects another API root on the operator's gateway.
+    """
+    credentials = _independent_anthropic_agent_credentials()
+    if credentials.get("ANTHROPIC_API_KEY", "").strip():
+        return credentials
+    base_url = credentials.get("ANTHROPIC_BASE_URL")
+    if not base_url:
+        base_url = _normalize_anthropic_base_url(provider.base_url or "", variable="SKILL_EVAL_LLM_BASE_URL")
+    if not base_url:
+        raise ProviderConfigurationError("SKILL_EVAL_LLM_BASE_URL is required for the Claude gateway route.")
+    return {"ANTHROPIC_API_KEY": provider.api_key or "", "ANTHROPIC_BASE_URL": base_url}
+
+
 def _judge_model_config(
     provider: ProviderConfig,
     provider_env: Mapping[str, str],
@@ -1925,7 +1962,9 @@ def _agent_credentials(
             }
         return {}
 
-    if provider.provider in {"openai", "openai-compatible"} and agent == "claude-code":
+    if provider.provider == "openai-compatible" and agent == "claude-code":
+        return _gateway_anthropic_agent_credentials(provider)
+    if provider.provider == "openai" and agent == "claude-code":
         return _independent_anthropic_agent_credentials()
     if provider.provider == "anthropic" and agent == "codex":
         return {
@@ -2222,14 +2261,23 @@ def _model_for_agent(
         configured = config_agents.get(agent, {}) if isinstance(config_agents, dict) else {}
         if isinstance(configured, dict) and configured.get("model"):
             selected, source = str(configured["model"]), "evals/config.yml"
+        elif provider.provider == "openai-compatible" and agent in GATEWAY_AGENT_DEFAULT_MODELS:
+            selected, source = GATEWAY_AGENT_DEFAULT_MODELS[agent], "openai-compatible agent default"
+            if agent == "claude-code":
+                credentials = _independent_anthropic_agent_credentials()
+                if credentials.get("ANTHROPIC_API_KEY", "").strip() and not credentials.get("ANTHROPIC_BASE_URL"):
+                    selected, source = CHAT_DEFAULT_ANTHROPIC, "native Anthropic agent default"
         else:
             selected, source = provider.model, "public provider default"
-    if agent in {"codex", "claude-code"} and provider.provider == "nv_build" and source == "public provider default":
-        # Nano is the cost-conscious default for Build itself, but in real
-        # bridged tool loops it failed to execute the target skill. Super is
-        # the smallest verified default for these compatibility bridges;
-        # explicit overrides remain exact.
-        selected = _NVIDIA_BUILD_BRIDGED_AGENT_DEFAULT_MODEL
+    if (
+        provider.provider == "nv_build"
+        and source == "public provider default"
+        and (agent in {"codex", "claude-code"} or provider.model == CHAT_DEFAULT_NVIDIA)
+    ):
+        # Share the NVIDIA chat default across agent execution and judging.
+        # Provider-model, --model, --agent-model, and evals/config.yml overrides
+        # stay exact for native OpenCode; bridge defaults remain compatibility-pinned.
+        selected = _NVIDIA_BUILD_AGENT_DEFAULT_MODEL
     if agent == "opencode":
         namespace = {
             "anthropic": "anthropic",
@@ -2237,9 +2285,18 @@ def _model_for_agent(
             "openai": "openai",
             "openai-compatible": "openai",
         }.get(provider.provider)
-        if namespace and source == "public provider default":
+        if namespace and source in {"public provider default", "openai-compatible agent default"}:
             selected = f"{namespace}/{selected}"
     return selected, source
+
+
+def _agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> str | None:
+    """Select only the provider-specific wrappers required for this environment."""
+    if provider.provider == "openai-compatible" and agent == "codex" and env_mode != ENV_MODE_LOCAL:
+        return _GATEWAY_CODEX_IMPORT_PATH
+    if provider.provider == "openai-compatible" and agent == "opencode" and env_mode == "docker":
+        return "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayOpenCode"
+    return _nvidia_build_agent_import_path(provider, agent, env_mode)
 
 
 def _nvidia_build_agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> str | None:
@@ -2581,7 +2638,7 @@ def _run_harbor(
     # Preserve the historical exact-value protection for every selected child
     # value, and additionally protect detached credential URI/proxy userinfo
     # (including percent-decoded and schemeless proxy components).
-    secret_values = set(run_env.values())
+    secret_values = {value for value in run_env.values() if len(value) >= MIN_EXACT_SECRET_CHARS}
     secret_values.update(secret_values_from_environment(run_env))
     command = build_harbor_run_command(
         dataset_path=dataset,
@@ -3365,6 +3422,7 @@ def _run_harbor_eval_impl(
     override_cpus: int | None = None,
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
+    evaluated_source: dict[str, str] | None = None,
     progress_reporter: ProgressReporter | None = None,
     _evaluator_skill_path: Path | None = None,
     _monotonic_start: float | None = None,
@@ -3425,7 +3483,7 @@ def _run_harbor_eval_impl(
     agent_runtime_preflight = (
         agent_runtime_preflight
         if agent_runtime_preflight is not None
-        else harbor_config.get("agent_runtime_preflight", True)
+        else harbor_config.get("agent_runtime_preflight", False)
     )
     grading_mode = grading_mode or grading_config.get("mode", "default")
     workspace_mode = skill_workspace_mode or workspace_config.get("mode", "isolated")
@@ -3589,10 +3647,10 @@ def _run_harbor_eval_impl(
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
-    nvidia_build_agent_import_paths = {
+    agent_import_paths = {
         agent: import_path
         for agent in agents
-        if (import_path := _nvidia_build_agent_import_path(provider, agent, env_mode)) is not None
+        if (import_path := _agent_import_path(provider, agent, env_mode)) is not None
     }
     runtime_secret_values = set().union(
         *(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values())
@@ -3773,6 +3831,9 @@ def _run_harbor_eval_impl(
         "task_source": task_source,
         "grading": {"mode": grading_mode},
         "agents": model_resolution,
+        # Persisted so a card rendered later from this run directory records the
+        # source tree that was evaluated, not the evaluator build that ran it.
+        "evaluated_source": normalized_evaluated_source(evaluated_source),
     }
     verifier_env = {**configured_runtime_env, **provider_env}
     staged_verifier_env = {
@@ -3925,6 +3986,9 @@ def _run_harbor_eval_impl(
     )
     staging_failure_stage = "with-skill-tasks"
     try:
+        is_dual_arm = not skip_baseline
+        with_arm_suffix = "-with-skill" if is_dual_arm else ""
+        without_arm_suffix = "-without-skill" if is_dual_arm else ""
         for agent in agents:
             with_dir = tasks_dir / agent / "with"
             without_dir = None if skip_baseline else tasks_dir / agent / "without"
@@ -3946,6 +4010,7 @@ def _run_harbor_eval_impl(
                 task_resources=resource_config,
                 agent_workdir=harbor_config.get("agent_workdir"),
                 evaluator_skill_path=evaluator_skill_path,
+                arm_suffix=with_arm_suffix,
             )
             task_selectors = validate_case_ids(task.name for task in task_paths)
             logical_case_ids = validate_case_ids(_native_entry_id(task) for task in task_paths)
@@ -3993,6 +4058,7 @@ def _run_harbor_eval_impl(
                     agent_workdir=harbor_config.get("agent_workdir"),
                     evaluator_skill_path=evaluator_skill_path,
                     _baseline_alias_validation=baseline_alias_validation,
+                    arm_suffix=without_arm_suffix,
                 )
                 baseline_task_selectors = validate_case_ids(task.name for task in baseline_task_paths)
                 baseline_logical_case_ids = validate_case_ids(_native_entry_id(task) for task in baseline_task_paths)
@@ -4081,7 +4147,7 @@ def _run_harbor_eval_impl(
                 override_cpus=override_cpus,
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
-                agent_import_path=nvidia_build_agent_import_paths.get(agent),
+                agent_import_path=agent_import_paths.get(agent),
                 environment_kwargs=effective_environment_kwargs,
             )
             if not preflight.ok:
@@ -4100,7 +4166,13 @@ def _run_harbor_eval_impl(
             )
         )
     else:
-        reporter.emit(ProgressEvent(stage="agent-runtime-preflight", state="skipped", detail="disabled by operator"))
+        reporter.emit(
+            ProgressEvent(
+                stage="agent-runtime-preflight",
+                state="skipped",
+                detail=("disabled by default; enable with --agent-runtime-preflight or harbor.agent_runtime_preflight"),
+            )
+        )
     errors: list[str] = []
     started_agents: SimpleQueue[str] = SimpleQueue()
 
@@ -4121,7 +4193,7 @@ def _run_harbor_eval_impl(
             override_cpus=override_cpus,
             override_memory_mb=override_memory_mb,
             override_storage_mb=override_storage_mb,
-            agent_import_path=nvidia_build_agent_import_paths.get(agent),
+            agent_import_path=agent_import_paths.get(agent),
             expected_trials=expected_trials,
             stop_on_pass=bool(stop_on_pass),
             pass_threshold=float(pass_threshold),

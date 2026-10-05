@@ -20,6 +20,7 @@ import shutil
 import stat
 import sys
 import unicodedata
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from fractions import Fraction
@@ -53,6 +54,7 @@ from skillevaluator.tier3.harbor.metrics import (
     score_value,
 )
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
+from skillevaluator.tier3.toml_utils import extract_toml_metadata_entry_id
 from skillevaluator.utils.redaction import contains_credential_value, redact_sensitive_data, redact_sensitive_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, stat_is_link_or_reparse
 
@@ -95,6 +97,14 @@ UNSAFE_CUSTOM_METRIC_UNION_REASON = (
 )
 MISSING_MULTI_STEP_REWARD_REASON = (
     "Authoritative multi-step verifier reward is missing; it was not reconstructed or scored"
+)
+MAX_STAGED_TASK_TOMLS = 512
+# Identity controls the collector derives itself; grader-authored rewards cannot set them.
+_COLLECTOR_IDENTITY_KEYS = (
+    "_arm_suffix",
+    "_authoritative_entry_id",
+    "_result_entry_id",
+    "_trusted_case_identity_unresolved",
 )
 TRIAL_DIAGNOSTIC_ARTIFACTS = ("result.json", "config.json", "exception.txt", "trial.log")
 AGENT_LOG_ARTIFACTS = (
@@ -3288,14 +3298,141 @@ def _merge_constituent_default_reward_failure(
     )
 
 
+def _staged_task_entry_id_map(
+    output_dir: Path | None,
+    agent: str = "",
+    variant: str = "",
+    *,
+    arm_suffix: str = "",
+    max_tasks: int = MAX_STAGED_TASK_TOMLS,
+) -> dict[str, str]:
+    """Build an unambiguous mapping from staged task directory or task.name to [metadata].entry_id."""
+    if output_dir is None:
+        return {}
+    tasks_root = output_dir / "_harbor-tasks"
+    if not tasks_root.is_dir() or tasks_root.is_symlink():
+        return {}
+
+    search_roots: list[Path] = []
+    if agent and variant:
+        candidate = tasks_root / agent / variant
+        if candidate.is_dir() and not candidate.is_symlink():
+            search_roots.append(candidate)
+    if not search_roots:
+        search_roots.append(tasks_root)
+
+    mapping: dict[str, str] = {}
+    ambiguous: set[str] = set()
+
+    def _bind(key: str, entry_id: str) -> None:
+        if not key or key in ambiguous:
+            return
+        existing = mapping.get(key)
+        if existing is not None and existing != entry_id:
+            del mapping[key]
+            ambiguous.add(key)
+        else:
+            mapping[key] = entry_id
+
+    for root in search_roots:
+        try:
+            task_tomls = sorted(root.rglob("task.toml"))
+        except OSError:
+            continue
+        for task_toml in task_tomls[:max_tasks]:
+            if task_toml.is_symlink() or not task_toml.is_file():
+                continue
+            raw_toml = _read_bounded_text(task_toml)
+            if raw_toml is None:
+                continue
+            try:
+                import tomllib
+
+                parsed = tomllib.loads(raw_toml)
+            except Exception:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            raw_entry_id = extract_toml_metadata_entry_id(parsed)
+            entry_id = str(raw_entry_id).strip() if raw_entry_id is not None else ""
+            if not entry_id:
+                entry_id = task_toml.parent.name
+            _bind(task_toml.parent.name, entry_id)
+            task_table = parsed.get("task")
+            if isinstance(task_table, dict) and isinstance(task_table.get("name"), str):
+                task_name = task_table["name"].strip()
+                if task_name:
+                    _bind(task_name, entry_id)
+                    short_name = task_name.rsplit("/", 1)[-1]
+                    _bind(short_name, entry_id)
+                    if arm_suffix and short_name.endswith(arm_suffix):
+                        _bind(short_name.removesuffix(arm_suffix), entry_id)
+    return mapping
+
+
 def _extract_rewards(
     job_dir: Path,
     case_id_by_task_selector: dict[str, str] | None = None,
+    *,
+    arm_suffix: str = "",
+    task_entry_id_map: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract reward.json from all trials in a job directory."""
     rewards: list[dict[str, Any]] = []
     scored_trial_roots: set[Path] = set()
     authoritative_trial_roots: set[Path] = set()
+
+    def _resolve_trial_name_entry_id(trial_name_val: str) -> str:
+        if not task_entry_id_map or not trial_name_val:
+            return ""
+        raw_prefix = trial_name_val.split("__", 1)[0]
+        candidates = [raw_prefix, _strip_attempt_suffix(raw_prefix)]
+        if arm_suffix:
+            for base in list(candidates):
+                if base.endswith(arm_suffix):
+                    stripped = base.removesuffix(arm_suffix)
+                    candidates.extend([stripped, _strip_attempt_suffix(stripped)])
+        for candidate in candidates:
+            if candidate in task_entry_id_map:
+                return task_entry_id_map[candidate]
+        return ""
+
+    def _populate_reward_entry_id(
+        reward_data: dict[str, Any],
+        result_payload: dict[str, Any] | None,
+        trial_name_val: str,
+    ) -> None:
+        if reward_data.get("entry_id"):
+            return
+        entry_id = ""
+        is_authoritative = False
+        if isinstance(result_payload, dict):
+            entry_id, is_authoritative = _resolve_harbor_result_entry_id(
+                result_payload,
+                arm_suffix=arm_suffix,
+                task_entry_id_map=task_entry_id_map,
+            )
+        if not entry_id:
+            entry_id = _resolve_trial_name_entry_id(trial_name_val)
+            if entry_id:
+                is_authoritative = True
+        if entry_id:
+            reward_data["entry_id"] = entry_id
+            if is_authoritative:
+                reward_data["_authoritative_entry_id"] = True
+            else:
+                reward_data["_result_entry_id"] = entry_id
+
+    def _assign_case_identity(data: dict[str, Any], result: dict[str, Any], trial_name: str) -> None:
+        for key in _COLLECTOR_IDENTITY_KEYS:
+            data.pop(key, None)
+        if case_id_by_task_selector is None:
+            # Direct callers and older artifacts have no runner-owned selector map;
+            # resolve them from Harbor's persisted task path or the staged tasks.
+            if arm_suffix:
+                data["_arm_suffix"] = arm_suffix
+            _populate_reward_entry_id(data, result or None, trial_name)
+        _apply_harbor_result_case_identity(data, result, case_id_by_task_selector)
 
     # Native multi-step Harbor tasks can persist an authoritative aggregate at
     # the trial root in addition to one reward file per step. Materialize that
@@ -3319,7 +3456,7 @@ def _extract_rewards(
         data["_trial_name"] = trial_name
         data["_trial_root_name"] = trial_dir.name
         data["_started_at"] = result.get("started_at")
-        _apply_harbor_result_case_identity(data, result, case_id_by_task_selector)
+        _assign_case_identity(data, result, trial_name)
         traj_file = _reward_trajectory_path(trial_dir, None)
         if traj_file.exists():
             data["_has_trajectory"] = True
@@ -3359,7 +3496,7 @@ def _extract_rewards(
                         result = loaded_result
                         _merge_constituent_default_reward_failure(data, result, trial_dir)
                         data["_started_at"] = result.get("started_at")
-                _apply_harbor_result_case_identity(data, result, case_id_by_task_selector)
+                _assign_case_identity(data, result, trial_name)
                 traj_file = _reward_trajectory_path(trial_dir, step_name)
                 if traj_file.exists():
                     data["_has_trajectory"] = True
@@ -3406,7 +3543,7 @@ def _extract_rewards(
                 data["_trial_root_name"] = trial_dir.name
                 data["_step_name"] = step_name
                 data["_started_at"] = result.get("started_at")
-                _apply_harbor_result_case_identity(data, result, case_id_by_task_selector)
+                _assign_case_identity(data, result, trial_name)
                 traj_file = _reward_trajectory_path(trial_dir, step_name)
                 if traj_file.exists():
                     data["_has_trajectory"] = True
@@ -3421,7 +3558,7 @@ def _extract_rewards(
         data["_trial_name"] = trial_name
         data["_trial_root_name"] = trial_dir.name
         data["_started_at"] = result.get("started_at")
-        _apply_harbor_result_case_identity(data, result, case_id_by_task_selector)
+        _assign_case_identity(data, result, trial_name)
         traj_file = _reward_trajectory_path(trial_dir, None)
         if traj_file.exists():
             data["_has_trajectory"] = True
@@ -3730,30 +3867,111 @@ def _task_selector_from_harbor_result(result: dict[str, Any]) -> str:
     return Path(task_paths[0]).name
 
 
+def _result_task_path_entry_id(task_path_value: Any) -> tuple[str, str]:
+    """Return (metadata_entry_id, dir_name) from a Harbor task path when available."""
+    if not isinstance(task_path_value, str) or not task_path_value.strip():
+        return "", ""
+    task_dir = Path(task_path_value.strip())
+    task_toml = task_dir / "task.toml"
+    if not task_toml.is_symlink() and task_toml.is_file():
+        raw_toml = _read_bounded_text(task_toml)
+        if raw_toml is not None:
+            try:
+                import tomllib
+
+                parsed = tomllib.loads(raw_toml)
+                raw_entry_id = extract_toml_metadata_entry_id(parsed)
+                if raw_entry_id is not None:
+                    entry_id = str(raw_entry_id).strip()
+                    if entry_id:
+                        return entry_id, task_dir.name
+            except Exception:
+                pass
+    return "", task_dir.name
+
+
+def _resolve_harbor_result_entry_id(
+    result: dict[str, Any],
+    *,
+    arm_suffix: str = "",
+    task_entry_id_map: Mapping[str, str] | None = None,
+) -> tuple[str, bool]:
+    """Resolve (entry_id, is_authoritative) from a Harbor result.json payload."""
+    fallback_dir_name = ""
+    task_id = result.get("task_id")
+    if isinstance(task_id, dict):
+        meta_id, dir_name = _result_task_path_entry_id(task_id.get("path"))
+        if meta_id:
+            return meta_id, True
+        fallback_dir_name = dir_name or fallback_dir_name
+
+    config = result.get("config")
+    if isinstance(config, dict):
+        task = config.get("task")
+        if isinstance(task, dict):
+            meta_id, dir_name = _result_task_path_entry_id(task.get("path"))
+            if meta_id:
+                return meta_id, True
+            fallback_dir_name = dir_name or fallback_dir_name
+
+    if fallback_dir_name and task_entry_id_map and fallback_dir_name in task_entry_id_map:
+        return task_entry_id_map[fallback_dir_name], True
+    # The task directory is canonical; repository-prefixed task names are only a
+    # fallback when Harbor omits the task path.
+    if fallback_dir_name:
+        return fallback_dir_name, False
+
+    task_name = result.get("task_name")
+    if isinstance(task_name, str) and task_name.strip():
+        raw_name = task_name.strip()
+        short_raw = raw_name.rsplit("/", 1)[-1]
+        attempt_stripped_raw = _strip_attempt_suffix(raw_name)
+        attempt_stripped_short = _strip_attempt_suffix(short_raw)
+
+        if task_entry_id_map:
+            lookup_keys = [raw_name, short_raw, attempt_stripped_raw, attempt_stripped_short]
+            if arm_suffix:
+                for base in (short_raw, attempt_stripped_short):
+                    if base.endswith(arm_suffix):
+                        without_arm = base.removesuffix(arm_suffix)
+                        lookup_keys.extend([without_arm, _strip_attempt_suffix(without_arm)])
+            for key in lookup_keys:
+                if key in task_entry_id_map:
+                    return task_entry_id_map[key], True
+
+        if arm_suffix:
+            if short_raw.endswith(arm_suffix):
+                return short_raw.removesuffix(arm_suffix), False
+            if attempt_stripped_short.endswith(arm_suffix):
+                return attempt_stripped_short.removesuffix(arm_suffix), False
+        return short_raw, False
+
+    return "", False
+
+
 def _entry_id_from_harbor_result(
     result: dict[str, Any],
     case_id_by_task_selector: dict[str, str] | None = None,
+    *,
+    arm_suffix: str = "",
+    task_entry_id_map: Mapping[str, str] | None = None,
 ) -> str:
-    if case_id_by_task_selector is None:
-        # Preserve the legacy collector contract for direct callers and older
-        # artifacts: Harbor's task_name is the logical/display identity they
-        # supplied. New runner paths pass an explicit trusted selector map and
-        # never use this authored field as logical truth.
-        task_name = result.get("task_name")
-        if isinstance(task_name, str) and task_name.strip():
-            return task_name.strip().rsplit("/", 1)[-1]
-
-    selector = _task_selector_from_harbor_result(result)
-    if selector:
-        return case_id_by_task_selector.get(selector, "") if case_id_by_task_selector is not None else selector
-
-    # A trusted mapping deliberately keeps authored ``[task].name`` separate
-    # from logical identity. Harbor 0.22 normally persists ``task_id.path``;
-    # if it is absent, fail coverage instead of guessing from a display name.
+    """Resolve a trial's case ID from Harbor's persisted result payload."""
     if case_id_by_task_selector is not None:
-        return ""
-
-    return ""
+        # A trusted mapping deliberately keeps authored ``[task].name`` separate
+        # from logical identity. Harbor normally persists ``task_id.path``; if it
+        # is absent or inconsistent, fail coverage instead of guessing from a
+        # display name.
+        selector = _task_selector_from_harbor_result(result)
+        return case_id_by_task_selector.get(selector, "") if selector else ""
+    entry_id, is_authoritative = _resolve_harbor_result_entry_id(
+        result,
+        arm_suffix=arm_suffix,
+        task_entry_id_map=task_entry_id_map,
+    )
+    if is_authoritative or not entry_id:
+        return entry_id
+    return _strip_attempt_suffix(entry_id)
 
 
 def _positive_attempt_ordinal(value: object) -> int | None:
@@ -3821,6 +4039,7 @@ def _apply_harbor_result_case_identity(
     if case_id_by_task_selector is not None:
         if entry_id:
             data["entry_id"] = entry_id
+            data["_authoritative_entry_id"] = True
             data.pop("_trusted_case_identity_unresolved", None)
         else:
             # A grader-authored identity is not authoritative. If Harbor's
@@ -4060,28 +4279,103 @@ def _reward_identity_is_publishable(reward: dict[str, Any]) -> bool:
     return _identity_text_is_publishable(trial_name.split("__", 1)[0])
 
 
-def _canonical_case_id(value: str, expected_case_ids: set[str] | None = None) -> str:
+def _strip_arm_suffix(value: str) -> str:
+    """Remove SkillEvaluator dual-arm suffixes (-with-skill, -without-skill) from an identifier."""
+    return re.sub(r"-(?:with|without)-skill$", "", value)
+
+
+def _strip_arm_and_attempt_suffixes(value: str) -> str:
+    """Remove at most one dual-arm suffix and one attempt suffix regardless of ordering."""
+    attempt_stripped = _strip_attempt_suffix(value)
+    if attempt_stripped != value:
+        return _strip_arm_suffix(attempt_stripped)
+    return _strip_attempt_suffix(_strip_arm_suffix(value))
+
+
+def _canonical_case_id(
+    value: str,
+    expected_case_ids: set[str] | None = None,
+    *,
+    strip_arm: bool = True,
+) -> str:
+    """Normalize a task, trial, or entry identifier to its canonical case ID."""
     if not _identity_text_is_publishable(value):
         return ""
     if expected_case_ids and value in expected_case_ids:
         return value
-    stripped = _strip_attempt_suffix(value)
-    if expected_case_ids and stripped in expected_case_ids:
-        return stripped
-    generated_prefix_stripped = stripped.removeprefix("skillevaluator-")
-    if expected_case_ids and generated_prefix_stripped in expected_case_ids:
-        return generated_prefix_stripped
-    return stripped
+    name_part = value.rpartition("/")[2] or value
+
+    if expected_case_ids:
+        raw_candidates = [
+            name_part,
+            _strip_attempt_suffix(name_part),
+        ]
+        if strip_arm:
+            raw_candidates.extend(
+                [
+                    _strip_arm_suffix(name_part),
+                    _strip_arm_and_attempt_suffixes(name_part),
+                ]
+            )
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for candidate in raw_candidates + [c.removeprefix("skillevaluator-") for c in raw_candidates]:
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+
+        for candidate in candidates:
+            if candidate in expected_case_ids:
+                return candidate
+
+    return _strip_attempt_suffix(name_part)
+
+
+def _normalize_expected_case_id_set(
+    expected_case_ids: Iterable[str] | None,
+) -> set[str] | None:
+    """Normalize optional expected case IDs into a stripped string set."""
+    if expected_case_ids is None:
+        return None
+    return {str(case_id).strip() for case_id in expected_case_ids if str(case_id).strip()}
 
 
 def _entry_id(reward: dict[str, Any], expected_case_ids: set[str] | None = None) -> str:
+    """Resolve the canonical case ID for a collected reward dictionary."""
     if reward.get("_trusted_case_identity_unresolved") is True:
         return "unknown"
-    if isinstance(reward.get("entry_id"), str) and reward["entry_id"]:
-        return _canonical_case_id(reward["entry_id"], expected_case_ids)
-    trial_name = reward.get("_trial_name")
+    entry_id = reward.get("entry_id")
+    if isinstance(entry_id, str) and entry_id:
+        raw_entry_id = entry_id.strip()
+        if reward.get("_authoritative_entry_id"):
+            return raw_entry_id
+        if not reward.get("_result_entry_id"):
+            if expected_case_ids:
+                if raw_entry_id in expected_case_ids:
+                    return raw_entry_id
+                stripped_attempt = _strip_attempt_suffix(raw_entry_id)
+                if stripped_attempt in expected_case_ids:
+                    return stripped_attempt
+            else:
+                return _strip_attempt_suffix(raw_entry_id)
+        return _canonical_case_id(
+            raw_entry_id,
+            expected_case_ids,
+            strip_arm=not bool(reward.get("_arm_suffix")),
+        )
+    trial_name = str(reward.get("_trial_name") or "")
     if trial_name:
-        return _canonical_case_id(trial_name.split("__", 1)[0], expected_case_ids)
+        trial_prefix = trial_name.split("__", 1)[0]
+        arm_suffix = str(reward.get("_arm_suffix") or "")
+        if arm_suffix:
+            attempt_stripped = _strip_attempt_suffix(trial_prefix)
+            if attempt_stripped.endswith(arm_suffix):
+                trial_prefix = attempt_stripped.removesuffix(arm_suffix)
+        return _canonical_case_id(
+            trial_prefix,
+            expected_case_ids,
+            strip_arm=not bool(arm_suffix),
+        )
     return "unknown"
 
 
@@ -4151,6 +4445,9 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
         }
         if first.get("_trusted_task_selector") is not None:
             logical_reward["_trusted_task_selector"] = first["_trusted_task_selector"]
+        for key in _COLLECTOR_IDENTITY_KEYS:
+            if key in first:
+                logical_reward[key] = first[key]
         if (attempt_ordinal := _attempt_ordinal(first)) is not None:
             logical_reward["_attempt_ordinal"] = attempt_ordinal
         if metric_set:
@@ -4815,11 +5112,13 @@ def _annotate_security_attribution(
     without_rewards: list[dict[str, Any]],
     *,
     baseline_run: bool = True,
+    expected_case_ids: list[str] | set[str] | None = None,
 ) -> dict[str, Any]:
     """Annotate with-skill security findings with baseline-aware attribution."""
+    expected_id_set = _normalize_expected_case_id_set(expected_case_ids)
     baseline_by_case: dict[str, list[dict[str, Any]]] = {}
     for reward in without_rewards:
-        baseline_by_case.setdefault(_entry_id(reward), []).extend(_security_score_findings(reward))
+        baseline_by_case.setdefault(_entry_id(reward, expected_id_set), []).extend(_security_score_findings(reward))
 
     summary = {
         "likely_skill_related": 0,
@@ -4832,7 +5131,7 @@ def _annotate_security_attribution(
     seen_cases: set[str] = set()
 
     for reward in with_rewards:
-        entry_id = _entry_id(reward)
+        entry_id = _entry_id(reward, expected_id_set)
         details = reward.get("details")
         if not isinstance(details, dict):
             continue
@@ -5327,11 +5626,13 @@ def _save_trials(
     variant: str,
     agent_model: str | None = None,
     agent_model_source: str | None = None,
+    expected_case_ids: list[str] | set[str] | None = None,
 ) -> None:
     """Save per-trial reward.json and trajectory.json into the results directory."""
     agent = _bounded_reward_metadata_text(agent) or "unknown"
     agent_model = _bounded_reward_metadata_text(agent_model)
     agent_model_source = _bounded_reward_metadata_text(agent_model_source)
+    expected_id_set = _normalize_expected_case_id_set(expected_case_ids)
     trials_dir.mkdir(parents=True, exist_ok=True)
     persisted_names, unscored_names = _persisted_trial_layout(rewards, job_dir)
     published_trial_ids = _published_trial_labels_by_root(
@@ -5383,8 +5684,8 @@ def _save_trials(
         # Harbor trial once per step.  This also populates the canonical report's
         # existing trial_id field instead of inventing a second report schema.
         clean_reward["trial_id"] = published_trial_ids[trial_root_name]
-        if not clean_reward.get("entry_id"):
-            clean_reward["entry_id"] = _entry_id(reward)
+        if not clean_reward.get("entry_id") or reward.get("_result_entry_id"):
+            clean_reward["entry_id"] = _entry_id(reward, expected_id_set)
         clean_reward["agent"] = agent
         if agent_model:
             clean_reward["model"] = agent_model
@@ -5789,6 +6090,7 @@ def collect_harbor_results(
         with_job_failure = ""
         with_execution: dict[str, Any] = {}
 
+        with_arm_suffix = "-with-skill" if not skip_baseline else ""
         if with_job_dir:
             with_job_ok, with_job_failure = validate_harbor_job_result(
                 with_job_dir / "result.json",
@@ -5798,8 +6100,22 @@ def collect_harbor_results(
             with_runtime_failures = _extract_agent_runtime_failures(with_job_dir)
             with_trial_failures = _extract_trial_failures(with_job_dir)
             preserve_partial = _can_preserve_partial_rewards(with_job_dir, with_trial_failures)
+            # Runner-owned selector maps are authoritative; staged task files only
+            # resolve identities for direct callers that do not supply one.
+            with_task_entry_ids = (
+                _staged_task_entry_id_map(output_dir, agent, "with", arm_suffix=with_arm_suffix)
+                if case_id_by_task_selector is None
+                else None
+            )
             with_collected_rewards = (
-                _extract_rewards(with_job_dir, case_id_by_task_selector) if with_job_ok or preserve_partial else []
+                _extract_rewards(
+                    with_job_dir,
+                    case_id_by_task_selector,
+                    arm_suffix=with_arm_suffix,
+                    task_entry_id_map=with_task_entry_ids,
+                )
+                if with_job_ok or preserve_partial
+                else []
             )
             with_rewards, invalid_score_failures = _partition_scoreable_rewards(with_collected_rewards)
             with_logical_rewards = _logical_attempt_rewards(with_rewards)
@@ -5845,6 +6161,7 @@ def collect_harbor_results(
                 variant="with_skill",
                 agent_model=agent_model,
                 agent_model_source=agent_model_source,
+                expected_case_ids=expected_case_ids,
             )
             _write_generated_root_json(
                 agent_dir / "with-skill" / "summary.json",
@@ -5969,8 +6286,18 @@ def collect_harbor_results(
                 without_runtime_failures = _extract_agent_runtime_failures(without_job_dir)
                 without_trial_failures = _extract_trial_failures(without_job_dir)
                 preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
+                without_task_entry_ids = (
+                    _staged_task_entry_id_map(output_dir, agent, "without", arm_suffix="-without-skill")
+                    if case_id_by_task_selector is None
+                    else None
+                )
                 without_collected_rewards = (
-                    _extract_rewards(without_job_dir, case_id_by_task_selector)
+                    _extract_rewards(
+                        without_job_dir,
+                        case_id_by_task_selector,
+                        arm_suffix="-without-skill",
+                        task_entry_id_map=without_task_entry_ids,
+                    )
                     if without_job_ok or preserve_partial
                     else []
                 )
@@ -6017,6 +6344,7 @@ def collect_harbor_results(
                     variant="without_skill",
                     agent_model=agent_model,
                     agent_model_source=agent_model_source,
+                    expected_case_ids=expected_case_ids,
                 )
                 _write_generated_root_json(
                     agent_dir / "without-skill" / "summary.json",
@@ -6164,6 +6492,7 @@ def collect_harbor_results(
                 with_rewards,
                 without_rewards,
                 baseline_run=not skip_baseline,
+                expected_case_ids=expected_case_ids,
             )
             _write_generated_root_json(
                 agent_dir / "security_attribution.json",
@@ -6180,6 +6509,7 @@ def collect_harbor_results(
                     variant="with_skill",
                     agent_model=agent_model,
                     agent_model_source=agent_model_source,
+                    expected_case_ids=expected_case_ids,
                 )
 
         agent_execution = _aggregate_execution([with_execution, without_execution])

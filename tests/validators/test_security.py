@@ -51,6 +51,13 @@ _SKILLSPECTOR_SEMANTIC_ANALYZERS = (
     "semantic_quality_policy",
     "semantic_security_discovery",
 )
+_SKILLSPECTOR_2_11_2_DOCS_ONLY_NOT_APPLICABLE_ANALYZERS = {
+    "behavioral_ast",
+    "behavioral_taint_tracking",
+    "bundled_execution_surface",
+    "mcp_least_privilege",
+    "meta_analyzer",
+}
 _SKILLSPECTOR_UNIVERSAL_ANALYZERS = {
     analyzer_id
     for analyzer_id in _SKILLSPECTOR_2_10_REQUIRED_ANALYZERS
@@ -204,6 +211,47 @@ def _set_universal_analyzer_work(payload: dict) -> None:
             )
             if "partial" in status:
                 status["partial"] = 0
+
+
+def _skillspector_documentation_only_report() -> dict:
+    """Return the exact SkillSpector 2.11.2 docs-only applicability shape."""
+    payload = _skillspector_json_report()
+    payload["metadata"]["skillspector_version"] = "2.11.2"
+    payload["components"] = [{"path": "SKILL.md", "executable": False}]
+    payload["analysis_completeness"].update(
+        {
+            "total_components": 1,
+            "scanned_components": 1,
+            "fully_inspected_files": 1,
+            "is_complete": False,
+            "status": "partial",
+        }
+    )
+    payload["analysis_completeness"]["analyzer_statuses"].append(
+        {
+            "analyzer_id": "bundled_execution_surface",
+            "status": "not_applicable",
+            "planned_work": 0,
+            "completed": 0,
+            "partial": 0,
+            "skipped": 0,
+            "failed": 0,
+            "unaccounted": 0,
+            "reason_code": "no_applicable_files",
+        }
+    )
+    for status in payload["analysis_completeness"]["analyzer_statuses"]:
+        if status["analyzer_id"] in _SKILLSPECTOR_2_11_2_DOCS_ONLY_NOT_APPLICABLE_ANALYZERS:
+            status.update(
+                {
+                    "status": "not_applicable",
+                    "planned_work": 0,
+                    "completed": 0,
+                    "reason_code": "no_applicable_files",
+                }
+            )
+    _set_universal_analyzer_work(payload)
+    return payload
 
 
 def _user_facing_reports(result: ValidationResult) -> list[str]:
@@ -2206,6 +2254,105 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert not result.errors
         assert any(detail.check_name == "skillspector" for detail in result.success_details)
 
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_accepts_fully_covered_documentation_only_report(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_documentation_only_report()
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.passed
+        assert not result.errors
+        assert any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @pytest.mark.parametrize(
+        "invalid_evidence",
+        ["unexpected-not-applicable", "wrong-reason", "unsupported-version"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_documentation_only_exception_requires_exact_applicability_evidence(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        invalid_evidence: str,
+    ) -> None:
+        payload = _skillspector_documentation_only_report()
+        statuses = payload["analysis_completeness"]["analyzer_statuses"]
+        if invalid_evidence == "unexpected-not-applicable":
+            status = next(item for item in statuses if item["analyzer_id"] == "mcp_tool_poisoning")
+            status.update(
+                {
+                    "status": "not_applicable",
+                    "planned_work": 0,
+                    "completed": 0,
+                    "reason_code": "no_applicable_files",
+                }
+            )
+        elif invalid_evidence == "wrong-reason":
+            status = next(item for item in statuses if item["analyzer_id"] == "behavioral_ast")
+            status["reason_code"] = "disabled_by_configuration"
+        else:
+            payload["metadata"]["skillspector_version"] = "2.11.3"
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        assert not any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @pytest.mark.parametrize(
+        "incomplete_detail",
+        [
+            pytest.param({"coverage_percent": 0}, id="missing-coverage"),
+            pytest.param({"partially_inspected_files": 1}, id="partially-inspected"),
+            pytest.param({"limitations": ["Analyzer failed."]}, id="limitation"),
+            pytest.param({"ledger_exceptions": [{"fatal": False}]}, id="ledger-exception"),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_documentation_only_exception_requires_full_coverage(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        incomplete_detail: dict,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload["analysis_completeness"].update(
+            {
+                "is_complete": False,
+                "status": "partial",
+                **incomplete_detail,
+            }
+        )
+        payload["analysis_completeness"]["analyzer_statuses"][0].update(
+            {"status": "not_applicable", "planned_work": 0, "completed": 0}
+        )
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        assert not any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_executable_skill_cannot_use_documentation_only_exception(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload["metadata"]["has_executable_scripts"] = True
+        payload["analysis_completeness"].update({"is_complete": False, "status": "partial"})
+        payload["analysis_completeness"]["analyzer_statuses"][0].update(
+            {"status": "not_applicable", "planned_work": 0, "completed": 0}
+        )
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        assert not any(detail.check_name == "skillspector" for detail in result.success_details)
+
     @pytest.mark.parametrize("version", ["2.9.5-safe", "2.9.6", "2.11.1-safe"])
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_accepts_captured_no_llm_report(
@@ -3712,7 +3859,7 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert child_env["OPENAI_API_KEY"] == public_key
         assert child_env["OPENAI_BASE_URL"] == "https://integrate.api.nvidia.com/v1"
         assert child_env["SKILLSPECTOR_PROVIDER"] == "openai"
-        assert child_env["SKILLSPECTOR_MODEL"] == "nvidia/nemotron-3-nano-30b-a3b"
+        assert child_env["SKILLSPECTOR_MODEL"] == "nvidia/nemotron-3-super-120b-a12b"
         assert "NVIDIA_API_KEY" not in child_env
         assert "ANTHROPIC_API_KEY" not in child_env
         assert retired_name not in child_env
@@ -5270,3 +5417,58 @@ class TestSpdxAndIpFalsePositiveHardening:
         result = SecurityValidator().validate_pii_only(skill_dir)
 
         assert any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36\n",
+            "HeadlessChrome/151.0.0.0 -> Chrome/151.0.0.0\n",
+            "Edge reports `Edg/140.0.0.0` and Opera reports OPR/122.0.0.0.\n",
+            "page = browser.new_page(user_agent='Chrome/140.0.0.0', base_url=base)\n",
+            '{"ua": "Mozilla\\/5.0 (X11; Linux x86_64) Chrome\\/140.0.0.0 Safari\\/537.36"}\n',
+        ],
+    )
+    def test_user_agent_product_versions_are_not_pii(self, tmp_path: Path, line: str) -> None:
+        skill_dir = tmp_path / "user-agent-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(line, encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert not any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "backups/8.8.8.8\n",
+            "Backups/8.8.8.8\n",
+            "whitelist: Office/52.14.1.9\n",
+            "https://files.example.com/Chrome/8.8.8.8\n",
+            "Proxy/8.8.8.8\n",
+            "Allow 52.0.0.0 through the firewall.\n",
+            "allowlist/52.0.0.0/8\n",
+            "https://api.example.com/v1/ips/52.0.0.0/8\n",
+        ],
+    )
+    def test_ip_outside_a_reduced_user_agent_version_remains_pii(self, tmp_path: Path, line: str) -> None:
+        skill_dir = tmp_path / "slash-ip-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(line, encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    def test_real_ip_on_a_user_agent_line_remains_pii(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / "user-agent-and-ip-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("Chrome/140.0.0.0 through proxy 8.8.8.8\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert [
+            finding.metadata.get("matched_value")
+            for finding in result.findings
+            if finding.check_name == "ip_addresses"
+        ] == ["8.8.8.8"]

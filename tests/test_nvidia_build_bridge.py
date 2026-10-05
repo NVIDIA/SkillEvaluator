@@ -1646,6 +1646,7 @@ def test_slow_drip_request_body_obeys_an_absolute_deadline(
 def test_partial_headers_time_out_without_exceeding_the_worker_bound(
     bridge_services: _BridgeServices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    header_timeout = bridge.REQUEST_HEADER_TIMEOUT_SECONDS
     monkeypatch.setattr(bridge, "REQUEST_HEADER_TIMEOUT_SECONDS", 0.05)
     clients = [
         socket.create_connection(("127.0.0.1", bridge_services.port), timeout=2) for _ in range(bridge.MAX_WORKERS + 2)
@@ -1653,8 +1654,12 @@ def test_partial_headers_time_out_without_exceeding_the_worker_bound(
     try:
         for client in clients:
             client.sendall(b"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1")
-        time.sleep(0.1)
         assert bridge_services.bridge_server.active_workers <= bridge.MAX_WORKERS
+        for client in clients:
+            _read_raw_http_response(client)
+        assert bridge_services.bridge_server.wait_for_workers(timeout=2)
+        # The short timeout exercises partial headers, not the normal health check.
+        monkeypatch.setattr(bridge, "REQUEST_HEADER_TIMEOUT_SECONDS", header_timeout)
         assert (
             _request(
                 f"{bridge_services.url}/healthz",

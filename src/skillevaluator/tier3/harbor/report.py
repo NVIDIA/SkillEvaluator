@@ -332,6 +332,8 @@ def _render_findings_body(findings: list[dict[str, Any]]) -> Any:
     """Render findings list into a Rich Text body (icon/label/score/question/reasons/evidence)."""
     from rich.text import Text
 
+    from skillevaluator.utils.rich_markup import strip_terminal_controls
+
     body = Text()
     for finding in findings:
         if finding["severity"] == "critical":
@@ -345,7 +347,7 @@ def _render_findings_body(findings: list[dict[str, Any]]) -> Any:
             style = "bold green"
 
         body.append(f"  {icon}: ", style=style)
-        body.append(f"{finding['label']} ", style="bold white")
+        body.append(f"{strip_terminal_controls(str(finding['label']))} ", style="bold white")
         body.append(f"{finding['score']:.2f}\n", style=style)
         question = METRIC_QUESTIONS.get(finding["metric"])
         if question:
@@ -353,13 +355,11 @@ def _render_findings_body(findings: list[dict[str, Any]]) -> Any:
 
         reason_style = "dim green" if finding["severity"] == "ok" else "dim"
         for reason in finding["reasons"]:
-            body.append(f"    → {reason}\n", style=reason_style)
+            body.append(f"    → {strip_terminal_controls(reason)}\n", style=reason_style)
 
         for ref in (finding.get("evidence_refs") or [])[:3]:
-            if isinstance(ref, str):
-                body.append(f"      evidence: {ref}\n", style="dim")
-            else:
-                body.append(f"      evidence: {_compact_evidence_ref(ref)}\n", style="dim")
+            ref_text = ref if isinstance(ref, str) else _compact_evidence_ref(ref)
+            body.append(f"      evidence: {strip_terminal_controls(ref_text)}\n", style="dim")
 
         body.append("\n")
     return body
@@ -833,7 +833,7 @@ def _passing_skill_suggestions(
     if num_trials < 4:
         suggestions.append(
             f"Expand evals.json with more test cases (currently {num_trials}). "
-            "Use 'skillevaluator create-eval-dataset --full' to generate a 4-bucket "
+            "Use 'skillevaluator create-eval-dataset --full' to generate the full bucket set "
             "strategy covering explicit, implicit, contextual, and negative cases."
         )
 
@@ -1064,8 +1064,11 @@ def display_findings_report(
     """
     from rich.console import Console
     from rich.panel import Panel
+    from rich.text import Text
 
-    console = Console()
+    from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
+
+    console = Console(emoji=False)
 
     agents_data = harbor_result.get("agents", {})
     report_agents = list(dict.fromkeys([*harbor_agents, *agents_data.keys()]))
@@ -1079,7 +1082,7 @@ def display_findings_report(
             best_agent_label = _agent_model_label(best_agent, harbor_result, agents_data)
             console.print(
                 f"  [dim]Findings from best performing agent/model combination for your skill:[/dim] "
-                f"[bold cyan]{best_agent_label}[/bold cyan]"
+                f"[bold cyan]{escape_markup(best_agent_label)}[/bold cyan]"
             )
             console.print()
     else:
@@ -1143,14 +1146,14 @@ def display_findings_report(
         suggestions = add_evidence_links_to_suggestions(suggestions, rewards)
         body.append("  \U0001f4a1 SUGGESTIONS\n", style="bold cyan")
         for i, suggestion in enumerate(suggestions, 1):
-            body.append(f"    {i}. {suggestion}\n", style="white")
+            body.append(f"    {i}. {strip_terminal_controls(str(suggestion))}\n", style="white")
     else:
         body.append("  \U0001f4a1 NEXT STEPS\n", style="bold cyan")
         suggestions = _passing_skill_suggestions(findings, rewards)
         rendered_messages.update(str(suggestion).strip() for suggestion in suggestions if str(suggestion).strip())
         suggestions = add_evidence_links_to_suggestions(suggestions, rewards)
         for i, suggestion in enumerate(suggestions, 1):
-            body.append(f"    {i}. {suggestion}\n", style="white")
+            body.append(f"    {i}. {strip_terminal_controls(str(suggestion))}\n", style="white")
     rendered_messages.update(str(suggestion).strip() for suggestion in suggestions if str(suggestion).strip())
 
     for agent, (agent_findings, _agent_rewards) in agent_reports.items():
@@ -1172,7 +1175,11 @@ def display_findings_report(
     console.print(
         Panel(
             body,
-            title=f"[bold]{skill_name} / {panel_agent_label} \u2014 Findings[/bold]",
+            # Panel parses a str title with emoji enabled whatever the console says.
+            title=Text.from_markup(
+                f"[bold]{escape_markup(f'{skill_name} / {panel_agent_label}')} \u2014 Findings[/bold]",
+                emoji=False,
+            ),
             border_style="cyan",
             padding=(1, 1),
         )

@@ -46,7 +46,7 @@ class TestIntraSkillValidatorProperties:
         monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test")
         monkeypatch.delenv("SKILL_EVAL_EMBEDDING_MODEL", raising=False)
 
-        assert resolve_embedding_provider().model == "nvidia/nv-embed-v1"
+        assert resolve_embedding_provider().model == "nvidia/nemotron-3-embed-1b"
 
 
 class TestIntraSkillValidatorValidate:
@@ -169,7 +169,7 @@ class TestIntraSkillValidatorValidate:
         mock_llm.assert_not_called()
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
-    def test_embedding_error_produces_critical_finding(self, mock_embed, tmp_path: Path) -> None:
+    def test_embedding_error_is_incomplete_without_skill_finding(self, mock_embed, tmp_path: Path) -> None:
         skill_dir = tmp_path / "skill"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
@@ -178,8 +178,10 @@ class TestIntraSkillValidatorValidate:
         v = IntraSkillValidator()
         result = v.validate(skill_dir)
         assert result.passed is False
-        assert any(f.severity == Severity.CRITICAL for f in result.findings)
-        assert all(f.file_path == skill_dir.name for f in result.findings)
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["embedding-provider"]
+        assert result.findings == []
+        assert "No API key" in result.errors[0]
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
@@ -197,8 +199,9 @@ class TestIntraSkillValidatorValidate:
         result = IntraSkillValidator().validate(skill_dir)
 
         assert result.passed is False
-        assert result.findings[0].check_name == "embedding_error"
-        assert result.findings[0].file_path == skill_dir.name
+        assert result.status == "incomplete"
+        assert result.findings == []
+        assert "Embedding provider error" in result.errors[0]
         mock_llm.assert_not_called()
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
@@ -233,6 +236,7 @@ class TestIntraSkillValidatorValidate:
         v = IntraSkillValidator()
         result = v.validate(skill_dir)
         assert result.passed is False
+        assert result.status == "failed"
         assert len(result.findings) >= 1
         assert result.findings[0].category == "DUPLICATE"
 
@@ -359,25 +363,116 @@ class TestIntraSkillValidatorValidate:
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
-    def test_llm_error_produces_critical_finding(self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path) -> None:
+    def test_llm_error_is_incomplete_without_skill_finding(
+        self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path, caplog
+    ) -> None:
         skill_dir = tmp_path / "skill"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
 
         mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
 
-        mock_analyze.side_effect = LLMClientError("API failed")
+        mock_analyze.side_effect = LLMClientError("API failed: private provider data")
 
         v = IntraSkillValidator()
         result = v.validate(skill_dir)
         assert result.passed is False
-        assert any(f.severity == Severity.CRITICAL for f in result.findings)
-        assert any("LLM" in f.message for f in result.findings)
-        assert all(f.file_path == skill_dir.name for f in result.findings)
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["deduplication-llm"]
+        assert result.findings == []
+        assert "LLM" in result.errors[0]
+        assert "private provider data" not in str(result.errors)
+        assert "private provider data" not in caplog.text
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_partial_llm_failure_preserves_valid_duplicate_finding(
+        self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path
+    ) -> None:
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("\n".join(f"## Section {letter}\n{letter.lower() * 200}" for letter in "ABCD"))
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
+
+        def analyze(_client, cluster):
+            if any("Section A" in member.heading for member in cluster.members):
+                return LLMVerdict("DUPLICATE", 0.9, "Same content", "Remove one")
+            raise RuntimeError("private provider response")
+
+        mock_analyze.side_effect = analyze
+        result = IntraSkillValidator().validate(skill)
+
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["deduplication-llm"]
+        assert len(result.findings) == 1
+        assert result.findings[0].category == "DUPLICATE"
+        assert result.findings[0].severity == Severity.HIGH
+        assert result.summary.critical_count == 0
+        assert result.summary.high_count == 1
+        assert result.metadata["llm_analysis"]["clusters_completed"] == 1
+        assert result.metadata["llm_analysis"]["clusters_failed"] == 1
+        assert "1 of 2 content clusters" in result.errors[0]
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_llm_initialization_error_preserves_collection_evidence(self, mock_embed, mock_llm, tmp_path: Path) -> None:
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+        mock_llm.side_effect = LLMClientError("missing credential")
+
+        result = IntraSkillValidator().validate(skill)
+
+        assert result.status == "incomplete"
+        assert result.findings == []
+        assert {detail.check_name for detail in result.success_details} == {"file_collection", "chunking"}
 
     def test_custom_threshold(self) -> None:
         v = IntraSkillValidator(threshold=0.95)
         assert v._threshold == 0.95
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_distinct_cluster_errors_are_grouped_in_deterministic_order(
+        self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path
+    ) -> None:
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text(
+            "\n".join(f"## Section {letter}\n{letter.lower() * 200}" for letter in "ABCDEF")
+        )
+        mock_embed.return_value.embed.return_value = [
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+        ]
+
+        class ServiceError(Exception):
+            def __init__(self, status):
+                self.status_code = status
+                super().__init__("private provider response")
+
+        def analyze(_client, cluster):
+            raise ServiceError(429 if any("Section A" in member.heading for member in cluster.members) else 400)
+
+        mock_analyze.side_effect = analyze
+        result = IntraSkillValidator().validate(skill)
+
+        assert result.status == "incomplete"
+        assert len(result.errors) == 1
+        assert "3 of 3 content clusters" in result.errors[0]
+        failures = result.metadata["llm_analysis"]["failures"]
+        assert [failure["count"] for failure in failures] == [2, 1]
+        assert failures[0]["diagnostic"].startswith("HTTP 400")
+        assert failures[1]["diagnostic"].startswith("HTTP 429")
+        assert result.errors[0].index("HTTP 400") < result.errors[0].index("HTTP 429")
+        assert "private provider response" not in result.errors[0]
 
     def test_custom_models(self) -> None:
         v = IntraSkillValidator(embedding_model="custom/embed", llm_model="custom/llm")

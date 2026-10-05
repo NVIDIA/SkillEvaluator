@@ -49,6 +49,9 @@ def _command_to_dict(command: click.Command) -> dict[str, Any]:
     }
     if isinstance(command, click.Group):
         data["commands"] = {name: _command_to_dict(command.commands[name]) for name in sorted(command.commands)}
+        workflow = getattr(command, "workflow", None)
+        if workflow is not None:
+            data["workflow"] = _command_to_dict(workflow)
     return data
 
 

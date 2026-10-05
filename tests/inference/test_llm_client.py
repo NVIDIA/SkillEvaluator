@@ -54,7 +54,7 @@ class TestLLMClientInit:
 
         client = LLMClient()
 
-        assert client.model == "nvidia/nemotron-3-nano-30b-a3b"
+        assert client.model == "nvidia/nemotron-3-super-120b-a12b"
         assert client._client is None
 
     def test_custom_params(self) -> None:
@@ -76,7 +76,7 @@ class TestLLMClientGetClient:
             client = LLMClient()
             assert client._get_client() is mock_openai
 
-        mock_cls.assert_called_once_with(api_key="test-key", base_url="https://api.openai.com/v1")
+        mock_cls.assert_called_once_with(api_key="test-key", base_url="https://api.openai.com/v1", max_retries=0)
 
     def test_missing_api_key_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
@@ -213,7 +213,7 @@ class TestLLMClientGetClient:
         with patch("openai.OpenAI", return_value=mock_openai) as mock_cls:
             assert LLMClient()._get_client() is mock_openai
 
-        mock_cls.assert_called_once_with(api_key="test-key", base_url=PUBLIC_NVIDIA_BUILD_BASE_URL)
+        mock_cls.assert_called_once_with(api_key="test-key", base_url=PUBLIC_NVIDIA_BUILD_BASE_URL, max_retries=0)
 
     def test_accepted_canonical_openai_url_constructs_real_sdk_client(self) -> None:
         client = LLMClient(
@@ -407,7 +407,8 @@ class TestCompletions:
 
         mock_openai.chat.completions.create.assert_called_once()
         call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
-        assert call_kwargs["model"] == "nvidia/nemotron-3-nano-30b-a3b"
+        assert call_kwargs["model"] == "nvidia/nemotron-3-super-120b-a12b"
+        assert call_kwargs["stream"] is False
         assert call_kwargs["max_tokens"] == 512
         assert call_kwargs["temperature"] == 0.0
         assert "max_completion_tokens" not in call_kwargs
@@ -543,7 +544,7 @@ class TestCompletions:
         with patch("openai.OpenAI", return_value=mock_openai) as mock_cls:
             LLMClient(max_tokens=512).completions("system", "user")
 
-        mock_cls.assert_called_once_with(api_key="test-key", base_url="https://example.test/v1")
+        mock_cls.assert_called_once_with(api_key="test-key", base_url="https://example.test/v1", max_retries=0)
         call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
         assert call_kwargs["max_tokens"] == 512
         assert "max_completion_tokens" not in call_kwargs

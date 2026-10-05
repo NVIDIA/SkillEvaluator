@@ -1111,7 +1111,8 @@ def test_inconclusive_credential_probe_degrades_and_continues(
     )
 
     assert "error" not in result
-    assert len(probe_calls) == (2 if provider_name == "anthropic" else 1)
+    # Gateway harness defaults are distinct from the evaluator/judge model.
+    assert len(probe_calls) == (2 if provider_name in {"anthropic", "openai-compatible"} else 1)
     assert any(call.provider == provider_name for call in probe_calls)
     assert task_calls
     transitions = [(event.stage, event.state) for event in reporter.events]
@@ -2077,7 +2078,14 @@ def test_default_task_staging_failure_cleans_transient_artifacts(
     assert result["run_config"]["credential_validation"]["status"] == "degraded"
     assert result["run_config"]["credential_validation"]["targets"] == [
         {
-            "labels": ["codex", "standard grader"],
+            "labels": ["codex"],
+            "provider": "openai-compatible",
+            "model": "openai/openai/gpt-5.6-sol",
+            "status": "degraded",
+            "detail": "model catalog access does not verify runtime credentials for this endpoint",
+        },
+        {
+            "labels": ["standard grader"],
             "provider": "openai-compatible",
             "model": "gpt-5",
             "status": "degraded",
@@ -2195,7 +2203,29 @@ def test_runtime_preflight_running_event_precedes_slow_preflight_call(
         ["codex"],
         output_dir=tmp_path / "results",
         keep_harbor_jobs=True,
+        agent_runtime_preflight=True,
         progress_reporter=reporter,
+    )
+
+
+def test_runtime_preflight_is_skipped_by_default_with_enablement_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, skill = _stub_runner(monkeypatch, tmp_path)
+    reporter = _RecordingReporter()
+
+    runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        progress_reporter=reporter,
+    )
+
+    event = next(event for event in reporter.events if event.stage == "agent-runtime-preflight")
+    assert event.state == "skipped"
+    assert event.detail == (
+        "disabled by default; enable with --agent-runtime-preflight or harbor.agent_runtime_preflight"
     )
 
 
@@ -2344,6 +2374,7 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
         ["codex", "opencode"],
         output_dir=tmp_path / "results",
         keep_harbor_jobs=True,
+        agent_runtime_preflight=True,
         progress_reporter=reporter,
     )
 
@@ -3104,3 +3135,29 @@ def test_command_runner_terminalizes_inherited_configuration_stage(
         ("run-finished", "failed"),
     ]
     assert transitions.count(("run-finished", "failed")) == 1
+
+
+def test_short_credential_named_flags_do_not_redact_counts() -> None:
+    from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
+
+    secrets = secret_values_from_environment(
+        {
+            "SDK_HAS_HOST_AUTH_REFRESH": "1",
+            "FEATURE_TOKEN_ENABLED": "yes",
+            "SERVICE_API_KEY": "service-key-123456",
+            "HTTPS_PROXY": "http://u:p@proxy.example:8080",
+        }
+    )
+
+    assert "1" not in secrets
+    assert "yes" not in secrets
+    assert "service-key-123456" in secrets
+    detail = redact_progress_detail(
+        "Harbor job did not complete successfully: 1 errored; codex with-skill (0/1 scored) "
+        "via http://u:p@proxy.example:8080 using service-key-123456",
+        secret_values=secrets,
+    )
+    assert "1 errored" in detail
+    assert "(0/1 scored)" in detail
+    assert "service-key-123456" not in detail
+    assert "u:p@" not in detail

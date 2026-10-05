@@ -373,6 +373,27 @@ class TestDiscoverAndExtract:
         with pytest.raises(ValueError, match=r"path.*limit"):
             discover_and_extract(tmp_path, "skill")
 
+    @pytest.mark.parametrize("content_type", ["skill", "rules", "workflows"])
+    def test_discovery_path_budget_counts_directories_and_unselected_files(
+        self, tmp_path: Path, monkeypatch, content_type: str
+    ) -> None:
+        monkeypatch.setattr(extractor_module, "MAX_DISCOVERED_PATHS", 4)
+        manifest_name, manifest_text = {
+            "skill": ("SKILL.md", VALID_SKILL_MD),
+            "rules": ("rule.mdc", VALID_RULE_MDC),
+            "workflows": ("workflow-rules.mdc", VALID_WORKFLOW_MDC),
+        }[content_type]
+        item_dir = tmp_path / "nested" / "item"
+        item_dir.mkdir(parents=True)
+        (item_dir / manifest_name).write_text(manifest_text)
+        (item_dir / "a.bin").write_bytes(b"x")
+
+        assert len(discover_and_extract(tmp_path, content_type, max_entries=5_000)) == 1
+
+        (item_dir / "b.bin").write_bytes(b"x")
+        with pytest.raises(ValueError, match=r"Collection path limit exceeded \(4\)"):
+            discover_and_extract(tmp_path, content_type, max_entries=5_000)
+
     def test_discovery_prunes_standard_excluded_directories(self, tmp_path: Path, write_skill, monkeypatch) -> None:
         hidden_skill = tmp_path / ".git" / "nested-skill"
         hidden_skill.mkdir(parents=True)

@@ -52,5 +52,5 @@ def parse_nested_model(model_class: type, v: Any, error_message: str | None = No
             raise ValueError(error_message)
         return None
     if isinstance(v, dict):
-        return model_class(**v)
+        return model_class.model_validate(v)
     return v

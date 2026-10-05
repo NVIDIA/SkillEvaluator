@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import re
 import shutil
 import stat
 import sys
@@ -13,6 +14,7 @@ import pytest
 from skillevaluator.tier3 import generate_dataset
 from skillevaluator.tier3.generate_dataset import (
     _discover_trajectories,
+    _generate_full,
     _run_agent_collect_trajectories,
     _to_agentskills_dataset,
 )
@@ -36,6 +38,58 @@ def test_discover_trajectories_uses_env_results_root(tmp_path, monkeypatch):
     monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(results_root))
 
     assert _discover_trajectories(skill) == {"case-001": trajectory}
+
+
+def test_discover_trajectories_opencode_txt_fallback(tmp_path):
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    results_root = tmp_path / "results"
+    skill_results = results_root / "my-skill"
+    run_id = "20260709_120000"
+    run_dir = skill_results / run_id
+    trial = run_dir / "opencode" / "with-skill" / "trials" / "case-001"
+    trial.mkdir(parents=True)
+    (trial / "opencode.txt").write_text(
+        '{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"c1",'
+        '"state":{"status":"completed","input":{"command":"echo hi"},"output":"hi"}}}\n',
+        encoding="utf-8",
+    )
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (skill_results / "latest").symlink_to(run_id)
+
+    trajectories = _discover_trajectories(skill, results_dir=results_root)
+    assert "case-001" in trajectories
+    assert trajectories["case-001"].get("steps")
+
+
+def test_discover_trajectories_opencode_maps_harbor_folder_via_result_metadata(tmp_path):
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    results_root = tmp_path / "results"
+    run_id = "20260709_120000"
+    run_dir = results_root / "demo" / run_id
+    trial_folder = "case-001__LRZctSP"
+    trial = run_dir / "opencode" / "with-skill" / "trials" / trial_folder
+    trial.mkdir(parents=True)
+    trajectory = {"steps": [{"tool_calls": [{"tool": "Read"}]}]}
+    trial.joinpath("trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    trial.joinpath("result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_folder,
+                "config": {"task": {"path": "tasks/case-001"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (results_root / "demo" / "latest").symlink_to(run_id)
+
+    found = _discover_trajectories(skill, results_dir=results_root)
+    assert list(found) == ["case-001"]
+    assert found["case-001"] == trajectory
 
 
 def test_discover_trajectories_maps_harbor_trial_folder_to_case_id(tmp_path, monkeypatch):
@@ -275,7 +329,7 @@ def test_main_invalid_skill_raises_domain_error_without_printing(tmp_path, capsy
     assert capsys.readouterr() == ("", "")
 
 
-@pytest.mark.parametrize(("extra_args", "expected_cases"), [([], 1), (["--full"], 4)])
+@pytest.mark.parametrize(("extra_args", "expected_cases"), [([], 1), (["--full"], 3)])
 def test_main_reports_created_dataset_with_written_payload(tmp_path, extra_args, expected_cases):
     skill = tmp_path / "my-skill"
     skill.mkdir()
@@ -290,6 +344,22 @@ def test_main_reports_created_dataset_with_written_payload(tmp_path, extra_args,
     assert result.path == skill / "evals" / "evals.json"
     assert result.cases_count == expected_cases
     assert result.dataset == json.loads(result.path.read_text(encoding="utf-8"))
+
+
+def test_main_full_with_author_negative_writes_four_cases(tmp_path):
+    skill = tmp_path / "my-skill"
+    evals = skill / "evals"
+    evals.mkdir(parents=True)
+    (evals / "EVAL.md").write_text("## Negative Cases\n- What is the capital of Peru?\n", encoding="utf-8")
+    (skill / "SKILL.md").write_text(
+        "---\nname: my-skill\ndescription: Does useful work\n---\n",
+        encoding="utf-8",
+    )
+
+    result = generate_dataset.main([str(skill), "--no-llm", "--full"])
+
+    assert result.cases_count == 4
+    assert any(case["id"].endswith("-neg-001") for case in result.dataset["evals"])
 
 
 def test_force_write_failure_preserves_existing_dataset(tmp_path, monkeypatch):
@@ -461,6 +531,83 @@ def test_parse_skill_falls_back_to_defaults_on_malformed_frontmatter(tmp_path):
     parsed = _parse(tmp_path, "name: [unclosed\ndescription: broken")
     assert parsed["name"] == "my-skill"
     assert parsed["description"] == ""
+
+
+
+def test_no_llm_negative_case_does_not_name_the_skill():
+    """Author-provided negatives must stay off-skill and must not name the skill."""
+    skill = {
+        "name": "pdf-extractor",
+        "description": "Extracts tables from PDF files",
+        "scripts": [],
+        "eval_prompt": "## Negative Cases\n- What is the capital of Peru?",
+    }
+    cases = _generate_full(skill)
+    negative = next(c for c in cases if c["id"] == "pdf-extractor-neg-001")
+    assert negative["expected_skill"] is None
+    assert "pdf-extractor" not in negative["question"]
+    assert "pdf-extractor" not in negative["ground_truth"]
+    for behavior in negative["expected_behavior"]:
+        assert "pdf-extractor" not in behavior
+    assert "without reading or applying this skill" in negative["expected_behavior"][0]
+    domain = {"pdf", "extractor", "extracts", "tables"}
+    question_tokens = set(re.findall(r"[a-z0-9]+", negative["question"].lower()))
+    assert not domain & question_tokens
+
+
+def test_no_llm_negative_case_omits_planning_skills_without_author_negative():
+    """Planning skills omit the negative bucket unless eval guidance supplies one."""
+    for skill in (
+        {
+            "name": "errand-planner",
+            "description": "Organizes weekend errands efficiently in a new city",
+            "scripts": [],
+            "eval_prompt": "",
+        },
+        {
+            "name": "day-planner",
+            "description": "Plans grocery runs and appointments across a busy week",
+            "scripts": [],
+            "eval_prompt": "",
+        },
+    ):
+        cases = _generate_full(skill)
+        assert all(not c["id"].endswith("-neg-001") for c in cases)
+        assert len(cases) == 3
+
+
+def test_no_llm_negative_case_uses_author_provided_negative_section():
+    skill = {
+        "name": "errand-planner",
+        "description": "Organizes weekend errands efficiently in a new city",
+        "scripts": [],
+        "eval_prompt": "## Negative Cases\n- What is the capital of Peru?",
+    }
+    cases = _generate_full(skill)
+    negative = next(c for c in cases if c["id"] == "errand-planner-neg-001")
+    assert negative["expected_skill"] is None
+    assert negative["question"] == "What is the capital of Peru?"
+
+
+def test_no_llm_negative_case_omits_without_author_negative():
+    """Template mode omits the negative bucket unless eval guidance supplies one."""
+    for skill in (
+        {
+            "name": "media-transcoder",
+            "description": "Changes sound recordings between lossless formats while retaining tags",
+            "scripts": [],
+            "eval_prompt": "",
+        },
+        {
+            "name": "music-reencoder",
+            "description": "Changes songs between codecs while keeping tags",
+            "scripts": [],
+            "eval_prompt": "",
+        },
+    ):
+        cases = _generate_full(skill)
+        assert all(not c["id"].endswith("-neg-001") for c in cases)
+        assert len(cases) == 3
 
 
 def test_parse_skill_includes_tools_dir_scripts(tmp_path):

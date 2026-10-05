@@ -158,7 +158,6 @@ _CONTEXT_COST_TYPES = frozenset({"skill", "rule", "mcp", "agent", "command", "ou
 MCP_JSON = PurePosixPath(".mcp.json")
 LSP_JSON = PurePosixPath(".lsp.json")
 HOOKS_JSON = PurePosixPath("hooks/hooks.json")
-MONITORS_JSON = PurePosixPath("monitors/monitors.json")
 _SETTINGS_FILES = (
     PurePosixPath("settings.json"),
     PurePosixPath(".claude/settings.json"),
@@ -1683,6 +1682,7 @@ class _Builder:
     def monitors(self) -> None:
         if self.profile.default_monitors_file is None:
             return  # only Claude Code plugins declare monitors
+        default = PurePosixPath(self.profile.default_monitors_file)
         declared_value = None
         if self.manifest is not None and self.contained:
             experimental = self.manifest.get("experimental")
@@ -1695,9 +1695,9 @@ class _Builder:
                 ("inline", "declared", self.manifest_rel, declared_value)
             ]
         elif declared_value is not None:
-            sources = self._json_sources("experimental.monitors", declared_value, MONITORS_JSON, merge_default=False)
+            sources = self._json_sources("experimental.monitors", declared_value, default, merge_default=False)
         else:
-            sources = self._json_sources("experimental.monitors", None, MONITORS_JSON)
+            sources = self._json_sources("experimental.monitors", None, default)
         for name, origin, rel, config in sources:
             if not rel:
                 self._add(Component("monitor", name, origin, None, "unsupported", problem=str(config)))

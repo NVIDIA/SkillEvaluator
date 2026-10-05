@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -33,6 +34,7 @@ from skillevaluator.plugin_components import (
     normalize_declared_path,
     refresh_component_finding_counts,
 )
+from skillevaluator.plugin_formats import CLAUDE_PROFILE
 from skillevaluator.tier1.commands import run_validation
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.policy import ValidationPolicy
@@ -825,6 +827,29 @@ def test_declared_monitors_replace_default_file(tmp_path: Path) -> None:
     result = _validate(root)
     assert {row["name"] for row in _components(result, "monitor")} == {"custom"}
     assert "plugin_permission_bypass_flag" not in _checks(result)
+
+
+def test_default_monitors_file_comes_from_the_format_profile(tmp_path: Path) -> None:
+    root = _plugin(
+        tmp_path,
+        {},
+        {
+            "monitors/monitors.json": [{"name": "claude-default", "command": "./watch.sh"}],
+            "watch/monitors.json": [{"name": "profile-default", "command": "./watch.sh"}],
+        },
+    )
+    profile = dataclasses.replace(CLAUDE_PROFILE, default_monitors_file="watch/monitors.json")
+    inventory = _Builder(
+        root,
+        {"name": "demo"},
+        contained=True,
+        manifest_rel=".claude-plugin/plugin.json",
+        allowed_private_hosts=(),
+        profile=profile,
+    ).build()
+    assert [(row.name, row.path) for row in inventory.of_type("monitor")] == [
+        ("profile-default", "watch/monitors.json")
+    ]
 
 
 def test_hooks_merge_declared_file_with_default(tmp_path: Path) -> None:

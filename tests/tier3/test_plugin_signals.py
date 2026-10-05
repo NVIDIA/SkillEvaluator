@@ -674,6 +674,40 @@ class TestHandoff:
             "detail": "artifact was not read by the consumer after the producer wrote it",
         }
 
+    @pytest.mark.parametrize(
+        ("fn", "args"),
+        [
+            ("apply_patch", {"input": "*** Begin Patch\n  *** Add File: out/report.json\n+{}\n*** End Patch"}),
+            (
+                "apply_patch",
+                {"input": "*** Begin Patch\n*** Update File: draft.json\n*** Move to: out/report.json\n*** End Patch"},
+            ),
+            ("apply_patch", {"patchText": "*** Begin Patch\n*** Add File: out/report.json\n+{}\n*** End Patch"}),
+            ("apply_patch", {"raw": "*** Begin Patch\n*** Add File: out/report.json\n+{}\n*** End Patch"}),
+            ("applypatch", {"input": "*** Begin Patch\n*** Add File: out/report.json\n+{}\n*** End Patch"}),
+            ("patch", {"mode": "patch", "patch": "*** Begin Patch\n*** Update File: out/report.json\n*** End Patch"}),
+            ("patch", {"mode": "replace", "path": "out/report.json", "old_string": "a", "new_string": "b"}),
+        ],
+        ids=[
+            "indented-header",
+            "move-to",
+            "opencode-patch-text",
+            "raw-input",
+            "applypatch",
+            "hermes-patch",
+            "hermes-replace",
+        ],
+    )
+    def test_patch_tool_writes_count_as_artifact_writes(self, fn: str, args: dict[str, Any]) -> None:
+        traj = _traj(
+            _one("Skill", {"skill": "alpha"}),
+            _one(fn, args, call_id="c2"),
+            _one("Skill", {"skill": "beta"}, call_id="c3"),
+            _one("Read", {"file_path": "out/report.json"}, call_id="c4"),
+        )
+        case = {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "artifact": "out/report.json"}]}
+        assert _signals(traj, case)["handoff"]["passed"] == 1
+
     def test_mcp_consumer_receiving_the_artifact_path_counts_as_a_read(self) -> None:
         traj = _traj(
             _one("Skill", {"skill": "alpha"}),

@@ -76,12 +76,12 @@ result.
   not appear in any user/system message, since then the consumer could have
   taken it from the prompt rather than from the producer.
 * ``artifact``: a producer-attributed call must write the path (write/edit
-  tools, shell redirects/``tee``/``cp``/``mv``/``touch``, or an MCP tool whose
-  name or argument key says it writes), and a later consumer-attributed call
-  must read it (read tools, shell readers/interpreters, or an MCP/subagent call
-  whose arguments name the path). Relative artifact paths match an observed
-  path equal to it or ending with ``/<artifact>``; absolute ones must match
-  exactly.
+  tools, the file headers of an ``apply_patch`` body, shell redirects/``tee``/
+  ``cp``/``mv``/``touch``, or an MCP tool whose name or argument key says it
+  writes), and a later consumer-attributed call must read it (read tools,
+  shell readers/interpreters, or an MCP/subagent call whose arguments name the
+  path). Relative artifact paths match an observed path equal to it or ending
+  with ``/<artifact>``; absolute ones must match exactly.
 * When both are given, both must hold.
 
 Trajectory content is untrusted: step, call, text and regex-subject sizes are
@@ -106,6 +106,7 @@ from typing import Any
 
 import regex
 
+from skillevaluator.tier3.eval_core.atif_helpers import _patch_file_paths
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     MAPPED_OUTER_EXEC_OBSERVATION,
     normalize_tool_call,
@@ -208,7 +209,13 @@ _SHELL_TOOLS = frozenset(
 _READ_TOOLS = frozenset(
     {"read", "read_file", "read_text_file", "view", "open", "open_file", "cat", "get_file_contents", "view_file"}
 )
-_WRITE_TOOLS = frozenset(
+# Edit tools that take an apply_patch body: Codex ``apply_patch``/``applypatch``
+# and the Hermes ``patch`` tool (whose ``replace`` mode names a ``path`` instead).
+_PATCH_TOOLS = frozenset({"apply_patch", "applypatch", "patch"})
+# Where harnesses put that body: Codex ``input``, OpenCode ``patchText``, Hermes
+# ``patch``, and ``raw`` for a tool input that was not a JSON object.
+_PATCH_BODY_KEYS = ("input", "patch", "patchText", "content", "raw")
+_WRITE_TOOLS = _PATCH_TOOLS | frozenset(
     {
         "write",
         "write_file",
@@ -219,7 +226,6 @@ _WRITE_TOOLS = frozenset(
         "multi_edit",
         "notebookedit",
         "notebook_edit",
-        "apply_patch",
         "str_replace_editor",
         "str_replace_based_edit_tool",
         "save_file",
@@ -2134,6 +2140,16 @@ def _is_mcp_call(call: _Call) -> bool:
     return any(ident.kind == COMPONENT_MCP for ident in call.idents)
 
 
+def _patch_targets(args: Mapping[str, Any]) -> list[str]:
+    """Paths named by the file headers of an apply_patch body (``Add``/``Update``/``Delete File``, ``Move to``)."""
+    paths: list[str] = []
+    for key in _PATCH_BODY_KEYS:
+        body = args.get(key)
+        if isinstance(body, str):
+            paths.extend(_patch_file_paths(body[:_MAX_ARGS_TEXT_CHARS]))
+    return paths
+
+
 def _call_writes(call: _Call, artifact: str) -> bool:
     fn_base = _base_tool_name(call.fn)
     if fn_base in _WRITE_TOOLS:
@@ -2143,12 +2159,7 @@ def _call_writes(call: _Call, artifact: str) -> bool:
             return False
         if any(_path_matches(path, artifact) for path in _path_args(call.args)):
             return True
-        if fn_base == "apply_patch":
-            patch = _first_string(call.args, ("input", "patch", "content"))
-            for match in re.finditer(r"^\*\*\* (?:Add|Update) File: (.+)$", patch[:_MAX_ARGS_TEXT_CHARS], re.MULTILINE):
-                if _path_matches(match.group(1), artifact):
-                    return True
-        return False
+        return fn_base in _PATCH_TOOLS and any(_path_matches(path, artifact) for path in _patch_targets(call.args))
     if fn_base in _SHELL_TOOLS and not _is_mcp_call(call):
         return any(_normalized_path_matches(path, artifact) for path in call.shell_paths[1])
     ident = next((item for item in call.idents if item.kind == COMPONENT_MCP), None)

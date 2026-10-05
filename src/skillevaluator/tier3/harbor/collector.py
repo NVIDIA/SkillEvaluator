@@ -3845,6 +3845,7 @@ def _collect_report_only_condition(
     """Collect one advisory comparison arm without affecting run validity."""
     job_name = f"{skill_name}-{agent}-{variant}"
     job_dir = _find_job_dir(jobs_dir, job_name)
+    collected_rewards: list[dict[str, Any]] = []
     rewards: list[dict[str, Any]] = []
     runtime_failures: list[dict[str, str]] = []
     trial_failures: list[dict[str, str]] = []
@@ -3855,7 +3856,7 @@ def _collect_report_only_condition(
         trial_failures = _extract_trial_failures(job_dir)
         if job_ok or _can_preserve_partial_rewards(job_dir, trial_failures):
             # Report-only arms are staged with the baseline's dual-arm suffix.
-            rewards = _extract_rewards(
+            collected_rewards = _extract_rewards(
                 job_dir,
                 arm_suffix="-without-skill",
                 task_entry_id_map=_staged_task_entry_id_map(
@@ -3865,7 +3866,9 @@ def _collect_report_only_condition(
                     arm_suffix="-without-skill",
                 ),
             )
-        rewards, invalid_score_failures = _partition_scoreable_rewards(rewards)
+        # Only scoreable rewards are averaged; every collected reward is persisted
+        # below, so an invalid-score trial keeps its diagnostics like in the other arms.
+        rewards, invalid_score_failures = _partition_scoreable_rewards(collected_rewards)
         trial_failures.extend(invalid_score_failures)
     else:
         job_failure = f"Harbor job directory was not created: {job_name}"
@@ -3912,7 +3915,7 @@ def _collect_report_only_condition(
     )
     if job_dir is not None:
         _save_trials(
-            rewards,
+            collected_rewards,
             condition_dir / "trials",
             job_dir,
             skill_name=skill_name,

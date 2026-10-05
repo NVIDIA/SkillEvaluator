@@ -15,7 +15,7 @@ from skillevaluator.tier3.harbor.collector import (
     _agent_runtime_failure_reason,
     collect_harbor_results,
 )
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
 
 
 def _write_complete_job_result(job_dir: Path, trial_names: list[str]) -> None:
@@ -567,6 +567,62 @@ def test_sum_of_parts_custom_only_overall_uses_logical_attempts(tmp_path: Path) 
     assert agent["overall_sum_of_parts"] == 0.7
     summary = json.loads((tmp_path / "results/opencode/sum-of-parts/summary.json").read_text(encoding="utf-8"))
     assert summary["overall_score"] == 0.7
+
+
+@pytest.mark.parametrize(
+    ("variant", "condition", "arm"),
+    [
+        ("with", "with-skill", "with_skill"),
+        ("without", "without-skill", "without_skill"),
+        ("sumofparts", "sum-of-parts", "sum_of_parts"),
+    ],
+)
+def test_every_arm_persists_an_invalid_score_trial_with_its_diagnostics(
+    tmp_path: Path,
+    variant: str,
+    condition: str,
+    arm: str,
+) -> None:
+    """An unscoreable trial keeps its redacted reward.json in every arm, sum-of-parts included."""
+    jobs_dir = tmp_path / "jobs"
+    trial_name = "case-001__attempt"
+    for job_variant in ("with", "without", "sumofparts"):
+        reward: dict[str, object] = {
+            "entry_id": "case-001",
+            "metric_set": DEFAULT_METRIC_SET,
+            **dict.fromkeys(DEFAULT_METRICS, 0.9),
+        }
+        if job_variant == variant:
+            reward["evaluation_status"] = "failed"
+            reward["evaluation_errors"] = {"accuracy": "judge timed out"}
+        job_dir = jobs_dir / f"demo-opencode-{job_variant}"
+        verifier = job_dir / trial_name / "verifier"
+        verifier.mkdir(parents=True)
+        (verifier / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+        _write_complete_job_result(job_dir, [trial_name])
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        sum_of_parts_arm=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    agent = results["agents"]["opencode"]
+    assert agent["conditions"][arm]["execution_status"] == "failed"
+    [failure] = agent["trial_failures"][arm]
+    assert failure["trial"] == trial_name
+    assert "accuracy: judge timed out" in failure["reason"]
+    trial_out = tmp_path / "results" / "opencode" / condition / "trials" / trial_name
+    persisted = json.loads((trial_out / "reward.json").read_text(encoding="utf-8"))
+    assert persisted["evaluation_status"] == "failed"
+    assert persisted["evaluation_errors"] == {"accuracy": "judge timed out"}
+    assert persisted["entry_id"] == "case-001"
+    assert not (trial_out / "failure.json").exists()
 
 
 def test_unexpected_case_fails_execution_coverage(tmp_path: Path) -> None:

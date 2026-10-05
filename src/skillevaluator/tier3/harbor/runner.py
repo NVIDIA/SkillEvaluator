@@ -236,6 +236,8 @@ _HARBOR_ENV_MODE_VARS = {
             "GOOGLE_CLOUD_PROJECT",
             "KUBECONFIG",
             "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY",
+            "SKILLEVALUATOR_GKE_AUTOPILOT",
+            "SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE",
         }
     ),
     "novita": frozenset({"NOVITA_API_KEY", "NOVITA_API_URL", "NOVITA_BASE_URL", "NOVITA_DOMAIN"}),
@@ -436,6 +438,7 @@ _SAFE_BACKEND_CONSTRUCTOR_KWARGS: dict[str, frozenset[str]] = {
     "gke": frozenset(
         {
             "allow_workload_identity",
+            "autopilot",
             "cluster_name",
             "region",
             "namespace",

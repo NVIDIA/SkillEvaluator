@@ -21,6 +21,7 @@ import pytest
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.environments.gke import GKEEnvironment
 from kubernetes import client as k8s_client
+from kubernetes.client.rest import ApiException
 
 import skillevaluator.tier3.harbor.gke_environment as gke_env_mod
 from skillevaluator.tier3.harbor.gke_environment import (
@@ -89,6 +90,7 @@ def make_gke_env(monkeypatch: pytest.MonkeyPatch) -> Callable[..., SkillEvaluato
         *,
         namespace: str = "skill-eval",
         allow_workload_identity: bool = False,
+        autopilot: bool | str | None = None,
         compose_mode: bool = False,
         fake_api: object | None = None,
         networking_api: object | None = None,
@@ -97,8 +99,14 @@ def make_gke_env(monkeypatch: pytest.MonkeyPatch) -> Callable[..., SkillEvaluato
         env.pod_name = "pod-under-test"
         env.namespace = namespace
         env._compose_mode = compose_mode
-        env._kwargs = {"allow_workload_identity": "1"} if allow_workload_identity else {}
+        kwargs: dict[str, str] = {}
+        if allow_workload_identity:
+            kwargs["allow_workload_identity"] = "1"
+        if autopilot is not None:
+            kwargs["autopilot"] = str(autopilot)
+        env._kwargs = kwargs
         env._allow_workload_identity = allow_workload_identity
+        env._autopilot = autopilot
         env._persistent_env = {}
         env.default_user = None
         env.task_env_config = SimpleNamespace(workdir=None, user=None)
@@ -177,7 +185,7 @@ def test_gke_environment_create_pod_blocks_metadata_host_and_bound_ksa_when_unpr
     expected_automount: bool | None,
     expect_error: bool,
 ) -> None:
-    """Enforce metadata NetworkPolicy, trusted probe container, token automount=False, and reject bound KSAs unless opted in."""
+    """Enforce metadata NetworkPolicy, trusted init + companion probe containers, token automount=False, and reject bound KSAs unless opted in."""
     created_pods: list[k8s_client.V1Pod] = []
     created_policies: list[k8s_client.V1NetworkPolicy] = []
 
@@ -223,6 +231,11 @@ def test_gke_environment_create_pod_blocks_metadata_host_and_bound_ksa_when_unpr
         assert pod.metadata.labels.get("skillevaluator.nvidia.com/metadata-isolated") == "true"
         assert pod.metadata.annotations.get("autopilot.gke.io/primary-container") == "main"
         assert pod.metadata.annotations.get("kubectl.kubernetes.io/default-container") == "main"
+        assert [c.name for c in (pod.spec.init_containers or [])] == ["skillevaluator-metadata-probe-init"]
+        init_probe = pod.spec.init_containers[0]
+        assert init_probe.image == "python:3.12-slim"
+        assert init_probe.command == ["sh", "-c", gke_env_mod._IN_POD_METADATA_ISOLATION_PROBE_SCRIPT]
+        assert init_probe.resources is None
         assert [c.name for c in pod.spec.containers] == ["main", "skillevaluator-metadata-probe"]
         probe_container = pod.spec.containers[1]
         assert probe_container.image == "python:3.12-slim"
@@ -232,6 +245,7 @@ def test_gke_environment_create_pod_blocks_metadata_host_and_bound_ksa_when_unpr
         dns_rule = created_policies[0].spec.egress[1]
         assert {(p.port, p.protocol) for p in dns_rule.ports} == {(53, "UDP"), (53, "TCP")}
     else:
+        assert not getattr(pod.spec, "init_containers", None)
         assert [c.name for c in pod.spec.containers] == ["main"]
     assert env._persistent_env.get("GCE_METADATA_HOST") == expected_metadata_host
     container_env_map = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
@@ -352,44 +366,120 @@ def test_gke_environment_create_pod_rejects_weakened_existing_network_policy(
     (
         "storage_request",
         "storage_limit",
+        "autopilot",
+        "node_name",
+        "gpu_request",
         "compose_mode",
         "custom_probe_image",
         "expected_main_request",
         "expected_main_limit",
+        "expected_init_containers",
         "expected_containers",
         "expected_probe_image",
     ),
     [
-        # 1. Autopilot 10Gi (10240Mi) main storage is capped to 10176Mi so main + 64Mi probe == 10240Mi
+        # 1. Autopilot (explicit flag) 10Gi (10240Mi) main storage is capped to 10176Mi so main + 64Mi probe == 10240Mi
         (
             "10240Mi",
             "10Gi",
+            True,
+            None,
+            None,
             False,
             None,
             "10176Mi",
             "10176Mi",
+            ["skillevaluator-metadata-probe-init"],
             ["main", "skillevaluator-metadata-probe"],
             "python:3.12-slim",
         ),
-        # 2. Sub-ceiling storage (5120Mi) is untouched and custom probe image env var is honored
+        # 2. Autopilot (auto-detected via gk3- node prefix) 10Gi (10240Mi) main storage is capped to 10176Mi
+        (
+            "10240Mi",
+            "10Gi",
+            None,
+            "gk3-eval-cluster-nap-12345",
+            None,
+            False,
+            None,
+            "10176Mi",
+            "10176Mi",
+            ["skillevaluator-metadata-probe-init"],
+            ["main", "skillevaluator-metadata-probe"],
+            "python:3.12-slim",
+        ),
+        # 3. Standard GKE (non-Autopilot node) preserves 10240Mi without lowering ([P2])
+        (
+            "10240Mi",
+            "10Gi",
+            None,
+            "gke-standard-cluster-default-pool-abc",
+            None,
+            False,
+            None,
+            "10240Mi",
+            "10Gi",
+            ["skillevaluator-metadata-probe-init"],
+            ["main", "skillevaluator-metadata-probe"],
+            "python:3.12-slim",
+        ),
+        # 4. Explicit >10Gi storage (20480Mi / 20Gi) is never lowered to 10176Mi even when Autopilot=True ([P2])
+        (
+            "20480Mi",
+            "20Gi",
+            True,
+            "gk3-eval-cluster-nap-12345",
+            None,
+            False,
+            None,
+            "20480Mi",
+            "20Gi",
+            ["skillevaluator-metadata-probe-init"],
+            ["main", "skillevaluator-metadata-probe"],
+            "python:3.12-slim",
+        ),
+        # 5. Autopilot GPU pod preserves 10240Mi because accelerator pods support up to 56TiB ephemeral storage
+        (
+            "10240Mi",
+            "10Gi",
+            True,
+            None,
+            "1",
+            False,
+            None,
+            "10240Mi",
+            "10Gi",
+            ["skillevaluator-metadata-probe-init"],
+            ["main", "skillevaluator-metadata-probe"],
+            "python:3.12-slim",
+        ),
+        # 6. Sub-ceiling storage (5120Mi) is untouched and custom probe image env var is honored on init + companion
         (
             "5120Mi",
+            None,
+            True,
+            None,
             None,
             False,
             "us-central1-docker.pkg.dev/my-proj/eval/probe:v1",
             "5120Mi",
             None,
+            ["skillevaluator-metadata-probe-init"],
             ["main", "skillevaluator-metadata-probe"],
             "us-central1-docker.pkg.dev/my-proj/eval/probe:v1",
         ),
-        # 3. Compose mode (DinD) does not inject a second probe container or cap dind storage
+        # 7. Compose mode (DinD) does not inject init/companion probe containers or cap dind storage
         (
             "10240Mi",
             None,
             True,
             None,
+            None,
+            True,
+            None,
             "10240Mi",
             None,
+            [],
             ["main"],
             None,
         ),
@@ -400,14 +490,18 @@ def test_gke_environment_create_pod_autopilot_storage_idempotency_and_custom_pro
     make_gke_env: Callable[..., SkillEvaluatorGKEEnvironment],
     storage_request: str,
     storage_limit: str | None,
+    autopilot: bool | None,
+    node_name: str | None,
+    gpu_request: str | None,
     compose_mode: bool,
     custom_probe_image: str | None,
     expected_main_request: str,
     expected_main_limit: str | None,
+    expected_init_containers: list[str],
     expected_containers: list[str],
     expected_probe_image: str | None,
 ) -> None:
-    """Cap Autopilot 10Gi ephemeral-storage, honor custom probe image override, and avoid duplicate probe containers on retry."""
+    """Scope 10Gi->10176Mi storage adjustment to non-accelerator Autopilot pods, preserve >10Gi requests, and avoid duplicates on retry."""
     if custom_probe_image is not None:
         monkeypatch.setenv("SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE", custom_probe_image)
 
@@ -415,10 +509,13 @@ def test_gke_environment_create_pod_autopilot_storage_idempotency_and_custom_pro
         _ = pod
 
     monkeypatch.setattr(GKEEnvironment, "_create_pod", noop_create_pod)
+    fake_nodes = [SimpleNamespace(metadata=SimpleNamespace(name=node_name, labels={}))] if node_name is not None else []
     env = make_gke_env(
+        autopilot=autopilot,
         compose_mode=compose_mode,
         fake_api=SimpleNamespace(
-            read_namespaced_service_account=lambda **_kw: SimpleNamespace(metadata=SimpleNamespace(annotations={}))
+            read_namespaced_service_account=lambda **_kw: SimpleNamespace(metadata=SimpleNamespace(annotations={})),
+            list_node=lambda **_kw: SimpleNamespace(items=fake_nodes),
         ),
         networking_api=SimpleNamespace(
             read_namespaced_network_policy=lambda **_kw: _build_metadata_blocking_network_policy("skill-eval"),
@@ -427,24 +524,119 @@ def test_gke_environment_create_pod_autopilot_storage_idempotency_and_custom_pro
     )
 
     pod = _make_pod("pod-storage-check")
+    requests_dict: dict[str, str] = {"cpu": "1", "memory": "2048Mi", "ephemeral-storage": storage_request}
+    limits_dict: dict[str, str] = {"ephemeral-storage": storage_limit} if storage_limit else {}
+    if gpu_request is not None:
+        requests_dict["nvidia.com/gpu"] = gpu_request
+        limits_dict["nvidia.com/gpu"] = gpu_request
     pod.spec.containers[0].resources = k8s_client.V1ResourceRequirements(
-        requests={"cpu": "1", "memory": "2048Mi", "ephemeral-storage": storage_request},
-        limits={"ephemeral-storage": storage_limit} if storage_limit else None,
+        requests=requests_dict,
+        limits=limits_dict or None,
     )
 
     # Call _create_pod twice to verify idempotency on retry/recreation
     asyncio.run(env._create_pod(pod))
     asyncio.run(env._create_pod(pod))
 
+    assert [c.name for c in (pod.spec.init_containers or [])] == expected_init_containers
     assert [c.name for c in pod.spec.containers] == expected_containers
     assert pod.spec.containers[0].resources.requests["ephemeral-storage"] == expected_main_request
     if expected_main_limit is not None:
         assert pod.spec.containers[0].resources.limits["ephemeral-storage"] == expected_main_limit
     if expected_probe_image is not None:
+        init_probe = pod.spec.init_containers[0]
+        assert init_probe.image == expected_probe_image
+        assert init_probe.resources is None
         probe_container = pod.spec.containers[1]
         assert probe_container.image == expected_probe_image
         assert probe_container.resources.requests["ephemeral-storage"] == "64Mi"
         assert probe_container.resources.limits["ephemeral-storage"] == "64Mi"
+
+
+@pytest.mark.parametrize(
+    ("init_exit_code", "init_waiting_reason", "pod_phase", "expected_error_snippet"),
+    [
+        # 1. Init probe succeeds (rc=0) and pod is Running/Ready -> succeeds
+        (0, None, "Running", None),
+        # 2. Init probe detects reachable metadata before main starts (rc=42) -> deletes pod and fails closed
+        (42, None, "Failed", "in-pod init probe reached the GKE/GCE metadata server"),
+        # 3. Init probe fails with missing tool/error (rc=43) while pod still Pending -> deletes pod and fails closed
+        (43, None, "Pending", "in-pod metadata isolation init probe exited with status 43"),
+        # 4. Init probe image fails to pull (ImagePullBackOff) -> deletes pod and fails closed without waiting 300s
+        (None, "ImagePullBackOff", "Pending", "failed to pull metadata probe image"),
+    ],
+)
+def test_gke_environment_wait_for_pod_ready_fails_closed_on_init_probe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    make_gke_env: Callable[..., SkillEvaluatorGKEEnvironment],
+    init_exit_code: int | None,
+    init_waiting_reason: str | None,
+    pod_phase: str,
+    expected_error_snippet: str | None,
+) -> None:
+    """Inspect init_container_statuses during _wait_for_pod_ready so a failed pre-start probe deletes the pod immediately."""
+    deleted_pods: list[tuple[str, str]] = []
+
+    async def fast_sleep(_sec: float) -> None:
+        return None
+
+    monkeypatch.setattr(gke_env_mod.asyncio, "sleep", fast_sleep)
+
+    init_state = SimpleNamespace(
+        waiting=(
+            SimpleNamespace(reason=init_waiting_reason, message="Back-off pulling image python:3.12-slim")
+            if init_waiting_reason
+            else None
+        ),
+        terminated=(
+            SimpleNamespace(exit_code=init_exit_code, reason="Completed" if init_exit_code == 0 else "Error")
+            if init_exit_code is not None
+            else None
+        ),
+    )
+    fake_pod = SimpleNamespace(
+        status=SimpleNamespace(
+            phase=pod_phase,
+            reason=None,
+            message=None,
+            init_container_statuses=[
+                SimpleNamespace(
+                    name="skillevaluator-metadata-probe-init",
+                    ready=(init_exit_code == 0),
+                    state=init_state,
+                )
+            ],
+            container_statuses=[
+                SimpleNamespace(
+                    name="main",
+                    ready=(pod_phase == "Running"),
+                    state=SimpleNamespace(waiting=None, terminated=None),
+                ),
+                SimpleNamespace(
+                    name="skillevaluator-metadata-probe",
+                    ready=(pod_phase == "Running"),
+                    state=SimpleNamespace(waiting=None, terminated=None),
+                ),
+            ],
+        )
+    )
+
+    env = make_gke_env(
+        namespace="skilleval",
+        fake_api=SimpleNamespace(
+            read_namespaced_pod=lambda **_k: fake_pod,
+            delete_namespaced_pod=lambda name, namespace, **_k: deleted_pods.append((name, namespace)),
+        ),
+    )
+    env.pod_name = "pod-init-check"
+
+    if expected_error_snippet is not None:
+        with pytest.raises(RuntimeError, match=expected_error_snippet):
+            asyncio.run(env._wait_for_pod_ready(timeout_sec=3))
+        assert deleted_pods == [("pod-init-check", "skilleval")]
+    else:
+        asyncio.run(env._wait_for_pod_ready(timeout_sec=3))
+        assert deleted_pods == []
 
 
 @pytest.mark.parametrize(
@@ -582,6 +774,12 @@ def test_gke_environment_wait_for_container_exec_ready_drains_stream_and_retries
         ("shimmed_python", 200, False, "shimmed_python", 43),
         # 8. Shimmed curl returning 0 without HTTP_CODE:000 output returns 43 (SP-3)
         ("shimmed_curl", 200, False, "shimmed_curl", 43),
+        # 9. BusyBox wget (docker:dind) rejecting --no-proxy returns 0 when connection is refused ([P1])
+        ("busybox_wget_unreachable", None, True, "busybox_wget", 0),
+        # 10. BusyBox wget (docker:dind) rejecting --no-proxy returns 42 when endpoint responds HTTP/1.1 200 ([P1])
+        ("busybox_wget_reachable_200_with_dead_proxy", 200, True, "busybox_wget", 42),
+        # 11. Shimmed or broken wget printing unrecognized error text fails closed with 43 ([P1])
+        ("shimmed_wget_unknown_output", 200, False, "shimmed_wget", 43),
     ],
 )
 def test_in_pod_metadata_isolation_probe_script_resists_proxy_and_binary_shims(
@@ -593,7 +791,7 @@ def test_in_pod_metadata_isolation_probe_script_resists_proxy_and_binary_shims(
     tool_mode: str,
     expected_rc: int,
 ) -> None:
-    """Verify the shell probe script ignores http_proxy variables, catches HTTP 4xx responses, and rejects /bin/true shims."""
+    """Verify the shell probe script ignores http_proxy variables, supports BusyBox wget, and rejects shims."""
     _ = scenario
     target_url = (
         "http://127.0.0.1:1/computeMetadata/v1/instance/service-accounts/default/token"
@@ -629,6 +827,43 @@ def test_in_pod_metadata_isolation_probe_script_resists_proxy_and_binary_shims(
         shim_path = shim_dir / "curl"
         shim_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         shim_path.chmod(shim_path.stat().st_mode | stat.S_IXUSR)
+        env["PATH"] = str(shim_dir)
+    elif tool_mode in ("busybox_wget", "shimmed_wget"):
+        shim_dir = tmp_path / f"shims_{tool_mode}"
+        shim_dir.mkdir()
+        real_grep = shutil.which("grep")
+        if real_grep is not None:
+            (shim_dir / "grep").symlink_to(real_grep)
+        wget_path = shim_dir / "wget"
+        if tool_mode == "busybox_wget":
+            busybox_output = (
+                "Connecting to 127.0.0.1:1 (127.0.0.1:1)\\nwget: can't connect to remote host (127.0.0.1): Connection refused\\n"
+                if http_status is None
+                else f"Connecting to 127.0.0.1 (127.0.0.1)\\n  HTTP/1.1 {http_status} OK\\n"
+            )
+            busybox_rc = 1 if http_status is None else 0
+            wget_path.write_text(
+                "#!/bin/sh\n"
+                'for arg in "$@"; do\n'
+                '  if [ "$arg" = "--no-proxy" ]; then\n'
+                "    printf \"wget: unrecognized option '--no-proxy'\\nBusyBox v1.36.1 multi-call binary.\\n\" >&2\n"
+                "    exit 1\n"
+                "  fi\n"
+                "done\n"
+                'if [ -n "${http_proxy:-}${HTTP_PROXY:-}${all_proxy:-}${ALL_PROXY:-}" ]; then\n'
+                '  printf "wget: proxy environment variable was not unset\\n" >&2\n'
+                "  exit 1\n"
+                "fi\n"
+                f'printf "{busybox_output}" >&2\n'
+                f"exit {busybox_rc}\n",
+                encoding="utf-8",
+            )
+        else:
+            wget_path.write_text(
+                '#!/bin/sh\nprintf "wget: unexpected shim error\\n" >&2\nexit 1\n',
+                encoding="utf-8",
+            )
+        wget_path.chmod(wget_path.stat().st_mode | stat.S_IXUSR)
         env["PATH"] = str(shim_dir)
 
     completed = subprocess.run(
@@ -993,3 +1228,116 @@ def test_gke_environment_exec_adc_token_refresh_and_isolation(
     assert env_obj._persistent_env.get("OPENAI_API_KEY") == expected_persistent_key
     if call_env is None and expected_persistent_key is None:
         assert captured_call_env is None
+
+
+@pytest.mark.parametrize(
+    ("read_effect", "should_raise", "expected_match"),
+    [
+        # 1. Running pod with healthy container -> no error
+        (
+            SimpleNamespace(
+                status=SimpleNamespace(
+                    phase="Running",
+                    container_statuses=[
+                        SimpleNamespace(
+                            name="main",
+                            state=SimpleNamespace(terminated=None),
+                            last_state=SimpleNamespace(terminated=None),
+                        )
+                    ],
+                )
+            ),
+            False,
+            "",
+        ),
+        # 2. Pod deleted/preempted (404 Not Found) -> fail fast with RuntimeError
+        (
+            ApiException(status=404, reason="Not Found"),
+            True,
+            r"no longer exists|deleted or preempted",
+        ),
+        # 3. Transient API server error (503 Service Unavailable) -> ignored
+        (
+            ApiException(status=503, reason="Service Unavailable"),
+            False,
+            "",
+        ),
+        # 4. Terminal pod phase (Failed) -> raises RuntimeError
+        (
+            SimpleNamespace(
+                status=SimpleNamespace(
+                    phase="Failed",
+                    container_statuses=[],
+                )
+            ),
+            True,
+            r"terminal phase 'Failed'",
+        ),
+    ],
+)
+def test_check_pod_terminated_fails_fast_when_pod_deleted_or_preempted(
+    make_gke_env: Callable[..., SkillEvaluatorGKEEnvironment],
+    read_effect: object,
+    should_raise: bool,
+    expected_match: str,
+) -> None:
+    """Fail immediately when the evaluation pod is 404 Not Found while ignoring transient non-404 API errors."""
+
+    def _read_pod(*, name: str, namespace: str) -> object:
+        assert name == "pod-under-test"
+        assert namespace == "default"
+        if isinstance(read_effect, Exception):
+            raise read_effect
+        return read_effect
+
+    env_obj = make_gke_env(
+        namespace="default",
+        fake_api=SimpleNamespace(read_namespaced_pod=_read_pod),
+    )
+
+    if should_raise:
+        with pytest.raises(RuntimeError, match=expected_match):
+            asyncio.run(env_obj._check_pod_terminated())
+    else:
+        asyncio.run(env_obj._check_pod_terminated())
+
+
+def test_wait_for_container_exec_ready_aborts_immediately_on_gke_warden_missing_pod(
+    monkeypatch: pytest.MonkeyPatch,
+    make_gke_env: Callable[..., SkillEvaluatorGKEEnvironment],
+) -> None:
+    """Translate GKE Warden missing-pod WebSocket AttributeError into an immediate RuntimeError without 60x retry sleep."""
+    sleep_calls: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(
+        "skillevaluator.tier3.harbor.gke_environment.asyncio.sleep",
+        _fake_sleep,
+    )
+    monkeypatch.setattr(
+        "skillevaluator.tier3.harbor.gke_environment.stream",
+        lambda fn, *args, **kwargs: fn(*args, **kwargs),
+    )
+
+    def _warden_missing_pod_exec(*_args: object, **_kwargs: object) -> object:
+        warden_err = RuntimeError(
+            'Handshake status 400 Bad Request: {"message":"Cannot connect to pod default/pod-under-test, not found."}'
+        )
+        raise AttributeError("'NoneType' object has no attribute 'decode'") from warden_err
+
+    env_obj = make_gke_env(
+        namespace="default",
+        fake_api=SimpleNamespace(
+            connect_get_namespaced_pod_exec=_warden_missing_pod_exec,
+            read_namespaced_pod=lambda **_kw: SimpleNamespace(
+                status=SimpleNamespace(phase="Running", container_statuses=[])
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match=r"no longer exists|not found"):
+        asyncio.run(env_obj._wait_for_container_exec_ready(max_attempts=60))
+
+    assert sleep_calls == []

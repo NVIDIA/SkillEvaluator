@@ -1990,3 +1990,49 @@ def test_harbor_subprocess_environment_forwards_adc_vars_only_to_non_local_modes
     )
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in local_env
     assert "CLOUDSDK_CONFIG" not in local_env
+
+
+def test_harbor_subprocess_environment_forwards_gke_probe_and_autopilot_vars(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Forward SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE and SKILLEVALUATOR_GKE_AUTOPILOT in gke mode and allow --ek autopilot."""
+    from skillevaluator.tier3.evals_config import _GKE_INFRASTRUCTURE_KWARGS
+
+    monkeypatch.setenv("SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE", "us-docker.pkg.dev/my-proj/repo/python:3.12-alpine")
+    monkeypatch.setenv("SKILLEVALUATOR_GKE_AUTOPILOT", "true")
+
+    provider = _provider("openai")
+    provider_env = runner._provider_environment(provider)
+
+    gke_env = runner._harbor_subprocess_environment(
+        env_mode="gke",
+        provider=provider,
+        configured_runtime_env={},
+        provider_env=provider_env,
+        agent="opencode",
+        agent_model="openai/test-model",
+    )
+    assert gke_env.get("SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE") == "us-docker.pkg.dev/my-proj/repo/python:3.12-alpine"
+    assert gke_env.get("SKILLEVALUATOR_GKE_AUTOPILOT") == "true"
+
+    docker_env = runner._harbor_subprocess_environment(
+        env_mode="docker",
+        provider=provider,
+        configured_runtime_env={},
+        provider_env=provider_env,
+        agent="opencode",
+        agent_model="openai/test-model",
+    )
+    assert "SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE" not in docker_env
+    assert "SKILLEVALUATOR_GKE_AUTOPILOT" not in docker_env
+
+    assert "autopilot" in _GKE_INFRASTRUCTURE_KWARGS
+    cmd = runner.build_harbor_run_command(
+        dataset_path=tmp_path / "dataset",
+        agent="opencode",
+        job_name="gke-job",
+        env_mode="gke",
+        environment_kwargs={"autopilot": "true", "cluster_name": "c"},
+    )
+    assert "autopilot=true" in cmd

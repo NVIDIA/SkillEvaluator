@@ -540,6 +540,48 @@ def test_progress_detail_strips_osc_title_and_hyperlink_payloads() -> None:
     assert rendered == "safe text click done"
 
 
+@pytest.mark.parametrize(
+    ("raw_text", "expected_text"),
+    [
+        (
+            "Zero Skill Execution in gcd-001-explicit-auth: The agent solved the task without invoking the skill.",
+            "Zero Skill Execution in gcd-001-explicit-auth: The agent solved the task without invoking the skill.",
+        ),
+        (
+            "3. Align Expected Skill for gcd-001-explicit-auth: Update the expected_skill attribute.",
+            "3. Align Expected Skill for gcd-001-explicit-auth: Update the expected_skill attribute.",
+        ),
+        (
+            "claude-code with-skill oauth-token: Trial completed with warnings",
+            "claude-code with-skill oauth-token: Trial completed with warnings",
+        ),
+        (
+            "auth: super-secret-value",
+            "auth: <redacted>",
+        ),
+        (
+            "--api-key: super-secret-value",
+            "--api-key: <redacted>",
+        ),
+        (
+            "gcd-001-explicit-auth=super-secret-value",
+            "gcd-001-explicit-auth=<redacted>",
+        ),
+        (
+            "ANTHROPIC_AUTH_TOKEN=super-secret-value",
+            "ANTHROPIC_AUTH_TOKEN=<redacted>",
+        ),
+    ],
+)
+def test_redact_progress_detail_preserves_hyphenated_identifiers_while_redacting_assignments(
+    raw_text: str,
+    expected_text: str,
+) -> None:
+    """Preserve prose after hyphenated case IDs while redacting colon and equals secret assignments."""
+    progress = _progress_module()
+    assert progress.redact_progress_detail(raw_text) == expected_text
+
+
 def test_plain_reporter_redacts_secrets_from_plan_values() -> None:
     progress = _progress_module()
     output = io.StringIO()
@@ -1899,7 +1941,7 @@ def test_default_task_staging_failure_cleans_transient_artifacts(
             "model": "gpt-5",
             "status": "degraded",
             "detail": "model catalog access does not verify runtime credentials for this endpoint",
-        }
+        },
     ]
     persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
     assert persisted["run_config"] == result["run_config"]

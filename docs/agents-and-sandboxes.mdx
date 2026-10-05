@@ -195,6 +195,35 @@ Environment rules — size limits, auto-generated fallbacks, and sidecar
 containers — are part of the `evals/` contract in
 [Eval Datasets](eval-datasets.mdx).
 
+## GKE mode
+
+When running with `--env-mode gke`, SkillEvaluator enforces least-privilege pod
+identity by default unless you explicitly opt in for trusted skills via
+`SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1` or `--ek allow_workload_identity=1`:
+
+- **ServiceAccount and metadata isolation**: Pods run with
+  `automountServiceAccountToken: false`, `hostNetwork: false`,
+  `GCE_METADATA_HOST=127.0.0.1:1`, and a pod-scoped egress `NetworkPolicy`
+  (`skillevaluator-block-gce-metadata`) that blocks HTTP egress to
+  `169.254.169.254/32` and `169.254.169.252/32` while preserving UDP/TCP port 53 DNS.
+  Kubernetes ServiceAccounts annotated with `iam.gke.io/gcp-service-account` or
+  `iam.gke.io/return-principal-id-as-email=true` are rejected.
+- **Trusted init and companion metadata probes**: Single-container evaluation
+  pods include a trusted init container (`skillevaluator-metadata-probe-init`)
+  that verifies metadata endpoints are unreachable *before* the `main` task
+  container starts, plus a companion container (`skillevaluator-metadata-probe`)
+  that re-verifies isolation before task upload. Set
+  `SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE` when your cluster requires pulling
+  the probe image (`python:3.12-slim` by default) from a private Artifact Registry mirror.
+- **GKE Autopilot ephemeral storage**: On GKE Autopilot (auto-detected via node
+  inspection or `gcloud`, or set explicitly with `SKILLEVALUATOR_GKE_AUTOPILOT`
+  / `--ek autopilot=<bool>`), general-purpose pods have a `10Gi` (`10240Mi`)
+  cumulative ephemeral-storage ceiling. When a non-GPU/TPU `main` container
+  requests `10Gi`, SkillEvaluator caps `main` to `10176Mi` so `main` (`10176Mi`) +
+  `skillevaluator-metadata-probe` (`64Mi`) equals `10240Mi`. Standard GKE
+  clusters, GPU/TPU pods, and explicit storage requests above `10Gi` are not
+  lowered.
+
 ## Local mode
 
 <Warning>

@@ -59,6 +59,7 @@ _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _GKE_INFRASTRUCTURE_KWARGS: frozenset[str] = frozenset(
     {
         "allow_workload_identity",
+        "autopilot",
         "cluster_name",
         "region",
         "namespace",

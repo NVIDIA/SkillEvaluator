@@ -10,6 +10,8 @@ import contextlib
 import os
 import re
 import shlex
+import shutil
+import subprocess
 import urllib.parse
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
@@ -29,6 +31,7 @@ if TYPE_CHECKING:
     from harbor.environments.base import ExecResult
 
 GKE_ALLOW_WORKLOAD_IDENTITY_ENV = "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY"
+GKE_AUTOPILOT_ENV = "SKILLEVALUATOR_GKE_AUTOPILOT"
 GKE_BOUND_SERVICE_ACCOUNT_ERROR_TEMPLATE = (
     "GKE namespace '{namespace}' ServiceAccount '{service_account}' is bound to GCP service account "
     "'{gcp_sa}' via Workload Identity, which exposes pod-level cloud credentials to evaluated skill "
@@ -50,6 +53,7 @@ GKE_METADATA_ISOLATION_LABEL_KEY = "skillevaluator.nvidia.com/metadata-isolated"
 GKE_METADATA_ISOLATION_LABEL_VALUE = "true"
 GKE_METADATA_NETWORK_POLICY_NAME = "skillevaluator-block-gce-metadata"
 GKE_METADATA_PROBE_CONTAINER_NAME = "skillevaluator-metadata-probe"
+GKE_METADATA_PROBE_INIT_CONTAINER_NAME = "skillevaluator-metadata-probe-init"
 GKE_METADATA_PROBE_IMAGE_ENV = "SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE"
 GKE_SERVICE_ACCOUNT_INSPECTION_ERROR_TEMPLATE = (
     "Failed to inspect GKE namespace '{namespace}' ServiceAccount '{service_account}' for Workload Identity "
@@ -58,6 +62,8 @@ GKE_SERVICE_ACCOUNT_INSPECTION_ERROR_TEMPLATE = (
 )
 SECURE_GKE_ENV_IMPORT_PATH = "skillevaluator.tier3.harbor.gke_environment:SkillEvaluatorGKEEnvironment"
 
+_ACCELERATOR_RESOURCE_PREFIXES = ("nvidia.com/gpu", "google.com/tpu")
+_AUTOPILOT_DETECTION_CACHE: dict[tuple[str, str], bool] = {}
 _AUTOPILOT_MAX_EPHEMERAL_STORAGE_MIB = 10240
 _BLOCKED_GCE_METADATA_CIDRS = ("169.254.169.252/32", "169.254.169.254/32")
 _BLOCKED_GCE_METADATA_HOST = "127.0.0.1:1"
@@ -95,6 +101,9 @@ _TRANSIENT_KUBELET_EXEC_ERROR_SNIPPETS = (
     "error sending request:",
     "No agent available",
     "unable to upgrade connection",
+)
+_WGET_EXPECTED_FAILURE_PATTERN = (
+    "Connection refused|timed out|can.t connect to remote host|Network is unreachable|No route to host|bad address"
 )
 
 
@@ -139,12 +148,14 @@ def _build_in_pod_metadata_isolation_probe_script(
         "done; exit 0; "
         "elif command -v wget >/dev/null 2>&1; then "
         f"for u in {sh_urls}; do "
-        f'out=$(wget --no-proxy -S -T {_METADATA_PROBE_HTTP_TIMEOUT_SEC} --header="Metadata-Flavor: Google" '
+        f'out=$(wget -S -T {_METADATA_PROBE_HTTP_TIMEOUT_SEC} --header="Metadata-Flavor: Google" '
         '-O /dev/null "$u" 2>&1 || true); '
         'if [ -z "$out" ]; then '
         f"exit {_METADATA_PROBE_MISSING_TOOL_EXIT_CODE}; fi; "
         'if printf "%s\\n" "$out" | grep -q "HTTP/"; then '
         f"exit {_METADATA_REACHABLE_EXIT_CODE}; fi; "
+        f'if ! printf "%s\\n" "$out" | grep -Eiq "{_WGET_EXPECTED_FAILURE_PATTERN}"; then '
+        f"exit {_METADATA_PROBE_MISSING_TOOL_EXIT_CODE}; fi; "
         "done; exit 0; "
         f"else exit {_METADATA_PROBE_MISSING_TOOL_EXIT_CODE}; fi"
     )
@@ -177,10 +188,24 @@ def _parse_storage_mib(quantity: object) -> int | None:
     return amount
 
 
+def _has_accelerator_resource(resources: Any) -> bool:
+    """Return True if a V1ResourceRequirements requests or limits GPUs or TPUs."""
+    for attr_name in ("requests", "limits"):
+        mapping = getattr(resources, attr_name, None)
+        if not isinstance(mapping, dict):
+            continue
+        for key, val in mapping.items():
+            key_str = str(key).strip()
+            val_str = str(val or "").strip()
+            if val_str and val_str != "0" and any(key_str.startswith(p) for p in _ACCELERATOR_RESOURCE_PREFIXES):
+                return True
+    return False
+
+
 def _adjust_autopilot_ephemeral_storage_for_probe(main_container: Any) -> None:
-    """Cap main container ephemeral-storage so adding the probe container stays within Autopilot's 10Gi ceiling."""
+    """Cap main container 10Gi ephemeral-storage so adding the 64Mi probe container stays within Autopilot's 10Gi ceiling."""
     resources = getattr(main_container, "resources", None)
-    if resources is None:
+    if resources is None or _has_accelerator_resource(resources):
         return
     max_main_mib = _AUTOPILOT_MAX_EPHEMERAL_STORAGE_MIB - _PROBE_CONTAINER_EPHEMERAL_STORAGE_MIB
     for attr_name in ("requests", "limits"):
@@ -188,8 +213,20 @@ def _adjust_autopilot_ephemeral_storage_for_probe(main_container: Any) -> None:
         if not isinstance(mapping, dict):
             continue
         current_mib = _parse_storage_mib(mapping.get("ephemeral-storage"))
-        if current_mib is not None and current_mib > max_main_mib:
+        if current_mib is not None and max_main_mib < current_mib <= _AUTOPILOT_MAX_EPHEMERAL_STORAGE_MIB:
             mapping["ephemeral-storage"] = f"{max_main_mib}Mi"
+
+
+def _build_metadata_probe_init_container(env: Mapping[str, str] | None = None) -> k8s_client.V1Container:
+    """Build the trusted init container that verifies GKE metadata isolation before any application container starts."""
+    return k8s_client.V1Container(
+        name=GKE_METADATA_PROBE_INIT_CONTAINER_NAME,
+        image=_get_metadata_probe_image(env),
+        command=["sh", "-c", _IN_POD_METADATA_ISOLATION_PROBE_SCRIPT],
+        env=[k8s_client.V1EnvVar(name="GCE_METADATA_HOST", value=_BLOCKED_GCE_METADATA_HOST)],
+        resources=None,
+        volume_mounts=[],
+    )
 
 
 def _build_metadata_probe_container(env: Mapping[str, str] | None = None) -> k8s_client.V1Container:
@@ -215,6 +252,26 @@ def _build_metadata_probe_container(env: Mapping[str, str] | None = None) -> k8s
     )
 
 
+def _extract_pod_missing_exec_detail(exc: BaseException) -> str | None:
+    """Return a diagnostic message if an exception chain indicates the target pod no longer exists."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, Exception) and _is_k8s_http_status(cur, 404, "not found"):
+            return str(cur)
+        text = str(cur)
+        lowered = text.lower()
+        if "cannot connect to pod" in lowered and "not found" in lowered:
+            return text
+        if 'pods "' in lowered and "not found" in lowered:
+            return text
+        if "pod " in lowered and "no longer exists" in lowered:
+            return text
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
 def _ensure_default_exec_container_routing(api: Any, *, default_container: str = "main") -> None:
     """Ensure untargeted connect_get_namespaced_pod_exec calls default to the main task container."""
     orig = getattr(api, "connect_get_namespaced_pod_exec", None)
@@ -224,7 +281,17 @@ def _ensure_default_exec_container_routing(api: Any, *, default_container: str =
     def _wrapped_exec(*args: Any, **kwargs: Any) -> Any:
         if kwargs.get("container") is None:
             kwargs["container"] = default_container
-        return orig(*args, **kwargs)
+        try:
+            return orig(*args, **kwargs)
+        except Exception as exc:
+            missing_detail = _extract_pod_missing_exec_detail(exc)
+            if missing_detail is not None:
+                pod_name = str(args[0] if len(args) > 0 else kwargs.get("name", "unknown"))
+                namespace = str(args[1] if len(args) > 1 else kwargs.get("namespace", "default"))
+                raise RuntimeError(
+                    f"Pod {pod_name} in namespace {namespace} no longer exists (deleted or preempted): {missing_detail}"
+                ) from exc
+            raise
 
     _wrapped_exec._skillevaluator_default_container_wrapped = True  # type: ignore[attr-defined]
     _wrapped_exec.__self__ = getattr(orig, "__self__", api)  # type: ignore[attr-defined]
@@ -232,13 +299,23 @@ def _ensure_default_exec_container_routing(api: Any, *, default_container: str =
         api.connect_get_namespaced_pod_exec = _wrapped_exec
 
 
-def coerce_gke_opt_in_flag(value: object) -> bool:
-    """Return True when an opt-in flag value represents an explicit truthy setting."""
+def parse_optional_bool_flag(value: object) -> bool | None:
+    """Parse an optional boolean setting (1/true/yes vs 0/false/no), returning None when unset."""
     if isinstance(value, bool):
         return value
     if value is None:
+        return None
+    cleaned = str(value).strip().lower()
+    if cleaned in {"1", "true", "yes"}:
+        return True
+    if cleaned in {"0", "false", "no"}:
         return False
-    return str(value).strip().lower() in {"1", "true", "yes"}
+    return None
+
+
+def coerce_gke_opt_in_flag(value: object) -> bool:
+    """Return True when an opt-in flag value represents an explicit truthy setting."""
+    return bool(parse_optional_bool_flag(value))
 
 
 def is_gke_workload_identity_allowed(
@@ -602,6 +679,21 @@ def ensure_gke_metadata_network_policy(
     _validate_existing_metadata_network_policy(reread, namespace=namespace)
 
 
+def _is_autopilot_node(node: Any) -> bool:
+    """Return True if a Kubernetes V1Node exhibits GKE Autopilot naming or label conventions."""
+    metadata = getattr(node, "metadata", None)
+    name = str(getattr(metadata, "name", "") or "").strip()
+    if name.startswith("gk3-"):
+        return True
+    labels = getattr(metadata, "labels", None)
+    if isinstance(labels, Mapping):
+        if any(str(k).startswith("autopilot.gke.io/") for k in labels):
+            return True
+        if parse_optional_bool_flag(labels.get("cloud.google.com/gke-autopilot")) is True:
+            return True
+    return False
+
+
 class SkillEvaluatorGKEEnvironment(GKEEnvironment):
     """Enforce least-privilege pod identity, exec readiness, and ADC refresh for GKE evaluation pods."""
 
@@ -609,12 +701,15 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
         self,
         *args: Any,
         allow_workload_identity: bool | str | None = None,
+        autopilot: bool | str | None = None,
         **kwargs: Any,
     ) -> None:
-        """Initialize the GKE environment while recording Workload Identity opt-in state."""
+        """Initialize the GKE environment while recording Workload Identity and Autopilot settings."""
         self._allow_workload_identity = (
             coerce_gke_opt_in_flag(allow_workload_identity) or is_gke_workload_identity_allowed()
         )
+        self._autopilot = parse_optional_bool_flag(autopilot)
+        self._detected_autopilot: bool | None = None
         super().__init__(*args, **kwargs)
 
     def _is_workload_identity_enabled(self) -> bool:
@@ -623,6 +718,69 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
             return True
         extra_kwargs = getattr(self, "_kwargs", None)
         return is_gke_workload_identity_allowed(extra_kwargs if isinstance(extra_kwargs, Mapping) else None)
+
+    def _is_autopilot_cluster(self, api: Any = None) -> bool:
+        """Return True when targeting a GKE Autopilot cluster via explicit override, node inspection, or gcloud."""
+        explicit = parse_optional_bool_flag(getattr(self, "_autopilot", None))
+        if explicit is not None:
+            return explicit
+        env_override = parse_optional_bool_flag(os.environ.get(GKE_AUTOPILOT_ENV))
+        if env_override is not None:
+            return env_override
+        extra_kwargs = getattr(self, "_kwargs", None)
+        if isinstance(extra_kwargs, Mapping):
+            kw_override = parse_optional_bool_flag(extra_kwargs.get("autopilot"))
+            if kw_override is not None:
+                return kw_override
+        cached = getattr(self, "_detected_autopilot", None)
+        if isinstance(cached, bool):
+            return cached
+
+        list_node = getattr(api, "list_node", None)
+        if callable(list_node):
+            with contextlib.suppress(Exception):
+                node_list = _call_k8s_with_timeout(
+                    list_node,
+                    request_timeout=_DEFAULT_K8S_REQUEST_TIMEOUT_SEC,
+                    limit=1,
+                )
+                items = getattr(node_list, "items", None) or []
+                if items:
+                    is_ap = any(_is_autopilot_node(node) for node in items)
+                    self._detected_autopilot = is_ap
+                    return is_ap
+
+        cluster_name = str(getattr(self, "cluster_name", "") or "").strip()
+        region = str(getattr(self, "region", "") or "").strip()
+        if cluster_name and region:
+            cache_key = (cluster_name, region)
+            if cache_key in _AUTOPILOT_DETECTION_CACHE:
+                is_ap = _AUTOPILOT_DETECTION_CACHE[cache_key]
+                self._detected_autopilot = is_ap
+                return is_ap
+            if shutil.which("gcloud"):
+                with contextlib.suppress(Exception):
+                    proc = subprocess.run(
+                        [
+                            "gcloud",
+                            "container",
+                            "clusters",
+                            "describe",
+                            cluster_name,
+                            f"--location={region}",
+                            "--format=value(autopilot.enabled)",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        check=False,
+                    )
+                    if proc.returncode == 0 and proc.stdout.strip():
+                        is_ap = proc.stdout.strip().lower() == "true"
+                        _AUTOPILOT_DETECTION_CACHE[cache_key] = is_ap
+                        self._detected_autopilot = is_ap
+                        return is_ap
+        return False
 
     async def _create_pod(self, pod: k8s_client.V1Pod) -> None:
         """Disable service account token automount, block metadata server, and reject GCP-bound KSAs unless opted in."""
@@ -654,16 +812,10 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
                     if not any(getattr(item, "name", None) == "GCE_METADATA_HOST" for item in env_list):
                         env_list.append(k8s_client.V1EnvVar(name="GCE_METADATA_HOST", value=_BLOCKED_GCE_METADATA_HOST))
                         container.env = env_list
-                if not compose_mode and not any(
-                    getattr(c, "name", None) == GKE_METADATA_PROBE_CONTAINER_NAME for c in containers
-                ):
-                    for container in containers:
-                        if getattr(container, "name", None) == "main":
-                            _adjust_autopilot_ephemeral_storage_for_probe(container)
-                    containers.append(_build_metadata_probe_container())
-                    pod.spec.containers = containers
             else:
                 sa_name = "default"
+                containers = []
+
             persistent = getattr(self, "_persistent_env", None)
             if isinstance(persistent, dict):
                 persistent.setdefault("GCE_METADATA_HOST", _BLOCKED_GCE_METADATA_HOST)
@@ -678,6 +830,20 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
                 )
             if not compose_mode:
                 _ensure_default_exec_container_routing(api, default_container="main")
+                if getattr(pod, "spec", None) is not None:
+                    init_containers = list(getattr(pod.spec, "init_containers", None) or [])
+                    if not any(
+                        getattr(c, "name", None) == GKE_METADATA_PROBE_INIT_CONTAINER_NAME for c in init_containers
+                    ):
+                        init_containers.append(_build_metadata_probe_init_container())
+                        pod.spec.init_containers = init_containers
+                    if not any(getattr(c, "name", None) == GKE_METADATA_PROBE_CONTAINER_NAME for c in containers):
+                        if await asyncio.to_thread(self._is_autopilot_cluster, api):
+                            for container in containers:
+                                if getattr(container, "name", None) == "main":
+                                    _adjust_autopilot_ephemeral_storage_for_probe(container)
+                        containers.append(_build_metadata_probe_container())
+                        pod.spec.containers = containers
             bound_gcp_sa = await asyncio.to_thread(
                 inspect_bound_gcp_service_account,
                 api,
@@ -715,6 +881,88 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
                     name=self.pod_name,
                     namespace=self.namespace,
                 )
+
+    async def _wait_for_pod_ready(self, timeout_sec: int = 300) -> None:
+        """Wait for pod readiness while failing fast if the metadata isolation init container fails."""
+        namespace = getattr(self, "namespace", "default")
+        max_polls = max(1, timeout_sec // 3)
+        for attempt in range(max_polls):
+            pod = await asyncio.to_thread(
+                self._api.read_namespaced_pod,
+                name=self.pod_name,
+                namespace=namespace,
+            )
+            status = getattr(pod, "status", None)
+            if not self._is_workload_identity_enabled():
+                for init_cs in getattr(status, "init_container_statuses", None) or []:
+                    if getattr(init_cs, "name", None) != GKE_METADATA_PROBE_INIT_CONTAINER_NAME:
+                        continue
+                    state = getattr(init_cs, "state", None)
+                    terminated = getattr(state, "terminated", None)
+                    if terminated is not None:
+                        exit_code = getattr(terminated, "exit_code", None)
+                        if exit_code not in (None, 0):
+                            await self._delete_unisolated_pod_best_effort()
+                            if exit_code == _METADATA_REACHABLE_EXIT_CODE:
+                                detail = (
+                                    "in-pod init probe reached the GKE/GCE metadata server "
+                                    "(169.254.169.254 or 169.254.169.252:988) before starting main container "
+                                    "despite NetworkPolicy; cluster CNI may not enforce egress NetworkPolicy"
+                                )
+                            else:
+                                detail = (
+                                    f"in-pod metadata isolation init probe exited with status {exit_code} "
+                                    "(missing python/curl/wget or probe error)"
+                                )
+                            raise RuntimeError(
+                                GKE_METADATA_ISOLATION_ERROR_TEMPLATE.format(
+                                    namespace=namespace,
+                                    detail=detail,
+                                )
+                            )
+                    waiting = getattr(state, "waiting", None)
+                    if waiting is not None and getattr(waiting, "reason", None) in (
+                        "ImagePullBackOff",
+                        "ErrImagePull",
+                        "InvalidImageName",
+                    ):
+                        await self._delete_unisolated_pod_best_effort()
+                        wait_msg = getattr(waiting, "message", None) or getattr(waiting, "reason", "ImagePullBackOff")
+                        raise RuntimeError(
+                            GKE_METADATA_ISOLATION_ERROR_TEMPLATE.format(
+                                namespace=namespace,
+                                detail=f"failed to pull metadata probe image: {wait_msg}",
+                            )
+                        )
+
+            phase = getattr(status, "phase", None)
+            if phase == "Running":
+                statuses = getattr(status, "container_statuses", None) or []
+                if statuses and all(getattr(cs, "ready", False) for cs in statuses):
+                    logger = getattr(self, "logger", None)
+                    if logger is not None:
+                        logger.debug("Pod %s is ready (attempt %d)", self.pod_name, attempt + 1)
+                    return
+            elif phase in ("Failed", "Succeeded"):
+                reason = getattr(status, "reason", None) or "unknown"
+                msg = getattr(status, "message", None) or ""
+                raise RuntimeError(f"Pod {self.pod_name} entered {phase} state: {reason} {msg}".strip())
+
+            for cs in getattr(status, "container_statuses", None) or []:
+                waiting = getattr(getattr(cs, "state", None), "waiting", None)
+                if waiting is not None and getattr(waiting, "reason", None) in (
+                    "ImagePullBackOff",
+                    "ErrImagePull",
+                    "CrashLoopBackOff",
+                ):
+                    raise RuntimeError(
+                        f"Container {getattr(cs, 'name', 'unknown')} in pod {self.pod_name}: "
+                        f"{waiting.reason} - {getattr(waiting, 'message', '')}"
+                    )
+
+            await asyncio.sleep(3)
+
+        raise TimeoutError(f"Pod {self.pod_name} did not become ready within {timeout_sec}s")
 
     async def _exec_pod_stream_command(
         self,
@@ -792,9 +1040,43 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
                 )
             )
 
+    async def _check_pod_terminated(self) -> None:
+        """Raise immediately if the pod was deleted/preempted or is in a terminal state."""
+        namespace = getattr(self, "namespace", "default")
+        try:
+            pod = await asyncio.to_thread(
+                self._api.read_namespaced_pod,
+                name=self.pod_name,
+                namespace=namespace,
+            )
+        except Exception as exc:
+            if _is_k8s_http_status(exc, 404, "not found"):
+                raise RuntimeError(
+                    f"Pod {self.pod_name} in namespace {namespace} no longer exists (deleted or preempted) "
+                    "and cannot accept exec."
+                ) from exc
+            return
+
+        status = getattr(pod, "status", None)
+        phase = getattr(status, "phase", None)
+        if phase in ("Failed", "Succeeded"):
+            raise RuntimeError(f"Pod {self.pod_name} is in terminal phase '{phase}' and cannot accept exec.")
+
+        for cs in getattr(status, "container_statuses", None) or []:
+            terminated = getattr(getattr(cs, "state", None), "terminated", None) or getattr(
+                getattr(cs, "last_state", None), "terminated", None
+            )
+            if terminated is not None:
+                reason = getattr(terminated, "reason", None) or ""
+                exit_code = getattr(terminated, "exit_code", None)
+                raise RuntimeError(
+                    f"Container '{getattr(cs, 'name', 'unknown')}' in pod {self.pod_name} has terminated "
+                    f"(reason={reason!r}, exit_code={exit_code}). Cannot exec into dead container."
+                )
+
     async def _wait_for_container_exec_ready(self, max_attempts: int = 60) -> None:
         """Wait until the GKE kubelet accepts exec streams and verify metadata server isolation."""
-        if not self._is_workload_identity_enabled() and not getattr(self, "_compose_mode", False):
+        if not getattr(self, "_compose_mode", False):
             api = getattr(self, "_api", None)
             if api is not None:
                 _ensure_default_exec_container_routing(api, default_container="main")
@@ -810,6 +1092,8 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
                     raise RuntimeError(f"Container readiness probe returned exit code {rc}")
                 break
             except Exception as exc:
+                if _extract_pod_missing_exec_detail(exc) is not None:
+                    raise
                 if attempt >= max_attempts - 1:
                     raise RuntimeError(f"Container not ready for exec after {max_attempts} attempts: {exc}") from exc
                 await asyncio.sleep(3)

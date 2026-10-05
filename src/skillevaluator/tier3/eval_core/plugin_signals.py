@@ -951,6 +951,27 @@ class _Ident:
     def persisted_label(self) -> str:
         return self.label if self.persist_name else f"{_IDENTITY_PREFIX[self.kind or '']}:{_NON_NAME}"
 
+    @cached_property
+    def typed_names(self) -> tuple[str, ...]:
+        """What a ``<Type>:<pattern>`` ref of this identity's type is matched against."""
+        if self.kind == COMPONENT_MCP:
+            server = self.server or ""
+            names = [server.casefold(), _norm_server(server)]
+            if self.tool:
+                names += [f"{server}/{self.tool}".casefold(), f"{server}__{self.tool}".casefold()]
+            return _match_names(names)
+        return _match_names(_name_candidates(self.name))
+
+    @cached_property
+    def untyped_names(self) -> tuple[str, ...]:
+        """What any other ref is matched against: the label, the raw tool name, and the component name."""
+        names = [self.label, self.fn]
+        if self.kind is not None:
+            names.extend(_name_candidates(self.name))
+        if self.kind == COMPONENT_COMMAND and self.name:
+            names.append(f"/{self.name}")
+        return _match_names(names)
+
 
 class _ShellPaths(NamedTuple):
     reads: list[str]
@@ -1784,7 +1805,12 @@ def _prompt_texts(trajectory: Mapping[str, Any]) -> list[str]:
 class _Ref:
     raw: str
     kind: str | None
-    pattern: str
+    pattern: str  # a casefolded ``fnmatch`` glob
+
+    @cached_property
+    def glob(self) -> re.Pattern[str]:
+        """The compiled glob, as :func:`fnmatch.fnmatchcase` compiles it."""
+        return re.compile(fnmatch.translate(self.pattern))
 
 
 def _parse_ref(raw: str) -> _Ref:
@@ -1797,8 +1823,9 @@ def _parse_ref(raw: str) -> _Ref:
     return _Ref(raw=text, kind=None, pattern=text.casefold())
 
 
-def _glob(value: str, pattern: str) -> bool:
-    return bool(value) and fnmatch.fnmatchcase(value.casefold(), pattern)
+def _match_names(values: Iterable[str]) -> tuple[str, ...]:
+    """The non-empty ``values``, casefolded: refs match case-insensitively."""
+    return tuple(value.casefold() for value in values if value)
 
 
 def _name_candidates(name: str) -> list[str]:
@@ -1807,22 +1834,13 @@ def _name_candidates(name: str) -> list[str]:
 
 
 def _ref_matches(ref: _Ref, ident: _Ident) -> bool:
-    if ref.kind is not None:
-        if ident.kind != ref.kind:
-            return False
-        if ident.kind == COMPONENT_MCP:
-            server = ident.server or ""
-            candidates = [server.casefold(), _norm_server(server)]
-            if ident.tool:
-                candidates += [f"{server}/{ident.tool}".casefold(), f"{server}__{ident.tool}".casefold()]
-            return any(_glob(candidate, ref.pattern) for candidate in candidates)
-        return any(_glob(candidate, ref.pattern) for candidate in _name_candidates(ident.name))
-    candidates = [ident.label, ident.fn]
-    if ident.kind is not None:
-        candidates.extend(_name_candidates(ident.name))
-    if ident.kind == COMPONENT_COMMAND and ident.name:
-        candidates.append(f"/{ident.name}")
-    return any(_glob(candidate, ref.pattern) for candidate in candidates)
+    if ref.kind is None:
+        names = ident.untyped_names
+    elif ref.kind == ident.kind:
+        names = ident.typed_names
+    else:
+        return False
+    return any(ref.glob.match(name) for name in names)
 
 
 def _refs(values: Sequence[str]) -> list[_Ref]:

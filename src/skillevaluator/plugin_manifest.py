@@ -15,7 +15,7 @@ case-insensitive filesystem, such as the macOS default, a client that opens
 ``.codex-plugin/plugin.json`` reads ``.Codex-Plugin/plugin.json``, so that
 spelling is the client's manifest too. A case variant is used only when the
 exact spelling is absent, and it is flagged (see
-:attr:`PluginManifestCandidate.case_variant`).
+:attr:`PluginManifestFile.case_variant`).
 """
 
 from __future__ import annotations
@@ -175,8 +175,13 @@ def _read_lenient_manifest(secure_file: SecureFile, declared_path: Path, *, max_
 
 
 @dataclass(frozen=True)
-class PluginManifestCandidate:
-    """An additional supported manifest found beside the selected one."""
+class PluginManifestFile:
+    """A supported manifest, kept as the inode that no-follow discovery found.
+
+    The base of :class:`PluginManifestLocation` (the selected manifest) and
+    :class:`PluginManifestCandidate` (an additional one); every read goes
+    through the anchored plugin root descriptor and checks that inode.
+    """
 
     declared_path: Path
     manifest_type: str
@@ -211,11 +216,13 @@ class PluginManifestCandidate:
 
         The bounded strict read comes first. A client JSON manifest that is over
         the 1 MiB read bound or not UTF-8 is then read leniently, as Tier 1 does
-        (``plugin_manifest_additional_unreadable``), because the client that
-        loads it shares neither limit: its hooks and MCP servers must not
-        disappear from Tier 3 coverage or the dependency audit. A link,
-        special file, or changed inode is never read (it raises, and Tier 1
-        fails it closed); anything that still does not parse gives ``None``.
+        (``manifest_unreadable`` for the selected manifest,
+        ``plugin_manifest_additional_unreadable`` for an additional one),
+        because the client that loads it shares neither limit: its hooks and
+        MCP servers must not disappear from Tier 3 coverage or the dependency
+        audit. A link, special file, or changed inode is never read (it raises,
+        and Tier 1 fails it closed); anything that still does not parse gives
+        ``None``.
         """
         syntax = manifest_syntax(self.manifest_type)
         try:
@@ -235,13 +242,15 @@ class PluginManifestCandidate:
 
 
 @dataclass(frozen=True)
-class PluginManifestLocation:
-    """A manifest identity retained from no-follow discovery through reads."""
+class PluginManifestCandidate(PluginManifestFile):
+    """An additional supported manifest found beside the selected one."""
 
-    declared_path: Path
+
+@dataclass(frozen=True)
+class PluginManifestLocation(PluginManifestFile):
+    """The selected manifest, retained from no-follow discovery through reads."""
+
     root: Path
-    manifest_type: str
-    secure_file: SecureFile
     # Other supported manifests in the same root, in precedence order.
     additional: tuple[PluginManifestCandidate, ...] = ()
 
@@ -251,27 +260,9 @@ class PluginManifestLocation:
         return self.declared_path
 
     @property
-    def manifest_filename(self) -> str:
-        """Root-relative POSIX path of the selected manifest."""
-        return self.secure_file.relative_path.as_posix()
-
-    @property
     def contained(self) -> bool:
         """Whether the selected manifest describes a contained plugin."""
         return self.manifest_type in PLUGIN_CONTAINED_MANIFEST_TYPES
-
-    @property
-    def case_variant(self) -> bool:
-        """Whether the file is spelled differently from the supported path (only case-insensitive clients load it)."""
-        return self.secure_file.relative_path not in _MANIFEST_TYPES_BY_PATH
-
-    def read_text(self, *, encoding: str = "utf-8", max_bytes: int = CONTENT_DEDUP_MAX_FILE_BYTES) -> str:
-        """Read the discovered inode through the anchored plugin root descriptor."""
-        return _read_secure_manifest(self.secure_file, self.declared_path, encoding=encoding, max_bytes=max_bytes)
-
-    def read_lenient_text(self, *, max_bytes: int = CONTENT_DEDUP_MAX_TOTAL_BYTES) -> str:
-        """Read the discovered inode leniently, like :meth:`PluginManifestCandidate.read_lenient_text`."""
-        return _read_lenient_manifest(self.secure_file, self.declared_path, max_bytes=max_bytes)
 
 
 _AGENT_PLUGINS_RELATIVE = Path(PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE)

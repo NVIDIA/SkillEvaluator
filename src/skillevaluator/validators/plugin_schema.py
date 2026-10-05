@@ -70,6 +70,7 @@ from skillevaluator.plugin_formats import (
 )
 from skillevaluator.plugin_manifest import (
     PluginManifestCandidate,
+    PluginManifestFile,
     PluginManifestLocation,
     PluginManifestPathError,
     canonical_manifest_relative,
@@ -980,7 +981,7 @@ class PluginSchemaValidator(ValidatorBase):
 
     @staticmethod
     def _parse_unreadable(
-        manifest: PluginManifestLocation | PluginManifestCandidate,
+        manifest: PluginManifestFile,
         problem: str,
         result: ValidationResult,
         *,

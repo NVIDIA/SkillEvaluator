@@ -441,3 +441,33 @@ def test_staged_root_mcp_json_still_fails_closed(tmp_path: Path) -> None:
     (bundle / ".mcp.json").write_text("{not json", encoding="utf-8")
     with pytest.raises(ValueError, match="mcp_config_file_invalid"):
         _prepare(bundle, tmp_path)
+
+
+def test_bundle_manifest_url_servers_are_probe_targets_with_their_own_config(tmp_path: Path) -> None:
+    """Probe targets come from the runnable servers and each server's own declared transport and headers."""
+    root = _bundle_plugin(
+        tmp_path / "b",
+        "mcp:\n"
+        "  - name: docs\n"
+        "    url: https://docs.example.com/mcp\n"
+        "    type: sse\n"
+        "    headers:\n"
+        "      Authorization: Bearer ${DOCS_TOKEN}\n"
+        "  - name: local\n"
+        "    command: npx\n"
+        "    args: ['-y', '@scope/fs@1.2.3']\n"
+        "  - name: search\n"
+        "    provider: public-provider\n",
+    )
+
+    package = _prepare(root, tmp_path)
+
+    assert package.runnable_mcp_servers == ("docs", "local")
+    assert package.mcp_probe_targets == (
+        {
+            "name": "docs",
+            "url": "https://docs.example.com/mcp",
+            "transport": "sse",
+            "headers": {"Authorization": "Bearer ${DOCS_TOKEN}"},
+        },
+    )

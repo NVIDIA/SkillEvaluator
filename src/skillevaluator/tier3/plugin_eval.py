@@ -589,7 +589,7 @@ def prepare_plugin_eval_package(
         dataset_case_count=len(dataset_cases),
         cross_component_case_count=cross_component_case_count,
         dependency_status_counts=dependency_status_counts,
-        mcp_probe_targets=_mcp_probe_targets(manifest, inventory, runnable_mcp),
+        mcp_probe_targets=tuple(mcp.probe_targets[:MAX_PLUGIN_MANIFEST_ITEMS]),
         **report_only,
     )
 
@@ -1719,6 +1719,10 @@ def _normalize_mcp_entries(
     bounded, no-follow plugin-root reader; here every declaration (including a
     shadowed one) must pass the blocking static checks before the effective
     servers are flattened to the list shape :func:`_split_mcp_servers` expects.
+
+    This is the one validation of the MCP entries: every returned entry has a
+    stripped, bounded string ``name``, and its launch fields passed
+    :func:`_reject_unsafe_mcp_declaration`.
     """
     raw_servers = manifest.get("mcp")
     if raw_servers:
@@ -1730,9 +1734,9 @@ def _normalize_mcp_entries(
         for idx, entry in enumerate(raw_servers):
             if not isinstance(entry, dict):
                 raise ValueError(f"Plugin manifest mcp[{idx}] must be an object")
-            name = entry.get("name")
-            _reject_unsafe_mcp_declaration(name, {key: value for key, value in entry.items() if key != "name"})
-            normalized_entries.append(entry)
+            config = {key: value for key, value in entry.items() if key != "name"}
+            _reject_unsafe_mcp_declaration(entry.get("name"), config)
+            normalized_entries.append({**entry, "name": entry["name"].strip()})
         return normalized_entries
 
     collection = inventory.mcp
@@ -1771,13 +1775,9 @@ def _normalize_mcp_entries(
     for declaration in collection.effective:
         if not _stageable(declaration.source):
             continue
+        # Validated above: the effective declarations are some of the stageable ones.
         config = declaration.config
-        safe_name = require_bounded_string(
-            declaration.name,
-            "Plugin MCP server name",
-            max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
-        ).strip()
-        entry: dict[str, Any] = {"name": safe_name}
+        entry: dict[str, Any] = {"name": declaration.name.strip()}
         # env/headers are declared config the eval runtime cannot apply (Harbor's
         # per-server MCPServerConfig has no such field). Record their presence so a
         # server evaluated WITHOUT its declared config marks the run INCOMPLETE
@@ -1828,7 +1828,8 @@ class _McpSplit:
     start it, and ``plugin_file`` holds the rewritten launch), ``plugin_files_unrooted``
     (relative paths or ``cwd`` nothing can start), ``env``/``headers`` and other
     declared fields the wrapper runtime drops, and ``user_config`` (a
-    ``${user_config.*}`` value only Claude Code fills in).
+    ``${user_config.*}`` value only Claude Code fills in). ``probe_targets`` are
+    the runnable URL servers for the opt-in ``--probe-mcp`` host probe.
     """
 
     runnable: list[dict[str, Any]]
@@ -1837,6 +1838,7 @@ class _McpSplit:
     gaps: dict[str, tuple[str, ...]]
     declared: dict[str, dict[str, Any]]
     user_config: dict[str, tuple[str, ...]]
+    probe_targets: list[dict[str, Any]]
 
     @property
     def unsupported_config(self) -> list[str]:
@@ -1849,31 +1851,36 @@ class _McpSplit:
 _CLAUDE_NATIVE_APPLIES = frozenset({"plugin_files", "env", "headers"})
 
 
-def _bounded_mcp_server(raw: dict[str, Any], idx: int, name: str) -> dict[str, Any]:
-    server: dict[str, Any] = {"name": name}
+def _runnable_server(entry: dict[str, Any]) -> dict[str, Any]:
+    """The launch fields of a validated MCP entry that reach the staged server list (``stdio`` by default)."""
+    server: dict[str, Any] = {"name": entry["name"]}
     for key in ("url", "command", "transport"):
-        if raw.get(key):
-            server[key] = require_bounded_string(
-                raw[key],
-                f"Plugin manifest mcp[{idx}].{key}",
-                max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
-            )
-    if raw.get("args"):
-        args = raw["args"]
-        if not isinstance(args, list) or len(args) > MAX_PLUGIN_MANIFEST_ITEMS:
-            raise ValueError(f"Plugin manifest mcp[{idx}].args must be a bounded list")
-        server["args"] = [
-            require_bounded_string(
-                arg,
-                f"Plugin manifest mcp[{idx}].args[{arg_index}]",
-                max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
-                allow_empty=True,
-            )
-            for arg_index, arg in enumerate(args)
-        ]
+        if entry.get(key):
+            server[key] = entry[key]
+    if entry.get("args"):
+        server["args"] = list(entry["args"])
     if "command" in server and "transport" not in server:
         server["transport"] = "stdio"
     return server
+
+
+def _probe_target(entry: dict[str, Any], declared: dict[str, Any]) -> dict[str, Any]:
+    """A runnable URL server for the ``--probe-mcp`` host probe: its transport and declared header references.
+
+    Header values are the declared literals or ``${VAR}`` references; they are never persisted.
+    """
+    raw_headers = declared.get("headers")
+    headers = (
+        {str(key): str(value) for key, value in list(raw_headers.items())[:32] if isinstance(value, str)}
+        if isinstance(raw_headers, dict)
+        else {}
+    )
+    return {
+        "name": entry["name"],
+        "url": entry["url"],
+        "transport": entry.get("transport") or entry.get("type") or "",
+        "headers": headers,
+    }
 
 
 def _user_config_keys(raw: dict[str, Any], declared: dict[str, Any]) -> tuple[str, ...]:
@@ -1904,35 +1911,18 @@ def _split_mcp_servers(
     the skip decision as runnable; the ones a copied plugin tree can start are
     kept in ``plugin_file`` for the native Claude Code adapter.
     """
-    raw_servers = _normalize_mcp_entries(manifest, inventory, contained_form, plugin_root=plugin_root)
-
     runnable: list[dict[str, Any]] = []
     provider_only: list[dict[str, str]] = []
     plugin_file: list[dict[str, Any]] = []
     gaps: dict[str, tuple[str, ...]] = {}
     declared_by_name: dict[str, dict[str, Any]] = {}
     user_config: dict[str, tuple[str, ...]] = {}
-    for idx, raw in enumerate(raw_servers):
-        if not isinstance(raw, dict):
-            raise ValueError(f"Plugin manifest mcp[{idx}] must be an object")
-        name = require_bounded_string(
-            raw.get("name"),
-            f"Plugin manifest mcp[{idx}].name",
-            max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
-        ).strip()
+    probe_targets: list[dict[str, Any]] = []
+    # Every entry was validated (bounded strings, blocking static checks) by _normalize_mcp_entries.
+    for raw in _normalize_mcp_entries(manifest, inventory, contained_form, plugin_root=plugin_root):
+        name = raw["name"]
         if not (raw.get("command") or raw.get("url")):
-            provider = raw.get("provider") or ""
-            provider_only.append(
-                {
-                    "name": name,
-                    "provider": require_bounded_string(
-                        provider,
-                        f"Plugin manifest mcp[{idx}].provider",
-                        max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
-                        allow_empty=True,
-                    ),
-                }
-            )
+            provider_only.append({"name": name, "provider": raw.get("provider") or ""})
             continue
         declared = raw.get("_declared")
         if not isinstance(declared, dict):
@@ -1943,7 +1933,7 @@ def _split_mcp_servers(
         if keys := _user_config_keys(raw, declared):
             user_config[name] = keys
             server_gaps.append("user_config")
-        server = _bounded_mcp_server(raw, idx, name)
+        server = _runnable_server(raw)
         if _launches_from_plugin_files(raw, root_prefixes=root_prefixes):
             # Staged verbatim, this server could not start in a wrapper arm, yet it
             # would count as runnable: a plugin whose only component it is would run
@@ -1959,9 +1949,11 @@ def _split_mcp_servers(
                 server_gaps.insert(0, "plugin_files_unrooted")
         else:
             runnable.append(server)
+            if server.get("url"):
+                probe_targets.append(_probe_target(raw, declared))
         if server_gaps:
             gaps[name] = tuple(dict.fromkeys(server_gaps))
-    return _McpSplit(runnable, provider_only, plugin_file, gaps, declared_by_name, user_config)
+    return _McpSplit(runnable, provider_only, plugin_file, gaps, declared_by_name, user_config, probe_targets)
 
 
 def _claude_applies(gaps: tuple[str, ...], user_config: tuple[str, ...], defaults: set[str]) -> bool:
@@ -2425,39 +2417,3 @@ def _write_plugin_runtime_components(evals_dir: Path, inventory: PluginInventory
         return
     env_dir.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(names, indent=2), encoding="utf-8")
-
-
-def _mcp_probe_targets(
-    manifest: dict[str, Any], inventory: PluginInventory, runnable_mcp: list[dict[str, Any]]
-) -> tuple[dict[str, Any], ...]:
-    """Runnable URL MCP servers with their declared transport and header references."""
-    configs: dict[str, dict[str, Any]] = {}
-    raw_servers = manifest.get("mcp")
-    if isinstance(raw_servers, list):
-        for entry in raw_servers:
-            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
-                configs.setdefault(entry["name"].strip(), entry)
-    for declaration in inventory.mcp.effective:
-        if isinstance(declaration.config, dict):
-            configs[str(declaration.name).strip()] = declaration.config
-    targets: list[dict[str, Any]] = []
-    for server in runnable_mcp:
-        url = server.get("url")
-        if not isinstance(url, str) or not url:
-            continue
-        config = configs.get(server["name"], {})
-        raw_headers = config.get("headers")
-        headers = (
-            {str(key): str(value) for key, value in list(raw_headers.items())[:32] if isinstance(value, str)}
-            if isinstance(raw_headers, dict)
-            else {}
-        )
-        targets.append(
-            {
-                "name": server["name"],
-                "url": url,
-                "transport": server.get("transport") or config.get("transport") or config.get("type") or "",
-                "headers": headers,
-            }
-        )
-    return tuple(targets[:MAX_PLUGIN_MANIFEST_ITEMS])

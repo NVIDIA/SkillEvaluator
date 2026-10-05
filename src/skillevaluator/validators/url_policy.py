@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 from skillevaluator.utils.redaction import redact_sensitive_text
@@ -118,18 +119,26 @@ class UrlCredentials:
         return self.userinfo or bool(self.query_keys)
 
 
-def url_credentials(url: str, *, any_userinfo: bool) -> UrlCredentials:
+# Which userinfo counts as a credential; see ``url_credentials``.
+UserinfoRule = Literal["any", "literal", "secret"]
+
+
+def url_credentials(url: str, *, userinfo_rule: UserinfoRule) -> UrlCredentials:
     """Credentials written into the text of ``url``: in its userinfo and in its query parameters.
 
     The URL is read as raw text, so a malformed port or bracket cannot hide a
     credential: the authority runs from ``//`` to the next ``/``, ``?``, or
     ``#``, and the userinfo through its last ``@``.
 
-    * Userinfo: with ``any_userinfo`` every user name or password counts, even a
-      ``$VAR`` one, for a URL a client calls with every request (MCP servers,
-      HTTP hooks): credentials belong in a header there. Otherwise (a URL inside
-      a command line) only a literal password counts, or a user name shaped like
-      a token, so ``https://x-access-token:${GITHUB_TOKEN}@github.com/...`` does not.
+    * Userinfo, by ``userinfo_rule``:
+
+      - ``"any"``: every user name or password counts, even a ``$VAR`` one. An
+        HTTP hook's client sends the userinfo as Basic auth with every request.
+      - ``"literal"``: a user name or password counts unless it is a ``$VAR`` /
+        ``${VAR}`` reference (MCP server URLs, where references are allowed).
+      - ``"secret"``: only a literal password counts, or a user name shaped like
+        a token (a URL inside a command line), so
+        ``https://x-access-token:${GITHUB_TOKEN}@github.com/...`` does not.
     * Query: a parameter counts when it has a literal value under a credential
       name (``api_key=literal``) or a value shaped like a secret under any name
       (``q=sk-...``). A ``$VAR`` / ``${VAR}`` reference never counts.
@@ -139,7 +148,7 @@ def url_credentials(url: str, *, any_userinfo: bool) -> UrlCredentials:
     user, _colon, password = userinfo.partition(":")
     query = url.partition("?")[2].partition("#")[0]
     return UrlCredentials(
-        userinfo=bool(at) and _userinfo_carries_credential(user, password, any_userinfo=any_userinfo),
+        userinfo=bool(at) and _userinfo_carries_credential(user, password, rule=userinfo_rule),
         query_keys=tuple(
             dict.fromkeys(
                 key
@@ -150,9 +159,11 @@ def url_credentials(url: str, *, any_userinfo: bool) -> UrlCredentials:
     )
 
 
-def _userinfo_carries_credential(user: str, password: str, *, any_userinfo: bool) -> bool:
-    if any_userinfo:
+def _userinfo_carries_credential(user: str, password: str, *, rule: UserinfoRule) -> bool:
+    if rule == "any":
         return bool(user or password)
+    if rule == "literal":
+        return any(part and not is_env_reference(part) for part in (user, password))
     decoded = unquote(password)
     literal_password = not password.startswith("$") and bool(decoded.strip()) and not is_env_reference(decoded)
     return literal_password or has_secret_shape(unquote(user))

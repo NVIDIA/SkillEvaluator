@@ -169,17 +169,18 @@ def _check_url_inline_secrets(server: _ServerFindings, url: str, *, ambiguous: b
 
     The URL is read as written and, when it is ``ambiguous``, also the way WHATWG
     clients read it: they find userinfo that urllib does not see, for example in
-    ``https:user:password@host``. A client sends any userinfo it finds, so even a
-    ``${VAR}`` user name or password counts.
+    ``https:user:password@host``. A literal user name or password counts; a
+    ``${VAR}`` reference does not, because the plugin then carries no secret.
     """
-    readings = [url_credentials(url.strip(), any_userinfo=True)]
+    readings = [url_credentials(url.strip(), userinfo_rule="literal")]
     if ambiguous:
-        readings.append(url_credentials(whatwg_url(url), any_userinfo=True))
+        readings.append(url_credentials(whatwg_url(url), userinfo_rule="literal"))
     if any(reading.userinfo for reading in readings):
         server.report(
             Severity.CRITICAL,
             "mcp_url_inline_secret",
-            f"url embeds userinfo credentials: {safe_url(url)!r} (userinfo withheld)",
+            f"url embeds inline userinfo credentials: {safe_url(url)!r} (userinfo withheld); only "
+            "${ENV} references are allowed",
             'Remove user:password@ from the URL; pass credentials by reference (e.g. header "${MY_TOKEN}").',
         )
     for key in dict.fromkeys(key for reading in readings for key in reading.query_keys):

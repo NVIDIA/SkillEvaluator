@@ -10,6 +10,7 @@ import pytest
 from skillevaluator.validators.url_policy import (
     MAX_REPORT_CHARS,
     UrlCredentials,
+    UserinfoRule,
     report_text,
     safe_url,
     url_credentials,
@@ -19,22 +20,29 @@ _TOKEN = "ghp_" + "0123456789abcdefghij0123456789abcdef"
 
 
 @pytest.mark.parametrize(
-    ("url", "any_userinfo", "expected"),
+    ("url", "rule", "expected"),
     [
-        ("https://user:secret@h.example/x", True, True),
-        ("https://${USER}:${TOKEN}@h.example/x", True, True),
-        ("https://deploy@h.example/x", True, True),
-        ("https://admin:hunter2@h.example:99999/x", True, True),
-        ("https://h.example/x", True, False),
-        ("https://user:secret@h.example/x", False, True),
-        ("https://x-access-token:${GITHUB_TOKEN}@github.com/org/repo.git", False, False),
-        ("https://deploy@h.example/x", False, False),
-        (f"https://{_TOKEN}@h.example/x", False, True),
-        ("ssh://git@github.com/org/repo.git", False, False),
+        ("https://user:secret@h.example/x", "any", True),
+        ("https://${USER}:${TOKEN}@h.example/x", "any", True),
+        ("https://deploy@h.example/x", "any", True),
+        ("https://admin:hunter2@h.example:99999/x", "any", True),
+        ("https://h.example/x", "any", False),
+        ("https://user:secret@h.example/x", "literal", True),
+        ("https://${USER}:${TOKEN}@h.example/x", "literal", False),
+        ("https://$USER@h.example/x", "literal", False),
+        ("https://user:${TOKEN}@h.example/x", "literal", True),
+        ("https://${USER}:secret@h.example/x", "literal", True),
+        ("https://deploy@h.example/x", "literal", True),
+        ("https://h.example/x", "literal", False),
+        ("https://user:secret@h.example/x", "secret", True),
+        ("https://x-access-token:${GITHUB_TOKEN}@github.com/org/repo.git", "secret", False),
+        ("https://deploy@h.example/x", "secret", False),
+        (f"https://{_TOKEN}@h.example/x", "secret", True),
+        ("ssh://git@github.com/org/repo.git", "secret", False),
     ],
 )
-def test_url_credentials_reads_the_userinfo_as_written(url: str, any_userinfo: bool, expected: bool) -> None:
-    assert url_credentials(url, any_userinfo=any_userinfo).userinfo is expected
+def test_url_credentials_reads_the_userinfo_as_written(url: str, rule: UserinfoRule, expected: bool) -> None:
+    assert url_credentials(url, userinfo_rule=rule).userinfo is expected
 
 
 @pytest.mark.parametrize(
@@ -49,12 +57,12 @@ def test_url_credentials_reads_the_userinfo_as_written(url: str, any_userinfo: b
     ],
 )
 def test_url_credentials_reads_credential_names_and_secret_shaped_values(query: str, keys: tuple[str, ...]) -> None:
-    for any_userinfo in (True, False):
-        assert url_credentials(f"https://h.example/x?{query}", any_userinfo=any_userinfo).query_keys == keys
+    for rule in ("any", "literal", "secret"):
+        assert url_credentials(f"https://h.example/x?{query}", userinfo_rule=rule).query_keys == keys
 
 
 def test_url_credentials_is_false_when_the_url_carries_none() -> None:
-    assert not url_credentials("https://h.example/x?page=2", any_userinfo=True)
+    assert not url_credentials("https://h.example/x?page=2", userinfo_rule="any")
     assert not UrlCredentials()
     assert UrlCredentials(query_keys=("token",))
 

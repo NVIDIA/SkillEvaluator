@@ -945,7 +945,7 @@ stages a server.
     | Check | Severity | Flags |
     | --- | --- | --- |
     | `mcp_inline_secret` | CRITICAL | An `env` or `headers` value that is a literal credential rather than a `$VAR` or `${VAR}` reference |
-    | `mcp_url_inline_secret` | CRITICAL | Credentials in the URL: any user information (even `${VAR}`, because clients send it with every request), a credential-named query parameter with a literal value, or a query value shaped like a known secret under any name (`?q=sk-…`). HTTP hooks use the same URL rules |
+    | `mcp_url_inline_secret` | CRITICAL | Credentials in the URL: user information with a literal user name or password (`${VAR}` references are allowed), a credential-named query parameter with a literal value, or a query value shaped like a known secret under any name (`?q=sk-…`). HTTP hooks use the same query rules but count any user information, even `${VAR}`, because the client sends it as Basic auth with every request |
     | `mcp_insecure_tls_env` | CRITICAL | `NODE_TLS_REJECT_UNAUTHORIZED=0`, `PYTHONHTTPSVERIFY=0`, or a truthy `GIT_SSL_NO_VERIFY`, `CURL_INSECURE`, `SSL_NO_VERIFY`, `TLS_INSECURE`, or `SSL_VERIFY_NONE` |
     | `mcp_insecure_flag` | CRITICAL | `insecure: true` |
     | `mcp_insecure_tls_config` | CRITICAL | A `tls` or `ssl` block with `rejectUnauthorized: false` or `verify: false` |

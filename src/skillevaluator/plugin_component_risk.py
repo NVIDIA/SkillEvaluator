@@ -2309,7 +2309,7 @@ def hook_allowlist_hosts(allowed_urls: Iterable[str]) -> list[str]:
 
 def _command_url_credentials(text: str) -> bool:
     """Whether a command line embeds credentials in a URL (``https://user:password@host``, ``?token=...``)."""
-    return any(url_credentials(match.group(0), any_userinfo=False) for match in _URL_IN_TEXT_RE.finditer(text))
+    return any(url_credentials(match.group(0), userinfo_rule="secret") for match in _URL_IN_TEXT_RE.finditer(text))
 
 
 def _header_secret(key: str, value: str) -> bool:
@@ -3076,7 +3076,7 @@ class HookAnalyzer:
         # Read from the URL text, so credentials are flagged even when the authority is malformed. Both
         # readings count: any userinfo Claude Code would send, and a literal password or token in the
         # raw text (committed with the plugin even when a backslash moves it out of the client's userinfo).
-        if url_credentials(client_url, any_userinfo=True) or url_credentials(record.url, any_userinfo=False):
+        if url_credentials(client_url, userinfo_rule="any") or url_credentials(record.url, userinfo_rule="secret"):
             site.report(
                 "inline_secret",
                 Severity.CRITICAL,

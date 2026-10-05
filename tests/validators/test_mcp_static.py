@@ -556,10 +556,17 @@ def test_command_findings_never_echo_an_inline_credential(config: dict) -> None:
     assert not any(_GITHUB_TOKEN in f.message or _OPENAI_KEY in f.message for f in findings)
 
 
-def test_url_userinfo_counts_even_when_written_as_references() -> None:
-    # MCP clients send whatever userinfo the URL holds, so credentials belong in a header.
+def test_url_userinfo_written_as_references_is_allowed() -> None:
+    # The client fills ${VAR} references from the user's environment; the plugin carries no secret.
     findings = validate_mcp_server_declaration("s", {"url": "https://${USER}:${TOKEN}@h.example/mcp"}, "p.json")
+    assert "mcp_url_inline_secret" not in _checks(findings)
+
+
+@pytest.mark.parametrize("url", ["https://user:${TOKEN}@h.example/mcp", "https://${USER}:secret@h.example/mcp"])
+def test_url_userinfo_with_a_literal_part_is_blocked(url: str) -> None:
+    findings = validate_mcp_server_declaration("s", {"url": url}, "p.json")
     assert [(f.check_name, f.severity) for f in findings] == [("mcp_url_inline_secret", Severity.CRITICAL)]
+    assert "only ${ENV} references are allowed" in findings[0].message
 
 
 # --------------------------------------------------------------------------- #

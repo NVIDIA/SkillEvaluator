@@ -211,7 +211,7 @@ def test_unreadable_sidecar_keeps_the_rerendered_run_incomplete(tmp_path: Path, 
 
 
 def test_unreadable_sidecar_reason_reaches_every_report_view() -> None:
-    from skillevaluator.evaluation.tier3_report import _incomplete_skip_reason
+    from skillevaluator.evaluation.tier3_report import incomplete_reason
     from skillevaluator.reporting.plugin_sections import tier3_plugin_view
 
     record = {"partial": True, "sidecar_error": "file_size_limit"}
@@ -225,7 +225,7 @@ def test_unreadable_sidecar_reason_reaches_every_report_view() -> None:
     assert view["excluded"] == [
         "Plugin provenance sidecar unreadable (file_size_limit), so the components evaluated at Tier 3 are unknown"
     ]
-    assert _incomplete_skip_reason(record) == f"INCOMPLETE: {view['incomplete_reason']}"
+    assert incomplete_reason(record) == f"INCOMPLETE: {view['incomplete_reason']}"
 
 
 def test_recorded_sidecar_error_stays_partial(tmp_path: Path) -> None:
@@ -528,18 +528,13 @@ def test_an_incomplete_run_with_deferred_components_still_names_them(tmp_path: P
 
 def test_every_report_gives_the_same_incomplete_reason() -> None:
     """A run that did not complete and also deferred a component names both causes everywhere."""
-    from skillevaluator.evaluation.tier3_report import (
-        _incomplete_skip_reason,
-        _plugin_incompleteness_conclusion,
-        incomplete_reason,
-    )
+    from skillevaluator.evaluation.tier3_report import _plugin_incompleteness_conclusion, incomplete_reason
     from skillevaluator.reporting.plugin_sections import tier3_plugin_view
 
     record = {"partial": True, "execution_incomplete": _FAILED_RUN, "unresolved_skill_refs": ["remote"]}
     reason = f"{_FAILED_RUN}; 1 unresolved skill ref could not be resolved or evaluated at Tier 3"
 
     assert incomplete_reason(record) == f"INCOMPLETE: {reason}"
-    assert _incomplete_skip_reason is incomplete_reason
     view = tier3_plugin_view({"plugin_provenance": record})
     assert view is not None and view["incomplete_reason"] == reason
     conclusion = _plugin_incompleteness_conclusion(record)

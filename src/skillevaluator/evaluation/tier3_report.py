@@ -532,10 +532,6 @@ def incomplete_reason(provenance: dict[str, Any]) -> str:
     return f"INCOMPLETE: {_plugin_completeness(provenance)['reason']}"
 
 
-# The earlier private name; ``cli.py`` imports it.
-_incomplete_skip_reason = incomplete_reason
-
-
 def _plugin_completeness(provenance: dict[str, Any]) -> dict[str, Any]:
     from skillevaluator.reporting.plugin_sections import completeness_view
 

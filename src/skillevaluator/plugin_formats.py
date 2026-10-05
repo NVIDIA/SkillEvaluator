@@ -111,12 +111,18 @@ def declares_agent_plugins_schema(data: Any) -> bool:
 # --------------------------------------------------------------------------- #
 # Profiles                                                                    #
 # --------------------------------------------------------------------------- #
+# The default skills folder of every format (skills/<name>/SKILL.md). A format
+# whose declared skills replace it says so in its profile.
+DEFAULT_SKILLS_DIR = "skills"
+
+
 @dataclass(frozen=True)
 class FormatProfile:
     """Where one manifest format declares components and where they live by default.
 
     Every default path is root-relative POSIX. ``None`` means the format has no
-    such default location, so the inventory does not look there.
+    such default location, so the inventory does not look there. Skills live in
+    :data:`DEFAULT_SKILLS_DIR` in every format.
     """
 
     manifest_type: str
@@ -141,7 +147,6 @@ class FormatProfile:
     declared_replaces_default: bool = False
     # Manifest fields that declare components (the builder reads only these).
     component_fields: frozenset[str] = frozenset()
-    default_skills_dir: str | None = "skills"
     # Agent Plugins discovers only immediate children of skills/.
     skills_immediate_children_only: bool = False
     # Declared skill folders are searched at any depth (Codex), not one level.
@@ -171,6 +176,11 @@ class FormatProfile:
     reference: str = "plugin manifest reference"
     # MCP config dialect: how server entries are normalized before the static policy.
     mcp_dialect: Literal["claude", "codex", "agent_plugins"] = "claude"
+
+    @property
+    def default_skills_dir(self) -> str:
+        """:data:`DEFAULT_SKILLS_DIR`, the same for every format (kept for existing readers)."""
+        return DEFAULT_SKILLS_DIR
 
 
 _CLAUDE_COMPONENT_FIELDS = frozenset(

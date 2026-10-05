@@ -60,6 +60,7 @@ from skillevaluator.models.plugin import PluginManifest
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.plugin_formats import (
     CLAUDE_PROFILE,
+    DEFAULT_SKILLS_DIR,
     FormatProfile,
     agent_plugins_schema_version,
     declared_value_replaces_default,
@@ -1084,11 +1085,10 @@ class PluginSchemaValidator(ValidatorBase):
         value = (normalized_component_manifest(manifest_type, data) or {}).get("skills")
         if not declared_value_replaces_default(profile, "skills", value):
             return None
-        default_dir = profile.default_skills_dir or "skills"
         for raw in value if isinstance(value, list) else [value]:
             if isinstance(raw, str):
                 declared = normalize_declared_path(raw, profile.manifest_path_prefixes)
-                if declared.rel is not None and declared.rel.as_posix() == default_dir:
+                if declared.rel is not None and declared.rel.as_posix() == DEFAULT_SKILLS_DIR:
                     return None
         return profile.label
 
@@ -1104,14 +1104,14 @@ class PluginSchemaValidator(ValidatorBase):
         scans skip (``evals/``, ``results/``, ``versions/`` within a skill) is
         HIGH, because clients that search ``skills/`` recursively load it.
         """
-        skills_dir = root / "skills"
+        skills_dir = root / DEFAULT_SKILLS_DIR
         from skillevaluator.utils.helpers import (
             find_bundled_plugin_skill_manifests,
             find_unscanned_plugin_skill_manifests,
         )
 
         try:
-            skill_manifests = find_bundled_plugin_skill_manifests(root)
+            skill_manifests = find_bundled_plugin_skill_manifests(root, DEFAULT_SKILLS_DIR)
         except ValueError as exc:
             result.metadata["security_failure"] = True
             result.add_finding(
@@ -1130,8 +1130,8 @@ class PluginSchemaValidator(ValidatorBase):
         plugin_meta = result.metadata.setdefault("plugin", {})
         plugin_meta["in_plugin_skills"] = len(skill_dirs)
         # Plugin-root-relative ids (``skills/<name>``).
-        plugin_meta["bundled_skills"] = [f"skills/{name}" for name in skill_names]
-        self._report_unscanned_skills(find_unscanned_plugin_skill_manifests(root), root, result)
+        plugin_meta["bundled_skills"] = [f"{DEFAULT_SKILLS_DIR}/{name}" for name in skill_names]
+        self._report_unscanned_skills(find_unscanned_plugin_skill_manifests(root, DEFAULT_SKILLS_DIR), root, result)
         if not skill_manifests:
             return
         from skillevaluator.validators.schema import SchemaValidator
@@ -1232,7 +1232,7 @@ class PluginSchemaValidator(ValidatorBase):
             path = component.path
             if component.type != "skill" or component.problem is not None or path is None:
                 continue
-            if path == "skills" or path.startswith("skills/") or path in seen:
+            if path == DEFAULT_SKILLS_DIR or path.startswith(f"{DEFAULT_SKILLS_DIR}/") or path in seen:
                 continue
             seen.add(path)
             skill_dir = root if path == "." else root / path

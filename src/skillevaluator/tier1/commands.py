@@ -22,6 +22,7 @@ from skillevaluator.constants import (
     PLUGIN_TREE_MAX_DISCOVERED_PATHS,
 )
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.plugin_formats import DEFAULT_SKILLS_DIR
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
 from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
@@ -314,7 +315,7 @@ def run_validation(
     # skill's name; root-owned plugin content is not a skill and is never
     # scored or linted as one, so the two scopes cannot double-report.
     skill_like = content_type in (None, CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN) or bool(bundled_skill_dirs)
-    skill_target = target_path / "skills" if content_type == CONTENT_TYPE_PLUGIN else target_path
+    skill_target = target_path / DEFAULT_SKILLS_DIR if content_type == CONTENT_TYPE_PLUGIN else target_path
 
     def _schema_results() -> list[ValidationResult]:
         v = _schema_validator_for(content_type, policy, repo_root, resolve_endpoints=resolve_endpoints)

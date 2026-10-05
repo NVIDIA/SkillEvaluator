@@ -28,18 +28,16 @@ from skillevaluator.tier3.plugin_native import (
     NativeBundle,
     NativePluginSource,
     PluginLoadError,
+    declared_plugin_paths,
     native_refusal,
 )
 
-# Plugin-root entries a native Claude Code plugin copy never carries: evaluator
-# data (the eval dataset must not reach the agent), VCS and caches, secrets,
-# and the component files the adapter marks unsupported or regenerates.
+# Plugin-root entries a native Claude Code plugin copy never carries beyond the
+# runtime skill copy rules, which already skip evaluator data (evals/, results/),
+# VCS, and caches: the component files the adapter marks unsupported or
+# regenerates, and the project's own Claude Code settings.
 _PLUGIN_TREE_IGNORED_ROOT = frozenset(
     {
-        "evals",
-        "results",
-        ".git",
-        "__pycache__",
         ".claude-plugin",
         ".mcp.json",
         ".lsp.json",
@@ -85,17 +83,13 @@ def build_native_task_staging(agent: str, adapter: HarnessAdapter, source: Nativ
 
 def _declared_unsupported_paths(source: NativePluginSource) -> set[str]:
     """Manifest-declared LSP and monitor files, which the native copy never carries."""
-    paths: set[str] = set()
     manifest = source.manifest
     experimental = manifest.get("experimental") if isinstance(manifest.get("experimental"), dict) else {}
-    for value in (manifest.get("lspServers"), manifest.get("monitors"), experimental.get("monitors")):
-        for raw in value if isinstance(value, list) else [value]:
-            if isinstance(raw, str) and raw.strip():
-                rel = raw.strip().removeprefix("${CLAUDE_PLUGIN_ROOT}").lstrip("/")
-                rel = PurePosixPath(rel.removeprefix("./")).as_posix()
-                if rel and not rel.startswith(".."):
-                    paths.add(rel)
-    return paths
+    return {
+        path.as_posix()
+        for value in (manifest.get("lspServers"), manifest.get("monitors"), experimental.get("monitors"))
+        for path in declared_plugin_paths(value)
+    }
 
 
 def _plugin_tree_ignore(source: NativePluginSource, excluded_roots: Sequence[Path] = ()):
@@ -110,7 +104,7 @@ def _plugin_tree_ignore(source: NativePluginSource, excluded_roots: Sequence[Pat
 
     def _ignore(directory: str, contents: list[str]) -> list[str]:
         current = Path(directory).resolve()
-        ignored = {name for name in contents if name in {"__pycache__", ".git", "results"} or is_env_file(name)}
+        ignored = {name for name in contents if is_env_file(name)}
         ignored.update(runtime_ignore(directory, contents))
         if current == root:
             ignored.update(name for name in contents if name in _PLUGIN_TREE_IGNORED_ROOT)

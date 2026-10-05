@@ -471,6 +471,23 @@ def test_claude_code_plugin_copy_skips_env_files_in_any_letter_case(tmp_path: Pa
     assert {"config/.env.example", "templates/.ENV.EXAMPLE"} <= files
 
 
+def test_claude_code_plugin_copy_skips_only_declared_lsp_and_monitor_files_inside_the_root(tmp_path: Path) -> None:
+    plugin = _contained_plugin(tmp_path)
+    manifest = json.loads((plugin / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    manifest.update({"lspServers": "/servers.lsp.json", "monitors": "$CLAUDE_PLUGIN_ROOT/config/monitors.json"})
+    _write(plugin / ".claude-plugin" / "plugin.json", json.dumps(manifest))
+    _write(plugin / "servers.lsp.json", "{}")
+    _write(plugin / "config" / "monitors.json", "[]")
+    package = prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage", plugin_load="native")
+
+    bundle, _, _ = _stage(tmp_path, "claude-code", package.native_source)
+
+    files = _files(bundle / "native" / "claude-code" / "plugin")
+    # An absolute path names no plugin file, while $CLAUDE_PLUGIN_ROOT names the plugin root.
+    assert "servers.lsp.json" in files
+    assert "config/monitors.json" not in files
+
+
 def test_claude_code_plugin_copy_skips_results_generated_output_and_the_evals_source(tmp_path: Path) -> None:
     """Grading data inside the plugin root never reaches the with-plugin image through the native copy."""
     from skillevaluator.tier3.output_provenance import mark_generated_output_root

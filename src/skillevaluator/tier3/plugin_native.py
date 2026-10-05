@@ -51,6 +51,7 @@ from skillevaluator.plugin_components import (
     COMPONENT_TYPES,
     PluginInventory,
     PluginRootReader,
+    normalize_declared_path,
     parse_markdown,
     summarize_coverage,
 )
@@ -590,6 +591,26 @@ def to_claude_root(value: Any, pattern: re.Pattern[str] | None) -> Any:
 
 #: The Cursor and Agent Plugins root placeholders, rewritten in every translated Cursor hook command.
 _CURSOR_ROOT_VAR_RE = foreign_root_var_re(("${CURSOR_PLUGIN_ROOT}", "${PLUGIN_ROOT}"))
+#: The plugin-root prefixes Claude Code expands in the paths a ``plugin.json`` declares.
+CLAUDE_ROOT_PATH_PREFIXES = (CLAUDE_PLUGIN_ROOT_VAR, "$CLAUDE_PLUGIN_ROOT")
+
+
+def declared_plugin_paths(value: Any) -> list[PurePosixPath]:
+    """The root-relative paths a ``plugin.json`` path field declares (one path or a list of them).
+
+    Each path is normalized like the Tier 1 inventory does
+    (:func:`~skillevaluator.plugin_components.normalize_declared_path`): a path
+    that escapes the plugin root (absolute, home-relative, or through ``..``),
+    one under another placeholder, and the plugin root itself are skipped.
+    """
+    paths: list[PurePosixPath] = []
+    for raw in value if isinstance(value, list) else [value]:
+        if not isinstance(raw, str):
+            continue
+        rel = normalize_declared_path(raw, CLAUDE_ROOT_PATH_PREFIXES).rel
+        if rel is not None and str(rel) != ".":
+            paths.append(rel)
+    return list(dict.fromkeys(paths))
 
 
 def _plugin_file_checker(plugin_root: Path | None) -> Callable[[str], bool] | None:
@@ -1293,21 +1314,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
 
     def _declared_skill_dirs(self, source: NativePluginSource) -> list[PurePosixPath]:
         """Root-relative skill directories the staged ``plugin.json`` declares."""
-        value = self.manifest(source).get("skills")
-        dirs: list[PurePosixPath] = []
-        for raw in value if isinstance(value, list) else [value]:
-            if not isinstance(raw, str) or not raw.strip():
-                continue
-            text = raw.strip().replace("\\", "/")
-            for prefix in (CLAUDE_PLUGIN_ROOT_VAR, "$CLAUDE_PLUGIN_ROOT"):
-                if text.startswith(prefix):
-                    text = text[len(prefix) :].lstrip("/") or "."
-            if text.startswith(("/", "$", "~")):
-                continue
-            rel = PurePosixPath(os.path.normpath(text))
-            if ".." not in rel.parts and str(rel) != ".":
-                dirs.append(rel)
-        return list(dict.fromkeys(dirs))
+        return declared_plugin_paths(self.manifest(source).get("skills"))
 
     def staged_skills(self, source: NativePluginSource) -> list[tuple[str, str, Path | None]]:
         """Every skill the staged plugin loads: ``(census name, plugin-relative dir, copy source or None)``.

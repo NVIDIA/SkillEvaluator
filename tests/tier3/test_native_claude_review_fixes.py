@@ -570,6 +570,24 @@ def test_declared_skill_dirs_claude_code_loads_are_tracked(tmp_path: Path) -> No
     assert state == "staged" and "native claude-code arm" in reason
 
 
+def test_declared_skill_dirs_that_climb_out_or_are_absolute_are_not_loaded(tmp_path: Path) -> None:
+    """Declared skill paths are normalized like the Tier 1 inventory: '..' and absolute paths are escapes."""
+    plugin = _claude(
+        tmp_path / "esc-plugin",
+        {"skills": ["./skills/", "./skills/../extra/", "/abs/", "$CLAUDE_PLUGIN_ROOT/more/"]},
+        {
+            "skills/in-skill/SKILL.md": SKILL.format(name="in-skill"),
+            "extra/extra-skill/SKILL.md": SKILL.format(name="extra-skill"),
+            "abs/abs-skill/SKILL.md": SKILL.format(name="abs-skill"),
+            "more/more-skill/SKILL.md": SKILL.format(name="more-skill"),
+        },
+    )
+
+    staged = ClaudeCodeAdapter().staged_skills(_prepare(plugin, tmp_path).native_source)
+
+    assert sorted(name for name, _rel, _copy_from in staged) == ["in-skill", "more-skill"]
+
+
 def test_member_skill_whose_name_is_already_taken_fails_closed(tmp_path: Path) -> None:
     outside = _write(tmp_path / "elsewhere" / "in-skill", {"SKILL.md": SKILL.format(name="in-skill")})
     plugin = _claude(tmp_path / "clash-plugin", files={"skills/in-skill/SKILL.md": SKILL.format(name="other")})

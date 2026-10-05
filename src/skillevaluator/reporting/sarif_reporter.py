@@ -212,7 +212,9 @@ def _result_from_finding(
     }
     if finding.suggestion:
         result["message"]["markdown"] = f"{finding.message}\n\n**Suggestion:** {finding.suggestion}"
-    # Resolve the file the finding points at once, so its location and its plugin component agree.
+    # Resolve the file the finding points at once, so its location and its plugin component agree. A bundled
+    # skill's "[skill] " label is not part of the path: kept, it became "%5Bskill%5D%20/abs/path", which points
+    # nowhere and leaks the local path.
     artifact_path = (components or _NO_INVENTORY).artifact_path(finding.file_path) if finding.file_path else ""
     location = _physical_location(finding, artifact_path, workspace_root, scan_root)
     if location is not None:

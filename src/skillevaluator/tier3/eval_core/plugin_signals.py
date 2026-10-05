@@ -2390,21 +2390,29 @@ def _grade_conflict(calls: Sequence[_Call], spec: Mapping[str, Any]) -> dict[str
 
 
 def _declared_keys(declared: Mapping[str, Sequence[str]] | None) -> list[tuple[str, str]]:
-    keys: list[tuple[str, str]] = []
+    keys: dict[tuple[str, str], None] = {}
     for kind in (COMPONENT_SKILL, COMPONENT_MCP, COMPONENT_SUBAGENT, COMPONENT_COMMAND):
         for name in (declared or {}).get(kind) or ():
-            if isinstance(name, str) and name and (kind, name) not in keys:
-                keys.append((kind, name))
-    return keys
+            if isinstance(name, str) and name:
+                keys[kind, name] = None
+    return list(keys)
 
 
-def _ident_is_component(ident: _Ident, kind: str, name: str, mcp_names: _McpNames) -> bool:
-    if ident.kind != kind:
-        return False
-    if kind == COMPONENT_MCP:
-        # ``_McpNames.identity`` already maps a recognizable server to its declared name.
-        return mcp_names.match(ident.server or "") == name
-    return name.casefold() in _name_candidates(ident.name)
+def _activated_components(
+    call: _Call, mcp_names: _McpNames, by_folded_name: Mapping[tuple[str, str], Sequence[str]]
+) -> set[tuple[str, str]]:
+    """The declared ``(type, name)`` components that ``call`` activates."""
+    activated: set[tuple[str, str]] = set()
+    for ident in call.component_idents:
+        if ident.kind == COMPONENT_MCP:
+            # ``_McpNames.identity`` already maps a recognizable server to its declared name.
+            server = mcp_names.match(ident.server or "")
+            if server is not None:
+                activated.add((COMPONENT_MCP, server))
+            continue
+        for candidate in _name_candidates(ident.name):
+            activated.update((ident.kind, name) for name in by_folded_name.get((ident.kind, candidate), ()))
+    return activated
 
 
 def _grade_activation_coverage(calls: Sequence[_Call], declared: Mapping[str, Sequence[str]]) -> dict[str, Any]:
@@ -2412,24 +2420,32 @@ def _grade_activation_coverage(calls: Sequence[_Call], declared: Mapping[str, Se
 
     Entries are ``"<type>:<name>"``. ``unavailable`` is a subset of ``exercised``.
     """
+    keys = _declared_keys(declared)
+    mcp_names = _McpNames(name for kind, name in keys if kind == COMPONENT_MCP)
+    # A skill, subagent or command activation names its component case-insensitively.
+    by_folded_name: dict[tuple[str, str], list[str]] = {}
+    for kind, name in keys:
+        if kind != COMPONENT_MCP:
+            by_folded_name.setdefault((kind, name.casefold()), []).append(name)
+    activated: set[tuple[str, str]] = set()
+    worked: set[tuple[str, str]] = set()  # activated by at least one call that did not fail
+    for call in calls:
+        components = _activated_components(call, mcp_names, by_folded_name)
+        activated |= components
+        if call.succeeded is not False:
+            worked |= components
     declared_labels: list[str] = []
     exercised: list[str] = []
     unverified: list[str] = []
     unavailable: list[str] = []
-    mcp_names = _McpNames(name for kind, name in _declared_keys(declared) if kind == COMPONENT_MCP)
-    for kind, name in _declared_keys(declared):
+    for kind, name in keys:
         label = _safe_text(f"{kind}:{name}")
         declared_labels.append(label)
-        outcomes = [
-            call.succeeded
-            for call in calls
-            if any(_ident_is_component(ident, kind, name, mcp_names) for ident in call.idents)
-        ]
-        if not outcomes:
+        if (kind, name) not in activated:
             unverified.append(label)
             continue
         exercised.append(label)
-        if all(outcome is False for outcome in outcomes):
+        if (kind, name) not in worked:
             unavailable.append(label)
     return {"declared": declared_labels, "exercised": exercised, "unverified": unverified, "unavailable": unavailable}
 

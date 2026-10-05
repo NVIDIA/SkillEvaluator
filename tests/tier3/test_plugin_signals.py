@@ -902,6 +902,37 @@ class TestActivationCoverage:
             "unavailable": ["mcp:jira"],
         }
 
+    def test_every_spelling_and_namespace_credits_the_declared_component(self) -> None:
+        traj = _traj(
+            _one("Skill", {"skill": "ALPHA"}),
+            _one("Skill", {"skill": "demo:deploy"}, call_id="c2"),
+            _one("Task", {"subagent_type": "Reviewer"}, call_id="c3"),
+            _one("my_docs__search", content="connection refused", call_id="c4"),
+            _one("mcp__plugin_demo_my_docs__search", content="403: forbidden", call_id="c5"),
+            _one("mcp__tracker__list", content="500: down", call_id="c6"),
+            _one("tracker.get", content="ok", call_id="c7"),
+        )
+        declared = {
+            "skill": ["Alpha", "alpha", "beta"],
+            "mcp": ["my.docs", "tracker"],
+            "subagent": ["reviewer"],
+            "command": ["deploy"],
+        }
+
+        block = _signals(traj, declared=declared)["activation_coverage"]
+
+        assert block["exercised"] == [
+            "skill:Alpha",
+            "skill:alpha",
+            "mcp:my.docs",
+            "mcp:tracker",
+            "subagent:reviewer",
+            "command:deploy",
+        ]
+        assert block["unverified"] == ["skill:beta"]
+        # Every my.docs call failed; one tracker call worked.
+        assert block["unavailable"] == ["mcp:my.docs"]
+
     def test_no_declared_components(self) -> None:
         block = _signals(_traj(_one("Skill", {"skill": "alpha"})), declared=None)["activation_coverage"]
         assert block == {"declared": [], "exercised": [], "unverified": [], "unavailable": []}

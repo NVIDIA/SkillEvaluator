@@ -296,7 +296,7 @@ def test_hook_urls_read_the_same_host_and_path_as_node(url: str, node_host: str,
     import posixpath
     from urllib.parse import urlsplit
 
-    from skillevaluator.validators.mcp_static import whatwg_url
+    from skillevaluator.validators.url_policy import whatwg_url
 
     parsed = urlsplit(whatwg_url(url))
     assert parsed.hostname == node_host
@@ -821,7 +821,7 @@ def test_redirect_locations_are_classified_where_node_would_follow_them(
 def test_whatwg_url_resolves_to_the_host_node_uses(location: str, node_host: str, expected: str) -> None:
     from urllib.parse import urlsplit
 
-    from skillevaluator.validators.mcp_static import whatwg_url
+    from skillevaluator.validators.url_policy import whatwg_url
 
     resolved = urlsplit(whatwg_url(location, "https://pub.example/mcp"))
     assert _canonical_host(resolved.hostname or "") == _canonical_host(node_host)

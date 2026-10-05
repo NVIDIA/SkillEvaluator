@@ -567,11 +567,11 @@ def test_values_that_are_not_jwt_like_stay_clean(value: str) -> None:
 def test_inline_secret_scan_is_linear_on_a_long_jwt_like_run(unit: str) -> None:
     import time
 
-    from skillevaluator.validators.mcp_static import _looks_like_inline_secret
+    from skillevaluator.validators.url_policy import looks_like_inline_secret
 
     # 256 KB with no "." after the run: a per-"eyJ" scan took about 15 s here.
     value = unit * (262_144 // len(unit))
     started = time.perf_counter()
-    assert _looks_like_inline_secret("SETTING", value) is False
+    assert looks_like_inline_secret("SETTING", value) is False
     assert validate_contained_mcp_servers({"s": {"command": "srv", "args": [value]}}, "p.json") is not None
     assert time.perf_counter() - started < 2.0

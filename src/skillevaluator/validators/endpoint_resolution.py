@@ -53,8 +53,8 @@ from skillevaluator.validators.mcp_static import (
     classify_endpoint_host,
     endpoint_client_host,
     host_is_allowlisted,
-    whatwg_url,
 )
+from skillevaluator.validators.url_policy import whatwg_url
 
 DNS_TIMEOUT_SECONDS = 3.0
 HEAD_TIMEOUT_SECONDS = 5.0

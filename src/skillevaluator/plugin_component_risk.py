@@ -54,8 +54,10 @@ from skillevaluator.validators.mcp_static import (
     classify_endpoint_host,
     classify_mcp_pinning,
     host_is_allowlisted,
-    is_env_reference,
     iter_config_strings,
+)
+from skillevaluator.validators.url_policy import (
+    is_env_reference,
     looks_like_inline_secret,
     url_ambiguities,
     whatwg_url,

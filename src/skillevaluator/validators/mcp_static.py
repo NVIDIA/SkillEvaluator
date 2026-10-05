@@ -30,13 +30,21 @@ import unicodedata
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import parse_qs, unquote, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 
 import idna
 
 from skillevaluator.models.plugin import MCP_NAME_PATTERN
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.utils.structured_data import MAX_STRUCTURED_NODES
+from skillevaluator.validators.url_policy import (
+    has_secret_shape,
+    is_credential_name,
+    is_env_reference,
+    looks_like_inline_secret,
+    url_ambiguities,
+    whatwg_url,
+)
 
 CATEGORY = "MCP_DECLARATION"
 
@@ -83,42 +91,6 @@ _INSECURE_TLS_FLAGS: frozenset[str] = frozenset(
     {"--insecure", "-k", "--no-check-certificate", "--tls-no-verify", "--ssl-no-verify", "--no-verify-tls"}
 )
 
-# env-var reference forms that are acceptable in place of an inline secret.
-_ENV_REF_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$|^\$[A-Za-z_][A-Za-z0-9_]*$")
-# env keys that name a credential -- their value must be a reference, never a literal.
-# The auth/bearer/token alternatives are suffix-anchored so benign config keys that
-# merely contain those substrings -- AUTH_TYPE, OAUTH_CLIENT_ID, BEARER_FORMAT,
-# TOKEN_ENDPOINT, TOKEN_TYPE, TOKEN_ISSUER -- are not misread as credentials, while
-# real credential keys (CLIENT_SECRET, AUTH_TOKEN, ACCESS_TOKEN, TOKEN_SECRET) match.
-_SECRET_KEY_RE = re.compile(
-    r"(?i)(secret|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key|credential"
-    r"|bearer[_-]?token|auth[_-](?:key|token|secret|pass(?:word)?)"
-    r"|token(?:[_-](?:secret|key|value|id))?$)"
-)
-# Inline HTTP auth-scheme credential carried in a value (e.g. an Authorization
-# header): "Bearer <token>" / "Basic <base64>" with a real payload. Anchored with a
-# minimum payload length so a "${ENV}" reference or benign prose never matches; this
-# keeps Authorization-style inline secrets covered without keying on the header name.
-_INLINE_AUTH_SCHEME_RE = re.compile(r"(?i)^(?:bearer|basic)\s+[A-Za-z0-9+/._=~-]{12,}$")
-# Known inline-secret value shapes. Only ``search`` truthiness is used.
-#
-# The JWT-like alternative starts only where a run of token characters starts
-# and scans to the run's first ``eyJ`` without ever stepping past one. A later
-# ``eyJ`` in the same run has fewer characters before the run ends, so it can
-# never match when the first one does not. A plain ``eyJ...`` alternative was
-# tried at every ``eyJ`` and scanned to the end of the run each time, which is
-# quadratic on a long ``eyJeyJ...`` value (about 1 s per 64 KB value).
-_SECRET_VALUE_RE = re.compile(
-    r"(sk-[A-Za-z0-9]{16,}"
-    r"|ghp_[A-Za-z0-9]{20,}"
-    r"|glpat-[A-Za-z0-9_-]{20,}"
-    r"|AKIA[0-9A-Z]{16}"
-    r"|xox[baprs]-[A-Za-z0-9-]{10,}"
-    r"|nvapi-[A-Za-z0-9_-]{16,}"
-    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
-    r"|(?<![A-Za-z0-9_-])(?:(?!eyJ)[A-Za-z0-9_-])*eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"
-)
-
 
 def _finding(
     severity: Severity, check_name: str, message: str, file_path: str, suggestion: str, *, name: str | None = None
@@ -135,47 +107,17 @@ def _finding(
     )
 
 
-def _is_env_reference(value: str) -> bool:
-    """True when *value* is an ``$VAR`` / ``${VAR}`` env reference (not a literal)."""
-    return bool(_ENV_REF_RE.match(value.strip()))
-
-
-def _looks_like_inline_secret(key: str, value: str) -> bool:
-    """True when an env/header value is an inline credential rather than a reference."""
-    v = value.strip()
-    if not v or _is_env_reference(v):
-        return False
-    if _SECRET_VALUE_RE.search(v):
-        return True
-    # An inline HTTP auth-scheme credential ("Bearer <token>" / "Basic <base64>"),
-    # independent of the key name -- covers Authorization-style headers.
-    if _INLINE_AUTH_SCHEME_RE.match(v):
-        return True
-    # A credential-named key whose value is a non-empty, non-reference literal.
-    return bool(_SECRET_KEY_RE.search(str(key)))
-
-
-def is_env_reference(value: str) -> bool:
-    """Public alias: ``True`` when *value* is a pure ``$VAR`` / ``${VAR}`` reference."""
-    return _is_env_reference(value)
-
-
-def looks_like_inline_secret(key: str, value: str) -> bool:
-    """Public alias: ``True`` when a keyed value is an inline credential rather than a reference."""
-    return _looks_like_inline_secret(key, value)
-
-
 def _credential_flag_name(token: str) -> str | None:
     """Return the flag name when *token* is a credential-bearing option flag.
 
     Handles ``--api-key`` / ``--api-key=VALUE`` (and short ``-x`` / ``-x=VALUE``)
     forms. The flag name (leading dashes stripped) is matched against the same
-    credential vocabulary used for env keys (:data:`_SECRET_KEY_RE`).
+    credential vocabulary used for env keys (:func:`~skillevaluator.validators.url_policy.is_credential_name`).
     """
     if not token.startswith("-"):
         return None
     flag = token.lstrip("-").split("=", 1)[0]
-    return flag if flag and _SECRET_KEY_RE.search(flag) else None
+    return flag if flag and is_credential_name(flag) else None
 
 
 # Everything after 'scheme:' (and any slashes or backslashes) through the last '@'
@@ -195,104 +137,6 @@ def redacted_url(url: str) -> str:
     except ValueError:  # e.g. an unbalanced '[' in the authority
         return "<unparseable URL>"
     return urlunparse((parsed.scheme, parsed.netloc.rpartition("@")[2], parsed.path, "", "", ""))
-
-
-# --------------------------------------------------------------------------- #
-# WHATWG URL reading                                                          #
-# --------------------------------------------------------------------------- #
-# Node (Claude Code http hooks, MCP SDK fetch), Rust's url crate, and browsers
-# parse URLs with the WHATWG URL Standard. For its "special" schemes it reads a
-# backslash as '/', skips any run of slashes after 'scheme:', and drops tabs and
-# line breaks, where urllib.parse does not. Policy decisions must read the URL
-# the way the client that connects to it does.
-_WHATWG_SPECIAL_SCHEMES = frozenset({"http", "https", "ws", "wss", "ftp"})
-_C0_CONTROL_OR_SPACE = "".join(chr(code) for code in range(0x21))
-# Edge characters that both urllib (str.strip) and WHATWG clients (C0 control or space) drop.
-_ASCII_EDGE_WHITESPACE = "".join(char for char in _C0_CONTROL_OR_SPACE if char.isspace())
-_TAB_OR_NEWLINE_RE = re.compile(r"[\t\n\r]")
-_URL_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):")
-
-
-def _special_scheme_slashes(text: str) -> str:
-    """Read ``\\`` as ``/`` before the query or fragment, as WHATWG does for special schemes."""
-    cut = min((index for index in (text.find("?"), text.find("#")) if index != -1), default=len(text))
-    return text[:cut].replace("\\", "/") + text[cut:]
-
-
-def _url_scheme(text: str) -> str | None:
-    match = _URL_SCHEME_RE.match(text)
-    return match.group(1).lower() if match else None
-
-
-def whatwg_url(url: str, base: str | None = None) -> str:
-    """The absolute URL a WHATWG client resolves ``url`` (against ``base``) to, in a form urllib reads the same way.
-
-    For http(s), ws(s), and ftp URLs the result has ``scheme://`` followed by the
-    authority the client connects to, so ``urlsplit(result).hostname`` is the host
-    Node would use: ``https://evil.net\\.example.com/`` reads as host ``evil.net``,
-    and ``http:169.254.169.254/`` as host ``169.254.169.254``. Other schemes, and a
-    relative URL without a base, come back with only the WHATWG trimming applied.
-    """
-    text = _TAB_OR_NEWLINE_RE.sub("", url.strip(_C0_CONTROL_OR_SPACE))
-    base_url = whatwg_url(base) if base is not None else None
-    base_scheme = _url_scheme(base_url) if base_url is not None else None
-    scheme = _url_scheme(text)
-    if scheme is not None:
-        if scheme not in _WHATWG_SPECIAL_SCHEMES:
-            return text
-        rest = _special_scheme_slashes(text[len(scheme) + 1 :])
-        if base_url is not None and scheme == base_scheme and not rest.startswith("//"):
-            # Same special scheme as the base and no authority: a relative reference.
-            return urljoin(base_url, rest)
-        # Any run of '/' and '\' after a special scheme introduces the authority.
-        return f"{scheme}://{rest.lstrip('/')}"
-    if base_url is None:
-        return text
-    if base_scheme in _WHATWG_SPECIAL_SCHEMES:
-        text = _special_scheme_slashes(text)
-        if text.startswith("//"):
-            # Any run of '/' and '\' starts the authority; urljoin would keep the base host for '///host'.
-            return f"{base_scheme}://{text.lstrip('/')}"
-    return urljoin(base_url, text)
-
-
-def url_ambiguities(url: str, *, percent_in_host: bool = False) -> list[str]:
-    """Why urllib and a WHATWG client (Node, MCP SDKs) could read ``url`` differently, or as different text.
-
-    Flags whitespace or control characters inside the URL (only leading and
-    trailing ASCII whitespace is allowed, which both readings strip; a NUL,
-    U+2028, or no-break space at either end still counts), and invisible
-    format characters such as a zero-width space anywhere (WHATWG drops some of
-    them from a host name, urllib keeps them). For http(s), ws(s), and ftp URLs
-    it also flags a backslash before the query, a scheme not followed by
-    exactly ``//`` (WHATWG skips any run of slashes, so ``https:///host``
-    connects to ``host``), and (with ``percent_in_host``) percent-encoding in
-    the host, which WHATWG decodes before it connects.
-    """
-    text = url.strip()
-    problems: list[str] = []
-    inner = url.strip(_ASCII_EDGE_WHITESPACE)
-    if any(char.isspace() or unicodedata.category(char) == "Cc" for char in inner):
-        problems.append("whitespace or a control character")
-    if any(unicodedata.category(char) == "Cf" for char in url):
-        problems.append("an invisible format character (such as a zero-width space)")
-    trimmed = _TAB_OR_NEWLINE_RE.sub("", text.strip(_C0_CONTROL_OR_SPACE))
-    scheme = _url_scheme(trimmed)
-    if scheme not in _WHATWG_SPECIAL_SCHEMES:
-        return problems
-    rest = trimmed[len(scheme) + 1 :]
-    cut = min((index for index in (rest.find("?"), rest.find("#")) if index != -1), default=len(rest))
-    if "\\" in rest[:cut]:
-        problems.append("a backslash, which clients read as '/'")
-    if not rest.startswith("//"):
-        problems.append(f"no '//' after '{scheme}:'")
-    elif rest[2:3] in {"/", "\\"}:
-        problems.append(f"more than two slashes after '{scheme}:'")
-    if percent_in_host:
-        authority = re.split(r"[/\\?#]", rest.lstrip("/\\"), maxsplit=1)[0]
-        if "%" in authority.rpartition("@")[2]:
-            problems.append("percent-encoding in the host")
-    return problems
 
 
 def _client_reading(parsed: Any) -> str:
@@ -322,7 +166,7 @@ def _check_url_inline_secrets(name: str, url: str, parsed: Any, file_path: str, 
         username, password = parsed.username, parsed.password
     except ValueError:  # malformed netloc / port
         username = password = None
-    if (password and not _is_env_reference(password)) or (username and not _is_env_reference(username)):
+    if (password and not is_env_reference(password)) or (username and not is_env_reference(username)):
         findings.append(
             _finding(
                 Severity.CRITICAL,
@@ -335,9 +179,9 @@ def _check_url_inline_secrets(name: str, url: str, parsed: Any, file_path: str, 
             )
         )
     for key, values in parse_qs(parsed.query, keep_blank_values=True).items():
-        if not _SECRET_KEY_RE.search(key):
+        if not is_credential_name(key):
             continue
-        if any(v and not _is_env_reference(v) for v in values):
+        if any(v and not is_env_reference(v) for v in values):
             findings.append(
                 _finding(
                     Severity.CRITICAL,
@@ -458,7 +302,7 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
                 value, value_idx = arg_list[idx + 1], idx + 1
             else:
                 value, value_idx = "", -1
-            if value and not _is_env_reference(value):
+            if value and not is_env_reference(value):
                 findings.append(
                     _finding(
                         Severity.CRITICAL,
@@ -473,12 +317,7 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
             continue
         if idx == flagged_value_idx:
             continue  # already reported as the preceding flag's value
-        stripped = token.strip()
-        if (
-            stripped
-            and not _is_env_reference(stripped)
-            and (_SECRET_VALUE_RE.search(stripped) or _INLINE_AUTH_SCHEME_RE.match(stripped))
-        ):
+        if has_secret_shape(token):
             findings.append(
                 _finding(
                     Severity.CRITICAL,
@@ -729,7 +568,7 @@ def _validate_env_and_headers(name: str, config: dict[str, Any], file_path: str,
                         name=name,
                     )
                 )
-            if _looks_like_inline_secret(key, value):
+            if looks_like_inline_secret(key, value):
                 findings.append(
                     _finding(
                         Severity.CRITICAL,

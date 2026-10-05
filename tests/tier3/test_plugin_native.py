@@ -398,6 +398,20 @@ def test_claude_code_stages_a_plugin_dir_with_wrapped_hooks_and_no_eval_data(tmp
     _assert_no_bypass(bundle)
 
 
+def test_claude_code_plugin_copy_skips_env_files_in_any_letter_case(tmp_path: Path) -> None:
+    plugin = _contained_plugin(tmp_path)
+    # One name per directory: a case-insensitive filesystem cannot hold .env and .ENV side by side.
+    _write(plugin / "scripts" / ".ENV", "TOKEN=do-not-copy\n")
+    _write(plugin / "config" / ".Env.local", "TOKEN=do-not-copy\n")
+    _write(plugin / "config" / ".env.example", "TOKEN=\n")
+    _write(plugin / "templates" / ".ENV.EXAMPLE", "TOKEN=\n")
+    package = prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage", plugin_load="native")
+    bundle, _, _ = _stage(tmp_path, "claude-code", package.native_source)
+    files = _files(bundle / "native" / "claude-code" / "plugin")
+    assert {"scripts/.ENV", "config/.Env.local"}.isdisjoint(files)
+    assert {"config/.env.example", "templates/.ENV.EXAMPLE"} <= files
+
+
 def test_claude_code_plugin_copy_skips_results_generated_output_and_the_evals_source(tmp_path: Path) -> None:
     """Grading data inside the plugin root never reaches the with-plugin image through the native copy."""
     from skillevaluator.tier3.output_provenance import mark_generated_output_root

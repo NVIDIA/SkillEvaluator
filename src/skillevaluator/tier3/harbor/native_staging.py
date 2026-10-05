@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from skillevaluator.plugin_components import is_env_file
 from skillevaluator.tier3.harbor.secure_copy import UnsafeStagingError, copy_file_secure, copytree_secure
 from skillevaluator.tier3.plugin_native import (
     BUNDLE_DIRNAME,
@@ -47,7 +48,6 @@ _PLUGIN_TREE_IGNORED_ROOT = frozenset(
         ".claude",
     }
 )
-_ENV_TEMPLATE_SUFFIXES = frozenset({"example", "sample", "template", "dist", "defaults", "tmpl"})
 
 
 @dataclass(frozen=True)
@@ -83,12 +83,6 @@ def build_native_task_staging(agent: str, adapter: HarnessAdapter, source: Nativ
     return NativeTaskStaging(agent=agent, adapter=adapter, source=source, bundle=adapter.build(source))
 
 
-def _is_env_file(name: str) -> bool:
-    if name != ".env" and not name.startswith(".env."):
-        return False
-    return name.rsplit(".", 1)[-1].lower() not in _ENV_TEMPLATE_SUFFIXES
-
-
 def _declared_unsupported_paths(source: NativePluginSource) -> set[str]:
     """Manifest-declared LSP and monitor files, which the native copy never carries."""
     paths: set[str] = set()
@@ -116,7 +110,7 @@ def _plugin_tree_ignore(source: NativePluginSource, excluded_roots: Sequence[Pat
 
     def _ignore(directory: str, contents: list[str]) -> list[str]:
         current = Path(directory).resolve()
-        ignored = {name for name in contents if name in {"__pycache__", ".git", "results"} or _is_env_file(name)}
+        ignored = {name for name in contents if name in {"__pycache__", ".git", "results"} or is_env_file(name)}
         ignored.update(runtime_ignore(directory, contents))
         if current == root:
             ignored.update(name for name in contents if name in _PLUGIN_TREE_IGNORED_ROOT)

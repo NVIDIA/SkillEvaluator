@@ -2067,11 +2067,14 @@ def _ref_label(ref: Any) -> str:
     return str(ref)
 
 
-def _is_env_file(name: str) -> bool:
-    lowered = name.lower()
-    return lowered == ".env" or (
-        lowered.startswith(".env.") and lowered.rsplit(".", 1)[-1] not in _ENV_TEMPLATE_SUFFIXES
-    )
+def is_env_file(name: str) -> bool:
+    """Whether *name* is a ``.env`` or ``.env.*`` file, in any letter case, that is not a template.
+
+    Tier 1 flags these names and native Tier 3 staging leaves them out of the
+    plugin copy, so both use this one rule.
+    """
+    folded = name.casefold()
+    return folded == ".env" or (folded.startswith(".env.") and folded.rsplit(".", 1)[-1] not in _ENV_TEMPLATE_SUFFIXES)
 
 
 def _scan_env_entries(
@@ -2088,7 +2091,7 @@ def _scan_env_entries(
         except OSError:
             continue
         if not is_dir:
-            if _is_env_file(entry.name):
+            if is_env_file(entry.name):
                 hits.append(rel_dir / entry.name)
         elif entry.name not in SCAN_EXCLUDED_DIRS and depth < 32:
             children.append(entry.name)

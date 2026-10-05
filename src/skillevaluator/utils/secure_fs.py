@@ -137,14 +137,6 @@ def stat_is_link_or_reparse(metadata: os.stat_result) -> bool:
     return stat.S_ISLNK(metadata.st_mode) or bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
 
 
-def is_link_or_reparse(path: Path) -> bool:
-    """Inspect one path without following it."""
-    try:
-        return stat_is_link_or_reparse(path.lstat())
-    except OSError as exc:
-        raise SecurePathError("path_access_error", f"Cannot inspect path safely: {path.name}: {exc}") from exc
-
-
 def _absolute_no_resolve(path: Path) -> Path:
     """Return an absolute lexical path without resolving links."""
     return Path(os.path.abspath(os.fspath(path)))  # noqa: PTH100

@@ -737,6 +737,33 @@ def test_malformed_or_linked_census_files_are_ignored(tmp_path: Path) -> None:
     assert read_census_file(good) == {"agent": "codex", "mode": "native", "loaded": [], "listed": [], "not_loaded": []}
 
 
+def test_missing_or_linked_harness_logs_read_as_none(tmp_path: Path) -> None:
+    from skillevaluator.tier3.plugin_native import read_harness_log_prefix
+
+    assert read_harness_log_prefix(tmp_path / "agent" / "claude-code.txt") is None
+    log = tmp_path / "claude-code.txt"
+    log.write_text('{"type": "system"}\n', encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(log)
+    assert read_harness_log_prefix(link) is None
+    assert read_harness_log_prefix(log) == '{"type": "system"}\n'
+
+
+def test_collector_keeps_a_claude_census_when_the_harness_log_is_missing(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.collector import _attach_load_census
+
+    job = tmp_path / "job"
+    census = {"agent": "claude-code", "mode": "native", "loaded": [], "not_loaded": []}
+    _write(job / "trial-1" / "agent" / "skilleval-load-census.json", json.dumps(census))
+    plan = {
+        "mode": "native",
+        "declared": [{"type": "skill", "name": "alpha"}],
+        "harness": {"kind": "claude-code-init", "plugin": "release-helper"},
+    }
+    summary = _attach_load_census([{"_trial_root_name": "trial-1"}], job, plan, agent="claude-code")
+    assert summary["trials"] == 1 and summary["fallback_trials"] == 0
+
+
 def _coverage(*rows: dict[str, Any]) -> dict[str, Any]:
     from skillevaluator.plugin_components import summarize_coverage
 

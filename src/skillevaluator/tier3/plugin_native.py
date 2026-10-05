@@ -2197,16 +2197,23 @@ def read_harness_log_prefix(path: Path, max_bytes: int = MAX_HARNESS_LOG_PREFIX_
     """Read at most ``max_bytes`` from the start of a harness log without following links.
 
     Harness logs can be large; the startup event this module needs is near the
-    top, so a prefix is enough. ``None`` for a missing, linked, or special file.
+    top, so a prefix is enough. ``None`` for a missing, linked, or special file;
+    ``SecurePathError`` when the path cannot be inspected.
     """
     import os
     import stat
 
-    from skillevaluator.utils.secure_fs import is_link_or_reparse
+    from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
 
     try:
-        if is_link_or_reparse(path):
-            return None
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise SecurePathError("path_access_error", f"Cannot inspect path safely: {path.name}: {exc}") from exc
+    if stat_is_link_or_reparse(metadata):
+        return None
+    try:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
         descriptor = os.open(path, flags)
     except OSError:

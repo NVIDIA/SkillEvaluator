@@ -2382,22 +2382,6 @@ def _activations(calls: Sequence[_Call]) -> list[dict[str, Any]]:
     return activations
 
 
-def detect_component_activations(
-    trajectory: Mapping[str, Any],
-    declared: Mapping[str, Sequence[str]] | None = None,
-    *,
-    mcp_call_servers: Mapping[str, str] | None = None,
-    subagent_aliases: Mapping[str, str] | None = None,
-) -> list[dict[str, Any]]:
-    """Ordered component activations (C3 ``activations``) in one ATIF trajectory."""
-    calls = (
-        _extract_calls(trajectory, declared or {}, mcp_call_servers, subagent_aliases)
-        if isinstance(trajectory, Mapping)
-        else None
-    )
-    return _activations(calls or [])
-
-
 def compute_plugin_signals(
     trajectory: Any,
     case: Mapping[str, Any] | None = None,
@@ -2604,7 +2588,6 @@ __all__ = [
     "PluginSignalsContext",
     "build_plugin_signals_context",
     "compute_plugin_signals",
-    "detect_component_activations",
     "match_declared_mcp_server",
     "plugin_case_spec",
     "summarize_plugin_signals",

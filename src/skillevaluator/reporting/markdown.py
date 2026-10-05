@@ -633,7 +633,7 @@ class MarkdownReporter(ReporterBase):
                     lines.append(f"**INCOMPLETE:** {cell(row['unverified'])}")
                     lines.append("")
         integration = view["integration"]
-        modes = (integration or {}).get("modes") or view["lift_modes"]
+        modes = view["lift_modes"]
         if integration or modes:
             lines.append("### Integration (advisory)")
             lines.append("")

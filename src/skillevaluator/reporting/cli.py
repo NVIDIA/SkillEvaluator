@@ -177,7 +177,7 @@ def print_plugin_tier3(view: dict, console: Console) -> None:
                 f"native: {esc(', '.join(row['native']) or 'none')}{esc(census)}[/dim]"
             )
     integration = view.get("integration")
-    modes = (integration or {}).get("modes") or view.get("lift_modes")
+    modes = view.get("lift_modes")
     if modes:
         fallback = " [yellow](fell back)[/yellow]" if modes["fallback"] else ""
         console.print(

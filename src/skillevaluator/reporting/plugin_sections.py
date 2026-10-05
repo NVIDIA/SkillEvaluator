@@ -464,7 +464,6 @@ def dependency_view(block: object) -> dict[str, Any] | None:
         missing = sum(1 for row in rows if row["state"] == "missing")
     return {
         "counts": count_rows,
-        "total": sum(row["count"] for row in count_rows) if count_rows else total_rows,
         "rows": rows,
         "omitted": max(0, total_rows - len(rows)),
         "missing": missing,
@@ -632,13 +631,11 @@ def mcp_view(value: object) -> dict[str, Any] | None:
     if not mcp:
         return None
     servers: list[dict[str, Any]] = []
-    total = 0
     for server in _sequence(mcp.get("servers")):
         if not isinstance(server, Mapping):
             continue
-        total += 1
         if len(servers) >= MAX_TABLE_ROWS:
-            continue
+            break
         pinned = server.get("pinned")
         servers.append(
             {
@@ -653,7 +650,6 @@ def mcp_view(value: object) -> dict[str, Any] | None:
     unpinned = [server for server in servers if server["pinned"] is False]
     return {
         "servers": servers,
-        "omitted": max(0, total - len(servers)),
         "pinning": pinning_view(mcp.get("pinning"), servers),
         "unpinned": unpinned,
     }
@@ -1283,7 +1279,6 @@ def integration_view(
         integration.get("completeness"), sum_of_parts_baseline=sum_of_parts_baseline
     ) or completeness_issues_view(integration, sum_of_parts_baseline=sum_of_parts_baseline)
     return {
-        "modes": modes,
         "measured": measured,
         "verdict": verdict,
         "verdict_label": verdict_label,
@@ -1381,7 +1376,6 @@ def _ci_row(kind: str, label: str, value: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "kind": kind,
         "label": label,
-        "estimate_value": estimate,
         "low_value": low,
         "high_value": high,
         "estimate": fmt_signed(estimate),
@@ -1434,6 +1428,7 @@ def _statistics_scope(
     cost = _mapping(statistics.get("cost"))
     efficiency = _mapping(statistics.get("token_efficiency"))
     arms = []
+    any_usd = any_not_priced = False
     for arm in _ordered_arms(reliability, cost, efficiency):
         arm_reliability = _mapping(reliability.get(arm))
         arm_cost = _mapping(cost.get(arm))
@@ -1457,22 +1452,20 @@ def _statistics_scope(
                 "token_efficiency": fmt_score(efficiency.get(arm)),
                 "has_reliability": bool(arm_reliability),
                 "has_tokens": has_tokens,
-                "has_usd": has_usd,
-                "usd_not_priced": has_tokens and not has_usd,
                 "has_efficiency": number(efficiency.get(arm)) is not None,
             }
         )
+        any_usd = any_usd or has_usd
+        any_not_priced = any_not_priced or (has_tokens and not has_usd)
     return {
         "label": label,
         "lift_ci": lift_ci,
         "arms": arms,
         "has_reliability": any(row["has_reliability"] for row in arms),
         "has_tokens": any(row["has_tokens"] for row in arms),
-        "has_usd": any(row["has_usd"] for row in arms),
-        "usd_not_priced": any(row["usd_not_priced"] for row in arms),
-        "usd_note": NOT_PRICED_NOTE if any(row["usd_not_priced"] for row in arms) else "",
+        "usd_note": NOT_PRICED_NOTE if any_not_priced else "",
         # The USD column also shows "not priced" when an arm has tokens but no dollars.
-        "show_usd": any(row["has_usd"] or row["usd_not_priced"] for row in arms),
+        "show_usd": any_usd or any_not_priced,
         "has_efficiency": any(row["has_efficiency"] for row in arms),
         "context_measured": _context_measured_view(statistics.get("context_cost_measured")),
         "completeness": completeness_issues_view(
@@ -2033,7 +2026,6 @@ def cve_summary_view(value: object) -> dict[str, Any] | None:
         severity_counts = [
             (severity, count(vulnerabilities.get(severity)) or 0) for severity in ("critical", "high", "medium", "low")
         ]
-        total = sum(amount for _severity, amount in severity_counts)
         scanners, _omitted = _names(entry.get("scanners"), limit=4)
         errors, _errors_omitted = _names(entry.get("errors"), limit=4)
         rows.append(
@@ -2046,7 +2038,6 @@ def cve_summary_view(value: object) -> dict[str, Any] | None:
                 "audited": count(entry.get("audited")) or 0,
                 "unverified": count(entry.get("unverified")) or 0,
                 "scanners": ", ".join(scanners) or "none",
-                "vulnerabilities": total,
                 "severity_label": ", ".join(f"{amount} {severity}" for severity, amount in severity_counts if amount)
                 or "none",
                 "errors": errors,
@@ -2057,7 +2048,6 @@ def cve_summary_view(value: object) -> dict[str, Any] | None:
     return {
         "rows": rows,
         "incomplete": any(row["status"] == "incomplete" for row in rows),
-        "vulnerabilities": sum(row["vulnerabilities"] for row in rows),
     }
 
 
@@ -2415,7 +2405,6 @@ def mcp_proof_view(value: object) -> dict[str, Any] | None:
     return {
         "rows": rows,
         "omitted": max(0, len(proof) - len(rows)),
-        "proven": proven,
         "headline": f"{proven} of {len(rows)} URL MCP server{'' if len(rows) == 1 else 's'} proven reachable",
         "note": MCP_PROOF_NOTE,
     }
@@ -2482,7 +2471,6 @@ def plugin_load_view(payload: object, *, context: _Tier3Context | None = None) -
             f"{len(confirmed)} confirmed by harness, {len(listed)} listed (files found, not confirmed), "
             f"{len(staged)} staged only, {len(not_loaded)} not loaded"
         )
-        trials = count(census.get("trials"))
         unverified = _mapping(provenance.get("native_load_unverified")).get(str(agent))
         mode = text(entry.get("mode"), limit=16) or "unknown"
         rows.append(
@@ -2496,13 +2484,8 @@ def plugin_load_view(payload: object, *, context: _Tier3Context | None = None) -
                 "wrapper": grouped["wrapper"],
                 "unsupported": grouped["unsupported"],
                 "census": bool(census),
-                "census_trials": trials,
-                "fallback_trials": count(census.get("fallback_trials")),
-                "harness": text(census.get("harness"), limit=64),
                 "confirmed": len(confirmed),
                 "listed": len(listed),
-                # ``verified`` keeps its old key for older callers; it now counts harness-confirmed components only.
-                "verified": len(confirmed),
                 "staged_only": len(staged),
                 "census_summary": census_summary,
                 "unverified": text(unverified) if unverified else "",

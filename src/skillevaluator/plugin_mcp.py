@@ -198,59 +198,118 @@ def collect_mcp_declarations(
     """
     collection = McpCollection()
     manifest = manifest if isinstance(manifest, dict) else None
-    manifest_display = reader.display(manifest_rel)
-
-    if manifest is not None and not contained and isinstance(manifest.get("mcp"), list):
-        for entry in manifest["mcp"][:PLUGIN_COMPONENT_MAX_ITEMS]:
-            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
-                config = {key: value for key, value in entry.items() if key != "name"}
-                collection.declarations.append(McpDeclaration(entry["name"], config, "agent_plugin_yaml", manifest_rel))
-
+    if manifest is not None and not contained:
+        _collect_bundle_manifest_servers(collection, manifest, manifest_rel)
     declared = manifest.get("mcpServers") if manifest is not None else None
-    entries: list[Any]
+    entries = _declared_entries(reader, collection, declared, manifest_rel)
+
+    # 1. The default root MCP file (unless the manifest names it explicitly, or
+    #    the format lets a declared mcpServers replace default discovery; Codex
+    #    only when it keeps the declared value).
+    if not (contained and declared_value_replaces_default(profile, "mcpServers", declared)):
+        _collect_default_files(reader, collection, entries, manifest_rel, profile)
+
+    # 2. Declared shapes in order.
+    for index, entry in enumerate(entries):
+        if isinstance(entry, dict):
+            _collect_inline_map(reader, collection, entry, manifest_rel)
+        elif isinstance(entry, str):
+            _collect_path_ref(reader, collection, entry, manifest_rel, profile)
+        else:
+            collection.findings.append(
+                _plugin_finding(
+                    Severity.HIGH,
+                    "mcp_servers_entry_invalid",
+                    f"mcpServers[{index}] must be a config-file path string or an inline server map "
+                    f"(got {type(entry).__name__})",
+                    reader.display(manifest_rel),
+                    'Use "./path/to/servers.json" or {"<name>": {"command"|"url": ...}} for each array entry.',
+                    category=MCP_CATEGORY,
+                )
+            )
+
+    # 3. Dialect normalization (Codex, Agent Plugins) before any static check.
+    if profile.mcp_dialect != "claude":
+        _normalize_dialect(reader, collection, profile, manifest)
+
+    # 4. Duplicate names across Claude Code sources (later replaces earlier).
+    _flag_duplicate_names(reader, collection)
+
+    if validate_servers:
+        for declaration in collection.declarations:
+            if declaration.source == "agent_plugin_yaml":
+                continue  # validated by the PluginManifest model
+            collection.server_findings.extend(
+                validate_mcp_server_declaration(
+                    declaration.name,
+                    declaration.config,
+                    reader.display(declaration.file),
+                    allowed_private_hosts=allowed_private_hosts,
+                )
+            )
+    return collection
+
+
+def _collect_bundle_manifest_servers(collection: McpCollection, manifest: dict[str, Any], manifest_rel: str) -> None:
+    """The ``mcp`` list of a bundle-reference ``agent_plugin.yaml``, kept as declared (Pydantic validates it)."""
+    entries = manifest.get("mcp")
+    if not isinstance(entries, list):
+        return
+    for entry in entries[:PLUGIN_COMPONENT_MAX_ITEMS]:
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+            config = {key: value for key, value in entry.items() if key != "name"}
+            collection.declarations.append(McpDeclaration(entry["name"], config, "agent_plugin_yaml", manifest_rel))
+
+
+def _declared_entries(
+    reader: PluginRootReader, collection: McpCollection, declared: Any, manifest_rel: str
+) -> list[Any]:
+    """The declared ``mcpServers`` shapes in order: an inline map, a path, or the first entries of an array.
+
+    An array past the item cap and a value of any other type get a HIGH finding.
+    """
     if declared is None:
-        entries = []
-    elif isinstance(declared, dict | str):
-        entries = [declared]
-    elif isinstance(declared, list):
-        entries = declared[:PLUGIN_COMPONENT_MAX_ITEMS]
+        return []
+    if isinstance(declared, dict | str):
+        return [declared]
+    if isinstance(declared, list):
         if len(declared) > PLUGIN_COMPONENT_MAX_ITEMS:
             collection.findings.append(
                 _plugin_finding(
                     Severity.HIGH,
                     "mcp_config_file_too_large",
                     f"'mcpServers' has {len(declared)} entries; only {PLUGIN_COMPONENT_MAX_ITEMS} are inspected",
-                    manifest_display,
+                    reader.display(manifest_rel),
                     "Reduce the number of mcpServers entries.",
                     category=MCP_CATEGORY,
                 )
             )
-    else:
-        collection.findings.append(
-            _plugin_finding(
-                Severity.HIGH,
-                "mcp_servers_not_object",
-                "'mcpServers' must be an inline server map, a config-file path string, or an array of those "
-                f"(got {type(declared).__name__})",
-                manifest_display,
-                'Use {"<name>": {"command"|"url"|"provider": ...}}, "./.mcp.json", or an array mixing both.',
-                category=MCP_CATEGORY,
-            )
+        return declared[:PLUGIN_COMPONENT_MAX_ITEMS]
+    collection.findings.append(
+        _plugin_finding(
+            Severity.HIGH,
+            "mcp_servers_not_object",
+            "'mcpServers' must be an inline server map, a config-file path string, or an array of those "
+            f"(got {type(declared).__name__})",
+            reader.display(manifest_rel),
+            'Use {"<name>": {"command"|"url"|"provider": ...}}, "./.mcp.json", or an array mixing both.',
+            category=MCP_CATEGORY,
         )
-        entries = []
+    )
+    return []
 
+
+def _collect_default_files(
+    reader: PluginRootReader, collection: McpCollection, entries: list[Any], manifest_rel: str, profile: FormatProfile
+) -> None:
+    """The format's default MCP files at the root, unless a declared path names one (then it loads as declared)."""
     explicit_files: set[PurePosixPath] = set()
     for entry in entries:
         if isinstance(entry, str):
             normalized = normalize_declared_path(entry, profile.manifest_path_prefixes)
             if normalized.rel is not None:
                 explicit_files.add(normalized.rel)
-
-    # 1. The default root MCP file (unless the manifest names it explicitly, or
-    #    the format lets a declared mcpServers replace default discovery; Codex
-    #    only when it keeps the declared value).
-    replace_default = contained and declared_value_replaces_default(profile, "mcpServers", declared)
-    for default_name in profile.default_mcp_files if not replace_default else ():
+    for default_name in profile.default_mcp_files:
         default_rel = PurePosixPath(default_name)
         if default_rel in explicit_files:
             continue
@@ -263,45 +322,30 @@ def collect_mcp_declarations(
             )
             collection.add_broken_source(finding, default_name, default_rel.as_posix(), "unsafe")
 
-    # 2. Declared shapes in order.
-    for index, entry in enumerate(entries):
-        if isinstance(entry, dict):
-            # A Cursor/Codex inline value may also use the {"mcpServers": {...}} wrapper.
-            inline = entry.get("mcpServers") if isinstance(entry.get("mcpServers"), dict) else entry
-            if len(inline) > PLUGIN_COMPONENT_MAX_ITEMS:
-                collection.findings.append(
-                    _plugin_finding(
-                        Severity.HIGH,
-                        "mcp_config_file_too_large",
-                        f"inline 'mcpServers' map declares {len(inline)} servers; only "
-                        f"{PLUGIN_COMPONENT_MAX_ITEMS} are inspected",
-                        manifest_display,
-                        "Reduce the number of MCP servers per map.",
-                        category=MCP_CATEGORY,
-                    )
-                )
-            for name, config in list(inline.items())[:PLUGIN_COMPONENT_MAX_ITEMS]:
-                collection.declarations.append(McpDeclaration(str(name), config, "inline", manifest_rel))
-        elif isinstance(entry, str):
-            _collect_path_ref(reader, collection, entry, manifest_rel, profile)
-        else:
-            collection.findings.append(
-                _plugin_finding(
-                    Severity.HIGH,
-                    "mcp_servers_entry_invalid",
-                    f"mcpServers[{index}] must be a config-file path string or an inline server map "
-                    f"(got {type(entry).__name__})",
-                    manifest_display,
-                    'Use "./path/to/servers.json" or {"<name>": {"command"|"url": ...}} for each array entry.',
-                    category=MCP_CATEGORY,
-                )
+
+def _collect_inline_map(
+    reader: PluginRootReader, collection: McpCollection, entry: dict[str, Any], manifest_rel: str
+) -> None:
+    """An inline ``mcpServers`` server map (Cursor and Codex may also wrap it in ``{"mcpServers": {...}}``)."""
+    inline = entry.get("mcpServers") if isinstance(entry.get("mcpServers"), dict) else entry
+    if len(inline) > PLUGIN_COMPONENT_MAX_ITEMS:
+        collection.findings.append(
+            _plugin_finding(
+                Severity.HIGH,
+                "mcp_config_file_too_large",
+                f"inline 'mcpServers' map declares {len(inline)} servers; only "
+                f"{PLUGIN_COMPONENT_MAX_ITEMS} are inspected",
+                reader.display(manifest_rel),
+                "Reduce the number of MCP servers per map.",
+                category=MCP_CATEGORY,
             )
+        )
+    for name, config in list(inline.items())[:PLUGIN_COMPONENT_MAX_ITEMS]:
+        collection.declarations.append(McpDeclaration(str(name), config, "inline", manifest_rel))
 
-    # 3. Dialect normalization (Codex, Agent Plugins) before any static check.
-    if profile.mcp_dialect != "claude":
-        _normalize_dialect(reader, collection, profile, manifest)
 
-    # 4. Duplicate names across Claude Code sources (later replaces earlier).
+def _flag_duplicate_names(reader: PluginRootReader, collection: McpCollection) -> None:
+    """MEDIUM for each server name declared again by a later Claude Code source, which replaces the earlier one."""
     seen: dict[str, McpDeclaration] = {}
     for declaration in collection.declarations:
         if declaration.source == "agent_plugin_yaml":
@@ -321,20 +365,6 @@ def collect_mcp_declarations(
                 )
             )
         seen[declaration.name] = declaration
-
-    if validate_servers:
-        for declaration in collection.declarations:
-            if declaration.source == "agent_plugin_yaml":
-                continue  # validated by the PluginManifest model
-            collection.server_findings.extend(
-                validate_mcp_server_declaration(
-                    declaration.name,
-                    declaration.config,
-                    reader.display(declaration.file),
-                    allowed_private_hosts=allowed_private_hosts,
-                )
-            )
-    return collection
 
 
 def _normalize_dialect(

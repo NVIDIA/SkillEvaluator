@@ -115,14 +115,13 @@ from skillevaluator.validators.mcp_static import (
 
 PLUGIN_CATEGORY = "PLUGIN_SCHEMA"
 
-ComponentType = Literal[
-    "skill", "rule", "mcp", "hook", "agent", "command", "lsp", "output_style", "monitor", "settings", "app", "extension"
-]
 Support = Literal["evaluated", "static_only", "unsupported"]
 Origin = Literal["declared", "packaged", "declared+packaged"]
 McpSource = Literal["inline", "mcp_json", "path_ref", "agent_plugin_yaml"]
 CoverageState = Literal["staged", "not_staged", "unsupported", "unavailable", "invalid", "loaded", "exercised"]
 
+# Types every inventory counts. The format-specific types, Codex apps ("app") and
+# Agent Plugins client-extension namespaces ("extension"), are counted only when present.
 COMPONENT_TYPES: tuple[str, ...] = (
     "skill",
     "rule",
@@ -135,9 +134,6 @@ COMPONENT_TYPES: tuple[str, ...] = (
     "monitor",
     "settings",
 )
-# Types only some manifest formats declare: Codex apps (connectors) and Agent
-# Plugins client-extension namespaces. Counted only when present.
-EXTRA_COMPONENT_TYPES: tuple[str, ...] = ("app", "extension")
 COVERAGE_STATES: tuple[str, ...] = ("staged", "not_staged", "unsupported", "unavailable", "invalid")
 _TYPE_SUPPORT: dict[str, Support] = {
     "skill": "evaluated",
@@ -153,16 +149,8 @@ _TYPE_SUPPORT: dict[str, Support] = {
     "app": "unsupported",
     "extension": "unsupported",
 }
-_CONTEXT_COST_TYPES = frozenset({"skill", "rule", "mcp", "agent", "command", "output_style"})
 
 MCP_JSON = PurePosixPath(".mcp.json")
-LSP_JSON = PurePosixPath(".lsp.json")
-HOOKS_JSON = PurePosixPath("hooks/hooks.json")
-_SETTINGS_FILES = (
-    PurePosixPath("settings.json"),
-    PurePosixPath(".claude/settings.json"),
-    PurePosixPath(".claude/settings.local.json"),
-)
 _MCP_BUNDLE_SUFFIXES = (".mcpb", ".dxt")
 _ENV_TEMPLATE_SUFFIXES = frozenset({"example", "sample", "template", "dist", "defaults", "tmpl"})
 _MAX_ENV_FILE_FINDINGS = 20

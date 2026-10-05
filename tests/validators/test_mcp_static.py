@@ -16,7 +16,8 @@ from pathlib import Path
 import pytest
 
 from skillevaluator.models.result import Severity
-from skillevaluator.validators.mcp_static import validate_contained_mcp_servers, validate_mcp_server_declaration
+from skillevaluator.plugin_components import PluginRootReader, collect_mcp_declarations
+from skillevaluator.validators.mcp_static import validate_mcp_server_declaration
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 
 
@@ -28,11 +29,11 @@ def _checks(findings) -> set[str]:
 # Public provider identifiers                                                 #
 # --------------------------------------------------------------------------- #
 def test_public_provider_only_entry_passes() -> None:
-    assert validate_contained_mcp_servers({"search": {"provider": "public-provider"}}, "p.json") == []
+    assert validate_mcp_server_declaration("search", {"provider": "public-provider"}, "p.json") == []
 
 
 def test_empty_public_provider_is_blocked() -> None:
-    findings = validate_contained_mcp_servers({"search": {"provider": ""}}, "p.json")
+    findings = validate_mcp_server_declaration("search", {"provider": ""}, "p.json")
     assert "mcp_provider_invalid" in _checks(findings)
 
 
@@ -40,7 +41,7 @@ def test_empty_public_provider_is_blocked() -> None:
 # Name charset (contained)                                                    #
 # --------------------------------------------------------------------------- #
 def test_contained_invalid_name_charset_blocked() -> None:
-    findings = validate_contained_mcp_servers({"bad name!": {"command": "python"}}, "p.json")
+    findings = validate_mcp_server_declaration("bad name!", {"command": "python"}, "p.json")
     assert "mcp_name_invalid" in _checks(findings)
 
 
@@ -58,11 +59,11 @@ def test_contained_invalid_name_charset_blocked() -> None:
     ],
 )
 def test_command_shell_metacharacters_blocked(config, expected) -> None:
-    assert expected in _checks(validate_contained_mcp_servers({"s": config}, "p.json"))
+    assert expected in _checks(validate_mcp_server_declaration("s", config, "p.json"))
 
 
 def test_command_shell_interpreter_dash_c_is_blocked() -> None:
-    findings = validate_contained_mcp_servers({"s": {"command": "/bin/sh", "args": ["-c", "startserver"]}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"command": "/bin/sh", "args": ["-c", "startserver"]}, "p.json")
     assert "mcp_command_dangerous_form" in _checks(findings)
 
 
@@ -104,7 +105,7 @@ def test_command_shell_interpreter_dash_c_is_blocked() -> None:
     ],
 )
 def test_command_shell_inline_program_forms_are_blocked(config) -> None:
-    findings = validate_contained_mcp_servers({"s": config}, "p.json")
+    findings = validate_mcp_server_declaration("s", config, "p.json")
     assert "mcp_command_dangerous_form" in _checks(findings)
 
 
@@ -131,18 +132,18 @@ def test_command_shell_inline_program_forms_are_blocked(config) -> None:
     ],
 )
 def test_command_without_shell_inline_program_is_not_dangerous_form(config) -> None:
-    findings = validate_contained_mcp_servers({"s": config}, "p.json")
+    findings = validate_mcp_server_declaration("s", config, "p.json")
     assert "mcp_command_dangerous_form" not in _checks(findings)
 
 
 @pytest.mark.parametrize("args", [5, True, 1.5])
 def test_shell_command_with_non_list_args_reports_args_not_list(args) -> None:
-    findings = validate_contained_mcp_servers({"s": {"command": "bash", "args": args}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"command": "bash", "args": args}, "p.json")
     assert _checks(findings) == {"mcp_args_not_list"}
 
 
 def test_command_floating_version_blocked() -> None:
-    findings = validate_contained_mcp_servers({"s": {"command": "npx", "args": ["-y", "some-server@latest"]}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"command": "npx", "args": ["-y", "some-server@latest"]}, "p.json")
     assert "mcp_command_floating_version" in _checks(findings)
 
 
@@ -160,7 +161,7 @@ def test_command_floating_version_blocked() -> None:
     ],
 )
 def test_command_floating_marker_on_a_package_or_image_is_blocked(config) -> None:
-    assert "mcp_command_floating_version" in _checks(validate_contained_mcp_servers({"s": config}, "p.json"))
+    assert "mcp_command_floating_version" in _checks(validate_mcp_server_declaration("s", config, "p.json"))
 
 
 @pytest.mark.parametrize(
@@ -180,27 +181,27 @@ def test_exact_scoped_package_whose_scope_starts_like_a_marker_passes(spec) -> N
         {"command": "npx", "args": [f"--package={spec}", "mcp"]},
         {"command": f"npx -y {spec}"},
     ):
-        assert validate_contained_mcp_servers({"s": config}, "p.json") == [], config
+        assert validate_mcp_server_declaration("s", config, "p.json") == [], config
 
 
 def test_command_insecure_tls_flag_blocked() -> None:
-    findings = validate_contained_mcp_servers({"s": {"command": "fetch-mcp", "args": ["--insecure"]}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"command": "fetch-mcp", "args": ["--insecure"]}, "p.json")
     assert "mcp_command_disables_tls" in _checks(findings)
 
 
 def test_clean_stdio_command_passes() -> None:
     config = {"command": "npx", "args": ["-y", "@scope/server-filesystem@1.2.3", "/data"], "transport": "stdio"}
-    assert validate_contained_mcp_servers({"fs": config}, "p.json") == []
+    assert validate_mcp_server_declaration("fs", config, "p.json") == []
 
 
 def test_unpinned_stdio_package_is_advisory_medium() -> None:
     config = {"command": "npx", "args": ["-y", "@scope/server-filesystem", "/data"], "transport": "stdio"}
-    findings = validate_contained_mcp_servers({"fs": config}, "p.json")
+    findings = validate_mcp_server_declaration("fs", config, "p.json")
     assert [(f.check_name, f.severity.value) for f in findings] == [("mcp_unpinned_package", "medium")]
 
 
 def test_empty_command_blocked() -> None:
-    assert "mcp_command_empty" in _checks(validate_contained_mcp_servers({"s": {"command": "   "}}, "p.json"))
+    assert "mcp_command_empty" in _checks(validate_mcp_server_declaration("s", {"command": "   "}, "p.json"))
 
 
 # --------------------------------------------------------------------------- #
@@ -217,41 +218,41 @@ def test_empty_command_blocked() -> None:
     ],
 )
 def test_url_scheme_policy_blocks_bad_schemes(url, expected) -> None:
-    assert expected in _checks(validate_contained_mcp_servers({"s": {"url": url}}, "p.json"))
+    assert expected in _checks(validate_mcp_server_declaration("s", {"url": url}, "p.json"))
 
 
 @pytest.mark.parametrize("url", ["https://host/mcp", "wss://host/mcp"])
 def test_secure_url_schemes_pass(url) -> None:
-    assert validate_contained_mcp_servers({"s": {"url": url, "transport": "http"}}, "p.json") == []
+    assert validate_mcp_server_declaration("s", {"url": url, "transport": "http"}, "p.json") == []
 
 
 @pytest.mark.parametrize("url", ["https://", "wss://"])
 def test_url_secure_scheme_without_host_blocked(url) -> None:
     # A secure scheme with no host is not a usable endpoint; reject it statically
     # rather than stage it runnable and fail later in Harbor.
-    assert "mcp_url_no_host" in _checks(validate_contained_mcp_servers({"s": {"url": url}}, "p.json"))
+    assert "mcp_url_no_host" in _checks(validate_mcp_server_declaration("s", {"url": url}, "p.json"))
 
 
 def test_url_with_extra_slashes_is_blocked_as_ambiguous() -> None:
     # urllib reads no host in https:///path; WHATWG clients (Node) connect to host 'path'.
-    findings = validate_contained_mcp_servers({"s": {"url": "https:///path"}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"url": "https:///path"}, "p.json")
     assert [f.check_name for f in findings if f.severity == "high"] == ["mcp_url_malformed_authority"]
 
 
 def test_url_malformed_authority_blocked() -> None:
-    findings = validate_contained_mcp_servers({"s": {"url": "https://host:notaport/mcp"}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"url": "https://host:notaport/mcp"}, "p.json")
     assert "mcp_url_malformed_authority" in _checks(findings)
 
 
 def test_url_with_host_and_port_passes() -> None:
-    assert validate_contained_mcp_servers({"s": {"url": "https://host:8443/mcp", "transport": "sse"}}, "p.json") == []
+    assert validate_mcp_server_declaration("s", {"url": "https://host:8443/mcp", "transport": "sse"}, "p.json") == []
 
 
 # --------------------------------------------------------------------------- #
 # Transport                                                                   #
 # --------------------------------------------------------------------------- #
 def test_invalid_transport_blocked() -> None:
-    findings = validate_contained_mcp_servers({"s": {"command": "python", "transport": "tcp"}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"command": "python", "transport": "tcp"}, "p.json")
     assert "mcp_transport_invalid" in _checks(findings)
 
 
@@ -260,15 +261,13 @@ def test_invalid_transport_blocked() -> None:
 # --------------------------------------------------------------------------- #
 def test_inline_secret_value_blocked() -> None:
     inline_secret = f"{'sk'}-abcdef0123456789abcdef"
-    findings = validate_contained_mcp_servers(
-        {"s": {"command": "python", "env": {"TOKEN": inline_secret}}}, "p.json"
-    )
+    findings = validate_mcp_server_declaration("s", {"command": "python", "env": {"TOKEN": inline_secret}}, "p.json")
     assert "mcp_inline_secret" in _checks(findings)
 
 
 def test_inline_credential_named_literal_blocked() -> None:
-    findings = validate_contained_mcp_servers(
-        {"s": {"command": "python", "env": {"GITHUB_TOKEN": "literal-value-123"}}}, "p.json"
+    findings = validate_mcp_server_declaration(
+        "s", {"command": "python", "env": {"GITHUB_TOKEN": "literal-value-123"}}, "p.json"
     )
     assert "mcp_inline_secret" in _checks(findings)
 
@@ -277,7 +276,7 @@ def test_env_reference_is_allowed() -> None:
     # env references are not inline secrets; env carries only the non-blocking
     # ignored-field advisory (runtime doesn't apply per-server env).
     config = {"command": "python", "env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}", "OTHER": "$OTHER"}}
-    checks = _checks(validate_contained_mcp_servers({"s": config}, "p.json"))
+    checks = _checks(validate_mcp_server_declaration("s", config, "p.json"))
     assert "mcp_inline_secret" not in checks
     assert checks <= {"mcp_field_ignored"}  # nothing blocking
 
@@ -285,7 +284,7 @@ def test_env_reference_is_allowed() -> None:
 def test_non_credential_env_literal_is_allowed() -> None:
     # Benign env literals: no blocking finding, only the ignored-field advisory.
     config = {"command": "python", "env": {"LOG_LEVEL": "debug", "PORT": "8080"}}
-    checks = _checks(validate_contained_mcp_servers({"s": config}, "p.json"))
+    checks = _checks(validate_mcp_server_declaration("s", config, "p.json"))
     assert "mcp_inline_secret" not in checks
     assert checks <= {"mcp_field_ignored"}
 
@@ -303,7 +302,7 @@ def test_benign_auth_bearer_named_keys_not_flagged() -> None:
             "BEARER_FORMAT": "JWT",
         },
     }
-    assert "mcp_inline_secret" not in _checks(validate_contained_mcp_servers({"s": config}, "p.json"))
+    assert "mcp_inline_secret" not in _checks(validate_mcp_server_declaration("s", config, "p.json"))
 
 
 @pytest.mark.parametrize(
@@ -312,7 +311,7 @@ def test_benign_auth_bearer_named_keys_not_flagged() -> None:
 )
 def test_real_credential_named_keys_still_flagged(key) -> None:
     # A plain literal on a genuinely credential-named key still blocks (no coverage lost).
-    findings = validate_contained_mcp_servers({"s": {"command": "python", "env": {key: "plain-literal-123"}}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"command": "python", "env": {key: "plain-literal-123"}}, "p.json")
     assert "mcp_inline_secret" in _checks(findings)
 
 
@@ -320,7 +319,7 @@ def test_real_credential_named_keys_still_flagged(key) -> None:
 def test_inline_auth_scheme_value_flagged_regardless_of_key(value) -> None:
     # An opaque Bearer/Basic credential in a value is caught even under a benign key
     # name, so tightening the key regex does not open an Authorization-header hole.
-    findings = validate_contained_mcp_servers({"s": {"url": "https://h/mcp", "headers": {"X-Custom": value}}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"url": "https://h/mcp", "headers": {"X-Custom": value}}, "p.json")
     assert "mcp_inline_secret" in _checks(findings)
 
 
@@ -328,7 +327,7 @@ def test_auth_scheme_env_reference_is_allowed() -> None:
     # A referenced Authorization header is not an inline secret; headers carry only
     # the non-blocking ignored-field advisory.
     config = {"url": "https://h/mcp", "headers": {"Authorization": "Bearer ${API_TOKEN}"}}
-    checks = _checks(validate_contained_mcp_servers({"s": config}, "p.json"))
+    checks = _checks(validate_mcp_server_declaration("s", config, "p.json"))
     assert "mcp_inline_secret" not in checks
     assert checks <= {"mcp_field_ignored"}
 
@@ -349,27 +348,27 @@ def test_env_field_advisory_is_non_blocking(tmp_path: Path) -> None:
 
 
 def test_insecure_tls_env_blocked() -> None:
-    findings = validate_contained_mcp_servers(
-        {"s": {"command": "python", "env": {"NODE_TLS_REJECT_UNAUTHORIZED": "0"}}}, "p.json"
+    findings = validate_mcp_server_declaration(
+        "s", {"command": "python", "env": {"NODE_TLS_REJECT_UNAUTHORIZED": "0"}}, "p.json"
     )
     assert "mcp_insecure_tls_env" in _checks(findings)
 
 
 def test_inline_secret_in_headers_blocked() -> None:
-    findings = validate_contained_mcp_servers(
-        {"s": {"url": "https://h/mcp", "headers": {"Authorization": "Bearer ghp_abcdefghijklmnopqrstuvwx"}}}, "p.json"
+    findings = validate_mcp_server_declaration(
+        "s", {"url": "https://h/mcp", "headers": {"Authorization": "Bearer ghp_abcdefghijklmnopqrstuvwx"}}, "p.json"
     )
     assert "mcp_inline_secret" in _checks(findings)
 
 
 def test_insecure_config_flag_blocked() -> None:
-    findings = validate_contained_mcp_servers({"s": {"url": "https://h/mcp", "insecure": True}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"url": "https://h/mcp", "insecure": True}, "p.json")
     assert "mcp_insecure_flag" in _checks(findings)
 
 
 def test_insecure_tls_config_block_blocked() -> None:
-    findings = validate_contained_mcp_servers(
-        {"s": {"url": "https://h/mcp", "tls": {"rejectUnauthorized": False}}}, "p.json"
+    findings = validate_mcp_server_declaration(
+        "s", {"url": "https://h/mcp", "tls": {"rejectUnauthorized": False}}, "p.json"
     )
     assert "mcp_insecure_tls_config" in _checks(findings)
 
@@ -378,37 +377,48 @@ def test_insecure_tls_config_block_blocked() -> None:
 # Shape / structure                                                           #
 # --------------------------------------------------------------------------- #
 def test_missing_kind_blocked() -> None:
-    assert "mcp_missing_kind" in _checks(validate_contained_mcp_servers({"s": {"description": "x"}}, "p.json"))
+    assert "mcp_missing_kind" in _checks(validate_mcp_server_declaration("s", {"description": "x"}, "p.json"))
 
 
 def test_multiple_kinds_are_blocked() -> None:
-    findings = validate_contained_mcp_servers(
-        {"s": {"command": "server", "url": "https://example.com/mcp"}}, "p.json"
-    )
+    findings = validate_mcp_server_declaration("s", {"command": "server", "url": "https://example.com/mcp"}, "p.json")
     assert "mcp_kind_invalid" in _checks(findings)
 
 
 def test_config_not_object_blocked() -> None:
-    assert "mcp_config_not_object" in _checks(validate_contained_mcp_servers({"s": "nope"}, "p.json"))
+    assert "mcp_config_not_object" in _checks(validate_mcp_server_declaration("s", "nope", "p.json"))
+
+
+def _collected(root: Path, mcp_servers: object, files: dict[str, dict] | None = None) -> list:
+    """The MCP findings the plugin-root collector gives for a contained manifest's ``mcpServers`` value."""
+    for rel, payload in (files or {}).items():
+        (root / rel).write_text(json.dumps(payload), encoding="utf-8")
+    collection = collect_mcp_declarations(
+        PluginRootReader(root),
+        {"name": "p", "mcpServers": mcp_servers},
+        contained=True,
+        manifest_rel=".claude-plugin/plugin.json",
+    )
+    return [*collection.findings, *collection.server_findings]
 
 
 @pytest.mark.parametrize("value", [42, True, 1.5])
-def test_mcp_servers_scalar_is_not_object(value) -> None:
-    assert "mcp_servers_not_object" in _checks(validate_contained_mcp_servers(value, "p.json"))
+def test_mcp_servers_scalar_is_not_object(tmp_path: Path, value) -> None:
+    assert "mcp_servers_not_object" in _checks(_collected(tmp_path, value))
 
 
-def test_mcp_servers_path_and_array_forms_are_accepted_in_memory() -> None:
-    # String paths are resolved by the plugin-root collector; inline array maps validate here.
-    assert validate_contained_mcp_servers("./.mcp.json", "p.json") == []
-    assert validate_contained_mcp_servers([], "p.json") == []
-    findings = validate_contained_mcp_servers(["./a.json", {"s": {"command": "sh", "args": ["-c", "x"]}}], "p.json")
+def test_mcp_servers_path_and_array_forms_are_collected(tmp_path: Path) -> None:
+    servers = {"servers.json": {"mcpServers": {"fs": {"command": "node", "args": ["server.js"]}}}}
+    assert _collected(tmp_path, "./servers.json", servers) == []
+    assert _collected(tmp_path, []) == []
+    findings = _collected(tmp_path, ["./servers.json", {"s": {"command": "sh", "args": ["-c", "x"]}}], servers)
     assert "mcp_command_dangerous_form" in _checks(findings)
-    assert "mcp_servers_entry_invalid" in _checks(validate_contained_mcp_servers([7], "p.json"))
+    assert "mcp_servers_entry_invalid" in _checks(_collected(tmp_path, [7]))
 
 
-def test_absent_and_empty_mcp_servers_yield_no_findings() -> None:
-    assert validate_contained_mcp_servers(None, "p.json") == []
-    assert validate_contained_mcp_servers({}, "p.json") == []
+def test_absent_and_empty_mcp_servers_yield_no_findings(tmp_path: Path) -> None:
+    assert _collected(tmp_path, None) == []
+    assert _collected(tmp_path, {}) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -451,42 +461,40 @@ def test_tier1_passes_clean_contained_mcp(tmp_path: Path) -> None:
 # Inline secrets in command args + URL userinfo/query (persist-safety)         #
 # --------------------------------------------------------------------------- #
 def test_command_arg_inline_credential_separate_tokens_blocked() -> None:
-    findings = validate_contained_mcp_servers(
-        {"s": {"command": "srv", "args": ["--api-key", "plain-literal-123"]}}, "p.json"
+    findings = validate_mcp_server_declaration(
+        "s", {"command": "srv", "args": ["--api-key", "plain-literal-123"]}, "p.json"
     )
     assert "mcp_command_inline_secret" in _checks(findings)
 
 
 def test_command_arg_inline_credential_equals_form_blocked() -> None:
-    findings = validate_contained_mcp_servers({"s": {"command": "srv", "args": ["--token=SECRET123"]}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"command": "srv", "args": ["--token=SECRET123"]}, "p.json")
     assert "mcp_command_inline_secret" in _checks(findings)
 
 
 def test_command_arg_credential_env_reference_allowed() -> None:
     for args in (["--api-key", "${API_KEY}"], ["--api-key=${API_KEY}"]):
-        findings = validate_contained_mcp_servers({"s": {"command": "srv", "args": args}}, "p.json")
+        findings = validate_mcp_server_declaration("s", {"command": "srv", "args": args}, "p.json")
         assert "mcp_command_inline_secret" not in _checks(findings)
 
 
 def test_command_arg_secret_value_shape_blocked_regardless_of_flag() -> None:
-    findings = validate_contained_mcp_servers(
-        {"s": {"command": "srv", "args": ["sk-abcdef0123456789abcdef"]}}, "p.json"
-    )
+    findings = validate_mcp_server_declaration("s", {"command": "srv", "args": ["sk-abcdef0123456789abcdef"]}, "p.json")
     assert "mcp_command_inline_secret" in _checks(findings)
 
 
 def test_url_userinfo_inline_credential_blocked() -> None:
-    findings = validate_contained_mcp_servers({"s": {"url": "https://user:secret@host/mcp"}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"url": "https://user:secret@host/mcp"}, "p.json")
     assert "mcp_url_inline_secret" in _checks(findings)
 
 
 def test_url_query_credential_literal_blocked() -> None:
-    findings = validate_contained_mcp_servers({"s": {"url": "https://host/mcp?api_key=literal"}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"url": "https://host/mcp?api_key=literal"}, "p.json")
     assert "mcp_url_inline_secret" in _checks(findings)
 
 
 def test_url_query_credential_env_reference_allowed() -> None:
-    findings = validate_contained_mcp_servers({"s": {"url": "https://host/mcp?api_key=${API_KEY}"}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"url": "https://host/mcp?api_key=${API_KEY}"}, "p.json")
     assert "mcp_url_inline_secret" not in _checks(findings)
 
 
@@ -541,22 +549,22 @@ def test_url_userinfo_counts_even_when_written_as_references() -> None:
 # Transport must match the declaration kind and use canonical (lowercase) form #
 # --------------------------------------------------------------------------- #
 def test_transport_kind_mismatch_command_http_blocked() -> None:
-    findings = validate_contained_mcp_servers({"s": {"command": "python", "transport": "http"}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"command": "python", "transport": "http"}, "p.json")
     assert "mcp_transport_kind_mismatch" in _checks(findings)
 
 
 def test_transport_kind_mismatch_url_stdio_blocked() -> None:
-    findings = validate_contained_mcp_servers({"s": {"url": "https://h/mcp", "transport": "stdio"}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"url": "https://h/mcp", "transport": "stdio"}, "p.json")
     assert "mcp_transport_kind_mismatch" in _checks(findings)
 
 
 def test_transport_uppercase_casing_blocked() -> None:
-    findings = validate_contained_mcp_servers({"s": {"command": "python", "transport": "STDIO"}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"command": "python", "transport": "STDIO"}, "p.json")
     assert "mcp_transport_bad_casing" in _checks(findings)
 
 
 def test_transport_url_sse_allowed() -> None:
-    findings = validate_contained_mcp_servers({"s": {"url": "https://h/mcp", "transport": "sse"}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"url": "https://h/mcp", "transport": "sse"}, "p.json")
     assert "mcp_transport_kind_mismatch" not in _checks(findings)
     assert "mcp_transport_bad_casing" not in _checks(findings)
 
@@ -575,12 +583,12 @@ def test_benign_token_prefixed_keys_not_flagged() -> None:
             "TOKEN_FORMAT": "jwt",
         },
     }
-    assert "mcp_inline_secret" not in _checks(validate_contained_mcp_servers({"s": config}, "p.json"))
+    assert "mcp_inline_secret" not in _checks(validate_mcp_server_declaration("s", config, "p.json"))
 
 
 @pytest.mark.parametrize("key", ["ACCESS_TOKEN", "REFRESH_TOKEN", "SESSION_TOKEN", "TOKEN", "TOKEN_SECRET"])
 def test_token_suffix_credential_keys_still_flagged(key) -> None:
-    findings = validate_contained_mcp_servers({"s": {"command": "python", "env": {key: "plain-literal-123"}}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"command": "python", "env": {key: "plain-literal-123"}}, "p.json")
     assert "mcp_inline_secret" in _checks(findings)
 
 
@@ -590,20 +598,20 @@ def test_token_suffix_credential_keys_still_flagged(key) -> None:
 def test_pythonhttpsverify_empty_or_false_not_flagged() -> None:
     # CPython only disables verification on exactly "0"; "" / "false" keep it ON.
     for val in ("", "false"):
-        findings = validate_contained_mcp_servers(
-            {"s": {"command": "python", "env": {"PYTHONHTTPSVERIFY": val}}}, "p.json"
+        findings = validate_mcp_server_declaration(
+            "s", {"command": "python", "env": {"PYTHONHTTPSVERIFY": val}}, "p.json"
         )
         assert "mcp_insecure_tls_env" not in _checks(findings)
 
 
 def test_pythonhttpsverify_zero_flagged() -> None:
-    findings = validate_contained_mcp_servers({"s": {"command": "python", "env": {"PYTHONHTTPSVERIFY": "0"}}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"command": "python", "env": {"PYTHONHTTPSVERIFY": "0"}}, "p.json")
     assert "mcp_insecure_tls_env" in _checks(findings)
 
 
 def test_command_arg_credential_flag_followed_by_flag_not_flagged() -> None:
     # `--api-key` immediately followed by another flag has no inline value.
-    findings = validate_contained_mcp_servers({"s": {"command": "srv", "args": ["--api-key", "--verbose"]}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"command": "srv", "args": ["--api-key", "--verbose"]}, "p.json")
     assert "mcp_command_inline_secret" not in _checks(findings)
 
 
@@ -622,15 +630,15 @@ _JWT_BODY = "eyJ" + "zdWIiOiIxMjM0In0"
     ],
 )
 def test_jwt_like_env_and_arg_values_are_still_inline_secrets(value: str) -> None:
-    findings = validate_contained_mcp_servers(
-        {"s": {"command": "srv", "args": [value], "env": {"SETTING": value}}}, "p.json"
+    findings = validate_mcp_server_declaration(
+        "s", {"command": "srv", "args": [value], "env": {"SETTING": value}}, "p.json"
     )
     assert {"mcp_inline_secret", "mcp_command_inline_secret"} <= _checks(findings)
 
 
 @pytest.mark.parametrize("value", [f"eyJshort.{_JWT_HEAD}", _JWT_HEAD, "keyJhbGc.x"])
 def test_values_that_are_not_jwt_like_stay_clean(value: str) -> None:
-    findings = validate_contained_mcp_servers({"s": {"command": "srv", "env": {"SETTING": value}}}, "p.json")
+    findings = validate_mcp_server_declaration("s", {"command": "srv", "env": {"SETTING": value}}, "p.json")
     assert "mcp_inline_secret" not in _checks(findings)
 
 
@@ -644,5 +652,5 @@ def test_inline_secret_scan_is_linear_on_a_long_jwt_like_run(unit: str) -> None:
     value = unit * (262_144 // len(unit))
     started = time.perf_counter()
     assert looks_like_inline_secret("SETTING", value) is False
-    assert validate_contained_mcp_servers({"s": {"command": "srv", "args": [value]}}, "p.json") is not None
+    assert validate_mcp_server_declaration("s", {"command": "srv", "args": [value]}, "p.json") is not None
     assert time.perf_counter() - started < 2.0

@@ -42,6 +42,7 @@ from skillevaluator.constants import (
     TIER2_LLM_MAX_TOTAL_PROMPT_CHARS,
 )
 from skillevaluator.deduplication.plugin.profile import BundledSkill, PluginProfile, member_overlap
+from skillevaluator.deduplication.result_status import mark_advisory_skip
 from skillevaluator.embedding.registry import classify
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 
@@ -74,7 +75,10 @@ def record_similarity(
     matches: list[dict[str, Any]],
     reason: str | None,
 ) -> None:
-    """Record one local-catalog check summary under ``metadata["plugin"][key]``."""
+    """Record one local-catalog check summary under ``metadata["plugin"][key]``.
+
+    A skipped check also gets its ``reason`` as a warning and the advisory skip metadata.
+    """
     plugin_meta = result.metadata.setdefault("plugin", {})
     plugin_meta[key] = {
         "status": status,
@@ -84,20 +88,12 @@ def record_similarity(
     }
     result.metadata["advisory_tier2"] = True
     if status == STATUS_SKIPPED:
-        result.metadata.update(
-            {
-                "skipped": True,
-                "execution_status": "skipped",
-                "skip_reason": reason,
-                "optional": True,
-            }
-        )
+        mark_advisory_skip(result, reason or "The local catalog check did not run.")
 
 
 def skipped_result(name: str, description: str, key: str, reason: str, *, catalog_entries: int = 0) -> ValidationResult:
     """Return an advisory, optional skip that says the check did not run (not that it failed)."""
     result = ValidationResult(validator_name=name, validator_description=description)
-    result.add_warning(reason)
     record_similarity(
         result,
         key,
@@ -199,7 +195,6 @@ def check_catalog_skills(
             result.add_warning(f"Bundled skill {skill.root_relative} was not compared: {skill.skip_reason}")
     if not comparable:
         reason = "No bundled skill has a SKILL.md name and description to compare."
-        result.add_warning(reason)
         record_similarity(
             result,
             INTER_SKILL_KEY,

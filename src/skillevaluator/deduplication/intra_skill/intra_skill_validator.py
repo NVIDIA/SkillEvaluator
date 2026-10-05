@@ -32,6 +32,7 @@ from skillevaluator.deduplication.intra_skill.llm_analyzer import (
     verdict_to_severity,
 )
 from skillevaluator.deduplication.intra_skill.semantic_clustering import ContentCluster, build_clusters
+from skillevaluator.deduplication.result_status import mark_security_failure
 from skillevaluator.deduplication.utils.chunker import ContentChunk, chunk_file
 from skillevaluator.deduplication.utils.skill_collector import SkillCollectionError, collect_files
 from skillevaluator.embedding.client import (
@@ -166,13 +167,7 @@ class IntraSkillValidator(ValidatorBase):
                 # Unsafe input means the check could not run safely. Callers
                 # that cap deduplication findings as advisory (plugin Tier 2)
                 # must keep this result blocking.
-                result.metadata.update(
-                    {
-                        "security_failure": True,
-                        "execution_status": "failed",
-                        "optional": False,
-                    }
-                )
+                mark_security_failure(result)
             return result
         logger.info("Collected %d file(s)", len(collected))
         result.add_success(

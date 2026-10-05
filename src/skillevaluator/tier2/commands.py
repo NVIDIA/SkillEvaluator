@@ -16,6 +16,7 @@ from skillevaluator.constants import (
     SIMILARITY_DEFAULT_THRESHOLD,
 )
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
+from skillevaluator.deduplication.result_status import mark_advisory_skip, mark_security_failure
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.tier1.commands import emit_reports
@@ -120,9 +121,7 @@ def _make_advisory(result: ValidationResult) -> ValidationResult:
         # Filesystem-integrity failures mean the requested check could not be
         # executed safely. Keep them blocking instead of disguising them as an
         # ordinary advisory deduplication finding.
-        result.passed = False
-        result.metadata.update({"execution_status": "failed", "optional": False})
-        return result
+        return mark_security_failure(result)
 
     # Errors and warnings that are not a finding's legacy string (provider
     # failures, skip reasons) are notes. Finding strings are rebuilt from the
@@ -161,14 +160,7 @@ def _unsafe_plugin_result(
             suggestion="Replace links, hardlinks, and special selected files with regular files inside the plugin root.",
         )
     )
-    result.metadata.update(
-        {
-            "security_failure": True,
-            "execution_status": "failed",
-            "optional": False,
-        }
-    )
-    return result
+    return mark_security_failure(result)
 
 
 def _plugin_work_limit_result(actual_skills: int) -> ValidationResult:
@@ -181,19 +173,13 @@ def _plugin_work_limit_result(actual_skills: int) -> ValidationResult:
         validator_name="Context Deduplication",
         validator_description="Detect redundant content within each bundled plugin skill",
     )
-    result.add_warning(reason)
-    result.metadata.update(
-        {
-            "advisory_tier2": True,
-            "execution_status": "skipped",
-            "optional": True,
-            "skip_reason": reason,
-            "work_limit_exceeded": True,
-            "actual_skills": actual_skills,
-            "skill_limit": MAX_PLUGIN_DEDUP_SKILLS,
-        }
+    return mark_advisory_skip(
+        result,
+        reason,
+        work_limit_exceeded=True,
+        actual_skills=actual_skills,
+        skill_limit=MAX_PLUGIN_DEDUP_SKILLS,
     )
-    return result
 
 
 def run_plugin_skill_context_dedup(
@@ -267,13 +253,7 @@ def run_plugin_skill_context_dedup(
         aggregate.summary.medium_count += skill_result.summary.medium_count
         aggregate.summary.low_count += skill_result.summary.low_count
         if skill_result.metadata.get("security_failure"):
-            aggregate.metadata.update(
-                {
-                    "security_failure": True,
-                    "execution_status": "failed",
-                    "optional": False,
-                }
-            )
+            mark_security_failure(aggregate)
     aggregate.passed = not aggregate.metadata.get("security_failure", False)
     aggregate.metadata["advisory_tier2"] = True
     return [aggregate]
@@ -475,11 +455,7 @@ def run_plugin_dedup_scan(
             validator_description="Detect redundant content within each bundled plugin skill",
         )
         reason = "Skipped: configure a public embedding provider or install the Tier 2 extra."
-        skipped.add_warning(reason)
-        skipped.metadata.update(
-            {"execution_status": "skipped", "skip_reason": reason, "optional": True, "advisory_tier2": True}
-        )
-        results.append(skipped)
+        results.append(mark_advisory_skip(skipped, reason))
     if catalog is not None and not run_context:
         results.extend(
             _catalog_check_skips(

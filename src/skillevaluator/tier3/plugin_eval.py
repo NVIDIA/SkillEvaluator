@@ -492,20 +492,22 @@ def prepare_plugin_eval_package(
     skipped = not (
         member_skills or staged_rules or runnable_mcp or _native_loaded_types(plugin_load, native_plan, native_source)
     )
+    mcp_coverage = _McpCoverage(
+        mcp,
+        unsupported=tuple(mcp_unsupported_config),
+        plugin_files_staged=claude_native,
+        plugin_file_gap_notes=_plugin_file_gap_notes(mcp, native_plan, user_config_defaults, mcp_unsupported_config),
+    )
     report_only = _inventory_provenance(
         inventory,
         plugin_root=plugin_root,
         contained=contained_form,
+        skipped=skipped,
         member_skills=member_skills,
         staged_rule_names=tuple(rule.name for rule in staged_rules),
         unresolved_skill_refs=unresolved_skill_refs,
         unresolved_rule_refs=unresolved_rule_refs,
-        runnable_names=tuple(server["name"] for server in runnable_mcp),
-        provider_names=tuple(server["name"] for server in provider_mcp),
-        unsupported_config=tuple(mcp_unsupported_config),
-        skipped=skipped,
-        plugin_file_names=tuple(server["name"] for server in mcp.plugin_file) if claude_native else (),
-        plugin_file_gap_notes=_plugin_file_gap_notes(mcp, native_plan, user_config_defaults, mcp_unsupported_config),
+        mcp=mcp_coverage,
         claude_skill_dirs=_claude_skill_dirs(native_source) if claude_native else (),
         arm_staging=_arm_staging(plugin_load, native_plan, native_source),
     )
@@ -517,7 +519,7 @@ def prepare_plugin_eval_package(
             plugin_name=plugin_name,
             package_path=None,
             include_skills=(),
-            unresolved_mcp_servers=tuple(server["name"] for server in provider_mcp),
+            unresolved_mcp_servers=mcp.provider_names,
             runnable_mcp_servers=(),
             unresolved_skill_refs=unresolved_skill_refs,
             unresolved_rule_refs=unresolved_rule_refs,
@@ -548,7 +550,7 @@ def prepare_plugin_eval_package(
         staged_rules=staged_rules,
         unresolved_skill_refs=unresolved_skill_refs,
         unresolved_rule_refs=unresolved_rule_refs,
-        provider_mcp_servers=tuple(server["name"] for server in provider_mcp),
+        provider_mcp_servers=mcp.provider_names,
     )
 
     if plugin_load == "wrapper":
@@ -582,8 +584,8 @@ def prepare_plugin_eval_package(
         native_source=native_source,
         package_path=package_path,
         include_skills=member_skills,
-        unresolved_mcp_servers=tuple(server["name"] for server in provider_mcp),
-        runnable_mcp_servers=tuple(server["name"] for server in runnable_mcp),
+        unresolved_mcp_servers=mcp.provider_names,
+        runnable_mcp_servers=mcp.runnable_names,
         mcp_unsupported_config=tuple(mcp_unsupported_config),
         staged_rules=tuple(rule.name for rule in staged_rules),
         unresolved_skill_refs=unresolved_skill_refs,
@@ -889,130 +891,73 @@ def _other_type_row(component: Component, staging: _ArmStaging | None) -> dict[s
     return coverage_row(component, "staged", reason)
 
 
+_SKIPPED_PACKAGE_NOTE = "the plugin package was skipped (nothing locally evaluable)"
+
+
+class _McpCoverage(NamedTuple):
+    """The plugin's MCP servers as the coverage rows report them for the resolved plan."""
+
+    split: _McpSplit
+    #: Servers some with-plugin arm cannot fully apply (the run is reported INCOMPLETE).
+    unsupported: tuple[str, ...]
+    #: Whether a native Claude Code arm starts the servers that launch from plugin files.
+    plugin_files_staged: bool
+    #: Why each unsupported plugin-file server still leaves the run INCOMPLETE.
+    plugin_file_gap_notes: dict[str, str]
+
+
 def _inventory_provenance(
     inventory: PluginInventory,
     *,
     plugin_root: Path,
     contained: bool,
+    skipped: bool,
     member_skills: tuple[Path, ...],
     staged_rule_names: tuple[str, ...],
     unresolved_skill_refs: tuple[str, ...],
     unresolved_rule_refs: tuple[str, ...],
-    runnable_names: tuple[str, ...],
-    provider_names: tuple[str, ...],
-    unsupported_config: tuple[str, ...],
-    skipped: bool,
-    plugin_file_names: tuple[str, ...] = (),
+    mcp: _McpCoverage,
     claude_skill_dirs: tuple[str, ...] = (),
-    plugin_file_gap_notes: dict[str, str] | None = None,
     arm_staging: _ArmStaging | None = None,
 ) -> dict[str, Any]:
     """Build the report-only C2 ``component_coverage`` / ``context_cost`` / ``mcp_pinning``.
 
-    *plugin_file_names* and *claude_skill_dirs* are what a native Claude Code
-    arm stages beyond the wrapper: MCP servers that launch from the copied
-    plugin files, and the skill directories its staged ``plugin.json`` loads.
-    *plugin_file_gap_notes* says why an unsupported plugin-file server still
-    leaves the run INCOMPLETE. *arm_staging* (the resolved per-agent plan) says
-    where each arm stages rules, hooks, subagents, and commands, so a native
-    arm's rows do not describe the wrapper.
+    *claude_skill_dirs* are the skill directories a native Claude Code arm's
+    staged ``plugin.json`` loads beyond the wrapper. *arm_staging* (the
+    resolved per-agent plan) says where each arm stages rules, hooks,
+    subagents, and commands, so a native arm's rows do not describe the
+    wrapper.
     """
     member_resolved = {path.resolve() for path in member_skills}
-    claude_dirs = set(claude_skill_dirs)
-    staged_rules = set(staged_rule_names)
     rows: list[dict[str, Any]] = []
-    skip_note = "the plugin package was skipped (nothing locally evaluable)"
     for component in inventory.components:
         if component.problem is not None:
             rows.append(coverage_row(component, "invalid", problem_reason(component)))
-            continue
-        if component.declared_by:
-            state = "unsupported" if component.support == "unsupported" else "not_staged"
-            # A cross-client row is one another client loads through its own rules or defaults.
-            source = (
-                f"loaded only by {component.loaded_by}"
-                if component.loaded_by
-                else f"declared only by the additional manifest {component.declared_by}"
-            )
-            rows.append(coverage_row(component, state, f"{source}; Tier 3 stages the selected manifest's components"))
-            continue
-        if component.type == "skill":
-            if component.path == ".":
-                rows.append(
-                    coverage_row(
-                        component,
-                        "not_staged",
-                        "a root SKILL.md single-skill plugin is inventoried only; Tier 3 stages skill directories",
-                    )
-                )
-            elif component.path is None:
-                if component.name in unresolved_skill_refs:
-                    rows.append(
-                        coverage_row(component, "unavailable", "remote skill reference is not resolvable offline")
-                    )
-                elif skipped:
-                    rows.append(coverage_row(component, "not_staged", skip_note))
-                else:
-                    rows.append(coverage_row(component, "staged", "skill reference resolved to a local member skill"))
-            elif (plugin_root / component.path).resolve() in member_resolved:
-                rows.append(coverage_row(component, "staged", "bundled skill staged as a plugin member skill"))
-            elif not skipped and component.path in claude_dirs:
-                rows.append(
-                    coverage_row(
-                        component,
-                        "staged",
-                        "declared skill directory staged by the native claude-code arm only (Claude Code loads the "
-                        "skill directories plugin.json declares); the other arms do not stage it",
-                    )
-                )
-            else:
-                rows.append(
-                    coverage_row(
-                        component,
-                        "not_staged",
-                        skip_note
-                        if skipped
-                        else "only skills under skills/ are staged by Tier 3 for this manifest format; this "
-                        "declared skill directory is inventoried only",
-                    )
-                )
-        elif component.type == "rule":
-            if component.path is None:
-                if component.name in unresolved_rule_refs:
-                    rows.append(
-                        coverage_row(component, "unavailable", "remote rule reference is not resolvable offline")
-                    )
-                elif skipped:
-                    rows.append(coverage_row(component, "not_staged", skip_note))
-                else:
-                    reason = _rule_reason(arm_staging, "embedded in the wrapper")
-                    rows.append(coverage_row(component, "staged", f"rule reference resolved and {reason}"))
-            elif {
-                component.name,
-                PurePosixPath(component.path).name,
-                component.path.removeprefix("rules/"),
-            } & staged_rules:
-                rows.append(coverage_row(component, "staged", _rule_reason(arm_staging)))
-            else:
-                rows.append(
-                    coverage_row(
-                        component,
-                        "not_staged",
-                        skip_note if skipped else "rule file is inventoried but was not staged by Tier 3",
-                    )
-                )
-        elif component.type == "mcp":
+        elif component.declared_by:
+            rows.append(_cross_client_row(component))
+        elif component.type == "skill":
             rows.append(
-                _mcp_coverage_row(
+                _skill_row(
                     component,
-                    contained,
-                    runnable_names,
-                    provider_names,
-                    unsupported_config,
-                    plugin_file_names,
-                    plugin_file_gap_notes or {},
+                    plugin_root=plugin_root,
+                    member_skills=member_resolved,
+                    claude_skill_dirs=set(claude_skill_dirs),
+                    unresolved_refs=unresolved_skill_refs,
+                    skipped=skipped,
                 )
             )
+        elif component.type == "rule":
+            rows.append(
+                _rule_row(
+                    component,
+                    staged_rule_names=set(staged_rule_names),
+                    unresolved_refs=unresolved_rule_refs,
+                    skipped=skipped,
+                    arm_staging=arm_staging,
+                )
+            )
+        elif component.type == "mcp":
+            rows.append(_mcp_coverage_row(component, contained, mcp))
         else:
             rows.append(_other_type_row(component, arm_staging))
     return {
@@ -1025,15 +970,84 @@ def _inventory_provenance(
     }
 
 
-def _mcp_coverage_row(
+def _cross_client_row(component: Component) -> dict[str, Any]:
+    """Coverage row of a component another client loads, through its own rules or an additional manifest."""
+    state = "unsupported" if component.support == "unsupported" else "not_staged"
+    source = (
+        f"loaded only by {component.loaded_by}"
+        if component.loaded_by
+        else f"declared only by the additional manifest {component.declared_by}"
+    )
+    return coverage_row(component, state, f"{source}; Tier 3 stages the selected manifest's components")
+
+
+def _skill_row(
     component: Component,
-    contained: bool,
-    runnable_names: tuple[str, ...],
-    provider_names: tuple[str, ...],
-    unsupported_config: tuple[str, ...],
-    plugin_file_names: tuple[str, ...] = (),
-    plugin_file_gap_notes: dict[str, str] | None = None,
+    *,
+    plugin_root: Path,
+    member_skills: set[Path],
+    claude_skill_dirs: set[str],
+    unresolved_refs: tuple[str, ...],
+    skipped: bool,
 ) -> dict[str, Any]:
+    """Coverage row of one skill: a staged member skill, a native Claude Code skill directory, or neither."""
+    if component.path == ".":
+        return coverage_row(
+            component,
+            "not_staged",
+            "a root SKILL.md single-skill plugin is inventoried only; Tier 3 stages skill directories",
+        )
+    if component.path is None:
+        if component.name in unresolved_refs:
+            return coverage_row(component, "unavailable", "remote skill reference is not resolvable offline")
+        if skipped:
+            return coverage_row(component, "not_staged", _SKIPPED_PACKAGE_NOTE)
+        return coverage_row(component, "staged", "skill reference resolved to a local member skill")
+    if (plugin_root / component.path).resolve() in member_skills:
+        return coverage_row(component, "staged", "bundled skill staged as a plugin member skill")
+    if skipped:
+        return coverage_row(component, "not_staged", _SKIPPED_PACKAGE_NOTE)
+    if component.path in claude_skill_dirs:
+        return coverage_row(
+            component,
+            "staged",
+            "declared skill directory staged by the native claude-code arm only (Claude Code loads the skill "
+            "directories plugin.json declares); the other arms do not stage it",
+        )
+    return coverage_row(
+        component,
+        "not_staged",
+        "only skills under skills/ are staged by Tier 3 for this manifest format; this declared skill directory "
+        "is inventoried only",
+    )
+
+
+def _rule_row(
+    component: Component,
+    *,
+    staged_rule_names: set[str],
+    unresolved_refs: tuple[str, ...],
+    skipped: bool,
+    arm_staging: _ArmStaging | None,
+) -> dict[str, Any]:
+    """Coverage row of one rule: staged (natively or in the wrapper), unavailable, or not staged."""
+    if component.path is None:
+        if component.name in unresolved_refs:
+            return coverage_row(component, "unavailable", "remote rule reference is not resolvable offline")
+        if skipped:
+            return coverage_row(component, "not_staged", _SKIPPED_PACKAGE_NOTE)
+        reason = _rule_reason(arm_staging, "embedded in the wrapper")
+        return coverage_row(component, "staged", f"rule reference resolved and {reason}")
+    if {component.name, PurePosixPath(component.path).name, component.path.removeprefix("rules/")} & staged_rule_names:
+        return coverage_row(component, "staged", _rule_reason(arm_staging))
+    return coverage_row(
+        component,
+        "not_staged",
+        _SKIPPED_PACKAGE_NOTE if skipped else "rule file is inventoried but was not staged by Tier 3",
+    )
+
+
+def _mcp_coverage_row(component: Component, contained: bool, mcp: _McpCoverage) -> dict[str, Any]:
     if component.bundle:
         return coverage_row(component, "unsupported", "MCP bundles (.mcpb/.dxt) are not unpacked or staged")
     declaration = component.mcp
@@ -1041,23 +1055,23 @@ def _mcp_coverage_row(
         return coverage_row(
             component, "not_staged", "agent_plugin.yaml plugins stage MCP servers from their 'mcp' list only"
         )
-    if component.name in runnable_names:
+    if component.name in mcp.split.runnable_names:
         reason = "runnable MCP server staged for the with-plugin arm only"
-        if component.name in unsupported_config:
+        if component.name in mcp.unsupported:
             reason += (
                 "; its env/headers or ${user_config.*} values are not applied by the runtime (run reported INCOMPLETE)"
             )
         return coverage_row(component, "staged", reason)
-    if component.name in plugin_file_names:
+    if mcp.plugin_files_staged and component.name in mcp.split.plugin_file_names:
         reason = (
             "MCP server launches from plugin files; staged for the native claude-code arm, which copies the plugin "
             "tree and expands ${CLAUDE_PLUGIN_ROOT}"
         )
-        if component.name in unsupported_config:
-            note = (plugin_file_gap_notes or {}).get(component.name, "not started in the other with-plugin arms")
+        if component.name in mcp.unsupported:
+            note = mcp.plugin_file_gap_notes.get(component.name, "not started in the other with-plugin arms")
             reason += f"; {note} (run reported INCOMPLETE)"
         return coverage_row(component, "staged", reason)
-    if component.name in unsupported_config:
+    if component.name in mcp.unsupported:
         # Not runnable: _split_mcp_servers keeps plugin-file launches out of the toml.
         return coverage_row(
             component,
@@ -1065,7 +1079,7 @@ def _mcp_coverage_row(
             "MCP server launches from plugin files (a plugin-root variable, a relative path, or cwd) that Tier 3 "
             "does not stage into the task environment; not started (run reported INCOMPLETE)",
         )
-    if component.name in provider_names:
+    if component.name in mcp.split.provider_names:
         return coverage_row(component, "unavailable", "provider-only MCP server is not runnable offline")
     return coverage_row(component, "not_staged", "MCP server was not staged")
 
@@ -1827,6 +1841,18 @@ class _McpSplit:
     def unsupported_config(self) -> list[str]:
         """Servers with config the wrapper runtime cannot apply (the run is INCOMPLETE)."""
         return list(self.gaps)
+
+    @property
+    def runnable_names(self) -> tuple[str, ...]:
+        return tuple(server["name"] for server in self.runnable)
+
+    @property
+    def provider_names(self) -> tuple[str, ...]:
+        return tuple(server["name"] for server in self.provider_only)
+
+    @property
+    def plugin_file_names(self) -> tuple[str, ...]:
+        return tuple(server["name"] for server in self.plugin_file)
 
 
 # What a native Claude Code arm applies itself (it copies the plugin tree and

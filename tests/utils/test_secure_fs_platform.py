@@ -731,9 +731,10 @@ class _TreeBackedWindowsHandles:
 
     def open_relative(self, parent_handle: int, name: str, **kwargs: int) -> int:
         path = self.paths[parent_handle] / name
-        follows_no_reparse = kwargs.get("object_attributes_flags", 0) & secure_fs._WINDOWS_OBJ_DONT_REPARSE
-        if path.is_symlink() and follows_no_reparse:
-            raise OSError(4390, "The file or directory is not a reparse point.")
+        # Like NtCreateFile, OBJ_DONT_REPARSE (part of the default flags) refuses a reparse point.
+        flags = kwargs.get("object_attributes_flags", secure_fs._WINDOWS_OBJECT_ATTRIBUTES_FLAGS)
+        if path.is_symlink() and flags & secure_fs._WINDOWS_OBJ_DONT_REPARSE:
+            raise OSError(4395, "A reparse point was encountered while opening the object.")
         return self._open(path)
 
     def metadata(self, handle: int) -> secure_fs._WindowsHandleMetadata:

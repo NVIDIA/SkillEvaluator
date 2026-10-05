@@ -63,6 +63,15 @@ _SHELL_INTERPRETERS: frozenset[str] = frozenset({"sh", "bash", "zsh", "dash", "k
 _SHELL_INLINE_PROGRAM_FLAG_RE = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
 # Floating / non-pinned version markers (supply-chain drift risk).
 _FLOATING_MARKERS: tuple[str, ...] = ("@latest", "@main", "@master", "@head", "@next", "@canary", ":latest", ":main")
+# A marker counts only when it is attached to a package or image name ("pkg@latest",
+# "img:main", "pkg@latest-beta"). An '@' that starts a token or follows a separator
+# (space, '=', ',', ':', a slash, a quote) begins an npm scope such as
+# "@nextcloud/..." or "@next-auth/...", and a marker that runs on into a longer
+# word or host name ("@mainstay", "git@main.example.com") is not a tag.
+_FLOATING_MARKER_RE = re.compile(
+    r"(?<=[^\s=,:/\\'\"])(?:" + "|".join(map(re.escape, _FLOATING_MARKERS)) + r")(?![\w.])",
+    re.IGNORECASE,
+)
 
 # Command flags that disable TLS/cert verification.
 _INSECURE_TLS_FLAGS: frozenset[str] = frozenset(
@@ -414,8 +423,7 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
                     name=name,
                 )
             )
-        low = token.lower()
-        if any(marker in low for marker in _FLOATING_MARKERS):
+        if _FLOATING_MARKER_RE.search(token):
             findings.append(
                 _finding(
                     Severity.HIGH,

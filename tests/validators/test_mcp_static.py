@@ -107,6 +107,43 @@ def test_command_floating_version_blocked() -> None:
     assert "mcp_command_floating_version" in _checks(findings)
 
 
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "npx", "args": ["-y", "@scope/pkg@next"]},
+        {"command": "npx", "args": ["-y", "pkg@latest-beta"]},
+        {"command": "npx", "args": ["-p", "a@latest,b", "a"]},
+        {"command": "npx -y PKG@LATEST"},
+        {"command": "uvx", "args": ["--from=pkg@main", "pkg"]},
+        {"command": "uvx", "args": ["--from", "pkg[cli]@latest", "pkg"]},
+        {"command": "docker", "args": ["run", "-i", "img:latest"]},
+        {"command": "docker", "args": ["run", "-i", "${IMAGE}:main"]},
+    ],
+)
+def test_command_floating_marker_on_a_package_or_image_is_blocked(config) -> None:
+    assert "mcp_command_floating_version" in _checks(validate_contained_mcp_servers({"s": config}, "p.json"))
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "@nextcloud/mcp-server@1.2.3",
+        "@headlessui/react@2.0.0",
+        "@mainstay/mcp@1.0.0",
+        "@next-auth/mcp@1.0.0",
+        "@canary/mcp@1.0.0",
+        "@latest/mcp@1.0.0",
+    ],
+)
+def test_exact_scoped_package_whose_scope_starts_like_a_marker_passes(spec) -> None:
+    for config in (
+        {"command": "npx", "args": ["-y", spec]},
+        {"command": "npx", "args": [f"--package={spec}", "mcp"]},
+        {"command": f"npx -y {spec}"},
+    ):
+        assert validate_contained_mcp_servers({"s": config}, "p.json") == [], config
+
+
 def test_command_insecure_tls_flag_blocked() -> None:
     findings = validate_contained_mcp_servers({"s": {"command": "fetch-mcp", "args": ["--insecure"]}}, "p.json")
     assert "mcp_command_disables_tls" in _checks(findings)

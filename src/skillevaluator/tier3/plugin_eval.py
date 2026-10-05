@@ -160,6 +160,7 @@ from skillevaluator.utils.structured_data import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from skillevaluator.plugin_formats import FormatProfile
     from skillevaluator.plugin_manifest import PluginManifestLocation
 
 # Shared with Harbor's runtime find_evals_file() and the report loader so a
@@ -351,146 +352,47 @@ def prepare_plugin_eval_package(
         ValueError: If the manifest is malformed, or local components exist but
             no eval dataset/task source can be found.
     """
-    location = _manifest_location(plugin_path)
-    manifest_path = location.path
-    contained_form = location.contained
-    profile = profile_for(location.manifest_type)
-    plugin_dir = location.root
-    plugin_root = location.secure_file.root
-    manifest_text = location.read_text()
-    manifest = _load_manifest_text(manifest_text, manifest_path, location.manifest_type)
-    plugin_name = _plugin_name(manifest, plugin_dir)
-    plugin_description = _plugin_description(manifest, plugin_name)
-    # Static inventory of every declared/packaged component (the selected
-    # manifest plus any additional manifests): supplies the MCP declarations
-    # from every mcpServers form and default MCP file for staging, the declared
-    # skills and rules of the newer formats, and the report-only coverage /
-    # context-cost / pinning provenance.
-    inventory = build_plugin_inventory(
-        plugin_root,
-        manifest,
-        contained=contained_form,
-        manifest_rel=manifest_rel_for(manifest_path, plugin_dir),
-        manifest_type=location.manifest_type,
-        additional=_additional_manifests(location),
-    )
-    stage_from_inventory = contained_form and profile.stage_from_inventory
-
+    plugin = _locate_plugin(plugin_path)
     # Layer-1 intra-repo resolver: canonical skill/rule refs whose <repo> is the
     # plugin's own clone are resolved to real dirs/files under the clone root
     # (widened, slug-verified containment); everything else stays unresolved.
-    resolver = _make_intra_repo_resolver(plugin_dir, plugin_root, repo_root, stage_root)
+    resolver = _make_intra_repo_resolver(plugin.plugin_dir, plugin.plugin_root, repo_root, stage_root)
     dependency_status_counts = (
-        () if contained_form else tuple(dependency_status_counts_for_manifest(manifest, plugin_dir, repo_root).items())
-    )
-
-    # Contained skills: symlink-safe discovery shared with Tier 1/2, plus any
-    # caller-supplied local skills, plus intra-repo-resolved bundle skill refs.
-    # Canonical refs to OTHER repos are never treated as paths.
-    contained_skills = (
-        _inventory_skill_dirs(inventory, plugin_root)
-        if stage_from_inventory
-        else tuple(path.resolve() for path in find_bundled_plugin_skills(plugin_dir))
-    )
-    extra_skills = tuple(dict.fromkeys(path.expanduser().resolve() for path in include_skills))
-    # Track WHICH canonical skill refs actually resolved intra-repo, keyed by the
-    # EXACT canonical ref (not basename), so a foreign same-basename ref from a
-    # different repo is never silently covered by a sibling repo's resolution
-    # (fail-open: a resolved `alpha` must not cover `other/repo::skills::alpha`).
-    intra_repo_skill_paths: list[Path] = []
-    resolved_skill_refs: set[str] = set()
-    if not contained_form:
-        for ref in _iter_raw_refs(manifest.get("skills")):
-            resolved = resolver.resolve_skill(ref)
-            if resolved is None:
-                continue
-            intra_repo_skill_paths.append(resolved)
-            canonical = normalize_ref(ref)
-            if canonical:
-                resolved_skill_refs.add(canonical)
-    intra_repo_skills = tuple(intra_repo_skill_paths)
-    member_skills = tuple(dict.fromkeys((*contained_skills, *extra_skills, *intra_repo_skills)))
-    local_skill_names = {path.name for path in member_skills}
-
-    # Contained plugins bundle their skills under skills/ (discovered above); the
-    # manifest 'skills' key is a directory pointer (e.g. "./skills/"), not a
-    # canonical ref list, so there are no unresolved remote skill refs. For bundle-
-    # reference plugins a ref is "covered" when a local component (contained,
-    # --include-skills, or intra-repo-resolved above) carries its trailing name.
-    unresolved_skill_refs: tuple[str, ...] = (
         ()
-        if contained_form
-        else _unresolved_refs(
-            manifest.get("skills"),
-            covered_names=local_skill_names,
-            resolved_refs=resolved_skill_refs,
-        )
+        if plugin.contained
+        else tuple(dependency_status_counts_for_manifest(plugin.manifest, plugin.plugin_dir, repo_root).items())
     )
-
-    # A contained manifest may express 'rules' as a directory pointer (e.g.
-    # "./rules/") rather than a canonical ref list. That string must not reach
-    # ref-parsing (_iter_raw_refs would raise "refs must be a list"); instead, like
-    # contained skills (discovered from skills/ on disk), contained rule files are
-    # discovered from <plugin>/rules/ and staged so they are actually exercised --
-    # honoring the contained-plugin contract rather than silently dropping them.
-    # Bundle-reference plugins resolve their refs as before.
-    rules_section = manifest.get("rules")
-    if stage_from_inventory:
-        staged_rules = tuple(_inventory_rule_files(inventory, plugin_root))
-        unresolved_rule_refs: tuple[str, ...] = ()
-    elif contained_form and not isinstance(rules_section, list):
-        staged_rules = tuple(_discover_contained_rule_files(plugin_root))
-        unresolved_rule_refs = ()
-    else:
-        staged_rules, unresolved_rule_refs = _resolve_rules(rules_section, plugin_dir, plugin_root, resolver)
-    component_manifest = (
-        normalized_component_manifest(location.manifest_type, manifest) or {} if contained_form else manifest
-    )
+    member_skills, unresolved_skill_refs = _resolve_member_skills(plugin, include_skills, resolver)
+    staged_rules, unresolved_rule_refs = _resolve_plugin_rules(plugin, resolver)
     mcp = _split_mcp_servers(
-        component_manifest, inventory, contained_form, plugin_root=plugin_root, root_prefixes=profile.root_prefixes
+        plugin.component_manifest,
+        plugin.inventory,
+        plugin.contained,
+        plugin_root=plugin.plugin_root,
+        root_prefixes=plugin.profile.root_prefixes,
     )
-    runnable_mcp, provider_mcp = mcp.runnable, mcp.provider_only
 
-    # Native plugin loading: resolve the per-agent plan first and snapshot the
-    # plugin only when some agent loads it natively. The skip decision and the
-    # INCOMPLETE rule then follow what each with-plugin arm really stages.
-    resolved_source = _resolve_evals_source(plugin_dir, evals_source) if plugin_load != "wrapper" else None
-    native_plan = _preview_plugin_load_plan(plugin_load, agents, env_mode, _preview_task_source(resolved_source))
-    native_source = None
-    if plugin_load != "wrapper" and (native_plan is None or any(d.native for d in native_plan.values())):
-        # Newer contained formats stage through their Claude-field-name view; the
-        # Claude Code and bundle-reference manifests stage as before.
-        native_manifest = (
-            (component_manifest or {})
-            if contained_form and location.manifest_type != PLUGIN_CONTAINED_MANIFEST_TYPE
-            else manifest
-        )
-        native_source = build_native_source(
-            inventory=inventory,
-            manifest=native_manifest,
-            plugin_root=plugin_root,
-            contained=contained_form,
-            manifest_rel=manifest_rel_for(manifest_path, plugin_dir),
-            plugin_name=plugin_name,
-            description=plugin_description,
-            member_skills=member_skills,
-            rules=tuple((rule.name, rule.content) for rule in staged_rules),
-            mcp_servers=runnable_mcp,
-            plugin_file_mcp_servers=mcp.plugin_file,
-            mcp_declared=mcp.declared,
-            nest_flat_hooks=location.manifest_type == PLUGIN_CURSOR_MANIFEST_TYPE,
-            hook_dialect="cursor" if location.manifest_type == PLUGIN_CURSOR_MANIFEST_TYPE else "claude",
-            hook_root_prefixes=profile.root_prefixes,
-            # An --evals-source inside the plugin root must not reach the agent
-            # through the native whole-plugin copy.
-            excluded_paths=_native_excluded_evals_paths(resolved_source, plugin_root),
-        )
-        native_plan = _apply_native_refusals(plugin_load, native_plan, native_source)
+    # Native and auto loading need the evals source before the load plan: the
+    # task source it pins decides whether an agent can load the plugin natively,
+    # and the native whole-plugin copy must leave it out. The wrapper resolves it
+    # only when it stages the package, so a plugin with nothing locally
+    # evaluable is skipped without its eval source being read or validated.
+    resolved_source = _resolve_evals_source(plugin.plugin_dir, evals_source) if plugin_load != "wrapper" else None
+    native_plan, native_source = _native_snapshot(
+        plugin,
+        plugin_load=plugin_load,
+        agents=agents,
+        env_mode=env_mode,
+        evals_source=resolved_source,
+        member_skills=member_skills,
+        staged_rules=staged_rules,
+        mcp=mcp,
+    )
     claude_native = _claude_native_arm(native_plan)
-    user_config_defaults = _user_config_defaults(manifest)
+    user_config_defaults = _user_config_defaults(plugin.manifest)
     mcp_unsupported_config = _unsupported_mcp_for_plan(mcp, native_plan, user_config_defaults)
     skipped = not (
-        member_skills or staged_rules or runnable_mcp or _native_loaded_types(plugin_load, native_plan, native_source)
+        member_skills or staged_rules or mcp.runnable or _native_loaded_types(plugin_load, native_plan, native_source)
     )
     mcp_coverage = _McpCoverage(
         mcp,
@@ -499,9 +401,9 @@ def prepare_plugin_eval_package(
         plugin_file_gap_notes=_plugin_file_gap_notes(mcp, native_plan, user_config_defaults, mcp_unsupported_config),
     )
     report_only = _inventory_provenance(
-        inventory,
-        plugin_root=plugin_root,
-        contained=contained_form,
+        plugin.inventory,
+        plugin_root=plugin.plugin_root,
+        contained=plugin.contained,
         skipped=skipped,
         member_skills=member_skills,
         staged_rule_names=tuple(rule.name for rule in staged_rules),
@@ -516,7 +418,7 @@ def prepare_plugin_eval_package(
     # than a with-plugin run identical to baseline (a meaningless zero lift).
     if skipped:
         return PluginEvalPackage(
-            plugin_name=plugin_name,
+            plugin_name=plugin.name,
             package_path=None,
             include_skills=(),
             unresolved_mcp_servers=mcp.provider_names,
@@ -529,58 +431,27 @@ def prepare_plugin_eval_package(
             skip_reason=_skip_reason(
                 unresolved_skill_refs,
                 unresolved_rule_refs,
-                provider_mcp,
+                mcp.provider_only,
                 [name for name, gaps in mcp.gaps.items() if gaps[0].startswith("plugin_files")],
             ),
             **report_only,
         )
 
-    package_path = _fresh_package_dir(stage_root, plugin_name)
-    _stage_agent_plugin_manifest(
-        package_path / "agent_plugin.yaml",
-        manifest_text,
-        manifest,
-        contained_form=contained_form,
-    )
-    _write_plugin_skill_md(
-        package_path / "SKILL.md",
-        plugin_name=plugin_name,
-        plugin_description=plugin_description,
-        include_skills=member_skills,
+    package_path = _fresh_package_dir(stage_root, plugin.name)
+    if plugin_load == "wrapper":
+        resolved_source = _resolve_evals_source(plugin.plugin_dir, evals_source)
+    dataset_cases = _stage_package_files(
+        package_path,
+        plugin,
+        member_skills=member_skills,
         staged_rules=staged_rules,
         unresolved_skill_refs=unresolved_skill_refs,
         unresolved_rule_refs=unresolved_rule_refs,
-        provider_mcp_servers=mcp.provider_names,
+        mcp=mcp,
+        evals_source=resolved_source,
     )
-
-    if plugin_load == "wrapper":
-        resolved_source = _resolve_evals_source(plugin_dir, evals_source)
-
-    evals_dir = package_path / "evals"
-    if resolved_source is not None:
-        _copy_evals_source(resolved_source, evals_dir)
-    else:
-        _write_combined_member_evals(evals_dir, member_skills, plugin_name=plugin_name)
-
-    dataset_path = next((evals_dir / name for name in _EVAL_DATASET_NAMES if (evals_dir / name).exists()), None)
-    if dataset_path is None and not (evals_dir / "harbor").exists():
-        raise ValueError(f"Prepared plugin package has no evaluation dataset: {package_path}")
-    # Native Harbor sources can be valid for effectiveness without carrying the
-    # structured composition metadata required for an Integration claim.
-    dataset_cases = load_dataset_entries(dataset_path) if dataset_path is not None else []
-    _reject_invalid_plugin_signal_fields(dataset_cases)
-    cross_component_case_count = sum(
-        1
-        for case in dataset_cases
-        if case.get("cross_component") is True
-        and isinstance(case.get("expected_skills"), list)
-        and len({str(name).strip() for name in case["expected_skills"] if str(name).strip()}) >= 2
-    )
-
-    _write_plugin_mcp_servers_toml(evals_dir, runnable_mcp)
-    _write_plugin_runtime_components(evals_dir, inventory, plugin_name=plugin_name)
     return PluginEvalPackage(
-        plugin_name=plugin_name,
+        plugin_name=plugin.name,
         native_source=native_source,
         package_path=package_path,
         include_skills=member_skills,
@@ -591,10 +462,256 @@ def prepare_plugin_eval_package(
         unresolved_skill_refs=unresolved_skill_refs,
         unresolved_rule_refs=unresolved_rule_refs,
         dataset_case_count=len(dataset_cases),
-        cross_component_case_count=cross_component_case_count,
+        cross_component_case_count=_cross_component_case_count(dataset_cases),
         dependency_status_counts=dependency_status_counts,
         mcp_probe_targets=tuple(mcp.probe_targets[:MAX_PLUGIN_MANIFEST_ITEMS]),
         **report_only,
+    )
+
+
+@dataclass(frozen=True)
+class _LocatedPlugin:
+    """The selected plugin manifest, read and parsed once, with the plugin's static inventory."""
+
+    location: PluginManifestLocation
+    manifest_text: str
+    manifest: dict[str, Any]
+    name: str
+    description: str
+    #: Every declared and packaged component (the selected manifest plus any
+    #: additional manifests): the MCP declarations from every mcpServers form and
+    #: default MCP file for staging, the declared skills and rules of the newer
+    #: formats, and the report-only coverage / context-cost / pinning provenance.
+    inventory: PluginInventory
+
+    @property
+    def contained(self) -> bool:
+        return self.location.contained
+
+    @property
+    def plugin_dir(self) -> Path:
+        return self.location.root
+
+    @property
+    def plugin_root(self) -> Path:
+        return self.location.secure_file.root
+
+    @property
+    def manifest_rel(self) -> str:
+        return manifest_rel_for(self.location.path, self.location.root)
+
+    @property
+    def profile(self) -> FormatProfile:
+        return profile_for(self.location.manifest_type)
+
+    @property
+    def stage_from_inventory(self) -> bool:
+        """Whether this format's skills and rules are staged from what the inventory found."""
+        return self.contained and self.profile.stage_from_inventory
+
+    @property
+    def component_manifest(self) -> dict[str, Any]:
+        """The manifest's component declarations in Claude Code field names (a contained format's own view)."""
+        if not self.contained:
+            return self.manifest
+        return normalized_component_manifest(self.location.manifest_type, self.manifest) or {}
+
+
+def _locate_plugin(plugin_path: Path) -> _LocatedPlugin:
+    location = _manifest_location(plugin_path)
+    manifest_text = location.read_text()
+    manifest = _load_manifest_text(manifest_text, location.path, location.manifest_type)
+    name = _plugin_name(manifest, location.root)
+    description = _plugin_description(manifest, name)
+    inventory = build_plugin_inventory(
+        location.secure_file.root,
+        manifest,
+        contained=location.contained,
+        manifest_rel=manifest_rel_for(location.path, location.root),
+        manifest_type=location.manifest_type,
+        additional=_additional_manifests(location),
+    )
+    return _LocatedPlugin(location, manifest_text, manifest, name, description, inventory)
+
+
+def _resolve_member_skills(
+    plugin: _LocatedPlugin, include_skills: tuple[Path, ...], resolver: _IntraRepoResolver
+) -> tuple[tuple[Path, ...], tuple[str, ...]]:
+    """The member skills to stage, and the skill refs that stay unresolved.
+
+    Members are the plugin's own skills (symlink-safe discovery shared with
+    Tier 1/2, or what the inventory found for the newer formats), the
+    caller-supplied local skills, and the bundle skill refs resolved intra-repo.
+    Canonical refs to OTHER repos are never treated as paths.
+    """
+    contained_skills = (
+        _inventory_skill_dirs(plugin.inventory, plugin.plugin_root)
+        if plugin.stage_from_inventory
+        else tuple(path.resolve() for path in find_bundled_plugin_skills(plugin.plugin_dir))
+    )
+    extra_skills = tuple(dict.fromkeys(path.expanduser().resolve() for path in include_skills))
+    if plugin.contained:
+        # A contained manifest's 'skills' key is a directory pointer (e.g.
+        # "./skills/"), not a canonical ref list, so there are no remote skill refs.
+        return tuple(dict.fromkeys((*contained_skills, *extra_skills))), ()
+
+    # Track WHICH canonical skill refs actually resolved intra-repo, keyed by the
+    # EXACT canonical ref (not basename), so a foreign same-basename ref from a
+    # different repo is never silently covered by a sibling repo's resolution
+    # (fail-open: a resolved `alpha` must not cover `other/repo::skills::alpha`).
+    intra_repo_skills: list[Path] = []
+    resolved_skill_refs: set[str] = set()
+    for ref in _iter_raw_refs(plugin.manifest.get("skills")):
+        resolved = resolver.resolve_skill(ref)
+        if resolved is None:
+            continue
+        intra_repo_skills.append(resolved)
+        canonical = normalize_ref(ref)
+        if canonical:
+            resolved_skill_refs.add(canonical)
+    member_skills = tuple(dict.fromkeys((*contained_skills, *extra_skills, *intra_repo_skills)))
+    # A ref is "covered" when a local component (contained, --include-skills, or
+    # intra-repo-resolved above) carries its trailing name.
+    unresolved = _unresolved_refs(
+        plugin.manifest.get("skills"),
+        covered_names={path.name for path in member_skills},
+        resolved_refs=resolved_skill_refs,
+    )
+    return member_skills, unresolved
+
+
+def _resolve_plugin_rules(
+    plugin: _LocatedPlugin, resolver: _IntraRepoResolver
+) -> tuple[tuple[_StagedRule, ...], tuple[str, ...]]:
+    """The rule files to stage (read once, bounded), and the rule refs that stay unresolved.
+
+    A contained manifest may express 'rules' as a directory pointer (e.g.
+    "./rules/") rather than a canonical ref list. That string must not reach
+    ref-parsing (_iter_raw_refs would raise "refs must be a list"); instead, like
+    contained skills (discovered from skills/ on disk), contained rule files are
+    discovered from <plugin>/rules/ and staged so they are actually exercised --
+    honoring the contained-plugin contract rather than silently dropping them.
+    Bundle-reference plugins resolve their refs.
+    """
+    rules_section = plugin.manifest.get("rules")
+    if plugin.stage_from_inventory:
+        return tuple(_inventory_rule_files(plugin.inventory, plugin.plugin_root)), ()
+    if plugin.contained and not isinstance(rules_section, list):
+        return tuple(_discover_contained_rule_files(plugin.plugin_root)), ()
+    return _resolve_rules(rules_section, plugin.plugin_dir, plugin.plugin_root, resolver)
+
+
+def _native_snapshot(
+    plugin: _LocatedPlugin,
+    *,
+    plugin_load: str,
+    agents: str | Sequence[str] | None,
+    env_mode: str | None,
+    evals_source: Path | None,
+    member_skills: tuple[Path, ...],
+    staged_rules: tuple[_StagedRule, ...],
+    mcp: _McpSplit,
+) -> tuple[dict[str, AgentLoadDecision] | None, NativePluginSource | None]:
+    """The per-agent load plan, and the plugin snapshot for the native adapters.
+
+    The plan comes first, and the plugin is snapshotted only when some agent
+    loads it natively, so the skip decision and the INCOMPLETE rule follow what
+    each with-plugin arm really stages. A component that enables a permission
+    bypass then refuses (``native``) or falls back (``auto``) for the agents
+    that would stage it.
+    """
+    plan = _preview_plugin_load_plan(plugin_load, agents, env_mode, _preview_task_source(evals_source))
+    if plugin_load == "wrapper" or (plan is not None and not any(decision.native for decision in plan.values())):
+        return plan, None
+    manifest_type = plugin.location.manifest_type
+    # Newer contained formats stage through their Claude-field-name view; the
+    # Claude Code and bundle-reference manifests stage as they are.
+    newer_contained_format = plugin.contained and manifest_type != PLUGIN_CONTAINED_MANIFEST_TYPE
+    source = build_native_source(
+        inventory=plugin.inventory,
+        manifest=plugin.component_manifest if newer_contained_format else plugin.manifest,
+        plugin_root=plugin.plugin_root,
+        contained=plugin.contained,
+        manifest_rel=plugin.manifest_rel,
+        plugin_name=plugin.name,
+        description=plugin.description,
+        member_skills=member_skills,
+        rules=tuple((rule.name, rule.content) for rule in staged_rules),
+        mcp_servers=mcp.runnable,
+        plugin_file_mcp_servers=mcp.plugin_file,
+        mcp_declared=mcp.declared,
+        nest_flat_hooks=manifest_type == PLUGIN_CURSOR_MANIFEST_TYPE,
+        hook_dialect="cursor" if manifest_type == PLUGIN_CURSOR_MANIFEST_TYPE else "claude",
+        hook_root_prefixes=plugin.profile.root_prefixes,
+        # An --evals-source inside the plugin root must not reach the agent
+        # through the native whole-plugin copy.
+        excluded_paths=_native_excluded_evals_paths(evals_source, plugin.plugin_root),
+    )
+    return _apply_native_refusals(plugin_load, plan, source), source
+
+
+def _stage_package_files(
+    package_path: Path,
+    plugin: _LocatedPlugin,
+    *,
+    member_skills: tuple[Path, ...],
+    staged_rules: tuple[_StagedRule, ...],
+    unresolved_skill_refs: tuple[str, ...],
+    unresolved_rule_refs: tuple[str, ...],
+    mcp: _McpSplit,
+    evals_source: Path | None,
+) -> list[dict[str, Any]]:
+    """Write the package: the staged manifest, the wrapper ``SKILL.md``, the evals, and the generated files.
+
+    The evals are a copy of *evals_source*, or the member skills' datasets
+    combined when there is none. Returns the dataset cases, after checking
+    their advisory plugin-signal fields.
+    """
+    _stage_agent_plugin_manifest(
+        package_path / "agent_plugin.yaml",
+        plugin.manifest_text,
+        plugin.manifest,
+        contained_form=plugin.contained,
+    )
+    _write_plugin_skill_md(
+        package_path / "SKILL.md",
+        plugin_name=plugin.name,
+        plugin_description=plugin.description,
+        include_skills=member_skills,
+        staged_rules=staged_rules,
+        unresolved_skill_refs=unresolved_skill_refs,
+        unresolved_rule_refs=unresolved_rule_refs,
+        provider_mcp_servers=mcp.provider_names,
+    )
+    evals_dir = package_path / "evals"
+    if evals_source is not None:
+        _copy_evals_source(evals_source, evals_dir)
+    else:
+        _write_combined_member_evals(evals_dir, member_skills, plugin_name=plugin.name)
+
+    dataset_path = next((evals_dir / name for name in _EVAL_DATASET_NAMES if (evals_dir / name).exists()), None)
+    if dataset_path is None and not (evals_dir / "harbor").exists():
+        raise ValueError(f"Prepared plugin package has no evaluation dataset: {package_path}")
+    dataset_cases = load_dataset_entries(dataset_path) if dataset_path is not None else []
+    _reject_invalid_plugin_signal_fields(dataset_cases)
+
+    _write_plugin_mcp_servers_toml(evals_dir, mcp.runnable)
+    _write_plugin_runtime_components(evals_dir, plugin.inventory, plugin_name=plugin.name)
+    return dataset_cases
+
+
+def _cross_component_case_count(dataset_cases: list[dict[str, Any]]) -> int:
+    """Cases that can support an Integration claim: ``cross_component`` with two or more expected skills.
+
+    Native Harbor sources can be valid for effectiveness without carrying this
+    structured composition metadata.
+    """
+    return sum(
+        1
+        for case in dataset_cases
+        if case.get("cross_component") is True
+        and isinstance(case.get("expected_skills"), list)
+        and len({str(name).strip() for name in case["expected_skills"] if str(name).strip()}) >= 2
     )
 
 

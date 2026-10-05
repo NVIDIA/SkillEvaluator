@@ -2368,7 +2368,7 @@
             </div>
             {% endif %}
             <div class="dashboard">
-                <div class="dashboard-card {{ 'success' if tier3_tone == 'pass' else ('danger' if tier3_tone == 'fail' else ('warning' if tier3_tone == 'warn' else '')) }}">
+                <div class="dashboard-card {{ {'pass': 'success', 'fail': 'danger', 'warn': 'warning'}.get(tier3_tone, '') }}">
                     <h3 class="dashboard-card-title">Verdict</h3>
                     <p class="dashboard-card-value">{{ tier3_display_verdict }}</p>
                     <p class="dashboard-card-subtitle">{{ 'Partial plugin run; not a pass' if tier3_plugin_incomplete else 'Evaluation outcome' }}</p>

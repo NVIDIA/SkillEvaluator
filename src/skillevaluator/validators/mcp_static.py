@@ -140,10 +140,6 @@ def _credential_flag_name(token: str) -> str | None:
     return flag if flag and is_credential_name(flag) else None
 
 
-# The old name of url_policy.safe_url, still imported by plugin_components.
-redacted_url = safe_url
-
-
 def _client_reading(url: str) -> str:
     """How WHATWG clients read an ambiguous URL, for messages: no userinfo, query, or fragment."""
     try:
@@ -242,11 +238,6 @@ def validate_mcp_pinning(name: str, config: dict[str, Any], file_path: str, find
     reports the same package twice.
     """
     _check_pinning(_ServerFindings(name, file_path, findings), config)
-
-
-# The names plugin_components imports.
-_validate_command = validate_mcp_command
-_validate_pinning = validate_mcp_pinning
 
 
 def _check_command(server: _ServerFindings, config: dict[str, Any]) -> None:
@@ -971,7 +962,7 @@ def _argv(config: Any) -> list[str] | None:
 
     A ``command`` whose whole string names a package runner is one executable,
     possibly a path with spaces such as ``C:\\Program Files\\nodejs\\npx.cmd``
-    (``_validate_command`` reads a shell the same way). Any other command with
+    (:func:`validate_mcp_command` reads a shell the same way). Any other command with
     spaces is a whole command line (``"npx -y pkg"``) and is split into words,
     so it reads like the argv form.
     """

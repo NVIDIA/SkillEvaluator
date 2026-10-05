@@ -46,10 +46,9 @@ from skillevaluator.validators.mcp_static import (
 from skillevaluator.validators.mcp_static import (
     McpPinning,
     classify_mcp_pinning,
-    looks_like_inline_secret,
-    redacted_url,
     validate_mcp_server_declaration,
 )
+from skillevaluator.validators.url_policy import looks_like_inline_secret, safe_url
 
 McpSource = Literal["inline", "mcp_json", "path_ref", "agent_plugin_yaml"]
 _MCP_BUNDLE_SUFFIXES = (".mcpb", ".dxt")
@@ -553,7 +552,7 @@ def _collect_url_ref(reader: PluginRootReader, collection: McpCollection, raw: s
     never carry the URL's userinfo or query credentials.
     """
     manifest_display = reader.display(manifest_rel)
-    shown = redacted_url(raw)
+    shown = safe_url(raw)
     lowered = raw.strip().lower()
 
     def fail(check: str, message: str, suggestion: str) -> None:

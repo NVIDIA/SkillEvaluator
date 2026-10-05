@@ -126,12 +126,8 @@ from skillevaluator.validators.mcp_static import (
     OverrideIssue,
     env_override_issues,
     permission_bypass_issues,
-)
-from skillevaluator.validators.mcp_static import (
-    _validate_command as mcp_validate_command,
-)
-from skillevaluator.validators.mcp_static import (
-    _validate_pinning as mcp_validate_pinning,
+    validate_mcp_command,
+    validate_mcp_pinning,
 )
 
 if TYPE_CHECKING:
@@ -419,8 +415,8 @@ def _lsp_command_findings(name: str, server: dict[str, Any], file_path: str) -> 
     if not isinstance(server.get("command"), str):
         return []
     raw: list[Finding] = []
-    mcp_validate_command(name, server, file_path, raw)
-    mcp_validate_pinning(name, server, file_path, raw)
+    validate_mcp_command(name, server, file_path, raw)
+    validate_mcp_pinning(name, server, file_path, raw)
     prefix = f"mcpServers['{name}']: "
     return [
         _plugin_finding(

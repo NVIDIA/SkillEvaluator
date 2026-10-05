@@ -252,6 +252,29 @@ def test_summarize_hook_census_over_trials() -> None:
     assert summary["total_runs"] == 3
 
 
+def test_census_caps_hooks_and_lines_and_marks_the_result_truncated() -> None:
+    def line(index: int, code: int = 0) -> str:
+        return json.dumps({"hook_id": f"h{index}", "event": "E", "exit_code": code})
+
+    # One hook more than the cap, then a known hook again: the extra hook is dropped, the known one still counts.
+    parsed = parse_hook_census("\n".join([*(line(index) for index in range(257)), line(0, 127)]))
+    assert parsed["truncated"] is True
+    assert len(parsed["hooks"]) == 256
+    assert parsed["hooks"][0]["runs"] == 2
+    assert (parsed["total_runs"], parsed["total_failures"], parsed["total_not_started"]) == (257, 1, 1)
+
+    long_run = parse_hook_census("\n".join(line(0) for _ in range(20_001)))
+    assert long_run["truncated"] is True
+    assert long_run["total_runs"] == 20_000
+
+    first = parse_hook_census("\n".join(line(index) for index in range(200)))
+    second = parse_hook_census("\n".join(line(index) for index in range(150, 350)))
+    summary = summarize_hook_census([first, second])
+    assert summary["truncated"] is True
+    assert len(summary["hooks"]) == 256
+    assert summary["total_runs"] == 200 + (256 - 150)
+
+
 def _write_job(jobs_dir: Path, variant: str, census: str | None) -> None:
     job_dir = jobs_dir / f"demo-claude-code-{variant}"
     trial = job_dir / "case-1__AbCd123"

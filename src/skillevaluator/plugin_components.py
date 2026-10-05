@@ -36,7 +36,7 @@ import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
@@ -453,6 +453,15 @@ def parse_markdown(text: str) -> _Markdown:
 # --------------------------------------------------------------------------- #
 # Inventory builder                                                           #
 # --------------------------------------------------------------------------- #
+class _JsonSource(NamedTuple):
+    """One loaded source of a JSON-config field (hooks, LSP servers, monitors, Codex apps)."""
+
+    name: str  # the file, or "inline" / "inline[<index>]" for a value written in the manifest
+    origin: Origin
+    rel: str  # root-relative file that holds the config (the manifest for an inline value)
+    config: Any  # the parsed config; None when the file could not be read or parsed safely
+
+
 class _Builder:
     def __init__(
         self,
@@ -577,26 +586,33 @@ class _Builder:
         return declared_value_replaces_default(self.profile, field_name, value)
 
     # -- declared paths and bounded reads ---------------------------------- #
-    def _resolve_declared(self, field_name: str, raw: Any, *, style: bool = True) -> tuple[DeclaredPath | None, str]:
-        """Normalize + classify one declared path; record findings. Returns (path, kind|problem)."""
+    def _resolve_declared(
+        self, field_name: str, raw: Any, *, style: bool = True, profile: FormatProfile | None = None
+    ) -> tuple[DeclaredPath | None, str]:
+        """Normalize + classify one declared path; record findings. Returns (path, kind|problem).
+
+        ``profile`` overrides the builder's format profile (the Codex rules of
+        ``extensions["com.openai"]``).
+        """
+        profile = profile or self.profile
         if not isinstance(raw, str):
             finding = _path_problem_finding(
                 self.reader, field_name, DeclaredPath(repr(raw), None), self.manifest_rel, "invalid"
             )
             self.inventory.findings.append(finding)
             return None, "invalid"
-        declared = normalize_declared_path(raw, self.profile.manifest_path_prefixes)
+        declared = normalize_declared_path(raw, profile.manifest_path_prefixes)
         if declared.problem is not None or declared.rel is None:
             problem = declared.problem if declared.problem == "escape" else "invalid"
             self.inventory.findings.append(
                 _path_problem_finding(
-                    self.reader, field_name, declared, self.manifest_rel, problem, reference=self.profile.reference
+                    self.reader, field_name, declared, self.manifest_rel, problem, reference=profile.reference
                 )
             )
             return declared, problem
-        if style and self.contained and self.profile.require_dot_relative and not declared.dot_relative:
+        if style and self.contained and profile.require_dot_relative and not declared.dot_relative:
             self.inventory.findings.append(
-                _style_finding(self.reader, field_name, declared, self.manifest_rel, self.profile)
+                _style_finding(self.reader, field_name, declared, self.manifest_rel, profile)
             )
         # Skill folders a client loads are scanned as skill units even in such a folder
         # (client_skill_dirs_outside_tree_scans), so only other components get this.
@@ -673,32 +689,43 @@ class _Builder:
             return None
 
     def _json_sources(
-        self, field_name: str, declared_value: Any, default: PurePosixPath | None, *, merge_default: bool = True
-    ) -> Iterator[tuple[str, Origin, str, Any]]:
-        """Yield (name, origin, root-relative file, parsed config) for a JSON-config field.
+        self,
+        component_type: str,
+        field_name: str,
+        declared_value: Any,
+        default: PurePosixPath | None,
+        *,
+        merge_default: bool = True,
+        profile: FormatProfile | None = None,
+    ) -> Iterator[_JsonSource]:
+        """The loaded sources of a JSON-config field: its default file, inline values, and declared files.
 
         ``hooks`` and ``lspServers`` merge with their default file; monitors replace it
         (``merge_default=False``) when declared. For Codex, a declared value
         replaces the default only when Codex keeps it; otherwise the default
-        file is loaded, as Codex does.
+        file is loaded, as Codex does. A declared path that cannot be loaded
+        is not yielded: it gets its finding and a broken ``component_type``
+        component without a path. ``profile`` overrides the builder's format
+        profile (the Codex rules of ``extensions["com.openai"]``).
         """
+        profile = profile or self.profile
         declared_values = self._declared_values(field_name, declared_value)
         explicit: set[PurePosixPath] = set()
         for raw in declared_values:
             if isinstance(raw, str):
-                declared = normalize_declared_path(raw, self.profile.manifest_path_prefixes)
+                declared = normalize_declared_path(raw, profile.manifest_path_prefixes)
                 if declared.rel is not None:
                     explicit.add(declared.rel)
         if merge_default:
             load_default = True
-        elif self.profile.codex_path_rules:
-            load_default = not self._declared_replaces(field_name, declared_value)
+        elif profile.codex_path_rules:
+            load_default = not declared_value_replaces_default(profile, field_name, declared_value)
         else:
             load_default = not declared_values
         default_kind = self.reader.kind(default) if load_default and default is not None else "missing"
         if default_kind == "file" and default not in explicit:
             config = self._load_json(default, field_name)
-            yield default.as_posix(), "packaged", default.as_posix(), config
+            yield _JsonSource(default.as_posix(), "packaged", default.as_posix(), config)
         elif default_kind in {"link", "special"} and default is not None:
             self.inventory.findings.append(
                 _path_problem_finding(
@@ -712,19 +739,21 @@ class _Builder:
             )
         for index, raw in enumerate(declared_values):
             if isinstance(raw, dict | list) and not isinstance(raw, str):
-                yield f"inline[{index}]" if len(declared_values) > 1 else "inline", "declared", self.manifest_rel, raw
+                name = f"inline[{index}]" if len(declared_values) > 1 else "inline"
+                yield _JsonSource(name, "declared", self.manifest_rel, raw)
                 continue
-            declared, kind = self._resolve_declared(field_name, raw)
+            declared, kind = self._resolve_declared(field_name, raw, profile=profile)
             if declared is None or declared.rel is None or kind != "file":
                 if kind == "dir" and declared is not None:
                     self.inventory.findings.append(
                         _path_problem_finding(self.reader, field_name, declared, self.manifest_rel, "invalid")
                     )
                     kind = "invalid"
-                yield (raw if isinstance(raw, str) else repr(raw)), "declared", "", kind
+                self._broken(component_type, None, raw, kind)
                 continue
             origin: Origin = "declared+packaged" if declared.rel == default else "declared"
-            yield declared.rel.as_posix(), origin, declared.rel.as_posix(), self._load_json(declared.rel, field_name)
+            config = self._load_json(declared.rel, field_name)
+            yield _JsonSource(declared.rel.as_posix(), origin, declared.rel.as_posix(), config)
 
     # -- skills ------------------------------------------------------------ #
     def skills(self) -> None:
@@ -1029,16 +1058,17 @@ class _Builder:
     def hooks(self) -> None:
         declared_value = self._declared_field("hooks")
         default = PurePosixPath(self.profile.default_hooks_file) if self.profile.default_hooks_file else None
-        sources = self._json_sources(
-            "hooks", declared_value, default, merge_default=not self.profile.declared_replaces_default
-        )
-        for name, origin, rel, config in sources:
-            self._hook(name, origin, rel, config)
+        merge_default = not self.profile.declared_replaces_default
+        for source in self._json_sources("hook", "hooks", declared_value, default, merge_default=merge_default):
+            self._hook(source)
 
-    def _hook(self, name: str, origin: Origin, rel: str, config: Any) -> None:
-        if not rel:
-            self._add(Component("hook", name, origin, None, "unsupported", problem=str(config)))
-            return
+    def _hook(self, source: _JsonSource, *, profile: FormatProfile | None = None) -> None:
+        """One hooks config: a ``hook`` component, its permission-bypass findings, and its risk records.
+
+        ``profile`` overrides the builder's format profile for the hook dialect.
+        """
+        name, origin, rel, config = source
+        profile = profile or self.profile
         self._add(Component("hook", name, origin, rel, "unsupported"))
         if config is not None:
             self.inventory.findings.extend(
@@ -1058,7 +1088,7 @@ class _Builder:
                 source=name,
                 file=rel,
                 display=self.reader.display(rel),
-                dialect=hook_dialect(self.profile.manifest_type, rel),
+                dialect=hook_dialect(profile.manifest_type, rel),
             )
             self.inventory.hook_records.extend(analysis.records)
             self.inventory.findings.extend(analysis.findings)
@@ -1262,10 +1292,7 @@ class _Builder:
         default = PurePosixPath(self.profile.default_lsp_file) if self.profile.default_lsp_file else None
         if default is None and declared_value is None:
             return
-        for name, origin, rel, config in self._json_sources("lspServers", declared_value, default):
-            if not rel:
-                self._add(Component("lsp", name, origin, None, "unsupported", problem=str(config)))
-                continue
+        for name, origin, rel, config in self._json_sources("lsp", "lspServers", declared_value, default):
             servers = config.get("lspServers", config) if isinstance(config, dict) else None
             if not isinstance(servers, dict) or not servers:
                 self._add(Component("lsp", name, origin, rel, "unsupported"))
@@ -1304,18 +1331,14 @@ class _Builder:
                 declared_value = experimental.get("monitors")
             elif "monitors" in self.manifest:
                 declared_value = self.manifest.get("monitors")
+        field_name = "experimental.monitors"
         if isinstance(declared_value, list) and all(isinstance(item, dict) for item in declared_value):
-            sources: Iterable[tuple[str, Origin, str, Any]] = [
-                ("inline", "declared", self.manifest_rel, declared_value)
-            ]
+            sources: Iterable[_JsonSource] = [_JsonSource("inline", "declared", self.manifest_rel, declared_value)]
         elif declared_value is not None:
-            sources = self._json_sources("experimental.monitors", declared_value, default, merge_default=False)
+            sources = self._json_sources("monitor", field_name, declared_value, default, merge_default=False)
         else:
-            sources = self._json_sources("experimental.monitors", None, default)
+            sources = self._json_sources("monitor", field_name, None, default)
         for name, origin, rel, config in sources:
-            if not rel:
-                self._add(Component("monitor", name, origin, None, "unsupported", problem=str(config)))
-                continue
             entries = config.get("monitors", config) if isinstance(config, dict) else config
             if not isinstance(entries, list) or not entries:
                 self._add(Component("monitor", name, origin, rel, "unsupported"))
@@ -1466,10 +1489,11 @@ class _Builder:
         if default_name is None and declared_value is None:
             return
         default = PurePosixPath(default_name) if default_name else None
-        for name, origin, rel, config in self._json_sources("apps", declared_value, default, merge_default=False):
-            if not rel:
-                self._add(Component("app", name, origin, None, "unsupported", problem=str(config)))
-                continue
+        self._add_apps(self._json_sources("app", "apps", declared_value, default, merge_default=False))
+
+    def _add_apps(self, sources: Iterable[_JsonSource]) -> None:
+        """One ``app`` component per alias in each ``.app.json`` ``apps`` map; a file without aliases is one."""
+        for name, origin, rel, config in sources:
             apps = config.get("apps") if isinstance(config, dict) else None
             if not isinstance(apps, dict) or not apps:
                 self._add(Component("app", name, origin, rel, "unsupported"))
@@ -1519,9 +1543,8 @@ class _Builder:
                 self._rule_dir(base / "rules", "packaged", support="unsupported")
             hooks_file = base / "hooks" / "hooks.json"
             if self.reader.kind(hooks_file) == "file":
-                self._hook(
-                    hooks_file.as_posix(), "packaged", hooks_file.as_posix(), self._load_json(hooks_file, "hooks")
-                )
+                config = self._load_json(hooks_file, "hooks")
+                self._hook(_JsonSource(hooks_file.as_posix(), "packaged", hooks_file.as_posix(), config))
 
     # -- OpenAI settings of an Agent Plugins manifest ---------------------- #
     def openai_extension(self) -> None:
@@ -1538,24 +1561,14 @@ class _Builder:
         openai = extensions.get("com.openai") if isinstance(extensions, dict) else None
         if not isinstance(openai, dict):
             return
-        profile = self.profile
-        self.profile = CODEX_PROFILE  # Codex path rules and messages for these fields
-        try:
-            if openai.get("hooks") is not None:
-                for name, origin, rel, config in self._json_sources("hooks", openai.get("hooks"), None):
-                    label = f"extensions.com.openai.hooks:{name}" if rel == self.manifest_rel else name
-                    self._hook(label, origin, rel, config)
-            if openai.get("apps") is not None:
-                for name, origin, rel, config in self._json_sources("apps", openai.get("apps"), None):
-                    apps = config.get("apps") if rel and isinstance(config, dict) else None
-                    if not isinstance(apps, dict) or not apps:
-                        problem = None if rel else str(config)
-                        self._add(Component("app", name, origin, rel or None, "unsupported", problem=problem))
-                        continue
-                    for alias in list(apps)[:PLUGIN_COMPONENT_MAX_ITEMS]:
-                        self._add(Component("app", str(alias), origin, rel, "unsupported"))
-        finally:
-            self.profile = profile
+        # Codex path rules, messages, and hook dialect for these fields.
+        if openai.get("hooks") is not None:
+            for source in self._json_sources("hook", "hooks", openai.get("hooks"), None, profile=CODEX_PROFILE):
+                if source.rel == self.manifest_rel:  # an inline hooks object
+                    source = source._replace(name=f"extensions.com.openai.hooks:{source.name}")
+                self._hook(source, profile=CODEX_PROFILE)
+        if openai.get("apps") is not None:
+            self._add_apps(self._json_sources("app", "apps", openai.get("apps"), None, profile=CODEX_PROFILE))
 
     # -- shipped .env files ------------------------------------------------ #
     def env_files(self) -> None:

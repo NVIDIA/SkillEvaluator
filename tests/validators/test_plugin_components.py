@@ -21,6 +21,7 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_FILE_BYTES,
     CONTENT_DEDUP_MAX_TOTAL_BYTES,
     CONTENT_TYPE_PLUGIN,
+    PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
     PLUGIN_COMPONENT_MAX_ITEMS,
     PLUGIN_CONFIG_MAX_BYTES,
     PLUGIN_CURSOR_MANIFEST_TYPE,
@@ -915,6 +916,46 @@ def test_hooks_merge_declared_file_with_default(tmp_path: Path) -> None:
     )
     names = {row["name"] for row in _components(_validate(root), "hook")}
     assert names == {"hooks/hooks.json", "cfg/extra-hooks.json"}
+
+
+def test_openai_extension_hooks_and_apps_use_the_codex_path_rules(tmp_path: Path) -> None:
+    openai = {"hooks": [{"hooks": {}}, "hooks/policy.json"], "apps": ["./tools.app.json", "./missing.app.json"]}
+    manifest = {
+        "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+        "name": "demo",
+        "version": "1.0.0",
+        "extensions": {"com.openai": openai},
+    }
+    files = {
+        "plugin.json": manifest,
+        "hooks/policy.json": {"hooks": {}},
+        "tools.app.json": {"apps": {"github": {"id": "gh"}, "slack": {"id": "sl"}}},
+    }
+    for rel, content in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(json.dumps(content), encoding="utf-8")
+
+    inventory = build_plugin_inventory(
+        tmp_path,
+        manifest,
+        contained=True,
+        manifest_rel="plugin.json",
+        manifest_type=PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
+    )
+
+    hooks = [(row.name, row.path) for row in inventory.of_type("hook") if row.declared_by is None]
+    assert hooks == [
+        ("extensions.com.openai.hooks:inline[0]", "plugin.json"),
+        ("hooks/policy.json", "hooks/policy.json"),
+    ]
+    [style] = [finding for finding in inventory.findings if finding.check_name == "plugin_component_path_style"]
+    assert "the Codex plugin loader ignores" in style.message
+    apps = [(row.name, row.path, row.problem) for row in inventory.of_type("app")]
+    assert apps == [
+        ("github", "tools.app.json", None),
+        ("slack", "tools.app.json", None),
+        ("./missing.app.json", None, "missing"),
+    ]
 
 
 @_SKIP_SYMLINKS

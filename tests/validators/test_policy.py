@@ -165,3 +165,29 @@ def test_policy_digest_excludes_source_path() -> None:
     second = ValidationPolicy(profile="external", source=Path("/tmp/two.yaml"))
 
     assert first.digest == second.digest
+
+
+def test_malformed_overlay_blocks_and_lists_warn_with_their_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    warnings: list[str] = []
+    monkeypatch.setattr(policy_module.logger, "warning", lambda message, *args: warnings.append(message % args))
+    overlay = tmp_path / "policy.yaml"
+    overlay.write_text(
+        "identity: [x]\n"
+        "mcp:\n  allowed_private_hosts: [ok.localhost, '', 7, ok.localhost]\n  extra: 1\n"
+        "hooks:\n  allowed_urls: https://one.example.com\n",
+        encoding="utf-8",
+    )
+    policy = load_policy_file(overlay)
+
+    assert policy.author_email_regex == default_policy().author_email_regex
+    assert policy.mcp_allowed_private_hosts == ("ok.localhost",)
+    assert policy.hook_allowed_urls == ()
+    assert warnings == [
+        f"Ignoring non-mapping 'identity' block in {overlay}.",
+        f"Ignoring unknown mcp key(s) ['extra'] in {overlay}.",
+        f"Ignoring invalid 'mcp.allowed_private_hosts' entry '' in {overlay}.",
+        f"Ignoring invalid 'mcp.allowed_private_hosts' entry 7 in {overlay}.",
+        f"Ignoring non-list 'hooks.allowed_urls' in {overlay}.",
+    ]

@@ -301,7 +301,9 @@ def claude_plugin_applicability(root: Path) -> tuple[str, str] | None:
     try:
         located = locate_plugin_manifest(Path(root))
     except PluginManifestPathError as exc:
-        return "error", redact_sensitive_text(f"Cannot locate the plugin manifest safely: {exc}", max_len=300)
+        return "error", redact_sensitive_text(
+            f"Cannot locate the plugin manifest safely: {exc}", max_len=MAX_MESSAGE_CHARS
+        )
     if located is None:
         return "not_applicable", "No supported plugin manifest was found, so there is nothing for Claude Code to check."
     if located.manifest_type != PLUGIN_CONTAINED_MANIFEST_TYPE:
@@ -329,7 +331,7 @@ class ClaudePluginValidateParity:
     def validate(self, root: Path, *, skillevaluator_verdict: str | None = None) -> ValidationResult:
         result = ValidationResult(validator_name=VALIDATOR_NAME, validator_description=VALIDATOR_DESCRIPTION)
         parity: dict[str, Any] = {
-            "command": "claude plugin validate <plugin-root> --strict --json",
+            "command": f"claude plugin validate {PLUGIN_ROOT_LABEL} --strict --json",
             "strict": True,
             "skillevaluator_verdict": skillevaluator_verdict or "unknown",
         }
@@ -379,7 +381,7 @@ class ClaudePluginValidateParity:
                     severity=Severity.MEDIUM,
                     check_name="claude_validate_error",
                     message=f"claude plugin validate: {message}",
-                    file_path="<plugin-root>",
+                    file_path=PLUGIN_ROOT_LABEL,
                     suggestion="Fix the reported problem; Claude Code reports the same error when it loads the plugin.",
                 )
             )
@@ -390,7 +392,7 @@ class ClaudePluginValidateParity:
                     severity=Severity.LOW,
                     check_name="claude_validate_warning",
                     message=f"claude plugin validate (--strict): {message}",
-                    file_path="<plugin-root>",
+                    file_path=PLUGIN_ROOT_LABEL,
                     suggestion="Fix the warning; --strict treats it as an error in CI.",
                 )
             )
@@ -408,7 +410,7 @@ class ClaudePluginValidateParity:
                             f"claude plugin validate --strict {claude_verdict} the plugin, but SkillEvaluator's "
                             f"manifest and component checks {skillevaluator_verdict} it"
                         ),
-                        file_path="<plugin-root>",
+                        file_path=PLUGIN_ROOT_LABEL,
                         suggestion=(
                             "Compare the two reports: SkillEvaluator adds security checks Claude Code does not run, "
                             "and Claude Code validates the full manifest schema that SkillEvaluator checks only "
@@ -471,7 +473,7 @@ class ClaudePluginValidateParity:
                 return parse_json_report(data, root=root)
             if _UNKNOWN_OPTION_RE.search(f"{run.stdout}\n{run.stderr}"):
                 # Claude Code before v2.1.259 has no --json; parse the text report instead.
-                parity["command"] = "claude plugin validate <plugin-root> --strict"
+                parity["command"] = f"claude plugin validate {PLUGIN_ROOT_LABEL} --strict"
                 run = self.tool.run(
                     ["plugin", "validate", target, "--strict"],
                     cwd=cwd,
@@ -487,7 +489,9 @@ class ClaudePluginValidateParity:
             detail = (run.stderr or "").strip().splitlines()
             parity.update(
                 status="error",
-                reason=redact_sensitive_text(detail[-1] if detail else f"exit code {run.exit_code}", max_len=300),
+                reason=redact_sensitive_text(
+                    detail[-1] if detail else f"exit code {run.exit_code}", max_len=MAX_MESSAGE_CHARS
+                ),
             )
             return None
         report = parse_text_report(run.stdout, run.stderr, root=root)
@@ -506,10 +510,6 @@ def skillevaluator_manifest_verdict(results: list[ValidationResult], schema_vali
             continue
         if isinstance(result.metadata, dict) and result.metadata.get("security_failure"):
             return "failed"
-        blocking = any(
-            (finding.severity if isinstance(finding.severity, Severity) else Severity(str(finding.severity).lower()))
-            in (Severity.CRITICAL, Severity.HIGH)
-            for finding in result.findings
-        )
+        blocking = any(finding.severity.is_error() for finding in result.findings)
         return "failed" if blocking else "passed"
     return None

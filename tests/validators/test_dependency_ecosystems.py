@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
@@ -17,6 +17,7 @@ from skillevaluator.tier1.commands import run_validation
 from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators import dependency_ecosystems as eco
 from skillevaluator.validators.dependencies import DependencySecurityValidator
+from skillevaluator.validators.plugin_tree import plugin_tree_scope
 
 
 class FakeTool:
@@ -97,8 +98,16 @@ NPM_AUDIT_REPORT = {
 # --------------------------------------------------------------------------- #
 # Parsers                                                                     #
 # --------------------------------------------------------------------------- #
+def _package_json(data: Any) -> list[eco.NpmDeclaration]:
+    return eco.read_npm_declarations(data, lockfile=False)[0]
+
+
+def _package_lock(data: Any) -> list[eco.NpmDeclaration]:
+    return eco.read_npm_declarations(data, lockfile=True)[0]
+
+
 def test_package_json_exact_and_floating_versions() -> None:
-    declarations = eco.parse_package_json(
+    declarations = _package_json(
         {
             "dependencies": {"lodash": "4.17.20", "left-pad": "^1.3.0", "alias": "npm:real-pkg@2.0.1"},
             "devDependencies": {"jest": "=29.7.0", "git-dep": "github:org/repo"},
@@ -119,13 +128,13 @@ def test_package_lock_v3_and_v1() -> None:
             "node_modules/local": {"version": "file:../local"},
         },
     }
-    assert [(d.name, d.exact_version) for d in eco.parse_package_lock(v3)] == [
+    assert [(d.name, d.exact_version) for d in _package_lock(v3)] == [
         ("a", "1.0.0"),
         ("b", "2.0.0"),
         ("local", None),
     ]
     v1 = {"dependencies": {"x": {"version": "1.2.3", "dependencies": {"y": {"version": "0.1.0"}}}}}
-    assert sorted((d.name, d.exact_version) for d in eco.parse_package_lock(v1)) == [("x", "1.2.3"), ("y", "0.1.0")]
+    assert sorted((d.name, d.exact_version) for d in _package_lock(v1)) == [("x", "1.2.3"), ("y", "0.1.0")]
 
 
 def test_dockerfile_images_skip_stages_and_scratch() -> None:
@@ -677,3 +686,102 @@ def test_one_failed_pip_audit_batch_counts_only_the_audited_pins(
         1,
         ["pip-audit"],
     )
+
+
+def test_failed_pip_audit_batch_keeps_the_vulnerabilities_of_the_batch_that_ran(
+    tmp_path: Path, tools: dict[str, FakeTool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = {
+        "dependencies": [
+            {"name": "numpy", "version": "1.26.4", "vulns": [{"id": "PYSEC-0000-1", "fix_versions": ["1.26.5"]}]}
+        ]
+    }
+    _fake_pip_audit(monkeypatch, _ok(report), ToolResult(False, "", "", -1, "pip-audit timed out after 180 seconds"))
+    requirements = "numpy==1.26.4; python_version < '3.13'\nnumpy==2.1.0; python_version >= '3.13'\n"
+    result = _dependency_result(_bare_plugin(tmp_path / "demo", {"requirements.txt": requirements}))
+    python = _summary(result, "python")
+    assert (python["status"], python["audited"], python["vulnerabilities"]["high"]) == ("incomplete", 1, 1)
+    assert python["errors"] == ["requirements.txt: pip-audit timed out after 180 seconds"]
+
+
+def test_one_source_reports_a_repeated_pip_audit_error_once(
+    tmp_path: Path, tools: dict[str, FakeTool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    offline = ToolResult(True, "", "ERROR: network unreachable\n", 1)
+    _fake_pip_audit(monkeypatch, offline, offline)
+    requirements = "numpy==1.26.4; python_version < '3.13'\nnumpy==2.1.0; python_version >= '3.13'\n"
+    result = _dependency_result(_bare_plugin(tmp_path / "demo", {"requirements.txt": requirements}))
+    python = _summary(result, "python")
+    assert (python["status"], python["audited"], python["scanners"]) == ("incomplete", 0, [])
+    assert python["errors"] == ["requirements.txt: pip-audit failed: ERROR: network unreachable"]
+
+
+def test_conflicting_pins_are_split_into_batches_that_name_each_package_once() -> None:
+    pins = [("a", "1.0.0"), ("b", "2.0.0"), ("a", "3.0.0"), ("a", "1.0.0"), ("a", "4.0.0")]
+    assert eco.split_conflicting_pins(pins) == [{"a": "1.0.0", "b": "2.0.0"}, {"a": "3.0.0"}, {"a": "4.0.0"}]
+
+
+def test_incomplete_outcome_counts_audited_packages_only_when_partial() -> None:
+    outcome = eco.AuditOutcome(scanner="pip-audit", status="incomplete", error="x: timed out")
+    outcome.count(Severity.HIGH)
+    whole = eco.empty_ecosystem_summary()
+    eco.record_outcome(whole, outcome, declarations=2, audited=1, unverified=0)
+    partial = eco.empty_ecosystem_summary()
+    eco.record_outcome(partial, outcome, declarations=2, audited=1, unverified=0, partial=True)
+    assert (whole["status"], whole["audited"], whole["vulnerabilities"]["high"]) == ("incomplete", 0, 0)
+    assert (partial["status"], partial["audited"], partial["vulnerabilities"]["high"]) == ("incomplete", 1, 1)
+    assert whole["errors"] == partial["errors"] == ["x: timed out"]
+
+
+def test_each_directory_is_walked_once_for_npm_manifests_and_dockerfiles(
+    tmp_path: Path, tools: dict[str, FakeTool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    walked: list[str] = []
+    discover = DependencySecurityValidator._discover
+
+    def _counting(directory: Path, selected: Any) -> list:
+        walked.append(Path(directory).name)
+        return discover(directory, selected)
+
+    monkeypatch.setattr(DependencySecurityValidator, "_discover", staticmethod(_counting))
+    tools["osv_scanner"].available = True
+    root = _bare_plugin(
+        tmp_path / "demo",
+        {
+            "skills/foo/SKILL.md": "---\nname: foo\ndescription: A bundled skill.\n---\nBody\n",
+            "skills/foo/package.json": {"dependencies": {"lodash": "4.17.20"}},
+            "Dockerfile": "FROM node:20.11.1\n",
+        },
+    )
+    result = _dependency_result(root)
+    assert sorted(walked) == ["demo", "foo"]
+    assert (_summary(result, "npm")["audited"], _summary(result, "container")["audited"]) == (1, 1)
+
+
+def test_dockerfile_discovery_failure_still_audits_the_npm_manifests(
+    tmp_path: Path, tools: dict[str, FakeTool]
+) -> None:
+    """A directory named like a Dockerfile fails Dockerfile discovery only; the npm audit still runs."""
+    tools["osv_scanner"].available = True
+    root = _bare_plugin(
+        tmp_path / "demo",
+        {"server/package.json": {"dependencies": {"lodash": "4.17.20"}}, "Dockerfile/README.md": "not a Dockerfile\n"},
+    )
+    result = _dependency_result(root)
+    assert result.incomplete_scans == ["container-image-audit"]
+    assert "Dockerfile discovery failed" in _summary(result, "container")["errors"][0]
+    npm = _summary(result, "npm")
+    assert (npm["status"], npm["audited"]) == ("audited", 1)
+
+
+def test_source_labels_are_plugin_relative(tmp_path: Path) -> None:
+    root = tmp_path / "demo"
+    skill = root / "skills" / "foo"
+    skill.mkdir(parents=True)
+    label = DependencySecurityValidator._source_label
+    with plugin_tree_scope(root, [skill]):
+        assert label(skill, PurePosixPath("package.json")) == "skills/foo/package.json"
+        assert label(root, PurePosixPath("docker/Dockerfile")) == "docker/Dockerfile"
+        assert label(root, PurePosixPath()) == "."
+        assert label(tmp_path / "elsewhere", PurePosixPath("package.json")) == "package.json"
+    assert label(skill, PurePosixPath("package.json")) == "package.json"

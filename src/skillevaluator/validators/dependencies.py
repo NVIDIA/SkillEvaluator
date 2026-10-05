@@ -32,11 +32,16 @@ import json
 import re
 import tempfile
 import tomllib
-from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from pathlib import Path, PurePath, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES, SCAN_EXCLUDED_DIRS
+from skillevaluator.constants import (
+    CONTENT_DEDUP_MAX_FILE_BYTES,
+    PLUGIN_TREE_MAX_DISCOVERED_PATHS,
+    SCAN_EXCLUDED_DIRS,
+)
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, discover_secure_files, secure_read_path_text
 from skillevaluator.utils.structured_data import (
     MAX_STRUCTURED_DEPTH,
@@ -48,20 +53,32 @@ from skillevaluator.utils.structured_data import (
 from skillevaluator.utils.tool_runner import Severity, Tools, cvss_to_severity, parse_json_output
 from skillevaluator.validators import dependency_ecosystems as eco
 from skillevaluator.validators.base import ValidationResult, ValidatorBase
-from skillevaluator.validators.plugin_tree import active_plugin_tree, is_plugin_tree_root, plugin_tree_exclusions
+from skillevaluator.validators.mcp_static import (
+    is_local_spec,
+    is_pep440_version,
+    is_remote_pypi_spec,
+    mcp_container_image,
+    parse_mcp_runner,
+    pypi_pin,
+    specifier_pin,
+)
+from skillevaluator.validators.plugin_tree import (
+    active_plugin_tree,
+    is_plugin_tree_root,
+    plugin_relative_dir,
+    plugin_tree_exclusions,
+)
 
 if TYPE_CHECKING:
     from skillevaluator.validators.policy import ValidationPolicy
 
 # Dependency manifests are read through a bounded, no-follow secure read.
 MAX_DEPENDENCY_FILE_BYTES = CONTENT_DEDUP_MAX_FILE_BYTES
-# Per-file cap on individual ``dependency-version-unverified`` findings; the
-# remainder is summarized in one message so a huge manifest cannot flood reports.
-MAX_UNVERIFIED_FINDINGS_PER_FILE = 100
 UNVERIFIED_CHECK_NAME = eco.UNVERIFIED_CHECK_NAME
-# Bounded discovery of npm manifests and Dockerfiles below one scanned directory.
+# At most this many npm manifests and Dockerfiles below one scanned directory are
+# audited. Their discovery walk is bounded like the whole-plugin walk that runs
+# before it (PLUGIN_TREE_MAX_DISCOVERED_PATHS).
 MAX_ECOSYSTEM_FILES = 64
-MAX_ECOSYSTEM_DISCOVERED_PATHS = 20_000
 # npm lockfiles list every installed package, so they get lockfile-sized bounds
 # (a larger byte cap and collection/token budgets that cover MAX_NPM_PACKAGES)
 # instead of the 1,024-entry budget of load_bounded_json. A lockfile over these
@@ -80,12 +97,6 @@ _REQUIREMENT_RE = re.compile(
     re.DOTALL,
 )
 _SPECIFIER_RE = re.compile(r"\s*(?P<op>~=|===|==|!=|<=|>=|<|>)\s*(?P<version>[^\s,;]+)\s*")
-# Conservative PEP 440 public/local version (no wildcards). Anything else is
-# treated as unverifiable rather than handed to pip-audit.
-_EXACT_VERSION_RE = re.compile(
-    r"(?:\d+!)?\d+(?:\.\d+)*(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?(?:\+[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?",
-    re.IGNORECASE,
-)
 # Trailing per-requirement pip options such as ``--hash=sha256:...``.
 _TRAILING_OPTIONS_RE = re.compile(r"\s+--?[A-Za-z]")
 
@@ -108,6 +119,25 @@ class DependencyDeclaration:
         return f"{self.name}=={self.exact_version}"
 
 
+@dataclass(frozen=True)
+class _Discovered:
+    """The files one ecosystem audits below a directory, or why they could not be discovered."""
+
+    files: tuple[PurePosixPath, ...] = ()
+    error: str | None = None
+
+
+_NPM_MANIFEST_NAMES = frozenset({eco.PACKAGE_JSON, *eco.LOCKFILE_NAMES})
+
+
+def _is_npm_manifest(relative: PurePath) -> bool:
+    return relative.name in _NPM_MANIFEST_NAMES
+
+
+def _is_dockerfile(relative: PurePath) -> bool:
+    return eco.is_dockerfile_name(relative.name)
+
+
 def canonicalize_package_name(name: str) -> str:
     """Normalize a distribution name per PEP 503."""
     return re.sub(r"[-_.]+", "-", name).lower()
@@ -116,9 +146,11 @@ def canonicalize_package_name(name: str) -> str:
 def parse_dependency_declaration(raw: str, *, line_number: int | None, role: str) -> DependencyDeclaration:
     """Parse one PEP 508 requirement string without installing or resolving it.
 
-    Only a single ``==`` specifier with a plain PEP 440 version counts as an
-    exact pin. Direct URL references, wildcards, ``===`` arbitrary equality,
-    ranges, and malformed strings are returned with ``exact_version=None``.
+    Only a single ``==`` or ``===`` specifier that names one valid PEP 440
+    version, in any spelling PEP 440 accepts, is an exact pin
+    (:func:`~skillevaluator.validators.mcp_static.specifier_pin`). Direct URL
+    references, wildcards, a ``===`` string that is not a version, ranges, and
+    malformed strings are returned with ``exact_version=None``.
     """
     text = raw.strip()
     match = _REQUIREMENT_RE.fullmatch(text)
@@ -139,9 +171,8 @@ def parse_dependency_declaration(raw: str, *, line_number: int | None, role: str
         if spec is None:
             return DependencyDeclaration(text, name, line_number, role, None)
         specifiers.append((spec.group("op"), spec.group("version")))
-    exact = None
-    if len(specifiers) == 1 and specifiers[0][0] == "==" and _EXACT_VERSION_RE.fullmatch(specifiers[0][1]):
-        exact = specifiers[0][1]
+    pin = specifier_pin(*specifiers[0]) if len(specifiers) == 1 else None
+    exact = pin.version if pin is not None and pin.auditable else None
     return DependencyDeclaration(text, name, line_number, role, exact)
 
 
@@ -227,7 +258,7 @@ def _parse_poetry_declaration(name: str, constraint: object) -> DependencyDeclar
     text = constraint.strip() if isinstance(constraint, str) else "*"
     if text in {"", "*"}:
         return parse_dependency_declaration(name, line_number=None, role="poetry")
-    if _EXACT_VERSION_RE.fullmatch(text):
+    if is_pep440_version(text):
         return parse_dependency_declaration(f"{name}=={text}", line_number=None, role="poetry")
     declaration = parse_dependency_declaration(f"{name}{text}", line_number=None, role="poetry")
     if declaration.name is None:
@@ -262,21 +293,22 @@ def _load_npm_lockfile(text: str) -> Any:
 
 
 def _python_runner_declaration(spec: str) -> DependencyDeclaration | None:
-    """A ``uvx``/``pipx run`` package spec as a declaration (``pkg@1.2.3`` is uv's spelling of ``pkg==1.2.3``).
+    """A ``uvx``/``pipx run`` package spec as a declaration; local paths are skipped.
 
-    Local paths are skipped; git and URL specs are kept as unverifiable.
+    The MCP pinning check reads the same pin
+    (:func:`~skillevaluator.validators.mcp_static.pypi_pin`, which also reads
+    uv's ``pkg@1.2.3`` spelling of ``pkg==1.2.3``): a pinned spec is audited
+    when its version is a valid PEP 440 version. A ``===`` pin of any other
+    string, and git and URL specs, are kept as unverifiable.
     """
-    from skillevaluator.validators import mcp_static as ms
-
     text = spec.strip()
-    if not text or ms._is_local_spec(text):
+    if not text or is_local_spec(text):
         return None
-    if text.startswith(ms._REMOTE_SPEC_PREFIXES) or "@ git+" in text or "@git+" in text:
+    if is_remote_pypi_spec(text):
         return DependencyDeclaration(text, None, None, "mcp", None)
-    name, at, version = text.partition("@")
-    if at and _EXACT_VERSION_RE.fullmatch(version.strip()):
-        text = f"{name.strip()}=={version.strip()}"
-    return parse_dependency_declaration(text, line_number=None, role="mcp")
+    declaration = parse_dependency_declaration(text, line_number=None, role="mcp")
+    pin = pypi_pin(text)
+    return replace(declaration, exact_version=pin.version if pin is not None and pin.auditable else None)
 
 
 class DependencySecurityValidator(ValidatorBase):
@@ -340,10 +372,11 @@ class DependencySecurityValidator(ValidatorBase):
         """Audit dependencies for a single skill directory (plus npm and images inside a plugin)."""
         result = self._audit_python(skill_path)
         if active_plugin_tree() is not None and skill_path.is_dir():
-            result.merge(self._audit_npm(skill_path))
+            npm_manifests, dockerfiles = self._discover_ecosystem_files(skill_path)
+            result.merge(self._audit_npm(skill_path, npm_manifests))
             if is_plugin_tree_root(skill_path):
                 result.merge(self._audit_mcp_packages(skill_path))
-            result.merge(self._audit_containers(skill_path))
+            result.merge(self._audit_containers(skill_path, dockerfiles))
         return result
 
     def _audit_python(self, skill_path: Path) -> ValidationResult:
@@ -436,13 +469,8 @@ class DependencySecurityValidator(ValidatorBase):
         unverified: list[DependencyDeclaration] = []
         for declaration in declarations:
             (exact if declaration.audit_line else unverified).append(declaration)
-        python_summary = self._summary.get("python")
-        if python_summary is not None:
-            python_summary["sources"] += 1
-            python_summary["declarations"] += len(declarations)
-            python_summary["unverified"] += len(unverified)
 
-        for declaration in unverified[:MAX_UNVERIFIED_FINDINGS_PER_FILE]:
+        for declaration in unverified[: eco.MAX_UNVERIFIED_PER_SOURCE]:
             result.add_finding(
                 eco.unverified_finding(
                     declaration.name or declaration.raw[:80],
@@ -454,97 +482,81 @@ class DependencySecurityValidator(ValidatorBase):
                     line_number=declaration.line_number,
                 )
             )
-        if len(unverified) > MAX_UNVERIFIED_FINDINGS_PER_FILE:
+        if len(unverified) > eco.MAX_UNVERIFIED_PER_SOURCE:
             result.add_message(
-                f"{source}: {len(unverified) - MAX_UNVERIFIED_FINDINGS_PER_FILE} more unpinned "
+                f"{source}: {len(unverified) - eco.MAX_UNVERIFIED_PER_SOURCE} more unpinned "
                 "declaration(s) not listed individually"
             )
 
-        if not exact:
+        outcome: eco.AuditOutcome | None = None
+        audited = 0
+        if exact:
+            outcome, audited = self._audit_exact_pins(result, source, exact)
+        else:
             result.add_message(f"{source}: no exactly pinned dependencies to audit")
-            if python_summary is not None and python_summary["status"] == "not_found":
-                python_summary["status"] = "no_exact"
-            return result
+        eco.record_outcome(
+            self._summary.setdefault("python", eco.empty_ecosystem_summary()),
+            outcome,
+            declarations=len(declarations),
+            audited=audited,
+            unverified=len(unverified),
+            partial=True,
+        )
+        if outcome is not None and outcome.status == "incomplete" and active_plugin_tree() is not None:
+            # A plugin run never passes without evidence, as for the npm and container
+            # audits; standalone skills keep the warning.
+            result.mark_scan_incomplete(PIP_AUDIT_SCAN)
+        return result
 
+    def _audit_exact_pins(
+        self, result: ValidationResult, source: str, exact: list[DependencyDeclaration]
+    ) -> tuple[eco.AuditOutcome, int]:
+        """Audit exact pins with pip-audit (and Safety); return the outcome and how many pins pip-audit audited.
+
+        A batch that produced no evidence (pip-audit missing, timeout, offline,
+        crash, no JSON report) makes the outcome INCOMPLETE with its error; the
+        batches that ran keep their evidence.
+        """
+        outcome = eco.AuditOutcome()
         batches = self._exact_batches(exact)
+        audited_lines: set[str] = set()
+        errors: list[str] = []
         with tempfile.TemporaryDirectory(prefix="skillevaluator-pip-audit-") as temp_dir:
             audit_files = self._write_audit_files(Path(temp_dir), batches)
             if Tools.pip_audit.is_available:
-                audited_lines: set[str] = set()
-                errors: list[str] = []
                 for lines, audit_file in zip(batches, audit_files, strict=True):
-                    batch_result, error = self._run_pip_audit_on_file(audit_file, source=source, cwd=Path(temp_dir))
+                    batch_result, error = self._run_pip_audit_on_file(
+                        audit_file, source=source, cwd=Path(temp_dir), outcome=outcome
+                    )
                     result.merge(batch_result)
                     if error is None:
                         audited_lines.update(lines)
                     else:
                         errors.append(error)
-                audited = sum(1 for declaration in exact if declaration.audit_line in audited_lines)
-                self._record_pip_audit(result, python_summary, source, audited=audited, errors=errors)
             else:
                 error = f"pip-audit not installed. {Tools.pip_audit.get_install_hint()}"
                 result.add_warning(error)
-                if active_plugin_tree() is not None:
-                    # A plugin run never passes without evidence, as for the npm and container audits.
-                    self._record_pip_audit(result, python_summary, source, audited=0, errors=[error])
-                elif python_summary is not None:
-                    python_summary["status"] = "unavailable"
+                errors.append(error)
 
             if self.use_safety and Tools.safety.is_available:
                 for audit_file in audit_files:
                     result.merge(self._run_safety(audit_file))
-        return result
-
-    @staticmethod
-    def _record_pip_audit(
-        result: ValidationResult,
-        python_summary: dict[str, Any] | None,
-        source: str,
-        *,
-        audited: int,
-        errors: list[str],
-    ) -> None:
-        """Fold one source's pip-audit evidence into the Python summary.
-
-        A batch that produced no evidence (timeout, offline, crash, no JSON
-        report) makes the Python status ``incomplete`` with the error, never
-        ``audited``. In a plugin run the scan is marked INCOMPLETE as well, as
-        for the npm and container audits; standalone skills keep the warning.
-        """
-        if python_summary is not None:
-            python_summary["audited"] += audited
-            if audited and PIP_AUDIT_SCAN not in python_summary["scanners"]:
-                python_summary["scanners"].append(PIP_AUDIT_SCAN)
-            if errors:
-                python_summary["status"] = "incomplete"
-                for error in errors:
-                    if len(python_summary["errors"]) < 8:
-                        python_summary["errors"].append(f"{source}: {error}"[:300])
-            elif python_summary["status"] in {"not_found", "no_exact"}:
-                python_summary["status"] = "audited"
-        if errors and active_plugin_tree() is not None:
-            result.mark_scan_incomplete(PIP_AUDIT_SCAN)
+        if audited_lines:
+            outcome.scanner = PIP_AUDIT_SCAN
+        if errors:
+            outcome.status = "incomplete"
+            outcome.error = f"{source}: {'; '.join(dict.fromkeys(errors))}"
+        return outcome, sum(1 for declaration in exact if declaration.audit_line in audited_lines)
 
     @staticmethod
     def _exact_batches(exact: list[DependencyDeclaration]) -> list[list[str]]:
-        """Group exact pins so no batch names one package twice.
+        """Group exact pins into ``name==version`` batches that name each package once.
 
         ``pip-audit --no-deps`` rejects duplicate package names with different
         pins (e.g. marker-split pins); each conflicting pin gets its own batch.
         """
-        batches: list[dict[str, str]] = []
-        for declaration in exact:
-            line = declaration.audit_line
-            if line is None or declaration.name is None:
-                continue
-            for batch in batches:
-                existing = batch.get(declaration.name)
-                if existing is None or existing == line:
-                    batch[declaration.name] = line
-                    break
-            else:
-                batches.append({declaration.name: line})
-        return [sorted(batch.values()) for batch in batches]
+        pins = [(declaration.name, declaration.audit_line) for declaration in exact if declaration.audit_line]
+        return [sorted(batch.values()) for batch in eco.split_conflicting_pins(pins)]
 
     @staticmethod
     def _write_audit_files(temp_dir: Path, batches: list[list[str]]) -> list[Path]:
@@ -557,13 +569,14 @@ class DependencySecurityValidator(ValidatorBase):
         return files
 
     def _run_pip_audit_on_file(
-        self, audit_file: Path, *, source: str, cwd: Path
+        self, audit_file: Path, *, source: str, cwd: Path, outcome: eco.AuditOutcome
     ) -> tuple[ValidationResult, str | None]:
         """Run pip-audit on a normalized pinned requirements file.
 
         ``--no-deps --disable-pip`` audits exactly the listed pins without
         creating a virtual environment, invoking pip, or building packages.
-        Returns the result and, when the run produced no evidence, the error.
+        Vulnerabilities are tallied on *outcome*. Returns the result and, when
+        the run produced no evidence, the error.
         """
         result = ValidationResult()
         tool_result = Tools.pip_audit.run(
@@ -586,15 +599,15 @@ class DependencySecurityValidator(ValidatorBase):
             error = tool_result.error_message
         elif tool_result.exit_code != 0 and parse_json_output(tool_result.stdout) is None:
             detail = (tool_result.stderr or "").strip().splitlines()
-            reason = detail[-1][:300] if detail else f"exit code {tool_result.exit_code}"
+            reason = detail[-1][: eco.MAX_ERROR_CHARS] if detail else f"exit code {tool_result.exit_code}"
             error = f"pip-audit failed: {reason}"
-        elif not self._process_pip_audit(tool_result.stdout, result, source):
+        elif not self._process_pip_audit(tool_result.stdout, result, source, outcome):
             error = "pip-audit produced no JSON report"
         if error is not None:
             result.add_warning(f"{source}: {error}")
         return result, error
 
-    def _process_pip_audit(self, output: str, result: ValidationResult, source: str) -> bool:
+    def _process_pip_audit(self, output: str, result: ValidationResult, source: str, outcome: eco.AuditOutcome) -> bool:
         """Parse pip-audit output and report vulnerabilities; ``False`` when there is no report."""
         data = parse_json_output(output, on_error="No known vulnerabilities found")
         if data is None:
@@ -621,6 +634,7 @@ class DependencySecurityValidator(ValidatorBase):
                 vuln_count += 1
                 self._report_vulnerability(
                     result,
+                    outcome,
                     pkg_name=pkg_name,
                     pkg_version=pkg_version,
                     vuln_id=vuln.get("id", "Unknown"),
@@ -678,6 +692,7 @@ class DependencySecurityValidator(ValidatorBase):
     def _report_vulnerability(
         self,
         result: ValidationResult,
+        outcome: eco.AuditOutcome,
         *,
         pkg_name: str,
         pkg_version: str,
@@ -685,14 +700,10 @@ class DependencySecurityValidator(ValidatorBase):
         fix_versions: list[str],
         severity: Severity,
     ) -> None:
-        """Report a single vulnerability finding."""
+        """Report a single vulnerability finding and tally it on *outcome*."""
         fix_hint = f" -> upgrade to {fix_versions[0]}" if fix_versions else ""
         message = f"{pkg_name}=={pkg_version}: {vuln_id}{fix_hint}"
-        python_summary = self._summary.get("python")
-        if python_summary is not None:
-            key = severity.value if isinstance(severity, Severity) else str(severity)
-            python_summary["vulnerabilities"][key] = python_summary["vulnerabilities"].get(key, 0) + 1
-
+        outcome.count(severity)
         result.add_finding(
             tag="CVE",
             severity=severity,
@@ -737,7 +748,7 @@ class DependencySecurityValidator(ValidatorBase):
             directory,
             selected=selected,
             excluded_dirs=SCAN_EXCLUDED_DIRS,
-            max_paths=MAX_ECOSYSTEM_DISCOVERED_PATHS,
+            max_paths=PLUGIN_TREE_MAX_DISCOVERED_PATHS,
             allow_context_alias=False,
         )
         found: list[PurePosixPath] = []
@@ -748,6 +759,30 @@ class DependencySecurityValidator(ValidatorBase):
             found.append(PurePosixPath(*parts))
         return sorted(found)
 
+    def _discover_ecosystem_files(self, directory: Path) -> tuple[_Discovered, _Discovered]:
+        """The npm manifests and the Dockerfiles below *directory*, found in one no-follow walk.
+
+        Discovery fails closed on a selected entry that is not a single regular
+        file (a directory named ``Dockerfile``, a hard-linked ``package.json``),
+        and such a failure belongs to one ecosystem. After any failure each
+        ecosystem is therefore discovered on its own, so the other is still
+        audited.
+        """
+        try:
+            found = self._discover(directory, lambda relative: _is_npm_manifest(relative) or _is_dockerfile(relative))
+        except (SecurePathError, ValueError):
+            return self._discover_one(directory, _is_npm_manifest), self._discover_one(directory, _is_dockerfile)
+        return (
+            _Discovered(tuple(rel for rel in found if _is_npm_manifest(rel))),
+            _Discovered(tuple(rel for rel in found if _is_dockerfile(rel))),
+        )
+
+    def _discover_one(self, directory: Path, selected: Callable[[PurePath], bool]) -> _Discovered:
+        try:
+            return _Discovered(tuple(self._discover(directory, selected)))
+        except (SecurePathError, ValueError) as exc:
+            return _Discovered(error=str(exc))
+
     @staticmethod
     def _source_label(directory: Path, rel: PurePosixPath) -> str:
         """The plugin-relative path of *rel* for messages and warnings.
@@ -756,14 +791,8 @@ class DependencySecurityValidator(ValidatorBase):
         skill's finding paths onto the skill directory, so a plugin-relative
         finding path would name the skill directory twice.
         """
-        tree = active_plugin_tree()
-        if tree is not None:
-            try:
-                prefix = Path(directory).absolute().relative_to(Path(tree.root).absolute())
-            except ValueError:
-                prefix = Path()
-            return (PurePosixPath(*prefix.parts) / rel).as_posix()
-        return rel.as_posix()
+        prefix = plugin_relative_dir(directory)
+        return (rel if prefix is None else prefix / rel).as_posix()
 
     @staticmethod
     def _read_npm_manifest(directory: Path, rel: PurePosixPath) -> tuple[Any, str | None]:
@@ -780,7 +809,7 @@ class DependencySecurityValidator(ValidatorBase):
             text = raw.decode("utf-8-sig")
             return (_load_npm_lockfile(text) if lockfile else load_bounded_json(text)), None
         except (SecurePathError, StructuredDataError, OSError, UnicodeError, ValueError) as exc:
-            return None, str(exc)[:300]
+            return None, str(exc)[: eco.MAX_ERROR_CHARS]
 
     def _record_unaudited(
         self,
@@ -798,7 +827,7 @@ class DependencySecurityValidator(ValidatorBase):
         self._apply_outcome(result, outcome, label, scan_name=scan_name)
         eco.record_outcome(summary, outcome, declarations=declarations, audited=0, unverified=0, new_source=new_source)
 
-    def _audit_npm(self, directory: Path) -> ValidationResult:
+    def _audit_npm(self, directory: Path, discovered: _Discovered) -> ValidationResult:
         """Audit exact npm pins from lockfiles (or package.json when a directory has no lockfile).
 
         A manifest that cannot be read or parsed within its bounds makes the npm
@@ -807,15 +836,13 @@ class DependencySecurityValidator(ValidatorBase):
         """
         result = ValidationResult()
         summary = self._summary.setdefault("npm", eco.empty_ecosystem_summary())
-        names = {eco.PACKAGE_JSON, *eco.LOCKFILE_NAMES}
-        try:
-            manifests = self._discover(directory, lambda relative: relative.name in names)
-        except (SecurePathError, ValueError) as exc:
+        if discovered.error is not None:
             label = self._source_label(directory, PurePosixPath())
             self._record_unaudited(
-                result, summary, label, f"npm manifest discovery failed: {exc}", scan_name=NPM_AUDIT_SCAN
+                result, summary, label, f"npm manifest discovery failed: {discovered.error}", scan_name=NPM_AUDIT_SCAN
             )
             return result
+        manifests = list(discovered.files)
         if len(manifests) > MAX_ECOSYSTEM_FILES:
             self._record_unaudited(
                 result,
@@ -938,7 +965,7 @@ class DependencySecurityValidator(ValidatorBase):
             unverified=len(unverified),
         )
 
-    def _audit_containers(self, directory: Path) -> ValidationResult:
+    def _audit_containers(self, directory: Path, discovered: _Discovered) -> ValidationResult:
         """Audit exact container images from MCP run commands (plugin root) and Dockerfiles."""
         result = ValidationResult()
         summary = self._summary.setdefault("container", eco.empty_ecosystem_summary())
@@ -947,14 +974,16 @@ class DependencySecurityValidator(ValidatorBase):
         if is_plugin_tree_root(directory):
             for image, label in self._mcp_images(directory):
                 images.append((eco.image_declaration(image, "mcp"), label, label))
-        try:
-            dockerfiles = self._discover(directory, lambda relative: eco.is_dockerfile_name(relative.name))
-        except (SecurePathError, ValueError) as exc:
+        if discovered.error is not None:
             label = self._source_label(directory, PurePosixPath())
             self._record_unaudited(
-                result, summary, label, f"Dockerfile discovery failed: {exc}", scan_name=CONTAINER_AUDIT_SCAN
+                result,
+                summary,
+                label,
+                f"Dockerfile discovery failed: {discovered.error}",
+                scan_name=CONTAINER_AUDIT_SCAN,
             )
-            dockerfiles = []
+        dockerfiles = list(discovered.files)
         if len(dockerfiles) > MAX_ECOSYSTEM_FILES:
             self._record_unaudited(
                 result,
@@ -1017,8 +1046,6 @@ class DependencySecurityValidator(ValidatorBase):
 
     def _mcp_images(self, root: Path) -> list[tuple[str, str]]:
         """Container images launched by the plugin's MCP servers (every declared form, no validation)."""
-        from skillevaluator.validators.mcp_static import mcp_container_image
-
         images: list[tuple[str, str]] = []
         seen_images: set[str] = set()
         for declaration in self._mcp_declarations(root):
@@ -1059,8 +1086,10 @@ class DependencySecurityValidator(ValidatorBase):
     def _audit_mcp_packages(self, root: Path) -> ValidationResult:
         """CVE-audit the packages MCP package runners install (``npx``/``bunx``/``pnpm dlx``, ``uvx``/``pipx run``).
 
-        Exact npm specs (``pkg@1.2.3``) join the npm audit and exact PyPI specs
-        (``pkg==1.2.3`` or ``pkg@1.2.3``) the pip-audit batch, with the role
+        Runner argv is read by :func:`~skillevaluator.validators.mcp_static.parse_mcp_runner`,
+        the reader the pinning check uses. Exact npm specs (``pkg@1.2.3``) join
+        the npm audit and exact PyPI specs (``pkg==1.2.3`` or ``pkg@1.2.3``,
+        including ``uvx --with`` requirements) the pip-audit batch, with the role
         ``mcp``, one audit per MCP config file; floating specs get the INFO
         ``dependency-version-unverified`` finding. Local paths are skipped.
         """
@@ -1068,18 +1097,17 @@ class DependencySecurityValidator(ValidatorBase):
         npm: dict[str, list[eco.NpmDeclaration]] = {}
         pypi: dict[str, list[DependencyDeclaration]] = {}
         for declaration in self._mcp_declarations(root):
-            packages = eco.mcp_runner_packages(declaration.config)
-            if packages is None:
+            invocation = parse_mcp_runner(declaration.config)
+            if invocation is None:
                 continue
-            ecosystem, specs = packages
             # One audit per MCP config file, so a file with many servers runs each scanner once.
             label = str(declaration.file)
-            for spec in specs:
-                if ecosystem == "npm":
-                    npm_declaration = eco.npm_spec_declaration(spec, "mcp")
-                    if npm_declaration is not None:
-                        npm.setdefault(label, []).append(npm_declaration)
-                else:
+            for spec in invocation.npm_specs:
+                npm_declaration = eco.npm_spec_declaration(spec, "mcp")
+                if npm_declaration is not None:
+                    npm.setdefault(label, []).append(npm_declaration)
+            if invocation.ecosystem == "pypi":
+                for spec in invocation.specs:
                     python_declaration = _python_runner_declaration(spec)
                     if python_declaration is not None:
                         pypi.setdefault(label, []).append(python_declaration)

@@ -921,7 +921,15 @@ stages a server.
 
     A server is **pinned** when a package runner fetches an exact version:
     `pkg@1.2.3`, `pkg==1.2.3`, `--from pkg==1.2.3`, a git or URL spec with a
-    40-character commit SHA, `image:1.2.3`, or `image@sha256:...`. An image
+    40-character commit SHA, `image:1.2.3`, or `image@sha256:...`. Every
+    package the runner installs must be exact, including each `uvx --with`
+    requirement. The check and the dependency audit share one exact-version
+    rule per ecosystem: an npm version such as `1.2.3`, `=1.2.3`, or `v1.2.3`,
+    and a PyPI `==`, `===`, or uv `@` pin of one valid PEP 440 version, in any
+    spelling PEP 440 accepts (`1.0rc1`, `v1.2.3`, `1.0-1`), which pip-audit
+    gets as `name==version`. Wildcards and ranges are not exact. A `===` pin of
+    a string that is not a PEP 440 version still counts as pinned, but the
+    audit reports it as unverified. An image
     version tag counts as pinned, but a digest is stronger because tags can be
     moved. The
     recognized runners are `npx`, `bunx`, `pnpx`, `pnpm dlx`, `yarn dlx`,
@@ -2498,11 +2506,12 @@ the following:
 - **No remote fetching.** Refs to other repositories stay `external` or
   unevaluated, and same-repository refs need a verifiable `origin` remote.
 - **The dependency audit covers declared exact pins only.** Python
-  requirements, npm lockfiles and `package.json`, and container images from
+  requirements, npm lockfiles and `package.json`, the packages that `npx`,
+  `uvx`, and the other MCP package runners install, and container images from
   MCP `run` commands and Dockerfiles are audited when a scanner is installed.
-  `yarn.lock`, `pnpm-lock.yaml`, and packages that `npx`, `uvx`, or other MCP
-  package runners fetch are not audited, and container-image audits need
-  registry access.
+  The dependencies a runner's package pulls in when it starts are not resolved
+  or audited, and neither are `yarn.lock`, `pnpm-lock.yaml`, or `jsr:` and
+  remote `deno run` modules. Container-image audits need registry access.
 - **Validator parity needs the Claude Code CLI.** The `claude-validate` check
   is skipped when `claude` is not on `PATH`, and its result depends on the
   installed Claude Code version.

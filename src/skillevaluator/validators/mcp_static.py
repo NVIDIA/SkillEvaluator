@@ -839,14 +839,59 @@ def _validate_insecure_tls_config(name: str, config: dict[str, Any], file_path: 
 # Supply-chain pinning                                                        #
 # --------------------------------------------------------------------------- #
 PinStatus = Literal["pinned", "unpinned", "not_applicable"]
+RunnerEcosystem = Literal["npm", "pypi", "deno", "container"]
 
-_EXACT_SEMVER_RE = re.compile(r"^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
-_PEP440_EXACT_RE = re.compile(
-    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?\s*(?:===\s*\S+|==\s*[0-9][0-9A-Za-z.!+_-]*)$"
+# The exact-version matchers are shared with the dependency audit, so a runner
+# spec counts as pinned exactly when the audit can match it to one release.
+# An exact npm version: "1.2.3", "=1.2.3", or "v1.2.3", with optional
+# prerelease and build metadata.
+_NPM_EXACT_RE = re.compile(r"^=?v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$")
+# The canonical PEP 440 version pattern, verbatim from PEP 440 Appendix B. It
+# matches every spelling PEP 440 accepts for one version, such as "1.2.3",
+# "v1.2.3", "1.0rc", "1.0-1", or "1.2.3-beta.1"; a wildcard such as "1.0.*" is
+# not a version.
+_PEP440_VERSION_PATTERN = r"""
+    v?
+    (?:
+        (?:(?P<epoch>[0-9]+)!)?                           # epoch
+        (?P<release>[0-9]+(?:\.[0-9]+)*)                  # release segment
+        (?P<pre>                                          # pre-release
+            [-_\.]?
+            (?P<pre_l>(a|b|c|rc|alpha|beta|pre|preview))
+            [-_\.]?
+            (?P<pre_n>[0-9]+)?
+        )?
+        (?P<post>                                         # post release
+            (?:-(?P<post_n1>[0-9]+))
+            |
+            (?:
+                [-_\.]?
+                (?P<post_l>post|rev|r)
+                [-_\.]?
+                (?P<post_n2>[0-9]+)?
+            )
+        )?
+        (?P<dev>                                          # dev release
+            [-_\.]?
+            (?P<dev_l>dev)
+            [-_\.]?
+            (?P<dev_n>[0-9]+)?
+        )?
+    )
+    (?:\+(?P<local>[a-z0-9]+(?:[-_\.][a-z0-9]+)*))?       # local version
+"""
+PEP440_VERSION_RE = re.compile(r"^\s*" + _PEP440_VERSION_PATTERN + r"\s*$", re.VERBOSE | re.IGNORECASE)
+# A PyPI requirement: a distribution name, optional extras, then its version specifier.
+_PYPI_REQUIREMENT_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\s*(?:\[[^\]]*\])?\s*(?P<specifier>.*)", re.DOTALL
 )
+# A version specifier that can pin one version: "==V", "===V", or uv's "@V".
+_PIN_SPECIFIER_RE = re.compile(r"(?P<operator>===|==|@)\s*(?P<version>\S+)")
 _GIT_SHA_RE = re.compile(r"(?:#|@)[0-9a-fA-F]{40}(?:$|[&#])")
 _DOCKER_DIGEST_RE = re.compile(r"@sha256:[0-9a-fA-F]{64}$")
 _VERSION_TAG_RE = re.compile(r"^v?\d+(?:\.\d+)*(?:[-+._][0-9A-Za-z.]+)*$")
+# A remote module URL that names an exact version (``https://deno.land/x/mod@v1.2.3/mod.ts``).
+_DENO_EXACT_MODULE_RE = re.compile(r"@v?\d+\.\d+\.\d+(?:[/?#]|$)")
 _PLUGIN_PATH_REFS: tuple[str, ...] = ("${CLAUDE_PLUGIN_ROOT}", "${CLAUDE_PLUGIN_DATA}", "${CLAUDE_PROJECT_DIR}")
 _LOCAL_SPEC_PREFIXES: tuple[str, ...] = (".", "/", "~", "file:", *_PLUGIN_PATH_REFS)
 _REMOTE_SPEC_PREFIXES: tuple[str, ...] = ("git+", "git:", "github:", "gitlab:", "bitbucket:", "http://", "https://")
@@ -998,14 +1043,23 @@ _DOCKER_VALUE_FLAGS = frozenset(
     }
 )
 _CONTAINER_RUNTIMES = frozenset({"docker", "podman", "nerdctl"})
+# Every command _runner_invocation reads as a package runner.
+_RUNNER_COMMANDS = frozenset(
+    {"npx", "bunx", "pnpx", "pnpm", "yarn", "npm", "uvx", "uv", "pipx", "deno", *_CONTAINER_RUNTIMES}
+)
 
 
 @dataclass(frozen=True)
 class McpPinning:
-    """Static supply-chain pinning classification of one MCP declaration."""
+    """Static supply-chain pinning classification of one MCP declaration.
+
+    ``remote`` is set when the package comes from a git or URL spec, or a
+    remote module, rather than from a registry.
+    """
 
     status: PinStatus
     detail: str
+    remote: bool = False
 
     @property
     def pinned(self) -> bool | None:
@@ -1015,12 +1069,70 @@ class McpPinning:
         return self.status == "pinned"
 
 
+@dataclass(frozen=True)
+class RunnerInvocation:
+    """A package runner that an MCP server command runs, and the specs it fetches.
+
+    ``runner`` names the invocation as findings show it (``npx``, ``pnpm dlx``,
+    ``uv tool run``, ``docker run``). ``specs`` are read from the argv the way
+    the runner reads it:
+
+    * ``npm`` (``npx``, ``bunx``, ``pnpx``, ``pnpm dlx``, ``yarn dlx``,
+      ``npm exec``): every ``-p``/``--package`` value, else the first
+      positional argument;
+    * ``pypi`` (``uvx``, ``uv tool run``, ``pipx run``): the ``--from`` or
+      ``--spec`` requirement, else the first positional argument, then every
+      ``uvx --with`` requirement;
+    * ``deno`` (``deno run``): the module it runs, an ``npm:`` or ``jsr:``
+      spec, a URL, or a local script;
+    * ``container`` (``docker``, ``podman``, or ``nerdctl run``): the image.
+
+    A runner's options end at the package, command, module, or image it runs
+    (``npm exec`` reads them up to ``--``); later arguments belong to the
+    server. ``specs`` is empty when the runner names no package or image.
+    """
+
+    ecosystem: RunnerEcosystem
+    runner: str
+    specs: tuple[str, ...]
+
+    @property
+    def npm_specs(self) -> tuple[str, ...]:
+        """The npm registry specs the runner installs, including the package of ``deno run npm:pkg``."""
+        if self.ecosystem == "npm":
+            return self.specs
+        if self.ecosystem == "deno":
+            return tuple(spec.removeprefix("npm:") for spec in self.specs if spec.startswith("npm:"))
+        return ()
+
+
 def _command_basename(command: str) -> str:
     base = command.strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
     for suffix in (".exe", ".cmd", ".bat", ".ps1"):
         if base.endswith(suffix):
             return base[: -len(suffix)]
     return base
+
+
+def _argv(config: Any) -> list[str] | None:
+    """The argv a runnable MCP declaration runs, or ``None`` when it has no command.
+
+    A ``command`` whose whole string names a package runner is one executable,
+    possibly a path with spaces such as ``C:\\Program Files\\nodejs\\npx.cmd``
+    (``_validate_command`` reads a shell the same way). Any other command with
+    spaces is a whole command line (``"npx -y pkg"``) and is split into words,
+    so it reads like the argv form.
+    """
+    if not isinstance(config, dict):
+        return None
+    command = config.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return None
+    raw_args = config.get("args")
+    args = [str(arg) for arg in raw_args] if isinstance(raw_args, list) else []
+    if _command_basename(command) in _RUNNER_COMMANDS:
+        return [command, *args]
+    return [*command.split(), *args]
 
 
 def _positionals(tokens: list[str], value_flags: frozenset[str]) -> Iterator[tuple[int, str]]:
@@ -1065,43 +1177,233 @@ def _first_positional(tokens: list[str], value_flags: frozenset[str]) -> str | N
     return next((token for _index, token in _positionals(tokens, value_flags)), None)
 
 
-def _is_local_spec(spec: str) -> bool:
+def _runner_options(args: list[str], value_flags: frozenset[str]) -> tuple[list[str], str | None]:
+    """A runner's own options, and its first positional argument (the package or command it runs).
+
+    The runner reads options only up to that argument (or ``--``): every later
+    argument belongs to the server, so a server's ``-p 3000`` or ``--with x``
+    is never read as the runner's.
+    """
+    first = next(_positionals(args, value_flags), None)
+    if first is None:
+        return args, None
+    index, positional = first
+    return args[:index], positional
+
+
+def _package_argument(options: list[str], positional: str | None, flag: str) -> str | None:
+    """The value of a runner's package option (``--from``, ``--spec``), else its first positional argument."""
+    values = _flag_values(options, (flag,))
+    return values[0] if values else positional
+
+
+def _container_run_args(args: list[str]) -> list[str] | None:
+    """The arguments after a container runtime's ``run`` or ``container run``; ``None`` for another subcommand."""
+    if args[:1] == ["run"]:
+        return args[1:]
+    if args[:2] == ["container", "run"]:
+        return args[2:]
+    return None
+
+
+def parse_mcp_runner(config: Any) -> RunnerInvocation | None:
+    """The package runner an MCP declaration runs, or ``None`` when it runs none.
+
+    This is the one argv reader for package runners: the pinning check
+    (:func:`classify_mcp_pinning`), the container-image lookup
+    (:func:`mcp_container_image`), and the dependency audit all read runner
+    invocations through it, so they agree on what a server installs. Local
+    interpreters, scripts, and binaries, container subcommands other than
+    ``run``, URL servers, and provider-only entries give ``None``.
+    """
+    argv = _argv(config)
+    return None if argv is None else _runner_invocation(argv)
+
+
+def _runner_invocation(argv: list[str]) -> RunnerInvocation | None:
+    base, args = _command_basename(argv[0]), argv[1:]
+    if base in {"npx", "bunx", "pnpx"}:
+        return _npm_invocation(base, args, _NPX_VALUE_FLAGS if base == "npx" else _DLX_VALUE_FLAGS)
+    if base in {"pnpm", "yarn"} and args[:1] == ["dlx"]:
+        return _npm_invocation(f"{base} dlx", args[1:], _DLX_VALUE_FLAGS)
+    if base == "npm" and args[:1] in (["exec"], ["x"]):
+        # Like every npm command, npm exec reads its options anywhere before "--".
+        return _npm_invocation("npm exec", args[1:], _NPX_VALUE_FLAGS, options_until_separator=True)
+    if base == "uvx":
+        return _uv_invocation("uvx", args)
+    if base == "uv" and args[:2] in (["tool", "run"], ["tool", "x"]):
+        return _uv_invocation("uv tool run", args[2:])
+    if base == "pipx" and args[:1] == ["run"]:
+        options, app = _runner_options(args[1:], _PIPX_VALUE_FLAGS)
+        spec = _package_argument(options, app, "--spec")
+        return RunnerInvocation("pypi", "pipx run", () if spec is None else (spec,))
+    if base == "deno" and args[:1] == ["run"]:
+        module = _first_positional(args[1:], _DENO_VALUE_FLAGS)
+        return RunnerInvocation("deno", "deno run", () if module is None else (module,))
+    run_args = _container_run_args(args) if base in _CONTAINER_RUNTIMES else None
+    if run_args is not None:
+        image = _first_positional(run_args, _DOCKER_VALUE_FLAGS)
+        return RunnerInvocation("container", f"{base} run", () if image is None else (image,))
+    return None
+
+
+def _npm_invocation(
+    runner: str, args: list[str], value_flags: frozenset[str], *, options_until_separator: bool = False
+) -> RunnerInvocation:
+    """An npm package runner: every ``-p``/``--package`` value, else the first positional argument.
+
+    The runner's options end at the package it runs, or, with
+    *options_until_separator*, at ``--``.
+    """
+    if options_until_separator:
+        options, spec = args, _first_positional(args, value_flags)
+    else:
+        options, spec = _runner_options(args, value_flags)
+    packages = _flag_values(options, ("-p", "--package"))
+    if packages:
+        return RunnerInvocation("npm", runner, tuple(packages))
+    return RunnerInvocation("npm", runner, () if spec is None else (spec,))
+
+
+def _uv_invocation(runner: str, args: list[str]) -> RunnerInvocation:
+    """``uvx`` / ``uv tool run``: the ``--from`` requirement (else the command), then every ``--with`` requirement.
+
+    Both options count only before the command; after it they are the
+    server's arguments. ``--with`` takes one or more comma-separated
+    requirements, and uv installs them next to the package. Without a command
+    uv only lists the installed tools, so it installs nothing.
+    """
+    options, command = _runner_options(args, _UVX_VALUE_FLAGS)
+    package = _package_argument(options, command, "--from")
+    if package is None:
+        return RunnerInvocation("pypi", runner, ())
+    extras = (item.strip() for value in _flag_values(options, ("--with",)) for item in value.split(","))
+    return RunnerInvocation("pypi", runner, (package, *(item for item in extras if item)))
+
+
+def is_local_spec(spec: str) -> bool:
+    """Whether a package spec names a local path (``./pkg``, ``/abs``, ``~/x``, ``file:``, ``${CLAUDE_PLUGIN_ROOT}/x``)."""
     return spec.startswith(_LOCAL_SPEC_PREFIXES)
+
+
+def is_remote_npm_spec(spec: str) -> bool:
+    """Whether an npm spec is fetched from git or a URL (``github:o/r``, ``git+https://...``, ``o/r``), not the registry."""
+    return spec.startswith(_REMOTE_SPEC_PREFIXES) or (not spec.startswith("@") and "/" in spec)
+
+
+def is_remote_pypi_spec(spec: str) -> bool:
+    """Whether a PyPI spec is fetched from git or a URL (``git+https://...``, ``pkg @ git+https://...``)."""
+    return spec.startswith(_REMOTE_SPEC_PREFIXES) or "@ git+" in spec or "@git+" in spec
+
+
+def split_npm_spec(spec: str) -> tuple[str, str | None]:
+    """``(name, version)`` of an npm registry spec; ``version`` is ``None`` when the spec names none.
+
+    A scope's leading ``@`` belongs to the name: ``@scope/pkg@1.2.3`` is
+    ``("@scope/pkg", "1.2.3")``.
+    """
+    at = spec.find("@", 1) if spec.startswith("@") else spec.find("@")
+    if at <= 0:
+        return spec, None
+    return spec[:at], spec[at + 1 :]
+
+
+def exact_npm_version(version: str) -> str | None:
+    """The exact version an npm version spec names (``1.2.3``, ``=1.2.3``, ``v1.2.3``), else ``None``."""
+    match = _NPM_EXACT_RE.match(version.strip())
+    return match.group(1) if match else None
+
+
+def is_pep440_version(text: str) -> bool:
+    """Whether *text* is one valid PEP 440 version, in any spelling PEP 440 accepts."""
+    return PEP440_VERSION_RE.fullmatch(text) is not None
+
+
+@dataclass(frozen=True)
+class PypiPin:
+    """The version a PyPI requirement pins with ``==``, ``===``, or uv's ``@``.
+
+    ``auditable`` is set when the version is a valid PEP 440 version, so the
+    dependency audit can hand ``name==version`` to pip-audit. A ``===`` pin of
+    any other string still pins the package, but no release can be matched to
+    it, so the audit reports it unverified.
+    """
+
+    version: str
+    auditable: bool
+
+
+def specifier_pin(operator: str, version: str) -> PypiPin | None:
+    """What one version specifier pins: ``==V`` and uv's ``@V`` when ``V`` is a PEP 440 version, and ``===V``.
+
+    The MCP pinning check and the dependency audit (``requirements*.txt``,
+    ``pyproject.toml``, and runner specs) all decide exactness here.
+    """
+    if operator == "===":
+        return PypiPin(version, auditable=is_pep440_version(version))
+    if operator in {"==", "@"} and is_pep440_version(version):
+        return PypiPin(version, auditable=True)
+    return None
+
+
+def pypi_pin(requirement: str) -> PypiPin | None:
+    """The version a PyPI runner requirement pins, else ``None``.
+
+    Reads ``pkg==V``, ``pkg===V``, uv's ``pkg@V``, extras (``pkg[x]==V``), and
+    the PEP 508 parenthesized form ``pkg (==V)``; an environment marker after
+    ``;`` is ignored. Ranges, wildcards, tags such as ``@latest``, and URLs pin
+    nothing (see :func:`specifier_pin`).
+    """
+    match = _PYPI_REQUIREMENT_RE.fullmatch(requirement.split(";", 1)[0].strip())
+    if match is None:
+        return None
+    specifier = match.group("specifier").strip()
+    if specifier.startswith("(") and specifier.endswith(")"):
+        specifier = specifier[1:-1].strip()
+    pin = _PIN_SPECIFIER_RE.fullmatch(specifier)
+    return None if pin is None else specifier_pin(pin.group("operator"), pin.group("version"))
 
 
 def _classify_npm_spec(spec: str) -> McpPinning:
     """Classify an npm package spec (``pkg``, ``@scope/pkg@1.2.3``, git/URL, local path)."""
-    if _is_local_spec(spec):
+    if is_local_spec(spec):
         return McpPinning("not_applicable", f"local package path {spec!r}")
-    if spec.startswith(_REMOTE_SPEC_PREFIXES) or (not spec.startswith("@") and "/" in spec):
+    if is_remote_npm_spec(spec):
         if _GIT_SHA_RE.search(spec):
-            return McpPinning("pinned", f"git/URL spec pinned to a commit: {spec!r}")
-        return McpPinning("unpinned", f"git/URL/GitHub spec without a commit SHA: {spec!r}")
-    at = spec.find("@", 1) if spec.startswith("@") else spec.find("@")
-    if at <= 0:
+            return McpPinning("pinned", f"git/URL spec pinned to a commit: {spec!r}", remote=True)
+        return McpPinning("unpinned", f"git/URL/GitHub spec without a commit SHA: {spec!r}", remote=True)
+    _name, version = split_npm_spec(spec)
+    if version is None:
         return McpPinning("unpinned", f"package {spec!r} has no version (resolves to the latest release)")
-    version = spec[at + 1 :]
-    if _EXACT_SEMVER_RE.match(version):
+    if exact_npm_version(version):
         return McpPinning("pinned", f"exact version {spec!r}")
     return McpPinning("unpinned", f"package {spec!r} uses a version range or dist-tag, not an exact version")
 
 
 def _classify_python_spec(spec: str) -> McpPinning:
     """Classify a PyPI requirement spec as used by ``uvx`` / ``pipx run``."""
-    if _is_local_spec(spec):
+    if is_local_spec(spec):
         return McpPinning("not_applicable", f"local package path {spec!r}")
-    if spec.startswith(_REMOTE_SPEC_PREFIXES) or "@ git+" in spec or "@git+" in spec:
+    if is_remote_pypi_spec(spec):
         if _GIT_SHA_RE.search(spec) or "#sha256=" in spec:
-            return McpPinning("pinned", f"git/URL spec pinned to a commit or hash: {spec!r}")
-        return McpPinning("unpinned", f"git/URL spec without a commit SHA or hash: {spec!r}")
-    if _PEP440_EXACT_RE.match(spec):
-        return McpPinning("pinned", f"exact version {spec!r}")
-    name, sep, version = spec.partition("@")
-    if sep and name and _EXACT_SEMVER_RE.match(version.strip()):
+            return McpPinning("pinned", f"git/URL spec pinned to a commit or hash: {spec!r}", remote=True)
+        return McpPinning("unpinned", f"git/URL spec without a commit SHA or hash: {spec!r}", remote=True)
+    if pypi_pin(spec) is not None:
         return McpPinning("pinned", f"exact version {spec!r}")
     if any(marker in spec for marker in ("<", ">", "~", "!", "*", ",", "=", "@")):
         return McpPinning("unpinned", f"requirement {spec!r} is a range or tag, not an exact '==' version")
     return McpPinning("unpinned", f"package {spec!r} has no version (resolves to the latest release)")
+
+
+def _classify_deno_module(module: str | None) -> McpPinning:
+    """Classify the module ``deno run`` runs: an ``npm:`` or ``jsr:`` package, a remote module, or a local script."""
+    if module and module.startswith(("npm:", "jsr:")):
+        return _prefixed("deno run: ", _classify_npm_spec(module.split(":", 1)[1]))
+    if module and module.startswith(("http://", "https://")):
+        if _DENO_EXACT_MODULE_RE.search(module):
+            return McpPinning("pinned", f"deno run: remote module pinned to an exact version: {module!r}", remote=True)
+        return McpPinning("unpinned", f"deno run: remote module without an exact version: {module!r}", remote=True)
+    return McpPinning("not_applicable", "deno run of a local script")
 
 
 def _classify_image(image: str) -> McpPinning:
@@ -1121,7 +1423,8 @@ def _classify_image(image: str) -> McpPinning:
     return McpPinning("unpinned", f"image {image!r} uses the non-version tag {tag!r}")
 
 
-def _classify_spec_list(specs: list[str], classify: Any) -> McpPinning:
+def _classify_spec_list(specs: Iterable[str], classify: Any) -> McpPinning:
+    """Classify several specs as one: unpinned when any spec is, else pinned when any is."""
     results = [classify(spec) for spec in specs]
     unpinned = [result for result in results if result.status == "unpinned"]
     if unpinned:
@@ -1132,125 +1435,70 @@ def _classify_spec_list(specs: list[str], classify: Any) -> McpPinning:
     return results[0]
 
 
+def _prefixed(prefix: str, pin: McpPinning) -> McpPinning:
+    return McpPinning(pin.status, f"{prefix}{pin.detail}", pin.remote)
+
+
+def _classify_invocation(invocation: RunnerInvocation) -> McpPinning:
+    runner, specs = invocation.runner, invocation.specs
+    if invocation.ecosystem == "deno":
+        return _classify_deno_module(specs[0] if specs else None)
+    if invocation.ecosystem == "container":
+        if not specs:
+            return McpPinning("unpinned", f"{runner} invocation without an image")
+        return _prefixed(f"{runner}: ", _classify_image(specs[0]))
+    if not specs:
+        # An npm runner without a package fetches nothing; uvx and pipx run need one.
+        status: PinStatus = "not_applicable" if invocation.ecosystem == "npm" else "unpinned"
+        return McpPinning(status, f"{runner} invocation without a package spec")
+    classify = _classify_npm_spec if invocation.ecosystem == "npm" else _classify_python_spec
+    return _prefixed(f"{runner}: ", _classify_spec_list(specs, classify))
+
+
 def classify_mcp_pinning(config: Any) -> McpPinning:
     """Classify whether one MCP declaration runs an exactly-pinned package.
 
     Package runners (``npx``, ``bunx``, ``pnpm dlx``, ``yarn dlx``, ``npm exec``,
     ``uvx``, ``uv tool run``, ``pipx run``, ``deno run`` of a registry spec, and
-    ``docker|podman run``) are ``pinned`` only with an exact version
-    (``pkg@1.2.3``, ``pkg==1.2.3``, ``--from pkg==1.2.3``, ``image:1.2.3``,
-    ``image@sha256:...``); otherwise they are ``unpinned``. Local interpreters and
-    scripts (``node ./server.js``, ``python -m local_module``, ``./bin/server``),
-    URL servers, and provider-only entries are ``not_applicable``.
+    ``docker|podman run``), read through :func:`parse_mcp_runner`, are
+    ``pinned`` only when every package they install has an exact version
+    (``pkg@1.2.3``, ``pkg==1.2.3``, ``--from pkg==1.2.3``, each ``uvx --with``
+    requirement, ``image:1.2.3``, ``image@sha256:...``); otherwise they are
+    ``unpinned``. Local interpreters and scripts (``node ./server.js``,
+    ``python -m local_module``, ``./bin/server``), URL servers, and
+    provider-only entries are ``not_applicable``.
     """
     if not isinstance(config, dict):
         return McpPinning("not_applicable", "declaration is not an object")
-    command = config.get("command")
-    if not isinstance(command, str) or not command.strip():
+    argv = _argv(config)
+    if argv is None:
         if isinstance(config.get("url"), str):
             return McpPinning("not_applicable", "remote url server (no package is installed)")
         return McpPinning("not_applicable", "provider-only or non-runnable declaration")
-    raw_args = config.get("args")
-    args = [str(arg) for arg in raw_args] if isinstance(raw_args, list) else []
-    command_parts = command.split()
-    if len(command_parts) > 1:
-        # A whole command line in 'command' ("npx -y pkg"): classify it argv-style.
-        command, args = command_parts[0], [*command_parts[1:], *args]
-    base = _command_basename(command)
-
-    if base in {"npx", "bunx", "pnpx"} or (base in {"pnpm", "yarn"} and args[:1] == ["dlx"]):
-        rest = args[1:] if base in {"pnpm", "yarn"} else args
-        value_flags = _NPX_VALUE_FLAGS if base == "npx" else _DLX_VALUE_FLAGS
-        runner = f"{base} dlx" if base in {"pnpm", "yarn"} else base
-        return _classify_npm_runner(runner, rest, value_flags)
-    if base == "npm" and args[:1] in (["exec"], ["x"]):
-        return _classify_npm_runner("npm exec", args[1:], _NPX_VALUE_FLAGS)
-    if base == "uvx" or (base == "uv" and args[:2] in (["tool", "run"], ["tool", "x"])):
-        rest = args if base == "uvx" else args[2:]
-        from_values = _flag_values(rest, ("--from",))
-        spec = from_values[0] if from_values else _first_positional(rest, _UVX_VALUE_FLAGS)
-        if spec is None:
-            return McpPinning("unpinned", "uvx invocation without a package spec")
-        return _prefixed(f"{base if base == 'uvx' else 'uv tool run'}: ", _classify_python_spec(spec))
-    if base == "pipx" and args[:1] == ["run"]:
-        rest = args[1:]
-        spec_values = _flag_values(rest, ("--spec",))
-        spec = spec_values[0] if spec_values else _first_positional(rest, _PIPX_VALUE_FLAGS)
-        if spec is None:
-            return McpPinning("unpinned", "pipx run invocation without a package spec")
-        return _prefixed("pipx run: ", _classify_python_spec(spec))
-    if base == "deno" and args[:1] == ["run"]:
-        spec = _first_positional(args[1:], _DENO_VALUE_FLAGS)
-        if spec and spec.startswith(("npm:", "jsr:")):
-            return _prefixed("deno run: ", _classify_npm_spec(spec.split(":", 1)[1]))
-        if spec and spec.startswith(("http://", "https://")):
-            if re.search(r"@v?\d+\.\d+\.\d+(?:[/?#]|$)", spec):
-                return McpPinning("pinned", f"deno run: remote module pinned to an exact version: {spec!r}")
-            return McpPinning("unpinned", f"deno run: remote module without an exact version: {spec!r}")
-        return McpPinning("not_applicable", "deno run of a local script")
+    invocation = _runner_invocation(argv)
+    if invocation is not None:
+        return _classify_invocation(invocation)
+    base = _command_basename(argv[0])
     if base in _CONTAINER_RUNTIMES:
-        if args[:1] == ["run"]:
-            rest = args[1:]
-        elif args[:2] == ["container", "run"]:
-            rest = args[2:]
-        else:
-            return McpPinning("not_applicable", f"{base} invocation is not 'run'")
-        image = _first_positional(rest, _DOCKER_VALUE_FLAGS)
-        if image is None:
-            return McpPinning("unpinned", f"{base} run invocation without an image")
-        return _prefixed(f"{base} run: ", _classify_image(image))
+        return McpPinning("not_applicable", f"{base} invocation is not 'run'")
     return McpPinning("not_applicable", f"local interpreter, script, or binary ({base!r})")
 
 
 def mcp_container_image(config: Any) -> str | None:
     """Return the image reference a ``docker|podman|nerdctl run`` MCP server launches, if any.
 
-    Uses the same argv parsing as :func:`classify_mcp_pinning`, so a flag value is
-    never mistaken for the image. Returns ``None`` for every other server kind.
+    Read through :func:`parse_mcp_runner`, so a flag value is never mistaken
+    for the image. Returns ``None`` for every other server kind.
     """
-    if not isinstance(config, dict):
+    invocation = parse_mcp_runner(config)
+    if invocation is None or invocation.ecosystem != "container" or not invocation.specs:
         return None
-    command = config.get("command")
-    if not isinstance(command, str) or not command.strip():
-        return None
-    raw_args = config.get("args")
-    args = [str(arg) for arg in raw_args] if isinstance(raw_args, list) else []
-    command_parts = command.split()
-    if len(command_parts) > 1:
-        command, args = command_parts[0], [*command_parts[1:], *args]
-    if _command_basename(command) not in _CONTAINER_RUNTIMES:
-        return None
-    if args[:1] == ["run"]:
-        rest = args[1:]
-    elif args[:2] == ["container", "run"]:
-        rest = args[2:]
-    else:
-        return None
-    return _first_positional(rest, _DOCKER_VALUE_FLAGS)
+    return invocation.specs[0]
 
 
 def is_exact_container_image(image: str) -> bool:
     """True when an image reference names one immutable (digest) or exact-version (tag) image."""
-    return classify_image_pinning(image).status == "pinned"
-
-
-def classify_image_pinning(image: str) -> McpPinning:
-    """Public wrapper around the container-image pinning classifier."""
-    return _classify_image(image.strip())
-
-
-def _classify_npm_runner(runner: str, tokens: list[str], value_flags: frozenset[str]) -> McpPinning:
-    packages = _flag_values(tokens, ("-p", "--package"))
-    if packages:
-        return _prefixed(f"{runner}: ", _classify_spec_list(packages, _classify_npm_spec))
-    spec = _first_positional(tokens, value_flags)
-    if spec is None:
-        return McpPinning("not_applicable", f"{runner} invocation without a package spec")
-    return _prefixed(f"{runner}: ", _classify_npm_spec(spec))
-
-
-def _prefixed(prefix: str, pin: McpPinning) -> McpPinning:
-    return McpPinning(pin.status, f"{prefix}{pin.detail}")
+    return _classify_image(image.strip()).status == "pinned"
 
 
 # --------------------------------------------------------------------------- #

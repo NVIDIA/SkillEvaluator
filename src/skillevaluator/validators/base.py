@@ -20,7 +20,7 @@ import contextvars
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from skillevaluator.constants import (
     SCAN_ARTIFACT_DIRS,
@@ -40,6 +40,7 @@ from skillevaluator.models.result import (
 from skillevaluator.validators.plugin_tree import (
     PluginTree,
     active_plugin_tree,
+    is_plugin_tree_root,
     plugin_relative_dir,
     plugin_tree_exclusions,
     rebase_relative_finding_paths,
@@ -270,7 +271,7 @@ class ValidatorBase(ABC):
             Aggregated ValidationResult for all skills
         """
         plugin_tree = active_plugin_tree()
-        if plugin_tree is not None and plugin_relative_dir(skill_path) == PurePosixPath():
+        if plugin_tree is not None and is_plugin_tree_root(skill_path):
             return self._validate_plugin_tree(plugin_tree, single_skill_validator, action_description)
 
         if self._is_skill_directory(skill_path):

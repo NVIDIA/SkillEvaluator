@@ -20,15 +20,20 @@ from skillevaluator.constants import (
     CONTENT_TYPE_UNKNOWN,
     CONTENT_TYPE_WORKFLOWS,
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE,
-    PLUGIN_CONTAINED_MANIFEST_FILE,
+    PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
     PLUGIN_MANIFEST_FILES,
-    PLUGIN_NATIVE_MANIFEST_DIRS,
     RULES_FILE_EXTENSION,
     SKILL_MANIFEST_FILE,
     SKILL_MANIFEST_VARIANTS,
     WORKFLOWS_MANIFEST_FILE,
 )
-from skillevaluator.plugin_manifest import agent_plugins_path_opt_in
+from skillevaluator.plugin_manifest import (
+    NATIVE_MANIFEST_DIRS_FOLDED,
+    agent_plugins_path_opt_in,
+    manifest_relative_path,
+    manifest_root_for,
+    manifest_type_for_relative_path,
+)
 from skillevaluator.utils.secure_fs import SecurePathError, stat_is_link_or_reparse
 
 # ---------------------------------------------------------------------------
@@ -36,25 +41,8 @@ from skillevaluator.utils.secure_fs import SecurePathError, stat_is_link_or_repa
 # ---------------------------------------------------------------------------
 
 
-_NATIVE_MANIFEST_DIRS_FOLDED = frozenset(name.casefold() for name in PLUGIN_NATIVE_MANIFEST_DIRS)
-
-
-def _is_contained_plugin_manifest(path: Path) -> bool:
-    """Return whether *path* is a vendor-directory plugin manifest.
-
-    ``plugin.json`` inside ``.claude-plugin/``, ``.codex-plugin/``, or
-    ``.cursor-plugin/`` roots a contained plugin at the directory's parent.
-    Names match without regard to case, as clients on a case-insensitive
-    filesystem open them.
-    """
-    return (
-        path.name.casefold() == PLUGIN_CONTAINED_MANIFEST_FILE
-        and path.parent.name.casefold() in _NATIVE_MANIFEST_DIRS_FOLDED
-    )
-
-
-def _is_agent_plugins_manifest(path: Path) -> bool:
-    """Return whether a root ``plugin.json`` declares an Agent Plugins ``$schema``.
+def _root_plugin_json_opts_in(path: Path) -> bool:
+    """Return whether the root ``plugin.json`` at *path* declares an Agent Plugins ``$schema``.
 
     A root ``plugin.json`` is an Agent Plugins v1 manifest only when it opts in
     with that ``$schema``; any other ``plugin.json`` is not a plugin manifest.
@@ -66,8 +54,6 @@ def _is_agent_plugins_manifest(path: Path) -> bool:
     parsed whole up to the lenient bound. Only a file that cannot be read
     safely (a link or special file) does not count.
     """
-    if path.name.casefold() != PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE:
-        return False
     try:
         return agent_plugins_path_opt_in(path)
     except (OSError, SecurePathError, ValueError):
@@ -76,9 +62,13 @@ def _is_agent_plugins_manifest(path: Path) -> bool:
 
 def _detect_from_file(path: Path) -> str | None:
     """Detect content type from a file path."""
-    if path.name in PLUGIN_MANIFEST_FILES or _is_contained_plugin_manifest(path):
-        return CONTENT_TYPE_PLUGIN
-    if _is_agent_plugins_manifest(path):
+    # Every plugin manifest name marks a plugin (the locator's lexical rule),
+    # except that a root plugin.json must also opt into Agent Plugins.
+    relative = manifest_relative_path(path)
+    if relative is not None and (
+        manifest_type_for_relative_path(relative) != PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE
+        or _root_plugin_json_opts_in(path)
+    ):
         return CONTENT_TYPE_PLUGIN
     if path.name.upper() == SKILL_MANIFEST_FILE.upper():
         return CONTENT_TYPE_SKILL
@@ -111,7 +101,7 @@ def _detect_from_directory(path: Path) -> str | None:
                     or entry.name in SKILL_MANIFEST_VARIANTS
                     or entry.name == WORKFLOWS_MANIFEST_FILE
                     or folded == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE
-                    or folded in _NATIVE_MANIFEST_DIRS_FOLDED
+                    or folded in NATIVE_MANIFEST_DIRS_FOLDED
                     or entry.name.endswith(RULES_FILE_EXTENSION)
                 )
                 if not interesting:
@@ -123,9 +113,9 @@ def _detect_from_directory(path: Path) -> str | None:
                 elif folded == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE:
                     # Only a regular root plugin.json that declares the Agent
                     # Plugins $schema marks a plugin (bounded, no-follow read).
-                    if stat.S_ISREG(metadata.st_mode) and _is_agent_plugins_manifest(path / entry.name):
+                    if stat.S_ISREG(metadata.st_mode) and _root_plugin_json_opts_in(path / entry.name):
                         plugin = True
-                elif folded in _NATIVE_MANIFEST_DIRS_FOLDED:
+                elif folded in NATIVE_MANIFEST_DIRS_FOLDED:
                     # Presence is enough for auto-detection (any spelling: a
                     # case-insensitive client opens it). The secure plugin
                     # locator later distinguishes a real contained manifest
@@ -262,12 +252,9 @@ def resolve_plugin_path(path: Path) -> Path:
     except OSError:
         return path
     if not stat.S_ISDIR(metadata.st_mode):
-        if path.name in PLUGIN_MANIFEST_FILES:
-            return path.parent
-        if _is_contained_plugin_manifest(path):
-            return path.parent.parent
-        if path.name.casefold() == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE:
-            return path.parent
+        root = manifest_root_for(path)
+        if root is not None:
+            return root
     return path
 
 

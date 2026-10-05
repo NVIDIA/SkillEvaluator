@@ -66,7 +66,9 @@ _CLIENT_MANIFEST_PATHS_FOLDED: dict[str, Path] = {
     for path, manifest_type in PLUGIN_MANIFEST_PRECEDENCE
     if manifest_type in PLUGIN_CONTAINED_MANIFEST_TYPES
 }
-_NATIVE_DIRS_FOLDED = frozenset(name.casefold() for name in PLUGIN_NATIVE_MANIFEST_DIRS)
+# Vendor manifest directories by case-folded name: clients on a case-insensitive
+# filesystem open .Claude-Plugin/plugin.json as .claude-plugin/plugin.json.
+NATIVE_MANIFEST_DIRS_FOLDED = frozenset(name.casefold() for name in PLUGIN_NATIVE_MANIFEST_DIRS)
 # Bytes of a root plugin.json read to decide the Agent Plugins opt-in. Clients
 # read the whole file, so this is the lenient read bound, not the 1 MiB manifest
 # bound. A larger file opts in, so it fails as an unreadable manifest.
@@ -376,11 +378,25 @@ def manifest_relative_path(path: Path) -> Path | None:
     if path.name in PLUGIN_MANIFEST_FILES:
         return Path(path.name)
     name = path.name.casefold()
-    if name == PLUGIN_CONTAINED_MANIFEST_FILE and path.parent.name.casefold() in _NATIVE_DIRS_FOLDED:
+    if name == PLUGIN_CONTAINED_MANIFEST_FILE and path.parent.name.casefold() in NATIVE_MANIFEST_DIRS_FOLDED:
         return Path(path.parent.name) / path.name
     if name == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE:
         return Path(path.name)
     return None
+
+
+def manifest_root_for(path: Path) -> Path | None:
+    """Return the plugin root that a manifest path names, or ``None`` if *path* names no manifest.
+
+    A lexical check (see :func:`manifest_relative_path`): the root is the
+    manifest's directory, or the parent of its vendor directory. Nothing is
+    read, so a root ``plugin.json`` names a root whether or not it opts into
+    Agent Plugins.
+    """
+    relative = manifest_relative_path(path)
+    if relative is None:
+        return None
+    return path.parent if len(relative.parts) == 1 else path.parent.parent
 
 
 def manifest_type_for_relative_path(relative: Path | str) -> str | None:
@@ -413,9 +429,9 @@ def locate_plugin_manifest(path: Path) -> PluginManifestLocation | None:
     # secure selected-file checks and fail explicitly.
     if not stat_is_link_or_reparse(target_metadata) and stat.S_ISDIR(target_metadata.st_mode):
         root = target
-    elif (relative := manifest_relative_path(target)) is not None:
-        direct_relative = relative
-        root = target.parent if len(relative.parts) == 1 else target.parent.parent
+    elif (manifest_root := manifest_root_for(target)) is not None:
+        root = manifest_root
+        direct_relative = target.relative_to(root)
     else:
         if stat_is_link_or_reparse(target_metadata):
             raise PluginManifestPathError(f"Plugin root is a symlink, junction, or reparse point: {target}")

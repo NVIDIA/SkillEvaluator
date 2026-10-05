@@ -26,7 +26,7 @@ from skillevaluator.constants import (
 from skillevaluator.deduplication.plugin.profile import discover_plugin_roots, load_plugin_profile
 from skillevaluator.models.result import Severity, ValidationResult
 from skillevaluator.plugin_components import build_plugin_inventory
-from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
+from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest, manifest_root_for
 from skillevaluator.reporting.markdown import MarkdownReporter
 from skillevaluator.reporting.plugin_sections import manifest_declarations_view, tier1_plugin_view
 from skillevaluator.tier3.plugin_eval import PLUGIN_MCP_SERVERS_FILENAME, prepare_plugin_eval_package
@@ -181,6 +181,26 @@ def test_direct_manifest_paths_resolve_to_the_plugin_root(tmp_path: Path, relati
     assert resolve_plugin_path(root / relative) == root
     assert detect_content_type(root / relative) == CONTENT_TYPE_PLUGIN
     assert detect_content_type(root) == CONTENT_TYPE_PLUGIN
+
+
+@pytest.mark.parametrize(
+    ("path", "root"),
+    [
+        ("p/agent_plugin.yaml", "p"),
+        ("p/.claude-plugin/plugin.json", "p"),
+        # Clients on a case-insensitive filesystem open this spelling as .codex-plugin/plugin.json.
+        ("p/.Codex-Plugin/Plugin.JSON", "p"),
+        # Lexical: a root plugin.json names the root whether or not it opts into Agent Plugins.
+        ("p/plugin.json", "p"),
+        ("plugin.json", "."),
+        # Only client (JSON) manifests match without regard to case.
+        ("p/Agent_Plugin.yaml", None),
+        ("p/.claude-plugin/other.json", None),
+        ("p/skills/SKILL.md", None),
+    ],
+)
+def test_manifest_root_for_names_the_root_of_a_manifest_path(path: str, root: str | None) -> None:
+    assert manifest_root_for(Path(path)) == (Path(root) if root is not None else None)
 
 
 def test_plain_root_plugin_json_directory_is_not_detected_as_a_plugin(tmp_path: Path) -> None:

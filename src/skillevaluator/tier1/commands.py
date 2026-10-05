@@ -8,6 +8,7 @@ from __future__ import annotations
 import stat
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import click
@@ -184,40 +185,94 @@ def _fail_closed_result(
     return result
 
 
-def _unsafe_plugin_tree_results(
-    target_path: Path,
-    exc: ValueError,
-    *,
-    include_schema: bool,
-    policy: ValidationPolicy | None,
-    repo_root: Path | None,
-    resolve_endpoints: bool,
-) -> list[ValidationResult]:
-    """Return the fail-closed results for a plugin tree that cannot be scanned safely."""
-    results: list[ValidationResult] = []
-    if include_schema:
-        validator = _schema_validator_for(CONTENT_TYPE_PLUGIN, policy, repo_root, resolve_endpoints=resolve_endpoints)
-        results.append(_as_result(validator.name, validator.description, validator.validate, target_path))
+def _unsafe_plugin_tree_result(exc: ValueError) -> ValidationResult:
+    """The fail-closed result for a plugin tree that cannot be scanned safely."""
     code = getattr(exc, "code", None)
     relative_path = getattr(exc, "relative_path", None)
     if code == "path_count_limit":
         reason = f"the plugin tree exceeds the {PLUGIN_TREE_MAX_DISCOVERED_PATHS}-entry limit for whole-plugin scans"
     else:
         reason = str(exc)
-    results.append(
-        _fail_closed_result(
-            "Plugin Tree Security",
-            "Verify the whole plugin tree is regular, contained, and link-free before scanning it",
-            check_name="unsafe_plugin_filesystem",
-            message=f"Refusing to scan the plugin tree: {reason}",
-            file_path=relative_path if relative_path and relative_path != "." else "<plugin-root>",
-            suggestion=(
-                "Replace linked, hard-linked, reparse-point, or special plugin paths with regular files and "
-                "directories contained by the plugin root."
-            ),
-        )
+    return _fail_closed_result(
+        "Plugin Tree Security",
+        "Verify the whole plugin tree is regular, contained, and link-free before scanning it",
+        check_name="unsafe_plugin_filesystem",
+        message=f"Refusing to scan the plugin tree: {reason}",
+        file_path=relative_path if relative_path and relative_path != "." else "<plugin-root>",
+        suggestion=(
+            "Replace linked, hard-linked, reparse-point, or special plugin paths with regular files and "
+            "directories contained by the plugin root."
+        ),
     )
-    return results
+
+
+@dataclass(frozen=True)
+class _PluginPreflight:
+    """The verified plugin root and skill folders, or the results that fail the run closed."""
+
+    root: Path
+    # Skills bundled under skills/, discovered without following links.
+    bundled_skill_dirs: list[Path] = field(default_factory=list)
+    # Skill folders the whole-tree scans validate as their own units: the bundled
+    # skills plus any skill a client loads from a folder the tree walk prunes.
+    tree_skill_dirs: list[Path] = field(default_factory=list)
+    # When the plugin cannot be checked safely: the results the run ends with.
+    failed: list[ValidationResult] = field(default_factory=list)
+
+
+def _plugin_preflight(
+    target_path: Path,
+    enabled: set[str],
+    *,
+    policy: ValidationPolicy | None,
+    repo_root: Path | None,
+    resolve_endpoints: bool,
+) -> _PluginPreflight:
+    """Resolve the plugin root and verify it before any check reads plugin content.
+
+    Bundled skills are discovered without following links, so a linked or
+    special entry under ``skills/`` fails before a skill-scoped validator
+    reads it. When a whole-tree check (:data:`PLUGIN_TREE_CHECKS`) is enabled,
+    the entire tree must pass the same no-follow verification, because those
+    scanners also read root-owned content (``scripts/``, ``hooks/``,
+    ``.mcp.json``, ...). Either problem fails the run closed: ``failed`` then
+    holds the results to report. With ``schema`` enabled they start with the
+    plugin schema result, which reports an unsafe ``skills/`` entry itself;
+    an unsafe tree adds a ``Plugin Tree Security`` result.
+    """
+    from skillevaluator.cli_core import resolve_plugin_path
+    from skillevaluator.utils.helpers import find_bundled_plugin_skills, verify_plugin_tree
+
+    root = resolve_plugin_path(target_path)
+
+    def schema_result() -> ValidationResult:
+        validator = _schema_validator_for(CONTENT_TYPE_PLUGIN, policy, repo_root, resolve_endpoints=resolve_endpoints)
+        return _as_result(validator.name, validator.description, validator.validate, root)
+
+    try:
+        bundled_skill_dirs = find_bundled_plugin_skills(root)
+    except ValueError as exc:
+        if "schema" in enabled:
+            return _PluginPreflight(root, failed=[schema_result()])
+        bundle_result = _fail_closed_result(
+            "Plugin Bundle Security",
+            "Securely discover skills bundled inside the plugin",
+            check_name="bundled_skill_path_unsafe",
+            message=f"Could not securely discover bundled skills: {exc}",
+            file_path="<plugin-skills>",
+            suggestion="Replace linked or special bundled-skill paths with regular contained directories.",
+        )
+        return _PluginPreflight(root, failed=[bundle_result])
+    if not enabled & PLUGIN_TREE_CHECKS:
+        return _PluginPreflight(root, bundled_skill_dirs)
+    try:
+        verify_plugin_tree(root)
+        tree_skill_dirs = [*bundled_skill_dirs, *_verified_skill_dirs_outside_tree_walk(root)]
+    except ValueError as exc:
+        failed = [schema_result()] if "schema" in enabled else []
+        failed.append(_unsafe_plugin_tree_result(exc))
+        return _PluginPreflight(root, bundled_skill_dirs, failed=failed)
+    return _PluginPreflight(root, bundled_skill_dirs, tree_skill_dirs)
 
 
 def _with_component_attribution(results: list[ValidationResult], content_type: str | None) -> list[ValidationResult]:
@@ -276,56 +331,55 @@ def run_validation(
     *resolve_endpoints* (``--resolve-endpoints``) opts a plugin's schema check
     into DNS and single-HEAD redirect checks of its MCP and HTTP hook URLs.
     """
+    results = _run_validation(
+        target_path,
+        checks=checks,
+        use_llm=use_llm,
+        llm_verify=llm_verify,
+        min_score=min_score,
+        previous_version=previous_version,
+        policy=policy,
+        content_type=content_type,
+        fail_fast=fail_fast,
+        continue_on_failure=continue_on_failure,
+        on_check=on_check,
+        repo_root=repo_root,
+        resolve_endpoints=resolve_endpoints,
+    )
+    # Recounted on every way out of the run, a failed plugin preflight included.
+    return _with_component_attribution(results, content_type)
+
+
+def _run_validation(
+    target_path: Path,
+    *,
+    checks: str | None,
+    use_llm: bool,
+    llm_verify: bool,
+    min_score: int,
+    previous_version: str | None,
+    policy: ValidationPolicy | None,
+    content_type: str | None,
+    fail_fast: bool,
+    continue_on_failure: bool,
+    on_check: Callable[[str], None] | None,
+    repo_root: Path | None,
+    resolve_endpoints: bool,
+) -> list[ValidationResult]:
+    """:func:`run_validation` before the plugin component findings are recounted."""
     enabled = _enabled_checks(checks)
     results: list[ValidationResult] = []
     bundled_skill_dirs: list[Path] = []
-    # Skill folders the whole-tree scans validate as their own units: the bundled
-    # skills plus any skill a client loads from a folder the tree walk prunes.
     tree_skill_dirs: list[Path] = []
     if content_type == CONTENT_TYPE_PLUGIN:
-        from skillevaluator.cli_core import resolve_plugin_path
-        from skillevaluator.utils.helpers import find_bundled_plugin_skills, verify_plugin_tree
-
-        target_path = resolve_plugin_path(target_path)
-        try:
-            # Secure, no-follow discovery: any linked or special entry under
-            # ``skills/`` fails here before a skill-scoped validator reads it.
-            bundled_skill_dirs = find_bundled_plugin_skills(target_path)
-        except ValueError as exc:
-            if "schema" in enabled:
-                validator = _schema_validator_for(
-                    CONTENT_TYPE_PLUGIN, policy, repo_root, resolve_endpoints=resolve_endpoints
-                )
-                return [_as_result(validator.name, validator.description, validator.validate, target_path)]
-            return [
-                _fail_closed_result(
-                    "Plugin Bundle Security",
-                    "Securely discover skills bundled inside the plugin",
-                    check_name="bundled_skill_path_unsafe",
-                    message=f"Could not securely discover bundled skills: {exc}",
-                    file_path="<plugin-skills>",
-                    suggestion="Replace linked or special bundled-skill paths with regular contained directories.",
-                )
-            ]
-        if enabled & PLUGIN_TREE_CHECKS:
-            # Whole-plugin scanners also read root-owned content (scripts/,
-            # hooks/, .mcp.json, ...), so the entire tree must pass the same
-            # no-follow verification before any of them runs.
-            try:
-                verify_plugin_tree(target_path)
-                tree_skill_dirs = [*bundled_skill_dirs, *_verified_skill_dirs_outside_tree_walk(target_path)]
-            except ValueError as exc:
-                return _with_component_attribution(
-                    _unsafe_plugin_tree_results(
-                        target_path,
-                        exc,
-                        include_schema="schema" in enabled,
-                        policy=policy,
-                        repo_root=repo_root,
-                        resolve_endpoints=resolve_endpoints,
-                    ),
-                    content_type,
-                )
+        preflight = _plugin_preflight(
+            target_path, enabled, policy=policy, repo_root=repo_root, resolve_endpoints=resolve_endpoints
+        )
+        if preflight.failed:
+            return preflight.failed
+        target_path = preflight.root
+        bundled_skill_dirs = preflight.bundled_skill_dirs
+        tree_skill_dirs = preflight.tree_skill_dirs
     # Skill-scoped checks (version/quality/lint) also run for plugins that
     # bundle skills. They target ``<plugin>/skills`` only, so the folder walker
     # validates each bundled skill once and prefixes its findings with the
@@ -423,7 +477,7 @@ def run_validation(
             results.extend(step_results)
 
             if any(result.metadata.get("security_failure") for result in step_results):
-                return _with_component_attribution(results, content_type)
+                return results
 
             error_count = sum(r.summary.errors for r in step_results)
             warning_count = sum(r.summary.warnings for r in step_results)
@@ -442,7 +496,7 @@ def run_validation(
                 )
 
             if fail_fast and not continue_on_failure and any(not r.passed for r in results):
-                return _with_component_attribution(results, content_type)
+                return results
 
     unknown = enabled - RECOGNIZED_CHECKS
     if unknown:
@@ -453,7 +507,7 @@ def run_validation(
         result.add_error(f"Unknown Tier 1 check(s): {', '.join(sorted(unknown))}")
         results.insert(0, result)
 
-    return _with_component_attribution(results, content_type)
+    return results
 
 
 def run_quality_check(target_path: Path, *, min_score: int = 70) -> list[ValidationResult]:

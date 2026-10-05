@@ -5922,3 +5922,22 @@ def test_docker_prerequisite_accepts_compose_v2(monkeypatch: pytest.MonkeyPatch)
     )
 
     assert _check_prerequisites(env_mode="docker", agents=[]) == []
+
+
+def test_local_nvidia_opencode_config_disables_oauth_for_remote_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    agent = object.__new__(SkillEvaluatorLocalOpenCode)
+    agent.mcp_servers = [
+        SimpleNamespace(name="remote-tools", transport="streamable-http", url="https://tools.example/mcp"),
+        SimpleNamespace(name="local-tools", transport="stdio", command="tool-server", args=["--stdio"]),
+    ]
+    agent._opencode_config = {}
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://integrate.api.nvidia.com/v1")
+
+    command = agent._nvidia_provider_config_command("nvidia/model")
+
+    payload = shlex.split(command.split("&&", 1)[1])[1]
+    config = json.loads(payload)
+    assert config["mcp"]["remote-tools"] == {"type": "remote", "url": "https://tools.example/mcp", "oauth": False}
+    assert config["mcp"]["local-tools"] == {"type": "local", "command": ["tool-server", "--stdio"]}

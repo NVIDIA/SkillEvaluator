@@ -323,11 +323,17 @@ def _safe_evaluation_errors(value: Any) -> dict[str, str] | list[str] | str:
     return _safe_diagnostic_text(value, max_len=512)
 
 
-def _read_json(path: Path) -> Any:
-    """Read one bounded regular JSON file through an anchored no-follow root."""
+def _read_json(path: Path, *, root: Path | None = None) -> Any:
+    """Read one bounded regular JSON file through an anchored no-follow root, or return ``None``.
+
+    The read is anchored at *root* (default: the file's directory), and no path
+    component below it may be a link.
+    """
+    anchor = path.parent if root is None else root
     try:
-        with SecureRoot(path.parent) as secure_root:
-            raw, _metadata = secure_root.read_bytes(Path(path.name), DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES)
+        relative = path.relative_to(anchor)
+        with SecureRoot(anchor) as secure_root:
+            raw, _metadata = secure_root.read_bytes(relative, DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES)
         return json.loads(raw)
     except (SecurePathError, ValueError, OSError, RecursionError, UnicodeError):
         return None
@@ -3592,16 +3598,6 @@ def _summarize_trajectory(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _read_job_json(job_dir: Path, relative_path: Path) -> Any:
-    """Read one bounded JSON file anchored at the Harbor job root without following links."""
-    try:
-        with SecureRoot(job_dir) as secure_root:
-            raw, _metadata = secure_root.read_bytes(relative_path, DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES)
-        return json.loads(raw)
-    except (SecurePathError, ValueError, OSError, RecursionError, UnicodeError):
-        return None
-
-
 def _usage_counter(value: Any) -> float | None:
     """Return a usable token or cost counter; anything else, even an oversized integer, counts as missing."""
     return finite_number(value, non_negative=True)
@@ -3635,23 +3631,18 @@ def _trial_usage(job_dir: Path | None, reward: dict[str, Any]) -> dict[str, floa
     ``result.json`` ``agent_result``. Reads are bounded, no-follow and anchored
     at the job root. Missing counters are left out rather than guessed.
     """
-    trial_root_name = str(reward.get("_trial_root_name") or "")
-    if job_dir is None or not trial_root_name or Path(trial_root_name).name != trial_root_name:
+    trial_root_name = _safe_trial_path_component(reward.get("_trial_root_name"))
+    if job_dir is None or not trial_root_name:
         return {}
-    if trial_root_name in {".", ".."}:
-        return {}
+    trial_root = job_dir / trial_root_name
 
     trajectories: list[dict[str, Any]] = []
-    root_trajectory = _read_job_json(job_dir, Path(trial_root_name, "agent", "trajectory.json"))
+    root_trajectory = _read_json(trial_root / "agent" / "trajectory.json", root=job_dir)
     if isinstance(root_trajectory, dict):
         trajectories.append(root_trajectory)
     else:
-        for step_path in _ordered_step_trajectory_paths(job_dir / trial_root_name):
-            try:
-                relative = step_path.relative_to(job_dir)
-            except ValueError:
-                continue
-            step_trajectory = _read_job_json(job_dir, relative)
+        for step_path in _ordered_step_trajectory_paths(trial_root):
+            step_trajectory = _read_json(step_path, root=job_dir)
             if isinstance(step_trajectory, dict):
                 trajectories.append(step_trajectory)
 
@@ -3678,7 +3669,7 @@ def _trial_usage(job_dir: Path | None, reward: dict[str, Any]) -> dict[str, floa
 
     if "prompt_tokens" in usage and "cost_usd" in usage:
         return usage
-    result = _read_job_json(job_dir, Path(trial_root_name, "result.json"))
+    result = _read_json(trial_root / "result.json", root=job_dir)
     if not isinstance(result, dict):
         return usage
     contexts: list[dict[str, Any]] = []

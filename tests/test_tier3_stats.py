@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -579,6 +580,20 @@ def test_trial_usage_falls_back_to_harbor_agent_result(tmp_path: Path) -> None:
     assert stats.uncached_tokens(usage) == 5_500
     assert _trial_usage(job_dir, {"_trial_root_name": "../escape"}) == {}
     assert _trial_usage(None, {"_trial_root_name": "case-1__attempt001"}) == {}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows file names cannot contain ':'")
+def test_trial_usage_skips_a_trial_root_name_that_saved_trials_refuse(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    trial_dir = job_dir / "case:1"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps({"agent_result": {"n_input_tokens": 10, "n_output_tokens": 5, "cost_usd": 0.1}}),
+        encoding="utf-8",
+    )
+
+    # Saved trials name such a root "unknown", so its usage is not attributed either.
+    assert _trial_usage(job_dir, {"_trial_root_name": "case:1"}) == {}
 
 
 def test_trial_usage_never_follows_a_symlinked_trajectory(tmp_path: Path) -> None:

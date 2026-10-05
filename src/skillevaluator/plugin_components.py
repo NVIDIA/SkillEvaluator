@@ -460,11 +460,15 @@ def normalize_declared_path(raw: str, root_prefixes: Iterable[str] = ("${CLAUDE_
     """Normalize one manifest path to a contained root-relative POSIX path.
 
     Claude Code requires ``./``-relative paths (``"."``/``"./"`` names the root).
-    A root placeholder prefix in ``root_prefixes`` is treated as the root. The
-    inventory passes only the placeholders a format's client expands in
-    manifest paths (:attr:`FormatProfile.manifest_path_prefixes`, Cursor's), so
-    any other leading ``${...}`` is the ``placeholder`` problem. Absolute
-    paths, home-relative paths, drive letters, and ``..`` segments are escapes.
+    A root placeholder in ``root_prefixes`` names the root only when a separator
+    (``/`` or ``\\``) or nothing follows it: a client expands it as text, so
+    ``${CURSOR_PLUGIN_ROOT}foo/x.sh`` loads ``<root>foo/x.sh`` beside the root,
+    an escape. The inventory passes only the placeholders a format's client
+    expands in manifest paths (:attr:`FormatProfile.manifest_path_prefixes`,
+    Cursor's), so any other leading ``${...}`` is the ``placeholder`` problem.
+    The ``${CLAUDE_PLUGIN_ROOT}`` default is kept for existing callers; Claude
+    Code itself expands no placeholder there. Absolute paths, home-relative
+    paths, drive letters, and ``..`` segments are escapes.
     """
     text = raw.strip()
     if not text:
@@ -473,12 +477,13 @@ def normalize_declared_path(raw: str, root_prefixes: Iterable[str] = ("${CLAUDE_
         return DeclaredPath(raw, None, "invalid")
     normalized = text.replace("\\", "/")
     dot_relative = normalized in {".", "./"} or normalized.startswith("./")
-    prefixes = [variant for prefix in root_prefixes for variant in (f"{prefix}/", prefix)]
-    for prefix in prefixes:
-        if normalized.startswith(prefix):
-            normalized = "./" + normalized[len(prefix) :].lstrip("/")
-            dot_relative = True
-            break
+    matched = [prefix for prefix in root_prefixes if prefix and normalized.startswith(prefix)]
+    if matched:
+        below_root = normalized[len(max(matched, key=len)) :]
+        if below_root and not below_root.startswith("/"):
+            return DeclaredPath(raw, None, "escape")  # "<root>foo/x.sh" is beside the root, not in it
+        normalized = "./" + below_root.lstrip("/")
+        dot_relative = True
     if normalized.startswith(("/", "~")) or _WINDOWS_DRIVE_RE.match(normalized):
         return DeclaredPath(raw, None, "escape")
     if normalized.startswith("${"):

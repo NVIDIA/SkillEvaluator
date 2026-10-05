@@ -628,6 +628,13 @@ def test_every_arm_persists_an_invalid_score_trial_with_its_diagnostics(
 @pytest.mark.parametrize(
     ("missing", "condition", "arm", "launch_errors", "job_failure"),
     [
+        (
+            "with",
+            "with-skill",
+            "with_skill",
+            ["opencode with-skill Harbor run failed: model not found"],
+            "model not found",
+        ),
         ("without", "without-skill", "without_skill", ["opencode without-skill Harbor run failed: quota"], "quota"),
         (
             "sumofparts",

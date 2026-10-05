@@ -280,14 +280,14 @@ def _reset_agent_generated_outputs(agent_dir: Path, output_root: Path) -> None:
 
 
 def _find_job_dir(jobs_dir: Path, job_name: str) -> Path | None:
-    """Find a Harbor job directory by name."""
+    """Return the Harbor job directory named ``job_name``, if Harbor created it.
+
+    The runner passes ``--job-name`` to Harbor, so only an exact match is that
+    job. A partial match could pick another arm's job: ``<skill>-<agent>-with``
+    is a prefix of ``<skill>-<agent>-without`` and of stop-on-pass attempt jobs.
+    """
     candidate = jobs_dir / job_name
-    if candidate.exists():
-        return candidate
-    for d in sorted(jobs_dir.iterdir(), reverse=True):
-        if d.is_dir() and job_name in d.name:
-            return d
-    return None
+    return candidate if candidate.exists() else None
 
 
 def _safe_text(value: Any, *, max_len: int | None = 2048) -> str:

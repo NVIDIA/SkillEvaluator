@@ -5338,7 +5338,8 @@ _CANARY_NON_FILE_TARGETS = (
     "/dev/udp/",
 )
 _CANARY_WRITE_PATH_KEYS = ("file_path", "filePath", "path", "filename", "target_file", "notebook_path")
-# OpenCode passes its apply_patch patch as ``patchText``; Codex as ``input``.
+# OpenCode passes its apply_patch patch as ``patchText``; Codex as ``input``. The
+# trajectory converters keep an input that is not an object as ``raw`` or ``value``.
 _CANARY_WRITE_BODY_KEYS = (
     "content",
     "new_string",
@@ -5349,6 +5350,8 @@ _CANARY_WRITE_BODY_KEYS = (
     "patch",
     "patchText",
     "input",
+    "raw",
+    "value",
 )
 _CANARY_COMMAND_KEYS = ("command", "cmd", "code", "script", "raw")
 _CANARY_WORKDIR_KEYS = ("workdir", "cwd")

@@ -137,8 +137,8 @@ _WILDCARD_TOOLS = frozenset({"*", "*(*)", "mcp__*", "mcp__*__*"})
 _EXACT_MATCHER_RE = re.compile(r"[A-Za-z0-9_|]+")
 # A looser name list ('Edit, Bash'): one that names Bash is treated as matching Bash.
 _NAME_LIST_RE = re.compile(r"[A-Za-z0-9_\- ,|]+")
-# A regex matcher that matches all of these tool names (and a shell tool) is treated as "every tool".
-_SAMPLE_TOOLS: tuple[str, ...] = ("Bash", "Read", "Write", "Edit", "WebFetch", "mcp__server__tool")
+# A regex matcher that matches a shell tool and all of these other tool names is treated as "every tool".
+_NON_SHELL_SAMPLE_TOOLS: tuple[str, ...] = ("Read", "Write", "Edit", "WebFetch", "mcp__server__tool")
 # Tools whose auto-approval skips a prompt that guards writes, network fetches, or MCP side effects.
 _SENSITIVE_TOOLS: tuple[str, ...] = ("Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "mcp__server__tool")
 
@@ -1258,6 +1258,16 @@ class _MatcherParser:
         return 0x08 if char == "b" else self._escaped_code(char)
 
 
+@functools.lru_cache(maxsize=512)
+def _compiled_matcher(text: str) -> _Node:
+    """The parsed regex of a matcher (cached; ``_UnsupportedMatcher`` and ``_InvalidMatcher`` propagate uncached).
+
+    Parse trees are immutable, so the scope and sensitive-tool checks share one;
+    each check evaluates it with its own :class:`_MatcherEvaluator` and work budget.
+    """
+    return _MatcherParser(text).parse()
+
+
 def _class_matches(node: _Node, code: int) -> bool:
     hit = any(any(low <= code <= high for low, high in ranges) != negated for ranges, negated in node[1])
     return hit != node[2]
@@ -1413,10 +1423,10 @@ def _matcher_scope(text: str, shell_tools: tuple[str, ...] = ("Bash",)) -> str:
     if _EXACT_MATCHER_RE.fullmatch(text):
         return scope
     try:
-        evaluator = _MatcherEvaluator(_MatcherParser(text).parse())
+        evaluator = _MatcherEvaluator(_compiled_matcher(text))
         if not any(evaluator.matches(tool) for tool in shell_tools):
             return scope
-        return "all" if all(evaluator.matches(tool) for tool in _SAMPLE_TOOLS[1:]) else "bash"
+        return "all" if all(evaluator.matches(tool) for tool in _NON_SHELL_SAMPLE_TOOLS) else "bash"
     except _UnsupportedMatcher:
         return "all"
     except _InvalidMatcher:
@@ -1446,7 +1456,7 @@ def matcher_sensitive_tools(matcher: str | None) -> tuple[str, ...]:
         return _SENSITIVE_TOOLS
     names_mcp = "mcp" in text.lower()
     try:
-        evaluator = _MatcherEvaluator(_MatcherParser(text).parse())
+        evaluator = _MatcherEvaluator(_compiled_matcher(text))
         return tuple(
             tool
             for tool in _SENSITIVE_TOOLS

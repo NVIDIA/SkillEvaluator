@@ -270,7 +270,7 @@ def image_registry_problem(
     if registry is None:
         return None, False
     host, _colon, port_text = registry.rpartition(":") if ":" in registry else (registry, "", "")
-    port = int(port_text) if port_text.isdigit() else 443
+    port = int(port_text) if port_text.isdecimal() else 443  # isdigit() also admits '²', which int() refuses
     try:
         verdict = er.classify_host(host, port, allowed_hosts, resolve=er.dns_resolver() if resolve else None)
     except (OSError, UnicodeError) as exc:

@@ -544,6 +544,22 @@ def test_html_tier3_escapes_untrusted_plugin_strings(tmp_path: Path) -> None:
     assert "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;" in (html or "")
 
 
+def test_html_tier3_verdict_card_of_a_partial_plugin_run_is_warn_toned(tmp_path: Path) -> None:
+    result = _tier3_result(tmp_path)
+    assert result.metadata["agent_eval"]["verdict"] == "pass"
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+
+    card = re.search(
+        r'<div class="dashboard-card ([^"]*)">\s*<h3 class="dashboard-card-title">Verdict</h3>\s*'
+        r'<p class="dashboard-card-value">([^<]*)</p>',
+        html,
+    )
+    assert card is not None
+    # The raw verdict passes, but a partial run reads INCOMPLETE and must not be colored as a success.
+    assert card.groups() == ("warning", "INCOMPLETE")
+
+
 def test_complete_plugin_run_reports_complete_and_no_incomplete_callout(tmp_path: Path) -> None:
     result = _tier3_result(tmp_path, partial=False)
     html = HTMLReporter(include_timestamp=False).render_all([result])

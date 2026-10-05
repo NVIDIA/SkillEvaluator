@@ -32,7 +32,7 @@ from skillevaluator.constants import (
     SCAN_EXCLUDED_DIRS,
 )
 from skillevaluator.models.result import Finding, Severity
-from skillevaluator.plugin_formats import CLAUDE_PROFILE
+from skillevaluator.plugin_formats import CLAUDE_PROFILE, FormatProfile
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, discover_secure_files, stat_is_link_or_reparse
 
 PLUGIN_CATEGORY = "PLUGIN_SCHEMA"
@@ -376,13 +376,10 @@ def _unscanned_path_finding(
 
 
 def _style_finding(
-    reader: PluginRootReader,
-    field_name: str,
-    declared: DeclaredPath,
-    manifest_rel: str,
-    *,
-    client: str = "Claude Code rejects",
+    reader: PluginRootReader, field_name: str, declared: DeclaredPath, manifest_rel: str, profile: FormatProfile
 ) -> Finding:
+    """MEDIUM for a manifest path without a leading ``./``, which the format's client rejects or ignores."""
+    client = "Claude Code rejects" if profile is CLAUDE_PROFILE else f"the {profile.label} loader ignores"
     return _plugin_finding(
         Severity.MEDIUM,
         "plugin_component_path_style",

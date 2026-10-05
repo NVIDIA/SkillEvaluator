@@ -595,7 +595,9 @@ class _Builder:
             )
             return declared, problem
         if style and self.contained and self.profile.require_dot_relative and not declared.dot_relative:
-            self.inventory.findings.append(self._style(field_name, declared))
+            self.inventory.findings.append(
+                _style_finding(self.reader, field_name, declared, self.manifest_rel, self.profile)
+            )
         # Skill folders a client loads are scanned as skill units even in such a folder
         # (client_skill_dirs_outside_tree_scans), so only other components get this.
         if field_name != "skills" and (
@@ -614,10 +616,6 @@ class _Builder:
             )
             return declared, "unsafe"
         return declared, kind
-
-    def _style(self, field_name: str, declared: DeclaredPath) -> Finding:
-        client = "Claude Code rejects" if self.profile is CLAUDE_PROFILE else f"the {self.profile.label} loader ignores"
-        return _style_finding(self.reader, field_name, declared, self.manifest_rel, client=client)
 
     def _list_dir(
         self, component_type: str, rel_dir: PurePosixPath, suffixes: tuple[str, ...] | None

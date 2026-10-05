@@ -467,8 +467,7 @@ def _collect_path_ref(
         collection.add_broken_source(finding, raw, path, problem)
 
     if profile.require_dot_relative and not declared.dot_relative:
-        client = "Claude Code rejects" if profile is CLAUDE_PROFILE else f"the {profile.label} loader ignores"
-        collection.findings.append(_style_finding(reader, "mcpServers", declared, manifest_rel, client=client))
+        collection.findings.append(_style_finding(reader, "mcpServers", declared, manifest_rel, profile))
     if (unscanned := _unscanned_path_finding(reader, "mcpServers", declared, manifest_rel)) is not None:
         collection.findings.append(unscanned)
     suffix = rel.suffix.lower()

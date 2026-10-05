@@ -316,7 +316,9 @@ def test_hermes_is_experimental_for_containers_but_not_local_mode() -> None:
     with pytest.raises(ValueError, match="does not support agent: hermes"):
         runner.build_harbor_run_command(dataset_path="d", agent="hermes", job_name="j", env_mode="local")
     command = runner.build_harbor_run_command(dataset_path="d", agent="hermes", job_name="j", env_mode="docker")
-    assert command[command.index("-a") + 1] == "hermes"
+    # Harbor 0.22+ takes the agent name through its unified ``--agent`` flag.
+    assert "-a" not in command
+    assert command[command.index("--agent") + 1] == "hermes"
 
 
 @pytest.mark.parametrize(

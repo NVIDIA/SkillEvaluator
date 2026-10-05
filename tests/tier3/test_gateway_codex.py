@@ -87,21 +87,27 @@ def test_selected_codex_launcher_preserves_provider_model_contract(
         assert option_value("--env") == mode
         assert "--environment-import-path" not in command
     agent = AgentFactory.create_agent_from_config(
+        # Harbor 0.22+ takes a built-in name or an import path through its unified ``--agent`` flag.
         AgentConfig(
-            name=option_value("-a"),
-            import_path=option_value("--agent-import-path"),
+            name=option_value("--agent"),
             model_name=option_value("--model"),
         ),
         logs_dir=tmp_path / "logs",
     )
 
     class RecordingEnvironment:
+        default_user = None
+
         def __init__(self):
             self.commands = []
 
         async def exec(self, command, **kwargs):
             self.commands.append((command, kwargs.get("env") or {}))
             return ExecResult(return_code=0, stdout="", stderr="")
+
+        async def upload_file(self, *_args, **_kwargs):
+            # Harbor 0.22+ uploads the merged Codex config before launch.
+            return None
 
     environment = RecordingEnvironment()
     instruction = "quote --model gpt-5.6-sol and /tmp/codex-secrets literally"

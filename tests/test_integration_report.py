@@ -66,6 +66,7 @@ def test_custom_only_sum_of_parts_produces_integration_lift() -> None:
             "integration_completeness": {"complete": True},
         },
         [],
+        [],
         None,
     )
 

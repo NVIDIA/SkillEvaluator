@@ -92,7 +92,7 @@ def test_failed_baseline_arm_drops_the_engine_lift() -> None:
         "execution_status": "failed",
     }
 
-    evaluators = _build_agent("codex", info, ["accuracy"], None)["evaluators"]
+    evaluators = _build_agent("codex", info, ["accuracy"], ["accuracy"], None)["evaluators"]
 
     assert evaluators == {"accuracy": {"with_skill": 0.8, "baseline": None, "lift": None}}
 

@@ -160,7 +160,7 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> None:
         )
         for agent in agents
     }
-    runtime_env, errors = _resolve_runtime_env(harbor.get("runtime_env"))
+    runtime_env, errors = _resolve_runtime_env(harbor.get("runtime_env"), env_mode=params["env_mode"])
     if errors:
         raise ValueError("; ".join(errors))
     _resolve_agent_runtime_plan(

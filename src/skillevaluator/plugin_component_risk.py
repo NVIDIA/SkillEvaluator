@@ -54,6 +54,7 @@ from skillevaluator.validators.mcp_static import (
     HostAllowlist,
     classify_endpoint_host,
     classify_mcp_pinning,
+    parse_mcp_runner,
 )
 from skillevaluator.validators.url_policy import (
     DEFAULT_PORTS,
@@ -303,7 +304,6 @@ _MAX_DIR_DEPTH = 8
 _PLUGIN_DATA_REFS: tuple[str, ...] = ("$CLAUDE_PLUGIN_DATA",)
 # Package runners that fetch and run a package (the MCP pinning classifier decides each one).
 _RUNNER_HINT_RE = re.compile(r"\b(?:npx|bunx|pnpx|pnpm|yarn|npm|uvx|uv|pipx|deno)\b", re.IGNORECASE)
-_RUNNER_NAMES = frozenset({"npx", "bunx", "pnpx", "pnpm", "yarn", "npm", "uvx", "uv", "pipx", "deno"})
 _COMMAND_PREFIX_WORDS = frozenset(
     {"sudo", "doas", "env", "exec", "command", "nohup", "nice", "time", "then", "do", "else", "if", "!", "(", "{"}
 )
@@ -2178,14 +2178,14 @@ def _package_runs(commands: list[str]) -> tuple[_PackageRun, ...]:
                 index += 1
             if index >= len(words):
                 continue
-            runner = words[index]
-            base = runner.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe").removesuffix(".cmd")
-            if base not in _RUNNER_NAMES:
-                continue
-            pin = classify_mcp_pinning({"command": runner, "args": words[index + 1 :]})
+            # The stage is read like an MCP server command, so its runner and pin match the MCP checks.
+            declaration = {"command": words[index], "args": words[index + 1 :]}
+            invocation = parse_mcp_runner(declaration)
+            if invocation is None or invocation.ecosystem == "container":
+                continue  # not a package runner (a container run is not one; see _RUNNER_HINT_RE)
+            pin = classify_mcp_pinning(declaration)
             if pin.status == "unpinned":
-                remote = pin.remote
-                runs.append(_PackageRun(_bounded(pin.detail, 160), remote))
+                runs.append(_PackageRun(_bounded(pin.detail, 160), pin.remote))
                 if len(runs) >= MAX_OUTSIDE_REFS:
                     return tuple(runs)
     return tuple(runs)

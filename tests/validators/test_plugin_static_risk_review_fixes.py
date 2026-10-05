@@ -336,7 +336,15 @@ def test_remote_code_evasions_are_caught(command: str) -> None:
     assert _shell_facts(command).remote_code
 
 
-@pytest.mark.parametrize("command", ["npx -y some-formatter --write .", "uvx some-linter check"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "npx -y some-formatter --write .",
+        "uvx some-linter check",
+        # Regression: the hook check knew only the .exe and .cmd runner shims; the MCP checks also read .ps1.
+        "npx.ps1 -y some-formatter --write .",
+    ],
+)
 def test_unpinned_package_runner_hooks_are_medium(tmp_path: Path, command: str) -> None:
     result = _validate(_claude(tmp_path, {"hooks/hooks.json": _hooks("PostToolUse", _command(command))}))
     checks = _checks(result)

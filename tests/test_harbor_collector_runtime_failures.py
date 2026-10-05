@@ -6,11 +6,15 @@
 from __future__ import annotations
 
 import json
+import os
+from collections import Counter
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
+from skillevaluator.tier3.harbor import collector as collector_module
 from skillevaluator.tier3.harbor.collector import (
     _agent_runtime_failure_reason,
     collect_harbor_results,
@@ -812,6 +816,34 @@ def test_every_arm_persists_the_expected_case_id_of_a_result_derived_entry(tmp_p
         assert list(agent["pass_at_k"][arm]["cases"]) == ["case-a"]
         reward_file = tmp_path / "results" / "opencode" / condition / "trials" / "case-a_attempt001" / "reward.json"
         assert json.loads(reward_file.read_text(encoding="utf-8"))["entry_id"] == "case-a", condition
+
+
+def test_collection_reads_each_trial_finding_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Failure checks and judge sidecars are read once per trial, not once per check or reward row."""
+    jobs_dir = tmp_path / "jobs"
+    for variant in ("with", "without"):
+        for case_id in CASES:
+            _write_reward(jobs_dir, variant=variant, case_id=case_id, attempt=1, steps=("prepare", "finish"))
+    _write_variant_job_results(jobs_dir)
+    reads: Counter[tuple[str, str]] = Counter()
+
+    def counted(name: str) -> Any:
+        original = getattr(collector_module, name)
+
+        def wrapper(trial_dir: Path, *args: Any) -> Any:
+            reads[(name, os.fspath(trial_dir))] += 1
+            return original(trial_dir, *args)
+
+        return wrapper
+
+    for name in ("_agent_runtime_failure_reason", "_trial_failure_reason", "_judge_sidecar_findings"):
+        monkeypatch.setattr(collector_module, name, counted(name))
+
+    result = _collect(tmp_path, n_attempts=1)
+
+    assert result["execution_status"] == "succeeded"
+    assert len(reads) == 3 * 2 * len(CASES)  # each finding, for each trial of both arms
+    assert set(reads.values()) == {1}
 
 
 def test_stop_on_pass_does_not_report_intentionally_skipped_attempts(tmp_path: Path) -> None:

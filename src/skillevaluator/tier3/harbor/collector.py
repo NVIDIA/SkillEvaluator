@@ -668,10 +668,6 @@ def _agent_runtime_failure_reason(trial_dir: Path) -> str:
     return ""
 
 
-def _is_agent_runtime_failure_trial(trial_dir: Path) -> bool:
-    return bool(_agent_runtime_failure_reason(trial_dir))
-
-
 def _read_failed_judge_sidecar(
     path: Path,
     *,
@@ -784,16 +780,58 @@ def _failed_judge_sidecar_paths(trial_dir: Path) -> tuple[list[tuple[str, Path, 
     return sorted(candidates, key=lambda item: (item[0], item[1].as_posix())), scan_failure
 
 
+@dataclass(frozen=True)
+class _JudgeSidecarFindings:
+    """What one trial's verifier sidecars say, from one bounded no-follow scan.
+
+    Readers share one instance per trial and must not modify it.
+    """
+
+    # The failed-judge diagnostic that makes the trial unscoreable, if any.
+    failure_diagnostic: dict[str, Any] | None
+    # Judged metrics each readable sidecar recorded as N/A, keyed by step
+    # directory name ("" for the trial-root verifier). Empty when the scan was
+    # incomplete; the failure diagnostic then makes the trial unscoreable.
+    declared_not_applicable: dict[str, frozenset[str]]
+
+
+def _judge_sidecar_findings(trial_dir: Path) -> _JudgeSidecarFindings:
+    """Scan and read a trial's judge sidecars once, keeping only what collection uses."""
+    sidecar_paths, scan_failure = _failed_judge_sidecar_paths(trial_dir)
+    sidecars = [
+        (step_name, *_read_failed_judge_sidecar(path, trial_dir=trial_dir, expected=expected))
+        for step_name, path, expected in sidecar_paths
+    ]
+    declared_not_applicable: dict[str, frozenset[str]] = {}
+    if not scan_failure:
+        for step_name, sidecar, read_failure in sidecars:
+            if read_failure or sidecar is None:
+                continue
+            declared_not_applicable[step_name] = frozenset(
+                metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric_is_not_applicable(sidecar, metric)
+            )
+    return _JudgeSidecarFindings(
+        failure_diagnostic=_judge_failure_diagnostic(sidecars, scan_failure),
+        declared_not_applicable=declared_not_applicable,
+    )
+
+
 def _failed_judge_diagnostic(trial_dir: Path) -> dict[str, Any] | None:
-    """Project failed judge sidecars into one safe, intrinsically unscoreable record."""
+    """Project a trial's failed judge sidecars into one safe, intrinsically unscoreable record."""
+    return _judge_sidecar_findings(trial_dir).failure_diagnostic
+
+
+def _judge_failure_diagnostic(
+    sidecars: list[tuple[str, dict[str, Any] | None, str]],
+    scan_failure: str,
+) -> dict[str, Any] | None:
+    """Project read sidecars ``(step, sidecar, read failure)`` into one unscoreable record."""
     errors: dict[str, str] = {}
     entry_id = ""
-    sidecar_paths, scan_failure = _failed_judge_sidecar_paths(trial_dir)
     found_failure = bool(scan_failure)
     if scan_failure:
         errors["collector"] = scan_failure
-    for step_name, path, expected in sidecar_paths:
-        sidecar, read_failure = _read_failed_judge_sidecar(path, trial_dir=trial_dir, expected=expected)
+    for step_name, sidecar, read_failure in sidecars:
         if read_failure:
             found_failure = True
             errors.setdefault("collector", read_failure)
@@ -857,13 +895,13 @@ def _unsafe_trial_directory_reason(trial_dir: Path) -> str:
     return "Unsafe Harbor trial directory could not be inspected; trial was not scored"
 
 
-def _trial_failure_reason(trial_dir: Path) -> str:
+def _trial_failure_reason(trial_dir: Path, artifacts: _TrialArtifacts | None = None) -> str:
     """Return the failure recorded for any incomplete Harbor trial."""
     if unsafe_reason := _unsafe_trial_directory_reason(trial_dir):
         return unsafe_reason
     _, exception_reason = _trial_exception_details(trial_dir)
     if exception_reason:
-        if diagnostic := _failed_judge_diagnostic(trial_dir):
+        if diagnostic := _judge_findings(trial_dir, artifacts).failure_diagnostic:
             return _unscoreable_reward_reason(diagnostic)
         return exception_reason
     exception_file = trial_dir / "exception.txt"
@@ -874,12 +912,60 @@ def _trial_failure_reason(trial_dir: Path) -> str:
     reason = next((line for line in reversed(lines) if line), "")
     if not reason:
         return ""
-    if diagnostic := _failed_judge_diagnostic(trial_dir):
+    if diagnostic := _judge_findings(trial_dir, artifacts).failure_diagnostic:
         return _unscoreable_reward_reason(diagnostic)
     return f"HarborTrialError: {reason}"[:600]
 
 
-def _extract_trial_failures(job_dir: Path) -> list[dict[str, str]]:
+class _TrialArtifacts:
+    """Read-once findings about the trials of one Harbor job.
+
+    Collection consults each trial several times: its trial and agent-runtime
+    failures before extracting rewards and again for each reward row, its judge
+    sidecars for each reward merge, and its hook census for both the scored and
+    the every-trial summaries. A collected job no longer changes, so each
+    finding is read once through the same bounded no-follow readers. Only the
+    small findings are kept, never a parsed trajectory or log.
+    """
+
+    def __init__(self) -> None:
+        self._trial_failures: dict[Path, str] = {}
+        self._runtime_failures: dict[Path, str] = {}
+        self._judge_findings: dict[Path, _JudgeSidecarFindings] = {}
+        self._hook_censuses: dict[Path, dict[str, Any]] = {}
+
+    def trial_failure(self, trial_dir: Path) -> str:
+        if trial_dir not in self._trial_failures:
+            self._trial_failures[trial_dir] = _trial_failure_reason(trial_dir, self)
+        return self._trial_failures[trial_dir]
+
+    def runtime_failure(self, trial_dir: Path) -> str:
+        if trial_dir not in self._runtime_failures:
+            self._runtime_failures[trial_dir] = _agent_runtime_failure_reason(trial_dir)
+        return self._runtime_failures[trial_dir]
+
+    def unscoreable(self, trial_dir: Path) -> bool:
+        """Whether the trial or its agent runtime failed, so none of its rewards are scored."""
+        return bool(self.trial_failure(trial_dir) or self.runtime_failure(trial_dir))
+
+    def judge_findings(self, trial_dir: Path) -> _JudgeSidecarFindings:
+        if trial_dir not in self._judge_findings:
+            self._judge_findings[trial_dir] = _judge_sidecar_findings(trial_dir)
+        return self._judge_findings[trial_dir]
+
+    def hook_census(self, trial_root: Path) -> dict[str, Any]:
+        if trial_root not in self._hook_censuses:
+            self._hook_censuses[trial_root] = read_hook_census(trial_root)
+        return self._hook_censuses[trial_root]
+
+
+def _judge_findings(trial_dir: Path, artifacts: _TrialArtifacts | None) -> _JudgeSidecarFindings:
+    """The trial's judge sidecar findings, read once per collection when *artifacts* is given."""
+    return artifacts.judge_findings(trial_dir) if artifacts is not None else _judge_sidecar_findings(trial_dir)
+
+
+def _extract_trial_failures(job_dir: Path, artifacts: _TrialArtifacts | None = None) -> list[dict[str, str]]:
+    artifacts = artifacts or _TrialArtifacts()
     failures: list[dict[str, str]] = []
     for trial_dir in sorted(job_dir.iterdir()):
         kind, unsafe_reason = _inspect_trial_directory(trial_dir)
@@ -888,7 +974,7 @@ def _extract_trial_failures(job_dir: Path) -> list[dict[str, str]]:
             continue
         if kind != "directory":
             continue
-        reason = _trial_failure_reason(trial_dir)
+        reason = artifacts.trial_failure(trial_dir)
         if reason:
             failures.append({"trial": trial_dir.name, "reason": redact_sensitive_text(reason)})
     return failures
@@ -933,13 +1019,14 @@ def _can_preserve_partial_rewards(job_dir: Path, trial_failures: list[dict[str, 
     return len(failed_trials) >= errors
 
 
-def _extract_agent_runtime_failures(job_dir: Path) -> list[dict[str, str]]:
+def _extract_agent_runtime_failures(job_dir: Path, artifacts: _TrialArtifacts | None = None) -> list[dict[str, str]]:
+    artifacts = artifacts or _TrialArtifacts()
     failures: list[dict[str, str]] = []
     for trial_dir in sorted(job_dir.iterdir()):
         kind, _reason = _inspect_trial_directory(trial_dir)
         if kind != "directory":
             continue
-        reason = _agent_runtime_failure_reason(trial_dir)
+        reason = artifacts.runtime_failure(trial_dir)
         if reason:
             failures.append({"trial": trial_dir.name, "reason": redact_sensitive_text(reason)})
     return failures
@@ -1483,14 +1570,18 @@ def _merge_reward_sidecars(data: dict[str, Any], verifier_dir: Path) -> None:
             data.setdefault(key, value)
 
 
-def _merge_trial_evaluation_failures(data: dict[str, Any], trial_dir: Path) -> None:
+def _merge_trial_evaluation_failures(
+    data: dict[str, Any],
+    trial_dir: Path,
+    artifacts: _TrialArtifacts | None = None,
+) -> None:
     """Preserve judge-failure diagnostics when Harbor supplies an aggregate reward."""
     # Pure custom-only verifiers do not run the standard Tier-3 LLM judge and
     # must not inherit its sidecar scan limits merely because step directories
     # exist. Default and default-plus-custom rewards carry canonical metrics.
     if not _standard_reward_metrics(data):
         return
-    diagnostic = _failed_judge_diagnostic(trial_dir)
+    diagnostic = _judge_findings(trial_dir, artifacts).failure_diagnostic
     if diagnostic is None:
         return
 
@@ -1563,7 +1654,11 @@ def _physical_steps_layout_present(trial_root: Path) -> bool:
     return True
 
 
-def _constituent_default_reward_failure(result: dict[str, Any], trial_root: Path | None = None) -> str:
+def _constituent_default_reward_failure(
+    result: dict[str, Any],
+    trial_root: Path | None = None,
+    artifacts: _TrialArtifacts | None = None,
+) -> str:
     """Return a safe failure when a standard step reward cannot support its aggregate."""
     root_verifier = result.get("verifier_result")
     root_rewards = root_verifier.get("rewards") if isinstance(root_verifier, dict) else None
@@ -1655,7 +1750,7 @@ def _constituent_default_reward_failure(result: dict[str, Any], trial_root: Path
         raw_step_name = step.get("step_name")
         if trial_root is not None and isinstance(raw_step_name, str) and not missing.intersection(rewards):
             if declared_not_applicable is None:
-                declared_not_applicable = _declared_not_applicable_metrics(trial_root)
+                declared_not_applicable = _judge_findings(trial_root, artifacts).declared_not_applicable
             if missing <= declared_not_applicable.get(raw_step_name, frozenset()):
                 continue
 
@@ -1666,28 +1761,11 @@ def _constituent_default_reward_failure(result: dict[str, Any], trial_root: Path
     return ""
 
 
-def _declared_not_applicable_metrics(trial_dir: Path) -> dict[str, frozenset[str]]:
-    """Return the judged metrics each verifier sidecar recorded as N/A.
-
-    Keys are step directory names, with ``""`` for the trial-root verifier.
-    Reuses the bounded, no-follow sidecar scan; an incomplete scan declares
-    nothing (the judge-failure merge already makes that trial unscoreable).
-    """
-    sidecar_paths, scan_failure = _failed_judge_sidecar_paths(trial_dir)
-    if scan_failure:
-        return {}
-    declared: dict[str, frozenset[str]] = {}
-    for step_name, path, expected in sidecar_paths:
-        sidecar, read_failure = _read_failed_judge_sidecar(path, trial_dir=trial_dir, expected=expected)
-        if read_failure or sidecar is None:
-            continue
-        declared[step_name] = frozenset(
-            metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric_is_not_applicable(sidecar, metric)
-        )
-    return declared
-
-
-def _restore_not_applicable_markers(data: dict[str, Any], trial_dir: Path) -> None:
+def _restore_not_applicable_markers(
+    data: dict[str, Any],
+    trial_dir: Path,
+    artifacts: _TrialArtifacts | None = None,
+) -> None:
     """Carry verifier N/A markers onto a reward rebuilt from Harbor's numeric ``result.json``.
 
     A judged metric absent from the rebuilt reward becomes N/A only when every
@@ -1700,7 +1778,7 @@ def _restore_not_applicable_markers(data: dict[str, Any], trial_dir: Path) -> No
     absent = [metric for metric in metrics if metric in NOT_APPLICABLE_ELIGIBLE_METRICS and metric not in data]
     if not absent:
         return
-    declared = _declared_not_applicable_metrics(trial_dir)
+    declared = _judge_findings(trial_dir, artifacts).declared_not_applicable
     if not declared:
         return
     for metric in absent:
@@ -1712,9 +1790,10 @@ def _merge_constituent_default_reward_failure(
     data: dict[str, Any],
     result: dict[str, Any],
     trial_root: Path | None = None,
+    artifacts: _TrialArtifacts | None = None,
 ) -> None:
     """Make an aggregate unscoreable when one of its standard constituents is invalid."""
-    reason = _constituent_default_reward_failure(result, trial_root)
+    reason = _constituent_default_reward_failure(result, trial_root, artifacts)
     if not reason:
         return
     data["evaluation_status"] = "failed"
@@ -1801,8 +1880,14 @@ def _extract_rewards(
     *,
     arm_suffix: str = "",
     task_entry_id_map: Mapping[str, str] | None = None,
+    artifacts: _TrialArtifacts | None = None,
 ) -> list[dict[str, Any]]:
-    """Extract reward.json from all trials in a job directory."""
+    """Extract reward.json from all trials in a job directory.
+
+    Rewards of a failed trial, or of a trial whose agent runtime failed, are
+    never extracted.
+    """
+    artifacts = artifacts or _TrialArtifacts()
     rewards: list[dict[str, Any]] = []
     scored_trial_roots: set[Path] = set()
     authoritative_trial_roots: set[Path] = set()
@@ -1853,7 +1938,7 @@ def _extract_rewards(
     # single logical row first so both averages and pass@k use the same score.
     for result_file in sorted(job_dir.glob("*/result.json")):
         trial_dir = result_file.parent
-        if _trial_failure_reason(trial_dir) or _is_agent_runtime_failure_trial(trial_dir):
+        if artifacts.unscoreable(trial_dir):
             continue
         result = _read_json(result_file)
         if not isinstance(result, dict) or not isinstance(result.get("step_results"), list):
@@ -1864,9 +1949,9 @@ def _extract_rewards(
         data = _reward_from_harbor_result(result)
         if not data:
             continue
-        _merge_constituent_default_reward_failure(data, result, trial_dir)
-        _merge_trial_evaluation_failures(data, trial_dir)
-        _restore_not_applicable_markers(data, trial_dir)
+        _merge_constituent_default_reward_failure(data, result, trial_dir, artifacts)
+        _merge_trial_evaluation_failures(data, trial_dir, artifacts)
+        _restore_not_applicable_markers(data, trial_dir, artifacts)
         trial_name = str(result.get("trial_name") or trial_dir.name)
         data["_trial_name"] = trial_name
         data["_trial_root_name"] = trial_dir.name
@@ -1884,7 +1969,7 @@ def _extract_rewards(
         if reward_file.parent.name == "verifier":
             try:
                 trial_dir, trial_name, step_name = _reward_trial_context(reward_file)
-                if _trial_failure_reason(trial_dir) or _is_agent_runtime_failure_trial(trial_dir):
+                if artifacts.unscoreable(trial_dir):
                     continue
                 if trial_dir in authoritative_trial_roots:
                     continue
@@ -1893,13 +1978,7 @@ def _extract_rewards(
                     logger.warning("Ignoring invalid or oversized Harbor reward: %s", reward_file)
                     continue
                 _merge_reward_sidecars(data, reward_file.parent)
-                _merge_trial_evaluation_failures(data, trial_dir)
-                if _trial_failure_reason(trial_dir) or _is_agent_runtime_failure_trial(trial_dir):
-                    logger.debug(
-                        "Skipping reward for failed Harbor trial: %s",
-                        trial_dir,
-                    )
-                    continue
+                _merge_trial_evaluation_failures(data, trial_dir, artifacts)
                 data["_trial_name"] = trial_name
                 data["_trial_root_name"] = trial_dir.name
                 if arm_suffix:
@@ -1912,7 +1991,7 @@ def _extract_rewards(
                     result = _read_json(result_file)
                     if isinstance(result, dict):
                         parsed_result = result
-                        _merge_constituent_default_reward_failure(data, result, trial_dir)
+                        _merge_constituent_default_reward_failure(data, result, trial_dir, artifacts)
                         data["_started_at"] = result.get("started_at")
                 _populate_reward_entry_id(data, parsed_result, trial_name)
                 traj_file = _reward_trajectory_path(trial_dir, step_name)
@@ -1928,8 +2007,7 @@ def _extract_rewards(
         if (
             trial_dir in authoritative_trial_roots
             or trial_dir in scored_trial_roots
-            or _trial_failure_reason(trial_dir)
-            or _is_agent_runtime_failure_trial(trial_dir)
+            or artifacts.unscoreable(trial_dir)
         ):
             continue
         result = _read_json(result_file)
@@ -1938,9 +2016,9 @@ def _extract_rewards(
         data = _reward_from_harbor_result(result)
         if not data:
             continue
-        _merge_constituent_default_reward_failure(data, result, trial_dir)
-        _merge_trial_evaluation_failures(data, trial_dir)
-        _restore_not_applicable_markers(data, trial_dir)
+        _merge_constituent_default_reward_failure(data, result, trial_dir, artifacts)
+        _merge_trial_evaluation_failures(data, trial_dir, artifacts)
+        _restore_not_applicable_markers(data, trial_dir, artifacts)
         trial_name = str(result.get("trial_name") or trial_dir.name)
         data["_trial_name"] = trial_name
         data["_trial_root_name"] = trial_dir.name
@@ -2367,10 +2445,11 @@ def harbor_job_passed(job_dir: Path, pass_threshold: float) -> bool:
     step rewards are averaged only when Harbor did not persist one.
     """
     job_ok, _ = validate_harbor_job_result(job_dir / "result.json")
-    trial_failures = _extract_trial_failures(job_dir)
+    artifacts = _TrialArtifacts()
+    trial_failures = _extract_trial_failures(job_dir, artifacts)
     if not job_ok and not _can_preserve_partial_rewards(job_dir, trial_failures):
         return False
-    rewards, _ = _partition_scoreable_rewards(_extract_rewards(job_dir))
+    rewards, _ = _partition_scoreable_rewards(_extract_rewards(job_dir, artifacts=artifacts))
     return any(
         (score := _overall_score(reward)) is not None and score >= pass_threshold
         for reward in _logical_attempt_rewards(rewards)
@@ -3325,6 +3404,7 @@ def _attach_plugin_signals(
     *,
     arm: str,
     expected_case_ids: list[str] | None,
+    artifacts: _TrialArtifacts | None = None,
 ) -> dict[str, Any] | None:
     """Attach report-only ``plugin_signals`` to scored rewards and return the arm summary.
 
@@ -3335,6 +3415,7 @@ def _attach_plugin_signals(
     """
     if context is None or job_dir is None or not context.arm_enabled(arm):
         return None
+    artifacts = artifacts or _TrialArtifacts()
     case_ids = set(expected_case_ids or [])
     groups: dict[str, list[dict[str, Any]]] = {}
     for reward in rewards:
@@ -3354,7 +3435,7 @@ def _attach_plugin_signals(
             subagent_aliases=context.aliases_for(arm),
         )
         # Hook census lines written by templates/hook_census.sh (native hook staging).
-        census = read_hook_census(job_dir / root)
+        census = artifacts.hook_census(job_dir / root)
         censuses.append(census)
         if signals is not None:
             signals["hook_census"] = census
@@ -3383,9 +3464,10 @@ def _arm_trial_roots(job_dir: Path | None) -> list[str]:
     return roots
 
 
-def _arm_hook_census(job_dir: Path | None) -> dict[str, Any]:
+def _arm_hook_census(job_dir: Path | None, artifacts: _TrialArtifacts | None = None) -> dict[str, Any]:
     """Hook census summary over every trial of one arm, including trials that were not scored."""
-    return summarize_hook_census([read_hook_census(job_dir / root) for root in _arm_trial_roots(job_dir)])
+    artifacts = artifacts or _TrialArtifacts()
+    return summarize_hook_census([artifacts.hook_census(job_dir / root) for root in _arm_trial_roots(job_dir)])
 
 
 def _trial_load_census(
@@ -4012,8 +4094,9 @@ def _collect_arm(
         job_dir / "result.json",
         expected_trials=collection.expected_trials,
     )
-    runtime_failures = _extract_agent_runtime_failures(job_dir)
-    trial_failures = _extract_trial_failures(job_dir)
+    artifacts = _TrialArtifacts()
+    runtime_failures = _extract_agent_runtime_failures(job_dir, artifacts)
+    trial_failures = _extract_trial_failures(job_dir, artifacts)
     collected_rewards: list[dict[str, Any]] = []
     if job_ok or _can_preserve_partial_rewards(job_dir, trial_failures):
         collected_rewards = _extract_rewards(
@@ -4025,6 +4108,7 @@ def _collect_arm(
                 arm.variant,
                 arm_suffix=arm.arm_suffix,
             ),
+            artifacts=artifacts,
         )
     # Only scoreable rewards are averaged. Every collected reward is saved below,
     # so an invalid-score trial keeps its redacted diagnostics.
@@ -4066,9 +4150,10 @@ def _collect_arm(
         collection.plugin_signals,
         arm=arm.key,
         expected_case_ids=collection.expected_case_ids,
+        artifacts=artifacts,
     )
     if plugin_signals_summary is not None and arm.hook_census_every_trial:
-        plugin_signals_summary["hook_census"] = _arm_hook_census(job_dir)
+        plugin_signals_summary["hook_census"] = _arm_hook_census(job_dir, artifacts)
     canary_summary = summarize_canary(rewards)
     collection.save_trials(arm, collected_rewards, job_dir)
     collection.write_summary(

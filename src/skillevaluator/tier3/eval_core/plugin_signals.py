@@ -104,7 +104,8 @@ import shlex
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from functools import cached_property
+from typing import Any, NamedTuple
 
 import regex
 
@@ -933,6 +934,24 @@ class _Ident:
         return self.label if self.persist_name else f"{_IDENTITY_PREFIX[self.kind or '']}:{_NON_NAME}"
 
 
+class _ShellPaths(NamedTuple):
+    reads: list[str]
+    writes: list[str]
+
+
+class _Result(NamedTuple):
+    """One tool result of a step.
+
+    ``scan`` is the part of ``text`` that failure markers are checked against,
+    and ``flagged`` whether the result carries a structured error flag.
+    """
+
+    call_id: str
+    text: str
+    scan: str
+    flagged: bool
+
+
 @dataclass
 class _Call:
     """One normalized tool call.
@@ -952,8 +971,6 @@ class _Call:
     observation: str | None = None
     succeeded: bool | None = None
     owner: int | None = None
-    _args_text: str | None = None
-    _shell_paths: tuple[list[str], list[str]] | None = None
 
     @property
     def is_shell(self) -> bool:
@@ -969,36 +986,32 @@ class _Call:
             return True
         return self.fn_base in _READ_TOOLS
 
-    @property
+    @cached_property
     def args_text(self) -> str:
-        if self._args_text is None:
-            try:
-                text = json.dumps(self.args, ensure_ascii=False, sort_keys=True, default=str)
-            except (TypeError, ValueError, RecursionError):
-                text = ""
-            self._args_text = text[:_MAX_ARGS_TEXT_CHARS]
-        return self._args_text
+        try:
+            text = json.dumps(self.args, ensure_ascii=False, sort_keys=True, default=str)
+        except (TypeError, ValueError, RecursionError):
+            text = ""
+        return text[:_MAX_ARGS_TEXT_CHARS]
 
     @property
     def component_idents(self) -> list[_Ident]:
         return [ident for ident in self.idents if ident.kind is not None]
 
-    @property
-    def shell_paths(self) -> tuple[list[str], list[str]]:
-        """Distinct normalized ``(read, written)`` shell path operands, parsed once per call."""
-        if self._shell_paths is None:
-            reads: dict[str, None] = {}
-            writes: dict[str, None] = {}
-            if self.is_shell:
-                for text in _shell_texts(self.fn_base, self.args):
-                    text_reads, text_writes = _shell_io(text, reader_verbs=_ARTIFACT_CONSUMER_VERBS)
-                    if _APPLY_PATCH_COMMAND_RE.search(text):
-                        # A shell ``apply_patch <<'EOF'`` (Codex) writes the files its patch headers name.
-                        text_writes.extend(_patch_file_paths(text))
-                    reads.update(dict.fromkeys(_normalize_path(path) for path in text_reads))
-                    writes.update(dict.fromkeys(_normalize_path(path) for path in text_writes))
-            self._shell_paths = (list(reads), list(writes))
-        return self._shell_paths
+    @cached_property
+    def shell_paths(self) -> _ShellPaths:
+        """Distinct normalized shell path operands this call reads and writes."""
+        reads: dict[str, None] = {}
+        writes: dict[str, None] = {}
+        if self.is_shell:
+            for text in _shell_texts(self.fn_base, self.args):
+                text_reads, text_writes = _shell_io(text, reader_verbs=_ARTIFACT_CONSUMER_VERBS)
+                if _APPLY_PATCH_COMMAND_RE.search(text):
+                    # A shell ``apply_patch <<'EOF'`` (Codex) writes the files its patch headers name.
+                    text_writes.extend(_patch_file_paths(text))
+                reads.update(dict.fromkeys(_normalize_path(path) for path in text_reads))
+                writes.update(dict.fromkeys(_normalize_path(path) for path in text_writes))
+        return _ShellPaths(list(reads), list(writes))
 
 
 def _safe_text(value: Any, limit: int = _MAX_LABEL_CHARS) -> str:
@@ -1091,41 +1104,39 @@ def _result_flagged(result: Mapping[str, Any]) -> bool:
     return isinstance(content, Mapping) and content.get("isError") is True
 
 
-def _observations(step: Mapping[str, Any]) -> list[tuple[str, str, str, bool]]:
-    """``(source_call_id, text, failure_scan_text, flagged)`` for each result of ``step``."""
+def _observations(step: Mapping[str, Any]) -> list[_Result]:
+    """Each result of ``step``."""
     observation = step.get("observation")
     if not isinstance(observation, Mapping):
         return []
     results = observation.get("results")
     if not isinstance(results, list):
         return []
-    entries: list[tuple[str, str, str, bool]] = []
+    entries: list[_Result] = []
     for result in results[:256]:
         if not isinstance(result, Mapping):
             continue
         parts = _content_parts(result.get("content"))
         text = "\n".join(parts)[:_MAX_OBSERVATION_CHARS]
         entries.append(
-            (
-                str(result.get("source_call_id") or ""),
-                text,
-                _failure_scan_text(parts, text),
-                _result_flagged(result),
+            _Result(
+                call_id=str(result.get("source_call_id") or ""),
+                text=text,
+                scan=_failure_scan_text(parts, text),
+                flagged=_result_flagged(result),
             )
         )
     return entries
 
 
-def _results_for_call(
-    results: list[tuple[str, str, str, bool]], call_id: str, *, call_count: int
-) -> list[tuple[str, str, bool]]:
+def _results_for_call(results: Sequence[_Result], call_id: str, *, call_count: int) -> list[_Result]:
     """Results attributable to ``call_id``; id matches win, ambiguity stays unknown."""
     if call_id:
-        matched = [(text, scan, flagged) for rid, text, scan, flagged in results if rid == call_id]
+        matched = [result for result in results if result.call_id == call_id]
         if matched:
             return matched
-    if call_count == 1 and len(results) == 1 and not results[0][0]:
-        return [results[0][1:]]
+    if call_count == 1 and len(results) == 1 and not results[0].call_id:
+        return [results[0]]
     return []
 
 
@@ -1155,7 +1166,7 @@ def _content_read_scan(text: str, *, shell: bool) -> str:
 
 
 def _outcome(
-    correlated: list[tuple[str, str, bool]], *, shell: bool, content_read: bool = False
+    correlated: Sequence[_Result], *, shell: bool, content_read: bool = False
 ) -> tuple[str | None, bool | None]:
     """``(observation text, succeeded)`` for one call (see the module docs).
 
@@ -1167,14 +1178,14 @@ def _outcome(
     """
     if not correlated:
         return None, None
-    text = "".join(item for item, _, _ in correlated)[:_MAX_OBSERVATION_CHARS]
-    flagged = any(is_error for _, _, is_error in correlated)
+    text = "".join(result.text for result in correlated)[:_MAX_OBSERVATION_CHARS]
+    flagged = any(result.flagged for result in correlated)
     if not flagged and not text.strip():
         return text, None
     if content_read:
-        scan = "\n".join(_content_read_scan(item, shell=shell) for item, _, _ in correlated)
+        scan = "\n".join(_content_read_scan(result.text, shell=shell) for result in correlated)
     else:
-        scan = "\n".join(window for _, window, _ in correlated)
+        scan = "\n".join(result.scan for result in correlated)
     lowered = scan.casefold()
     markers = _UNAVAILABLE_MARKERS if shell else (*_UNAVAILABLE_MARKERS, *_FILE_MISSING_MARKERS)
     failed = flagged or any(marker in lowered for marker in markers) or bool(_FAILED_CALL_RE.search(scan))
@@ -2166,7 +2177,7 @@ def _call_writes(call: _Call, artifact: str) -> bool:
             return True
         return fn_base in _PATCH_TOOLS and any(_path_matches(path, artifact) for path in _patch_targets(call.args))
     if call.is_shell:
-        return any(_normalized_path_matches(path, artifact) for path in call.shell_paths[1])
+        return any(_normalized_path_matches(path, artifact) for path in call.shell_paths.writes)
     if call.mcp is None:
         return False
     tool = (call.mcp.tool or "").casefold()
@@ -2189,7 +2200,7 @@ def _call_reads(call: _Call, artifact: str) -> bool:
     ) and any(_path_matches(path, artifact) for path in _path_args(call.args)):
         return True
     if call.is_shell:
-        return any(_normalized_path_matches(path, artifact) for path in call.shell_paths[0])
+        return any(_normalized_path_matches(path, artifact) for path in call.shell_paths.reads)
     if call.mcp is not None or any(ident.kind == COMPONENT_SUBAGENT for ident in call.idents):
         return any(
             _path_matches(token, artifact)

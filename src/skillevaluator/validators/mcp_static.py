@@ -30,7 +30,7 @@ import unicodedata
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import parse_qs, unquote, urlparse, urlunparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 import idna
 
@@ -43,6 +43,7 @@ from skillevaluator.validators.url_policy import (
     is_env_reference,
     looks_like_inline_secret,
     url_ambiguities,
+    url_credentials,
     whatwg_url,
 )
 
@@ -160,38 +161,42 @@ def _safe_hostname(parsed: Any) -> str | None:
         return None
 
 
-def _check_url_inline_secrets(name: str, url: str, parsed: Any, file_path: str, findings: list[Finding]) -> None:
-    """Flag inline credentials embedded in a URL's userinfo or query string."""
-    try:
-        username, password = parsed.username, parsed.password
-    except ValueError:  # malformed netloc / port
-        username = password = None
-    if (password and not is_env_reference(password)) or (username and not is_env_reference(username)):
+def _check_url_inline_secrets(
+    name: str, url: str, file_path: str, findings: list[Finding], *, ambiguous: bool = False
+) -> None:
+    """Flag credentials written into a URL's userinfo or query string.
+
+    The URL is read as written and, when it is ``ambiguous``, also the way WHATWG
+    clients read it: they find userinfo that urllib does not see, for example in
+    ``https:user:password@host``. A client sends any userinfo it finds, so even a
+    ``${VAR}`` user name or password counts.
+    """
+    readings = [url_credentials(url.strip(), any_userinfo=True)]
+    if ambiguous:
+        readings.append(url_credentials(whatwg_url(url), any_userinfo=True))
+    if any(reading.userinfo for reading in readings):
         findings.append(
             _finding(
                 Severity.CRITICAL,
                 "mcp_url_inline_secret",
-                f"url embeds inline userinfo credentials: {redacted_url(url)!r} (userinfo withheld); only "
-                "${ENV} references are allowed",
+                f"url embeds userinfo credentials: {redacted_url(url)!r} (userinfo withheld)",
                 file_path,
                 'Remove user:password@ from the URL; pass credentials by reference (e.g. header "${MY_TOKEN}").',
                 name=name,
             )
         )
-    for key, values in parse_qs(parsed.query, keep_blank_values=True).items():
-        if not is_credential_name(key):
-            continue
-        if any(v and not is_env_reference(v) for v in values):
-            findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "mcp_url_inline_secret",
-                    f"url query parameter {key!r} carries an inline credential; only ${{ENV}} references are allowed",
-                    file_path,
-                    "Do not put credentials in the URL query string; reference a secret handle/env var instead.",
-                    name=name,
-                )
+    for key in dict.fromkeys(key for reading in readings for key in reading.query_keys):
+        shown = "<redacted>" if has_secret_shape(key) else key[:64]
+        findings.append(
+            _finding(
+                Severity.CRITICAL,
+                "mcp_url_inline_secret",
+                f"url query parameter {shown!r} carries an inline credential; only ${{ENV}} references are allowed",
+                file_path,
+                "Do not put credentials in the URL query string; reference a secret handle/env var instead.",
+                name=name,
             )
+        )
 
 
 def _is_insecure_tls_env(key: str, value: str) -> bool:
@@ -432,11 +437,7 @@ def _validate_url(
     scheme = (parsed.scheme or "").lower()
     # Inline credentials in userinfo/query are persisted verbatim; check them
     # independent of the scheme (secure https URLs are the common case).
-    found = len(findings)
-    _check_url_inline_secrets(name, url, raw, file_path, findings)
-    if problems and len(findings) == found:
-        # WHATWG clients read userinfo urllib does not see, e.g. in 'https:user:password@host'.
-        _check_url_inline_secrets(name, url, parsed, file_path, findings)
+    _check_url_inline_secrets(name, url, file_path, findings, ambiguous=bool(problems))
     if problems:
         # A Python client may still connect where urllib reads the host: classify that one too.
         try:

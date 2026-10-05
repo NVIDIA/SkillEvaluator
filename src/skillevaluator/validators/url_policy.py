@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from urllib.parse import urljoin
+from dataclasses import dataclass
+from urllib.parse import parse_qs, unquote, urljoin
 
 # --------------------------------------------------------------------------- #
 # Inline credentials                                                          #
@@ -94,6 +95,65 @@ def looks_like_inline_secret(key: str, value: str) -> bool:
     if not text or is_env_reference(text):
         return False
     return has_secret_shape(text) or is_credential_name(str(key))
+
+
+@dataclass(frozen=True)
+class UrlCredentials:
+    """Where the text of one URL carries credentials; false when it carries none."""
+
+    # The userinfo ('user:password@') carries one.
+    userinfo: bool = False
+    # Query parameters whose value is one, in the order they appear.
+    query_keys: tuple[str, ...] = ()
+
+    def __bool__(self) -> bool:
+        return self.userinfo or bool(self.query_keys)
+
+
+def url_credentials(url: str, *, any_userinfo: bool) -> UrlCredentials:
+    """Credentials written into the text of ``url``: in its userinfo and in its query parameters.
+
+    The URL is read as raw text, so a malformed port or bracket cannot hide a
+    credential: the authority runs from ``//`` to the next ``/``, ``?``, or
+    ``#``, and the userinfo through its last ``@``.
+
+    * Userinfo: with ``any_userinfo`` every user name or password counts, even a
+      ``$VAR`` one, because the client sends what is written there with every
+      request (MCP servers, HTTP hooks). Otherwise (a URL inside a command line)
+      only a literal password counts, or a user name shaped like a token, so
+      ``https://x-access-token:${GITHUB_TOKEN}@github.com/...`` does not.
+    * Query: a parameter counts when it has a literal value under a credential
+      name (``api_key=literal``) or a value shaped like a secret under any name
+      (``q=sk-...``). A ``$VAR`` / ``${VAR}`` reference never counts.
+    """
+    authority = re.split(r"[/?#]", url.partition("//")[2], maxsplit=1)[0]
+    userinfo, at, _host = authority.rpartition("@")
+    user, _colon, password = userinfo.partition(":")
+    query = url.partition("?")[2].partition("#")[0]
+    return UrlCredentials(
+        userinfo=bool(at) and _userinfo_carries_credential(user, password, any_userinfo=any_userinfo),
+        query_keys=tuple(
+            dict.fromkeys(
+                key
+                for key, values in parse_qs(query, keep_blank_values=True).items()
+                if any(_query_value_is_credential(key, value) for value in values)
+            )
+        ),
+    )
+
+
+def _userinfo_carries_credential(user: str, password: str, *, any_userinfo: bool) -> bool:
+    if any_userinfo:
+        return bool(user or password)
+    decoded = unquote(password)
+    literal_password = not password.startswith("$") and bool(decoded.strip()) and not is_env_reference(decoded)
+    return literal_password or has_secret_shape(unquote(user))
+
+
+def _query_value_is_credential(key: str, value: str) -> bool:
+    if not value or is_env_reference(value):
+        return False
+    return is_credential_name(key) or has_secret_shape(value)
 
 
 # --------------------------------------------------------------------------- #

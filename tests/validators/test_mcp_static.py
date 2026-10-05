@@ -15,7 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.validators.mcp_static import validate_contained_mcp_servers
+from skillevaluator.models.result import Severity
+from skillevaluator.validators.mcp_static import validate_contained_mcp_servers, validate_mcp_server_declaration
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 
 
@@ -464,6 +465,36 @@ def test_url_query_credential_literal_blocked() -> None:
 def test_url_query_credential_env_reference_allowed() -> None:
     findings = validate_contained_mcp_servers({"s": {"url": "https://host/mcp?api_key=${API_KEY}"}}, "p.json")
     assert "mcp_url_inline_secret" not in _checks(findings)
+
+
+_GITHUB_TOKEN = "ghp_" + "0123456789abcdefghij0123456789abcdef"
+_OPENAI_KEY = "sk-" + "abcdefghijklmnop1234"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [f"key={_GITHUB_TOKEN}", f"q={_OPENAI_KEY}", f"page=2&state={_GITHUB_TOKEN}", "auth=Bearer%20abcdefghijklmnop"],
+)
+def test_url_query_value_shaped_like_a_secret_is_blocked_under_any_name(query: str) -> None:
+    """Regression: only credential-named keys were checked, so '?key=ghp_...' passed (the hook rule flags it)."""
+    findings = validate_mcp_server_declaration("s", {"url": f"https://h.example/mcp?{query}"}, "p.json")
+
+    assert [(f.check_name, f.severity) for f in findings] == [("mcp_url_inline_secret", Severity.CRITICAL)]
+    assert not any(_GITHUB_TOKEN in f.message or _OPENAI_KEY in f.message for f in findings)
+
+
+def test_url_query_keys_shaped_like_a_secret_are_not_echoed() -> None:
+    url = f"https://h.example/mcp?{_GITHUB_TOKEN}={_OPENAI_KEY}"
+    findings = validate_mcp_server_declaration("s", {"url": url}, "p.json")
+
+    assert [f.check_name for f in findings] == ["mcp_url_inline_secret"]
+    assert _GITHUB_TOKEN not in findings[0].message
+
+
+def test_url_userinfo_counts_even_when_written_as_references() -> None:
+    # MCP clients send whatever userinfo the URL holds, so credentials belong in a header.
+    findings = validate_mcp_server_declaration("s", {"url": "https://${USER}:${TOKEN}@h.example/mcp"}, "p.json")
+    assert [(f.check_name, f.severity) for f in findings] == [("mcp_url_inline_secret", Severity.CRITICAL)]
 
 
 # --------------------------------------------------------------------------- #

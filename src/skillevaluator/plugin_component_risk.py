@@ -40,7 +40,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse, urlsplit
+from urllib.parse import unquote, urlparse, urlsplit
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_FILE_BYTES,
@@ -60,6 +60,7 @@ from skillevaluator.validators.url_policy import (
     is_env_reference,
     looks_like_inline_secret,
     url_ambiguities,
+    url_credentials,
     whatwg_url,
 )
 
@@ -2333,35 +2334,9 @@ def _unparsed_url(url: str) -> str:
     return _bounded(f"{prefix}{slashes}{authority.rpartition('@')[2]}{slash}{path}")
 
 
-def _url_embeds_credentials(url: str, *, any_userinfo: bool = False) -> bool:
-    """Whether ``url`` carries credentials in its userinfo or in a credential query parameter.
-
-    Read from the raw text, so a malformed port or bracket cannot hide them. With
-    ``any_userinfo``, every ``user@`` counts (an http hook sends it as Basic
-    auth); otherwise a user name counts only when it looks like a token, and a
-    password only when it is a literal, not a ``$VAR`` reference.
-    """
-    authority = re.split(r"[/?#]", url.partition("//")[2], maxsplit=1)[0]
-    userinfo, at, _host = authority.rpartition("@")
-    if at:
-        user, _colon, password = userinfo.partition(":")
-        if any_userinfo and (user or password):
-            return True
-        if password and not password.startswith("$") and looks_like_inline_secret("password", unquote(password)):
-            return True
-        if user and looks_like_inline_secret("user", unquote(user)):
-            return True
-    query = url.partition("?")[2].partition("#")[0]
-    return any(
-        value and looks_like_inline_secret(key, value)
-        for key, values in parse_qs(query, keep_blank_values=True).items()
-        for value in values
-    )
-
-
 def _command_url_credentials(text: str) -> bool:
     """Whether a command line embeds credentials in a URL (``https://user:password@host``, ``?token=...``)."""
-    return any(_url_embeds_credentials(match.group(0)) for match in _URL_IN_TEXT_RE.finditer(text))
+    return any(url_credentials(match.group(0), any_userinfo=False) for match in _URL_IN_TEXT_RE.finditer(text))
 
 
 def _header_secret(key: str, value: str) -> bool:
@@ -3204,7 +3179,7 @@ class HookAnalyzer:
         # Read from the URL text, so credentials are flagged even when the authority is malformed. Both
         # readings count: any userinfo Claude Code would send, and a literal password or token in the
         # raw text (committed with the plugin even when a backslash moves it out of the client's userinfo).
-        if _url_embeds_credentials(client_url, any_userinfo=True) or _url_embeds_credentials(record.url):
+        if url_credentials(client_url, any_userinfo=True) or url_credentials(record.url, any_userinfo=False):
             record.risk_flags.append("inline_secret")
             analysis.findings.append(
                 _finding(

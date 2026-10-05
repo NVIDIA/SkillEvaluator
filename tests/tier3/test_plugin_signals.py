@@ -708,6 +708,25 @@ class TestHandoff:
         case = {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "artifact": "out/report.json"}]}
         assert _signals(traj, case)["handoff"]["passed"] == 1
 
+    @pytest.mark.parametrize(
+        ("command", "passed"),
+        [
+            ("cd /workspace && apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: out/report.json\n+{}\nEOF", 1),
+            # A header-like line in a file that is not a patch names no write.
+            ("cat > notes.md <<'EOF'\n*** Add File: out/report.json\nEOF", 0),
+        ],
+        ids=["shell-apply-patch", "plain-heredoc"],
+    )
+    def test_shell_apply_patch_headers_count_as_artifact_writes(self, command: str, passed: int) -> None:
+        traj = _traj(
+            _one("Skill", {"skill": "alpha"}),
+            _one("exec_command", {"cmd": command}, call_id="c2"),
+            _one("Skill", {"skill": "beta"}, call_id="c3"),
+            _one("Read", {"file_path": "out/report.json"}, call_id="c4"),
+        )
+        case = {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "artifact": "out/report.json"}]}
+        assert _signals(traj, case)["handoff"]["passed"] == passed
+
     def test_mcp_consumer_receiving_the_artifact_path_counts_as_a_read(self) -> None:
         traj = _traj(
             _one("Skill", {"skill": "alpha"}),

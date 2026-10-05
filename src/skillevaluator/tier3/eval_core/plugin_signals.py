@@ -107,6 +107,7 @@ from typing import Any
 import regex
 
 from skillevaluator.tier3.eval_core.atif_helpers import _patch_file_paths
+from skillevaluator.tier3.eval_core.checks import _APPLY_PATCH_COMMAND_RE
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     MAPPED_OUTER_EXEC_OBSERVATION,
     normalize_tool_call,
@@ -995,6 +996,9 @@ class _Call:
             if fn_base in _SHELL_TOOLS and not any(ident.kind == COMPONENT_MCP for ident in self.idents):
                 for text in _shell_texts(fn_base, self.args):
                     text_reads, text_writes = _shell_io(text, reader_verbs=_ARTIFACT_CONSUMER_VERBS)
+                    if _APPLY_PATCH_COMMAND_RE.search(text):
+                        # A shell ``apply_patch <<'EOF'`` (Codex) writes the files its patch headers name.
+                        text_writes.extend(_patch_file_paths(text))
                     reads.update(dict.fromkeys(_normalize_path(path) for path in text_reads))
                     writes.update(dict.fromkeys(_normalize_path(path) for path in text_writes))
             self._shell_paths = (list(reads), list(writes))

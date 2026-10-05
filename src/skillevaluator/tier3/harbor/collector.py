@@ -20,6 +20,7 @@ import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -3188,6 +3189,7 @@ def _plugin_signal_trajectory(trial_root: Path) -> dict[str, Any] | None:
 
 _CODEX_LOG_MAX_BYTES = 16 * 1024 * 1024
 _CODEX_SESSION_FILES = 8
+_CODEX_SESSION_WALK_ENTRIES = 4_096
 _CODEX_MCP_CALLS = 4_000
 _CODEX_SERVER_NAME_RE = re.compile(r"[^\x00-\x1f\x7f-\x9f]{1,128}")
 
@@ -3215,18 +3217,47 @@ def _codex_json_lines(path: Path) -> list[Any]:
     return events
 
 
-def _codex_session_files(sessions: Path) -> list[Path]:
-    found: list[Path] = []
-    if sessions.is_symlink():
-        return found
+def _is_real_directory(path: Path) -> bool:
     try:
-        for directory, subdirs, files in os.walk(sessions):
-            subdirs[:] = sorted(name for name in subdirs if not (Path(directory) / name).is_symlink())
-            found.extend(Path(directory) / name for name in sorted(files) if name.endswith(".jsonl"))
-            if len(found) >= _CODEX_SESSION_FILES:
-                break
+        metadata = path.lstat()
     except OSError:
+        return False
+    return not stat_is_link_or_reparse(metadata) and stat.S_ISDIR(metadata.st_mode)
+
+
+def _codex_session_files(sessions: Path) -> list[Path]:
+    """Return the first Codex session logs (``*.jsonl``) under ``<trial>/agent/sessions``.
+
+    The tree is agent-writable, so the walk never follows a link or reparse
+    point and lists at most ``_CODEX_SESSION_WALK_ENTRIES`` entries. It visits
+    names in sorted order, a directory's files before its subdirectories.
+    """
+    if not (_is_real_directory(sessions.parent) and _is_real_directory(sessions)):
         return []
+    found: list[Path] = []
+    budget = _CODEX_SESSION_WALK_ENTRIES
+    pending = [sessions]
+    while pending and budget > 0 and len(found) < _CODEX_SESSION_FILES:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(islice(iterator, budget), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        budget -= len(entries)
+        subdirectories: list[Path] = []
+        for entry in entries:
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat_is_link_or_reparse(metadata):
+                continue
+            if stat.S_ISDIR(metadata.st_mode):
+                subdirectories.append(Path(entry.path))
+            elif stat.S_ISREG(metadata.st_mode) and entry.name.endswith(".jsonl"):
+                found.append(Path(entry.path))
+        pending.extend(reversed(subdirectories))
     return found[:_CODEX_SESSION_FILES]
 
 

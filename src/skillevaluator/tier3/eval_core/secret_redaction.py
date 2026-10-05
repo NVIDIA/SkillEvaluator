@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 import re
 
+from skillevaluator.utils.redaction import GITHUB_PAT_RE, GITHUB_TOKEN_RE, GITLAB_PAT_RE, SLACK_TOKEN_RE
+
 # Prefix-style key detectors match either (a) a prefix at a token boundary
 # (negative lookbehind), with any body, or (b) a prefix glued directly onto a
 # word char, but only when followed by a strong real-key signature: a
@@ -40,10 +42,13 @@ LOG_JWT_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?=(?P<lead>(?:\b|[A-Za-z0-9_-]*?-)(?=eyJ)))(?P=lead)"
     r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"
 )
-# GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained (github_pat_) tokens.
-# Single bounded character classes keep both patterns linear.
-LOG_GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,255}\b")
-LOG_GITHUB_PAT_RE = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,255}\b")
+# GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained (github_pat_) tokens,
+# GitLab personal access tokens (glpat-), and Slack tokens (xoxa-/xoxb-/xoxp-/xoxr-/xoxs-):
+# the patterns redact_sensitive_text uses, under the names the Harbor verifier's copy has.
+LOG_GITHUB_TOKEN_RE = GITHUB_TOKEN_RE
+LOG_GITHUB_PAT_RE = GITHUB_PAT_RE
+LOG_GITLAB_PAT_RE = GITLAB_PAT_RE
+LOG_SLACK_TOKEN_RE = SLACK_TOKEN_RE
 
 # Match verifier log redaction; shorter placeholders can corrupt ordinary diagnostic text.
 _MIN_EXACT_SECRET_LENGTH = 8
@@ -87,8 +92,8 @@ def redact_secrets_in_log_line(
     line = LOG_SK_RE.sub("sk-<redacted>", line)
     line = LOG_NVAPI_RE.sub("nvapi-<redacted>", line)
     line = LOG_CRSR_RE.sub("crsr_<redacted>", line)
-    line = LOG_GITHUB_TOKEN_RE.sub(lambda match: match.group()[:4] + "<redacted>", line)
-    line = LOG_GITHUB_PAT_RE.sub("github_pat_<redacted>", line)
+    for pattern in (LOG_GITHUB_TOKEN_RE, LOG_GITHUB_PAT_RE, LOG_GITLAB_PAT_RE, LOG_SLACK_TOKEN_RE):
+        line = pattern.sub(r"\g<prefix><redacted>", line)
     line = OPENSHIFT_TOKEN_RE.sub("sha256~<redacted>", line)
     if "eyJ" not in line:  # every JWT match contains "eyJ"; skip the scan on ordinary lines
         return line

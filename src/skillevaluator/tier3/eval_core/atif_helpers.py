@@ -71,38 +71,6 @@ def get_skill_tool_calls(traj: dict[str, Any]) -> list[str]:
     return skills
 
 
-def get_read_calls(traj: dict[str, Any]) -> list[str]:
-    """Get file paths from read calls and shell commands that inspect ``SKILL.md``."""
-    paths: list[str] = []
-    for tc in get_all_tool_calls(traj):
-        fn = tc["fn"].lower()
-        if fn in ("read", "read_file"):
-            path = tc["args"].get("path", tc["args"].get("file_path", ""))
-            if path:
-                paths.append(str(path))
-        elif fn in ("bash", "execute", "exec_command", "run", "run_code", "shell", "command"):
-            cmd = tc["args"].get("command", "") or tc["args"].get("cmd", "") or tc["args"].get("code", "")
-            if "skill.md" in str(cmd).lower():
-                paths.append(str(cmd))
-    return paths
-
-
-def get_bash_commands(traj: dict[str, Any]) -> list[str]:
-    """Extract command strings from bash/execute/run_code tool calls."""
-    cmds: list[str] = []
-    for _, tc in iter_tool_calls(traj):
-        fn = (tc.get("function_name") or "").lower()
-        if fn in ("bash", "execute", "exec_command", "run_code", "run", "shell", "command"):
-            cmd = (tc.get("arguments") or {}).get("command", "")
-            if not cmd:
-                cmd = (tc.get("arguments") or {}).get("cmd", "")
-            if not cmd:
-                cmd = (tc.get("arguments") or {}).get("code", "")
-            if cmd:
-                cmds.append(str(cmd))
-    return cmds
-
-
 def get_agent_text(traj: dict[str, Any]) -> str:
     """Concatenate all agent message text from the trajectory."""
     parts: list[str] = []
@@ -138,19 +106,6 @@ def get_final_response(traj: dict[str, Any]) -> str:
     steps = traj.get("steps", [])
     index = _final_response_index(steps)
     return "" if index is None else steps[index]["message"]
-
-
-def get_output_tokens(traj: dict[str, Any]) -> int:
-    """Extract total completion tokens from trajectory metrics."""
-    final = traj.get("final_metrics") or {}
-    if final.get("total_completion_tokens"):
-        return int(final["total_completion_tokens"])
-    last = 0
-    for step in traj.get("steps", []):
-        m = step.get("metrics") or {}
-        if m.get("completion_tokens"):
-            last = int(m["completion_tokens"])
-    return last
 
 
 def build_conversation_summary(

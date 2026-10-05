@@ -1838,21 +1838,8 @@ def manifest_rel_for(manifest_path: Path, root: Path) -> str:
 
 
 def parsed_additional_manifests(location: PluginManifestLocation) -> list[tuple[str, str, dict[str, Any]]]:
-    """``(manifest_type, manifest_rel, data)`` of each other supported manifest beside the selected one.
-
-    This is the ``additional`` argument of :func:`build_plugin_inventory`.
-    Each manifest is parsed for audits
-    (:meth:`~skillevaluator.plugin_manifest.PluginManifestCandidate.parse_for_audit`):
-    a client manifest over the read bound or not UTF-8 is read leniently, as
-    Tier 1 reads it, so its hooks and MCP servers are still checked; an unsafe
-    or unparseable one is left out (Tier 1 reports it).
-    """
-    parsed: list[tuple[str, str, dict[str, Any]]] = []
-    for candidate in location.additional:
-        data = candidate.parse_for_audit()
-        if data is not None:
-            parsed.append((candidate.manifest_type, candidate.manifest_filename, data))
-    return parsed
+    """Alias of :meth:`~skillevaluator.plugin_manifest.PluginManifestLocation.parsed_additional`, kept for importers."""
+    return location.parsed_additional()
 
 
 def plugin_inventory_for_root(root: Path) -> PluginInventory | None:
@@ -1882,7 +1869,7 @@ def plugin_inventory_for_root(root: Path) -> PluginInventory | None:
             parsed = None
         data = parsed if isinstance(parsed, dict) else None
         manifest_rel = manifest_rel_for(located.path, located.root)
-        additional = parsed_additional_manifests(located)
+        additional = located.parsed_additional()
     return build_plugin_inventory(
         root,
         data,

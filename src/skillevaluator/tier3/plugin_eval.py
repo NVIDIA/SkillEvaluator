@@ -529,7 +529,8 @@ def _locate_plugin(plugin_path: Path) -> _LocatedPlugin:
         contained=location.contained,
         manifest_rel=manifest_rel_for(location.path, location.root),
         manifest_type=location.manifest_type,
-        additional=_additional_manifests(location),
+        # Inventoried, never staged, so coverage reports what only another client loads.
+        additional=location.parsed_additional(),
     )
     return _LocatedPlugin(location, manifest_text, manifest, name, description, inventory)
 
@@ -1259,23 +1260,6 @@ def write_plugin_provenance(run_dir: Path, provenance: dict[str, Any]) -> Path |
         return target
     except (OSError, SecurePathError):
         return None
-
-
-def _additional_manifests(location: PluginManifestLocation) -> list[tuple[str, str, dict[str, Any] | None]]:
-    """Best-effort bounded parse of the other supported manifests in the root.
-
-    Their components are inventoried (never staged) so coverage reports them.
-    A client manifest over the 1 MiB read bound or not UTF-8 is read leniently,
-    like Tier 1 does, so its hooks and MCP servers still show in coverage. An
-    unsafe or unparseable additional manifest is skipped here; Tier 1 reports
-    it (``manifest_unsafe``, ``plugin_manifest_additional_invalid``).
-    """
-    parsed: list[tuple[str, str, dict[str, Any] | None]] = []
-    for candidate in location.additional:
-        data = candidate.parse_for_audit()
-        if data is not None:
-            parsed.append((candidate.manifest_type, candidate.manifest_filename, data))
-    return parsed
 
 
 def _stageable_component(component: Component, component_type: str) -> bool:

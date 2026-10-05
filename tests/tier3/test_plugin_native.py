@@ -749,6 +749,34 @@ def test_missing_or_linked_harness_logs_read_as_none(tmp_path: Path) -> None:
     assert read_harness_log_prefix(log) == '{"type": "system"}\n'
 
 
+def test_harness_log_under_a_non_directory_reads_as_none(tmp_path: Path) -> None:
+    from skillevaluator.tier3.plugin_native import read_harness_log_prefix
+
+    (tmp_path / "agent").write_text("not a directory", encoding="utf-8")
+    assert read_harness_log_prefix(tmp_path / "agent" / "claude-code.txt") is None
+
+
+def test_collector_keeps_a_claude_census_when_the_harness_log_cannot_be_inspected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.tier3 import plugin_native
+    from skillevaluator.tier3.harbor.collector import _trial_load_census
+    from skillevaluator.utils.secure_fs import SecurePathError
+
+    def inaccessible(path: Path, *args: Any, **kwargs: Any) -> str | None:
+        raise SecurePathError("path_access_error", f"Cannot inspect path safely: {path.name}: Permission denied")
+
+    monkeypatch.setattr(plugin_native, "read_harness_log_prefix", inaccessible)
+    trial = tmp_path / "job" / "trial-1"
+    census = {"agent": "claude-code", "mode": "native", "loaded": [], "not_loaded": []}
+    _write(trial / "agent" / "skilleval-load-census.json", json.dumps(census))
+    declared = [{"type": "skill", "name": "alpha"}]
+    plan = {"mode": "native", "declared": declared, "harness": {"kind": "claude-code-init", "plugin": "p"}}
+
+    result = _trial_load_census(trial, plan, agent="claude-code", mode="native", declared=declared)
+    assert result == {"agent": "claude-code", "mode": "native", "loaded": [], "listed": [], "not_loaded": []}
+
+
 def test_collector_keeps_a_claude_census_when_the_harness_log_is_missing(tmp_path: Path) -> None:
     from skillevaluator.tier3.harbor.collector import _attach_load_census
 

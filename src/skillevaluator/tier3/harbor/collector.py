@@ -3322,7 +3322,12 @@ def _trial_load_census(
     census = restrict_census(census, declared, agent=agent)
     harness = plan.get("harness") if isinstance(plan.get("harness"), Mapping) else {}
     if harness.get("kind") == "claude-code-init" and isinstance(harness.get("plugin"), str):
-        text = read_harness_log_prefix(trial_root / "agent" / CLAUDE_CODE_LOG_FILENAME)
+        try:
+            text = read_harness_log_prefix(trial_root / "agent" / CLAUDE_CODE_LOG_FILENAME)
+        except (SecurePathError, OSError):
+            # The census is advisory: a log that cannot be inspected safely only
+            # leaves this trial without harness evidence.
+            text = None
         init = claude_init_event(text) if text else None
         if init is not None:
             census = apply_claude_init_evidence(census, declared, init, plugin=harness["plugin"])

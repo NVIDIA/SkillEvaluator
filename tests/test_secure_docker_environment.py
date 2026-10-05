@@ -111,6 +111,7 @@ def test_secure_docker_exec_redacts_persistent_and_per_call_credentials_from_all
     environment._resources_compose_path = None
     environment._env_compose_path = None
     environment._mounts_compose_path = None
+    environment._stream_compose_path = None
     environment._use_prebuilt = True
     environment._is_windows_container = False
     environment.extra_docker_compose_paths = []

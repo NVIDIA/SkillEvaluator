@@ -20,10 +20,12 @@ import pytest
 from harbor.models.task.config import TaskConfig, TaskOS
 from harbor.models.task.paths import TaskPaths
 from harbor.models.task.task import Task
-from harbor.models.task.verifier_mode import resolve_effective_verifier_env_config
+from harbor.models.task.verifier_mode import (
+    resolve_effective_verifier_env_config,
+    resolve_verifier_environment_definition,
+)
 from harbor.models.trajectories import Trajectory
 from harbor.models.trial.paths import TrialPaths
-from harbor.trial.trial import Trial
 from harbor.verifier.verifier import Verifier
 
 import skillevaluator.tier3.harbor.adapter as adapter_module
@@ -619,11 +621,9 @@ def test_native_tasks_allow_staged_verifier_env_interpolation_in_separate_verifi
         '    ports: ["18080:80"]\n'
     )
     (verifier_context / "docker-compose.yaml").write_text(compose_text, encoding="utf-8")
-    if verifier_scope == "step":
-        # Harbor 0.22 resolves an existing separate step verifier context as a
-        # complete overlay, so it must provide its own test script instead of
-        # falling back to the task-level tests/test.sh.
-        (verifier_context / "test.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    # A Compose definition makes the verifier a dedicated image that bundles its
+    # own tests; Harbor uploads no tests to it, so it must ship its test script.
+    (verifier_context / "test.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
 
     staged_task = stage_native_harbor_tasks(
         target,
@@ -2707,15 +2707,22 @@ def test_native_custom_only_rejects_top_level_fallback_hidden_by_existing_separa
 
     harbor_task = Task(native_task, disable_verification=True)
     assert harbor_task.config.steps is not None
-    build_context = Trial._verifier_env_build_context(
-        SimpleNamespace(task=harbor_task),
+    definition = resolve_verifier_environment_definition(
+        harbor_task.config,
+        harbor_task.paths,
         harbor_task.config.steps[0],
     )
-    assert build_context.resolve() == step_tests.resolve()
-    assert not (build_context / "test.sh").exists()
+    # The step's Dockerfile makes a dedicated verifier image that bundles its
+    # own tests, so Harbor never uploads the top-level tests/test.sh.
+    assert definition is not None
+    assert definition.directory.resolve() == step_tests.resolve()
+    assert definition.bundled_tests is True
+    assert not (definition.directory / "test.sh").exists()
     output_dir = tmp_path / "native-custom-only-testless-separate-step-context"
 
-    with pytest.raises(FileNotFoundError, match=r"Harbor-resolvable test script for every verifier pass"):
+    # The fixture's evals/grader.py would be injected into tests/, which Harbor
+    # never uploads to the step's dedicated verifier image.
+    with pytest.raises(ValueError, match=r"dedicated verifier image for step 'step-one'"):
         stage_native_harbor_tasks(
             target,
             output_dir,
@@ -2747,12 +2754,16 @@ def test_native_custom_only_accepts_top_level_fallback_for_separate_step_without
 
     harbor_task = Task(native_task, disable_verification=True)
     assert harbor_task.config.steps is not None
-    build_context = Trial._verifier_env_build_context(
-        SimpleNamespace(task=harbor_task),
+    definition = resolve_verifier_environment_definition(
+        harbor_task.config,
+        harbor_task.paths,
         harbor_task.config.steps[0],
     )
-    assert build_context.resolve() == tests_dir.resolve()
-    assert (build_context / "test.sh").is_file()
+    # Without a verifier image or build definition, Harbor builds the verifier
+    # from environment/ and uploads the shared tests/test.sh at verify time.
+    assert definition is not None
+    assert definition.directory.resolve() == (native_task / "environment").resolve()
+    assert definition.bundled_tests is False
 
     [staged] = stage_native_harbor_tasks(
         target,
@@ -4606,3 +4617,95 @@ def test_link_or_reparse_check_accepts_missing_windows_file_attributes(tmp_path:
     )
 
     assert not adapter_module._path_is_link_or_reparse(path, partial_metadata)
+
+
+def _write_separate_verifier_task(target: Path, *, step: bool) -> Path:
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    if step:
+        authored = '\n[[steps]]\nname = "step-one"\n\n[steps.verifier]\nenvironment_mode = "separate"\n'
+        step_dir = native_task / "steps" / "step-one"
+        step_dir.mkdir(parents=True)
+        (step_dir / "instruction.md").write_text("Run step one.\n", encoding="utf-8")
+    else:
+        authored = '\n[verifier]\nenvironment_mode = "separate"\n'
+    task_toml.write_text(task_toml.read_text(encoding="utf-8") + authored, encoding="utf-8")
+    tests_dir = native_task / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test.sh").write_text("#!/bin/sh\nprintf 1 > /logs/verifier/reward.txt\n", encoding="utf-8")
+    return native_task
+
+
+def test_native_fallback_verifier_compose_uses_the_verifier_allowlist(tmp_path: Path) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    native_task = _write_separate_verifier_task(target, step=False)
+    (target / "evals" / "grader.py").unlink()
+    environment_dir = native_task / "environment"
+    environment_dir.mkdir()
+    (environment_dir / "Dockerfile").write_text("FROM python:3.12-slim\n", encoding="utf-8")
+    (environment_dir / "docker-compose.yaml").write_text(
+        "services:\n  main:\n    depends_on: [helper]\n  helper:\n    image: busybox:${AGENT_ONLY}\n",
+        encoding="utf-8",
+    )
+    task = TaskConfig.model_validate_toml((native_task / "task.toml").read_text(encoding="utf-8"))
+    definition = resolve_verifier_environment_definition(task, TaskPaths(native_task))
+    assert definition is not None
+    assert definition.directory == native_task / "environment"
+    assert definition.bundled_tests is False
+
+    # Harbor builds this verifier from environment/, so a value staged only
+    # for the agent must not reach the verifier's Compose model.
+    with pytest.raises(ValueError, match="undeclared interpolation variables"):
+        stage_native_harbor_tasks(
+            target,
+            tmp_path / "native-fallback-verifier-compose",
+            grading_mode="custom_only",
+            runtime_env={"AGENT_ONLY": "${AGENT_ONLY}"},
+            verifier_env={},
+        )
+
+
+@pytest.mark.parametrize("step", [False, True])
+def test_native_separate_verifier_rejects_compose_yml_harbor_ignores(tmp_path: Path, step: bool) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    native_task = _write_separate_verifier_task(target, step=step)
+    context = native_task / "steps" / "step-one" / "tests" if step else native_task / "tests"
+    context.mkdir(parents=True, exist_ok=True)
+    (context / "docker-compose.yml").write_text("services:\n  main: {}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"must be named docker-compose\.yaml"):
+        stage_native_harbor_tasks(
+            target,
+            tmp_path / f"native-yml-verifier-{step}",
+            grading_mode="custom_only",
+        )
+
+
+def test_native_dedicated_verifier_image_without_bundled_test_is_incomplete(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.adapter import _native_custom_only_tests_are_complete
+
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    native_task = _write_separate_verifier_task(target, step=False)
+    task_toml = native_task / "task.toml"
+    task_toml.write_text(
+        task_toml.read_text(encoding="utf-8") + '\n[verifier.environment]\ndocker_image = "verifier:latest"\n',
+        encoding="utf-8",
+    )
+    (native_task / "tests" / "test.sh").unlink()
+
+    assert _native_custom_only_tests_are_complete(native_task) is False
+    (native_task / "tests" / "test.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    assert _native_custom_only_tests_are_complete(native_task) is True
+
+
+def test_native_standard_grading_rejects_fallback_separate_verifier(tmp_path: Path) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_separate_verifier_task(target, step=False)
+
+    with pytest.raises(ValueError, match="separate verifier context is unsupported with SkillEvaluator standard"):
+        stage_native_harbor_tasks(
+            target,
+            tmp_path / "native-standard-fallback-verifier",
+            grading_mode="default",
+        )

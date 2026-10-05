@@ -122,8 +122,11 @@ from skillevaluator.tier3_environments import (
     DEFAULT_ENV_MODE,
     ENV_MODE_LOCAL,
     HARBOR_ENV_MODES,
+    HARBOR_ENVIRONMENT_ALIAS_KWARGS,
     HARBOR_ENVIRONMENT_EXTRAS,
-    HARBOR_V022_ENVIRONMENT_KWARGS,
+    HARBOR_ENVIRONMENT_KWARGS,
+    HARBOR_VERSION,
+    harbor_environment_type,
 )
 from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
@@ -1063,6 +1066,7 @@ _HARBOR_RUNTIME_POLICY_KWARGS = frozenset(
         "context_id",
         "cpu_enforcement_policy",
         "delete",
+        "enable_environment_dir_upload",
         "environment_dir",
         "environment_name",
         "extra_allowed_hosts",
@@ -1088,6 +1092,7 @@ _HARBOR_RUNTIME_POLICY_KWARGS = frozenset(
         "pod_run_as_user",
         "phase_network_policies",
         "session_id",
+        "stream",
         "suppress_override_warnings",
         "extra_env",
         "extra_volume_mounts",
@@ -1113,6 +1118,8 @@ _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS: dict[str, frozenset[str]] = {
         }
     ),
     "blaxel": frozenset({"dind_extra_args"}),
+    # Credential strategy selection; SkillEvaluator sets it only for the wandb alias.
+    "cwsandbox": frozenset({"auth"}),
     "daytona": frozenset({"network_block_all"}),
     "ec2": frozenset({"iam_instance_profile", "strict_host_key_checking"}),
     "gke": frozenset({"memory_limit_multiplier"}),
@@ -1121,6 +1128,7 @@ _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS: dict[str, frozenset[str]] = {
     "singularity": frozenset({"singularity_no_mount"}),
     "use-computer": frozenset({"resources"}),
     "vercel": frozenset({"ports"}),
+    "wandb": frozenset({"auth"}),
 }
 
 
@@ -1134,8 +1142,10 @@ def _environment_kwarg_policy_error(env_mode: str, environment_kwargs: Mapping[s
     reserved = _HARBOR_RUNTIME_POLICY_KWARGS | _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS.get(env_mode, frozenset())
     if collisions := sorted(reserved & environment_kwargs.keys()):
         return "Environment kwarg(s) reserved for Harbor runtime policy: " + ", ".join(collisions)
-    if unknown := sorted(environment_kwargs.keys() - HARBOR_V022_ENVIRONMENT_KWARGS[env_mode]):
-        return f"Harbor 0.22.0 environment '{env_mode}' does not accept environment kwarg(s): " + ", ".join(unknown)
+    if unknown := sorted(environment_kwargs.keys() - HARBOR_ENVIRONMENT_KWARGS[env_mode]):
+        return f"Harbor {HARBOR_VERSION} environment '{env_mode}' does not accept environment kwarg(s): " + ", ".join(
+            unknown
+        )
     return None
 
 
@@ -1259,10 +1269,13 @@ def build_harbor_run_command(
             command.extend(["--agent", agent])
         command.extend(["--env", SECURE_DOCKER_ENV_IMPORT_PATH])
     else:
-        command.extend(["--agent", agent_import_path or agent, "--env", env_mode])
+        command.extend(["--agent", agent_import_path or agent, "--env", harbor_environment_type(env_mode)])
     for name, value in sorted(_HARBOR_AGENT_KWARGS.get(agent, {}).items()):
         command.extend(["--ak", encode_environment_kwarg(name, value)])
     for name, value in sorted(validated_environment_kwargs.items()):
+        command.extend(["--ek", encode_environment_kwarg(name, value)])
+    # Alias kwargs come after operator kwargs, which may never set them.
+    for name, value in sorted(HARBOR_ENVIRONMENT_ALIAS_KWARGS.get(env_mode, {}).items()):
         command.extend(["--ek", encode_environment_kwarg(name, value)])
     if jobs_dir is not None:
         command.extend(["--jobs-dir", str(Path(jobs_dir).absolute())])
@@ -1553,10 +1566,31 @@ def _environment_kwarg_prerequisite_errors(
     return []
 
 
+def _cwsandbox_prerequisite_errors(env_mode: str) -> list[str]:
+    """Check what Harbor's cwsandbox backend needs; Harbor 0.24 no longer checks it."""
+    if harbor_environment_type(env_mode) != "cwsandbox":
+        return []
+    required_modules = ("cwsandbox", "wandb") if env_mode == "wandb" else ("cwsandbox",)
+    if missing := [name for name in required_modules if importlib.util.find_spec(name) is None]:
+        return [
+            f"Harbor environment '{env_mode}' needs optional dependencies: {', '.join(missing)}. "
+            f"{_environment_extra_install_hint(env_mode)}"
+        ]
+    if env_mode == "wandb":
+        netrc_paths = [os.environ.get("NETRC", ""), str(Path.home() / ".netrc"), str(Path.home() / "_netrc")]
+        if not os.environ.get("WANDB_API_KEY", "").strip() and not any(
+            path and Path(path).expanduser().is_file() for path in netrc_paths
+        ):
+            return ["Harbor environment 'wandb' requires WANDB_API_KEY or a netrc file from `wandb login`."]
+    elif not os.environ.get("CWSANDBOX_API_KEY", "").strip():
+        return ["Harbor environment 'cwsandbox' requires CWSANDBOX_API_KEY."]
+    return []
+
+
 def _environment_extra_install_hint(env_mode: str) -> str:
     extra = HARBOR_ENVIRONMENT_EXTRAS.get(env_mode)
     if extra is not None:
-        return f"Install 'harbor[{extra}]==0.22.0'."
+        return f"Install 'harbor[{extra}]=={HARBOR_VERSION}'."
     system_hints = {
         "apple-container": "Install the Apple container CLI; Harbor has no Python extra for this backend.",
         "openshift": "Install the OpenShift oc CLI; Harbor has no Python extra for this backend.",
@@ -1802,7 +1836,9 @@ def _check_prerequisites(
         from harbor.environments.factory import EnvironmentFactory
         from harbor.models.environment_type import EnvironmentType
 
-        EnvironmentFactory.run_preflight(EnvironmentType(env_mode))
+        if cwsandbox_errors := _cwsandbox_prerequisite_errors(env_mode):
+            return cwsandbox_errors
+        EnvironmentFactory.run_preflight(EnvironmentType(harbor_environment_type(env_mode)))
         if env_mode == "ack":
             ack_subprocess_env = (
                 dict(subprocess_env)

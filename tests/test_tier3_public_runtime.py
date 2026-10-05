@@ -191,7 +191,7 @@ def test_native_environment_kwargs_round_trip_through_real_harbor_parser() -> No
 
 @pytest.mark.parametrize("env_mode", sorted(HARBOR_NATIVE_ENV_MODES - {"docker"}))
 def test_native_environment_kwargs_reject_unknown_harbor_022_names(env_mode: str) -> None:
-    with pytest.raises(ValueError, match=rf"Harbor 0\.22\.0 environment '{env_mode}'.*totally_ignored"):
+    with pytest.raises(ValueError, match=rf"Harbor 0\.24\.0 environment '{env_mode}'.*totally_ignored"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="codex",
@@ -576,8 +576,9 @@ def test_native_environment_required_kwargs_reject_whitespace_padded_ec2_launch_
 
 
 def test_native_environment_install_hints_use_real_harbor_022_extra_names() -> None:
-    assert "harbor[gke]==0.22.0" in _environment_extra_install_hint("ack")
-    assert "harbor[cloud]==0.22.0" not in _environment_extra_install_hint("ack")
+    assert "harbor[gke]==0.24.0" in _environment_extra_install_hint("ack")
+    assert "harbor[cloud]==0.24.0" not in _environment_extra_install_hint("ack")
+    assert "harbor[cwsandbox]==0.24.0" in _environment_extra_install_hint("wandb")
     assert "no Python extra" in _environment_extra_install_hint("openshift")
 
 

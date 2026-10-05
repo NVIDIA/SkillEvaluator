@@ -7050,6 +7050,7 @@ def test_compose_stdin_handoff_redacts_secret_without_argv_or_environment(
     environment._resources_compose_path = None
     environment._env_compose_path = None
     environment._mounts_compose_path = None
+    environment._stream_compose_path = None
     environment._use_prebuilt = True
     environment._is_windows_container = False
     environment.extra_docker_compose_paths = []

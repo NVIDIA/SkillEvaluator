@@ -450,10 +450,26 @@ def test_local_is_a_registered_env_mode() -> None:
 def test_registered_native_env_modes_are_supported_subset_of_pinned_harbor_release() -> None:
     from harbor.models.environment_type import EnvironmentType
 
-    harbor_modes = frozenset(environment.value for environment in EnvironmentType)
+    from skillevaluator.tier3_environments import harbor_environment_type
 
-    assert harbor_modes > HARBOR_NATIVE_ENV_MODES
-    assert harbor_modes - HARBOR_NATIVE_ENV_MODES == {"cua-cloud", "opensandbox", "hf-sandbox"}
+    harbor_modes = frozenset(environment.value for environment in EnvironmentType)
+    harbor_types = frozenset(harbor_environment_type(mode) for mode in HARBOR_NATIVE_ENV_MODES)
+
+    assert harbor_modes > harbor_types
+    # Each SkillEvaluator mode maps to a pinned Harbor type; only aliases are not types themselves.
+    assert HARBOR_NATIVE_ENV_MODES - harbor_modes == {"wandb"}
+    # Harbor backends SkillEvaluator does not expose until it can project task bundles safely.
+    assert harbor_modes - harbor_types == {
+        "cua-cloud",
+        "opensandbox",
+        "hf-sandbox",
+        "podman",
+        "kata",
+        "runta",
+        "prime",
+        "mosaic",
+        "smol",
+    }
 
 
 def test_build_command_uses_unified_flags_for_local_imports() -> None:

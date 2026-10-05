@@ -23,9 +23,12 @@ from packaging.version import Version
 
 from skillevaluator.cli import cli
 from skillevaluator.tier3_environments import (
+    HARBOR_ENVIRONMENT_ALIAS_KWARGS,
     HARBOR_ENVIRONMENT_EXTRAS,
+    HARBOR_ENVIRONMENT_TYPE_ALIASES,
     HARBOR_ENVIRONMENTS,
     HARBOR_NATIVE_ENV_MODES,
+    HARBOR_VERSION,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -127,7 +130,7 @@ def test_public_extras_use_public_dependency_sources() -> None:
     )
 
 
-def test_harbor_022_dependency_contract_keeps_base_install_isolated() -> None:
+def test_harbor_dependency_contract_keeps_base_install_isolated() -> None:
     project = _project()
     extras = project["project"]["optional-dependencies"]
     base_requirements = [Requirement(raw) for raw in project["project"]["dependencies"]]
@@ -145,7 +148,8 @@ def test_harbor_022_dependency_contract_keeps_base_install_isolated() -> None:
     assert base_names.isdisjoint({"harbor", "litellm"})
     assert len(harbor_requirements) == 1
     assert not harbor_requirements[0].extras
-    assert str(harbor_requirements[0].specifier) == "==0.22.0"
+    assert HARBOR_VERSION == "0.24.0"
+    assert str(harbor_requirements[0].specifier) == f"=={HARBOR_VERSION}"
     assert len(litellm_requirements) == 1
     litellm_specifier = litellm_requirements[0].specifier
     assert litellm_specifier.contains(Version("1.92.0"), prereleases=True)
@@ -161,7 +165,7 @@ def test_harbor_022_dependency_contract_keeps_base_install_isolated() -> None:
         name: [Version(package["version"]) for package in lock["package"] if package["name"] == name]
         for name in ("harbor", "litellm")
     }
-    assert locked_versions["harbor"] == [Version("0.22.0")]
+    assert locked_versions["harbor"] == [Version(HARBOR_VERSION)]
     assert len(locked_versions["litellm"]) == 1
     assert litellm_specifier.contains(locked_versions["litellm"][0], prereleases=True)
 
@@ -169,7 +173,7 @@ def test_harbor_022_dependency_contract_keeps_base_install_isolated() -> None:
     locked_requirements = root_lock["metadata"]["requires-dist"]
     locked_harbor = [requirement for requirement in locked_requirements if requirement["name"] == "harbor"]
     locked_litellm = [requirement for requirement in locked_requirements if requirement["name"] == "litellm"]
-    assert [requirement["specifier"] for requirement in locked_harbor] == ["==0.22.0"]
+    assert [requirement["specifier"] for requirement in locked_harbor] == [f"=={HARBOR_VERSION}"]
     assert [requirement["specifier"] for requirement in locked_litellm] == [">=1.92.0,<1.94.0.dev0"]
 
 
@@ -185,11 +189,14 @@ def test_harbor_environment_extra_mapping_matches_installed_metadata() -> None:
     assert {extra for extra in HARBOR_ENVIRONMENT_EXTRAS.values() if extra is not None} <= provided_extras
     assert {
         mode: extra for mode, extra in HARBOR_ENVIRONMENT_EXTRAS.items() if extra is not None and extra != mode
-    } == {"ack": "gke"}
+    } == {"ack": "gke", "wandb": "cwsandbox"}
     assert HARBOR_ENVIRONMENT_EXTRAS["ack"] == "gke"
+    # Harbor 0.24 merged its W&B sandbox into the cwsandbox extra.
+    assert "wandb" not in provided_extras
+    assert HARBOR_ENVIRONMENT_TYPE_ALIASES == {"wandb": "cwsandbox"}
 
 
-def _harbor_022_environment_kwargs_from_installed_source() -> dict[str, frozenset[str]]:
+def _harbor_environment_kwargs_from_installed_source() -> dict[str, frozenset[str]]:
     """Read the pinned Harbor sources without importing optional backend SDKs."""
     harbor_spec = importlib.util.find_spec("harbor")
     assert harbor_spec is not None and harbor_spec.origin is not None
@@ -282,13 +289,22 @@ def _harbor_022_environment_kwargs_from_installed_source() -> dict[str, frozense
     return contract
 
 
-def test_harbor_022_environment_kwarg_contract_matches_installed_source() -> None:
+def test_harbor_environment_kwarg_contract_matches_installed_source() -> None:
     from skillevaluator import tier3_environments
 
-    contract = getattr(tier3_environments, "HARBOR_V022_ENVIRONMENT_KWARGS", None)
+    contract = getattr(tier3_environments, "HARBOR_ENVIRONMENT_KWARGS", None)
+    registry = _harbor_environment_kwargs_from_installed_source()
 
     assert contract is not None
-    assert contract == _harbor_022_environment_kwargs_from_installed_source()
+    # Aliases are SkillEvaluator modes, not Harbor registry types.
+    assert HARBOR_ENVIRONMENT_TYPE_ALIASES.keys().isdisjoint(registry)
+    assert {
+        mode: kwargs for mode, kwargs in contract.items() if mode not in HARBOR_ENVIRONMENT_TYPE_ALIASES
+    } == registry
+    for alias, harbor_type in HARBOR_ENVIRONMENT_TYPE_ALIASES.items():
+        alias_kwargs = HARBOR_ENVIRONMENT_ALIAS_KWARGS[alias]
+        assert alias_kwargs.keys() <= registry[harbor_type]
+        assert contract[alias] == registry[harbor_type] - alias_kwargs.keys()
 
 
 def test_public_docs_match_harbor_environment_and_kwarg_contract() -> None:
@@ -308,8 +324,8 @@ def test_public_docs_match_harbor_environment_and_kwarg_contract() -> None:
     assert all(f"`{mode}`" in agents for mode in HARBOR_ENVIRONMENTS)
     for mode, extra in HARBOR_ENVIRONMENT_EXTRAS.items():
         if extra is not None:
-            assert f"| `{mode}` | Harbor-native | `harbor[{extra}]==0.22.0`" in agents
-    assert "`harbor[cloud]==0.22.0`" not in public_docs
+            assert f"| `{mode}` | Harbor-native | `harbor[{extra}]=={HARBOR_VERSION}`" in agents
+    assert f"`harbor[cloud]=={HARBOR_VERSION}`" not in public_docs
     assert "not exposed until SkillEvaluator can project the complete task bundle" in normalized_docs
     assert "does not contact AWS" in normalized_docs
     assert "does not contact the GKE cluster" in normalized_docs
@@ -846,12 +862,13 @@ def test_tier3_docs_name_the_supported_harbor_backend_version() -> None:
     tier3 = (REPO_ROOT / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
     normalized = " ".join(tier3.split())
 
-    assert "The `tier3` extra installs Harbor 0.22.0" in normalized
+    assert f"The `tier3` extra installs Harbor {HARBOR_VERSION}" in normalized
     assert "The exact Harbor pin is deliberate" in normalized
-    assert "stable Harbor 0.22.0 rather than unreleased `main`" in normalized
+    assert f"stable Harbor {HARBOR_VERSION} rather than unreleased `main`" in normalized
     assert "litellm>=1.92.0,<1.94.0.dev0" in normalized
     assert "static Tier 1 installs do not pull it in" in normalized
     assert "0.13.2" not in normalized
+    assert "0.22.0" not in normalized
 
 
 def test_tier3_docs_describe_the_current_nvidia_build_docker_handoff() -> None:

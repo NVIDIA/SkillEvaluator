@@ -489,7 +489,24 @@ class _Builder:
         self._keys: dict[tuple[str, str, str], Component] = {}
         self._truncated: set[str] = set()
 
-    # -- generic helpers -------------------------------------------------- #
+    def build(self) -> PluginInventory:
+        self.skills()
+        self.rules()
+        self.mcp()
+        self.hooks()
+        self.markdown_components("agent", "agents", self.profile.default_agents_dir)
+        self.markdown_components("command", "commands", self.profile.default_commands_dir)
+        self.lsp()
+        self.markdown_components("output_style", "outputStyles", self.profile.default_output_styles_dir)
+        self.monitors()
+        self.settings()
+        self.apps()
+        self.extensions()
+        self.openai_extension()
+        self.env_files()
+        return self.inventory
+
+    # -- inventory bookkeeping --------------------------------------------- #
     @property
     def manifest_display(self) -> str:
         return self.reader.display(self.manifest_rel)
@@ -519,96 +536,15 @@ class _Builder:
         self.inventory.components.append(component)
         return component
 
-    def _read(self, rel: PurePosixPath, max_bytes: int = CONTENT_DEDUP_MAX_FILE_BYTES) -> str | None:
-        try:
-            return self.reader.read_text(rel, max_bytes)
-        except (SecurePathError, OSError):
-            self.inventory.unread_files += 1
+    def _broken(self, component_type: str, declared: DeclaredPath | None, raw: Any, problem: str) -> None:
+        path = declared.rel.as_posix() if declared is not None and declared.rel is not None else None
+        name = raw if isinstance(raw, str) else repr(raw)
+        self._add(Component(component_type, name, "declared", path, _TYPE_SUPPORT[component_type], problem=problem))
+
+    def _declared_field(self, field_name: str) -> Any:
+        if self.manifest is None or not self.contained:
             return None
-
-    def _read_hook_script(self, rel: PurePosixPath) -> str | None:
-        """Text of a script a hook runs from the plugin root (``${CLAUDE_PLUGIN_ROOT}``), for the hook risk analyzer.
-
-        Returns the whole file (at most ``MAX_SCRIPT_BYTES``) of a regular file,
-        hard-linked or not, decoded as UTF-8 with replacement characters (so one
-        non-UTF-8 byte does not hide the script), or ``None`` when nothing or a
-        directory is at ``rel``. Raises :class:`HookScriptUnreadable` when
-        something is there that cannot be read safely: a link, a special file, a
-        file over the size limit, or an exhausted read budget.
-        """
-        kind = self.reader.kind(rel, allow_hard_links=True)
-        if kind in {"missing", "dir"}:
-            return None
-        if kind == "link":
-            raise HookScriptUnreadable(
-                f"'{rel.as_posix()}' is (or passes through) a symlink or reparse point; it was not followed"
-            )
-        if kind != "file":
-            raise HookScriptUnreadable(f"'{rel.as_posix()}' is a special file, or cannot be inspected")
-        try:
-            raw = self.reader.read_script_bytes(rel, MAX_SCRIPT_BYTES)
-        except (SecurePathError, OSError) as exc:
-            raise HookScriptUnreadable(f"'{rel.as_posix()}' could not be read safely: {exc}") from exc
-        return raw.decode("utf-8-sig", errors="replace")
-
-    def _write_capable_mcp(self) -> list[str]:
-        """Runnable MCP servers without a declared read-only mode (tool lists are unknown statically)."""
-        return [
-            declaration.name
-            for declaration in self.inventory.mcp.effective
-            if declaration.runnable and not mcp_server_is_read_only(declaration.config)
-        ]
-
-    def _privileges(
-        self,
-        component: Component,
-        frontmatter: dict[str, Any],
-        display: str,
-        *,
-        source_file: str | None = None,
-        **kwargs: Any,
-    ) -> None:
-        key = (component.type, component.name, component.path)
-        if any((r.type, r.name, r.path) == key for r in self.inventory.privilege_records):
-            return
-        if component.type == "agent":
-            plugin_name = self.manifest.get("name") if self.manifest is not None else None
-            record, findings = analyze_agent(
-                component.name,
-                component.path,
-                frontmatter,
-                display,
-                write_capable_mcp=self._write_capable_mcp(),
-                plugin_name=plugin_name if isinstance(plugin_name, str) else None,
-            )
-        elif component.type == "command":
-            record, findings = analyze_command(component.name, component.path, frontmatter, display, **kwargs)
-        elif component.type == "skill":
-            record, findings = analyze_skill(component.name, component.path, frontmatter, display)
-        else:
-            return
-        self.inventory.privilege_records.append(record)
-        self.inventory.findings.extend(findings)
-        if component.type in {"command", "skill"} and "hooks" in frontmatter:
-            file = source_file or component.path or self.manifest_rel
-            self._frontmatter_hooks(frontmatter.get("hooks"), file, display)
-
-    def _frontmatter_hooks(self, config: Any, file: str, display: str) -> None:
-        """Hooks in a skill's or command's frontmatter: Claude Code registers them while it is active."""
-        if not isinstance(config, dict):
-            return
-        source = f"{file}#hooks"
-        self.inventory.findings.extend(
-            _override_findings(
-                [*permission_bypass_issues(config), *permission_mode_flag_issues(config)],
-                display,
-                where=f"hooks ({source})",
-                component=("hook", source),
-            )
-        )
-        analysis = self._hook_analyzer.analyze(config, source=source, file=file, display=display, dialect=CLAUDE_HOOKS)
-        self.inventory.hook_records.extend(analysis.records)
-        self.inventory.findings.extend(analysis.findings)
+        return self.manifest.get(field_name)
 
     def _declared_values(self, field_name: str, value: Any) -> list[Any]:
         if value is None:
@@ -632,6 +568,15 @@ class _Builder:
             )
         )
 
+    def _declared_replaces(self, field_name: str, value: Any) -> bool:
+        """Whether a declared field suppresses default-folder discovery for its type.
+
+        Codex drops a path it does not accept and loads the default location
+        instead (:func:`~skillevaluator.plugin_formats.declared_value_replaces_default`).
+        """
+        return declared_value_replaces_default(self.profile, field_name, value)
+
+    # -- declared paths and bounded reads ---------------------------------- #
     def _resolve_declared(self, field_name: str, raw: Any, *, style: bool = True) -> tuple[DeclaredPath | None, str]:
         """Normalize + classify one declared path; record findings. Returns (path, kind|problem)."""
         if not isinstance(raw, str):
@@ -674,19 +619,6 @@ class _Builder:
         client = "Claude Code rejects" if self.profile is CLAUDE_PROFILE else f"the {self.profile.label} loader ignores"
         return _style_finding(self.reader, field_name, declared, self.manifest_rel, client=client)
 
-    def _declared_replaces(self, field_name: str, value: Any) -> bool:
-        """Whether a declared field suppresses default-folder discovery for its type.
-
-        Codex drops a path it does not accept and loads the default location
-        instead (:func:`~skillevaluator.plugin_formats.declared_value_replaces_default`).
-        """
-        return declared_value_replaces_default(self.profile, field_name, value)
-
-    def _broken(self, component_type: str, declared: DeclaredPath | None, raw: Any, problem: str) -> None:
-        path = declared.rel.as_posix() if declared is not None and declared.rel is not None else None
-        name = raw if isinstance(raw, str) else repr(raw)
-        self._add(Component(component_type, name, "declared", path, _TYPE_SUPPORT[component_type], problem=problem))
-
     def _list_dir(
         self, component_type: str, rel_dir: PurePosixPath, suffixes: tuple[str, ...] | None
     ) -> list[PurePosixPath] | None:
@@ -717,7 +649,86 @@ class _Builder:
             )
             return None
 
-    # -- skills ----------------------------------------------------------- #
+    def _read(self, rel: PurePosixPath, max_bytes: int = CONTENT_DEDUP_MAX_FILE_BYTES) -> str | None:
+        try:
+            return self.reader.read_text(rel, max_bytes)
+        except (SecurePathError, OSError):
+            self.inventory.unread_files += 1
+            return None
+
+    def _load_json(self, rel: PurePosixPath, field_name: str) -> Any:
+        try:
+            text = self.reader.read_text(rel, PLUGIN_CONFIG_MAX_BYTES, config=True)
+            return load_bounded_json(text)
+        except (SecurePathError, StructuredDataError, OSError) as exc:
+            # Blocking: an unread hooks/LSP/monitor/settings config skips the
+            # permission-bypass and env-override checks, so fail closed.
+            self.inventory.findings.append(
+                _plugin_finding(
+                    Severity.HIGH,
+                    "plugin_component_unreadable",
+                    f"{field_name} config '{rel.as_posix()}' could not be read or parsed safely: {exc}",
+                    self.reader.display(rel),
+                    f"Keep '{rel.as_posix()}' a regular UTF-8 JSON file under {PLUGIN_CONFIG_MAX_BYTES} bytes.",
+                )
+            )
+            return None
+
+    def _json_sources(
+        self, field_name: str, declared_value: Any, default: PurePosixPath | None, *, merge_default: bool = True
+    ) -> Iterator[tuple[str, Origin, str, Any]]:
+        """Yield (name, origin, root-relative file, parsed config) for a JSON-config field.
+
+        ``hooks`` and ``lspServers`` merge with their default file; monitors replace it
+        (``merge_default=False``) when declared. For Codex, a declared value
+        replaces the default only when Codex keeps it; otherwise the default
+        file is loaded, as Codex does.
+        """
+        declared_values = self._declared_values(field_name, declared_value)
+        explicit: set[PurePosixPath] = set()
+        for raw in declared_values:
+            if isinstance(raw, str):
+                declared = normalize_declared_path(raw, self.profile.manifest_path_prefixes)
+                if declared.rel is not None:
+                    explicit.add(declared.rel)
+        if merge_default:
+            load_default = True
+        elif self.profile.codex_path_rules:
+            load_default = not self._declared_replaces(field_name, declared_value)
+        else:
+            load_default = not declared_values
+        default_kind = self.reader.kind(default) if load_default and default is not None else "missing"
+        if default_kind == "file" and default not in explicit:
+            config = self._load_json(default, field_name)
+            yield default.as_posix(), "packaged", default.as_posix(), config
+        elif default_kind in {"link", "special"} and default is not None:
+            self.inventory.findings.append(
+                _path_problem_finding(
+                    self.reader,
+                    field_name,
+                    DeclaredPath(default.as_posix(), default),
+                    self.manifest_rel,
+                    "unsafe",
+                    default,
+                )
+            )
+        for index, raw in enumerate(declared_values):
+            if isinstance(raw, dict | list) and not isinstance(raw, str):
+                yield f"inline[{index}]" if len(declared_values) > 1 else "inline", "declared", self.manifest_rel, raw
+                continue
+            declared, kind = self._resolve_declared(field_name, raw)
+            if declared is None or declared.rel is None or kind != "file":
+                if kind == "dir" and declared is not None:
+                    self.inventory.findings.append(
+                        _path_problem_finding(self.reader, field_name, declared, self.manifest_rel, "invalid")
+                    )
+                    kind = "invalid"
+                yield (raw if isinstance(raw, str) else repr(raw)), "declared", "", kind
+                continue
+            origin: Origin = "declared+packaged" if declared.rel == default else "declared"
+            yield declared.rel.as_posix(), origin, declared.rel.as_posix(), self._load_json(declared.rel, field_name)
+
+    # -- skills ------------------------------------------------------------ #
     def skills(self) -> None:
         from skillevaluator.utils.helpers import find_bundled_plugin_skill_manifests
 
@@ -911,7 +922,7 @@ class _Builder:
             "always-on: frontmatter name + description; on-demand: SKILL.md body",
         )
 
-    # -- rules ------------------------------------------------------------ #
+    # -- rules ------------------------------------------------------------- #
     def rules(self) -> None:
         declared_default = False
         section = self.manifest.get("rules") if self.manifest is not None else None
@@ -975,7 +986,111 @@ class _Builder:
                 "on-demand: rule body (embedded in the Tier 3 wrapper SKILL.md)",
             )
 
-    # -- markdown component types (agents, commands, output styles) ------- #
+    # -- MCP servers ------------------------------------------------------- #
+    def mcp(self) -> None:
+        collection = collect_mcp_declarations(
+            self.reader,
+            self.manifest,
+            contained=self.contained,
+            manifest_rel=self.manifest_rel,
+            allowed_private_hosts=self.allowed_private_hosts,
+            profile=self.profile,
+        )
+        self.inventory.mcp = collection
+        self.inventory.findings.extend(collection.findings)
+        self.inventory.findings.extend(collection.server_findings)
+        sources_by_name: dict[str, set[str]] = {}
+        for declaration in collection.declarations:
+            sources_by_name.setdefault(declaration.name, set()).add(declaration.source)
+        for declaration in collection.effective:
+            if declaration.source == "mcp_json" and not self.contained:
+                support: Support = "static_only"
+            else:
+                support = "evaluated" if declaration.runnable else "static_only"
+            sources = sources_by_name.get(declaration.name, set())
+            if "mcp_json" in sources and sources - {"mcp_json"}:
+                origin: Origin = "declared+packaged"  # a declared server replaced the .mcp.json one
+            else:
+                origin = "packaged" if declaration.source == "mcp_json" else "declared"
+            component = self._add(
+                Component("mcp", declaration.name, origin, declaration.file, support, mcp=declaration)
+            )
+            component.cost = CostRow(
+                "mcp",
+                declaration.name,
+                0,
+                0,
+                "tool schemas are not known statically (not counted)",
+            )
+        for raw, path, problem in collection.broken_sources:
+            self._add(Component("mcp", raw, "declared", path, "static_only", problem=problem))
+        for raw, path in collection.bundles:
+            self._add(Component("mcp", raw, "declared", path, "unsupported", bundle=True))
+
+    # -- hooks ------------------------------------------------------------- #
+    def hooks(self) -> None:
+        declared_value = self._declared_field("hooks")
+        default = PurePosixPath(self.profile.default_hooks_file) if self.profile.default_hooks_file else None
+        sources = self._json_sources(
+            "hooks", declared_value, default, merge_default=not self.profile.declared_replaces_default
+        )
+        for name, origin, rel, config in sources:
+            self._hook(name, origin, rel, config)
+
+    def _hook(self, name: str, origin: Origin, rel: str, config: Any) -> None:
+        if not rel:
+            self._add(Component("hook", name, origin, None, "unsupported", problem=str(config)))
+            return
+        self._add(Component("hook", name, origin, rel, "unsupported"))
+        if config is not None:
+            self.inventory.findings.extend(
+                _override_findings(
+                    [*permission_bypass_issues(config), *permission_mode_flag_issues(config)],
+                    self.reader.display(rel),
+                    where=f"hooks ({name})",
+                    component=("hook", name),
+                )
+            )
+            # Cursor and Agent Plugins client extensions (com.cursor/, com.github.copilot/)
+            # list handlers flat under each event; nested matcher groups pass through. Each
+            # client's own event names, approval output, and command keys apply.
+            config = _nested_hook_groups(config)
+            analysis = self._hook_analyzer.analyze(
+                config,
+                source=name,
+                file=rel,
+                display=self.reader.display(rel),
+                dialect=hook_dialect(self.profile.manifest_type, rel),
+            )
+            self.inventory.hook_records.extend(analysis.records)
+            self.inventory.findings.extend(analysis.findings)
+
+    def _read_hook_script(self, rel: PurePosixPath) -> str | None:
+        """Text of a script a hook runs from the plugin root (``${CLAUDE_PLUGIN_ROOT}``), for the hook risk analyzer.
+
+        Returns the whole file (at most ``MAX_SCRIPT_BYTES``) of a regular file,
+        hard-linked or not, decoded as UTF-8 with replacement characters (so one
+        non-UTF-8 byte does not hide the script), or ``None`` when nothing or a
+        directory is at ``rel``. Raises :class:`HookScriptUnreadable` when
+        something is there that cannot be read safely: a link, a special file, a
+        file over the size limit, or an exhausted read budget.
+        """
+        kind = self.reader.kind(rel, allow_hard_links=True)
+        if kind in {"missing", "dir"}:
+            return None
+        if kind == "link":
+            raise HookScriptUnreadable(
+                f"'{rel.as_posix()}' is (or passes through) a symlink or reparse point; it was not followed"
+            )
+        if kind != "file":
+            raise HookScriptUnreadable(f"'{rel.as_posix()}' is a special file, or cannot be inspected")
+        try:
+            raw = self.reader.read_script_bytes(rel, MAX_SCRIPT_BYTES)
+        except (SecurePathError, OSError) as exc:
+            raise HookScriptUnreadable(f"'{rel.as_posix()}' could not be read safely: {exc}") from exc
+        return raw.decode("utf-8-sig", errors="replace")
+
+    # -- markdown component types (agents, commands, output styles) -------- #
     def _suffixes(self, component_type: str) -> tuple[str, ...]:
         if component_type == "agent":
             return self.profile.agent_suffixes
@@ -1013,11 +1128,6 @@ class _Builder:
                 self._markdown_dir(component_type, declared.rel, origin)
             else:
                 self._markdown_file(component_type, declared.rel, origin)
-
-    def _declared_field(self, field_name: str) -> Any:
-        if self.manifest is None or not self.contained:
-            return None
-        return self.manifest.get(field_name)
 
     def _markdown_dir(self, component_type: str, rel_dir: PurePosixPath, origin: Origin) -> None:
         for rel in self._list_dir(component_type, rel_dir, self._suffixes(component_type)) or []:
@@ -1088,116 +1198,67 @@ class _Builder:
             else:
                 self._privileges(component, {}, self.manifest_display, entry=entry)
 
-    # -- JSON-config component types (hooks, lsp, monitors, settings) ----- #
-    def _load_json(self, rel: PurePosixPath, field_name: str) -> Any:
-        try:
-            text = self.reader.read_text(rel, PLUGIN_CONFIG_MAX_BYTES, config=True)
-            return load_bounded_json(text)
-        except (SecurePathError, StructuredDataError, OSError) as exc:
-            # Blocking: an unread hooks/LSP/monitor/settings config skips the
-            # permission-bypass and env-override checks, so fail closed.
-            self.inventory.findings.append(
-                _plugin_finding(
-                    Severity.HIGH,
-                    "plugin_component_unreadable",
-                    f"{field_name} config '{rel.as_posix()}' could not be read or parsed safely: {exc}",
-                    self.reader.display(rel),
-                    f"Keep '{rel.as_posix()}' a regular UTF-8 JSON file under {PLUGIN_CONFIG_MAX_BYTES} bytes.",
-                )
-            )
-            return None
-
-    def _json_sources(
-        self, field_name: str, declared_value: Any, default: PurePosixPath | None, *, merge_default: bool = True
-    ) -> Iterator[tuple[str, Origin, str, Any]]:
-        """Yield (name, origin, root-relative file, parsed config) for a JSON-config field.
-
-        ``hooks`` and ``lspServers`` merge with their default file; monitors replace it
-        (``merge_default=False``) when declared. For Codex, a declared value
-        replaces the default only when Codex keeps it; otherwise the default
-        file is loaded, as Codex does.
-        """
-        declared_values = self._declared_values(field_name, declared_value)
-        explicit: set[PurePosixPath] = set()
-        for raw in declared_values:
-            if isinstance(raw, str):
-                declared = normalize_declared_path(raw, self.profile.manifest_path_prefixes)
-                if declared.rel is not None:
-                    explicit.add(declared.rel)
-        if merge_default:
-            load_default = True
-        elif self.profile.codex_path_rules:
-            load_default = not self._declared_replaces(field_name, declared_value)
-        else:
-            load_default = not declared_values
-        default_kind = self.reader.kind(default) if load_default and default is not None else "missing"
-        if default_kind == "file" and default not in explicit:
-            config = self._load_json(default, field_name)
-            yield default.as_posix(), "packaged", default.as_posix(), config
-        elif default_kind in {"link", "special"} and default is not None:
-            self.inventory.findings.append(
-                _path_problem_finding(
-                    self.reader,
-                    field_name,
-                    DeclaredPath(default.as_posix(), default),
-                    self.manifest_rel,
-                    "unsafe",
-                    default,
-                )
-            )
-        for index, raw in enumerate(declared_values):
-            if isinstance(raw, dict | list) and not isinstance(raw, str):
-                yield f"inline[{index}]" if len(declared_values) > 1 else "inline", "declared", self.manifest_rel, raw
-                continue
-            declared, kind = self._resolve_declared(field_name, raw)
-            if declared is None or declared.rel is None or kind != "file":
-                if kind == "dir" and declared is not None:
-                    self.inventory.findings.append(
-                        _path_problem_finding(self.reader, field_name, declared, self.manifest_rel, "invalid")
-                    )
-                    kind = "invalid"
-                yield (raw if isinstance(raw, str) else repr(raw)), "declared", "", kind
-                continue
-            origin: Origin = "declared+packaged" if declared.rel == default else "declared"
-            yield declared.rel.as_posix(), origin, declared.rel.as_posix(), self._load_json(declared.rel, field_name)
-
-    def hooks(self) -> None:
-        declared_value = self._declared_field("hooks")
-        default = PurePosixPath(self.profile.default_hooks_file) if self.profile.default_hooks_file else None
-        sources = self._json_sources(
-            "hooks", declared_value, default, merge_default=not self.profile.declared_replaces_default
-        )
-        for name, origin, rel, config in sources:
-            self._hook(name, origin, rel, config)
-
-    def _hook(self, name: str, origin: Origin, rel: str, config: Any) -> None:
-        if not rel:
-            self._add(Component("hook", name, origin, None, "unsupported", problem=str(config)))
+    # -- tool and permission grants (skills, agents, commands) ------------- #
+    def _privileges(
+        self,
+        component: Component,
+        frontmatter: dict[str, Any],
+        display: str,
+        *,
+        source_file: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        key = (component.type, component.name, component.path)
+        if any((r.type, r.name, r.path) == key for r in self.inventory.privilege_records):
             return
-        self._add(Component("hook", name, origin, rel, "unsupported"))
-        if config is not None:
-            self.inventory.findings.extend(
-                _override_findings(
-                    [*permission_bypass_issues(config), *permission_mode_flag_issues(config)],
-                    self.reader.display(rel),
-                    where=f"hooks ({name})",
-                    component=("hook", name),
-                )
+        if component.type == "agent":
+            plugin_name = self.manifest.get("name") if self.manifest is not None else None
+            record, findings = analyze_agent(
+                component.name,
+                component.path,
+                frontmatter,
+                display,
+                write_capable_mcp=self._write_capable_mcp(),
+                plugin_name=plugin_name if isinstance(plugin_name, str) else None,
             )
-            # Cursor and Agent Plugins client extensions (com.cursor/, com.github.copilot/)
-            # list handlers flat under each event; nested matcher groups pass through. Each
-            # client's own event names, approval output, and command keys apply.
-            config = _nested_hook_groups(config)
-            analysis = self._hook_analyzer.analyze(
-                config,
-                source=name,
-                file=rel,
-                display=self.reader.display(rel),
-                dialect=hook_dialect(self.profile.manifest_type, rel),
-            )
-            self.inventory.hook_records.extend(analysis.records)
-            self.inventory.findings.extend(analysis.findings)
+        elif component.type == "command":
+            record, findings = analyze_command(component.name, component.path, frontmatter, display, **kwargs)
+        elif component.type == "skill":
+            record, findings = analyze_skill(component.name, component.path, frontmatter, display)
+        else:
+            return
+        self.inventory.privilege_records.append(record)
+        self.inventory.findings.extend(findings)
+        if component.type in {"command", "skill"} and "hooks" in frontmatter:
+            file = source_file or component.path or self.manifest_rel
+            self._frontmatter_hooks(frontmatter.get("hooks"), file, display)
 
+    def _write_capable_mcp(self) -> list[str]:
+        """Runnable MCP servers without a declared read-only mode (tool lists are unknown statically)."""
+        return [
+            declaration.name
+            for declaration in self.inventory.mcp.effective
+            if declaration.runnable and not mcp_server_is_read_only(declaration.config)
+        ]
+
+    def _frontmatter_hooks(self, config: Any, file: str, display: str) -> None:
+        """Hooks in a skill's or command's frontmatter: Claude Code registers them while it is active."""
+        if not isinstance(config, dict):
+            return
+        source = f"{file}#hooks"
+        self.inventory.findings.extend(
+            _override_findings(
+                [*permission_bypass_issues(config), *permission_mode_flag_issues(config)],
+                display,
+                where=f"hooks ({source})",
+                component=("hook", source),
+            )
+        )
+        analysis = self._hook_analyzer.analyze(config, source=source, file=file, display=display, dialect=CLAUDE_HOOKS)
+        self.inventory.hook_records.extend(analysis.records)
+        self.inventory.findings.extend(analysis.findings)
+
+    # -- LSP servers ------------------------------------------------------- #
     def lsp(self) -> None:
         declared_value = self._declared_field("lspServers")
         default = PurePosixPath(self.profile.default_lsp_file) if self.profile.default_lsp_file else None
@@ -1233,6 +1294,7 @@ class _Builder:
                     )
                     self.inventory.findings.extend(_lsp_command_findings(str(server_name), server, display))
 
+    # -- monitors ---------------------------------------------------------- #
     def monitors(self) -> None:
         if self.profile.default_monitors_file is None:
             return  # only Claude Code plugins declare monitors
@@ -1293,6 +1355,7 @@ class _Builder:
         self.inventory.hook_records.extend(analysis.records)
         self.inventory.findings.extend(analysis.findings)
 
+    # -- shipped settings -------------------------------------------------- #
     def settings(self) -> None:
         for rel in (PurePosixPath(path) for path in self.profile.settings_files):
             kind = self.reader.kind(rel)
@@ -1393,48 +1456,7 @@ class _Builder:
             )
         )
 
-    # -- MCP -------------------------------------------------------------- #
-    def mcp(self) -> None:
-        collection = collect_mcp_declarations(
-            self.reader,
-            self.manifest,
-            contained=self.contained,
-            manifest_rel=self.manifest_rel,
-            allowed_private_hosts=self.allowed_private_hosts,
-            profile=self.profile,
-        )
-        self.inventory.mcp = collection
-        self.inventory.findings.extend(collection.findings)
-        self.inventory.findings.extend(collection.server_findings)
-        sources_by_name: dict[str, set[str]] = {}
-        for declaration in collection.declarations:
-            sources_by_name.setdefault(declaration.name, set()).add(declaration.source)
-        for declaration in collection.effective:
-            if declaration.source == "mcp_json" and not self.contained:
-                support: Support = "static_only"
-            else:
-                support = "evaluated" if declaration.runnable else "static_only"
-            sources = sources_by_name.get(declaration.name, set())
-            if "mcp_json" in sources and sources - {"mcp_json"}:
-                origin: Origin = "declared+packaged"  # a declared server replaced the .mcp.json one
-            else:
-                origin = "packaged" if declaration.source == "mcp_json" else "declared"
-            component = self._add(
-                Component("mcp", declaration.name, origin, declaration.file, support, mcp=declaration)
-            )
-            component.cost = CostRow(
-                "mcp",
-                declaration.name,
-                0,
-                0,
-                "tool schemas are not known statically (not counted)",
-            )
-        for raw, path, problem in collection.broken_sources:
-            self._add(Component("mcp", raw, "declared", path, "static_only", problem=problem))
-        for raw, path in collection.bundles:
-            self._add(Component("mcp", raw, "declared", path, "unsupported", bundle=True))
-
-    # -- Codex apps (connectors) ------------------------------------------ #
+    # -- Codex apps (connectors) ------------------------------------------- #
     def apps(self) -> None:
         """Inventory Codex app (connector) declarations: ``apps`` or the default ``.app.json``.
 
@@ -1503,6 +1525,40 @@ class _Builder:
                     hooks_file.as_posix(), "packaged", hooks_file.as_posix(), self._load_json(hooks_file, "hooks")
                 )
 
+    # -- OpenAI settings of an Agent Plugins manifest ---------------------- #
+    def openai_extension(self) -> None:
+        """Hooks and apps in ``extensions["com.openai"]`` of an Agent Plugins manifest.
+
+        OpenAI documents this object as the place for Codex hooks (a path, an
+        array of paths, an inline hooks object, or an array of them) and app
+        mappings (a path to an ``.app.json``), read with the Codex path rules.
+        Its hooks get the same bypass and risk checks as any other hooks.
+        """
+        if not self.profile.client_extensions or self.manifest is None:
+            return
+        extensions = self.manifest.get("extensions")
+        openai = extensions.get("com.openai") if isinstance(extensions, dict) else None
+        if not isinstance(openai, dict):
+            return
+        profile = self.profile
+        self.profile = CODEX_PROFILE  # Codex path rules and messages for these fields
+        try:
+            if openai.get("hooks") is not None:
+                for name, origin, rel, config in self._json_sources("hooks", openai.get("hooks"), None):
+                    label = f"extensions.com.openai.hooks:{name}" if rel == self.manifest_rel else name
+                    self._hook(label, origin, rel, config)
+            if openai.get("apps") is not None:
+                for name, origin, rel, config in self._json_sources("apps", openai.get("apps"), None):
+                    apps = config.get("apps") if rel and isinstance(config, dict) else None
+                    if not isinstance(apps, dict) or not apps:
+                        problem = None if rel else str(config)
+                        self._add(Component("app", name, origin, rel or None, "unsupported", problem=problem))
+                        continue
+                    for alias in list(apps)[:PLUGIN_COMPONENT_MAX_ITEMS]:
+                        self._add(Component("app", str(alias), origin, rel, "unsupported"))
+        finally:
+            self.profile = profile
+
     # -- shipped .env files ------------------------------------------------ #
     def env_files(self) -> None:
         hits, complete = _find_env_files(self.reader.root)
@@ -1538,57 +1594,6 @@ class _Builder:
                     "Do not package .env files.",
                 )
             )
-
-    # -- OpenAI settings of an Agent Plugins manifest ---------------------- #
-    def openai_extension(self) -> None:
-        """Hooks and apps in ``extensions["com.openai"]`` of an Agent Plugins manifest.
-
-        OpenAI documents this object as the place for Codex hooks (a path, an
-        array of paths, an inline hooks object, or an array of them) and app
-        mappings (a path to an ``.app.json``), read with the Codex path rules.
-        Its hooks get the same bypass and risk checks as any other hooks.
-        """
-        if not self.profile.client_extensions or self.manifest is None:
-            return
-        extensions = self.manifest.get("extensions")
-        openai = extensions.get("com.openai") if isinstance(extensions, dict) else None
-        if not isinstance(openai, dict):
-            return
-        profile = self.profile
-        self.profile = CODEX_PROFILE  # Codex path rules and messages for these fields
-        try:
-            if openai.get("hooks") is not None:
-                for name, origin, rel, config in self._json_sources("hooks", openai.get("hooks"), None):
-                    label = f"extensions.com.openai.hooks:{name}" if rel == self.manifest_rel else name
-                    self._hook(label, origin, rel, config)
-            if openai.get("apps") is not None:
-                for name, origin, rel, config in self._json_sources("apps", openai.get("apps"), None):
-                    apps = config.get("apps") if rel and isinstance(config, dict) else None
-                    if not isinstance(apps, dict) or not apps:
-                        problem = None if rel else str(config)
-                        self._add(Component("app", name, origin, rel or None, "unsupported", problem=problem))
-                        continue
-                    for alias in list(apps)[:PLUGIN_COMPONENT_MAX_ITEMS]:
-                        self._add(Component("app", str(alias), origin, rel, "unsupported"))
-        finally:
-            self.profile = profile
-
-    def build(self) -> PluginInventory:
-        self.skills()
-        self.rules()
-        self.mcp()
-        self.hooks()
-        self.markdown_components("agent", "agents", self.profile.default_agents_dir)
-        self.markdown_components("command", "commands", self.profile.default_commands_dir)
-        self.lsp()
-        self.markdown_components("output_style", "outputStyles", self.profile.default_output_styles_dir)
-        self.monitors()
-        self.settings()
-        self.apps()
-        self.extensions()
-        self.openai_extension()
-        self.env_files()
-        return self.inventory
 
 
 def _markdown_cost(component_type: str, name: str, parsed: _Markdown) -> CostRow:

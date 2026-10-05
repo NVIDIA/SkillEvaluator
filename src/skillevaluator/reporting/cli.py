@@ -89,14 +89,14 @@ def print_plugin_tier1_static(risk: dict, console: Console) -> None:
             f"[bold]Plugin privileges:[/bold] {privileges['agents']} subagent(s), {privileges['commands']} command(s); "
             f"{privileges['flagged']} flagged"
         )
-        for row in [row for row in privileges["rows"] if row["risky"]][:10]:
+        for row in [row for row in privileges["rows"] if row["risky"]][:_CLI_LIST_ITEMS]:
             console.print(
                 f"  - {escape_markup(row['type'])} {escape_markup(row['name'])}: {escape_markup(', '.join(row['flags']))}"
             )
     hooks = risk.get("hooks")
     if hooks:
         console.print(f"[bold]Plugin hooks:[/bold] {hooks['total']} handler(s); {hooks['flagged']} flagged")
-        for row in [row for row in hooks["rows"] if row["flagged"]][:10]:
+        for row in [row for row in hooks["rows"] if row["flagged"]][:_CLI_LIST_ITEMS]:
             # Escape the brackets with the plugin-controlled matcher: "[/x]" is a
             # closing tag and "[mcp__memory__.*]" a style tag to Rich markup.
             matcher = escape_markup(f"[{row['matcher']}]")
@@ -277,7 +277,7 @@ def print_plugin_runtime_evidence(view: dict, console: Console) -> None:
             console.print(
                 f"    [bold]{esc(entry['scope'])} · {esc(entry['arm_label'])}[/bold]: {esc(entry['summary'])}"
             )
-            for row in entry["rows"][:10]:
+            for row in entry["rows"][:_CLI_LIST_ITEMS]:
                 console.print(
                     f"      [dim]- {esc(row['hook_id'])} ({esc(row['event'])}): {row['runs']} run(s), "
                     f"{row['failures']} failure(s)[/dim]"

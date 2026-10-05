@@ -42,6 +42,14 @@ MAX_TEXT_CHARS = 300
 MAX_AGENTS = 16
 MAX_TOP_FAILURES = 5
 MAX_SERVERS = 32
+# Display bounds for a status, state, type, kind or other keyword, and for an agent, arm,
+# event, origin, method or other short label.
+_KEYWORD_CHARS = 32
+_LABEL_CHARS = 64
+# Finding and component paths are compared whole, before any display bound.
+_PATH_CHARS = 4096
+# How many names a sentence lists before it counts the rest as "(+N more)".
+_NAMES_IN_TEXT = 12
 
 DEPENDENCY_STATES = ("provided", "referenced", "missing", "external", "unresolved")
 COVERAGE_STATES = ("staged", "not_staged", "unsupported", "unavailable", "invalid")
@@ -338,19 +346,19 @@ def manifest_declarations_view(value: object) -> dict[str, Any] | None:
         rows.append(
             {
                 "manifest_filename": text(row.get("manifest_filename"), limit=128),
-                "manifest_type": text(row.get("manifest_type"), limit=64),
+                "manifest_type": text(row.get("manifest_type"), limit=_LABEL_CHARS),
                 "selected": row.get("selected") is True,
-                "status": text(row.get("status"), limit=32),
+                "status": text(row.get("status"), limit=_KEYWORD_CHARS),
                 "name": text(row.get("name")) or "—",
-                "version": text(row.get("version"), limit=64) or "—",
-                "spec_version": text(row.get("spec_version"), limit=32),
+                "version": text(row.get("version"), limit=_LABEL_CHARS) or "—",
+                "spec_version": text(row.get("spec_version"), limit=_KEYWORD_CHARS),
             }
         )
     if len(rows) < 2:
         return None
     conflicts = [
         {
-            "field": text(conflict.get("field"), limit=32),
+            "field": text(conflict.get("field"), limit=_KEYWORD_CHARS),
             "selected": text(conflict.get("selected")),
             "additional": text(conflict.get("additional")),
             "manifest_filename": text(conflict.get("manifest_filename"), limit=128),
@@ -372,7 +380,7 @@ def manifest_declarations_view(value: object) -> dict[str, Any] | None:
 def _fmt_overlap(value: object) -> str:
     numeric = number(value)
     if numeric is None:
-        return text(value, limit=64) or "n/a"
+        return text(value, limit=_LABEL_CHARS) or "n/a"
     if isinstance(value, float) and 0.0 <= numeric <= 1.0:
         return fmt_rate(numeric)
     return fmt_count(numeric)
@@ -402,7 +410,7 @@ def similarity_view(value: object, *, kind: str) -> dict[str, Any] | None:
     if not similarity:
         return None
     title, columns = _SIMILARITY_TABLES[kind]
-    status = text(similarity.get("status"), limit=32).lower() or "unknown"
+    status = text(similarity.get("status"), limit=_KEYWORD_CHARS).lower() or "unknown"
     matches: list[dict[str, str]] = []
     total = 0
     for match in _sequence(similarity.get("matches")):
@@ -425,7 +433,7 @@ def similarity_view(value: object, *, kind: str) -> dict[str, Any] | None:
                     "subject": text(match.get("name")),
                     "similarity": fmt_score(match.get("similarity")),
                     "member_overlap": _fmt_overlap(match.get("member_overlap")),
-                    "verdict": text(match.get("verdict"), limit=64),
+                    "verdict": text(match.get("verdict"), limit=_LABEL_CHARS),
                 }
             )
     catalog_entries = count(similarity.get("catalog_entries"))
@@ -463,7 +471,7 @@ def _state_counts(value: object, ordered_states: tuple[str, ...]) -> list[dict[s
     counts = _mapping(value)
     rows = [{"state": state, "count": count(counts.get(state)) or 0} for state in ordered_states]
     for key, raw in sorted(counts.items(), key=lambda item: str(item[0])):
-        state = text(key, limit=64)
+        state = text(key, limit=_LABEL_CHARS)
         amount = count(raw)
         if state and state not in ordered_states and amount is not None:
             rows.append({"state": state, "count": amount})
@@ -487,10 +495,10 @@ def dependency_view(block: object) -> dict[str, Any] | None:
             total_rows += 1
             if len(rows) >= MAX_TABLE_ROWS:
                 continue
-            state = text(entry.get("state"), limit=32) or "unknown"
+            state = text(entry.get("state"), limit=_KEYWORD_CHARS) or "unknown"
             rows.append(
                 {
-                    "kind": text(kind, limit=32).rstrip("s") or "ref",
+                    "kind": text(kind, limit=_KEYWORD_CHARS).rstrip("s") or "ref",
                     "ref": text(entry.get("ref")),
                     "state": state,
                     "state_class": _DEPENDENCY_STATE_CLASSES.get(state, "neutral"),
@@ -530,8 +538,8 @@ def inventory_view(
         if not isinstance(component, Mapping):
             continue
         total += 1
-        component_type = text(component.get("type"), limit=32) or "unknown"
-        support = text(component.get("support"), limit=32)
+        component_type = text(component.get("type"), limit=_KEYWORD_CHARS) or "unknown"
+        support = text(component.get("support"), limit=_KEYWORD_CHARS)
         computed_counts[component_type] = computed_counts.get(component_type, 0) + 1
         if len(rows) >= MAX_TABLE_ROWS:
             continue
@@ -539,7 +547,7 @@ def inventory_view(
             {
                 "type": component_type,
                 "name": text(component.get("name")),
-                "origin": text(component.get("origin"), limit=64),
+                "origin": text(component.get("origin"), limit=_LABEL_CHARS),
                 "path": text(component.get("path")),
                 "support": support,
                 "support_label": SUPPORT_LABELS.get(support, support or "unknown"),
@@ -550,9 +558,9 @@ def inventory_view(
     declared_counts = _mapping(inventory.get("counts"))
     count_source = declared_counts or computed_counts
     counts = [
-        {"type": text(key, limit=32), "count": amount}
+        {"type": text(key, limit=_KEYWORD_CHARS), "count": amount}
         for key, raw in sorted(count_source.items(), key=lambda item: str(item[0]))
-        if (amount := count(raw)) is not None and text(key, limit=32)
+        if (amount := count(raw)) is not None and text(key, limit=_KEYWORD_CHARS)
     ][:MAX_LIST_ITEMS]
     unsupported = _unsupported_types(inventory)
     return {
@@ -571,8 +579,8 @@ def _unsupported_types(inventory: Mapping[str, Any]) -> list[str]:
         return _names(inventory.get("unsupported_types_present"))[0]
     unsupported: list[str] = []
     for component in _sequence(inventory.get("components")):
-        if isinstance(component, Mapping) and text(component.get("support"), limit=32) == "unsupported":
-            component_type = text(component.get("type"), limit=32) or "unknown"
+        if isinstance(component, Mapping) and text(component.get("support"), limit=_KEYWORD_CHARS) == "unsupported":
+            component_type = text(component.get("type"), limit=_KEYWORD_CHARS) or "unknown"
             if component_type not in unsupported:
                 unsupported.append(component_type)
     return unsupported
@@ -680,9 +688,9 @@ def mcp_view(value: object) -> dict[str, Any] | None:
         servers.append(
             {
                 "name": text(server.get("name")) or "unnamed",
-                "source": text(server.get("source"), limit=64),
-                "kind": text(server.get("kind"), limit=32),
-                "transport": text(server.get("transport"), limit=64),
+                "source": text(server.get("source"), limit=_LABEL_CHARS),
+                "kind": text(server.get("kind"), limit=_KEYWORD_CHARS),
+                "transport": text(server.get("transport"), limit=_LABEL_CHARS),
                 "pinned": pinned if isinstance(pinned, bool) else None,
                 "pin_detail": text(server.get("pin_detail")),
             }
@@ -708,7 +716,7 @@ def context_cost_view(value: object) -> dict[str, Any] | None:
             continue
         components.append(
             {
-                "type": text(entry.get("type"), limit=32),
+                "type": text(entry.get("type"), limit=_KEYWORD_CHARS),
                 "name": text(entry.get("name")),
                 "always_on_value": number(entry.get("always_on_tokens")) or 0.0,
                 "always_on": fmt_count(entry.get("always_on_tokens")),
@@ -720,8 +728,8 @@ def context_cost_view(value: object) -> dict[str, Any] | None:
         return None
     components.sort(key=lambda row: (-row["always_on_value"], row["type"], row["name"]))
     notes, _omitted = _names(cost.get("notes"), limit=8)
-    estimator = text(cost.get("estimator"), limit=64)
-    method = text(cost.get("method"), limit=64) or "static_estimate"
+    estimator = text(cost.get("estimator"), limit=_LABEL_CHARS)
+    method = text(cost.get("method"), limit=_LABEL_CHARS) or "static_estimate"
     label = "Static estimate"
     if estimator == "chars_div_4":
         label = "Static estimate (characters ÷ 4)"
@@ -765,7 +773,7 @@ def _inventory_components(block: object) -> list[Mapping[str, Any]]:
 
 def _component_path(component: Mapping[str, Any]) -> str:
     """Return a component's root-relative path with ``/`` separators."""
-    return text(component.get("path"), limit=4096).replace("\\", "/").removeprefix("./").rstrip("/")
+    return text(component.get("path"), limit=_PATH_CHARS).replace("\\", "/").removeprefix("./").rstrip("/")
 
 
 class ComponentIndex:
@@ -777,17 +785,17 @@ class ComponentIndex:
 
     def __init__(self, block: object) -> None:
         source = _mapping(block)
-        self._root = text(source.get("root"), limit=4096).replace("\\", "/").rstrip("/")
+        self._root = text(source.get("root"), limit=_PATH_CHARS).replace("\\", "/").rstrip("/")
         components = _inventory_components(source)
         self._by_path: dict[str, dict[str, str]] = {}
         for component in components[: MAX_TABLE_ROWS * 5]:
             path = _component_path(component)
             if path and path not in self._by_path:
                 self._by_path[path] = {
-                    "type": text(component.get("type"), limit=32),
+                    "type": text(component.get("type"), limit=_KEYWORD_CHARS),
                     "name": text(component.get("name")),
                     "path": path,
-                    "support": text(component.get("support"), limit=32),
+                    "support": text(component.get("support"), limit=_KEYWORD_CHARS),
                 }
         self._skill_by_name: dict[str, str] = {}
         # Folder walkers label a skill with its directory name ("bar" for skills/nested/bar),
@@ -839,7 +847,7 @@ class ComponentIndex:
         longest matching component path wins, so a file inside ``skills/foo``
         maps to that skill rather than to a broader component.
         """
-        raw = self.artifact_path(text(file_path, limit=4096))
+        raw = self.artifact_path(text(file_path, limit=_PATH_CHARS))
         if not raw:
             return None
         normalized = raw.replace("\\", "/")
@@ -886,7 +894,9 @@ def plugin_provenance(payload: object) -> Mapping[str, Any]:
 def _agents(payload: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
     agents = _mapping(payload.get("agents"))
     return [
-        (text(name, limit=64), agent) for name, agent in list(agents.items())[:MAX_AGENTS] if isinstance(agent, Mapping)
+        (text(name, limit=_LABEL_CHARS), agent)
+        for name, agent in list(agents.items())[:MAX_AGENTS]
+        if isinstance(agent, Mapping)
     ]
 
 
@@ -918,7 +928,9 @@ class _Tier3Context:
 def _tier3_context(payload: Mapping[str, Any]) -> _Tier3Context:
     provenance = plugin_provenance(payload)
     modes = _lift_modes(payload, provenance)
-    best_agent = text(payload.get("best_agent") or _mapping(payload.get("summary")).get("best_agent"), limit=64)
+    best_agent = text(
+        payload.get("best_agent") or _mapping(payload.get("summary")).get("best_agent"), limit=_LABEL_CHARS
+    )
     return _Tier3Context(
         provenance=provenance,
         modes=modes,
@@ -1094,7 +1106,7 @@ def sidecar_error_reason(provenance: object) -> str:
     INCOMPLETE because its evaluated components are unknown, not because a
     listed dependency failed to resolve.
     """
-    code = text(_mapping(provenance).get("sidecar_error"), limit=64)
+    code = text(_mapping(provenance).get("sidecar_error"), limit=_LABEL_CHARS)
     if not code:
         return ""
     return f"plugin provenance sidecar unreadable ({code}), so the components evaluated at Tier 3 are unknown"
@@ -1133,7 +1145,7 @@ def completeness_view(provenance: object) -> dict[str, Any] | None:
         "partial": partial,
         "counts": counts,
         "names": {key: _names(value)[0] for key, value in lists.items()},
-        "sidecar_error": text(source.get("sidecar_error"), limit=64) if sidecar_reason else "",
+        "sidecar_error": text(source.get("sidecar_error"), limit=_LABEL_CHARS) if sidecar_reason else "",
         # Whether something was actually deferred; a run can be INCOMPLETE only because it did not complete.
         "deferred": bool(deferred),
         "status_text": "INCOMPLETE" if partial else "Complete",
@@ -1175,12 +1187,12 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
         if not isinstance(component, Mapping):
             continue
         total += 1
-        state = text(component.get("state"), limit=32) or "unknown"
+        state = text(component.get("state"), limit=_KEYWORD_CHARS) or "unknown"
         computed_counts[state] = computed_counts.get(state, 0) + 1
         row = {
-            "type": text(component.get("type"), limit=32) or "unknown",
+            "type": text(component.get("type"), limit=_KEYWORD_CHARS) or "unknown",
             "name": text(component.get("name")),
-            "origin": text(component.get("origin"), limit=64),
+            "origin": text(component.get("origin"), limit=_LABEL_CHARS),
             "path": text(component.get("path")),
             "state": state,
             "state_label": COVERAGE_LABELS.get(state, state),
@@ -1317,7 +1329,7 @@ def integration_view(
     lift = number(integration.get("integration_lift"))
     measured_flag = integration.get("measured")
     measured = measured_flag if isinstance(measured_flag, bool) else bool(integration) and lift is not None
-    verdict = text(integration.get("verdict"), limit=64).lower() or "inconclusive"
+    verdict = text(integration.get("verdict"), limit=_LABEL_CHARS).lower() or "inconclusive"
     if not measured:
         verdict = "inconclusive"
     verdict_label, verdict_class = _INTEGRATION_VERDICTS.get(verdict, (_humanize(verdict), "warn"))
@@ -1338,7 +1350,7 @@ def integration_view(
         uncertainty = _mapping(uncertainty.get("integration"))
     if uncertainty:
         ci = _ci_row("integration", "Integration lift", uncertainty)
-    point_verdict = text(integration.get("point_verdict"), limit=64).lower()
+    point_verdict = text(integration.get("point_verdict"), limit=_LABEL_CHARS).lower()
     point_label = (
         _INTEGRATION_VERDICTS.get(point_verdict, (_humanize(point_verdict), "warn"))[0]
         if point_verdict and point_verdict != verdict
@@ -1440,7 +1452,7 @@ def _ci_row(kind: str, label: str, value: Mapping[str, Any]) -> dict[str, Any]:
     includes_zero = value.get("ci_includes_zero")
     if not isinstance(includes_zero, bool):
         includes_zero = low <= 0.0 <= high if low is not None and high is not None else None
-    precision = text(value.get("precision"), limit=32).lower()
+    precision = text(value.get("precision"), limit=_KEYWORD_CHARS).lower()
     interval = f"[{fmt_signed(low)}, {fmt_signed(high)}]" if low is not None and high is not None else "n/a"
     confidence_label = f"{confidence * 100:.0f}% CI" if confidence is not None else "CI"
     return {
@@ -1451,7 +1463,7 @@ def _ci_row(kind: str, label: str, value: Mapping[str, Any]) -> dict[str, Any]:
         "estimate": fmt_signed(estimate),
         "interval": interval,
         "confidence": confidence_label,
-        "method": text(value.get("method"), limit=64),
+        "method": text(value.get("method"), limit=_LABEL_CHARS),
         "resamples": fmt_count(value.get("resamples")),
         "n_cases": fmt_count(value.get("n_cases")),
         "precision": precision or "unknown",
@@ -1465,7 +1477,7 @@ def _ordered_arms(*mappings: Mapping[str, Any]) -> list[str]:
     arms: list[str] = []
     for mapping in mappings:
         for key in mapping:
-            arm = text(key, limit=64)
+            arm = text(key, limit=_LABEL_CHARS)
             if arm and arm not in arms:
                 arms.append(arm)
     order = {arm: index for index, arm in enumerate(_ARM_ORDER)}
@@ -1548,14 +1560,14 @@ def _context_measured_view(value: object) -> dict[str, Any] | None:
     measured = _mapping(value)
     if not measured:
         return None
-    status = text(measured.get("status"), limit=32).lower() or "unknown"
+    status = text(measured.get("status"), limit=_KEYWORD_CHARS).lower() or "unknown"
     delta = number(measured.get("delta_tokens_mean"))
     return {
         "status": status,
         "measured": status == "measured" and delta is not None,
         "delta": "n/a" if delta is None else f"{delta:+,.0f} tokens",
         "n_pairs": fmt_count(measured.get("n_pairs")),
-        "method": text(measured.get("method"), limit=64),
+        "method": text(measured.get("method"), limit=_LABEL_CHARS),
         "reason": text(measured.get("reason")),
     }
 
@@ -1571,7 +1583,7 @@ def completeness_issues_view(value: object, *, sum_of_parts_baseline: bool = Fal
     shortfall = []
     for entry in _sequence(completeness.get("attempt_shortfall"))[:MAX_LIST_ITEMS]:
         if isinstance(entry, Mapping):
-            arm = text(entry.get("arm"), limit=64)
+            arm = text(entry.get("arm"), limit=_LABEL_CHARS)
             shortfall.append(
                 {
                     "case": text(entry.get("case")),
@@ -1611,7 +1623,7 @@ def _arm_signal_summaries(agent: Mapping[str, Any]) -> dict[str, Mapping[str, An
         return summaries
     conditions = _mapping(agent.get("conditions"))
     return {
-        text(arm, limit=64): summary
+        text(arm, limit=_LABEL_CHARS): summary
         for arm, condition in conditions.items()
         if (summary := _mapping(_mapping(condition).get("plugin_signals_summary"))) and _is_signal_summary(summary)
     }
@@ -1630,7 +1642,7 @@ def _signal_summaries(value: object) -> dict[str, Mapping[str, Any]]:
     if _is_signal_summary(summary):
         return {"with_skill": summary}
     return {
-        text(arm, limit=64): candidate
+        text(arm, limit=_LABEL_CHARS): candidate
         for arm, raw in summary.items()
         if (candidate := _mapping(raw)) and _is_signal_summary(candidate)
     }
@@ -1675,7 +1687,7 @@ def signals_view(payload: object, *, context: _Tier3Context | None = None) -> di
 
 
 def _scored(section: Mapping[str, Any]) -> bool:
-    return text(section.get("status"), limit=32).lower() != "not_applicable"
+    return text(section.get("status"), limit=_KEYWORD_CHARS).lower() != "not_applicable"
 
 
 def _rate(section: Mapping[str, Any], *keys: str, numerator: str, denominator: str) -> float | None:
@@ -1720,7 +1732,7 @@ def _signal_failures(arguments: Mapping[str, Any]) -> list[dict[str, str]]:
                 {
                     "tool": text(failure.get("tool")),
                     "arg": text(failure.get("arg")),
-                    "rule": text(failure.get("rule"), limit=64),
+                    "rule": text(failure.get("rule"), limit=_LABEL_CHARS),
                     "detail": text(failure.get("detail")),
                     "count": fmt_count(failure.get("count")) if failure.get("count") is not None else "",
                 }
@@ -1844,9 +1856,9 @@ def _signal_entry(
     }
 
 
-def _component_list(rows: list[dict[str, Any]], total: int, *, limit: int = 12) -> str:
-    """Name the first *limit* coverage rows and count the rest of *total*."""
-    names = [f"{row['type']} {row['name']}".strip() for row in rows[:limit]]
+def _component_list(rows: list[dict[str, Any]], total: int) -> str:
+    """Name the first coverage rows and count the rest of *total*."""
+    names = [f"{row['type']} {row['name']}".strip() for row in rows[:_NAMES_IN_TEXT]]
     omitted = max(0, total - len(names))
     return ", ".join(names) + (f" (+{omitted} more)" if names and omitted else "")
 
@@ -1866,7 +1878,7 @@ def excluded_behavior(view: Mapping[str, Any], provenance: object) -> list[str]:
         listed = _component_list(coverage["staged_not_observed_rows"], coverage["staged_not_observed"])
         statements.append(f"Staged but not observed in any plugin trial: {listed}")
     for deferral in _DEFERRALS:
-        names, omitted = _names(source.get(deferral.field), limit=12)
+        names, omitted = _names(source.get(deferral.field), limit=_NAMES_IN_TEXT)
         if names:
             suffix = f" (+{omitted} more)" if omitted else ""
             statements.append(f"{deferral.excluded}: {', '.join(names)}{suffix}")
@@ -1951,7 +1963,7 @@ def _flag_labels(flags: object, labels: Mapping[str, str]) -> list[str]:
 def _tool_list_label(value: object) -> str:
     if value is None:
         return ""
-    names, omitted = _names(value, limit=12)
+    names, omitted = _names(value, limit=_NAMES_IN_TEXT)
     label = ", ".join(names) if names else "none"
     return f"{label} (+{omitted} more)" if omitted else label
 
@@ -1969,9 +1981,9 @@ def hook_risk_view(value: object) -> dict[str, Any] | None:
         rows.append(
             {
                 "id": text(hook.get("id")),
-                "event": text(hook.get("event"), limit=64),
+                "event": text(hook.get("event"), limit=_LABEL_CHARS),
                 "matcher": text(matcher, limit=80) if isinstance(matcher, str) and matcher.strip() else "(all)",
-                "handler_type": text(hook.get("handler_type"), limit=32),
+                "handler_type": text(hook.get("handler_type"), limit=_KEYWORD_CHARS),
                 "target": text(hook.get("target"), limit=160),
                 "flags": flags,
                 "flagged": bool(flags),
@@ -2003,7 +2015,7 @@ def privileges_view(value: object) -> dict[str, Any] | None:
         return None
     rows: list[dict[str, Any]] = []
     for row in components:
-        component_type = text(row.get("type"), limit=32)
+        component_type = text(row.get("type"), limit=_KEYWORD_CHARS)
         raw_flags = [str(flag) for flag in _sequence(row.get("flags"))]
         if component_type == "agent":
             grants = "inherits all tools" if row.get("inherits_all_tools") else _tool_list_label(row.get("tools"))
@@ -2021,8 +2033,8 @@ def privileges_view(value: object) -> dict[str, Any] | None:
                 "name": text(row.get("name")),
                 "path": text(row.get("path")),
                 "grants": grants,
-                "model": text(row.get("model"), limit=64),
-                "permission_mode": text(row.get("permission_mode"), limit=32),
+                "model": text(row.get("model"), limit=_LABEL_CHARS),
+                "permission_mode": text(row.get("permission_mode"), limit=_KEYWORD_CHARS),
                 "invocation": invocation,
                 "flags": _flag_labels(raw_flags, _PRIVILEGE_FLAG_LABELS),
                 "risky": risky,
@@ -2045,7 +2057,7 @@ def validator_parity_view(value: object) -> dict[str, Any] | None:
     block = _mapping(value)
     if not block:
         return None
-    status = text(block.get("status"), limit=32) or "unknown"
+    status = text(block.get("status"), limit=_KEYWORD_CHARS) or "unknown"
     agree = block.get("agree")
     errors, errors_omitted = _names(block.get("errors"), limit=20)
     warnings, warnings_omitted = _names(block.get("warnings"), limit=20)
@@ -2055,8 +2067,8 @@ def validator_parity_view(value: object) -> dict[str, Any] | None:
         "status_label": _PARITY_STATUS_LABELS.get(status, _humanize(status)),
         # Agreement colours the status only when the two validators were compared.
         "status_class": agreement_class if status == "compared" else "neutral",
-        "claude_verdict": text(block.get("claude_verdict"), limit=32) or "n/a",
-        "skillevaluator_verdict": text(block.get("skillevaluator_verdict"), limit=32) or "unknown",
+        "claude_verdict": text(block.get("claude_verdict"), limit=_KEYWORD_CHARS) or "n/a",
+        "skillevaluator_verdict": text(block.get("skillevaluator_verdict"), limit=_KEYWORD_CHARS) or "unknown",
         "agreement": "agree" if agree is True else "disagree" if agree is False else "n/a",
         "agreement_class": agreement_class,
         "error_count": count(block.get("error_count")) if count(block.get("error_count")) is not None else len(errors),
@@ -2088,7 +2100,7 @@ def cve_summary_view(value: object) -> dict[str, Any] | None:
         entry = _mapping(ecosystems.get(name))
         if not entry:
             continue
-        status = text(entry.get("status"), limit=32) or "unknown"
+        status = text(entry.get("status"), limit=_KEYWORD_CHARS) or "unknown"
         if status == "not_found":
             continue
         label, css = _CVE_STATUS_LABELS.get(status, (_humanize(status), "neutral"))
@@ -2100,7 +2112,7 @@ def cve_summary_view(value: object) -> dict[str, Any] | None:
         errors, _errors_omitted = _names(entry.get("errors"), limit=4)
         rows.append(
             {
-                "ecosystem": text(name, limit=32),
+                "ecosystem": text(name, limit=_KEYWORD_CHARS),
                 "status": status,
                 "status_label": label,
                 "status_class": css,
@@ -2131,7 +2143,7 @@ def endpoint_resolution_view(value: object) -> dict[str, Any] | None:
     for row in endpoints[:MAX_TABLE_ROWS]:
         head = _mapping(row.get("head"))
         redirect = _mapping(row.get("redirect"))
-        status = text(row.get("status"), limit=32) or "unknown"
+        status = text(row.get("status"), limit=_KEYWORD_CHARS) or "unknown"
         head_label = ""
         if head.get("skipped"):
             head_label = "not contacted"
@@ -2140,7 +2152,7 @@ def endpoint_resolution_view(value: object) -> dict[str, Any] | None:
         elif head.get("status") is not None:
             head_label = f"HTTP {count(head.get('status'))}"
         addresses, addresses_omitted = _names(row.get("addresses"), limit=4)
-        redirect_classification = text(redirect.get("classification"), limit=32)
+        redirect_classification = text(redirect.get("classification"), limit=_KEYWORD_CHARS)
         status_class = _ENDPOINT_STATUS_CLASSES.get(status, "neutral")
         redirect_class = _ENDPOINT_REDIRECT_CLASSES.get(redirect_classification) or (
             "warn" if redirect.get("downgrade") is True else None
@@ -2154,7 +2166,7 @@ def endpoint_resolution_view(value: object) -> dict[str, Any] | None:
                 "url": text(row.get("url"), limit=160),
                 "status": status,
                 "status_class": status_class,
-                "classification": text(row.get("classification"), limit=32),
+                "classification": text(row.get("classification"), limit=_KEYWORD_CHARS),
                 "addresses": ", ".join(addresses) + (f" (+{addresses_omitted})" if addresses_omitted else ""),
                 "head": head_label,
                 "redirect": text(redirect.get("url"), limit=160),
@@ -2164,7 +2176,7 @@ def endpoint_resolution_view(value: object) -> dict[str, Any] | None:
             }
         )
     counts = [
-        {"status": text(key, limit=32), "count": amount}
+        {"status": text(key, limit=_KEYWORD_CHARS), "count": amount}
         for key, raw in sorted(_mapping(block.get("counts")).items(), key=lambda item: str(item[0]))
         if (amount := count(raw)) is not None
     ]
@@ -2237,7 +2249,7 @@ def _hook_census_rows(census: Mapping[str, Any]) -> list[dict[str, Any]]:
         rows.append(
             {
                 "hook_id": text(hook.get("hook_id")),
-                "event": text(hook.get("event"), limit=64),
+                "event": text(hook.get("event"), limit=_LABEL_CHARS),
                 "runs": runs,
                 "blocked": count(hook.get("blocked")) or 0,
                 "failures": failures,
@@ -2304,7 +2316,7 @@ def hook_census_view(payload: object, *, context: _Tier3Context | None = None) -
 def _canary_arm_row(arm: str, summary: Mapping[str, Any], *, sum_of_parts_baseline: bool) -> dict[str, Any]:
     sinks = _mapping(summary.get("sinks"))
     sink_labels = [
-        f"{CANARY_SINK_LABELS.get(str(kind), text(kind, limit=64))} ({count(amount) or 0})"
+        f"{CANARY_SINK_LABELS.get(str(kind), text(kind, limit=_LABEL_CHARS))} ({count(amount) or 0})"
         for kind, amount in list(sinks.items())[:MAX_LIST_ITEMS]
     ]
     leaked = count(summary.get("leaked")) or 0
@@ -2455,7 +2467,7 @@ def mcp_proof_view(value: object) -> dict[str, Any] | None:
     rows = []
     for name, raw in list(proof.items())[:MAX_SERVERS]:
         entry = _mapping(raw)
-        status = text(entry.get("status"), limit=32) or "declared"
+        status = text(entry.get("status"), limit=_KEYWORD_CHARS) or "declared"
         label, css = MCP_PROOF_LABELS.get(status, (status, "warn"))
         tools, omitted = _names(entry.get("tools"), limit=50)
         rows.append(
@@ -2522,7 +2534,7 @@ def plugin_load_view(payload: object, *, context: _Tier3Context | None = None) -
         entry = _mapping(entry)
         components = _mapping(entry.get("components"))
         grouped = {
-            mode: sorted(text(kind, limit=32) for kind, value in components.items() if value == mode)
+            mode: sorted(text(kind, limit=_KEYWORD_CHARS) for kind, value in components.items() if value == mode)
             for mode in PLUGIN_LOAD_MODES
         }
         census = censuses.get(str(agent), {})
@@ -2545,10 +2557,10 @@ def plugin_load_view(payload: object, *, context: _Tier3Context | None = None) -
         mode = text(entry.get("mode"), limit=16) or "unknown"
         rows.append(
             {
-                "agent": text(agent, limit=64),
+                "agent": text(agent, limit=_LABEL_CHARS),
                 "mode": mode,
                 "mode_class": "ok" if mode == "native" else "warn",
-                "adapter": text(entry.get("adapter"), limit=64),
+                "adapter": text(entry.get("adapter"), limit=_LABEL_CHARS),
                 "reason": text(entry.get("reason")),
                 "native": grouped["native"],
                 "wrapper": grouped["wrapper"],
@@ -2560,7 +2572,7 @@ def plugin_load_view(payload: object, *, context: _Tier3Context | None = None) -
                 "census_summary": census_summary,
                 "unverified": text(unverified) if unverified else "",
                 "not_loaded": [
-                    f"{text(item.get('type'), limit=32)} {text(item.get('name'))}: {text(item.get('reason'))}"
+                    f"{text(item.get('type'), limit=_KEYWORD_CHARS)} {text(item.get('name'))}: {text(item.get('reason'))}"
                     for item in not_loaded[:MAX_LIST_ITEMS]
                 ],
             }

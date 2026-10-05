@@ -551,11 +551,15 @@ def test_the_native_prefix_does_not_depend_on_the_skill_alias_rule(
 ) -> None:
     from skillevaluator.tier3.plugin_native import ClaudeCodeAdapter
 
-    def staged_skill_aliases(self: ClaudeCodeAdapter, source: Any, names: Any) -> list[str]:
-        # An alias rule that lists only the skills the staged plugin loads and ignores ``names``.
-        return [f"{self.plugin_name(source)}:{name}" for name in ("acme", "billing")]
+    build = ClaudeCodeAdapter.build
 
-    monkeypatch.setattr(ClaudeCodeAdapter, "workspace_skill_aliases", staged_skill_aliases)
+    def build_with_staged_skill_aliases(self: ClaudeCodeAdapter, source: Any) -> Any:
+        bundle = build(self, source)
+        # An alias rule that lists only the skills the staged plugin loads.
+        bundle.skill_aliases = [f"{self.plugin_name(source)}:{name}" for name in ("acme", "billing")]
+        return bundle
+
+    monkeypatch.setattr(ClaudeCodeAdapter, "build", build_with_staged_skill_aliases)
     entry = {
         **_native_task_entry(tmp_path, "claude-code"),
         "expected_skill": "billing",

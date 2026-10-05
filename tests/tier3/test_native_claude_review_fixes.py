@@ -545,7 +545,7 @@ def test_member_skill_outside_claude_skill_dirs_is_copied_into_skills(tmp_path: 
     census = _run_setup(bundle, tmp_path / "container")
     listed = {row["name"]: row["evidence"] for row in census["listed"] if row["type"] == "skill"}
     assert listed["inc-skill"].endswith("/plugin/skills/inc-skill/SKILL.md")
-    assert sorted(staging.workspace_skill_aliases(["in-skill", "inc-skill"])) == [
+    assert sorted(staging.workspace_skill_aliases()) == [
         "inc-plugin:in-skill",
         "inc-plugin:inc-skill",
     ]
@@ -562,12 +562,30 @@ def test_declared_skill_dirs_claude_code_loads_are_tracked(tmp_path: Path) -> No
     )
     bundle, staging = _stage(tmp_path, "claude-code", _prepare(plugin, tmp_path).native_source)
 
-    assert "sk-plugin:extra-skill" in staging.workspace_skill_aliases(["in-skill"])
+    assert "sk-plugin:extra-skill" in staging.workspace_skill_aliases()
     census = _run_setup(bundle, tmp_path / "container")
     assert {("skill", "in-skill"), ("skill", "extra-skill")} <= _pairs(census["listed"])
     package = _prepare(plugin, tmp_path, agents="claude-code", env_mode="docker")
     state, reason = _coverage(package, "skill")["extra-skill"]
     assert state == "staged" and "native claude-code arm" in reason
+
+
+def test_declared_skill_dirs_that_climb_out_or_are_absolute_are_not_loaded(tmp_path: Path) -> None:
+    """Declared skill paths are normalized like the Tier 1 inventory: '..' and absolute paths are escapes."""
+    plugin = _claude(
+        tmp_path / "esc-plugin",
+        {"skills": ["./skills/", "./skills/../extra/", "/abs/", "$CLAUDE_PLUGIN_ROOT/more/"]},
+        {
+            "skills/in-skill/SKILL.md": SKILL.format(name="in-skill"),
+            "extra/extra-skill/SKILL.md": SKILL.format(name="extra-skill"),
+            "abs/abs-skill/SKILL.md": SKILL.format(name="abs-skill"),
+            "more/more-skill/SKILL.md": SKILL.format(name="more-skill"),
+        },
+    )
+
+    staged = ClaudeCodeAdapter().staged_skills(_prepare(plugin, tmp_path).native_source)
+
+    assert sorted(name for name, _rel, _copy_from in staged) == ["in-skill", "more-skill"]
 
 
 def test_member_skill_whose_name_is_already_taken_fails_closed(tmp_path: Path) -> None:

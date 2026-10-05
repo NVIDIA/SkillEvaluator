@@ -132,3 +132,38 @@ def test_a_census_listing_does_not_repeat_the_planned_native_rule(tmp_path: Path
         reason
         == "staged as a native rule for claude-code; the load census listed it (x) but the harness did not confirm it was loaded"
     )
+
+
+def test_rows_record_the_agents_that_stage_them_natively(tmp_path: Path) -> None:
+    rows = _rows(tmp_path, "native", "claude-code,codex")
+
+    assert rows["rule"]["native_agents"] == ["claude-code", "codex"]
+    assert rows["hook"]["native_agents"] == ["claude-code"]
+    assert "native_agents" not in _rows(tmp_path, "wrapper", None)["rule"]
+
+
+def test_a_census_listing_by_some_planned_agents_does_not_repeat_the_plan(tmp_path: Path) -> None:
+    rows = _rows(tmp_path, "native", "claude-code,codex")
+    rule = rows["rule"]
+    census = {"codex": {"mode": "native", "listed": [{"type": "rule", "name": rule["name"], "evidence": "x"}]}}
+    plugin_load = {"by_agent": {"codex": {"mode": "native", "components": {"rule": "native"}}}}
+
+    promoted = apply_load_census({"components": [rule]}, census, plugin_load)
+
+    assert promoted["components"][0]["reason"] == (
+        "staged as a native rule for claude-code, codex; the load census listed it (x) but the harness did not "
+        "confirm it was loaded"
+    )
+
+
+def test_the_census_reads_the_recorded_agents_not_the_reason_text() -> None:
+    census = {"claude-code": {"mode": "native", "listed": [{"type": "hook", "name": "h", "evidence": "x"}]}}
+    plugin_load = {"by_agent": {"claude-code": {"mode": "native", "components": {"hook": "native"}}}}
+    listed = "the load census listed it (x) but the harness did not confirm it was loaded"
+
+    def reason(row: dict[str, Any]) -> str:
+        return apply_load_census({"components": [row]}, census, plugin_load)["components"][0]["reason"]
+
+    row = {"type": "hook", "name": "h", "path": "h", "state": "staged", "reason": "planned"}
+    assert reason({**row, "native_agents": ["claude-code"]}) == f"planned; {listed}"
+    assert reason(row) == f"planned; staged natively for claude-code; {listed}"

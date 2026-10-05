@@ -1478,7 +1478,9 @@ agent-requested or manual, is not staged for them; the load census lists it as
 not loaded with the reason. Claude Code user rules can be scoped, so its
 adapter turns `globs` (or `paths`) into the rule's `paths` frontmatter, stages
 always-on rules without frontmatter, and leaves agent-requested and manual
-rules out with the same census reason.
+rules out with the same census reason. Every adapter reads a rule's scope the
+same way: `paths` wins over `globs`, either may be a list or a comma-separated
+string, and a value with no pattern in it does not scope the rule.
 
 OpenCode subagents keep their tool limits. A `tools` (or `allowed-tools`) list
 becomes a `permission` block that denies `*` and allows the mapped tools:
@@ -2294,7 +2296,8 @@ change the `INCOMPLETE` rule or any score.
 
 Tier 3 plugin provenance lists every inventoried component in
 `component_coverage`. Each row has a `type`, `name`, `origin`, `path`, `state`,
-and `reason`:
+and `reason`. A row that a native with-plugin arm stages also lists those
+agents in `native_agents`:
 
 | State | Meaning |
 | --- | --- |

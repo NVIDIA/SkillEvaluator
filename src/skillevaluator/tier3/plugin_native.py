@@ -34,6 +34,7 @@ in :mod:`skillevaluator.tier3.harbor.native_agents`.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -50,15 +51,14 @@ from skillevaluator.plugin_components import (
     COMPONENT_TYPES,
     PluginInventory,
     PluginRootReader,
+    normalize_declared_path,
     parse_markdown,
     summarize_coverage,
 )
 from skillevaluator.tier3.toml_utils import toml_quote
 from skillevaluator.tier3_environments import PLUGIN_LOAD_CHOICES
 from skillevaluator.utils.secure_fs import SecurePathError, stat_is_link_or_reparse
-from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json, load_bounded_yaml
-
-DEFAULT_PLUGIN_LOAD = "wrapper"
+from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json
 
 #: Build-context directory (inside a task's ``environment/``) copied to ``/skilleval``.
 BUNDLE_DIRNAME = "skilleval"
@@ -68,11 +68,9 @@ SETUP_SCRIPT = "/skilleval/native/setup.sh"
 HOOK_CENSUS_SCRIPT = "/skilleval/hook_census.sh"
 HOOK_CENSUS_TEMPLATE = Path(__file__).resolve().parent / "harbor" / "templates" / "hook_census.sh"
 LOAD_CENSUS_FILENAME = "skilleval-load-census.json"
-LOAD_CENSUS_PATH = f"/logs/agent/{LOAD_CENSUS_FILENAME}"
 WRAPPER_ADAPTER = "wrapper"
 STAGED_EVIDENCE = "staged"
 
-COMPONENT_MODES: tuple[str, ...] = ("native", "wrapper", "unsupported")
 #: What the default wrapper path does with each component type.
 WRAPPER_COMPONENTS: dict[str, str] = {
     component_type: ("wrapper" if component_type in {"skill", "rule", "mcp"} else "unsupported")
@@ -171,10 +169,6 @@ class NativePluginSource:
     #: LSP server configs by name, from ``.lsp.json`` or ``lspServers``.
     lsp_servers: Mapping[str, Any] = field(default_factory=dict)
 
-    @property
-    def plugin_slug(self) -> str:
-        return plugin_slug(self.plugin_name)
-
     def present_types(self) -> set[str]:
         present: set[str] = set()
         if self.member_skills:
@@ -188,9 +182,6 @@ class NativePluginSource:
         present.update(text.type for text in self.texts)
         present.update(component_type for component_type, _name in self.other)
         return present
-
-    def texts_of(self, component_type: str) -> list[NativeTextComponent]:
-        return [text for text in self.texts if text.type == component_type]
 
 
 def plugin_slug(name: str) -> str:
@@ -249,7 +240,7 @@ def native_component_types(adapter: HarnessAdapter, source: NativePluginSource) 
     tree; settings and LSP count only when there is something to stage.
     """
     present = source.present_types()
-    if getattr(adapter, "copies_plugin_tree", False) and source.plugin_file_mcp_servers:
+    if adapter.copies_plugin_tree and source.plugin_file_mcp_servers:
         present.add("mcp")
     if not source.settings:
         present.discard("settings")
@@ -547,8 +538,8 @@ CURSOR_TO_CLAUDE_HOOK_EVENTS: dict[str, tuple[str, str | None]] = {
     "stop": ("Stop", None),
 }
 CLAUDE_PLUGIN_ROOT_VAR = "${CLAUDE_PLUGIN_ROOT}"
-_CLAUDE_ROOT_VAR_NAMES = frozenset({"CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA"})
-_FOREIGN_ROOT_VAR_RE = re.compile(r"\$\{(?:CURSOR_PLUGIN_ROOT|PLUGIN_ROOT)\}|\$(?:CURSOR_PLUGIN_ROOT|PLUGIN_ROOT)\b")
+#: The install-time variables Claude Code expands when it loads a plugin.
+CLAUDE_ROOT_VAR_NAMES = frozenset({"CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA"})
 _ROOT_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _LEADING_WORD_RE = re.compile(r"(\s*)(\S+)")
 _RELATIVE_WORD_RE = re.compile(r"(^|\s)\./")
@@ -557,14 +548,58 @@ _PARENT_WORD_RE = re.compile(r"(^|\s)\.\./")
 _BARE_WORD_RE = re.compile(r"(^|[\s;&|(])([A-Za-z0-9_][A-Za-z0-9_./-]*)(?=$|[\s;&|)])")
 
 
-def _foreign_root_var_re(root_prefixes: Sequence[str]) -> re.Pattern[str] | None:
-    """Match a format's own plugin-root placeholder that Claude Code does not expand, braced or bare."""
+def plugin_root_var_names(root_prefixes: Sequence[str]) -> tuple[str, ...]:
+    """The variable names that name the plugin root: a format's own placeholders plus Claude Code's.
+
+    *root_prefixes* are the format's placeholders as written (``${PLUGIN_ROOT}``,
+    ``${CURSOR_PLUGIN_ROOT}``).
+    """
     names = {str(prefix).strip().removeprefix("$").removeprefix("{").removesuffix("}") for prefix in root_prefixes}
-    foreign = sorted(name for name in names if _ROOT_VAR_NAME_RE.fullmatch(name) and name not in _CLAUDE_ROOT_VAR_NAMES)
+    return tuple(sorted({name for name in names if _ROOT_VAR_NAME_RE.fullmatch(name)} | CLAUDE_ROOT_VAR_NAMES))
+
+
+@functools.lru_cache(maxsize=32)
+def foreign_root_var_re(root_prefixes: tuple[str, ...]) -> re.Pattern[str] | None:
+    """Match a format's own plugin-root placeholder that Claude Code does not expand, braced or bare.
+
+    ``None`` when every placeholder in *root_prefixes* is one Claude Code expands.
+    """
+    foreign = [name for name in plugin_root_var_names(root_prefixes) if name not in CLAUDE_ROOT_VAR_NAMES]
     if not foreign:
         return None
     alternatives = "|".join(re.escape(name) for name in foreign)
     return re.compile(r"\$\{(?:" + alternatives + r")\}|\$(?:" + alternatives + r")\b")
+
+
+def to_claude_root(value: Any, pattern: re.Pattern[str] | None) -> Any:
+    """A string with each *pattern* placeholder rewritten to ``${CLAUDE_PLUGIN_ROOT}``; other values unchanged."""
+    if pattern is None or not isinstance(value, str):
+        return value
+    return pattern.sub(lambda _match: CLAUDE_PLUGIN_ROOT_VAR, value)
+
+
+#: The Cursor and Agent Plugins root placeholders, rewritten in every translated Cursor hook command.
+_CURSOR_ROOT_VAR_RE = foreign_root_var_re(("${CURSOR_PLUGIN_ROOT}", "${PLUGIN_ROOT}"))
+#: The plugin-root prefixes Claude Code expands in the paths a ``plugin.json`` declares.
+CLAUDE_ROOT_PATH_PREFIXES = (CLAUDE_PLUGIN_ROOT_VAR, "$CLAUDE_PLUGIN_ROOT")
+
+
+def declared_plugin_paths(value: Any) -> list[PurePosixPath]:
+    """The root-relative paths a ``plugin.json`` path field declares (one path or a list of them).
+
+    Each path is normalized like the Tier 1 inventory does
+    (:func:`~skillevaluator.plugin_components.normalize_declared_path`): a path
+    that escapes the plugin root (absolute, home-relative, or through ``..``),
+    one under another placeholder, and the plugin root itself are skipped.
+    """
+    paths: list[PurePosixPath] = []
+    for raw in value if isinstance(value, list) else [value]:
+        if not isinstance(raw, str):
+            continue
+        rel = normalize_declared_path(raw, CLAUDE_ROOT_PATH_PREFIXES).rel
+        if rel is not None and str(rel) != ".":
+            paths.append(rel)
+    return list(dict.fromkeys(paths))
 
 
 def _plugin_file_checker(plugin_root: Path | None) -> Callable[[str], bool] | None:
@@ -598,9 +633,7 @@ def claude_root_command(
     that names a plugin file (``sh scripts/x.sh``, ``python3 hooks/x.py``).
     """
     root = f'"{CLAUDE_PLUGIN_ROOT_VAR}"/'
-    rewritten = _FOREIGN_ROOT_VAR_RE.sub(lambda _match: CLAUDE_PLUGIN_ROOT_VAR, command)
-    if foreign_root is not None:
-        rewritten = foreign_root.sub(lambda _match: CLAUDE_PLUGIN_ROOT_VAR, rewritten)
+    rewritten = to_claude_root(to_claude_root(command, _CURSOR_ROOT_VAR_RE), foreign_root)
     match = _LEADING_WORD_RE.match(rewritten)
     if match is not None:
         program = match.group(2)
@@ -636,13 +669,9 @@ def _claude_root_vars(handler: Any, foreign_root: re.Pattern[str]) -> Any:
     """Rewrite a format's plugin-root placeholder to ``${CLAUDE_PLUGIN_ROOT}`` in a command handler."""
     if not isinstance(handler, dict) or not isinstance(handler.get("command"), str):
         return handler
-
-    def _sub(value: Any) -> Any:
-        return foreign_root.sub(lambda _match: CLAUDE_PLUGIN_ROOT_VAR, value) if isinstance(value, str) else value
-
-    rewritten = {**handler, "command": _sub(handler["command"])}
+    rewritten = {**handler, "command": to_claude_root(handler["command"], foreign_root)}
     if isinstance(handler.get("args"), list):
-        rewritten["args"] = [_sub(arg) for arg in handler["args"]]
+        rewritten["args"] = [to_claude_root(arg, foreign_root) for arg in handler["args"]]
     return handler if rewritten == handler else rewritten
 
 
@@ -663,7 +692,7 @@ def wrap_hook_sources(sources: Sequence[NativeHookSource], *, plugin_root: Path 
     dropped: list[tuple[str, str]] = []
     plugin_file = _plugin_file_checker(plugin_root)
     for source in sources:
-        foreign_root = _foreign_root_var_re(source.root_prefixes)
+        foreign_root = foreign_root_var_re(tuple(source.root_prefixes))
         rebuilt: dict[tuple[str, int], dict[str, Any]] = {}
         order: list[tuple[str, int]] = []
         targets: dict[tuple[str, int], str] = {}
@@ -910,6 +939,8 @@ class NativeBundle:
     handlers that were wrapped; only those ids count as hook runs.
     ``harness`` tells the collector which harness report confirms loading (for
     Claude Code: its ``system/init`` event and the plugin name it reports).
+    ``skill_aliases`` are the extra names the harness may report for the staged
+    skills (Claude Code's ``<plugin>:<skill>``), which routing grades accept.
     """
 
     agent: str
@@ -921,6 +952,7 @@ class NativeBundle:
     declared: list[dict[str, str]] = field(default_factory=list)
     hook_ids: dict[str, list[str]] = field(default_factory=dict)
     harness: dict[str, str] = field(default_factory=dict)
+    skill_aliases: list[str] = field(default_factory=list)
 
     def census_plan(self) -> dict[str, Any]:
         """What the collector needs to read and check this arm's load census."""
@@ -947,6 +979,8 @@ class HarnessAdapter:
     stage_member_skills = True
     #: Pass the plugin's MCP servers through Harbor's task MCP list.
     plugin_mcp_via_task = False
+    #: Copy the plugin root into the task, so MCP servers that launch from plugin files can start.
+    copies_plugin_tree = False
     #: Why ``--plugin-load auto`` uses the generated wrapper for this harness even
     #: where the adapter works (``None``: ``auto`` uses the adapter).
     auto_wrapper_reason: str | None = None
@@ -962,10 +996,6 @@ class HarnessAdapter:
         if task_source != "evals_json":
             return "native Harbor task sources (evals/harbor/) keep their own environment"
         return None
-
-    def workspace_skill_aliases(self, source: NativePluginSource, names: Sequence[str]) -> list[str]:  # noqa: ARG002
-        """Extra skill names the harness may report for staged member skills (for routing grades)."""
-        return []
 
     #: The harness reports plugin skills and commands as ``<plugin>:<name>``.
     namespaces_plugin_names = False
@@ -995,7 +1025,7 @@ class HarnessAdapter:
             rows.extend(("hook", hook.name, reason) for hook in source.hooks)
         rows.extend((text.type, text.name, reason) for text in source.texts if modes.get(text.type) == "unsupported")
         rows.extend((component_type, name, reason) for component_type, name in source.other)
-        if not getattr(self, "copies_plugin_tree", False):
+        if not self.copies_plugin_tree:
             # Only an adapter that copies the plugin tree can start a server that launches from plugin files.
             rows.extend(
                 (
@@ -1031,72 +1061,90 @@ def _is_true(value: Any) -> bool:
     return value is True or (isinstance(value, str) and value.strip().casefold() == "true")
 
 
-def _always_on_rule(name: str, content: str) -> tuple[str | None, str | None]:
-    """Return ``(body, None)`` for a rule that applies to every task, or ``(None, reason)``.
-
-    The frontmatter is never staged. A Cursor rule is always on only with
-    ``alwaysApply: true``; ``globs`` (or Claude ``paths``) scope it to matching
-    files, and without either it is agent-requested or manual. A rule with no
-    frontmatter stays always on.
-    """
-    lines = content.splitlines()
-    if not lines or lines[0].strip() != "---" or not any(line.strip() == "---" for line in lines[1:]):
-        return content.strip(), None
-    parsed = parse_markdown(content)
-    meta = parsed.frontmatter
-    if _is_true(meta.get("alwaysApply")):
-        return parsed.body.strip(), None
-    scope = meta.get("globs") or meta.get("paths")
-    if scope:
-        shown = ", ".join(str(item) for item in scope) if isinstance(scope, list) else str(scope)
-        return None, (
-            f"scoped rule (applies only to files matching {shown[:80]}); this harness has only an always-on "
-            "rules channel, so it is not staged"
-        )
-    if "alwaysApply" in meta or name.casefold().endswith(".mdc"):
-        kind = "agent-requested" if parsed.description else "manual"
-        return None, (
-            f"{kind} rule (alwaysApply is not true); this harness has only an always-on rules channel, "
-            "so it is not staged"
-        )
-    return parsed.body.strip(), None
-
-
 def _rule_globs(scope: Any) -> list[str]:
     """Cursor ``globs`` or Claude ``paths``: a list, or a comma-separated string, of glob patterns."""
     items = scope if isinstance(scope, list) else str(scope).split(",")
     return [text for item in items if (text := str(item).strip())][:64]
 
 
-def _claude_user_rule(name: str, content: str) -> tuple[str | None, str | None]:
-    """The staged Claude Code user rule for one plugin rule, or ``(None, reason)``.
+@dataclass(frozen=True)
+class _RuleActivation:
+    """When a plugin rule applies, read from its frontmatter (which is never staged).
 
-    Claude Code loads a user rule on every task unless its frontmatter has
-    ``paths``, so a rule's scope must be expressed that way. A rule with no
-    frontmatter or ``alwaysApply: true`` is always on (its frontmatter is not
-    staged). Cursor ``globs`` (or Claude ``paths``) become ``paths``. A Cursor
-    agent-requested or manual rule has no Claude Code equivalent and is not
-    staged.
+    ``body`` is the rule without its frontmatter (stripped when there was one).
+    ``globs`` are the file patterns a scoped rule applies to. ``on_request``
+    names a rule that is neither always on nor scoped: ``agent-requested`` (it
+    has a description) or ``manual``.
+    """
+
+    body: str
+    globs: tuple[str, ...] = ()
+    on_request: str | None = None
+
+
+def _rule_activation(name: str, content: str) -> _RuleActivation:
+    """Classify one plugin rule as always on, scoped to file patterns, or applied on request.
+
+    A rule with no frontmatter, or with ``alwaysApply: true``, is always on.
+    Claude ``paths`` or Cursor ``globs`` (a list, or a comma-separated string)
+    scope it to matching files. Otherwise a rule that sets ``alwaysApply``, or
+    a Cursor ``.mdc`` rule, is agent-requested or manual; any other rule is
+    always on.
     """
     lines = content.splitlines()
     if not lines or lines[0].strip() != "---" or not any(line.strip() == "---" for line in lines[1:]):
-        return content.rstrip() + "\n", None
+        return _RuleActivation(content)
     parsed = parse_markdown(content)
     meta = parsed.frontmatter
     body = parsed.body.strip()
     if _is_true(meta.get("alwaysApply")):
-        return body + "\n", None
-    patterns = _rule_globs(meta.get("paths") or meta.get("globs") or [])
-    if patterns:
-        listed = "".join(f"  - {json.dumps(pattern)}\n" for pattern in patterns)
-        return f"---\npaths:\n{listed}---\n\n{body}\n", None
+        return _RuleActivation(body)
+    globs = _rule_globs(meta.get("paths") or meta.get("globs") or [])
+    if globs:
+        return _RuleActivation(body, globs=tuple(globs))
     if "alwaysApply" in meta or name.casefold().endswith(".mdc"):
-        kind = "agent-requested" if parsed.description else "manual"
+        return _RuleActivation(body, on_request="agent-requested" if parsed.description else "manual")
+    return _RuleActivation(body)
+
+
+def _always_on_rule(name: str, content: str) -> tuple[str | None, str | None]:
+    """Return ``(body, None)`` for a rule that applies to every task, or ``(None, reason)``.
+
+    For harnesses whose only rules channel is always on: a scoped,
+    agent-requested, or manual rule is not staged.
+    """
+    rule = _rule_activation(name, content)
+    if rule.globs:
         return None, (
-            f"{kind} rule (alwaysApply is not true); Claude Code user rules are always on or scoped by paths, "
+            f"scoped rule (applies only to files matching {', '.join(rule.globs)[:80]}); this harness has only an "
+            "always-on rules channel, so it is not staged"
+        )
+    if rule.on_request:
+        return None, (
+            f"{rule.on_request} rule (alwaysApply is not true); this harness has only an always-on rules channel, "
             "so it is not staged"
         )
-    return body + "\n", None
+    return rule.body.strip(), None
+
+
+def _claude_user_rule(name: str, content: str) -> tuple[str | None, str | None]:
+    """The staged Claude Code user rule for one plugin rule, or ``(None, reason)``.
+
+    Claude Code loads a user rule on every task unless its frontmatter has
+    ``paths``, so a scoped rule is staged with its patterns as ``paths``. A
+    Cursor agent-requested or manual rule has no Claude Code equivalent and is
+    not staged.
+    """
+    rule = _rule_activation(name, content)
+    if rule.globs:
+        listed = "".join(f"  - {json.dumps(pattern)}\n" for pattern in rule.globs)
+        return f"---\npaths:\n{listed}---\n\n{rule.body}\n", None
+    if rule.on_request:
+        return None, (
+            f"{rule.on_request} rule (alwaysApply is not true); Claude Code user rules are always on or scoped by "
+            "paths, so it is not staged"
+        )
+    return rule.body.rstrip() + "\n", None
 
 
 def _staged_rules(source: NativePluginSource) -> tuple[list[tuple[str, str]], list[tuple[str, str, str]]]:
@@ -1245,16 +1293,12 @@ class ClaudeCodeAdapter(HarnessAdapter):
     stage_member_skills = False
     #: The plugin root is copied, so MCP servers that launch from plugin files start here.
     copies_plugin_tree = True
-    plugin_dir = f"{NATIVE_ROOT}/claude-code/plugin"
+    #: Where the staged plugin lives in the bundle, and so in the container (``plugin_dir``).
+    bundle_dir = "native/claude-code/plugin"
+    plugin_dir = f"{CONTAINER_ROOT}/{bundle_dir}"
 
     def plugin_name(self, source: NativePluginSource) -> str:
         return plugin_slug(source.plugin_name)
-
-    def workspace_skill_aliases(self, source: NativePluginSource, names: Sequence[str]) -> list[str]:  # noqa: ARG002
-        # Claude Code namespaces plugin skills ``<plugin>:<skill dir>``. The aliases
-        # cover every skill the staged plugin loads, not only the member skills.
-        prefix = self.plugin_name(source)
-        return [f"{prefix}:{PurePosixPath(rel).name}" for _name, rel, _copy in self.staged_skills(source)]
 
     def manifest(self, source: NativePluginSource) -> dict[str, Any]:
         """The staged ``plugin.json``: identity plus the component keys that stay native.
@@ -1273,22 +1317,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
         return manifest
 
     def _declared_skill_dirs(self, source: NativePluginSource) -> list[PurePosixPath]:
-        """Root-relative skill directories the staged ``plugin.json`` declares."""
-        value = self.manifest(source).get("skills")
-        dirs: list[PurePosixPath] = []
-        for raw in value if isinstance(value, list) else [value]:
-            if not isinstance(raw, str) or not raw.strip():
-                continue
-            text = raw.strip().replace("\\", "/")
-            for prefix in (CLAUDE_PLUGIN_ROOT_VAR, "$CLAUDE_PLUGIN_ROOT"):
-                if text.startswith(prefix):
-                    text = text[len(prefix) :].lstrip("/") or "."
-            if text.startswith(("/", "$", "~")):
-                continue
-            rel = PurePosixPath(os.path.normpath(text))
-            if ".." not in rel.parts and str(rel) != ".":
-                dirs.append(rel)
-        return list(dict.fromkeys(dirs))
+        """Root-relative skill directories the staged ``plugin.json`` declares (it keeps a contained ``skills``)."""
+        return declared_plugin_paths(source.manifest.get("skills")) if source.contained else []
 
     def staged_skills(self, source: NativePluginSource) -> list[tuple[str, str, Path | None]]:
         """Every skill the staged plugin loads: ``(census name, plugin-relative dir, copy source or None)``.
@@ -1364,17 +1394,31 @@ class ClaudeCodeAdapter(HarnessAdapter):
 
     def build(self, source: NativePluginSource) -> NativeBundle:
         bundle = self._base_bundle()
-        base = "native/claude-code/plugin"
-        slug = self.plugin_name(source)
-        checks: list[CensusCheck] = []
         # The plugin root is copied (secure copy, evals/ and unsupported files
         # excluded) so hook scripts and other plugin-relative files resolve.
-        bundle.plugin_tree = base
+        bundle.plugin_tree = self.bundle_dir
+        bundle.harness = {"kind": "claude-code-init", "plugin": self.plugin_name(source)}
         manifest = self.manifest(source)
-        # Census targets come from what the staged plugin actually loads.
+        checks: list[CensusCheck] = []
+        not_loaded: list[tuple[str, str, str]] = []
+        self._stage_skills(bundle, source, checks)
+        self._stage_mcp_servers(bundle, source, checks)
+        self._stage_hooks(bundle, source, checks, not_loaded)
+        self._stage_texts(bundle, source, manifest, checks)
+        bundle.generated[f"{self.bundle_dir}/.claude-plugin/plugin.json"] = json.dumps(manifest, indent=2) + "\n"
+        self._stage_plugin_configs(bundle, source, checks)
+        setup_lines = self._stage_rules(bundle, source, checks, not_loaded)
+        return self._finish(bundle, source, setup_lines=setup_lines, checks=checks, not_loaded=not_loaded)
+
+    def _stage_skills(self, bundle: NativeBundle, source: NativePluginSource, checks: list[CensusCheck]) -> None:
+        """Copy the member skills Claude Code would not read where they are, and list every loaded skill."""
+        slug = self.plugin_name(source)
+        # Census targets come from what the staged plugin actually loads. Claude Code
+        # names each one ``<plugin>:<skill dir>``, member skill or not.
         for name, rel, copy_from in self.staged_skills(source):
+            bundle.skill_aliases.append(f"{slug}:{PurePosixPath(rel).name}")
             if copy_from is not None:
-                bundle.trees.append((copy_from, f"{base}/{rel}"))
+                bundle.trees.append((copy_from, f"{self.bundle_dir}/{rel}"))
             checks.append(
                 CensusCheck(
                     "skill",
@@ -1386,13 +1430,19 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     harness_name=PurePosixPath(rel).name,
                 )
             )
-        # Runnable servers plus the ones that launch from the copied plugin files
-        # (Claude Code expands ${CLAUDE_PLUGIN_ROOT} for them), with their env/headers.
+
+    def _stage_mcp_servers(self, bundle: NativeBundle, source: NativePluginSource, checks: list[CensusCheck]) -> None:
+        """Write the staged ``.mcp.json``.
+
+        It holds the runnable servers plus the ones that launch from the copied
+        plugin files (Claude Code expands ``${CLAUDE_PLUGIN_ROOT}`` for them),
+        with their env/headers.
+        """
         servers = {
             _redacted(str(server["name"])): _mcp_entry_claude(server, source.mcp_declared.get(str(server["name"])))
             for server in (*source.mcp_servers, *source.plugin_file_mcp_servers)
         }
-        bundle.generated[f"{base}/.mcp.json"] = json.dumps({"mcpServers": servers}, indent=2) + "\n"
+        bundle.generated[f"{self.bundle_dir}/.mcp.json"] = json.dumps({"mcpServers": servers}, indent=2) + "\n"
         checks.extend(
             CensusCheck(
                 "mcp",
@@ -1404,12 +1454,19 @@ class ClaudeCodeAdapter(HarnessAdapter):
             )
             for name in servers
         )
+
+    def _stage_hooks(
+        self,
+        bundle: NativeBundle,
+        source: NativePluginSource,
+        checks: list[CensusCheck],
+        not_loaded: list[tuple[str, str, str]],
+    ) -> None:
+        """Merge every hook source into one census-wrapped ``hooks/hooks.json``, with one listing per source."""
         wrapped = wrap_hook_sources(source.hooks, plugin_root=source.plugin_root)
-        bundle.generated[f"{base}/hooks/hooks.json"] = json.dumps(wrapped.config, indent=2) + "\n"
+        bundle.generated[f"{self.bundle_dir}/hooks/hooks.json"] = json.dumps(wrapped.config, indent=2) + "\n"
         for owner, _event, identifier in wrapped.ids:
             bundle.hook_ids.setdefault(owner, []).append(identifier)
-        bundle.harness = {"kind": "claude-code-init", "plugin": slug}
-        not_loaded: list[tuple[str, str, str]] = []
         for hook in source.hooks:
             identifiers = [identifier for owner, _event, identifier in wrapped.ids if owner == hook.name]
             dropped = [event for owner, event in wrapped.dropped if owner == hook.name]
@@ -1445,13 +1502,25 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     label="plugin-dir hooks listing",
                 )
             )
+
+    def _stage_texts(
+        self,
+        bundle: NativeBundle,
+        source: NativePluginSource,
+        manifest: dict[str, Any],
+        checks: list[CensusCheck],
+    ) -> None:
+        """List the subagents, commands, and output styles; an inline command becomes a staged file.
+
+        The inline command's ``commands`` map entry in *manifest* (the staged
+        ``plugin.json``) is pointed at that file.
+        """
         commands = manifest.get("commands")
         for text in source.texts:
             rel = text.rel
             if rel is None:
-                # An inline command-map entry becomes a staged file the map points to.
                 rel = f"commands/{safe_name(text.name)}.md"
-                bundle.generated[f"{base}/{rel}"] = text.text
+                bundle.generated[f"{self.bundle_dir}/{rel}"] = text.text
                 if isinstance(commands, dict) and isinstance(commands.get(text.name), dict):
                     entry = {key: value for key, value in commands[text.name].items() if key != "content"}
                     entry["source"] = f"./{rel}"
@@ -1468,9 +1537,14 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     harness_name=command_name if text.type == "command" else "",
                 )
             )
-        bundle.generated[f"{base}/.claude-plugin/plugin.json"] = json.dumps(manifest, indent=2) + "\n"
+
+    def _stage_plugin_configs(
+        self, bundle: NativeBundle, source: NativePluginSource, checks: list[CensusCheck]
+    ) -> None:
+        """Write the applied ``settings.json`` and ``.lsp.json``, and list them and ``bin/``."""
         if source.settings:
-            bundle.generated[f"{base}/{_PLUGIN_SETTINGS_FILE}"] = json.dumps(dict(source.settings), indent=2) + "\n"
+            settings = json.dumps(dict(source.settings), indent=2) + "\n"
+            bundle.generated[f"{self.bundle_dir}/{_PLUGIN_SETTINGS_FILE}"] = settings
             checks.append(
                 CensusCheck(
                     "settings",
@@ -1481,7 +1555,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 )
             )
         if source.lsp_servers:
-            bundle.generated[f"{base}/.lsp.json"] = json.dumps(dict(source.lsp_servers), indent=2) + "\n"
+            bundle.generated[f"{self.bundle_dir}/.lsp.json"] = json.dumps(dict(source.lsp_servers), indent=2) + "\n"
             checks.extend(
                 CensusCheck(
                     "lsp",
@@ -1495,28 +1569,41 @@ class ClaudeCodeAdapter(HarnessAdapter):
             )
         if ("bin", "bin") in source.other:
             checks.append(CensusCheck("bin", "bin", "dir", f"{self.plugin_dir}/bin", label="plugin-dir listing"))
-        setup_lines: list[str] = []
-        if source.rules:
-            rules_dir = f"skilleval-{slug}"
-            setup_lines.append(': "${CLAUDE_CONFIG_DIR:=$HOME/.claude}"')
-            destinations: dict[str, str] = {}
-            for name, content in source.rules:
-                staged, reason = _claude_user_rule(name, content)
-                if staged is None:
-                    not_loaded.append(("rule", name, reason or "not a Claude Code user rule"))
-                    continue
-                file_name = _claude_rule_file_name(name)
-                if file_name in destinations:
-                    raise ValueError(
-                        f"Refusing to stage plugin rules natively: '{destinations[file_name]}' and '{name}' would "
-                        f"both be staged as rules/{file_name}"
-                    )
-                destinations[file_name] = name
-                bundle.generated[f"native/claude-code/rules/{file_name}"] = staged
-                dest = f"$CLAUDE_CONFIG_DIR/rules/{rules_dir}/{file_name}"
-                setup_lines.append(f'skilleval_copy "{NATIVE_ROOT}/claude-code/rules/{file_name}" "{dest}"')
-                checks.append(CensusCheck("rule", name, "file", dest, label="user rules listing"))
-        return self._finish(bundle, source, setup_lines=setup_lines, checks=checks, not_loaded=not_loaded)
+
+    def _stage_rules(
+        self,
+        bundle: NativeBundle,
+        source: NativePluginSource,
+        checks: list[CensusCheck],
+        not_loaded: list[tuple[str, str, str]],
+    ) -> list[str]:
+        """Stage each rule as a Claude Code user rule; return the setup lines that copy them into place.
+
+        The rules go to ``$CLAUDE_CONFIG_DIR/rules/skilleval-<plugin>/``, one file
+        per rule. Two rules that would share a file name fail staging.
+        """
+        if not source.rules:
+            return []
+        rules_dir = f"skilleval-{self.plugin_name(source)}"
+        setup_lines = [': "${CLAUDE_CONFIG_DIR:=$HOME/.claude}"']
+        destinations: dict[str, str] = {}
+        for name, content in source.rules:
+            staged, reason = _claude_user_rule(name, content)
+            if staged is None:
+                not_loaded.append(("rule", name, reason or "not a Claude Code user rule"))
+                continue
+            file_name = _claude_rule_file_name(name)
+            if file_name in destinations:
+                raise ValueError(
+                    f"Refusing to stage plugin rules natively: '{destinations[file_name]}' and '{name}' would "
+                    f"both be staged as rules/{file_name}"
+                )
+            destinations[file_name] = name
+            bundle.generated[f"native/claude-code/rules/{file_name}"] = staged
+            dest = f"$CLAUDE_CONFIG_DIR/rules/{rules_dir}/{file_name}"
+            setup_lines.append(f'skilleval_copy "{NATIVE_ROOT}/claude-code/rules/{file_name}" "{dest}"')
+            checks.append(CensusCheck("rule", name, "file", dest, label="user rules listing"))
+        return setup_lines
 
 
 def _check_codex_mcp_toml(text: str, servers: Sequence[Mapping[str, Any]]) -> None:
@@ -1918,13 +2005,6 @@ def adapter_for(agent: str) -> HarnessAdapter | None:
     return HARNESS_ADAPTERS.get(agent)
 
 
-def component_support_matrix() -> dict[str, dict[str, str]]:
-    """Per-harness component modes, plus the wrapper column (documentation and tests)."""
-    matrix = {agent: adapter.component_modes() for agent, adapter in HARNESS_ADAPTERS.items()}
-    matrix[WRAPPER_ADAPTER] = dict(WRAPPER_COMPONENTS)
-    return matrix
-
-
 # --------------------------------------------------------------------------- #
 # Plan resolution and provenance                                               #
 # --------------------------------------------------------------------------- #
@@ -1954,6 +2034,43 @@ class AgentLoadDecision:
 def wrapper_decision(agent: str, reason: str) -> AgentLoadDecision:
     """A wrapper-mode decision with ``reason`` (the default, or an ``auto`` fallback)."""
     return AgentLoadDecision(agent, "wrapper", reason, WRAPPER_ADAPTER, dict(WRAPPER_COMPONENTS))
+
+
+def refuse_or_fall_back(requested: str, agent: str, reason: str) -> AgentLoadDecision:
+    """The decision for an agent that cannot load the plugin natively, for ``reason``.
+
+    ``native`` refuses: it raises :class:`PluginLoadError`. ``auto`` falls back
+    to the generated wrapper and records why.
+    """
+    if requested == "native":
+        raise PluginLoadError(f"--plugin-load native is not supported for {agent}: {reason}")
+    return wrapper_decision(agent, f"auto: {reason}; using the generated wrapper")
+
+
+def apply_native_refusals(
+    requested: str,
+    decisions: Mapping[str, AgentLoadDecision],
+    source: NativePluginSource | None,
+) -> dict[str, AgentLoadDecision]:
+    """Check each native decision against the prepared plugin snapshot.
+
+    A native decision needs the snapshot, and an adapter refuses to stage a
+    component type natively when that component enables a permission bypass
+    (:func:`native_refusal`). Either way the agent is refused or falls back
+    (:func:`refuse_or_fall_back`); wrapper decisions are kept as they are.
+    """
+    checked = dict(decisions)
+    for agent, decision in decisions.items():
+        if not decision.native:
+            continue
+        adapter = adapter_for(agent)
+        if source is None:
+            reason: str | None = "no native plugin snapshot was prepared for this run"
+        else:
+            reason = native_refusal(adapter, source) if adapter is not None else None
+        if reason is not None:
+            checked[agent] = refuse_or_fall_back(requested, agent, reason)
+    return checked
 
 
 def resolve_plugin_load(
@@ -1987,9 +2104,7 @@ def resolve_plugin_load(
             else adapter.unsupported_reason(env_mode=env_mode, task_source=task_source)
         )
         if reason is not None:
-            if requested == "native":
-                raise PluginLoadError(f"--plugin-load native is not supported for {agent}: {reason}")
-            decisions[agent] = wrapper_decision(agent, f"auto: {reason}; using the generated wrapper")
+            decisions[agent] = refuse_or_fall_back(requested, agent, reason)
             continue
         assert adapter is not None
         if requested == "auto" and adapter.auto_wrapper_reason:
@@ -2445,8 +2560,10 @@ def native_load_unverified(summary: Mapping[str, Any]) -> str | None:
     return None
 
 
-_STATE_RANK = {"staged": 1, "loaded": 2, "exercised": 3}
-_EVALUATED_STATES = frozenset(_STATE_RANK)
+#: Coverage states in which the with-plugin arm had the component, from the weakest evidence to the
+#: strongest: staged for it, loaded by the harness, exercised at runtime. A row is never downgraded.
+COVERAGE_STATE_RANK = {"staged": 1, "loaded": 2, "exercised": 3}
+EVALUATED_COVERAGE_STATES = frozenset(COVERAGE_STATE_RANK)
 
 
 def _coverage_names(row: Mapping[str, Any]) -> set[str]:
@@ -2459,7 +2576,8 @@ def _coverage_names(row: Mapping[str, Any]) -> set[str]:
     return {name for name in names if name}
 
 
-def _native_types_by_agent(plugin_load: Mapping[str, Any] | None) -> dict[str, set[str]]:
+def native_types_by_agent(plugin_load: Any) -> dict[str, set[str]]:
+    """The component types each native with-plugin arm loads natively, from the ``plugin_load`` provenance."""
     by_agent = plugin_load.get("by_agent") if isinstance(plugin_load, Mapping) else None
     result: dict[str, set[str]] = {}
     for agent, entry in (by_agent or {}).items() if isinstance(by_agent, Mapping) else ():
@@ -2481,14 +2599,16 @@ def apply_load_census(
     Harness evidence (``loaded``) promotes a row to ``loaded``. A listing alone
     (``listed``) promotes a row to ``staged`` at most. A ``not_loaded`` entry
     adds its reason. Precedence is ``exercised`` > ``loaded`` > ``staged``: a
-    row is never downgraded. Notes are appended to the existing reason, so an
+    row is never downgraded. A listed row whose ``native_agents`` (recorded by
+    the resolved plan) already cover the listing agents does not repeat that
+    it is staged natively for them. Notes are appended to the existing reason, so an
     earlier note (for example an INCOMPLETE MCP note) survives, also on a row
     that stays unsupported; a row promoted from an unevaluated state gets the
     census note in place of the old "not staged" reason.
     """
     if not isinstance(coverage, Mapping):
         return None if coverage is None else dict(coverage)
-    native_types = _native_types_by_agent(plugin_load)
+    native_types = native_types_by_agent(plugin_load)
     hits: dict[str, dict[tuple[str, str], list[tuple[str, str]]]] = {"loaded": {}, LISTED_KEY: {}, "not_loaded": {}}
     for agent, summary in summaries.items():
         types = native_types.get(str(agent), set())
@@ -2524,16 +2644,16 @@ def apply_load_census(
         note = ""
         if found := lookup("loaded"):
             agents = ", ".join(sorted({agent for agent, _detail in found}))
-            new_state = "loaded" if _STATE_RANK.get(state, 0) < _STATE_RANK["loaded"] else state
+            new_state = "loaded" if COVERAGE_STATE_RANK.get(state, 0) < COVERAGE_STATE_RANK["loaded"] else state
             note = f"loaded natively by {agents} (load census, harness evidence: {found[0][1]})"
         elif found := lookup(LISTED_KEY):
-            agents = ", ".join(sorted({agent for agent, _detail in found}))
-            new_state = "staged" if _STATE_RANK.get(state, 0) < _STATE_RANK["staged"] else state
-            staged = f"staged natively for {agents}"
-            # A row the resolved plan already marked staged for these agents keeps one copy of that phrase.
-            old_reason = str(row.get("reason") or "")
-            planned = (staged, f"staged as a native rule for {agents}")
-            prefix = "" if any(phrase in old_reason for phrase in planned) else f"{staged}; "
+            listed_by = sorted({agent for agent, _detail in found})
+            new_state = "staged" if COVERAGE_STATE_RANK.get(state, 0) < COVERAGE_STATE_RANK["staged"] else state
+            # A row the resolved plan already staged natively for these agents (its
+            # native_agents) says so in its reason; the note does not repeat it.
+            planned = row.get("native_agents")
+            planned_for = set(planned) if isinstance(planned, list) else set()
+            prefix = "" if planned_for.issuperset(listed_by) else f"staged natively for {', '.join(listed_by)}; "
             note = f"{prefix}the load census listed it ({found[0][1]}) but the harness did not confirm it was loaded"
         elif found := lookup("not_loaded"):
             agents = ", ".join(sorted({agent for agent, _detail in found}))
@@ -2543,7 +2663,7 @@ def apply_load_census(
             old = str(row.get("reason") or "")
             # A promotion replaces an old "not staged" reason; a not-loaded note keeps the reason it adds to.
             promoted = new_state != state
-            row["reason"] = f"{old}; {note}" if old and (state in _EVALUATED_STATES or not promoted) else note
+            row["reason"] = f"{old}; {note}" if old and (state in EVALUATED_COVERAGE_STATES or not promoted) else note
             row["state"] = new_state
         rows.append(row)
     return summarize_coverage(rows)
@@ -2584,18 +2704,3 @@ def finalize_native_provenance(provenance: dict[str, Any], engine_result: Any) -
     if unverified:
         provenance["native_load_unverified"] = unverified
         provenance["partial"] = True
-
-
-def parse_frontmatter_yaml(text: str) -> dict[str, Any]:
-    """Small helper for tests and adapters: parse a Markdown file's frontmatter."""
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}
-    for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
-            try:
-                data = load_bounded_yaml("\n".join(lines[1:index]))
-            except (StructuredDataError, ValueError):
-                return {}
-            return data if isinstance(data, dict) else {}
-    return {}

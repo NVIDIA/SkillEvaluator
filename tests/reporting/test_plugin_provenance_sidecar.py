@@ -311,6 +311,8 @@ def _prepared_package(tmp_path: Path, record: dict) -> SimpleNamespace:
         unresolved_skill_refs=tuple(record["unresolved_skill_refs"]),
         unresolved_rule_refs=(),
         unresolved_mcp_servers=tuple(record["provider_only_mcp_servers"]),
+        native_source=None,
+        mcp_probe_targets=(),
         integration_evidence_error=lambda: None,
         provenance=lambda: dict(record),
     )

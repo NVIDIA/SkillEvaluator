@@ -86,17 +86,23 @@ def validate_tier2_llm_prompt(prompt: object, *, context: str) -> str:
     )
 
 
+def _require_unit_interval(value: object, label: str) -> float:
+    """Require a real number (not a bool) that is finite and within [0, 1]."""
+    message = f"{label} must be a finite number within [0, 1]"
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise LLMClientError(message)
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise LLMClientError(message) from exc
+    if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+        raise LLMClientError(message)
+    return number
+
+
 def validate_tier2_llm_similarity_score(value: object, *, context: str) -> float:
     """Require a finite similarity score within [0, 1] before rendering."""
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        raise LLMClientError(f"{context} similarity score must be a finite number within [0, 1]")
-    try:
-        score = float(value)
-    except (OverflowError, TypeError, ValueError) as exc:
-        raise LLMClientError(f"{context} similarity score must be a finite number within [0, 1]") from exc
-    if not math.isfinite(score) or not 0.0 <= score <= 1.0:
-        raise LLMClientError(f"{context} similarity score must be a finite number within [0, 1]")
-    return score
+    return _require_unit_interval(value, f"{context} similarity score")
 
 
 def validate_tier2_llm_prompt_batch(
@@ -135,15 +141,7 @@ def parse_bounded_llm_verdict(
     if verdict not in valid_verdicts:
         raise LLMClientError(f"LLM returned unknown verdict '{verdict}'. Expected one of: {set(valid_verdicts)}")
 
-    raw_confidence = data.get("confidence", 0.0)
-    if not isinstance(raw_confidence, (int, float)) or isinstance(raw_confidence, bool):
-        raise LLMClientError(f"{context} confidence must be a finite number within [0, 1]")
-    try:
-        confidence = float(raw_confidence)
-    except (OverflowError, TypeError, ValueError) as exc:
-        raise LLMClientError(f"{context} confidence must be a finite number within [0, 1]") from exc
-    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
-        raise LLMClientError(f"{context} confidence must be a finite number within [0, 1]")
+    confidence = _require_unit_interval(data.get("confidence", 0.0), f"{context} confidence")
 
     reasoning = require_bounded_llm_string(
         data.get("reasoning", ""),

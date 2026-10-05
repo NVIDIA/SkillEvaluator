@@ -45,11 +45,9 @@ from typing import Any
 
 from skillevaluator.plugin_components import summarize_coverage
 from skillevaluator.tier3.mcp_proof import apply_in_agent_mcp_proof
+from skillevaluator.tier3.plugin_native import EVALUATED_COVERAGE_STATES, native_types_by_agent
 
 STATE_EXERCISED = "exercised"
-STATE_LOADED = "loaded"
-EVALUATED_STATES = ("staged", STATE_LOADED, STATE_EXERCISED)
-_AVAILABLE_STATES = frozenset({"staged", STATE_LOADED, STATE_EXERCISED})
 _ACTIVATION_PREFIX = {"skill": "skill", "mcp": "mcp", "agent": "subagent", "command": "command"}
 
 
@@ -66,16 +64,6 @@ def _with_plugin_summaries(engine_result: Mapping[str, Any] | None) -> list[tupl
     return summaries
 
 
-def _native_types(provenance: Mapping[str, Any], agent: str) -> set[str]:
-    plugin_load = provenance.get("plugin_load")
-    by_agent = plugin_load.get("by_agent") if isinstance(plugin_load, Mapping) else None
-    entry = by_agent.get(agent) if isinstance(by_agent, Mapping) else None
-    components = entry.get("components") if isinstance(entry, Mapping) else None
-    if not isinstance(components, Mapping):
-        return set()
-    return {str(kind) for kind, mode in components.items() if mode == "native"}
-
-
 def _staged_hook_ids(provenance: Mapping[str, Any], agent: str, source: str) -> frozenset[str]:
     """The exact hook ids SkillEvaluator wrapped for ``source`` in ``agent``'s with-plugin arm."""
     load_census = provenance.get("load_census")
@@ -88,10 +76,13 @@ def _staged_hook_ids(provenance: Mapping[str, Any], agent: str, source: str) -> 
 
 
 def _hook_census_evidence(
-    name: str, agent: str, summary: Mapping[str, Any], provenance: Mapping[str, Any]
+    name: str, agent: str, summary: Mapping[str, Any], provenance: Mapping[str, Any], native_types: set[str]
 ) -> str | None:
-    """Self-reported hook census evidence for one natively staged hook source, or ``None``."""
-    if "hook" not in _native_types(provenance, agent):
+    """Self-reported hook census evidence for one natively staged hook source, or ``None``.
+
+    *native_types* are the component types ``agent`` loads natively.
+    """
+    if "hook" not in native_types:
         return None
     allowed = _staged_hook_ids(provenance, agent, name)
     if not allowed:
@@ -118,13 +109,11 @@ def _hook_census_evidence(
     )
 
 
-def summarize_runtime_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """C2 summary that counts ``loaded`` and ``exercised`` rows as evaluated."""
-    return summarize_coverage(rows)
-
-
 def _exercise_evidence(
-    row: Mapping[str, Any], summaries: list[tuple[str, Mapping[str, Any]]], provenance: Mapping[str, Any]
+    row: Mapping[str, Any],
+    summaries: list[tuple[str, Mapping[str, Any]]],
+    provenance: Mapping[str, Any],
+    native_types: Mapping[str, set[str]],
 ) -> str | None:
     kind = str(row.get("type") or "")
     name = str(row.get("name") or "")
@@ -132,16 +121,17 @@ def _exercise_evidence(
     if not name or state == "invalid":
         return None
     for agent, summary in summaries:
+        agent_native_types = native_types.get(agent, set())
         if kind == "hook":
             # Only natively staged hooks are wrapped, and only their exact
             # staged ids count: a census line is writable from the sandbox.
-            if evidence := _hook_census_evidence(name, agent, summary, provenance):
+            if evidence := _hook_census_evidence(name, agent, summary, provenance, agent_native_types):
                 return evidence
             continue
         # Available to this agent: staged or loaded, or its type natively loaded.
         # Unavailable components cannot have run, so an activation label alone
         # does not count.
-        if state not in _AVAILABLE_STATES and kind not in _native_types(provenance, agent):
+        if state not in EVALUATED_COVERAGE_STATES and kind not in agent_native_types:
             continue
         prefix = _ACTIVATION_PREFIX.get(kind)
         if prefix is None:
@@ -166,12 +156,13 @@ def apply_runtime_coverage(provenance: dict[str, Any], engine_result: Mapping[st
     summaries = _with_plugin_summaries(engine_result)
     if not summaries:
         return 0
+    native_types = native_types_by_agent(provenance.get("plugin_load"))
     promoted = 0
     updated_rows: list[dict[str, Any]] = []
     for raw in rows:
         row = dict(raw) if isinstance(raw, Mapping) else raw
         if isinstance(row, dict) and row.get("state") != STATE_EXERCISED:
-            evidence = _exercise_evidence(row, summaries, provenance)
+            evidence = _exercise_evidence(row, summaries, provenance, native_types)
             if evidence is not None:
                 reason = str(row.get("reason") or "")
                 row["state"] = STATE_EXERCISED
@@ -179,7 +170,7 @@ def apply_runtime_coverage(provenance: dict[str, Any], engine_result: Mapping[st
                 promoted += 1
         updated_rows.append(row)
     if promoted:
-        provenance["component_coverage"] = summarize_runtime_coverage(updated_rows)
+        provenance["component_coverage"] = summarize_coverage(updated_rows)
     return promoted
 
 
@@ -193,10 +184,7 @@ def apply_runtime_evidence(provenance: dict[str, Any], engine_result: Mapping[st
 
 
 __all__ = [
-    "EVALUATED_STATES",
     "STATE_EXERCISED",
-    "STATE_LOADED",
     "apply_runtime_coverage",
     "apply_runtime_evidence",
-    "summarize_runtime_coverage",
 ]

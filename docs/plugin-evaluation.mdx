@@ -1291,7 +1291,9 @@ stages the with-plugin arm the way each harness loads plugins instead; see
   `mcpServers` forms and root `.mcp.json`. They are written to a with-plugin-only
   MCP file, so they never reach a baseline arm. Each declaration first passes
   the blocking Tier 1 MCP checks. A raw inline credential is never written to
-  the staged file. MCP servers in the dataset's own
+  the staged file. That file, `evals/environment/plugin_mcp_servers.toml`, is
+  generated, so an evals source that already contains it fails staging. MCP
+  servers in the dataset's own
   `evals/environment/mcp_servers.toml` are task environment and are shared by
   every arm. A server launched from plugin files (a `command`, `args`, or `cwd`
   that uses `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}`, the manifest

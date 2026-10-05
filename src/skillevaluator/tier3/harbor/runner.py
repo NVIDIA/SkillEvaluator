@@ -25,7 +25,7 @@ import time
 import tomllib
 from collections.abc import Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import wraps
@@ -927,6 +927,89 @@ def _harbor_bin() -> str:
     return str(candidate) if candidate.exists() else (shutil.which("harbor") or "harbor")
 
 
+# Harbor loads ``.env.local`` from its working directory, and Harbor and LiteLLM
+# call ``load_dotenv()`` on import. Every Harbor process therefore starts in an
+# empty evaluator-owned directory with dotenv loading and telemetry disabled, so
+# no file outside the allowlisted environment can add credentials or settings.
+# These controls are applied at launch, outside the secret-tracked environment.
+_HARBOR_LAUNCH_ENV = MappingProxyType({"HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_DISABLED": "1"})
+# Allowlisted host variables that name a file or directory. A relative value keeps
+# its meaning by being anchored to the operator's working directory.
+_HARBOR_HOST_PATH_ENV_VARS = frozenset(
+    {
+        "APPTAINER_AUTHFILE",
+        "APPTAINER_CONFIGDIR",
+        "AWS_CA_BUNDLE",
+        "AWS_CONFIG_FILE",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+        "AWS_CREDENTIAL_FILE",
+        "AWS_LOGIN_CACHE_DIRECTORY",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+        "CLOUDSDK_CONFIG",
+        "DOCKER_CERT_PATH",
+        "DOCKER_CONFIG",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "LANGSMITH_CONFIG_FILE",
+        "MODAL_CONFIG_PATH",
+        "NETRC",
+        "REQUESTS_CA_BUNDLE",
+        "SINGULARITY_AUTHFILE",
+        "SINGULARITY_CONFIGDIR",
+        "SKYPILOT_GLOBAL_CONFIG",
+        "SKYPILOT_PROJECT_CONFIG",
+        "SSL_CERT_FILE",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+    }
+)
+_HARBOR_HOST_PATH_LIST_ENV_VARS = frozenset({"AWS_DATA_PATH", "KUBECONFIG", "SSL_CERT_DIR"})
+_HOST_PATH_ENVIRONMENT_KWARGS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "ack": frozenset({"kubeconfig"}),
+        "ec2": frozenset({"ssh_key_path", "ssh_known_hosts_path"}),
+        "singularity": frozenset({"singularity_image_cache_dir"}),
+    }
+)
+
+
+def _absolute_host_path(value: str) -> str:
+    """Anchor a relative host path to the operator's working directory."""
+    if not value or value.startswith("~"):
+        return value
+    path = Path(value)
+    return value if path.is_absolute() else str(path.absolute())
+
+
+def _harbor_launch_environment(env: Mapping[str, str]) -> dict[str, str]:
+    """Return a Harbor child environment that no longer depends on the caller's directory."""
+    launch_env = dict(env)
+    for name in _HARBOR_HOST_PATH_ENV_VARS & launch_env.keys():
+        launch_env[name] = _absolute_host_path(launch_env[name])
+    for name in _HARBOR_HOST_PATH_LIST_ENV_VARS & launch_env.keys():
+        launch_env[name] = os.pathsep.join(_absolute_host_path(entry) for entry in launch_env[name].split(os.pathsep))
+    launch_env.update(_HARBOR_LAUNCH_ENV)
+    return launch_env
+
+
+def _absolute_host_path_kwargs(env_mode: str, environment_kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """Anchor relative host-path constructor kwargs before Harbor changes directory."""
+    anchored = dict(environment_kwargs)
+    for name in _HOST_PATH_ENVIRONMENT_KWARGS.get(env_mode, frozenset()) & anchored.keys():
+        if isinstance(anchored[name], str):
+            anchored[name] = _absolute_host_path(anchored[name])
+    return anchored
+
+
+@contextmanager
+def _harbor_launch_cwd() -> Iterator[Path]:
+    """Yield a private, empty working directory for one Harbor process."""
+    with tempfile.TemporaryDirectory(prefix="skillevaluator-harbor-", ignore_cleanup_errors=True) as directory:
+        yield Path(directory)
+
+
 def _harbor_supports_yes() -> bool:
     """The supported Harbor CLI accepts ``--yes`` for non-interactive runs."""
     return True
@@ -1114,6 +1197,7 @@ def build_harbor_run_command(
     )
     if policy_error := _environment_kwarg_policy_error(env_mode, validated_environment_kwargs):
         raise ValueError(policy_error)
+    validated_environment_kwargs = _absolute_host_path_kwargs(env_mode, validated_environment_kwargs)
 
     command = [
         _harbor_bin(),
@@ -1125,7 +1209,7 @@ def build_harbor_run_command(
         "--n-concurrent",
         str(n_concurrent),
         "-p",
-        str(dataset_path),
+        str(Path(dataset_path).absolute()),
     ]
     if env_mode == ENV_MODE_LOCAL:
         # Local mode is a custom SkillEvaluator environment + agent wrappers,
@@ -1173,7 +1257,7 @@ def build_harbor_run_command(
     for name, value in sorted(validated_environment_kwargs.items()):
         command.extend(["--ek", encode_environment_kwarg(name, value)])
     if jobs_dir is not None:
-        command.extend(["--jobs-dir", str(jobs_dir)])
+        command.extend(["--jobs-dir", str(Path(jobs_dir).absolute())])
     if disable_verification:
         command.append("--disable-verification")
     for task_name in include_task_names or []:
@@ -1539,6 +1623,7 @@ def _check_ack_cluster_readiness_subprocess(
     validated = validate_environment_kwargs(dict(environment_kwargs), env_mode="ack")
     if policy_error := _environment_kwarg_policy_error("ack", validated):
         raise ValueError(policy_error)
+    validated = _absolute_host_path_kwargs("ack", validated)
     payload = {name: validated[name] for name in ("namespace", "context", "kubeconfig") if name in validated}
     encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
     child_env = dict(subprocess_env)
@@ -1546,19 +1631,22 @@ def _check_ack_cluster_readiness_subprocess(
     redacted_values.update(str(value) for value in payload.values() if isinstance(value, str) and value)
     process: subprocess.Popen[str] | None = None
     try:
-        process = subprocess.Popen(
-            [sys.executable, "-c", _ACK_CLUSTER_READINESS_PROBE_CODE],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=child_env,
-            start_new_session=os.name == "posix",
-        )
-        stdout, stderr = process.communicate(
-            encoded,
-            timeout=_ACK_CLUSTER_READINESS_SUBPROCESS_TIMEOUT_SECONDS,
-        )
+        with _harbor_launch_cwd() as launch_cwd:
+            # ``-P`` keeps the probe's working directory off ``sys.path``.
+            process = subprocess.Popen(
+                [sys.executable, "-P", "-c", _ACK_CLUSTER_READINESS_PROBE_CODE],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=str(launch_cwd),
+                env=_harbor_launch_environment(child_env),
+                start_new_session=os.name == "posix",
+            )
+            stdout, stderr = process.communicate(
+                encoded,
+                timeout=_ACK_CLUSTER_READINESS_SUBPROCESS_TIMEOUT_SECONDS,
+            )
     except subprocess.TimeoutExpired:
         assert process is not None
         _terminate_ack_readiness_process(process)
@@ -1593,6 +1681,23 @@ def _modal_custom_config_status() -> tuple[bool, str | None]:
     return True, None
 
 
+def _python_dotenv_prerequisite_error() -> str | None:
+    """Require the python-dotenv release that honors ``PYTHON_DOTENV_DISABLED``."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        installed = version("python-dotenv")
+    except PackageNotFoundError:
+        return None
+    release = re.match(r"(\d+)\.(\d+)", installed)
+    if release is None or (int(release[1]), int(release[2])) >= (1, 2):
+        return None
+    return (
+        f"python-dotenv {installed} cannot disable Harbor's .env loading; "
+        "install skillevaluator[tier3] to upgrade it to 1.2.0 or newer."
+    )
+
+
 def _check_prerequisites(
     env_mode: str = DEFAULT_ENV_MODE,
     agents: list[str] | None = None,
@@ -1602,6 +1707,8 @@ def _check_prerequisites(
     """Check Harbor and the selected environment (built-in or local mode)."""
     if env_mode not in HARBOR_ENV_MODES:
         return [f"Unsupported Harbor environment '{env_mode}'. Choose one of: {', '.join(sorted(HARBOR_ENV_MODES))}"]
+    if dotenv_error := _python_dotenv_prerequisite_error():
+        return [dotenv_error]
     if kwarg_errors := _environment_kwarg_prerequisite_errors(env_mode, environment_kwargs):
         return kwarg_errors
     if env_mode == ENV_MODE_LOCAL:
@@ -2443,6 +2550,7 @@ def _run_bounded_harbor_process(
     command: list[str],
     *,
     env: Mapping[str, str],
+    cwd: Path,
     stdin_text: str | None,
     timeout_seconds: float | None,
     max_output_bytes: int,
@@ -2463,7 +2571,8 @@ def _run_bounded_harbor_process(
         stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        env=dict(env),
+        cwd=str(cwd),
+        env=_harbor_launch_environment(env),
         start_new_session=os.name == "posix",
         creationflags=creation_flags,
     )
@@ -2663,15 +2772,17 @@ def _run_harbor(
         # Harbor owns its phase deadlines, and native tasks may intentionally
         # leave the agent unbounded. Keep bounded streaming and process-tree
         # cleanup without imposing an outer orchestration deadline.
-        result = _run_bounded_harbor_process(
-            command,
-            env=handoff.subprocess_env,
-            stdin_text=handoff.stdin_text,
-            timeout_seconds=None,
-            max_output_bytes=_HARBOR_RUN_OUTPUT_MAX_BYTES,
-            diagnostic_tail_chars=_HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS,
-            secret_values=secret_values,
-        )
+        with _harbor_launch_cwd() as launch_cwd:
+            result = _run_bounded_harbor_process(
+                command,
+                env=handoff.subprocess_env,
+                cwd=launch_cwd,
+                stdin_text=handoff.stdin_text,
+                timeout_seconds=None,
+                max_output_bytes=_HARBOR_RUN_OUTPUT_MAX_BYTES,
+                diagnostic_tail_chars=_HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS,
+                secret_values=secret_values,
+            )
     except (OSError, RuntimeError, UnicodeError) as exc:
         detail = _redact_harbor_diagnostic(exc, secret_values=secret_values)
         if not detail:

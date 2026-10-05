@@ -425,6 +425,7 @@ def test_tier3_direct_dependencies_have_complete_license_notices() -> None:
         "harbor": "Harbor (Apache-2.0)",
         "mcp": "MCP (MIT)",
         "pyjwt": "PyJWT (MIT)",
+        "python-dotenv": "python-dotenv (BSD-3-Clause)",
     }
     notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
 

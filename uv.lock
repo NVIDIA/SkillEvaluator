@@ -1835,6 +1835,7 @@ all = [
     { name = "openai" },
     { name = "pip-audit" },
     { name = "pyjwt", extra = ["crypto"] },
+    { name = "python-dotenv" },
 ]
 dev = [
     { name = "build" },
@@ -1868,6 +1869,7 @@ tier3 = [
     { name = "mcp" },
     { name = "openai" },
     { name = "pyjwt", extra = ["crypto"] },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata]
@@ -1891,6 +1893,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.2.0" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.6.0" },
+    { name = "python-dotenv", marker = "extra == 'tier3'", specifier = ">=1.2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=13.5.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.4,<0.16" },

@@ -66,6 +66,8 @@ tier3 = [
     "mcp>=1.28.1,<2",
     # CVE-2026-48522 through CVE-2026-48526 fixed floor.
     "pyjwt[crypto]>=2.13.0",
+    # PYTHON_DOTENV_DISABLED, which keeps Harbor from loading .env files, needs 1.2.0.
+    "python-dotenv>=1.2.0",
 ]
 # Static security scanners (floors raised to the established release baseline).
 security = [

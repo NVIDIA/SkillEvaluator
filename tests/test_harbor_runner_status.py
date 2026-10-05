@@ -126,6 +126,7 @@ def test_bounded_harbor_process_preserves_exit_and_combined_diagnostic_tail(
     result = runner._run_bounded_harbor_process(
         [sys.executable, "-c", script],
         env=dict(os.environ),
+        cwd=Path.cwd(),
         stdin_text=None,
         timeout_seconds=5,
         max_output_bytes=4096,
@@ -146,6 +147,7 @@ def test_bounded_harbor_process_redacts_before_retaining_diagnostic_tail() -> No
     result = runner._run_bounded_harbor_process(
         [sys.executable, "-c", script],
         env=dict(os.environ),
+        cwd=Path.cwd(),
         stdin_text=None,
         timeout_seconds=5,
         max_output_bytes=4096,
@@ -169,6 +171,7 @@ def test_bounded_harbor_process_drops_partial_secret_at_output_limit() -> None:
     result = runner._run_bounded_harbor_process(
         [sys.executable, "-c", script],
         env=dict(os.environ),
+        cwd=Path.cwd(),
         stdin_text=None,
         timeout_seconds=5,
         max_output_bytes=len((prefix + accepted_secret_prefix).encode()),
@@ -188,6 +191,7 @@ def test_bounded_harbor_process_timeout_includes_blocked_stdin_delivery() -> Non
         runner._run_bounded_harbor_process(
             [sys.executable, "-c", "import time; time.sleep(30)"],
             env=dict(os.environ),
+            cwd=Path.cwd(),
             stdin_text="x" * (1024 * 1024),
             timeout_seconds=0.1,
             max_output_bytes=4096,
@@ -205,6 +209,7 @@ def test_bounded_harbor_process_contains_tree_after_stdin_delivery_error() -> No
         runner._run_bounded_harbor_process(
             [sys.executable, "-c", "import time; time.sleep(30)"],
             env=dict(os.environ),
+            cwd=Path.cwd(),
             stdin_text="\udcff",
             timeout_seconds=5,
             max_output_bytes=4096,
@@ -223,6 +228,7 @@ def test_bounded_harbor_process_timeout_preserves_redacted_diagnostic_tail() -> 
         runner._run_bounded_harbor_process(
             [sys.executable, "-c", script],
             env=dict(os.environ),
+            cwd=Path.cwd(),
             stdin_text=None,
             timeout_seconds=0.1,
             max_output_bytes=4096,
@@ -243,6 +249,7 @@ def test_bounded_harbor_process_redacts_secret_created_by_timeout_message() -> N
         runner._run_bounded_harbor_process(
             [sys.executable, "-c", "import time; time.sleep(30)"],
             env=dict(os.environ),
+            cwd=Path.cwd(),
             stdin_text=None,
             timeout_seconds=0.1,
             max_output_bytes=4096,
@@ -289,6 +296,7 @@ def test_bounded_harbor_process_owns_cleanup_during_thread_start(
             runner._run_bounded_harbor_process(
                 [sys.executable, "-c", "import time; time.sleep(30)"],
                 env=dict(os.environ),
+                cwd=Path.cwd(),
                 stdin_text="payload",
                 timeout_seconds=5,
                 max_output_bytes=4096,
@@ -341,6 +349,7 @@ def test_bounded_harbor_process_failure_reaps_descendants(
             runner._run_bounded_harbor_process(
                 [sys.executable, "-c", parent_script],
                 env=dict(os.environ),
+                cwd=Path.cwd(),
                 stdin_text=None,
                 timeout_seconds=1,
                 max_output_bytes=4096,
@@ -351,6 +360,7 @@ def test_bounded_harbor_process_failure_reaps_descendants(
         result = runner._run_bounded_harbor_process(
             [sys.executable, "-c", parent_script],
             env=dict(os.environ),
+            cwd=Path.cwd(),
             stdin_text=None,
             timeout_seconds=5,
             max_output_bytes=4096,
@@ -407,6 +417,7 @@ def test_bounded_harbor_process_failure_reaps_windows_descendants(
             runner._run_bounded_harbor_process(
                 [sys.executable, "-c", parent_script],
                 env=dict(os.environ),
+                cwd=Path.cwd(),
                 stdin_text=None,
                 timeout_seconds=1,
                 max_output_bytes=4096,
@@ -417,6 +428,7 @@ def test_bounded_harbor_process_failure_reaps_windows_descendants(
         result = runner._run_bounded_harbor_process(
             [sys.executable, "-c", parent_script],
             env=dict(os.environ),
+            cwd=Path.cwd(),
             stdin_text=None,
             timeout_seconds=5,
             max_output_bytes=4096,

@@ -5737,8 +5737,9 @@ def test_ack_subprocess_probe_uses_exact_harbor_environment_and_stdin(
         subprocess_env=child_env,
     )
 
-    assert captured["env"] == child_env
+    assert captured["env"] == {**child_env, "HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_DISABLED": "1"}
     assert "ALIBABA_CLOUD_ACCESS_KEY_ID" not in captured["env"]
+    assert Path(str(captured["cwd"])) != Path.cwd()
     assert json.loads(str(captured["input"])) == {
         "namespace": "skill-evals",
         "context": "production",
@@ -5752,7 +5753,7 @@ def test_ack_subprocess_probe_uses_exact_harbor_environment_and_stdin(
     assert captured["start_new_session"] is (os.name == "posix")
     command = captured["command"]
     assert isinstance(command, list)
-    assert command[:2] == [sys.executable, "-c"]
+    assert command[:3] == [sys.executable, "-P", "-c"]
     assert "production" not in " ".join(command)
     assert "/config/ack" not in " ".join(command)
 

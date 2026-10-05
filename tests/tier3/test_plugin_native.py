@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from skillevaluator.plugin_components import parse_markdown
 from skillevaluator.tier3.harbor.native_staging import build_native_task_staging, stage_native_bundle
 from skillevaluator.tier3.plugin_eval import prepare_plugin_eval_package
 from skillevaluator.tier3.plugin_native import (
@@ -34,14 +35,12 @@ from skillevaluator.tier3.plugin_native import (
     PluginLoadError,
     apply_load_census,
     apply_native_refusals,
-    component_support_matrix,
     fallback_census,
     finalize_native_provenance,
     foreign_root_var_re,
     hook_id,
     native_agent_import_path,
     normalize_census,
-    parse_frontmatter_yaml,
     plugin_load_provenance,
     refuse_or_fall_back,
     resolve_plugin_load,
@@ -255,7 +254,7 @@ def test_plugin_load_provenance_matches_the_contract_shape() -> None:
 
 
 def test_component_support_matrix() -> None:
-    matrix = component_support_matrix()
+    matrix = {agent: adapter.component_modes() for agent, adapter in HARNESS_ADAPTERS.items()}
     native = {agent: sorted(k for k, v in modes.items() if v == "native") for agent, modes in matrix.items()}
     # Claude Code also loads a plugin's LSP servers and its settings.json (agent, subagentStatusLine).
     assert native["claude-code"] == [
@@ -709,14 +708,14 @@ def test_opencode_stages_config_instructions_agents_and_commands(tmp_path: Path,
     }
     agent = (native / "config" / "agents" / "helper.md").read_text(encoding="utf-8")
     # `tools: Read` keeps the subagent read-only in OpenCode.
-    assert parse_frontmatter_yaml(agent) == {
+    assert parse_markdown(agent).frontmatter == {
         "description": "Helps",
         "mode": "subagent",
         "permission": {"*": "deny", "read": "allow"},
     }
     assert "tools" not in agent
     command = (native / "config" / "commands" / "review.md").read_text(encoding="utf-8")
-    assert parse_frontmatter_yaml(command) == {"description": "Review a change"}
+    assert parse_markdown(command).frontmatter == {"description": "Review a change"}
     assert HARNESS_ADAPTERS["opencode"].launch_env() == {
         "OPENCODE_CONFIG": "/skilleval/native/opencode/opencode.json",
         "OPENCODE_CONFIG_DIR": "/skilleval/native/opencode/config",

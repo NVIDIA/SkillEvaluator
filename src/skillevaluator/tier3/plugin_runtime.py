@@ -109,11 +109,6 @@ def _hook_census_evidence(
     )
 
 
-def summarize_runtime_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """C2 summary that counts ``loaded`` and ``exercised`` rows as evaluated."""
-    return summarize_coverage(rows)
-
-
 def _exercise_evidence(
     row: Mapping[str, Any],
     summaries: list[tuple[str, Mapping[str, Any]]],
@@ -175,7 +170,7 @@ def apply_runtime_coverage(provenance: dict[str, Any], engine_result: Mapping[st
                 promoted += 1
         updated_rows.append(row)
     if promoted:
-        provenance["component_coverage"] = summarize_runtime_coverage(updated_rows)
+        provenance["component_coverage"] = summarize_coverage(updated_rows)
     return promoted
 
 
@@ -192,5 +187,4 @@ __all__ = [
     "STATE_EXERCISED",
     "apply_runtime_coverage",
     "apply_runtime_evidence",
-    "summarize_runtime_coverage",
 ]

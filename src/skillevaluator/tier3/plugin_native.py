@@ -58,9 +58,7 @@ from skillevaluator.plugin_components import (
 from skillevaluator.tier3.toml_utils import toml_quote
 from skillevaluator.tier3_environments import PLUGIN_LOAD_CHOICES
 from skillevaluator.utils.secure_fs import SecurePathError, stat_is_link_or_reparse
-from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json, load_bounded_yaml
-
-DEFAULT_PLUGIN_LOAD = "wrapper"
+from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json
 
 #: Build-context directory (inside a task's ``environment/``) copied to ``/skilleval``.
 BUNDLE_DIRNAME = "skilleval"
@@ -70,11 +68,9 @@ SETUP_SCRIPT = "/skilleval/native/setup.sh"
 HOOK_CENSUS_SCRIPT = "/skilleval/hook_census.sh"
 HOOK_CENSUS_TEMPLATE = Path(__file__).resolve().parent / "harbor" / "templates" / "hook_census.sh"
 LOAD_CENSUS_FILENAME = "skilleval-load-census.json"
-LOAD_CENSUS_PATH = f"/logs/agent/{LOAD_CENSUS_FILENAME}"
 WRAPPER_ADAPTER = "wrapper"
 STAGED_EVIDENCE = "staged"
 
-COMPONENT_MODES: tuple[str, ...] = ("native", "wrapper", "unsupported")
 #: What the default wrapper path does with each component type.
 WRAPPER_COMPONENTS: dict[str, str] = {
     component_type: ("wrapper" if component_type in {"skill", "rule", "mcp"} else "unsupported")
@@ -173,10 +169,6 @@ class NativePluginSource:
     #: LSP server configs by name, from ``.lsp.json`` or ``lspServers``.
     lsp_servers: Mapping[str, Any] = field(default_factory=dict)
 
-    @property
-    def plugin_slug(self) -> str:
-        return plugin_slug(self.plugin_name)
-
     def present_types(self) -> set[str]:
         present: set[str] = set()
         if self.member_skills:
@@ -190,9 +182,6 @@ class NativePluginSource:
         present.update(text.type for text in self.texts)
         present.update(component_type for component_type, _name in self.other)
         return present
-
-    def texts_of(self, component_type: str) -> list[NativeTextComponent]:
-        return [text for text in self.texts if text.type == component_type]
 
 
 def plugin_slug(name: str) -> str:
@@ -1962,13 +1951,6 @@ def adapter_for(agent: str) -> HarnessAdapter | None:
     return HARNESS_ADAPTERS.get(agent)
 
 
-def component_support_matrix() -> dict[str, dict[str, str]]:
-    """Per-harness component modes, plus the wrapper column (documentation and tests)."""
-    matrix = {agent: adapter.component_modes() for agent, adapter in HARNESS_ADAPTERS.items()}
-    matrix[WRAPPER_ADAPTER] = dict(WRAPPER_COMPONENTS)
-    return matrix
-
-
 # --------------------------------------------------------------------------- #
 # Plan resolution and provenance                                               #
 # --------------------------------------------------------------------------- #
@@ -2666,18 +2648,3 @@ def finalize_native_provenance(provenance: dict[str, Any], engine_result: Any) -
     if unverified:
         provenance["native_load_unverified"] = unverified
         provenance["partial"] = True
-
-
-def parse_frontmatter_yaml(text: str) -> dict[str, Any]:
-    """Small helper for tests and adapters: parse a Markdown file's frontmatter."""
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}
-    for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
-            try:
-                data = load_bounded_yaml("\n".join(lines[1:index]))
-            except (StructuredDataError, ValueError):
-                return {}
-            return data if isinstance(data, dict) else {}
-    return {}

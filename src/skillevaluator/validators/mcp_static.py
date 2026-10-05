@@ -841,10 +841,19 @@ def _validate_insecure_tls_config(name: str, config: dict[str, Any], file_path: 
 PinStatus = Literal["pinned", "unpinned", "not_applicable"]
 RunnerEcosystem = Literal["npm", "pypi", "deno", "container"]
 
-_EXACT_SEMVER_RE = re.compile(r"^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
-_PEP440_EXACT_RE = re.compile(
-    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?\s*(?:===\s*\S+|==\s*[0-9][0-9A-Za-z.!+_-]*)$"
+# The exact-version matchers are shared with the dependency audit, so a runner
+# spec counts as pinned exactly when the audit can match it to one release.
+# An exact npm version: "1.2.3", "=1.2.3", or "v1.2.3", with optional
+# prerelease and build metadata.
+_NPM_EXACT_RE = re.compile(r"^=?v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$")
+# A conservative exact PEP 440 version (public or local, no wildcards). Anything
+# else is treated as unverifiable rather than handed to pip-audit.
+EXACT_PEP440_VERSION_RE = re.compile(
+    r"(?:\d+!)?\d+(?:\.\d+)*(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?(?:\+[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?",
+    re.IGNORECASE,
 )
+# A PyPI requirement that names one version: "pkg==V", "pkg[extra]==V", or uv's "pkg@V".
+_PYPI_PIN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\s*(?:\[[^\]]*\])?\s*(?:==|@)\s*(?P<version>\S+)")
 _GIT_SHA_RE = re.compile(r"(?:#|@)[0-9a-fA-F]{40}(?:$|[&#])")
 _DOCKER_DIGEST_RE = re.compile(r"@sha256:[0-9a-fA-F]{64}$")
 _VERSION_TAG_RE = re.compile(r"^v?\d+(?:\.\d+)*(?:[-+._][0-9A-Za-z.]+)*$")
@@ -1196,39 +1205,78 @@ def _uv_invocation(runner: str, args: list[str]) -> RunnerInvocation:
     return RunnerInvocation("pypi", runner, (package, *(item for item in extras if item)))
 
 
-def _is_local_spec(spec: str) -> bool:
+def is_local_spec(spec: str) -> bool:
+    """Whether a package spec names a local path (``./pkg``, ``/abs``, ``~/x``, ``file:``, ``${CLAUDE_PLUGIN_ROOT}/x``)."""
     return spec.startswith(_LOCAL_SPEC_PREFIXES)
+
+
+def is_remote_npm_spec(spec: str) -> bool:
+    """Whether an npm spec is fetched from git or a URL (``github:o/r``, ``git+https://...``, ``o/r``), not the registry."""
+    return spec.startswith(_REMOTE_SPEC_PREFIXES) or (not spec.startswith("@") and "/" in spec)
+
+
+def is_remote_pypi_spec(spec: str) -> bool:
+    """Whether a PyPI spec is fetched from git or a URL (``git+https://...``, ``pkg @ git+https://...``)."""
+    return spec.startswith(_REMOTE_SPEC_PREFIXES) or "@ git+" in spec or "@git+" in spec
+
+
+def split_npm_spec(spec: str) -> tuple[str, str | None]:
+    """``(name, version)`` of an npm registry spec; ``version`` is ``None`` when the spec names none.
+
+    A scope's leading ``@`` belongs to the name: ``@scope/pkg@1.2.3`` is
+    ``("@scope/pkg", "1.2.3")``.
+    """
+    at = spec.find("@", 1) if spec.startswith("@") else spec.find("@")
+    if at <= 0:
+        return spec, None
+    return spec[:at], spec[at + 1 :]
+
+
+def exact_npm_version(version: str) -> str | None:
+    """The exact version an npm version spec names (``1.2.3``, ``=1.2.3``, ``v1.2.3``), else ``None``."""
+    match = _NPM_EXACT_RE.match(version.strip())
+    return match.group(1) if match else None
+
+
+def exact_pypi_version(requirement: str) -> str | None:
+    """The version a PyPI requirement pins exactly, else ``None``.
+
+    ``pkg==1.2.3``, ``pkg[extra]==1.2.3``, and uv's ``pkg@1.2.3`` each pin one
+    version (an environment marker after ``;`` is ignored); the version must
+    match :data:`EXACT_PEP440_VERSION_RE`. Ranges, wildcards, ``===``, tags, and
+    URLs are not exact.
+    """
+    match = _PYPI_PIN_RE.fullmatch(requirement.split(";", 1)[0].strip())
+    if match is None or not EXACT_PEP440_VERSION_RE.fullmatch(match.group("version")):
+        return None
+    return match.group("version")
 
 
 def _classify_npm_spec(spec: str) -> McpPinning:
     """Classify an npm package spec (``pkg``, ``@scope/pkg@1.2.3``, git/URL, local path)."""
-    if _is_local_spec(spec):
+    if is_local_spec(spec):
         return McpPinning("not_applicable", f"local package path {spec!r}")
-    if spec.startswith(_REMOTE_SPEC_PREFIXES) or (not spec.startswith("@") and "/" in spec):
+    if is_remote_npm_spec(spec):
         if _GIT_SHA_RE.search(spec):
             return McpPinning("pinned", f"git/URL spec pinned to a commit: {spec!r}")
         return McpPinning("unpinned", f"git/URL/GitHub spec without a commit SHA: {spec!r}")
-    at = spec.find("@", 1) if spec.startswith("@") else spec.find("@")
-    if at <= 0:
+    _name, version = split_npm_spec(spec)
+    if version is None:
         return McpPinning("unpinned", f"package {spec!r} has no version (resolves to the latest release)")
-    version = spec[at + 1 :]
-    if _EXACT_SEMVER_RE.match(version):
+    if exact_npm_version(version):
         return McpPinning("pinned", f"exact version {spec!r}")
     return McpPinning("unpinned", f"package {spec!r} uses a version range or dist-tag, not an exact version")
 
 
 def _classify_python_spec(spec: str) -> McpPinning:
     """Classify a PyPI requirement spec as used by ``uvx`` / ``pipx run``."""
-    if _is_local_spec(spec):
+    if is_local_spec(spec):
         return McpPinning("not_applicable", f"local package path {spec!r}")
-    if spec.startswith(_REMOTE_SPEC_PREFIXES) or "@ git+" in spec or "@git+" in spec:
+    if is_remote_pypi_spec(spec):
         if _GIT_SHA_RE.search(spec) or "#sha256=" in spec:
             return McpPinning("pinned", f"git/URL spec pinned to a commit or hash: {spec!r}")
         return McpPinning("unpinned", f"git/URL spec without a commit SHA or hash: {spec!r}")
-    if _PEP440_EXACT_RE.match(spec):
-        return McpPinning("pinned", f"exact version {spec!r}")
-    name, sep, version = spec.partition("@")
-    if sep and name and _EXACT_SEMVER_RE.match(version.strip()):
+    if exact_pypi_version(spec):
         return McpPinning("pinned", f"exact version {spec!r}")
     if any(marker in spec for marker in ("<", ">", "~", "!", "*", ",", "=", "@")):
         return McpPinning("unpinned", f"requirement {spec!r} is a range or tag, not an exact '==' version")

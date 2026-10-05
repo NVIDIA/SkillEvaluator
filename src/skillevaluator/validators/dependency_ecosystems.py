@@ -38,6 +38,13 @@ from typing import Any
 
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.utils.tool_runner import ExternalTool, Tools, cvss_to_severity, parse_json_output
+from skillevaluator.validators.mcp_static import (
+    exact_npm_version,
+    is_exact_container_image,
+    is_local_spec,
+    is_remote_npm_spec,
+    split_npm_spec,
+)
 
 UNVERIFIED_CHECK_NAME = "dependency-version-unverified"
 NPM_VULN_CHECK = "npm-vulnerability"
@@ -54,7 +61,6 @@ PACKAGE_JSON = "package.json"
 SEVERITY_KEYS = ("critical", "high", "medium", "low", "info")
 
 _NPM_NAME_RE = re.compile(r"^(?:@[A-Za-z0-9._~-]+/)?[A-Za-z0-9._~-]{1,214}$")
-_NPM_EXACT_RE = re.compile(r"^=?v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$")
 _IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,511}$")
 _SEVERITY_WORDS = {
     "critical": Severity.CRITICAL,
@@ -85,12 +91,6 @@ class ImageDeclaration:
     image: str
     role: str
     exact: bool
-
-
-def exact_npm_version(spec: str) -> str | None:
-    """Return the exact semver an npm spec pins (``1.2.3``, ``=1.2.3``, ``v1.2.3``), else ``None``."""
-    match = _NPM_EXACT_RE.match(spec.strip())
-    return match.group(1) if match else None
 
 
 def parse_package_json(data: Any) -> list[NpmDeclaration]:
@@ -171,8 +171,6 @@ def _items(value: Any) -> list[tuple[str, Any]]:
 
 
 def image_declaration(image: str, role: str) -> ImageDeclaration:
-    from skillevaluator.validators.mcp_static import is_exact_container_image
-
     text = image.strip()
     exact = bool(_IMAGE_REF_RE.match(text)) and "$" not in text and is_exact_container_image(text)
     return ImageDeclaration(text[:512], role, exact)
@@ -225,16 +223,17 @@ def parse_dockerfile_images(text: str) -> list[ImageDeclaration]:
 # MCP package runners                                                         #
 # --------------------------------------------------------------------------- #
 def npm_spec_declaration(spec: str, role: str) -> NpmDeclaration | None:
-    """An npm runner spec (``pkg``, ``@scope/pkg@1.2.3``, git or URL) as a declaration; ``None`` for a local path."""
-    from skillevaluator.validators import mcp_static as ms
+    """An npm runner spec (``pkg``, ``@scope/pkg@1.2.3``, git or URL) as a declaration; ``None`` for a local path.
 
+    Its version is exact when the MCP pinning check calls the spec pinned: both
+    use :func:`~skillevaluator.validators.mcp_static.exact_npm_version`.
+    """
     text = spec.strip()
-    if not text or ms._is_local_spec(text):
+    if not text or is_local_spec(text):
         return None
-    if text.startswith(ms._REMOTE_SPEC_PREFIXES) or (not text.startswith("@") and "/" in text):
+    if is_remote_npm_spec(text):
         return NpmDeclaration(text[:214], text[:200], role, None)
-    at = text.find("@", 1) if text.startswith("@") else text.find("@")
-    name, version = (text[:at], text[at + 1 :]) if at > 0 else (text, "")
+    name, version = split_npm_spec(text)
     exact = exact_npm_version(version) if version and _NPM_NAME_RE.match(name) else None
     return NpmDeclaration(name, text[:200], role, exact)
 

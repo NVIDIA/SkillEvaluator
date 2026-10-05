@@ -32,7 +32,7 @@ import json
 import re
 import tempfile
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -48,7 +48,14 @@ from skillevaluator.utils.structured_data import (
 from skillevaluator.utils.tool_runner import Severity, Tools, cvss_to_severity, parse_json_output
 from skillevaluator.validators import dependency_ecosystems as eco
 from skillevaluator.validators.base import ValidationResult, ValidatorBase
-from skillevaluator.validators.mcp_static import mcp_container_image, parse_mcp_runner
+from skillevaluator.validators.mcp_static import (
+    EXACT_PEP440_VERSION_RE,
+    exact_pypi_version,
+    is_local_spec,
+    is_remote_pypi_spec,
+    mcp_container_image,
+    parse_mcp_runner,
+)
 from skillevaluator.validators.plugin_tree import active_plugin_tree, is_plugin_tree_root, plugin_tree_exclusions
 
 if TYPE_CHECKING:
@@ -81,12 +88,6 @@ _REQUIREMENT_RE = re.compile(
     re.DOTALL,
 )
 _SPECIFIER_RE = re.compile(r"\s*(?P<op>~=|===|==|!=|<=|>=|<|>)\s*(?P<version>[^\s,;]+)\s*")
-# Conservative PEP 440 public/local version (no wildcards). Anything else is
-# treated as unverifiable rather than handed to pip-audit.
-_EXACT_VERSION_RE = re.compile(
-    r"(?:\d+!)?\d+(?:\.\d+)*(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?(?:\+[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?",
-    re.IGNORECASE,
-)
 # Trailing per-requirement pip options such as ``--hash=sha256:...``.
 _TRAILING_OPTIONS_RE = re.compile(r"\s+--?[A-Za-z]")
 
@@ -141,7 +142,7 @@ def parse_dependency_declaration(raw: str, *, line_number: int | None, role: str
             return DependencyDeclaration(text, name, line_number, role, None)
         specifiers.append((spec.group("op"), spec.group("version")))
     exact = None
-    if len(specifiers) == 1 and specifiers[0][0] == "==" and _EXACT_VERSION_RE.fullmatch(specifiers[0][1]):
+    if len(specifiers) == 1 and specifiers[0][0] == "==" and EXACT_PEP440_VERSION_RE.fullmatch(specifiers[0][1]):
         exact = specifiers[0][1]
     return DependencyDeclaration(text, name, line_number, role, exact)
 
@@ -228,7 +229,7 @@ def _parse_poetry_declaration(name: str, constraint: object) -> DependencyDeclar
     text = constraint.strip() if isinstance(constraint, str) else "*"
     if text in {"", "*"}:
         return parse_dependency_declaration(name, line_number=None, role="poetry")
-    if _EXACT_VERSION_RE.fullmatch(text):
+    if EXACT_PEP440_VERSION_RE.fullmatch(text):
         return parse_dependency_declaration(f"{name}=={text}", line_number=None, role="poetry")
     declaration = parse_dependency_declaration(f"{name}{text}", line_number=None, role="poetry")
     if declaration.name is None:
@@ -263,21 +264,20 @@ def _load_npm_lockfile(text: str) -> Any:
 
 
 def _python_runner_declaration(spec: str) -> DependencyDeclaration | None:
-    """A ``uvx``/``pipx run`` package spec as a declaration (``pkg@1.2.3`` is uv's spelling of ``pkg==1.2.3``).
+    """A ``uvx``/``pipx run`` package spec as a declaration; local paths are skipped.
 
-    Local paths are skipped; git and URL specs are kept as unverifiable.
+    Its version is exact when the MCP pinning check calls the spec pinned: both
+    use :func:`~skillevaluator.validators.mcp_static.exact_pypi_version`, which
+    also reads uv's ``pkg@1.2.3`` spelling of ``pkg==1.2.3``. Git and URL specs
+    are kept as unverifiable.
     """
-    from skillevaluator.validators import mcp_static as ms
-
     text = spec.strip()
-    if not text or ms._is_local_spec(text):
+    if not text or is_local_spec(text):
         return None
-    if text.startswith(ms._REMOTE_SPEC_PREFIXES) or "@ git+" in text or "@git+" in text:
+    if is_remote_pypi_spec(text):
         return DependencyDeclaration(text, None, None, "mcp", None)
-    name, at, version = text.partition("@")
-    if at and _EXACT_VERSION_RE.fullmatch(version.strip()):
-        text = f"{name.strip()}=={version.strip()}"
-    return parse_dependency_declaration(text, line_number=None, role="mcp")
+    declaration = parse_dependency_declaration(text, line_number=None, role="mcp")
+    return replace(declaration, exact_version=exact_pypi_version(text))
 
 
 class DependencySecurityValidator(ValidatorBase):

@@ -15,9 +15,13 @@ from skillevaluator.constants import CONTENT_TYPE_PLUGIN
 from skillevaluator.models.result import Severity
 from skillevaluator.tier1.commands import run_validation
 from skillevaluator.utils.tool_runner import ToolResult, Tools
+from skillevaluator.validators import dependency_ecosystems as eco
+from skillevaluator.validators.dependencies import _python_runner_declaration
 from skillevaluator.validators.mcp_static import (
     RunnerInvocation,
     classify_mcp_pinning,
+    exact_npm_version,
+    exact_pypi_version,
     mcp_container_image,
     parse_mcp_runner,
     validate_mcp_server_declaration,
@@ -130,6 +134,72 @@ def test_uv_tool_run_reads_with_requirements_too() -> None:
         "unpinned",
         "uv tool run: requirement 'foo>=1' is a range or tag, not an exact '==' version",
     )
+
+
+# --------------------------------------------------------------------------- #
+# One exact-version matcher per ecosystem                                     #
+# --------------------------------------------------------------------------- #
+def test_npm_equals_pin_is_pinned_like_the_audit_reads_it() -> None:
+    """Regression: ``npx -y pkg@=1.2.3`` was unpinned to the pinning check but an exact 1.2.3 to the audit."""
+    pin = classify_mcp_pinning({"command": "npx", "args": ["-y", "pkg@=1.2.3"]})
+    assert (pin.status, pin.detail) == ("pinned", "npx: exact version 'pkg@=1.2.3'")
+    declaration = eco.npm_spec_declaration("pkg@=1.2.3", "mcp")
+    assert declaration is not None
+    assert (declaration.name, declaration.exact_version) == ("pkg", "1.2.3")
+
+
+@pytest.mark.parametrize(
+    ("version", "exact"),
+    [("1.2.3", "1.2.3"), ("=1.2.3", "1.2.3"), ("v1.2.3-beta.1", "1.2.3-beta.1"), ("^1.2.3", None), ("1.2", None)],
+)
+def test_exact_npm_version(version: str, exact: str | None) -> None:
+    assert exact_npm_version(version) == exact
+
+
+@pytest.mark.parametrize(
+    ("requirement", "exact"),
+    [
+        ("pkg==1.2.3", "1.2.3"),
+        ("pkg[extra] == 1.0.post1", "1.0.post1"),
+        ("pkg@1.2", "1.2"),
+        ("pkg==1.0; python_version >= '3.12'", "1.0"),
+        ("pkg===1.0", None),
+        ("pkg==1.0.*", None),
+        ("pkg==1.0,<2", None),
+        ("pkg@latest", None),
+        ("pkg @ https://example.invalid/pkg.whl", None),
+        ("pkg", None),
+    ],
+)
+def test_exact_pypi_version(requirement: str, exact: str | None) -> None:
+    assert exact_pypi_version(requirement) == exact
+
+
+_NPM_RUNNER_SPECS = (
+    *("pkg", "pkg@1.2.3", "pkg@=1.2.3", "pkg@v1.2.3", "pkg@^1.2.3", "pkg@1", "pkg@latest", "pkg@", "@scope/pkg"),
+    *("@scope/pkg@1.2.3", "@scope/pkg@=1.2.3-beta.1", "pkg@>=1.2.3", "pkg@==1.2.3"),
+)
+_PYTHON_RUNNER_SPECS = (
+    *("pkg", "pkg==1.0", "pkg[x]==1.0", "pkg===1.0", "pkg==1.0.*", "pkg>=1", "pkg==1.0,<2", "pkg==1.0rc", "pkg@1.2"),
+    *("pkg@1.2.3", "pkg@v1.2.3", "pkg@1.2.3-beta.1", "pkg@latest", "pkg==1.0; python_version > '3'", "pkg==v1.0"),
+    "pkg @ https://example.invalid/pkg.whl",
+)
+
+
+@pytest.mark.parametrize("spec", _NPM_RUNNER_SPECS)
+def test_npm_runner_spec_is_pinned_exactly_when_the_audit_finds_one_version(spec: str) -> None:
+    pin = classify_mcp_pinning({"command": "npx", "args": ["-y", spec]})
+    declaration = eco.npm_spec_declaration(spec, "mcp")
+    assert declaration is not None
+    assert (pin.status == "pinned") == (declaration.exact_version is not None)
+
+
+@pytest.mark.parametrize("spec", _PYTHON_RUNNER_SPECS)
+def test_python_runner_spec_is_pinned_exactly_when_the_audit_finds_one_version(spec: str) -> None:
+    pin = classify_mcp_pinning({"command": "uvx", "args": [spec]})
+    declaration = _python_runner_declaration(spec)
+    assert declaration is not None
+    assert (pin.status == "pinned") == (declaration.exact_version is not None)
 
 
 # --------------------------------------------------------------------------- #

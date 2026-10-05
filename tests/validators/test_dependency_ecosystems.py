@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
@@ -17,6 +17,7 @@ from skillevaluator.tier1.commands import run_validation
 from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators import dependency_ecosystems as eco
 from skillevaluator.validators.dependencies import DependencySecurityValidator
+from skillevaluator.validators.plugin_tree import plugin_tree_scope
 
 
 class FakeTool:
@@ -763,3 +764,16 @@ def test_dockerfile_discovery_failure_still_audits_the_npm_manifests(
     assert "Dockerfile discovery failed" in _summary(result, "container")["errors"][0]
     npm = _summary(result, "npm")
     assert (npm["status"], npm["audited"]) == ("audited", 1)
+
+
+def test_source_labels_are_plugin_relative(tmp_path: Path) -> None:
+    root = tmp_path / "demo"
+    skill = root / "skills" / "foo"
+    skill.mkdir(parents=True)
+    label = DependencySecurityValidator._source_label
+    with plugin_tree_scope(root, [skill]):
+        assert label(skill, PurePosixPath("package.json")) == "skills/foo/package.json"
+        assert label(root, PurePosixPath("docker/Dockerfile")) == "docker/Dockerfile"
+        assert label(root, PurePosixPath()) == "."
+        assert label(tmp_path / "elsewhere", PurePosixPath("package.json")) == "package.json"
+    assert label(skill, PurePosixPath("package.json")) == "package.json"

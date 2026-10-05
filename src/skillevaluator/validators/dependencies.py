@@ -61,7 +61,12 @@ from skillevaluator.validators.mcp_static import (
     mcp_container_image,
     parse_mcp_runner,
 )
-from skillevaluator.validators.plugin_tree import active_plugin_tree, is_plugin_tree_root, plugin_tree_exclusions
+from skillevaluator.validators.plugin_tree import (
+    active_plugin_tree,
+    is_plugin_tree_root,
+    plugin_relative_dir,
+    plugin_tree_exclusions,
+)
 
 if TYPE_CHECKING:
     from skillevaluator.validators.policy import ValidationPolicy
@@ -782,14 +787,8 @@ class DependencySecurityValidator(ValidatorBase):
         skill's finding paths onto the skill directory, so a plugin-relative
         finding path would name the skill directory twice.
         """
-        tree = active_plugin_tree()
-        if tree is not None:
-            try:
-                prefix = Path(directory).absolute().relative_to(Path(tree.root).absolute())
-            except ValueError:
-                prefix = Path()
-            return (PurePosixPath(*prefix.parts) / rel).as_posix()
-        return rel.as_posix()
+        prefix = plugin_relative_dir(directory)
+        return (rel if prefix is None else prefix / rel).as_posix()
 
     @staticmethod
     def _read_npm_manifest(directory: Path, rel: PurePosixPath) -> tuple[Any, str | None]:

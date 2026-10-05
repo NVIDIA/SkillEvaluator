@@ -361,6 +361,21 @@ class TestDetectContentType:
         random_dir.mkdir()
         assert detect_content_type(random_dir) == CONTENT_TYPE_UNKNOWN
 
+    def test_directory_is_listed_once(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The root-manifest and nested-structure checks share one bounded listing of the directory."""
+        (tmp_path / "workflows").mkdir()
+        real_scandir = os.scandir
+        listed: list[str] = []
+
+        def tracking_scandir(path):
+            listed.append(os.fspath(path))
+            return real_scandir(path)
+
+        monkeypatch.setattr(cli_core.os, "scandir", tracking_scandir)
+
+        assert detect_content_type(tmp_path) == CONTENT_TYPE_WORKFLOWS
+        assert listed == [os.fspath(tmp_path)]
+
     @pytest.mark.parametrize("name", ["SKILL.md", "agent_plugin.yaml", "workflow-rules.mdc"])
     def test_detects_broken_selected_link_by_lexical_name(self, tmp_path: Path, name: str) -> None:
         selected = tmp_path / name

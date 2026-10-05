@@ -10,6 +10,8 @@ Click command group itself lives in :mod:`skillevaluator.cli`.
 
 import os
 import stat
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from skillevaluator.constants import (
@@ -80,8 +82,80 @@ def _detect_from_file(path: Path) -> str | None:
     return None
 
 
-def _detect_from_directory(path: Path) -> str | None:
-    """Detect content type from directory contents."""
+# Content folders in detection precedence order. A path that passes through one
+# (``.../skills/<name>``), or a directory that holds one as a real subdirectory,
+# is that content type.
+_STRUCTURE_MARKERS: tuple[tuple[str, frozenset[str]], ...] = (
+    (CONTENT_TYPE_SKILL, frozenset({"skills", "team-skills"})),
+    (CONTENT_TYPE_RULES, frozenset({"team-rules"})),
+    (CONTENT_TYPE_WORKFLOWS, frozenset({"workflows", "team-workflows"})),
+)
+_STRUCTURE_MARKER_NAMES = frozenset(name for _content_type, names in _STRUCTURE_MARKERS for name in names)
+
+
+def _structure_type(names: Iterable[str]) -> str | None:
+    """Return the content type of the first content folder, by precedence, among *names*."""
+    present = frozenset(names)
+    for content_type, markers in _STRUCTURE_MARKERS:
+        if not markers.isdisjoint(present):
+            return content_type
+    return None
+
+
+@dataclass(frozen=True)
+class _RootMarkers:
+    """What one listing of a directory's top level found (see :func:`_root_markers`)."""
+
+    # A plugin manifest, or a vendor manifest directory (.claude-plugin/, ...).
+    plugin: bool
+    skill: bool
+    workflows: bool
+    rules: bool
+    # Content folders (skills/, team-rules/, ...) that are real directories.
+    structure_dirs: frozenset[str]
+
+    @property
+    def content_type(self) -> str | None:
+        """The content type the directory's own manifests and files mark.
+
+        A plugin manifest at the root -- agent_plugin.yaml/.yml
+        (bundle-reference), a .claude-plugin/, .codex-plugin/, or
+        .cursor-plugin/ plugin.json, or an Agent Plugins root plugin.json
+        (contained) -- wins: a plugin may also contain skills/**/SKILL.md.
+        """
+        if self.plugin:
+            return CONTENT_TYPE_PLUGIN
+        if self.skill:
+            return CONTENT_TYPE_SKILL
+        if self.workflows:
+            return CONTENT_TYPE_WORKFLOWS
+        if self.rules:
+            return CONTENT_TYPE_RULES
+        return None
+
+
+def _may_mark_content(name: str) -> bool:
+    """Whether a top-level entry named *name* can mark a content type (only these are inspected)."""
+    folded = name.casefold()
+    return (
+        name in PLUGIN_MANIFEST_FILES
+        or name in SKILL_MANIFEST_VARIANTS
+        or name == WORKFLOWS_MANIFEST_FILE
+        or name in _STRUCTURE_MARKER_NAMES
+        or name.endswith(RULES_FILE_EXTENSION)
+        or folded == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE
+        or folded in NATIVE_MANIFEST_DIRS_FOLDED
+    )
+
+
+def _root_markers(path: Path) -> _RootMarkers | None:
+    """List the top level of the directory *path* once, bounded and without following links.
+
+    Only entries that can mark a content type are inspected, each with
+    ``lstat``. ``None`` means *path* is not a regular directory, cannot be
+    listed or inspected, or has more than ``CONTENT_DEDUP_MAX_DISCOVERED_PATHS``
+    entries.
+    """
     try:
         root_metadata = path.lstat()
     except OSError:
@@ -89,103 +163,60 @@ def _detect_from_directory(path: Path) -> str | None:
     if stat_is_link_or_reparse(root_metadata) or not stat.S_ISDIR(root_metadata.st_mode):
         return None
     plugin = skill = workflows = rules = False
-    contained = False
+    structure_dirs: set[str] = set()
     try:
         with os.scandir(path) as iterator:
             for count, entry in enumerate(iterator, start=1):
                 if count > CONTENT_DEDUP_MAX_DISCOVERED_PATHS:
                     return None
-                folded = entry.name.casefold()
-                interesting = (
-                    entry.name in PLUGIN_MANIFEST_FILES
-                    or entry.name in SKILL_MANIFEST_VARIANTS
-                    or entry.name == WORKFLOWS_MANIFEST_FILE
-                    or folded == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE
-                    or folded in NATIVE_MANIFEST_DIRS_FOLDED
-                    or entry.name.endswith(RULES_FILE_EXTENSION)
-                )
-                if not interesting:
+                name = entry.name
+                if not _may_mark_content(name):
                     continue
+                folded = name.casefold()
                 metadata = entry.stat(follow_symlinks=False)
                 non_directory = not stat.S_ISDIR(metadata.st_mode)
-                if entry.name in PLUGIN_MANIFEST_FILES and non_directory:
+                if name in _STRUCTURE_MARKER_NAMES:
+                    if not non_directory and not stat_is_link_or_reparse(metadata):
+                        structure_dirs.add(name)
+                elif name in PLUGIN_MANIFEST_FILES and non_directory:
                     plugin = True
                 elif folded == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE:
                     # Only a regular root plugin.json that declares the Agent
                     # Plugins $schema marks a plugin (bounded, no-follow read).
-                    if stat.S_ISREG(metadata.st_mode) and _root_plugin_json_opts_in(path / entry.name):
+                    if stat.S_ISREG(metadata.st_mode) and _root_plugin_json_opts_in(path / name):
                         plugin = True
                 elif folded in NATIVE_MANIFEST_DIRS_FOLDED:
                     # Presence is enough for auto-detection (any spelling: a
                     # case-insensitive client opens it). The secure plugin
                     # locator later distinguishes a real contained manifest
                     # from an empty, linked, or malformed marker directory.
-                    contained = True
-                elif entry.name in SKILL_MANIFEST_VARIANTS and non_directory:
+                    plugin = True
+                elif name in SKILL_MANIFEST_VARIANTS and non_directory:
                     skill = True
-                elif entry.name == WORKFLOWS_MANIFEST_FILE and non_directory:
+                elif name == WORKFLOWS_MANIFEST_FILE and non_directory:
                     workflows = True
-                elif entry.name.endswith(RULES_FILE_EXTENSION) and non_directory:
+                elif name.endswith(RULES_FILE_EXTENSION) and non_directory:
                     rules = True
     except OSError:
         return None
-    # Plugin detection must win before the SKILL.md / nested-structure checks:
-    # a plugin dir may also contain skills/**/SKILL.md, but a plugin manifest at
-    # the root -- agent_plugin.yaml/.yml (bundle-reference), a .claude-plugin/,
-    # .codex-plugin/, or .cursor-plugin/ plugin.json, or an Agent Plugins root
-    # plugin.json (contained) -- makes it a plugin.
-    if plugin or contained:
-        return CONTENT_TYPE_PLUGIN
-    if skill:
-        return CONTENT_TYPE_SKILL
-    if workflows:
-        return CONTENT_TYPE_WORKFLOWS
-    if rules:
-        return CONTENT_TYPE_RULES
-    return None
+    return _RootMarkers(plugin, skill, workflows, rules, frozenset(structure_dirs))
+
+
+def _detect_from_directory(path: Path) -> str | None:
+    """Detect content type from directory contents."""
+    markers = _root_markers(path)
+    return markers.content_type if markers is not None else None
 
 
 def _detect_from_path_parts(path: Path) -> str | None:
     """Detect content type from folder path patterns."""
-    parts = path.parts
-    if "skills" in parts or "team-skills" in parts:
-        return CONTENT_TYPE_SKILL
-    if "team-rules" in parts:
-        return CONTENT_TYPE_RULES
-    if "workflows" in parts or "team-workflows" in parts:
-        return CONTENT_TYPE_WORKFLOWS
-    return None
+    return _structure_type(path.parts)
 
 
 def _detect_from_nested_structure(path: Path) -> str | None:
     """Detect content type from a bounded, shallow structural marker scan."""
-    try:
-        root_metadata = path.lstat()
-    except OSError:
-        return None
-    if stat_is_link_or_reparse(root_metadata) or not stat.S_ISDIR(root_metadata.st_mode):
-        return None
-
-    markers: set[str] = set()
-    try:
-        with os.scandir(path) as iterator:
-            for count, entry in enumerate(iterator, start=1):
-                if count > CONTENT_DEDUP_MAX_DISCOVERED_PATHS:
-                    return None
-                if entry.name not in {"skills", "team-skills", "team-rules", "workflows", "team-workflows"}:
-                    continue
-                metadata = entry.stat(follow_symlinks=False)
-                if not stat_is_link_or_reparse(metadata) and stat.S_ISDIR(metadata.st_mode):
-                    markers.add(entry.name)
-    except OSError:
-        return None
-    if markers & {"skills", "team-skills"}:
-        return CONTENT_TYPE_SKILL
-    if "team-rules" in markers:
-        return CONTENT_TYPE_RULES
-    if markers & {"workflows", "team-workflows"}:
-        return CONTENT_TYPE_WORKFLOWS
-    return None
+    markers = _root_markers(path)
+    return _structure_type(markers.structure_dirs) if markers is not None else None
 
 
 def detect_content_type(path: Path) -> str:
@@ -202,13 +233,15 @@ def detect_content_type(path: Path) -> str:
         metadata = None
     if metadata is not None and not stat.S_ISDIR(metadata.st_mode) and (detected := _detect_from_file(path)):
         return detected
-    if metadata is not None and stat.S_ISDIR(metadata.st_mode) and (detected := _detect_from_directory(path)):
+    # One listing of a directory serves the manifest and the nested-structure checks.
+    markers = _root_markers(path) if metadata is not None and stat.S_ISDIR(metadata.st_mode) else None
+    if markers is not None and (detected := markers.content_type):
         return detected
 
     if detected := _detect_from_path_parts(path):
         return detected
 
-    if metadata is not None and stat.S_ISDIR(metadata.st_mode) and (detected := _detect_from_nested_structure(path)):
+    if markers is not None and (detected := _structure_type(markers.structure_dirs)):
         return detected
 
     return CONTENT_TYPE_UNKNOWN

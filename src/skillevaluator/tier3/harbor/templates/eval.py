@@ -7,7 +7,9 @@ Harbor Skill Evaluation Verifier -- standalone.
 
 Reads:
   /logs/agent/trajectory.json   -- ATIF trajectory from any agent (preferred)
-  /logs/agent/claude-code.txt   -- Claude Code stream JSONL fallback (synthetic ATIF)
+  /logs/agent/claude-code.txt   -- Claude Code stream JSONL: fallback (synthetic ATIF), and subagent tool calls
+  /logs/agent/sessions/projects/<project>/<session>/subagents/*.jsonl
+                                -- Claude Code subagent transcripts, for the security checks
   /logs/agent/cursor-cli.txt    -- Cursor CLI stdout fallback (heuristic synthetic ATIF)
   /tests/entry.json             -- dataset entry with expected_skill, expected_behavior, etc.
 
@@ -71,120 +73,6 @@ except ImportError:  # pragma: no cover -- older task bundles
             except (json.JSONDecodeError, OSError) as e:
                 meta["warning"] = str(e)
         return None, meta
-
-
-# Claude Code writes each subagent's own transcript to
-# <config>/projects/<project>/<session>/subagents/agent-<id>.jsonl, and its
-# stream-json output marks subagent messages with a parent_tool_use_id.
-# Harbor's trajectory.json holds the main session only, so the security checks
-# fold in subagent tool calls from both places (deduplicated by tool_use id).
-_SUBAGENT_MAX_ENTRIES = 256
-_SUBAGENT_MAX_FILES = 64
-_SUBAGENT_MAX_BYTES = 8 * 1024 * 1024
-_SUBAGENT_MAX_CALLS = 2048
-
-
-def _read_regular_text(path, limit=_SUBAGENT_MAX_BYTES):
-    """Bounded, no-follow read of one regular file as text, or ``""``."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    try:
-        descriptor = os.open(str(path), flags)
-    except (OSError, ValueError):
-        return ""
-    chunks = []
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            return ""
-        remaining = limit
-        while remaining > 0:
-            chunk = os.read(descriptor, min(remaining, 1 << 20))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-    except OSError:
-        return ""
-    finally:
-        os.close(descriptor)
-    return b"".join(chunks).decode("utf-8", errors="replace")
-
-
-def _plain_children(path, *, directories):
-    """Up to ``_SUBAGENT_MAX_ENTRIES`` children of ``path`` that are not symlinks, sorted."""
-    children = []
-    try:
-        for child in Path(path).iterdir():
-            if len(children) >= _SUBAGENT_MAX_ENTRIES:
-                break
-            children.append(child)
-    except OSError:
-        return []
-    children.sort()
-    return [
-        child
-        for child in children
-        if not child.is_symlink() and (child.is_dir() if directories else child.suffix == ".jsonl")
-    ]
-
-
-def _tool_result_text(content):
-    if isinstance(content, list):
-        return "\n".join(
-            str(block.get("text") or "") if isinstance(block, dict) else str(block) for block in content
-        ).strip()
-    return "" if content is None else str(content)
-
-
-def _collect_subagent_calls(text, *, marked_only, calls, results, seen):
-    """Tool calls from Claude Code JSONL events; ``marked_only`` keeps events with a ``parent_tool_use_id``."""
-    for line in text.splitlines():
-        if len(calls) >= _SUBAGENT_MAX_CALLS:
-            return
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(event, dict) or (marked_only and not event.get("parent_tool_use_id")):
-            continue
-        message = event.get("message")
-        content = message.get("content") if isinstance(message, dict) else None
-        for block in content if isinstance(content, list) else ():
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "tool_use":
-                call_id = str(block.get("id") or "")
-                if call_id in seen:
-                    continue
-                if call_id:
-                    seen.add(call_id)
-                arguments = block.get("input")
-                if not isinstance(arguments, dict):
-                    arguments = {} if arguments is None else {"raw": arguments}
-                calls.append((call_id, {"action": str(block.get("name") or ""), "action_input": dict(arguments)}))
-            elif block.get("type") == "tool_result" and block.get("tool_use_id"):
-                results[str(block["tool_use_id"])] = _tool_result_text(block.get("content"))
-
-
-def subagent_tool_calls(traj, logs_dir):
-    """Tool calls Claude Code subagents made that ``traj`` does not already hold, as security-check dicts."""
-    seen = {
-        str(tc.get("tool_call_id"))
-        for step in (traj or {}).get("steps") or []
-        if isinstance(step, dict)
-        for tc in step.get("tool_calls") or []
-        if isinstance(tc, dict) and tc.get("tool_call_id")
-    }
-    calls = []
-    results = {}
-    transcripts = []
-    for project in _plain_children(Path(logs_dir) / "sessions" / "projects", directories=True):
-        for session in _plain_children(project, directories=True):
-            transcripts.extend(_plain_children(session / "subagents", directories=False))
-    for path in transcripts[:_SUBAGENT_MAX_FILES]:
-        _collect_subagent_calls(_read_regular_text(path), marked_only=False, calls=calls, results=results, seen=seen)
-    stream = _read_regular_text(Path(logs_dir) / "claude-code.txt")
-    _collect_subagent_calls(stream, marked_only=True, calls=calls, results=results, seen=seen)
-    return [{**call, "observation": results.get(call_id, ""), "subagent": True} for call_id, call in calls]
 
 
 try:
@@ -6884,6 +6772,121 @@ def check_canary(tool_calls, spec, *, read_files=False):
 
 
 # ── Canary exfiltration (end shared block) ───────────────────────────────────
+
+
+# ── Subagent tool calls ──────────────────────────────────────────────────────
+# Claude Code writes each subagent's own transcript to
+# <config>/projects/<project>/<session>/subagents/agent-<id>.jsonl, and its
+# stream-json output marks subagent messages with a parent_tool_use_id.
+# Harbor's trajectory.json holds the main session only, so the security checks
+# fold in subagent tool calls from both places (deduplicated by tool_use id).
+_SUBAGENT_MAX_ENTRIES = 256
+_SUBAGENT_MAX_FILES = 64
+_SUBAGENT_MAX_BYTES = 8 * 1024 * 1024
+_SUBAGENT_MAX_CALLS = 2048
+
+
+def _read_regular_text(path, limit=_SUBAGENT_MAX_BYTES):
+    """Bounded, no-follow read of one regular file as text, or ``""``."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(str(path), flags)
+    except (OSError, ValueError):
+        return ""
+    chunks = []
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return ""
+        remaining = limit
+        while remaining > 0:
+            chunk = os.read(descriptor, min(remaining, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError:
+        return ""
+    finally:
+        os.close(descriptor)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def _plain_children(path, *, directories):
+    """Up to ``_SUBAGENT_MAX_ENTRIES`` children of ``path`` that are not symlinks, sorted."""
+    children = []
+    try:
+        for child in Path(path).iterdir():
+            if len(children) >= _SUBAGENT_MAX_ENTRIES:
+                break
+            children.append(child)
+    except OSError:
+        return []
+    children.sort()
+    return [
+        child
+        for child in children
+        if not child.is_symlink() and (child.is_dir() if directories else child.suffix == ".jsonl")
+    ]
+
+
+def _tool_result_text(content):
+    if isinstance(content, list):
+        return "\n".join(
+            str(block.get("text") or "") if isinstance(block, dict) else str(block) for block in content
+        ).strip()
+    return "" if content is None else str(content)
+
+
+def _collect_subagent_calls(text, *, marked_only, calls, results, seen):
+    """Tool calls from Claude Code JSONL events; ``marked_only`` keeps events with a ``parent_tool_use_id``."""
+    for line in text.splitlines():
+        if len(calls) >= _SUBAGENT_MAX_CALLS:
+            return
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or (marked_only and not event.get("parent_tool_use_id")):
+            continue
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else ():
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                call_id = str(block.get("id") or "")
+                if call_id in seen:
+                    continue
+                if call_id:
+                    seen.add(call_id)
+                arguments = block.get("input")
+                if not isinstance(arguments, dict):
+                    arguments = {} if arguments is None else {"raw": arguments}
+                calls.append((call_id, {"action": str(block.get("name") or ""), "action_input": dict(arguments)}))
+            elif block.get("type") == "tool_result" and block.get("tool_use_id"):
+                results[str(block["tool_use_id"])] = _tool_result_text(block.get("content"))
+
+
+def subagent_tool_calls(traj, logs_dir):
+    """Tool calls Claude Code subagents made that ``traj`` does not already hold, as security-check dicts."""
+    seen = {
+        str(tc.get("tool_call_id"))
+        for step in (traj or {}).get("steps") or []
+        if isinstance(step, dict)
+        for tc in step.get("tool_calls") or []
+        if isinstance(tc, dict) and tc.get("tool_call_id")
+    }
+    calls = []
+    results = {}
+    transcripts = []
+    for project in _plain_children(Path(logs_dir) / "sessions" / "projects", directories=True):
+        for session in _plain_children(project, directories=True):
+            transcripts.extend(_plain_children(session / "subagents", directories=False))
+    for path in transcripts[:_SUBAGENT_MAX_FILES]:
+        _collect_subagent_calls(_read_regular_text(path), marked_only=False, calls=calls, results=results, seen=seen)
+    stream = _read_regular_text(Path(logs_dir) / "claude-code.txt")
+    _collect_subagent_calls(stream, marked_only=True, calls=calls, results=results, seen=seen)
+    return [{**call, "observation": results.get(call_id, ""), "subagent": True} for call_id, call in calls]
 
 
 def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None, canary=None, canary_read_files=False):

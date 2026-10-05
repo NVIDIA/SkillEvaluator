@@ -1244,9 +1244,6 @@ def _atomic_write_posix(path: Path, payload: bytes) -> None:
     parent_fd = _open_absolute_directory_posix(absolute.parent)
     temporary_name: str | None = None
     descriptor = -1
-    before: os.stat_result | None = None
-    opened: os.stat_result | None = None
-    written_metadata: os.stat_result | None = None
     try:
         before = _inspect_destination_posix(parent_fd, absolute.name, missing_ok=True)
         flags = (

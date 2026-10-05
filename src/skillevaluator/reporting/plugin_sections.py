@@ -73,7 +73,8 @@ ARM_LABELS = {
     "baseline": "Baseline (no plugin)",
     "sum_of_parts": "Sum of parts",
 }
-_PLUGIN_ARMS = frozenset({"with_skill", "with_plugin"})
+# The arms that ran with the plugin (newer payloads name it with_plugin).
+PLUGIN_ARMS = frozenset({"with_skill", "with_plugin"})
 # In a legacy 2-arm ``--lift-mode integration`` run the only baseline arm stages
 # the plugin's member components individually, so that arm and its interval
 # describe the sum of parts, not a run without the plugin.
@@ -259,6 +260,11 @@ def json_safe(value: Any, *, _depth: int = 0) -> Any:
     return str(value)
 
 
+def _humanize(value: str) -> str:
+    """Turn an unlabelled snake_case value into a title: ``needs_review`` -> ``Needs Review``."""
+    return value.replace("_", " ").title()
+
+
 def _plural(value: int, noun: str, plural: str | None = None) -> str:
     return f"{value} {noun if value == 1 else plural or noun + 's'}"
 
@@ -405,7 +411,7 @@ def similarity_view(value: object, *, kind: str) -> dict[str, Any] | None:
             )
     return {
         "status": status,
-        "status_label": {"compared": "Compared", "skipped": "Skipped"}.get(status, status.replace("_", " ").title()),
+        "status_label": {"compared": "Compared", "skipped": "Skipped"}.get(status, _humanize(status)),
         "catalog_entries": count(similarity.get("catalog_entries")),
         "matches": matches,
         "omitted": max(0, total - len(matches)),
@@ -1254,7 +1260,7 @@ def integration_view(
     verdict = text(integration.get("verdict"), limit=64).lower() or "inconclusive"
     if not measured:
         verdict = "inconclusive"
-    verdict_label, verdict_class = _INTEGRATION_VERDICTS.get(verdict, (verdict.replace("_", " ").title(), "warn"))
+    verdict_label, verdict_class = _INTEGRATION_VERDICTS.get(verdict, (_humanize(verdict), "warn"))
     reason = text(integration.get("reason")) or text(provenance.get("integration_skip_reason"))
     if not integration:
         reason = reason or "Integration was requested, but this run recorded no sum-of-parts comparison."
@@ -1274,7 +1280,7 @@ def integration_view(
         ci = _ci_row("integration", "Integration lift", uncertainty)
     point_verdict = text(integration.get("point_verdict"), limit=64).lower()
     point_label = (
-        _INTEGRATION_VERDICTS.get(point_verdict, (point_verdict.replace("_", " ").title(), "warn"))[0]
+        _INTEGRATION_VERDICTS.get(point_verdict, (_humanize(point_verdict), "warn"))[0]
         if point_verdict and point_verdict != verdict
         else ""
     )
@@ -1409,7 +1415,7 @@ def _ordered_arms(*mappings: Mapping[str, Any]) -> list[str]:
 def arm_label(arm: str, *, sum_of_parts_baseline: bool = False) -> str:
     if sum_of_parts_baseline and arm in _BASELINE_ARMS:
         return SUM_OF_PARTS_BASELINE_LABEL
-    return ARM_LABELS.get(arm, arm.replace("_", " ").title())
+    return ARM_LABELS.get(arm, _humanize(arm))
 
 
 def _statistics_scope(
@@ -1583,7 +1589,7 @@ def signals_view(payload: object, *, context: _Tier3Context | None = None) -> di
         for arm in _ordered_arms(summaries):
             entry = _signal_entry(scope, arm, summaries[arm], sum_of_parts_baseline=context.sum_of_parts_baseline)
             entries.append(entry)
-            if entry["activation"] and arm in {"with_skill", "with_plugin"}:
+            if entry["activation"] and arm in PLUGIN_ARMS:
                 for key, collected in activation.items():
                     for name in entry["activation"][key]:
                         if name not in collected and len(collected) < MAX_LIST_ITEMS:
@@ -1986,7 +1992,7 @@ def validator_parity_view(value: object) -> dict[str, Any] | None:
     agreement_class = "ok" if agree is True else "warn" if agree is False else "neutral"
     return {
         "status": status,
-        "status_label": _PARITY_STATUS_LABELS.get(status, status.replace("_", " ").title()),
+        "status_label": _PARITY_STATUS_LABELS.get(status, _humanize(status)),
         # Agreement colours the status only when the two validators were compared.
         "status_class": agreement_class if status == "compared" else "neutral",
         "claude_verdict": text(block.get("claude_verdict"), limit=32) or "n/a",
@@ -2025,7 +2031,7 @@ def cve_summary_view(value: object) -> dict[str, Any] | None:
         status = text(entry.get("status"), limit=32) or "unknown"
         if status == "not_found":
             continue
-        label, css = _CVE_STATUS_LABELS.get(status, (status.replace("_", " ").title(), "neutral"))
+        label, css = _CVE_STATUS_LABELS.get(status, (_humanize(status), "neutral"))
         vulnerabilities = _mapping(entry.get("vulnerabilities"))
         severity_counts = [
             (severity, count(vulnerabilities.get(severity)) or 0) for severity in ("critical", "high", "medium", "low")
@@ -2283,7 +2289,7 @@ def _canary_verdict(rows: list[dict[str, Any]], *, sum_of_parts_baseline: bool) 
     leak rate, a sum-of-parts leak is always named, and a clean run whose decoy
     file was missing is not a confirmed pass.
     """
-    plugin = next((row for row in rows if row["arm"] in _PLUGIN_ARMS), None)
+    plugin = next((row for row in rows if row["arm"] in PLUGIN_ARMS), None)
     baseline = next((row for row in rows if row["arm"] in _BASELINE_ARMS), None)
     parts = next((row for row in rows if row["arm"] == "sum_of_parts"), None)
     baseline_name = "the sum-of-parts baseline" if sum_of_parts_baseline else "the baseline"

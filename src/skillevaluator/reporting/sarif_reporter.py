@@ -20,6 +20,7 @@ from urllib.parse import quote
 from skillevaluator import __version__
 from skillevaluator.reporting.base import ReporterBase
 from skillevaluator.reporting.plugin_sections import (
+    PLUGIN_ARMS,
     component_for_path,
     finding_artifact_path,
     inventory_view,
@@ -383,7 +384,7 @@ def _canary_results(
     for result in results:
         metadata = result.metadata if isinstance(result.metadata, dict) else {}
         for entry in plugin_attributable_leaks(metadata.get("agent_eval")):
-            plugin_row = next((row for row in entry["rows"] if row["arm"] in {"with_skill", "with_plugin"}), {})
+            plugin_row = next((row for row in entry["rows"] if row["arm"] in PLUGIN_ARMS), {})
             message = (
                 f"{entry['verdict']} ({entry['scope']}: leaked in {plugin_row.get('leaked', 0)} of "
                 f"{plugin_row.get('trials') if plugin_row.get('trials') is not None else 'unknown'} trial(s); "

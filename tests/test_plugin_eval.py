@@ -10,7 +10,7 @@ import pytest
 
 from skillevaluator.cli import _plugin_lift_mode_for_evidence
 from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES, CONTENT_DEDUP_MAX_TOTAL_BYTES
-from skillevaluator.plugin_dependencies import MAX_PLUGIN_MANIFEST_ITEMS
+from skillevaluator.plugin_dependencies import MAX_PLUGIN_MANIFEST_ITEMS, slug_from_remote_url
 from skillevaluator.plugin_manifest import locate_plugin_manifest
 from skillevaluator.tier3 import plugin_eval as plugin_eval_module
 from skillevaluator.tier3.plugin_eval import (
@@ -101,7 +101,6 @@ def test_both_lift_falls_back_without_composition_evidence() -> None:
         include_skills=(),
         unresolved_mcp_servers=(),
         runnable_mcp_servers=(),
-        rule_refs=(),
         dataset_case_count=1,
         cross_component_case_count=0,
     )
@@ -173,7 +172,7 @@ skills:
     ],
 )
 def test_remote_slug_matches_normalized_canonical_repo(url: str) -> None:
-    assert plugin_eval_module._slug_from_remote_url(url) == "nvidia/skillevaluator"
+    assert slug_from_remote_url(url) == "nvidia/skillevaluator"
 
 
 def test_same_repo_public_ref_resolves_without_remote_fetch(

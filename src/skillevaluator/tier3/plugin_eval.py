@@ -70,7 +70,6 @@ from skillevaluator.constants import (
     DESCRIPTION_MAX_LENGTH,
     NAME_MAX_LENGTH,
     PLUGIN_CONTAINED_MANIFEST_TYPE,
-    PLUGIN_CONTAINED_MANIFEST_TYPES,
     PLUGIN_CURSOR_MANIFEST_TYPE,
     PLUGIN_MANIFEST_RELATIVE_PATHS,
     SCAN_EXCLUDED_DIRS,
@@ -112,7 +111,6 @@ from skillevaluator.plugin_dependencies import parse_canonical_ref as _parse_can
 from skillevaluator.plugin_dependencies import ref_label as _ref_label
 from skillevaluator.plugin_dependencies import ref_name as _ref_name
 from skillevaluator.plugin_dependencies import ref_source as _ref_source
-from skillevaluator.plugin_dependencies import slug_from_remote_url as _slug_from_remote_url  # noqa: F401
 from skillevaluator.plugin_formats import manifest_syntax, normalized_component_manifest, profile_for
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries, normalize_dataset_entries
 from skillevaluator.tier3.eval_core.plugin_signals import validate_plugin_case_fields
@@ -187,7 +185,6 @@ class PluginEvalPackage:
     include_skills: tuple[Path, ...]
     unresolved_mcp_servers: tuple[str, ...]
     runnable_mcp_servers: tuple[str, ...]
-    rule_refs: tuple[str, ...]
     staged_rules: tuple[str, ...] = ()
     unresolved_skill_refs: tuple[str, ...] = ()
     unresolved_rule_refs: tuple[str, ...] = ()
@@ -424,19 +421,13 @@ def prepare_plugin_eval_package(
     # Bundle-reference plugins resolve their refs as before.
     rules_section = manifest.get("rules")
     if stage_from_inventory:
-        contained_rules = _inventory_rule_files(inventory, plugin_root)
-        staged_rules = tuple(contained_rules)
-        unresolved_rule_refs = ()
-        all_rule_refs = tuple(rule.name for rule in contained_rules)
+        staged_rules = tuple(_inventory_rule_files(inventory, plugin_root))
+        unresolved_rule_refs: tuple[str, ...] = ()
     elif contained_form and not isinstance(rules_section, list):
-        contained_rules = _discover_contained_rule_files(plugin_root)
-        staged_rules = tuple(contained_rules)
+        staged_rules = tuple(_discover_contained_rule_files(plugin_root))
         unresolved_rule_refs = ()
-        all_rule_refs = tuple(rule.name for rule in contained_rules)
     else:
-        staged_rules, unresolved_rule_refs, all_rule_refs = _resolve_rules(
-            rules_section, plugin_dir, plugin_root, resolver
-        )
+        staged_rules, unresolved_rule_refs = _resolve_rules(rules_section, plugin_dir, plugin_root, resolver)
     component_manifest = (
         normalized_component_manifest(location.manifest_type, manifest) or {} if contained_form else manifest
     )
@@ -515,7 +506,6 @@ def prepare_plugin_eval_package(
             include_skills=(),
             unresolved_mcp_servers=tuple(server["name"] for server in provider_mcp),
             runnable_mcp_servers=(),
-            rule_refs=tuple(all_rule_refs),
             unresolved_skill_refs=unresolved_skill_refs,
             unresolved_rule_refs=unresolved_rule_refs,
             mcp_unsupported_config=tuple(mcp_unsupported_config),
@@ -582,7 +572,6 @@ def prepare_plugin_eval_package(
         unresolved_mcp_servers=tuple(server["name"] for server in provider_mcp),
         runnable_mcp_servers=tuple(server["name"] for server in runnable_mcp),
         mcp_unsupported_config=tuple(mcp_unsupported_config),
-        rule_refs=tuple(all_rule_refs),
         staged_rules=tuple(rule.name for rule in staged_rules),
         unresolved_skill_refs=unresolved_skill_refs,
         unresolved_rule_refs=unresolved_rule_refs,
@@ -1116,18 +1105,6 @@ def write_plugin_provenance(run_dir: Path, provenance: dict[str, Any]) -> Path |
         return None
 
 
-def _is_contained_manifest(path: Path) -> bool:
-    """Whether *path* names a contained-plugin manifest (any supported JSON format).
-
-    Mirrors the Tier 1 detection (``plugin_manifest.manifest_relative_path``) so
-    the plugin-eval path accepts exactly the manifest forms Tier 1 does.
-    """
-    from skillevaluator.plugin_manifest import manifest_relative_path, manifest_type_for_relative_path
-
-    relative = manifest_relative_path(path)
-    return relative is not None and manifest_type_for_relative_path(relative) in PLUGIN_CONTAINED_MANIFEST_TYPES
-
-
 def _additional_manifests(location: PluginManifestLocation) -> list[tuple[str, str, dict[str, Any] | None]]:
     """Best-effort bounded parse of the other supported manifests in the root.
 
@@ -1188,10 +1165,6 @@ def _inventory_rule_files(inventory: PluginInventory, plugin_root: Path) -> list
     return staged
 
 
-def _manifest_path(plugin_path: Path) -> Path:
-    return _manifest_location(plugin_path).path
-
-
 def _manifest_location(plugin_path: Path) -> PluginManifestLocation:
     from skillevaluator.plugin_manifest import locate_plugin_manifest
 
@@ -1203,10 +1176,8 @@ def _manifest_location(plugin_path: Path) -> PluginManifestLocation:
     return located
 
 
-def _load_manifest_text(raw_text: str, manifest_path: Path, manifest_type: str | None = None) -> dict[str, Any]:
-    json_syntax = (
-        manifest_syntax(manifest_type) == "json" if manifest_type is not None else _is_contained_manifest(manifest_path)
-    )
+def _load_manifest_text(raw_text: str, manifest_path: Path, manifest_type: str) -> dict[str, Any]:
+    json_syntax = manifest_syntax(manifest_type) == "json"
     try:
         data = load_bounded_json(raw_text.lstrip("\ufeff")) if json_syntax else load_bounded_yaml(raw_text)
     except StructuredDataError as exc:
@@ -1415,10 +1386,10 @@ def _unresolved_refs(
 
 def _resolve_rules(
     section: Any, plugin_dir: Path, plugin_root: Path, resolver: _IntraRepoResolver
-) -> tuple[tuple[_StagedRule, ...], tuple[str, ...], tuple[str, ...]]:
+) -> tuple[tuple[_StagedRule, ...], tuple[str, ...]]:
     """Resolve rule refs to contained files; report remote/unresolved ones.
 
-    Returns ``(staged_rule_files, unresolved_labels, all_labels)``. A rule file is
+    Returns ``(staged_rule_files, unresolved_labels)``. A rule file is
     staged when it resolves to a real file inside the plugin root (symlink-
     contained, mirroring :func:`find_bundled_plugin_skills`) OR when a canonical
     remote ref names *this* clone and resolves intra-repo under the clone root.
@@ -1427,7 +1398,6 @@ def _resolve_rules(
     """
     staged: list[_StagedRule] = []
     unresolved: list[str] = []
-    all_labels: list[str] = []
     seen: set[Path] = set()
     total_bytes = 0
 
@@ -1443,7 +1413,6 @@ def _resolve_rules(
 
     for ref in _iter_raw_refs(section):
         label = _ref_label(ref)
-        all_labels.append(label)
         if _ref_source(ref) in _REMOTE_REF_SOURCES:
             # A remote rule ref whose <repo> is this clone resolves intra-repo to a
             # real file under the clone root; otherwise it stays unresolved.
@@ -1458,7 +1427,7 @@ def _resolve_rules(
             _stage(resolved)
         elif resolved is None:
             unresolved.append(label)
-    return tuple(staged), tuple(unresolved), tuple(all_labels)
+    return tuple(staged), tuple(unresolved)
 
 
 def _resolve_contained_file(ref: Any, plugin_dir: Path, plugin_root: Path) -> Path | None:

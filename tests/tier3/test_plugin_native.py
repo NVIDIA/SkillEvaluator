@@ -30,8 +30,10 @@ from skillevaluator.tier3.plugin_native import (
     STAGED_EVIDENCE,
     WRAPPER_COMPONENTS,
     NativeHookSource,
+    NativePluginSource,
     PluginLoadError,
     apply_load_census,
+    apply_native_refusals,
     component_support_matrix,
     fallback_census,
     finalize_native_provenance,
@@ -40,6 +42,7 @@ from skillevaluator.tier3.plugin_native import (
     normalize_census,
     parse_frontmatter_yaml,
     plugin_load_provenance,
+    refuse_or_fall_back,
     resolve_plugin_load,
     summarize_censuses,
     wrap_hook_handler,
@@ -192,6 +195,48 @@ def test_native_fails_fast_in_local_mode_and_auto_falls_back_with_a_reason() -> 
         resolve_plugin_load("native", ["codex"], env_mode="docker", task_source="native_harbor")
     with pytest.raises(PluginLoadError, match="no native plugin adapter"):
         resolve_plugin_load("native", ["cursor-cli"], env_mode="docker")
+
+
+def test_refuse_or_fall_back_raises_for_native_and_falls_back_for_auto() -> None:
+    with pytest.raises(PluginLoadError, match="--plugin-load native is not supported for codex: no adapter"):
+        refuse_or_fall_back("native", "codex", "no adapter")
+    decision = refuse_or_fall_back("auto", "codex", "no adapter")
+    assert (decision.mode, decision.reason) == ("wrapper", "auto: no adapter; using the generated wrapper")
+    assert decision.components == WRAPPER_COMPONENTS
+
+
+def test_native_refusals_block_only_the_adapters_that_stage_the_refused_type(tmp_path: Path) -> None:
+    source = NativePluginSource(
+        plugin_name="demo",
+        description="Demo",
+        contained=True,
+        plugin_root=tmp_path,
+        manifest={},
+        manifest_rel=".claude-plugin/plugin.json",
+        refusals=(("hook", "hooks/hooks.json", "the hook enables a permission bypass"),),
+    )
+    decisions = resolve_plugin_load("auto", ["claude-code", "codex"], env_mode="docker")
+
+    checked = apply_native_refusals("auto", decisions, source)
+
+    # Claude Code stages hooks natively, so it falls back; Codex never stages hooks.
+    assert checked["claude-code"].reason == "auto: the hook enables a permission bypass; using the generated wrapper"
+    assert checked["codex"] == decisions["codex"]
+    with pytest.raises(PluginLoadError, match="not supported for claude-code: the hook enables"):
+        apply_native_refusals("native", resolve_plugin_load("native", ["claude-code"], env_mode="docker"), source)
+
+
+def test_native_decisions_without_a_snapshot_fall_back_and_wrapper_decisions_stay() -> None:
+    # Hermes resolves to the wrapper under auto; Codex resolves to its native adapter.
+    decisions = resolve_plugin_load("auto", ["codex", "hermes"], env_mode="docker")
+    assert decisions["codex"].native and not decisions["hermes"].native
+
+    checked = apply_native_refusals("auto", decisions, None)
+
+    assert checked["codex"].reason == (
+        "auto: no native plugin snapshot was prepared for this run; using the generated wrapper"
+    )
+    assert checked["hermes"] == decisions["hermes"]
 
 
 def test_plugin_load_provenance_matches_the_contract_shape() -> None:

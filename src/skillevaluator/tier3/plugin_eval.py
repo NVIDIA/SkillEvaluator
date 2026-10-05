@@ -694,22 +694,13 @@ def _apply_native_refusals(plugin_load: str, plan: dict[str, Any] | None, source
     unknown plan, ``native`` refuses any bypass (every adapter might stage it)
     and ``auto`` leaves the decision to the runner.
     """
-    from skillevaluator.tier3.plugin_native import PluginLoadError, adapter_for, native_refusal, wrapper_decision
+    from skillevaluator.tier3.plugin_native import PluginLoadError, apply_native_refusals
 
     if plan is None:
         if plugin_load == "native" and source.refusals:
             raise PluginLoadError(source.refusals[0][2])
         return None
-    updated = dict(plan)
-    for agent, decision in plan.items():
-        adapter = adapter_for(agent)
-        reason = native_refusal(adapter, source) if decision.native and adapter is not None else None
-        if reason is None:
-            continue
-        if plugin_load == "native":
-            raise PluginLoadError(f"--plugin-load native is not supported for {agent}: {reason}")
-        updated[agent] = wrapper_decision(agent, f"auto: {reason}; using the generated wrapper")
-    return updated
+    return apply_native_refusals(plugin_load, plan, source)
 
 
 def _claude_native_arm(plan: dict[str, Any] | None) -> bool:

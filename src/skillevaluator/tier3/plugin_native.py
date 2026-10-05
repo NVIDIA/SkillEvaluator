@@ -1956,6 +1956,43 @@ def wrapper_decision(agent: str, reason: str) -> AgentLoadDecision:
     return AgentLoadDecision(agent, "wrapper", reason, WRAPPER_ADAPTER, dict(WRAPPER_COMPONENTS))
 
 
+def refuse_or_fall_back(requested: str, agent: str, reason: str) -> AgentLoadDecision:
+    """The decision for an agent that cannot load the plugin natively, for ``reason``.
+
+    ``native`` refuses: it raises :class:`PluginLoadError`. ``auto`` falls back
+    to the generated wrapper and records why.
+    """
+    if requested == "native":
+        raise PluginLoadError(f"--plugin-load native is not supported for {agent}: {reason}")
+    return wrapper_decision(agent, f"auto: {reason}; using the generated wrapper")
+
+
+def apply_native_refusals(
+    requested: str,
+    decisions: Mapping[str, AgentLoadDecision],
+    source: NativePluginSource | None,
+) -> dict[str, AgentLoadDecision]:
+    """Check each native decision against the prepared plugin snapshot.
+
+    A native decision needs the snapshot, and an adapter refuses to stage a
+    component type natively when that component enables a permission bypass
+    (:func:`native_refusal`). Either way the agent is refused or falls back
+    (:func:`refuse_or_fall_back`); wrapper decisions are kept as they are.
+    """
+    checked = dict(decisions)
+    for agent, decision in decisions.items():
+        if not decision.native:
+            continue
+        adapter = adapter_for(agent)
+        if source is None:
+            reason: str | None = "no native plugin snapshot was prepared for this run"
+        else:
+            reason = native_refusal(adapter, source) if adapter is not None else None
+        if reason is not None:
+            checked[agent] = refuse_or_fall_back(requested, agent, reason)
+    return checked
+
+
 def resolve_plugin_load(
     requested: str,
     agents: Sequence[str],
@@ -1987,9 +2024,7 @@ def resolve_plugin_load(
             else adapter.unsupported_reason(env_mode=env_mode, task_source=task_source)
         )
         if reason is not None:
-            if requested == "native":
-                raise PluginLoadError(f"--plugin-load native is not supported for {agent}: {reason}")
-            decisions[agent] = wrapper_decision(agent, f"auto: {reason}; using the generated wrapper")
+            decisions[agent] = refuse_or_fall_back(requested, agent, reason)
             continue
         assert adapter is not None
         if requested == "auto" and adapter.auto_wrapper_reason:

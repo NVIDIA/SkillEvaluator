@@ -889,8 +889,16 @@ _HARBOR_ENV_MODE_VARS = {
     ),
     "hyperbrowser": _DOCKER_HOST_ENV_VARS | frozenset({"HYPERBROWSER_API_KEY", "HYPERBROWSER_BASE_URL"}),
     "vercel": frozenset({"VERCEL_OIDC_TOKEN", "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID", "VERCEL_TOKEN"}),
-    "runta": frozenset({"RUNTA_CONFIG", "RUNTA_TOKEN"}),
-    "mosaic": frozenset({"MOSAIC_API_TOKEN", "MOSAIC_REGISTRY_PASSWORD", "MOSAIC_REGISTRY_USERNAME"}),
+    "runta": frozenset({"RUNTA_CONFIG", "RUNTA_ENDPOINT", "RUNTA_TOKEN"}),
+    "mosaic": frozenset(
+        {
+            "MOSAIC_API_TOKEN",
+            "MOSAIC_API_URL",
+            "MOSAIC_REGISTRY_PASSWORD",
+            "MOSAIC_REGISTRY_USERNAME",
+            "MOSAIC_RETRIES",
+        }
+    ),
 }
 _BEDROCK_HOST_ENV_VARS = _AWS_HOST_ENV_VARS | {
     "AWS_BEARER_TOKEN_BEDROCK",

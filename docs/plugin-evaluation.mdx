@@ -2496,11 +2496,12 @@ the following:
 - **No remote fetching.** Refs to other repositories stay `external` or
   unevaluated, and same-repository refs need a verifiable `origin` remote.
 - **The dependency audit covers declared exact pins only.** Python
-  requirements, npm lockfiles and `package.json`, and container images from
+  requirements, npm lockfiles and `package.json`, the packages that `npx`,
+  `uvx`, and the other MCP package runners install, and container images from
   MCP `run` commands and Dockerfiles are audited when a scanner is installed.
-  `yarn.lock`, `pnpm-lock.yaml`, and packages that `npx`, `uvx`, or other MCP
-  package runners fetch are not audited, and container-image audits need
-  registry access.
+  The dependencies a runner's package pulls in when it starts are not resolved
+  or audited, and neither are `yarn.lock`, `pnpm-lock.yaml`, or `jsr:` and
+  remote `deno run` modules. Container-image audits need registry access.
 - **Validator parity needs the Claude Code CLI.** The `claude-validate` check
   is skipped when `claude` is not on `PATH`, and its result depends on the
   installed Claude Code version.

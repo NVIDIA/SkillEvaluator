@@ -9,6 +9,7 @@ eliminating duplication across RulesSchemaValidator and WorkflowsSchemaValidator
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,20 @@ def parse_frontmatter(file_path: Path) -> tuple[ParsedFrontmatter | None, Valida
     ), result
 
 
+def format_validation_location(error: dict[str, Any]) -> str:
+    """Keep boolean, null, and date YAML keys recognizable in error locations."""
+    location = [str(loc) for loc in error["loc"]]
+    if error.get("type") == "invalid_key" and location:
+        key = error["input"]
+        if key is None:
+            location[-1] = "null"
+        elif isinstance(key, bool):
+            location[-1] = str(key).lower()
+        elif isinstance(key, date):
+            location[-1] = key.isoformat()
+    return ".".join(location)
+
+
 def validate_pydantic_model(
     model_class: type,
     data: dict[str, Any],
@@ -95,9 +110,9 @@ def validate_pydantic_model(
     from pydantic import ValidationError
 
     try:
-        return model_class(**data)
+        return model_class.model_validate(data)
     except ValidationError as e:
         for error in e.errors():
-            field = ".".join(str(loc) for loc in error["loc"])
+            field = format_validation_location(error)
             result.add_error(f"Field '{field}': {error['msg']}")
         return None

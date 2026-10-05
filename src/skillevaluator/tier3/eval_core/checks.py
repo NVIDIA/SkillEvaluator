@@ -709,6 +709,32 @@ def _shell_tokens(cmd: Any) -> list[str]:
             return []
 
 
+# The most one expansion of shell variables may add to the text it expands
+# (Linux PATH_MAX). A variable can hold others, so short text such as
+# ``A=x; A=$A$A; ...`` or ``B=$A$A...; cat $B$B...`` would otherwise build text
+# without bound. An expansion that would add more is not settled: it reads as
+# _UNSETTLED_VALUE, so no SKILL.md read is credited, the script walk cannot
+# tell, and the network check treats it as a risk.
+_MAX_SHELL_EXPANSION_CHARS = 4096
+
+
+def _expand_shell_variables(text: str, values: dict[str, str], unset: str | None = None) -> str | None:
+    """*text* with each ``$NAME`` and ``${NAME}`` replaced by its value in *values*, or ``None`` when that adds
+    more than ``_MAX_SHELL_EXPANSION_CHARS``. A name without a value is kept as written, or replaced by *unset*."""
+    pieces: list[str] = []
+    position = 0
+    for match in _SHELL_VARIABLE_RE.finditer(text):
+        value = values.get(match.group(1) or match.group(2))
+        if value is None:
+            value = match.group() if unset is None else unset
+        pieces.extend((text[position : match.start()], value))
+        position = match.end()
+    pieces.append(text[position:])
+    if sum(len(piece) for piece in pieces) > len(text) + _MAX_SHELL_EXPANSION_CHARS:
+        return None
+    return "".join(pieces)
+
+
 def _skill_md_arg(arg: str, assignments: dict[str, str]) -> bool:
     value = _resolved_shell_arg(arg, assignments)
     value_l = value.replace("\\", "/").lower()
@@ -721,14 +747,27 @@ def _resolved_shell_arg(arg: str, assignments: dict[str, str]) -> str:
         value = value[1:]
     value = value.replace(_QUOTED_SYNTAX_MARK * 2, _QUOTED_SYNTAX_MARK).lstrip("<>")
     for _ in range(2):
-        resolved = _SHELL_VARIABLE_RE.sub(
-            lambda match: assignments.get(match.group(1) or match.group(2), match.group(0)),
-            value,
-        )
+        resolved = _expand_shell_variables(value, assignments)
+        if resolved is None:
+            return _UNSETTLED_VALUE
         if resolved == value:
             break
         value = resolved
     return value
+
+
+def _joined_shell_args(args: list[str], assignments: dict[str, str]) -> str:
+    """*args* resolved and joined by spaces, or ``_UNSETTLED_VALUE`` once that adds more than
+    ``_MAX_SHELL_EXPANSION_CHARS`` to them."""
+    resolved: list[str] = []
+    growth = 0
+    for arg in args:
+        value = _resolved_shell_arg(arg, assignments)
+        growth += len(value) - len(str(arg))
+        if growth > _MAX_SHELL_EXPANSION_CHARS:
+            return _UNSETTLED_VALUE
+        resolved.append(value)
+    return " ".join(resolved)
 
 
 def _is_output_redirect(token: str) -> bool:
@@ -1393,7 +1432,10 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
 
         if executable in _SHELL_COMMAND_INTERPRETERS:
             c_payload = _shell_c_payload(command, cmd_idx, assignments)
-            if c_payload and _is_network_exfiltration_command(c_payload, _depth=_depth + 1):
+            # A payload too long to expand is not settled; with a network client in the command, that is a risk.
+            if c_payload and (
+                _UNSETTLED_VALUE in c_payload or _is_network_exfiltration_command(c_payload, _depth=_depth + 1)
+            ):
                 return True
             continue
 
@@ -1407,8 +1449,11 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
                     ):
                         eval_payload = eval_payload[1:-1]
                 else:
-                    eval_payload = " ".join(_resolved_shell_arg(arg, assignments) for arg in raw_args)
-                if eval_payload and _is_network_exfiltration_command(eval_payload, _depth=_depth + 1):
+                    eval_payload = _joined_shell_args(raw_args, assignments)
+                if eval_payload and (
+                    _UNSETTLED_VALUE in eval_payload
+                    or _is_network_exfiltration_command(eval_payload, _depth=_depth + 1)
+                ):
                     return True
             continue
 
@@ -4763,9 +4808,11 @@ def _value_now(raw: str, scope: dict[str, str]) -> str:
     An assignment copies the value it reads; it is not a live alias, so
     ``f=other.py; g=$f; f=run.py`` leaves g as other.py. A variable this text
     has not bound reads as empty, as it does in the tool's clean environment.
-    What the text cannot settle (``$(...)``, ``${f:-x}``) is kept as written.
+    What the text cannot settle (``$(...)``, ``${f:-x}``) is kept as written,
+    and a value that would grow past ``_MAX_SHELL_EXPANSION_CHARS`` is unsettled.
     """
-    return _SHELL_VARIABLE_RE.sub(lambda match: scope.get(match.group(1) or match.group(2), ""), str(raw))
+    value = _expand_shell_variables(str(raw), scope, unset="")
+    return _UNSETTLED_VALUE if value is None else value
 
 
 def _attribute_changes(words: list[str]) -> tuple[set[str], set[str]]:
@@ -5053,7 +5100,7 @@ def _apply_eval_bindings(words: list[str], scope: dict[str, str], reading: str, 
     none to read. Where the text is not settled here (a value the text cannot
     settle, a command substitution), every bound name is left unsettled.
     """
-    expanded = " ".join(_value_now(str(word), scope) for word in words)
+    expanded = _value_now(" ".join(str(word) for word in words), scope)
     text = expanded.replace(_LITERAL_DOLLAR, "$").replace(_QUOTED_NEWLINE, "\n")
     if _UNSETTLED_VALUE in text or _UNSETTLED_EXPANSION_RE.search(text):
         _unsettle_every_binding(scope)
@@ -5073,7 +5120,7 @@ def _apply_eval_bindings(words: list[str], scope: dict[str, str], reading: str, 
         command = [str(word) for word in segment[cmd_idx:]]
         segment = []
         if command and _SHELL_VARIABLE_RE.search(command[0]):
-            command = " ".join(_value_now(word, trial) for word in command).split()
+            command = _value_now(" ".join(command), trial).split()
             if any(_UNSETTLED_VALUE in word for word in command):
                 _unsettle_every_binding(scope)
                 return

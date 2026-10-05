@@ -149,6 +149,7 @@ _SHARED_SECURITY_CONSTANTS = [
     "_INERT_PRINT_COMMANDS",
     "_SECRET_VAR_NAME_RE",
     "_MAX_NETWORK_ACTION_CHARS",
+    "_MAX_SHELL_EXPANSION_CHARS",
     "WASTE_INDICATORS",
     # Canary exfiltration (H04); the whole block is also compared verbatim in
     # test_canary_exfiltration.py.

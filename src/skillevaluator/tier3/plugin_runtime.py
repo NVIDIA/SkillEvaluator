@@ -8,7 +8,8 @@ After the Harbor run, :func:`apply_runtime_evidence` promotes C2
 component ran, and upgrades ``mcp_proof`` from in-agent MCP calls:
 
 * **hooks**: the hook census (``plugin_signals_summary.with_skill.hook_census``)
-  recorded at least one run of a handler that SkillEvaluator wrapped. Census
+  recorded a started run of every handler that SkillEvaluator wrapped for that
+  source (one handler that never started leaves the source unexercised). Census
   ids use the static hook-risk id format
   ``<source>#<event>[<group>].hooks[<handler>]`` (for example
   ``hooks/hooks.json#PreToolUse[0].hooks[0]``), and a hook's coverage row name
@@ -28,9 +29,10 @@ component ran, and upgrades ``mcp_proof`` from in-agent MCP calls:
   server that ``activation_coverage`` exercised.
 
 Subagents, commands, skills, and MCP servers are promoted only when the
-component was actually available to the agent: its row is ``staged`` or
-``loaded``, or ``plugin_load`` reports the type as natively loaded for that
-agent.
+component was actually available to the agent: its row is ``staged``,
+``loaded``, or ``not_loaded`` (staged, but some native agent did not load it,
+while another arm may have had it), or ``plugin_load`` reports the type as
+natively loaded for that agent.
 
 Precedence is ``exercised`` > ``loaded`` > ``staged``; a row is never
 downgraded and an ``invalid`` row never changes. Everything here is
@@ -49,7 +51,7 @@ from skillevaluator.tier3.mcp_proof import apply_in_agent_mcp_proof
 STATE_EXERCISED = "exercised"
 STATE_LOADED = "loaded"
 EVALUATED_STATES = ("staged", STATE_LOADED, STATE_EXERCISED)
-_AVAILABLE_STATES = frozenset({"staged", STATE_LOADED, STATE_EXERCISED})
+_AVAILABLE_STATES = frozenset({"staged", STATE_LOADED, STATE_EXERCISED, "not_loaded"})
 _ACTIVATION_PREFIX = {"skill": "skill", "mcp": "mcp", "agent": "subagent", "command": "command"}
 
 
@@ -99,6 +101,7 @@ def _hook_census_evidence(
     census = summary.get("hook_census")
     hooks = census.get("hooks") if isinstance(census, Mapping) else None
     runs = not_started = 0
+    started_ids: set[str] = set()
     for hook in hooks or ():
         if not isinstance(hook, Mapping) or str(hook.get("hook_id") or "") not in allowed:
             continue
@@ -107,10 +110,13 @@ def _hook_census_evidence(
             continue
         runs += hook_runs
         skipped = hook.get("not_started")
-        if isinstance(skipped, int) and not isinstance(skipped, bool) and skipped > 0:
-            not_started += min(skipped, hook_runs)
+        skipped = min(skipped, hook_runs) if isinstance(skipped, int) and not isinstance(skipped, bool) else 0
+        not_started += max(0, skipped)
+        if hook_runs - max(0, skipped) > 0:
+            started_ids.add(str(hook["hook_id"]))
     started = runs - not_started
-    if started <= 0:
+    # The row is the whole hook source: one handler that never started leaves it unexercised.
+    if started <= 0 or not allowed <= started_ids:
         return None
     return (
         f"hook census recorded {started} started run(s) in the {agent} with-plugin arm "

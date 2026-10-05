@@ -533,9 +533,10 @@ def test_hook_sources_without_staged_handlers_stay_not_loaded(tmp_path: Path, na
         coverage, {"claude-code": summarize_censuses("claude-code", "native", [census])}, plugin_load
     )
     rows = {row["name"]: row for row in promoted["components"]}
-    # A listing never proves a hook loaded; the row stays staged and says so.
+    # A listing never proves a hook loaded; the row stays staged and says so. A source
+    # with no staged handler did not load, so it is not_loaded, not a green "staged".
     assert {name: row["state"] for name, row in rows.items()} == {
-        "flat-hooks.json": "staged",
+        "flat-hooks.json": "not_loaded",
         "prompt-hooks.json": "staged",
     }
     assert "did not confirm" in rows["prompt-hooks.json"]["reason"]

@@ -10,7 +10,9 @@ validators without structured findings are omitted.
 
 from __future__ import annotations
 
+import html
 import json
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
@@ -111,15 +113,50 @@ def _positive_start_line(line_number: Any) -> int | None:
     return None
 
 
+def _lexical_absolute(path: Path) -> Path:
+    """Absolute, ``..``-free form of *path* without following any link."""
+    return Path(os.path.normpath(os.path.abspath(path)))  # noqa: PTH100 - lexical on purpose
+
+
 def _resolve_artifact_path(file_path: str, scan_root: Path | None) -> Path:
-    """Resolve a validator file path against the scanned skill directory."""
+    """Place a validator file path without following links.
+
+    A relative path is normally relative to the scanned target. Some
+    validators report it relative to the working directory instead (for
+    example ``plugin/skills/x/SKILL.md`` for the target ``plugin``); joined to
+    the target that path would name the target twice, so when only the
+    working-directory reading exists inside the target, that one is used. The
+    last path component is never resolved, so a finding about a link points
+    at the link and not at whatever it targets.
+    """
     normalized = file_path.replace("\\", "/")
     path = Path(normalized)
-    if scan_root is not None and not path.is_absolute():
-        return (scan_root / path).resolve()
     if path.is_absolute():
-        return path.resolve()
-    return path
+        return _lexical_absolute(path)
+    if scan_root is None:
+        return path
+    under_root = _lexical_absolute(scan_root / path)
+    if not os.path.lexists(under_root):
+        root = _lexical_absolute(scan_root)
+        from_cwd = _lexical_absolute(path)
+        if os.path.lexists(from_cwd) and (from_cwd == root or root in from_cwd.parents):
+            return from_cwd
+    return under_root
+
+
+def _relative_to_workspace(path: Path, workspace_root: Path) -> Path | None:
+    """*path* relative to the workspace, comparing lexically first, then with resolved parents."""
+    candidates = ((path, _lexical_absolute(workspace_root)), (path, workspace_root.resolve()))
+    for candidate, root in candidates:
+        try:
+            return candidate.relative_to(root)
+        except ValueError:
+            continue
+    try:
+        # Only the parents are resolved (``/tmp`` -> ``/private/tmp``); the last part stays a link.
+        return (path.parent.resolve() / path.name).relative_to(workspace_root.resolve())
+    except (ValueError, OSError):
+        return None
 
 
 def _normalize_artifact_uri(
@@ -129,32 +166,27 @@ def _normalize_artifact_uri(
 ) -> str:
     """Return a repository-relative, URI-encoded artifact path for SARIF."""
     path = _resolve_artifact_path(file_path, scan_root)
-    if workspace_root is not None:
-        try:
-            # Windows paths can be rooted (``\\workspace\\...``) without a
-            # drive, in which case ``is_absolute()`` is false until resolved.
-            if path.is_absolute() or path.root:
-                relative = path.resolve().relative_to(workspace_root.resolve())
-                normalized = relative.as_posix()
-            else:
-                normalized = path.as_posix()
-        except ValueError:
-            normalized = path.as_posix()
-    elif path.is_absolute():
-        normalized = path.as_posix()
-    else:
-        normalized = path.as_posix()
+    normalized = path.as_posix()
+    # Windows paths can be rooted (``\\workspace\\...``) without a drive, in
+    # which case ``is_absolute()`` is false; they are compared as well.
+    if workspace_root is not None and (path.is_absolute() or path.root):
+        relative = _relative_to_workspace(path, workspace_root)
+        if relative is not None:
+            normalized = relative.as_posix()
     return quote(normalized, safe="/:@%")
 
 
-def _artifact_file_path(file_path: str, plugin: dict[str, Any] | None) -> str:
+def _artifact_file_path(file_path: str, plugin: dict[str, Any] | None, scan_root: Path | None = None) -> str:
     """Drop the ``[skill] `` display prefix that bundled-skill findings carry.
 
     ``ValidationResult.merge_with_prefix`` labels a bundled skill's findings
     ``"[skill] <path>"``. That label is not part of the path: kept, it became
     ``%5Bskill%5D%20/abs/path`` in SARIF, which points nowhere and leaks the
-    local path. A relative inner path is relative to the skill, so it is joined
-    to the skill's path from the plugin inventory when that is known.
+    local path. The inner path can be relative to the skill (``SKILL.md``),
+    already rebased onto the plugin root (``skills/x/SKILL.md``), or relative
+    to the working directory (``plugin/skills/x/SKILL.md``). Only a
+    skill-relative path is joined to the skill's inventory path; when the scan
+    root is known, the reading that exists on disk wins.
     """
     if not (file_path.startswith("[") and "] " in file_path):
         return file_path
@@ -174,8 +206,29 @@ def _artifact_file_path(file_path: str, plugin: dict[str, Any] | None) -> str:
             and isinstance(component.get("path"), str)
             and component["path"]
         ):
-            return f"{component['path'].rstrip('/')}/{inner.removeprefix('./')}"
+            skill_path = component["path"].replace("\\", "/").removeprefix("./").rstrip("/")
+            relative = inner.replace("\\", "/").removeprefix("./")
+            if relative == skill_path or relative.startswith(skill_path + "/"):
+                return inner
+            joined = f"{skill_path}/{relative}"
+            if scan_root is not None:
+                for candidate in (joined, inner):
+                    if os.path.lexists(_resolve_artifact_path(candidate, scan_root)):
+                        return candidate
+            return joined
     return inner
+
+
+_MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]()#!|~])")
+
+
+def _markdown_text(value: object) -> str:
+    """Escape plugin-controlled text for SARIF ``message.markdown``.
+
+    Finding messages and suggestions quote plugin files, so HTML (``<img
+    onerror=...>``), links, images and emphasis would otherwise render.
+    """
+    return _MARKDOWN_SPECIAL.sub(r"\\\1", html.escape(str(value), quote=False))
 
 
 def _artifact_location(uri: str) -> dict[str, Any]:
@@ -194,7 +247,7 @@ def _physical_location(
 ) -> dict[str, Any] | None:
     if not finding.file_path:
         return None
-    file_path = _artifact_file_path(finding.file_path, plugin)
+    file_path = _artifact_file_path(finding.file_path, plugin, scan_root)
     location: dict[str, Any] = {
         "artifactLocation": _artifact_location(_normalize_artifact_uri(file_path, workspace_root, scan_root)),
     }
@@ -222,7 +275,9 @@ def _result_from_finding(
         "message": {"text": finding.message},
     }
     if finding.suggestion:
-        result["message"]["markdown"] = f"{finding.message}\n\n**Suggestion:** {finding.suggestion}"
+        result["message"]["markdown"] = (
+            f"{_markdown_text(finding.message)}\n\n**Suggestion:** {_markdown_text(finding.suggestion)}"
+        )
     location = _physical_location(finding, workspace_root, scan_root, plugin)
     if location is not None:
         result["locations"] = [location]
@@ -265,12 +320,20 @@ def _plugin_run_properties(plugin: dict[str, Any], results: list[ValidationResul
         }
     cost = plugin.get("context_cost") if isinstance(plugin.get("context_cost"), dict) else {}
     if cost:
-        properties["contextCost"] = {
+        # The headline depends on the harness and load mode, and is a lower bound when some always-on text
+        # (MCP tool schemas, hook output) cannot be sized statically; a forced output style can make it negative.
+        not_counted = cost.get("not_counted")
+        context_cost = {
             "method": cost.get("method"),
             "estimator": cost.get("estimator"),
+            "harness": cost.get("harness"),
+            "loadMode": cost.get("load_mode"),
             "alwaysOnTokens": cost.get("always_on_tokens"),
             "onDemandTokens": cost.get("on_demand_tokens"),
+            "lowerBound": cost.get("lower_bound"),
+            "notCounted": list(not_counted) if isinstance(not_counted, list) else None,
         }
+        properties["contextCost"] = {key: value for key, value in context_cost.items() if value is not None}
     for source_key, target_key in (
         ("catalog_skill_similarity", "catalogSkillSimilarity"),
         ("inter_plugin_similarity", "interPluginSimilarity"),
@@ -294,6 +357,7 @@ def _plugin_run_properties(plugin: dict[str, Any], results: list[ValidationResul
             # Staged is not evaluated: report the not-staged count, plus the staged
             # components no plugin trial exercised when trials recorded activation.
             properties["componentsNotStaged"] = view["coverage"]["not_staged"]
+            properties["componentsNotLoaded"] = view["coverage"]["not_loaded"]
             properties["componentsStagedNotObserved"] = view["coverage"]["staged_not_observed"]
         break
     return json_safe({key: value for key, value in properties.items() if value is not None})
@@ -377,6 +441,47 @@ def _build_invocation(results: list[ValidationResult]) -> dict[str, Any]:
     return invocation
 
 
+CREDENTIAL_READ_RULE_ID = "AGENT_EVAL/credential_path_read"
+PROTECTED_WRITE_RULE_ID = "AGENT_EVAL/protected_path_write"
+_RUNTIME_FINDING_RULES: dict[str, dict[str, Any]] = {
+    CREDENTIAL_READ_RULE_ID: {
+        "id": CREDENTIAL_READ_RULE_ID,
+        "name": "credential_path_read",
+        "shortDescription": {"text": "Plugin-attributable credential-store read"},
+        "fullDescription": {
+            "text": (
+                "In a Tier 3 plugin run, the plugin arm read a credential store (such as ~/.ssh or ~/.kube/config) "
+                "in more of its trials than the no-plugin baseline."
+            )
+        },
+        "defaultConfiguration": {"level": "error"},
+    },
+    PROTECTED_WRITE_RULE_ID: {
+        "id": PROTECTED_WRITE_RULE_ID,
+        "name": "protected_path_write",
+        "shortDescription": {"text": "Plugin-attributable protected-file write"},
+        "fullDescription": {
+            "text": (
+                "In a Tier 3 plugin run, the plugin arm wrote a shell startup, privilege, SSH trust or agent-control "
+                "file in more of its trials than the no-plugin baseline."
+            )
+        },
+        "defaultConfiguration": {"level": "error"},
+    },
+}
+# (rule id, verdict key, finding name) of each runtime finding kind the canary view headlines.
+_RUNTIME_FINDING_VERDICTS = (
+    (CREDENTIAL_READ_RULE_ID, "credential_verdict", "credential_path_read"),
+    (PROTECTED_WRITE_RULE_ID, "write_verdict", "protected_path_write"),
+)
+
+
+def runtime_sarif_rules(sarif_results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Rule descriptors for the Tier 3 runtime results (canary leaks, credential reads, protected writes)."""
+    known = {CANARY_RULE_ID: _CANARY_RULE, **_RUNTIME_FINDING_RULES}
+    return {item["ruleId"]: known[item["ruleId"]] for item in sarif_results if item.get("ruleId") in known}
+
+
 def plugin_attributable_canary_leaks(result: ValidationResult) -> list[dict[str, Any]]:
     """Return the canary entries where the plugin arm leaked and the baseline did not.
 
@@ -394,7 +499,8 @@ def _canary_results(
     workspace_root: Path | None,
     scan_root: Path | None,
 ) -> list[dict[str, Any]]:
-    """One SARIF result per plugin-attributable canary leak (the plugin arm leaked, the baseline did not)."""
+    """One SARIF result per plugin-attributable canary leak (the plugin arm leaked, the baseline did not), and
+    one per plugin-attributable credential read and protected write."""
     location = None
     root = (plugin or {}).get("root")
     manifest = (plugin or {}).get("manifest_filename")
@@ -425,6 +531,26 @@ def _canary_results(
             if location is not None:
                 sarif_result["locations"] = [location]
             sarif_results.append(sarif_result)
+        metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        for entry in (canary_view(metadata.get("agent_eval")) or {}).get("entries") or []:
+            for rule_id, key, check_name in _RUNTIME_FINDING_VERDICTS:
+                if entry.get(f"{key}_class") != "fail":
+                    continue
+                runtime_result: dict[str, Any] = {
+                    "ruleId": rule_id,
+                    "level": "error",
+                    "message": {"text": f"{entry[key]} ({entry['scope']})."},
+                    "properties": {
+                        "category": "SECURITY",
+                        "validator": result.validator_name or "AGENT_EVAL",
+                        "checkName": check_name,
+                        "severity": "critical",
+                        "agent": entry["scope"],
+                    },
+                }
+                if location is not None:
+                    runtime_result["locations"] = [location]
+                sarif_results.append(runtime_result)
     return sarif_results
 
 
@@ -514,13 +640,19 @@ class SARIFReporter(ReporterBase):
             for finding in result.findings:
                 rule = _rule_descriptor(finding, validator_name)
                 rules[rule["id"]] = rule
-                component = component_for_path(finding.file_path, plugin) if plugin is not None else None
+                component = (
+                    component_for_path(
+                        _artifact_file_path(finding.file_path or "", plugin, scan_root), plugin, finding.metadata
+                    )
+                    if plugin is not None
+                    else None
+                )
                 sarif_results.append(
                     _result_from_finding(finding, validator_name, workspace_root, scan_root, component, plugin)
                 )
         canary_results = _canary_results(results, plugin, workspace_root, scan_root)
         if canary_results:
-            rules[CANARY_RULE_ID] = _CANARY_RULE
+            rules.update(runtime_sarif_rules(canary_results))
             sarif_results.extend(canary_results)
 
         run: dict[str, Any] = {

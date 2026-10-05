@@ -245,6 +245,77 @@ def test_content_relative_finding_paths_rewrite_only_paths_built_from_the_target
     ]
 
 
+def test_content_relative_finding_paths_move_the_mirrored_error_strings(tmp_path: Path) -> None:
+    """Regression: a moved finding kept its old path in ``errors``, so reports listed it twice."""
+    from skillevaluator.cli import _content_relative_finding_paths
+    from skillevaluator.reporting.base import additional_errors
+
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    result = ValidationResult(validator_name="Schema")
+    result.add_finding(Finding("SCHEMA", Severity.HIGH, "fixture", "manifest", "sample/.claude-plugin/plugin.json"))
+    result.add_finding(Finding("SCHEMA", Severity.LOW, "fixture", "note", "sample/README.md"))
+    result.add_error("[EXEC-HIGH] runner failed in sample/run.log")
+    skill = ValidationResult(validator_name="Skill")
+    skill.add_finding(Finding("QUALITY", Severity.HIGH, "fixture", "skill", "sample/skills/foo/SKILL.md"))
+    result.merge_with_prefix(skill, "foo")
+
+    _content_relative_finding_paths([result], Path("sample"), sample)
+
+    assert [finding.file_path for finding in result.findings] == [
+        ".claude-plugin/plugin.json",
+        "README.md",
+        "[foo] skills/foo/SKILL.md",
+    ]
+    assert result.errors == [
+        "[SCHEMA-HIGH] manifest in .claude-plugin/plugin.json",
+        # An error with no finding behind it is not a finding path; it stays as written.
+        "[EXEC-HIGH] runner failed in sample/run.log",
+        "[foo] [QUALITY-HIGH] skill in skills/foo/SKILL.md",
+    ]
+    assert result.warnings == ["[SCHEMA-LOW] note in README.md"]
+    assert additional_errors(result) == ["[EXEC-HIGH] runner failed in sample/run.log"]
+
+
+def test_validate_relative_target_lists_each_blocking_finding_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: `validate sample` from the parent folder printed an extra stale 'Errors:' block."""
+    plugin = tmp_path / "sample"
+    (plugin / ".claude-plugin").mkdir(parents=True)
+    manifest = {
+        "name": "sample",
+        "version": "1.0.0",
+        "description": "Relative target fixture",
+        "author": {"name": "Example"},
+        "lspServers": {"nocommand": {"extensionToLanguage": {".x": "x"}}},
+    }
+    (plugin / ".claude-plugin" / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr("skillevaluator.utils.helpers.resolve_git_remote_url", lambda _path: None)
+    monkeypatch.setattr("skillevaluator.utils.helpers.resolve_git_root", lambda _path: None)
+    monkeypatch.chdir(tmp_path)
+    reports = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            *("validate", "sample", "--type", "plugin", "--tiers", "1", "--no-llm"),
+            *("-r", "cli", "-r", "markdown", "-r", "json", "-o", str(reports)),
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    markdown = next(reports.glob("*.md")).read_text(encoding="utf-8")
+    assert "has no 'command'" in markdown
+    assert "Errors:" not in markdown
+    assert "\nErrors:" not in result.output
+    assert "sample/.claude-plugin/plugin.json" not in result.output + markdown
+    payload = json.loads(next(reports.glob("*.json")).read_text(encoding="utf-8"))
+    errors = [error for entry in payload["results"] for error in entry["legacy"]["errors"]]
+    assert any("has no 'command'" in error for error in errors)
+    assert all(error.endswith(" in .claude-plugin/plugin.json") for error in errors if "has no 'command'" in error)
+
+
 def test_similarity_help_exposes_catalog_workflow_and_hides_legacy_cache_names() -> None:
     result = CliRunner().invoke(cli, ["similarity-check", "--help"])
 
@@ -759,13 +830,15 @@ def test_live_eval_help_uses_skill_evaluator_runtime_and_grading_names() -> None
     runner = CliRunner()
 
     evaluate = runner.invoke(cli, ["evaluate", "--help"])
+    # Click wraps the long environment choice list mid-word, so read it without line breaks.
+    choices = "".join(evaluate.output.split())
     assert evaluate.exit_code == 0
-    assert "e2b" in evaluate.output
-    assert "modal" in evaluate.output
-    assert "default_plus_custom" in evaluate.output
+    assert "|e2b|" in choices
+    assert "|modal|" in choices
+    assert "default_plus_custom" in choices
     assert "harbor-environment" not in evaluate.output
     assert "k8s-sandbox" not in evaluate.output
-    assert "local" in evaluate.output
+    assert "|local]" in choices
     assert "--autopilot" in evaluate.output
     assert "--progress [auto|rich|plain|off]" in evaluate.output
 

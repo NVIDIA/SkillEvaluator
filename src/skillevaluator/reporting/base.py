@@ -381,16 +381,9 @@ def additional_errors(result: ValidationResult) -> list[str]:
     Findings also populate the legacy error list. Keep independent errors,
     including execution diagnostics, without repeating those mirrored entries.
     """
-    represented = {finding.to_legacy_string() for finding in result.findings}
-    for finding in result.findings:
-        # merge_with_prefix puts skill labels before legacy messages but inside
-        # structured finding paths. Recognize both forms, including nested merges.
-        location = finding.location
-        prefix = ""
-        while location.startswith("[") and "] " in location:
-            label, _, location = location.partition("] ")
-            prefix += label + "] "
-            represented.add(f"{prefix}{finding.tag} {finding.message} in {location}")
+    # merge_with_prefix puts skill labels before legacy messages but inside
+    # structured finding paths. Recognize both forms, including nested merges.
+    represented = {form for finding in result.findings for form in finding.legacy_string_forms()}
     return [error for error in result.errors if error not in represented]
 
 

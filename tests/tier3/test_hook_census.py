@@ -218,6 +218,14 @@ def test_parse_hook_census_redacts_and_bounds_ids() -> None:
     assert len(hook["hook_id"]) <= 256
 
 
+def test_parse_hook_census_keeps_the_staged_hook_id_spelling() -> None:
+    """Census rows join the staged hook ids by exact string, so spaces in a source path are kept."""
+    hook_id = "hooks/my  hooks.json#PreToolUse[0].hooks[0]"
+    parsed = parse_hook_census(json.dumps({"hook_id": hook_id, "event": "PreToolUse", "exit_code": 0}))
+
+    assert [hook["hook_id"] for hook in parsed["hooks"]] == [hook_id]
+
+
 def test_read_hook_census_absent_present_and_unsafe(tmp_path: Path) -> None:
     assert read_hook_census(tmp_path)["status"] == "absent"
     agent = tmp_path / "agent"

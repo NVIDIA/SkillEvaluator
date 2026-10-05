@@ -38,7 +38,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.utils.redaction import redact_sensitive_text
+from skillevaluator.tier3.eval_core.plugin_signals import _safe_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 
 HOOK_CENSUS_FILENAME = "skilleval-hook-census.jsonl"
@@ -61,11 +61,6 @@ CENSUS_STATUS_UNREADABLE = "unreadable"
 
 # Per-hook counters; each also has a ``total_<counter>`` over every hook.
 _CENSUS_COUNTERS = ("runs", "failures", "blocked", "not_started")
-
-
-def _safe(value: Any, limit: int) -> str:
-    text = " ".join(str(value).split())
-    return redact_sensitive_text(text)[:limit]
 
 
 def _int(value: Any) -> int | None:
@@ -139,7 +134,7 @@ def parse_hook_census(text: str) -> dict[str, Any]:
             continue
         key = keys.get((hook_id, event))
         if key is None:
-            key = (_safe(hook_id, MAX_HOOK_ID_CHARS), _safe(event, MAX_HOOK_EVENT_CHARS))
+            key = (_safe_text(hook_id, MAX_HOOK_ID_CHARS), _safe_text(event, MAX_HOOK_EVENT_CHARS))
             keys[hook_id, event] = key
         row = _census_row(rows, key, total_duration_ms=0)
         if row is None:
@@ -171,9 +166,9 @@ def read_hook_census(trial_root: Path | None) -> dict[str, Any]:
         with SecureRoot(agent_dir) as root:
             raw, _metadata = root.read_bytes(Path(HOOK_CENSUS_FILENAME), MAX_HOOK_CENSUS_BYTES)
     except SecurePathError as exc:
-        return empty_hook_census(CENSUS_STATUS_UNREADABLE, _safe(f"{exc.code}: {exc}", 200))
+        return empty_hook_census(CENSUS_STATUS_UNREADABLE, _safe_text(f"{exc.code}: {exc}", 200))
     except (OSError, ValueError) as exc:
-        return empty_hook_census(CENSUS_STATUS_UNREADABLE, _safe(type(exc).__name__, 200))
+        return empty_hook_census(CENSUS_STATUS_UNREADABLE, _safe_text(type(exc).__name__, 200))
     return parse_hook_census(raw.decode("utf-8", errors="replace"))
 
 
@@ -269,7 +264,7 @@ def summarize_canary(rewards: Iterable[Mapping[str, Any]]) -> dict[str, Any] | N
         for sink in canary.get("sinks") or ():
             kind = sink.get("kind") if isinstance(sink, Mapping) else None
             if isinstance(kind, str) and kind:
-                label = _safe(kind, 64)
+                label = _safe_text(kind, 64)
                 if label in sink_counts or len(sink_counts) < MAX_CANARY_SINK_KINDS:
                     sink_counts[label] = sink_counts.get(label, 0) + 1
     if n_trials == 0:

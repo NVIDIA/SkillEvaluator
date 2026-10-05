@@ -69,8 +69,9 @@ class NativeTaskStaging:
     def plugin_mcp_via_task(self) -> bool:
         return self.adapter.plugin_mcp_via_task
 
-    def workspace_skill_aliases(self, names: Sequence[str]) -> list[str]:
-        return self.adapter.workspace_skill_aliases(self.source, names)
+    def workspace_skill_aliases(self) -> list[str]:
+        """Extra names the harness may report for the staged skills (for routing grades)."""
+        return list(self.bundle.skill_aliases)
 
 
 def build_native_task_staging(agent: str, adapter: HarnessAdapter, source: NativePluginSource) -> NativeTaskStaging:

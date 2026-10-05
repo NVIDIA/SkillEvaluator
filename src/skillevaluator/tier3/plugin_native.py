@@ -939,6 +939,8 @@ class NativeBundle:
     handlers that were wrapped; only those ids count as hook runs.
     ``harness`` tells the collector which harness report confirms loading (for
     Claude Code: its ``system/init`` event and the plugin name it reports).
+    ``skill_aliases`` are the extra names the harness may report for the staged
+    skills (Claude Code's ``<plugin>:<skill>``), which routing grades accept.
     """
 
     agent: str
@@ -950,6 +952,7 @@ class NativeBundle:
     declared: list[dict[str, str]] = field(default_factory=list)
     hook_ids: dict[str, list[str]] = field(default_factory=dict)
     harness: dict[str, str] = field(default_factory=dict)
+    skill_aliases: list[str] = field(default_factory=list)
 
     def census_plan(self) -> dict[str, Any]:
         """What the collector needs to read and check this arm's load census."""
@@ -991,10 +994,6 @@ class HarnessAdapter:
         if task_source != "evals_json":
             return "native Harbor task sources (evals/harbor/) keep their own environment"
         return None
-
-    def workspace_skill_aliases(self, source: NativePluginSource, names: Sequence[str]) -> list[str]:  # noqa: ARG002
-        """Extra skill names the harness may report for staged member skills (for routing grades)."""
-        return []
 
     #: The harness reports plugin skills and commands as ``<plugin>:<name>``.
     namespaces_plugin_names = False
@@ -1297,12 +1296,6 @@ class ClaudeCodeAdapter(HarnessAdapter):
     def plugin_name(self, source: NativePluginSource) -> str:
         return plugin_slug(source.plugin_name)
 
-    def workspace_skill_aliases(self, source: NativePluginSource, names: Sequence[str]) -> list[str]:  # noqa: ARG002
-        # Claude Code namespaces plugin skills ``<plugin>:<skill dir>``. The aliases
-        # cover every skill the staged plugin loads, not only the member skills.
-        prefix = self.plugin_name(source)
-        return [f"{prefix}:{PurePosixPath(rel).name}" for _name, rel, _copy in self.staged_skills(source)]
-
     def manifest(self, source: NativePluginSource) -> dict[str, Any]:
         """The staged ``plugin.json``: identity plus the component keys that stay native.
 
@@ -1320,8 +1313,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
         return manifest
 
     def _declared_skill_dirs(self, source: NativePluginSource) -> list[PurePosixPath]:
-        """Root-relative skill directories the staged ``plugin.json`` declares."""
-        return declared_plugin_paths(self.manifest(source).get("skills"))
+        """Root-relative skill directories the staged ``plugin.json`` declares (it keeps a contained ``skills``)."""
+        return declared_plugin_paths(source.manifest.get("skills")) if source.contained else []
 
     def staged_skills(self, source: NativePluginSource) -> list[tuple[str, str, Path | None]]:
         """Every skill the staged plugin loads: ``(census name, plugin-relative dir, copy source or None)``.
@@ -1404,8 +1397,10 @@ class ClaudeCodeAdapter(HarnessAdapter):
         # excluded) so hook scripts and other plugin-relative files resolve.
         bundle.plugin_tree = base
         manifest = self.manifest(source)
-        # Census targets come from what the staged plugin actually loads.
+        # Census targets come from what the staged plugin actually loads. Claude Code
+        # names each one ``<plugin>:<skill dir>``, member skill or not.
         for name, rel, copy_from in self.staged_skills(source):
+            bundle.skill_aliases.append(f"{slug}:{PurePosixPath(rel).name}")
             if copy_from is not None:
                 bundle.trees.append((copy_from, f"{base}/{rel}"))
             checks.append(

@@ -545,7 +545,7 @@ def test_member_skill_outside_claude_skill_dirs_is_copied_into_skills(tmp_path: 
     census = _run_setup(bundle, tmp_path / "container")
     listed = {row["name"]: row["evidence"] for row in census["listed"] if row["type"] == "skill"}
     assert listed["inc-skill"].endswith("/plugin/skills/inc-skill/SKILL.md")
-    assert sorted(staging.workspace_skill_aliases(["in-skill", "inc-skill"])) == [
+    assert sorted(staging.workspace_skill_aliases()) == [
         "inc-plugin:in-skill",
         "inc-plugin:inc-skill",
     ]
@@ -562,7 +562,7 @@ def test_declared_skill_dirs_claude_code_loads_are_tracked(tmp_path: Path) -> No
     )
     bundle, staging = _stage(tmp_path, "claude-code", _prepare(plugin, tmp_path).native_source)
 
-    assert "sk-plugin:extra-skill" in staging.workspace_skill_aliases(["in-skill"])
+    assert "sk-plugin:extra-skill" in staging.workspace_skill_aliases()
     census = _run_setup(bundle, tmp_path / "container")
     assert {("skill", "in-skill"), ("skill", "extra-skill")} <= _pairs(census["listed"])
     package = _prepare(plugin, tmp_path, agents="claude-code", env_mode="docker")

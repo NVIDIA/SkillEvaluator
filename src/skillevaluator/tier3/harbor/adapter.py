@@ -5525,9 +5525,7 @@ def _generate_harbor_tasks_into(
     if native_plugin is not None:
         # Harness-reported names for natively loaded member skills (for example
         # Claude Code's ``<plugin>:<skill>``) are routing-allowed like the originals.
-        workspace_skill_names = sorted(
-            {*workspace_skill_names, *native_plugin.workspace_skill_aliases(workspace_skill_names)}
-        )
+        workspace_skill_names = sorted({*workspace_skill_names, *native_plugin.workspace_skill_aliases()})
     native_plugin_names = _native_plugin_names(native_plugin)
 
     input_files_dir = evals_dir / "files"

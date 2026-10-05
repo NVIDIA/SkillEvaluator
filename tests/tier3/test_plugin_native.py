@@ -452,7 +452,7 @@ def test_claude_code_stages_a_plugin_dir_with_wrapped_hooks_and_no_eval_data(tmp
     assert (bundle / "hook_census.sh").read_bytes() == HOOK_CENSUS_TEMPLATE.read_bytes()
     assert (bundle / "native" / "claude-code" / "rules" / "style.md").read_text() == "Always cite ticket IDs.\n"
     assert staging.stage_member_skills is False and staging.stage_wrapper_skill is False
-    assert staging.workspace_skill_aliases(["ticket-triage"]) == ["release-helper:ticket-triage"]
+    assert staging.workspace_skill_aliases() == ["release-helper:ticket-triage"]
     _assert_no_bypass(bundle)
 
 

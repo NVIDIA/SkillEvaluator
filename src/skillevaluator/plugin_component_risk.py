@@ -1563,8 +1563,9 @@ def _outside_root_reference(token: str, refs: tuple[str, ...] = _PLUGIN_ROOT_REF
         if value.startswith(_SYSTEM_PATH_PREFIXES):
             return None
         return "is an absolute path outside the plugin"
-    parts = value.replace("\\", "/").split("/")
-    if ".." in parts:
+    # Only a '..' that climbs above the start counts: './a/../b' stays inside.
+    _rel, escapes = _contained_path(value)
+    if escapes:
         return "climbs out of the working directory with '..'"
     return None
 

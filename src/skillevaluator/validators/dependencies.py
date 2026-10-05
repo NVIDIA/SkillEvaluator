@@ -691,8 +691,8 @@ class DependencySecurityValidator(ValidatorBase):
         message = f"{pkg_name}=={pkg_version}: {vuln_id}{fix_hint}"
         python_summary = self._summary.get("python")
         if python_summary is not None:
-            key = severity.value if isinstance(severity, Severity) else str(severity)
-            python_summary["vulnerabilities"][key] = python_summary["vulnerabilities"].get(key, 0) + 1
+            vulnerabilities = python_summary["vulnerabilities"]
+            vulnerabilities[severity.value] = vulnerabilities.get(severity.value, 0) + 1
 
         result.add_finding(
             tag="CVE",

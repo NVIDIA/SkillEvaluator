@@ -506,10 +506,6 @@ def skillevaluator_manifest_verdict(results: list[ValidationResult], schema_vali
             continue
         if isinstance(result.metadata, dict) and result.metadata.get("security_failure"):
             return "failed"
-        blocking = any(
-            (finding.severity if isinstance(finding.severity, Severity) else Severity(str(finding.severity).lower()))
-            in (Severity.CRITICAL, Severity.HIGH)
-            for finding in result.findings
-        )
+        blocking = any(finding.severity.is_error() for finding in result.findings)
         return "failed" if blocking else "passed"
     return None

@@ -328,7 +328,7 @@ class AuditOutcome:
     unaudited: int = 0
 
     def add(self, finding: Finding) -> None:
-        severity = finding.severity.value if isinstance(finding.severity, Severity) else str(finding.severity)
+        severity = finding.severity.value
         self.vulnerabilities[severity] = self.vulnerabilities.get(severity, 0) + 1
         if len(self.findings) < MAX_VULN_FINDINGS_PER_SOURCE:
             self.findings.append(finding)

@@ -408,7 +408,7 @@ class CodeRiskValidator(ValidatorBase):
                 suggestion=refs.strip(" ()") if refs else None,
                 metadata=metadata,
             ),
-            is_error=severity == Severity.HIGH,
+            is_error=severity.is_error(),
         )
 
     def _build_reference_string(self, metadata: dict) -> str:

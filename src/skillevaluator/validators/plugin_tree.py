@@ -26,11 +26,12 @@ import os
 import shutil
 import stat
 import tempfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
+from skillevaluator.constants import SCAN_EXCLUDED_DIRS
 from skillevaluator.logging_config import get_logger
 from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
 
@@ -41,6 +42,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "PluginTree",
+    "ScanView",
     "active_plugin_tree",
     "is_plugin_tree_root",
     "plugin_relative_dir",
@@ -195,32 +197,51 @@ def _staging_ignore(source: Path, excluded_subtrees: frozenset[tuple[str, ...]],
     return ignore
 
 
+@dataclass(frozen=True)
+class ScanView:
+    """What an external scanner scans for a path: a staged copy without bundled skills, or the path itself."""
+
+    path: Path
+    staged: bool
+
+
+SCAN_VIEW_FALLBACK_WARNING = "Could not stage the plugin root without bundled skills; scanning in place"
+
+
 @contextlib.contextmanager
-def plugin_tree_scan_view(path: Path, *, excluded_dir_names: Iterable[str] = ()) -> Iterator[Path | None]:
+def plugin_tree_scan_view(
+    path: Path,
+    *,
+    excluded_dir_names: Iterable[str] = SCAN_EXCLUDED_DIRS,
+    on_fallback: Callable[[str], None] | None = None,
+) -> Iterator[ScanView]:
     """Stage *path* without its bundled-skill subtrees for an external scanner.
 
-    Yields ``None`` when *path* owns no bundled-skill subtree (scan it in
-    place) or when staging fails; callers then scan in place, which can repeat
-    bundled-skill findings but never loses coverage. Otherwise yields a
-    temporary copy, named like *path*, that is removed on exit. Map reported
-    absolute paths back with :func:`rewrite_finding_path_prefix`.
+    When *path* owns a bundled-skill subtree, yields a staged temporary copy,
+    named like *path* and removed on exit; map reported absolute paths back
+    with :func:`rewrite_finding_path_prefix`. Otherwise *path* itself is
+    scanned in place. If staging fails, *path* is scanned in place too, which
+    can repeat bundled-skill findings but never loses coverage, and
+    *on_fallback* receives :data:`SCAN_VIEW_FALLBACK_WARNING` to record.
     """
     excluded = plugin_tree_exclusions(path)
     if not excluded or not path.is_dir():
-        yield None
+        yield ScanView(path, staged=False)
         return
 
     source = path.resolve()
     with tempfile.TemporaryDirectory(prefix="skillevaluator-plugin-root-") as temp_dir:
-        view: Path | None = Path(temp_dir) / source.name
+        view = ScanView(Path(temp_dir) / source.name, staged=True)
         try:
             shutil.copytree(
                 source,
-                view,
+                view.path,
                 symlinks=True,
                 ignore=_staging_ignore(source, excluded, frozenset(excluded_dir_names)),
             )
         except (OSError, shutil.Error) as exc:
             logger.warning("Could not stage the plugin root without bundled skills (%s); scanning in place", exc)
-            view = None
+            if on_fallback is not None:
+                on_fallback(SCAN_VIEW_FALLBACK_WARNING)
+            view = ScanView(path, staged=False)
         yield view

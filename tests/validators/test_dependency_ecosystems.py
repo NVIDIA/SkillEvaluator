@@ -98,8 +98,16 @@ NPM_AUDIT_REPORT = {
 # --------------------------------------------------------------------------- #
 # Parsers                                                                     #
 # --------------------------------------------------------------------------- #
+def _package_json(data: Any) -> list[eco.NpmDeclaration]:
+    return eco.read_npm_declarations(data, lockfile=False)[0]
+
+
+def _package_lock(data: Any) -> list[eco.NpmDeclaration]:
+    return eco.read_npm_declarations(data, lockfile=True)[0]
+
+
 def test_package_json_exact_and_floating_versions() -> None:
-    declarations = eco.parse_package_json(
+    declarations = _package_json(
         {
             "dependencies": {"lodash": "4.17.20", "left-pad": "^1.3.0", "alias": "npm:real-pkg@2.0.1"},
             "devDependencies": {"jest": "=29.7.0", "git-dep": "github:org/repo"},
@@ -120,13 +128,13 @@ def test_package_lock_v3_and_v1() -> None:
             "node_modules/local": {"version": "file:../local"},
         },
     }
-    assert [(d.name, d.exact_version) for d in eco.parse_package_lock(v3)] == [
+    assert [(d.name, d.exact_version) for d in _package_lock(v3)] == [
         ("a", "1.0.0"),
         ("b", "2.0.0"),
         ("local", None),
     ]
     v1 = {"dependencies": {"x": {"version": "1.2.3", "dependencies": {"y": {"version": "0.1.0"}}}}}
-    assert sorted((d.name, d.exact_version) for d in eco.parse_package_lock(v1)) == [("x", "1.2.3"), ("y", "0.1.0")]
+    assert sorted((d.name, d.exact_version) for d in _package_lock(v1)) == [("x", "1.2.3"), ("y", "0.1.0")]
 
 
 def test_dockerfile_images_skip_stages_and_scratch() -> None:

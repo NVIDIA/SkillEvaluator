@@ -99,18 +99,12 @@ class ImageDeclaration:
     exact: bool
 
 
-def parse_package_json(data: Any) -> list[NpmDeclaration]:
-    """Direct dependency declarations from a parsed ``package.json`` (the first ``MAX_NPM_PACKAGES``)."""
-    return read_npm_declarations(data, lockfile=False)[0]
-
-
-def parse_package_lock(data: Any) -> list[NpmDeclaration]:
-    """Resolved packages in a lockfile (v1 ``dependencies``, v2/v3 ``packages``; the first ``MAX_NPM_PACKAGES``)."""
-    return read_npm_declarations(data, lockfile=True)[0]
-
-
 def read_npm_declarations(data: Any, *, lockfile: bool) -> tuple[list[NpmDeclaration], int]:
     """The first ``MAX_NPM_PACKAGES`` declarations of a parsed manifest, and how many it declares in total.
+
+    A ``package.json`` gives its ``dependencies``, ``optionalDependencies``, and
+    ``devDependencies``; a lockfile its resolved packages (v1 ``dependencies``,
+    v2/v3 ``packages``).
 
     A total above the returned count means the manifest was cut at the cap; the
     caller must record that, so a package past the cap is never dropped silently.

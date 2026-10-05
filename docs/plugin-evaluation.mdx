@@ -673,8 +673,10 @@ classified offline. Nothing is fetched, read, or copied.
 
 Repository identity fails closed. A ref is compared with the local repository
 only when the repository root is the git top-level and its `origin` remote
-yields an `<owner>/<repo>` slug. SSH and HTTPS remotes are both accepted, and
-comparison is case-insensitive. Path existence alone never proves identity.
+yields an `<owner>/<repo>` slug. SSH (`ssh://` or `git@host:owner/repo`) and
+HTTPS remotes are accepted; any other remote, such as `http://`, `git://`,
+`file://`, or a local path, yields no slug. Comparison is case-insensitive.
+Path existence alone never proves identity.
 Without a verified slug, every ref stays `unresolved` and advisory, and the
 success message says the missing-dependency gate could not be evaluated for
 them. A bundled skill with the same name as a ref never changes the ref's

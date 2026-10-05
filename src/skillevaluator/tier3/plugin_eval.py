@@ -117,6 +117,15 @@ from skillevaluator.plugin_formats import manifest_syntax, normalized_component_
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries, normalize_dataset_entries
 from skillevaluator.tier3.eval_core.plugin_signals import validate_plugin_case_fields
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
+
+# The generated with-plugin files the Harbor adapter reads (and their name cap).
+# PLUGIN_MCP_SERVERS_FILENAME stays distinct from the task-environment
+# ``mcp_servers.toml`` so the adapter can stage it for the with-plugin arm only.
+from skillevaluator.tier3.harbor.adapter import (
+    MAX_PLUGIN_RUNTIME_NAMES,
+    PLUGIN_MCP_SERVERS_FILENAME,
+    PLUGIN_RUNTIME_COMPONENTS_FILENAME,
+)
 from skillevaluator.tier3.harbor.secure_copy import UnsafeStagingError, copy_file_secure, copytree_secure
 from skillevaluator.tier3.plugin_native import foreign_root_var_re, plugin_root_var_names, to_claude_root
 from skillevaluator.utils.helpers import find_bundled_plugin_skills
@@ -143,13 +152,6 @@ if TYPE_CHECKING:
 # Shared with Harbor's runtime find_evals_file() and the report loader so a
 # dataset accepted/staged here is resolvable downstream.
 _EVAL_DATASET_NAMES = tuple(f"evals{extension}" for extension in DATASET_EXTENSIONS)
-
-# Filename for the plugin's own runnable MCP servers. Kept distinct from the
-# task-environment ``mcp_servers.toml`` so the adapter can stage it for the
-# with-plugin arm only (see ``adapter.generate_harbor_tasks``).
-PLUGIN_MCP_SERVERS_FILENAME = "plugin_mcp_servers.toml"
-# Declared subagent and command names for activation coverage (read by the runner).
-PLUGIN_RUNTIME_COMPONENTS_FILENAME = "plugin_runtime_components.json"
 
 # Install-time variables a harness expands when it loads an installed plugin
 # (Claude Code's CLAUDE_PLUGIN_ROOT/DATA, plus each manifest format's own root
@@ -2410,7 +2412,7 @@ def _write_plugin_runtime_components(evals_dir: Path, inventory: PluginInventory
         key = {"agent": "subagents", "command": "commands"}.get(component.type)
         if key is None or component.problem is not None or not component.name:
             continue
-        if component.name not in names[key] and len(names[key]) < 256:
+        if component.name not in names[key] and len(names[key]) < MAX_PLUGIN_RUNTIME_NAMES:
             names[key].append(component.name)
             staged = opencode_agent_name(plugin_name, component.name) if key == "subagents" else component.name
             if staged.casefold() != component.name.casefold():

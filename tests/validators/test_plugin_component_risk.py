@@ -14,8 +14,8 @@ import pytest
 
 from skillevaluator.models.result import Severity, ValidationResult
 from skillevaluator.plugin_component_risk import (
-    _fetches_remote_code,
     _HookUrlAllowlist,
+    _shell_facts,
     hook_allowlist_hosts,
     matcher_scope,
     mcp_server_is_read_only,
@@ -366,7 +366,7 @@ def test_remote_code_hooks_are_critical(tmp_path: Path, command: str) -> None:
     ],
 )
 def test_remote_code_forms(command: str) -> None:
-    assert _fetches_remote_code(command)
+    assert _shell_facts(command).remote_code
 
 
 @pytest.mark.parametrize(
@@ -382,7 +382,7 @@ def test_remote_code_forms(command: str) -> None:
     ],
 )
 def test_benign_downloads_are_not_remote_code(command: str) -> None:
-    assert not _fetches_remote_code(command)
+    assert not _shell_facts(command).remote_code
 
 
 def test_remote_code_in_a_referenced_script_is_found(tmp_path: Path) -> None:

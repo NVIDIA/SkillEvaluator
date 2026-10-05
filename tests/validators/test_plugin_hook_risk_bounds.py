@@ -24,8 +24,8 @@ from skillevaluator.plugin_component_risk import (
     HookScriptUnreadable,
     _allow_shapes,
     _compiled_matcher,
-    _fetches_remote_code,
     _matcher_scope,
+    _shell_facts,
     iter_hook_handlers,
     matcher_scope,
     matcher_sensitive_tools,
@@ -89,7 +89,7 @@ def test_redos_matchers_are_classified_quickly() -> None:
 def test_remote_code_scan_is_linear_on_padded_scripts() -> None:
     start = time.perf_counter()
     for payload in ("curl ", "iex ", "bash $(", "python3.", "curl -o a | ", "'"):
-        _fetches_remote_code((payload * (MAX_SCRIPT_BYTES // len(payload)))[: MAX_SCRIPT_BYTES - 10])
+        _shell_facts((payload * (MAX_SCRIPT_BYTES // len(payload)))[: MAX_SCRIPT_BYTES - 10])
     assert time.perf_counter() - start < 3.0
 
 

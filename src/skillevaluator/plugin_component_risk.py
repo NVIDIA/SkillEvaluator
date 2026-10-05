@@ -1729,6 +1729,25 @@ class _ShellFacts:
 
 
 def _shell_facts(text: str) -> _ShellFacts:
+    """What shell ``text`` does; ``remote_code`` says whether it runs downloaded content.
+
+    Covers a fetch piped into an interpreter that reads its program from
+    standard input, possibly through other stages (``curl … | sh``,
+    ``wget -qO- … | tee x | /usr/bin/env bash``, ``| $SHELL``, ``| busybox sh``,
+    ``| source /dev/stdin``), a fetch in a command substitution or here-string
+    (``bash -c "$(curl …)"``, ``sh <(wget …)``, ``source /dev/stdin <<< "$(curl …)"``),
+    a variable that holds a download and is evaluated (``c=$(curl …); eval "$c"``),
+    Python or JavaScript that evaluates a download (``exec(urlopen(…).read())``),
+    PowerShell's ``iex (iwr …)``, a download to a file (or unpacked into a
+    directory) that the text also runs (``curl -o /tmp/x … && sh /tmp/x``), and a
+    package runner of a git or URL spec (``npx github:user/repo``,
+    ``deno run https://…``). An interpreter that gets its program from ``-m`` or
+    a script path, or from ``-c`` / ``-e`` with a program that does not
+    evaluate its standard input, only reads the download as data
+    (``curl … | python3 -m json.tool``), so it does not count; a ``-c`` / ``-e``
+    program that does (``| python3 -c 'exec(sys.stdin.read())'``,
+    ``| bash -c "$(cat)"``) does. Linear in the text.
+    """
     commands = [match.group(0) for match in _SHELL_COMMAND_RE.finditer(text)]
     packages = _package_runs(commands)
     remote_code = _EXEC_FETCHED_RE.search(text) is not None or any(package.remote for package in packages)
@@ -1749,29 +1768,6 @@ def _shell_facts(text: str) -> _ShellFacts:
     facts.remote_code = remote_code
     facts.downloads = downloads
     return facts
-
-
-def _fetches_remote_code(text: str) -> bool:
-    """Whether shell ``text`` runs downloaded content.
-
-    Covers a fetch piped into an interpreter that reads its program from
-    standard input, possibly through other stages (``curl … | sh``,
-    ``wget -qO- … | tee x | /usr/bin/env bash``, ``| $SHELL``, ``| busybox sh``,
-    ``| source /dev/stdin``), a fetch in a command substitution or here-string
-    (``bash -c "$(curl …)"``, ``sh <(wget …)``, ``source /dev/stdin <<< "$(curl …)"``),
-    a variable that holds a download and is evaluated (``c=$(curl …); eval "$c"``),
-    Python or JavaScript that evaluates a download (``exec(urlopen(…).read())``),
-    PowerShell's ``iex (iwr …)``, a download to a file (or unpacked into a
-    directory) that the text also runs (``curl -o /tmp/x … && sh /tmp/x``), and a
-    package runner of a git or URL spec (``npx github:user/repo``,
-    ``deno run https://…``). An interpreter that gets its program from ``-m`` or
-    a script path, or from ``-c`` / ``-e`` with a program that does not
-    evaluate its standard input, only reads the download as data
-    (``curl … | python3 -m json.tool``), so it does not count; a ``-c`` / ``-e``
-    program that does (``| python3 -c 'exec(sys.stdin.read())'``,
-    ``| bash -c "$(cat)"``) does. Linear in the text.
-    """
-    return _shell_facts(text).remote_code
 
 
 def _has_substitution(text: str) -> bool:

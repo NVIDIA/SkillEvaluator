@@ -247,7 +247,7 @@ _PATH_ARG_KEYS = (
 )
 _SHELL_COMMAND_KEYS = ("cmd", "command", "code", "script", "input")
 _TOOL_NAME_SEPARATORS = ("__", ".", ":", "/")
-# MCP tool-name spellings (see ``_mcp_identity``). Hermes names MCP tools
+# MCP tool-name spellings (see ``_McpNames.identity``). Hermes names MCP tools
 # ``mcp_<server>_<tool>`` with every character outside ``[A-Za-z0-9_]`` as ``_``;
 # Claude Code names plugin servers ``plugin_<plugin>_<server>``.
 _HERMES_NAME_RE = re.compile(r"[^a-z0-9_]")
@@ -1232,6 +1232,108 @@ def _server_spellings(server: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys((low, _norm_server(server), _HERMES_NAME_RE.sub("_", low))))
 
 
+class _McpPrefix(NamedTuple):
+    """A tool-name prefix that names a declared MCP server (see :meth:`_McpNames.identity`)."""
+
+    order: int  # scan order: declared server, then its spelling, then the prefix form
+    length: int
+    rank: int  # 0 for the server's exact spelling, 1 or 2 for a harness-normalized one
+    server: str
+    spelling: str
+    bare: bool  # OpenCode's ``<server>_<tool>``, a form other harnesses never use
+
+
+class _McpNames:
+    """The declared MCP servers of one arm, indexed by every spelling and tool-name prefix harnesses give them.
+
+    Built once per trajectory, so naming the server of a call takes a few
+    dictionary lookups however many servers are declared.
+    """
+
+    def __init__(self, declared: Iterable[Any]) -> None:
+        self.names = list(dict.fromkeys(name for name in declared if isinstance(name, str) and name))
+        self._exact: dict[str, str] = {}  # casefolded name -> first declared name
+        self._spelled: dict[str, list[str]] = {}  # spelling -> the declared names that have it
+        self._prefixes: dict[str, list[_McpPrefix]] = {}
+        order = 0
+        for name in self.names:
+            self._exact.setdefault(name.casefold(), name)
+            for rank, spelling in enumerate(_server_spellings(name)):
+                holders = self._spelled.setdefault(spelling, [])
+                if name not in holders:
+                    holders.append(name)
+                forms = [(spelling + separator, False) for separator in _TOOL_NAME_SEPARATORS]
+                forms += [(f"mcp_{spelling}_", False), (spelling + "_", True)]
+                for prefix, bare in forms:
+                    entry = _McpPrefix(order, len(prefix), rank, name, spelling, bare)
+                    self._prefixes.setdefault(prefix, []).append(entry)
+                    order += 1
+        self._prefix_ends = frozenset(prefix[-1] for prefix in self._prefixes)
+
+    def match(self, observed: str) -> str | None:
+        """See :func:`match_declared_mcp_server`."""
+        low = observed.casefold()
+        if not low or not self.names:
+            return None
+        exact = self._exact.get(low)
+        if exact is not None:
+            return exact
+        spelled = self._spelled.get(low, [])
+        if len(spelled) == 1:
+            return spelled[0]
+        if spelled or not low.startswith(_CLAUDE_PLUGIN_SERVER_PREFIX):
+            return None
+        rest = low[len(_CLAUDE_PLUGIN_SERVER_PREFIX) :]
+        slug, sep, server = rest.partition("_")
+        if slug and sep and server:
+            found = self.match(server)
+            if found is not None:
+                return found
+        # The longest declared spelling ``rest`` ends with, after a ``_`` that is not its first character.
+        for index in range(1, len(rest)):
+            if rest[index] == "_" and (longest := self._spelled.get(rest[index + 1 :])):
+                return longest[0] if len(longest) == 1 else None
+        return None
+
+    def identity(self, fn: str, *, agent: str) -> tuple[str, str] | None:
+        """``(server, tool)`` of an MCP tool call, with the server mapped to its declared name when known.
+
+        Recognized spellings: ``mcp__<server>__<tool>`` (Claude Code, Codex;
+        Claude Code plugin servers appear as ``plugin_<plugin>_<server>``), and
+        for declared servers ``<server>__<tool>``/``.``/``/``/``:``, Hermes
+        ``mcp_<server>_<tool>``, and OpenCode ``<server>_<tool>`` (not for
+        harnesses that never use it). The longest matching prefix wins; on a tie
+        an exact spelling beats a normalized one, and a remaining tie between
+        servers is left unattributed.
+        """
+        low = fn.casefold()
+        if low.startswith(_MCP_PREFIX):
+            server, _, tool = fn[len(_MCP_PREFIX) :].partition("__")
+            if not server:
+                return None
+            return self.match(server) or server, tool
+        bare_allowed = agent.casefold() not in _NO_BARE_MCP_PREFIX_AGENTS and low not in _BUILTIN_TOOL_NAMES
+        matches: list[_McpPrefix] = []
+        for end in range(1, len(low)):  # a prefix leaves at least one character of tool name
+            if low[end - 1] in self._prefix_ends:
+                matches.extend(self._prefixes.get(low[:end], ()))
+        best: tuple[int, int] | None = None
+        best_spelling = ""
+        winners: list[str] = []
+        for entry in sorted(matches):
+            if entry.bare and not bare_allowed:
+                continue
+            key = (entry.length, -min(entry.rank, 1))
+            if best is None or key > best:
+                best, best_spelling, winners = key, entry.spelling, [entry.server]
+            elif key == best and entry.server not in winners:
+                winners.append(entry.server)
+        if best is None:
+            return None
+        # Two declared servers share this spelling: count the call under the spelling itself.
+        return (winners[0] if len(winners) == 1 else best_spelling), fn[best[0] :]
+
+
 def match_declared_mcp_server(observed: str, declared: Iterable[str]) -> str | None:
     """The one declared server that ``observed`` (a server name taken from a tool name) refers to.
 
@@ -1242,73 +1344,7 @@ def match_declared_mcp_server(observed: str, declared: Iterable[str]) -> str | N
     ``_``, so the server is what follows the first ``_`` (a longest declared
     suffix is the fallback).
     """
-    names = [name for name in declared if isinstance(name, str) and name]
-    low = observed.casefold()
-    if not low or not names:
-        return None
-    exact = [name for name in names if name.casefold() == low]
-    if exact:
-        return exact[0]
-    spelled = list(dict.fromkeys(name for name in names if low in _server_spellings(name)))
-    if len(spelled) == 1:
-        return spelled[0]
-    if spelled or not low.startswith(_CLAUDE_PLUGIN_SERVER_PREFIX):
-        return None
-    rest = low[len(_CLAUDE_PLUGIN_SERVER_PREFIX) :]
-    slug, sep, server = rest.partition("_")
-    if slug and sep and server:
-        found = match_declared_mcp_server(server, names)
-        if found is not None:
-            return found
-    suffixes: dict[int, list[str]] = {}
-    for name in names:
-        for spelling in _server_spellings(name):
-            if rest.endswith("_" + spelling) and len(rest) > len(spelling) + 1:
-                suffixes.setdefault(len(spelling), []).append(name)
-    if not suffixes:
-        return None
-    longest = list(dict.fromkeys(suffixes[max(suffixes)]))
-    return longest[0] if len(longest) == 1 else None
-
-
-def _mcp_identity(fn: str, declared_mcp: Sequence[str], *, agent: str = "") -> tuple[str, str] | None:
-    """``(server, tool)`` of an MCP tool call, with the server mapped to its declared name when known.
-
-    Recognized spellings: ``mcp__<server>__<tool>`` (Claude Code, Codex; Claude
-    Code plugin servers appear as ``plugin_<plugin>_<server>``), and for
-    declared servers ``<server>__<tool>``/``.``/``/``/``:``, Hermes
-    ``mcp_<server>_<tool>``, and OpenCode ``<server>_<tool>`` (not for
-    harnesses that never use it). The longest matching prefix wins; on a tie an
-    exact spelling beats a normalized one, and a remaining tie between servers
-    is left unattributed.
-    """
-    low = fn.casefold()
-    if low.startswith(_MCP_PREFIX):
-        server, _, tool = fn[len(_MCP_PREFIX) :].partition("__")
-        if not server:
-            return None
-        return match_declared_mcp_server(server, declared_mcp) or server, tool
-    bare_prefix = agent.casefold() not in _NO_BARE_MCP_PREFIX_AGENTS and low not in _BUILTIN_TOOL_NAMES
-    best: tuple[int, int] | None = None
-    best_spelling = ""
-    winners: list[str] = []
-    for server in declared_mcp:
-        for rank, spelling in enumerate(_server_spellings(server)):
-            prefixes = [spelling + separator for separator in _TOOL_NAME_SEPARATORS] + [f"mcp_{spelling}_"]
-            if bare_prefix:
-                prefixes.append(spelling + "_")
-            for prefix in prefixes:
-                if not (low.startswith(prefix) and len(low) > len(prefix)):
-                    continue
-                key = (len(prefix), -min(rank, 1))
-                if best is None or key > best:
-                    best, best_spelling, winners = key, spelling, [server]
-                elif key == best and server not in winners:
-                    winners.append(server)
-    if best is None:
-        return None
-    # Two declared servers share this spelling: count the call under the spelling itself.
-    return (winners[0] if len(winners) == 1 else best_spelling), fn[best[0] :]
+    return _McpNames(declared).match(observed)
 
 
 def _first_string(args: Mapping[str, Any], keys: Sequence[str]) -> str:
@@ -1566,9 +1602,9 @@ def _persistable_name(name: str, members: Sequence[str]) -> bool:
     return any(member.casefold() == folded for member in members)
 
 
-def _mcp_ident(fn: str, declared_mcp: Sequence[str], *, agent: str) -> _Ident | None:
-    """The MCP identity of a call named ``fn``, labeled ``mcp__<server>__<tool>`` (see :func:`_mcp_identity`)."""
-    identity = _mcp_identity(fn, declared_mcp, agent=agent)
+def _mcp_ident(fn: str, mcp_names: _McpNames, *, agent: str) -> _Ident | None:
+    """The MCP identity of a call named ``fn``, labeled ``mcp__<server>__<tool>`` (see :meth:`_McpNames.identity`)."""
+    identity = mcp_names.identity(fn, agent=agent)
     if identity is None:
         return None
     server, tool = identity
@@ -1653,6 +1689,7 @@ def _expanded_tool_calls(raw: Mapping[str, Any], outer_id: str, mcp_call_servers
 def _identify_call(
     tool_call: Mapping[str, Any],
     declared: Mapping[str, Sequence[str]],
+    mcp_names: _McpNames,
     *,
     seq: int,
     step_index: int,
@@ -1663,7 +1700,7 @@ def _identify_call(
     fn = str(tool_call.get("function_name") or "")[:_MAX_LABEL_CHARS]
     args = tool_call.get("arguments")
     args = args if isinstance(args, dict) else {}
-    mcp = _mcp_ident(fn, declared.get(COMPONENT_MCP) or (), agent=agent)
+    mcp = _mcp_ident(fn, mcp_names, agent=agent)
     fn_base = _base_tool_name(mcp.tool if mcp is not None and mcp.tool else fn)
     idents = _identities(fn, fn_base, mcp, args, declared, subagent_aliases=subagent_aliases)
     return _Call(seq=seq, step_index=step_index, fn=fn, fn_base=fn_base, args=args, idents=idents, mcp=mcp)
@@ -1689,6 +1726,7 @@ def _extract_calls(
     if not isinstance(steps, list):
         return None
     agent = _trajectory_agent(trajectory)
+    mcp_names = _McpNames(declared.get(COMPONENT_MCP) or ())
     calls: list[_Call] = []
     owner: int | None = None  # the latest skill/command activation: it opens a window for the calls after it
     for step_index, step in enumerate(steps[:_MAX_STEPS]):
@@ -1704,6 +1742,7 @@ def _extract_calls(
                 call = _identify_call(
                     tool_call,
                     declared,
+                    mcp_names,
                     seq=len(calls),
                     step_index=step_index,
                     agent=agent,
@@ -2359,12 +2398,12 @@ def _declared_keys(declared: Mapping[str, Sequence[str]] | None) -> list[tuple[s
     return keys
 
 
-def _ident_is_component(ident: _Ident, kind: str, name: str, declared_mcp: Sequence[str] = ()) -> bool:
+def _ident_is_component(ident: _Ident, kind: str, name: str, mcp_names: _McpNames) -> bool:
     if ident.kind != kind:
         return False
     if kind == COMPONENT_MCP:
-        # ``_mcp_identity`` already maps a recognizable server to its declared name.
-        return match_declared_mcp_server(ident.server or "", declared_mcp or (name,)) == name
+        # ``_McpNames.identity`` already maps a recognizable server to its declared name.
+        return mcp_names.match(ident.server or "") == name
     return name.casefold() in _name_candidates(ident.name)
 
 
@@ -2377,14 +2416,14 @@ def _grade_activation_coverage(calls: Sequence[_Call], declared: Mapping[str, Se
     exercised: list[str] = []
     unverified: list[str] = []
     unavailable: list[str] = []
-    declared_mcp = [name for kind, name in _declared_keys(declared) if kind == COMPONENT_MCP]
+    mcp_names = _McpNames(name for kind, name in _declared_keys(declared) if kind == COMPONENT_MCP)
     for kind, name in _declared_keys(declared):
         label = _safe_text(f"{kind}:{name}")
         declared_labels.append(label)
         outcomes = [
             call.succeeded
             for call in calls
-            if any(_ident_is_component(ident, kind, name, declared_mcp) for ident in call.idents)
+            if any(_ident_is_component(ident, kind, name, mcp_names) for ident in call.idents)
         ]
         if not outcomes:
             unverified.append(label)

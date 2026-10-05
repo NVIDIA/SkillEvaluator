@@ -16,6 +16,7 @@ from skillevaluator.tier3.eval_core.plugin_signals import (
     MAX_TOOL_PATTERNS,
     build_plugin_signals_context,
     compute_plugin_signals,
+    match_declared_mcp_server,
     plugin_case_spec,
     summarize_plugin_signals,
     validate_plugin_case_fields,
@@ -243,6 +244,51 @@ class TestClassifierCodexStyle:
         activations = _activations(traj)
 
         assert [a["tool"] for a in activations] == ["mcp__github__search_code", "mcp__jira__create_ticket"]
+
+
+class TestMcpServerNames:
+    @pytest.mark.parametrize(
+        ("observed", "declared", "expected"),
+        [
+            ("GitHub", ["github", "jira"], "github"),
+            ("my_docs", ["my.docs", "my_docs"], "my_docs"),  # an exact name beats another server's spelling
+            ("my_docs", ["my.docs"], "my.docs"),
+            ("my_docs", ["my.docs", "my-docs"], None),  # a spelling two servers share credits neither
+            ("plugin_demo-plugin_docs", ["docs"], "docs"),
+            ("plugin_demo_my_docs", ["my.docs"], "my.docs"),
+            ("plugin_a_b_team_docs", ["team_docs", "docs"], "team_docs"),  # the longest declared suffix
+            ("plugin_x_y_my_docs", ["my.docs", "my-docs"], None),
+            ("plugin_", ["docs"], None),
+            ("slack", ["github"], None),
+            ("github", [], None),
+        ],
+    )
+    def test_observed_server_names_map_to_one_declared_server(
+        self, observed: str, declared: list[str], expected: str | None
+    ) -> None:
+        assert match_declared_mcp_server(observed, declared) == expected
+
+    @pytest.mark.parametrize(
+        ("agent", "fn", "servers", "tool"),
+        [
+            ("claude-code", "my.docs__search", ["my.docs", "my"], "mcp__my.docs__search"),  # the longest prefix wins
+            ("claude-code", "my_docs__search", ["my.docs", "my-docs"], "mcp__my_docs__search"),
+            ("hermes", "mcp_my_docs_search", ["my.docs", "my-docs"], "mcp__my_docs__search"),
+            ("opencode", "github_team.list", ["github", "github_team"], "mcp__github_team__list"),
+            ("opencode", "docs_search", ["docs"], "mcp__docs__search"),
+            ("codex", "docs_search", ["docs"], None),  # only OpenCode names MCP tools <server>_<tool>
+            ("opencode", "web_search", ["web"], None),  # a built-in tool, not the web server's
+            ("claude-code", "mcp__plugin_demo_my_docs__get", ["my.docs"], "mcp__my.docs__get"),
+        ],
+    )
+    def test_tool_names_map_to_declared_servers(
+        self, agent: str, fn: str, servers: list[str], tool: str | None
+    ) -> None:
+        traj = {**_traj(_one(fn)), "agent": {"name": agent}}
+
+        activations = _signals(traj, declared={"skill": [], "mcp": servers})["activations"]
+
+        assert [a["tool"] for a in activations if a["type"] == "mcp"] == ([tool] if tool else [])
 
 
 class TestShellReadsAgainstTheScoredCheck:

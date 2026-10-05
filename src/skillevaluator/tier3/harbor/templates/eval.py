@@ -643,13 +643,21 @@ _RANK_OLD_WRITE = 2  # a write to a path the agent wrote again later
 _RANK_KEEP = 3  # the final answer and the latest write to each path
 
 
-def _get_final_response(traj):
-    for step in reversed(traj.get("steps", [])):
+def _final_response_index(steps):
+    """Index of the final response: the last agent step with a non-empty message, or ``None``."""
+    for index in range(len(steps) - 1, -1, -1):
+        step = steps[index]
         if step.get("source") == "agent":
             msg = step.get("message") or ""
             if isinstance(msg, str) and msg.strip():
-                return msg
-    return ""
+                return index
+    return None
+
+
+def _get_final_response(traj):
+    steps = traj.get("steps", [])
+    index = _final_response_index(steps)
+    return "" if index is None else steps[index]["message"]
 
 
 def _cut_sizes(limit):
@@ -872,16 +880,6 @@ def _demote_superseded_writes(entries):
     for index, entry in enumerate(entries):
         if entry[2] and all(last_writer[path] != index for path in entry[2]):
             entry[1] = _RANK_OLD_WRITE
-
-
-def _final_response_index(steps):
-    for index in range(len(steps) - 1, -1, -1):
-        step = steps[index]
-        if step.get("source") == "agent":
-            msg = step.get("message") or ""
-            if isinstance(msg, str) and msg.strip():
-                return index
-    return None
 
 
 def _history_call_entry(tc, write_bodies):
@@ -1270,22 +1268,18 @@ def _dedupe_evidence_refs(refs):
 
 def _final_response_ref(traj):
     steps = traj.get("steps", [])
-    for step_idx in range(len(steps) - 1, -1, -1):
-        step = steps[step_idx]
-        if step.get("source") != "agent":
-            continue
-        msg = step.get("message") or ""
-        if isinstance(msg, str) and msg.strip():
-            return [
-                _evidence_ref(
-                    source="trajectory.json",
-                    json_pointer=f"/steps/{step_idx}",
-                    kind="final_response",
-                    label="Final response",
-                    excerpt=msg,
-                )
-            ]
-    return []
+    index = _final_response_index(steps)
+    if index is None:
+        return []
+    return [
+        _evidence_ref(
+            source="trajectory.json",
+            json_pointer=f"/steps/{index}",
+            kind="final_response",
+            label="Final response",
+            excerpt=steps[index]["message"],
+        )
+    ]
 
 
 def _tool_call_ref(step_idx, tc, *, kind):

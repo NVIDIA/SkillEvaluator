@@ -43,6 +43,7 @@ from skillevaluator.validators.url_policy import (
     is_credential_name,
     is_env_reference,
     looks_like_inline_secret,
+    report_text,
     safe_url,
     url_ambiguities,
     url_credentials,
@@ -217,6 +218,11 @@ def _is_insecure_tls_env(key: str, value: str) -> bool:
     return False
 
 
+def _shown(text: str) -> str:
+    """A command token or command line for messages: bounded and redacted, withheld whole when shaped like a secret."""
+    return "<value withheld>" if has_secret_shape(text) else report_text(text, 120)
+
+
 def _iter_command_tokens(config: dict[str, Any]) -> list[str]:
     tokens: list[str] = []
     command = config.get("command")
@@ -263,7 +269,7 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
                 _finding(
                     Severity.CRITICAL,
                     "mcp_command_shell_metacharacters",
-                    f"command token contains shell metacharacters: {token!r}",
+                    f"command token contains shell metacharacters: {_shown(token)!r}",
                     file_path,
                     "Remove shell operators (; | & ` $() < >). MCP commands run argv-style, not via a shell.",
                     name=name,
@@ -274,7 +280,7 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
                 _finding(
                     Severity.CRITICAL,
                     "mcp_command_disables_tls",
-                    f"command disables TLS/certificate verification: {token!r}",
+                    f"command disables TLS/certificate verification: {_shown(token)!r}",
                     file_path,
                     "Remove insecure-TLS flags; do not disable certificate verification.",
                     name=name,
@@ -285,7 +291,7 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
                 _finding(
                     Severity.HIGH,
                     "mcp_command_floating_version",
-                    f"command token uses a floating (unpinned) version: {token!r}",
+                    f"command token uses a floating (unpinned) version: {_shown(token)!r}",
                     file_path,
                     "Pin the referenced package/image to an exact version, not latest/main.",
                     name=name,
@@ -330,7 +336,7 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
                 _finding(
                     Severity.CRITICAL,
                     "mcp_command_inline_secret",
-                    f"command argument contains an inline credential: {token!r}",
+                    f"command argument args[{idx}] contains an inline credential (value withheld)",
                     file_path,
                     'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
                     name=name,
@@ -344,7 +350,8 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
             _finding(
                 Severity.CRITICAL,
                 "mcp_command_dangerous_form",
-                f"command invokes a shell interpreter with '-c' ({command!r}); this executes an arbitrary program string",
+                f"command invokes a shell interpreter with '-c' ({_shown(command)!r}); this executes an arbitrary "
+                "program string",
                 file_path,
                 "Invoke the server binary directly instead of wrapping it in a shell '-c' string.",
                 name=name,

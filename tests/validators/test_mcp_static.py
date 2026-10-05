@@ -514,6 +514,23 @@ def test_url_query_keys_shaped_like_a_secret_are_not_echoed() -> None:
     assert _GITHUB_TOKEN not in findings[0].message
 
 
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "srv", "args": ["--opt", _GITHUB_TOKEN]},
+        {"command": "srv", "args": [f"--api-key={_OPENAI_KEY};"]},
+        {"command": f"bash -c 'curl -H \"Authorization: token {_GITHUB_TOKEN}\" x'"},
+        {"command": "npx", "args": [f"pkg@latest;{_GITHUB_TOKEN}"]},
+    ],
+)
+def test_command_findings_never_echo_an_inline_credential(config: dict) -> None:
+    """Regression: 'command argument contains an inline credential' printed the credential itself."""
+    findings = validate_mcp_server_declaration("s", config, "p.json")
+
+    assert "mcp_command_inline_secret" in _checks(findings) or "mcp_command_dangerous_form" in _checks(findings)
+    assert not any(_GITHUB_TOKEN in f.message or _OPENAI_KEY in f.message for f in findings)
+
+
 def test_url_userinfo_counts_even_when_written_as_references() -> None:
     # MCP clients send whatever userinfo the URL holds, so credentials belong in a header.
     findings = validate_mcp_server_declaration("s", {"url": "https://${USER}:${TOKEN}@h.example/mcp"}, "p.json")

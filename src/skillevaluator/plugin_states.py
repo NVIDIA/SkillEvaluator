@@ -22,3 +22,7 @@ DEPENDENCY_STATES: tuple[str, ...] = ("provided", "referenced", "missing", "exte
 COVERAGE_STATES: tuple[str, ...] = ("staged", "not_staged", "unsupported", "unavailable", "invalid")
 COVERAGE_STATE_RANK: dict[str, int] = {"staged": 1, "loaded": 2, "exercised": 3}
 EVALUATED_COVERAGE_STATES: frozenset[str] = frozenset(COVERAGE_STATE_RANK)
+# Set by the native load census when the harness reported that a staged component
+# did not load. It is not evaluated, but it was staged, so reports count it apart
+# from the components that were never staged.
+NOT_LOADED_STATE = "not_loaded"

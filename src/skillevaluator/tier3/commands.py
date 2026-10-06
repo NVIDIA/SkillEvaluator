@@ -632,6 +632,7 @@ def evaluate(
     *,
     agents: str | None,
     env_mode: str,
+    environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
     n_attempts: int | None,
     pass_threshold: float | None,
@@ -708,6 +709,9 @@ def evaluate(
                 raise ValueError(f"A public LLM provider is required for live evaluation: {exc}") from exc
 
         agent_models = parse_agent_model_overrides(agent_model)
+        from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+
+        environment_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
         unknown_model_agents = sorted(set(agent_models) - set(agent_list))
         if unknown_model_agents:
             raise ValueError(
@@ -744,6 +748,7 @@ def evaluate(
             agent_runtime_preflight=agent_runtime_preflight,
             env_mode=env_mode,
             env_mode_source="CLI",
+            environment_kwargs=environment_kwargs,
             timeout_multiplier=timeout_multiplier,
             evaluated_source=evaluated_source,
             override_cpus=override_cpus,
@@ -763,6 +768,7 @@ def doctor(
     *,
     agents: str | None,
     env_mode: str,
+    environment_kwarg: tuple[str, ...] = (),
     verify_models: bool = False,
     agent_model: tuple[str, ...] = (),
 ) -> int:
@@ -843,7 +849,21 @@ def doctor(
     else:
         rows.append(("Harbor agents", "pass", ", ".join(agent_list)))
 
-    prereq_errors = _check_prerequisites(env_mode=env_mode, agents=agent_list)
+    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+
+    try:
+        environment_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
+    except ValueError as exc:
+        environment_kwargs = {}
+        prereq_errors = [str(exc)]
+    else:
+        prerequisite_subprocess_env = dict(next(iter(runtime_plans.values())).subprocess_env) if runtime_plans else None
+        prereq_errors = _check_prerequisites(
+            env_mode=env_mode,
+            agents=agent_list,
+            environment_kwargs=environment_kwargs,
+            subprocess_env=prerequisite_subprocess_env,
+        )
     if prereq_errors:
         for error in prereq_errors:
             rows.append((f"{env_mode} prerequisite", "fail", error))
@@ -1026,6 +1046,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     agent_without: dict[str, dict[str, float]] = {}
     agent_meta: dict[str, dict[str, Any]] = {}
     agent_not_applicable: dict[str, frozenset[str]] = {}
+    agent_without_not_applicable: dict[str, frozenset[str]] = {}
 
     for candidate_root in candidate_roots:
         if not candidate_root.exists():
@@ -1034,6 +1055,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
         root_without: dict[str, dict[str, float]] = {}
         root_meta: dict[str, dict[str, Any]] = {}
         root_not_applicable: dict[str, frozenset[str]] = {}
+        root_without_not_applicable: dict[str, frozenset[str]] = {}
         for ts_dir in ordered_run_directories(candidate_root):
             allow_missing_status = _run_timestamp(ts_dir.name) is None or is_legacy_completed_run_dir(ts_dir)
             try:
@@ -1067,17 +1089,18 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                     wo_summary = agent_dir / "without-skill" / "summary.json"
                     if wo_summary.exists():
                         try:
-                            wo_scores = _summary_scores(
-                                json.loads(wo_summary.read_text(encoding="utf-8")),
-                                allow_missing_status=allow_missing_status,
-                            )
+                            wo_data = json.loads(wo_summary.read_text(encoding="utf-8"))
+                            wo_scores = _summary_scores(wo_data, allow_missing_status=allow_missing_status)
                             if wo_scores:
                                 root_without[agent_name] = wo_scores
+                                # The no-skill arm has no skill to discover or route to.
+                                root_without_not_applicable[agent_name] = _summary_not_applicable(wo_data)
                         except (ValueError, OSError):
                             pass
         if root_with:
             agent_with, agent_without, agent_meta = root_with, root_without, root_meta
             agent_not_applicable = root_not_applicable
+            agent_without_not_applicable = root_without_not_applicable
             break
 
     if not agent_with:
@@ -1106,6 +1129,10 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
             with_score = _safe_score(agent_with[agent], metric)
             row.append(Text(f"{with_score:.2f}", style=f"bold {_score_style(with_score)}"))
             if agent in agent_without:
+                if _without_not_applicable(agent, metric, agent_without, agent_without_not_applicable):
+                    # The no-skill arm cannot score it, so there is no lift (not a 0.0 baseline).
+                    row.append(Text("N/A", style="dim"))
+                    continue
                 without_score = _safe_score(agent_without[agent], metric)
                 delta = with_score - without_score
                 if delta > 0:
@@ -1127,10 +1154,18 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
         with_avg = sum(_safe_score(agent_with[agent], metric) for metric in scored_metrics) / len(scored_metrics)
         overall_row.append(Text(f"{with_avg:.2f}", style=f"bold {_score_style(with_avg)}"))
         if agent in agent_without:
-            without_avg = sum(_safe_score(agent_without[agent], metric) for metric in scored_metrics) / len(
-                scored_metrics
-            )
-            delta = with_avg - without_avg
+            # The lift compares only the metrics both arms scored.
+            shared_metrics = [
+                metric
+                for metric in scored_metrics
+                if not _without_not_applicable(agent, metric, agent_without, agent_without_not_applicable)
+            ]
+            if not shared_metrics:
+                overall_row.append(Text("N/A", style="bold dim"))
+                continue
+            shared_with = sum(_safe_score(agent_with[agent], metric) for metric in shared_metrics)
+            shared_without = sum(_safe_score(agent_without[agent], metric) for metric in shared_metrics)
+            delta = (shared_with - shared_without) / len(shared_metrics)
             delta_text = f"+{delta:.2f}" if delta > 0 else f"{delta:.2f}"
             delta_style = "bold green" if delta > 0 else ("bold red" if delta < 0 else "bold dim")
             overall_row.append(Text(delta_text, style=delta_style))
@@ -1193,6 +1228,16 @@ def _display_metrics(agent_with: dict[str, dict[str, float]]) -> tuple[tuple[str
         return (*default_metrics, *custom_metrics), default_metrics
     metrics = tuple(sorted({metric for scores in agent_with.values() for metric in scores}))
     return metrics, metrics
+
+
+def _without_not_applicable(
+    agent: str,
+    metric: str,
+    agent_without: dict[str, dict[str, float]],
+    agent_without_not_applicable: dict[str, frozenset[str]],
+) -> bool:
+    """Whether the no-skill arm recorded *metric* as not applicable (no score, so no lift)."""
+    return metric in agent_without_not_applicable.get(agent, frozenset()) and metric not in agent_without.get(agent, {})
 
 
 def _safe_score(scores: dict[str, float], metric: str) -> float:

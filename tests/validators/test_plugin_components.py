@@ -324,7 +324,8 @@ def test_unparseable_remote_mcp_url_is_reported_not_raised(tmp_path: Path) -> No
 def test_non_dot_relative_mcp_path_gets_style_finding(tmp_path: Path) -> None:
     root = _plugin(tmp_path, {"mcpServers": "cfg.json"}, {"cfg.json": {"x": _PINNED_FS}})
     result = _validate(root)
-    assert _checks(result)["plugin_component_path_style"] == Severity.MEDIUM
+    # Claude Code rejects the whole manifest for a path without './' (proof H7), so it blocks.
+    assert _checks(result)["plugin_component_path_style"] == Severity.HIGH
     assert _servers(result)["x"]["source"] == "path_ref"
 
 
@@ -385,10 +386,10 @@ def test_declared_component_path_problems_are_high(tmp_path: Path, field: str, v
     ("manifest", "field", "component"),
     [
         ({"skills": "./README.md"}, "skills", ("skill", "./README.md", "README.md")),
-        ({"commands": {"ship": {"source": "./cfg"}}}, "commands", ("command", "ship", "cfg")),
+        # A commands-map source may be a folder (Claude Code loads its .md files); see test_f90_inventory_paths.
         ({"hooks": "./cfg"}, "hooks", ("hook", "./cfg", None)),
     ],
-    ids=["skills-file", "command-source-folder", "hooks-folder"],
+    ids=["skills-file", "hooks-folder"],
 )
 def test_declared_path_of_the_wrong_kind_is_an_invalid_component(
     tmp_path: Path, manifest: dict, field: str, component: tuple
@@ -822,13 +823,15 @@ def test_components_past_the_per_type_cap_are_listed_once_with_one_truncation_no
 
 
 def test_a_subagent_reached_twice_gets_one_privilege_record(tmp_path: Path) -> None:
+    # Listed twice (Claude Code takes only .md files in 'agents', so a folder is not a second route).
+    agents = ["./agents/helper.md", "./agents/helper.md"]
     root = _plugin(
         tmp_path,
-        {"agents": ["./agents/helper.md", "./agents/"]},
+        {"agents": agents},
         {"agents/helper.md": "---\nname: helper\ndescription: h\ntools: Bash\n---\nbody\n"},
     )
     inventory = build_plugin_inventory(
-        root, {"agents": ["./agents/helper.md", "./agents/"]}, contained=True, manifest_rel=".claude-plugin/plugin.json"
+        root, {"agents": agents}, contained=True, manifest_rel=".claude-plugin/plugin.json"
     )
     assert [(record.type, record.name) for record in inventory.privilege_records] == [("agent", "helper")]
     assert [component.origin for component in inventory.of_type("agent")] == ["declared+packaged"]
@@ -921,16 +924,18 @@ def test_is_env_file_ignores_letter_case(name: str, expected: bool) -> None:
 def test_context_cost_splits_always_on_and_on_demand(tmp_path: Path) -> None:
     cost = _validate(_rich_plugin(tmp_path)).metadata["plugin"]["context_cost"]
     assert cost["method"] == "static_estimate"
-    assert cost["estimator"] == "chars_div_4"
+    assert cost["estimator"] == "chars_div_4_cjk"
     rows = {(row["type"], row["name"]): row for row in cost["by_component"]}
     skill = rows[("skill", "demo")]
     assert skill["always_on_tokens"] == -(-len("demo" + "Demo skill") // 4)
     assert skill["on_demand_tokens"] == -(-len("# Demo\n\nBody.") // 4)
-    assert rows[("rule", "style.md")]["always_on_tokens"] == 0
-    assert rows[("rule", "style.md")]["on_demand_tokens"] > 0
+    # Native Claude Code loading stages rules as user rules, which load in every session.
+    assert rows[("rule", "style.md")]["always_on_tokens"] > 0
+    assert rows[("rule", "style.md")]["on_demand_tokens"] == 0
     assert rows[("agent", "reviewer")]["always_on_tokens"] == -(-len("Reviews code") // 4)
     assert rows[("command", "about")]["always_on_tokens"] == -(-len("About") // 4)
-    assert rows[("output_style", "terse")]["always_on_tokens"] > 0  # force-for-plugin
+    # force-for-plugin: the style replaces Claude Code's default coding instructions, so it shrinks the prompt.
+    assert rows[("output_style", "terse")]["always_on_tokens"] < 0
     assert rows[("mcp", "fs")] == {**rows[("mcp", "fs")], "always_on_tokens": 0, "on_demand_tokens": 0}
     assert cost["always_on_tokens"] == sum(row["always_on_tokens"] for row in cost["by_component"])
     notes = " ".join(cost["notes"])
@@ -1002,7 +1007,11 @@ def test_hooks_merge_declared_file_with_default(tmp_path: Path) -> None:
 
 
 def test_openai_extension_hooks_and_apps_use_the_codex_path_rules(tmp_path: Path) -> None:
-    openai = {"hooks": [{"hooks": {}}, "hooks/policy.json"], "apps": ["./tools.app.json", "./missing.app.json"]}
+    # Codex drops a path without './' (a style finding, no component) and loads the './' one.
+    openai = {
+        "hooks": [{"hooks": {}}, "hooks/policy.json", "./hooks/policy.json"],
+        "apps": ["./tools.app.json", "./missing.app.json"],
+    }
     manifest = {
         "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
         "name": "demo",
@@ -1033,6 +1042,7 @@ def test_openai_extension_hooks_and_apps_use_the_codex_path_rules(tmp_path: Path
     ]
     [style] = [finding for finding in inventory.findings if finding.check_name == "plugin_component_path_style"]
     assert "the Codex plugin loader ignores" in style.message
+    assert style.metadata["plugin_component_ref"] == "hooks/policy.json"
     apps = [(row.name, row.path, row.problem) for row in inventory.of_type("app")]
     assert apps == [
         ("github", "tools.app.json", None),

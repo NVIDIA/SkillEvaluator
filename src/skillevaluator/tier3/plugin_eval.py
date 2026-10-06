@@ -50,6 +50,7 @@ skipped package (an honest optional-skip; the caller exits 0 without a run).
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import os
 import re
@@ -72,9 +73,9 @@ from skillevaluator.constants import (
     PLUGIN_CONTAINED_MANIFEST_TYPE,
     PLUGIN_CURSOR_MANIFEST_TYPE,
     PLUGIN_MANIFEST_RELATIVE_PATHS,
+    PLUGIN_NAME_MAX_REPORT_CHARS,
     SCAN_EXCLUDED_DIRS,
 )
-from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
 from skillevaluator.models.result import Severity
 from skillevaluator.plugin_components import (
     MCP_JSON,
@@ -140,6 +141,7 @@ from skillevaluator.tier3.plugin_native import (
     apply_native_refusals,
     build_native_source,
     foreign_root_var_re,
+    member_skill_hook_refusal,
     native_component_types,
     opencode_agent_name,
     plugin_root_var_names,
@@ -246,6 +248,7 @@ class PluginEvalPackage:
         unresolved_rule = list(self.unresolved_rule_refs)
         provider_only_mcp = list(self.unresolved_mcp_servers)
         mcp_unsupported_config = list(self.mcp_unsupported_config)
+        status_counts = {**dict.fromkeys(DEPENDENCY_STATES, 0), **dict(self.dependency_status_counts)}
         provenance: dict[str, Any] = {
             "plugin_name": self.plugin_name,
             "evaluated_member_skills": [path.name for path in self.include_skills],
@@ -258,12 +261,16 @@ class PluginEvalPackage:
             "dataset_case_count": self.dataset_case_count,
             "cross_component_case_count": self.cross_component_case_count,
             "integration_evidence_ready": self.cross_component_case_count > 0,
-            "partial": bool(unresolved_skill or unresolved_rule or provider_only_mcp or mcp_unsupported_config),
+            # A missing same-repository dependency can never be evaluated, so it alone makes the run partial.
+            "partial": bool(
+                unresolved_skill
+                or unresolved_rule
+                or provider_only_mcp
+                or mcp_unsupported_config
+                or status_counts.get("missing")
+            ),
             # Offline classification of declared skill/rule refs (same classifier as Tier 1).
-            "dependency_status_counts": {
-                **dict.fromkeys(DEPENDENCY_STATES, 0),
-                **dict(self.dependency_status_counts),
-            },
+            "dependency_status_counts": status_counts,
         }
         # Report-only: unsupported component types are listed here, never gated.
         if self.component_coverage is not None:
@@ -274,13 +281,28 @@ class PluginEvalPackage:
             provenance["mcp_pinning"] = self.mcp_pinning
         return provenance
 
+    @property
+    def incomplete_skip(self) -> bool:
+        """Nothing was locally evaluable because declared components could not be resolved or run.
+
+        Such a run is INCOMPLETE, not an optional skip: a plugin whose only
+        refs are external, or whose only component is a provider-only MCP
+        server, must not pass Tier 3 with exit 0.
+        """
+        return self.skipped and bool(self.provenance()["partial"])
+
     def integration_evidence_error(self) -> str | None:
         """Explain why an Integration arm would not test composition."""
+        if not self.include_skills:
+            return (
+                "The plugin has no member skills, so Integration has no parts to compare it with "
+                "(it needs member skills and a dataset case with cross_component=true naming two or more of them)"
+            )
         if self.cross_component_case_count > 0:
             return None
         return (
             "Integration evaluation requires at least one dataset case with "
-            "cross_component=true and two or more expected_skills"
+            "cross_component=true and two or more expected_skills that are member skills of the plugin"
         )
 
 
@@ -331,6 +353,7 @@ def prepare_plugin_eval_package(
     plugin_load: str = "wrapper",
     agents: str | Sequence[str] | None = None,
     env_mode: str | None = None,
+    policy: Any = None,
 ) -> PluginEvalPackage:
     """Materialize an ``agent_plugin.yaml`` as a skill-shaped evaluation target.
 
@@ -352,6 +375,11 @@ def prepare_plugin_eval_package(
             snapshot follow what each with-plugin arm really stages.
         env_mode: The run's environment mode; ``None`` leaves the plan unknown
             (every with-plugin arm is then treated like the wrapper).
+        policy: The validation policy (``validate --policy`` / ``--profile``);
+            ``None`` resolves the default profile, as Tier 1 does. Its
+            ``severity_overrides`` and ``mcp.allowed_private_hosts`` apply to
+            the MCP static checks that gate staging, so Tier 3 blocks exactly
+            what Tier 1 blocks.
 
     Returns:
         Prepared package metadata. If nothing is locally evaluable, a package
@@ -361,17 +389,27 @@ def prepare_plugin_eval_package(
         ValueError: If the manifest is malformed, or local components exist but
             no eval dataset/task source can be found.
     """
-    plugin = _locate_plugin(plugin_path)
+    if policy is None:
+        from skillevaluator.validators.policy import resolve_policy
+
+        policy = resolve_policy()
+    plugin = _locate_plugin(plugin_path, allowed_private_hosts=tuple(policy.mcp_allowed_private_hosts))
     # Layer-1 intra-repo resolver: canonical skill/rule refs whose <repo> is the
     # plugin's own clone are resolved to real dirs/files under the clone root
     # (widened, slug-verified containment); everything else stays unresolved.
+    # It uses Tier 1's repository identity, so both tiers resolve the same root.
     resolver = _make_intra_repo_resolver(plugin.plugin_dir, plugin.plugin_root, repo_root, stage_root)
     dependency_status_counts = (
         ()
         if plugin.contained
-        else tuple(dependency_status_counts_for_manifest(plugin.manifest, plugin.plugin_dir, repo_root).items())
+        else tuple(
+            dependency_status_counts_for_manifest(
+                plugin.manifest, plugin.plugin_dir, repo_root, identity=resolver.identity
+            ).items()
+        )
     )
     member_skills, unresolved_skill_refs = _resolve_member_skills(plugin, include_skills, resolver)
+    _refuse_member_skill_hooks(member_skills)
     staged_rules, unresolved_rule_refs = _resolve_plugin_rules(plugin, resolver)
     mcp = _split_mcp_servers(
         plugin.component_manifest,
@@ -379,6 +417,8 @@ def prepare_plugin_eval_package(
         plugin.contained,
         plugin_root=plugin.plugin_root,
         root_prefixes=plugin.profile.root_prefixes,
+        policy=policy,
+        manifest_type=plugin.location.manifest_type,
     )
 
     # Native and auto loading need the evals source before the load plan: the
@@ -387,7 +427,7 @@ def prepare_plugin_eval_package(
     # only when it stages the package, so a plugin with nothing locally
     # evaluable is skipped without its eval source being read or validated.
     resolved_source = _resolve_evals_source(plugin.plugin_dir, evals_source) if plugin_load != "wrapper" else None
-    native_plan, native_source = _native_snapshot(
+    native_plan, native_source, staging_source = _native_snapshot(
         plugin,
         plugin_load=plugin_load,
         agents=agents,
@@ -421,7 +461,8 @@ def prepare_plugin_eval_package(
         mcp=mcp_coverage,
         claude_skill_dirs=_claude_skill_dirs(native_source) if claude_native else (),
         claude_native_agents=claude_native,
-        arm_staging=_arm_staging(plugin_load, native_plan, native_source),
+        arm_staging=_arm_staging(plugin_load, native_plan, staging_source),
+        cost_agents=_cost_agents(agents),
     )
 
     # Optional-skip: nothing to evaluate locally in Phase 1. Honest skip rather
@@ -443,6 +484,7 @@ def prepare_plugin_eval_package(
                 unresolved_rule_refs,
                 mcp.provider_only,
                 [name for name, gaps in mcp.gaps.items() if gaps[0].startswith("plugin_files")],
+                unrooted_mcp=[name for name, gaps in mcp.gaps.items() if gaps[0] == "plugin_files_unrooted"],
             ),
             **report_only,
         )
@@ -472,7 +514,7 @@ def prepare_plugin_eval_package(
         unresolved_skill_refs=unresolved_skill_refs,
         unresolved_rule_refs=unresolved_rule_refs,
         dataset_case_count=len(dataset_cases),
-        cross_component_case_count=_cross_component_case_count(dataset_cases),
+        cross_component_case_count=_cross_component_case_count(dataset_cases, member_skills),
         dependency_status_counts=dependency_status_counts,
         mcp_probe_targets=tuple(mcp.probe_targets[:MAX_PLUGIN_MANIFEST_ITEMS]),
         **report_only,
@@ -527,7 +569,8 @@ class _LocatedPlugin:
         return normalized_component_manifest(self.location.manifest_type, self.manifest) or {}
 
 
-def _locate_plugin(plugin_path: Path) -> _LocatedPlugin:
+def _locate_plugin(plugin_path: Path, *, allowed_private_hosts: tuple[str, ...] = ()) -> _LocatedPlugin:
+    """Read the selected manifest and inventory the plugin; *allowed_private_hosts* is the policy's MCP allowlist."""
     location = _manifest_location(plugin_path)
     manifest_text = location.read_text()
     manifest = _load_manifest_text(manifest_text, location.path, location.manifest_type)
@@ -538,6 +581,7 @@ def _locate_plugin(plugin_path: Path) -> _LocatedPlugin:
         manifest,
         contained=location.contained,
         manifest_rel=location.manifest_filename,
+        allowed_private_hosts=allowed_private_hosts,
         manifest_type=location.manifest_type,
         # Inventoried, never staged, so coverage reports what only another client loads.
         additional=location.parsed_additional(),
@@ -552,8 +596,9 @@ def _resolve_member_skills(
 
     Members are the plugin's own skills (symlink-safe discovery shared with
     Tier 1/2, or what the inventory found for the newer formats), the
-    caller-supplied local skills, and the bundle skill refs resolved intra-repo.
-    Canonical refs to OTHER repos are never treated as paths.
+    caller-supplied local skills, and the bundle skill refs Tier 1 proves
+    (:func:`_resolve_skill_refs`). Canonical refs to OTHER repos are never
+    treated as paths.
     """
     contained_skills = (
         _inventory_skill_dirs(plugin.inventory, plugin.plugin_root)
@@ -566,29 +611,17 @@ def _resolve_member_skills(
         # "./skills/"), not a canonical ref list, so there are no remote skill refs.
         return tuple(dict.fromkeys((*contained_skills, *extra_skills))), ()
 
-    # Track WHICH canonical skill refs actually resolved intra-repo, keyed by the
-    # EXACT canonical ref (not basename), so a foreign same-basename ref from a
-    # different repo is never silently covered by a sibling repo's resolution
-    # (fail-open: a resolved `alpha` must not cover `other/repo::skills::alpha`).
-    intra_repo_skills: list[Path] = []
-    resolved_skill_refs: set[str] = set()
-    for ref in _iter_raw_refs(plugin.manifest.get("skills")):
-        resolved = resolver.resolve_skill(ref)
-        if resolved is None:
-            continue
-        intra_repo_skills.append(resolved)
-        canonical = normalize_ref(ref)
-        if canonical:
-            resolved_skill_refs.add(canonical)
-    member_skills = tuple(dict.fromkeys((*contained_skills, *extra_skills, *intra_repo_skills)))
-    # A ref is "covered" when a local component (contained, --include-skills, or
-    # intra-repo-resolved above) carries its trailing name.
-    unresolved = _unresolved_refs(
+    # A bundle-reference ref is covered only when Tier 1 would call it provided or
+    # referenced, or (external/unresolved) by a same-named --include-skills
+    # directory. A same-named bundled skill never covers a missing or external ref.
+    intra_repo_skills, unresolved = _resolve_skill_refs(
         plugin.manifest.get("skills"),
-        covered_names={path.name for path in member_skills},
-        resolved_refs=resolved_skill_refs,
+        resolver=resolver,
+        plugin_dir=plugin.plugin_dir,
+        contained=contained_skills,
+        included=extra_skills,
     )
-    return member_skills, unresolved
+    return tuple(dict.fromkeys((*contained_skills, *extra_skills, *intra_repo_skills))), unresolved
 
 
 def _resolve_plugin_rules(
@@ -622,23 +655,28 @@ def _native_snapshot(
     member_skills: tuple[Path, ...],
     staged_rules: tuple[_StagedRule, ...],
     mcp: _McpSplit,
-) -> tuple[dict[str, AgentLoadDecision] | None, NativePluginSource | None]:
-    """The per-agent load plan, and the plugin snapshot for the native adapters.
+) -> tuple[dict[str, AgentLoadDecision] | None, NativePluginSource | None, NativePluginSource | None]:
+    """The per-agent load plan, the plugin snapshot for the native adapters, and the snapshot the coverage reads.
 
     The plan comes first, and the plugin is snapshotted only when some agent
     loads it natively, so the skip decision and the INCOMPLETE rule follow what
     each with-plugin arm really stages. A component that enables a permission
     bypass then refuses (``native``) or falls back (``auto``) for the agents
-    that would stage it.
+    that would stage it. A wrapper run stages no native source, but its
+    coverage rows still name the components that ``--plugin-load native``
+    would refuse, so it reads the refusals from a snapshot it never stages
+    (none when native loading cannot read the plugin: no native hint either).
     """
     plan = _preview_plugin_load_plan(plugin_load, agents, env_mode, _preview_task_source(evals_source))
-    if plugin_load == "wrapper" or (plan is not None and not any(decision.native for decision in plan.values())):
-        return plan, None
+    refusal_only = plugin_load == "wrapper"
+    if not refusal_only and plan is not None and not any(decision.native for decision in plan.values()):
+        return plan, None, None
     manifest_type = plugin.location.manifest_type
     # Newer contained formats stage through their Claude-field-name view; the
     # Claude Code and bundle-reference manifests stage as they are.
     newer_contained_format = plugin.contained and manifest_type != PLUGIN_CONTAINED_MANIFEST_TYPE
-    source = build_native_source(
+    build_source = functools.partial(
+        build_native_source,
         inventory=plugin.inventory,
         manifest=plugin.component_manifest if newer_contained_format else plugin.manifest,
         plugin_root=plugin.plugin_root,
@@ -658,7 +696,13 @@ def _native_snapshot(
         # through the native whole-plugin copy.
         excluded_paths=_native_excluded_evals_paths(evals_source, plugin.plugin_root),
     )
-    return _apply_native_refusals(plugin_load, plan, source), source
+    if refusal_only:
+        try:
+            return plan, None, build_source()
+        except (ValueError, OSError):
+            return plan, None, None
+    source = build_source()
+    return _apply_native_refusals(plugin_load, plan, source), source, source
 
 
 def _stage_package_files(
@@ -711,18 +755,21 @@ def _stage_package_files(
     return dataset_cases
 
 
-def _cross_component_case_count(dataset_cases: list[dict[str, Any]]) -> int:
-    """Cases that can support an Integration claim: ``cross_component`` with two or more expected skills.
+def _cross_component_case_count(dataset_cases: list[dict[str, Any]], member_skills: tuple[Path, ...]) -> int:
+    """Cases that can support an Integration claim: ``cross_component`` naming two or more member skills.
 
-    Native Harbor sources can be valid for effectiveness without carrying this
-    structured composition metadata.
+    A composition case must name two or more of the plugin's own member
+    skills: names that are not members cannot be staged in the member-skills
+    arm. Native Harbor sources can be valid for effectiveness without carrying
+    this structured composition metadata.
     """
+    member_names = {skill.name.strip().casefold() for skill in member_skills}
     return sum(
         1
         for case in dataset_cases
         if case.get("cross_component") is True
         and isinstance(case.get("expected_skills"), list)
-        and len({str(name).strip() for name in case["expected_skills"] if str(name).strip()}) >= 2
+        and len({str(name).strip().casefold() for name in case["expected_skills"]} & member_names) >= 2
     )
 
 
@@ -934,6 +981,10 @@ class _ArmStaging:
 
     native: dict[str, _NativeArm]
     wrapper: tuple[str, ...]
+    #: ``(type, name)`` of components native staging refuses (a permission bypass).
+    refused: frozenset[tuple[str, str]] = frozenset()
+    #: False when the refusals are unknown (a wrapper run whose refusal pass could not read the plugin).
+    refusals_known: bool = True
 
     def native_for(self, component_type: str) -> list[str]:
         return sorted(agent for agent, arm in self.native.items() if component_type in arm.types)
@@ -947,8 +998,9 @@ def _arm_staging(
     plugin_load: str, plan: dict[str, AgentLoadDecision] | None, source: NativePluginSource | None
 ) -> _ArmStaging | None:
     """The per-arm staging for the coverage reasons; ``None`` when a native or auto plan is not known."""
+    refused = frozenset((kind, name) for kind, name, _message in getattr(source, "refusals", ()) or ())
     if plugin_load == "wrapper":
-        return _ArmStaging(native={}, wrapper=())
+        return _ArmStaging(native={}, wrapper=(), refused=refused, refusals_known=source is not None)
     if plan is None:
         return None
     native: dict[str, _NativeArm] = {}
@@ -960,7 +1012,7 @@ def _arm_staging(
             continue
         types = frozenset(native_component_types(adapter, source))
         native[agent] = _NativeArm(adapter.adapter_id, adapter.component_modes(), types)
-    return _ArmStaging(native=native, wrapper=tuple(sorted(wrapper)))
+    return _ArmStaging(native=native, wrapper=tuple(sorted(wrapper)), refused=refused)
 
 
 def _rule_reason(staging: _ArmStaging | None, wrapper_reason: str = _WRAPPER_RULE_REASON) -> str:
@@ -996,6 +1048,13 @@ def _native_capable_agents(component_type: str) -> list[str]:
     )
 
 
+def _refuse_member_skill_hooks(member_skills: tuple[Path, ...]) -> None:
+    """Every load mode stages member skills as written, so a bypass flag in their frontmatter hooks blocks staging."""
+    refusal = member_skill_hook_refusal(member_skills)
+    if refusal is not None:
+        raise PluginLoadError(refusal)
+
+
 def _other_type_row(component: Component, staging: _ArmStaging | None) -> dict[str, Any]:
     """Coverage row of a hook, subagent, command, or other type the generated wrapper does not stage.
 
@@ -1003,7 +1062,23 @@ def _other_type_row(component: Component, staging: _ArmStaging | None) -> dict[s
     a native arm stages the type, why each other arm does not (the wrapper, or
     that agent's native adapter), and the wrapper note when no arm is native.
     """
+    from skillevaluator.plugin_components import is_skill_frontmatter_hook
+
     kind = component.type
+    if is_skill_frontmatter_hook(component):
+        native = staging.native_for(kind) if staging is not None else []
+        wrapped = (
+            f"census-wrapped in the native {', '.join(native)} arm"
+            + ("; staged without the hook census in the other arms" if staging is not None and staging.wrapper else "")
+            if native
+            else "staged without the hook census, so its runs are not counted"
+        )
+        return coverage_row(
+            component,
+            "staged",
+            f"skill-frontmatter hooks are staged with their member skill, and Claude Code runs them while the skill "
+            f"is active; {wrapped}",
+        )
     capable = _native_capable_agents(kind)
     if not capable:
         return coverage_row(
@@ -1012,6 +1087,10 @@ def _other_type_row(component: Component, staging: _ArmStaging | None) -> dict[s
     wrapper_note = f"the generated wrapper does not stage {kind} components"
     if staging is None or not staging.native:
         hint = f"; --plugin-load native stages them for {', '.join(capable)}"
+        if staging is not None and (kind, component.name) in staging.refused:
+            hint = "; --plugin-load native refuses this one, because it enables a permission bypass"
+        elif staging is not None and not staging.refusals_known:
+            hint = ""
         return coverage_row(component, "unsupported", wrapper_note + hint)
     others = [f"{agent} ({wrapper_note})" for agent in staging.wrapper]
     for agent, arm in sorted(staging.native.items()):
@@ -1059,6 +1138,7 @@ def _inventory_provenance(
     claude_skill_dirs: tuple[str, ...] = (),
     claude_native_agents: tuple[str, ...] = (),
     arm_staging: _ArmStaging | None = None,
+    cost_agents: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Build the report-only C2 ``component_coverage`` / ``context_cost`` / ``mcp_pinning``.
 
@@ -1106,7 +1186,7 @@ def _inventory_provenance(
         "component_coverage": summarize_coverage(rows),
         "context_cost": inventory.context_cost(
             extra_rows=_external_member_skill_costs(member_skills, plugin_root),
-            extra_notes=(_TIER3_COVERAGE_NOTE,),
+            **_tier3_cost_view(arm_staging, cost_agents),
         ),
         "mcp_pinning": mcp_pinning_summary(inventory.mcp.effective),
     }
@@ -1231,6 +1311,8 @@ def _mcp_coverage_row(component: Component, contained: bool, mcp: _McpCoverage) 
 
 def _external_member_skill_costs(member_skills: tuple[Path, ...], plugin_root: Path) -> list[CostRow]:
     """Context-cost rows for member skills staged from outside the plugin root."""
+    from skillevaluator.plugin_components import cost_chars, model_hidden_traits
+
     root = plugin_root.resolve()
     rows: list[CostRow] = []
     for skill_dir in member_skills:
@@ -1246,14 +1328,58 @@ def _external_member_skill_costs(member_skills: tuple[Path, ...], plugin_root: P
                 CostRow(
                     "skill",
                     skill_dir.name,
-                    len(parsed.name or "") + len(parsed.description or ""),
-                    len(parsed.body),
+                    cost_chars((parsed.name or "") + (parsed.description or "")),
+                    cost_chars(parsed.body),
                     "member skill staged from outside the plugin root; always-on: name + description; "
                     "on-demand: SKILL.md body",
+                    traits=model_hidden_traits(parsed.frontmatter),
                 )
             )
             break
     return rows
+
+
+def _cost_agents(agents: str | Sequence[str] | None) -> tuple[str, ...]:
+    """The run's agents for the context-cost view; empty when they cannot be resolved."""
+    try:
+        return tuple(_planned_agents(agents) or ())
+    except ValueError:
+        return ()
+
+
+def _tier3_cost_view(staging: _ArmStaging | None, agents: Sequence[str]) -> dict[str, Any]:
+    """The harness and load mode the Tier 3 static estimate describes, and the note that goes with it.
+
+    A native arm of a modeled harness wins (Claude Code or Codex); a wrapper
+    run describes the first modeled agent's wrapper. When the plan is not
+    known yet, the plugin's own native view stays; when no agent is modeled,
+    the plugin's own harness is shown with the run's load mode.
+    """
+    from skillevaluator.plugin_components import COST_HARNESS_LABELS, COST_NATIVE, COST_VIEWS, COST_WRAPPER
+
+    modeled = [agent for agent in agents if agent in {harness for harness, _mode in COST_VIEWS}]
+    if staging is None:
+        return {
+            "extra_notes": (
+                "Tier 3: the load mode of each arm is decided at run time; by_harness gives the native and "
+                "wrapper estimates.",
+            )
+        }
+    native = [agent for agent in sorted(staging.native) if agent in modeled]
+    wrapped = [agent for agent in modeled if agent not in staging.native]
+    views = [(agent, COST_NATIVE) for agent in native] + [(agent, COST_WRAPPER) for agent in wrapped]
+    notes: list[str] = []
+    if any(mode == COST_WRAPPER for _agent, mode in views) or not staging.native:
+        notes.append(_TIER3_COVERAGE_NOTE)
+    if len(views) > 1:
+        shown = ", ".join(f"{COST_HARNESS_LABELS[agent]} ({mode})" for agent, mode in views)
+        notes.append(f"Tier 3 arms load the plugin differently ({shown}); by_harness gives each estimate.")
+    if not views:
+        unmodeled = ", ".join(agents) or "the run's agents"
+        notes.append(f"No context-cost model for {unmodeled}; the estimate shows the plugin's own harness.")
+        return {"load_mode": COST_NATIVE if staging.native else COST_WRAPPER, "extra_notes": tuple(notes)}
+    harness, load_mode = views[0]
+    return {"harness": harness, "load_mode": load_mode, "extra_notes": tuple(notes)}
 
 
 def write_plugin_provenance(run_dir: Path, provenance: dict[str, Any]) -> Path | None:
@@ -1345,10 +1471,28 @@ def _load_manifest_text(raw_text: str, manifest_path: Path, manifest_type: str) 
 
 
 def _plugin_name(manifest: dict[str, Any], plugin_dir: Path) -> str:
+    """The plugin's own name. Plugin names are not skill names: Claude Code sets no length limit and Codex loads
+    long names, so Tier 1 passes them and this bound is the report bound, not the 64-character skill limit."""
     raw_name = manifest.get("name")
     if raw_name is None or (isinstance(raw_name, str) and not raw_name.strip()):
         raw_name = plugin_dir.name
-    return require_bounded_string(raw_name, "Plugin manifest name", max_chars=NAME_MAX_LENGTH).strip()
+    return require_bounded_string(raw_name, "Plugin manifest name", max_chars=PLUGIN_NAME_MAX_REPORT_CHARS).strip()
+
+
+# Room for the package suffix in one file name (255 bytes on common file systems).
+_PACKAGE_NAME_MAX_CHARS = 200
+
+
+def _wrapper_skill_name(plugin_name: str) -> str:
+    """The generated wrapper ``SKILL.md`` name: the plugin name, cut to the skill name limit when longer.
+
+    A longer name keeps its start and gets a short hash of the whole name, so two long plugin names that share
+    a prefix stay apart.
+    """
+    if len(plugin_name) <= NAME_MAX_LENGTH:
+        return plugin_name
+    digest = hashlib.sha256(plugin_name.encode("utf-8")).hexdigest()[:8]
+    return f"{plugin_name[: NAME_MAX_LENGTH - len(digest) - 1].rstrip('-_. ')}-{digest}"
 
 
 def _plugin_description(manifest: dict[str, Any], plugin_name: str) -> str:
@@ -1389,6 +1533,8 @@ class _IntraRepoResolver:
     local_slug: str | None
     active: bool
     snapshot_root: Path
+    # The repository identity Tier 1 uses for the same plugin (same root, same slug).
+    identity: Any = dataclass_field(default=None, repr=False, compare=False)
     _snapshot_cache: dict[tuple[str, str, str], Path | None] = dataclass_field(
         default_factory=dict,
         repr=False,
@@ -1483,61 +1629,87 @@ def _make_intra_repo_resolver(
     repo_root: Path | None,
     stage_root: Path,
 ) -> _IntraRepoResolver:
-    """Build the intra-repo resolver, honoring an optional ``--repo-root`` override.
+    """Build the intra-repo resolver from the same repository identity Tier 1 uses.
 
-    ``repo_root`` (CLI ``--repo-root``) is a determinism override for CI; when it
-    does not actually contain the plugin it is ignored in favor of the layout
-    heuristic. Resolution is inactive when the clone root equals the plugin root
-    (a standalone plugin with no enclosing repo to resolve into).
+    Root precedence matches Tier 1 (:func:`resolve_repository_identity`):
+    ``--repo-root`` when it contains the plugin, then the git top-level that
+    contains the plugin, then the catalog layout. A ``--repo-root`` that does
+    not contain the plugin is ignored, as at Tier 1. Resolution is active only
+    when the root's ``origin`` slug is known (the same fail-closed rule).
     """
-    clone_root = _find_repo_root(plugin_dir).resolve()
-    if repo_root is not None:
-        override = repo_root.expanduser().resolve()
-        if _is_within(plugin_root, override):
-            clone_root = override
-    active = clone_root != plugin_root.resolve()
-    local_slug = _local_repo_slug(clone_root) if active else None
+    from skillevaluator.plugin_dependencies import resolve_repository_identity
+
+    del plugin_root  # the identity is resolved from the plugin directory, as at Tier 1
+    identity = resolve_repository_identity(plugin_dir, repo_root, slug_for=_local_repo_slug)
     snapshot_root = stage_root.expanduser().absolute() / ".intra-repo-snapshots"
     return _IntraRepoResolver(
-        clone_root=clone_root,
-        local_slug=local_slug,
-        active=active,
+        clone_root=identity.clone_root,
+        local_slug=identity.local_slug,
+        active=identity.local_slug is not None,
         snapshot_root=snapshot_root,
+        identity=identity,
     )
 
 
-def _unresolved_refs(
+def _resolve_skill_refs(
     section: Any,
     *,
-    covered_names: set[str],
-    resolved_refs: frozenset[str] | set[str] = frozenset(),
-) -> tuple[str, ...]:
-    """Return labels for refs that Phase 1 cannot resolve to a local component.
+    resolver: _IntraRepoResolver,
+    plugin_dir: Path,
+    contained: tuple[Path, ...],
+    included: tuple[Path, ...],
+) -> tuple[tuple[Path, ...], tuple[str, ...]]:
+    """Stage the skill refs Tier 1 can prove, and return ``(staged skill dirs, unresolved labels)``.
 
-    A ref is covered when EITHER its exact canonical ref resolved intra-repo
-    (``resolved_refs``), OR a local component (contained skill / ``--include-skills``)
-    carries its trailing name AND that name is declared only once in this section.
-    A basename shared by 2+ declared refs is AMBIGUOUS: a bare local component has
-    no repo identity, so it cannot satisfy a *specific* repo's ref -- such refs stay
-    unresolved unless exactly resolved, closing the fail-open where a resolved
-    ``alpha`` covered a foreign ``other/repo::skills::alpha``.
+    Each ref is classified by the Tier 1 classifier with the resolver's
+    identity, so both tiers agree:
+
+    * ``provided``: the skill at that path inside the plugin (a bundled skill,
+      or another skill folder inside the plugin root);
+    * ``referenced``: a private snapshot of the same-repository skill;
+    * ``missing``: never covered. A bundled skill with the same name is not
+      the skill the ref names (it is not at that repository path);
+    * ``external`` or ``unresolved``: covered only by an ``--include-skills``
+      directory with the ref's trailing name, when that name is declared once.
+      That flag is the explicit way to supply a skill Tier 3 cannot fetch; a
+      bundled skill with the same name never covers such a ref.
+
+    A ref listed twice is reported once. A same-repository ref that reaches its
+    target through a link is refused with ``ValueError``, as staging always did.
     """
+    from skillevaluator.plugin_dependencies import classify_section
+
     raw_refs = _iter_raw_refs(section)
+    pairs = classify_section(raw_refs, kind="skills", plugin_root=plugin_dir, identity=resolver.identity)
+    contained_dirs = set(contained)
+    included_names: dict[str, int] = {}
+    for path in included:
+        included_names[path.name] = included_names.get(path.name, 0) + 1
     name_counts: dict[str, int] = {}
-    for ref in raw_refs:
+    for ref, _row in pairs:
         name = _ref_name(ref)
         if name:
             name_counts[name] = name_counts.get(name, 0) + 1
-    labels: list[str] = []
-    for ref in raw_refs:
-        canonical = normalize_ref(ref)
-        if canonical and canonical in resolved_refs:
+    staged: list[Path] = []
+    unresolved: list[str] = []
+    for ref, row in pairs:
+        if row.state == "provided" and row.path:
+            target = (plugin_dir / row.path).resolve()
+            if target not in contained_dirs:
+                staged.append(target)
             continue
-        name = _ref_name(ref)
-        if name and name in covered_names and name_counts.get(name, 0) == 1:
-            continue
-        labels.append(_ref_label(ref))
-    return tuple(labels)
+        if row.state == "referenced" or row.cause == "link":
+            # A linked target is refused outright (ValueError), as staging always did; never staged.
+            resolved = resolver.resolve_skill(ref)
+            if resolved is not None and row.state == "referenced":
+                staged.append(resolved)
+                continue
+        elif row.state in {"external", "unresolved"}:
+            name = _ref_name(ref)
+            if name and name_counts.get(name) == 1 and included_names.get(name) == 1:
+                continue
+        unresolved.append(_ref_label(ref))
+    return tuple(dict.fromkeys(staged)), tuple(unresolved)
 
 
 def _resolve_rules(
@@ -1545,13 +1717,20 @@ def _resolve_rules(
 ) -> tuple[tuple[_StagedRule, ...], tuple[str, ...]]:
     """Resolve rule refs to contained files; report remote/unresolved ones.
 
-    Returns ``(staged_rule_files, unresolved_labels)``. A rule file is
-    staged when it resolves to a real file inside the plugin root (symlink-
-    contained, mirroring :func:`find_bundled_plugin_skills`) OR when a canonical
-    remote ref names *this* clone and resolves intra-repo under the clone root.
-    Each staged rule is read once, here, through a bounded no-follow read, and
-    the staged set shares the contained ``rules/`` aggregate byte bound.
+    Returns ``(staged_rule_files, unresolved_labels)``. A canonical
+    remote ref is classified by the Tier 1 classifier with the resolver's
+    identity (same root, same case-exact probe), so both tiers agree: a
+    ``provided`` rule (inside the plugin root) is staged from the plugin, a
+    ``referenced`` rule from a private snapshot of this repository, and a
+    ``missing``, ``external``, or ``unresolved`` rule is never staged. A
+    path-like ref is staged when it resolves to a real file inside the plugin
+    root (symlink-contained, mirroring :func:`find_bundled_plugin_skills`). A
+    canonical ref listed twice is reported once. Each staged rule is read once,
+    here, through a bounded no-follow read, and the staged set shares the
+    contained ``rules/`` aggregate byte bound.
     """
+    from skillevaluator.plugin_dependencies import CAUSE_LINK, classify_ref, normalize_ref
+
     staged: list[_StagedRule] = []
     unresolved: list[str] = []
     seen: set[Path] = set()
@@ -1567,16 +1746,31 @@ def _resolve_rules(
         staged.append(rule)
         seen.add(path)
 
+    listings: dict[Path, frozenset[str] | None] = {}
+    classified: set[str] = set()
     for ref in _iter_raw_refs(section):
         label = _ref_label(ref)
         if _ref_source(ref) in _REMOTE_REF_SOURCES:
-            # A remote rule ref whose <repo> is this clone resolves intra-repo to a
-            # real file under the clone root; otherwise it stays unresolved.
-            intra = resolver.resolve_rule(ref)
-            if intra is None:
-                unresolved.append(label)
-            elif intra not in seen:
-                _stage(intra)
+            key = normalize_ref(ref) if isinstance(ref, str | dict) else None
+            if key is not None:
+                if key in classified:
+                    continue
+                classified.add(key)
+            row = classify_ref(ref, kind="rules", plugin_root=plugin_dir, identity=resolver.identity, listings=listings)
+            if row.state == "provided" and row.path:
+                target = (plugin_dir / row.path).resolve()
+                if _is_within(target, plugin_root):
+                    if target not in seen:
+                        _stage(target)
+                    continue
+            elif row.state == "referenced" or row.cause == CAUSE_LINK:
+                # A linked target is refused outright (ValueError), as staging always did; never staged.
+                intra = resolver.resolve_rule(ref)
+                if intra is not None and row.state == "referenced":
+                    if intra not in seen:
+                        _stage(intra)
+                    continue
+            unresolved.append(label)
             continue
         resolved = _resolve_contained_file(ref, plugin_dir, plugin_root)
         if resolved is not None and resolved not in seen:
@@ -1673,13 +1867,49 @@ def _discover_contained_rule_files(plugin_root: Path) -> list[_StagedRule]:
         raise ValueError(f"Refusing unsafe or unbounded contained plugin rules: {exc}") from exc
 
 
-def _reject_unsafe_mcp_declaration(name: Any, config: dict[str, Any]) -> None:
+_URL_USERINFO_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9+.-]*://)[^\s/@'\"]+@")
+
+
+def _effective_severity(finding: Any, policy: Any) -> Severity:
+    """The finding's severity after the policy's ``severity_overrides``, as Tier 1 applies them."""
+    current = finding.severity if isinstance(finding.severity, Severity) else Severity(str(finding.severity).lower())
+    return policy.severity_for(finding.category, finding.check_name, current) if policy is not None else current
+
+
+def _blocking(findings: Any, policy: Any) -> list[Any]:
+    return [
+        finding for finding in findings if _effective_severity(finding, policy) in (Severity.CRITICAL, Severity.HIGH)
+    ]
+
+
+def _refusal_detail(finding: Any) -> str:
+    """A blocking finding's message for a Tier 3 refusal, never with a credential in it.
+
+    An inline-secret finding names only its check; any other message loses URL
+    user information and every known token shape.
+    """
+    from skillevaluator.utils.redaction import redact_sensitive_text
+
+    check = str(finding.check_name)
+    if "secret" in check or "credential" in check:
+        return "an inline credential (the value is not shown)"
+    text = _URL_USERINFO_RE.sub(r"\1<redacted>@", str(finding.message))
+    return redact_secrets_in_log_line(redact_sensitive_text(text, max_len=MAX_PLUGIN_MANIFEST_TEXT_CHARS))
+
+
+def _reject_unsafe_mcp_declaration(
+    name: Any, config: dict[str, Any], *, policy: Any = None, manifest_type: str | None = None
+) -> None:
     """Fail closed before a runnable MCP declaration reaches Harbor.
 
     The direct Tier 3 command does not run Tier 1 first. Reuse the same network-free
     declaration policy here so shell smuggling, insecure endpoints, inline secrets,
     malformed transports, and other blocking findings can never be executed merely
-    because the caller selected Tier 3 directly.
+    because the caller selected Tier 3 directly. The *policy*'s private-host
+    allowlist and severity overrides apply exactly as in Tier 1, and the
+    refusal never repeats a credential. *manifest_type* names the format whose
+    client loads the server, so a Codex plugin's ``${VAR:-default}`` URL (which
+    Codex does not expand) is refused here as Tier 1 reports it.
     """
     from skillevaluator.validators.mcp_static import validate_mcp_server_declaration
 
@@ -1728,17 +1958,64 @@ def _reject_unsafe_mcp_declaration(name: Any, config: dict[str, Any]) -> None:
                 allow_empty=True,
             )
 
-    blocking = [
-        finding
-        for finding in validate_mcp_server_declaration(safe_name, config, "<plugin manifest>")
-        if finding.severity in (Severity.CRITICAL, Severity.HIGH)
-    ]
+    hosts = tuple(policy.mcp_allowed_private_hosts) if policy is not None else ()
+    findings = validate_mcp_server_declaration(
+        safe_name, config, "<plugin manifest>", allowed_private_hosts=hosts, manifest_type=manifest_type
+    )
+    blocking = _blocking(findings, policy)
     if blocking:
         first = blocking[0]
         raise ValueError(
             f"Plugin manifest MCP server '{safe_name}' failed blocking static validation "
-            f"({first.check_name}): {first.message}"
+            f"({first.check_name}): {_refusal_detail(first)}"
         )
+
+
+def _reject_unloaded_mcp_findings(inventory: PluginInventory, policy: Any) -> None:
+    """Refuse a plugin whose MCP servers Tier 1 blocks even though Tier 3 does not stage them.
+
+    Another client can load the same folder (Claude Code reads a root
+    ``.mcp.json`` with ``--plugin-dir``), and a bundle-reference plugin's root
+    ``.mcp.json`` is inventoried but never staged. Their per-server findings
+    are Tier 1 findings, so a blocking one (after the policy) refuses the run
+    here too. Broken config files that nothing stages stay non-blocking.
+    """
+    server_findings = [
+        *inventory.mcp.server_findings,
+        *(
+            finding
+            for finding in inventory.findings
+            if finding.category == "MCP_DECLARATION" and (finding.metadata or {}).get("mcp_server")
+        ),
+    ]
+    blocking = _blocking(server_findings, policy)
+    if blocking:
+        first = blocking[0]
+        server = str((first.metadata or {}).get("mcp_server") or "")[:MAX_PLUGIN_MANIFEST_TEXT_CHARS]
+        raise ValueError(
+            f"Plugin MCP server '{server}' (not staged, but loaded from this folder by a client or checked by Tier 1) "
+            f"failed blocking static validation ({first.check_name}): {_refusal_detail(first)}"
+        )
+
+
+_YAML_MCP_KEYS = frozenset({"name", "provider"})
+
+
+def _reject_runnable_yaml_mcp_entry(entry: dict[str, Any], idx: int) -> None:
+    """Hold an ``agent_plugin.yaml`` ``mcp`` entry to the manifest schema Tier 1 validates: ``name`` and ``provider``."""
+    from skillevaluator.models.plugin import MCP_NAME_PATTERN
+
+    extra = sorted(str(key)[:64] for key in entry if key not in _YAML_MCP_KEYS)
+    name, provider = entry.get("name"), entry.get("provider")
+    if extra:
+        raise ValueError(
+            f"Plugin manifest mcp[{idx}] is not a name and provider entry: agent_plugin.yaml MCP entries take only "
+            f"'name' and 'provider' (Tier 1 reports the rest as schema errors); unsupported keys: {', '.join(extra)}"
+        )
+    if not isinstance(name, str) or not re.fullmatch(MCP_NAME_PATTERN, name.strip()):
+        raise ValueError(f"Plugin manifest mcp[{idx}].name must be a valid MCP server name (the manifest schema)")
+    if not isinstance(provider, str) or not provider.strip():
+        raise ValueError(f"Plugin manifest mcp[{idx}] needs a non-empty provider (the manifest schema)")
 
 
 def _launches_from_plugin_files(config: dict[str, Any], *, root_prefixes: tuple[str, ...] = ()) -> bool:
@@ -1837,11 +2114,15 @@ def _normalize_mcp_entries(
     contained_form: bool,
     *,
     plugin_root: Path | None = None,
+    policy: Any = None,
+    manifest_type: str | None = None,
 ) -> list[dict[str, Any]]:
     """Normalize every manifest MCP form into the bundle-reference list shape.
 
     Bundle-reference ``agent_plugin.yaml`` uses a top-level ``mcp`` *list* of
-    ``{name, provider}`` / ``{name, command|url, transport}`` objects. A contained
+    ``{name, provider}`` objects, the manifest schema Tier 1 validates; a
+    runnable ``{name, command|url, transport}`` entry is refused, as Tier 1
+    reports it (:func:`_reject_runnable_yaml_mcp_entry`). A contained
     ``.claude-plugin/plugin.json`` declares servers in any documented Claude Code
     form -- an inline ``mcpServers`` map, a ``.json`` path, or an array mixing
     both -- merged over the root ``.mcp.json`` (a later same-name server replaces
@@ -1864,9 +2145,11 @@ def _normalize_mcp_entries(
         for idx, entry in enumerate(raw_servers):
             if not isinstance(entry, dict):
                 raise ValueError(f"Plugin manifest mcp[{idx}] must be an object")
+            _reject_runnable_yaml_mcp_entry(entry, idx)
             config = {key: value for key, value in entry.items() if key != "name"}
-            _reject_unsafe_mcp_declaration(entry.get("name"), config)
+            _reject_unsafe_mcp_declaration(entry.get("name"), config, policy=policy, manifest_type=manifest_type)
             normalized_entries.append({**entry, "name": entry["name"].strip()})
+        _reject_unloaded_mcp_findings(inventory, policy)
         return normalized_entries
 
     collection = inventory.mcp
@@ -1876,14 +2159,16 @@ def _normalize_mcp_entries(
     # root .mcp.json is inventoried (Tier 1 reports it) but never staged, so it
     # blocks here no more than it does when the manifest has an 'mcp' list.
     # Without the plugin root the finding cannot be attributed: keep it (fail closed).
-    blocking = collection.blocking_source_findings
+    # Every config-source finding, so a policy that raises one to HIGH blocks here as in Tier 1.
+    blocking = list(collection.findings)
     if not contained_form and plugin_root is not None:
         unstaged = _unstaged_root_mcp_json(manifest, plugin_root)
         blocking = [finding for finding in blocking if finding.file_path != unstaged]
+    blocking = _blocking(blocking, policy)
     if blocking:
         first = blocking[0]
         raise ValueError(
-            f"Plugin MCP configuration failed blocking static validation ({first.check_name}): {first.message}"
+            f"Plugin MCP configuration failed blocking static validation ({first.check_name}): {_refusal_detail(first)}"
         )
 
     def _stageable(source: str) -> bool:
@@ -1899,7 +2184,8 @@ def _normalize_mcp_entries(
             raise ValueError(f"Plugin manifest mcpServers[{declaration.name!r}] must be an object")
         # Fail closed: a raw inline credential must never be flattened into the
         # persisted toml (only ${ENV} references may reach the artifact).
-        _reject_unsafe_mcp_declaration(declaration.name, declaration.config)
+        _reject_unsafe_mcp_declaration(declaration.name, declaration.config, policy=policy, manifest_type=manifest_type)
+    _reject_unloaded_mcp_findings(inventory, policy)
 
     normalized: list[dict[str, Any]] = []
     for declaration in collection.effective:
@@ -2041,6 +2327,8 @@ def _split_mcp_servers(
     *,
     plugin_root: Path | None = None,
     root_prefixes: tuple[str, ...] = (),
+    policy: Any = None,
+    manifest_type: str | None = None,
 ) -> _McpSplit:
     """Split MCP entries into runnable (command/url), plugin-file, and provider-only.
 
@@ -2061,7 +2349,9 @@ def _split_mcp_servers(
     user_config: dict[str, tuple[str, ...]] = {}
     probe_targets: list[dict[str, Any]] = []
     # Every entry was validated (bounded strings, blocking static checks) by _normalize_mcp_entries.
-    for raw in _normalize_mcp_entries(manifest, inventory, contained_form, plugin_root=plugin_root):
+    for raw in _normalize_mcp_entries(
+        manifest, inventory, contained_form, plugin_root=plugin_root, policy=policy, manifest_type=manifest_type
+    ):
         name = raw["name"]
         if not (raw.get("command") or raw.get("url")):
             provider_only.append({"name": name, "provider": raw.get("provider") or ""})
@@ -2122,28 +2412,62 @@ def _skip_reason(
     unresolved_rule_refs: tuple[str, ...],
     provider_mcp: list[dict[str, str]],
     unsupported_mcp: list[str] | tuple[str, ...] = (),
+    *,
+    unrooted_mcp: list[str] | tuple[str, ...] = (),
 ) -> str:
+    """Why nothing was evaluated, with advice for each kind of component that is actually present.
+
+    ``unsupported_mcp`` names the servers launched from unstaged plugin files;
+    ``unrooted_mcp`` the ones among them that no copied plugin can start either
+    (relative paths or a relative ``cwd``).
+    """
     parts: list[str] = []
+    advice: list[str] = []
     if unresolved_skill_refs:
-        parts.append(f"{len(unresolved_skill_refs)} remote skill ref(s)")
+        parts.append(f"{len(unresolved_skill_refs)} unresolved skill ref(s)")
+        advice.append(
+            "Add the referenced skills to this repository at their reference paths, or pass --include-skills "
+            "with a local copy of a remote skill (a bundled skill with the same name does not satisfy a reference)."
+        )
     if unresolved_rule_refs:
-        parts.append(f"{len(unresolved_rule_refs)} remote rule ref(s)")
+        parts.append(f"{len(unresolved_rule_refs)} unresolved rule ref(s)")
+        advice.append("Add the referenced rules to this repository at their reference paths.")
     if provider_mcp:
         parts.append(f"{len(provider_mcp)} provider-only MCP server(s)")
+        advice.append(
+            "A provider-only MCP server (a name and provider, with no command or url) is not run in Phase 1; "
+            "declare a command or url to test it locally."
+        )
     if unsupported_mcp:
         # In a skipped package these are only plugin-file launches: a server with
         # just unapplied env/headers is still runnable, so it never reaches here.
         parts.append(f"{len(unsupported_mcp)} MCP server(s) launched from unstaged plugin files")
-    detail = ", ".join(parts) if parts else "no declared dependencies"
+        unrooted = set(unrooted_mcp)
+        if any(name not in unrooted for name in unsupported_mcp):
+            advice.append(
+                "Only a native Claude Code arm copies plugin files and can start such a server: run the "
+                "claude-code agent with --plugin-load native or auto."
+            )
+        if unrooted:
+            advice.append(
+                "Start a server with ${CLAUDE_PLUGIN_ROOT} paths instead of relative paths or a relative cwd, "
+                "so a copied plugin can start it."
+            )
+    if not parts:
+        return "Plugin has no locally-resolvable components to evaluate in Phase 1 (no declared dependencies)."
+    deferred = (
+        " Remote bundle-reference resolution is deferred to a later phase."
+        if unresolved_skill_refs or unresolved_rule_refs
+        else ""
+    )
     return (
-        "Plugin has no locally-resolvable components to evaluate in Phase 1 "
-        f"({detail}). Remote bundle-reference resolution is deferred to a later phase; "
-        "bundle the skills under <plugin>/skills or pass --include-skills to evaluate now."
+        f"Plugin has no locally-resolvable components to evaluate in Phase 1 ({', '.join(parts)}), "
+        f"so nothing it declares was evaluated.{deferred} {' '.join(advice)}"
     )
 
 
 def _fresh_package_dir(stage_root: Path, plugin_name: str) -> Path:
-    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", plugin_name).strip("-._") or "plugin"
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", plugin_name).strip("-._")[:_PACKAGE_NAME_MAX_CHARS] or "plugin"
     package_path = stage_root.expanduser().resolve() / f"{safe_name}{PLUGIN_EVAL_PACKAGE_SUFFIX}"
     if package_path.exists():
         raise ValueError(f"Plugin evaluation staging path already exists: {package_path}")
@@ -2174,7 +2498,7 @@ def _write_plugin_skill_md(
 
     frontmatter = yaml.safe_dump(
         {
-            "name": plugin_name,
+            "name": _wrapper_skill_name(plugin_name),
             "description": plugin_description,
             "metadata": {"generated_by": "skillevaluator-plugin-eval"},
         },

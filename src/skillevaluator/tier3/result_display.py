@@ -41,9 +41,12 @@ def _number(value: object, *, signed: bool = False) -> str:
 
 
 def _score_style(score: float) -> str:
-    if score >= 0.8:
+    # The dimension verdict thresholds, as on the evaluator cards and the HTML dimension rows.
+    from skillevaluator.constants import DIMENSION_VERDICT_NEUTRAL_THRESHOLD, DIMENSION_VERDICT_PASS_THRESHOLD
+
+    if score >= DIMENSION_VERDICT_PASS_THRESHOLD:
         return "green"
-    if score >= 0.6:
+    if score >= DIMENSION_VERDICT_NEUTRAL_THRESHOLD:
         return "yellow"
     return "red"
 
@@ -386,6 +389,51 @@ def _resolved_skill_name(result: Mapping[str, Any]) -> str:
     return "Skill Evaluation"
 
 
+def _report_lift_overall(
+    data: Mapping[str, Any],
+    lift: Mapping[str, Any],
+    *,
+    members_baseline: bool,
+) -> Mapping[str, Any]:
+    """The summary lift on the reports' basis, so this screen shows one lift, not two.
+
+    ``lift.json``'s ``overall`` averages the metrics; the reports compare the
+    dimensions both arms scored, case-weighted, which is the paired
+    statistics' estimate. Runs without those statistics keep ``lift.json``.
+    """
+    uncertainty = data.get("lift_uncertainty") if isinstance(data.get("lift_uncertainty"), Mapping) else {}
+    entry = uncertainty.get("integration") if members_baseline else uncertainty.get("effectiveness")
+    if members_baseline and not isinstance(entry, Mapping):
+        entry = uncertainty.get("effectiveness")  # older runs filed it there
+    if isinstance(entry, Mapping):
+        if entry.get("partial") is True:
+            return {}  # a partial comparison is never shown as a final lift
+        values = [finite_number(entry.get(key)) for key in ("treatment_score", "control_score", "estimate")]
+        if all(value is not None for value in values):
+            return {"with_skill": values[0], "without_skill": values[1], "delta": values[2]}
+    overall = lift.get("overall")
+    return overall if isinstance(overall, Mapping) else {}
+
+
+def _partial_plugin_run(result: Mapping[str, Any]) -> bool:
+    """Whether the plugin run is INCOMPLETE (some components unresolved): a partial result, not a pass."""
+    provenance = result.get("plugin_provenance")
+    return isinstance(provenance, Mapping) and provenance.get("partial") is True
+
+
+def _members_baseline(result: Mapping[str, Any]) -> bool:
+    """Whether the only baseline arm staged the plugin's member skills (legacy ``--lift-mode integration``)."""
+    run_config = result.get("run_config") if isinstance(result.get("run_config"), Mapping) else {}
+    recorded = run_config.get("lift_mode") if isinstance(run_config.get("lift_mode"), Mapping) else {}
+    provenance = result.get("plugin_provenance") if isinstance(result.get("plugin_provenance"), Mapping) else {}
+    effective = recorded.get("effective") or provenance.get("effective_lift_mode")
+    if effective is None:
+        workspace = run_config.get("skill_workspace") if isinstance(run_config.get("skill_workspace"), Mapping) else {}
+        target = run_config.get("eval_target") if isinstance(run_config.get("eval_target"), Mapping) else {}
+        return target.get("kind") == "plugin" and bool(workspace.get("baseline_includes_workspace_skills"))
+    return effective == "integration"
+
+
 def _render_agent_scores(
     *,
     console: Console,
@@ -406,6 +454,8 @@ def _render_agent_scores(
     custom_without = data.get("custom_without_skill") if isinstance(data.get("custom_without_skill"), Mapping) else {}
     custom_lift = data.get("custom_lift") if isinstance(data.get("custom_lift"), Mapping) else {}
     show_baseline = not baseline_skipped and bool(baseline_status or baseline_scores or lift)
+    # Legacy --lift-mode integration: the only baseline staged the member skills.
+    members_baseline = _members_baseline(result)
 
     table = Table(
         show_header=True,
@@ -419,7 +469,7 @@ def _render_agent_scores(
     table.add_column("With Skill", justify="right", no_wrap=True, width=10)
     table.add_column("", no_wrap=True, width=10)
     if show_baseline:
-        table.add_column("No Skill", justify="right", no_wrap=True, width=9)
+        table.add_column("Members" if members_baseline else "No Skill", justify="right", no_wrap=True, width=9)
         table.add_column("", no_wrap=True, width=10)
         table.add_column("Lift", justify="right", no_wrap=True, width=8)
 
@@ -451,7 +501,8 @@ def _render_agent_scores(
     if (with_not_applicable | baseline_not_applicable).intersection(metrics):
         table.caption = (
             "N/A = not applicable: no eval case gave that evaluator a ground_truth or expected_behavior "
-            "to judge against, so it is excluded from scores and lift."
+            "to judge against, or the arm has no skill to discover or route to, so it is excluded from "
+            "scores and lift."
         )
 
     if custom_with or custom_without:
@@ -479,7 +530,7 @@ def _render_agent_scores(
         score, bar = _score_cell(with_overall)
         table.add_row(Text("Overall", style="bold"), score, bar)
 
-    overall = lift.get("overall") if isinstance(lift.get("overall"), Mapping) else {}
+    overall = _report_lift_overall(data, lift, members_baseline=members_baseline)
     with_overall = overall.get("with_skill") if with_usable else None
     baseline_overall = overall.get("without_skill") if baseline_usable else None
     if show_baseline and (finite_number(with_overall) is not None or finite_number(baseline_overall) is not None):
@@ -491,14 +542,13 @@ def _render_agent_scores(
             if finite_number(with_overall) is not None and finite_number(baseline_overall) is not None
             else None
         )
-        table.add_row(
-            Text("Skill Lift", style="bold"),
-            with_score,
-            with_bar,
-            baseline_score,
-            baseline_bar,
-            _delta_cell(delta),
-        )
+        lift_label = Text("Lift vs. members" if members_baseline else "Skill Lift", style="bold")
+        delta_cell = _delta_cell(delta)
+        if _partial_plugin_run(result):
+            # An INCOMPLETE plugin run has no final lift: keep the arm scores, not a final-looking delta.
+            lift_label.append(" (partial run, not final)", style="dim")
+            delta_cell = Text("partial", style="dim italic")
+        table.add_row(lift_label, with_score, with_bar, baseline_score, baseline_bar, delta_cell)
 
     if not table.rows:
         with_score, with_bar = _score_cell(None)
@@ -534,16 +584,20 @@ def _render_agent_scores(
         if subtitle.plain:
             subtitle.append("\n")
         subtitle.append(safe(agent_output), style="dim")
-    # Repeat the stored evaluator lift prominently without changing either
-    # table or deriving a headline from dimensions or incomplete comparisons.
+    # Repeat the reported lift prominently, on the same basis as every report,
+    # without deriving a headline from incomplete comparisons or partial runs.
     content: Table | Group = table
     if (
         with_usable
         and baseline_usable
         and all(finite_number(value) is not None for value in (with_overall, baseline_overall, overall.get("delta")))
     ):
-        headline = Text("OVERALL SKILL LIFT   ", style="bold")
-        headline.append_text(_delta_cell(overall["delta"]))
+        label = "LIFT VS. MEMBER SKILLS   " if members_baseline else "OVERALL SKILL LIFT   "
+        if _partial_plugin_run(result):
+            headline = Text(f"{label.strip()} not shown: partial plugin run (INCOMPLETE), not final", style="dim")
+        else:
+            headline = Text(label, style="bold")
+            headline.append_text(_delta_cell(overall["delta"]))
         agents = result.get("agents")
         if isinstance(agents, Mapping) and len(agents) > 1:
             headline.append(f" · {safe(agent)}", style="dim")
@@ -758,13 +812,14 @@ def _redact_strings(value: Any, safe: Any) -> Any:
 
 
 def _with_report_integration(result: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Add the report payload's Integration block to a raw engine result.
+    """Add the report payload's Integration blocks to a raw engine result.
 
     The engine result has no ``integration`` block: the reports build it from
     the per-agent scores, the run config and the plugin provenance. Without it
     the CLI said Integration "recorded no sum-of-parts comparison" right above a
-    measured Integration lift. This builds the block the report for this run
-    carries (:func:`~skillevaluator.evaluation.tier3_report.integration_report_for`),
+    measured Integration lift. This adds the blocks the report for this run
+    carries (:func:`~skillevaluator.evaluation.tier3_report.integration_reports_for`):
+    the run-level block, and in a multi-agent run each agent's own named block,
     so the CLI and the reports agree.
     """
     from skillevaluator.reporting.plugin_sections import is_plugin_payload
@@ -782,9 +837,9 @@ def _with_report_integration(result: Mapping[str, Any]) -> Mapping[str, Any]:
     run_config = result.get("run_config")
     provenance = result.get("plugin_provenance")
     try:
-        from skillevaluator.evaluation.tier3_report import integration_report_for
+        from skillevaluator.evaluation.tier3_report import integration_reports_for
 
-        integration = integration_report_for(
+        integration, per_agent = integration_reports_for(
             agents,
             dict(run_config) if isinstance(run_config, Mapping) else None,
             dict(provenance) if isinstance(provenance, Mapping) else None,
@@ -794,7 +849,12 @@ def _with_report_integration(result: Mapping[str, Any]) -> Mapping[str, Any]:
         return result
     if integration is None:
         return result
-    return {**result, "integration": integration}
+    # Multi-agent runs: each agent keeps its own named Integration block.
+    named_agents = {
+        name: {**agent, "integration": per_agent[name]} if name in per_agent else agent
+        for name, agent in agents.items()
+    }
+    return {**result, "integration": integration, "agents": named_agents}
 
 
 def _render_plugin_blocks(*, console: Console, result: Mapping[str, Any], safe: Any) -> None:

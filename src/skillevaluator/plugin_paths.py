@@ -10,9 +10,11 @@ classifies paths with ``lstat`` on every component (links are never
 followed) and reads files through
 :class:`~skillevaluator.utils.secure_fs.SecureRoot` with a byte bound. The
 finding helpers report a declared path that is missing, escapes the root, is
-unsafe, lacks the ``./`` prefix, or lies in a folder Tier 1 scans skip. The
-component inventory (:mod:`skillevaluator.plugin_components`) and the MCP
-collection (:mod:`skillevaluator.plugin_mcp`) share them.
+unsafe, lacks the ``./`` prefix, starts with a root variable, or lies in a
+folder Tier 1 scans skip, and a names-only walk notes the shipped folders the
+scans skip and refuses links out of the plugin inside them. The component
+inventory (:mod:`skillevaluator.plugin_components`) and the MCP collection
+(:mod:`skillevaluator.plugin_mcp`) share them.
 """
 
 from __future__ import annotations
@@ -21,19 +23,28 @@ import os
 import re
 import stat
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
     CONTENT_DEDUP_MAX_TOTAL_BYTES,
+    PLUGIN_TREE_MAX_DISCOVERED_PATHS,
+    PLUGIN_TREE_PRUNED_DIRS,
     SCAN_ARTIFACT_DIRS,
     SCAN_EXCLUDED_DIRS,
 )
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.plugin_formats import CLAUDE_PROFILE, DEFAULT_SKILLS_DIR, FormatProfile
-from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, discover_secure_files, lstat_walk
+from skillevaluator.utils.secure_fs import (
+    MAX_SECURE_DIRECTORY_DEPTH,
+    SecurePathError,
+    SecureRoot,
+    discover_secure_files,
+    lstat_walk,
+    stat_is_link_or_reparse,
+)
 
 # The category of every plugin schema and component finding; a policy overlay changes a severity with
 # PLUGIN_SCHEMA.<check>.
@@ -55,6 +66,8 @@ class DeclaredPath:
     rel: PurePosixPath | None
     problem: str | None = None  # empty | escape | invalid | placeholder
     dot_relative: bool = True
+    # The root placeholder (``${CURSOR_PLUGIN_ROOT}``) the path started with, if any.
+    root_variable: str | None = None
 
 
 def normalize_declared_path(raw: str, root_prefixes: Iterable[str]) -> DeclaredPath:
@@ -69,7 +82,8 @@ def normalize_declared_path(raw: str, root_prefixes: Iterable[str]) -> DeclaredP
     text, so ``${CURSOR_PLUGIN_ROOT}foo/x.sh`` loads ``<root>foo/x.sh`` beside
     the root, an escape. Absolute paths, home-relative paths, a drive letter in
     any part (``./C:/Users``), and ``..`` segments are escapes; any other colon
-    (an NTFS data stream, ``x.md:hidden``) is ``invalid``.
+    (an NTFS data stream, ``x.md:hidden``) is ``invalid``. A path that starts
+    with a root placeholder records it as ``root_variable``.
     """
     text = raw.strip()
     if not text:
@@ -78,9 +92,11 @@ def normalize_declared_path(raw: str, root_prefixes: Iterable[str]) -> DeclaredP
         return DeclaredPath(raw, None, "invalid")
     normalized = text.replace("\\", "/")
     dot_relative = normalized in {".", "./"} or normalized.startswith("./")
+    root_variable: str | None = None
     matched = [prefix for prefix in root_prefixes if prefix and normalized.startswith(prefix)]
     if matched:
-        below_root = normalized[len(max(matched, key=len)) :]
+        root_variable = max(matched, key=len)
+        below_root = normalized[len(root_variable) :]
         if below_root and not below_root.startswith("/"):
             return DeclaredPath(raw, None, "escape")  # "<root>foo/x.sh" is beside the root, not in it
         normalized = "./" + below_root.lstrip("/")
@@ -99,7 +115,7 @@ def normalize_declared_path(raw: str, root_prefixes: Iterable[str]) -> DeclaredP
     if any(":" in part for part in parts):
         return DeclaredPath(raw, None, "invalid")
     rel = PurePosixPath(*parts) if parts else PurePosixPath(".")
-    return DeclaredPath(raw, rel, None, dot_relative)
+    return DeclaredPath(raw, rel, None, dot_relative, root_variable)
 
 
 class PluginRootReader:
@@ -306,31 +322,35 @@ def _path_problem_finding(
     )
 
 
-# The folders named in plugin_component_path_unscanned messages.
-_UNSCANNED_FOLDERS = "evals/, results/, versions/, .git/, .venv/, node_modules/, __pycache__/"
-_UNSCANNED_SUGGESTION = (
-    "Move the component out of evaluation-output, version-snapshot, VCS, virtualenv, package, and bytecode-cache "
-    "folders."
-)
+# The folders named in plugin_component_path_unscanned messages, and the advice they give.
+_UNSCANNED_FOLDERS_TEXT = "evals/, results/, versions/, node_modules/, .venv/, .git/, __pycache__/"
+_UNSCANNED_SUGGESTION = "Move the component out of dependency, VCS, evaluation-output, and version-snapshot folders."
+
+
+def _unscanned_folder(rel: PurePosixPath) -> str | None:
+    """The first folder of a plugin-root-relative path that Tier 1 whole-tree scans skip, or ``None``.
+
+    The security, secret, and Unicode scans prune every
+    :data:`~skillevaluator.constants.SCAN_EXCLUDED_DIRS` name at any depth:
+    ``evals/``, ``results/``, and ``versions/`` (and their dotted forms),
+    ``node_modules/``, ``.venv/``, ``.git/``, and ``__pycache__/``. Only an
+    ``evals``/``results``/``versions`` folder at the first level of
+    ``skills/`` (``skills/evals/``) is scanned anyway, because bundled-skill
+    discovery scans it as a skill.
+    """
+    parts = rel.parts
+    for index, part in enumerate(parts):
+        if part not in SCAN_EXCLUDED_DIRS:
+            continue
+        if part in SCAN_ARTIFACT_DIRS and index == 1 and parts[0] == DEFAULT_SKILLS_DIR:
+            continue
+        return part
+    return None
 
 
 def _in_unscanned_folder(rel: PurePosixPath) -> bool:
-    """Whether a plugin-root-relative path is inside a folder that Tier 1 whole-tree scans skip.
-
-    The security, secret, and Unicode scans prune every folder in
-    :data:`~skillevaluator.constants.SCAN_EXCLUDED_DIRS` at any depth:
-    ``evals/``, ``results/``, and ``versions/`` (and their dotted forms),
-    ``.git/``, ``.venv/``, ``node_modules/``, and ``__pycache__/``. Only an
-    evaluation-output or snapshot name at the first level of ``skills/``
-    (``skills/evals/``) is scanned anyway, because bundled-skill discovery
-    scans it as a skill.
-    """
-    parts = rel.parts
-    return any(
-        part in SCAN_EXCLUDED_DIRS
-        and not (index == 1 and parts[0] == DEFAULT_SKILLS_DIR and part in SCAN_ARTIFACT_DIRS)
-        for index, part in enumerate(parts)
-    )
+    """Whether a plugin-root-relative path is inside a folder that Tier 1 whole-tree scans skip."""
+    return _unscanned_folder(rel) is not None
 
 
 def _unscanned_path_finding(
@@ -338,51 +358,274 @@ def _unscanned_path_finding(
 ) -> Finding | None:
     """HIGH when a declared component lives in a folder that Tier 1 whole-tree scans skip.
 
-    The scans prune evaluation output, snapshots, VCS metadata, virtualenvs,
-    packages, and bytecode caches (:func:`_in_unscanned_folder`), so a
-    component the manifest loads from there would never be scanned.
+    The security, secret, and Unicode scans prune evaluation output and
+    version snapshots (``evals/``, ``results/``, ``versions/``), dependency
+    folders (``node_modules/``, ``.venv/``), VCS metadata (``.git/``), and
+    bytecode caches (:func:`_unscanned_folder`). A component the manifest
+    loads from there would never be scanned.
     """
     rel = declared.rel
-    if rel is None or not _in_unscanned_folder(rel):
+    folder = _unscanned_folder(rel) if rel is not None else None
+    if folder is None:
         return None
     return _plugin_finding(
         Severity.HIGH,
         "plugin_component_path_unscanned",
-        f"'{field_name}' path {declared.raw!r} is inside a folder that Tier 1 whole-tree scans skip "
-        f"({_UNSCANNED_FOLDERS}), so the client loads files that are never security-scanned",
+        f"'{field_name}' path {declared.raw!r} is inside '{folder}/', a folder that Tier 1 whole-tree scans skip "
+        f"({_UNSCANNED_FOLDERS_TEXT}), so the client loads files that are never security-scanned",
         reader.display(manifest_rel),
         _UNSCANNED_SUGGESTION,
         metadata={"plugin_component_ref": declared.raw},
     )
 
 
-def _unscanned_file_finding(reader: PluginRootReader, component_type: str, rel: PurePosixPath) -> Finding:
-    """HIGH for a component file a client loads from a nested folder that Tier 1 whole-tree scans skip.
+def _unscanned_packaged_finding(
+    reader: PluginRootReader, component_type: str, rel: PurePosixPath, folder_rel: PurePosixPath
+) -> Finding | None:
+    """HIGH for a component file a client loads from a folder the scans skip, below the folder it lists.
 
-    For example ``commands/evals/deploy.md``: clients load nested component
-    folders whatever their name (:meth:`PluginRootReader.list_files`), and the
-    scans prune that one (:func:`_in_unscanned_folder`).
+    Clients load nested component folders whatever their name: Claude Code
+    loads ``agents/``, ``commands/``, and ``output-styles/`` at any depth, so
+    ``agents/evals/x.md`` is a live subagent even though the whole-tree scans
+    prune ``evals/`` (see :meth:`PluginRootReader.list_files`). A listed folder
+    that is itself inside such a folder already has its declared-path finding
+    (:func:`_unscanned_path_finding`), so its files get no second one.
     """
+    folder = _unscanned_folder(rel)
+    if folder is None or _in_unscanned_folder(folder_rel):
+        return None
+    label = component_type.replace("_", " ")
     return _plugin_finding(
         Severity.HIGH,
         "plugin_component_path_unscanned",
-        f"{component_type} file '{rel.as_posix()}' is inside a folder that Tier 1 whole-tree scans skip "
-        f"({_UNSCANNED_FOLDERS}), so the client loads a file that is never security-scanned",
+        f"{label} '{rel.as_posix()}' is inside '{folder}/', a folder that Tier 1 whole-tree scans skip "
+        f"({_UNSCANNED_FOLDERS_TEXT}). The client loads it from '{folder_rel.as_posix()}/', but it is never "
+        "security-scanned",
         reader.display(rel),
         _UNSCANNED_SUGGESTION,
-        metadata={"path": rel.as_posix()},
+        metadata={"plugin_component_ref": rel.as_posix()},
     )
 
 
 def _style_finding(
+    reader: PluginRootReader,
+    field_name: str,
+    declared: DeclaredPath,
+    manifest_rel: str,
+    *,
+    profile: FormatProfile = CLAUDE_PROFILE,
+) -> Finding:
+    """The finding for a declared path a client does not accept as written (no leading ``./``, or ``./`` alone).
+
+    Its severity follows the client: Claude Code rejects the whole manifest
+    (HIGH, the plugin does not load); Codex drops the value and loads the
+    format's default location instead (MEDIUM).
+    """
+    if declared.rel is not None and str(declared.rel) == "." and declared.dot_relative:
+        problem = "names the plugin root itself"
+        fix = "Name the component folder or file, for example './skills/'."
+    else:
+        problem = "does not start with './'"
+        fix = f"Write the path as './{declared.rel.as_posix() if declared.rel else declared.raw}'."
+    if profile.rejects_undotted_paths:
+        severity = Severity.HIGH
+        outcome = f"{profile.label.removesuffix(' plugin')} rejects the whole manifest and does not load the plugin"
+    else:
+        severity = Severity.MEDIUM
+        outcome = f"the {profile.label} loader ignores this value and loads the default location instead"
+    return _plugin_finding(
+        severity,
+        "plugin_component_path_style",
+        f"'{field_name}' path {declared.raw!r} {problem}; {outcome}",
+        reader.display(manifest_rel),
+        fix,
+        metadata={"plugin_component_ref": declared.raw},
+    )
+
+
+def _root_variable_finding(
     reader: PluginRootReader, field_name: str, declared: DeclaredPath, manifest_rel: str, profile: FormatProfile
 ) -> Finding:
-    """MEDIUM for a manifest path without a leading ``./``, which the format's client rejects or ignores."""
-    client = "Claude Code rejects" if profile is CLAUDE_PROFILE else f"the {profile.label} loader ignores"
+    """MEDIUM for a component path that starts with a root variable the client documents only elsewhere (Cursor)."""
     return _plugin_finding(
         Severity.MEDIUM,
-        "plugin_component_path_style",
-        f"'{field_name}' path {declared.raw!r} does not start with './'; {client} such manifest paths",
+        "plugin_component_path_root_variable",
+        f"'{field_name}' path {declared.raw!r} starts with {declared.root_variable}. The {profile.label} reference "
+        "documents root variables for hook commands and MCP server fields, not for manifest component paths, so "
+        "the client may not expand it there and may not load this component. SkillEvaluator still checks the files "
+        "it names",
         reader.display(manifest_rel),
-        f"Write the path as './{declared.rel.as_posix() if declared.rel else declared.raw}'.",
+        f"Write the path relative to the plugin root, for example './{declared.rel.as_posix() if declared.rel else ''}'.",
+        metadata={"plugin_component_ref": declared.raw},
     )
+
+
+# --------------------------------------------------------------------------- #
+# Folders the whole-tree scans skip                                           #
+# --------------------------------------------------------------------------- #
+# Dependency folders and VCS metadata a plugin may ship that Tier 1 whole-tree
+# scans skip. Their presence is noted (LOW) so a reader knows what was not
+# scanned. A .git folder at the plugin root is the checkout's own metadata.
+_NOTED_UNSCANNED_DIRS = frozenset({"node_modules", ".venv", ".git"})
+_MAX_UNSCANNED_LINK_FINDINGS = 20
+# A virtual environment links its interpreter to the system Python by design.
+_VENV_INTERPRETER_RE = re.compile(r"^(?:python|pypy)(?:\d+(?:\.\d+)?)?(?:\.exe)?$")
+
+
+@dataclass
+class _PrunedWalk:
+    noted: list[PurePosixPath] = field(default_factory=list)
+    escaping_links: list[PurePosixPath] = field(default_factory=list)
+    complete: bool = True
+
+
+def _link_leaves_root(real_root: str, directory: str, name: str) -> bool:
+    """Whether a link (or reparse point) leads outside the plugin root; unresolvable links count as outside.
+
+    An absolute target is outside: it names a host path, not a plugin file.
+    A relative target is resolved through every link on the way
+    (``os.path.realpath``; targets are never read), so a chain such as
+    ``node_modules/up -> ..`` and ``node_modules/evil -> up/../outside.md``
+    is caught, and compared with the resolved root (``real_root``). A link
+    loop or a path that cannot be resolved counts as outside; a dangling link
+    whose missing target would be inside the root does not.
+    """
+    link = os.path.join(directory, name)  # noqa: PTH118 - plain string path
+    try:
+        target = os.readlink(link)  # noqa: PTH115 - reads the link text only
+    except (OSError, ValueError):
+        return True
+    if not target or PurePosixPath(target).is_absolute() or _WINDOWS_DRIVE_RE.match(target) or target[0] in "/\\":
+        return True
+    try:
+        resolved = os.path.realpath(link, strict=True)
+    except (FileNotFoundError, NotADirectoryError):
+        resolved = os.path.realpath(link)  # dangling: resolve as far as the existing parts go
+    except (OSError, ValueError, RuntimeError):
+        return True  # a loop, or a part that cannot be inspected
+    return resolved != real_root and not resolved.startswith(real_root.rstrip(os.sep) + os.sep)
+
+
+def _is_venv_interpreter(directory: Path, name: str) -> bool:
+    """A ``python*`` link in the ``bin/`` (``Scripts/``) folder of a virtual environment (next to ``pyvenv.cfg``)."""
+    if directory.name not in {"bin", "Scripts"} or not _VENV_INTERPRETER_RE.match(name):
+        return False
+    try:
+        return stat.S_ISREG((directory.parent / "pyvenv.cfg").lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _walk_pruned_folders(root: Path) -> _PrunedWalk:
+    """Names-only walk that finds the folders the whole-tree walk prunes and the links inside them.
+
+    The whole-tree verification (``verify_plugin_tree``) refuses every link
+    outside these folders and never enters them. Inside them, a link that
+    leads out of the plugin root is recorded; links that stay inside (for
+    example ``node_modules/.bin`` entries) and a virtual environment's
+    interpreter links are not. Links are never followed, and the walk is
+    bounded like the whole-tree walk.
+    """
+    walk = _PrunedWalk()
+    root_path = Path(os.path.abspath(os.fspath(root)))  # noqa: PTH100 - lexical, never resolved
+    real_root = os.path.realpath(root_path)  # only to compare where links lead
+    budgets = {False: PLUGIN_TREE_MAX_DISCOVERED_PATHS, True: PLUGIN_TREE_MAX_DISCOVERED_PATHS}
+    # (directory, root-relative path, inside a pruned folder)
+    pending: list[tuple[Path, PurePosixPath, bool]] = [(root_path, PurePosixPath(), False)]
+    while pending:
+        directory, rel_dir, pruned = pending.pop()
+        try:
+            if stat_is_link_or_reparse(directory.lstat()):
+                continue
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda item: item.name)
+        except OSError:
+            walk.complete = False
+            continue
+        for entry in entries:
+            budgets[pruned] -= 1
+            if budgets[pruned] < 0:
+                walk.complete = False
+                break
+            rel = rel_dir / entry.name
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat_is_link_or_reparse(metadata):
+                if (
+                    pruned
+                    and not _is_venv_interpreter(directory, entry.name)
+                    and _link_leaves_root(real_root, str(directory), entry.name)
+                ):
+                    walk.escaping_links.append(rel)
+                continue
+            if not stat.S_ISDIR(metadata.st_mode) or len(rel.parts) >= MAX_SECURE_DIRECTORY_DEPTH:
+                continue
+            enters_pruned = not pruned and entry.name in PLUGIN_TREE_PRUNED_DIRS
+            if enters_pruned and entry.name == ".git" and not rel_dir.parts:
+                continue  # the checkout's own metadata: no client loads it, and it can be large
+            if enters_pruned and entry.name in _NOTED_UNSCANNED_DIRS:
+                walk.noted.append(rel)
+            pending.append((Path(entry.path), rel, pruned or enters_pruned))
+    return walk
+
+
+def _pruned_folder_findings(reader: PluginRootReader) -> list[Finding]:
+    """Say which shipped folders Tier 1 does not scan, and refuse links out of the plugin inside them."""
+    walk = _walk_pruned_folders(reader.root)
+    findings: list[Finding] = []
+    for rel in walk.escaping_links[:_MAX_UNSCANNED_LINK_FINDINGS]:
+        folder = _unscanned_folder(rel) or rel.parts[0]
+        findings.append(
+            _plugin_finding(
+                Severity.HIGH,
+                "plugin_unscanned_folder_link",
+                f"'{rel.as_posix()}' is a symlink or reparse point that leads outside the plugin root, inside "
+                f"'{folder}/', a folder Tier 1 whole-tree scans skip. A client that runs or reads it uses content "
+                "SkillEvaluator never checked",
+                reader.display(rel),
+                "Replace the link with the regular file or folder it points to, inside the plugin root, or remove it.",
+                metadata={"path": rel.as_posix()},
+            )
+        )
+    if len(walk.escaping_links) > _MAX_UNSCANNED_LINK_FINDINGS:
+        findings.append(
+            _plugin_finding(
+                Severity.HIGH,
+                "plugin_unscanned_folder_link",
+                f"{len(walk.escaping_links)} links lead outside the plugin root from folders Tier 1 scans skip; only "
+                f"the first {_MAX_UNSCANNED_LINK_FINDINGS} are listed",
+                reader.display("."),
+                "Replace links with regular files and folders inside the plugin root.",
+            )
+        )
+    if walk.noted:
+        shown = ", ".join(f"'{rel.as_posix()}/'" for rel in walk.noted[:10])
+        more = f" and {len(walk.noted) - 10} more" if len(walk.noted) > 10 else ""
+        findings.append(
+            _plugin_finding(
+                Severity.LOW,
+                "plugin_unscanned_folders",
+                f"Tier 1 whole-tree security, secret, and Unicode scans skip {shown}{more} (dependency folders and "
+                "VCS metadata). Their files are not scanned; a declared component or MCP server that loads from "
+                "them is reported separately",
+                reader.display("."),
+                "Do not ship dependency folders; let the client install pinned dependencies, or vendor reviewed "
+                "code outside these folders.",
+                metadata={"paths": [rel.as_posix() for rel in walk.noted[:10]]},
+            )
+        )
+    if not walk.complete:
+        findings.append(
+            _plugin_finding(
+                Severity.LOW,
+                "plugin_unscanned_folder_scan_incomplete",
+                f"the link check of folders Tier 1 scans skip stopped early (more than "
+                f"{PLUGIN_TREE_MAX_DISCOVERED_PATHS} entries, or a folder could not be listed); later entries were "
+                "not checked for links",
+                reader.display("."),
+                "Keep dependency folders and generated output out of the plugin package.",
+            )
+        )
+    return findings

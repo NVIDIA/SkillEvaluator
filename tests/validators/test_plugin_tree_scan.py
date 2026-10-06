@@ -339,7 +339,7 @@ def test_root_findings_are_not_attributed_to_a_bundled_skill(tmp_path: Path, sca
     assert rows[("skill", "foo")]["findings"] == len(skill_findings)
 
 
-def test_root_is_scanned_even_after_a_critical_skill_finding_stops_the_skill_loop(tmp_path: Path) -> None:
+def test_every_bundled_skill_and_the_root_are_scanned_after_a_critical_skill_finding(tmp_path: Path) -> None:
     plugin = _plugin(tmp_path)
     (plugin / "skills" / "foo" / "config.py").write_text(f'KEY = "{AWS_KEY}"\n', encoding="utf-8")
     _skill(plugin / "skills", "zeta")
@@ -347,9 +347,13 @@ def test_root_is_scanned_even_after_a_critical_skill_finding_stops_the_skill_loo
 
     results = _by_name(run_validation(plugin, checks="pii", content_type=CONTENT_TYPE_PLUGIN))
 
-    # Without --continue-on-failure the folder walk still stops after the
-    # first skill with a CRITICAL finding, but the plugin root is always scanned.
-    assert _paths(results["PII Scan"]) == ["[foo] skills/foo/config.py", "scripts/evil.py"]
+    # A CRITICAL finding in one bundled skill does not stop the audit of the
+    # next one (proof M5), and the plugin root is always scanned.
+    assert _paths(results["PII Scan"]) == [
+        "[foo] skills/foo/config.py",
+        "[zeta] skills/zeta/config.py",
+        "scripts/evil.py",
+    ]
 
 
 def test_rebase_leaves_absolute_and_placeholder_paths_alone() -> None:

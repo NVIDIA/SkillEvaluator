@@ -80,7 +80,8 @@ def test_legacy_root_plugin_json_content_does_not_fail_a_claude_plugin(tmp_path:
 @pytest.mark.parametrize(
     ("manifest", "checks"),
     [
-        # Not UTF-8: a decode error. The lenient read still checks the fields: 'café' is not a valid name.
+        # Not UTF-8: a decode error, read leniently, not a security failure (proof L6). The lenient read
+        # still checks the fields: 'café' is not a valid name.
         (_agent_plugins("utf-16"), {"manifest_unreadable", "schema:name:pattern"}),
         (_agent_plugins("latin-1"), {"manifest_unreadable", "schema:name:pattern"}),
         # ASCII-only UTF-16 without a BOM is valid UTF-8 (with NULs), so it decodes and then fails as JSON.
@@ -183,6 +184,8 @@ def test_additional_manifest_content_problem_is_high_but_not_a_security_failure(
     assert checks == ({"plugin_manifest_conflict": Severity.MEDIUM} if relative == "plugin.json" else {})
     [finding] = [f for f in result.findings if f.check_name == "plugin_manifest_additional_unreadable"]
     assert expected in finding.message
+    # Only the components of an additional manifest are checked, not its fields.
+    assert "its fields" not in finding.message
     assert "security_failure" not in result.metadata
     assert not result.passed
     rows = result.metadata["plugin"]["manifest_declarations"]["manifests"]

@@ -5,19 +5,27 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
+from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.url_policy import (
     MAX_REPORT_CHARS,
     UrlCredentials,
     UserinfoRule,
     has_secret_shape,
+    is_env_reference,
     report_text,
     safe_url,
+    url_ambiguities,
     url_credentials,
 )
 
 _TOKEN = "ghp_" + "0123456789abcdefghij0123456789abcdef"
+# A long random user name, as a token used as the user name of a URL is.
+_HEX_USER = "3f2a9c1be47d8a05f6e2b9c4d1a7e3f0b8c6d2a1"
 
 
 @pytest.mark.parametrize(
@@ -35,10 +43,21 @@ _TOKEN = "ghp_" + "0123456789abcdefghij0123456789abcdef"
         ("https://${USER}:secret@h.example/x", "literal", True),
         ("https://deploy@h.example/x", "literal", True),
         ("https://h.example/x", "literal", False),
+        ("https://${USER:-}:${PW:-}@h.example/x", "literal", False),
+        ("https://${env:USER}@h.example/x", "literal", False),
+        ("https://user:${PW:-hunter2}@h.example/x", "literal", True),
         ("https://user:secret@h.example/x", "secret", True),
         ("https://x-access-token:${GITHUB_TOKEN}@github.com/org/repo.git", "secret", False),
+        ("https://x-access-token:${GITHUB_TOKEN:-}@github.com/org/repo.git", "secret", False),
+        ("https://x-access-token:${GITHUB_TOKEN:-hunter2}@github.com/org/repo.git", "secret", True),
         ("https://deploy@h.example/x", "secret", False),
+        ("https://AdminUser1@h.example/x", "secret", False),
         (f"https://{_TOKEN}@h.example/x", "secret", True),
+        (f"https://{_HEX_USER}@h.example/x", "secret", True),
+        # The raw text holds a backslash in the userinfo, which WHATWG clients read as '/'.
+        (f"https://{_HEX_USER}\\@h.example/x", "secret", True),
+        ("https://169.254.169.254\\@h.example/x", "secret", False),
+        ("https://deploy:31337\\@h.example/x", "secret", True),
         ("ssh://git@github.com/org/repo.git", "secret", False),
     ],
 )
@@ -53,8 +72,14 @@ def test_url_credentials_reads_the_userinfo_as_written(url: str, rule: UserinfoR
         (f"q={_TOKEN}", ("q",)),
         ("token=a&page=2&token=b", ("token",)),
         ("api_key=${API_KEY}", ()),
+        ("api_key=${API_KEY:-}", ()),
+        ("api_key=${API_KEY:-literal}", ("api_key",)),
         ("api_key=", ()),
         ("page=2", ()),
+        # 'key' and 'sig' name a credential in a URL query; a setting is not a credential.
+        ("key=primary&sig=v2", ("key", "sig")),
+        ("token=true", ()),
+        ("password_policy=strict", ()),
     ],
 )
 def test_url_credentials_reads_credential_names_and_secret_shaped_values(query: str, keys: tuple[str, ...]) -> None:
@@ -85,6 +110,40 @@ def test_url_credentials_flags_a_query_key_shaped_like_a_secret(query: str) -> N
     """Regression: only query values were checked, so a bare '?ghp_...' component carried no credential."""
     for rule in ("any", "literal", "secret"):
         assert url_credentials(f"https://h.example/sse?{query}", userinfo_rule=rule).query_keys == (_TOKEN,)
+
+
+@pytest.mark.parametrize(
+    ("value", "reference"),
+    [
+        ("$TOKEN", True),
+        ("${TOKEN}", True),
+        ("${TOKEN:-}", True),
+        ("${env:TOKEN}", True),
+        ("${TOKEN:-literal}", False),
+        ("Bearer ${TOKEN}", False),
+        ("literal", False),
+    ],
+)
+def test_env_reference_forms(value: str, reference: bool) -> None:
+    """A reference with no default (or an empty one) carries no value; a default ships with the plugin."""
+    assert is_env_reference(value) is reference
+
+
+@pytest.mark.parametrize(
+    ("url", "ambiguous"),
+    [
+        ("https://h.example/a b", False),
+        ("https://h.example/x?q=a b", False),
+        ("https://h.example .com/x", True),
+        ("https:// h.example/x", True),
+        ("https://h.example/a\u00a0b", True),
+        ("https://h.example/a\tb", True),
+        ("mailto:a b@h.example", True),
+    ],
+)
+def test_a_plain_space_after_the_host_is_not_ambiguous(url: str, ambiguous: bool) -> None:
+    """Clients percent-encode a plain space in the path; whitespace before it, or any other kind, still counts."""
+    assert bool(url_ambiguities(url)) is ambiguous
 
 
 def test_url_credentials_is_false_when_the_url_carries_none() -> None:
@@ -236,3 +295,47 @@ def test_every_github_token_prefix_has_a_secret_shape(prefix: str) -> None:
 def test_fine_grained_github_token_has_a_secret_shape() -> None:
     assert has_secret_shape("github_pat_" + "11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz")
     assert not has_secret_shape("github_pat_short")
+
+
+# --------------------------------------------------------------------------- #
+# One credential rule for MCP server URLs and HTTP hook URLs                   #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("url", "flagged"),
+    [
+        ("https://api.example.com/x?key=rawFAKEvalue0123", True),
+        ("https://api.example.com/x?sig=v2", True),
+        ("https://api.example.com/x?key=${API_KEY}", False),
+        ("https://api.example.com/x?token=true", False),
+        ("https://api.example.com/x?password_policy=strict", False),
+        ("https://api.example.com/x?q=sk-" + "a1B2" * 5, True),
+        (f"https://api.example.com/x?{_TOKEN}", True),
+        ("https://api.example.com/x#/cb?access_token=abc123", True),
+        ("https://api.example.com/x?page=2", False),
+        ("https://admin:hunter2@api.example.com/x", True),
+        ("https://user:${PW}@api.example.com/x", True),
+        ("https://admin:hunter2\\@api.example.com/x", True),
+        (f"https://{_HEX_USER}\\@api.example.com/x", True),
+        ("https://169.254.169.254\\@api.example.com/x", False),
+    ],
+)
+def test_mcp_and_hook_urls_get_the_same_credential_verdict(tmp_path: Path, url: str, flagged: bool) -> None:
+    """The same URL is an inline credential for an MCP server and an HTTP hook, or for neither.
+
+    The one documented difference is user information made only of references
+    (``https://${USER}:${PW}@host``): an HTTP hook's client sends any userinfo
+    as Basic auth with every request, so it counts there.
+    """
+    root = tmp_path / "demo"
+    files = {
+        ".claude-plugin/plugin.json": {"name": "demo", "version": "1.0.0", "description": "URL credential probe"},
+        ".mcp.json": {"mcpServers": {"remote": {"type": "http", "url": url}}},
+        "hooks/hooks.json": {"hooks": {"PostToolUse": [{"matcher": "Write", "hooks": [{"type": "http", "url": url}]}]}},
+    }
+    for rel, content in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(json.dumps(content), encoding="utf-8")
+
+    checks = {finding.check_name for finding in PluginSchemaValidator().validate(root).findings}
+
+    assert ("mcp_url_inline_secret" in checks, "plugin_hook_inline_secret" in checks) == (flagged, flagged)

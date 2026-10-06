@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextvars
 import importlib.util
 import io
 import logging
@@ -54,7 +55,8 @@ def _staged_verifier_sources() -> tuple[tuple[Path, ...], tuple[str, ...]]:
 
     with tempfile.TemporaryDirectory() as scratch, mock.patch.object(harbor_adapter.shutil, "copy2", record):
         harbor_adapter._copy_verifier(Path(scratch))
-        staged = tuple(sorted(path.name for path in (Path(scratch) / "tests").iterdir()))
+        # Harbor 0.22+ runs the verifier from an evaluator-owned package inside tests/.
+        staged = tuple(sorted(path.name for path in harbor_adapter._evaluator_tests_dir(Path(scratch)).iterdir()))
     return tuple(sources), staged
 
 
@@ -310,7 +312,7 @@ def test_staged_verifier_runs_its_canary_and_retry_code_on_an_older_python(tmp_p
     if python is None:
         pytest.skip("no Python older than 3.12 is installed; the call checker above still runs")
     harbor_adapter._copy_verifier(tmp_path)
-    tests_dir = tmp_path / "tests"
+    tests_dir = harbor_adapter._evaluator_tests_dir(tmp_path)
     for helper in ("custom_grader_runner.py", "metric.py"):  # staged for custom graders and Harbor's metric
         shutil.copy2(_TEMPLATES / helper, tests_dir / helper)
     if subprocess.run([python, "-I", "-c", "import idna"], capture_output=True, timeout=30).returncode != 0:
@@ -432,7 +434,8 @@ _JWT = _fixture_secret(
     ],
 )
 def test_linear_pii_patterns_still_report_the_same_values(tmp_path: Path, text: str, check: str, value: str) -> None:
-    assert _pii_findings(tmp_path, text).get(check) == [value]
+    # A credential is reported redacted (public prefix and length), never copied into the report.
+    assert _pii_findings(tmp_path, text).get(check) == [SecurityValidator._shown_pii_value(check, value)]
 
 
 @pytest.mark.parametrize(
@@ -445,7 +448,8 @@ def test_linear_pii_patterns_still_report_the_same_values(tmp_path: Path, text: 
 )
 def test_db_url_password_with_a_slash_is_still_reported(tmp_path: Path, url: str) -> None:
     """Generated passwords often hold a raw "/"; the linear pattern must still report them."""
-    assert _pii_findings(tmp_path, f"DATABASE_URL={url}/app").get("database_credentials") == [url]
+    expected = SecurityValidator._shown_pii_value("database_credentials", url)
+    assert _pii_findings(tmp_path, f"DATABASE_URL={url}/app").get("database_credentials") == [expected]
 
 
 @pytest.mark.parametrize(
@@ -492,7 +496,17 @@ def _local_environment(tmp_path: Path) -> SkillEvaluatorLocalEnvironment:
     environment._inherit_agent_keys = False
     environment._strict_reads = False
     environment._active_processes = {}
+    # The Harbor 0.22+ local environment tracks process creation and streamed output;
+    # its __init__ and Harbor's BaseEnvironment.__init__ set these.
+    environment._active_process_secret_values = {}
+    environment._pending_creations = set()
+    environment._creation_secret_values = {}
+    environment._creation_cleanups = {}
+    environment._creation_cleanup_errors = []
+    environment._stop_requested = False
     environment._persistent_env = {}
+    environment._output_callbacks = contextvars.ContextVar("output_callbacks", default=())
+    environment._exec_env_overlays = contextvars.ContextVar("exec_env_overlays", default=())
     environment._sandbox = local_sandbox.Sandbox(local_sandbox.SandboxPlan("none", "advisory-only", "test"))
     trial = tmp_path / "trial"
     environment.trial_paths = type(

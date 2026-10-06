@@ -113,7 +113,7 @@ def test_floating_uvx_with_requirement_is_unpinned() -> None:
     """Regression: ``uvx --with foo pkg==1.0`` was pinned although uv installs a floating ``foo``."""
     pin = classify_mcp_pinning({"command": "uvx", "args": ["--with", "foo", "pkg==1.0"]})
     assert pin.status == "unpinned"
-    assert pin.detail == "uvx: package 'foo' has no version (resolves to the latest release)"
+    assert pin.detail == "uvx --with: package 'foo' has no version (resolves to the latest release)"
     findings = validate_mcp_server_declaration("s", {"command": "uvx", "args": ["--with", "foo", "pkg==1.0"]}, "p")
     assert [(f.check_name, f.severity) for f in findings] == [("mcp_unpinned_package", Severity.MEDIUM)]
 
@@ -135,7 +135,7 @@ def test_uv_tool_run_reads_with_requirements_too() -> None:
     pin = classify_mcp_pinning({"command": "uv", "args": ["tool", "run", "--with", "foo>=1", "pkg==1.0"]})
     assert (pin.status, pin.detail) == (
         "unpinned",
-        "uv tool run: requirement 'foo>=1' is a range or tag, not an exact '==' version",
+        "uv tool run --with: requirement 'foo>=1' is a range or tag, not an exact '==' version",
     )
 
 
@@ -318,7 +318,7 @@ def test_pinning_reads_a_runner_path_with_spaces() -> None:
     floating = classify_mcp_pinning({"command": _UVX_WITH_SPACES, "args": ["--with", "foo", "pkg==1.0"]})
     assert (floating.status, floating.detail) == (
         "unpinned",
-        "uvx: package 'foo' has no version (resolves to the latest release)",
+        "uvx --with: package 'foo' has no version (resolves to the latest release)",
     )
     compose = classify_mcp_pinning({"command": _DOCKER_WITH_SPACES, "args": ["compose", "up"]})
     assert (compose.status, compose.detail) == ("not_applicable", "docker invocation is not 'run'")
@@ -727,4 +727,5 @@ def test_audit_and_pinning_read_the_same_uvx_requirements(tmp_path: Path, pip_au
         f.metadata["package_name"] for f in result.findings if f.check_name == "dependency-version-unverified"
     ]
     assert unverified == ["foo"]
-    assert classify_mcp_pinning(server).detail == "uvx: package 'foo' has no version (resolves to the latest release)"
+    detail = classify_mcp_pinning(server).detail
+    assert detail == "uvx --with: package 'foo' has no version (resolves to the latest release)"

@@ -59,6 +59,7 @@ class EvaluationOptions:
     # Supplied by the orchestration input, never inferred from repository state:
     # the tree that runs the evaluator is not the tree being evaluated.
     evaluated_source: dict[str, str] | None = None
+    environment_kwarg: tuple[str, ...] = ()
 
     def engine_kwargs(self) -> dict[str, Any]:
         """Return keyword arguments (excluding ``skill_path``) for the engine."""

@@ -143,8 +143,14 @@ Example usage here.
 
         naming_findings = [f for f in result.findings if f.check_name == "manifest_naming"]
         assert len(naming_findings) == 1, "Expected a HIGH finding for lowercase skill.md naming"
-        assert "SKILL.md" in naming_findings[0].message
-        assert "agentskills.io" in naming_findings[0].message
+        # Compare the whole message: it names the canonical file and the spec it comes from.
+        assert naming_findings[0].message == (
+            "Skill manifest uses non-canonical name 'skill.md' — "
+            "the agentskills.io spec requires 'SKILL.md' (uppercase). "
+            "On case-sensitive filesystems (Linux), this will not be "
+            "recognized by spec-compliant tooling"
+        )
+        assert naming_findings[0].suggestion == "Rename 'skill.md' to 'SKILL.md' to comply with the agentskills.io spec"
 
     def test_skill_md_uppercase_no_naming_warning(self, tmp_path: Path):
         """Test that SKILL.md (uppercase) does NOT produce a naming warning."""

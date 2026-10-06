@@ -20,6 +20,7 @@ from time import monotonic
 from typing import Literal, Protocol, TextIO, runtime_checkable
 
 from skillevaluator.tier3.harbor.secret_redaction import redact_secrets_in_log_line
+from skillevaluator.utils.redaction import credential_uri_secret_values
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 ProgressMode = Literal["auto", "rich", "plain", "off"]
@@ -34,6 +35,10 @@ _SECRET_ASSIGNMENT_RE = re.compile(
 )
 _SECRET_ENV_NAME_RE = re.compile(r"(?i)(?:api[_-]?key|access[_-]?key|auth|credential|password|secret|token)")
 _LIVE_MIN_EVENT_ROWS = 6
+# Values of credential-named variables that are plainly flags, not secrets.
+_FLAG_LIKE_VALUE_RE = re.compile(r"(?i)^(?:[0-9]+|true|false|yes|no|on|off|enabled|disabled|none|null)$")
+_MIN_NAMED_SECRET_LENGTH = 4
+_CREDENTIAL_URI_USERINFO_RE = re.compile(r"(?i)(?P<scheme>[a-z][a-z0-9+.-]{0,31}://)(?P<userinfo>[^\s/?#]+@)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,16 +104,47 @@ class ProgressReporter(Protocol):
 def redact_progress_detail(detail: object, *, secret_values: set[str] | None = None) -> str:
     """Return a single-line diagnostic safe enough for a progress surface."""
     text = " ".join(strip_terminal_controls(str(detail)).split())
+    if "://" in text:
+        text = _CREDENTIAL_URI_USERINFO_RE.sub(r"\g<scheme><redacted>@", text)
     for secret in sorted(secret_values or (), key=len, reverse=True):
         if len(secret) >= 4:
             text = text.replace(secret, "<redacted>")
+        elif secret:
+            # Exact credential-derived fragments can legitimately be short
+            # (for example proxy userinfo). Redact them only as standalone
+            # tokens so a one-character secret cannot erase normal prose.
+            text = re.sub(
+                rf"(?<![A-Za-z0-9_]){re.escape(secret)}(?![A-Za-z0-9_])",
+                "<redacted>",
+                text,
+            )
     text = redact_secrets_in_log_line(text, extra_secret_values=secret_values)
     return _SECRET_ASSIGNMENT_RE.sub(r"\1<redacted>", text)
 
 
 def secret_values_from_environment(environment: Mapping[str, str]) -> set[str]:
     """Extract exact credential values without treating every env value as secret."""
-    return {str(value) for name, value in environment.items() if value and _SECRET_ENV_NAME_RE.search(name)}
+    protected: set[str] = set()
+    for name, value in environment.items():
+        if not value:
+            continue
+        rendered = str(value)
+        if (
+            _SECRET_ENV_NAME_RE.search(name)
+            and len(rendered) >= _MIN_NAMED_SECRET_LENGTH
+            and not _FLAG_LIKE_VALUE_RE.match(rendered.strip())
+        ):
+            # A credential-named flag such as FOO_AUTH_ENABLED=1 is not a secret;
+            # treating "1" as one would redact ordinary progress text.
+            protected.add(rendered)
+        if name.upper().endswith("_PROXY") or "://" in rendered:
+            protected.update(
+                credential_uri_secret_values(
+                    rendered,
+                    allow_schemeless=name.upper().endswith("_PROXY"),
+                )
+            )
+    return protected
 
 
 class PlainProgressReporter:

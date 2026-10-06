@@ -450,7 +450,7 @@ def test_lockfile_larger_than_the_manifest_budget_is_audited(tmp_path: Path, too
     ("lockfile", "limits", "reason"),
     [
         (b'{"lockfileVersion": 3, "packages": {', {}, "not valid JSON"),
-        (b'{"lockfileVersion": 3, "name": "caf\xe9"}', {}, "can't decode"),
+        (b'{"lockfileVersion": 3, "name": "caf\xe9"}', {}, "not valid UTF-8"),
         (json.dumps(_lockfile(3)).encode(), {"MAX_LOCKFILE_BYTES": 64}, "64-byte limit"),
         (json.dumps(_lockfile(20)).encode(), {"MAX_LOCKFILE_COLLECTION_ITEMS": 10}, "collection size exceeds 10"),
     ],
@@ -618,7 +618,9 @@ def test_mcp_file_shared_by_two_manifests_lists_its_image_once(tmp_path: Path) -
         tmp_path / "demo",
         {".codex-plugin/plugin.json": {"name": "demo"}, ".mcp.json": {"mcpServers": {"db": _DOCKER_SERVER}}},
     )
-    assert DependencySecurityValidator()._mcp_images(root) == [(_IMAGE, ".mcp.json (mcpServers['db'])")]
+    assert DependencySecurityValidator()._mcp_images(root) == [
+        (_IMAGE, ".mcp.json (mcpServers['db'])", ".mcp.json", "db")
+    ]
 
 
 def _fake_pip_audit(monkeypatch: pytest.MonkeyPatch, *responses: ToolResult) -> FakeTool:
@@ -667,10 +669,10 @@ def test_pip_audit_evidence_keeps_the_plugin_python_audit_complete(
     )
 
 
-def test_pin_pip_audit_skipped_makes_the_plugin_python_audit_incomplete(
+def test_pin_pip_audit_skipped_is_not_audited_in_the_plugin_summary(
     tmp_path: Path, tools: dict[str, FakeTool], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression: a skipped pin was counted as audited, so the plugin's Python audit passed as complete."""
+    """Regression: a skipped pin was counted as audited. It is a MEDIUM not-audited finding and an unverified pin."""
     skipped = {
         "name": "requests",
         "skip_reason": "Dependency not found on PyPI and could not be audited: requests (2.31.0+corp)",
@@ -680,15 +682,21 @@ def test_pin_pip_audit_skipped_makes_the_plugin_python_audit_incomplete(
 
     result = _dependency_result(_bare_plugin(tmp_path / "demo", files))
 
-    assert result.incomplete_scans == ["pip-audit"]
+    assert result.incomplete_scans == []
+    [not_audited] = [f for f in result.findings if f.check_name == eco.NOT_AUDITED_CHECK]
+    assert (not_audited.severity, not_audited.metadata["package_name"], not_audited.file_path) == (
+        Severity.MEDIUM,
+        "requests",
+        "requirements.txt",
+    )
     python = _summary(result, "python")
-    assert (python["status"], python["declarations"], python["audited"], python["unverified"]) == (
-        "incomplete",
+    assert (python["status"], python["declarations"], python["audited"], python["unverified"], python["errors"]) == (
+        "audited",
         2,
         1,
         1,
+        [],
     )
-    assert python["errors"] == ["requirements.txt: pip-audit could not audit 1 pin(s): requests==2.31.0+corp"]
 
 
 def test_one_failed_pip_audit_batch_counts_only_the_audited_pins(

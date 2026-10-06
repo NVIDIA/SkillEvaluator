@@ -212,7 +212,7 @@ Static checks; LLM-free by default. Tier 1 gates the exit code and always runs.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--checks, --tier1-checks TEXT` | all applicable | Comma-separated subset of Tier 1 checks. Default choices: `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, `lint`; opt-in (not run by default): `dependency`, and, for plugins, `claude-validate` (parity with `claude plugin validate --strict`). `quality`/`lint`/`version` are skill-only and skipped for rules and workflows. |
+| `--checks, --tier1-checks TEXT` | all applicable | Comma-separated subset of Tier 1 checks. Default choices: `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, `lint`; opt-in (not run by default): `dependency`, and, for plugins, `claude-validate` (parity with `claude plugin validate`). `quality`/`lint`/`version` are skill-only and skipped for rules and workflows. |
 | `--resolve-endpoints` | off | Plugin only, opt-in network check: resolve MCP and HTTP hook URL hosts and send one credential-free `HEAD` (no redirects followed) to flag names or redirects that reach private, link-local, or cloud-metadata addresses. Also enabled by `endpoints.resolve: true` in the policy. See [Plugin Evaluation](plugin-evaluation.mdx#opt-in-endpoint-dns-and-redirect-checks). |
 | `--fail-fast` | off | Stop on the first failing check instead of collecting all issues. |
 | `-c, --continue-on-failure` | off | Run the full pipeline without stopping early; record all issues in the reports. Overrides `--fail-fast`, and for folder validation keeps scanning every skill past a CRITICAL finding. |
@@ -238,7 +238,7 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--tier3 / --no-tier3` | enabled for skills | Run or skip Tier 3 live agent evaluation. Accepts a supported YAML/JSON dataset or native Harbor source and validates it before execution. `--agent-eval` / `--no-agent-eval` are compatibility aliases. Explicit `--tiers` selection controls scope; `--no-tier3` also disables autopilot. |
-| `--block-on-agent-eval / --no-block-on-agent-eval` | advisory | Choose whether Tier 3 findings, including missing or invalid selected task-source evidence, participate in the `validate` exit gate. This flag does not enable Tier 3 by itself. |
+| `--block-on-agent-eval / --no-block-on-agent-eval` | advisory | Choose whether Tier 3 participates in the `validate` exit gate. With the flag, a Tier 3 `FAIL` verdict, a confirmed Skill Lift regression (FAIL band with the whole interval below zero), a skipped or `INCOMPLETE` run, and missing or invalid selected task-source evidence fail `validate`; a `NEUTRAL` verdict does not. Every report calls a gated run that never ran `FAIL`, and a partial plugin run `INCOMPLETE` unless its verdict is `FAIL` or it shows a confirmed regression. Without it, Tier 3 is reported but never changes the exit code. This flag does not enable Tier 3 by itself. |
 | `--autopilot / --no-autopilot` | enabled for skills | Generate one starter case when no evaluation source exists, then run Tier 3. Existing sources are reused unchanged; invalid sources are reported. `--no-autopilot` requires an existing source. Explicit tier selection or `--no-tier3` can exclude Tier 3. |
 | `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents to evaluate. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. |
 | `--env-mode` | `docker` | Harbor environment backend (full list under [tier3 evaluate](#tier3-evaluate)). |
@@ -246,6 +246,8 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | `--plugin-load [wrapper\|native\|auto]` | `wrapper` | Plugin only: how the with-plugin arm loads the plugin: the generated wrapper skill, the harness's own plugin layout, or native where supported. See [Native loading](plugin-evaluation.mdx#native-loading). |
 | `--probe-mcp` | off | Plugin only: before Tier 3, probe each author-supplied URL MCP server from the host (`initialize` + `tools/list`, bounded, no redirects) under the endpoint policy and `mcp.allowed_private_hosts` from `--policy`. Advisory; recorded as `mcp_proof`. See [Public MCP proof](plugin-evaluation.mdx#public-mcp-proof). |
 | `--probe-mcp-env NAME` | none | Plugin only, with `--probe-mcp`: a host environment variable the probe may expand into a server's declared `${NAME}` headers (repeatable). Without it, the probe sends only literal header values; a header that references any other variable is not sent. |
+| `--environment-kwarg`, `--ek` | none | Operator-only `KEY=VALUE` constructor option for Harbor-native non-Docker backends (repeatable). Forwarded only when Tier 3 is enabled; skill-owned `evals/config.yml` cannot set these values. Never pass secrets. |
+| `--policy FILE` | bundled profile | Custom policy YAML overlaid on the default profile, as in `validate`. Its `severity_overrides` apply to the MCP static checks that gate staging (so Tier 3 blocks what Tier 1 blocks), and `mcp.allowed_private_hosts` reaches `--probe-mcp`. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
@@ -399,7 +401,8 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; experimental: `hermes` (container environments only, Anthropic provider); the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
-| `--env-mode` | `docker` | Where trials run. All 16 values: `docker`, `daytona`, `e2b`, `modal`, `runloop`, `langsmith`, `gke`, `novita`, `apple-container`, `singularity`, `islo`, `tensorlake`, `cwsandbox`, `wandb`, `use-computer`, `local`. Cloud modes are provider-managed Harbor backends enabled by the matching Harbor extra; `local` runs on your host. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `--env-mode` | `docker` | Where trials run. SkillEvaluator exposes 23 environment modes: 22 Harbor-native backends, including Docker, plus SkillEvaluator `local` mode. See the complete extras and prerequisites matrix in [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `--environment-kwarg`, `--ek` | none | Operator-only `KEY=VALUE` constructor option for Harbor-native non-Docker backends (repeatable). Values accept JSON-compatible types; skill-owned `evals/config.yml` cannot set them. Never pass secrets. Docker and local reject all kwargs, and Harbor runtime-policy fields for overrides, mounts, networks, extra Compose, lifecycle, and pod security are reserved. |
 | `--autopilot` | off | Create one eval case when no dataset/task source exists, then evaluate. The case is LLM-generated with the configured provider, with a deterministic keyless template fallback; an existing source is never overwritten. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
 | `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
@@ -458,7 +461,7 @@ skillevaluator tier3 evaluate-plugin ./my-plugin --lift-mode both \
 | `--skip-baseline` | off | Skip the no-plugin baseline. Invalid with `integration` or `both`, which require a baseline. |
 | `--lift-mode [effectiveness\|integration\|both]` | `effectiveness` | Compare the coordinated plugin with no plugin, its member skills staged individually, or both. `both` falls back to effectiveness when composition evidence is missing. |
 | `--plugin-load [wrapper\|native\|auto]` | `wrapper` | How the with-plugin arm loads the plugin. `native` fails for agents or environments without a native adapter; `auto` falls back to the wrapper. Baseline arms are unchanged. See [Native loading](plugin-evaluation.mdx#native-loading). |
-| `--probe-mcp` | off | Before the run, probe each author-supplied URL MCP server from the host (`initialize` + `tools/list`, bounded, no redirects) under the endpoint policy. This command takes no policy file and uses a bundled profile (`SKILLEVALUATOR_PROFILE` or the default), none of which allowlists private hosts, so private hosts are not probed; a custom `mcp.allowed_private_hosts` allowlist applies to `--probe-mcp` only through `validate --tier3 --policy <file>`. Advisory; recorded as `mcp_proof` in plugin provenance. See [Public MCP proof](plugin-evaluation.mdx#public-mcp-proof). |
+| `--probe-mcp` | off | Before the run, probe each author-supplied URL MCP server from the host (`initialize` + `tools/list`, bounded, no redirects) under the endpoint policy. Private hosts are probed only when the `--policy` file's `mcp.allowed_private_hosts` allowlists them; no bundled profile (`SKILLEVALUATOR_PROFILE` or the default) does. Advisory; recorded as `mcp_proof` in plugin provenance. See [Public MCP proof](plugin-evaluation.mdx#public-mcp-proof). |
 | `--probe-mcp-env NAME` | none | With `--probe-mcp`: a host environment variable the probe may expand into a server's declared `${NAME}` headers (repeatable). Without it, the probe sends only literal header values; a header that references any other variable is not sent. |
 | `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
 | `--pass-threshold FLOAT` | unset | Score threshold (0.0–1.0) for a case to count as passed. |
@@ -485,7 +488,9 @@ Integration requires at least one dataset case with `cross_component: true`
 and two or more distinct `expected_skills`. An explicit `integration` run is
 inconclusive without that evidence and exits 1 before any agent runs; `both`
 still runs the valid effectiveness comparison and records why Integration was
-skipped. A plugin with nothing locally evaluable is skipped with exit 0. A
+skipped. A plugin with nothing locally evaluable exits 1 as `INCOMPLETE` when
+its declared refs or MCP servers could not be resolved, and is skipped with
+exit 0 only when it declares nothing to evaluate. A
 partial run (unresolved refs, provider-only MCP servers, or MCP `env` or
 `headers` the runtime cannot apply) writes its results and then exits 1 as
 `INCOMPLETE`. [Plugin Evaluation](plugin-evaluation.mdx#tier-3-live-evaluation)
@@ -589,7 +594,8 @@ skillevaluator doctor --env-mode docker
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-a, --agents TEXT` | provider-native | Comma-separated agents to check. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. |
-| `--env-mode` | `docker` | Backend to check (same 16 values as [tier3 evaluate](#tier3-evaluate)). |
+| `--env-mode` | `docker` | Backend to check (same 23 modes as [tier3 evaluate](#tier3-evaluate)). |
+| `--environment-kwarg`, `--ek` | none | `KEY=VALUE` non-secret constructor option for a Harbor-native non-Docker backend (repeatable). Pass the same values intended for evaluation. Docker and local reject all kwargs; policy-owned fields are rejected for every eligible backend. |
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable) — check readiness with the model each agent will actually run. |
 | `--verify-models` | off | Live per-agent catalog probe. Prints pass for verified access, warn for an inconclusive or non-authoritative result (success or failure), and fail only for a definitive credential, model, or configuration rejection. |
 
@@ -606,7 +612,8 @@ skillevaluator health-check
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-a, --agents TEXT` | provider-native | Comma-separated agents to check. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. |
-| `--env-mode` | `docker` | Backend to check (same 16 values as [tier3 evaluate](#tier3-evaluate)). |
+| `--env-mode` | `docker` | Backend to check (same 23 modes as [tier3 evaluate](#tier3-evaluate)). |
+| `--environment-kwarg`, `--ek` | none | `KEY=VALUE` non-secret constructor option for a Harbor-native non-Docker backend (repeatable). Pass the same values intended for evaluation. Docker and local reject all kwargs; policy-owned fields are rejected for every eligible backend. |
 
 ## models
 

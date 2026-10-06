@@ -554,3 +554,32 @@ def test_policy_ignores_malformed_mcp_block(tmp_path: Path) -> None:
     assert load_policy_file(policy_path).mcp_allowed_private_hosts == ()
     policy_path.write_text("mcp:\n  allowed_private_hosts: localhost\n", encoding="utf-8")
     assert load_policy_file(policy_path).mcp_allowed_private_hosts == ()
+
+
+@pytest.mark.parametrize(
+    ("tag", "matches"),
+    [
+        ("1.2.3", True),
+        ("v1.2.3-rc.1", True),
+        ("1.0.0+build.5", True),
+        ("2024.10_beta", True),
+        ("-1.2", False),
+        ("1.2-", False),
+        ("latest", False),
+    ],
+)
+def test_version_tag_pattern_keeps_its_matches(tag: str, matches: bool) -> None:
+    from skillevaluator.validators.mcp_static import _VERSION_TAG_RE
+
+    assert bool(_VERSION_TAG_RE.match(tag)) is matches
+
+
+def test_version_tag_pattern_rejects_a_long_bad_tag_quickly() -> None:
+    import time
+
+    from skillevaluator.validators.mcp_static import _VERSION_TAG_RE
+
+    started = time.perf_counter()
+    assert _VERSION_TAG_RE.match("1" + ".a" * 40 + "!") is None
+    # The old pattern backtracked exponentially here (about 0.1 s at 22 repeats, doubling per repeat).
+    assert time.perf_counter() - started < 1.0

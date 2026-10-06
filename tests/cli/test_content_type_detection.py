@@ -574,7 +574,8 @@ class TestAgentPluginsRootManifestDetection:
         assert content_type == CONTENT_TYPE_PLUGIN
         [schema] = results
         assert not schema.passed
-        assert [finding.check_name for finding in schema.findings] == ["manifest_outside_root"]
+        # The refusal names a hard link as such (plugin_schema._manifest_link_problem).
+        assert [finding.check_name for finding in schema.findings] == ["manifest_hardlinked"]
 
     def test_manifest_over_the_opt_in_bound_opts_in_unread(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

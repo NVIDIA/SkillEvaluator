@@ -517,7 +517,7 @@ def test_html_tier3_statistics_render_ci_reliability_cost_and_context(tmp_path: 
     assert "not priced: the run recorded tokens but no USD cost" in statistics
     assert "pass^k: a case passes only when all k attempts pass." in statistics
     context = element_text(html, "tier3-plugin-context-measured") or ""
-    assert "+1,450 tokens per first turn across 4 paired trial(s)" in context
+    assert "+1,450 tokens per first turn (mean over 4 paired cases)" in context
     assert "Missing cases: case-2" in statistics
     assert "Failed arms: Sum of parts" in statistics
     assert "Attempt shortfall in case-3 (Sum of parts): 1 of 3 attempts observed" in statistics
@@ -577,10 +577,12 @@ def test_html_tier3_signals_are_advisory_and_render_every_block(tmp_path: Path) 
     signals = element_text(html, "tier3-plugin-signals") or ""
     assert signals.startswith("Plugin Signals — Advisory")
     assert "codex · Plugin Advisory 3 trial(s); 1 without a trajectory" in signals
-    assert "Tool selection (precision / recall / F1) 80% / 67% / 73% 1 decoy call(s) (10% of calls)" in signals
+    # ``decoy_call_rate`` is the share of trials with a decoy call, not a share of calls.
+    assert "Tool selection (precision / recall / F1) 80% / 67% / 73% 1 decoy call(s), in 10% of trials" in signals
     assert "Tool arguments 75% pass rate 3/4 checks passed" in signals
     assert "MCP call success 80% 4/5 succeeded; 1 failed; 0 unknown" in signals
-    assert "Order checks 1/2 passed (50%)" in signals
+    # The unit is edges, not trials.
+    assert "Order checks 1/2 edges in order (50%)" in signals
     assert "Handoff checks not configured for this dataset" in signals
     assert "Conflict checks 1/1 passed (100%)" in signals
     assert "Activation coverage 67% exercised declared 3, exercised 2, unverified 0, unavailable 1" in signals
@@ -698,7 +700,7 @@ def test_cli_reporter_prints_tier3_plugin_blocks(tmp_path: Path) -> None:
     assert "Lift mode: requested both · effective effectiveness (fell back)" in plain
     assert "Integration: INCONCLUSIVE — No cross-component case completed. (advisory)" in plain
     assert "CI includes zero" in plain
-    assert "Measured context delta: +1,450 tokens per first turn (4 pairs)" in plain
+    assert "Measured context delta: +1,450 tokens per first turn (mean over 4 paired cases)" in plain
     assert "Plugin signals (advisory, report-only; never changes a score or verdict)" in plain
     assert "handoff not configured for this dataset" in plain
 

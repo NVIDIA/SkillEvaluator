@@ -23,8 +23,9 @@ literals and well-known names only. With ``validate --resolve-endpoints`` (or
 URLs are read the way WHATWG clients (Node, the MCP SDKs) read them, so a
 backslash, a missing ``//``, or a percent-encoded host name cannot hide the real
 host. A host that resolves to a non-public address is never contacted.
-Endpoints left unchecked by the endpoint cap, the time budget, or unavailable
-DNS make the result incomplete.
+Endpoints left unchecked by the endpoint cap, the time budget, unavailable DNS,
+a failed ``HEAD`` request, or a redirect target that does not resolve make the
+result incomplete.
 Default validation never imports the network path: nothing here runs unless
 enabled.
 """
@@ -338,6 +339,8 @@ class _Run:
     lookups: int = 0
     resolved: int = 0
     timed_out: int = 0
+    head_failed: int = 0
+    redirect_unresolved: int = 0
     unchecked: list[EndpointTarget] = field(default_factory=list)
     first_file: str = ""
 
@@ -382,8 +385,9 @@ class EndpointChecker:
         up the time budget before a later endpoint's addresses are classified. The
         summary has ``incomplete: true`` (with reasons, and one MEDIUM
         ``endpoint_resolution_incomplete`` finding) when the endpoint cap or the
-        time budget left endpoints unchecked, a DNS lookup timed out, or no host
-        resolved at all.
+        time budget left endpoints unchecked, a DNS lookup timed out, no host
+        resolved at all, a ``HEAD`` request failed, or a redirect target did not
+        resolve (each of the last two also gets a LOW finding on its endpoint).
         """
         run = _Run(deadline=self.clock() + self.budget)
         rows: list[dict[str, Any]] = []
@@ -449,6 +453,12 @@ class EndpointChecker:
             reasons.append(f"DNS lookups timed out for {run.timed_out} host(s)")
         if run.lookups and not run.resolved and not run.timed_out:
             reasons.append("no endpoint host could be resolved (DNS may be unavailable)")
+        if run.head_failed:
+            reasons.append(
+                f"the HEAD request failed for {run.head_failed} endpoint(s), so their redirects were not checked"
+            )
+        if run.redirect_unresolved:
+            reasons.append(f"the redirect target of {run.redirect_unresolved} endpoint(s) could not be resolved")
         return reasons
 
     def _incomplete_finding(self, run: _Run, rows: list[dict[str, Any]], reasons: list[str]) -> Finding:
@@ -603,9 +613,22 @@ class EndpointChecker:
             head = HeadResult(None, None, f"{type(exc).__name__}: {str(exc)[:160]}")
         row["head"] = {"status": head.status, "location": safe_url(head.location) if head.location else None}
         if head.error:
+            # No answer means no Location to classify: a server that stalls (or answers only real clients)
+            # would otherwise pass the redirect check. The run is incomplete, never silently clean.
             row["head"]["error"] = head.error
             row["status"] = "head_failed"
-            return []
+            run.head_failed += 1
+            run.unchecked.append(item.target)
+            return [
+                self._finding(
+                    item.target,
+                    Severity.LOW,
+                    "endpoint_head_failed",
+                    f"the HEAD request to {safe_url(item.target.url)!r} failed ({head.error}); its redirect was "
+                    "not checked",
+                    "Rerun --resolve-endpoints where the endpoint answers, or check its redirects by hand.",
+                )
+            ]
         row["status"] = "public"
         if head.location:
             return self._check_redirect(item.target, row, item.target.url, head.location, item.scheme, run)
@@ -655,8 +678,21 @@ class EndpointChecker:
             run.budget_skipped += 1
             run.unchecked.append(target)
             return findings
-        except (OSError, UnicodeError):
+        except (OSError, UnicodeError) as exc:
+            reason = "timed out" if isinstance(exc, TimeoutError) else type(exc).__name__
             redirect["classification"] = "unresolved"
+            run.redirect_unresolved += 1
+            run.unchecked.append(target)
+            findings.append(
+                self._finding(
+                    target,
+                    Severity.LOW,
+                    "endpoint_redirect_unresolved",
+                    f"{safe_url(url)!r} redirects to {display!r}, whose host {host!r} could not be resolved "
+                    f"({reason}); the redirect target was not checked",
+                    "Rerun --resolve-endpoints where DNS is reachable, or check the redirect target by hand.",
+                )
+            )
             return findings
         if verdict.static is None:
             redirect["addresses"] = list(verdict.addresses[:MAX_ADDRESSES])

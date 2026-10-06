@@ -8,7 +8,8 @@ artifacts, and nothing else is.
 masks Tier 3 logs, progress, and judge evidence, and the Harbor verifier has a
 standalone copy of the latter. All of them use one set of token patterns, which
 ``skillevaluator.utils.redaction`` defines; the verifier's copy is pinned to it in
-test_harbor_template_secret_patterns.py.
+test_harbor_template_secret_patterns.py. The artifact redactor masks more on top:
+a URL's whole userinfo, and a token shape glued into a longer word.
 """
 
 from __future__ import annotations
@@ -27,8 +28,9 @@ from skillevaluator.utils import redaction
 eval_template = load_harbor_eval_template("harbor_template_eval_prefixed_tokens")
 
 # The redactors that write text out, and the judge-evidence wrappers built on the log redactor.
+_ARTIFACTS = redaction.redact_sensitive_text
 _BASE_REDACTORS = {
-    "artifacts": redaction.redact_sensitive_text,
+    "artifacts": _ARTIFACTS,
     "logs": secret_redaction.redact_secrets_in_log_line,
     "verifier-logs": eval_template.redact_secrets_in_log_line,
 }
@@ -37,8 +39,11 @@ _REDACTORS = {
     "judge-evidence": atif_helpers._redact_evidence_text,
     "verifier-judge-evidence": eval_template._redact_evidence_text,
 }
+# Every redactor but the artifact one: the log redactor and the wrappers built on it.
+_LOG_REDACTORS = {name: redact for name, redact in _REDACTORS.items() if redact is not _ARTIFACTS}
 REDACTORS = pytest.mark.parametrize("redact", list(_REDACTORS.values()), ids=list(_REDACTORS))
 BASE_REDACTORS = pytest.mark.parametrize("redact", list(_BASE_REDACTORS.values()), ids=list(_BASE_REDACTORS))
+LOG_REDACTORS = pytest.mark.parametrize("redact", list(_LOG_REDACTORS.values()), ids=list(_LOG_REDACTORS))
 
 
 def _fixture_secret(*parts: str) -> str:
@@ -77,24 +82,35 @@ def test_every_token_shape_is_redacted_and_keeps_its_prefix(redact, prefix: str,
     token = prefix + body
 
     assert redact(f"pushed with {token} to origin") == f"pushed with {prefix}<redacted> to origin"
+
+
+@LOG_REDACTORS
+@pytest.mark.parametrize(("prefix", "body"), list(_TOKENS.values()), ids=list(_TOKENS))
+def test_a_token_in_url_userinfo_keeps_its_prefix_in_logs(redact, prefix: str, body: str) -> None:
+    token = prefix + body
+
     assert redact(f"https://{token}@git.example.com/o/r.git") == f"https://{prefix}<redacted>@git.example.com/o/r.git"
 
 
-# Text shaped like the start of a token that is not one: a bare or short prefix, a
-# prefix glued to a word, a type letter Slack does not issue ("xoxo" is also a word),
-# an over-long GitHub body (GitHub tokens end at a word boundary within 255
-# characters), and hyphenated words.
+@pytest.mark.parametrize(("prefix", "body"), list(_TOKENS.values()), ids=list(_TOKENS))
+def test_artifacts_redact_the_whole_url_userinfo(prefix: str, body: str) -> None:
+    redacted = _ARTIFACTS(f"https://{prefix + body}@git.example.com/o/r.git")
+
+    # The userinfo goes whole, so not even the token's prefix is left.
+    assert redacted == "https://<redacted>@git.example.com/o/r.git"
+    assert body not in redacted
+
+
+# Text shaped like the start of a token that is not one, for every redactor: a bare or
+# short prefix, a type letter Slack does not issue ("xoxo" is also a word), a Hugging
+# Face prefix glued to a word, and hyphenated words.
 NEAR_MISSES = [
     "see the ghp_, github_pat_, glpat- and xoxb- prefixes",
     "ghp_" + _CLASSIC_BODY[:35],
-    "xghp_" + _CLASSIC_BODY,
-    "ghp_" + "a" * 300,
     "github_pat_" + "short",
     "glpat-" + "a" * 19,
-    "xglpat-" + "a" * 20,
     "a glpat-style-token-name",
     "xoxb-" + "123456789",
-    "uxoxb-" + "1234567890ab",
     "xoxo-hugs-and-kisses-from-me",
     "xoxz-" + "1234567890ab",
     "tune task-granularity and Mask-conditioned kernels",
@@ -104,10 +120,37 @@ NEAR_MISSES = [
 ]
 
 
+# A token shape glued into a longer word, or a GitHub body past 255 characters (GitHub
+# tokens end at a word boundary within 255 characters), as ``(text, the token text
+# artifacts must not keep)``. The log redactors keep the text; the artifact redactor
+# also masks a token inside a name ("quality_ghp_..."), so it redacts these too.
+GLUED_NEAR_MISSES = {
+    "glued-github": ("xghp_" + _CLASSIC_BODY, _CLASSIC_BODY),
+    "over-long-github": ("ghp_" + "a" * 300, "ghp_" + "a" * 36),
+    "glued-gitlab": ("xglpat-" + "a" * 20, "glpat-" + "a" * 20),
+    "glued-slack": ("uxoxb-" + "1234567890ab", "xoxb-1234567890ab"),
+}
+_GLUED_TEXTS = [text for text, _token in GLUED_NEAR_MISSES.values()]
+
+
 @REDACTORS
 @pytest.mark.parametrize("text", NEAR_MISSES)
 def test_text_that_only_resembles_a_token_is_kept(redact, text: str) -> None:
     assert redact(text) == text
+
+
+@LOG_REDACTORS
+@pytest.mark.parametrize("text", _GLUED_TEXTS, ids=list(GLUED_NEAR_MISSES))
+def test_logs_keep_a_token_shape_glued_into_a_word(redact, text: str) -> None:
+    assert redact(text) == text
+
+
+@pytest.mark.parametrize(("text", "token"), list(GLUED_NEAR_MISSES.values()), ids=list(GLUED_NEAR_MISSES))
+def test_artifacts_redact_a_token_shape_glued_into_a_word(text: str, token: str) -> None:
+    redacted = _ARTIFACTS(text)
+
+    assert token not in redacted
+    assert "<redacted>" in redacted
 
 
 _AWS_KEYS = {
@@ -126,13 +169,15 @@ def test_aws_access_keys_are_redacted(redact, key: str) -> None:
 def test_long_text_is_redacted_piece_by_piece(redact) -> None:
     # Every near miss beside every token, repeated to over 256 KiB: the result is the
     # redaction of one piece, repeated, so no match reaches across pieces.
-    piece = " ".join([*NEAR_MISSES, *(prefix + body for prefix, body in _TOKENS.values())]) + "\n"
+    piece = " ".join([*NEAR_MISSES, *_GLUED_TEXTS, *(prefix + body for prefix, body in _TOKENS.values())]) + "\n"
     copies = (256 * 1024) // len(piece) + 1
 
     redacted = redact(piece * copies)
 
     assert redacted == redact(piece) * copies
-    assert redacted.count("<redacted>") == len(_TOKENS) * copies
+    # Artifacts also redact each token shape glued into a word.
+    per_piece = len(_TOKENS) + (len(_GLUED_TEXTS) if redact is _ARTIFACTS else 0)
+    assert redacted.count("<redacted>") == per_piece * copies
 
 
 # Every copy of the token patterns: the shared ones and the Harbor verifier's.
@@ -185,7 +230,7 @@ def test_log_redaction_uses_the_artifact_token_patterns() -> None:
 
 def test_one_pass_redacts_what_each_pattern_redacts_in_turn() -> None:
     """The redactors read the text once, with the alternation of every token pattern."""
-    text = " ".join([*NEAR_MISSES, *(prefix + body for prefix, body in _TOKENS.values())])
+    text = " ".join([*NEAR_MISSES, *_GLUED_TEXTS, *(prefix + body for prefix, body in _TOKENS.values())])
     in_turn = text
     for pattern in redaction.PREFIXED_TOKEN_PATTERNS:
         in_turn = pattern.sub(r"\g<prefix><redacted>", in_turn)

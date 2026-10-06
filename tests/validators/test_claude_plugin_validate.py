@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Opt-in `claude plugin validate --strict` parity check (the subprocess is always mocked)."""
+"""Opt-in `claude plugin validate` parity check (the subprocess is always mocked)."""
 
 from __future__ import annotations
 
@@ -84,7 +84,8 @@ def test_exact_command_env_and_agreement(tmp_path: Path, monkeypatch: pytest.Mon
     root = _plugin(tmp_path)
     result = ClaudePluginValidateParity(fake).validate(root, skillevaluator_verdict="passed")
     [call] = fake.calls
-    assert call["args"] == ["plugin", "validate", str(root.absolute()), "--strict", "--json"]
+    # Not --strict: parity is about what Claude Code refuses to load (proof M38).
+    assert call["args"] == ["plugin", "validate", str(root.absolute()), "--json"]
     assert call["replace_env"] is True
     assert "ANTHROPIC_API_KEY" not in call["env"]
     assert "GITHUB_TOKEN" not in call["env"]
@@ -123,7 +124,7 @@ def test_old_cli_without_json_falls_back_to_text(tmp_path: Path) -> None:
         ]
     )
     result = ClaudePluginValidateParity(fake).validate(_plugin(tmp_path), skillevaluator_verdict="failed")
-    assert [call["args"][-1] for call in fake.calls] == ["--json", "--strict"]
+    assert [call["args"][3:] for call in fake.calls] == [["--json"], []]
     parity = result.metadata["plugin"]["validator_parity"]
     assert parity["format"] == "text"
     assert parity["claude_verdict"] == "failed"

@@ -56,11 +56,11 @@ from skillevaluator.plugin_components import (
     summarize_coverage,
 )
 from skillevaluator.plugin_formats import CLAUDE_PROFILE
-from skillevaluator.plugin_states import COVERAGE_STATE_RANK, EVALUATED_COVERAGE_STATES
+from skillevaluator.plugin_states import COVERAGE_STATE_RANK, EVALUATED_COVERAGE_STATES, NOT_LOADED_STATE
 from skillevaluator.tier3.toml_utils import toml_quote
 from skillevaluator.tier3_environments import PLUGIN_LOAD_CHOICES
 from skillevaluator.utils.secure_fs import SecurePathError, read_bounded, stat_is_link_or_reparse
-from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json
+from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json, load_bounded_yaml
 
 #: Build-context directory (inside a task's ``environment/``) copied to ``/skilleval``.
 BUNDLE_DIRNAME = "skilleval"
@@ -353,6 +353,20 @@ def build_native_source(
             )
             texts.append(NativeTextComponent(component.type, component.name, component.path, text))
         elif component.type == "hook":
+            from skillevaluator.plugin_components import frontmatter_hook_file
+
+            markdown_file = frontmatter_hook_file(component)
+            if markdown_file is not None:
+                # A skill's or command's frontmatter hooks: refused like any hook source when they enable a
+                # bypass, and census-wrapped inside their own file by an adapter that stages hooks.
+                config = _frontmatter_hook_config(reader, markdown_file)
+                if config is None:
+                    continue
+                _refuse("hook", component.name, _bypass_refusal(config, where=f"plugin hooks '{component.name}'"))
+                hooks.append(
+                    NativeHookSource(component.name, markdown_file, config, "claude", tuple(hook_root_prefixes))
+                )
+                continue
             if component.path == manifest_rel:
                 config = _inline_hook_config(manifest, component.name)
             elif component.path:
@@ -410,6 +424,46 @@ def build_native_source(
         settings=settings,
         lsp_servers=lsp_servers,
     )
+
+
+def _frontmatter_hook_config(reader: PluginRootReader, rel: str) -> dict[str, Any] | None:
+    """The ``hooks`` block of a Markdown file's frontmatter (bounded, no-follow read), or ``None``."""
+    try:
+        text = reader.read_text(PurePosixPath(rel), CONTENT_DEDUP_MAX_FILE_BYTES)
+    except (SecurePathError, OSError) as exc:
+        raise ValueError(f"Refusing unsafe or unreadable plugin file '{rel}': {exc}") from exc
+    config = parse_markdown(text).frontmatter.get("hooks")
+    return config if isinstance(config, dict) else None
+
+
+def is_frontmatter_hook_source(hook: NativeHookSource) -> bool:
+    """Whether a hooks source is a skill's or command's frontmatter ``hooks`` block (named ``<file>#hooks``).
+
+    Such hooks run only while their skill or command is active, so they are
+    census-wrapped inside their own file, never merged into ``hooks/hooks.json``.
+    """
+    return hook.rel is not None and hook.name == f"{hook.rel}#hooks"
+
+
+def member_skill_hook_refusal(member_skills: Sequence[Path]) -> str | None:
+    """Why a member skill must not be staged in any load mode: its frontmatter hooks enable a permission bypass.
+
+    Every load mode stages member skills with their ``SKILL.md`` as written, and
+    Claude Code runs a skill's frontmatter hooks while the skill is active, so a
+    bypass flag there would run in the wrapper arms too (``None`` when none does).
+    """
+    for skill_dir in member_skills:
+        reader = PluginRootReader(skill_dir)
+        manifest = next((name for name in ("SKILL.md", "skill.md") if reader.kind(PurePosixPath(name)) == "file"), None)
+        if manifest is None:
+            continue
+        config = _frontmatter_hook_config(reader, manifest)
+        if config is None:
+            continue
+        refusal = _bypass_refusal(config, where=f"member skill '{skill_dir.name}' (its frontmatter hooks)")
+        if refusal is not None:
+            return refusal
+    return None
 
 
 _PLUGIN_SETTINGS_FILE = "settings.json"
@@ -695,6 +749,8 @@ def wrap_hook_sources(sources: Sequence[NativeHookSource], *, plugin_root: Path 
     dropped: list[tuple[str, str]] = []
     plugin_file = _plugin_file_checker(plugin_root)
     for source in sources:
+        if is_frontmatter_hook_source(source):
+            continue  # staged inside its own skill or command file (stage_frontmatter_hooks)
         foreign_root = foreign_root_var_re(tuple(source.root_prefixes))
         rebuilt: dict[tuple[str, int], dict[str, Any]] = {}
         order: list[tuple[str, int]] = []
@@ -732,6 +788,143 @@ def wrap_hook_sources(sources: Sequence[NativeHookSource], *, plugin_root: Path 
         },
         tuple(ids),
         tuple(dropped),
+    )
+
+
+@dataclass(frozen=True)
+class FrontmatterHookStaging:
+    """Census-wrapped copies of the skill and command files whose frontmatter declares hooks.
+
+    ``files`` maps a staged plugin-relative path to its rewritten Markdown,
+    ``ids`` lists ``(source, event, hook_id)`` for every wrapped command handler,
+    and ``needles`` maps each rewritten source to ``(staged file, its first hook
+    id)`` (``None`` when it has no command handler to wrap).
+    """
+
+    files: dict[str, str]
+    ids: tuple[tuple[str, str, str], ...]
+    needles: dict[str, tuple[str, str | None]]
+
+
+def _frontmatter_parts(text: str) -> tuple[list[str], list[str]] | None:
+    """The frontmatter lines and the lines after it (``None`` without a closed ``---`` block)."""
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return None
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return lines[1:index], lines[index + 1 :]
+    return None
+
+
+def _wrapped_frontmatter_hooks(hook: NativeHookSource, ids: list[tuple[str, str, str]]) -> dict[str, Any] | None:
+    """The hooks block with every command handler census-wrapped (within the ``MAX_HOOK_*`` bounds)."""
+    import copy
+
+    config = copy.deepcopy(hook.config)
+    events = config.get("hooks") if isinstance(config, dict) and isinstance(config.get("hooks"), dict) else config
+    if not isinstance(events, dict):
+        return None
+    foreign_root = foreign_root_var_re(tuple(hook.root_prefixes))
+    emitted = 0
+    kept: dict[str, Any] = {}
+    for event, groups in list(events.items())[:MAX_HOOK_EVENTS]:
+        if not isinstance(groups, list):
+            continue
+        staged_groups: list[Any] = []
+        for group_index, group in enumerate(groups[:MAX_HOOK_GROUPS]):
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                continue
+            handlers: list[Any] = []
+            for handler_index, handler in enumerate(group["hooks"]):
+                if emitted >= MAX_HOOK_HANDLERS:
+                    break
+                emitted += 1
+                rooted = _claude_root_vars(handler, foreign_root) if foreign_root is not None else handler
+                identifier = hook_id(hook.name, str(event), group_index, handler_index)
+                wrapped = wrap_hook_handler(rooted, hook_id_value=identifier, event=str(event))
+                if wrapped is not rooted:
+                    ids.append((hook.name, str(event), identifier))
+                handlers.append(wrapped)
+            staged_groups.append({**group, "hooks": handlers})
+        kept[str(event)] = staged_groups
+    if isinstance(config, dict) and isinstance(config.get("hooks"), dict):
+        return {**config, "hooks": kept}
+    return kept
+
+
+def stage_frontmatter_hooks(
+    sources: Sequence[NativeHookSource],
+    *,
+    plugin_root: Path,
+    staged_skills: Sequence[tuple[str, str, Path | None]] = (),
+) -> FrontmatterHookStaging:
+    """Rewrite each skill or command file whose frontmatter declares hooks, with census-wrapped handlers.
+
+    Claude Code runs frontmatter hooks only while their skill or command is
+    active, so they stay in their own file: the staged copy of that file gets the
+    same frontmatter with every command handler wrapped by the hook census (ids
+    ``<file>#hooks#<event>[<group>].hooks[<handler>]``, the Tier 1 ``hook_risk``
+    ids). *staged_skills* is the adapter's ``(name, staged dir, copy source)``
+    list, so a member skill the adapter copies to ``skills/<name>`` is rewritten
+    there. A file whose frontmatter does not round-trip is left as it is.
+    """
+    import yaml
+
+    root = plugin_root.resolve()
+    relocated: dict[str, str] = {}
+    for _name, staged_rel, copied_from in staged_skills:
+        if copied_from is not None and copied_from.resolve().is_relative_to(root):
+            relocated[copied_from.resolve().relative_to(root).as_posix()] = staged_rel
+    reader = PluginRootReader(plugin_root)
+    files: dict[str, str] = {}
+    ids: list[tuple[str, str, str]] = []
+    needles: dict[str, tuple[str, str | None]] = {}
+    for hook in sources:
+        if not is_frontmatter_hook_source(hook) or hook.rel is None:
+            continue
+        text = reader.read_text(PurePosixPath(hook.rel), CONTENT_DEDUP_MAX_FILE_BYTES)
+        parts = _frontmatter_parts(text)
+        frontmatter = parse_markdown(text).frontmatter
+        start = len(ids)
+        wrapped = _wrapped_frontmatter_hooks(hook, ids)
+        if parts is None or wrapped is None or not frontmatter:
+            del ids[start:]
+            continue
+        _lines, body = parts
+        staged_frontmatter = {**frontmatter, "hooks": wrapped}
+        dumped = yaml.safe_dump(staged_frontmatter, sort_keys=False, allow_unicode=True, width=1_000_000)
+        try:
+            round_trips = load_bounded_yaml(dumped) == staged_frontmatter
+        except (StructuredDataError, ValueError):
+            round_trips = False
+        if not round_trips:
+            del ids[start:]
+            continue
+        rel = PurePosixPath(hook.rel)
+        staged = PurePosixPath(relocated.get(rel.parent.as_posix(), rel.parent.as_posix())) / rel.name
+        files[staged.as_posix()] = "---\n" + dumped + "---\n" + "".join(body)
+        needles[hook.name] = (staged.as_posix(), ids[start][2] if len(ids) > start else None)
+    return FrontmatterHookStaging(files, tuple(ids), needles)
+
+
+def frontmatter_census_check(
+    hook: NativeHookSource, staging: FrontmatterHookStaging, plugin_dir: str
+) -> tuple[CensusCheck | None, tuple[str, str, str] | None]:
+    """The listing check for a frontmatter hook source in the staged plugin, or its ``not_loaded`` row."""
+    if hook.name in staging.needles:
+        rel, needle = staging.needles[hook.name]
+        target = f"{plugin_dir}/{rel}"
+        if needle is None:
+            return CensusCheck("hook", hook.name, "file", target, label="plugin-dir frontmatter listing"), None
+        check = CensusCheck(
+            "hook", hook.name, "contains", target, needle=needle, label="plugin-dir frontmatter listing"
+        )
+        return check, None
+    return None, (
+        "hook",
+        hook.name,
+        "frontmatter hooks could not be census-wrapped; the file is staged as written, so their runs are not counted",
     )
 
 
@@ -1465,12 +1658,25 @@ class ClaudeCodeAdapter(HarnessAdapter):
         checks: list[CensusCheck],
         not_loaded: list[tuple[str, str, str]],
     ) -> None:
-        """Merge every hook source into one census-wrapped ``hooks/hooks.json``, with one listing per source."""
+        """Merge every hook source into one census-wrapped ``hooks/hooks.json``, with one listing per source.
+
+        Frontmatter hooks of a skill or command stay in their own file, census-wrapped there
+        (:func:`stage_frontmatter_hooks`).
+        """
         wrapped = wrap_hook_sources(source.hooks, plugin_root=source.plugin_root)
         bundle.generated[f"{self.bundle_dir}/hooks/hooks.json"] = json.dumps(wrapped.config, indent=2) + "\n"
-        for owner, _event, identifier in wrapped.ids:
+        frontmatter = stage_frontmatter_hooks(
+            source.hooks, plugin_root=source.plugin_root, staged_skills=self.staged_skills(source)
+        )
+        bundle.generated.update({f"{self.bundle_dir}/{rel}": text for rel, text in frontmatter.files.items()})
+        for owner, _event, identifier in (*wrapped.ids, *frontmatter.ids):
             bundle.hook_ids.setdefault(owner, []).append(identifier)
         for hook in source.hooks:
+            if is_frontmatter_hook_source(hook):
+                check, missing = frontmatter_census_check(hook, frontmatter, self.plugin_dir)
+                checks.extend([check] if check is not None else [])
+                not_loaded.extend([missing] if missing is not None else [])
+                continue
             identifiers = [identifier for owner, _event, identifier in wrapped.ids if owner == hook.name]
             dropped = [event for owner, event in wrapped.dropped if owner == hook.name]
             not_loaded.extend(
@@ -2499,7 +2705,6 @@ def summarize_censuses(
     lists: dict[str, list[dict[str, str]]] = {"loaded": [], LISTED_KEY: [], "staged": [], "not_loaded": []}
     for item in order:
         weakest = min(strengths[item]) if trials else 0
-        found = sum(1 for value in strengths[item] if value >= _EVIDENCE_STRENGTH[LISTED_KEY])
         entry = {"type": item[0], "name": item[1]}
         if weakest >= _EVIDENCE_STRENGTH["loaded"]:
             lists["loaded"].append({**entry, "evidence": details[item].get("loaded", "")})
@@ -2508,8 +2713,7 @@ def summarize_censuses(
         elif weakest >= _EVIDENCE_STRENGTH["staged"]:
             lists["staged"].append({**entry, "evidence": STAGED_EVIDENCE})
         else:
-            reason = details[item].get("not_loaded") or f"listed in {found} of {trials} trial census(es)"
-            lists["not_loaded"].append({**entry, "reason": reason})
+            lists["not_loaded"].append({**entry, "reason": _partial_load_reason(strengths[item], details[item])})
     summary: dict[str, Any] = {
         "agent": agent,
         "mode": mode,
@@ -2532,6 +2736,34 @@ def summarize_censuses(
             if isinstance(ids, list | tuple)
         }
     return summary
+
+
+def _partial_load_reason(strengths: Sequence[int], details: Mapping[str, str]) -> str:
+    """Why a component is ``not_loaded`` over the trials, with how many trials did load it.
+
+    The first trial's ``not_loaded`` text alone ("did not load plugin X")
+    read as if it never loaded, also when it loaded in most trials.
+    """
+    trials = len(strengths)
+    missing = sum(1 for value in strengths if value <= 0)
+    found = sum(1 for value in strengths if value >= _EVIDENCE_STRENGTH[LISTED_KEY])
+    reason = details.get("not_loaded") or ""
+    if missing >= trials or not trials:
+        return reason or f"listed in {found} of {trials} trial census(es)"
+    parts = [
+        f"{reason} in {missing} of {trials} trial(s)"
+        if reason
+        else f"missing from {missing} of {trials} trial census(es)"
+    ]
+    for label, low, high in (
+        ("loaded (harness evidence)", _EVIDENCE_STRENGTH["loaded"], None),
+        ("listed only", _EVIDENCE_STRENGTH[LISTED_KEY], _EVIDENCE_STRENGTH["loaded"]),
+        ("staged only (no census)", _EVIDENCE_STRENGTH["staged"], _EVIDENCE_STRENGTH[LISTED_KEY]),
+    ):
+        amount = sum(1 for value in strengths if value >= low and (high is None or value < high))
+        if amount:
+            parts.append(f"{label} in {amount} of {trials}")
+    return "; ".join(parts)
 
 
 def native_load_unverified(summary: Mapping[str, Any]) -> str | None:
@@ -2587,14 +2819,20 @@ def apply_load_census(
     Only component types ``plugin_load`` reports as ``native`` for that agent
     count; anything else in a census was not staged natively and is ignored.
     Harness evidence (``loaded``) promotes a row to ``loaded``. A listing alone
-    (``listed``) promotes a row to ``staged`` at most. A ``not_loaded`` entry
-    adds its reason. Precedence is ``exercised`` > ``loaded`` > ``staged``: a
-    row is never downgraded. A listed row whose ``native_agents`` (recorded by
-    the resolved plan) already cover the listing agents does not repeat that
-    it is staged natively for them. Notes are appended to the existing reason, so an
-    earlier note (for example an INCOMPLETE MCP note) survives, also on a row
-    that stays unsupported; a row promoted from an unevaluated state gets the
-    census note in place of the old "not staged" reason.
+    (``listed``) promotes a row to ``staged`` at most. When the harness
+    reported that a staged component did not load (``not_loaded``), the row
+    becomes ``not_loaded``: it was staged but not evaluated, so it no longer
+    reads as covered. Each agent's evidence is folded in on its own, so in a
+    multi-agent run one agent's load never hides another agent's failure: any
+    agent's ``not_loaded`` wins over another's listing or load, and the reason
+    names every agent's result. ``exercised`` rows (and ``invalid`` and
+    ``unavailable`` ones) never change. A listed row whose ``native_agents``
+    (recorded by the resolved plan) already cover the listing agents does not
+    repeat that it is staged natively for them. Notes are appended to the
+    existing reason, so an earlier note (for example an INCOMPLETE MCP note)
+    survives, also on a row that stays unsupported; a row promoted from an
+    unevaluated state gets the census note in place of the old "not staged"
+    reason.
     """
     if not isinstance(coverage, Mapping):
         return None if coverage is None else dict(coverage)
@@ -2630,30 +2868,40 @@ def apply_load_census(
                 [],
             )
 
+        loaded, listed, failed = lookup("loaded"), lookup(LISTED_KEY), lookup("not_loaded")
         new_state = state
-        note = ""
-        if found := lookup("loaded"):
-            agents = ", ".join(sorted({agent for agent, _detail in found}))
+        notes: list[str] = []
+        if loaded:
+            agents = ", ".join(sorted({agent for agent, _detail in loaded}))
             new_state = "loaded" if COVERAGE_STATE_RANK.get(state, 0) < COVERAGE_STATE_RANK["loaded"] else state
-            note = f"loaded natively by {agents} (load census, harness evidence: {found[0][1]})"
-        elif found := lookup(LISTED_KEY):
-            listed_by = sorted({agent for agent, _detail in found})
-            new_state = "staged" if COVERAGE_STATE_RANK.get(state, 0) < COVERAGE_STATE_RANK["staged"] else state
+            notes.append(f"loaded natively by {agents} (load census, harness evidence: {loaded[0][1]})")
+        if listed:
+            listed_by = sorted({agent for agent, _detail in listed})
+            if not loaded:
+                new_state = "staged" if COVERAGE_STATE_RANK.get(state, 0) < COVERAGE_STATE_RANK["staged"] else state
             # A row the resolved plan already staged natively for these agents (its
             # native_agents) says so in its reason; the note does not repeat it.
             planned = row.get("native_agents")
             planned_for = set(planned) if isinstance(planned, list) else set()
             prefix = "" if planned_for.issuperset(listed_by) else f"staged natively for {', '.join(listed_by)}; "
-            note = f"{prefix}the load census listed it ({found[0][1]}) but the harness did not confirm it was loaded"
-        elif found := lookup("not_loaded"):
-            agents = ", ".join(sorted({agent for agent, _detail in found}))
-            note = f"not loaded natively by {agents}: {found[0][1]}"
-        if note:
-            note = note[: MAX_CENSUS_TEXT * 2]
+            notes.append(
+                f"{prefix}the load census listed it ({listed[0][1]}) but the harness did not confirm it was loaded"
+            )
+        if failed:
+            for agent in sorted({agent for agent, _detail in failed}):
+                reason = next(detail for name, detail in failed if name == agent)
+                notes.append(f"not loaded natively by {agent}: {reason}")
+            # Staged (by the plan or a listing) but reported as not loaded: not evaluated.
+            if new_state in EVALUATED_COVERAGE_STATES or state == NOT_LOADED_STATE:
+                new_state = NOT_LOADED_STATE
+        if notes:
+            note = "; ".join(notes)[: MAX_CENSUS_TEXT * 2 * max(1, len(notes))]
             old = str(row.get("reason") or "")
             # A promotion replaces an old "not staged" reason; a not-loaded note keeps the reason it adds to.
-            promoted = new_state != state
-            row["reason"] = f"{old}; {note}" if old and (state in EVALUATED_COVERAGE_STATES or not promoted) else note
+            promoted = (
+                new_state != state and new_state in EVALUATED_COVERAGE_STATES and state not in EVALUATED_COVERAGE_STATES
+            )
+            row["reason"] = f"{old}; {note}" if old and not promoted else note
             row["state"] = new_state
         rows.append(row)
     return summarize_coverage(rows)

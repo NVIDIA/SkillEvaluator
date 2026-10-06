@@ -844,6 +844,7 @@ class SecurityValidator(ValidatorBase):
             use_llm,
             stage_name,
             result,
+            scanned_root=original_root if original_root is not None else scan_root,
         ):
             result.mark_scan_incomplete(stage_name)
             return result
@@ -880,8 +881,19 @@ class SecurityValidator(ValidatorBase):
         use_llm: bool,
         stage_name: str,
         result: ValidationResult,
+        *,
+        scanned_root: Path | None = None,
     ) -> bool:
-        """Return whether JSON is a trustworthy SkillSpector findings report."""
+        """Return whether JSON is a trustworthy SkillSpector findings report.
+
+        A ``partial`` analysis makes the scan INCOMPLETE, except when every
+        reason is one SkillEvaluator already covers (:meth:`_covered_partial_note`):
+        a path-like reference to a file the skill or plugin does not ship, or a
+        plugin hooks file SkillSpector cannot interpret that the plugin's own hook
+        risk model parses. *scanned_root* is the directory the report's relative
+        paths start from.
+        """
+        partial_reported = False
         if "error" in data and data["error"] is not None:
             result.add_error("skillspector reported an error; security scan did not complete")
             return False
@@ -1400,11 +1412,18 @@ class SecurityValidator(ValidatorBase):
                             "security scan did not complete"
                         )
                         return False
-                    result.add_error(
-                        "skillspector JSON field 'analysis_completeness' reports incomplete analysis "
-                        f"(status '{completeness_status}'); security scan did not complete"
+                    partial_reported = True
+                    covered_note = SecurityValidator._covered_partial_note(
+                        ledger_exceptions, analyzer_statuses, counts, limitations, scanned_root
                     )
-                    result.mark_scan_incomplete(stage_name)
+                    if covered_note is not None:
+                        result.add_warning(covered_note)
+                    else:
+                        result.add_error(
+                            "skillspector JSON field 'analysis_completeness' reports incomplete analysis "
+                            f"(status '{completeness_status}'); security scan did not complete"
+                        )
+                        result.mark_scan_incomplete(stage_name)
 
         status = data.get("status")
         if status is not None and not isinstance(status, str):
@@ -1471,7 +1490,7 @@ class SecurityValidator(ValidatorBase):
             return False
         recommendation = risk.get("recommendation")
         expected_recommendation = _SKILLSPECTOR_RECOMMENDATION_BY_SEVERITY[severity]
-        if result.is_incomplete and severity == "LOW":
+        if (result.is_incomplete or partial_reported) and severity == "LOW":
             expected_recommendation = "CAUTION"
         if not isinstance(recommendation, str) or recommendation != expected_recommendation:
             result.add_error(
@@ -1755,6 +1774,134 @@ class SecurityValidator(ValidatorBase):
             return False
 
         return True
+
+    @staticmethod
+    def _plugin_hook_files_read() -> frozenset[str]:
+        """Plugin-root-relative hooks files the plugin's hook risk model parses, in the plugin tree scan in scope.
+
+        Empty outside a plugin tree scope, or when the plugin's component
+        inventory cannot be built. A hooks file counts once the analyzer has a
+        handler record for it (so it parsed), and only when it is a ``hook``
+        component of the inventory without a problem.
+        """
+        from skillevaluator.plugin_components import plugin_inventory_for_root
+        from skillevaluator.validators.plugin_tree import active_plugin_tree
+
+        tree = active_plugin_tree()
+        if tree is None:
+            return frozenset()
+        try:
+            inventory = plugin_inventory_for_root(tree.root)
+        except (OSError, ValueError, RecursionError) as exc:
+            logger.warning("Could not build the plugin inventory for the SkillSpector hook check: %s", exc)
+            return frozenset()
+        if inventory is None:
+            return frozenset()
+        hook_files = {
+            component.path
+            for component in inventory.components
+            if component.type == "hook" and component.problem is None and component.path
+        }
+        return frozenset(record.file for record in inventory.hook_records if record.file in hook_files)
+
+    @staticmethod
+    def _plugin_relative(scanned_root: Path, path: str) -> str | None:
+        """*path* (relative to the scanned directory) as a plugin-root-relative POSIX path, or ``None``."""
+        from skillevaluator.validators.plugin_tree import active_plugin_tree
+
+        tree = active_plugin_tree()
+        if tree is None or Path(path).is_absolute():
+            return None
+        try:
+            relative = (scanned_root.resolve() / path).relative_to(tree.root.resolve())
+        except (OSError, ValueError):
+            return None
+        return relative.as_posix()
+
+    @staticmethod
+    def _covered_partial_note(
+        ledger_exceptions: list[dict],
+        analyzer_statuses: list[dict],
+        counts: Mapping[str, int],
+        limitations: list[str],
+        scanned_root: Path | None,
+    ) -> str | None:
+        """A note for a ``partial`` SkillSpector analysis whose every gap SkillEvaluator covers, else ``None``.
+
+        Two partial reasons are not scanner gaps:
+
+        * ``reference_missing`` (reference resolution): a path-like mention of a
+          file the skill or plugin does not ship, such as a user file the skill
+          reads (``Read CHANGELOG.md``). Every shipped file was still inspected.
+        * ``opaque_content`` from the ``bundled_execution_surface`` analyzer on a
+          plugin hooks file: SkillSpector records the hook declaration but does not
+          model hook commands. Inside a plugin tree scan the plugin's own hook risk
+          model (Plugin Schema & Bundle References) parses that file: every handler,
+          the scripts it runs, auto-approval, remote code, and endpoints. A file
+          that analyzer did not read (not a hooks source of this plugin, or one it
+          could not parse) stays a gap.
+
+        Any other reason, a fatal or non-partial exception, an uninspected file,
+        another degraded analyzer, or an unexplained limitation keeps the scan
+        INCOMPLETE (``None``).
+        """
+        hook_analyzer = "bundled_execution_surface"
+        missing_refs: list[str] = []
+        opaque_paths: list[str] = []
+        for exception in ledger_exceptions:
+            reason = exception.get("reason_code")
+            if exception.get("fatal") is not False or exception.get("outcome") != "partial":
+                return None
+            path = exception.get("path")
+            if not isinstance(path, str) or not path.strip():
+                return None
+            if reason == "reference_missing" and exception.get("phase") == "reference_resolution":
+                line = exception.get("start_line")
+                missing_refs.append(f"{path}:{line}" if isinstance(line, int) else path)
+            elif reason == "opaque_content" and exception.get("analyzers") == [hook_analyzer]:
+                opaque_paths.append(path)
+            else:
+                return None
+        if not (missing_refs or opaque_paths):
+            return None
+        opaque = sorted(set(opaque_paths))
+        if counts.get("entirely_uninspected_files") != 0 or counts.get("partially_inspected_files") != len(opaque):
+            return None
+        for status in analyzer_statuses:
+            state = status.get("status")
+            if state in {"completed", "not_applicable", "disabled"}:
+                continue
+            if (
+                not opaque
+                or status.get("analyzer_id") != hook_analyzer
+                or state != "degraded"
+                or status.get("partial") != len(opaque_paths)
+                or any(status.get(field) for field in ("skipped", "failed", "unaccounted"))
+            ):
+                return None
+        allowed_limitations = {f"Analyzer {hook_analyzer} status: degraded."} if opaque else set()
+        if any(limitation not in allowed_limitations for limitation in limitations):
+            return None
+        if opaque:
+            read = SecurityValidator._plugin_hook_files_read()
+            if scanned_root is None or not all(
+                SecurityValidator._plugin_relative(scanned_root, path) in read for path in opaque
+            ):
+                return None
+        notes: list[str] = []
+        if opaque:
+            notes.append(
+                f"SkillSpector could not interpret the hook commands in {', '.join(opaque[:5])} (opaque_content); "
+                "the plugin's own hook risk check (Plugin Schema & Bundle References) parses this hooks file, "
+                "so this is not a scan gap"
+            )
+        if missing_refs:
+            notes.append(
+                f"SkillSpector found {len(missing_refs)} path-like reference(s) to files that are not shipped "
+                f"({', '.join(missing_refs[:5])}; reference_missing); every shipped file was scanned, so this is "
+                "not a scan gap"
+            )
+        return "; ".join(notes)
 
     @staticmethod
     def _minimum_skillspector_risk_score(
@@ -2230,6 +2377,8 @@ class SecurityValidator(ValidatorBase):
 
         Returns (Finding, is_error) where is_error is True for CRITICAL/HIGH.
         """
+        from skillevaluator.validators.mcp_static import redact_secrets
+
         g = _issue_field(issue)
         issue_sev = str(g("severity", "UNKNOWN")).upper()
         explanation = g("explanation")
@@ -2238,17 +2387,21 @@ class SecurityValidator(ValidatorBase):
         code_snippet = g("code_snippet")
         file_path, line_number = SecurityValidator._parse_issue_location(issue)
 
+        # SkillSpector quotes the plugin's own code. A credential on that line (the very thing a secret
+        # pattern reports) must never be copied into a report, so the snippet and the texts are masked.
         finding = Finding(
             category="SECURITY",
             severity=issue_sev,
             check_name=f"{g('pattern', 'Unknown')} ({g('id', '?')})",
-            message=SecurityValidator._build_issue_message(
-                g("category"), g("finding"), explanation, g("pattern", "Unknown")
+            message=redact_secrets(
+                SecurityValidator._build_issue_message(
+                    g("category"), g("finding"), explanation, g("pattern", "Unknown")
+                )
             ),
             file_path=file_path,
             line_number=line_number,
-            line_content=code_snippet[:200] if code_snippet else None,
-            suggestion=suggestion,
+            line_content=redact_secrets(str(code_snippet))[:200] if code_snippet else None,
+            suggestion=redact_secrets(suggestion) if suggestion else None,
             metadata=SecurityValidator._build_issue_metadata(issue),
         )
         return finding, issue_sev in ("CRITICAL", "HIGH")
@@ -2301,6 +2454,40 @@ class SecurityValidator(ValidatorBase):
                 message=f"Security scan completed - {len(issues)} advisory finding(s) (no critical/high issues)",
                 issue_count=len(issues),
             )
+
+    # PII categories that are credentials or card/identity numbers: their value is never copied into a report.
+    _SECRET_PII_CATEGORIES: frozenset[str] = frozenset(
+        {
+            "database_credentials",
+            "jwt_tokens",
+            "hardcoded_secrets",
+            "webhook_urls",
+            "aws_identifiers",
+            "github_tokens",
+            "private_keys",
+            "credit_cards",
+            "ssn",
+        }
+    )
+    # Public, low-information prefixes kept in front of a redacted value so a reader knows what was found.
+    _PUBLIC_SECRET_PREFIXES: tuple[str, ...] = (
+        "ghp_",
+        "ghs_",
+        "AKIA",
+        "ASIA",
+        "eyJ",
+        "-----BEGIN",
+        "arn:aws:",
+        "https://hooks.slack.com/",
+        "https://discord.com/api/webhooks/",
+        "postgresql://",
+        "postgres://",
+        "mysql://",
+        "mariadb://",
+        "mongodb://",
+        "redis://",
+        "jdbc:",
+    )
 
     def _scan_for_pii(self, skill_path: Path) -> ValidationResult:
         """Scan files for PII using regex patterns (emails, paths, SSNs, etc.)."""
@@ -2357,9 +2544,12 @@ class SecurityValidator(ValidatorBase):
                 group["confidences"].append(finding_data.get("confidence", "high"))
 
         confidence_rank = {"low": 0, "medium": 1, "high": 2}
+        secret_patterns = self._secret_pii_patterns()
         for group in groups.values():
             first = group["first"]
-            value = first.get("matched_value")
+            # A credential is never copied into a report: the message, metadata, and source line show a
+            # redacted form, so every report format (JSON, Markdown, HTML, SARIF, CLI, BENCHMARK) stays clean.
+            value = self._shown_pii_value(first["category"], first.get("matched_value"))
             occurrences = group["occurrences"]
             severity = first["severity"].upper()
 
@@ -2369,9 +2559,12 @@ class SecurityValidator(ValidatorBase):
                 metadata["matched_value"] = value
                 metadata["occurrence_count"] = len(occurrences)
                 metadata["occurrences"] = [{"file": f, "line": line} for f, line in occurrences]
+                if first["category"] in self._SECRET_PII_CATEGORIES:
+                    metadata["value_redacted"] = True
             if len(occurrences) > 1:
                 message += f" — {len(occurrences)} occurrences ({self._format_occurrences(occurrences)})"
 
+            line_content = first.get("line_content")
             finding = Finding(
                 category="PII",
                 severity=severity,
@@ -2379,7 +2572,7 @@ class SecurityValidator(ValidatorBase):
                 message=message,
                 file_path=group["first_file"],
                 line_number=first["line"],
-                line_content=first.get("line_content"),
+                line_content=self._redact_pii_line(line_content, secret_patterns) if line_content else line_content,
                 suggestion=first.get("suggestion"),
                 metadata=metadata,
             )
@@ -2393,6 +2586,37 @@ class SecurityValidator(ValidatorBase):
             )
 
         return result
+
+    @classmethod
+    def _shown_pii_value(cls, category: str, value: str | None) -> str | None:
+        """The matched value for reports: a credential category shows only a public prefix and its length."""
+        if not value or category not in cls._SECRET_PII_CATEGORIES:
+            return value
+        prefix = next((known for known in cls._PUBLIC_SECRET_PREFIXES if value.lower().startswith(known.lower())), "")
+        return f"{prefix}…[redacted, {len(value)} characters]"
+
+    def _secret_pii_patterns(self) -> list[re.Pattern]:
+        """The compiled patterns of every credential category, to mask any credential on a reported line."""
+        global_exceptions = self.pii_patterns.get("exceptions", {}).get("allowed_paths", [])
+        return [
+            regex
+            for category, regex, _exceptions, _pattern in self._compile_pii_patterns(global_exceptions)
+            if category in self._SECRET_PII_CATEGORIES
+        ]
+
+    @staticmethod
+    def _redact_pii_line(line: str, patterns: list[re.Pattern]) -> str:
+        """``line`` with every credential on it masked: PII credential matches (also ones another pattern
+        reported), URL user information and queries, and credential-named flags and assignments."""
+        from skillevaluator.validators.mcp_static import redact_secrets
+
+        def _mask(match: re.Match) -> str:
+            start, end = match.span("value") if "value" in match.re.groupindex else match.span()
+            return match.group(0)[: start - match.start()] + "<redacted>" + match.group(0)[end - match.start() :]
+
+        for regex in patterns:
+            line = regex.sub(_mask, line)
+        return redact_secrets(line)
 
     @staticmethod
     def _format_occurrences(occurrences: list[tuple[str, int]], max_files: int = 3, max_lines: int = 10) -> str:
@@ -2506,13 +2730,17 @@ class SecurityValidator(ValidatorBase):
     _GPS_ZERO_PATTERN = re.compile(r"[-+]?0+\.0+[,\s]+[-+]?0+\.0+")
     # Match version/tag as identifier tokens, including separator and camel-case styles.
     # Plain substrings such as ``conversion`` and ``staging`` are not version labels.
+    # The camel-case parts are single optional runs: "(?:[A-Za-z][a-z0-9]*)*" matched
+    # the same identifiers but could split a long lowercase run in exponentially many
+    # ways (ReDoS); the lookarounds pin every match to whole identifier runs, so the
+    # matched spans are unchanged.
     _VERSION_LABEL_PATTERN = re.compile(
         r"(?:"
         r"(?i:(?<![a-z0-9])(?:[a-z0-9]+[_-])*(?:versions?|tags?)(?:[_-][a-z0-9]+)*(?![a-z0-9]))"
-        r"|(?<![A-Za-z0-9])(?:[A-Za-z][a-z0-9]*)*(?:Version|Versions|Tag|Tags)"
-        r"(?:[A-Z][A-Za-z0-9]*)*(?![A-Za-z0-9])"
+        r"|(?<![A-Za-z0-9])(?:[A-Za-z][A-Za-z0-9]*)?(?:Version|Versions|Tag|Tags)"
+        r"(?:[A-Z][A-Za-z0-9]*)?(?![A-Za-z0-9])"
         r"|(?<![A-Za-z0-9])(?:version|versions|tag|tags)"
-        r"(?:[A-Z][A-Za-z0-9]*)+(?![A-Za-z0-9])"
+        r"[A-Z][A-Za-z0-9]*(?![A-Za-z0-9])"
         r")"
     )
     _PACKAGE_VERSION_CALL_PATTERN = re.compile(

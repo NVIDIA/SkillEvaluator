@@ -33,8 +33,9 @@ import dataclasses
 import math
 import os
 import re
+import stat
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, NamedTuple
@@ -51,6 +52,7 @@ from skillevaluator.constants import (
     PLUGIN_CURSOR_MANIFEST_TYPE,
     PLUGIN_MANIFEST_RELATIVE_PATHS,
     PLUGIN_MANIFEST_TYPE,
+    PLUGIN_TREE_MAX_DISCOVERED_PATHS,
     SCAN_ARTIFACT_DIRS,
     SCAN_EXCLUDED_DIRS,
     SKILL_MANIFEST_VARIANTS,
@@ -68,6 +70,7 @@ from skillevaluator.plugin_component_risk import (
     HookRecord,
     HookScriptUnreadable,
     PrivilegeRecord,
+    allowed_tools_flag_issues,
     analyze_agent,
     analyze_command,
     analyze_skill,
@@ -83,6 +86,7 @@ from skillevaluator.plugin_formats import (
     DEFAULT_SKILLS_DIR,
     PROFILES,
     FormatProfile,
+    codex_accepts_path,
     declared_value_replaces_default,
     normalized_component_manifest,
     parse_manifest_text,
@@ -100,21 +104,34 @@ from skillevaluator.plugin_paths import (
     _in_unscanned_folder,
     _path_problem_finding,
     _plugin_finding,
+    _pruned_folder_findings,
+    _root_variable_finding,
     _style_finding,
-    _unscanned_file_finding,
+    _unscanned_packaged_finding,
     _unscanned_path_finding,
     normalize_declared_path,
 )
 from skillevaluator.plugin_states import COVERAGE_STATES, EVALUATED_COVERAGE_STATES
-from skillevaluator.utils.secure_fs import SecurePathError, stat_is_link_or_reparse
-from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json, load_bounded_yaml
+from skillevaluator.utils.secure_fs import (
+    MAX_SECURE_DIRECTORY_DEPTH,
+    SecurePathError,
+    stat_is_link_or_reparse,
+)
+from skillevaluator.utils.structured_data import (
+    StructuredDataError,
+    StructuredDataLimitError,
+    load_bounded_json,
+    load_bounded_yaml,
+)
 from skillevaluator.validators.mcp_static import (
     OverrideIssue,
     env_override_issues,
+    env_tls_and_secret_issues,
     permission_flag_issues,
     validate_mcp_command,
     validate_mcp_pinning,
 )
+from skillevaluator.validators.url_policy import report_text
 
 Support = Literal["evaluated", "static_only", "unsupported"]
 Origin = Literal["declared", "packaged", "declared+packaged"]
@@ -157,6 +174,9 @@ _ENV_SCAN_MAX_DEPTH = 32
 _MANIFEST_PATHS = frozenset(PLUGIN_MANIFEST_RELATIVE_PATHS)
 # Agent Plugins client-extension namespace directory names (reverse-domain).
 _NAMESPACE_DIR_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$")
+# Codex drops a value of the wrong type in these fields, loads the default location, and still installs the
+# plugin (plugin_formats: Codex check-1 rules). A wrong-typed 'apps' makes Codex refuse the manifest.
+_CODEX_IGNORED_SCALAR_FIELDS = frozenset({"skills", "commands", "hooks"})
 
 
 # --------------------------------------------------------------------------- #
@@ -164,20 +184,38 @@ _NAMESPACE_DIR_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$")
 # --------------------------------------------------------------------------- #
 @dataclass
 class CostRow:
+    """One component's static context-cost row.
+
+    ``always_on_chars`` and ``on_demand_chars`` are token-weighted characters
+    (:func:`cost_chars`) as the component's own harness loads it natively.
+    :func:`_view_rows` turns them into the numbers of one harness and load
+    mode. ``not_counted`` names always-on text whose size is not known
+    statically (MCP tool schemas, hook output). ``traits`` are the frontmatter
+    facts the views read: ``model_hidden`` (``disable-model-invocation``),
+    ``forced_style`` and ``keeps_coding_instructions`` (output styles), and
+    the rule traits of :func:`rule_traits` (``always_apply``, ``paths_rule``,
+    ``requested``).
+    """
+
     type: str
     name: str
     always_on_chars: int
     on_demand_chars: int
     basis: str
+    not_counted: str | None = None
+    traits: frozenset[str] = frozenset()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        row: dict[str, Any] = {
             "type": self.type,
             "name": self.name,
             "always_on_tokens": estimate_tokens(self.always_on_chars),
             "on_demand_tokens": estimate_tokens(self.on_demand_chars),
             "basis": self.basis,
         }
+        if self.not_counted:
+            row["not_counted"] = self.not_counted
+        return row
 
 
 @dataclass
@@ -201,6 +239,9 @@ class Component:
     # For a component only another client loads from its default location (the
     # cross-client pass): which clients load it.
     loaded_by: str | None = None
+    # For a bundle-reference skill or rule ref: ``external`` or ``unresolved``
+    # (``missing`` refs are broken: ``problem == "missing"``).
+    dependency_state: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         row = {
@@ -211,6 +252,11 @@ class Component:
             "support": self.support,
             "findings": self.findings,
         }
+        if self.problem:
+            # A broken declaration (missing, escape, unsafe, invalid): the client cannot load it.
+            row["problem"] = self.problem
+        if self.dependency_state:
+            row["dependency"] = self.dependency_state
         if self.declared_by:
             row["declared_by"] = self.declared_by
         if self.loaded_by:
@@ -230,6 +276,8 @@ class PluginInventory:
     # Static risk records (plugin_component_risk): per-hook handlers and per agent/command grants.
     hook_records: list[HookRecord] = field(default_factory=list)
     privilege_records: list[PrivilegeRecord] = field(default_factory=list)
+    # The harness whose native loading the default context-cost estimate describes.
+    cost_harness: str = "claude-code"
 
     def of_type(self, component_type: str) -> list[Component]:
         return [component for component in self.components if component.type == component_type]
@@ -264,6 +312,7 @@ class PluginInventory:
             "components": [component.to_dict() for component in self.components],
             "counts": counts,
             "unsupported_types_present": unsupported,
+            "broken": sum(1 for component in self.components if component.problem),
         }
 
     def mcp_summary(self) -> dict[str, Any]:
@@ -282,19 +331,52 @@ class PluginInventory:
         ]
         return {"servers": servers, "pinning": summarize_pinning(pins)}
 
-    def context_cost(self, *, extra_rows: Iterable[CostRow] = (), extra_notes: Iterable[str] = ()) -> dict[str, Any]:
+    def context_cost(
+        self,
+        *,
+        extra_rows: Iterable[CostRow] = (),
+        extra_notes: Iterable[str] = (),
+        harness: str | None = None,
+        load_mode: str | None = None,
+    ) -> dict[str, Any]:
+        """The static always-on versus on-demand estimate, for one harness and load mode plus every other view.
+
+        *harness* and *load_mode* pick the headline view (a Tier 3 run's own);
+        either defaults to the plugin's own harness (``cost_harness``) and native
+        loading, and a pair that is not modeled falls back to that native view.
+        ``by_harness`` repeats the totals for each modeled harness and load mode.
+        """
         rows = [component.cost for component in self.components if component.cost is not None]
         rows.extend(extra_rows)
+        selected = (harness or self.cost_harness, load_mode or COST_NATIVE)
+        if selected not in _VIEW_TYPES:
+            selected = (self.cost_harness, COST_NATIVE)
+        views = list(COST_VIEWS)
+        if (self.cost_harness, COST_NATIVE) not in views:
+            views.insert(0, (self.cost_harness, COST_NATIVE))  # Cursor: its own view first
+        by_component = [row.to_dict() for row in _view_rows(rows, *selected)]
+        not_counted = [f"{row['type']} {row['name']}" for row in by_component if row.get("not_counted")]
         notes = [*_CONTEXT_COST_NOTES, *self.notes, *extra_notes]
+        if not_counted:
+            notes.append(
+                "Lower bound: the always-on total leaves out what cannot be sized statically: "
+                + ", ".join(not_counted[:5])
+                + (f" and {len(not_counted) - 5} more" if len(not_counted) > 5 else "")
+                + "."
+            )
         if self.unread_files:
             notes.append(f"{self.unread_files} component file(s) could not be read safely and are not counted.")
-        by_component = [row.to_dict() for row in rows]
         return {
             "method": "static_estimate",
-            "estimator": "chars_div_4",
+            "estimator": COST_ESTIMATOR,
+            "harness": selected[0],
+            "load_mode": selected[1],
             "always_on_tokens": sum(row["always_on_tokens"] for row in by_component),
             "on_demand_tokens": sum(row["on_demand_tokens"] for row in by_component),
+            "lower_bound": bool(not_counted),
+            "not_counted": not_counted,
             "by_component": by_component,
+            "by_harness": [_view_summary(rows, *view) for view in views],
             "notes": notes,
         }
 
@@ -317,19 +399,298 @@ class PluginInventory:
 
 
 _CONTEXT_COST_NOTES: tuple[str, ...] = (
-    "Static estimate: tokens are approximated as characters / 4 (chars_div_4); no tokenizer is run.",
-    "Always-on: each skill's frontmatter name + description, each agent's and command's description, and "
-    "output styles marked force-for-plugin: true.",
-    "On-demand: SKILL.md bodies, rule bodies, agent and command bodies, and output styles the user must select.",
-    "In SkillEvaluator's Tier 3 wrapper, plugin rules are embedded in the generated wrapper SKILL.md, so rules "
-    "load on demand with the wrapper rather than always-on.",
-    "MCP tool schemas are not known statically; MCP servers contribute 0 tokens to this estimate.",
+    "Static estimate: tokens are approximated as characters / 4, with each CJK or other full-width character "
+    "counted as 1 token (chars_div_4_cjk); no tokenizer is run.",
+    "Always-on, for the harness and load mode shown: skill names and descriptions (Claude Code leaves out "
+    "disable-model-invocation items), agent and command descriptions, the one forced output style Claude Code "
+    "applies (it replaces the default coding instructions unless keep-coding-instructions is set, so it can "
+    "shrink the prompt), rules the native adapter stages as always on (not agent-requested or manual rules, and "
+    "for Codex not paths- or globs-scoped rules, which it does not stage), and UserPromptSubmit or startup "
+    "SessionStart hook output that reads a plugin file.",
+    "On-demand: SKILL.md bodies, agent and command bodies, output styles the user must select, and rules in "
+    "wrapper mode, where they are embedded in the generated wrapper SKILL.md.",
+    "MCP tool schemas are not known statically, so MCP servers are marked not counted, like hook output produced "
+    "at run time. Claude Code may shorten long skill descriptions in its listing, depending on its version. "
+    "by_harness gives the estimate for each harness and load mode.",
 )
 
 
 def estimate_tokens(chars: int) -> int:
-    """``chars_div_4`` estimator (rounded up)."""
-    return math.ceil(max(chars, 0) / 4)
+    """Tokens for token-weighted characters (:func:`cost_chars`): divided by 4, rounded away from zero."""
+    return math.ceil(chars / 4) if chars >= 0 else -math.ceil(-chars / 4)
+
+
+COST_ESTIMATOR = "chars_div_4_cjk"
+COST_NATIVE = "native"
+COST_WRAPPER = "wrapper"
+#: The harness and load-mode views every static estimate reports in ``by_harness``.
+COST_VIEWS: tuple[tuple[str, str], ...] = (
+    ("claude-code", COST_NATIVE),
+    ("claude-code", COST_WRAPPER),
+    ("codex", COST_NATIVE),
+    ("codex", COST_WRAPPER),
+)
+COST_HARNESS_LABELS = {"claude-code": "Claude Code", "codex": "Codex", "cursor": "Cursor"}
+#: The component types each view puts into the model's context. Native Claude Code loads every
+#: type; SkillEvaluator's native Codex adapter stages skills, rules (AGENTS.md), and MCP servers;
+#: the generated wrapper stages member skills, embeds rules, and starts runnable MCP servers.
+_VIEW_TYPES: dict[tuple[str, str], frozenset[str]] = {
+    ("claude-code", COST_NATIVE): frozenset({"skill", "rule", "agent", "command", "output_style", "mcp", "hook"}),
+    ("claude-code", COST_WRAPPER): frozenset({"skill", "rule", "mcp"}),
+    ("codex", COST_NATIVE): frozenset({"skill", "rule", "mcp"}),
+    ("codex", COST_WRAPPER): frozenset({"skill", "rule", "mcp"}),
+    ("cursor", COST_NATIVE): frozenset({"skill", "rule", "agent", "command", "mcp"}),
+}
+#: Harnesses that read ``disable-model-invocation`` and keep such skills and commands out of the listing.
+#: Codex rejects the field in its own skill validator and lists the skill anyway.
+_HIDES_MODEL_DISABLED = frozenset({"claude-code", "cursor"})
+#: Characters of Claude Code's default system text ("Doing tasks" coding instructions) that a forced
+#: output style replaces unless it sets ``keep-coding-instructions`` (2.1.284 captures: 3,233-3,262).
+CLAUDE_CODE_CODING_INSTRUCTIONS_CHARS = 3_250
+#: Hook events whose output Claude Code adds to the first model request.
+_FIRST_TURN_HOOK_EVENTS = frozenset({"SessionStart", "UserPromptSubmit"})
+#: The SessionStart source of a new session; resume, clear, and compact start later.
+_SESSION_START_SOURCE = "startup"
+
+
+def _runs_in_first_request(record: HookRecord) -> bool:
+    """Whether a first-turn hook handler runs before the first request of a new session.
+
+    UserPromptSubmit has no matcher. A SessionStart matcher is matched against
+    the start source (``startup``, ``resume``, ``clear``, ``compact``) the way
+    Claude Code matches tool names, read like ``matcher_scope`` in
+    ``plugin_component_risk``: no matcher, ``""`` or ``*`` selects every
+    source, a name or ``|`` list must name ``startup``, and anything else is a
+    regular expression searched in ``startup``. A matcher the evaluator cannot
+    decide counts (fail closed).
+    """
+    from skillevaluator.plugin_component_risk import (
+        _EXACT_MATCHER_RE,
+        _NAME_LIST_RE,
+        MAX_MATCHER_CHARS,
+        _InvalidMatcher,
+        _matcher_names,
+        _MatcherEvaluator,
+        _MatcherParser,
+        _UnsupportedMatcher,
+    )
+
+    if record.event != "SessionStart" or record.matcher is None or record.matcher.strip() in {"", "*"}:
+        return True
+    text = record.matcher.strip()
+    if _NAME_LIST_RE.fullmatch(text) and _SESSION_START_SOURCE in _matcher_names(text):
+        return True
+    if _EXACT_MATCHER_RE.fullmatch(text):
+        return False
+    if len(text) > MAX_MATCHER_CHARS:
+        return True
+    try:
+        return _MatcherEvaluator(_MatcherParser(text).parse()).matches(_SESSION_START_SOURCE)
+    except _UnsupportedMatcher:
+        return True
+    except _InvalidMatcher:
+        return False
+
+
+_PRIMARY_COST_HARNESS = {PLUGIN_CODEX_MANIFEST_TYPE: "codex", PLUGIN_CURSOR_MANIFEST_TYPE: "cursor"}
+_TYPE_WORDS = {
+    "skill": "skills",
+    "rule": "rules",
+    "agent": "subagents",
+    "command": "commands",
+    "output_style": "output styles",
+    "mcp": "MCP servers",
+    "hook": "plugin hooks",
+}
+
+
+def cost_chars(text: str) -> int:
+    """Token-weighted length: 1 per character, 4 per CJK or other full-width character (about 1 token each).
+
+    Characters divided by 4 fits English text. CJK text runs near one token
+    per character (a 225-character Chinese description is 172 o200k tokens),
+    so wide characters weigh 4.
+    """
+    if text.isascii():
+        return len(text)
+    import unicodedata
+
+    wide = sum(1 for char in text if unicodedata.east_asian_width(char) in {"W", "F"})
+    return len(text) + 3 * wide
+
+
+def _claude_flag(value: Any) -> bool:
+    """Whether Claude Code reads a frontmatter flag as on.
+
+    A Claude Code 2.1.284 probe forced an output style for ``true``,
+    ``"true"``, ``yes`` and ``1``, and not for ``false`` or ``"false"``.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1"}
+    return False
+
+
+def model_hidden_traits(frontmatter: dict[str, Any]) -> frozenset[str]:
+    """``{"model_hidden"}`` when ``disable-model-invocation`` is on (as Claude Code reads it), else empty."""
+    return frozenset({"model_hidden"}) if _claude_flag(frontmatter.get("disable-model-invocation")) else frozenset()
+
+
+def _rule_flag(value: Any) -> bool:
+    """``alwaysApply`` as the native adapters read it: YAML ``true`` or the string ``"true"`` (any case)."""
+    return value is True or (isinstance(value, str) and value.strip().casefold() == "true")
+
+
+def _rule_has_frontmatter(text: str) -> bool:
+    """Whether a rule file opens with a closed ``---`` frontmatter block, as the native adapters test it."""
+    lines = text.splitlines()
+    return bool(lines) and lines[0].strip() == "---" and any(line.strip() == "---" for line in lines[1:])
+
+
+def _rule_patterns(scope: Any) -> list[str]:
+    """Cursor ``globs`` or Claude ``paths``: a list, or a comma-separated string, of glob patterns."""
+    items = scope if isinstance(scope, list) else str(scope).split(",")
+    return [text for item in items if (text := str(item).strip())]
+
+
+def rule_traits(name: str, text: str, frontmatter: dict[str, Any]) -> frozenset[str]:
+    """How SkillEvaluator's native adapters stage one rule (``tier3.plugin_native``).
+
+    A rule without frontmatter is always on. With frontmatter:
+    ``always_apply`` when ``alwaysApply`` is true; else ``paths_rule`` when
+    ``paths`` (or ``globs``) lists a pattern, which Claude Code native loading
+    stages as a ``paths`` rule and Codex native loading does not stage (it has
+    only an always-on rules channel); and ``requested`` for a Cursor
+    agent-requested or manual rule (``alwaysApply`` present but not true, or a
+    ``.mdc`` rule), which neither adapter stages. Like the adapters
+    (``_rule_activation``), every channel reads the same patterns: a ``paths``
+    or ``globs`` value without one scopes nothing.
+    """
+    if not _rule_has_frontmatter(text):
+        return frozenset()
+    if _rule_flag(frontmatter.get("alwaysApply")):
+        return frozenset({"always_apply"})
+    traits: set[str] = set()
+    if _rule_patterns(frontmatter.get("paths") or frontmatter.get("globs") or []):
+        traits.add("paths_rule")
+    if "alwaysApply" in frontmatter or name.casefold().endswith(".mdc"):
+        traits.add("requested")
+    return frozenset(traits)
+
+
+def native_rule_staging(harness: str, traits: frozenset[str]) -> str:
+    """``always_on``, ``on_demand`` (a ``paths`` rule), or ``not_staged`` under one harness's native loading."""
+    if "always_apply" in traits:
+        return "always_on"
+    if harness == "codex" and "paths_rule" in traits:
+        return "not_staged"
+    if harness != "codex" and "paths_rule" in traits:
+        return "on_demand"
+    return "not_staged" if "requested" in traits else "always_on"
+
+
+def _rule_view(row: CostRow, harness: str, load_mode: str) -> CostRow:
+    body = row.on_demand_chars + row.always_on_chars
+    if load_mode == COST_WRAPPER:
+        return CostRow("rule", row.name, 0, body, "on-demand: embedded in the generated wrapper SKILL.md")
+    if harness == "cursor":
+        if "always_apply" in row.traits:
+            return CostRow("rule", row.name, body, 0, "always-on: alwaysApply rule (Cursor adds it to every request)")
+        return CostRow("rule", row.name, 0, body, "on-demand: Cursor attaches it by globs, description, or mention")
+    label = COST_HARNESS_LABELS.get(harness, harness)
+    staging = native_rule_staging(harness, row.traits)
+    if staging == "on_demand":
+        return CostRow("rule", row.name, 0, body, "on-demand: a paths- or globs-scoped rule loads with matching files")
+    if staging == "not_staged" and harness == "codex" and "paths_rule" in row.traits:
+        return CostRow(
+            "rule",
+            row.name,
+            0,
+            0,
+            f"not loaded: {label} native loading has only an always-on rules channel, so a paths- or "
+            "globs-scoped rule is not staged",
+        )
+    if staging == "not_staged":
+        return CostRow(
+            "rule",
+            row.name,
+            0,
+            0,
+            f"not loaded: {label} native loading does not stage an agent-requested or manual rule "
+            "(alwaysApply is not true)",
+        )
+    where = "appends it to $CODEX_HOME/AGENTS.md" if harness == "codex" else "stages it as a Claude Code user rule"
+    return CostRow("rule", row.name, body, 0, f"always-on: native loading {where}")
+
+
+def _view_rows(rows: Iterable[CostRow], harness: str, load_mode: str) -> list[CostRow]:
+    """The rows as one harness and load mode loads them (see :data:`_VIEW_TYPES`).
+
+    Claude Code applies one forced output style (the first in file order) and
+    warns about the rest; the applied style replaces the default coding
+    instructions unless it sets ``keep-coding-instructions``.
+    """
+    loads = _VIEW_TYPES[(harness, load_mode)]
+    label = f"{COST_HARNESS_LABELS.get(harness, harness)} ({load_mode})"
+    applied_style: str | None = None
+    out: list[CostRow] = []
+    for row in rows:
+        if row.type not in loads:
+            words = _TYPE_WORDS.get(row.type, f"{row.type} components")
+            out.append(CostRow(row.type, row.name, 0, 0, f"not loaded: {label} does not load {words}"))
+        elif row.type == "rule":
+            out.append(_rule_view(row, harness, load_mode))
+        elif "model_hidden" in row.traits and harness in _HIDES_MODEL_DISABLED:
+            out.append(
+                CostRow(
+                    row.type,
+                    row.name,
+                    0,
+                    row.always_on_chars + row.on_demand_chars,
+                    "on-demand only: disable-model-invocation keeps it out of the model's listing",
+                )
+            )
+        elif "forced_style" in row.traits and applied_style is not None:
+            out.append(
+                CostRow(
+                    row.type,
+                    row.name,
+                    0,
+                    row.always_on_chars,
+                    f"on-demand: forced too, but Claude Code applies only one forced output style ({applied_style})",
+                )
+            )
+        elif "forced_style" in row.traits:
+            applied_style = row.name
+            header = cost_chars(f"# Output Style: {row.name}\n\n")
+            if "keeps_coding_instructions" in row.traits:
+                out.append(dataclasses.replace(row, always_on_chars=header + row.always_on_chars))
+            else:
+                net = header + row.always_on_chars - CLAUDE_CODE_CODING_INSTRUCTIONS_CHARS
+                basis = (
+                    "always-on: forced output style body; it replaces Claude Code's default coding instructions "
+                    f"(about {CLAUDE_CODE_CODING_INSTRUCTIONS_CHARS:,} characters), so the net cost can be negative"
+                )
+                out.append(dataclasses.replace(row, always_on_chars=net, basis=basis))
+        else:
+            out.append(row)
+    return out
+
+
+def _view_summary(rows: list[CostRow], harness: str, load_mode: str) -> dict[str, Any]:
+    by_component = [row.to_dict() for row in _view_rows(rows, harness, load_mode)]
+    not_counted = sum(1 for row in by_component if row.get("not_counted"))
+    return {
+        "harness": harness,
+        "load_mode": load_mode,
+        "always_on_tokens": sum(row["always_on_tokens"] for row in by_component),
+        "on_demand_tokens": sum(row["on_demand_tokens"] for row in by_component),
+        "lower_bound": bool(not_counted),
+        "not_counted": not_counted,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -356,6 +717,127 @@ def _unscanned_skill_finding(reader: PluginRootReader, manifest_rel: PurePosixPa
     )
 
 
+# Dependency folders, VCS metadata, and bytecode caches: whole-tree scans prune them at any depth.
+_DEPENDENCY_DIRS = SCAN_EXCLUDED_DIRS - SCAN_ARTIFACT_DIRS
+_DEPENDENCY_DIRS_TEXT = "node_modules/, .venv/, .git/, __pycache__/"
+
+
+def _loaded_dependency_skill(parts: tuple[str, ...], *, recursive: bool) -> str | None:
+    """The dependency folder of a ``SKILL.md`` a client loads from a skills folder, or ``None``.
+
+    ``parts`` is the manifest path relative to the skills folder. Claude Code
+    loads every ``<skills folder>/<name>/SKILL.md``, hidden names included, so
+    ``skills/node_modules/SKILL.md`` and ``skills/.venv/SKILL.md`` are skills.
+    Codex (``recursive``) searches the folder at any depth but skips hidden
+    folders, so it also loads ``skills/x/node_modules/pkg/SKILL.md``.
+    """
+    folders = parts[:-1]
+    if len(folders) == 1 and folders[0] in _DEPENDENCY_DIRS:
+        return folders[0]
+    if not recursive or any(part.startswith(".") for part in folders):
+        return None
+    return next((part for part in folders if part in _DEPENDENCY_DIRS), None)
+
+
+def find_dependency_folder_skills(
+    root: Path, skills_dir: str = DEFAULT_SKILLS_DIR, *, recursive: bool = True
+) -> tuple[list[PurePosixPath], bool]:
+    """Skills a client loads from a dependency folder inside a skills folder, and whether the search finished.
+
+    Bundled-skill discovery prunes ``node_modules/``, ``.venv/``, ``.git/``,
+    and ``__pycache__/`` like the whole-tree scans, so a ``SKILL.md`` there is
+    never listed or scanned, yet clients load it
+    (:func:`_loaded_dependency_skill`). The paths are plugin-root relative.
+    The walk reads names only, never follows links, skips hidden folders
+    below the first level (no client loads skills from them), and stops after
+    :data:`~skillevaluator.constants.PLUGIN_TREE_MAX_DISCOVERED_PATHS` entries.
+    """
+    start = Path(root)
+    for part in PurePosixPath(skills_dir).parts:
+        start = start / part
+        try:
+            metadata = start.lstat()
+        except OSError:
+            return [], True
+        if stat_is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+            return [], True  # a linked skills folder is reported by skill discovery
+    base = PurePosixPath(skills_dir)
+    found: list[PurePosixPath] = []
+    budget = PLUGIN_TREE_MAX_DISCOVERED_PATHS
+    # Breadth first, so the folders clients load first are searched first.
+    # (directory, path relative to the skills folder, whether its subfolders are searched)
+    pending: list[tuple[Path, PurePosixPath, bool]] = [(start, PurePosixPath(), True)]
+    while pending:
+        directory, relative, descend = pending.pop(0)
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in entries:
+            budget -= 1
+            if budget < 0:
+                return sorted(found), False
+            child = relative / entry.name
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISREG(metadata.st_mode):
+                if entry.name in SKILL_MANIFEST_VARIANTS and _loaded_dependency_skill(child.parts, recursive=recursive):
+                    found.append(base / child)
+                continue
+            if not descend or not stat.S_ISDIR(metadata.st_mode) or stat_is_link_or_reparse(metadata):
+                continue
+            searched = recursive and not entry.name.startswith(".") and len(child.parts) < MAX_SECURE_DIRECTORY_DEPTH
+            if searched or (not relative.parts and entry.name in _DEPENDENCY_DIRS):
+                # A first-level dependency folder is a skill folder (its own SKILL.md); only a
+                # recursive client searches below it, and never below a hidden one.
+                pending.append((Path(entry.path), child, searched))
+    return sorted(found), True
+
+
+def dependency_folder_skill_findings(
+    display: Callable[[PurePosixPath], str], skills_dir: str, found: list[PurePosixPath], complete: bool
+) -> list[Finding]:
+    """HIGH for each skill a client loads from a dependency folder; LOW when the search stopped early.
+
+    ``display`` maps a plugin-root-relative path to the finding's file path.
+    Every client view and the bundled-skill check report the same text, so a
+    merged inventory keeps one finding per skill.
+    """
+    findings: list[Finding] = []
+    for rel in found[:PLUGIN_COMPONENT_MAX_ITEMS]:
+        folder = next(part for part in rel.parts if part in _DEPENDENCY_DIRS)
+        findings.append(
+            _plugin_finding(
+                Severity.HIGH,
+                "plugin_skill_in_unscanned_folder",
+                f"'{rel.as_posix()}' is a skill inside '{folder}/', a folder that Tier 1 scans skip "
+                f"({_DEPENDENCY_DIRS_TEXT}). A client loads it from '{skills_dir}/' (Claude Code loads every "
+                f"'{skills_dir}/<name>/' folder, and Codex searches the folder at any depth), but SkillEvaluator "
+                "never lists or security-scans it",
+                display(rel),
+                "Give the skill folder a different name, or keep dependency folders, VCS metadata, and bytecode "
+                "caches out of skills folders.",
+                metadata={"path": rel.as_posix()},
+            )
+        )
+    if not complete:
+        findings.append(
+            _plugin_finding(
+                Severity.LOW,
+                "plugin_skill_scan_incomplete",
+                f"the search for skills inside dependency folders in '{skills_dir}/' stopped after "
+                f"{PLUGIN_TREE_MAX_DISCOVERED_PATHS} entries; a client may load skills from the rest",
+                display(PurePosixPath(skills_dir)),
+                "Keep dependency folders out of skills folders.",
+                metadata={"path": skills_dir},
+            )
+        )
+    return findings
+
+
 def _override_findings(
     issues: Iterable[OverrideIssue],
     file_path: str,
@@ -379,12 +861,44 @@ def _override_findings(
     return findings
 
 
+# The name and path suffix of a hook component that is a skill's or command's frontmatter ``hooks`` block.
+FRONTMATTER_HOOKS_SUFFIX = "#hooks"
+
+
+def frontmatter_hook_file(component: Component) -> str | None:
+    """The Markdown file whose frontmatter holds a frontmatter-hook component's hooks, else ``None``."""
+    path = component.path or ""
+    if component.type != "hook" or not path.endswith(FRONTMATTER_HOOKS_SUFFIX):
+        return None
+    return path.removesuffix(FRONTMATTER_HOOKS_SUFFIX) or None
+
+
+def is_skill_frontmatter_hook(component: Component) -> bool:
+    """Whether a hook component is the frontmatter ``hooks`` block of a skill (staged with its skill)."""
+    file = frontmatter_hook_file(component)
+    return file is not None and PurePosixPath(file).name in SKILL_MANIFEST_VARIANTS
+
+
+# A Codex project config a plugin may ship, and its settings that turn off approvals or the sandbox.
+_CODEX_CONFIG_FILE = ".codex/config.toml"
+_CODEX_BYPASS_SETTINGS = (("approval_policy", "never"), ("sandbox_mode", "danger-full-access"))
+
+
+def _agent_cli_flag_issues(value: Any) -> list[OverrideIssue]:
+    """Agent-CLI flags in a hook, LSP, monitor, or settings config: permission bypasses, the permissive
+    ``--permission-mode acceptEdits|auto`` (one :func:`permission_flag_issues` walk), and ``--allowedTools Bash``."""
+    return [*permission_flag_issues(value), *allowed_tools_flag_issues(value)]
+
+
 def _lsp_command_findings(name: str, server: dict[str, Any], file_path: str) -> list[Finding]:
     """The MCP stdio command-form checks for one LSP server's ``command`` and ``args``, as ``plugin_lsp_*``.
 
     Claude Code starts an LSP server like a stdio MCP server (argv, no shell),
-    so a shell ``-c`` program, shell metacharacters, inline credentials, and
-    unpinned package runners get the same findings.
+    so a shell ``-c`` program, inline credentials, and unpinned package runners
+    get the same findings, worded for an LSP server. Without a shell, ``;`` or
+    ``|`` inside an argument is passed to the server literally and is not
+    flagged (the MCP argv rule); an argument that is only an operator or
+    carries command substitution is a LOW note, not the MCP CRITICAL.
     """
     if not isinstance(server.get("command"), str):
         return []
@@ -392,17 +906,46 @@ def _lsp_command_findings(name: str, server: dict[str, Any], file_path: str) -> 
     validate_mcp_command(name, server, file_path, raw)
     validate_mcp_pinning(name, server, file_path, raw)
     prefix = f"mcpServers['{name}']: "
-    return [
-        _plugin_finding(
-            finding.severity,
-            f"plugin_lsp_{finding.check_name.removeprefix('mcp_')}",
-            f"lspServers['{name}']: {finding.message.removeprefix(prefix)}",
-            file_path,
-            finding.suggestion,
-            metadata={"plugin_component": {"type": "lsp", "name": name}},
+    findings: list[Finding] = []
+    for finding in raw:
+        check = f"plugin_lsp_{finding.check_name.removeprefix('mcp_')}"
+        severity, message, suggestion = finding.severity, finding.message.removeprefix(prefix), finding.suggestion
+        if check == "plugin_lsp_command_shell_metacharacters":
+            if any(item.check_name == check for item in findings):
+                continue
+            severity = Severity.LOW
+            message = (
+                "an argument contains shell metacharacters (; | & ` $() < >); Claude Code starts LSP servers "
+                "without a shell, so they reach the server literally"
+            )
+            suggestion = "Check that the argument is meant literally; the server does not get a shell."
+        findings.append(
+            _plugin_finding(
+                severity,
+                check,
+                f"lspServers['{name}']: {_lsp_wording(message)}",
+                file_path,
+                _lsp_wording(suggestion) if suggestion else suggestion,
+                metadata={"plugin_component": {"type": "lsp", "name": name}},
+            )
         )
-        for finding in raw
-    ]
+    return findings
+
+
+def _lsp_wording(text: str) -> str:
+    """MCP check text reworded for an LSP server."""
+    return (
+        text.replace("runnable MCP ", "LSP server ")
+        .replace("MCP commands run", "LSP servers run")
+        .replace("MCP server", "LSP server")
+    )
+
+
+def _lsp_env_findings(name: str, env: Any, file_path: str) -> list[Finding]:
+    """The MCP env checks for an LSP server's ``env``: TLS verification off and inline credentials (CRITICAL)."""
+    return _override_findings(
+        env_tls_and_secret_issues(env), file_path, where=f"lspServers['{name}']", component=("lsp", name)
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -416,8 +959,67 @@ class _Markdown:
     frontmatter: dict[str, Any]
 
 
+# Claude Code's lenient frontmatter retry: a ``key: value`` line whose plain
+# value holds a YAML indicator (or ": ") is re-read as a double-quoted string.
+_LENIENT_KEY_RE = re.compile(r"^([a-zA-Z_-]+):\s+(.+)$")
+_LENIENT_SPECIAL_RE = re.compile(r"[{}\[\]*&#!|>%@`]|: ")
+_LEADING_TABS_RE = re.compile(r"^\t+", re.MULTILINE)
+
+
+def _quote_lenient_values(raw: str) -> str:
+    """Quote the plain frontmatter values strict YAML rejects, the way Claude Code retries a failed parse.
+
+    Claude Code 2.1.x parses frontmatter with a YAML parser and, when that
+    fails, quotes each top-level ``key: value`` whose value contains a YAML
+    indicator (``{}[]*&#!|>%@`` or a backtick) or ``": "`` (unless it is
+    already quoted or is a valid flow list), turns leading tabs into two spaces
+    each, and parses again. So
+    ``description: Deploy: runs the script`` and ``tools: *`` load, and the
+    privileges and context cost must be read the same way.
+    """
+    lines: list[str] = []
+    for line in raw.split("\n"):
+        match = _LENIENT_KEY_RE.match(line)
+        if match is not None:
+            key, value = match.groups()
+            if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                lines.append(line)
+                continue
+            if value.startswith("[") and value.endswith("]"):
+                try:
+                    if isinstance(load_bounded_yaml(value), list):
+                        lines.append(line)
+                        continue
+                except StructuredDataError:
+                    pass
+            if _LENIENT_SPECIAL_RE.search(value):
+                escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+                lines.append(f'{key}: "{escaped}"')
+                continue
+        lines.append(line)
+    return _LEADING_TABS_RE.sub(lambda tabs: "  " * len(tabs.group(0)), "\n".join(lines))
+
+
+def _load_frontmatter(raw: str) -> Any:
+    """Bounded YAML frontmatter, with Claude Code's lenient retry when strict YAML rejects it."""
+    if not raw.strip():
+        return {}
+    try:
+        return load_bounded_yaml(raw)
+    except StructuredDataLimitError:
+        raise
+    except (StructuredDataError, ValueError):
+        return load_bounded_yaml(_quote_lenient_values(raw))
+
+
 def parse_markdown(text: str) -> _Markdown:
-    """Split optional ``---`` YAML frontmatter from a Markdown body (bounded YAML)."""
+    """Split optional ``---`` YAML frontmatter from a Markdown body (bounded YAML).
+
+    Frontmatter that strict YAML rejects is read again the way Claude Code
+    reads it (:func:`_quote_lenient_values`), so a value such as ``Deploy:
+    runs the script`` does not hide the fields after it. Frontmatter that
+    still fails to parse gives no fields, as in Claude Code.
+    """
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return _Markdown(None, None, text.strip(), {})
@@ -426,8 +1028,8 @@ def parse_markdown(text: str) -> _Markdown:
             raw = "\n".join(lines[1:index])
             body = "\n".join(lines[index + 1 :]).strip()
             try:
-                data = load_bounded_yaml(raw) if raw.strip() else {}
-            except (StructuredDataError, ValueError):
+                data = _load_frontmatter(raw)
+            except (StructuredDataError, ValueError, RecursionError):
                 return _Markdown(None, None, body, {})
             if not isinstance(data, dict):
                 return _Markdown(None, None, body, {})
@@ -520,6 +1122,7 @@ class _Builder:
         self.extensions()
         self.openai_extension()
         self.env_files()
+        self.finish_costs()
         return self.inventory
 
     # -- inventory bookkeeping --------------------------------------------- #
@@ -594,6 +1197,10 @@ class _Builder:
         return declared_value_replaces_default(self.profile, field_name, value)
 
     # -- declared paths and bounded reads ---------------------------------- #
+    def _codex_drops(self, raw: Any, profile: FormatProfile) -> bool:
+        """Whether Codex ignores this declared path value (and loads the default location instead)."""
+        return self.contained and profile.codex_path_rules and not codex_accepts_path(raw)
+
     def _resolve_declared(
         self,
         field_name: str,
@@ -609,17 +1216,38 @@ class _Builder:
         The second value is the path's kind when it is one of ``kinds``, and
         otherwise the problem: ``escape``, ``invalid``, ``missing``, or
         ``unsafe``. A file where the field takes a folder (or the reverse) is
-        ``invalid``; its finding names ``wrong_kind_field`` when given.
-        ``profile`` overrides the builder's format profile (the Codex rules of
+        ``invalid``; its finding names ``wrong_kind_field`` when given. The
+        kind is ``dropped`` when the client ignores the value: Codex drops any
+        path it does not accept (no leading ``./``, ``./`` alone, ``..``, a root
+        variable) and loads the default location instead, so the value names
+        no component. Its findings are still reported. ``profile`` overrides
+        the builder's format profile (the Codex rules of
         ``extensions["com.openai"]``).
         """
         profile = profile or self.profile
+        dropped = self._codex_drops(raw, profile)
         if not isinstance(raw, str):
+            if dropped and field_name in _CODEX_IGNORED_SCALAR_FIELDS:
+                # Codex drops a skills, commands, or hooks value of the wrong type, loads the default location,
+                # and still installs the plugin: MEDIUM, as check 1 rates it for the Codex client.
+                self.inventory.findings.append(
+                    _plugin_finding(
+                        Severity.MEDIUM,
+                        "plugin_component_path_invalid",
+                        f"'{field_name}' entry {report_text(repr(raw), 80)} is not a path; Codex ignores the value, "
+                        "loads the default location, and still installs the plugin",
+                        self.reader.display(self.manifest_rel),
+                        f"Write '{field_name}' as a './'-relative path (or a list of them), or remove it to use the "
+                        "default location.",
+                        metadata={"plugin_component_ref": repr(raw)},
+                    )
+                )
+                return None, "dropped"
             finding = _path_problem_finding(
                 self.reader, field_name, DeclaredPath(repr(raw), None), self.manifest_rel, "invalid"
             )
             self.inventory.findings.append(finding)
-            return None, "invalid"
+            return None, "dropped" if dropped else "invalid"
         declared = normalize_declared_path(raw, profile.manifest_path_prefixes)
         if declared.problem is not None or declared.rel is None:
             problem = declared.problem if declared.problem == "escape" else "invalid"
@@ -628,10 +1256,20 @@ class _Builder:
                     self.reader, field_name, declared, self.manifest_rel, problem, reference=profile.reference
                 )
             )
-            return declared, problem
+            return declared, "dropped" if dropped else problem
+        if dropped:
+            if style:
+                self.inventory.findings.append(
+                    _style_finding(self.reader, field_name, declared, self.manifest_rel, profile=profile)
+                )
+            return declared, "dropped"
         if style and self.contained and profile.require_dot_relative and not declared.dot_relative:
             self.inventory.findings.append(
-                _style_finding(self.reader, field_name, declared, self.manifest_rel, profile)
+                _style_finding(self.reader, field_name, declared, self.manifest_rel, profile=profile)
+            )
+        if self.contained and declared.root_variable is not None:
+            self.inventory.findings.append(
+                _root_variable_finding(self.reader, field_name, declared, self.manifest_rel, profile)
             )
         # Skill folders a client loads are scanned as skill units even in such a folder
         # (client_skill_dirs_outside_tree_scans), so only other components get this.
@@ -639,6 +1277,20 @@ class _Builder:
             unscanned := _unscanned_path_finding(self.reader, field_name, declared, self.manifest_rel)
         ):
             self.inventory.findings.append(unscanned)
+        if self.contained and (wrong_kind := self._wrong_file_kind(field_name, raw, profile)) is not None:
+            self.inventory.findings.append(
+                _plugin_finding(
+                    Severity.HIGH,
+                    "plugin_component_path_invalid",
+                    f"'{field_name}' entry {raw!r} must name a {wrong_kind} file; "
+                    f"{profile.label.removesuffix(' plugin')} rejects the whole manifest otherwise and does not "
+                    "load the plugin",
+                    self.reader.display(self.manifest_rel),
+                    f"List each {wrong_kind} file by its own './'-relative path, as the {profile.reference} requires.",
+                    metadata={"plugin_component_ref": raw},
+                )
+            )
+            return declared, "invalid"
         kind = self.reader.kind(declared.rel)
         if kind == "missing":
             self.inventory.findings.append(
@@ -659,6 +1311,19 @@ class _Builder:
             return declared, "invalid"
         return declared, kind
 
+    @staticmethod
+    def _wrong_file_kind(field_name: str, raw: str, profile: FormatProfile) -> str | None:
+        """The file kind a field's paths must name when ``raw`` does not (Claude Code: ``.md`` agents, ``.json`` configs).
+
+        The client's schema compares the raw text, so a folder (``./agents/``)
+        or another suffix fails it.
+        """
+        if field_name in profile.markdown_file_fields and not raw.endswith(".md"):
+            return "Markdown (.md)"
+        if field_name in profile.json_file_fields and not raw.endswith(".json"):
+            return "JSON (.json)"
+        return None
+
     def _resolve_component(
         self,
         component_type: str,
@@ -674,26 +1339,27 @@ class _Builder:
 
         A path that cannot be loaded gets its finding (:meth:`_resolve_declared`)
         and a broken ``component_type`` component named ``name`` (by default
-        the declared value) in its place.
+        the declared value) in its place. A value the client drops (Codex loads
+        the default location instead) names no component, so it gets none.
         """
         declared, kind = self._resolve_declared(
             field_name, raw, kinds=kinds, wrong_kind_field=wrong_kind_field, style=style
         )
         if kind in kinds and declared is not None and declared.rel is not None:
             return _ResolvedPath(declared.rel, kind)
-        self._broken(component_type, declared, raw if name is None else name, kind)
+        if kind != "dropped":
+            self._broken(component_type, declared, raw if name is None else name, kind)
         return None
 
     def _list_dir(
         self, component_type: str, rel_dir: PurePosixPath, suffixes: tuple[str, ...] | None
     ) -> list[PurePosixPath] | None:
-        """List a component folder, nested folders included; a file in one the scans skip is HIGH.
+        """List a component folder, nested folders included (see :meth:`PluginRootReader.list_files`).
 
-        A folder declared inside such a folder already has its own finding
-        (:func:`_unscanned_path_finding`), so its files get no second one.
+        A folder that holds an unsafe entry is HIGH, with a broken row, and gives ``None``.
         """
         try:
-            files = self.reader.list_files(rel_dir, suffixes=suffixes)
+            return self.reader.list_files(rel_dir, suffixes=suffixes)
         except SecurePathError as exc:
             offending = exc.relative_path if exc.relative_path not in {"", "."} else ""
             location = (rel_dir / offending) if offending else rel_dir
@@ -718,11 +1384,6 @@ class _Builder:
                 )
             )
             return None
-        if not _in_unscanned_folder(rel_dir):
-            for rel in files:
-                if _in_unscanned_folder(rel):
-                    self.inventory.findings.append(_unscanned_file_finding(self.reader, component_type, rel))
-        return files
 
     def _read(self, rel: PurePosixPath, max_bytes: int = CONTENT_DEDUP_MAX_FILE_BYTES) -> str | None:
         try:
@@ -730,6 +1391,28 @@ class _Builder:
         except (SecurePathError, OSError):
             self.inventory.unread_files += 1
             return None
+
+    def _read_lenient(self, rel: PurePosixPath) -> str | None:
+        """Like :meth:`_read`, but a file that is not UTF-8 is decoded with replacement characters.
+
+        Claude Code still lists such a component (a Latin-1 agent shows up with
+        U+FFFD where the bytes were), so the cost estimate must count it.
+        """
+        try:
+            return self.reader.read_text(rel, CONTENT_DEDUP_MAX_FILE_BYTES)
+        except SecurePathError as exc:
+            if exc.code != "invalid_text_encoding":
+                self.inventory.unread_files += 1
+                return None
+        except OSError:
+            self.inventory.unread_files += 1
+            return None
+        try:
+            raw = self.reader._read_bytes(rel, CONTENT_DEDUP_MAX_FILE_BYTES)
+        except (SecurePathError, OSError):
+            self.inventory.unread_files += 1
+            return None
+        return raw.decode("utf-8-sig", errors="replace")
 
     def _load_json(self, rel: PurePosixPath, field_name: str) -> Any:
         try:
@@ -764,16 +1447,17 @@ class _Builder:
         ``hooks`` and ``lspServers`` merge with their default file; monitors replace it
         (``merge_default=False``) when declared. For Codex, a declared value
         replaces the default only when Codex keeps it; otherwise the default
-        file is loaded, as Codex does. A declared path that cannot be loaded
-        is not yielded: it gets its finding and a broken ``component_type``
-        component without a path. ``profile`` overrides the builder's format
-        profile (the Codex rules of ``extensions["com.openai"]``).
+        file is loaded, as Codex does, and a declared path Codex drops is not
+        yielded. A declared path that cannot be loaded is not yielded either:
+        it gets its finding and a broken ``component_type`` component without a
+        path. ``profile`` overrides the builder's format profile (the Codex
+        rules of ``extensions["com.openai"]``).
         """
         profile = profile or self.profile
         declared_values = self._declared_values(field_name, declared_value)
         explicit: set[PurePosixPath] = set()
         for raw in declared_values:
-            if isinstance(raw, str):
+            if isinstance(raw, str) and not self._codex_drops(raw, profile):
                 declared = normalize_declared_path(raw, profile.manifest_path_prefixes)
                 if declared.rel is not None:
                     explicit.add(declared.rel)
@@ -804,6 +1488,8 @@ class _Builder:
                 yield _JsonSource(name, "declared", self.manifest_rel, raw)
                 continue
             declared, kind = self._resolve_declared(field_name, raw, kinds=("file",), profile=profile)
+            if kind == "dropped":
+                continue  # the client ignores the value and loads the default file instead
             if kind != "file" or declared is None or declared.rel is None:
                 self._broken(component_type, None, raw, kind)  # a broken config source has no path
                 continue
@@ -827,6 +1513,7 @@ class _Builder:
                     declared_default = True
                     continue
                 self._declared_skill_dir(resolved.rel)
+                self._flag_dependency_folder_skills(resolved.rel)
         elif self.manifest is not None:
             for ref in _section_refs(self.manifest.get("skills")):
                 self._add(Component("skill", _ref_label(ref), "declared", None, "evaluated"))
@@ -989,6 +1676,23 @@ class _Builder:
         if _in_unscanned_folder(manifest_rel.parent):
             self.inventory.findings.append(_unscanned_skill_finding(self.reader, manifest_rel))
 
+    def _flag_dependency_folder_skills(self, rel_dir: PurePosixPath) -> None:
+        """HIGH for a skill a client loads from a dependency folder inside declared skills folder ``rel_dir``.
+
+        Skill discovery prunes ``node_modules/``, ``.venv/``, ``.git/``, and
+        ``__pycache__/``, so such a skill is never listed or scanned
+        (:func:`find_dependency_folder_skills`). Skills under ``skills/`` are
+        reported by the bundled-skill validator, so they are not repeated here.
+        """
+        if rel_dir.parts[:1] == (DEFAULT_SKILLS_DIR,):
+            return
+        found, complete = find_dependency_folder_skills(
+            self.reader.root, rel_dir.as_posix(), recursive=self.profile.skills_recursive
+        )
+        self.inventory.findings.extend(
+            dependency_folder_skill_findings(self.reader.display, rel_dir.as_posix(), found, complete)
+        )
+
     def _skill_cost(self, component: Component, manifest_rel: PurePosixPath) -> None:
         text = self._read(manifest_rel)
         if text is None:
@@ -998,13 +1702,13 @@ class _Builder:
         self._privileges(
             component, parsed.frontmatter, self.reader.display(manifest_rel), source_file=manifest_rel.as_posix()
         )
-        always = len(parsed.name or "") + len(parsed.description or "")
         component.cost = CostRow(
             "skill",
             component.name,
-            always,
-            len(parsed.body),
+            cost_chars((parsed.name or "") + (parsed.description or "")),
+            cost_chars(parsed.body),
             "always-on: frontmatter name + description; on-demand: SKILL.md body",
+            traits=model_hidden_traits(parsed.frontmatter),
         )
 
     # -- rules ------------------------------------------------------------- #
@@ -1052,8 +1756,11 @@ class _Builder:
             self._add(Component("rule", default_name, "packaged", default_name, "evaluated", problem="unsafe"))
 
     def _rule_dir(self, rel_dir: PurePosixPath, origin: Origin, *, support: Support = "evaluated") -> None:
+        """Every rule file in a rules folder, at any depth; one in a folder the scans skip is also HIGH."""
         files = self._list_dir("rule", rel_dir, self.profile.rule_suffixes)
         for rel in files or []:
+            if (unscanned := _unscanned_packaged_finding(self.reader, "rule", rel, rel_dir)) is not None:
+                self.inventory.findings.append(unscanned)
             self._rule_file(rel, origin, name=rel.relative_to(rel_dir).as_posix(), support=support)
 
     def _rule_file(
@@ -1062,12 +1769,15 @@ class _Builder:
         component = self._add(Component("rule", name or rel.name, origin, rel.as_posix(), support))
         text = self._read(rel)
         if text is not None:
+            text = text.strip()  # Tier 3 stages the stripped file, so a leading blank line hides no frontmatter
+            parsed = parse_markdown(text)
             component.cost = CostRow(
                 "rule",
                 component.name,
                 0,
-                len(text.strip()),
-                "on-demand: rule body (embedded in the Tier 3 wrapper SKILL.md)",
+                cost_chars(parsed.body),
+                "rule body",
+                traits=rule_traits(component.name, text, parsed.frontmatter),
             )
 
     # -- MCP servers ------------------------------------------------------- #
@@ -1111,7 +1821,8 @@ class _Builder:
                 declaration.name,
                 0,
                 0,
-                "tool schemas are not known statically (not counted)",
+                "always-on: the server's tool schemas",
+                not_counted="MCP tool schemas are not known statically (Tier 3 measures them)",
             )
         for raw, path, problem in collection.broken_sources:
             self._add(Component("mcp", raw, "declared", path, "static_only", problem=problem))
@@ -1137,7 +1848,7 @@ class _Builder:
         if config is not None:
             self.inventory.findings.extend(
                 _override_findings(
-                    permission_flag_issues(config),
+                    _agent_cli_flag_issues(config),
                     self.reader.display(rel),
                     where=f"hooks ({name})",
                     component=("hook", name),
@@ -1221,11 +1932,19 @@ class _Builder:
                 self._markdown_file(component_type, rel, origin)
 
     def _markdown_dir(self, component_type: str, rel_dir: PurePosixPath, origin: Origin) -> None:
+        """Every agent, command, or output style a client loads from a folder, at any depth.
+
+        Nothing is pruned: Claude Code also loads ``agents/evals/x.md``, so a
+        file in a folder the whole-tree scans skip is inventoried, checked for
+        privileges, and reported as unscanned (HIGH).
+        """
         for rel in self._list_dir(component_type, rel_dir, self._suffixes(component_type)) or []:
+            if (unscanned := _unscanned_packaged_finding(self.reader, component_type, rel, rel_dir)) is not None:
+                self.inventory.findings.append(unscanned)
             self._markdown_file(component_type, rel, origin)
 
     def _markdown_file(self, component_type: str, rel: PurePosixPath, origin: Origin) -> None:
-        text = self._read(rel)
+        text = self._read_lenient(rel)
         parsed = parse_markdown(text) if text is not None else None
         name = (parsed.name if parsed is not None and parsed.name else None) or rel.stem
         component = self._add(Component(component_type, name, origin, rel.as_posix(), _TYPE_SUPPORT[component_type]))
@@ -1234,7 +1953,7 @@ class _Builder:
             self._privileges(component, parsed.frontmatter, self.reader.display(rel))
 
     def _command_map(self, commands: dict[str, Any]) -> None:
-        """The object form of ``commands``: each entry has a ``source`` Markdown file or inline ``content``."""
+        """The object form of ``commands``: each entry has a ``source`` file or folder, or inline ``content``."""
         self._check_item_count("'commands' map", len(commands))
         for index, (command_name, entry) in enumerate(commands.items()):
             if index >= PLUGIN_COMPONENT_MAX_ITEMS:
@@ -1253,7 +1972,7 @@ class _Builder:
             elif "content" in entry:
                 self._inline_command(command_name, entry)
             else:
-                self._command_file(command_name, entry)
+                self._command_source(command_name, entry)
 
     def _inline_command(self, command_name: str, entry: dict[str, Any]) -> None:
         description = entry.get("description") if isinstance(entry.get("description"), str) else ""
@@ -1262,40 +1981,80 @@ class _Builder:
         component.cost = CostRow(
             "command",
             component.name,
-            len(description),
-            len(content),
+            cost_chars(description),
+            cost_chars(content),
             "always-on: description; on-demand: inline content",
         )
         self._privileges(component, {}, self.manifest_display, entry=entry)
 
-    def _command_file(self, command_name: str, entry: dict[str, Any]) -> None:
+    def _command_source(self, command_name: str, entry: dict[str, Any]) -> None:
+        """A ``commands`` map entry's ``source``: a command file, or a folder of them (:meth:`_command_map_folder`)."""
+        source = entry.get("source")
         resolved = self._resolve_component(
-            "command",
-            f"commands[{command_name!r}].source",
-            entry.get("source"),
-            kinds=("file",),
-            name=str(command_name),
-            wrong_kind_field="commands",
+            "command", f"commands[{command_name!r}].source", source, name=str(command_name)
         )
         if resolved is None:
             return
+        if resolved.kind == "dir":
+            self._command_map_folder(str(command_name), DeclaredPath(str(source), resolved.rel), entry)
+            return
         description = entry.get("description") if isinstance(entry.get("description"), str) else ""
-        text = self._read(resolved.rel)
         component = self._add(
             Component("command", str(command_name), "declared", resolved.rel.as_posix(), "unsupported")
         )
-        if text is not None:
-            parsed = parse_markdown(text)
-            component.cost = CostRow(
-                "command",
-                component.name,
-                len(description or parsed.description or ""),
-                len(parsed.body),
-                "always-on: description; on-demand: command body",
-            )
-            self._privileges(component, parsed.frontmatter, self.reader.display(resolved.rel), entry=entry)
-        else:
+        self._command_text(component, resolved.rel, description, entry)
+
+    def _command_text(self, component: Component, rel: PurePosixPath, description: str, entry: dict[str, Any]) -> None:
+        """Read one command file of a ``commands`` map entry: its context cost and privileges."""
+        text = self._read(rel)
+        if text is None:
             self._privileges(component, {}, self.manifest_display, entry=entry)
+            return
+        parsed = parse_markdown(text)
+        component.cost = CostRow(
+            "command",
+            component.name,
+            cost_chars(description or parsed.description or ""),
+            cost_chars(parsed.body),
+            "always-on: description; on-demand: command body",
+            traits=model_hidden_traits(parsed.frontmatter),
+        )
+        self._privileges(component, parsed.frontmatter, self.reader.display(rel), entry=entry)
+
+    def _command_map_folder(self, command_name: str, declared: DeclaredPath, entry: dict[str, Any]) -> None:
+        """A ``commands`` map entry whose source is a folder: one command per Markdown file directly in it.
+
+        Claude Code accepts "a command file or skill directory" as the source.
+        For a folder it loads each ``.md`` file directly inside as a command
+        named after the file (``cmds/a.md`` is ``a``, whatever the map key; a
+        ``SKILL.md`` is ``SKILL``) and does not search subfolders. Each row
+        names its file, so Tier 3 stages and checks the file itself. A folder
+        without Markdown files loads no command: the entry is an invalid row.
+        """
+        rel_dir = declared.rel
+        if rel_dir is None:
+            return
+        files = self._list_dir("command", rel_dir, self._suffixes("command"))
+        if files is None:
+            return  # an unsafe entry: reported, with a broken row
+        direct = [rel for rel in files if rel.parent == rel_dir]
+        if not direct:
+            self.inventory.findings.append(
+                _plugin_finding(
+                    Severity.MEDIUM,
+                    "plugin_command_folder_empty",
+                    f"commands[{command_name!r}].source {declared.raw!r} is a folder with no Markdown (.md) file "
+                    "directly in it, so Claude Code loads no command from it",
+                    self.manifest_display,
+                    "Point the source at the command's .md file, or put the command files directly in the folder.",
+                    metadata={"plugin_component": {"type": "command", "name": command_name}},
+                )
+            )
+            self._broken("command", declared, command_name, "invalid")
+            return
+        for rel in direct[:PLUGIN_COMPONENT_MAX_ITEMS]:
+            component = self._add(Component("command", rel.stem, "declared", rel.as_posix(), "unsupported"))
+            self._command_text(component, rel, "", entry)
 
     # -- tool and permission grants (skills, agents, commands) ------------- #
     def _privileges(
@@ -1320,9 +2079,13 @@ class _Builder:
                 plugin_name=plugin_name if isinstance(plugin_name, str) else None,
             )
         elif component.type == "command":
-            record, findings = analyze_command(component.name, component.path, frontmatter, display, **kwargs)
+            record, findings = analyze_command(
+                component.name, component.path, frontmatter, display, client=self._grant_client, **kwargs
+            )
         elif component.type == "skill":
-            record, findings = analyze_skill(component.name, component.path, frontmatter, display)
+            record, findings = analyze_skill(
+                component.name, component.path, frontmatter, display, client=self._grant_client
+            )
         else:
             return
         self.inventory.privilege_records.append(record)
@@ -1332,14 +2095,26 @@ class _Builder:
             file = source_file or component.path or self.manifest_rel
             self._frontmatter_hooks(frontmatter.get("hooks"), file, display)
 
+    @property
+    def _grant_client(self) -> str | None:
+        """The client whose manifest loads this inventory's commands and skills, when it ignores allowed-tools."""
+        return "codex" if self.profile.manifest_type == PLUGIN_CODEX_MANIFEST_TYPE else None
+
     def _frontmatter_hooks(self, config: Any, file: str, display: str) -> None:
-        """Hooks in a skill's or command's frontmatter: Claude Code registers them while it is active."""
+        """Hooks in a skill's or command's frontmatter: Claude Code registers them while it is active.
+
+        Each such ``hooks`` block is a ``hook`` component of its own, named and
+        located ``<file>#hooks`` (the fragment keeps path-prefix attribution of
+        the file's other findings on the skill or command), so Tier 3 can stage,
+        census-wrap, refuse, and report it like any other hook source.
+        """
         if not isinstance(config, dict):
             return
-        source = f"{file}#hooks"
+        source = f"{file}{FRONTMATTER_HOOKS_SUFFIX}"
+        self._add(Component("hook", source, "packaged", source, "unsupported"))
         self.inventory.findings.extend(
             _override_findings(
-                permission_flag_issues(config),
+                _agent_cli_flag_issues(config),
                 display,
                 where=f"hooks ({source})",
                 component=("hook", source),
@@ -1368,7 +2143,7 @@ class _Builder:
                 component = ("lsp", str(server_name))
                 self.inventory.findings.extend(
                     _override_findings(
-                        permission_flag_issues(server),
+                        _agent_cli_flag_issues(server),
                         display,
                         where=where,
                         component=component,
@@ -1380,6 +2155,7 @@ class _Builder:
                             env_override_issues(server.get("env")), display, where=where, component=component
                         )
                     )
+                    self.inventory.findings.extend(_lsp_env_findings(str(server_name), server.get("env"), display))
                     self.inventory.findings.extend(_lsp_command_findings(str(server_name), server, display))
 
     # -- monitors ---------------------------------------------------------- #
@@ -1413,13 +2189,25 @@ class _Builder:
                 monitor_name = entry_name or f"{name}[{index}]"
                 self._add(Component("monitor", monitor_name, origin, rel, "unsupported"))
                 self._monitor_command(monitor_name, entry, rel)
-            self.inventory.findings.extend(
-                _override_findings(
-                    permission_flag_issues(entries),
-                    self.reader.display(rel),
-                    where=f"monitors ({name})",
+                # Each monitor's own bypass findings land on its own inventory row.
+                self.inventory.findings.extend(
+                    _override_findings(
+                        _agent_cli_flag_issues(entry),
+                        self.reader.display(rel),
+                        where=f"monitors ({name}) entry '{monitor_name}'",
+                        component=("monitor", monitor_name),
+                    )
                 )
-            )
+            rest = entries[PLUGIN_COMPONENT_MAX_ITEMS:]
+            if rest:
+                # Entries past the inventory cap are not rows, but are still scanned.
+                self.inventory.findings.extend(
+                    _override_findings(
+                        _agent_cli_flag_issues(rest),
+                        self.reader.display(rel),
+                        where=f"monitors ({name})",
+                    )
+                )
 
     def _monitor_command(self, monitor_name: str, entry: Any, rel: str) -> None:
         """A monitor runs its ``command`` unsandboxed for the whole session (like a hook), and every line it
@@ -1436,6 +2224,9 @@ class _Builder:
             display=self.reader.display(rel),
             dialect=MONITOR_HOOKS,
         )
+        for finding in analysis.findings:
+            # The analyzer tags hook sources; a monitor's findings belong to its own inventory row.
+            finding.metadata["plugin_component"] = {"type": "monitor", "name": monitor_name}
         self.inventory.hook_records.extend(analysis.records)
         self.inventory.findings.extend(analysis.findings)
 
@@ -1463,6 +2254,75 @@ class _Builder:
             inline = self.manifest.get("settings")
             self._add(Component("settings", "plugin.json#settings", "declared", self.manifest_rel, "unsupported"))
             self._settings_checks(inline, self.manifest_rel, "plugin.json#settings")
+        self._codex_config()
+
+    def _codex_config(self) -> None:
+        """A shipped Codex project config (``.codex/config.toml``), the Codex twin of ``.claude/settings.json``.
+
+        Codex reads it when the folder is opened as a trusted project, so it is
+        checked in every format: ``approval_policy = "never"`` or ``sandbox_mode =
+        "danger-full-access"`` (top level or in a profile) is HIGH, and its strings
+        and argv lists get the agent-CLI flag checks.
+        """
+        rel = PurePosixPath(_CODEX_CONFIG_FILE)
+        kind = self.reader.kind(rel)
+        if kind in {"missing", "dir"}:
+            return
+        name = rel.as_posix()
+        if kind in {"link", "special"}:
+            self.inventory.findings.append(
+                _path_problem_finding(
+                    self.reader, "settings", DeclaredPath(name, rel), self.manifest_rel, "unsafe", rel
+                )
+            )
+            self._add(Component("settings", name, "packaged", name, "unsupported", problem="unsafe"))
+            return
+        self._add(Component("settings", name, "packaged", name, "unsupported"))
+        display = self.reader.display(rel)
+        import tomllib
+
+        try:
+            config = tomllib.loads(self.reader.read_text(rel, PLUGIN_CONFIG_MAX_BYTES, config=True))
+        except (SecurePathError, OSError, tomllib.TOMLDecodeError, RecursionError, ValueError) as exc:
+            self.inventory.findings.append(
+                _plugin_finding(
+                    Severity.HIGH,
+                    "plugin_component_unreadable",
+                    f"settings config '{name}' could not be read or parsed safely: {report_text(str(exc), 160)}",
+                    display,
+                    f"Keep '{name}' a regular UTF-8 TOML file under {PLUGIN_CONFIG_MAX_BYTES} bytes.",
+                    metadata={"plugin_component": {"type": "settings", "name": name}},
+                )
+            )
+            return
+        component = ("settings", name)
+        tables = [("", config)]
+        profiles = config.get("profiles")
+        if isinstance(profiles, dict):
+            tables.extend((f"profiles.{key}.", value) for key, value in list(profiles.items())[:64])
+        for prefix, table in tables:
+            if not isinstance(table, dict):
+                continue
+            for key, value in _CODEX_BYPASS_SETTINGS:
+                if isinstance(table.get(key), str) and table[key].strip().lower() == value:
+                    self.inventory.findings.append(
+                        _plugin_finding(
+                            Severity.HIGH,
+                            "plugin_settings_bypass_permissions",
+                            f"shipped Codex config '{name}' sets {prefix}{key} = \"{value}\", which "
+                            + (
+                                "turns off every approval prompt"
+                                if key == "approval_policy"
+                                else "turns off the command sandbox"
+                            ),
+                            display,
+                            f"Remove {prefix}{key}; let the user choose Codex's approval policy and sandbox.",
+                            metadata={"plugin_component": {"type": "settings", "name": name}},
+                        )
+                    )
+        self.inventory.findings.extend(
+            _override_findings(_agent_cli_flag_issues(config), display, where=name, component=component)
+        )
 
     def _settings_checks(self, config: Any, rel: str, component_name: str) -> None:
         if not isinstance(config, dict):
@@ -1602,6 +2462,90 @@ class _Builder:
                 )
             )
 
+    # -- context cost facts of the whole inventory ------------------------- #
+    def finish_costs(self) -> None:
+        """Cost facts that need the whole inventory: the estimate's own harness, and first-turn hook output."""
+        if self.contained:
+            self.inventory.cost_harness = _PRIMARY_COST_HARNESS.get(self.profile.manifest_type, "claude-code")
+        for component in self.inventory.components:
+            if component.type != "hook" or not component.path or component.problem is not None:
+                continue
+            records = [
+                record
+                for record in self.inventory.hook_records
+                if (record.source, record.file) == (component.name, component.path)
+                and record.event in _FIRST_TURN_HOOK_EVENTS
+            ]
+            if not records:
+                continue
+            # A SessionStart group whose matcher does not select "startup" (resume, clear, compact) runs later.
+            first = {id(record) for record in records if _runs_in_first_request(record)}
+            counted = 0
+            later = 0
+            unknown: list[str] = []
+            for record in records:
+                chars = self._hook_output_chars(record)
+                if id(record) not in first:
+                    later += chars or 0
+                elif chars is None:
+                    unknown.append(record.event)
+                else:
+                    counted += chars
+            events = ", ".join(sorted({record.event for record in records if id(record) in first}))
+            if not first:
+                basis = (
+                    "on-demand: the SessionStart matcher does not select startup (only resume, clear, or compact), "
+                    "so the output is not in the first request"
+                )
+            elif len(first) < len(records):
+                basis = (
+                    f"always-on: {events} hook output goes into the first request; SessionStart handlers whose "
+                    "matcher does not select startup are on-demand"
+                )
+            else:
+                basis = f"always-on: {events} hook output goes into the first request"
+            component.cost = CostRow(
+                "hook",
+                component.name,
+                counted,
+                later,
+                basis,
+                not_counted=(
+                    f"output of {len(unknown)} {', '.join(sorted(set(unknown)))} hook handler(s) is produced at run "
+                    "time and is not known statically"
+                    if unknown
+                    else None
+                ),
+            )
+
+    def _hook_output_chars(self, record: HookRecord) -> int | None:
+        """Characters a ``cat <plugin file>`` or literal ``echo`` hook prints; ``None`` when not known statically."""
+        import shlex
+
+        if record.handler_type != "command" or not record.target:
+            return None
+        try:
+            words = shlex.split(record.target)
+        except ValueError:
+            return None
+        if len(words) >= 2 and words[0] == "echo" and not any("$" in word or "`" in word for word in words[1:]):
+            return cost_chars(" ".join(words[1:]) + "\n")
+        if len(words) != 2 or words[0] != "cat":
+            return None
+        target = words[1].replace("\\", "/")
+        for prefix in (*self.profile.root_prefixes, "$CLAUDE_PLUGIN_ROOT"):
+            if target.startswith(prefix + "/"):
+                rel = PurePosixPath(os.path.normpath(target[len(prefix) + 1 :]))
+                break
+        else:
+            return None  # a relative path is read from the session's working directory, not the plugin
+        if rel.is_absolute() or ".." in rel.parts:
+            return None
+        try:
+            return cost_chars(self.reader.read_text(rel, CONTENT_DEDUP_MAX_FILE_BYTES))
+        except (SecurePathError, OSError):
+            return None
+
 
 def _settings_findings(config: dict[str, Any], rel: str, display: str) -> list[Finding]:
     """The checks on shipped Claude Code settings: a settings file, or the manifest's inline ``settings``."""
@@ -1664,24 +2608,63 @@ def _settings_findings(config: dict[str, Any], rel: str, display: str) -> list[F
                 "Remove enableAllProjectMcpServers; let users approve MCP servers explicitly.",
             )
         )
+    enabled = config.get("enabledMcpjsonServers")
+    if isinstance(enabled, list) and enabled:
+        names = ", ".join(report_text(str(name), 40) for name in enabled[:8])
+        findings.append(
+            _plugin_finding(
+                Severity.MEDIUM,
+                "plugin_settings_auto_approve",
+                f"shipped settings '{rel}' lists enabledMcpjsonServers ({names}), auto-approving those project "
+                "MCP servers",
+                display,
+                "Remove enabledMcpjsonServers; let users approve MCP servers explicitly.",
+            )
+        )
+    allow = permissions.get("allow") if isinstance(permissions, dict) else None
+    if isinstance(allow, list) and any(
+        isinstance(rule, str) and "".join(rule.split()).lower() in {"mcp__*", "mcp__*__*"} for rule in allow
+    ):
+        findings.append(
+            _plugin_finding(
+                Severity.MEDIUM,
+                "plugin_settings_auto_approve",
+                f"shipped settings '{rel}' pre-approves every MCP tool (mcp__*) in permissions.allow",
+                display,
+                "Remove the mcp__* allow rule; pre-approve only the MCP tools the plugin needs, by name.",
+            )
+        )
     findings.extend(_override_findings(env_override_issues(config.get("env")), display, where=rel))
-    findings.extend(_override_findings(permission_flag_issues(config), display, where=rel))
+    # Claude Code ignores env from plugin settings, but it applies if the file is copied into a project: HIGH.
+    findings.extend(
+        _override_findings(env_tls_and_secret_issues(config.get("env"), severity=Severity.HIGH), display, where=rel)
+    )
+    findings.extend(_override_findings(_agent_cli_flag_issues(config), display, where=rel))
     return findings
 
 
 def _markdown_cost(component_type: str, name: str, parsed: _Markdown) -> CostRow:
+    """The cost row of an agent, command, or output style (a forced style is resolved per view)."""
+    frontmatter = parsed.frontmatter
+    body = cost_chars(parsed.body)
     if component_type == "output_style":
-        forced = parsed.frontmatter.get("force-for-plugin") is True
-        if forced:
-            return CostRow(component_type, name, len(parsed.body), 0, "always-on: force-for-plugin output style body")
-        return CostRow(component_type, name, 0, len(parsed.body), "on-demand: output style body when selected")
+        if _claude_flag(frontmatter.get("force-for-plugin")):
+            traits = {"forced_style"}
+            if _claude_flag(frontmatter.get("keep-coding-instructions")):
+                traits.add("keeps_coding_instructions")
+            return CostRow(
+                component_type, name, body, 0, "always-on: forced output style body", traits=frozenset(traits)
+            )
+        return CostRow(component_type, name, 0, body, "on-demand: output style body when selected")
     label = "agent" if component_type == "agent" else "command"
     basis = (
         "always-on: description; on-demand: subagent prompt (loads in the subagent's own context)"
         if label == "agent"
         else "always-on: description; on-demand: command body"
     )
-    return CostRow(component_type, name, len(parsed.description or ""), len(parsed.body), basis)
+    return CostRow(
+        component_type, name, cost_chars(parsed.description or ""), body, basis, traits=model_hidden_traits(frontmatter)
+    )
 
 
 def _section_refs(section: Any) -> list[Any]:
@@ -1822,6 +2805,13 @@ def plugin_inventory_for_root(root: Path) -> PluginInventory | None:
         return None
     additional: list[tuple[str, str, dict[str, Any]]] = []
     if located is None:
+        from skillevaluator.cli_core import manifestless_plugin_markers
+
+        if manifestless_plugin_markers(root):
+            # Claude Code --plugin-dir loads a folder without a manifest from its default locations.
+            return build_plugin_inventory(
+                root, None, contained=True, manifest_rel=CLAUDE_PROFILE.manifest_path, manifestless=True
+            )
         manifest_type, data, manifest_rel = None, None, CLAUDE_PROFILE.manifest_path
     else:
         manifest_type = located.manifest_type
@@ -1878,6 +2868,7 @@ def build_plugin_inventory(
     hook_allowed_urls: Iterable[str] = (),
     manifest_type: str | None = None,
     additional: Iterable[tuple[str, str, dict[str, Any] | None]] = (),
+    manifestless: bool = False,
 ) -> PluginInventory:
     """Build the static component inventory for a plugin root (never follows links).
 
@@ -1901,9 +2892,29 @@ def build_plugin_inventory(
     manifest with its own path rules and defaults. What only such a view loads
     carries ``declared_by`` (the manifest that client reads, or the default
     location) and ``loaded_by`` (the client), and is checked but not staged.
+
+    ``manifestless`` inventories a folder without any manifest the way Claude
+    Code ``--plugin-dir`` loads it: its default locations only. No other client
+    loads such a folder, so there is no cross-client pass.
+
+    Every inventory also reports the shipped folders the whole-tree scans skip
+    (``node_modules/``, ``.venv/``, nested ``.git/``) and refuses links out of
+    the plugin root inside any skipped folder.
     """
     allowed_private_hosts = tuple(allowed_private_hosts)
     hook_allowed_urls = tuple(hook_allowed_urls)
+    if manifestless:
+        inventory = _Builder(
+            root,
+            None,
+            contained=True,
+            manifest_rel=CLAUDE_PROFILE.manifest_path,
+            allowed_private_hosts=allowed_private_hosts,
+            hook_allowed_urls=hook_allowed_urls,
+            profile=CLAUDE_PROFILE,
+        ).build()
+        inventory.findings.extend(_pruned_folder_findings(PluginRootReader(root)))
+        return inventory
 
     def _inventory(
         data: dict[str, Any] | None, data_type: str | None, rel: str, *, is_contained: bool
@@ -1926,6 +2937,9 @@ def build_plugin_inventory(
     selected_type = manifest_type or (PLUGIN_CONTAINED_MANIFEST_TYPE if contained else PLUGIN_MANIFEST_TYPE)
     loaded: list[tuple[str | None, dict[str, Any] | None, str]] = [(selected_type, manifest, manifest_rel)]
     loaded.extend((extra_type, extra_manifest, extra_rel) for extra_type, extra_rel, extra_manifest in additional)
+    # Whether every file Claude Code loads from this folder is in the inventory: it reads a .claude-plugin
+    # manifest, or (in a folder without one) the --plugin-dir defaults view merged below.
+    claude_covered = any(loaded_type == PLUGIN_CONTAINED_MANIFEST_TYPE for loaded_type, _data, _rel in loaded)
     for profile, data, rel, loaded_by in _cross_client_views(loaded):
         view = _Builder(
             root,
@@ -1943,7 +2957,10 @@ def build_plugin_inventory(
             declared_by=rel if data is not None else None,
             loaded_by=loaded_by,
             manifest_files={loaded_rel for _type, _data, loaded_rel in loaded},
+            claude_covered=claude_covered,
         )
+        claude_covered = claude_covered or profile is _CLAUDE_DEFAULTS_VIEW
+    inventory.findings.extend(_pruned_folder_findings(PluginRootReader(root)))
     return inventory
 
 
@@ -2012,6 +3029,7 @@ def _merge_cross_client(
     declared_by: str | None,
     loaded_by: str,
     manifest_files: Iterable[str] = (),
+    claude_covered: bool = False,
 ) -> None:
     """Merge what another client's view loads that the inventory has not checked yet.
 
@@ -2023,21 +3041,112 @@ def _merge_cross_client(
     (including the manifests) are dropped: those files were checked with the
     rules of the manifest that loads them, and a second client's format rules
     would only repeat or contradict them.
+
+    ``claude_covered`` says the inventory already holds every file Claude Code
+    loads from the folder. Then a grant that only Claude Code would honor (Codex
+    ignores ``allowed-tools``) in a file only this view loads has no effect in
+    either client (:func:`_inert_grant_finding`).
     """
     covered = _covered_paths(inventory) | _MANIFEST_PATHS | set(manifest_files)
+    # A skill is covered by its folder, but its grant findings point at its SKILL.md.
+    covered.update(
+        f"{component.path}/SKILL.md"
+        for component in inventory.components
+        if component.type == "skill" and component.path not in {None, "", "."}
+    )
     components = [component for component in view.components if component.type not in _CROSS_CLIENT_SKIPPED_TYPES]
     for component in components:
         component.declared_by = declared_by or component.path or loaded_by
         component.loaded_by = loaded_by
+    # A finding the inventory already has (the same file seen by both views, such as a shipped .env) is
+    # dropped before the loading client is named in the others.
+    seen = {_finding_key(finding) for finding in inventory.findings}
+    findings = [
+        finding
+        for finding in view.findings
+        if _finding_rel_path(str(finding.file_path or ""), root) not in covered and _finding_key(finding) not in seen
+    ]
+    privilege_records = [record for record in view.privilege_records if record.path not in covered]
+    for finding in findings:
+        if claude_covered and finding.metadata.get("claude_only_grant"):
+            _inert_grant_finding(finding)
+        _cross_client_finding(finding, loaded_by)
+    for record in privilege_records:
+        if claude_covered and "claude_only_grant" in record.flags:
+            record.flags[:] = ["inert_grant" if flag == "claude_only_grant" else flag for flag in record.flags]
+        if any(flag not in _BENIGN_PRIVILEGE_RECORD_FLAGS for flag in record.flags):
+            record.flags.append("cross_client_only")
     extra = PluginInventory(
         components=components,
-        findings=[
-            finding for finding in view.findings if _finding_rel_path(str(finding.file_path or ""), root) not in covered
-        ],
+        findings=findings,
         hook_records=[record for record in view.hook_records if record.file not in covered],
-        privilege_records=[record for record in view.privilege_records if record.path not in covered],
+        privilege_records=privilege_records,
     )
     _merge_additional(inventory, extra, None)
+
+
+# Subagent, command, and skill grant findings (check 6).
+_PRIVILEGE_CHECKS = frozenset(
+    {
+        *(
+            f"plugin_agent_{name}"
+            for name in (
+                "unrestricted_bash",
+                "wildcard_tools",
+                "inherits_all_tools",
+                "bypass_permissions",
+                "accept_edits",
+                "auto_mode",
+            )
+        ),
+        *(f"plugin_{kind}_{name}" for kind in ("command", "skill") for name in ("unrestricted_bash", "wildcard_tools")),
+    }
+)
+_BENIGN_PRIVILEGE_RECORD_FLAGS = frozenset(
+    {"no_frontmatter", "inherits_all_tools", "ignored_hooks", "ignored_mcpServers", "wildcard_ignored", "inert_grant"}
+)
+
+
+def _inert_grant_finding(finding: Finding) -> None:
+    """Rewrite a Claude Code-only grant in a file Claude Code does not load: it has no effect in either client.
+
+    Codex loads the file (it reads a Claude Code manifest with its own path rules,
+    so a ``commands`` map does not hide ``commands/`` from it) but ignores
+    ``allowed-tools``; Claude Code honors ``allowed-tools`` but does not load the
+    file. The finding is LOW and says so, instead of warning about Claude Code.
+    """
+    component = finding.metadata.get("plugin_component") or {}
+    kind = str(component.get("type") or "component")
+    name = str(component.get("name") or "")
+    grant = "a wildcard tool grant" if finding.check_name.endswith("_wildcard_tools") else "unrestricted 'Bash'"
+    finding.message = (
+        f"{kind} '{name}' pre-approves {grant} in allowed-tools, but the grant has no effect: Codex ignores "
+        f"allowed-tools (it has no Bash tool), and Claude Code does not load this {kind} from this folder"
+    )
+    finding.severity = Severity.LOW
+    finding.suggestion = (
+        f"Remove the unused {kind}, or declare it in the Claude Code manifest and scope its allowed-tools to the "
+        "exact commands it needs."
+    )
+    finding.metadata["inert_grant"] = True
+
+
+def _cross_client_finding(finding: Finding, loaded_by: str) -> None:
+    """Name the client that loads a cross-client file in its finding, and cap a grant finding at MEDIUM.
+
+    Only a client whose manifest is not the selected one loads such a file
+    (Claude Code ``--plugin-dir`` in a Codex or Cursor folder, or Codex through
+    another client's manifest). Every such finding says which client loads it.
+    Subagent, command, and skill grants (check 6) then never apply to the plugin
+    as its author ships it, so they warn and do not fail the plugin; hook, MCP,
+    LSP, and other executable findings keep their severity, since that client
+    would run the code.
+    """
+    finding.message = f"loaded only by {loaded_by}: {finding.message}"
+    finding.metadata["loaded_by"] = loaded_by
+    if finding.check_name in _PRIVILEGE_CHECKS and finding.severity in {Severity.CRITICAL, Severity.HIGH}:
+        finding.metadata["cross_client_severity"] = str(getattr(finding.severity, "value", finding.severity))
+        finding.severity = Severity.MEDIUM
 
 
 def _covered_paths(inventory: PluginInventory) -> set[str]:
@@ -2149,10 +3258,14 @@ def _finding_rel_path(file_path: str, root: Path) -> str | None:
         return None
     root_text = os.path.abspath(os.fspath(root))  # noqa: PTH100 - lexical, never resolved
     absolute = os.path.abspath(text)  # noqa: PTH100 - lexical, never resolved
-    if absolute == root_text:
-        return "."
-    if absolute.startswith(root_text.rstrip(os.sep) + os.sep):
-        return Path(os.path.relpath(absolute, root_text)).as_posix()
+    # Some scanners (Semgrep, Bandit) report resolved paths, so a plugin reached
+    # through a symlinked parent folder is also matched by its resolved root.
+    # Only the root is resolved; the finding path itself is never followed.
+    for base in dict.fromkeys((root_text, os.path.realpath(root_text))):
+        if absolute == base:
+            return "."
+        if absolute.startswith(base.rstrip(os.sep) + os.sep):
+            return Path(os.path.relpath(absolute, base)).as_posix()
     if Path(text).is_absolute():
         return None
     # Validators that report paths relative to the plugin root.
@@ -2188,9 +3301,15 @@ def attribute_findings(components: list[Component], findings: Iterable[Finding],
     mcp_by_name = {component.name: component for component in components if component.type == "mcp"}
     by_type_name: dict[tuple[str, str], Component] = {}
     by_name: dict[str, Component] = {}
+    by_exact_path: dict[str, Component] = {}
     for component in components:
         by_type_name.setdefault((component.type, component.name), component)
         by_name.setdefault(component.name, component)
+        # A broken component (missing, invalid) wins its path over a working one of the same path.
+        if component.path:
+            current = by_exact_path.get(component.path)
+            if current is None or (component.problem and not current.problem):
+                by_exact_path[component.path] = component
     for finding in findings:
         rel = _finding_rel_path(str(finding.file_path or ""), root)
         metadata = finding.metadata if isinstance(finding.metadata, dict) else {}
@@ -2207,9 +3326,18 @@ def attribute_findings(components: list[Component], findings: Iterable[Finding],
                 target.findings += 1
                 continue
         ref = metadata.get("plugin_component_ref")
-        if isinstance(ref, str) and ref in by_name:
-            by_name[ref].findings += 1
-            continue
+        if isinstance(ref, str):
+            target = by_name.get(ref) or _component_for_ref(ref, by_exact_path)
+            if target is not None:
+                target.findings += 1
+                continue
+        # A bundle-reference dependency finding names its ref and section (skills or rules).
+        dependency_type = {"skills": "skill", "rules": "rule"}.get(str(metadata.get("section")))
+        if dependency_type is not None and isinstance(metadata.get("ref"), str):
+            target = by_type_name.get((dependency_type, metadata["ref"]))
+            if target is not None:
+                target.findings += 1
+                continue
         if rel is None or rel == ".":
             continue
         for component in by_path:
@@ -2217,6 +3345,22 @@ def attribute_findings(components: list[Component], findings: Iterable[Finding],
             if rel == path or rel.startswith(path.rstrip("/") + "/"):
                 component.findings += 1
                 break
+
+
+# Root variables any supported format may put in front of a component path.
+_ALL_ROOT_VARIABLES = ("${CLAUDE_PLUGIN_ROOT}", "${CURSOR_PLUGIN_ROOT}", "${PLUGIN_ROOT}")
+
+
+def _component_for_ref(ref: str, by_exact_path: dict[str, Component]) -> Component | None:
+    """The component whose root-relative path a declared ref names, compared after normalization.
+
+    ``./agents/x.md``, ``agents/x.md``, and ``${CLAUDE_PLUGIN_ROOT}/agents/x.md``
+    all name the component at ``agents/x.md``, whatever its frontmatter name.
+    """
+    declared = normalize_declared_path(ref, _ALL_ROOT_VARIABLES)
+    if declared.rel is None or declared.problem is not None:
+        return None
+    return by_exact_path.get(declared.rel.as_posix())
 
 
 def refresh_component_finding_counts(results: Iterable[Any]) -> None:
@@ -2245,6 +3389,7 @@ def refresh_component_finding_counts(results: Iterable[Any]) -> None:
                 row.get("origin", "packaged"),
                 row.get("path"),
                 row.get("support", "unsupported"),
+                problem=row.get("problem") if isinstance(row.get("problem"), str) else None,
             )
             for row in rows
             if isinstance(row, dict)

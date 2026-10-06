@@ -146,7 +146,7 @@ def test_tier3_evaluate_plugin_command_uses_public_plugin_options(
 @pytest.mark.parametrize(
     ("arguments", "evidence_error", "expected"),
     [
-        (["--lift-mode", "integration"], "composition evidence is missing", "Integration is inconclusive"),
+        (["--lift-mode", "integration"], "composition evidence is missing", "Integration was not run"),
         (["--lift-mode", "both", "--skip-baseline"], None, "Integration requires a baseline"),
     ],
 )
@@ -274,8 +274,7 @@ def test_evaluate_plugin_prepares_the_plugin_root_of_a_manifest_path(
             "integration",
             False,
             "no composition evidence",
-            "Integration is inconclusive: no composition evidence. "
-            "Add a cross-component case or use --lift-mode effectiveness.",
+            "Integration was not run: no composition evidence. Fix that, or use --lift-mode effectiveness.",
         ),
     ],
 )
@@ -288,7 +287,7 @@ def test_plugin_integration_error(
 @pytest.mark.parametrize(
     ("lift_mode", "skip_baseline", "evidence_error", "expected"),
     [
-        ("integration", False, "composition evidence is missing", "Tier 3 plugin Integration is inconclusive"),
+        ("integration", False, "composition evidence is missing", "Tier 3 plugin Integration was not run"),
         ("both", True, None, "Tier 3 plugin Integration requires a baseline"),
     ],
 )

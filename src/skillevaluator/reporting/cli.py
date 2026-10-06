@@ -77,8 +77,15 @@ _CLI_LIST_ITEMS = 10
 
 
 def _print_remaining(console: Console, remaining: int) -> None:
+    """Count the rows a Tier 3 coverage list (not staged, not loaded, not observed) left out."""
     if remaining > 0:
         console.print(f"    [dim]... and {remaining} more[/dim]")
+
+
+def _print_more_rows(console: Console, omitted: int, what: str) -> None:
+    """Count the rows a Tier 1 static-risk list (flagged components or hook handlers) left out."""
+    if omitted > 0:
+        console.print(f"  ... and {omitted} more {what} (the JSON report lists every one)")
 
 
 def print_plugin_tier1_static(risk: dict, console: Console) -> None:
@@ -86,17 +93,20 @@ def print_plugin_tier1_static(risk: dict, console: Console) -> None:
     privileges = risk.get("privileges")
     if privileges:
         console.print(
-            f"[bold]Plugin privileges:[/bold] {privileges['agents']} subagent(s), {privileges['commands']} command(s); "
-            f"{privileges['flagged']} flagged"
+            f"[bold]Plugin privileges:[/bold] {privileges['agents']} subagent(s), {privileges['commands']} command(s), "
+            f"{privileges.get('skills', 0)} skill(s); {privileges['flagged']} flagged"
         )
-        for row in [row for row in privileges["rows"] if row["risky"]][:_CLI_LIST_ITEMS]:
+        risky = [row for row in privileges["rows"] if row["risky"]]
+        for row in risky[:_CLI_LIST_ITEMS]:
             console.print(
                 f"  - {escape_markup(row['type'])} {escape_markup(row['name'])}: {escape_markup(', '.join(row['flags']))}"
             )
+        _print_more_rows(console, max(len(risky), privileges["flagged"]) - _CLI_LIST_ITEMS, "flagged component(s)")
     hooks = risk.get("hooks")
     if hooks:
         console.print(f"[bold]Plugin hooks:[/bold] {hooks['total']} handler(s); {hooks['flagged']} flagged")
-        for row in [row for row in hooks["rows"] if row["flagged"]][:_CLI_LIST_ITEMS]:
+        flagged = [row for row in hooks["rows"] if row["flagged"]]
+        for row in flagged[:_CLI_LIST_ITEMS]:
             # Escape the brackets with the plugin-controlled matcher: "[/x]" is a
             # closing tag and "[mcp__memory__.*]" a style tag to Rich markup.
             matcher = escape_markup(f"[{row['matcher']}]")
@@ -104,6 +114,7 @@ def print_plugin_tier1_static(risk: dict, console: Console) -> None:
                 f"  - {escape_markup(row['event'])} {matcher} {escape_markup(row['handler_type'])}: "
                 f"{escape_markup(', '.join(row['flags']))}"
             )
+        _print_more_rows(console, max(len(flagged), hooks["flagged"]) - _CLI_LIST_ITEMS, "flagged handler(s)")
     cve = risk.get("cve")
     if cve:
         parts = [
@@ -116,7 +127,7 @@ def print_plugin_tier1_static(risk: dict, console: Console) -> None:
     if parity:
         if parity["status"] == "compared":
             console.print(
-                f"[bold]claude plugin validate --strict:[/bold] {escape_markup(parity['claude_verdict'])} "
+                f"[bold]claude plugin validate:[/bold] {escape_markup(parity['claude_verdict'])} "
                 f"({parity['error_count']} errors, {parity['warning_count']} warnings); SkillEvaluator "
                 f"{escape_markup(parity['skillevaluator_verdict'])} ({escape_markup(parity['agreement'])})"
             )
@@ -172,6 +183,13 @@ def _print_coverage(coverage: dict | None, console: Console) -> None:
         reason = f": {esc(row['reason'])}" if row["reason"] else ""
         console.print(f"    [dim]- {esc(row['type'])} {esc(row['name'])} ({esc(row['state_label'])}){reason}[/dim]")
     _print_remaining(console, coverage["not_staged"] - len(shown))
+    shown = coverage["not_loaded_rows"][:_CLI_LIST_ITEMS]
+    for row in shown:
+        reason = f": {esc(row['reason'])}" if row["reason"] else ""
+        console.print(
+            f"    [dim]- {esc(row['type'])} {esc(row['name'])} (staged, not loaded){reason}[/dim]", soft_wrap=True
+        )
+    _print_remaining(console, coverage["not_loaded"] - len(shown))
     shown = coverage["staged_not_observed_rows"][:_CLI_LIST_ITEMS]
     for row in shown:
         console.print(
@@ -210,33 +228,37 @@ def _print_lift_modes(modes: dict | None, console: Console) -> None:
 def _print_integration(integration: dict | None, console: Console) -> None:
     if not integration:
         return
+    # One named Integration line per agent in a multi-agent run.
+    per_agent = integration.get("per_agent")
+    for entry in per_agent or [integration]:
+        _print_integration_entry(entry, console, scope=entry.get("agent") if per_agent else "")
+
+
+def _print_integration_entry(entry: dict, console: Console, *, scope: str) -> None:
     esc = escape_markup
-    if not integration["measured"]:
+    named = f" ({esc(scope)})" if scope else ""
+    if not entry["measured"]:
         console.print(
-            f"  [bold]Integration:[/bold] [yellow]INCONCLUSIVE[/yellow] — {esc(integration['reason'])} "
+            f"  [bold]Integration{named}:[/bold] [yellow]INCONCLUSIVE[/yellow] — {esc(entry['reason'])} "
             "[dim](advisory)[/dim]",
             soft_wrap=True,
         )
         return
-    point = (
-        f" [dim](point estimate: {esc(integration['point_verdict_label'])})[/dim]"
-        if integration["point_verdict_label"]
-        else ""
-    )
+    point = f" [dim](point estimate: {esc(entry['point_verdict_label'])})[/dim]" if entry["point_verdict_label"] else ""
     console.print(
-        f"  [bold]Integration:[/bold] {esc(integration['verdict_label']).upper()} "
-        f"(lift {integration['integration_lift']}){point} [dim](advisory)[/dim]"
+        f"  [bold]Integration{named}:[/bold] {esc(entry['verdict_label']).upper()} "
+        f"(lift {entry['integration_lift']}){point} [dim](advisory)[/dim]"
     )
-    ci = integration["ci"]
+    ci = entry["ci"]
     if ci:
         console.print(f"    [dim]{esc(ci['confidence'])} {esc(ci['interval'])}, precision {esc(ci['precision'])}[/dim]")
-    if integration["reason"]:
-        console.print(f"    [dim]{esc(integration['reason'])}[/dim]", soft_wrap=True)
-    if integration["components"]:
-        more = f" (+{integration['components_omitted']} more)" if integration["components_omitted"] else ""
-        console.print(f"    [dim]components: {esc(', '.join(integration['components']))}{more}[/dim]")
-    if integration["interpretation"]:
-        console.print(f"    [dim]{esc(integration['interpretation'])}[/dim]", soft_wrap=True)
+    if entry["reason"]:
+        console.print(f"    [dim]{esc(entry['reason'])}[/dim]", soft_wrap=True)
+    if entry["components"]:
+        more = f" (+{entry['components_omitted']} more)" if entry["components_omitted"] else ""
+        console.print(f"    [dim]components: {esc(', '.join(entry['components']))}{more}[/dim]")
+    if entry["interpretation"]:
+        console.print(f"    [dim]{esc(entry['interpretation'])}[/dim]", soft_wrap=True)
 
 
 def _print_signals(signals: dict | None, console: Console) -> None:
@@ -256,14 +278,14 @@ def _print_signals(signals: dict | None, console: Console) -> None:
 def _signal_details(entry: dict) -> list[str]:
     """Return one compact line per signal recorded for an arm."""
     details = []
-    tool = entry["tool_selection"]
-    if tool:
-        details.append(
-            f"tool selection P/R/F1 {tool['precision']} / {tool['recall']} / {tool['f1']}, "
-            f"{tool['decoy_calls']} decoy call(s)"
-            if tool["applicable"]
-            else f"tool selection {NOT_CONFIGURED}"
-        )
+    for label, selection in (("component routing", entry.get("routing")), ("tool selection", entry["tool_selection"])):
+        if selection:
+            details.append(
+                f"{label} P/R/F1 {selection['precision']} / {selection['recall']} / {selection['f1']}, "
+                f"{selection['decoy_calls']} decoy call(s), in {selection['decoy_call_rate']} of trials"
+                if selection["applicable"]
+                else f"{label} {NOT_CONFIGURED}"
+            )
     arguments = entry["arguments"]
     if arguments:
         details.append(
@@ -273,8 +295,26 @@ def _signal_details(entry: dict) -> list[str]:
         )
     mcp = entry["mcp_calls"]
     if mcp:
-        details.append(f"MCP calls {mcp['success_rate']} succeeded ({mcp['succeeded']}/{mcp['total']})")
-    details.extend(f"{check['name'].lower()} {check['label']}" for check in entry["checks"])
+        details.append(
+            f"MCP calls {mcp['success_rate']} succeeded ({mcp['succeeded']}/{mcp['total']}; "
+            f"{mcp['failed']} failed, {mcp['unknown']} unknown)"
+        )
+        details.extend(
+            f"  {server['server']}: {server['succeeded']}/{server['total']} succeeded, {server['failed']} "
+            f"failed, {server['unknown']} unknown; {server['tools'] or 'no tools'}"
+            for server in mcp["servers"][:8]
+        )
+    for check in entry["checks"]:
+        note = f"; {check['note']}" if check.get("note") else ""
+        details.append(f"{check['name'].lower()} {check['label']}{note}")
+        details.extend(
+            f"  not in order: {edge['before']} -> {edge['after']}: {edge['reason']} ({edge['trials']} trial(s))"
+            for edge in (check.get("edges") or [])[:5]
+        )
+        details.extend(
+            f"  failed probe: {probe['probe']} ({probe['trials']} trial(s))"
+            for probe in (check.get("probes") or [])[:5]
+        )
     activation = entry["activation"]
     if activation:
         details.append(f"activation {len(activation['exercised'])}/{len(activation['declared'])} exercised")
@@ -297,10 +337,16 @@ def _print_canary(canary: dict | None, console: Console) -> None:
         console.print(
             f"  [bold]Canary exfiltration ({esc(entry['scope'])}):[/bold] [{style}]{esc(entry['verdict'])}[/{style}]"
         )
+        for label, key in (("Credential reads", "credential_verdict"), ("Protected writes", "write_verdict")):
+            if entry.get(key):
+                style = _STATUS_STYLES.get(entry[f"{key}_class"], "yellow")
+                console.print(f"    {label}: [{style}]{esc(entry[key])}[/{style}]", soft_wrap=True)
         for row in entry["rows"]:
             console.print(
                 f"    [dim]{esc(row['arm_label'])}: {row['leaked']} of {esc(str(row['trials']))} trial(s) leaked,"
-                f" decoy planted in {esc(str(row['planted']))} (sinks: {esc(row['sinks'])})[/dim]"
+                f" decoy planted in {esc(str(row['planted']))} (sinks: {esc(row['sinks'])});"
+                f" credential reads: {esc(row['credential_cell'])}; protected writes: {esc(row['write_cell'])}[/dim]",
+                soft_wrap=True,
             )
 
 
@@ -342,14 +388,23 @@ def _print_plugin_statistics_scope(scope: dict, console: Console, *, show_label:
         table.add_column("Cases", justify="right")
         for row in scope["lift_ci"]:
             warning = " [yellow](CI includes zero)[/yellow]" if row["ci_includes_zero"] else ""
+            partial = " [yellow](partial)[/yellow]" if row.get("partial") else ""
+            interval = (
+                f"{esc(row['interval'])} {esc(row['confidence'])}"
+                if row["interval"] != "n/a"
+                else "n/a (too few cases)"
+            )
             table.add_row(
                 esc(row["label"]),
                 row["estimate"],
-                f"{esc(row['interval'])} {esc(row['confidence'])}{warning}",
+                f"{interval}{warning}{partial}",
                 esc(row["precision"]),
-                row["n_cases"],
+                esc(row["n_cases"]),
             )
         console.print(table)
+        for row in scope["lift_ci"]:
+            if row.get("partial_note"):
+                console.print(f"  [yellow]{esc(row['label'])}:[/yellow] {esc(row['partial_note'])}", soft_wrap=True)
     if scope["arms"] and (scope["has_reliability"] or scope["has_tokens"] or scope["has_efficiency"]):
         table = Table(title=f"Reliability and Cost (advisory){label}", border_style="cyan", show_header=True)
         table.add_column("Arm", style="bold")
@@ -375,18 +430,13 @@ def _print_plugin_statistics_scope(scope: dict, console: Console, *, show_label:
                 row.append(arm["token_efficiency"])
             table.add_row(*row)
         console.print(table)
+        if scope.get("reliability_note"):
+            console.print(f"  [yellow]{esc(scope['reliability_note'])}[/yellow]", soft_wrap=True)
         if scope["usd_note"]:
             console.print(f"  [dim]{esc(scope['usd_note'])}[/dim]", soft_wrap=True)
     measured = scope["context_measured"]
     if measured:
-        if measured["measured"]:
-            console.print(
-                f"  [bold]Measured context delta:[/bold] {esc(measured['delta'])} per first turn "
-                f"({measured['n_pairs']} pairs)"
-            )
-        else:
-            reason = f": {esc(measured['reason'])}" if measured["reason"] else ""
-            console.print(f"  [bold]Measured context delta:[/bold] not measured ({esc(measured['status'])}){reason}")
+        console.print(f"  [bold]Measured context delta:[/bold] {esc(measured['summary'])}", soft_wrap=True)
     completeness = scope["completeness"]
     if completeness and completeness["issues"]:
         parts = []
@@ -517,8 +567,33 @@ class CLIReporter(ReporterBase):
         # Print overall status
         advisory_skips = [result for result in results if self._is_advisory_agent_eval_skip(result)]
         required_passed = all(passes_required_gate(result) for result in results)
-        if any(result.is_incomplete for result in results):
+        advisory_tier3 = [label for result in results if (label := self._advisory_tier3_gate_label(result))]
+        advisory_tier3 += [
+            "Tier 3 INCOMPLETE"
+            for result in results
+            if passes_required_gate(result) and self._tier3_incomplete_reason(result) is not None
+        ]
+        blocking = [result for result in results if not passes_required_gate(result)]
+        # A real failure outranks missing evidence (the footer and BENCHMARK.md use the same rule): a result
+        # that failed on a blocking finding of its own, a Tier 3 FAIL, or a gated Tier 3 run that never ran.
+        real_failures = [result for result in blocking if not self._missing_evidence_only(result)]
+        missing = list(dict.fromkeys(tool for result in results for tool in result.incomplete_scans))
+        only_tier3_incomplete = bool(blocking) and all(self._tier3_incomplete_reason(result) for result in blocking)
+        if real_failures and (missing or any(self._tier3_incomplete_reason(result) for result in blocking)):
+            also = escape_markup(", ".join(missing) if missing else "Tier 3")
+            console.print(
+                f"\n[bold red][FAIL] Validation failed[/bold red] [yellow](evidence is also incomplete: "
+                f"{also} did not complete)[/yellow]\n"
+            )
+        elif not real_failures and (missing or only_tier3_incomplete):
             console.print("\n[bold yellow][INCOMPLETE] Validation evidence is incomplete[/bold yellow]\n")
+        elif required_passed and advisory_tier3:
+            # Tier 3 failed its gate but was advisory: the exit code is 0, yet "all passed" would be false.
+            console.print(
+                "\n[bold green][PASS] Required validations passed[/bold green] "
+                f"[yellow]({escape_markup(advisory_tier3[0])} is advisory; "
+                "--block-on-agent-eval makes it gate)[/yellow]\n"
+            )
         elif required_passed:
             if advisory_skips:
                 console.print(
@@ -555,7 +630,12 @@ class CLIReporter(ReporterBase):
         if agent_eval:
             self._print_agent_eval_tables(agent_eval, console)
 
-        if self._is_advisory_agent_eval_skip(result):
+        if self._gated_tier3_not_run(result):
+            console.print(
+                "[red][FAIL] Live evaluation did not run, and --block-on-agent-eval makes Tier 3 gate[/red]\n"
+            )
+            self._print_summary_stats(result, console)
+        elif self._is_advisory_agent_eval_skip(result):
             console.print("[yellow][SKIP] Live evaluation did not run[/yellow]\n")
             self._print_summary_stats(result, console)
         elif result.is_incomplete:
@@ -563,6 +643,9 @@ class CLIReporter(ReporterBase):
             console.print(f"[yellow][INCOMPLETE] {escape_markup(tools)} did not complete[/yellow]\n")
             self._print_summary_stats(result, console)
             self._print_findings(result, console)
+        elif (tier3_incomplete := self._tier3_incomplete_reason(result)) is not None:
+            console.print(f"[yellow][INCOMPLETE] {escape_markup(tier3_incomplete)}[/yellow]\n")
+            self._print_summary_stats(result, console)
         elif result.passed:
             console.print("[green][PASS] Validation passed[/green]\n")
             self._print_summary_stats(result, console)
@@ -684,10 +767,12 @@ class CLIReporter(ReporterBase):
         CLIReporter._print_agent_eval_verdict(agent_eval, console)
 
         evaluators = agent_eval.get("evaluators", {})
-        if evaluators:
-            CLIReporter._print_evaluator_table(evaluators, console)
-
         plugin_view = tier3_plugin_view(agent_eval)
+        if evaluators:
+            CLIReporter._print_evaluator_table(
+                evaluators, console, members_baseline=bool(plugin_view and plugin_view["sum_of_parts_baseline"])
+            )
+
         if plugin_view is not None:
             print_plugin_tier3(plugin_view, console)
 
@@ -703,7 +788,16 @@ class CLIReporter(ReporterBase):
         vc = "green" if verdict == "pass" else ("red" if verdict == "fail" else "yellow")
         composite_text = f"{composite:+.2f}" if isinstance(composite, int | float) else "N/A"
         verdict_text = escape_markup(str(verdict).upper())
-        console.print(f"\n  [{vc}]Verdict: {verdict_text} (composite lift = {composite_text})[/{vc}]")
+        band = agent_eval.get("lift_band") if isinstance(agent_eval.get("lift_band"), dict) else {}
+        band_text = ""
+        if band.get("verdict"):
+            # The Skill Lift band; a confirmed regression gates with --block-on-agent-eval.
+            band_text = f"; Skill Lift band {str(band['verdict']).upper()}"
+            if band["verdict"] == "fail":
+                band_text += ", confirmed regression" if band.get("regression_confirmed") is True else ", not confirmed"
+        console.print(
+            f"\n  [{vc}]Verdict: {verdict_text} (composite lift = {composite_text}{escape_markup(band_text)})[/{vc}]"
+        )
         if runtime:
             console.print(f"  [dim]Runtime: {runtime:.1f}s[/dim]")
         harbor_viewer = normalize_harbor_viewer_for_display(agent_eval)
@@ -722,17 +816,24 @@ class CLIReporter(ReporterBase):
         console.print()
 
     @staticmethod
-    def _print_evaluator_table(evaluators: dict, console: Console) -> None:
-        """Print the per-evaluator with-skill, baseline, and lift table."""
+    def _print_evaluator_table(evaluators: dict, console: Console, *, members_baseline: bool = False) -> None:
+        """Print the per-evaluator with-skill, baseline, and lift table.
+
+        With ``members_baseline`` (legacy ``--lift-mode integration``) the only
+        baseline staged the plugin's member skills, so the lift is plugin vs.
+        member skills, never Skill Lift.
+        """
         if evaluators:
             table = Table(
-                title="Evaluator Scores (Skill Lift)",
+                title="Evaluator Scores (plugin vs. member skills)"
+                if members_baseline
+                else "Evaluator Scores (Skill Lift)",
                 border_style="cyan",
                 show_header=True,
             )
             table.add_column("Evaluator", style="bold")
             table.add_column("With Skill", justify="right")
-            table.add_column("Baseline", justify="right")
+            table.add_column("Member skills" if members_baseline else "Baseline", justify="right")
             table.add_column("Lift", justify="right")
 
             for name, scores in evaluators.items():
@@ -934,8 +1035,30 @@ class CLIReporter(ReporterBase):
             )
             s = result.summary
             static_test_evidence = self._static_test_evidence_message(result)
+            tier3_gate = self._tier3_gate_failure_text(result)
+            tier3_incomplete = self._tier3_incomplete_reason(result)
 
-            if advisory_skip:
+            if tier3_incomplete is not None:
+                # A partial or skipped Tier 3 run is missing evidence, not a failed check.
+                status = "[bold yellow]INCOMPLETE[/bold yellow]"
+                details = escape_markup(tier3_incomplete)
+            elif tier3_gate is not None:
+                # A Tier 3 FAIL: name the reason, and say when it did not gate the exit code.
+                if self._advisory_tier3_gate_label(result):
+                    status = "[red]FAIL[/red] (advisory)"
+                details = escape_markup(tier3_gate)
+                if skip_reason := (result.metadata or {}).get("skip_reason"):
+                    # A partial run that failed: the evaluated parts failed, and the rest was not evaluated.
+                    details += escape_markup(f"; {skip_reason}")
+            elif self._gated_tier3_not_run(result):
+                # --block-on-agent-eval made Tier 3 gate, and it never ran: the gate failed.
+                agent_eval = result.metadata.get("agent_eval", {})
+                provenance = agent_eval.get("provenance", {}) if isinstance(agent_eval, dict) else {}
+                status = "[red]FAIL[/red]"
+                details = escape_markup(
+                    f"{provenance.get('message') or 'Live evaluation did not run'} (--block-on-agent-eval gates Tier 3)"
+                )
+            elif advisory_skip:
                 agent_eval = result.metadata.get("agent_eval", {})
                 provenance = agent_eval.get("provenance", {}) if isinstance(agent_eval, dict) else {}
                 details = escape_markup(str(provenance.get("message") or "Live evaluation did not run"))
@@ -949,6 +1072,9 @@ class CLIReporter(ReporterBase):
                     counts.append(f"{s.warnings} warnings")
                 if counts:
                     details += f" ({', '.join(counts)})"
+                if not self._missing_evidence_only(result):
+                    # It also failed on a blocking finding of its own: FAIL outranks missing evidence.
+                    status = "[red]FAIL[/red]"
             elif result.passed:
                 catalog_summary = plugin_catalog_similarity_summary(result)
                 if catalog_summary:
@@ -972,6 +1098,77 @@ class CLIReporter(ReporterBase):
             table.add_row(escape_markup(str(result.validator_name)), status, details)
 
         console.print(table)
+
+    @staticmethod
+    def _tier3_gate_failure_text(result: ValidationResult) -> str | None:
+        """Return the first Tier 3 gate failure message (``Tier 3 verdict FAIL: ...``), or ``None``."""
+        labels = (result.metadata or {}).get("tier3_gate_failures")
+        if result.passed or not isinstance(labels, list) or not labels:
+            return None
+        for error in result.errors:
+            if any(str(error).startswith(f"{label}:") for label in labels):
+                return str(error)
+        return str(labels[0])
+
+    @staticmethod
+    def _tier3_incomplete_reason(result: ValidationResult) -> str | None:
+        """Return why a Tier 3 run is INCOMPLETE (partial or skipped), or ``None``.
+
+        An advisory skip has its own SKIP row, and a partial run that failed its
+        gate (a FAIL verdict or a confirmed Skill Lift regression) is a failure,
+        as on the BENCHMARK card and in the footer.
+        """
+        metadata = result.metadata or {}
+        payload = metadata.get("agent_eval")
+        if result.validator_name != "AGENT_EVAL" or result.passed or not isinstance(payload, dict):
+            return None
+        if CLIReporter._is_advisory_agent_eval_skip(result) or str(payload.get("verdict") or "").lower() == "fail":
+            return None
+        if metadata.get("tier3_gate_failures"):
+            return None
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        skipped = "skipped" in (
+            metadata.get("execution_status"),
+            payload.get("execution_status"),
+            summary.get("execution_status"),
+        )
+        if not skipped:
+            return None
+        return str(metadata.get("skip_reason") or "INCOMPLETE: Tier 3 did not complete")
+
+    @staticmethod
+    def _missing_evidence_only(result: ValidationResult) -> bool:
+        """Whether a blocking result is only missing evidence (INCOMPLETE), not failed.
+
+        A scan that did not complete counts as a failure when the same result also
+        recorded a blocking finding of its own.
+        """
+        from skillevaluator.reporting.benchmark import has_blocking_finding
+
+        if result.is_incomplete:
+            return not has_blocking_finding(result)
+        return CLIReporter._tier3_incomplete_reason(result) is not None
+
+    @staticmethod
+    def _gated_tier3_not_run(result: ValidationResult) -> bool:
+        """A Tier 3 run that never ran while ``--block-on-agent-eval`` made Tier 3 gate: a failed gate."""
+        gating = (result.metadata or {}).get("gating")
+        return (
+            CLIReporter._is_advisory_agent_eval_skip(result)
+            and isinstance(gating, dict)
+            and gating.get("blocking") is True
+        )
+
+    @staticmethod
+    def _advisory_tier3_gate_label(result: ValidationResult) -> str | None:
+        """Return the Tier 3 gate failure label when Tier 3 was outside the exit gate."""
+        labels = (result.metadata or {}).get("tier3_gate_failures")
+        gating = (result.metadata or {}).get("gating")
+        if result.passed or not isinstance(labels, list) or not labels:
+            return None
+        if not isinstance(gating, dict) or gating.get("blocking") is not False:
+            return None
+        return " · ".join(str(label) for label in labels)
 
     @staticmethod
     def _static_test_evidence_message(result: ValidationResult) -> str | None:

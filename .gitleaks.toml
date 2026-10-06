@@ -29,3 +29,17 @@ description = "Synthetic basic-auth, cloud-key and URL-token fixtures in the fir
 condition = "AND"
 commits = ["66ae1d4c1188e2a8d9f0586abe0a895e04b78758", "727826808a2d4c3c2b7c393d67f5339efde28532"]
 paths = ['''^tests/tier3/test_security_finding_evidence\.py$''', '''^tests/validators/test_mcp_hardening\.py$''']
+
+[[allowlists]]
+description = "Synthetic NVIDIA Build token used by streaming redaction tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8$''']
+paths = ['''^tests/test_harbor_local_mode\.py$''']
+
+[[allowlists]]
+description = "Synthetic main-container values used by Docker isolation tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^main-(persistent|task|scoped)-secret-[0-9]{5}$''']
+paths = ['''^tests/test_harbor_secure_docker_environment\.py$''']

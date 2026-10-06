@@ -206,7 +206,7 @@ def test_rewards_and_report_payload_never_carry_argument_values_or_non_name_comp
 
     (top,) = payload["plugin_signals_summary"]["with_skill"]["arguments"]["top_failures"]
     assert top["detail"] == f"expected 7, got string(len={len(url)})"
-    assert "Skill:<non-name>" in reward["plugin_signals"]["tool_selection"]["called"]
+    assert "Skill:<non-name>" in reward["plugin_signals"]["routing"]["called"]
     persisted = [json.dumps(reward), json.dumps(payload), json.dumps(_summary(tmp_path, "plugin", "with-skill"))]
     for text in persisted:
         assert "S3cr3tP4ss" not in text

@@ -17,8 +17,9 @@ extends) unchanged, except for its launch command:
 No wrapper adds a permission-bypass flag; the launch flags are Harbor's own.
 
 Only Harbor's launch command is rewritten. It is recognized on its launcher
-line (the command up to the `` -- `` prompt separator, which must be a single
-line) at a shell-command boundary. Harbor's setup commands carry task and
+line (the command up to the `` -- `` prompt separator, or the whole command
+when the agent reads its prompt from an env var; it must be a single line) at a
+shell-command boundary. Harbor's setup commands carry task and
 plugin text (MCP JSON, YAML heredocs, skill paths) after their first line, so
 that text can never take the launch's place. Every launch pattern is linear
 (no nested or overlapping quantifiers). A run whose launch never appears, or
@@ -34,11 +35,11 @@ import shlex
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from harbor.agents.installed.claude_code import ClaudeCode
-from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.hermes import Hermes
 from harbor.agents.installed.opencode import OpenCode
 
 from skillevaluator.tier3.harbor.local_agents import (
+    SkillEvaluatorCodex,
     SkillEvaluatorGatewayCodex,
     SkillEvaluatorGatewayOpenCode,
     SkillEvaluatorNvidiaBuildClaudeCode,
@@ -64,7 +65,7 @@ class _NativePluginLoadMixin:
 
     #: Harbor's launch, matched on the single launcher line only (see the module docstring).
     _SKILLEVAL_LAUNCH_RE: ClassVar[re.Pattern[str]] = re.compile(r"(?!)")
-    #: Harbor passes the prompt after `` -- `` (Claude Code, Codex, OpenCode); Hermes uses an env var.
+    #: Harbor passes the prompt after `` -- `` (Codex, OpenCode); Claude Code and Hermes read it from an env var.
     _SKILLEVAL_PROMPT_SEPARATOR: ClassVar[bool] = True
 
     def _skilleval_rewrite_launcher(self, launcher: str, match: re.Match[str]) -> str:  # noqa: ARG002
@@ -146,11 +147,19 @@ class _NativePluginLoadMixin:
 
 
 class _NativeClaudeCodeMixin(_NativePluginLoadMixin):
-    # Harbor: ``...; claude --verbose --output-format=stream-json ... --print -- <prompt>``.
+    # Harbor pipes the prompt in from an env var:
+    # ``...; printf "%s" "$<var>" | claude --verbose --output-format=stream-json ... --print 2>&1 | tee ...``.
+    # (Harbor 0.13 passed it after ``--print -- <prompt>``; that shape still matches.)
     _SKILLEVAL_LAUNCH_RE = re.compile(_COMMAND_START + r"(?P<cli>claude)[ \t]+--verbose\b")
+    _SKILLEVAL_PROMPT_SEPARATOR = False
+    _PRINT_FLAG_RE: ClassVar[re.Pattern[str]] = re.compile(r"[ \t]--print(?:[ \t]|$)")
 
     def _skilleval_launch_shape(self, launcher: str) -> bool:
-        return launcher.rstrip().endswith(" --print")
+        match = self._SKILLEVAL_LAUNCH_RE.search(launcher)
+        if match is None:
+            return False
+        rest = launcher[match.end() :]
+        return "--output-format=stream-json" in rest and self._PRINT_FLAG_RE.search(rest) is not None
 
     def _skilleval_rewrite_launcher(self, launcher: str, match: re.Match[str]) -> str:
         flag = f" --plugin-dir {shlex.quote(ClaudeCodeAdapter.plugin_dir)}"
@@ -186,7 +195,7 @@ class NativeNvidiaBuildClaudeCode(_NativeClaudeCodeMixin, SkillEvaluatorNvidiaBu
     """NVIDIA Build-routed Claude Code with the plugin loaded through ``--plugin-dir``."""
 
 
-class NativeCodex(_NativeCodexMixin, Codex):
+class NativeCodex(_NativeCodexMixin, SkillEvaluatorCodex):
     """Codex with plugin rules and MCP servers staged into ``$CODEX_HOME``."""
 
 

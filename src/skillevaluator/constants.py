@@ -141,6 +141,10 @@ PLUGIN_MANIFEST_TYPE = "agent_bundle_yaml"
 PLUGIN_MODE = "bundle_reference"
 PLUGIN_CONTAINED_MANIFEST_TYPE = "claude_plugin_json"
 PLUGIN_CONTAINED_MODE = "contained"
+# Plugin names are not skill names: Claude Code sets no length limit and the
+# Codex runtime loads long names (its packaging tools stop at 64 characters), so
+# NAME_MAX_LENGTH does not apply to them. Reports keep at most this many characters.
+PLUGIN_NAME_MAX_REPORT_CHARS = 256
 
 # Additional native plugin manifest formats. Each is a contained plugin: its
 # components ship inside the plugin root, like ``.claude-plugin/plugin.json``.

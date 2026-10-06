@@ -15,6 +15,7 @@ import pytest
 from skillevaluator.models.result import Severity, ValidationResult
 from skillevaluator.plugin_component_risk import (
     _HookUrlAllowlist,
+    _outside_root_reference,
     _shell_facts,
     hook_allowlist_hosts,
     matcher_scope,
@@ -410,6 +411,29 @@ def test_downloads_without_execution_are_not_remote_code(tmp_path: Path) -> None
     assert "plugin_hook_remote_code" not in _checks(_validate(root))
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "npx -y github:example/hook-tool#main",
+        "uvx --from git+https://github.com/example/hook-tool@main hook-tool",
+    ],
+)
+def test_git_package_on_a_moving_ref_is_remote_code(tmp_path: Path, command: str) -> None:
+    """A hook package from git is code the plugin does not ship, also when its ref is a moving branch.
+
+    The hook check reads the pin's ``remote`` field, not its wording, so a git
+    spec that follows a branch (a floating version too) must be marked remote:
+    CRITICAL remote code, not a HIGH floating version.
+    """
+    root = _plugin(
+        tmp_path,
+        files={"hooks/hooks.json": _hooks({"PostToolUse": [{"hooks": [{"type": "command", "command": command}]}]})},
+    )
+    checks = _checks(_validate(root))
+    assert checks["plugin_hook_remote_code"] == Severity.CRITICAL
+    assert "plugin_hook_command_floating_version" not in checks
+
+
 def test_context_injection_hooks_are_low(tmp_path: Path) -> None:
     root = _plugin(
         tmp_path,
@@ -429,6 +453,11 @@ def test_context_injection_hooks_are_low(tmp_path: Path) -> None:
     assert result.passed
 
 
+def test_a_dot_slash_path_whose_dots_stay_inside_does_not_climb_out() -> None:
+    assert _outside_root_reference("./a/../b") is None
+    assert _outside_root_reference("./a/../../b") == "climbs out of the working directory with '..'"
+
+
 @pytest.mark.parametrize(
     ("token", "expected"),
     [
@@ -442,7 +471,9 @@ def test_context_injection_hooks_are_low(tmp_path: Path) -> None:
         ("a/../../x", True),
         ("a\\..\\..\\x", True),
         ("--file=../x", True),
-        ("./a/../b", False),
+        # A '..' that stays inside is not an escape. (A './' word is still reported, as a path the client
+        # resolves against the user's project, so the inside case is checked without './'; see below.)
+        ("a/../b", False),
         ("a/..", False),
     ],
 )
@@ -640,22 +671,23 @@ def test_a_hook_flag_is_counted_once_however_many_findings_raise_it(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    "url",
+    ("url", "expected"),
     [
-        "https://admin:hunter2@hooks.example.com:99999/x",
-        "https://admin:hunter2@hooks.example.com:abc/x",
-        "//admin:hunter2@hooks.example.com/x",
-        "https://admin:hunter2@[::1/x",
-        "admin:hunter2@hooks.example.com/x?token=hunter2#hunter2",
-        "https://admin:p@ss:hunter2@hooks.example.com/x",
+        ("https://admin:hunter2@hooks.example.com:99999/x", "https://hooks.example.com:99999/x"),
+        ("https://admin:hunter2@hooks.example.com:abc/x", "https://hooks.example.com:abc/x"),
+        ("//admin:hunter2@hooks.example.com/x", "//hooks.example.com/x"),
+        ("https://admin:hunter2@[::1/x", "https://[::1/x"),
+        ("admin:hunter2@hooks.example.com/x?token=hunter2#hunter2", "hooks.example.com/x"),
+        ("https://admin:p@ss:hunter2@hooks.example.com/x", "https://hooks.example.com/x"),
     ],
 )
-def test_safe_url_never_keeps_userinfo(url: str) -> None:
+def test_safe_url_never_keeps_userinfo(url: str, expected: str) -> None:
     shown = safe_url(url)
 
+    # Compare the whole redacted URL: the host stays, userinfo, query and fragment go.
+    assert shown == expected
     assert "hunter2" not in shown
     assert "admin" not in shown
-    assert "hooks.example.com" in shown or "::1" in shown
 
 
 def _dumped(result: ValidationResult) -> str:

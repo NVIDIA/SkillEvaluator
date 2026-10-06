@@ -257,15 +257,22 @@
             "modal",
             "runloop",
             "langsmith",
+            "ec2",
             "gke",
+            "ack",
+            "openshift",
             "novita",
             "apple-container",
             "singularity",
             "islo",
             "tensorlake",
             "cwsandbox",
-            "wandb",
             "use-computer",
+            "blaxel",
+            "beam",
+            "skypilot",
+            "hyperbrowser",
+            "vercel",
             "local"
           ],
           "default": "docker",
@@ -274,6 +281,16 @@
             "--env-mode"
           ],
           "param_type": "option"
+        },
+        {
+          "multiple": true,
+          "name": "environment_kwarg",
+          "opts": [
+            "--ek",
+            "--environment-kwarg"
+          ],
+          "param_type": "option",
+          "type": "text"
         },
         {
           "multiple": true,
@@ -324,15 +341,22 @@
             "modal",
             "runloop",
             "langsmith",
+            "ec2",
             "gke",
+            "ack",
+            "openshift",
             "novita",
             "apple-container",
             "singularity",
             "islo",
             "tensorlake",
             "cwsandbox",
-            "wandb",
             "use-computer",
+            "blaxel",
+            "beam",
+            "skypilot",
+            "hyperbrowser",
+            "vercel",
             "local"
           ],
           "default": "docker",
@@ -341,6 +365,16 @@
             "--env-mode"
           ],
           "param_type": "option"
+        },
+        {
+          "multiple": true,
+          "name": "environment_kwarg",
+          "opts": [
+            "--ek",
+            "--environment-kwarg"
+          ],
+          "param_type": "option",
+          "type": "text"
         },
         {
           "default": "False",
@@ -614,15 +648,22 @@
             "modal",
             "runloop",
             "langsmith",
+            "ec2",
             "gke",
+            "ack",
+            "openshift",
             "novita",
             "apple-container",
             "singularity",
             "islo",
             "tensorlake",
             "cwsandbox",
-            "wandb",
             "use-computer",
+            "blaxel",
+            "beam",
+            "skypilot",
+            "hyperbrowser",
+            "vercel",
             "local"
           ],
           "default": "docker",
@@ -787,6 +828,14 @@
           "type": "text"
         },
         {
+          "name": "policy_path",
+          "opts": [
+            "--policy"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
           "choices": [
             "default",
             "default_plus_custom",
@@ -908,15 +957,22 @@
             "modal",
             "runloop",
             "langsmith",
+            "ec2",
             "gke",
+            "ack",
+            "openshift",
             "novita",
             "apple-container",
             "singularity",
             "islo",
             "tensorlake",
             "cwsandbox",
-            "wandb",
             "use-computer",
+            "blaxel",
+            "beam",
+            "skypilot",
+            "hyperbrowser",
+            "vercel",
             "local"
           ],
           "default": "docker",
@@ -925,6 +981,16 @@
             "--env-mode"
           ],
           "param_type": "option"
+        },
+        {
+          "multiple": true,
+          "name": "environment_kwarg",
+          "opts": [
+            "--ek",
+            "--environment-kwarg"
+          ],
+          "param_type": "option",
+          "type": "text"
         }
       ]
     },
@@ -2369,15 +2435,22 @@
                 "modal",
                 "runloop",
                 "langsmith",
+                "ec2",
                 "gke",
+                "ack",
+                "openshift",
                 "novita",
                 "apple-container",
                 "singularity",
                 "islo",
                 "tensorlake",
                 "cwsandbox",
-                "wandb",
                 "use-computer",
+                "blaxel",
+                "beam",
+                "skypilot",
+                "hyperbrowser",
+                "vercel",
                 "local"
               ],
               "default": "docker",
@@ -2386,6 +2459,16 @@
                 "--env-mode"
               ],
               "param_type": "option"
+            },
+            {
+              "multiple": true,
+              "name": "environment_kwarg",
+              "opts": [
+                "--ek",
+                "--environment-kwarg"
+              ],
+              "param_type": "option",
+              "type": "text"
             },
             {
               "multiple": true,
@@ -2436,15 +2519,22 @@
                 "modal",
                 "runloop",
                 "langsmith",
+                "ec2",
                 "gke",
+                "ack",
+                "openshift",
                 "novita",
                 "apple-container",
                 "singularity",
                 "islo",
                 "tensorlake",
                 "cwsandbox",
-                "wandb",
                 "use-computer",
+                "blaxel",
+                "beam",
+                "skypilot",
+                "hyperbrowser",
+                "vercel",
                 "local"
               ],
               "default": "docker",
@@ -2453,6 +2543,16 @@
                 "--env-mode"
               ],
               "param_type": "option"
+            },
+            {
+              "multiple": true,
+              "name": "environment_kwarg",
+              "opts": [
+                "--ek",
+                "--environment-kwarg"
+              ],
+              "param_type": "option",
+              "type": "text"
             },
             {
               "default": "False",
@@ -2726,15 +2826,22 @@
                 "modal",
                 "runloop",
                 "langsmith",
+                "ec2",
                 "gke",
+                "ack",
+                "openshift",
                 "novita",
                 "apple-container",
                 "singularity",
                 "islo",
                 "tensorlake",
                 "cwsandbox",
-                "wandb",
                 "use-computer",
+                "blaxel",
+                "beam",
+                "skypilot",
+                "hyperbrowser",
+                "vercel",
                 "local"
               ],
               "default": "docker",
@@ -2897,6 +3004,14 @@
               ],
               "param_type": "option",
               "type": "text"
+            },
+            {
+              "name": "policy_path",
+              "opts": [
+                "--policy"
+              ],
+              "param_type": "option",
+              "type": "file"
             },
             {
               "choices": [
@@ -3219,15 +3334,22 @@
               "modal",
               "runloop",
               "langsmith",
+              "ec2",
               "gke",
+              "ack",
+              "openshift",
               "novita",
               "apple-container",
               "singularity",
               "islo",
               "tensorlake",
               "cwsandbox",
-              "wandb",
               "use-computer",
+              "blaxel",
+              "beam",
+              "skypilot",
+              "hyperbrowser",
+              "vercel",
               "local"
             ],
             "default": "docker",
@@ -3236,6 +3358,16 @@
               "--env-mode"
             ],
             "param_type": "option"
+          },
+          {
+            "multiple": true,
+            "name": "environment_kwarg",
+            "opts": [
+              "--ek",
+              "--environment-kwarg"
+            ],
+            "param_type": "option",
+            "type": "text"
           },
           {
             "default": "False",
@@ -3735,15 +3867,22 @@
             "modal",
             "runloop",
             "langsmith",
+            "ec2",
             "gke",
+            "ack",
+            "openshift",
             "novita",
             "apple-container",
             "singularity",
             "islo",
             "tensorlake",
             "cwsandbox",
-            "wandb",
             "use-computer",
+            "blaxel",
+            "beam",
+            "skypilot",
+            "hyperbrowser",
+            "vercel",
             "local"
           ],
           "default": "docker",
@@ -3797,6 +3936,16 @@
             "--plugin-load"
           ],
           "param_type": "option"
+        },
+        {
+          "multiple": true,
+          "name": "environment_kwarg",
+          "opts": [
+            "--ek",
+            "--environment-kwarg"
+          ],
+          "param_type": "option",
+          "type": "text"
         },
         {
           "default": "False",

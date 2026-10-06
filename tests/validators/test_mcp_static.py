@@ -56,11 +56,15 @@ def test_contained_invalid_name_charset_blocked() -> None:
 @pytest.mark.parametrize(
     "config,expected",
     [
+        # Arguments run argv-style: only command substitution, a bare operator argument, a shell line in
+        # 'command', the command line of 'cmd /c', or an inline program still count (an operator inside one
+        # plain argument is text).
         ({"command": "python", "args": ["-c", "a; rm -rf /"]}, "mcp_command_shell_metacharacters"),
         ({"command": "echo", "args": ["$(whoami)"]}, "mcp_command_shell_metacharacters"),
-        ({"command": "server", "args": ["a | b"]}, "mcp_command_shell_metacharacters"),
-        ({"command": "server", "args": ["a && b"]}, "mcp_command_shell_metacharacters"),
-        ({"command": "server", "args": ["out > /tmp/x"]}, "mcp_command_shell_metacharacters"),
+        ({"command": "server", "args": ["a", "&&", "b"]}, "mcp_command_shell_metacharacters"),
+        ({"command": "server a | b"}, "mcp_command_shell_metacharacters"),
+        ({"command": "cmd", "args": ["/c", "server", "&", "calc"]}, "mcp_command_shell_metacharacters"),
+        ({"command": "server", "args": ["out", ">", "/tmp/x"]}, "mcp_command_shell_metacharacters"),
     ],
 )
 def test_command_shell_metacharacters_blocked(config, expected) -> None:
@@ -87,6 +91,8 @@ def test_command_shell_interpreter_dash_c_is_blocked() -> None:
         # Option values are skipped, not mistaken for the script operand.
         {"command": "bash", "args": ["-o", "pipefail", "-c", "startserver"]},
         {"command": "bash", "args": ["-eo", "pipefail", "-c", "startserver"]},
+        {"command": "bash", "args": ["-oe", "pipefail", "-c", "startserver"]},
+        {"command": "env", "args": ["bash", "+lc", "startserver"]},
         {"command": "bash", "args": ["-O", "extglob", "-c", "startserver"]},
         {"command": "bash", "args": ["--rcfile", "x", "-c", "startserver"]},
         {"command": "bash", "args": ["--init-file", "x", "-c", "startserver"]},
@@ -228,6 +234,53 @@ def test_command_floating_version_blocked() -> None:
 )
 def test_command_floating_marker_on_a_package_or_image_is_blocked(config) -> None:
     assert "mcp_command_floating_version" in _checks(validate_mcp_server_declaration("s", config, "p.json"))
+
+
+@pytest.mark.parametrize(
+    ("image", "floating"),
+    [
+        ("${REGISTRY}/mcp:latest", True),
+        ("$IMAGE:nightly", True),
+        ("${REGISTRY:-ghcr.io}/mcp:1.2.3", False),
+        ("${REGISTRY}/mcp:${TAG}", False),
+        ("${IMAGE}", False),
+    ],
+)
+def test_image_name_from_the_environment_keeps_its_written_tag(image: str, floating: bool) -> None:
+    checks = _checks(validate_mcp_server_declaration("s", {"command": "docker", "args": ["run", image]}, "p.json"))
+    assert ("mcp_command_floating_version" in checks) is floating
+
+
+@pytest.mark.parametrize(
+    ("config", "floating"),
+    [
+        # A git ref that names a moving branch or tag floats like '@latest' does.
+        ({"command": "uvx", "args": ["--from", "git+https://github.com/example/mcp@main", "mcp-server"]}, True),
+        ({"command": "uvx", "args": ["--from", "git+https://github.com/example/mcp@latest", "mcp-server"]}, True),
+        ({"command": "uvx", "args": ["--from", "git+https://github.com/example/mcp@next", "mcp-server"]}, True),
+        ({"command": "uvx", "args": ["--from", "pkg @ git+https://github.com/o/mcp@master#egg=pkg", "pkg"]}, True),
+        ({"command": "npx", "args": ["-y", "github:example/mcp#main"]}, True),
+        ({"command": "npx", "args": ["-y", "git+https://github.com/example/mcp.git#develop"]}, True),
+        # A fixed tag, no ref, a user name before the host, or npm's semver range is unpinned but not floating.
+        ({"command": "uvx", "args": ["--from", "git+https://github.com/example/mcp@v1.2.3", "mcp-server"]}, False),
+        ({"command": "uvx", "args": ["--from", "git+ssh://git@github.com/example/mcp", "mcp-server"]}, False),
+        ({"command": "npx", "args": ["-y", "github:example/mcp#semver:^1.0"]}, False),
+        ({"command": "npx", "args": ["-y", "github:example/main"]}, False),
+    ],
+)
+def test_git_spec_on_a_moving_branch_is_floating(config, floating: bool) -> None:
+    checks = _checks(validate_mcp_server_declaration("s", config, "p.json"))
+    assert ("mcp_command_floating_version" in checks) is floating
+    assert ("mcp_unpinned_package" in checks) is not floating
+
+
+def test_git_spec_pinned_to_a_commit_on_a_branch_name_passes() -> None:
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    for config in (
+        {"command": "uvx", "args": ["--from", f"git+https://github.com/example/mcp@{sha}", "mcp-server"]},
+        {"command": "npx", "args": ["-y", f"github:example/mcp#{sha}"]},
+    ):
+        assert validate_mcp_server_declaration("s", config, "p.json") == [], config
 
 
 @pytest.mark.parametrize(
@@ -642,12 +695,14 @@ def test_url_findings_never_show_userinfo_that_a_backslash_turns_into_the_host(u
 @pytest.mark.parametrize(
     ("config", "secret"),
     [
+        # An argument is shell text only where it holds command substitution, or in 'command' itself.
         ({"command": "node", "args": ["server.js", "--password", "p4ss`w0rd"]}, "p4ss`w0rd"),
-        ({"command": "node", "args": ["server.js", "--client-secret", "s3cr3t<x"]}, "s3cr3t"),
-        ({"command": "node", "args": ["server.js", "--api-key", "abcd1234&x"]}, "abcd1234"),
-        ({"command": "node", "args": ["server.js", "--token", "Sup3rS3cretValue@latest"]}, "Sup3rS3cretValue"),
-        ({"command": "node", "args": ["server.js", "--passwd=p4ss;w0rd"]}, "p4ss;w0rd"),
-        ({"command": "node server.js --password p4ss`w0rd"}, "p4ss`w0rd"),
+        ({"command": "node", "args": ["server.js", "--client-secret", "s3cr3t$(x)"]}, "s3cr3t"),
+        ({"command": "node", "args": ["server.js", "--api-key", "abcd1234`x`"]}, "abcd1234"),
+        ({"command": "node", "args": ["server.js", "--passwd=p4ss`w0rd"]}, "p4ss`w0rd"),
+        ({"command": "node server.js --password p4ss;w0rd"}, "p4ss;w0rd"),
+        # npx reads the value of an option it does not know as a package too, so the pinning check sees it.
+        ({"command": "npx", "args": ["-y", "--token", "Sup3rS3cretValue@latest", "pkg@1.0.0"]}, "Sup3rS3cretValue"),
     ],
 )
 def test_command_findings_never_echo_a_credential_flag_value(config: dict, secret: str) -> None:
@@ -834,7 +889,7 @@ def test_values_that_are_not_jwt_like_stay_clean(value: str) -> None:
 def test_inline_secret_scan_is_linear_on_a_long_jwt_like_run(unit: str) -> None:
     import time
 
-    from skillevaluator.validators.url_policy import looks_like_inline_secret
+    from skillevaluator.validators.mcp_static import looks_like_inline_secret
 
     # 256 KB with no "." after the run: a per-"eyJ" scan took about 15 s here.
     value = unit * (262_144 // len(unit))

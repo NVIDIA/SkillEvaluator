@@ -604,7 +604,8 @@ def test_lsp_servers_get_stdio_command_form_checks(tmp_path: Path) -> None:
     result = _validate(_claude(tmp_path, {".lsp.json": lsp}))
     checks = _checks(result)
     assert checks["plugin_lsp_command_dangerous_form"] == Severity.CRITICAL
-    assert checks["plugin_lsp_command_shell_metacharacters"] == Severity.CRITICAL
+    # Claude Code starts an LSP server as argv without a shell: metacharacters alone are a LOW note (proof L12).
+    assert checks["plugin_lsp_command_shell_metacharacters"] == Severity.LOW
     assert not result.passed
 
 

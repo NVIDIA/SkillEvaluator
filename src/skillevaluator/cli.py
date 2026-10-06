@@ -402,11 +402,14 @@ def _content_relative_finding_paths(results: list[ValidationResult], validated: 
     the typed target is rewritten as ``validate .`` would report it, unless it
     names an existing entry under the content root (a skill "examples" with its
     own "examples/" folder). A bundled skill's ``"[skill] "`` label is kept.
+    The ``errors`` / ``warnings`` string that mirrors a moved finding moves
+    with it, so reports still match it to the finding and do not list it again.
     """
     prefix = validated.parts
     if validated.is_absolute() or not prefix:
         return  # absolute paths are already unambiguous; "." has no prefix
     for result in results:
+        moved: list[tuple[list[str], list[str]]] = []
         for finding in result.findings:
             skill, path = split_display_prefix(finding.file_path or "")
             label = "" if skill is None else f"[{skill}] "
@@ -417,10 +420,22 @@ def _content_relative_finding_paths(results: list[ValidationResult], validated: 
             # target without ".." can be ambiguous.
             if ".." not in prefix and (content_root / path).exists(follow_symlinks=False):
                 continue
-            # Keep the path's own separator: str(Path(...)) would turn a "/" path
-            # into "\\" on Windows, so reports and SARIF would mix both styles.
-            separator = "\\" if "\\" in path and "/" not in path else "/"
-            finding.file_path = label + (separator.join(parts[len(prefix) :]) or ".")
+            # Always "/": str(Path(...)) gives "\\" on Windows, and validators there
+            # build backslash paths, so reports and SARIF would otherwise differ by OS.
+            old_forms = finding.legacy_string_forms()
+            finding.file_path = label + ("/".join(parts[len(prefix) :]) or ".")
+            moved.append((old_forms, finding.legacy_string_forms()))
+        for old_forms, new_forms in moved:
+            _move_legacy_string(result, old_forms, new_forms)
+
+
+def _move_legacy_string(result: ValidationResult, old_forms: list[str], new_forms: list[str]) -> None:
+    """Rewrite one ``errors`` / ``warnings`` entry that mirrors a moved finding to its new path."""
+    for messages in (result.errors, result.warnings):
+        for old, new in zip(old_forms, new_forms, strict=False):
+            if old in messages:
+                messages[messages.index(old)] = new
+                return
 
 
 def _record_validate_json_report(report_name: str | None) -> None:
@@ -669,6 +684,7 @@ def _run_agent_eval_or_skip(
     *,
     agents: str | None,
     env_mode: str,
+    environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
     n_concurrent: int | None,
     max_agents: int | None,
@@ -695,6 +711,7 @@ def _run_agent_eval_or_skip(
     probe_mcp_env: tuple[str, ...] = (),
     allowed_private_hosts: tuple[str, ...] = (),
     plugin_load: str = "wrapper",
+    policy: Any = None,
 ) -> ValidationResult:
     """Run Tier 3 live agent evaluation and fold the result into the combined report.
 
@@ -708,6 +725,7 @@ def _run_agent_eval_or_skip(
             target_path,
             agents=agents,
             env_mode=env_mode,
+            environment_kwarg=environment_kwarg,
             skip_baseline=skip_baseline,
             n_concurrent=n_concurrent,
             max_agents=max_agents,
@@ -731,6 +749,7 @@ def _run_agent_eval_or_skip(
             probe_mcp_env=probe_mcp_env,
             allowed_private_hosts=allowed_private_hosts,
             plugin_load=plugin_load,
+            policy=policy,
         )
 
     if validate_source:
@@ -758,6 +777,7 @@ def _run_agent_eval_or_skip(
         skill_path=target_path,
         agents=agents,
         env_mode=env_mode,
+        environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
         n_concurrent=n_concurrent,
         max_agents=max_agents,
@@ -843,14 +863,15 @@ def _plugin_integration_error(lift_mode: str, skip_baseline: bool, reason: str |
 
     Integration compares against the without-plugin baseline, so it needs that
     arm. ``--lift-mode integration`` also needs composition evidence (*reason*
-    says what is missing); ``both`` falls back to effectiveness instead.
+    says what is missing); ``both`` falls back to effectiveness instead. The
+    refusal says the comparison was not run, never a verdict on one.
     """
     if lift_mode not in {"integration", "both"}:
         return None
     if skip_baseline:
         return "Integration requires a baseline; remove --skip-baseline."
     if reason and lift_mode == "integration":
-        return f"Integration is inconclusive: {reason}. Add a cross-component case or use --lift-mode effectiveness."
+        return f"Integration was not run: {reason}. Fix that, or use --lift-mode effectiveness."
     return None
 
 
@@ -936,13 +957,20 @@ def _plugin_mcp_proof(
     each gets one bounded host probe (``initialize`` + ``tools/list``) under the
     endpoint policy. Only the host variables named with ``--probe-mcp-env`` (for every
     server, one host, or one server) are expanded into declared headers, and the
-    variables that may be sent are printed per host before the probe runs.
+    variables that may be sent are printed per host before the probe runs. The
+    tool input schemas the probe lists are recorded in the prepared package, so
+    the run checks every call's arguments against the server's own schema.
     Advisory only: it never changes the INCOMPLETE rule.
     """
     targets = prepared.mcp_probe_targets
     if not targets:
         return None
-    from skillevaluator.tier3.mcp_proof import declared_mcp_proof, planned_env_sends, probe_mcp_servers
+    from skillevaluator.tier3.mcp_proof import (
+        declared_mcp_proof,
+        planned_env_sends,
+        probe_mcp_servers,
+        write_mcp_input_schemas,
+    )
 
     if not probe_mcp:
         return declared_mcp_proof(targets)
@@ -952,7 +980,9 @@ def _plugin_mcp_proof(
             f"MCP probe may send {escape_markup(', '.join(names))} to {escape_markup(host or 'an unknown host')} "
             f"(server {escape_markup(server)}, --probe-mcp-env)"
         )
-    return probe_mcp_servers(targets, allowed_private_hosts=allowed_private_hosts, expand_env=probe_mcp_env)
+    proof = probe_mcp_servers(targets, allowed_private_hosts=allowed_private_hosts, expand_env=probe_mcp_env)
+    write_mcp_input_schemas(getattr(prepared, "package_path", None), proof)
+    return proof
 
 
 def _incomplete_plugin_provenance(
@@ -1069,11 +1099,36 @@ def _incomplete_plugin_agent_eval_result(
     return result
 
 
+def _incomplete_plugin_skip_result(plugin_dir: Path, prepared: Any) -> ValidationResult:
+    """An INCOMPLETE ``AGENT_EVAL`` result for a plugin with nothing locally evaluable.
+
+    A plugin whose only refs are external, missing, or unresolved, or whose
+    only component is a provider-only MCP server, evaluated nothing. That is
+    not an advisory skip: the result fails, says INCOMPLETE, and carries the
+    plugin provenance, so every report lists what could not be evaluated.
+    """
+    from skillevaluator.evaluation.tier3_report import advisory_skip_result, incomplete_reason
+
+    provenance = prepared.provenance()
+    reason = incomplete_reason(provenance)
+    message = f"Tier 3 plugin evaluation is INCOMPLETE: nothing was evaluated. {prepared.skip_reason or ''}".strip()
+    result = advisory_skip_result(message, skill_name=plugin_dir.name)
+    payload = result.metadata.get("agent_eval")
+    if isinstance(payload, dict):
+        payload["plugin_provenance"] = provenance
+        payload["provenance"] = {"source": "plugin", "reason": "incomplete", "advisory": False, "message": message}
+    result.passed = False
+    result.metadata["execution_status"] = "skipped"
+    result.metadata["skip_reason"] = f"{reason} (nothing was evaluated)"
+    return result
+
+
 def _run_plugin_agent_eval(
     plugin_target: Path,
     *,
     agents: str | None,
     env_mode: str,
+    environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
     n_concurrent: int | None,
     max_agents: int | None,
@@ -1097,6 +1152,7 @@ def _run_plugin_agent_eval(
     probe_mcp_env: tuple[str, ...] = (),
     allowed_private_hosts: tuple[str, ...] = (),
     plugin_load: str = "wrapper",
+    policy: Any = None,
 ) -> ValidationResult:
     """Stage and evaluate a public plugin without fetching remote components."""
     import tempfile
@@ -1126,8 +1182,11 @@ def _run_plugin_agent_eval(
                 plugin_load=plugin_load,
                 agents=agents,
                 env_mode=env_mode,
+                policy=policy,
             )
             if prepared.skipped or prepared.package_path is None:
+                if getattr(prepared, "incomplete_skip", False):
+                    return _incomplete_plugin_skip_result(plugin_dir, prepared)
                 return _skipped(
                     f"Tier 3 plugin evaluation skipped: {prepared.skip_reason or 'nothing locally evaluable'}"
                 )
@@ -1151,6 +1210,7 @@ def _run_plugin_agent_eval(
                 results_dir=results_dir,
                 agents=agents,
                 env_mode=env_mode,
+                environment_kwarg=environment_kwarg,
                 skip_baseline=skip_baseline,
                 n_concurrent=n_concurrent,
                 max_agents=max_agents,
@@ -1427,6 +1487,8 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
     env_mode = params.get("env_mode", "docker")
     if env_mode != "docker":
         argv.extend(["--env-mode", str(env_mode)])
+    for value in params.get("environment_kwarg") or ():
+        argv.extend(["--environment-kwarg", str(value)])
     lift_mode = params.get("lift_mode", "effectiveness")
     if lift_mode != "effectiveness":
         argv.extend(["--lift-mode", str(lift_mode)])
@@ -1756,11 +1818,20 @@ def _finish_pipeline_view(
     ]
     payload = ((tier3_result.metadata or {}).get("agent_eval") or {}) if tier3_result is not None else {}
     summary = payload.get("summary") or payload
+    # A Tier 3 FAIL (complete or partial run) or an INCOMPLETE partial run that stayed advisory.
+    tier3_gate = _tier3_gate_label(tier3_result) or (
+        "Tier 3 INCOMPLETE"
+        if tier3_result is not None and not tier3_result.passed and _gate_result_incomplete(tier3_result)
+        else None
+    )
 
     if not gate_failed:
         ran = sum(1 for block in view.blocks if block.status not in ("pending", "skip"))
         advisory_failed = any(block.status == "fail" and block.number in {2, 3} for block in view.blocks)
-        if advisory_failed:
+        if tier3_gate:
+            # Tier 3 failed its gate or is INCOMPLETE, but it is advisory here: never call that "all tiers passed".
+            headline = f"gating tiers passed · {tier3_gate} is advisory (--block-on-agent-eval gates it)"
+        elif advisory_failed:
             headline = "gating tiers passed · advisory tier reported findings (see report)"
         else:
             headline = f"all {ran} tier{'s' if ran != 1 else ''} passed"
@@ -1770,20 +1841,91 @@ def _finish_pipeline_view(
         view.finish(Verdict(passed=True, headline=headline), links)
         return
 
-    failed = [result for result in tier_gate_results if not result.passed and not _is_skipped(result)]
-    if failed:
-        first = failed[0].validator_name or "validation"
-        extra = f" (+{len(failed) - 1} more)" if len(failed) > 1 else ""
-        tier_no = (failed[0].metadata.get("gating") or {}).get("tier")
-        tier_label = f" in Tier {tier_no}" if tier_no is not None else ""
-        headline = f"{first}{extra} failed{tier_label}"
-    else:
-        headline = "validation failed"
+    blocked = [result for result in tier_gate_results if not result.passed]
+    incomplete = [result for result in blocked if _gate_result_incomplete(result)]
+    # A skipped Tier 3 run that gates is a failure (it did not run); other skipped results never block.
+    failed = [
+        result
+        for result in blocked
+        if not _gate_result_incomplete(result) and (result.validator_name == "AGENT_EVAL" or not _is_skipped(result))
+    ]
+    # Missing evidence also counts when the same result failed on a blocking finding of its own.
+    missing = [result for result in blocked if result in incomplete or result.is_incomplete]
     rerun = _rerun_hint(target_path, agent_eval)
-    view.finish(
-        Verdict(passed=False, headline=headline, fix=first_fix(tier_gate_results), rerun=rerun),
-        links,
-    )
+    if failed:
+        # A real failure outranks missing evidence; the headline still counts what did not complete.
+        headline = _gate_headline(failed, "failed")
+        if missing:
+            headline += f" · {len(missing)} did not complete"
+        verdict = Verdict(passed=False, headline=headline, fix=first_fix(tier_gate_results), rerun=rerun)
+    elif incomplete:
+        verdict = Verdict(
+            passed=False, incomplete=True, headline=_gate_headline(incomplete, "did not complete"), rerun=rerun
+        )
+    else:
+        verdict = Verdict(passed=False, headline="validation failed", fix=first_fix(tier_gate_results), rerun=rerun)
+    view.finish(verdict, links)
+
+
+def _tier3_gate_label(result: ValidationResult | None) -> str | None:
+    """Return why a Tier 3 run, complete or partial, failed its gate (``Tier 3 verdict FAIL``), or ``None``."""
+    labels = (result.metadata or {}).get("tier3_gate_failures") if result is not None else None
+    if not isinstance(labels, list) or not labels:
+        return None
+    return " · ".join(str(label) for label in labels)
+
+
+def _gate_result_incomplete(result: ValidationResult) -> bool:
+    """Whether a blocking result is only missing evidence (INCOMPLETE) rather than failed.
+
+    The rule is the one the terminal summary and BENCHMARK.md use. A scanner that
+    did not complete is INCOMPLETE, unless the same result also recorded a
+    blocking finding of its own: a real failure outranks missing evidence. A
+    partial Tier 3 plugin run is INCOMPLETE unless it failed its gate (a FAIL
+    verdict or a confirmed Skill Lift regression). A Tier 3 run that did not run
+    at all fails the gate when ``--block-on-agent-eval`` makes Tier 3 gate.
+    """
+    from skillevaluator.reporting.benchmark import has_blocking_finding
+    from skillevaluator.reporting.console_ui import _is_skipped
+
+    if result.validator_name != "AGENT_EVAL":
+        return result.is_incomplete and not has_blocking_finding(result)
+    metadata = result.metadata or {}
+    payload = metadata.get("agent_eval") if isinstance(metadata.get("agent_eval"), dict) else {}
+    if _tier3_gate_label(result) or str(payload.get("verdict") or "").lower() == "fail":
+        return False
+    if _tier3_not_run_message(result) is not None:
+        return False
+    return _is_skipped(result)
+
+
+def _tier3_not_run_message(result: ValidationResult) -> str | None:
+    """Return why Tier 3 did not run at all (an advisory skip result), or ``None``."""
+    payload = (result.metadata or {}).get("agent_eval")
+    provenance = payload.get("provenance") if isinstance(payload, dict) else None
+    if not isinstance(provenance, dict) or not (provenance.get("advisory") and provenance.get("reason") == "skipped"):
+        return None
+    return str(provenance.get("message") or "Tier 3 live evaluation did not run").strip()
+
+
+def _gate_headline(results: list[ValidationResult], outcome: str) -> str:
+    """Name the first blocking result, its tier, and how many more share the outcome."""
+    first = results[0]
+    extra = f" (+{len(results) - 1} more)" if len(results) > 1 else ""
+    tier_no = ((first.metadata or {}).get("gating") or {}).get("tier")
+    tier_label = f" in Tier {tier_no}" if tier_no is not None else ""
+    if first.validator_name == "AGENT_EVAL":
+        if label := _tier3_gate_label(first):
+            return f"{label}{extra}"
+        if outcome == "did not complete":
+            reason = str((first.metadata or {}).get("skip_reason") or "").strip()
+            reason = reason.removeprefix("INCOMPLETE:").strip()
+            return f"Tier 3{extra}: {reason}" if reason else f"Tier 3{extra} did not complete"
+        if (message := _tier3_not_run_message(first)) is not None:
+            # A gated Tier 3 run that never ran: say why (the message already names Tier 3).
+            return f"{message}{extra}" if message.startswith("Tier 3") else f"Tier 3 did not run{extra}: {message}"
+        return f"Tier 3 live evaluation{extra} {outcome}"
+    return f"{first.validator_name or 'validation'}{extra} {outcome}{tier_label}"
 
 
 def _print_tier_banner(title: str) -> None:
@@ -1965,7 +2107,7 @@ def _resolve_validate_target(
     help="Comma-separated subset of Tier 1 checks to run (default: all applicable). "
     "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint; "
     "opt-in (not run by default): dependency, and claude-validate (plugins: parity with "
-    "'claude plugin validate --strict' when the claude CLI is installed). "
+    "'claude plugin validate' when the claude CLI is installed). "
     "quality/lint/version are skill-only and skipped for rules/workflows.",
 )
 @click.option(
@@ -2107,7 +2249,9 @@ def _resolve_validate_target(
     default=None,
     cls=GroupedOption,
     help_group=_TIER3_GROUP,
-    help="Make Tier 3 findings gate the exit code. Default: advisory.",
+    help="Make Tier 3 gate the exit code: a FAIL verdict, a confirmed Skill Lift regression (FAIL band, whole "
+    "interval below zero), or a run that is skipped or INCOMPLETE then fails validate. A NEUTRAL verdict never "
+    "does. Default: advisory (reported, exit code unchanged).",
 )
 @click.option(
     "--autopilot/--no-autopilot",
@@ -2175,6 +2319,14 @@ def _resolve_validate_target(
     help="Plugin only: how the with-plugin arm loads the plugin. 'wrapper' stages a generated wrapper skill; "
     "'native' stages it the way each harness loads plugins (fails for unsupported agents or local mode); "
     "'auto' uses native where supported and the wrapper otherwise.",
+)
+@click.option(
+    "--environment-kwarg",
+    "--ek",
+    multiple=True,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
 )
 @click.option(
     "--skip-baseline",
@@ -2340,6 +2492,7 @@ def validate(
     probe_mcp: bool,
     probe_mcp_env: tuple[str, ...],
     plugin_load: str,
+    environment_kwarg: tuple[str, ...],
     skip_baseline: bool,
     n_concurrent: int | None,
     max_agents: int | None,
@@ -2368,7 +2521,11 @@ def validate(
     blocking Tier 2 deduplication, and advisory Tier 3 live evaluation.
     For skills, reuse the existing dataset or generate one when missing.
     Use --tiers 1,2 to omit live evaluation, or --block-on-agent-eval to make
-    Tier 3 gate the exit code. Reports follow --report and --output-dir.
+    Tier 3 gate the exit code: a Tier 3 FAIL verdict, a confirmed Skill Lift
+    regression, or a skipped or INCOMPLETE Tier 3 run then fails validate; NEUTRAL
+    does not. Without the flag, Tier 3 is reported (BENCHMARK.md says it was
+    advisory) but never changes the exit code.
+    Reports follow --report and --output-dir.
 
     Rules, workflows, and plugins retain Tier 1/2 by default; their Tier 3
     evaluation requires an explicit --tier3, --autopilot, or --full request.
@@ -2510,6 +2667,10 @@ def validate(
         repo_root=repo_root,
         resolve_endpoints=resolve_endpoints,
     )
+    if resolved_type == CONTENT_TYPE_PLUGIN and resolved_target != target_path:
+        from skillevaluator.validators.plugin_schema import PluginSchemaValidator
+
+        PluginSchemaValidator.note_requested_manifest(results, target_path)
     # The raw pass/fail signal drives --fail-fast identically in both modes;
     # the DISPLAYED tier summary must reflect policy-finalized severities or
     # the tier blocks can contradict the verdict panel (apply_policy is
@@ -2609,6 +2770,7 @@ def validate(
             resolved_target,
             agents=agents,
             env_mode=env_mode,
+            environment_kwarg=environment_kwarg,
             skip_baseline=skip_baseline,
             n_concurrent=n_concurrent,
             max_agents=max_agents,
@@ -2635,6 +2797,7 @@ def validate(
             probe_mcp_env=probe_mcp_env,
             allowed_private_hosts=tuple(policy.mcp_allowed_private_hosts),
             plugin_load=plugin_load,
+            policy=policy,
         )
         results.append(tier3_result)
         tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(tier3_result)
@@ -2643,7 +2806,15 @@ def validate(
             # Reports read the skip reason from metadata, so the generation
             # failure must land there too, not only in the view's skip row.
             tier3_result.metadata["skip_reason"] = tier3_skip
-        if tier3_ran:
+        if not tier3_ran and (tier3_gate_label := _tier3_gate_label(tier3_result)):
+            # A partial run that failed its gate (FAIL verdict or confirmed regression) is FAIL, not skipped,
+            # as in the footer and the reports; the note says what was not evaluated.
+            view.tier_done(
+                tier3_index,
+                failed=True,
+                rows=[*tier3_config_rows[3:], detail_row("verdict", tier3_gate_label, tier3_skip)],
+            )
+        elif tier3_ran:
             view.tier_done(tier3_index, failed=not tier3_ok, rows=[*tier3_config_rows[3:], *tier3_rows])
         else:
             view.tier_skip(tier3_index, tier3_skip)
@@ -3167,6 +3338,12 @@ def _tier2_workflow(
 )
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
 @click.option(
+    "--environment-kwarg",
+    "--ek",
+    multiple=True,
+    help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
+)
+@click.option(
     "--autopilot",
     is_flag=True,
     help="Create one eval case when no dataset/task source exists, then evaluate.",
@@ -3227,6 +3404,7 @@ def evaluate(
     skill_path: Path,
     agents: str | None,
     env_mode: str,
+    environment_kwarg: tuple[str, ...],
     autopilot: bool,
     skip_baseline: bool,
     n_attempts: int | None,
@@ -3272,6 +3450,7 @@ def evaluate(
         skill_path=skill_path,
         agents=agents,
         env_mode=env_mode,
+        environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
         n_attempts=n_attempts,
         pass_threshold=pass_threshold,
@@ -3410,6 +3589,16 @@ def evaluate(
     callback=_validate_probe_mcp_env,
     help=_PROBE_MCP_ENV_HELP,
 )
+@click.option(
+    "--policy",
+    "policy_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Custom policy YAML overlaid on the default profile, as in validate: its severity_overrides apply to the "
+        "MCP checks that gate staging, and mcp.allowed_private_hosts reaches --probe-mcp."
+    ),
+)
 @click.option("--grading-mode", type=GRADING_MODE_CHOICE, default=None)
 @click.option("--results-dir", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=None)
 @click.option("--harbor-keep-jobs", is_flag=True)
@@ -3445,6 +3634,7 @@ def evaluate_plugin(
     copy_repo: bool,
     probe_mcp: bool,
     probe_mcp_env: tuple[str, ...],
+    policy_path: Path | None,
     grading_mode: str | None,
     results_dir: Path | None,
     harbor_keep_jobs: bool,
@@ -3463,9 +3653,14 @@ def evaluate_plugin(
     from skillevaluator.evaluation.tier3_report import incomplete_reason, refresh_plugin_run_report
     from skillevaluator.tier3.harbor.progress import create_progress_reporter
     from skillevaluator.tier3.plugin_eval import prepare_plugin_eval_package
+    from skillevaluator.validators.policy import resolve_policy
 
     plugin_dir = resolve_plugin_path(plugin_path)
     service = EvaluationService()
+    try:
+        policy = resolve_policy(policy_path=policy_path)
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
     try:
         with tempfile.TemporaryDirectory(prefix="skillevaluator-plugin-eval-") as temp_dir:
             prepared = prepare_plugin_eval_package(
@@ -3477,6 +3672,7 @@ def evaluate_plugin(
                 plugin_load=plugin_load,
                 agents=agents,
                 env_mode=env_mode,
+                policy=policy,
             )
             for label, values in (
                 ("Unresolved remote skill refs", prepared.unresolved_skill_refs),
@@ -3488,6 +3684,11 @@ def evaluate_plugin(
                         f"[yellow]{label} (deferred, not evaluated):[/yellow] {escape_markup(', '.join(values))}"
                     )
             if prepared.skipped or prepared.package_path is None:
+                if prepared.incomplete_skip:
+                    # Declared components exist but none could be evaluated: INCOMPLETE, never exit 0.
+                    raise click.ClickException(
+                        f"{incomplete_reason(prepared.provenance())} (nothing was evaluated). {prepared.skip_reason}"
+                    )
                 console.print(
                     f"[yellow]Skipping plugin evaluation:[/yellow] {escape_markup(str(prepared.skip_reason))}"
                 )
@@ -3501,11 +3702,7 @@ def evaluate_plugin(
                     f"[yellow]Integration skipped:[/yellow] {escape_markup(integration_skip_reason)}. "
                     "Running effectiveness only."
                 )
-            allowed_private_hosts: tuple[str, ...] = ()
-            if probe_mcp:
-                from skillevaluator.validators.policy import resolve_policy
-
-                allowed_private_hosts = tuple(resolve_policy().mcp_allowed_private_hosts)
+            allowed_private_hosts = tuple(policy.mcp_allowed_private_hosts) if probe_mcp else ()
             mcp_proof = _plugin_mcp_proof(
                 prepared,
                 probe_mcp=probe_mcp,
@@ -3739,14 +3936,26 @@ def models_command(limit: int, as_json: bool) -> None:
         "NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
     ),
 )
-@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
+@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE, metavar="MODE")
+@click.option(
+    "--environment-kwarg",
+    "--ek",
+    multiple=True,
+    help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
+)
 @click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")
 @click.option(
     "--verify-models",
     is_flag=True,
     help="Check resolved agent-model catalog reachability with a live credential-bearing request.",
 )
-def doctor(agents: str | None, env_mode: str, agent_model: tuple[str, ...], verify_models: bool) -> None:
+def doctor(
+    agents: str | None,
+    env_mode: str,
+    environment_kwarg: tuple[str, ...],
+    agent_model: tuple[str, ...],
+    verify_models: bool,
+) -> None:
     """Check live-evaluation runtime readiness."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
@@ -3754,6 +3963,7 @@ def doctor(agents: str | None, env_mode: str, agent_model: tuple[str, ...], veri
         tier3_doctor(
             agents=agents,
             env_mode=env_mode,
+            environment_kwarg=environment_kwarg,
             verify_models=verify_models,
             agent_model=agent_model,
         )
@@ -3767,12 +3977,26 @@ def doctor(agents: str | None, env_mode: str, agent_model: tuple[str, ...], veri
     default=None,
     help="Agent list; default follows the configured provider.",
 )
-@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
-def health_check(agents: str | None, env_mode: str) -> None:
+@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE, metavar="MODE")
+@click.option(
+    "--environment-kwarg",
+    "--ek",
+    multiple=True,
+    help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
+)
+def health_check(agents: str | None, env_mode: str, environment_kwarg: tuple[str, ...]) -> None:
     """Quick readiness check for the CLI and selected live-eval backend."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
-    raise SystemExit(tier3_doctor(agents=agents, env_mode=env_mode, verify_models=False, agent_model=()))
+    raise SystemExit(
+        tier3_doctor(
+            agents=agents,
+            env_mode=env_mode,
+            environment_kwarg=environment_kwarg,
+            verify_models=False,
+            agent_model=(),
+        )
+    )
 
 
 @tier3.command("validate")

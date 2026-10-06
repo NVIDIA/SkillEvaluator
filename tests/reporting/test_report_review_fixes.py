@@ -92,7 +92,7 @@ def test_failed_baseline_arm_drops_the_engine_lift() -> None:
         "execution_status": "failed",
     }
 
-    evaluators = _build_agent("codex", info, ["accuracy"], None)["evaluators"]
+    evaluators = _build_agent("codex", info, ["accuracy"], ["accuracy"], None)["evaluators"]
 
     assert evaluators == {"accuracy": {"with_skill": 0.8, "baseline": None, "lift": None}}
 
@@ -321,7 +321,11 @@ def test_unsupported_type_split_names_only_the_types_tier1_checked() -> None:
 
 
 def test_tier1_names_monitors_statically_checked_from_their_hook_risk_rows(tmp_path: Path) -> None:
-    """Tier 1 checks each monitor's command like a command hook on the event Monitor."""
+    """Tier 1 checks each monitor's command like a command hook on the event Monitor.
+
+    The plugin schema check also evaluates every LSP server it inventories, so
+    neither type is one SkillEvaluator only lists.
+    """
     from skillevaluator.reporting.plugin_sections import tier1_plugin_view, unsupported_type_split
 
     plugin = tmp_path / "plug"
@@ -339,10 +343,10 @@ def test_tier1_names_monitors_statically_checked_from_their_hook_risk_rows(tmp_p
     block = next(result.metadata["plugin"] for result in results if isinstance(result.metadata.get("plugin"), dict))
     view = tier1_plugin_view(block)
 
-    assert unsupported_type_split(block) == {"static_only": ["monitor"], "unevaluated": ["lsp"]}
+    assert unsupported_type_split(block) == {"static_only": ["lsp", "monitor"], "unevaluated": []}
     assert view is not None
     assert view["inventory"]["unsupported_note"] == (
-        "Tier 3 does not stage these types in wrapper mode; Tier 1 checks monitors statically and only lists lsp."
+        "Tier 3 does not stage these types in wrapper mode; Tier 1 checks LSP servers and monitors statically."
     )
 
 
@@ -1261,6 +1265,23 @@ def test_engine_result_display_reports_the_measured_integration_lift() -> None:
 
     assert "recorded no sum-of-parts comparison" not in output
     assert "Integration: REAL INTEGRATION (lift +0.20)" in output
+
+
+def test_engine_result_display_names_each_agents_integration_block() -> None:
+    """A multi-agent run summary shows each agent's own named Integration line, as the reports do."""
+    from skillevaluator.tier3.result_display import render_result
+
+    result = _both_mode_engine_result()
+    claude = json.loads(json.dumps(result["agents"]["codex"]))
+    claude["with_skill"] = {"accuracy": 0.6}
+    claude["lift_uncertainty"]["integration"].update(estimate=-0.1, ci_low=-0.17, ci_high=-0.06)
+    result["agents"]["claude-code"] = claude
+
+    output = " ".join(render_result(result).split())
+
+    assert "recorded no sum-of-parts comparison" not in output
+    assert "Integration (codex): REAL INTEGRATION (lift +0.20)" in output
+    assert "Integration (claude-code): NEGATIVE INTEGRATION (lift -0.10)" in output
 
 
 def test_markdown_integration_line_prints_the_lift_once(tmp_path: Path) -> None:

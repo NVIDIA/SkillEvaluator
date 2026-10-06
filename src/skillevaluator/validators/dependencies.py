@@ -28,10 +28,11 @@ make the ecosystem INCOMPLETE.
 
 from __future__ import annotations
 
+import json
 import re
 import tempfile
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePath, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -41,6 +42,7 @@ from skillevaluator.constants import (
     PLUGIN_TREE_MAX_DISCOVERED_PATHS,
     SCAN_EXCLUDED_DIRS,
 )
+from skillevaluator.models.result import Finding
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, discover_secure_files, secure_read_path_text
 from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json
 from skillevaluator.utils.tool_runner import Severity, Tools, cvss_to_severity, parse_json_output
@@ -68,6 +70,9 @@ if TYPE_CHECKING:
 # Dependency manifests are read through a bounded, no-follow secure read.
 MAX_DEPENDENCY_FILE_BYTES = CONTENT_DEDUP_MAX_FILE_BYTES
 UNVERIFIED_CHECK_NAME = eco.UNVERIFIED_CHECK_NAME
+# A Python advisory (pip-audit or Safety), and an exact pin the scanner could not audit.
+PYTHON_VULN_CHECK = "python-vulnerability"
+NOT_AUDITED_CHECK_NAME = "dependency-not-audited"
 # At most this many npm manifests and Dockerfiles below one scanned directory are
 # audited. Their discovery walk is bounded like the whole-plugin walk that runs
 # before it (PLUGIN_TREE_MAX_DISCOVERED_PATHS).
@@ -123,7 +128,8 @@ class _Discovered:
     error: str | None = None
 
 
-_NPM_MANIFEST_NAMES = frozenset({eco.PACKAGE_JSON, *eco.LOCKFILE_NAMES})
+# npm manifests the audit reads, and the yarn, pnpm, and bun lockfiles it reports as not audited.
+_NPM_MANIFEST_NAMES = frozenset({eco.PACKAGE_JSON, *eco.LOCKFILE_NAMES, *eco.UNSUPPORTED_LOCKFILE_NAMES})
 
 
 def _is_npm_manifest(relative: PurePath) -> bool:
@@ -264,6 +270,37 @@ def _parse_poetry_declaration(name: str, constraint: object) -> DependencyDeclar
     return declaration
 
 
+_TIER2_WORD_RE = re.compile(r"\bTier 2 ")
+
+
+def read_failure_reason(exc: BaseException) -> str:
+    """Why a dependency file could not be read, in the words of this Tier 1 check.
+
+    The shared no-follow reader was written for Tier 2 inputs and names Tier 2
+    in its messages ("Selected Tier 2 file is not valid UTF-8"); this audit is
+    a Tier 1 check, so that word is dropped and a bad encoding is said plainly.
+    """
+    if isinstance(exc, UnicodeError) or (isinstance(exc, SecurePathError) and exc.code == "invalid_text_encoding"):
+        return "the file is not valid UTF-8 text"
+    return _TIER2_WORD_RE.sub("", str(exc))[: eco.MAX_ERROR_CHARS]
+
+
+def _safety_json(output: str) -> Any:
+    """The JSON report in Safety's stdout. Safety 3.x prints deprecation banners before and after it."""
+    data = parse_json_output(output)
+    if data is not None:
+        return data
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"^[ \t]*[\[{]", output or "", re.MULTILINE):
+        try:
+            value, _end = decoder.raw_decode(output, match.end() - 1)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict | list):
+            return value
+    return None
+
+
 def _python_runner_declaration(spec: str) -> DependencyDeclaration | None:
     """A ``uvx``/``pipx run`` package spec as a declaration; local paths are skipped.
 
@@ -314,6 +351,8 @@ class DependencySecurityValidator(ValidatorBase):
         self.resolve_endpoints = resolve_endpoints or bool(policy is not None and policy.resolve_endpoints)
         self._summary: dict[str, dict[str, Any]] = {}
         self._mcp_cache: dict[Path, list[Any]] = {}
+        self._advisories = eco.AdvisorySeverityLookup()
+        self._npm_registry = eco.NpmRegistryCheck()
 
     @property
     def name(self) -> str:
@@ -327,6 +366,8 @@ class DependencySecurityValidator(ValidatorBase):
         """Run dependency audit on skill(s) at path."""
         self._summary = {name: eco.empty_ecosystem_summary() for name in ("python", "npm", "container")}
         self._mcp_cache = {}
+        self._advisories = eco.AdvisorySeverityLookup()
+        self._npm_registry = eco.NpmRegistryCheck()
         result = self._validate_folder_or_skill(
             skill_path,
             self._validate_single_skill,
@@ -358,7 +399,7 @@ class DependencySecurityValidator(ValidatorBase):
         # Find dependency files
         dep_files = self._find_dependency_files(skill_path)
         if not dep_files["requirements"] and not dep_files["pyproject"]:
-            result.add_message("No dependency files found - skipping vulnerability audit")
+            result.add_message("No dependency files found for the Python audit (requirements*.txt, pyproject.toml)")
             return result
 
         # Audit requirements.txt files
@@ -379,14 +420,39 @@ class DependencySecurityValidator(ValidatorBase):
         }
 
     def _read_dependency_file(self, path: Path, result: ValidationResult) -> str | None:
-        """Read a dependency manifest with a bounded, no-follow secure read."""
+        """Read a dependency manifest with a bounded, no-follow secure read.
+
+        A manifest that cannot be read is never skipped silently: in a plugin
+        run it makes the Python audit INCOMPLETE (see :meth:`_python_unaudited`).
+        """
         try:
             return secure_read_path_text(path, MAX_DEPENDENCY_FILE_BYTES)
         except SecurePathError as exc:
-            result.add_warning(f"{path.name}: refusing to read dependency file: {exc}")
+            if exc.code == "invalid_text_encoding":
+                self._python_unaudited(result, path.name, read_failure_reason(exc))
+            else:
+                self._python_unaudited(
+                    result, path.name, f"refusing to read dependency file: {read_failure_reason(exc)}"
+                )
         except OSError as exc:
-            result.add_warning(f"{path.name}: could not read dependency file: {exc}")
+            self._python_unaudited(result, path.name, f"could not read dependency file: {exc}")
         return None
+
+    def _python_unaudited(self, result: ValidationResult, label: str, reason: str) -> None:
+        """A Python manifest that could not be read or parsed: INCOMPLETE in a plugin run, a warning otherwise.
+
+        Plugin runs never pass without evidence, as for an npm lockfile or a
+        Dockerfile that cannot be read; standalone skills keep the warning.
+        """
+        message = f"{label}: Python dependencies were not audited: {reason}"
+        result.add_warning(message)
+        summary = self._summary.setdefault("python", eco.empty_ecosystem_summary())
+        if active_plugin_tree() is None:
+            summary["sources"] += 1
+            return
+        outcome = eco.AuditOutcome(status="incomplete", error=message)
+        eco.record_outcome(summary, outcome, declarations=0, audited=0, unverified=0)
+        result.mark_scan_incomplete(PIP_AUDIT_SCAN)
 
     def _audit_requirements(self, req_file: Path) -> ValidationResult:
         """Audit the exactly pinned declarations of a requirements file."""
@@ -420,7 +486,7 @@ class DependencySecurityValidator(ValidatorBase):
         try:
             data = tomllib.loads(text)
         except tomllib.TOMLDecodeError as exc:
-            result.add_warning(f"{pyproject.name}: could not parse dependency declarations: {exc}")
+            self._python_unaudited(result, pyproject.name, f"could not parse dependency declarations: {exc}")
             return result
 
         declarations = parse_pyproject_declarations(data)
@@ -434,7 +500,9 @@ class DependencySecurityValidator(ValidatorBase):
         """Flag unverifiable declarations, then audit exact pins without resolution.
 
         ``source`` is the declaring file's POSIX path relative to the audited
-        directory; it names the file in findings and messages.
+        directory; it names the file in findings, messages and summary errors:
+        the manifest name inside the scanned directory (bundled-skill paths are
+        rebased onto the plugin root later), or the root-relative MCP manifest.
         """
         result = ValidationResult()
         exact: list[DependencyDeclaration] = []
@@ -461,19 +529,21 @@ class DependencySecurityValidator(ValidatorBase):
             )
 
         outcome: eco.AuditOutcome | None = None
-        audited = skipped = 0
+        audited = not_audited = 0
         if exact:
-            outcome, audited, skipped = self._audit_exact_pins(result, source, exact)
+            outcome, audited, not_audited = self._audit_exact_pins(result, source, exact)
         else:
             result.add_message(f"{source}: no exactly pinned dependencies to audit")
+        summary = self._summary.setdefault("python", eco.empty_ecosystem_summary())
         eco.record_outcome(
-            self._summary.setdefault("python", eco.empty_ecosystem_summary()),
+            summary,
             outcome,
             declarations=len(declarations),
             audited=audited,
-            unverified=len(unverified) + skipped,
+            unverified=len(unverified) + not_audited,
             partial=True,
         )
+        self._mark_unverified(summary, not_audited)
         if outcome is not None and outcome.status == "incomplete" and active_plugin_tree() is not None:
             # A plugin run never passes without evidence, as for the npm and container
             # audits; standalone skills keep the warning.
@@ -486,32 +556,39 @@ class DependencySecurityValidator(ValidatorBase):
         """Audit exact pins with pip-audit (and Safety).
 
         Returns the outcome, how many pins pip-audit audited, and how many it
-        skipped. A batch that produced no evidence (pip-audit missing, timeout,
+        could not audit. Vulnerabilities from both scanners are tallied on the
+        outcome; they share ``reported``, so an advisory both report is listed
+        once. A batch that produced no evidence (pip-audit missing, timeout,
         offline, crash, no JSON report) makes the outcome INCOMPLETE with its
         error; the batches that ran keep their evidence. A pin that pip-audit
-        skips (a local version such as ``2.31.0+corp``, or a package not on
-        PyPI) is not audited either: it gets the INFO unverified finding with
-        pip-audit's reason, and the outcome is INCOMPLETE.
+        skips (a package or version PyPI does not know, such as a private
+        package) is not audited either: it gets a MEDIUM ``dependency-not-audited``
+        finding with pip-audit's reason.
         """
         outcome = eco.AuditOutcome()
         batches = self._exact_batches(exact)
         audited_lines: set[str] = set()
-        skipped_lines: dict[str, str] = {}
+        skipped: dict[str, str] = {}
         errors: list[str] = []
+        reported: set[tuple[str, str, str]] = set()
         with tempfile.TemporaryDirectory(prefix="skillevaluator-pip-audit-") as temp_dir:
             audit_files = self._write_audit_files(Path(temp_dir), batches)
             if Tools.pip_audit.is_available:
                 for lines, audit_file in zip(batches, audit_files, strict=True):
-                    batch_result, error, skipped = self._run_pip_audit_on_file(
-                        audit_file, source=source, cwd=Path(temp_dir), outcome=outcome
+                    batch_result, error, batch_skipped = self._run_pip_audit_on_file(
+                        audit_file,
+                        cwd=Path(temp_dir),
+                        file_path=source,
+                        exact=exact,
+                        reported=reported,
+                        outcome=outcome,
                     )
                     result.merge(batch_result)
-                    if error is not None:
+                    if error is None:
+                        audited_lines.update(lines)
+                        skipped.update(batch_skipped)
+                    else:
                         errors.append(error)
-                        continue
-                    batch_skipped = self._skipped_lines(lines, skipped)
-                    skipped_lines.update(batch_skipped)
-                    audited_lines.update(line for line in lines if line not in batch_skipped)
             else:
                 error = f"pip-audit not installed. {Tools.pip_audit.get_install_hint()}"
                 result.add_warning(error)
@@ -519,62 +596,61 @@ class DependencySecurityValidator(ValidatorBase):
 
             if self.use_safety and Tools.safety.is_available:
                 for audit_file in audit_files:
-                    result.merge(self._run_safety(audit_file))
-        skipped = self._report_skipped_pins(result, source, exact, skipped_lines)
-        if skipped_lines:
-            errors.append(f"pip-audit could not audit {len(skipped_lines)} pin(s): {', '.join(skipped_lines)}")
-        if audited_lines:
+                    result.merge(
+                        self._run_safety(audit_file, file_path=source, exact=exact, reported=reported, outcome=outcome)
+                    )
+        not_audited = [
+            declaration
+            for declaration in exact
+            if declaration.audit_line in audited_lines and declaration.name in skipped
+        ]
+        for declaration in not_audited[: eco.MAX_UNVERIFIED_PER_SOURCE]:
+            self._report_not_audited(result, source, declaration, skipped[declaration.name or ""])
+        audited = sum(1 for declaration in exact if declaration.audit_line in audited_lines) - len(not_audited)
+        if audited:
             outcome.scanner = PIP_AUDIT_SCAN
         if errors:
             outcome.status = "incomplete"
             outcome.error = f"{source}: {'; '.join(dict.fromkeys(errors))}"
-        return outcome, sum(1 for declaration in exact if declaration.audit_line in audited_lines), skipped
+        return outcome, audited, len(not_audited)
 
     @staticmethod
-    def _report_skipped_pins(
-        result: ValidationResult, source: str, exact: list[DependencyDeclaration], skipped_lines: dict[str, str]
-    ) -> int:
-        """Warn about and report each exact pin pip-audit skipped as unverified; return how many there are."""
-        skipped = [
-            (declaration, declaration.audit_line) for declaration in exact if declaration.audit_line in skipped_lines
-        ]
-        for declaration, line in skipped[: eco.MAX_UNVERIFIED_PER_SOURCE]:
-            reason = skipped_lines[line]
-            result.add_warning(f"{source}: pip-audit could not audit {line}: {reason[: eco.MAX_ERROR_CHARS]}")
-            result.add_finding(
-                eco.unverified_finding(
-                    declaration.name or declaration.raw[:80],
-                    line,
-                    source,
-                    ecosystem="python",
-                    role=declaration.role,
-                    kind="version",
-                    line_number=declaration.line_number,
-                    reason=reason,
-                )
-            )
-        if len(skipped) > eco.MAX_UNVERIFIED_PER_SOURCE:
-            result.add_message(
-                f"{source}: {len(skipped) - eco.MAX_UNVERIFIED_PER_SOURCE} more pin(s) that pip-audit could not "
-                "audit, not listed individually"
-            )
-        return len(skipped)
+    def _mark_unverified(summary: dict[str, Any], not_audited: int) -> None:
+        """Exact pins were declared but none could be audited: ``unverified`` (Not audited), never ``audited``."""
+        if not_audited and summary["audited"] == 0 and summary["status"] in {"no_exact", "audited"}:
+            summary["status"] = "unverified"
 
     @staticmethod
-    def _skipped_lines(lines: list[str], skipped: list[tuple[str, str]]) -> dict[str, str]:
-        """The ``name==version`` lines of one batch that pip-audit skipped, with its reason for each.
-
-        A batch names each package once. A skipped name that matches no line
-        skips the whole batch, so no pin is credited as audited by mistake.
-        """
-        by_name = {canonicalize_package_name(line.split("==", 1)[0]): line for line in lines}
-        found: dict[str, str] = {}
-        for name, reason in skipped:
-            line = by_name.get(canonicalize_package_name(name))
-            if line is None:
-                return dict.fromkeys(lines, reason)
-            found[line] = reason
-        return found
+    def _report_not_audited(
+        result: ValidationResult, location: str, declaration: DependencyDeclaration, reason: str
+    ) -> None:
+        """An exact pin pip-audit skipped (for example, not on PyPI): applicability was never checked."""
+        result.add_finding(
+            Finding(
+                category="DEPENDENCY",
+                severity=Severity.MEDIUM,
+                check_name=NOT_AUDITED_CHECK_NAME,
+                message=(
+                    f"{declaration.audit_line}: pip-audit could not audit this pin ({reason[:160]}); "
+                    "vulnerability applicability was not asserted"
+                ),
+                file_path=location,
+                line_number=declaration.line_number,
+                suggestion=(
+                    "Check the package name and version. A private or internal package needs its own "
+                    "vulnerability audit."
+                ),
+                metadata={
+                    "ecosystem": "python",
+                    "package_name": declaration.name,
+                    "package_version": declaration.exact_version,
+                    "dependency_role": declaration.role,
+                    "resolution_status": "not_audited",
+                    "skip_reason": reason[: eco.MAX_ERROR_CHARS],
+                    "scanner": "pip-audit",
+                },
+            )
+        )
 
     @staticmethod
     def _exact_batches(exact: list[DependencyDeclaration]) -> list[list[str]]:
@@ -597,15 +673,22 @@ class DependencySecurityValidator(ValidatorBase):
         return files
 
     def _run_pip_audit_on_file(
-        self, audit_file: Path, *, source: str, cwd: Path, outcome: eco.AuditOutcome
-    ) -> tuple[ValidationResult, str | None, list[tuple[str, str]]]:
+        self,
+        audit_file: Path,
+        *,
+        cwd: Path,
+        file_path: str,
+        exact: list[DependencyDeclaration],
+        reported: set[tuple[str, str, str]],
+        outcome: eco.AuditOutcome,
+    ) -> tuple[ValidationResult, str | None, dict[str, str]]:
         """Run pip-audit on a normalized pinned requirements file.
 
         ``--no-deps --disable-pip`` audits exactly the listed pins without
         creating a virtual environment, invoking pip, or building packages.
         Vulnerabilities are tallied on *outcome*. Returns the result, the error
-        when the run produced no evidence, and ``(name, reason)`` for each pin
-        that pip-audit skipped.
+        when the run produced no evidence, and the packages pip-audit skipped
+        (name -> ``skip_reason``).
         """
         result = ValidationResult()
         tool_result = Tools.pip_audit.run(
@@ -624,7 +707,7 @@ class DependencySecurityValidator(ValidatorBase):
         )
 
         error: str | None = None
-        skipped: list[tuple[str, str]] = []
+        skipped: dict[str, str] = {}
         if tool_result.error_message:
             error = tool_result.error_message
         elif tool_result.exit_code != 0 and parse_json_output(tool_result.stdout) is None:
@@ -632,22 +715,31 @@ class DependencySecurityValidator(ValidatorBase):
             reason = detail[-1][: eco.MAX_ERROR_CHARS] if detail else f"exit code {tool_result.exit_code}"
             error = f"pip-audit failed: {reason}"
         else:
-            report = self._process_pip_audit(tool_result.stdout, result, source, outcome)
-            if report is None:
+            processed = self._process_pip_audit(
+                tool_result.stdout, result, file_path, exact=exact, reported=reported, outcome=outcome
+            )
+            if processed is None:
                 error = "pip-audit produced no JSON report"
             else:
-                skipped = report
+                skipped = processed
         if error is not None:
-            result.add_warning(f"{source}: {error}")
+            result.add_warning(f"{file_path}: {error}")
         return result, error, skipped
 
     def _process_pip_audit(
-        self, output: str, result: ValidationResult, source: str, outcome: eco.AuditOutcome
-    ) -> list[tuple[str, str]] | None:
-        """Parse pip-audit output and report vulnerabilities.
+        self,
+        output: str,
+        result: ValidationResult,
+        file_path: str,
+        *,
+        exact: Sequence[DependencyDeclaration] = (),
+        reported: set[tuple[str, str, str]] | None = None,
+        outcome: eco.AuditOutcome,
+    ) -> dict[str, str] | None:
+        """Parse pip-audit output into ``python-vulnerability`` findings, tallied on *outcome*.
 
-        Returns ``(name, reason)`` for each dependency pip-audit skipped (its
-        ``skip_reason``), or ``None`` when there is no report.
+        Returns the packages pip-audit skipped (canonical name -> ``skip_reason``,
+        for example a pin PyPI does not know), or ``None`` when there is no report.
         """
         data = parse_json_output(output, on_error="No known vulnerabilities found")
         if data is None:
@@ -655,44 +747,66 @@ class DependencySecurityValidator(ValidatorBase):
 
         # Handle both list and dict output formats
         dependencies = data if isinstance(data, list) else data.get("dependencies", [])
+        roles = {declaration.name: declaration.role for declaration in exact if declaration.name}
+        reported = reported if reported is not None else set()
 
         vuln_count = 0
-        seen: set[tuple[str, str, str]] = set()
-        skipped: list[tuple[str, str]] = []
-        for dep in dependencies:
+        skipped: dict[str, str] = {}
+        for dep in dependencies if isinstance(dependencies, list) else []:
             if not isinstance(dep, dict):
                 continue
 
-            pkg_name = dep.get("name", "unknown")
-            pkg_version = dep.get("version", "unknown")
-            if dep.get("skip_reason"):
-                skipped.append((str(pkg_name), str(dep["skip_reason"])))
+            pkg_name = str(dep.get("name", "unknown"))
+            skip_reason = dep.get("skip_reason")
+            if skip_reason and not dep.get("vulns"):
+                skipped[canonicalize_package_name(pkg_name)] = str(skip_reason)
                 continue
+            pkg_version = str(dep.get("version", "unknown"))
 
-            for vuln in dep.get("vulns", []):
-                # pip-audit can list the same advisory twice for one package.
-                key = (str(pkg_name), str(pkg_version), str(vuln.get("id", "Unknown")))
-                if key in seen:
+            for vuln in dep.get("vulns", []) or []:
+                if not isinstance(vuln, dict):
                     continue
-                seen.add(key)
+                vuln_id = str(vuln.get("id", "Unknown"))
+                aliases = [str(alias) for alias in vuln.get("aliases", []) or [] if isinstance(alias, str)]
+                # pip-audit can list the same advisory twice for one pin. The version is in the
+                # key: one file can pin a package twice (marker-split pins), and each pin is audited.
+                key = (canonicalize_package_name(pkg_name), pkg_version, vuln_id)
+                if key in reported:
+                    continue
+                reported.add(key)
+                reported.update((key[0], pkg_version, alias) for alias in aliases)
                 vuln_count += 1
+                fix_versions = vuln.get("fix_versions", [])
                 self._report_vulnerability(
                     result,
                     outcome,
+                    file_path=file_path,
                     pkg_name=pkg_name,
                     pkg_version=pkg_version,
-                    vuln_id=vuln.get("id", "Unknown"),
-                    fix_versions=vuln.get("fix_versions", []),
+                    vuln_id=vuln_id,
+                    aliases=aliases,
+                    fix_versions=[str(item) for item in fix_versions] if isinstance(fix_versions, list) else [],
                     severity=self._get_vuln_severity(vuln),
+                    scanner="pip-audit",
+                    role=roles.get(canonicalize_package_name(pkg_name)),
                 )
 
         status = f"Found {vuln_count} vulnerability(ies)" if vuln_count else "No vulnerabilities found"
-        not_audited = f"; {len(skipped)} pin(s) could not be audited" if skipped else ""
-        result.add_message(f"{source}: {status} (pip-audit){not_audited}")
+        if skipped:
+            status += f"; {len(skipped)} pin(s) could not be audited"
+        result.add_message(f"{file_path}: {status} (pip-audit)")
         return skipped
 
-    def _run_safety(self, req_file: Path) -> ValidationResult:
-        """Run Safety check for supplementary coverage."""
+    def _run_safety(
+        self,
+        req_file: Path,
+        *,
+        file_path: str | None = None,
+        exact: Sequence[DependencyDeclaration] = (),
+        reported: set[tuple[str, str, str]] | None = None,
+        outcome: eco.AuditOutcome,
+    ) -> ValidationResult:
+        """Run Safety check for supplementary coverage (advisories pip-audit did not report)."""
         result = ValidationResult()
 
         tool_result = Tools.safety.run(
@@ -700,84 +814,176 @@ class DependencySecurityValidator(ValidatorBase):
             timeout=60,
         )
 
-        # Safety errors are non-critical (pip-audit is primary)
-        if tool_result.success:
-            self._process_safety(tool_result.stdout, result)
+        # Safety is secondary (pip-audit is primary): a failed run is a warning, never a gate.
+        if tool_result.error_message:
+            result.add_warning(f"Safety did not run: {tool_result.error_message[:200]}")
+        elif tool_result.success:
+            self._process_safety(
+                tool_result.stdout,
+                result,
+                file_path=file_path or req_file.name,
+                exact=exact,
+                reported=reported,
+                outcome=outcome,
+            )
 
         return result
 
-    def _process_safety(self, output: str, result: ValidationResult) -> None:
-        """Parse Safety output and report additional findings."""
-        data = parse_json_output(output)
-        if not data:
+    def _process_safety(
+        self,
+        output: str,
+        result: ValidationResult,
+        *,
+        file_path: str = "requirements.txt",
+        exact: Sequence[DependencyDeclaration] = (),
+        reported: set[tuple[str, str, str]] | None = None,
+        outcome: eco.AuditOutcome,
+    ) -> None:
+        """Parse Safety JSON (2.x list or 3.x report, banners around it allowed) into findings, tallied on *outcome*.
+
+        An advisory pip-audit already reported (same package, version, and id or
+        CVE) is not repeated. Output with no JSON report is a warning.
+        """
+        data = _safety_json(output)
+        if data is None:
+            result.add_warning("Safety produced no JSON report; its advisories were not used")
             return
 
-        # Handle varying Safety output formats
-        vulnerabilities = data.get("vulnerabilities", data if isinstance(data, list) else [])
+        if isinstance(data, list):
+            vulnerabilities = data
+        else:
+            vulnerabilities = data.get("vulnerabilities", [])
+        roles = {declaration.name: declaration.role for declaration in exact if declaration.name}
+        reported = reported if reported is not None else set()
+        pins = {declaration.name: declaration.exact_version for declaration in exact if declaration.name}
 
-        for vuln in vulnerabilities:
+        for vuln in vulnerabilities if isinstance(vulnerabilities, list) else []:
+            if isinstance(vuln, list) and len(vuln) >= 5:
+                # Safety 2.x legacy rows: [package, spec, version, advisory, id, ...]
+                vuln = {
+                    "package_name": vuln[0],
+                    "analyzed_version": vuln[2],
+                    "advisory": vuln[3],
+                    "vulnerability_id": vuln[4],
+                }
             if not isinstance(vuln, dict):
                 continue
 
-            pkg_name = vuln.get("package_name", vuln.get("name", "unknown"))
-            severity_str = vuln.get("severity", "medium").lower()
-            severity = Severity(severity_str) if severity_str in Severity else Severity.MEDIUM
-
-            vuln_id = vuln.get("vulnerability_id", vuln.get("id", "Unknown"))
-            advisory = vuln.get("advisory", "")[:100]
-
-            # Safety findings are supplementary - only critical as errors
-            result.add_finding(
-                tag="SAFETY",
-                severity=severity,
-                message=f"{pkg_name}: {vuln_id} - {advisory}",
-                fail_on_medium=False,
+            pkg_name = str(vuln.get("package_name", vuln.get("name", "unknown")))
+            canonical = canonicalize_package_name(pkg_name)
+            vuln_id = str(vuln.get("vulnerability_id", vuln.get("id", "Unknown")))
+            cve = vuln.get("CVE") or vuln.get("cve")
+            ids = [vuln_id, *([str(cve)] if isinstance(cve, str) and cve else [])]
+            version = str(vuln.get("analyzed_version") or pins.get(canonical) or "unknown")
+            if any((canonical, version, item) in reported for item in ids):
+                continue
+            reported.update((canonical, version, item) for item in ids)
+            advisory = vuln.get("advisory")
+            fixed = vuln.get("fixed_versions")
+            self._report_vulnerability(
+                result,
+                outcome,
+                file_path=file_path,
+                pkg_name=pkg_name,
+                pkg_version=version,
+                vuln_id=f"SAFETY-{vuln_id}" if vuln_id.isdigit() else vuln_id,
+                aliases=ids[1:],
+                fix_versions=[str(item) for item in fixed] if isinstance(fixed, list) else [],
+                severity=self._safety_severity(vuln.get("severity"), ids),
+                scanner="safety",
+                role=roles.get(canonical),
+                summary=str(advisory)[:100] if isinstance(advisory, str) else "",
             )
+
+    def _safety_severity(self, value: Any, ids: list[str]) -> eco.AdvisorySeverity:
+        """Safety's own severity (a word, or a 3.x ``{cvss_v3: {base_severity, base_score}}``), else the advisory."""
+        if isinstance(value, str) and value.strip().lower() in {"critical", "high", "medium", "low"}:
+            return eco.AdvisorySeverity(Severity(value.strip().lower()), "safety")
+        if isinstance(value, dict):
+            for key in ("cvss_v3", "cvssv3", "cvss_v2"):
+                block = value.get(key)
+                if not isinstance(block, dict):
+                    continue
+                word = str(block.get("base_severity") or "").strip().lower()
+                if word in {"critical", "high", "medium", "low"}:
+                    return eco.AdvisorySeverity(Severity(word), f"safety:{key}")
+                score = block.get("base_score")
+                if isinstance(score, int | float) and score > 0:
+                    return eco.AdvisorySeverity(cvss_to_severity(float(score)), f"safety:{key}")
+        return self._advisories.severity(ids)
 
     def _report_vulnerability(
         self,
         result: ValidationResult,
         outcome: eco.AuditOutcome,
         *,
+        file_path: str,
         pkg_name: str,
         pkg_version: str,
         vuln_id: str,
+        aliases: list[str],
         fix_versions: list[str],
-        severity: Severity,
+        severity: eco.AdvisorySeverity,
+        scanner: str,
+        role: str | None = None,
+        summary: str = "",
     ) -> None:
-        """Report a single vulnerability finding and tally it on *outcome*."""
+        """Report one Python advisory as a structured ``python-vulnerability`` finding and tally it on *outcome*.
+
+        The severity comes from the advisory data. When it cannot be known, the
+        finding is HIGH and says so, rather than inventing a severity silently.
+        """
         fix_hint = f" -> upgrade to {fix_versions[0]}" if fix_versions else ""
-        message = f"{pkg_name}=={pkg_version}: {vuln_id}{fix_hint}"
-        outcome.count(severity)
+        detail = f" ({summary})" if summary else ""
+        level = severity.severity
+        unknown = ""
+        if level is None:
+            level = Severity.HIGH
+            unknown = " (advisory severity unknown; reported as HIGH)"
+        outcome.count(level)
+        metadata: dict[str, Any] = {
+            "ecosystem": "python",
+            "package_name": pkg_name,
+            "package_version": pkg_version,
+            "vulnerability_id": vuln_id,
+            "aliases": aliases[:8],
+            "fix_versions": fix_versions[:8],
+            "scanner": scanner,
+            "severity_source": severity.source if severity.severity is not None else "unknown",
+        }
+        if severity.severity is None:
+            metadata["severity_unknown_reason"] = severity.source[: eco.MAX_ERROR_CHARS]
+        if role:
+            metadata["dependency_role"] = role
         result.add_finding(
-            tag="CVE",
-            severity=severity,
-            message=message,
+            Finding(
+                category="DEPENDENCY",
+                severity=level,
+                check_name=PYTHON_VULN_CHECK,
+                message=f"{pkg_name}=={pkg_version}: {vuln_id}{detail}{fix_hint}{unknown}",
+                file_path=file_path,
+                suggestion="Upgrade to a fixed version and rerun the dependency audit." if fix_versions else None,
+                metadata=metadata,
+            ),
             fail_on_medium=self.fail_on_medium,
         )
 
-    def _get_vuln_severity(self, vuln: dict) -> Severity:
-        """Extract severity from vulnerability data."""
-        # Explicit severity field
-        if "severity" in vuln:
-            sev = vuln["severity"].lower()
-            try:
-                return Severity(sev)
-            except ValueError:
-                pass
+    def _get_vuln_severity(self, vuln: dict) -> eco.AdvisorySeverity:
+        """Severity of a pip-audit advisory: an explicit field when present, else the advisory data.
 
-        # CVSS score from aliases
-        for alias in vuln.get("aliases", []):
-            if isinstance(alias, dict) and "cvss" in alias:
-                score = alias.get("cvss", {}).get("score", 0)
-                return cvss_to_severity(score)
-
-        # Default based on ID prefix (PYSEC/GHSA are usually important)
-        vuln_id = vuln.get("id", "")
-        if vuln_id.startswith(("PYSEC", "GHSA")):
-            return Severity.HIGH
-
-        return Severity.MEDIUM
+        pip-audit's JSON states no severity, so the advisory record (the GitHub
+        advisory alias first) is looked up; ``severity=None`` when that fails.
+        """
+        explicit = vuln.get("severity")
+        if isinstance(explicit, str) and explicit.strip().lower() in {"critical", "high", "medium", "low"}:
+            return eco.AdvisorySeverity(Severity(explicit.strip().lower()), "scanner")
+        for alias in vuln.get("aliases", []) or []:
+            if isinstance(alias, dict) and isinstance(alias.get("cvss"), dict):
+                score = alias["cvss"].get("score")
+                if isinstance(score, int | float) and score > 0:
+                    return eco.AdvisorySeverity(cvss_to_severity(float(score)), "scanner:cvss")
+        ids = [str(vuln.get("id", "")), *(alias for alias in vuln.get("aliases", []) or [] if isinstance(alias, str))]
+        return self._advisories.severity(ids)
 
     # ------------------------------------------------------------------ #
     # npm and container images (plugin runs only)                          #
@@ -826,7 +1032,7 @@ class DependencySecurityValidator(ValidatorBase):
         try:
             return _Discovered(tuple(self._discover(directory, selected)))
         except (SecurePathError, ValueError) as exc:
-            return _Discovered(error=str(exc))
+            return _Discovered(error=read_failure_reason(exc))
 
     @staticmethod
     def _source_label(directory: Path, rel: PurePosixPath) -> str:
@@ -862,7 +1068,7 @@ class DependencySecurityValidator(ValidatorBase):
             )
             return data, None
         except (SecurePathError, StructuredDataError, OSError, UnicodeError, ValueError) as exc:
-            return None, str(exc)[: eco.MAX_ERROR_CHARS]
+            return None, read_failure_reason(exc)
 
     def _record_unaudited(
         self,
@@ -910,6 +1116,17 @@ class DependencySecurityValidator(ValidatorBase):
             by_dir.setdefault(rel.parent, []).append(rel)
         for rels in by_dir.values():
             lockfiles = [rel for rel in rels if rel.name in eco.LOCKFILE_NAMES]
+            if not lockfiles:
+                # yarn and pnpm lockfiles pin exact versions this audit cannot read: never a silent pass.
+                for rel in (rel for rel in rels if rel.name in eco.UNSUPPORTED_LOCKFILE_NAMES):
+                    self._record_unaudited(
+                        result,
+                        summary,
+                        self._source_label(directory, rel),
+                        f"{rel.name} is not supported by the npm audit, so the versions it pins were not audited "
+                        "(commit a package-lock.json, or audit this lockfile separately)",
+                        scan_name=NPM_AUDIT_SCAN,
+                    )
             candidates = [*lockfiles, *(rel for rel in rels if rel.name == eco.PACKAGE_JSON)]
             unreadable: list[str] = []
             for rel in candidates:
@@ -933,7 +1150,7 @@ class DependencySecurityValidator(ValidatorBase):
                     label,
                     data,
                     lockfile=rel.name in eco.LOCKFILE_NAMES,
-                    file_path=rel.as_posix(),
+                    finding_path=rel.as_posix(),
                 )
                 break
         return result
@@ -946,7 +1163,7 @@ class DependencySecurityValidator(ValidatorBase):
         data: Any,
         *,
         lockfile: bool,
-        file_path: str,
+        finding_path: str | None = None,
     ) -> None:
         """Audit the exact pins of one parsed lockfile or ``package.json``; floating versions are unverified.
 
@@ -955,7 +1172,7 @@ class DependencySecurityValidator(ValidatorBase):
         """
         declarations, total = eco.read_npm_declarations(data, lockfile=lockfile)
         result.add_message(f"Auditing {label} ({total} npm declaration(s))")
-        self._audit_npm_declarations(result, summary, label, declarations, total=total, file_path=file_path)
+        self._audit_npm_declarations(result, summary, label, declarations, total=total, finding_path=finding_path)
 
     def _audit_npm_declarations(
         self,
@@ -965,9 +1182,17 @@ class DependencySecurityValidator(ValidatorBase):
         declarations: list[eco.NpmDeclaration],
         *,
         total: int,
-        file_path: str,
+        finding_path: str | None = None,
     ) -> None:
-        """Audit npm declarations; *label* names the source in messages, *file_path* in findings."""
+        """Audit npm declarations of one source.
+
+        ``label`` names the source in messages (plugin-root relative);
+        ``finding_path`` is the path findings carry, relative to the scanned
+        directory, because a bundled skill's finding paths are rebased onto the
+        plugin root afterwards (a plugin-relative path would get the skill
+        folder twice).
+        """
+        path = finding_path or label
         if total > len(declarations):
             self._record_unaudited(
                 result,
@@ -978,14 +1203,33 @@ class DependencySecurityValidator(ValidatorBase):
                 declarations=total - len(declarations),
                 new_source=False,
             )
-        exact = [(d.name, d.exact_version) for d in declarations if d.exact_version]
+        # An exact pin from a git, file, or path source, or one the public registry does not know, is
+        # not audited (the public audit cannot speak for it): MEDIUM dependency-not-audited, as for Python.
+        off_registry: list[tuple[eco.NpmDeclaration, str | None]] = [
+            (d, None) for d in declarations if d.exact_version and d.not_from_registry
+        ]
+        unknown_reasons: list[str] = []
+        if Tools.osv_scanner.is_available or Tools.npm.is_available:
+            for declaration in declarations:
+                if not declaration.exact_version or declaration.not_from_registry:
+                    continue
+                if not declaration.needs_registry_check:
+                    continue
+                exists, error = self._npm_registry.exists(declaration.name, declaration.exact_version)
+                if exists is False:
+                    off_registry.append((declaration, "the public npm registry does not have this package version"))
+                elif exists is None and error:
+                    unknown_reasons.append(error)
+        skipped = {id(d) for d, _reason in off_registry}
+        not_audited = len(off_registry)
+        exact = [(d.name, d.exact_version) for d in declarations if d.exact_version and id(d) not in skipped]
         unverified = [d for d in declarations if not d.exact_version]
         for declaration in unverified[: eco.MAX_UNVERIFIED_PER_SOURCE]:
             result.add_finding(
                 eco.unverified_finding(
                     declaration.name,
                     declaration.raw,
-                    file_path,
+                    path,
                     ecosystem="npm",
                     role=declaration.role,
                     kind="npm version",
@@ -996,10 +1240,25 @@ class DependencySecurityValidator(ValidatorBase):
                 f"{label}: {len(unverified) - eco.MAX_UNVERIFIED_PER_SOURCE} more floating npm declaration(s) "
                 "not listed individually"
             )
+        for declaration, reason in off_registry[: eco.MAX_UNVERIFIED_PER_SOURCE]:
+            result.add_finding(eco.npm_not_audited_finding(declaration, path, reason))
+        if len(off_registry) > eco.MAX_UNVERIFIED_PER_SOURCE:
+            result.add_message(
+                f"{label}: {len(off_registry) - eco.MAX_UNVERIFIED_PER_SOURCE} more npm package(s) that could "
+                "not be audited not listed individually"
+            )
+        if unknown_reasons:
+            result.add_message(
+                f"{label}: {len(unknown_reasons)} npm pin(s) were not checked against the public registry "
+                f"({unknown_reasons[0][:160]}); they were audited by name and version"
+            )
         if not exact:
-            eco.record_outcome(summary, None, declarations=len(declarations), audited=0, unverified=len(unverified))
+            eco.record_outcome(
+                summary, None, declarations=len(declarations), audited=0, unverified=len(unverified) + not_audited
+            )
+            self._mark_unverified(summary, not_audited)
             return
-        outcome = eco.audit_npm_pins([(name, version) for name, version in exact if version], source=file_path)
+        outcome = eco.audit_npm_pins([(name, version) for name, version in exact if version], source=path)
         self._apply_outcome(result, outcome, label, scan_name=NPM_AUDIT_SCAN)
         if outcome.unaudited:
             self._record_unaudited(
@@ -1015,18 +1274,25 @@ class DependencySecurityValidator(ValidatorBase):
             outcome,
             declarations=len(declarations),
             audited=len(exact) - outcome.unaudited,
-            unverified=len(unverified),
+            unverified=len(unverified) + not_audited,
         )
+        if outcome.status != "incomplete":
+            self._mark_unverified(summary, not_audited)
 
     def _audit_containers(self, directory: Path, discovered: _Discovered) -> ValidationResult:
-        """Audit exact container images from MCP run commands (plugin root) and Dockerfiles."""
+        """Audit exact container images from MCP run commands (plugin root) and Dockerfiles.
+
+        Each image keeps a message label (the MCP server or Dockerfile) and the
+        file path its findings carry: the MCP file or the Dockerfile, never a
+        label, so every report can point at a real file.
+        """
         result = ValidationResult()
         summary = self._summary.setdefault("container", eco.empty_ecosystem_summary())
-        # (image, label for messages, file path for findings); MCP images are only read at the plugin root.
-        images: list[tuple[eco.ImageDeclaration, str, str]] = []
+        # (declaration, message label, finding path, MCP server name)
+        images: list[tuple[eco.ImageDeclaration, str, str, str | None]] = []
         if is_plugin_tree_root(directory):
-            for image, label in self._mcp_images(directory):
-                images.append((eco.image_declaration(image, "mcp"), label, label))
+            for image, label, path, server in self._mcp_images(directory):
+                images.append((eco.image_declaration(image, "mcp"), label, path, server))
         if discovered.error is not None:
             label = self._source_label(directory, PurePosixPath())
             self._record_unaudited(
@@ -1056,14 +1322,16 @@ class DependencySecurityValidator(ValidatorBase):
                     result,
                     summary,
                     label,
-                    f"could not read Dockerfile safely: {exc}",
+                    f"could not read Dockerfile safely: {read_failure_reason(exc)}",
                     scan_name=CONTAINER_AUDIT_SCAN,
                 )
                 continue
-            images.extend((declaration, label, rel.as_posix()) for declaration in eco.parse_dockerfile_images(text))
-        unique: dict[str, tuple[eco.ImageDeclaration, str, str]] = {}
-        for declaration, label, file_path in images:
-            unique.setdefault(declaration.image, (declaration, label, file_path))
+            images.extend(
+                (declaration, label, rel.as_posix(), None) for declaration in eco.parse_dockerfile_images(text)
+            )
+        unique: dict[str, tuple[eco.ImageDeclaration, str, str, str | None]] = {}
+        for entry in images:
+            unique.setdefault(entry[0].image, entry)
         if len(unique) > eco.MAX_IMAGES:
             self._record_unaudited(
                 result,
@@ -1072,41 +1340,45 @@ class DependencySecurityValidator(ValidatorBase):
                 f"{len(unique)} container images found; only the first {eco.MAX_IMAGES} were audited",
                 scan_name=CONTAINER_AUDIT_SCAN,
             )
-        for declaration, label, file_path in list(unique.values())[: eco.MAX_IMAGES]:
+        for declaration, label, path, server in list(unique.values())[: eco.MAX_IMAGES]:
             if not declaration.exact:
-                result.add_finding(
-                    eco.unverified_finding(
-                        declaration.image,
-                        declaration.image,
-                        file_path,
-                        ecosystem="container",
-                        role=declaration.role,
-                        kind="container image",
-                    )
+                finding = eco.unverified_finding(
+                    declaration.image,
+                    declaration.image,
+                    path,
+                    ecosystem="container",
+                    role=declaration.role,
+                    kind="container image",
                 )
+                if server is not None:
+                    finding.metadata["mcp_server"] = server
+                result.add_finding(finding)
                 eco.record_outcome(summary, None, declarations=1, audited=0, unverified=1)
                 continue
             result.add_message(f"Auditing container image {declaration.image} ({label})")
             outcome = eco.audit_image(
                 declaration.image,
-                source=file_path,
+                source=path,
                 allowed_hosts=self.allowed_private_hosts,
                 resolve=self.resolve_endpoints,
             )
+            if server is not None:
+                for finding in outcome.findings:
+                    finding.metadata["mcp_server"] = server
             self._apply_outcome(result, outcome, label, scan_name=CONTAINER_AUDIT_SCAN)
             eco.record_outcome(summary, outcome, declarations=1, audited=1, unverified=0)
         return result
 
-    def _mcp_images(self, root: Path) -> list[tuple[str, str]]:
-        """Container images launched by the plugin's MCP servers (every declared form, no validation)."""
-        images: list[tuple[str, str]] = []
+    def _mcp_images(self, root: Path) -> list[tuple[str, str, str, str]]:
+        """Images the plugin's MCP servers launch: ``(image, label, MCP file, server name)`` (no validation)."""
+        images: list[tuple[str, str, str, str]] = []
         seen_images: set[str] = set()
         for declaration in self._mcp_declarations(root):
             image = mcp_container_image(declaration.config)
             # Manifests that share an MCP file (Claude Code and Codex both load .mcp.json) list an image once.
             if image and image not in seen_images:
                 seen_images.add(image)
-                images.append((image, self._mcp_label(declaration)))
+                images.append((image, self._mcp_label(declaration), str(declaration.file), str(declaration.name)))
         return images
 
     @staticmethod
@@ -1141,41 +1413,79 @@ class DependencySecurityValidator(ValidatorBase):
 
         Runner argv is read by :func:`~skillevaluator.validators.mcp_static.parse_mcp_runner`,
         the reader the pinning check uses. Exact npm specs (``pkg@1.2.3``) join
-        the npm audit and exact PyPI specs (``pkg==1.2.3`` or ``pkg@1.2.3``,
-        including ``uvx --with`` requirements) the pip-audit batch, with the role
-        ``mcp``, one audit per MCP config file; floating specs, and each ``uvx
-        --with-requirements`` file (its packages are not read), get the INFO
-        ``dependency-version-unverified`` finding. Local paths are skipped.
+        the npm audit and exact PyPI specs (``pkg==1.2.3`` or ``pkg@1.2.3``) the
+        pip-audit batch, with the role ``mcp``, one audit per MCP config file.
+        The PyPI specs include the ``--with`` requirements that ``uvx``, ``uv
+        tool run``, and ``uv run`` install next to the server
+        (``RunnerInvocation.specs`` lists ``with_specs`` too). Floating specs, and
+        each ``--with-requirements`` file (its packages are not read), get the
+        INFO ``dependency-version-unverified`` finding. Local paths are skipped.
+        Each finding names the MCP server that installs the package
+        (``metadata["mcp_server"]``, plus ``mcp_servers`` when several do), as
+        container-image findings do.
         """
         result = ValidationResult()
         npm: dict[str, list[eco.NpmDeclaration]] = {}
         pypi: dict[str, list[DependencyDeclaration]] = {}
+        # (MCP file, ecosystem, package name) -> the servers that install it, in declaration order.
+        servers: dict[tuple[str, str, str], list[str]] = {}
         for declaration in self._mcp_declarations(root):
             invocation = parse_mcp_runner(declaration.config)
             if invocation is None:
                 continue
             # One audit per MCP config file, so a file with many servers runs each scanner once.
             label = str(declaration.file)
+            keys: list[tuple[str, str, str]] = []
             for spec in invocation.npm_specs:
                 npm_declaration = eco.npm_spec_declaration(spec, "mcp")
                 if npm_declaration is not None:
                     npm.setdefault(label, []).append(npm_declaration)
+                    keys.append((label, "npm", npm_declaration.name))
             if invocation.ecosystem == "pypi":
-                for spec in invocation.specs:
-                    python_declaration = _python_runner_declaration(spec)
+                python_declarations = [_python_runner_declaration(spec) for spec in invocation.specs]
+                # A --with-requirements file's packages are not read, so it is reported unverified rather than skipped.
+                python_declarations.extend(
+                    DependencyDeclaration(f"--with-requirements {requirements}", None, None, "mcp", None)
+                    for requirements in invocation.requirement_files
+                )
+                for python_declaration in python_declarations:
                     if python_declaration is not None:
                         pypi.setdefault(label, []).append(python_declaration)
-                for requirements in invocation.requirement_files:
-                    # The file's packages are not read, so they are reported unverified rather than skipped.
-                    unread = DependencyDeclaration(f"--with-requirements {requirements}", None, None, "mcp", None)
-                    pypi.setdefault(label, []).append(unread)
+                        name = python_declaration.name or python_declaration.raw
+                        keys.append((label, "python", canonicalize_package_name(name)))
+            for key in keys:
+                names = servers.setdefault(key, [])
+                if str(declaration.name) not in names:
+                    names.append(str(declaration.name))
         summary = self._summary.setdefault("npm", eco.empty_ecosystem_summary())
         for label, declarations in npm.items():
-            result.add_message(f"Auditing {label} ({len(declarations)} npm package(s) an MCP runner installs)")
-            self._audit_npm_declarations(result, summary, label, declarations, total=len(declarations), file_path=label)
+            sub = ValidationResult()
+            sub.add_message(f"Auditing {label} ({len(declarations)} npm package(s) an MCP runner installs)")
+            self._audit_npm_declarations(sub, summary, label, declarations, total=len(declarations))
+            self._attribute_mcp_servers(sub, label, "npm", servers)
+            result.merge(sub)
         for label, declarations in pypi.items():
-            result.merge(self._audit_declarations(label, declarations))
+            sub = self._audit_declarations(label, declarations)
+            self._attribute_mcp_servers(sub, label, "python", servers)
+            result.merge(sub)
         return result
+
+    @staticmethod
+    def _attribute_mcp_servers(
+        result: ValidationResult, label: str, ecosystem: str, servers: dict[tuple[str, str, str], list[str]]
+    ) -> None:
+        """Name the MCP server(s) that install each finding's package."""
+        for finding in result.findings:
+            package = finding.metadata.get("package_name") if isinstance(finding.metadata, dict) else None
+            if not isinstance(package, str):
+                continue
+            name = canonicalize_package_name(package) if ecosystem == "python" else package
+            names = servers.get((label, ecosystem, name))
+            if not names:
+                continue
+            finding.metadata["mcp_server"] = names[0]
+            if len(names) > 1:
+                finding.metadata["mcp_servers"] = list(names)
 
     @staticmethod
     def _apply_outcome(result: ValidationResult, outcome: eco.AuditOutcome, label: str, *, scan_name: str) -> None:

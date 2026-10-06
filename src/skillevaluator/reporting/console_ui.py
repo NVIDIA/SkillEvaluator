@@ -206,6 +206,7 @@ class Verdict:
     headline: str
     fix: list[tuple[str, str]] | None = None
     rerun: str | None = None
+    incomplete: bool = False  # exit 1 because required evidence is missing, not because a check failed
 
 
 class ValidateView:
@@ -445,7 +446,8 @@ class ValidateView:
                 ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 0", MUTED)
             )
             return Panel(body, box=box.ROUNDED, border_style=GREEN, width=self.width, padding=(0, 2))
-        line1 = _pill("✗ FAIL", RED, ink="#1C0605") + Text.assemble(
+        label = "! INCOMPLETE" if verdict.incomplete else "✗ FAIL"
+        line1 = _pill(label, RED, ink="#1C0605") + Text.assemble(
             ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 1", MUTED)
         )
         parts: list = [line1]
@@ -740,8 +742,13 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
     lift = summary.get("overall_lift")
     with_score = summary.get("overall_score")
     if isinstance(lift, (int, float)) and isinstance(with_score, (int, float)):
-        baseline = max(0.0, min(1.0, float(with_score) - float(lift)))
-        rows.append(lift_row(float(lift), float(with_score), baseline))
+        basis = _lift_basis_scores(payload, summary)
+        if basis is not None:
+            rows.append(lift_row(float(lift), *basis))
+        else:
+            # Older payloads have no lift basis; their lift is the full score minus the baseline.
+            baseline = max(0.0, min(1.0, float(with_score) - float(lift)))
+            rows.append(lift_row(float(lift), float(with_score), baseline))
     exec_status = payload.get("execution_status") or summary.get("execution_status")
     ok = bool(result.passed) and exec_status in (None, "succeeded")
     if not ok:
@@ -756,6 +763,26 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
             )
         )
     return True, ok, rows, ""
+
+
+def _lift_basis_scores(payload: dict, summary: dict) -> tuple[float, float] | None:
+    """The best agent's two arm scores on the lift's own basis, or ``None`` for older payloads.
+
+    The lift compares the dimensions both arms scored, case by case. The full
+    with-skill score also has Discoverability and Efficiency, which the arm
+    without the skill does not, so full score minus lift is not a baseline.
+    """
+    agents = payload.get("agents")
+    best = summary.get("best_agent") or payload.get("best_agent")
+    agent = agents.get(best) if isinstance(agents, dict) and isinstance(best, str) else None
+    bases = agent.get("lift_basis") if isinstance(agent, dict) else None
+    basis = bases.get("effectiveness") if isinstance(bases, dict) else None
+    if not isinstance(basis, dict):
+        return None
+    scores = [basis.get("with_skill"), basis.get("baseline")]
+    if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in scores):
+        return None
+    return float(scores[0]), float(scores[1])
 
 
 def _first_error(result: ValidationResult) -> str:

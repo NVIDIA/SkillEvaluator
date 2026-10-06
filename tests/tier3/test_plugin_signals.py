@@ -399,8 +399,12 @@ class TestOutcomeTriState:
             "403: Failed to decrypt access token",
             "<tool_use_error>No such tool</tool_use_error>",
             "MCP error -32602",
-            "500: boom",
+            # A status line needs its reason phrase: "500: boom" is an answer the agent saw (proof M32).
+            "500: Internal Server Error",
             "HTTP/1.1 404 - Not Found",
+            # An HTTP/x.y status line fails without a reason phrase (#180's 3a46e21 row).
+            "HTTP/1.1 404 - x",
+            "HTTP/2 500",
             "Done.\nstatus code 502: bad gateway",
             # A status after an error word or a request line, not at the start of the line.
             "Request failed with status 404: Not Found",
@@ -419,6 +423,9 @@ class TestOutcomeTriState:
             "Found in src/app.py:404: def handler()",
             "Total: 500 - all good",
             "The error handler is in src/app.py:404: def handler()",
+            # A server's own "Error: ..." text with no flag is an answer; its status still needs a reason phrase.
+            "Error: 500 - boom",
+            "HTTP/1.1 404 responses are cached by the CDN for an hour.",
         ],
     )
     def test_status_like_numbers_inside_a_successful_answer_are_not_failures(self, content: str) -> None:
@@ -488,17 +495,20 @@ def test_unreadable_trajectory_yields_none() -> None:
 # Graders
 # ---------------------------------------------------------------------------
 
-EMPTY_CASE_STATUSES = ("tool_selection", "arguments", "order", "handoff", "conflict")
+EMPTY_CASE_STATUSES = ("routing", "tool_selection", "arguments", "order", "handoff", "conflict")
 
 
 def test_case_without_fields_is_not_applicable_everywhere() -> None:
     signals = _signals(_traj(_one("Skill", {"skill": "alpha"})))
     for key in EMPTY_CASE_STATUSES:
         assert signals[key]["status"] == "not_applicable", key
-    assert signals["tool_selection"]["precision"] is None
-    assert signals["tool_selection"]["called"] == ["Skill:alpha"]
+    assert signals["routing"]["precision"] is None
+    # Check 15 (routing) sees the skill; check 22 (tool selection) does not.
+    assert signals["routing"]["called"] == ["Skill:alpha"]
+    assert signals["tool_selection"]["called"] == []
     assert set(signals) == {
         "activations",
+        "routing",
         "tool_selection",
         "arguments",
         "mcp_calls",
@@ -525,19 +535,23 @@ class TestToolSelection:
             "decoy_tools": ["mcp__slack__*"],
         }
 
-        block = _signals(traj, case)["tool_selection"]
+        signals = _signals(traj, case)
+        block = signals["tool_selection"]
 
+        # Check 22 scores the tool refs only; the skill ref is check 15's (routing).
         assert block["called"] == [
-            "Skill:alpha",
             "mcp__github__list_issues",
             "mcp__github__get_issue",
             "mcp__slack__post",
         ]
-        assert block["precision"] == 0.75
-        assert block["recall"] == pytest.approx(0.6667)
-        assert block["f1"] == pytest.approx(0.7059, abs=1e-4)
+        assert block["precision"] == pytest.approx(0.6667)
+        assert block["recall"] == 0.5
+        assert block["f1"] == pytest.approx(0.5714, abs=1e-4)
         assert block["decoy_calls"] == 2
         assert block["status"] == "scored"
+        routing = signals["routing"]
+        assert routing["called"] == ["Skill:alpha"]
+        assert (routing["precision"], routing["recall"], routing["decoy_calls"]) == (1.0, 1.0, 0)
 
     def test_listed_plain_tool_enters_scope_but_unlisted_ones_do_not(self) -> None:
         traj = _traj(_one("Bash", {"command": "ls"}), _one("Read", {"file_path": "x"}, call_id="c2"))
@@ -547,9 +561,9 @@ class TestToolSelection:
         assert block["recall"] is None
         assert block["f1"] is None
 
-    def test_nothing_called_with_expectations_scores_zero(self) -> None:
-        block = _signals(_traj(), {"expected_tools": ["Skill:alpha"]})["tool_selection"]
-        assert (block["precision"], block["recall"], block["f1"]) == (0.0, 0.0, 0.0)
+    def test_nothing_called_with_expectations_has_undefined_precision(self) -> None:
+        block = _signals(_traj(), {"expected_tools": ["Skill:alpha"]})["routing"]
+        assert (block["precision"], block["recall"], block["f1"]) == (None, 0.0, 0.0)
 
     def test_decoy_only_case_with_nothing_in_scope_has_undefined_precision(self) -> None:
         block = _signals(_traj(_one("Bash")), {"decoy_tools": ["mcp__slack__*"]})["tool_selection"]
@@ -559,13 +573,13 @@ class TestToolSelection:
 
     def test_generated_wrapper_skill_is_not_a_selection(self) -> None:
         traj = _traj(_one("Skill", {"skill": "my-plugin"}), _one("Skill", {"skill": "alpha"}, call_id="c2"))
-        block = _signals(traj, {"expected_tools": ["Skill:alpha"]}, wrapper_skills=["my-plugin"])["tool_selection"]
+        block = _signals(traj, {"expected_tools": ["Skill:alpha"]}, wrapper_skills=["my-plugin"])["routing"]
         assert block["called"] == ["Skill:alpha"]
         assert block["precision"] == 1.0
 
     def test_codex_manifest_read_satisfies_skill_ref(self) -> None:
         traj = _traj(_one("exec_command", {"cmd": "cat skills/alpha/SKILL.md"}))
-        block = _signals(traj, {"expected_tools": ["skill:ALPHA"]})["tool_selection"]
+        block = _signals(traj, {"expected_tools": ["skill:ALPHA"]})["routing"]
         assert block["recall"] == 1.0
 
 
@@ -623,11 +637,12 @@ class TestArguments:
             }
         ]
 
-    def test_rule_without_matching_call_is_reported_but_not_checked(self) -> None:
+    def test_rule_without_matching_call_is_reported_and_counted(self) -> None:
         block = _signals(_traj(_one("Bash")), {"tool_arguments": [{"tool": "mcp__x__*", "required": ["a"]}]})[
             "arguments"
         ]
-        assert block["checked"] == 0
+        # An uncalled rule counts as a check that did not pass (proof M31), so a rate cannot hide it.
+        assert (block["checked"], block["passed"]) == (1, 0)
         assert block["failures"][0]["rule"] == "not_called"
         assert block["status"] == "scored"
 
@@ -752,7 +767,7 @@ class TestMcpCalls:
     def test_success_rate_excludes_unknown_and_covers_every_server(self) -> None:
         traj = _traj(
             _one("mcp__github__a", content="ok"),
-            _one("mcp__github__b", content="500: boom", call_id="c2"),
+            _one("mcp__github__b", content="500: Internal Server Error", call_id="c2"),
             _step([_tc("mcp__undeclared__c", call_id="c3")]),
             _one("Bash", call_id="c4"),
         )
@@ -792,9 +807,10 @@ class TestOrder:
         block = _signals(self.TRAJ, case)["order"]
 
         assert (block["edges"], block["satisfied"]) == (3, 1)
+        # Each edge that does not hold says why: a real reversal and a missing call differ.
         assert block["violated"] == [
-            {"before": "Skill:gamma | Skill:beta", "after": "Skill:alpha"},
-            {"before": "Skill:alpha", "after": "Skill:missing"},
+            {"before": "Skill:gamma | Skill:beta", "after": "Skill:alpha", "reason": "reversed"},
+            {"before": "Skill:alpha", "after": "Skill:missing", "reason": "after_never_called"},
         ]
 
     def test_globs_in_refs(self) -> None:
@@ -1024,9 +1040,10 @@ class TestActivationCoverage:
 
         block = _signals(traj)["activation_coverage"]
 
+        # Every jira call failed: it is unavailable, not exercised (the lists do not overlap).
         assert block == {
             "declared": ["skill:alpha", "skill:beta", "mcp:github", "mcp:jira"],
-            "exercised": ["skill:alpha", "mcp:github", "mcp:jira"],
+            "exercised": ["skill:alpha", "mcp:github"],
             "unverified": ["skill:beta"],
             "unavailable": ["mcp:jira"],
         }
@@ -1053,13 +1070,13 @@ class TestActivationCoverage:
         assert block["exercised"] == [
             "skill:Alpha",
             "skill:alpha",
-            "mcp:my.docs",
             "mcp:tracker",
             "subagent:reviewer",
             "command:deploy",
         ]
         assert block["unverified"] == ["skill:beta"]
-        # Every my.docs call failed; one tracker call worked.
+        # Both my.docs spellings name the declared server, but every my.docs call failed, so it is unavailable
+        # and not exercised (the lists do not overlap); one tracker call worked.
         assert block["unavailable"] == ["mcp:my.docs"]
 
     def test_no_declared_components(self) -> None:
@@ -1078,13 +1095,14 @@ def test_summary_aggregates_rates_means_and_coverage_union() -> None:
         "conflict_probes": [{"id": "p", "must_use": "Skill:alpha", "must_not_use": "Skill:beta"}],
     }
     first = _signals(
-        _traj(_one("Skill", {"skill": "alpha"}), _one("mcp__jira__x", content="500: down", call_id="c2")), case
+        _traj(_one("Skill", {"skill": "alpha"}), _one("mcp__jira__x", content="503 Service Unavailable", call_id="c2")),
+        case,
     )
     second = _signals(
         _traj(_one("Skill", {"skill": "beta"}), _one("mcp__jira__x", content="ok", call_id="c2")),
         case,
     )
-    third = _signals(_traj(_one("mcp__github__y", content="403: denied")), {})
+    third = _signals(_traj(_one("mcp__github__y", content="403: Forbidden")), {})
 
     summary = summarize_plugin_signals([first, second, third, None])
 
@@ -1095,17 +1113,26 @@ def test_summary_aggregates_rates_means_and_coverage_union() -> None:
         "mean_per_trial": pytest.approx(1.6667),
         "by_type": {"skill": 2, "mcp": 3},
     }
-    assert summary["tool_selection"]["n_scored"] == 2
-    assert summary["tool_selection"]["recall"] == 0.5
-    assert summary["conflict"] == {"n_scored": 2, "checked": 2, "passed": 1, "pass_rate": 0.5, "status": "scored"}
+    assert summary["routing"]["n_scored"] == 2
+    assert summary["routing"]["recall"] == 0.5
+    assert summary["tool_selection"]["n_scored"] == 0
+    assert summary["conflict"] == {
+        "n_scored": 2,
+        "checked": 2,
+        "passed": 1,
+        "pass_rate": 0.5,
+        "status": "scored",
+        "failed_probes": [{"probe": "p", "trials": 1}],
+    }
     assert summary["arguments"]["status"] == "not_applicable"
     assert summary["mcp_calls"]["by_server"]["jira"]["success_rate"] == 0.5
     coverage = summary["activation_coverage"]
-    assert coverage["exercised"] == ["skill:alpha", "skill:beta", "mcp:github", "mcp:jira"]
+    assert coverage["exercised"] == ["skill:alpha", "skill:beta", "mcp:jira"]
     assert coverage["unverified"] == []
     # jira worked in one trial, so only github (failed everywhere it ran) is unavailable.
     assert coverage["unavailable"] == ["mcp:github"]
-    assert coverage["exercise_rate"]["mcp:jira"] == pytest.approx(0.6667)
+    # The trial where every jira call failed did not exercise it.
+    assert coverage["exercise_rate"]["mcp:jira"] == pytest.approx(0.3333)
 
 
 def test_summary_of_no_trials_is_empty_but_well_formed() -> None:
@@ -1272,8 +1299,13 @@ def test_context_builder_bounds_and_scopes_declared_components() -> None:
     )
 
     assert context.member_skills == ("alpha", "beta")
-    assert context.declared_for("with_skill") == {"skill": ["alpha", "beta"], "mcp": ["github"]}
-    assert context.declared_for("sum_of_parts") == {"skill": ["alpha", "beta"], "mcp": []}
+    assert context.declared_for("with_skill") == {"skill": ["alpha", "beta"], "mcp": ["github"], "plugin": ["demo"]}
+    assert context.declared_for("sum_of_parts") == {
+        "skill": ["alpha", "beta"],
+        "mcp": [],
+        "plugin": ["demo"],
+        "unstaged": ["mcp"],
+    }
     assert set(context.cases) == {"case-1"}
     assert context.case_spec("missing") == {}
     assert context.arm_enabled("with_skill") and context.arm_enabled("sum_of_parts")
@@ -1302,19 +1334,19 @@ class TestUntrustedTrajectoryContent:
             "<non-name>",
             "<non-name>",
             "<non-name>",
-            "Release Notes",
+            "release notes",
             "code-reviewer",
             "plugin:deploy",
         ]
-        assert signals["tool_selection"]["called"] == [
+        assert signals["routing"]["called"] == [
             "Skill:<non-name>",
             "Agent:<non-name>",
             "Command:<non-name>",
-            "Skill:Release Notes",
+            "Skill:release notes",
             "Agent:code-reviewer",
             "Command:plugin:deploy",
         ]
-        assert [f["tool"] for f in signals["arguments"]["failures"]] == ["Skill:<non-name>", "Skill:Release Notes"]
+        assert [f["tool"] for f in signals["arguments"]["failures"]] == ["Skill:<non-name>", "Skill:release notes"]
 
     def test_adversarial_text_for_the_redactor_does_not_stall_collection(self, monkeypatch: pytest.MonkeyPatch) -> None:
         payload = "a." * 32_768  # quadratic for the credential redactor's assignment patterns

@@ -458,7 +458,8 @@ def test_in_agent_evidence_upgrades_and_never_downgrades() -> None:
     assert upgraded["docs"]["status"] == "used-successfully"
     assert upgraded["docs"]["tools"] == ["search"]
     assert "host probe: ok" in upgraded["docs"]["detail"]
-    assert upgraded["tracker"]["status"] == "reachable-in-agent"
+    # Called, but nothing succeeded: not proof that the server is reachable (proof M30).
+    assert upgraded["tracker"]["status"] == "called-no-success"
     assert upgraded["idle"] == proof["idle"]
     assert apply_in_agent_mcp_proof(upgraded, None) == upgraded
 
@@ -491,8 +492,10 @@ def test_in_agent_evidence_indexes_the_declared_servers_once(monkeypatch: pytest
 
     assert len(builds) == 1
     assert upgraded["docs"]["status"] == "used-successfully"
-    assert upgraded["tracker"]["status"] == "reachable-in-agent"
-    assert upgraded["tracker"]["detail"].startswith("agent made 6 call(s), 0 succeeded")
+    # Every agent's plugin_demo_tracker calls count for the declared tracker; none succeeded, so it is
+    # called-no-success, not reachable (proof M30).
+    assert upgraded["tracker"]["status"] == "called-no-success"
+    assert upgraded["tracker"]["detail"].startswith("agent made 6 call(s): 0 succeeded")
 
 
 def test_declared_default_without_probe() -> None:

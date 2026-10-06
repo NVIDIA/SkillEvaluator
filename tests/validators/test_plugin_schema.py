@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from skillevaluator.constants import PLUGIN_MANIFEST_TYPE, PLUGIN_MODE
+from skillevaluator.models.result import Severity
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 
 _VALID_MANIFEST = """
@@ -161,7 +162,10 @@ class TestPluginSchemaValidator:
         _write_manifest(tmp_path, _VALID_MANIFEST)
         result = PluginSchemaValidator().validate(tmp_path)
         assert result.passed
-        assert not result.findings
+        # Outside a git clone the missing-dependency gate cannot run; that is a non-blocking finding, not a pass.
+        assert [(f.check_name, f.severity) for f in result.findings] == [
+            ("plugin_dependency_unverified", Severity.MEDIUM)
+        ]
         assert result.metadata["manifest_type"] == PLUGIN_MANIFEST_TYPE
         assert result.metadata["plugin_mode"] == PLUGIN_MODE
         assert result.metadata["plugin"]["name"] == "my-bundle"
@@ -241,21 +245,31 @@ skills:
         result = PluginSchemaValidator().validate(tmp_path)
 
         assert not result.passed
-        assert any(f.check_name == "schema:name:missing" for f in result.findings)
+        # An empty name has its own check name and message, not the "missing" one.
+        assert any(f.check_name == "schema:name:empty" for f in result.findings)
 
     @pytest.mark.parametrize("manifest_dir", [".claude-plugin", ".cursor-plugin"])
-    def test_declared_dependencies_count_only_component_fields(self, tmp_path: Path, manifest_dir: str):
-        """Regression: the Claude Code path counted keywords and skipped an mcpServers path."""
+    def test_declared_dependencies_count_the_same_fields_on_both_paths(self, tmp_path: Path, manifest_dir: str):
+        """Regression: the Claude Code path counted keywords and skipped an mcpServers path.
+
+        Both manifest paths now apply one rule: only fields that name other plugins
+        are dependencies (proof L1). Keywords and component fields (an
+        ``mcpServers`` path, ``commands``) are not, and only Claude Code has a
+        ``dependencies`` field.
+        """
         manifest = tmp_path / manifest_dir / "plugin.json"
         manifest.parent.mkdir()
         declared = {"keywords": ["a", "b"], "mcpServers": "./mcp.json", "commands": ["./c.md"]}
+        if manifest_dir == ".claude-plugin":
+            declared["dependencies"] = ["helper"]
         manifest.write_text(json.dumps({"name": "demo", **declared}), encoding="utf-8")
         (tmp_path / "mcp.json").write_text('{"mcpServers": {}}', encoding="utf-8")
         (tmp_path / "c.md").write_text("# C\n", encoding="utf-8")
 
         result = PluginSchemaValidator().validate(tmp_path)
 
-        assert result.metadata["plugin"]["declared_dependencies"] == {"mcpServers": 1, "commands": 1}
+        expected = {"plugins": 1} if manifest_dir == ".claude-plugin" else None
+        assert result.metadata["plugin"].get("declared_dependencies") == expected
 
     def test_deep_contained_json_produces_bounded_complexity_finding(self, tmp_path: Path):
         manifest = tmp_path / ".claude-plugin" / "plugin.json"

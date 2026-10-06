@@ -158,7 +158,13 @@ def test_dns_failure_is_low_and_head_failure_is_recorded() -> None:
     summary, findings = checker.check(
         [_target("https://gone.example.com/"), _target("https://down.example.com/", kind="hook")]
     )
-    assert [(f.check_name, f.severity) for f in findings] == [("endpoint_resolution_failed", Severity.LOW)]
+    # A failed HEAD leaves the redirect unchecked: LOW on the endpoint, and the run is INCOMPLETE.
+    assert [(f.check_name, f.severity) for f in findings] == [
+        ("endpoint_resolution_failed", Severity.LOW),
+        ("endpoint_head_failed", Severity.LOW),
+        ("endpoint_resolution_incomplete", Severity.MEDIUM),
+    ]
+    assert summary["incomplete"] is True
     statuses = {row["url"]: row["status"] for row in summary["endpoints"]}
     assert statuses == {"https://gone.example.com/": "unresolved", "https://down.example.com/": "head_failed"}
 

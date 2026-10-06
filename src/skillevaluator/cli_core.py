@@ -206,10 +206,76 @@ def _root_markers(path: Path) -> _RootMarkers | None:
     return _RootMarkers(plugin, skill, workflows, rules, frozenset(structure_dirs))
 
 
+def _directory_content_type(path: Path, markers: _RootMarkers) -> str | None:
+    """The content type of the directory *path*, whose top level holds *markers*.
+
+    Its own manifests and files decide first (:attr:`_RootMarkers.content_type`).
+    Without any, Claude Code plugin components in their default locations
+    (:func:`manifestless_plugin_markers`) make it a plugin.
+    """
+    if detected := markers.content_type:
+        return detected
+    return CONTENT_TYPE_PLUGIN if manifestless_plugin_markers(path) else None
+
+
 def _detect_from_directory(path: Path) -> str | None:
     """Detect content type from directory contents."""
     markers = _root_markers(path)
-    return markers.content_type if markers is not None else None
+    return _directory_content_type(path, markers) if markers is not None else None
+
+
+# Claude Code default plugin locations that only a plugin uses: a folder of
+# Markdown subagents, commands, or output styles, or a hooks, monitors, or LSP
+# config. A root .mcp.json or skills/ folder is common outside plugins too, so
+# neither alone marks a plugin.
+_MARKDOWN_PLUGIN_DIRS = ("agents", "commands", "output-styles")
+_CONFIG_PLUGIN_FILES = ("hooks/hooks.json", "monitors/monitors.json", ".lsp.json")
+_MARKER_SCAN_LIMIT = 256
+
+
+def _has_markdown_file(directory: Path) -> bool:
+    """Whether a real directory directly holds a regular ``.md`` file (bounded, no links followed)."""
+    try:
+        metadata = directory.lstat()
+        if stat_is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+            return False
+        with os.scandir(directory) as iterator:
+            for count, entry in enumerate(iterator, start=1):
+                if count > _MARKER_SCAN_LIMIT:
+                    return False
+                if entry.name.lower().endswith(".md") and stat.S_ISREG(entry.stat(follow_symlinks=False).st_mode):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def manifestless_plugin_markers(path: Path) -> list[str]:
+    """Claude Code default plugin locations present in a folder that has no plugin manifest.
+
+    Claude Code ``--plugin-dir`` loads any folder as a plugin: without a
+    ``.claude-plugin/plugin.json`` it reads its default locations and takes the
+    plugin name from the folder. A folder with ``agents/``, ``commands/``, or
+    ``output-styles/`` Markdown files, or a ``hooks/hooks.json``,
+    ``monitors/monitors.json``, or ``.lsp.json``, is such a plugin, so it is
+    validated as one (its subagent and command privileges included) rather than
+    as a skill collection. Nothing is followed through a link.
+    """
+    markers = [f"{name}/" for name in _MARKDOWN_PLUGIN_DIRS if _has_markdown_file(path / name)]
+    for relative in _CONFIG_PLUGIN_FILES:
+        current = path
+        try:
+            for part in relative.split("/"):
+                current = current / part
+                metadata = current.lstat()
+                if stat_is_link_or_reparse(metadata):
+                    break
+            else:
+                if stat.S_ISREG(metadata.st_mode):
+                    markers.append(relative)
+        except OSError:
+            continue
+    return markers
 
 
 def _detect_from_path_parts(path: Path) -> str | None:
@@ -230,6 +296,9 @@ def detect_content_type(path: Path) -> str:
     A plugin manifest at the root -- agent_plugin.yaml/.yml (bundle-reference), a
     vendor plugin.json (.claude-plugin/, .codex-plugin/, .cursor-plugin/), or an
     Agent Plugins root plugin.json (contained) -- wins over a nested skills tree.
+    A folder without any manifest or root ``SKILL.md`` that ships Claude Code
+    plugin components in their default locations (:func:`manifestless_plugin_markers`)
+    is a plugin too: Claude Code ``--plugin-dir`` loads it.
     """
     try:
         metadata = path.lstat()
@@ -239,7 +308,7 @@ def detect_content_type(path: Path) -> str:
         return detected
     # One listing of a directory serves the manifest and the nested-structure checks.
     markers = _root_markers(path) if metadata is not None and stat.S_ISDIR(metadata.st_mode) else None
-    if markers is not None and (detected := markers.content_type):
+    if markers is not None and (detected := _directory_content_type(path, markers)):
         return detected
 
     if detected := _detect_from_path_parts(path):

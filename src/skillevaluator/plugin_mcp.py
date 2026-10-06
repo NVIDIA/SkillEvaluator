@@ -8,13 +8,16 @@ inline server map, a ``.json`` config path, an ``.mcpb``/``.dxt`` bundle, or an
 array mixing them) and the format's default MCP files through the plugin-root
 reader (:mod:`skillevaluator.plugin_paths`). It normalizes Codex and Agent
 Plugins entries and records the config-source findings and the per-server
-static checks. The component inventory
+static checks, including server code launched from a folder Tier 1 scans skip.
+The component inventory
 (:mod:`skillevaluator.plugin_components`) turns the collection into ``mcp``
 components.
 """
 
 from __future__ import annotations
 
+import posixpath
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -26,15 +29,22 @@ from skillevaluator.plugin_formats import (
     CLAUDE_PROFILE,
     FormatProfile,
     agent_plugins_schema_version,
+    codex_accepts_path,
     declared_value_replaces_default,
 )
 from skillevaluator.plugin_paths import (
+    _UNSCANNED_FOLDERS_TEXT,
+    _VENV_INTERPRETER_RE,
+    _WINDOWS_DRIVE_RE,
     PLUGIN_CATEGORY,
     DeclaredPath,
     PluginRootReader,
+    _in_unscanned_folder,
     _path_problem_finding,
     _plugin_finding,
+    _root_variable_finding,
     _style_finding,
+    _unscanned_folder,
     _unscanned_path_finding,
     normalize_declared_path,
 )
@@ -44,6 +54,7 @@ from skillevaluator.validators.mcp_static import (
     CATEGORY as MCP_CATEGORY,
 )
 from skillevaluator.validators.mcp_static import (
+    CODEX_UNAPPLIED_MCP_FIELDS,
     McpPinning,
     classify_mcp_pinning,
     validate_mcp_server_declaration,
@@ -54,8 +65,6 @@ McpSource = Literal["inline", "mcp_json", "path_ref", "agent_plugin_yaml"]
 _MCP_BUNDLE_SUFFIXES = (".mcpb", ".dxt")
 # Codex MCP transport aliases and Agent Plugins' streamable-http type both mean http.
 _HTTP_TYPE_ALIASES = frozenset({"streamable-http", "streamable_http"})
-# Codex MCP fields that carry auth or environment the evaluation runtime does not apply.
-_CODEX_UNAPPLIED_MCP_FIELDS = ("env_vars", "env_http_headers", "bearer_token_env_var", "http_headers_helper", "oauth")
 
 
 # --------------------------------------------------------------------------- #
@@ -200,20 +209,22 @@ def collect_mcp_declarations(
     if manifest is not None and not contained:
         _collect_bundle_manifest_servers(collection, manifest, manifest_rel)
     declared = manifest.get("mcpServers") if manifest is not None else None
-    entries = _declared_entries(reader, collection, declared, manifest_rel)
+    entries = _declared_entries(reader, collection, declared, manifest_rel, profile, contained=contained)
 
     # 1. The default root MCP file (unless the manifest names it explicitly, or
     #    the format lets a declared mcpServers replace default discovery; Codex
     #    only when it keeps the declared value).
     if not (contained and declared_value_replaces_default(profile, "mcpServers", declared)):
-        _collect_default_files(reader, collection, entries, manifest_rel, profile)
+        _collect_default_files(
+            reader, collection, entries, manifest_rel, profile, declared=declared, contained=contained
+        )
 
     # 2. Declared shapes in order.
     for index, entry in enumerate(entries):
         if isinstance(entry, dict):
             _collect_inline_map(reader, collection, entry, manifest_rel)
         elif isinstance(entry, str):
-            _collect_path_ref(reader, collection, entry, manifest_rel, profile)
+            _collect_path_ref(reader, collection, entry, manifest_rel, profile, contained=contained)
         else:
             collection.findings.append(
                 _plugin_finding(
@@ -238,14 +249,20 @@ def collect_mcp_declarations(
         for declaration in collection.declarations:
             if declaration.source == "agent_plugin_yaml":
                 continue  # validated by the PluginManifest model
-            collection.server_findings.extend(
-                validate_mcp_server_declaration(
-                    declaration.name,
-                    declaration.config,
-                    reader.display(declaration.file),
-                    allowed_private_hosts=allowed_private_hosts,
-                )
+            server_findings = validate_mcp_server_declaration(
+                declaration.name,
+                declaration.config,
+                reader.display(declaration.file),
+                allowed_private_hosts=allowed_private_hosts,
+                manifest_type=profile.manifest_type,
             )
+            for finding in server_findings:
+                # Every finding here is about this one server (an invalid name included), so the
+                # inventory row of the server counts it.
+                if isinstance(finding.metadata, dict):
+                    finding.metadata.setdefault("mcp_server", declaration.name)
+            collection.server_findings.extend(server_findings)
+            collection.server_findings.extend(_unscanned_server_files(reader, declaration, profile))
     return collection
 
 
@@ -261,11 +278,19 @@ def _collect_bundle_manifest_servers(collection: McpCollection, manifest: dict[s
 
 
 def _declared_entries(
-    reader: PluginRootReader, collection: McpCollection, declared: Any, manifest_rel: str
+    reader: PluginRootReader,
+    collection: McpCollection,
+    declared: Any,
+    manifest_rel: str,
+    profile: FormatProfile,
+    *,
+    contained: bool,
 ) -> list[Any]:
     """The declared ``mcpServers`` shapes in order: an inline map, a path, or the first entries of an array.
 
-    An array past the item cap and a value of any other type get a HIGH finding.
+    An array past the item cap gets a HIGH finding. A value of any other type
+    is HIGH too, except that Codex drops it, loads the default ``.mcp.json``,
+    and still installs the plugin (MEDIUM).
     """
     if declared is None:
         return []
@@ -284,12 +309,20 @@ def _declared_entries(
                 )
             )
         return declared[:PLUGIN_COMPONENT_MAX_ITEMS]
+    # Codex drops an mcpServers value of the wrong type, loads the default .mcp.json, and still installs the
+    # plugin (MEDIUM, as check 1 rates it); Claude Code refuses the manifest.
+    codex_ignores = contained and profile.codex_path_rules
     collection.findings.append(
         _plugin_finding(
-            Severity.HIGH,
+            Severity.MEDIUM if codex_ignores else Severity.HIGH,
             "mcp_servers_not_object",
             "'mcpServers' must be an inline server map, a config-file path string, or an array of those "
-            f"(got {type(declared).__name__})",
+            f"(got {type(declared).__name__})"
+            + (
+                "; Codex ignores the value, loads the default .mcp.json, and still installs the plugin"
+                if codex_ignores
+                else ""
+            ),
             reader.display(manifest_rel),
             'Use {"<name>": {"command"|"url"|"provider": ...}}, "./.mcp.json", or an array mixing both.',
             category=MCP_CATEGORY,
@@ -299,12 +332,24 @@ def _declared_entries(
 
 
 def _collect_default_files(
-    reader: PluginRootReader, collection: McpCollection, entries: list[Any], manifest_rel: str, profile: FormatProfile
+    reader: PluginRootReader,
+    collection: McpCollection,
+    entries: list[Any],
+    manifest_rel: str,
+    profile: FormatProfile,
+    *,
+    declared: Any,
+    contained: bool,
 ) -> None:
-    """The format's default MCP files at the root, unless a declared path names one (then it loads as declared)."""
+    """The format's default MCP files at the root, unless a declared path names one (then it loads as declared).
+
+    A path Codex drops does not count as naming one. When the format's client
+    may read the default file beside a declared ``mcpServers`` (Cursor), a LOW
+    note says both are checked.
+    """
     explicit_files: set[PurePosixPath] = set()
     for entry in entries:
-        if isinstance(entry, str):
+        if isinstance(entry, str) and not (contained and profile.codex_path_rules and not codex_accepts_path(entry)):
             normalized = normalize_declared_path(entry, profile.manifest_path_prefixes)
             if normalized.rel is not None:
                 explicit_files.add(normalized.rel)
@@ -315,6 +360,8 @@ def _collect_default_files(
         kind = reader.kind(default_rel)
         if kind == "file":
             _load_mcp_file(reader, collection, default_rel, "mcp_json", default_rel.as_posix())
+            if contained and declared is not None and "mcpServers" in profile.merged_default_fields:
+                collection.findings.append(_merged_default_mcp_note(reader, default_rel, profile))
         elif kind in {"link", "special"}:
             finding = _path_problem_finding(
                 reader, "mcpServers", DeclaredPath(default_name, default_rel), manifest_rel, "unsafe", default_rel
@@ -364,6 +411,155 @@ def _flag_duplicate_names(reader: PluginRootReader, collection: McpCollection) -
                 )
             )
         seen[declaration.name] = declaration
+
+
+def _merged_default_mcp_note(reader: PluginRootReader, default_rel: PurePosixPath, profile: FormatProfile) -> Finding:
+    """LOW: a format's root MCP file is checked next to a declared ``mcpServers`` (Cursor)."""
+    return _plugin_finding(
+        Severity.LOW,
+        "mcp_root_config_also_checked",
+        f"The {profile.label} declares mcpServers and also ships '{default_rel.as_posix()}'. The format's reference "
+        "says a declared field replaces the default location, but the client loader may read both files, so "
+        "SkillEvaluator checks the servers in both",
+        reader.display(default_rel),
+        f"Move the servers of '{default_rel.as_posix()}' into the declared mcpServers file, or remove "
+        f"'{default_rel.as_posix()}'.",
+        category=MCP_CATEGORY,
+    )
+
+
+# A root placeholder followed by a plugin path, anywhere in a command or argument.
+_ROOT_VARIABLE_PATH_RE = re.compile(
+    r"\$\{?(?:CLAUDE_PLUGIN_ROOT|PLUGIN_ROOT|CURSOR_PLUGIN_ROOT)\}?/([^\s\"'`;|&<>()]+)"
+)
+# A root placeholder alone: the plugin root itself.
+_ROOT_VARIABLE_ONLY_RE = re.compile(r"^\$\{?(?:CLAUDE_PLUGIN_ROOT|PLUGIN_ROOT|CURSOR_PLUGIN_ROOT)\}?/?$")
+
+
+def _launch_path(value: str) -> str:
+    """The path part of a launch value: the value of a ``--flag=path`` argument, else the value itself."""
+    text = value.strip().replace("\\", "/")
+    return text.split("=", 1)[1] if text.startswith("-") and "=" in text else text
+
+
+def _lexical_plugin_path(candidate: str) -> PurePosixPath | None:
+    """A plugin-root-relative path with ``.`` and ``..`` resolved lexically; ``None`` when it leaves the root.
+
+    ``scripts/../node_modules/srv/index.js`` is ``node_modules/srv/index.js``;
+    a path that climbs out of the root is not a plugin file.
+    """
+    if candidate.startswith(("/", "~", "$")) or _WINDOWS_DRIVE_RE.match(candidate):
+        return None
+    resolved = posixpath.normpath(candidate or ".")
+    if resolved == ".." or resolved.startswith("../"):
+        return None
+    return PurePosixPath(resolved)
+
+
+def _rooted_launch_paths(value: str) -> list[PurePosixPath]:
+    """Plugin files a launch value names from the plugin root: after a root variable, or with a leading ``./``."""
+    candidates = [match.group(1) for match in _ROOT_VARIABLE_PATH_RE.finditer(value)]
+    path = _launch_path(value)
+    if path.startswith("./"):
+        candidates.append(path[2:])
+    return [rel for rel in map(_lexical_plugin_path, candidates) if rel is not None]
+
+
+def _launch_cwd(cwd: Any, *, relative_cwd: bool) -> PurePosixPath | None:
+    """The plugin folder an MCP server runs in, from its ``cwd``, or ``None``.
+
+    A root variable or a ``./`` path names a plugin folder in any format.
+    Codex (``relative_cwd``) also resolves a bare relative ``cwd``, ``.``
+    included, against the plugin folder.
+    """
+    if not isinstance(cwd, str) or not cwd.strip():
+        return None
+    text = cwd.strip().replace("\\", "/")
+    if _ROOT_VARIABLE_ONLY_RE.match(text):
+        return PurePosixPath(".")
+    rooted = _rooted_launch_paths(text)
+    if rooted:
+        return rooted[0]
+    if not relative_cwd:
+        return None
+    return _lexical_plugin_path(text)
+
+
+def _server_launch_files(config: dict[str, Any], *, relative_cwd: bool) -> list[tuple[PurePosixPath, bool]]:
+    """Plugin-root-relative paths an MCP server launch runs or reads, in order, each with whether it is the ``cwd``.
+
+    ``command`` and ``args`` name plugin files through a root variable
+    (``${CLAUDE_PLUGIN_ROOT}/node_modules/srv/server.py``), a ``./`` path,
+    or a ``--flag=./path`` argument. A ``cwd`` inside the plugin is a plugin
+    folder itself, and relative ``command`` and ``args`` values resolve
+    against it (``cwd: "node_modules/srv"`` with ``args: ["index.js"]``).
+    """
+    values: list[str] = []
+    if isinstance(config.get("command"), str):
+        values.append(config["command"])
+    args = config.get("args")
+    if isinstance(args, list):
+        values.extend(arg for arg in args[:PLUGIN_COMPONENT_MAX_ITEMS] if isinstance(arg, str))
+    paths: list[tuple[PurePosixPath, bool]] = []
+    for value in values:
+        paths.extend((rel, False) for rel in _rooted_launch_paths(value))
+    base = _launch_cwd(config.get("cwd"), relative_cwd=relative_cwd)
+    if base is None:
+        return paths
+    if _in_unscanned_folder(base):
+        return [*paths, (base, True)]  # everything the server runs from there is in the skipped folder
+    for value in values:
+        path = _launch_path(value)
+        if not path or path.startswith(("-", "/", "~", "$")) or "://" in path or _WINDOWS_DRIVE_RE.match(path):
+            continue  # an option, a URL, or an absolute, home, or variable path
+        joined = _lexical_plugin_path(path if str(base) == "." else f"{base.as_posix()}/{path}")
+        if joined is not None:
+            paths.append((joined, False))
+    return paths
+
+
+def _unscanned_server_files(
+    reader: PluginRootReader, declaration: McpDeclaration, profile: FormatProfile = CLAUDE_PROFILE
+) -> list[Finding]:
+    """HIGH when an MCP server runs a plugin file from a folder that Tier 1 whole-tree scans skip.
+
+    The server's launch names plugin files (:func:`_server_launch_files`):
+    a root variable, a ``./`` or ``--flag=./`` path, ``..`` resolved
+    lexically, and its ``cwd`` (Codex resolves a relative ``cwd`` against the
+    plugin folder). Code there (``node_modules/``, ``.venv/``, ...) is never
+    security-scanned, so the server is reported like any other component that
+    loads from such a folder. A virtual environment's own interpreter
+    (``.venv/bin/python3``) is not plugin code and is not reported.
+    """
+    config = declaration.config
+    if not isinstance(config, dict):
+        return []
+    seen: set[str] = set()
+    findings: list[Finding] = []
+    for rel, is_cwd in _server_launch_files(config, relative_cwd=profile.mcp_dialect == "codex"):
+        folder = _unscanned_folder(rel)
+        if folder is None or rel.as_posix() in seen:
+            continue
+        parts = rel.parts
+        if len(parts) >= 2 and parts[-2] in {"bin", "Scripts"} and _VENV_INTERPRETER_RE.match(parts[-1]):
+            continue  # a virtual environment's interpreter; the script it runs is checked on its own
+        seen.add(rel.as_posix())
+        verb = "runs in" if is_cwd else "runs"
+        findings.append(
+            _plugin_finding(
+                Severity.HIGH,
+                "plugin_component_path_unscanned",
+                f"MCP server '{declaration.name}' {verb} '{rel.as_posix()}', which is inside '{folder}/', "
+                f"a folder that Tier 1 whole-tree scans skip ({_UNSCANNED_FOLDERS_TEXT}); the server code is never "
+                "security-scanned",
+                reader.display(declaration.file),
+                "Ship the server entry point outside dependency, VCS, evaluation-output, and version-snapshot "
+                "folders, or run a pinned package with a package runner.",
+                category=MCP_CATEGORY,
+                metadata={"mcp_server": declaration.name},
+            )
+        )
+    return findings
 
 
 def _normalize_dialect(
@@ -427,7 +623,7 @@ def _normalize_dialect(
             http_headers = normalized.pop("http_headers", None)
             if http_headers is not None:
                 normalized["headers"] = _codex_headers(normalized.get("headers"), http_headers)
-            declaration.unapplied = tuple(key for key in _CODEX_UNAPPLIED_MCP_FIELDS if config.get(key))
+            declaration.unapplied = tuple(key for key in CODEX_UNAPPLIED_MCP_FIELDS if config.get(key))
             if "bearer_token" in config:
                 collection.findings.append(
                     _plugin_finding(
@@ -478,21 +674,30 @@ def _collect_path_ref(
     raw: str,
     manifest_rel: str,
     profile: FormatProfile = CLAUDE_PROFILE,
+    *,
+    contained: bool = True,
 ) -> None:
     """Collect one ``mcpServers`` string: a remote bundle URL, a ``.json`` config file, or a bundle file.
 
     A reference that cannot be loaded is a broken source with a blocking finding.
+    A path Codex drops (it loads the default ``.mcp.json`` instead) gets its
+    finding but is not a broken source.
     """
     if raw.strip().lower().startswith(("https://", "http://")):
         _collect_url_ref(reader, collection, raw, manifest_rel)
         return
+    # Codex drops a path it does not accept and loads the default .mcp.json instead.
+    dropped = contained and profile.codex_path_rules and not codex_accepts_path(raw)
     declared = normalize_declared_path(raw, profile.manifest_path_prefixes)
     if declared.problem is not None or declared.rel is None:
         problem = "escape" if declared.problem == "escape" else "invalid"
         finding = _path_problem_finding(
             reader, "mcpServers", declared, manifest_rel, problem, reference=profile.reference
         )
-        collection.add_broken_source(finding, raw, None, problem)
+        if dropped:
+            collection.findings.append(finding)
+        else:
+            collection.add_broken_source(finding, raw, None, problem)
         return
     rel = declared.rel
     path = rel.as_posix()
@@ -500,8 +705,13 @@ def _collect_path_ref(
     def fail(finding: Finding, problem: str = "invalid") -> None:
         collection.add_broken_source(finding, raw, path, problem)
 
+    if dropped:
+        collection.findings.append(_style_finding(reader, "mcpServers", declared, manifest_rel, profile=profile))
+        return
     if profile.require_dot_relative and not declared.dot_relative:
-        collection.findings.append(_style_finding(reader, "mcpServers", declared, manifest_rel, profile))
+        collection.findings.append(_style_finding(reader, "mcpServers", declared, manifest_rel, profile=profile))
+    if contained and declared.root_variable is not None:
+        collection.findings.append(_root_variable_finding(reader, "mcpServers", declared, manifest_rel, profile))
     if (unscanned := _unscanned_path_finding(reader, "mcpServers", declared, manifest_rel)) is not None:
         collection.findings.append(unscanned)
     suffix = rel.suffix.lower()
@@ -514,6 +724,7 @@ def _collect_path_ref(
                 reader.display(manifest_rel),
                 "Point mcpServers at a JSON file such as './.mcp.json'.",
                 category=MCP_CATEGORY,
+                metadata={"plugin_component_ref": raw},
             )
         )
         return
@@ -555,8 +766,10 @@ def _collect_url_ref(reader: PluginRootReader, collection: McpCollection, raw: s
     shown = safe_url(raw)
     lowered = raw.strip().lower()
 
-    def fail(check: str, message: str, suggestion: str) -> None:
-        finding = _plugin_finding(Severity.HIGH, check, message, manifest_display, suggestion, category=MCP_CATEGORY)
+    def fail(check: str, message: str, suggestion: str, *, metadata: dict[str, Any] | None = None) -> None:
+        finding = _plugin_finding(
+            Severity.HIGH, check, message, manifest_display, suggestion, category=MCP_CATEGORY, metadata=metadata
+        )
         collection.add_broken_source(finding, shown, None)
 
     if not lowered.split("?", 1)[0].endswith(_MCP_BUNDLE_SUFFIXES):
@@ -564,6 +777,7 @@ def _collect_url_ref(reader: PluginRootReader, collection: McpCollection, raw: s
             "mcp_config_path_invalid",
             f"mcpServers URL {shown!r} is not an .mcpb/.dxt bundle; only bundles may be referenced by URL",
             "Reference a './'-relative .json config file, an inline server map, or an .mcpb bundle.",
+            metadata={"plugin_component_ref": shown},
         )
         return
     collection.findings.append(
@@ -593,14 +807,25 @@ def _collect_url_ref(reader: PluginRootReader, collection: McpCollection, raw: s
 def _load_mcp_file(
     reader: PluginRootReader, collection: McpCollection, rel: PurePosixPath, source: McpSource, raw: str
 ) -> None:
-    """Collect the servers of one MCP config file; a file that cannot be used is a broken source."""
+    """Collect the servers of one MCP config file; a file that cannot be used is a broken source.
+
+    Its finding names the declared ref (``plugin_component_ref``), so the broken source's inventory row counts it.
+    """
     display = reader.display(rel)
     path = rel.as_posix()
 
     def fail(
         check: str, message: str, suggestion: str, *, problem: str = "invalid", category: str = MCP_CATEGORY
     ) -> None:
-        finding = _plugin_finding(Severity.HIGH, check, message, display, suggestion, category=category)
+        finding = _plugin_finding(
+            Severity.HIGH,
+            check,
+            message,
+            display,
+            suggestion,
+            category=category,
+            metadata={"plugin_component_ref": raw},
+        )
         collection.add_broken_source(finding, raw, path, problem)
 
     try:

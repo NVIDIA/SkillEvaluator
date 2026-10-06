@@ -5472,3 +5472,30 @@ class TestSpdxAndIpFalsePositiveHardening:
             for finding in result.findings
             if finding.check_name == "ip_addresses"
         ] == ["8.8.8.8"]
+
+
+@pytest.mark.parametrize(
+    ("text", "labels"),
+    [
+        ("appVersion = 1.2.3.4", ["appVersion"]),
+        ("imageTag: 10.0.0.1", ["imageTag"]),
+        ("versionCode=1.0.0.1", ["versionCode"]),
+        ("build-version: 1.2.3.4", ["build-version"]),
+        ("conversion 1.2.3.4", []),
+        ("staging 1.2.3.4", []),
+    ],
+)
+def test_version_label_pattern_finds_whole_identifier_labels(text: str, labels: list[str]) -> None:
+    found = [match.group() for match in SecurityValidator._VERSION_LABEL_PATTERN.finditer(text)]
+
+    assert found == labels
+
+
+def test_version_label_pattern_stays_fast_on_long_identifier_runs() -> None:
+    import time
+
+    started = time.perf_counter()
+    for text in ("a" * 60 + "!", "version" + "A" * 60 + "!", "b" * 40 + "Version" + "Q" * 40 + "x!"):
+        list(SecurityValidator._VERSION_LABEL_PATTERN.finditer(text))
+    # The old camel-case groups backtracked exponentially (about 0.15 s on 22 lowercase letters, doubling per letter).
+    assert time.perf_counter() - started < 1.0

@@ -131,8 +131,10 @@ def test_catalog_layout_classifies_each_state_and_gates_missing(tmp_path: Path) 
     }
     assert all(f.severity == Severity.HIGH for f in missing)
     assert not result.passed
-    # Only the missing refs produce findings; the other states are advisory.
-    assert {f.check_name for f in result.findings} == {"plugin_dependency_missing"}
+    # Only the missing refs block. The ref the gate could not check gets a non-blocking finding (proof L8).
+    assert {f.check_name for f in result.findings} == {"plugin_dependency_missing", "plugin_dependency_unverified"}
+    [unverified] = [f for f in result.findings if f.check_name == "plugin_dependency_unverified"]
+    assert (unverified.severity, unverified.metadata["ref"]) == (Severity.MEDIUM, f"github::{REPO}::docs::guide")
 
 
 @requires_git
@@ -280,19 +282,26 @@ def test_repository_identity_runs_two_git_commands(tmp_path: Path, monkeypatch: 
     [
         (ORIGIN, REPO),
         ("git@github.com:Example-Org/example-repo.git", REPO),
+        # An SCP-style remote without a user gave the slug "github.com:example-org/example-repo", so every
+        # same-repository ref was "external" and a missing one passed.
+        ("github.com:Example-Org/example-repo.git", REPO),
         ("ssh://git@github.com/Example-Org/example-repo.git", REPO),
-        ("http://github.com/Example-Org/example-repo.git", None),
-        # Read as an SCP-style "user@host:path" remote before the scheme was checked first.
-        ("http://user@github.com:8080/Example-Org/example-repo.git", None),
-        ("git://git@github.com:9418/Example-Org/example-repo.git", None),
+        # http:// and git:// origins name their repository as well as https:// does.
+        ("http://github.com/Example-Org/example-repo.git", REPO),
+        # Once read as an SCP-style "user@host:path" remote, giving "host/8080/group/repo".
+        ("http://user:example-secret@github.com:8080/Example-Org/example-repo.git", REPO),
+        ("git://git@github.com:9418/Example-Org/example-repo.git", REPO),
         ("file:///srv/git/Example-Org/example-repo.git", None),
+        ("/srv/git/example-repo.git", None),
         # Regression: credentials plus a port gave the slug "8443/example-org/example-repo".
         ("https://gitlab-ci-token:example-token@gitlab.example.com:8443/Example-Org/example-repo.git", REPO),
         ("https://user@gitlab.example.com:8443/Example-Org/example-repo.git", REPO),
         ("ssh://git@gitlab.example.com:2222/Example-Org/example-repo.git", REPO),
     ],
 )
-def test_only_ssh_and_https_origins_establish_identity(tmp_path: Path, origin: str, slug: str | None) -> None:
+def test_hosted_origins_establish_identity_and_local_paths_do_not(
+    tmp_path: Path, origin: str, slug: str | None
+) -> None:
     repo = _git_repo(tmp_path / "repo", origin=origin)
 
     assert local_repo_slug(repo) == slug
@@ -319,14 +328,11 @@ def test_https_origin_with_credentials_and_a_port_keeps_the_missing_dependency_g
 
 @requires_git
 @pytest.mark.parametrize(
-    ("origin", "form"),
-    [
-        ("http://user:example-secret@gitlab.example.com:8080/Example-Org/example-repo.git", "uses http://"),
-        ("git://gitlab.example.com/Example-Org/example-repo.git", "uses git://"),
-        ("/srv/git/example-repo.git", "is a local path or another unsupported form"),
-    ],
+    "origin",
+    ["/srv/git/example-repo.git", "file:///srv/git/Example-Org/example-repo.git"],
+    ids=["local-path", "file-url"],
 )
-def test_unsupported_origin_is_named_as_the_reason_identity_is_unknown(tmp_path: Path, origin: str, form: str) -> None:
+def test_unsupported_origin_is_named_as_the_reason_identity_is_unknown(tmp_path: Path, origin: str) -> None:
     """Regression: the reason said the clone had no 'origin' remote, and advised what could not help."""
     repo = _git_repo(tmp_path / "repo", origin=origin)
     plugin = _manifest(repo / "plugins" / "p", skills=[f"git::{REPO}::skills::shared"])
@@ -335,25 +341,30 @@ def test_unsupported_origin_is_named_as_the_reason_identity_is_unknown(tmp_path:
     result = PluginSchemaValidator(repo_root=repo).validate(plugin)
 
     assert identity.local_slug is None
-    assert f"the 'origin' remote of 'repo' {form}" in identity.reason
-    assert "is not a git top-level" not in identity.reason
+    assert "the 'origin' remote of 'repo' is a local path" in identity.reason
+    assert "is not the git top-level" not in identity.reason
     assert "--repo-root" not in identity.reason
-    assert "example-secret" not in identity.reason
     assert identity.reason in _rows(result)[f"git::{REPO}::skills::shared"]["reason"]
-    [summary] = [detail for detail in result.success_details if detail.check_name == "plugin_dependencies"]
-    assert "point the 'origin' remote at an ssh or https URL" in summary.message
-    assert "--repo-root" not in summary.message
+    # The gate did not run: an unverified finding whose advice fits the cause, never a passing row.
+    [unverified] = [f for f in result.findings if f.check_name == "plugin_dependency_unverified"]
+    assert unverified.severity == Severity.MEDIUM
+    assert "is a local path" in unverified.message
+    assert unverified.suggestion == identity.remedy
+    assert "point the 'origin' remote" in unverified.suggestion
+    assert "--repo-root" not in unverified.suggestion
+    assert not [detail for detail in result.success_details if detail.check_name == "plugin_dependencies"]
+    assert result.passed
 
 
 @requires_git
-def test_missing_origin_still_advises_the_git_clone_or_repo_root(tmp_path: Path) -> None:
+def test_missing_origin_advises_adding_one(tmp_path: Path) -> None:
     repo = _git_repo(tmp_path / "repo", origin=None)
     plugin = _manifest(repo / "plugins" / "p", skills=[f"git::{REPO}::skills::shared"])
 
     identity = resolve_repository_identity(plugin)
 
-    assert "'repo' is not a git top-level with an 'origin' remote" in identity.reason
-    assert "pass --repo-root <git top-level>" in identity.reason
+    assert "the git repository 'repo' has no 'origin' remote" in identity.reason
+    assert "git remote add origin <url>" in identity.remedy
 
 
 @pytest.mark.parametrize(

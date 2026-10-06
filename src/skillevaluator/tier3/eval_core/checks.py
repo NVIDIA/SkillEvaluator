@@ -715,8 +715,8 @@ def _shell_tokens(cmd: Any) -> list[str]:
 # without bound. A variable whose value would add more reads as
 # _UNSETTLED_VALUE, and the text around it is kept as written. No SKILL.md
 # read is credited through such a word, the skill walks read it as undecidable
-# where it may run or name something, and the network check treats a payload
-# holding it as a risk.
+# where it may run or name something, and the network check treats it as a
+# risk where a client's name or an upload option would be.
 _MAX_SHELL_EXPANSION_CHARS = 4096
 
 
@@ -1405,10 +1405,22 @@ def _network_assignment(word: str) -> tuple[str, str] | None:
 
 
 def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
-    """Inspect a shell command for network client exfiltration indicators."""
-    if not cmd_text or _depth > 3:
+    """Inspect a shell command for network client exfiltration indicators.
+
+    A ``-c`` or ``eval`` payload is read as a command of its own. A word in it
+    that holds a value too long to expand (``_UNSETTLED_VALUE``) may be any
+    word, so it is a risk where a client's name or an upload option would be:
+    as the command, as a client's argument, or as a later word of a command
+    that is not a print.
+    """
+    if not cmd_text:
         return False
-    if not _NETWORK_CLIENT_FAST_PATTERN.search(cmd_text):
+    # Only a payload this check expanded holds the mark, and the client may be
+    # in the value it could not expand.
+    unsettled = _depth > 0 and _UNSETTLED_VALUE in cmd_text
+    if _depth > 3:
+        return unsettled
+    if not unsettled and not _NETWORK_CLIENT_FAST_PATTERN.search(cmd_text):
         return False
     if len(cmd_text) > _MAX_NETWORK_ACTION_CHARS:
         return True
@@ -1457,14 +1469,15 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
         if cmd_idx >= len(command):
             continue
 
+        if _UNSETTLED_VALUE in _resolved_shell_arg(command[cmd_idx], assignments):
+            # The command is in a value too long to expand, so it may be a client.
+            return True
+
         executable = _shell_executable(command[cmd_idx]).removesuffix(".exe")
 
         if executable in _SHELL_COMMAND_INTERPRETERS:
             c_payload = _shell_c_payload(command, cmd_idx, assignments)
-            # A payload too long to expand is not settled; with a network client in the command, that is a risk.
-            if c_payload and (
-                _UNSETTLED_VALUE in c_payload or _is_network_exfiltration_command(c_payload, _depth=_depth + 1)
-            ):
+            if c_payload and _is_network_exfiltration_command(c_payload, _depth=_depth + 1):
                 return True
             continue
 
@@ -1479,10 +1492,7 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
                         eval_payload = eval_payload[1:-1]
                 else:
                     eval_payload = _joined_shell_args(raw_args, assignments)
-                if eval_payload and (
-                    _UNSETTLED_VALUE in eval_payload
-                    or _is_network_exfiltration_command(eval_payload, _depth=_depth + 1)
-                ):
+                if eval_payload and _is_network_exfiltration_command(eval_payload, _depth=_depth + 1):
                     return True
             continue
 
@@ -1494,13 +1504,17 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
                 if not tok or "://" in tok or tok.startswith("-"):
                     continue
                 sub_exe = _shell_executable(tok).removesuffix(".exe")
-                if sub_exe in _NETWORK_EXECUTABLES:
+                # A word too long to expand may be a client's name, as a wrapper runs it.
+                if sub_exe in _NETWORK_EXECUTABLES or _UNSETTLED_VALUE in tok:
                     return True
             continue
 
         args = command[cmd_idx + 1 :]
 
         for arg in args:
+            if _UNSETTLED_VALUE in _resolved_shell_arg(arg, assignments):
+                # An argument too long to expand may carry an upload option or the data.
+                return True
             if _has_unquoted_secret_var(arg):
                 return True
             if _has_literal_secret(arg):

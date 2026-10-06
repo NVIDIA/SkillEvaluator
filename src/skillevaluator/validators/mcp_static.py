@@ -1567,7 +1567,10 @@ _PEP440_EXACT_RE = re.compile(
 )
 _GIT_SHA_RE = re.compile(r"(?:#|@)[0-9a-fA-F]{40}(?:$|[&#])")
 _DOCKER_DIGEST_RE = re.compile(r"@sha256:[0-9a-fA-F]{64}$")
-_VERSION_TAG_RE = re.compile(r"^v?\d+(?:\.\d+)*(?:[-+._][0-9A-Za-z.]+)*$")
+# A dot belongs to the segment body, so only "-", "+" or "_" can start a later
+# segment. The old "(?:[-+._][0-9A-Za-z.]+)*" accepted the same tags but could
+# split a run of ".x" in exponentially many ways (ReDoS on a long bad tag).
+_VERSION_TAG_RE = re.compile(r"^v?\d+(?:\.\d+)*(?:[-+._][0-9A-Za-z.]+(?:[-+_][0-9A-Za-z.]+)*)?$")
 _DOTTED_VERSION_PREFIX_RE = re.compile(r"^v?\d+\.\d+(?![0-9A-Za-z])")
 _PLUGIN_PATH_REFS: tuple[str, ...] = ("${CLAUDE_PLUGIN_ROOT}", "${CLAUDE_PLUGIN_DATA}", "${CLAUDE_PROJECT_DIR}")
 _LOCAL_SPEC_PREFIXES: tuple[str, ...] = (".", "/", "~", "file:", *_PLUGIN_PATH_REFS)

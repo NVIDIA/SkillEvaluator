@@ -606,22 +606,23 @@ def test_http_hook_inline_credentials(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "url",
+    ("url", "expected"),
     [
-        "https://admin:hunter2@hooks.example.com:99999/x",
-        "https://admin:hunter2@hooks.example.com:abc/x",
-        "//admin:hunter2@hooks.example.com/x",
-        "https://admin:hunter2@[::1/x",
-        "admin:hunter2@hooks.example.com/x?token=hunter2#hunter2",
-        "https://admin:p@ss:hunter2@hooks.example.com/x",
+        ("https://admin:hunter2@hooks.example.com:99999/x", "https://hooks.example.com:99999/x"),
+        ("https://admin:hunter2@hooks.example.com:abc/x", "https://hooks.example.com:abc/x"),
+        ("//admin:hunter2@hooks.example.com/x", "//hooks.example.com/x"),
+        ("https://admin:hunter2@[::1/x", "https://[::1/x"),
+        ("admin:hunter2@hooks.example.com/x?token=hunter2#hunter2", "hooks.example.com/x"),
+        ("https://admin:p@ss:hunter2@hooks.example.com/x", "https://hooks.example.com/x"),
     ],
 )
-def test_safe_url_never_keeps_userinfo(url: str) -> None:
+def test_safe_url_never_keeps_userinfo(url: str, expected: str) -> None:
     shown = safe_url(url)
 
+    # Compare the whole redacted URL: the host stays, userinfo, query and fragment go.
+    assert shown == expected
     assert "hunter2" not in shown
     assert "admin" not in shown
-    assert "hooks.example.com" in shown or "::1" in shown
 
 
 def _dumped(result: ValidationResult) -> str:

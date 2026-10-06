@@ -167,6 +167,40 @@ def test_report_text_marks_a_text_cut_by_the_redaction_window_as_truncated() -> 
     assert len(text) <= MAX_REPORT_CHARS and text.endswith("...<truncated>")
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "task-550e8400e29b41d4a716446655440000",
+        "disk-0123456789abcdef0123",
+        "risk-ABCDEFGHIJKLMNOPQRSTUV",
+        "x_hf_" + "a" * 34,
+        "pnpm_" + "A" * 36,
+        "npm_config_cache",
+    ],
+)
+def test_ids_that_contain_a_short_token_prefix_have_no_secret_shape(value: str) -> None:
+    """Regression: 'sk-' had no left boundary, so 'task-<hex>' and 'disk-<hex>' ids read as API keys."""
+    assert not has_secret_shape(value)
+    assert url_credentials(f"https://h.example/mcp?session={value}", userinfo_rule="literal").query_keys == ()
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "sk-" + "abcdefghijklmnop1234",
+        "xoxb-" + "1234567890-abcdefghij",
+        "xoxe-1-" + "My0xLTEtMTIzNDU2Nzg5MC0xMjM0",
+        "hf_" + "AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+        "npm_" + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+        "AKIA" + "ABCDEFGHIJ012345",
+        "ASIA" + "ABCDEFGHIJ012345",
+    ],
+)
+def test_every_canonical_token_shape_is_a_secret_and_is_redacted(token: str) -> None:
+    assert has_secret_shape(token) and has_secret_shape(f"key={token}")
+    assert token not in report_text(f"run --flag {token} --next")
+
+
 @pytest.mark.parametrize("prefix", ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"])
 def test_every_github_token_prefix_has_a_secret_shape(prefix: str) -> None:
     token = prefix + "0123456789abcdefghij0123456789abcdef"

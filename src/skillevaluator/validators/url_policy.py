@@ -50,6 +50,11 @@ _SECRET_KEY_RE = re.compile(
 _INLINE_AUTH_SCHEME_RE = re.compile(r"(?i)^(?:bearer|basic)\s+[A-Za-z0-9+/._=~-]{12,}$")
 # Known inline-secret value shapes. Only ``search`` truthiness is used.
 #
+# The short prefixes 'sk-', 'hf_', and 'npm_' also end ordinary words and ids
+# ('task-<hex>', 'disk-<hex>', 'pnpm_...'), so they match only where a word
+# starts. The longer prefixes match anywhere, so a token glued to other text
+# ('%3Dghp_...') is still found.
+#
 # The JWT-like alternative starts only where a run of token characters starts
 # and scans to the run's first ``eyJ`` without ever stepping past one. A later
 # ``eyJ`` in the same run has fewer characters before the run ends, so it can
@@ -57,13 +62,15 @@ _INLINE_AUTH_SCHEME_RE = re.compile(r"(?i)^(?:bearer|basic)\s+[A-Za-z0-9+/._=~-]
 # tried at every ``eyJ`` and scanned to the end of the run each time, which is
 # quadratic on a long ``eyJeyJ...`` value (about 1 s per 64 KB value).
 _SECRET_VALUE_RE = re.compile(
-    r"(sk-[A-Za-z0-9]{16,}"
+    r"((?<![A-Za-z0-9_-])sk-[A-Za-z0-9]{16,}"
     r"|gh[pousr]_[A-Za-z0-9]{20,}"
     r"|github_pat_[A-Za-z0-9_]{22,}"
     r"|glpat-[A-Za-z0-9_-]{20,}"
-    r"|AKIA[0-9A-Z]{16}"
-    r"|xox[baprs]-[A-Za-z0-9-]{10,}"
+    r"|(?:AKIA|ASIA)[0-9A-Z]{16}"
+    r"|xox[abeprs]-[A-Za-z0-9-]{10,}"
     r"|nvapi-[A-Za-z0-9_-]{16,}"
+    r"|(?<![A-Za-z0-9_-])hf_[A-Za-z0-9]{30,}"
+    r"|(?<![A-Za-z0-9_-])npm_[A-Za-z0-9]{36}"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
     r"|(?<![A-Za-z0-9_-])(?:(?!eyJ)[A-Za-z0-9_-])*eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"
 )

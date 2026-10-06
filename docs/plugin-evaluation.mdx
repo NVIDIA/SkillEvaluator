@@ -784,11 +784,12 @@ event, the flat shape Cursor and Agent Plugins client extensions such as
 `com.cursor/` and `com.github.copilot/` use, are read as one-handler matcher
 groups. User information is removed from every target and URL in the reports,
 even when the URL does not parse, and a value shaped like a known token
-(`ghp_…`, `glpat-…`, `xoxb-…`, `sk-…`, or a JWT) is redacted, also inside a
-URL path (`ghp_<redacted>`, `jwt-<redacted>`, `<redacted>`). A private key is
-redacted whole, from its BEGIN line to its END line. A long target is cut
-before it is redacted, and a token the cut splits is dropped. MCP command
-findings never echo an argument that holds a credential.
+(`ghp_…`, `glpat-…`, `xoxb-…`, `hf_…`, `npm_…`, `sk-…`, or a JWT) is
+redacted, also inside a URL path (`ghp_<redacted>`, `jwt-<redacted>`,
+`<redacted>`). A private key is redacted whole, from its BEGIN line to its END
+line. A long target is cut before it is redacted, and a token the cut splits
+is dropped. MCP command findings never echo an argument that holds a
+credential.
 
 Each client's own hook semantics apply. Claude Code and Codex use the events
 and outputs above. Cursor (and an Agent Plugins `com.cursor/` namespace) adds

@@ -531,6 +531,12 @@ def test_url_query_value_shaped_like_a_secret_is_blocked_under_any_name(query: s
     assert not any(_GITHUB_TOKEN in f.message or _OPENAI_KEY in f.message for f in findings)
 
 
+@pytest.mark.parametrize("query", ["session=task-550e8400e29b41d4a716446655440000", "vol=disk-0123456789abcdef0123"])
+def test_url_query_ids_that_end_in_sk_are_not_credentials(query: str) -> None:
+    """Regression: 'task-<hex>' matched the 'sk-' API-key shape, a CRITICAL finding that blocked the server."""
+    assert validate_mcp_server_declaration("s", {"url": f"https://mcp.example.com/sse?{query}"}, "p.json") == []
+
+
 def test_url_query_keys_shaped_like_a_secret_are_not_echoed() -> None:
     url = f"https://h.example/mcp?{_GITHUB_TOKEN}={_OPENAI_KEY}"
     findings = validate_mcp_server_declaration("s", {"url": url}, "p.json")

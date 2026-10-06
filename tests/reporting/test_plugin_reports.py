@@ -333,6 +333,34 @@ def test_html_tier3_coverage_states_what_was_not_demonstrated(tmp_path: Path) ->
     assert element_text(html, "tier3-plugin-not-evaluated").startswith("2 components not staged")
 
 
+def test_markdown_names_every_staged_component_no_plugin_trial_exercised(tmp_path: Path) -> None:
+    from skillevaluator.reporting.plugin_sections import plugin_provenance
+
+    result = _tier3_result(tmp_path, partial=False, statistics=False)
+    payload = result.metadata["agent_eval"]
+    names = [f"stg{i:02d}" for i in range(30)]
+    plugin_provenance(payload)["component_coverage"] = {
+        "components": [
+            {"type": "skill", "name": name, "path": f"skills/{name}", "state": "staged", "reason": ""} for name in names
+        ],
+        "counts": {"staged": 30},
+        "not_evaluated": 0,
+    }
+    declared = [f"skill:{name}" for name in names]
+    payload["agents"]["codex"]["plugin_signals_summary"]["with_skill"]["activation_coverage"] = {
+        "declared": declared,
+        "exercised": [],
+        "unverified": declared,
+        "unavailable": [],
+    }
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+
+    assert "Staged but not observed in any plugin trial:" in markdown
+    for name in names:
+        assert f"- skill {name} (unverified)" in markdown
+
+
 def test_staged_but_unexercised_components_are_not_reported_as_evaluated(tmp_path: Path) -> None:
     """Every component staged, none exercised: the headline counts staging and the rest is listed as excluded."""
     from io import StringIO

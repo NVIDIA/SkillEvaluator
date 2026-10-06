@@ -687,6 +687,34 @@ def test_command_hook_url_credentials_are_critical_and_redacted(tmp_path: Path, 
     assert "s3cr3tPassw0rd" not in _dumped(result)
 
 
+_BARE_QUERY_TOKEN = "ghp_" + "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2"
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [
+        _http_hook(f"https://hooks.example.com/notify?{_BARE_QUERY_TOKEN}"),
+        _hooks(
+            {
+                "PostToolUse": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": f"curl -s https://api.example.com/x?{_BARE_QUERY_TOKEN}"}
+                        ]
+                    }
+                ]
+            }
+        ),
+    ],
+)
+def test_hook_url_query_component_shaped_like_a_secret_is_critical(tmp_path: Path, hooks: dict) -> None:
+    """Regression: a bare '?ghp_...' query component parsed to an empty value and was never flagged."""
+    result = _validate(_plugin(tmp_path, files={"hooks/hooks.json": hooks}))
+
+    assert _checks(result)["plugin_hook_inline_secret"] == Severity.CRITICAL
+    assert _BARE_QUERY_TOKEN not in _dumped(result)
+
+
 @pytest.mark.parametrize(
     "command",
     [

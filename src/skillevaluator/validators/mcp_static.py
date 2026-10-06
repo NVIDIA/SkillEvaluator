@@ -173,7 +173,7 @@ def _whatwg_hostname(url: str) -> str | None:
 
 
 def _check_url_inline_secrets(server: _ServerFindings, url: str, *, ambiguous: bool = False) -> None:
-    """Flag credentials written into a URL's userinfo or query string.
+    """Flag credentials written into a URL's userinfo, query string, or fragment.
 
     The URL is read as written and, when it is ``ambiguous``, also the way WHATWG
     clients read it: they find userinfo that urllib does not see, for example in
@@ -191,14 +191,18 @@ def _check_url_inline_secrets(server: _ServerFindings, url: str, *, ambiguous: b
             "${ENV} references are allowed",
             'Remove user:password@ from the URL; pass credentials by reference (e.g. header "${MY_TOKEN}").',
         )
-    for key in dict.fromkeys(key for reading in readings for key in reading.query_keys):
-        shown = "<redacted>" if has_secret_shape(key) else key[:64]
-        server.report(
-            Severity.CRITICAL,
-            "mcp_url_inline_secret",
-            f"url query parameter {shown!r} carries an inline credential; only ${{ENV}} references are allowed",
-            "Do not put credentials in the URL query string; reference a secret handle/env var instead.",
-        )
+    for part, keys in (
+        ("query", [key for reading in readings for key in reading.query_keys]),
+        ("fragment", [key for reading in readings for key in reading.fragment_keys]),
+    ):
+        for key in dict.fromkeys(keys):
+            shown = "<redacted>" if has_secret_shape(key) else key[:64]
+            server.report(
+                Severity.CRITICAL,
+                "mcp_url_inline_secret",
+                f"url {part} parameter {shown!r} carries an inline credential; only ${{ENV}} references are allowed",
+                "Do not put credentials in the URL query or fragment; reference a secret handle/env var instead.",
+            )
 
 
 def _is_insecure_tls_env(key: str, value: str) -> bool:

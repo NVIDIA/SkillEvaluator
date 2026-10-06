@@ -121,11 +121,13 @@ class UrlCredentials:
 
     # The userinfo ('user:password@') carries one.
     userinfo: bool = False
-    # Query parameters whose value is one, in the order they appear.
+    # Query parameters that carry one, in the order they appear.
     query_keys: tuple[str, ...] = ()
+    # Parameters in the fragment ('#access_token=...', '#/cb?token=...') that carry one.
+    fragment_keys: tuple[str, ...] = ()
 
     def __bool__(self) -> bool:
-        return self.userinfo or bool(self.query_keys)
+        return self.userinfo or bool(self.query_keys) or bool(self.fragment_keys)
 
 
 # Which userinfo counts as a credential; see ``url_credentials``.
@@ -133,7 +135,7 @@ UserinfoRule = Literal["any", "literal", "secret"]
 
 
 def url_credentials(url: str, *, userinfo_rule: UserinfoRule) -> UrlCredentials:
-    """Credentials written into the text of ``url``: in its userinfo and in its query parameters.
+    """Credentials written into the text of ``url``: in its userinfo, query parameters, and fragment parameters.
 
     The URL is read as raw text, so a malformed port or bracket cannot hide a
     credential: the authority runs from ``//`` to the next ``/``, ``?``, or
@@ -149,21 +151,30 @@ def url_credentials(url: str, *, userinfo_rule: UserinfoRule) -> UrlCredentials:
         a token (a URL inside a command line), so
         ``https://x-access-token:${GITHUB_TOKEN}@github.com/...`` does not.
     * Query: a parameter counts when it has a literal value under a credential
-      name (``api_key=literal``) or a value shaped like a secret under any name
-      (``q=sk-...``). A ``$VAR`` / ``${VAR}`` reference never counts.
+      name (``api_key=literal``), a value shaped like a secret under any name
+      (``q=sk-...``), or a name shaped like a secret (a bare ``?ghp_...``). A
+      ``$VAR`` / ``${VAR}`` reference never counts. The query ends at the
+      fragment; the fragment's parameters (after its last ``?``, as in
+      ``#/cb?access_token=...``) are read the same way, as ``fragment_keys``.
     """
     userinfo, _rest = _split_raw_userinfo(url)
     user, _colon, password = userinfo.partition(":")
-    query = url.partition("?")[2].partition("#")[0]
+    before_fragment, _hash, fragment = url.partition("#")
     return UrlCredentials(
         userinfo=_userinfo_carries_credential(user, password, rule=userinfo_rule),
-        query_keys=tuple(
-            dict.fromkeys(
-                key
-                for key, values in parse_qs(query, keep_blank_values=True).items()
-                if any(_query_value_is_credential(key, value) for value in values)
-            )
-        ),
+        query_keys=_credential_parameters(before_fragment.partition("?")[2]),
+        fragment_keys=_credential_parameters(fragment.rpartition("?")[2]),
+    )
+
+
+def _credential_parameters(text: str) -> tuple[str, ...]:
+    """The names of the ``name=value`` parameters in ``text`` that carry a credential, in the order they appear."""
+    return tuple(
+        dict.fromkeys(
+            key
+            for key, values in parse_qs(text, keep_blank_values=True).items()
+            if has_secret_shape(key) or any(_query_value_is_credential(key, value) for value in values)
+        )
     )
 
 

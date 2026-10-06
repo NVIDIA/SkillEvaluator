@@ -537,6 +537,23 @@ def test_url_query_ids_that_end_in_sk_are_not_credentials(query: str) -> None:
     assert validate_mcp_server_declaration("s", {"url": f"https://mcp.example.com/sse?{query}"}, "p.json") == []
 
 
+@pytest.mark.parametrize("query", [_GITHUB_TOKEN, f"{_GITHUB_TOKEN}=1"])
+def test_url_query_component_shaped_like_a_secret_is_blocked(query: str) -> None:
+    """Regression: a bare '?ghp_...' query component parsed to an empty value and was never flagged."""
+    findings = validate_mcp_server_declaration("s", {"url": f"https://mcp.example.com/sse?{query}"}, "p.json")
+
+    assert [(f.check_name, f.severity) for f in findings] == [("mcp_url_inline_secret", Severity.CRITICAL)]
+    assert _GITHUB_TOKEN not in findings[0].message
+
+
+def test_url_fragment_credential_is_reported_as_a_fragment_parameter() -> None:
+    """Regression: '#/cb?access_token=...' was reported as a query parameter."""
+    findings = validate_mcp_server_declaration("s", {"url": "https://h.example/mcp#/cb?access_token=abc"}, "p.json")
+
+    assert [(f.check_name, f.severity) for f in findings] == [("mcp_url_inline_secret", Severity.CRITICAL)]
+    assert "url fragment parameter 'access_token' carries an inline credential" in findings[0].message
+
+
 def test_url_query_keys_shaped_like_a_secret_are_not_echoed() -> None:
     url = f"https://h.example/mcp?{_GITHUB_TOKEN}={_OPENAI_KEY}"
     findings = validate_mcp_server_declaration("s", {"url": url}, "p.json")

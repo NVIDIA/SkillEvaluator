@@ -62,6 +62,31 @@ def test_url_credentials_reads_credential_names_and_secret_shaped_values(query: 
         assert url_credentials(f"https://h.example/x?{query}", userinfo_rule=rule).query_keys == keys
 
 
+@pytest.mark.parametrize(
+    ("url", "query_keys", "fragment_keys"),
+    [
+        ("https://h.example/#/cb?access_token=abc", (), ("access_token",)),
+        ("https://h.example/x?page=2#access_token=abc&token_type=bearer", (), ("access_token",)),
+        ("https://h.example/x?api_key=literal#section-2", ("api_key",), ()),
+        ("https://h.example/x#L10-L20", (), ()),
+    ],
+)
+def test_url_credentials_reads_the_query_only_up_to_the_fragment(
+    url: str, query_keys: tuple[str, ...], fragment_keys: tuple[str, ...]
+) -> None:
+    """Regression: the query was read from the first '?' even inside the fragment ('#/cb?access_token=...')."""
+    credentials = url_credentials(url, userinfo_rule="literal")
+    assert (credentials.query_keys, credentials.fragment_keys) == (query_keys, fragment_keys)
+    assert bool(credentials) is bool(query_keys or fragment_keys)
+
+
+@pytest.mark.parametrize("query", [_TOKEN, f"{_TOKEN}=1", f"page=2&{_TOKEN}"])
+def test_url_credentials_flags_a_query_key_shaped_like_a_secret(query: str) -> None:
+    """Regression: only query values were checked, so a bare '?ghp_...' component carried no credential."""
+    for rule in ("any", "literal", "secret"):
+        assert url_credentials(f"https://h.example/sse?{query}", userinfo_rule=rule).query_keys == (_TOKEN,)
+
+
 def test_url_credentials_is_false_when_the_url_carries_none() -> None:
     assert not url_credentials("https://h.example/x?page=2", userinfo_rule="any")
     assert not UrlCredentials()

@@ -2951,7 +2951,8 @@ class HookAnalyzer:
                 "inline_secret",
                 Severity.CRITICAL,
                 "plugin_hook_inline_secret",
-                "the command embeds a credential in a URL (user:password@ or a credential query parameter)",
+                "the command embeds a credential in a URL (user:password@, or a credential query or fragment "
+                "parameter)",
                 "Remove the credential from the hook command; read it from an environment variable or a "
                 "credential helper when the hook runs.",
             )
@@ -3071,7 +3072,7 @@ class HookAnalyzer:
                 "inline_secret",
                 Severity.CRITICAL,
                 "plugin_hook_inline_secret",
-                "the http handler url embeds credentials (user:password or a credential query parameter)",
+                "the http handler url embeds credentials (user:password, or a credential query or fragment parameter)",
                 "Remove credentials from the URL; pass them through headers with $VAR interpolation and "
                 "allowedEnvVars.",
             )

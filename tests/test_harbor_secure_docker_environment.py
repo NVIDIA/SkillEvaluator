@@ -8470,3 +8470,33 @@ def test_invalid_exec_environment_fails_without_serializing_value(
 
     assert message in str(caught.value)
     assert _SENTINEL not in str(caught.value)
+
+
+def test_sidecar_accepts_compose_value_when_sensitive_named_values_are_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``XDG_SESSION_ID=1`` and similar flags must not block values like ``python:3.13-slim``."""
+    environment = _initialized_secure_docker_environment(
+        tmp_path,
+        persistent_env={"FOO_AUTH_ENABLED": "1", "CLAUDE_CODE_CHILD_SESSION": "1"},
+    )
+    monkeypatch.setenv("XDG_SESSION_ID", "1")
+    monkeypatch.setenv("CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH", "1")
+    monkeypatch.setenv("HELPER_IMAGE", "python:3.13-slim")
+    (environment.environment_dir / "docker-compose.yaml").write_text(
+        "services:\n  helper:\n    image: ${HELPER_IMAGE:?required}\n",
+        encoding="utf-8",
+    )
+
+    class _Spawned(Exception):
+        pass
+
+    async def create_subprocess(*_args: object, **_kwargs: object) -> object:
+        raise _Spawned
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    with pytest.raises(_Spawned):
+        asyncio.run(environment.service_exec("true", service="helper"))
+

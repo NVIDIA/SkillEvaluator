@@ -35,6 +35,9 @@ _SECRET_ASSIGNMENT_RE = re.compile(
 )
 _SECRET_ENV_NAME_RE = re.compile(r"(?i)(?:api[_-]?key|access[_-]?key|auth|credential|password|secret|token)")
 _LIVE_MIN_EVENT_ROWS = 6
+# Values of credential-named variables that are plainly flags, not secrets.
+_FLAG_LIKE_VALUE_RE = re.compile(r"(?i)^(?:[0-9]+|true|false|yes|no|on|off|enabled|disabled|none|null)$")
+_MIN_NAMED_SECRET_LENGTH = 4
 _CREDENTIAL_URI_USERINFO_RE = re.compile(r"(?i)(?P<scheme>[a-z][a-z0-9+.-]{0,31}://)(?P<userinfo>[^\s/?#]+@)")
 
 
@@ -126,7 +129,13 @@ def secret_values_from_environment(environment: Mapping[str, str]) -> set[str]:
         if not value:
             continue
         rendered = str(value)
-        if _SECRET_ENV_NAME_RE.search(name):
+        if (
+            _SECRET_ENV_NAME_RE.search(name)
+            and len(rendered) >= _MIN_NAMED_SECRET_LENGTH
+            and not _FLAG_LIKE_VALUE_RE.match(rendered.strip())
+        ):
+            # A credential-named flag such as FOO_AUTH_ENABLED=1 is not a secret;
+            # treating "1" as one would redact ordinary progress text.
             protected.add(rendered)
         if name.upper().endswith("_PROXY") or "://" in rendered:
             protected.update(

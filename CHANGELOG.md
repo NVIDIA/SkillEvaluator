@@ -97,6 +97,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 no longer treats flag values of credential-named variables (for example `XDG_SESSION_ID=1` or `FOO_AUTH_ENABLED=true`) as secrets, so progress counts are not redacted and the Docker sidecar no longer refuses values such as `127.0.0.1` or `python:3.13-slim`.
 - Report non-string YAML keys as validation errors in skills, rules, workflows,
   and plugin manifests instead of raising a `TypeError`, including frontmatter
   `metadata` keys. Show boolean, null, and date keys in a readable YAML form.

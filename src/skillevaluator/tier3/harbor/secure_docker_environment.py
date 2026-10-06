@@ -238,9 +238,25 @@ def _eligible_secret_values(
     )
 
 
+_FLAG_LIKE_VALUE_RE = re.compile(r"(?i)^(?:[0-9]+|true|false|yes|no|on|off|enabled|disabled|none|null)$")
+
+
+def _is_flag_like_value(value: str) -> bool:
+    """Return whether a sensitive-named value is plainly a flag, not a secret."""
+    return bool(_FLAG_LIKE_VALUE_RE.match(value.strip()))
+
+
 def _sensitive_environment_values(environment: Mapping[str, str]) -> set[str]:
-    """Return exact values whose component-aware names mark them sensitive."""
-    return {value for name, value in environment.items() if value and _SENSITIVE_ENV_NAME_RE.search(name)}
+    """Return exact values whose component-aware names mark them sensitive.
+
+    Flag values such as ``XDG_SESSION_ID=1`` or ``*_AUTH_ENABLED=true`` are not
+    secrets; protecting them would block ordinary values like ``127.0.0.1``.
+    """
+    return {
+        value
+        for name, value in environment.items()
+        if value and _SENSITIVE_ENV_NAME_RE.search(name) and not _is_flag_like_value(value)
+    }
 
 
 def _credential_uri_environment_values(environment: Mapping[str, str]) -> set[str]:
@@ -2180,7 +2196,10 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             exact_protected_values.update(
                 value
                 for name, value in environment.items()
-                if name != NVIDIA_BUILD_KEY_STDIN_ENV and value and _SENSITIVE_ENV_NAME_RE.search(name)
+                if name != NVIDIA_BUILD_KEY_STDIN_ENV
+                and value
+                and _SENSITIVE_ENV_NAME_RE.search(name)
+                and not _is_flag_like_value(value)
             )
 
         include(os.environ)
@@ -2214,7 +2233,9 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             for name, value in environment.items():
                 if not value or (name == retained_name and value == retained_value):
                     continue
-                if len(value) >= _MIN_EXACT_SECRET_LENGTH or _SENSITIVE_ENV_NAME_RE.search(name):
+                if len(value) >= _MIN_EXACT_SECRET_LENGTH or (
+                    _SENSITIVE_ENV_NAME_RE.search(name) and not _is_flag_like_value(value)
+                ):
                     protected_values.add(value)
 
         include(getattr(self, "_compose_task_env", {}))

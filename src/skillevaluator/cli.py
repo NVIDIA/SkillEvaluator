@@ -420,11 +420,10 @@ def _content_relative_finding_paths(results: list[ValidationResult], validated: 
             # target without ".." can be ambiguous.
             if ".." not in prefix and (content_root / path).exists(follow_symlinks=False):
                 continue
-            # Keep the path's own separator: str(Path(...)) would turn a "/" path
-            # into "\\" on Windows, so reports and SARIF would mix both styles.
-            separator = "\\" if "\\" in path and "/" not in path else "/"
+            # Always "/": str(Path(...)) gives "\\" on Windows, and validators there
+            # build backslash paths, so reports and SARIF would otherwise differ by OS.
             old_forms = finding.legacy_string_forms()
-            finding.file_path = label + (separator.join(parts[len(prefix) :]) or ".")
+            finding.file_path = label + ("/".join(parts[len(prefix) :]) or ".")
             moved.append((old_forms, finding.legacy_string_forms()))
         for old_forms, new_forms in moved:
             _move_legacy_string(result, old_forms, new_forms)

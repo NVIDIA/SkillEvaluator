@@ -222,8 +222,8 @@ def test_content_relative_finding_paths_rewrite_only_paths_built_from_the_target
     }
     assert run(Path("sample"), sample, list(paths)) == list(paths.values())
     if os.sep == "\\":
-        # A Windows-style path keeps its own separator after the rewrite.
-        assert run(Path("sample"), sample, ["[foo] sample\\skills\\foo\\SKILL.md"]) == ["[foo] skills\\foo\\SKILL.md"]
+        # A Windows-style path is reported with "/" like every other rewritten path.
+        assert run(Path("sample"), sample, ["[foo] sample\\skills\\foo\\SKILL.md"]) == ["[foo] skills/foo/SKILL.md"]
     # "." and absolute targets already give unambiguous paths.
     assert run(Path(), sample, ["SKILL.md"]) == ["SKILL.md"]
     assert run(sample, sample, [str(sample / "SKILL.md")]) == [str(sample / "SKILL.md")]

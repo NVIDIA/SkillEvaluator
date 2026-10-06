@@ -94,7 +94,11 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> None:
     from skillevaluator.cli import _evaluated_source_from_options
     from skillevaluator.provider_config import resolve_llm_provider
     from skillevaluator.tier3.commands import parse_agent_model_overrides, resolve_agents, validate_agents
-    from skillevaluator.tier3.evals_config import _validate_config, load_evals_config
+    from skillevaluator.tier3.evals_config import (
+        _validate_config,
+        load_evals_config,
+        parse_environment_kwarg_overrides,
+    )
     from skillevaluator.tier3.harbor.runner import (
         _model_for_agent,
         _resolve_agent_runtime_plan,
@@ -126,6 +130,7 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> None:
         if params.get(cli_name) is not None:
             effective.setdefault(group, {})["mode"] = params[cli_name]
     _validate_config(effective, config_path or skill_path / "evals" / "config.yml")
+    parse_environment_kwarg_overrides(params.get("environment_kwarg") or (), env_mode=params["env_mode"])
     if harbor.get("stop_on_pass", False) and harbor.get("n_attempts", 1) == 1:
         raise ValueError("stop_on_pass requires n_attempts > 1")
 
@@ -160,7 +165,7 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> None:
         )
         for agent in agents
     }
-    runtime_env, errors = _resolve_runtime_env(harbor.get("runtime_env"))
+    runtime_env, errors = _resolve_runtime_env(harbor.get("runtime_env"), env_mode=params["env_mode"])
     if errors:
         raise ValueError("; ".join(errors))
     _resolve_agent_runtime_plan(
@@ -181,13 +186,22 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> None:
 def _preflight_environment(params: dict[str, Any]) -> None:
     """Check installed runtimes and backend configuration without an agent run."""
     from skillevaluator.tier3.commands import parse_agents
+    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
     from skillevaluator.tier3.harbor.runner import _check_prerequisites
 
-    # These Harbor preflights perform remote authentication RPCs. Leave those
+    # These preflights contact a remote control plane or cluster. Leave those
     # probes in the execution engine instead of running them before generation.
-    if params["env_mode"] in {"cwsandbox", "wandb", "langsmith"}:
+    if params["env_mode"] in {"ack", "cwsandbox", "langsmith", "openshift", "wandb"}:
         return
-    errors = _check_prerequisites(env_mode=params["env_mode"], agents=parse_agents(params["agents"]))
+    environment_kwargs = parse_environment_kwarg_overrides(
+        params.get("environment_kwarg") or (),
+        env_mode=params["env_mode"],
+    )
+    errors = _check_prerequisites(
+        env_mode=params["env_mode"],
+        agents=parse_agents(params["agents"]),
+        environment_kwargs=environment_kwargs,
+    )
     if errors:
         raise ValueError("; ".join(errors))
 

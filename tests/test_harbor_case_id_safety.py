@@ -202,6 +202,7 @@ def test_all_dataset_formats_reject_unsafe_ids_before_creating_output(
 
 
 def test_valid_case_id_boundaries_round_trip_through_real_harbor_model(tmp_path: Path) -> None:
+    from harbor.models.task.config import TaskConfig
     from harbor.models.task.task import Task
 
     case_ids: list[object] = [0, "a", "A_b-c.1", "x" * 128]
@@ -213,6 +214,9 @@ def test_valid_case_id_boundaries_round_trip_through_real_harbor_model(tmp_path:
 
     assert [path.name for path in task_paths] == expected_ids
     for expected_id, task_path in zip(expected_ids, task_paths, strict=True):
+        task_config_text = (task_path / "task.toml").read_text(encoding="utf-8")
+        parsed_config = TaskConfig.model_validate_toml(task_config_text)
+        assert parsed_config.schema_version == "1.3"
         task = Task(task_path)
         assert task.config.metadata["entry_id"] == expected_id
         entry = json.loads((task_path / "tests" / "entry.json").read_text(encoding="utf-8"))
@@ -220,6 +224,36 @@ def test_valid_case_id_boundaries_round_trip_through_real_harbor_model(tmp_path:
 
     dataset = tomllib.loads((output_dir / "dataset.toml").read_text(encoding="utf-8"))
     assert [task["name"] for task in dataset["tasks"]] == [f"nvidia/{case_id}" for case_id in sorted(expected_ids)]
+
+
+def test_native_harbor_14_task_stages_without_rewriting_its_schema(tmp_path: Path) -> None:
+    from harbor.models.task.config import TaskConfig
+
+    skill_path = _write_skill(tmp_path, ["case-001"])
+    native_task = skill_path / "evals" / "harbor" / "case-001"
+    native_task.mkdir(parents=True)
+    (native_task / "instruction.md").write_text("Run the native Harbor 0.22 task.\n", encoding="utf-8")
+    native_config_text = (
+        'schema_version = "1.4"\n\n'
+        "[task]\n"
+        'name = "nvidia/native-case-001"\n\n'
+        "[metadata]\n"
+        'entry_id = "case-001"\n\n'
+        "[environment]\n"
+        'network_mode = "public"\n'
+    )
+    (native_task / "task.toml").write_text(native_config_text, encoding="utf-8")
+    source_config = TaskConfig.model_validate_toml(native_config_text)
+    output_dir = tmp_path / "native-output"
+
+    task_paths = stage_native_harbor_tasks(skill_path, output_dir)
+
+    assert source_config.schema_version == "1.4"
+    assert task_paths == [output_dir / "case-001"]
+    assert (native_task / "task.toml").read_text(encoding="utf-8") == native_config_text
+    staged_config_text = (task_paths[0] / "task.toml").read_text(encoding="utf-8")
+    assert TaskConfig.model_validate_toml(staged_config_text).schema_version == "1.4"
+    assert 'schema_version = "1.4"' in staged_config_text
 
 
 def test_existing_task_symlink_is_rejected_without_touching_its_target(tmp_path: Path) -> None:

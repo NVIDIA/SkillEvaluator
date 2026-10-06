@@ -224,7 +224,8 @@ def test_bounded_harbor_process_timeout_preserves_redacted_diagnostic_tail() -> 
             [sys.executable, "-c", script],
             env=dict(os.environ),
             stdin_text=None,
-            timeout_seconds=0.1,
+            # Long enough for the child to start and write its diagnostic on a loaded machine; it sleeps 30 s.
+            timeout_seconds=5,
             max_output_bytes=4096,
             diagnostic_tail_chars=128,
             secret_values={secret},

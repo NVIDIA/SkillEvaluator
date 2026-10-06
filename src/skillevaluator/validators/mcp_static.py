@@ -1804,10 +1804,16 @@ class HostAllowlist:
         suffixes: list[str] = []
         networks: list[IPNetwork] = []
         for raw in entries:
-            entry = _normalize_host(raw) if isinstance(raw, str) else ""
-            if entry.startswith("*."):
-                suffixes.append(entry[1:])
-            elif entry:
+            text = raw.strip().translate(_DOT_LOOKALIKES) if isinstance(raw, str) else ""
+            if text.startswith("*."):
+                # The suffix is normalized on its own: IDNA rejects the '*' label, which would
+                # leave a Unicode suffix that never matches a host normalized to punycode.
+                suffix = _normalize_host(text[2:])
+                if suffix:
+                    suffixes.append(f".{suffix}")
+                continue
+            entry = _normalize_host(text)
+            if entry:
                 names.add(entry)
                 with contextlib.suppress(ValueError):  # a host name, not an IP literal or network
                     networks.append(ipaddress.ip_network(entry, strict=False))

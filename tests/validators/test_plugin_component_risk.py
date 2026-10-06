@@ -490,6 +490,13 @@ def test_http_hook_endpoint_policy(tmp_path: Path) -> None:
     assert checks["plugin_hook_http_endpoint_private"] == Severity.MEDIUM
 
 
+def test_http_hook_unicode_wildcard_host_pattern_is_allowed(tmp_path: Path) -> None:
+    """Regression: '*.bücher.example' in hooks.allowed_urls never matched, since hosts are compared in punycode."""
+    root = _plugin(tmp_path, files={"hooks/hooks.json": _http_hook("https://sub.bücher.example/x")})
+    policy = ValidationPolicy(hook_allowed_urls=("*.bücher.example",))
+    assert "plugin_hook_http_url_not_allowed" not in _checks(_validate(root, policy))
+
+
 def test_http_hook_allowlist_policy(tmp_path: Path) -> None:
     root = _plugin(
         tmp_path,

@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import tracemalloc
+from collections.abc import Callable
+
 import pytest
 
 from skillevaluator.utils.structured_data import (
@@ -71,6 +74,94 @@ def test_json_preflight_does_not_treat_an_escaped_backslash_as_an_escape_prefix(
 def test_json_preflight_bounds_an_unterminated_string() -> None:
     with pytest.raises(StructuredDataLimitError, match=r"string length exceeds 3"):
         preflight_json_structure('["abcd', max_string_chars=3)
+
+
+def _traced_peak_bytes(callback: Callable[[], object]) -> int:
+    """Return the most memory *callback* held at once, as tracemalloc sees it."""
+    was_tracing = tracemalloc.is_tracing()
+    if not was_tracing:
+        tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        before, _peak = tracemalloc.get_traced_memory()
+        callback()
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        if not was_tracing:
+            tracemalloc.stop()
+    return peak - before
+
+
+def test_json_preflight_scans_a_string_of_escapes_in_memory_linear_in_its_size() -> None:
+    # A 256 KiB string value made only of escapes. A backtracking repeat kept regex
+    # state for every escape (about 80 bytes per input byte, so an 8 MiB lockfile
+    # peaked at 655 MiB); the scan may hold only a few copies of the input.
+    raw = '{"a": "' + '\\"' * 131_072 + '"}'
+
+    def scan() -> None:
+        with pytest.raises(StructuredDataLimitError, match=r"string length exceeds 65536"):
+            preflight_json_structure(raw)
+
+    assert _traced_peak_bytes(scan) < 16 * len(raw)
+
+
+def test_json_preflight_refuses_a_string_far_past_the_limit_without_decoding_its_escapes() -> None:
+    # One decoded character takes at most twelve input characters (an escaped
+    # surrogate pair), so a 1 MiB body cannot fit 65,536 characters; decoding it
+    # would hold bookkeeping for each of its 524,288 escapes.
+    raw = '{"a": "' + '\\"' * 524_288 + '"}'
+
+    def scan() -> None:
+        with pytest.raises(StructuredDataLimitError, match=r"string length exceeds 65536"):
+            preflight_json_structure(raw)
+
+    assert _traced_peak_bytes(scan) < 2 * len(raw)
+
+
+@pytest.mark.parametrize(
+    ("body", "max_string_chars"),
+    [
+        # Twelve input characters decode to one: the bound is exact.
+        ("\\ud83d\\ude00" * 4, 4),
+        ("\\u0041" * 4, 4),
+        ("a" * 4, 4),
+    ],
+)
+def test_json_preflight_decodes_a_body_within_twelve_characters_per_allowed_character(
+    body: str, max_string_chars: int
+) -> None:
+    preflight_json_structure(f'["{body}"]', max_string_chars=max_string_chars)
+
+    with pytest.raises(StructuredDataLimitError, match=rf"string length exceeds {max_string_chars - 1}"):
+        preflight_json_structure(f'["{body}"]', max_string_chars=max_string_chars - 1)
+
+
+@pytest.mark.parametrize(
+    ("raw", "max_string_chars", "max_tokens"),
+    [
+        ('["a\\"b"]', 3, 2),
+        ('["a\\\\", "b"]', 2, 4),
+        ('["\\"\\"\\""]', 3, 2),
+        ('["x", "y\\\\", {"k": "v\\u00e9"}]', 2, 8),
+    ],
+)
+def test_json_preflight_reads_strings_with_escapes_as_whole_tokens(
+    raw: str, max_string_chars: int, max_tokens: int
+) -> None:
+    preflight_json_structure(raw, max_string_chars=max_string_chars, max_tokens=max_tokens)
+
+    with pytest.raises(StructuredDataLimitError, match=r"string length exceeds"):
+        preflight_json_structure(raw, max_string_chars=max_string_chars - 1, max_tokens=max_tokens)
+    with pytest.raises(StructuredDataLimitError, match=r"token count exceeds"):
+        preflight_json_structure(raw, max_string_chars=max_string_chars, max_tokens=max_tokens - 1)
+
+
+def test_json_preflight_leaves_a_trailing_lone_backslash_outside_an_unterminated_string() -> None:
+    # The string body stops before a backslash that has no character to escape.
+    preflight_json_structure('["ab\\', max_string_chars=2)
+
+    with pytest.raises(StructuredDataLimitError, match=r"string length exceeds 1"):
+        preflight_json_structure('["ab\\', max_string_chars=1)
 
 
 @pytest.mark.parametrize(

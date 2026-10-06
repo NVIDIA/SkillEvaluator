@@ -152,12 +152,17 @@ def _reject_json_constant(value: str) -> object:
 
 # One preflight step: a whole string (an unterminated one runs to the end of
 # the input) or one bracket. Everything between two steps is numbers,
-# literals, colons, commas, and whitespace, handled as one run.
-_JSON_STEP = re.compile(r'"(?P<body>[^"\\]*(?:\\.[^"\\]*)*)(?P<closed>")?|[\[\]{}]', re.DOTALL)
+# literals, colons, commas, and whitespace, handled as one run. The string
+# repeats are possessive: nothing after them can fail, so they never need to
+# backtrack, and a greedy repeat would keep backtracking state for every
+# escape (about 80 bytes per input byte, far more than the input).
+_JSON_STEP = re.compile(r'"(?P<body>[^"\\]*+(?:\\.[^"\\]*+)*+)(?P<closed>")?|[\[\]{}]', re.DOTALL)
 # An escaped UTF-16 surrogate pair decodes to one character, like any other escape.
 _JSON_ESCAPE = re.compile(
     r"\\u[dD][89abAB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\.", re.DOTALL
 )
+# The most input characters one decoded character takes: an escaped surrogate pair.
+_MAX_INPUT_CHARS_PER_CHARACTER = 12
 _JSON_ITEM_CHARACTER = re.compile(r"[^\s:]")
 
 
@@ -231,9 +236,22 @@ class _JsonPreflight:
         if _JSON_ITEM_CHARACTER.search(raw, start, end):
             collection.has_trailing_item = True
 
+    def _exceeds_string_limit(self, body: str) -> bool:
+        """Return whether *body* decodes to more than ``max_string_chars`` characters.
+
+        A decoded character takes one to twelve input characters, so only a
+        body between those bounds is decoded; a longer one is refused without
+        holding bookkeeping for each of its escapes.
+        """
+        if len(body) <= self.max_string_chars:
+            return False
+        if len(body) > _MAX_INPUT_CHARS_PER_CHARACTER * self.max_string_chars:
+            return True
+        return _json_string_length(body) > self.max_string_chars
+
     def string(self, body: str, *, closed: bool) -> None:
         self._mark_item()
-        if _json_string_length(body) > self.max_string_chars:
+        if self._exceeds_string_limit(body):
             raise _limit(f"JSON string length exceeds {self.max_string_chars}")
         if closed:
             self._count_tokens(1)

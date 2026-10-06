@@ -193,7 +193,13 @@ class PluginRootReader:
         return self._read_bytes(rel, max_bytes, allow_hardlinks=True)
 
     def list_files(self, rel_dir: PurePosixPath, *, suffixes: tuple[str, ...] | None = None) -> list[PurePosixPath]:
-        """Securely list regular files below a contained directory (raises on links)."""
+        """Securely list regular files below a contained directory (raises on links).
+
+        Nothing is pruned: a client loads a nested component folder whatever its
+        name, so ``commands/evals/`` and ``agents/node_modules/`` are listed too,
+        although the Tier 1 whole-tree scans skip them (see
+        :func:`_in_unscanned_folder`).
+        """
         start = self.root if str(rel_dir) == "." else self.root / rel_dir.as_posix()
 
         def _selected(relative: Path) -> bool:
@@ -202,7 +208,6 @@ class PluginRootReader:
         files = discover_secure_files(
             start,
             selected=_selected,
-            excluded_dirs=SCAN_EXCLUDED_DIRS,
             max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
             allow_context_alias=False,
         )
@@ -344,6 +349,24 @@ def _unscanned_path_finding(
         reader.display(manifest_rel),
         _UNSCANNED_SUGGESTION,
         metadata={"plugin_component_ref": declared.raw},
+    )
+
+
+def _unscanned_file_finding(reader: PluginRootReader, component_type: str, rel: PurePosixPath) -> Finding:
+    """HIGH for a component file a client loads from a nested folder that Tier 1 whole-tree scans skip.
+
+    For example ``commands/evals/deploy.md``: clients load nested component
+    folders whatever their name (:meth:`PluginRootReader.list_files`), and the
+    scans prune that one (:func:`_in_unscanned_folder`).
+    """
+    return _plugin_finding(
+        Severity.HIGH,
+        "plugin_component_path_unscanned",
+        f"{component_type} file '{rel.as_posix()}' is inside a folder that Tier 1 whole-tree scans skip "
+        f"({_UNSCANNED_FOLDERS}), so the client loads a file that is never security-scanned",
+        reader.display(rel),
+        _UNSCANNED_SUGGESTION,
+        metadata={"path": rel.as_posix()},
     )
 
 

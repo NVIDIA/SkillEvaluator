@@ -691,6 +691,49 @@ def test_declared_component_in_a_vendor_folder_is_high(
 
 
 @pytest.mark.parametrize(
+    ("rel", "check"),
+    [
+        ("commands/evals/deploy.md", "plugin_command_unrestricted_bash"),
+        ("commands/results/deploy.md", "plugin_command_unrestricted_bash"),
+        ("agents/node_modules/helper.md", "plugin_agent_bypass_permissions"),
+    ],
+)
+def test_component_in_a_pruned_folder_inside_a_component_folder_is_listed_and_high(
+    tmp_path: Path, rel: str, check: str
+) -> None:
+    """Regression: listing skipped commands/evals/ and the like, so a loaded command had no inventory row or finding.
+
+    Claude Code loads nested command and agent folders, and the whole-tree
+    scans prune these names, so the file is listed with its checks and the
+    unscanned folder is HIGH.
+    """
+    content = _PRIVILEGED_COMMAND if rel.startswith("commands/") else _BYPASS_AGENT
+    root = _write(tmp_path / "p", {".claude-plugin/plugin.json": {"name": "demo"}, rel: content})
+
+    result = _validate(root)
+
+    assert rel in {row["path"] for row in _rows(result)}
+    checks = _checks(result)
+    assert checks[check] == Severity.HIGH
+    assert checks["plugin_component_path_unscanned"] == Severity.HIGH
+    [unscanned] = [f for f in result.findings if f.check_name == "plugin_component_path_unscanned"]
+    assert unscanned.metadata == {"path": rel}
+    assert unscanned.file_path == str(root / rel)
+    assert not result.passed
+
+
+def test_component_in_an_ordinary_nested_folder_is_not_unscanned(tmp_path: Path) -> None:
+    root = _write(
+        tmp_path / "p",
+        {".claude-plugin/plugin.json": {"name": "demo"}, "commands/ops/deploy.md": _PRIVILEGED_COMMAND},
+    )
+
+    checks = _checks(_validate(root))
+    assert checks["plugin_command_unrestricted_bash"] == Severity.HIGH
+    assert "plugin_component_path_unscanned" not in checks
+
+
+@pytest.mark.parametrize(
     ("rel", "unscanned"),
     [
         ("evals/agents", True),

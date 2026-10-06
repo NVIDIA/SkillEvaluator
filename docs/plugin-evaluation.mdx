@@ -542,7 +542,11 @@ Tier 1 file walks also skip `.git/`, `.venv/`, `node_modules/`, and
 skills folder inside one, such as `"skills": "./node_modules/pkg/skills"`, is
 scanned as its own skill unit, and a manifest path into one for any other
 component, such as `"agents": "./.venv/agents/"`, is a HIGH
-`plugin_component_path_unscanned`.
+`plugin_component_path_unscanned`. Component folders are listed whole, because
+clients load nested folders whatever their name. A command, agent, output
+style, or rule file in a skipped folder inside a component folder, such as
+`commands/evals/deploy.md` or `agents/node_modules/helper.md`, is listed and
+checked like any other, and is a HIGH `plugin_component_path_unscanned` too.
 
 ### Reference sources
 

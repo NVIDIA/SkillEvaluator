@@ -101,6 +101,7 @@ from skillevaluator.plugin_paths import (
     _path_problem_finding,
     _plugin_finding,
     _style_finding,
+    _unscanned_file_finding,
     _unscanned_path_finding,
     normalize_declared_path,
 )
@@ -693,8 +694,13 @@ class _Builder:
     def _list_dir(
         self, component_type: str, rel_dir: PurePosixPath, suffixes: tuple[str, ...] | None
     ) -> list[PurePosixPath] | None:
+        """List a component folder, nested folders included; a file in one the scans skip is HIGH.
+
+        A folder declared inside such a folder already has its own finding
+        (:func:`_unscanned_path_finding`), so its files get no second one.
+        """
         try:
-            return self.reader.list_files(rel_dir, suffixes=suffixes)
+            files = self.reader.list_files(rel_dir, suffixes=suffixes)
         except SecurePathError as exc:
             offending = exc.relative_path if exc.relative_path not in {"", "."} else ""
             location = (rel_dir / offending) if offending else rel_dir
@@ -719,6 +725,11 @@ class _Builder:
                 )
             )
             return None
+        if not _in_unscanned_folder(rel_dir):
+            for rel in files:
+                if _in_unscanned_folder(rel):
+                    self.inventory.findings.append(_unscanned_file_finding(self.reader, component_type, rel))
+        return files
 
     def _read(self, rel: PurePosixPath, max_bytes: int = CONTENT_DEDUP_MAX_FILE_BYTES) -> str | None:
         try:

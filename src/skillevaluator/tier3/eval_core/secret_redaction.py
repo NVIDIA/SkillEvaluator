@@ -8,8 +8,6 @@ from __future__ import annotations
 import os
 import re
 
-from skillevaluator.utils.redaction import GITHUB_PAT_RE, GITHUB_TOKEN_RE, GITLAB_PAT_RE, SLACK_TOKEN_RE
-
 # Prefix-style key detectors match either (a) a prefix at a token boundary
 # (negative lookbehind), with any body, or (b) a prefix glued directly onto a
 # word char, but only when followed by a strong real-key signature: a
@@ -42,13 +40,18 @@ LOG_JWT_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?=(?P<lead>(?:\b|[A-Za-z0-9_-]*?-)(?=eyJ)))(?P=lead)"
     r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"
 )
-# GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained (github_pat_) tokens,
-# GitLab personal access tokens (glpat-), and Slack tokens (xoxa-/xoxb-/xoxp-/xoxr-/xoxs-):
-# the patterns redact_sensitive_text uses, under the names the Harbor verifier's copy has.
-LOG_GITHUB_TOKEN_RE = GITHUB_TOKEN_RE
-LOG_GITHUB_PAT_RE = GITHUB_PAT_RE
-LOG_GITLAB_PAT_RE = GITLAB_PAT_RE
-LOG_SLACK_TOKEN_RE = SLACK_TOKEN_RE
+# Tokens whose prefix names their service: GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and
+# fine-grained (github_pat_) tokens, GitLab personal access tokens (glpat-), and Slack tokens
+# (xoxa-/xoxb-/xoxp-/xoxr-/xoxs-). Redaction keeps the ``prefix`` group. Each pattern is the
+# prefix and one character class of at most 255 characters, so a match attempt reads a
+# bounded number of characters and a scan stays linear in the text. They are defined here,
+# in a module that imports nothing from the package, so that eval_core loads on its own;
+# skillevaluator.utils.redaction redacts artifacts with the same patterns, and the standalone
+# Harbor verifier keeps a copy that a drift test pins.
+LOG_GITHUB_TOKEN_RE = re.compile(r"\b(?P<prefix>gh[pousr]_)[A-Za-z0-9]{36,255}\b")
+LOG_GITHUB_PAT_RE = re.compile(r"\b(?P<prefix>github_pat_)[A-Za-z0-9_]{22,255}\b")
+LOG_GITLAB_PAT_RE = re.compile(r"\b(?P<prefix>glpat-)[A-Za-z0-9_-]{20,255}")
+LOG_SLACK_TOKEN_RE = re.compile(r"\b(?P<prefix>xox[abprs]-)[A-Za-z0-9-]{10,255}")
 
 # Match verifier log redaction; shorter placeholders can corrupt ordinary diagnostic text.
 _MIN_EXACT_SECRET_LENGTH = 8

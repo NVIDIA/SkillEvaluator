@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import re
 import re._parser
+import subprocess
+import sys
 
 import pytest
 from tests.conftest import load_harbor_eval_template
@@ -150,3 +152,16 @@ def test_log_redaction_uses_the_artifact_token_patterns() -> None:
         secret_redaction.LOG_GITLAB_PAT_RE,
         secret_redaction.LOG_SLACK_TOKEN_RE,
     ) == redaction.PREFIXED_TOKEN_PATTERNS
+
+
+def test_the_eval_core_redactor_loads_without_the_utils_package() -> None:
+    """eval_core loads on its own: the token patterns live with the log redactor, not under skillevaluator.utils,
+    whose package __init__ loads the tool runner and pydantic."""
+    code = (
+        "import sys\n"
+        "import skillevaluator.tier3.eval_core.checks\n"
+        "print(sorted(name for name in ('skillevaluator.utils', 'pydantic') if name in sys.modules))\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120, check=True)
+
+    assert result.stdout.strip() == "[]"

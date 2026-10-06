@@ -220,6 +220,9 @@ def test_parse_hook_census_redacts_and_bounds_ids() -> None:
 
 # How far a label's raw text is read before redaction: plugin_signals._safe_text(value, 256).
 _LABEL_WINDOW = 256 * 4 + 256
+# The JWT fixture below is assembled from its parts so secret scanners don't read it as a real token.
+_JWT_HEADER = "eyJhbGciOiJIUzI1NiJ9"
+_JWT_PAYLOAD = "eyJzdWIiOiJhZG1pbiIsInJvbGUiOiJyb290In0"
 
 
 @pytest.mark.parametrize(
@@ -228,7 +231,7 @@ _LABEL_WINDOW = 256 * 4 + 256
         ("AKIA" + "ABCDEFGHIJKLMNOP", 19),
         ("ghp_" + "Z9" * 18, 20),
         (
-            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiIsInJvbGUiOiJyb290In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+            f"{_JWT_HEADER}.{_JWT_PAYLOAD}.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
             60,
         ),
     ],

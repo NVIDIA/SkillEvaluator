@@ -199,12 +199,16 @@ def test_report_text_redacts_every_known_secret_shape() -> None:
 
 
 _KEY_BODY = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW"
+# Assembled at run time so secret scanners don't read the fixtures below as real key blocks.
+_PRIVATE_KEY = "PRIVATE " + "KEY"
 
 
 @pytest.mark.parametrize("separator", ["\\n", "\n"])
 def test_report_text_redacts_a_whole_private_key(separator: str) -> None:
     """Regression: only the BEGIN line was redacted, so the key body and its END line were shown."""
-    key = f"-----BEGIN OPENSSH PRIVATE KEY-----{separator}{_KEY_BODY}{separator}-----END OPENSSH PRIVATE KEY-----"
+    key = (
+        f"-----BEGIN OPENSSH {_PRIVATE_KEY}-----{separator}{_KEY_BODY}{separator}-----END OPENSSH {_PRIVATE_KEY}-----"
+    )
 
     text = report_text(f"printf '%s' '{key}' > ~/.ssh/id")
 
@@ -213,7 +217,7 @@ def test_report_text_redacts_a_whole_private_key(separator: str) -> None:
 
 def test_report_text_withholds_everything_after_a_private_key_it_cannot_read_as_a_block() -> None:
     # 'XPRIVATE KEY' has the secret shape of a private-key header but is not a PEM label redaction reads.
-    text = report_text(f"echo '-----BEGIN XPRIVATE KEY----- {_KEY_BODY} -----END XPRIVATE KEY-----' > k")
+    text = report_text(f"echo '-----BEGIN X{_PRIVATE_KEY}----- {_KEY_BODY} -----END X{_PRIVATE_KEY}-----' > k")
 
     assert text == "echo 'private-key-<redacted>"
 

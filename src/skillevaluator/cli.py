@@ -3581,7 +3581,9 @@ def evaluate_plugin(
                     plugin_provenance=provenance,
                 )
             if failure:
-                raise click.ClickException(f"Tier 3 plugin evaluation did not complete: {failure}")
+                # The INCOMPLETE reason every report gives: why the run did not complete, then what it deferred.
+                fallback = {"execution_incomplete": f"Tier 3 plugin evaluation did not complete: {failure}"}
+                raise click.ClickException(incomplete_reason(provenance or fallback))
             if provenance and provenance.get("partial"):
                 raise click.ClickException(incomplete_reason(provenance))
     except click.ClickException:

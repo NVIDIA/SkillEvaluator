@@ -755,6 +755,39 @@ def test_evaluate_plugin_writes_provenance_before_failing(
     assert refreshed and refreshed[0]["execution_incomplete"] == sidecar["execution_incomplete"]
 
 
+@pytest.mark.parametrize("provenance_builds", [True, False], ids=["with-provenance", "provenance-failed"])
+def test_evaluate_plugin_fails_with_the_incomplete_reason_the_reports_give(
+    tmp_path: Path, package, monkeypatch: pytest.MonkeyPatch, provenance_builds: bool
+) -> None:
+    from skillevaluator.evaluation.tier3_report import incomplete_reason
+
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    engine, run_dir = _failed_engine(tmp_path, package)
+    prepared = _prepared(tmp_path, package)
+    prepared.provenance = lambda: {**package.provenance(), "unresolved_skill_refs": ["org/repo/a", "org/repo/b"]}
+    monkeypatch.setattr("skillevaluator.tier3.plugin_eval.prepare_plugin_eval_package", lambda *_a, **_k: prepared)
+    monkeypatch.setattr(EvaluationService, "evaluate", lambda _self, _options, **_kwargs: engine)
+    monkeypatch.setattr("skillevaluator.tier3.result_display.render_evaluation_result", lambda *_a, **_k: None)
+    monkeypatch.setattr("skillevaluator.evaluation.tier3_report.refresh_plugin_run_report", lambda *_a, **_k: None)
+    if not provenance_builds:
+
+        def broken_provenance(*_args: Any) -> dict[str, Any]:
+            raise RuntimeError("provenance could not be built")
+
+        monkeypatch.setattr(cli_module, "_plugin_provenance_with_runtime_evidence", broken_provenance)
+
+    outcome = CliRunner().invoke(cli_module.cli, ["tier3", "evaluate-plugin", str(plugin), "--progress", "off"])
+
+    assert outcome.exit_code == 1
+    failure = "Tier 3 plugin evaluation did not complete: claude-code without-skill Harbor run failed"
+    assert f"Error: INCOMPLETE: {failure}" in outcome.output
+    if provenance_builds:
+        sidecar = json.loads((run_dir / "plugin_provenance.json").read_text(encoding="utf-8"))
+        assert f"Error: {incomplete_reason(sidecar)}" in outcome.output
+        assert "2 unresolved skill refs could not be resolved or evaluated at Tier 3" in outcome.output
+
+
 def test_a_crash_in_the_report_only_sum_of_parts_arm_keeps_the_other_arms(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

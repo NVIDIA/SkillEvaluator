@@ -116,7 +116,11 @@ def _positive_start_line(line_number: Any) -> int | None:
 
 
 def _resolve_artifact_path(file_path: str, scan_root: Path | None) -> Path:
-    """Resolve a validator file path against the scanned skill directory."""
+    """Resolve a validator file path against the scanned skill directory.
+
+    The result is resolved when it is absolute; without a scan root a
+    relative path is returned as it is.
+    """
     normalized = file_path.replace("\\", "/")
     path = Path(normalized)
     if scan_root is not None and not path.is_absolute():
@@ -126,28 +130,22 @@ def _resolve_artifact_path(file_path: str, scan_root: Path | None) -> Path:
     return path
 
 
-def _normalize_artifact_uri(
-    file_path: str,
-    workspace_root: Path | None,
-    scan_root: Path | None = None,
-) -> str:
-    """Return a repository-relative, URI-encoded artifact path for SARIF."""
-    path = _resolve_artifact_path(file_path, scan_root)
+def _artifact_uri(path: Path, workspace_root: Path | None) -> str:
+    """Return the repository-relative, URI-encoded SARIF URI of a :func:`_resolve_artifact_path` result.
+
+    *workspace_root* is already resolved.
+    """
+    normalized = path.as_posix()
     if workspace_root is not None:
         try:
-            # Windows paths can be rooted (``\\workspace\\...``) without a
-            # drive, in which case ``is_absolute()`` is false until resolved.
-            if path.is_absolute() or path.root:
-                relative = path.resolve().relative_to(workspace_root.resolve())
-                normalized = relative.as_posix()
-            else:
-                normalized = path.as_posix()
+            if path.is_absolute():
+                normalized = path.relative_to(workspace_root).as_posix()
+            elif path.root:
+                # Windows paths can be rooted (``\\workspace\\...``) without a
+                # drive, in which case ``is_absolute()`` is false until resolved.
+                normalized = path.resolve().relative_to(workspace_root).as_posix()
         except ValueError:
-            normalized = path.as_posix()
-    elif path.is_absolute():
-        normalized = path.as_posix()
-    else:
-        normalized = path.as_posix()
+            pass
     return quote(normalized, safe="/:@%")
 
 
@@ -159,17 +157,11 @@ def _artifact_location(uri: str) -> dict[str, Any]:
     return location
 
 
-def _physical_location(
-    finding: Finding,
-    artifact_path: str,
-    workspace_root: Path | None,
-    scan_root: Path | None = None,
-) -> dict[str, Any] | None:
-    if not artifact_path:
+def _physical_location(finding: Finding, path: Path | None, workspace_root: Path | None) -> dict[str, Any] | None:
+    """Return the SARIF location of a finding whose file resolved to *path*."""
+    if path is None:
         return None
-    location: dict[str, Any] = {
-        "artifactLocation": _artifact_location(_normalize_artifact_uri(artifact_path, workspace_root, scan_root)),
-    }
+    location: dict[str, Any] = {"artifactLocation": _artifact_location(_artifact_uri(path, workspace_root))}
     start_line = _positive_start_line(finding.line_number)
     if start_line is not None:
         region: dict[str, Any] = {"startLine": start_line}
@@ -179,18 +171,24 @@ def _physical_location(
     return {"physicalLocation": location}
 
 
-def _plugin_component(artifact_path: str, components: ComponentIndex, scan_root: Path | None) -> dict[str, str] | None:
+def _plugin_component(
+    artifact_path: str,
+    path: Path | None,
+    components: ComponentIndex,
+    scan_root: Path | None,
+) -> dict[str, str] | None:
     """Return the inventory component a finding's file belongs to.
 
     The plugin block records its root as typed (``.`` for ``validate .``),
     which an absolute finding path cannot match. The scan root is the resolved
-    plugin root, so such a path is looked up relative to it instead.
+    plugin root, so such a path is looked up relative to it instead, through
+    *path*, the resolved file the finding's SARIF location names.
     """
     component = components.component(artifact_path)
-    if component is not None or scan_root is None or not Path(artifact_path).is_absolute():
+    if component is not None or scan_root is None or path is None or not Path(artifact_path).is_absolute():
         return component
     try:
-        relative = _resolve_artifact_path(artifact_path, scan_root).relative_to(scan_root.resolve())
+        relative = path.relative_to(scan_root)
     except ValueError:
         return None
     return components.component(relative.as_posix())
@@ -203,7 +201,10 @@ def _result_from_finding(
     scan_root: Path | None = None,
     components: ComponentIndex | None = None,
 ) -> dict[str, Any]:
-    """Convert one finding; *components* indexes the plugin inventory of a plugin run."""
+    """Convert one finding; *components* indexes the plugin inventory of a plugin run.
+
+    *workspace_root* and *scan_root* are already resolved.
+    """
     severity = _finding_severity_value(finding)
     result: dict[str, Any] = {
         "ruleId": _rule_id(validator_name, finding.check_name),
@@ -216,7 +217,8 @@ def _result_from_finding(
     # skill's "[skill] " label is not part of the path: kept, it became "%5Bskill%5D%20/abs/path", which points
     # nowhere and leaks the local path.
     artifact_path = (components or _NO_INVENTORY).artifact_path(finding.file_path) if finding.file_path else ""
-    location = _physical_location(finding, artifact_path, workspace_root, scan_root)
+    path = _resolve_artifact_path(artifact_path, scan_root) if artifact_path else None
+    location = _physical_location(finding, path, workspace_root)
     if location is not None:
         result["locations"] = [location]
     properties: dict[str, Any] = {
@@ -227,7 +229,7 @@ def _result_from_finding(
     }
     if finding.metadata:
         properties["metadata"] = finding.metadata
-    plugin_component = _plugin_component(artifact_path, components, scan_root) if components is not None else None
+    plugin_component = _plugin_component(artifact_path, path, components, scan_root) if components is not None else None
     if plugin_component:
         properties["pluginComponent"] = plugin_component
     result["properties"] = properties
@@ -382,7 +384,7 @@ def _canary_results(
     root = (plugin or {}).get("root")
     manifest = (plugin or {}).get("manifest_filename")
     if isinstance(root, str) and root and isinstance(manifest, str) and manifest:
-        uri = _normalize_artifact_uri(f"{root.rstrip('/')}/{manifest}", workspace_root, scan_root)
+        uri = _artifact_uri(_resolve_artifact_path(f"{root.rstrip('/')}/{manifest}", scan_root), workspace_root)
         location = {"physicalLocation": {"artifactLocation": _artifact_location(uri)}}
     sarif_results: list[dict[str, Any]] = []
     for result in results:
@@ -489,8 +491,9 @@ class SARIFReporter(ReporterBase):
     def render_all(self, results: list[ValidationResult]) -> str:
         rules: dict[str, dict[str, Any]] = {}
         sarif_results: list[dict[str, Any]] = []
-        workspace_root = self.workspace_root
-        scan_root = self.scan_root
+        # Resolved once: every finding's location is made relative to them.
+        workspace_root = self.workspace_root.resolve() if self.workspace_root is not None else None
+        scan_root = self.scan_root.resolve() if self.scan_root is not None else None
 
         plugin = self._plugin_block_from_results(results)
         components = ComponentIndex(plugin) if plugin is not None else None

@@ -901,6 +901,31 @@ def test_sarif_does_not_join_a_root_relative_bundled_skill_path_onto_the_skill(t
     }
 
 
+def test_sarif_resolves_each_finding_path_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A finding's location and plugin component share one resolved path, and the roots are resolved once."""
+    result = _validate_dot_plugin_result()
+    findings = 20
+    for index in range(findings):
+        # Absolute paths miss the inventory (its root is "." as typed), so the scan-root fallback places them.
+        result.add_finding(_finding(str(tmp_path / "skills" / "foo" / f"file{index}.md"), f"check{index}"))
+    resolved: list[Path] = []
+    resolve = Path.resolve
+
+    def counting_resolve(path: Path, *args: object, **kwargs: object) -> Path:
+        resolved.append(path)
+        return resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", counting_resolve)
+
+    document = _sarif([result], tmp_path)
+
+    assert set(_placed(document).values()) == {
+        (f"skills/foo/file{index}.md", "skills/foo") for index in range(findings)
+    }
+    # One per finding, plus the workspace root, the scan root, and the manifest's canary location.
+    assert len(resolved) <= findings + 3
+
+
 def _plugin_with_skills(*skills: tuple[str, str], root: str = ".") -> ValidationResult:
     """Tier 1 results for a plugin whose inventory lists these ``(name, path)`` bundled skills."""
     result = ValidationResult(validator_name="Plugin Schema", validator_description="Tier 1 plugin validation")

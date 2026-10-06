@@ -57,19 +57,19 @@ class DeclaredPath:
     dot_relative: bool = True
 
 
-def normalize_declared_path(raw: str, root_prefixes: Iterable[str] = ("${CLAUDE_PLUGIN_ROOT}",)) -> DeclaredPath:
+def normalize_declared_path(raw: str, root_prefixes: Iterable[str]) -> DeclaredPath:
     """Normalize one manifest path to a contained root-relative POSIX path.
 
     Claude Code requires ``./``-relative paths (``"."``/``"./"`` names the root).
-    A root placeholder in ``root_prefixes`` names the root only when a separator
-    (``/`` or ``\\``) or nothing follows it: a client expands it as text, so
+    ``root_prefixes`` are the root placeholders the format's client expands in
+    manifest paths: callers pass :attr:`FormatProfile.manifest_path_prefixes`,
+    which only Cursor's profile fills, so any other leading ``${...}`` is the
+    ``placeholder`` problem. A root
+    placeholder names the root only when a separator (``/`` or ``\\``) or
+    nothing follows it: a client expands it as text, so
     ``${CURSOR_PLUGIN_ROOT}foo/x.sh`` loads ``<root>foo/x.sh`` beside the root,
-    an escape. The inventory passes only the placeholders a format's client
-    expands in manifest paths (:attr:`FormatProfile.manifest_path_prefixes`,
-    Cursor's), so any other leading ``${...}`` is the ``placeholder`` problem.
-    The ``${CLAUDE_PLUGIN_ROOT}`` default is kept for existing callers; Claude
-    Code itself expands no placeholder there. Absolute paths, home-relative
-    paths, drive letters, and ``..`` segments are escapes.
+    an escape. Absolute paths, home-relative paths, drive letters, and ``..``
+    segments are escapes.
     """
     text = raw.strip()
     if not text:

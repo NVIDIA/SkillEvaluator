@@ -55,6 +55,7 @@ from skillevaluator.plugin_components import (
     parse_markdown,
     summarize_coverage,
 )
+from skillevaluator.plugin_formats import CLAUDE_PROFILE
 from skillevaluator.plugin_states import COVERAGE_STATE_RANK, EVALUATED_COVERAGE_STATES
 from skillevaluator.tier3.toml_utils import toml_quote
 from skillevaluator.tier3_environments import PLUGIN_LOAD_CHOICES
@@ -581,23 +582,24 @@ def to_claude_root(value: Any, pattern: re.Pattern[str] | None) -> Any:
 
 #: The Cursor and Agent Plugins root placeholders, rewritten in every translated Cursor hook command.
 _CURSOR_ROOT_VAR_RE = foreign_root_var_re(("${CURSOR_PLUGIN_ROOT}", "${PLUGIN_ROOT}"))
-#: The plugin-root prefixes Claude Code expands in the paths a ``plugin.json`` declares.
-CLAUDE_ROOT_PATH_PREFIXES = (CLAUDE_PLUGIN_ROOT_VAR, "$CLAUDE_PLUGIN_ROOT")
 
 
 def declared_plugin_paths(value: Any) -> list[PurePosixPath]:
     """The root-relative paths a ``plugin.json`` path field declares (one path or a list of them).
 
-    Each path is normalized like the Tier 1 inventory does
-    (:func:`~skillevaluator.plugin_paths.normalize_declared_path`): a path
-    that escapes the plugin root (absolute, home-relative, or through ``..``),
-    one under another placeholder, and the plugin root itself are skipped.
+    Each path is normalized with the Tier 1 inventory's rule for Claude Code
+    (:func:`~skillevaluator.plugin_paths.normalize_declared_path` with
+    :data:`~skillevaluator.plugin_formats.CLAUDE_PROFILE`): a path that
+    escapes the plugin root (absolute, home-relative, or through ``..``), one
+    that starts with a placeholder (Claude Code expands ``${CLAUDE_PLUGIN_ROOT}``
+    in hook commands and MCP server fields, not in component paths), and the
+    plugin root itself are skipped.
     """
     paths: list[PurePosixPath] = []
     for raw in value if isinstance(value, list) else [value]:
         if not isinstance(raw, str):
             continue
-        rel = normalize_declared_path(raw, CLAUDE_ROOT_PATH_PREFIXES).rel
+        rel = normalize_declared_path(raw, CLAUDE_PROFILE.manifest_path_prefixes).rel
         if rel is not None and str(rel) != ".":
             paths.append(rel)
     return list(dict.fromkeys(paths))

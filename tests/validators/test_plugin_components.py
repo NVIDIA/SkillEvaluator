@@ -43,7 +43,7 @@ from skillevaluator.plugin_components import (
     refresh_component_finding_counts,
     summarize_coverage,
 )
-from skillevaluator.plugin_formats import CLAUDE_PROFILE
+from skillevaluator.plugin_formats import CLAUDE_PROFILE, CURSOR_PROFILE
 from skillevaluator.plugin_manifest import locate_plugin_manifest
 from skillevaluator.tier1.commands import run_validation
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
@@ -51,6 +51,8 @@ from skillevaluator.validators.policy import ValidationPolicy
 
 _SKIP_SYMLINKS = pytest.mark.skipif(os.name == "nt", reason="POSIX symlink fixture")
 _PINNED_FS = {"command": "npx", "args": ["-y", "@scope/fs@1.2.3"]}
+# The root placeholders Cursor expands in manifest component paths.
+_CURSOR_PREFIXES = CURSOR_PROFILE.manifest_path_prefixes
 
 
 def _plugin(root: Path, manifest: dict | None = None, files: dict[str, str | dict | list] | None = None) -> Path:
@@ -409,33 +411,35 @@ def test_symlink_inside_default_component_dir_is_unsafe(tmp_path: Path) -> None:
 
 
 def test_normalize_declared_path() -> None:
-    assert normalize_declared_path("./a/b/").rel.as_posix() == "a/b"
-    assert normalize_declared_path(".").rel.as_posix() == "."
-    assert normalize_declared_path("${CLAUDE_PLUGIN_ROOT}/x.json").rel.as_posix() == "x.json"
-    assert normalize_declared_path("a/../../b").problem == "escape"
-    assert normalize_declared_path("\\\\server\\share").problem == "escape"
-    assert normalize_declared_path("${HOME}/x").problem == "placeholder"
-    assert normalize_declared_path("${CLAUDE_PLUGIN_ROOT}/x.json", ()).problem == "placeholder"
-    assert normalize_declared_path("./a${HOME}").problem == "invalid"
-    assert normalize_declared_path("").problem == "empty"
-    assert normalize_declared_path("x.json").dot_relative is False
+    claude = CLAUDE_PROFILE.manifest_path_prefixes
+    assert normalize_declared_path("./a/b/", claude).rel.as_posix() == "a/b"
+    assert normalize_declared_path(".", claude).rel.as_posix() == "."
+    assert normalize_declared_path("${CLAUDE_PLUGIN_ROOT}/x.json", _CURSOR_PREFIXES).rel.as_posix() == "x.json"
+    assert normalize_declared_path("a/../../b", claude).problem == "escape"
+    assert normalize_declared_path("\\\\server\\share", claude).problem == "escape"
+    assert normalize_declared_path("${HOME}/x", _CURSOR_PREFIXES).problem == "placeholder"
+    # Claude Code expands no placeholder in manifest component paths.
+    assert normalize_declared_path("${CLAUDE_PLUGIN_ROOT}/x.json", claude).problem == "placeholder"
+    assert normalize_declared_path("./a${HOME}", claude).problem == "invalid"
+    assert normalize_declared_path("", claude).problem == "empty"
+    assert normalize_declared_path("x.json", claude).dot_relative is False
 
 
 @pytest.mark.parametrize(
     ("raw", "rel"),
-    [("${CLAUDE_PLUGIN_ROOT}", "."), ("${CLAUDE_PLUGIN_ROOT}/", "."), ("${CLAUDE_PLUGIN_ROOT}\\x.json", "x.json")],
+    [("${CURSOR_PLUGIN_ROOT}", "."), ("${CURSOR_PLUGIN_ROOT}/", "."), ("${CLAUDE_PLUGIN_ROOT}\\x.json", "x.json")],
 )
 def test_root_placeholder_followed_by_a_separator_or_nothing_names_the_root(raw: str, rel: str) -> None:
-    declared = normalize_declared_path(raw)
+    declared = normalize_declared_path(raw, _CURSOR_PREFIXES)
     assert (declared.rel, declared.problem) == (PurePosixPath(rel), None)
 
 
 @pytest.mark.parametrize(
-    "raw", ["${CLAUDE_PLUGIN_ROOT}foo/x.sh", "${CLAUDE_PLUGIN_ROOT}.mcp.json", "${CLAUDE_PLUGIN_ROOT}=x"]
+    "raw", ["${CURSOR_PLUGIN_ROOT}foo/x.sh", "${CLAUDE_PLUGIN_ROOT}.mcp.json", "${CURSOR_PLUGIN_ROOT}=x"]
 )
 def test_root_placeholder_glued_to_a_name_escapes_the_root(raw: str) -> None:
-    """A client expands ``${CLAUDE_PLUGIN_ROOT}foo/x.sh`` to ``<root>foo/x.sh``, beside the root, not ``foo/x.sh``."""
-    declared = normalize_declared_path(raw)
+    """A client expands ``${CURSOR_PLUGIN_ROOT}foo/x.sh`` to ``<root>foo/x.sh``, beside the root, not ``foo/x.sh``."""
+    declared = normalize_declared_path(raw, _CURSOR_PREFIXES)
     assert (declared.rel, declared.problem) == (None, "escape")
 
 

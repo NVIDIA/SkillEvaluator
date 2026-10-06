@@ -470,10 +470,22 @@ def test_claude_code_plugin_copy_skips_env_files_in_any_letter_case(tmp_path: Pa
     assert {"config/.env.example", "templates/.ENV.EXAMPLE"} <= files
 
 
-def test_claude_code_plugin_copy_skips_only_declared_lsp_and_monitor_files_inside_the_root(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("monitors", "copied"),
+    [
+        ("./config/monitors.json", False),
+        # Claude Code expands no root placeholder in manifest component paths
+        # (Tier 1 reports these as invalid), so they name no plugin file.
+        ("$CLAUDE_PLUGIN_ROOT/config/monitors.json", True),
+        ("${CLAUDE_PLUGIN_ROOT}/config/monitors.json", True),
+    ],
+)
+def test_claude_code_plugin_copy_skips_only_declared_lsp_and_monitor_files_inside_the_root(
+    tmp_path: Path, monitors: str, copied: bool
+) -> None:
     plugin = _contained_plugin(tmp_path)
     manifest = json.loads((plugin / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
-    manifest.update({"lspServers": "/servers.lsp.json", "monitors": "$CLAUDE_PLUGIN_ROOT/config/monitors.json"})
+    manifest.update({"lspServers": "/servers.lsp.json", "monitors": monitors})
     _write(plugin / ".claude-plugin" / "plugin.json", json.dumps(manifest))
     _write(plugin / "servers.lsp.json", "{}")
     _write(plugin / "config" / "monitors.json", "[]")
@@ -482,9 +494,9 @@ def test_claude_code_plugin_copy_skips_only_declared_lsp_and_monitor_files_insid
     bundle, _, _ = _stage(tmp_path, "claude-code", package.native_source)
 
     files = _files(bundle / "native" / "claude-code" / "plugin")
-    # An absolute path names no plugin file, while $CLAUDE_PLUGIN_ROOT names the plugin root.
+    # An absolute path names no plugin file, while a './' path names one inside the root.
     assert "servers.lsp.json" in files
-    assert "config/monitors.json" not in files
+    assert ("config/monitors.json" in files) is copied
 
 
 def test_claude_code_plugin_copy_skips_results_generated_output_and_the_evals_source(tmp_path: Path) -> None:

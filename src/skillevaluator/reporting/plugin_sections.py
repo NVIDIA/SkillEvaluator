@@ -577,7 +577,11 @@ def _unsupported_types(inventory: Mapping[str, Any]) -> list[str]:
 
 # The component types Tier 1 checks statically (Hook risk, Subagent and command
 # privileges) when the plugin block carries rows for them, as reports name them.
-_STATIC_RISK_TYPE_NAMES = {"hook": "hooks", "agent": "subagents", "command": "commands"}
+_STATIC_RISK_TYPE_NAMES = {"hook": "hooks", "monitor": "monitors", "agent": "subagents", "command": "commands"}
+# Tier 1 checks a plugin monitor's command like a command hook on this event
+# (plugin_component_risk.MONITOR_EVENT), so a Hook risk row on it is the
+# monitor's, not a hook's.
+_MONITOR_HOOK_EVENT = "Monitor"
 
 
 def unsupported_type_split(block: object, coverage: Mapping[str, Any] | None = None) -> dict[str, list[str]]:
@@ -608,8 +612,9 @@ def _statically_checked_types(block: Mapping[str, Any]) -> set[str]:
     Reads the raw rows: :func:`static_risk_view` builds their display rows.
     """
     checked: set[str] = set()
-    if any(isinstance(hook, Mapping) for hook in _sequence(_mapping(block.get("hook_risk")).get("hooks"))):
-        checked.add("hook")
+    for hook in _sequence(_mapping(block.get("hook_risk")).get("hooks")):
+        if isinstance(hook, Mapping):
+            checked.add("monitor" if hook.get("event") == _MONITOR_HOOK_EVENT else "hook")
     for row in _sequence(_mapping(block.get("privileges")).get("components")):
         component_type = text(row.get("type"), limit=_KEYWORD_CHARS) if isinstance(row, Mapping) else ""
         if component_type in _STATIC_RISK_TYPE_NAMES:

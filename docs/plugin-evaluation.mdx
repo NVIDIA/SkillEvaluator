@@ -95,8 +95,9 @@ Reports make the gaps explicit instead of letting them read as a pass:
 - **Tier 1** inventories every component with a `support` level of
   `evaluated`, `static_only`, or `unsupported`, and lists the component types
   that Tier 3 does not stage in wrapper mode in `unsupported_types_present`.
-  Tier 1 still checks hooks, subagents and commands statically (Hook risk and
-  Subagent and command privileges). Every report names an unsupported type as
+  Tier 1 still checks hooks, monitors, subagents and commands statically (Hook
+  risk, which checks a monitor's command on the event `Monitor`, and Subagent
+  and command privileges). Every report names an unsupported type as
   statically checked only when that run has Hook risk or privilege rows for it,
   and says that nothing evaluated the rest.
 - **Tier 3** records a coverage state and a reason for every component. When a

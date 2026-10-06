@@ -320,6 +320,48 @@ def test_unsupported_type_split_names_only_the_types_tier1_checked() -> None:
     )
 
 
+def test_tier1_names_monitors_statically_checked_from_their_hook_risk_rows(tmp_path: Path) -> None:
+    """Tier 1 checks each monitor's command like a command hook on the event Monitor."""
+    from skillevaluator.reporting.plugin_sections import tier1_plugin_view, unsupported_type_split
+
+    plugin = tmp_path / "plug"
+    (plugin / ".claude-plugin").mkdir(parents=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "plug", "version": "1.0.0", "description": "demo"}), encoding="utf-8"
+    )
+    (plugin / "monitors").mkdir()
+    (plugin / "monitors" / "monitors.json").write_text(
+        json.dumps({"monitors": [{"name": "watch", "command": "tail -f build.log"}]}), encoding="utf-8"
+    )
+    (plugin / ".lsp.json").write_text(json.dumps({"py": {"command": "pylsp"}}), encoding="utf-8")
+
+    results = tier1_commands.run_validation(plugin, checks="schema", content_type="plugin")
+    block = next(result.metadata["plugin"] for result in results if isinstance(result.metadata.get("plugin"), dict))
+    view = tier1_plugin_view(block)
+
+    assert unsupported_type_split(block) == {"static_only": ["monitor"], "unevaluated": ["lsp"]}
+    assert view is not None
+    assert view["inventory"]["unsupported_note"] == (
+        "Tier 3 does not stage these types in wrapper mode; Tier 1 checks monitors statically and only lists lsp."
+    )
+
+
+def test_a_monitor_hook_risk_row_does_not_mark_hooks_statically_checked() -> None:
+    from skillevaluator.reporting.plugin_sections import unsupported_type_split
+
+    block = tier1_plugin_result().metadata["plugin"]
+    block["component_inventory"]["unsupported_types_present"] = ["hook", "monitor"]
+    monitor_row = {"id": "monitor:watch#Monitor[0].hooks[0]", "source": "monitor:watch", "event": "Monitor"}
+    block["hook_risk"] = {"hooks": [monitor_row]}
+
+    assert unsupported_type_split(block) == {"static_only": ["monitor"], "unevaluated": ["hook"]}
+
+    hook_row = {"id": "hooks/hooks.json#PreToolUse[0].hooks[0]", "source": "hooks/hooks.json", "event": "PreToolUse"}
+    block["hook_risk"] = {"hooks": [monitor_row, hook_row]}
+
+    assert unsupported_type_split(block) == {"static_only": ["hook", "monitor"], "unevaluated": []}
+
+
 def _static_risk_block(*, unsupported: list[str]) -> dict:
     block = tier1_plugin_result().metadata["plugin"]
     block["component_inventory"]["unsupported_types_present"] = unsupported

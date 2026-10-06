@@ -430,7 +430,11 @@ def probe_repository_path(
         if error is not None:
             return _Probe("error", f"cannot inspect '{so_far}': {error}")
         if metadata is None:
-            return _Probe("absent", f"'{so_far}' does not exist")
+            # On a case-sensitive filesystem a case-only typo is simply absent, so
+            # name the other spelling here too; otherwise only macOS/Windows say why.
+            other = _exact_entry(parent, part, listings)
+            spelled = f" ('{other}' differs only in letter case)" if other else ""
+            return _Probe("absent", f"'{so_far}' does not exist{spelled}")
         other = _exact_entry(parent, part, listings)
         if other is not None:
             spelled = f" ('{other}' differs only in letter case)" if other else ""

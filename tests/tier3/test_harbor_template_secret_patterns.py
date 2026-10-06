@@ -205,6 +205,7 @@ def test_security_constants_stay_in_sync_with_eval_core(name):
         "LOG_SLACK_TOKEN_RE",
         "LOG_HUGGING_FACE_TOKEN_RE",
         "LOG_NPM_TOKEN_RE",
+        "LOG_PREFIXED_TOKEN_RE",
         "LOG_AWS_ACCESS_KEY_RE",
     ],
 )

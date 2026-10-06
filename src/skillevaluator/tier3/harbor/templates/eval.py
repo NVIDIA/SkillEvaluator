@@ -243,6 +243,19 @@ LOG_PREFIXED_TOKEN_PATTERNS = (
     LOG_NPM_TOKEN_RE,
 )
 LOG_AWS_ACCESS_KEY_RE = re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}")
+# All of the prefixed patterns in one pass over the text. Each pattern's ``prefix`` group is
+# renamed for its alternative, so the alternative that matched is the match's last group.
+LOG_PREFIXED_TOKEN_RE = re.compile(
+    "|".join(
+        pattern.pattern.replace("(?P<prefix>", f"(?P<prefix{index}>", 1)
+        for index, pattern in enumerate(LOG_PREFIXED_TOKEN_PATTERNS)
+    )
+)
+
+
+def keep_token_prefix(match):
+    """The replacement for a ``LOG_PREFIXED_TOKEN_RE`` match: its prefix, then ``<redacted>``."""
+    return f"{match.group(match.lastgroup)}<redacted>"
 
 
 def redact_secrets_in_log_line(line, *, extra_secret_values=None):
@@ -253,8 +266,7 @@ def redact_secrets_in_log_line(line, *, extra_secret_values=None):
     line = LOG_SK_RE.sub("sk-<redacted>", line)
     line = LOG_NVAPI_RE.sub("nvapi-<redacted>", line)
     line = LOG_CRSR_RE.sub("crsr_<redacted>", line)
-    for pattern in LOG_PREFIXED_TOKEN_PATTERNS:
-        line = pattern.sub(r"\g<prefix><redacted>", line)
+    line = LOG_PREFIXED_TOKEN_RE.sub(keep_token_prefix, line)
     line = LOG_AWS_ACCESS_KEY_RE.sub("aws-access-key-<redacted>", line)
     line = OPENSHIFT_TOKEN_RE.sub("sha256~<redacted>", line)
     if "eyJ" not in line:  # every JWT match contains "eyJ"; skip the scan on ordinary lines

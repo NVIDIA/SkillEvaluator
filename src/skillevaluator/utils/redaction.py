@@ -16,7 +16,9 @@ from skillevaluator.tier3.eval_core.secret_redaction import (
     LOG_GITLAB_PAT_RE,
     LOG_HUGGING_FACE_TOKEN_RE,
     LOG_NPM_TOKEN_RE,
+    LOG_PREFIXED_TOKEN_RE,
     LOG_SLACK_TOKEN_RE,
+    keep_token_prefix,
 )
 
 _SECRET_KEY_PARTS = {
@@ -138,6 +140,8 @@ PREFIXED_TOKEN_PATTERNS = (
     HUGGING_FACE_TOKEN_RE,
     NPM_TOKEN_RE,
 )
+# All of them in one pass; ``keep_token_prefix`` writes the matched prefix back.
+PREFIXED_TOKEN_RE = LOG_PREFIXED_TOKEN_RE
 AWS_ACCESS_KEY_RE = LOG_AWS_ACCESS_KEY_RE
 _REDACTIONS = (
     (_JWT_RE, r"\g<lead>jwt-<redacted>"),
@@ -147,7 +151,7 @@ _REDACTIONS = (
     (re.compile(r"(?<![A-Za-z0-9_-])nvapi-[a-zA-Z0-9_-]{8,}"), "nvapi-<redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])crsr_[a-f0-9]{16,}"), "crsr_<redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])sha256~[A-Za-z0-9._~-]+"), "sha256~<redacted>"),
-    *((pattern, r"\g<prefix><redacted>") for pattern in PREFIXED_TOKEN_PATTERNS),
+    (PREFIXED_TOKEN_RE, keep_token_prefix),
 )
 
 

@@ -149,6 +149,8 @@ _ALL_TOKEN_PATTERNS = {
     "verifier-slack": eval_template.LOG_SLACK_TOKEN_RE,
     "verifier-hugging-face": eval_template.LOG_HUGGING_FACE_TOKEN_RE,
     "verifier-npm": eval_template.LOG_NPM_TOKEN_RE,
+    "one-pass": redaction.PREFIXED_TOKEN_RE,
+    "verifier-one-pass": eval_template.LOG_PREFIXED_TOKEN_RE,
 }
 # The longest token any pattern matches: "github_pat_" and a 255-character body.
 _LONGEST_TOKEN_CHARS = len("github_pat_") + 255
@@ -177,7 +179,19 @@ def test_log_redaction_uses_the_artifact_token_patterns() -> None:
         secret_redaction.LOG_HUGGING_FACE_TOKEN_RE,
         secret_redaction.LOG_NPM_TOKEN_RE,
     ) == redaction.PREFIXED_TOKEN_PATTERNS
+    assert secret_redaction.LOG_PREFIXED_TOKEN_RE is redaction.PREFIXED_TOKEN_RE
     assert secret_redaction.LOG_AWS_ACCESS_KEY_RE is redaction.AWS_ACCESS_KEY_RE
+
+
+def test_one_pass_redacts_what_each_pattern_redacts_in_turn() -> None:
+    """The redactors read the text once, with the alternation of every token pattern."""
+    text = " ".join([*NEAR_MISSES, *(prefix + body for prefix, body in _TOKENS.values())])
+    in_turn = text
+    for pattern in redaction.PREFIXED_TOKEN_PATTERNS:
+        in_turn = pattern.sub(r"\g<prefix><redacted>", in_turn)
+
+    assert redaction.PREFIXED_TOKEN_RE.sub(secret_redaction.keep_token_prefix, text) == in_turn
+    assert eval_template.LOG_PREFIXED_TOKEN_RE.sub(eval_template.keep_token_prefix, text) == in_turn
 
 
 def test_the_eval_core_redactor_loads_without_the_utils_package() -> None:

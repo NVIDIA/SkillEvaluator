@@ -64,13 +64,12 @@ def normalize_declared_path(raw: str, root_prefixes: Iterable[str]) -> DeclaredP
     ``root_prefixes`` are the root placeholders the format's client expands in
     manifest paths: callers pass :attr:`FormatProfile.manifest_path_prefixes`,
     which only Cursor's profile fills, so any other leading ``${...}`` is the
-    ``placeholder`` problem. A root
-    placeholder names the root only when a separator (``/`` or ``\\``) or
-    nothing follows it: a client expands it as text, so
-    ``${CURSOR_PLUGIN_ROOT}foo/x.sh`` loads ``<root>foo/x.sh`` beside the root,
-    an escape. Absolute paths, home-relative paths, a drive letter in any part
-    (``./C:/Users``), and ``..`` segments are escapes; any other colon (an NTFS
-    data stream, ``x.md:hidden``) is ``invalid``.
+    ``placeholder`` problem. A root placeholder names the root only when a
+    separator (``/`` or ``\\``) or nothing follows it: a client expands it as
+    text, so ``${CURSOR_PLUGIN_ROOT}foo/x.sh`` loads ``<root>foo/x.sh`` beside
+    the root, an escape. Absolute paths, home-relative paths, a drive letter in
+    any part (``./C:/Users``), and ``..`` segments are escapes; any other colon
+    (an NTFS data stream, ``x.md:hidden``) is ``invalid``.
     """
     text = raw.strip()
     if not text:

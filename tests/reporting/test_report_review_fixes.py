@@ -320,6 +320,44 @@ def test_unsupported_type_split_names_only_the_types_tier1_checked() -> None:
     )
 
 
+def _static_risk_block(*, unsupported: list[str]) -> dict:
+    block = tier1_plugin_result().metadata["plugin"]
+    block["component_inventory"]["unsupported_types_present"] = unsupported
+    block["hook_risk"] = {
+        "hooks": [{"id": "hooks.json#PreToolUse[0].hooks[0]", "event": "PreToolUse", "handler_type": "command"}]
+    }
+    block["privileges"] = {"components": [{"type": "agent", "name": "reviewer", "path": "agents/reviewer.md"}]}
+    return block
+
+
+@pytest.mark.parametrize("unsupported", [["hook", "agent"], []])
+def test_tier1_plugin_view_builds_the_static_risk_rows_once(
+    monkeypatch: pytest.MonkeyPatch, unsupported: list[str]
+) -> None:
+    """Which unsupported types Tier 1 checked is read from the raw rows, not from a second set of display rows."""
+    from skillevaluator.reporting import plugin_sections
+
+    built: list[str] = []
+    for name in ("hook_risk_view", "privileges_view"):
+        view_builder = getattr(plugin_sections, name)
+        monkeypatch.setattr(
+            plugin_sections,
+            name,
+            lambda value, _name=name, _build=view_builder: built.append(_name) or _build(value),
+        )
+
+    view = plugin_sections.tier1_plugin_view(_static_risk_block(unsupported=unsupported))
+
+    assert view is not None
+    assert sorted(built) == ["hook_risk_view", "privileges_view"]
+    assert view["static_risk"]["hooks"]["total"] == 1
+    assert view["inventory"]["unsupported_note"] == (
+        "Tier 3 does not stage these types in wrapper mode; Tier 1 checks hooks and subagents statically."
+        if unsupported
+        else ""
+    )
+
+
 # ---------------------------------------------------------------------------
 # Markdown says how many endpoints and parity messages it left out
 # ---------------------------------------------------------------------------

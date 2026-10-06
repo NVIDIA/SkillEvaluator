@@ -592,8 +592,10 @@ def unsupported_type_split(block: object, coverage: Mapping[str, Any] | None = N
     """
     source = _mapping(block)
     staged = {row.get("type") for row in _sequence(_mapping(coverage).get("rows")) if row.get("staged")}
-    static = _statically_checked_types(source)
     remaining = [name for name in _unsupported_types(_mapping(source.get("component_inventory"))) if name not in staged]
+    if not remaining:
+        return {"static_only": [], "unevaluated": []}
+    static = _statically_checked_types(source)
     return {
         "static_only": [name for name in remaining if name in static],
         "unevaluated": [name for name in remaining if name not in static],
@@ -601,11 +603,17 @@ def unsupported_type_split(block: object, coverage: Mapping[str, Any] | None = N
 
 
 def _statically_checked_types(block: Mapping[str, Any]) -> set[str]:
-    """Return the component types this Tier 1 plugin block carries static-risk rows for."""
-    checked = {"hook"} if hook_risk_view(block.get("hook_risk")) else set()
-    privileges = privileges_view(block.get("privileges"))
-    if privileges:
-        checked.update(row["type"] for row in privileges["rows"] if row["type"] in _STATIC_RISK_TYPE_NAMES)
+    """Return the component types this Tier 1 plugin block carries static-risk rows for.
+
+    Reads the raw rows: :func:`static_risk_view` builds their display rows.
+    """
+    checked: set[str] = set()
+    if any(isinstance(hook, Mapping) for hook in _sequence(_mapping(block.get("hook_risk")).get("hooks"))):
+        checked.add("hook")
+    for row in _sequence(_mapping(block.get("privileges")).get("components")):
+        component_type = text(row.get("type"), limit=_KEYWORD_CHARS) if isinstance(row, Mapping) else ""
+        if component_type in _STATIC_RISK_TYPE_NAMES:
+            checked.add(component_type)
     return checked
 
 

@@ -210,9 +210,7 @@ _PRIVATE_KEY = "PRIVATE " + "KEY"
 @pytest.mark.parametrize("separator", ["\\n", "\n"])
 def test_report_text_redacts_a_whole_private_key(separator: str) -> None:
     """Regression: only the BEGIN line was redacted, so the key body and its END line were shown."""
-    key = (
-        f"-----BEGIN OPENSSH {_PRIVATE_KEY}-----{separator}{_KEY_BODY}{separator}-----END OPENSSH {_PRIVATE_KEY}-----"
-    )
+    key = f"-----BEGIN OPENSSH {_PRIVATE_KEY}-----{separator}{_KEY_BODY}{separator}-----END OPENSSH {_PRIVATE_KEY}-----"
 
     text = report_text(f"printf '%s' '{key}' > ~/.ssh/id")
 

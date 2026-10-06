@@ -35,6 +35,7 @@ from skillevaluator.tier1.commands import run_validation
 from skillevaluator.utils.helpers import find_bundled_plugin_skills
 from skillevaluator.utils.structured_data import StructuredDataError
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
+from skillevaluator.validators.policy import ValidationPolicy, apply_policy
 
 _AP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
 _AP_MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
@@ -498,14 +499,14 @@ def test_unscanned_skills_past_the_reporting_cap_are_counted(tmp_path: Path) -> 
     [truncated] = [f for f in result.findings if f.check_name == "schema_errors_truncated"]
     assert truncated.severity == Severity.HIGH
     assert truncated.metadata == {"actual": 105, "reported": 100, "highest_unreported_severity": "high"}
-    assert "produced 105 findings; only the first 100 are reported" in truncated.message
+    assert "produced 105 findings; only the 100 most severe are reported" in truncated.message
     assert "The most severe of the 5 not reported is HIGH." in truncated.message
 
 
-def test_manifest_field_error_past_the_reporting_cap_still_blocks(
+def test_manifest_field_error_after_the_reporting_cap_is_reported_and_blocks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Whether the manifest passed its field checks is decided over every problem, not the 100 reported."""
+    """A field error after 100 warnings is reported ahead of them, and the manifest fails its field checks."""
     from skillevaluator.plugin_formats import ManifestIssue
     from skillevaluator.validators import plugin_schema
 
@@ -515,11 +516,11 @@ def test_manifest_field_error_past_the_reporting_cap_still_blocks(
     root = _write(tmp_path / "p", {".codex-plugin/plugin.json": _CODEX})
 
     result = _validate(root)
-    assert "schema:name:pattern" not in _checks(result)  # past the cap: counted, not listed
+    assert _checks(result)["schema:name:pattern"] == Severity.HIGH  # ranked ahead of the warnings
     [truncated] = [f for f in result.findings if f.check_name == "schema_errors_truncated"]
-    # The 100 reported findings are MEDIUM; the one past the cap is HIGH, and so is the note that counts it.
-    assert truncated.severity == Severity.HIGH
-    assert truncated.metadata == {"actual": 101, "reported": 100, "highest_unreported_severity": "high"}
+    # The last MEDIUM warning is past the cap, so the note that counts it is MEDIUM.
+    assert truncated.severity == Severity.MEDIUM
+    assert truncated.metadata == {"actual": 101, "reported": 100, "highest_unreported_severity": "medium"}
     assert "plugin_manifest" not in [detail.check_name for detail in result.success_details]
     assert not result.passed
 
@@ -567,12 +568,90 @@ def test_reporting_cap_finding_takes_the_highest_unreported_severity(
     ]
     result = ValidationResult(validator_name="test")
 
-    _add_capped(result, findings, source="Test", noun="findings", file_path="f", suggestion="s")
+    _add_capped(result, findings, policy=None, source="Test", noun="findings", file_path="f", suggestion="s")
 
     [truncated] = [f for f in result.findings if f.check_name == "schema_errors_truncated"]
     assert truncated.severity == expected
     assert truncated.metadata["highest_unreported_severity"] == expected.value
     assert truncated.severity.is_error() == any(severity.is_error() for severity in unreported)
+
+
+def _escalating_policy(*checks: str) -> ValidationPolicy:
+    return ValidationPolicy(profile="custom", severity_overrides=dict.fromkeys(checks, Severity.HIGH))
+
+
+def test_policy_escalation_past_the_reporting_cap_still_blocks(tmp_path: Path) -> None:
+    """Regression: a finding a policy escalates must block even when the cap would push it out of the report.
+
+    The .env finding (MEDIUM) comes after 100 LOW agent findings. The policy is
+    applied after validation and never saw it, so the truncation note was MEDIUM
+    and the plugin passed.
+    """
+    files: dict[str, bytes | str | dict | list] = {".claude-plugin/plugin.json": {"name": "demo"}, ".env": "MODE=dev\n"}
+    for index in range(100):
+        files[f"agents/a{index:03}.md"] = f"---\nname: a{index:03}\ndescription: Helper\ntools: Bash\n---\nYou help.\n"
+    root = _write(tmp_path / "p", files)
+    policy = _escalating_policy("PLUGIN_SCHEMA.plugin_env_file_shipped")
+
+    [result] = apply_policy([PluginSchemaValidator(policy=policy).validate(root)], policy)
+
+    assert not result.passed
+    # The 100 most severe findings are reported, so the escalated one is listed.
+    assert _checks(result)["plugin_env_file_shipped"] == Severity.HIGH
+    [truncated] = [f for f in result.findings if f.check_name == "schema_errors_truncated"]
+    assert truncated.severity == Severity.LOW
+    assert truncated.metadata == {"actual": 101, "reported": 100, "highest_unreported_severity": "low"}
+    assert "produced 101 findings; only the 100 most severe are reported" in truncated.message
+
+
+def test_reporting_cap_ranks_findings_by_the_policy_severity() -> None:
+    """Past the cap, the findings the policy makes the most severe are the ones reported."""
+    from skillevaluator.validators.plugin_schema import MAX_PLUGIN_SCHEMA_FINDINGS, _add_capped, _schema_finding
+
+    findings = [
+        _schema_finding(f"note{index}", message="m", file_path="f", suggestion="s", severity=Severity.LOW)
+        for index in range(MAX_PLUGIN_SCHEMA_FINDINGS)
+    ]
+    findings.append(_schema_finding("escalated", message="m", file_path="f", suggestion="s", severity=Severity.MEDIUM))
+    policy = _escalating_policy("PLUGIN_SCHEMA.escalated")
+    result = ValidationResult(validator_name="test")
+
+    _add_capped(result, findings, policy=policy, source="Test", noun="findings", file_path="f", suggestion="s")
+    apply_policy([result], policy)
+
+    assert [f.check_name for f in result.findings[:2]] == ["escalated", "note0"]
+    assert result.findings[0].severity == Severity.HIGH
+    assert [f.check_name for f in result.findings[-2:]] == ["note98", "schema_errors_truncated"]
+    assert result.findings[-1].severity == Severity.LOW
+    assert not result.passed
+
+
+def test_manifest_success_row_follows_the_policy_severity(tmp_path: Path) -> None:
+    """A field warning the policy escalates to HIGH means the manifest did not pass its field checks."""
+    codex = {key: value for key, value in _CODEX.items() if key != "author"}
+    root = _write(tmp_path / "p", {".codex-plugin/plugin.json": codex})
+    assert "plugin_manifest" in [detail.check_name for detail in _validate(root).success_details]
+    policy = _escalating_policy("PLUGIN_SCHEMA.schema:author:missing")
+
+    [result] = apply_policy([PluginSchemaValidator(policy=policy).validate(root)], policy)
+
+    assert _checks(result)["schema:author:missing"] == Severity.HIGH
+    assert "plugin_manifest" not in [detail.check_name for detail in result.success_details]
+    assert not result.passed
+
+
+def test_manifest_success_row_follows_the_policy_severity_of_mcp_findings(tmp_path: Path) -> None:
+    """An MCP finding the policy escalates to HIGH withholds the manifest success row, like a default HIGH one."""
+    server = {"mcpServers": {"srv": {"command": "npx", "args": ["-y", "some-mcp-server"]}}}
+    root = _write(tmp_path / "p", {".claude-plugin/plugin.json": {"name": "demo"}, ".mcp.json": server})
+    assert "plugin_manifest" in [detail.check_name for detail in _validate(root).success_details]
+    policy = _escalating_policy("MCP_DECLARATION.mcp_unpinned_package")
+
+    [result] = apply_policy([PluginSchemaValidator(policy=policy).validate(root)], policy)
+
+    assert _checks(result)["mcp_unpinned_package"] == Severity.HIGH
+    assert "plugin_manifest" not in [detail.check_name for detail in result.success_details]
+    assert not result.passed
 
 
 def test_declared_component_in_an_unscanned_folder_is_high(tmp_path: Path) -> None:

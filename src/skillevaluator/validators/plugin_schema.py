@@ -123,45 +123,61 @@ def _schema_finding(
     )
 
 
+def _policy_severity(finding: Finding, policy: ValidationPolicy | None) -> Severity:
+    """The severity *finding* ends up with once the active *policy* is applied to the result."""
+    if policy is None:
+        return finding.severity
+    return policy.severity_for(finding.category, finding.check_name, finding.severity)
+
+
 def _add_capped(
     result: ValidationResult,
     findings: list[Finding],
     *,
+    policy: ValidationPolicy | None,
     source: str,
     noun: str,
     file_path: Path | str,
     suggestion: str,
 ) -> None:
-    """Add the first ``MAX_PLUGIN_SCHEMA_FINDINGS`` findings, then one finding that counts the rest.
+    """Add the ``MAX_PLUGIN_SCHEMA_FINDINGS`` most severe findings, then one finding that counts the rest.
 
-    The message reads "<source> produced <count> <noun>; only the first
-    <cap> are reported." The truncation finding takes the highest severity
-    among the findings past the cap, so it blocks exactly when one of them
-    would have: a blocking finding past the cap still fails validation, and
-    findings that are all LOW do not.
+    Severities are the ones the active *policy* gives: the policy is applied
+    only after validation, and never sees the findings left out here. Past
+    the cap the findings are ranked most severe first, keeping their order
+    within a severity, so no unreported finding is more severe than a
+    reported one, and a blocking finding is always reported. The message
+    reads "<source> produced <count> <noun>; only the <cap> most severe are
+    reported." The truncation finding takes the highest severity among the
+    unreported findings, so findings past the cap that are all LOW do not
+    fail validation.
     """
-    for finding in findings[:MAX_PLUGIN_SCHEMA_FINDINGS]:
+    if len(findings) <= MAX_PLUGIN_SCHEMA_FINDINGS:
+        for finding in findings:
+            result.add_finding(finding)
+        return
+    ranked = sorted(findings, key=lambda finding: _SEVERITY_ORDER.index(_policy_severity(finding, policy)))
+    for finding in ranked[:MAX_PLUGIN_SCHEMA_FINDINGS]:
         result.add_finding(finding)
-    unreported = findings[MAX_PLUGIN_SCHEMA_FINDINGS:]
-    if unreported:
-        severity = min((finding.severity for finding in unreported), key=_SEVERITY_ORDER.index)
-        result.add_finding(
-            _schema_finding(
-                "schema_errors_truncated",
-                message=(
-                    f"{source} produced {len(findings)} {noun}; only the first {MAX_PLUGIN_SCHEMA_FINDINGS} are "
-                    f"reported. The most severe of the {len(unreported)} not reported is {severity.value.upper()}."
-                ),
-                file_path=file_path,
-                suggestion=suggestion,
-                severity=severity,
-                metadata={
-                    "actual": len(findings),
-                    "reported": MAX_PLUGIN_SCHEMA_FINDINGS,
-                    "highest_unreported_severity": severity.value,
-                },
-            )
+    unreported = ranked[MAX_PLUGIN_SCHEMA_FINDINGS:]
+    severity = _policy_severity(unreported[0], policy)  # the most severe one: the ranking is most severe first
+    result.add_finding(
+        _schema_finding(
+            "schema_errors_truncated",
+            message=(
+                f"{source} produced {len(findings)} {noun}; only the {MAX_PLUGIN_SCHEMA_FINDINGS} most severe are "
+                f"reported. The most severe of the {len(unreported)} not reported is {severity.value.upper()}."
+            ),
+            file_path=file_path,
+            suggestion=suggestion,
+            severity=severity,
+            metadata={
+                "actual": len(findings),
+                "reported": MAX_PLUGIN_SCHEMA_FINDINGS,
+                "highest_unreported_severity": severity.value,
+            },
         )
+    )
 
 
 def _unsafe_read_finding(manifest: PluginManifestFile, exc: PluginManifestPathError, *, subject: str) -> Finding:
@@ -413,13 +429,17 @@ class PluginSchemaValidator(ValidatorBase):
         _add_capped(
             result,
             findings,
+            policy=self.policy,
             source="Plugin component validation",
             noun="findings",
             file_path=location.path,
             suggestion="Fix the reported plugin component and MCP declaration errors, then rerun validation.",
         )
         if contained and manifest is not None:
-            blocking_mcp = any(finding.category == MCP_CATEGORY and finding.severity.is_error() for finding in findings)
+            blocking_mcp = any(
+                finding.category == MCP_CATEGORY and _policy_severity(finding, self.policy).is_error()
+                for finding in findings
+            )
             if not blocking_mcp and manifest_valid:
                 name = result.metadata.get("plugin", {}).get("name", "")
                 if location.manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE:
@@ -723,6 +743,7 @@ class PluginSchemaValidator(ValidatorBase):
         _add_capped(
             result,
             findings,
+            policy=self.policy,
             source="Plugin schema",
             noun="errors",
             file_path=manifest_path,
@@ -800,11 +821,12 @@ class PluginSchemaValidator(ValidatorBase):
             )
             for issue in validate_manifest_fields(location.manifest_type, data)
         ]
-        # Over every problem, including any past the reporting cap.
-        blocking = any(finding.severity.is_error() for finding in findings)
+        # Over every problem, at the severity the policy gives it.
+        blocking = any(_policy_severity(finding, self.policy).is_error() for finding in findings)
         _add_capped(
             result,
             findings,
+            policy=self.policy,
             source=f"{profile.label} manifest validation",
             noun="findings",
             file_path=location.path,
@@ -1133,8 +1155,7 @@ class PluginSchemaValidator(ValidatorBase):
         for skill_dir, skill_name, manifest in zip(skill_dirs, skill_names, skill_manifests, strict=True):
             self._validate_one_skill(validator, skill_dir, skill_name, manifest, result, advisory=advisory)
 
-    @staticmethod
-    def _report_unscanned_skills(unscanned: list[Any], root: Path, result: ValidationResult) -> None:
+    def _report_unscanned_skills(self, unscanned: list[Any], root: Path, result: ValidationResult) -> None:
         suggestion = (
             "Move evaluation output and version snapshots out of the plugin (for Tier 3 results, use "
             "--results-dir or SKILLEVALUATOR_RESULTS_DIR), or give a real skill a different folder name."
@@ -1155,6 +1176,7 @@ class PluginSchemaValidator(ValidatorBase):
         _add_capped(
             result,
             findings,
+            policy=self.policy,
             source="The search for skills in folders that Tier 1 scans skip",
             noun="findings",
             file_path=root / DEFAULT_SKILLS_DIR,

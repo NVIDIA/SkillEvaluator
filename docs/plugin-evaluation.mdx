@@ -537,6 +537,13 @@ elsewhere. A `SKILL.md` deeper inside a skill's own `evals/`, `results/`, or
 `versions/` folder is still a HIGH `plugin_skill_in_unscanned_folder`, as it is
 under `skills/`.
 
+Tier 1 file walks also skip `.git/`, `.venv/`, `node_modules/`, and
+`__pycache__/` at any depth, and the same rules apply to them: a declared
+skills folder inside one, such as `"skills": "./node_modules/pkg/skills"`, is
+scanned as its own skill unit, and a manifest path into one for any other
+component, such as `"agents": "./.venv/agents/"`, is a HIGH
+`plugin_component_path_unscanned`.
+
 ### Reference sources
 
 A skill or rule reference names a public source-control system and a

@@ -297,17 +297,29 @@ def _path_problem_finding(
     )
 
 
+# The folders named in plugin_component_path_unscanned messages.
+_UNSCANNED_FOLDERS = "evals/, results/, versions/, .git/, .venv/, node_modules/, __pycache__/"
+_UNSCANNED_SUGGESTION = (
+    "Move the component out of evaluation-output, version-snapshot, VCS, virtualenv, package, and bytecode-cache "
+    "folders."
+)
+
+
 def _in_unscanned_folder(rel: PurePosixPath) -> bool:
     """Whether a plugin-root-relative path is inside a folder that Tier 1 whole-tree scans skip.
 
-    The scans prune ``evals/``, ``results/``, and ``versions/`` (and their
-    dotted forms) at any depth. Only ``skills/<name>`` at the first level of
-    ``skills/`` is scanned anyway, because bundled-skill discovery scans it as
-    a skill.
+    The security, secret, and Unicode scans prune every folder in
+    :data:`~skillevaluator.constants.SCAN_EXCLUDED_DIRS` at any depth:
+    ``evals/``, ``results/``, and ``versions/`` (and their dotted forms),
+    ``.git/``, ``.venv/``, ``node_modules/``, and ``__pycache__/``. Only an
+    evaluation-output or snapshot name at the first level of ``skills/``
+    (``skills/evals/``) is scanned anyway, because bundled-skill discovery
+    scans it as a skill.
     """
     parts = rel.parts
     return any(
-        part in SCAN_ARTIFACT_DIRS and not (index == 1 and parts[0] == DEFAULT_SKILLS_DIR)
+        part in SCAN_EXCLUDED_DIRS
+        and not (index == 1 and parts[0] == DEFAULT_SKILLS_DIR and part in SCAN_ARTIFACT_DIRS)
         for index, part in enumerate(parts)
     )
 
@@ -317,11 +329,9 @@ def _unscanned_path_finding(
 ) -> Finding | None:
     """HIGH when a declared component lives in a folder that Tier 1 whole-tree scans skip.
 
-    ``evals/``, ``results/``, and ``versions/`` (and their dotted forms) hold
-    evaluation output and snapshots, so the security, secret, and Unicode
-    scans prune them. A component the manifest loads from there would never be
-    scanned. Only ``skills/<name>`` at the first level of ``skills/`` is
-    searched, because bundled-skill discovery scans it as a skill.
+    The scans prune evaluation output, snapshots, VCS metadata, virtualenvs,
+    packages, and bytecode caches (:func:`_in_unscanned_folder`), so a
+    component the manifest loads from there would never be scanned.
     """
     rel = declared.rel
     if rel is None or not _in_unscanned_folder(rel):
@@ -329,10 +339,10 @@ def _unscanned_path_finding(
     return _plugin_finding(
         Severity.HIGH,
         "plugin_component_path_unscanned",
-        f"'{field_name}' path {declared.raw!r} is inside a folder that Tier 1 whole-tree scans skip (evals/, "
-        "results/, versions/), so the client loads files that are never security-scanned",
+        f"'{field_name}' path {declared.raw!r} is inside a folder that Tier 1 whole-tree scans skip "
+        f"({_UNSCANNED_FOLDERS}), so the client loads files that are never security-scanned",
         reader.display(manifest_rel),
-        "Move the component out of evaluation-output and version-snapshot folders.",
+        _UNSCANNED_SUGGESTION,
         metadata={"plugin_component_ref": declared.raw},
     )
 

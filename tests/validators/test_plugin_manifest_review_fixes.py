@@ -666,6 +666,55 @@ def test_declared_component_in_an_unscanned_folder_is_high(tmp_path: Path) -> No
     assert _checks(_validate(root))["plugin_component_path_unscanned"] == Severity.HIGH
 
 
+_PRIVILEGED_COMMAND = "---\ndescription: Deploy\nallowed-tools: Bash(*)\n---\nDeploy now\u202e please.\n"
+_BYPASS_AGENT = (
+    "---\nname: helper\ndescription: Helps\ntools: Bash\npermissionMode: bypassPermissions\n---\nYou help.\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("field", "declared", "rel", "content"),
+    [
+        ("commands", "./node_modules/.cache/cmds/", "node_modules/.cache/cmds/deploy.md", _PRIVILEGED_COMMAND),
+        ("agents", "./.venv/agents/", ".venv/agents/helper.md", _BYPASS_AGENT),
+        ("agents", "./__pycache__/agents/", "__pycache__/agents/helper.md", _BYPASS_AGENT),
+    ],
+    ids=["node_modules-commands", "venv-agents", "pycache-agents"],
+)
+def test_declared_component_in_a_vendor_folder_is_high(
+    tmp_path: Path, field: str, declared: str, rel: str, content: str
+) -> None:
+    """Regression: the scans also prune node_modules/, .venv/, .git/, and __pycache__/, so these were never scanned."""
+    root = _write(tmp_path / "p", {".claude-plugin/plugin.json": {"name": "demo", field: declared}, rel: content})
+
+    assert _checks(_validate(root))["plugin_component_path_unscanned"] == Severity.HIGH
+
+
+@pytest.mark.parametrize(
+    ("rel", "unscanned"),
+    [
+        ("evals/agents", True),
+        ("node_modules/pkg/skills/x", True),
+        (".venv/agents/a.md", True),
+        ("lib/.git/x.md", True),
+        ("a/__pycache__/x.md", True),
+        ("commands/evals/deploy.md", True),
+        # Bundled-skill discovery scans a skills/<name> folder whatever its name.
+        ("skills/evals", False),
+        ("skills/evals/references/x.md", False),
+        ("skills/node_modules", True),
+        ("skills/a/evals/x", True),
+        ("commands/ops/deploy.md", False),
+    ],
+)
+def test_in_unscanned_folder_matches_every_folder_the_scans_prune(rel: str, unscanned: bool) -> None:
+    from pathlib import PurePosixPath
+
+    from skillevaluator.plugin_paths import _in_unscanned_folder
+
+    assert _in_unscanned_folder(PurePosixPath(rel)) is unscanned
+
+
 def _hidden_skill(name: str) -> str:
     # A right-to-left override that the Unicode scan fails on, so "scanned" is observable.
     return _SKILL.format(name=name).replace("Use this demo skill.", "Use this demo\u202eskill.")
@@ -691,6 +740,22 @@ def test_declared_skills_folder_inside_an_artifact_folder_is_scanned(tmp_path: P
     assert _UNSCANNED_CHECK not in checks
     unicode = _unicode_result(root)
     assert any("evals/x" in str(finding.file_path) for finding in unicode.findings)
+    assert not unicode.passed
+
+
+def test_declared_skills_folder_inside_a_vendor_folder_is_scanned(tmp_path: Path) -> None:
+    """Regression: a skills folder declared under node_modules/ was loaded but pruned from every scan."""
+    root = _write(
+        tmp_path / "p",
+        {
+            ".claude-plugin/plugin.json": {"name": "demo", "skills": "./node_modules/pkg/skills"},
+            "node_modules/pkg/skills/x/SKILL.md": _hidden_skill("x"),
+        },
+    )
+
+    assert "plugin_component_path_unscanned" not in _checks(_validate(root))
+    unicode = _unicode_result(root)
+    assert any("node_modules/pkg/skills/x" in str(finding.file_path) for finding in unicode.findings)
     assert not unicode.passed
 
 

@@ -1847,10 +1847,12 @@ def client_skill_dirs_outside_tree_scans(root: Path) -> list[PurePosixPath]:
     """Skill folders a client loads that the whole-tree walk would prune, plugin-root relative.
 
     Tier 1 whole-tree scans prune ``evals/``, ``results/``, and ``versions/``
-    (and dotted forms) everywhere except one level under ``skills/``. A
-    declared skills folder can still load a skill from such a folder, for
-    example ``my-skills/evals/`` or a declared ``./evals/``. These folders are
-    scanned as their own skill units instead (``tier1.commands``). A
+    (and dotted forms) everywhere except one level under ``skills/``, and
+    ``.git/``, ``.venv/``, ``node_modules/``, and ``__pycache__/`` everywhere
+    (``_in_unscanned_folder``). A declared skills folder can still load a skill
+    from such a folder, for example ``my-skills/evals/``, a declared
+    ``./evals/``, or a declared ``./node_modules/pkg/skills``. These folders
+    are scanned as their own skill units instead (``tier1.commands``). A
     ``SKILL.md`` deep inside a skill's own artifact folder is not listed; it
     stays HIGH ``plugin_skill_in_unscanned_folder``.
     """

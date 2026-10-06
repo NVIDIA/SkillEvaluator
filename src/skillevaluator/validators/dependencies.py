@@ -520,22 +520,7 @@ class DependencySecurityValidator(ValidatorBase):
             if self.use_safety and Tools.safety.is_available:
                 for audit_file in audit_files:
                     result.merge(self._run_safety(audit_file))
-        for line, reason in skipped_lines.items():
-            result.add_warning(f"{source}: pip-audit could not audit {line}: {reason[: eco.MAX_ERROR_CHARS]}")
-        for declaration in exact:
-            if declaration.audit_line in skipped_lines:
-                result.add_finding(
-                    eco.unverified_finding(
-                        declaration.name or declaration.raw[:80],
-                        declaration.audit_line,
-                        source,
-                        ecosystem="python",
-                        role=declaration.role,
-                        kind="version",
-                        line_number=declaration.line_number,
-                        reason=skipped_lines[declaration.audit_line],
-                    )
-                )
+        skipped = self._report_skipped_pins(result, source, exact, skipped_lines)
         if skipped_lines:
             errors.append(f"pip-audit could not audit {len(skipped_lines)} pin(s): {', '.join(skipped_lines)}")
         if audited_lines:
@@ -543,8 +528,37 @@ class DependencySecurityValidator(ValidatorBase):
         if errors:
             outcome.status = "incomplete"
             outcome.error = f"{source}: {'; '.join(dict.fromkeys(errors))}"
-        audited = sum(1 for declaration in exact if declaration.audit_line in audited_lines)
-        return outcome, audited, sum(1 for declaration in exact if declaration.audit_line in skipped_lines)
+        return outcome, sum(1 for declaration in exact if declaration.audit_line in audited_lines), skipped
+
+    @staticmethod
+    def _report_skipped_pins(
+        result: ValidationResult, source: str, exact: list[DependencyDeclaration], skipped_lines: dict[str, str]
+    ) -> int:
+        """Warn about and report each exact pin pip-audit skipped as unverified; return how many there are."""
+        skipped = [
+            (declaration, declaration.audit_line) for declaration in exact if declaration.audit_line in skipped_lines
+        ]
+        for declaration, line in skipped[: eco.MAX_UNVERIFIED_PER_SOURCE]:
+            reason = skipped_lines[line]
+            result.add_warning(f"{source}: pip-audit could not audit {line}: {reason[: eco.MAX_ERROR_CHARS]}")
+            result.add_finding(
+                eco.unverified_finding(
+                    declaration.name or declaration.raw[:80],
+                    line,
+                    source,
+                    ecosystem="python",
+                    role=declaration.role,
+                    kind="version",
+                    line_number=declaration.line_number,
+                    reason=reason,
+                )
+            )
+        if len(skipped) > eco.MAX_UNVERIFIED_PER_SOURCE:
+            result.add_message(
+                f"{source}: {len(skipped) - eco.MAX_UNVERIFIED_PER_SOURCE} more pin(s) that pip-audit could not "
+                "audit, not listed individually"
+            )
+        return len(skipped)
 
     @staticmethod
     def _skipped_lines(lines: list[str], skipped: list[tuple[str, str]]) -> dict[str, str]:

@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
-from skillevaluator.tier3.eval_core.plugin_signals import match_declared_mcp_server
+from skillevaluator.tier3.eval_core.plugin_signals import declared_mcp_server_matcher
 from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 from skillevaluator.validators.mcp_static import HostAllowlist, classify_endpoint_host, host_name_is_allowlisted
@@ -702,11 +702,12 @@ def _with_plugin_mcp_servers(
     names exactly one declared server). Keys that name no declared server are
     dropped, so one server's calls never credit another.
     """
-    names = [str(name) for name in declared]
     totals: dict[str, dict[str, int]] = {}
     agents = engine_result.get("agents") if isinstance(engine_result, Mapping) else None
     if not isinstance(agents, Mapping):
         return totals
+    # Index the declared servers once for every agent's lookups.
+    match_server = declared_mcp_server_matcher(str(name) for name in declared)
     for agent in agents.values():
         summaries = agent.get("plugin_signals_summary") if isinstance(agent, Mapping) else None
         arm = summaries.get("with_skill") if isinstance(summaries, Mapping) else None
@@ -717,7 +718,7 @@ def _with_plugin_mcp_servers(
         for server, counts in by_server.items():
             if not isinstance(counts, Mapping):
                 continue
-            target = match_declared_mcp_server(str(server), names)
+            target = match_server(str(server))
             if target is None:
                 continue
             bucket = totals.setdefault(target, {"total": 0, "succeeded": 0})

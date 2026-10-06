@@ -15,6 +15,7 @@ from skillevaluator.tier3.eval_core.plugin_signals import (
     MAX_TOOL_PATTERNS,
     build_plugin_signals_context,
     compute_plugin_signals,
+    declared_mcp_server_matcher,
     match_declared_mcp_server,
     plugin_case_spec,
     summarize_plugin_signals,
@@ -318,6 +319,23 @@ class TestMcpServerNames:
         self, observed: str, declared: list[str], expected: str | None
     ) -> None:
         assert match_declared_mcp_server(observed, declared) == expected
+        assert declared_mcp_server_matcher(declared)(observed) == expected
+
+    def test_declared_servers_are_indexed_once_per_trajectory(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        builds: list[object] = []
+        build = plugin_signals._McpNames.__init__
+
+        def counting_build(self: Any, declared: Any) -> None:
+            builds.append(self)
+            build(self, declared)
+
+        monkeypatch.setattr(plugin_signals._McpNames, "__init__", counting_build)
+        traj = _traj(_one("mcp__github__get_issue"), _one("jira__create_ticket", call_id="c2"))
+
+        signals = _signals(traj)
+
+        assert len(builds) == 1
+        assert signals["activation_coverage"]["exercised"] == ["mcp:github", "mcp:jira"]
 
     @pytest.mark.parametrize(
         ("agent", "fn", "servers", "tool"),

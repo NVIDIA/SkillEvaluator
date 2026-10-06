@@ -1273,29 +1273,41 @@ class _McpPrefix(NamedTuple):
 class _McpNames:
     """The declared MCP servers of one arm, indexed by every spelling and tool-name prefix harnesses give them.
 
-    Built once per trajectory, so naming the server of a call takes a few
-    dictionary lookups however many servers are declared.
+    Built once per trajectory (or per batch of lookups), so naming the server
+    of a call takes a few dictionary lookups however many servers are
+    declared. The tool-name prefix table is built on the first
+    :meth:`identity`, since :meth:`match` does not use it.
     """
 
     def __init__(self, declared: Iterable[Any]) -> None:
         self.names = list(dict.fromkeys(name for name in declared if isinstance(name, str) and name))
         self._exact: dict[str, str] = {}  # casefolded name -> first declared name
         self._spelled: dict[str, list[str]] = {}  # spelling -> the declared names that have it
-        self._prefixes: dict[str, list[_McpPrefix]] = {}
-        order = 0
         for name in self.names:
             self._exact.setdefault(name.casefold(), name)
-            for rank, spelling in enumerate(_server_spellings(name)):
+            for spelling in _server_spellings(name):
                 holders = self._spelled.setdefault(spelling, [])
                 if name not in holders:
                     holders.append(name)
+
+    @cached_property
+    def _prefixes(self) -> dict[str, list[_McpPrefix]]:
+        """Tool-name prefix -> the declared-server entries it names (see :meth:`identity`)."""
+        prefixes: dict[str, list[_McpPrefix]] = {}
+        order = 0
+        for name in self.names:
+            for rank, spelling in enumerate(_server_spellings(name)):
                 forms = [(spelling + separator, False) for separator in _TOOL_NAME_SEPARATORS]
                 forms += [(f"mcp_{spelling}_", False), (spelling + "_", True)]
                 for prefix, bare in forms:
                     entry = _McpPrefix(order, len(prefix), rank, name, spelling, bare)
-                    self._prefixes.setdefault(prefix, []).append(entry)
+                    prefixes.setdefault(prefix, []).append(entry)
                     order += 1
-        self._prefix_ends = frozenset(prefix[-1] for prefix in self._prefixes)
+        return prefixes
+
+    @cached_property
+    def _prefix_ends(self) -> frozenset[str]:
+        return frozenset(prefix[-1] for prefix in self._prefixes)
 
     def match(self, observed: str) -> str | None:
         """See :func:`match_declared_mcp_server`."""
@@ -1372,6 +1384,11 @@ def match_declared_mcp_server(observed: str, declared: Iterable[str]) -> str | N
     suffix is the fallback).
     """
     return _McpNames(declared).match(observed)
+
+
+def declared_mcp_server_matcher(declared: Iterable[str]) -> Callable[[str], str | None]:
+    """:func:`match_declared_mcp_server` for one set of declared servers, indexed once for many lookups."""
+    return _McpNames(declared).match
 
 
 def _first_string(args: Mapping[str, Any], keys: Sequence[str]) -> str:
@@ -1746,6 +1763,7 @@ def _claimable_results(
 def _extract_calls(
     trajectory: Mapping[str, Any],
     declared: Mapping[str, Sequence[str]],
+    mcp_names: _McpNames,
     mcp_call_servers: Mapping[str, str] | None = None,
     subagent_aliases: Mapping[str, str] | None = None,
 ) -> list[_Call] | None:
@@ -1753,7 +1771,6 @@ def _extract_calls(
     if not isinstance(steps, list):
         return None
     agent = _trajectory_agent(trajectory)
-    mcp_names = _McpNames(declared.get(COMPONENT_MCP) or ())
     calls: list[_Call] = []
     owner: int | None = None  # the latest skill/command activation: it opens a window for the calls after it
     for step_index, step in enumerate(steps[:_MAX_STEPS]):
@@ -2470,13 +2487,15 @@ def _activated_components(
     return activated
 
 
-def _grade_activation_coverage(calls: Sequence[_Call], declared: Mapping[str, Sequence[str]]) -> dict[str, Any]:
+def _grade_activation_coverage(
+    calls: Sequence[_Call], declared: Mapping[str, Sequence[str]], mcp_names: _McpNames
+) -> dict[str, Any]:
     """Declared components exercised, never activated, or whose every activation failed.
 
     Entries are ``"<type>:<name>"``. ``unavailable`` is a subset of ``exercised``.
+    ``mcp_names`` indexes the declared MCP servers.
     """
     keys = _declared_keys(declared)
-    mcp_names = _McpNames(name for kind, name in keys if kind == COMPONENT_MCP)
     # A skill, subagent or command activation names its component case-insensitively.
     by_folded_name: dict[tuple[str, str], list[str]] = {}
     for kind, name in keys:
@@ -2546,7 +2565,8 @@ def compute_plugin_signals(
     if not isinstance(trajectory, Mapping):
         return None
     declared_map: Mapping[str, Sequence[str]] = declared or {}
-    calls = _extract_calls(trajectory, declared_map, mcp_call_servers, subagent_aliases)
+    mcp_names = _McpNames(declared_map.get(COMPONENT_MCP) or ())
+    calls = _extract_calls(trajectory, declared_map, mcp_names, mcp_call_servers, subagent_aliases)
     if calls is None:
         return None
     spec = plugin_case_spec(case)
@@ -2560,7 +2580,7 @@ def compute_plugin_signals(
         "order": _grade_order(calls, spec),
         "handoff": _grade_handoff(calls, spec, prompts=_prompt_texts(trajectory) if has_value else ()),
         "conflict": _grade_conflict(calls, spec),
-        "activation_coverage": _grade_activation_coverage(calls, declared_map),
+        "activation_coverage": _grade_activation_coverage(calls, declared_map, mcp_names),
     }
 
 
@@ -2728,6 +2748,7 @@ __all__ = [
     "PluginSignalsContext",
     "build_plugin_signals_context",
     "compute_plugin_signals",
+    "declared_mcp_server_matcher",
     "match_declared_mcp_server",
     "plugin_case_spec",
     "summarize_plugin_signals",

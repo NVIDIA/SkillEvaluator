@@ -813,11 +813,32 @@ _LOCAL_SPEC_PREFIXES: tuple[str, ...] = (".", "/", "~", "file:", *_PLUGIN_PATH_R
 _REMOTE_SPEC_PREFIXES: tuple[str, ...] = ("git+", "git:", "github:", "gitlab:", "bitbucket:", "http://", "https://")
 
 # Value-taking flags per package runner, so a flag's value is never mistaken for
-# the package spec. Unknown flags are treated as boolean.
+# the package spec. The npm runners read an option missing from both their value
+# flags and _NPM_SWITCHES fail-closed (see _npm_invocation); the other runners
+# read it as a switch.
 _NPX_VALUE_FLAGS = frozenset(
-    {"-p", "--package", "-c", "--call", "--registry", "--cache", "--userconfig", "--prefix", "-w", "--workspace"}
+    {
+        *("-p", "--package", "-c", "--call", "--registry", "--cache", "--userconfig", "--globalconfig"),
+        *("--prefix", "-C", "-w", "--workspace", "--loglevel", "--node-options", "--script-shell", "--shell"),
+        *("--location", "-L", "--before", "--tag", "--omit", "--include", "-n", "--node-arg", "--npm"),
+    }
 )
 _DLX_VALUE_FLAGS = frozenset({"-p", "--package", "--registry", "--allow-build"})
+# Options of the npm runners that take no value: npx's own switches, npm's Boolean
+# options and the shorthands that expand to one, and the bunx and pnpm dlx switches.
+# A runner's value flags win, so npx's '-c' (--call) still takes a value.
+_NPM_SWITCHES = frozenset(
+    {
+        *("-y", "--yes", "--no-install", "--ignore-existing", "--always-spawn", "--shell-auto-fallback"),
+        *("-q", "--quiet", "-s", "--silent", "-d", "-dd", "-ddd", "--verbose", "-g", "--global", "-f", "--force"),
+        *("--offline", "--prefer-offline", "--prefer-online", "--ignore-scripts", "--foreground-scripts"),
+        *("--legacy-peer-deps", "--strict-peer-deps", "--install-links", "--package-lock", "--strict-ssl"),
+        *("--dry-run", "--json", "--parseable", "-l", "--long", "-ws", "--workspaces", "-iwr"),
+        *("--include-workspace-root", "--audit", "--fund", "--progress", "--color", "--unicode", "--timing"),
+        *("--update-notifier", "-v", "--version", "-h", "--help", "--usage", "--bun", "-c", "--shell-mode"),
+    }
+)
+_PACKAGE_FLAGS = frozenset({"-p", "--package"})
 _UVX_VALUE_FLAGS = frozenset(
     {
         "--from",
@@ -1187,16 +1208,43 @@ def _npm_invocation(
     """An npm package runner: every ``-p``/``--package`` value, else the first positional argument.
 
     The runner's options end at the package it runs, or, with
-    *options_until_separator*, at ``--``.
+    *options_until_separator*, at ``--``. A value flag takes the next word and
+    a switch (``_NPM_SWITCHES``) takes none. Any other option takes the next
+    word unless it starts with ``-``, as npx reads it; but npm reads an option
+    it does not know as a switch, so that word may be the package too and is
+    kept as one more spec. The specs can only gain a package this way, never
+    lose the one the runner installs.
     """
-    if options_until_separator:
-        options, spec = args, _first_positional(args, value_flags)
-    else:
-        options, spec = _runner_options(args, value_flags)
-    packages = _flag_values(options, ("-p", "--package"))
-    if packages:
-        return RunnerInvocation("npm", runner, tuple(packages))
-    return RunnerInvocation("npm", runner, () if spec is None else (spec,))
+    packages: list[str] = []
+    maybe_packages: list[str] = []
+    first: str | None = None
+    index = 0
+    while index < len(args):
+        word = args[index]
+        index += 1
+        if word == "--":
+            if first is None and index < len(args):
+                first = args[index]
+            break
+        if word == "-" or not word.startswith("-"):
+            if first is None:
+                first = word
+            if options_until_separator:
+                continue
+            break
+        name, equals, value = word.partition("=")
+        if equals:
+            if name in _PACKAGE_FLAGS:
+                packages.append(value)
+        elif name in value_flags:
+            if index < len(args) and name in _PACKAGE_FLAGS:
+                packages.append(args[index])
+            index += 1
+        elif name not in _NPM_SWITCHES and index < len(args) and not args[index].startswith("-"):
+            maybe_packages.append(args[index])
+            index += 1
+    specs = packages or ([] if first is None else [first])
+    return RunnerInvocation("npm", runner, tuple(dict.fromkeys([*specs, *maybe_packages])))
 
 
 def _uv_invocation(runner: str, args: list[str]) -> RunnerInvocation:

@@ -946,7 +946,12 @@ stages a server.
     behind a wrapper such as `env NODE_ENV=production npx …` or
     `timeout 600 uvx …` (the wrappers `mcp_command_dangerous_form` looks
     through). Local interpreters and scripts, URL servers, and provider-only
-    servers are `not_applicable`.
+    servers are `not_applicable`. A runner's own options end at the package it
+    runs, so a server's `-p 3000` is not npx's `--package`. When an npm runner
+    option is neither a known value option (`--registry`, `--globalconfig`, …)
+    nor a known switch (`-y`, `--prefer-offline`, …), the word after it is
+    checked as a package as well: npx reads it as the option's value, npm as
+    the package.
   </Accordion>
   <Accordion title="Secrets and TLS">
     | Check | Severity | Flags |

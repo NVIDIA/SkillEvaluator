@@ -181,6 +181,47 @@ def test_npm_exec_reads_its_options_until_the_separator(args: list[str], specs: 
     assert invocation.specs == specs
 
 
+@pytest.mark.parametrize(
+    ("args", "specs"),
+    [
+        # npm options that take a value: the word after them is not the package.
+        (["--globalconfig", "x@1.0.0", "-p", "github:evil/x", "x-cmd"], ("github:evil/x",)),
+        (["--node-options", "x@1.0.0", "--package", "some-floating-pkg", "x-cmd"], ("some-floating-pkg",)),
+        (["--loglevel", "silent", "pkg@1.2.3", "-p", "3000"], ("pkg@1.2.3",)),
+        # An option the reader does not know: npx gives it the next word as its value, npm reads it as a
+        # switch, so that word may be the package too.
+        (["--some-new-option", "x@1.0.0", "-p", "github:evil/x", "x-cmd"], ("github:evil/x", "x@1.0.0")),
+        (["--some-new-switch", "pkg"], ("pkg",)),
+        (["--no-yes", "pkg@1.2.3", "-p", "3000"], ("3000", "pkg@1.2.3")),
+        # npm switches take no value.
+        (["-y", "--prefer-offline", "-q", "pkg@1.2.3", "-p", "3000"], ("pkg@1.2.3",)),
+    ],
+)
+def test_npx_reads_its_options_the_way_npx_does(args: list[str], specs: tuple[str, ...]) -> None:
+    """Regression: an npm value option missing from the table ('--globalconfig x@1.0.0') was read as a switch, so
+    its value became the package and a later '-p <floating spec>' was never checked or audited."""
+    invocation = parse_mcp_runner({"command": "npx", "args": args})
+    assert invocation is not None
+    assert invocation.specs == specs
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--globalconfig", "x@1.0.0", "-p", "github:evil/x", "x-cmd"],
+        ["--node-options", "x@1.0.0", "--package", "some-floating-pkg", "x-cmd"],
+        ["--some-new-option", "x@1.0.0", "-p", "github:evil/x", "x-cmd"],
+    ],
+)
+def test_npx_package_after_an_option_value_is_pin_checked(args: list[str]) -> None:
+    assert classify_mcp_pinning({"command": "npx", "args": args}).status == "unpinned"
+
+
+def test_npm_exec_reads_a_value_option_before_the_package() -> None:
+    invocation = parse_mcp_runner({"command": "npm", "args": ["exec", "--globalconfig", "x@1.0.0", "x-cmd"]})
+    assert invocation is not None and invocation.specs == ("x-cmd",)
+
+
 def test_server_port_flag_keeps_an_exact_npx_package_pinned() -> None:
     pin = classify_mcp_pinning({"command": "npx", "args": ["-y", "some-mcp@1.2.3", "-p", "3000"]})
     assert (pin.status, pin.detail) == ("pinned", "npx: exact version 'some-mcp@1.2.3'")

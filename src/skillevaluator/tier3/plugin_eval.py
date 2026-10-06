@@ -397,7 +397,7 @@ def prepare_plugin_eval_package(
         staged_rules=staged_rules,
         mcp=mcp,
     )
-    claude_native = _claude_native_arm(native_plan)
+    claude_native = _claude_native_arms(native_plan)
     user_config_defaults = _user_config_defaults(plugin.manifest)
     mcp_unsupported_config = _unsupported_mcp_for_plan(mcp, native_plan, user_config_defaults)
     skipped = not (
@@ -406,7 +406,7 @@ def prepare_plugin_eval_package(
     mcp_coverage = _McpCoverage(
         mcp,
         unsupported=tuple(mcp_unsupported_config),
-        plugin_files_staged=claude_native,
+        plugin_file_agents=claude_native,
         plugin_file_gap_notes=_plugin_file_gap_notes(mcp, native_plan, user_config_defaults, mcp_unsupported_config),
     )
     report_only = _inventory_provenance(
@@ -420,6 +420,7 @@ def prepare_plugin_eval_package(
         unresolved_rule_refs=unresolved_rule_refs,
         mcp=mcp_coverage,
         claude_skill_dirs=_claude_skill_dirs(native_source) if claude_native else (),
+        claude_native_agents=claude_native,
         arm_staging=_arm_staging(plugin_load, native_plan, native_source),
     )
 
@@ -823,9 +824,9 @@ def _copies_tree(agent: str, decision: AgentLoadDecision) -> bool:
     return decision.native and adapter is not None and adapter.copies_plugin_tree
 
 
-def _claude_native_arm(plan: dict[str, AgentLoadDecision] | None) -> bool:
-    """Whether some with-plugin arm loads the plugin natively through a copied plugin tree (Claude Code)."""
-    return any(_copies_tree(agent, decision) for agent, decision in (plan or {}).items())
+def _claude_native_arms(plan: dict[str, AgentLoadDecision] | None) -> tuple[str, ...]:
+    """The with-plugin arms that load the plugin natively through a copied plugin tree (Claude Code)."""
+    return tuple(sorted(agent for agent, decision in (plan or {}).items() if _copies_tree(agent, decision)))
 
 
 def _unsupported_mcp_for_plan(
@@ -1038,8 +1039,8 @@ class _McpCoverage(NamedTuple):
     split: _McpSplit
     #: Servers some with-plugin arm cannot fully apply (the run is reported INCOMPLETE).
     unsupported: tuple[str, ...]
-    #: Whether a native Claude Code arm starts the servers that launch from plugin files.
-    plugin_files_staged: bool
+    #: The native Claude Code arms, which start the servers that launch from plugin files.
+    plugin_file_agents: tuple[str, ...]
     #: Why each unsupported plugin-file server still leaves the run INCOMPLETE.
     plugin_file_gap_notes: dict[str, str]
 
@@ -1056,12 +1057,14 @@ def _inventory_provenance(
     unresolved_rule_refs: tuple[str, ...],
     mcp: _McpCoverage,
     claude_skill_dirs: tuple[str, ...] = (),
+    claude_native_agents: tuple[str, ...] = (),
     arm_staging: _ArmStaging | None = None,
 ) -> dict[str, Any]:
     """Build the report-only C2 ``component_coverage`` / ``context_cost`` / ``mcp_pinning``.
 
     *claude_skill_dirs* are the skill directories a native Claude Code arm's
-    staged ``plugin.json`` loads beyond the wrapper. *arm_staging* (the
+    staged ``plugin.json`` loads beyond the wrapper, and *claude_native_agents*
+    the native Claude Code arms that load them. *arm_staging* (the
     resolved per-agent plan) says where each arm stages rules, hooks,
     subagents, and commands, so a native arm's rows do not describe the
     wrapper.
@@ -1080,6 +1083,7 @@ def _inventory_provenance(
                     plugin_root=plugin_root,
                     member_skills=member_resolved,
                     claude_skill_dirs=set(claude_skill_dirs),
+                    claude_native_agents=claude_native_agents,
                     unresolved_refs=unresolved_skill_refs,
                     skipped=skipped,
                 )
@@ -1125,6 +1129,7 @@ def _skill_row(
     plugin_root: Path,
     member_skills: set[Path],
     claude_skill_dirs: set[str],
+    claude_native_agents: tuple[str, ...],
     unresolved_refs: tuple[str, ...],
     skipped: bool,
 ) -> dict[str, Any]:
@@ -1146,12 +1151,13 @@ def _skill_row(
     if skipped:
         return coverage_row(component, "not_staged", _SKIPPED_PACKAGE_NOTE)
     if component.path in claude_skill_dirs:
-        return coverage_row(
+        row = coverage_row(
             component,
             "staged",
             "declared skill directory staged by the native claude-code arm only (Claude Code loads the skill "
             "directories plugin.json declares); the other arms do not stage it",
         )
+        return _natively_staged(row, list(claude_native_agents))
     return coverage_row(
         component,
         "not_staged",
@@ -1201,7 +1207,7 @@ def _mcp_coverage_row(component: Component, contained: bool, mcp: _McpCoverage) 
                 "; its env/headers or ${user_config.*} values are not applied by the runtime (run reported INCOMPLETE)"
             )
         return coverage_row(component, "staged", reason)
-    if mcp.plugin_files_staged and component.name in mcp.split.plugin_file_names:
+    if mcp.plugin_file_agents and component.name in mcp.split.plugin_file_names:
         reason = (
             "MCP server launches from plugin files; staged for the native claude-code arm, which copies the plugin "
             "tree and expands ${CLAUDE_PLUGIN_ROOT}"
@@ -1209,7 +1215,7 @@ def _mcp_coverage_row(component: Component, contained: bool, mcp: _McpCoverage) 
         if component.name in mcp.unsupported:
             note = mcp.plugin_file_gap_notes.get(component.name, "not started in the other with-plugin arms")
             reason += f"; {note} (run reported INCOMPLETE)"
-        return coverage_row(component, "staged", reason)
+        return _natively_staged(coverage_row(component, "staged", reason), list(mcp.plugin_file_agents))
     if component.name in mcp.unsupported:
         # Not runnable: _split_mcp_servers keeps plugin-file launches out of the toml.
         return coverage_row(

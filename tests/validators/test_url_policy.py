@@ -76,8 +76,8 @@ def test_url_credentials_is_false_when_the_url_carries_none() -> None:
         ("https://evil.net\\.example.com/x", "https://evil.net/.example.com/x"),
         ("https://[::1]:8443/mcp", "https://[::1]:8443/mcp"),
         ("https://admin:hunter2@h.example:99999/x", "https://h.example:99999/x"),
-        (f"https://hooks.example.com/notify/{_TOKEN}/x", "https://hooks.example.com/notify/<redacted>/x"),
-        (f"https://h.example:bad/{_TOKEN}", "https://h.example:bad/<redacted>"),
+        (f"https://hooks.example.com/notify/{_TOKEN}/x", "https://hooks.example.com/notify/ghp_<redacted>/x"),
+        (f"https://h.example:bad/{_TOKEN}", "https://h.example:bad/ghp_<redacted>"),
     ],
 )
 def test_safe_url_shows_where_a_client_connects_without_credentials(url: str, shown: str) -> None:
@@ -94,7 +94,60 @@ def test_report_text_redacts_every_known_secret_shape() -> None:
     )
 
     assert _TOKEN not in text and "xoxb-1234567890abc" not in text and "user:pw" not in text
-    assert text.startswith("gh auth login --with-token <redacted>;")
+    assert text.startswith("gh auth login --with-token ghp_<redacted>;")
+
+
+_KEY_BODY = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW"
+
+
+@pytest.mark.parametrize("separator", ["\\n", "\n"])
+def test_report_text_redacts_a_whole_private_key(separator: str) -> None:
+    """Regression: only the BEGIN line was redacted, so the key body and its END line were shown."""
+    key = f"-----BEGIN OPENSSH PRIVATE KEY-----{separator}{_KEY_BODY}{separator}-----END OPENSSH PRIVATE KEY-----"
+
+    text = report_text(f"printf '%s' '{key}' > ~/.ssh/id")
+
+    assert text == "printf '%s' 'private-key-<redacted>' > ~/.ssh/id"
+
+
+def test_report_text_withholds_everything_after_a_private_key_it_cannot_read_as_a_block() -> None:
+    # 'XPRIVATE KEY' has the secret shape of a private-key header but is not a PEM label redaction reads.
+    text = report_text(f"echo '-----BEGIN XPRIVATE KEY----- {_KEY_BODY} -----END XPRIVATE KEY-----' > k")
+
+    assert text == "echo 'private-key-<redacted>"
+
+
+def test_report_text_redacts_a_whole_jwt() -> None:
+    """Regression: the JWT's header and payload were redacted, but its signature was shown."""
+    signature = "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+    jwt = f"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.{signature}"
+
+    text = report_text(f"notify --session {jwt} --quiet")
+
+    assert signature not in text
+    assert text == "notify --session jwt-<redacted> --quiet"
+
+
+def test_report_text_never_shows_a_token_cut_at_the_redaction_window() -> None:
+    """Regression: a token cut by the redaction window was too short to match its pattern, and the redacted
+    JWT before it shrank the text enough to bring the cut token into view."""
+    jwt = f"eyJ{'A' * 150}.eyJ{'A' * 150}.{'B' * 20}"
+    head = f"sh -c 'notify {jwt}' "
+    cut_inside_token = 23  # 'ghp_' and 19 of the token's 36 characters fall inside the window
+    pad = "x" * (2 * MAX_REPORT_CHARS - len(head) - len(" --token ") - cut_inside_token)
+    command = f"{head}{pad} --token {_TOKEN}"
+    assert command[: 2 * MAX_REPORT_CHARS].endswith(_TOKEN[:cut_inside_token])
+
+    text = report_text(command)
+
+    assert _TOKEN[4:8] not in text
+    assert text.startswith("sh -c 'notify jwt-<redacted>' xxx") and text.endswith("...<truncated>")
+
+
+def test_report_text_marks_a_text_cut_by_the_redaction_window_as_truncated() -> None:
+    text = report_text("a " * MAX_REPORT_CHARS + "tail")
+
+    assert len(text) <= MAX_REPORT_CHARS and text.endswith("...<truncated>")
 
 
 @pytest.mark.parametrize("prefix", ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"])

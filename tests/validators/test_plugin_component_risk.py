@@ -618,7 +618,7 @@ def test_hook_records_never_keep_a_token_from_the_command_line(tmp_path: Path) -
 
     dumped = json.dumps(result.metadata["plugin"]["hook_risk"])
     assert github not in dumped and gitlab not in dumped
-    assert "gh auth login --with-token <redacted>" in _hook_rows(result)[0]["target"]
+    assert "gh auth login --with-token ghp_<redacted>" in _hook_rows(result)[0]["target"]
 
 
 def test_a_hook_flag_is_counted_once_however_many_findings_raise_it(tmp_path: Path) -> None:

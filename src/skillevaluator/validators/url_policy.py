@@ -20,6 +20,7 @@ Nothing here touches the network.
 from __future__ import annotations
 
 import re
+import string
 import unicodedata
 from dataclasses import dataclass
 from typing import Literal
@@ -285,6 +286,12 @@ def url_ambiguities(url: str, *, percent_in_host: bool = False) -> list[str]:
 MAX_REPORT_CHARS = 200
 # 'user:password@' in a URL authority (through its last '@'); scrubbed from every text a report shows.
 _URL_USERINFO_RE = re.compile(r"//[^/?#\s]*@")
+# The characters tokens are written with. A token that the redaction window cuts can
+# be too short for its pattern to match, so report_text drops the cut token.
+_TOKEN_CHARACTERS = string.ascii_letters + string.digits + "_-.~+/="
+# A private-key header that redact_sensitive_text did not read as the start of a key block.
+_PRIVATE_KEY_HEADER_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_TRUNCATED = "...<truncated>"
 
 
 def report_text(value: str, limit: int = MAX_REPORT_CHARS) -> str:
@@ -292,13 +299,26 @@ def report_text(value: str, limit: int = MAX_REPORT_CHARS) -> str:
 
     Userinfo is removed from the whole text; only a window of twice the limit is
     redacted (the result keeps at most ``limit`` characters), because the
-    redaction patterns can take quadratic time on long unbroken input. Every
-    secret shape the inline-credential checks know (``ghp_…``, ``glpat-…``,
-    ``xoxb-…``, ...) is redacted, as well as what ``redact_sensitive_text`` covers.
+    redaction patterns can take quadratic time on long unbroken input. A token
+    that the window cuts is dropped, and a cut text ends in ``...<truncated>``.
+    ``redact_sensitive_text`` runs first, so a private key is redacted whole,
+    BEGIN line to END line, and so is a JWT; then every other secret shape the
+    inline-credential checks know (``ghp_…``, ``glpat-…``, ``xoxe-…``, ...) is.
     """
     text = _URL_USERINFO_RE.sub("//", " ".join(value.split()))
-    window = _SECRET_VALUE_RE.sub("<redacted>", text[: 2 * limit])
-    return redact_sensitive_text(window, max_len=limit)
+    window = text[: 2 * limit]
+    cut = len(window) < len(text)
+    if cut:
+        window = window.rstrip(_TOKEN_CHARACTERS)
+    shown = redact_sensitive_text(window)
+    header = _PRIVATE_KEY_HEADER_RE.search(shown)
+    if header is not None:
+        # A key whose BEGIN line redact_sensitive_text could not read: withhold the rest of the text.
+        shown = f"{shown[: header.start()]}private-key-<redacted>"
+    shown = _SECRET_VALUE_RE.sub("<redacted>", shown)
+    if cut or len(shown) > limit:
+        return shown[: limit - len(_TRUNCATED)] + _TRUNCATED if limit > len(_TRUNCATED) else shown[:limit]
+    return shown
 
 
 def safe_url(url: str) -> str:

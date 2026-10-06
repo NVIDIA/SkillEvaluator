@@ -21,6 +21,7 @@ Nothing here touches the network.
 
 from __future__ import annotations
 
+import bisect
 import math
 import re
 import string
@@ -660,23 +661,34 @@ def report_text(value: str, limit: int = MAX_REPORT_CHARS) -> str:
     return shown[: limit - len(_TRUNCATED)] + _TRUNCATED
 
 
+# redact_secrets reads whole plugin lines, so these patterns read each run of text once: a pattern tried at every
+# word of a long run, reading to the end of the run each time, takes quadratic time (100 KB of '-ab' took 30 s).
+#
 # A URL's userinfo anywhere in a text: inside '${VAR:-https://user:pw@host}', after another word, or after a
 # scheme-less '//'. Inside other text only an authority introduced by two slashes counts, so 'mcp:1.2.3@sha256:...'
-# or 'npm:pkg@1.2.3' is left alone. And the query of a URL anywhere in a text.
-_EMBEDDED_USERINFO_RE = re.compile(r"(?i)((?:\b[a-z][a-z0-9+.\-]*:)?[/\\]{2,})[^\s/\\?#@{}'\"<>]*@")
-_EMBEDDED_URL_QUERY_RE = re.compile(
-    r"(?i)(\b[a-z][a-z0-9+.\-]*:[/\\]{2,}(?:\$\{[^}]*\}|[^\s?#'\"<>{}])*)\?(?:\$\{[^}]*\}|[^\s#'\"<>{}])*"
-)
+# or 'npm:pkg@1.2.3' is left alone. A match starts at the first slash of a run; the scheme before it stays as written.
+_EMBEDDED_USERINFO_RE = re.compile(r"(?<![/\\])([/\\]{2,}+)[^\s/\\?#@{}'\"<>]*+@")
 _MAX_USERINFO_PASSES = 4
+# Where a URL starts inside other text: a scheme, ':', and two or more slashes. The scheme is a run of scheme
+# characters ('git+https') with a letter that starts a word (_SCHEME_START_RE), so 'x-https://' has one and
+# 'x_https://' does not.
+_EMBEDDED_URL_START_RE = re.compile(r"(?i)(?<![a-z0-9+.\-])([a-z0-9+.\-]++):[/\\]{2,}+")
+_SCHEME_START_RE = re.compile(r"(?i)\b[a-z]")
+# What ends the authority and path of a URL inside other text and, but for '?', its query: a blank, '?', '#', a
+# quote, '<', '>', or a brace. A '${...}' reference is part of the URL whatever it holds, up to the next '}'; with
+# no '}' after it, its '{' ends the URL.
+_URL_TEXT_BREAK_RE = re.compile(r"""[\s?#'"<>{}]|\$\{""")
 # Values that read as credentials wherever they appear in an echoed command or spec: 'Bearer <token>', the
-# value after a credential-named flag ('--api-key X', '--token=X'), and a credential-named assignment.
+# value after a credential-named flag ('--api-key X', '--token=X'), and a credential-named assignment. A name is
+# read to its end once, from its first credential word: a later word reaches the same end.
 _ECHOED_AUTH_VALUE_RE = re.compile(r"(?i)\b(bearer|basic|token)(\s+)[A-Za-z0-9+/._=~-]{8,}")
 _ECHOED_CREDENTIAL_FLAG_RE = re.compile(
-    r"(?i)((?<![\w-])--?[\w-]*(?:token|secret|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|auth)[\w-]*"
-    r"(?:=|\s+))(?!\$)[^\s'\"|;&]+"
+    r"(?i)((?<![\w-])--?(?>[\w-]*?(?:token|secret|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|auth))"
+    r"[\w-]*+(?:=|\s+))(?!\$)[^\s'\"|;&]+"
 )
 _ECHOED_CREDENTIAL_ASSIGNMENT_RE = re.compile(
-    r"(?i)(\b[A-Z0-9_]*(?:TOKEN|SECRET|PASSW(?:OR)?D|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY)[A-Z0-9_]*=)(?!\$)[^\s'\"|;&]+"
+    r"(?i)(\b(?>[A-Z0-9_]*?(?:TOKEN|SECRET|PASSW(?:OR)?D|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY))[A-Z0-9_]*+=)"
+    r"(?!\$)[^\s'\"|;&]+"
 )
 
 
@@ -687,20 +699,68 @@ def redact_secrets(text: str) -> str:
     and known secret shapes (``ghp_...``, ``sk-...``, a JWT), ``Bearer
     <token>``, the value after a credential-named flag, and a credential-named
     assignment become ``<redacted>``. The rest stays as written, line breaks
-    included, and the text is not bounded: the URL patterns take quadratic time
-    on a long unbroken run, so bound text first (:func:`report_text`) where a
-    report field shows it.
+    included, and the text is not bounded; it is read in linear time, so a long
+    line costs little. Bound it (:func:`report_text`) where a report field
+    shows it.
     """
     for _pass in range(_MAX_USERINFO_PASSES):
         stripped = _EMBEDDED_USERINFO_RE.sub(r"\1", text)
         if stripped == text:
             break
         text = stripped
-    text = _EMBEDDED_URL_QUERY_RE.sub(r"\1", text)
+    text = _without_url_queries(text)
     text = _SECRET_VALUE_RE.sub("<redacted>", text)
     text = _ECHOED_AUTH_VALUE_RE.sub(r"\1\2<redacted>", text)
     text = _ECHOED_CREDENTIAL_FLAG_RE.sub(r"\1<redacted>", text)
     return _ECHOED_CREDENTIAL_ASSIGNMENT_RE.sub(r"\1<redacted>", text)
+
+
+def _without_url_queries(text: str) -> str:
+    """``text`` without the query of each URL in it: ``scheme://host/path?query`` keeps ``scheme://host/path``.
+
+    A URL's path ends at its first break (``_URL_TEXT_BREAK_RE``). When that
+    break is ``?``, the query runs from it to the next break that is not ``?``.
+    URLs are read from left to right, and a URL inside the query of an earlier
+    one goes with that query. Where a path or a query that reaches each break
+    ends is worked out once, from the last break back, so URLs that share a
+    path (``a://`` repeated) do not each read it to its end, as the regular
+    expression this replaces did.
+    """
+    urls = [
+        url for url in _EMBEDDED_URL_START_RE.finditer(text) if _SCHEME_START_RE.search(text, url.start(), url.end(1))
+    ]
+    if not urls:
+        return text
+    breaks = [found.start() for found in _URL_TEXT_BREAK_RE.finditer(text)]
+    # Where a path, and a query, that reaches breaks[index] ends.
+    path_ends = [len(text)] * (len(breaks) + 1)
+    query_ends = [len(text)] * (len(breaks) + 1)
+    closing = None  # the index of the next '}'
+    for index in reversed(range(len(breaks))):
+        start = breaks[index]
+        char = text[start]
+        if char == "}":
+            closing = index
+        if char != "$":
+            path_ends[index] = start
+            query_ends[index] = query_ends[index + 1] if char == "?" else start
+        elif closing is not None:
+            # A '${' reference ends at the next '}', and the URL goes on after it.
+            path_ends[index], query_ends[index] = path_ends[closing + 1], query_ends[closing + 1]
+        else:
+            path_ends[index] = query_ends[index] = start + 1  # no '}' after it: its '{' ends the URL
+    kept: list[str] = []
+    resume = 0
+    for url in urls:
+        if url.start() < resume:
+            continue  # inside the query of an earlier URL
+        index = bisect.bisect_left(breaks, url.end())
+        query = path_ends[index]
+        if text.startswith("?", query):
+            kept.append(text[resume:query])
+            resume = query_ends[index]
+    kept.append(text[resume:])
+    return "".join(kept)
 
 
 def report_value(value: str, limit: int = MAX_REPORT_CHARS) -> str:

@@ -225,9 +225,7 @@ def _shown(text: str, limit: int = 120) -> str:
     :func:`~skillevaluator.validators.url_policy.report_text` bounds the text to
     ``limit`` characters first, removing URL user information and the
     credentials it knows; then :func:`redact_secrets` removes URL queries,
-    credential flag values, and the other secret shapes. Bounding comes first
-    because the embedded-URL patterns take quadratic time on a long unbroken
-    run of text.
+    credential flag values, and the other secret shapes.
     """
     return redact_secrets(report_text(text, limit))
 
@@ -244,7 +242,6 @@ def redacted_url(url: str) -> str:
     """
     text = url.strip()
     if _URL_EXPANSION_RE.search(text):
-        # Bounded before redact_secrets runs, whose URL patterns take quadratic time on long unbroken text.
         return redact_secrets(report_text(_redacted_reference_url(text)))
     return safe_url(text)
 

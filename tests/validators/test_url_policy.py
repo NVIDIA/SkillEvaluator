@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -17,6 +20,7 @@ from skillevaluator.validators.url_policy import (
     UserinfoRule,
     has_secret_shape,
     is_env_reference,
+    redact_secrets,
     report_text,
     safe_url,
     url_ambiguities,
@@ -299,6 +303,66 @@ def test_every_github_token_prefix_has_a_secret_shape(prefix: str) -> None:
 def test_fine_grained_github_token_has_a_secret_shape() -> None:
     assert has_secret_shape("github_pat_" + "11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz")
     assert not has_secret_shape("github_pat_short")
+
+
+# --------------------------------------------------------------------------- #
+# redact_secrets on whole plugin lines                                         #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        ("${MCP_URL:-https://u:pw@host/mcp?token=x}", "${MCP_URL:-https://host/mcp}"),
+        ("https://h/${A:-x y}?token=t z", "https://h/${A:-x y} z"),
+        ("a://x${B:-b://y?token=t}", "a://x${B:-b://y}"),
+        ("https://h/?u=https://x:pw@z/w?v=1 next", "https://h/ next"),
+        ("see https://h/a?q=1#frag and git+ssh://h/r.git?ref=v1", "see https://h/a#frag and git+ssh://h/r.git"),
+        ("--api-key=pw1 TOKEN=pw2 --auth $Y", "--api-key=<redacted> TOKEN=<redacted> --auth $Y"),
+    ],
+)
+def test_redact_secrets_drops_userinfo_and_queries_of_urls_anywhere_in_a_line(text: str, shown: str) -> None:
+    assert redact_secrets(text) == shown
+
+
+# (prefix, run, repeats, suffix): the text, and what redact_secrets shows of it. Each text took 10 s to minutes to
+# redact, because a pattern was tried at every word, URL, slash, or credential word of the run and read to its end.
+_LONG_RUNS = [
+    (("https://user:pw@h/", "-ab", 33_000, ""), ("https://h/", "-ab", 33_000, "")),
+    (("", "-eyJ", 16_384, " --token hunter2"), ("", "-eyJ", 16_384, " --token <redacted>")),
+    (("", "a.b", 33_000, " https://u:pw@h/"), ("", "a.b", 33_000, " https://h/")),
+    (("", "a://", 25_000, "?token=hunter2"), ("", "a://", 25_000, "")),
+    (("", "x://y", 20_000, "?sig=hunter2"), ("", "x://y", 20_000, "")),
+    (("", "a://${x}", 12_000, "?token=hunter2"), ("", "a://${x}", 12_000, "")),
+    (("", "/", 100_000, "u:pw@h"), ("", "/", 100_000, "h")),
+    (("a:", "/", 100_000, "u:pw@h?token=hunter2"), ("a:", "/", 100_000, "h")),
+    (("", "--auth", 16_000, "=hunter2"), ("", "--auth", 16_000, "=<redacted>")),
+    (("", "TOKEN", 20_000, "=hunter2"), ("", "TOKEN", 20_000, "=<redacted>")),
+]
+
+
+def test_redact_secrets_takes_linear_time_on_long_runs() -> None:
+    """Regression (CWE-1333): SecurityValidator redacts a SkillSpector snippet or a PII line whole, so one crafted
+    100 KB line stalled Tier 1 for minutes. Runs in a subprocess so that a slow redaction fails the timeout instead
+    of hanging the suite; the limit is generous because the redactions take well under a second."""
+    code = textwrap.dedent(
+        """
+        import json, sys
+        from skillevaluator.validators.url_policy import redact_secrets
+
+        def build(prefix, run, repeats, suffix):
+            return prefix + run * repeats + suffix
+
+        for text, expected in json.load(sys.stdin):
+            shown = redact_secrets(build(*text))
+            print("ok" if shown == build(*expected) else json.dumps([text[1], shown[:60], shown[-60:]]))
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code], input=json.dumps(_LONG_RUNS), capture_output=True, text=True, timeout=60
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == ["ok"] * len(_LONG_RUNS), completed.stdout
 
 
 # --------------------------------------------------------------------------- #

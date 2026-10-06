@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_LLM_CLUSTERS,
@@ -24,9 +23,6 @@ from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.tier1.commands import emit_reports
 from skillevaluator.utils.secure_fs import SecurePathError
 from skillevaluator.validators.similarity import SimilarityValidator
-
-if TYPE_CHECKING:
-    from skillevaluator.utils.secure_fs import SecureFile
 
 
 def _guarded_result(title: str, target_path: Path, callback) -> list[ValidationResult]:
@@ -320,16 +316,16 @@ def run_plugin_catalog_checks(
     llm_verdict: bool = False,
     llm_model: str | None = None,
     max_scalar_comparisons: int = SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
-    skill_manifests: Sequence[SecureFile] | None = None,
 ) -> list[ValidationResult]:
     """Run advisory Check C-inter and Check B against a local JSON catalog.
 
     Without a catalog both checks are recorded as skipped, not failed. The
     catalog is read with the bounded no-follow loader; plugin and bundled skill
-    reads use the secure plugin helpers. ``skill_manifests`` are the bundled
-    skill manifests when the caller has already discovered them. Only the
-    configured embedding provider (and the chat LLM when ``llm_verdict`` is
-    set) is contacted.
+    reads use the secure plugin helpers. The bundled skills are discovered
+    right before they are read, so a skill saved since an earlier phase is
+    compared as saved; only an unsafe entry (a link, hard link, or special
+    file) is refused. Only the configured embedding provider (and the chat LLM
+    when ``llm_verdict`` is set) is contacted.
     """
     from skillevaluator.deduplication.plugin.catalog_checks import (
         INTER_PLUGIN_DESCRIPTION,
@@ -357,11 +353,7 @@ def run_plugin_catalog_checks(
         return _catalog_check_skips(_NO_CATALOG_REASON)
 
     try:
-        profile = load_plugin_profile(
-            plugin_root,
-            max_skills=MAX_PLUGIN_DEDUP_SKILLS,
-            skill_manifests=skill_manifests,
-        )
+        profile = load_plugin_profile(plugin_root, max_skills=MAX_PLUGIN_DEDUP_SKILLS)
     except PluginSkillLimitError as exc:
         reason = (
             f"Plugin bundles {exc.actual} skills, exceeding the automatic Tier 2 limit of "
@@ -444,9 +436,11 @@ def run_plugin_dedup_scan(
 
     Check A and C-intra always run offline or against the configured embedding
     provider. Check C-inter and Check B compare against an optional local JSON
-    catalog and are recorded as skipped when no catalog is supplied. The
-    bundled skills are discovered once and shared by C-intra and the catalog
-    checks.
+    catalog and are recorded as skipped when no catalog is supplied. C-intra
+    validates the bundled skills discovered here. Its embedding and LLM calls
+    can take minutes, so the catalog checks discover the skills again right
+    before they read them instead of matching a SKILL.md saved meanwhile
+    against this older snapshot.
     """
     from skillevaluator.deduplication.plugin import IntraPluginValidator
     from skillevaluator.utils.helpers import find_bundled_plugin_skill_manifests
@@ -490,7 +484,6 @@ def run_plugin_dedup_scan(
                 model=model,
                 llm_verdict=llm_verdict,
                 llm_model=llm_model,
-                skill_manifests=skill_manifests,
             )
         )
     return results

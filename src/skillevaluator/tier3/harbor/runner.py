@@ -24,7 +24,7 @@ import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
@@ -1139,6 +1139,7 @@ _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS: dict[str, frozenset[str]] = {
 
 
 _KATA_RUNTIME_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_KATA_DNS_SERVER_RE = re.compile(r"[0-9A-Fa-f:.]{2,45}")
 
 
 def _environment_kwarg_policy_error(env_mode: str, environment_kwargs: Mapping[str, Any]) -> str | None:
@@ -1168,21 +1169,51 @@ def _kata_environment_kwarg_error(environment_kwargs: Mapping[str, Any]) -> str 
     if not isinstance(runtime, str) or "kata" not in runtime or not _KATA_RUNTIME_NAME_RE.fullmatch(runtime):
         return "Harbor environment 'kata' requires kata_runtime to name a registered Kata runtime handler"
     # Harbor writes each server into the microVM's resolv.conf. Parse them the
-    # way Harbor does (comma strings are split and trimmed) and allow only IPs.
-    dns = environment_kwargs.get("kata_dns")
-    if dns is None:
+    # way Harbor does (comma strings are split and trimmed) and allow only IP
+    # literals: an IPv6 zone ID (%...) could otherwise carry resolver directives.
+    if "kata_dns" not in environment_kwargs:
         return None
+    dns = environment_kwargs["kata_dns"]
     if isinstance(dns, str):
         servers = [server.strip() for server in dns.split(",") if server.strip()]
     elif isinstance(dns, list) and all(isinstance(server, str) for server in dns):
         servers = dns
     else:
         return "Harbor environment 'kata' requires kata_dns to be a list of IP addresses"
+    # Without a server Harbor keeps Docker's embedded resolver, which a Kata VM cannot reach.
+    if not servers:
+        return "Harbor environment 'kata' requires kata_dns to list at least one IP address"
     for server in servers:
+        if not _KATA_DNS_SERVER_RE.fullmatch(server):
+            return "Harbor environment 'kata' requires kata_dns to be a list of IP addresses"
         try:
             ipaddress.ip_address(server)
         except ValueError:
             return "Harbor environment 'kata' requires kata_dns to be a list of IP addresses"
+    return None
+
+
+def _staged_task_environment_error(env_mode: str, task_dirs: Iterable[Path]) -> str | None:
+    """Reject staged task environments the selected backend cannot run."""
+    if env_mode != "kata":
+        return None
+    import yaml
+
+    for task_dir in task_dirs:
+        compose_path = task_dir / "environment" / "docker-compose.yaml"
+        if not compose_path.is_file():
+            continue
+        try:
+            compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            return f"Could not read the Docker Compose model of task '{task_dir.name}'"
+        services = compose.get("services") if isinstance(compose, dict) else None
+        if sidecars := sorted(str(name) for name in services or {} if name != "main"):
+            # Kata replaces each service's resolv.conf, so Compose service-name DNS stops working.
+            return (
+                f"Harbor environment 'kata' cannot run task '{task_dir.name}' with Compose sidecar services "
+                f"({', '.join(sidecars)}): services in Kata microVMs cannot resolve each other by name"
+            )
     return None
 
 
@@ -4204,6 +4235,8 @@ def _run_harbor_eval_impl(
                 evaluator_skill_path=evaluator_skill_path,
                 arm_suffix=with_arm_suffix,
             )
+            if staged_environment_error := _staged_task_environment_error(env_mode, task_paths):
+                raise ValueError(staged_environment_error)
             task_selectors = validate_case_ids(task.name for task in task_paths)
             logical_case_ids = validate_case_ids(_native_entry_id(task) for task in task_paths)
             case_id_by_task_selector = dict(zip(task_selectors, logical_case_ids, strict=True))

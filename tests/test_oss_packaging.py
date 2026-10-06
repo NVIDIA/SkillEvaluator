@@ -808,7 +808,7 @@ def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     assert "skillevaluator tier3 evaluate ./my-skill --agents claude-code --env-mode docker\n" in tier3
     assert "Explicit model overrides are preserved exactly" in public_docs
     assert "OpenCode renders it as" in public_docs
-    assert "Docker or local compatibility bridge" in public_docs
+    assert "in-container (Docker and Kata) or local compatibility bridge" in public_docs
     assert "experimental Claude Code" in public_docs
 
 

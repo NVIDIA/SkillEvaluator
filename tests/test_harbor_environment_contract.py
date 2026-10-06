@@ -115,6 +115,13 @@ def test_kata_runs_the_hardened_kata_backend() -> None:
         ({"kata_dns": ["dns.example"]}, "kata_dns"),
         ({"kata_dns": [" 1.1.1.1"]}, "kata_dns"),
         ({"kata_dns": {"server": "1.1.1.1"}}, "kata_dns"),
+        ({"kata_dns": "fe80::1%eth0\nsearch attacker.example"}, "kata_dns"),
+        ({"kata_dns": ["fe80::1%eth0\noptions ndots:15"]}, "kata_dns"),
+        ({"kata_dns": ["fe80::1%eth0"]}, "kata_dns"),
+        ({"kata_dns": ""}, "at least one IP address"),
+        ({"kata_dns": ","}, "at least one IP address"),
+        ({"kata_dns": []}, "at least one IP address"),
+        ({"kata_dns": None}, "kata_dns"),
     ],
 )
 def test_kata_kwargs_keep_the_microvm_boundary(environment_kwargs: dict[str, object], message: str) -> None:
@@ -128,7 +135,7 @@ def test_kata_kwargs_keep_the_microvm_boundary(environment_kwargs: dict[str, obj
         )
 
 
-@pytest.mark.parametrize("dns", ["1.1.1.1, 2606:4700:4700::1111", ["9.9.9.9"], []])
+@pytest.mark.parametrize("dns", ["1.1.1.1, 2606:4700:4700::1111", ["9.9.9.9"], ["10.0.0.2", "::1"]])
 def test_kata_accepts_literal_dns_servers(dns: object) -> None:
     command = build_harbor_run_command(
         dataset_path="/tmp/dataset",
@@ -184,6 +191,52 @@ def test_kata_prerequisites_require_the_selected_runtime(
         assert errors == []
     else:
         assert errors == ["Harbor environment 'kata' requires Docker to register the Kata runtime 'kata-clh'."]
+
+
+def test_kata_default_runtime_must_be_registered(monkeypatch: pytest.MonkeyPatch) -> None:
+    from harbor.environments.factory import EnvironmentFactory
+    from harbor.environments.kata import KataEnvironment
+
+    monkeypatch.setattr(EnvironmentFactory, "run_preflight", lambda _environment_type, **_kwargs: None)
+    monkeypatch.setattr(KataEnvironment, "_registered_kata_runtimes", classmethod(lambda _cls: ["kata-clh"]))
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: runner.subprocess.CompletedProcess(
+            [], 0, stdout="Docker Compose version v2", stderr=""
+        ),
+    )
+
+    assert runner._check_prerequisites(env_mode="kata", agents=["opencode"]) == [
+        "Harbor environment 'kata' requires Docker to register the Kata runtime 'kata'."
+    ]
+
+
+def test_kata_rejects_compose_sidecars_before_harbor_starts(tmp_path: Path) -> None:
+    def task(name: str, compose: str | None) -> Path:
+        environment = tmp_path / name / "environment"
+        environment.mkdir(parents=True)
+        if compose is not None:
+            (environment / "docker-compose.yaml").write_text(compose, encoding="utf-8")
+        return tmp_path / name
+
+    dockerfile_only = task("dockerfile-only", None)
+    main_only = task("main-only", "services:\n  main:\n    environment:\n      MODE: test\n")
+    sidecar = task("with-db", "services:\n  main: {}\n  db:\n    image: postgres:16\n")
+
+    assert runner._staged_task_environment_error("kata", [dockerfile_only, main_only]) is None
+    error = runner._staged_task_environment_error("kata", [dockerfile_only, sidecar])
+    assert error is not None
+    assert "task 'with-db'" in error
+    assert "(db)" in error
+    assert runner._staged_task_environment_error("docker", [sidecar]) is None
+
+
+def test_kata_runs_are_described_as_microvm_attempts() -> None:
+    from skillevaluator.reporting.benchmark import _environment_note
+
+    assert _environment_note("kata") == "Each task attempt ran in its own Kata Containers microVM."
+    assert _environment_note("docker") == "Each task attempt ran in its own isolated Docker container."
 
 
 def test_kata_uses_the_docker_nvidia_build_handoff_and_host_environment() -> None:

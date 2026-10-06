@@ -618,6 +618,14 @@ def test_nvidia_build_agent_import_selection_includes_local_bridge_agents() -> N
         "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildClaudeCode"
     )
     assert _nvidia_build_agent_import_path(provider, "opencode", "docker") is None
+    assert _nvidia_build_agent_import_path(provider, "codex", "kata") == (
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex"
+    )
+    assert _nvidia_build_agent_import_path(provider, "claude-code", "kata") == (
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildClaudeCode"
+    )
+    assert _nvidia_build_agent_import_path(provider, "opencode", "kata") is None
+    assert _nvidia_build_agent_import_path(provider, "codex", "daytona") is None
     assert _nvidia_build_agent_import_path(provider, "codex", "local") == (
         "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalNvidiaBuildCodex"
     )

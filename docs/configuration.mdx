@@ -12,7 +12,7 @@ export NVIDIA_API_KEY='nvapi-...'
 ```
 
 The same key covers Tier 1 LLM checks, Tier 2 embeddings and chat, and supported
-Tier 3 agents in Docker or local mode. OpenAI likewise starts with
+Tier 3 agents in Docker, Kata, or local mode. OpenAI likewise starts with
 `SKILL_EVAL_LLM_PROVIDER=openai` and `OPENAI_API_KEY`, using Codex for Tier 3.
 External scanners, agent runtimes, and sandboxes remain prerequisites; model
 credentials do not install them.
@@ -235,7 +235,7 @@ Live evaluation has two credential roles. They can share a key when the selected
 
 Both roles resolve from the operator's environment; a skill's `evals/config.yml` can never supply, rename, or redirect a credential. What each agent needs depends on the provider and `--env-mode`:
 
-- **NVIDIA Build, one key** (`--env-mode docker` or `local`): a single `NVIDIA_API_KEY` powers the evaluator and all three supported agents — `opencode` calls NVIDIA Build directly, while `claude-code` and `codex` route through SkillEvaluator's compatibility bridge (in-container in Docker mode; an authenticated in-process host bridge in `local` mode). Agent models must be full NVIDIA Build catalog IDs in `publisher/model` form.
+- **NVIDIA Build, one key** (`--env-mode docker`, `kata`, or `local`): a single `NVIDIA_API_KEY` powers the evaluator and all three supported agents — `opencode` calls NVIDIA Build directly, while `claude-code` and `codex` route through SkillEvaluator's compatibility bridge (in-container in Docker and Kata modes; an authenticated in-process host bridge in `local` mode). Agent models must be full NVIDIA Build catalog IDs in `publisher/model` form.
 - **NVIDIA Build on Harbor cloud modes** (`daytona`, `e2b`, ...): the bridge is not available. `claude-code` needs its own native `ANTHROPIC_API_KEY`, `codex` needs a full OpenAI Responses API credential (`OPENAI_API_KEY` plus `OPENAI_BASE_URL`), and each needs an explicit model via `--agent-model` or `harbor.agents.<agent>.model`.
 - **Matching native provider**: when the evaluator provider is the agent's own (for example `anthropic` with `claude-code`, or `openai` with `codex`), the same key serves both roles automatically.
 - **OpenAI-compatible gateway**: Codex, OpenCode, and Claude Code inherit the shared URL and key. The gateway must support the selected harness's API and model. Explicit Claude credentials and endpoint settings take precedence as described above.

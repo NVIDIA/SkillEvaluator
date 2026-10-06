@@ -290,7 +290,7 @@ documents. An eval entry's `files` string or list selects only those paths
 | File | Rules |
 | --- | --- |
 | `Dockerfile` | At most 20 KB; the first non-comment line must be `FROM`. The build context is `environment/` itself, so `COPY` paths are relative to it (`COPY skills/`, not `COPY environment/skills/`). If absent, an image is auto-generated from `scripts/requirements.txt` and `scripts/apt-packages.txt` on a `python:3.12-slim` base. |
-| `docker-compose.yaml` | Sidecar services only (databases, APIs, mock servers) launched alongside the agent container. A strict allowlist applies: host port mappings are removed, and host mounts, privileged access, and unrecognized keys are rejected. Also accepted as `docker-compose.yml`. |
+| `docker-compose.yaml` | Sidecar services only (databases, APIs, mock servers) launched alongside the agent container. Not supported with `--env-mode kata`, where services cannot resolve each other by name. A strict allowlist applies: host port mappings are removed, and host mounts, privileged access, and unrecognized keys are rejected. Also accepted as `docker-compose.yml`. |
 | `mcp_servers.toml` | MCP servers injected into the container. TOML array-of-tables `[[mcp_servers]]`; each entry needs `name` plus `url` or `command`. Command-based servers use `transport = "stdio"` (auto-inferred); URL-based servers default to `sse`. |
 | Subdirectories | Copied into the container environment (config files, seed data for sidecars). Any name except `__pycache__` and `.git`. |
 

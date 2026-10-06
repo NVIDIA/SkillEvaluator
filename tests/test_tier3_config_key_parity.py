@@ -367,6 +367,27 @@ harbor:
     assert result["run_config"]["harbor"]["base_image_mode"] == mode
 
 
+def test_kata_uses_the_shared_docker_base_image(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = """\
+schema_version: 1
+harbor:
+  task_source: evals_json
+  base_image_mode: reuse
+"""
+    builds: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        runner,
+        "build_eval_base_image",
+        lambda *_args, **kwargs: builds.append(kwargs) or "skillevaluator-base:test",
+    )
+
+    result, captured = _run_engine(monkeypatch, tmp_path, config, env_mode="kata")
+
+    assert "error" not in result
+    assert len(builds) == 1
+    assert captured["emit"]["base_image"] == "skillevaluator-base:test"
+
+
 def test_base_image_mode_defaults_to_self_contained_tasks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

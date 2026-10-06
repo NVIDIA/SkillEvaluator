@@ -161,7 +161,7 @@ the environment extra shown below when a managed backend needs one.
 | `local` | SkillEvaluator | Your machine, under an OS sandbox policy — see [Local mode](#local-mode). |
 
 <Tip>
-SkillEvaluator documents setup for `docker` and `local`. For any other
+SkillEvaluator documents setup for `docker`, `kata`, and `local`. For any other
 backend, install the mapped Harbor extra or system CLI shown above, set the
 credentials that backend requires, and confirm readiness with
 `skillevaluator doctor --env-mode <mode>` before a full run.
@@ -344,7 +344,7 @@ Two environment kwargs are accepted:
 | Kwarg | Default | Rule |
 | --- | --- | --- |
 | `kata_runtime` | `kata` | A registered Docker runtime handler whose name contains `kata`, such as `kata-clh` or `kata-qemu`. Other handlers, such as `runc`, are rejected. |
-| `kata_dns` | `1.1.1.1,8.8.8.8` | IP addresses written to each microVM's `resolv.conf`, as a list or comma-separated string. Set your network's resolvers when public DNS is blocked. |
+| `kata_dns` | `1.1.1.1,8.8.8.8` | At least one IP address, written to each microVM's `resolv.conf`, as a list or comma-separated string. The default replaces the resolvers Docker's embedded DNS would forward to, so set your network's resolvers when public DNS is blocked or when a gateway, judge, or package endpoint uses an internal hostname. |
 
 Harbor's Kata backend has limits that SkillEvaluator keeps:
 
@@ -353,8 +353,9 @@ Harbor's Kata backend has limits that SkillEvaluator keeps:
 - Non-public network policies are rejected before start, because Kata VMs
   cannot join the egress-control sidecar's network namespace. Generated tasks
   use public networking.
-- Compose service-name DNS does not work inside the microVM; services reach
-  each other by IP.
+- Compose service-name DNS does not work inside the microVM, so tasks whose
+  Compose model declares services other than `main`, such as a database
+  sidecar, are rejected before the run starts.
 
 ## Local mode
 

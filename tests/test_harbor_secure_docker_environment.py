@@ -8529,6 +8529,26 @@ def test_secure_kata_keeps_docker_hardening_under_the_kata_runtime(
 
     assert environment.type() == EnvironmentType.KATA
     assert SkillEvaluatorSecureKataEnvironment.runtime() is DOCKER_RUNTIME
+    # Plain Harbor KataEnvironment also reports stream/gpus/windows as False, so
+    # prove the hardened methods are the ones that run.
+    hardened_owners = {
+        name: next(cls for cls in SkillEvaluatorSecureKataEnvironment.__mro__ if name in cls.__dict__)
+        for name in (
+            "preflight",
+            "start",
+            "exec",
+            "download_file",
+            "download_dir",
+            "capabilities",
+            "runtime",
+            "_run_docker_compose_command",
+        )
+    }
+    assert hardened_owners["exec"] is SkillEvaluatorSecureDockerEnvironment
+    assert all(
+        owner in {SkillEvaluatorSecureDockerEnvironment, SkillEvaluatorDockerEnvironment}
+        for owner in hardened_owners.values()
+    ), hardened_owners
     assert environment.capabilities.stream is False
     assert environment.capabilities.gpus is False
     assert environment.capabilities.windows is False

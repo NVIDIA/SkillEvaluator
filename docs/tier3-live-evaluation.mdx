@@ -7,7 +7,7 @@ description: "Run a real agent with and without your skill in a sandboxed enviro
 Tier 3 answers the question the other tiers can't: **does your skill actually
 make an agent better at the task?** It is the one tier that needs real
 infrastructure — model access for the evaluator and selected agent, and
-Docker or another sandbox. NVIDIA Build in Docker or local mode uses one key
+Docker or another sandbox. NVIDIA Build in Docker, Kata, or local mode uses one key
 for both roles; OpenAI with Codex can also share its key. This guide takes you from a skill directory to a
 finished with-skill vs. without-skill comparison.
 
@@ -356,9 +356,9 @@ Compose, proxy, or tracing controls. Configure the selected backend in the
 host environment instead.
 
 One deliberate exception collapses the two roles: with the `nv_build` provider
-in `--env-mode docker` or `local`, a single `NVIDIA_API_KEY` powers the
+in `--env-mode docker`, `kata`, or `local`, a single `NVIDIA_API_KEY` powers the
 evaluator and all three agents. Direct OpenCode talks to NVIDIA Build directly;
-Codex and experimental Claude Code use a Docker or local compatibility bridge.
+Codex and experimental Claude Code use an in-container (Docker and Kata) or local compatibility bridge.
 Explicit model overrides are preserved exactly. Without an override, all three
 agents default to Nemotron Super (`nvidia/nemotron-3-super-120b-a12b`); direct
 OpenCode renders it as `nvidia/nvidia/nemotron-3-super-120b-a12b` because its
@@ -604,7 +604,7 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
     Export the agent's credential in the host environment where you run
     `skillevaluator` — agent credentials are read only from the host, never
     from `evals/config.yml`. It is a separate role from the evaluator key,
-    except with `nv_build` in Docker or local mode, where one
+    except with `nv_build` in Docker, Kata, or local mode, where one
     `NVIDIA_API_KEY` covers both.
   </Accordion>
   <Accordion title="evaluate cannot start the environment">

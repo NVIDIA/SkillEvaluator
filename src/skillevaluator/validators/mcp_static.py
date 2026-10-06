@@ -1088,10 +1088,11 @@ def _command_argv(command: str, args: list[str]) -> list[str]:
     ``C:\\Program Files\\nodejs\\npx.cmd``, so every option is in ``args``; or it
     may hold a whole command line (``npx -y pkg``, ``bash -c node``), which is
     split into words. Its first word decides. The string is one program only when
-    it starts like a path (its first word has a ``/`` or ``\\``) that names no
-    runner, shell, or wrapper, while the whole string does. So ``npx -y pkg
-    /srv/docker`` and ``bash -c x /usr/bin/env`` are command lines, whatever
-    their last path segment names.
+    it reads as a path with spaces (its first word has a ``/`` or ``\\``, and no
+    later word is an option) whose first word names no runner, shell, or
+    wrapper, while the whole string does. So ``npx -y pkg /srv/docker`` and
+    ``bash -c x /usr/bin/env`` are command lines, whatever their last path
+    segment names.
 
     A wrapper such as ``env``, ``nohup``, or ``timeout`` is looked through
     (:func:`_wrapped_command`); a wrapper that names no command is the program.
@@ -1099,6 +1100,7 @@ def _command_argv(command: str, args: list[str]) -> list[str]:
     words = command.split()
     path_with_spaces = (
         ("/" in words[0] or "\\" in words[0])
+        and not any(word.startswith("-") for word in words[1:])
         and _command_basename(words[0]) not in _NAMED_PROGRAMS
         and _command_basename(command) in _NAMED_PROGRAMS
     )

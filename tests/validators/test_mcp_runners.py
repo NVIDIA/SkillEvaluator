@@ -349,9 +349,13 @@ def test_a_command_line_is_read_by_its_first_word(config: dict[str, Any], expect
     assert classify_mcp_pinning(config).status == "unpinned"
 
 
-def test_a_command_line_that_only_ends_in_a_runner_path_is_not_that_runner() -> None:
-    pin = classify_mcp_pinning({"command": "node ./server.js --data /srv/docker"})
-    assert (pin.status, pin.detail) == ("not_applicable", "local interpreter, script, or binary ('node')")
+@pytest.mark.parametrize(
+    ("command", "program"),
+    [("node ./server.js --data /srv/docker", "node"), ("./bin/serve --cache-dir /opt/cache/uvx", "serve")],
+)
+def test_a_command_line_that_only_ends_in_a_runner_path_is_not_that_runner(command: str, program: str) -> None:
+    pin = classify_mcp_pinning({"command": command})
+    assert (pin.status, pin.detail) == ("not_applicable", f"local interpreter, script, or binary ({program!r})")
 
 
 # --------------------------------------------------------------------------- #

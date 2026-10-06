@@ -38,6 +38,15 @@ from typing import Any
 
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.utils.tool_runner import ExternalTool, Tools, cvss_to_severity, parse_json_output
+from skillevaluator.validators.mcp_static import (
+    exact_npm_version,
+    is_exact_container_image,
+    is_local_spec,
+    is_remote_npm_spec,
+    parse_mcp_runner,
+    split_npm_spec,
+)
+from skillevaluator.validators.url_policy import report_value
 
 UNVERIFIED_CHECK_NAME = "dependency-version-unverified"
 NPM_VULN_CHECK = "npm-vulnerability"
@@ -45,7 +54,13 @@ CONTAINER_VULN_CHECK = "container-vulnerability"
 MAX_NPM_PACKAGES = 5_000
 MAX_IMAGES = 32
 MAX_VULN_FINDINGS_PER_SOURCE = 200
+# Per-source cap on individual dependency-version-unverified findings; the rest are
+# summarized in one message, so a huge manifest cannot flood reports.
 MAX_UNVERIFIED_PER_SOURCE = 100
+# An ecosystem summary keeps at most MAX_SUMMARY_ERRORS scanner errors, and an
+# error message is cut to MAX_ERROR_CHARS.
+MAX_SUMMARY_ERRORS = 8
+MAX_ERROR_CHARS = 300
 NPM_AUDIT_TIMEOUT = 180
 OSV_TIMEOUT = 300
 IMAGE_SCAN_TIMEOUT = 600
@@ -61,7 +76,6 @@ PACKAGE_JSON = "package.json"
 SEVERITY_KEYS = ("critical", "high", "medium", "low", "info")
 
 _NPM_NAME_RE = re.compile(r"^(?:@[A-Za-z0-9._~-]+/)?[A-Za-z0-9._~-]{1,214}$")
-_NPM_EXACT_RE = re.compile(r"^=?v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$")
 _IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,511}$")
 _SEVERITY_WORDS = {
     "critical": Severity.CRITICAL,
@@ -101,24 +115,12 @@ class ImageDeclaration:
     exact: bool
 
 
-def exact_npm_version(spec: str) -> str | None:
-    """Return the exact semver an npm spec pins (``1.2.3``, ``=1.2.3``, ``v1.2.3``), else ``None``."""
-    match = _NPM_EXACT_RE.match(spec.strip())
-    return match.group(1) if match else None
-
-
-def parse_package_json(data: Any) -> list[NpmDeclaration]:
-    """Direct dependency declarations from a parsed ``package.json`` (the first ``MAX_NPM_PACKAGES``)."""
-    return read_npm_declarations(data, lockfile=False)[0]
-
-
-def parse_package_lock(data: Any) -> list[NpmDeclaration]:
-    """Resolved packages in a lockfile (v1 ``dependencies``, v2/v3 ``packages``; the first ``MAX_NPM_PACKAGES``)."""
-    return read_npm_declarations(data, lockfile=True)[0]
-
-
 def read_npm_declarations(data: Any, *, lockfile: bool) -> tuple[list[NpmDeclaration], int]:
     """The first ``MAX_NPM_PACKAGES`` declarations of a parsed manifest, and how many it declares in total.
+
+    A ``package.json`` gives its ``dependencies``, ``optionalDependencies``, and
+    ``devDependencies``; a lockfile its resolved packages (v1 ``dependencies``,
+    v2/v3 ``packages``).
 
     A total above the returned count means the manifest was cut at the cap; the
     caller must record that, so a package past the cap is never dropped silently.
@@ -223,8 +225,6 @@ def _items(value: Any) -> list[tuple[str, Any]]:
 
 
 def image_declaration(image: str, role: str) -> ImageDeclaration:
-    from skillevaluator.validators.mcp_static import is_exact_container_image
-
     text = image.strip()
     exact = bool(_IMAGE_REF_RE.match(text)) and "$" not in text and is_exact_container_image(text)
     return ImageDeclaration(text[:512], role, exact)
@@ -277,103 +277,37 @@ def parse_dockerfile_images(text: str) -> list[ImageDeclaration]:
 # MCP package runners                                                         #
 # --------------------------------------------------------------------------- #
 def mcp_runner_packages(config: Any) -> tuple[str, list[str]] | None:
-    """The package specs an MCP package runner installs: ``("npm", specs)``, ``("pypi", specs)``, or ``None``.
+    """The registry packages an MCP package runner installs: ``("npm", specs)``, ``("pypi", specs)``, or ``None``.
 
-    Uses the argv parsing of the MCP pinning classifier
-    (:func:`~skillevaluator.validators.mcp_static.classify_mcp_pinning`), so a
-    flag value is never mistaken for the package, and launch wrappers (``cmd
-    /c``, ``env X=1``, ``timeout``, ``sudo``, ``sh -c``) are looked through the
-    same way: ``npx``, ``bunx``, ``pnpx``, ``bun x``, ``pnpm dlx`` (with
-    ``--package`` before or after ``dlx``), ``yarn dlx``, ``npm exec``, and
-    ``deno run npm:`` give npm specs (every ``-p``/``--package`` value, else the
-    first positional); ``uvx``, ``uv tool run``, ``uv run --with``, and ``pipx
-    run`` give PyPI specs (``--from``/``--spec``, else the first positional,
-    plus every ``--with`` requirement).
+    A view of :func:`~skillevaluator.validators.mcp_static.parse_mcp_runner`,
+    the argv reader the pinning check uses, so launch wrappers (``cmd /c``,
+    ``env X=1``, ``timeout``, ``sudo``, ``sh -c``) are looked through the same
+    way. The npm runners and ``deno run npm:`` give npm specs; ``uvx``, ``uv
+    tool run``, ``uv run --with``, and ``pipx run`` give PyPI specs. A container
+    image, ``go run``, and ``dnx`` give ``None``.
     """
-    from skillevaluator.validators import mcp_static as ms
-
-    if not isinstance(config, dict):
+    invocation = parse_mcp_runner(config)
+    if invocation is None:
         return None
-    command = config.get("command")
-    if not isinstance(command, str) or not command.strip():
-        return None
-    raw_args = config.get("args")
-    args = [str(arg) for arg in raw_args] if isinstance(raw_args, list) else []
-    argv = ms.unwrap_launch_command(ms._launch_argv(command, args))
-    if not argv:
-        return None
-    base, args = ms._command_basename(argv[0]), argv[1:]
-    if base in {"npx", "bunx", "pnpx"}:
-        return "npm", _npm_runner_specs(args, ms._NPX_VALUE_FLAGS if base == "npx" else ms._DLX_VALUE_FLAGS)
-    if base == "bun":
-        sub, rest = ms._subcommand(args, ms._DLX_VALUE_FLAGS)
-        return ("npm", _npm_runner_specs(rest, ms._DLX_VALUE_FLAGS)) if sub == "x" else None
-    if base in {"pnpm", "yarn"}:
-        sub, rest = ms._subcommand(args, ms._DLX_VALUE_FLAGS)
-        if sub != "dlx":
-            return None
-        # '--package' may come before 'dlx' ('pnpm --package=@scope/pkg dlx bin').
-        before = args[: len(args) - len(rest) - 1]
-        packages = ms._flag_values(before, ("-p", "--package"))
-        return "npm", packages or _npm_runner_specs(rest, ms._DLX_VALUE_FLAGS)
-    if base == "npm":
-        sub, rest = ms._subcommand(args, ms._NPM_GLOBAL_VALUE_FLAGS)
-        return ("npm", _npm_runner_specs(rest, ms._NPX_VALUE_FLAGS)) if sub in {"exec", "x"} else None
-    if base == "deno" and args[:1] == ["run"]:
-        spec = ms._first_positional(args[1:], ms._DENO_VALUE_FLAGS)
-        return ("npm", [spec[4:]]) if spec and spec.startswith("npm:") else None
-    if base == "uvx":
-        return "pypi", _uv_tool_specs(args)
-    if base == "uv":
-        sub, rest = ms._subcommand(args, ms._UV_RUN_VALUE_FLAGS)
-        if sub == "tool":
-            tool_sub, tool_rest = ms._subcommand(rest, ms._UVX_VALUE_FLAGS)
-            return ("pypi", _uv_tool_specs(tool_rest)) if tool_sub in {"run", "x"} else None
-        if sub == "run":
-            # 'uv run' runs the project environment; '--with' adds packages resolved on every run.
-            options = [*args[: len(args) - len(rest) - 1], *rest[: ms._skip_options(rest, ms._UV_RUN_VALUE_FLAGS)]]
-            extra = [item.strip() for value in ms._flag_values(options, ("--with",)) for item in value.split(",")]
-            return ("pypi", [item for item in extra if item]) if extra else None
-        return None
-    if base == "pipx" and args[:1] == ["run"]:
-        rest = args[1:]
-        spec_values = ms._flag_values(rest, ("--spec",))
-        spec = spec_values[0] if spec_values else ms._first_positional(rest, ms._PIPX_VALUE_FLAGS)
-        return ("pypi", [spec]) if spec else None
+    if invocation.ecosystem == "pypi":
+        return "pypi", list(invocation.specs)
+    if invocation.ecosystem == "npm" or invocation.npm_specs:
+        return "npm", list(invocation.npm_specs)
     return None
 
 
-def _uv_tool_specs(rest: list[str]) -> list[str]:
-    """``uvx`` / ``uv tool run``: the tool spec (``--from``, else the first positional) and every ``--with``."""
-    from skillevaluator.validators import mcp_static as ms
-
-    from_values = ms._flag_values(rest, ("--from",))
-    spec = from_values[0] if from_values else ms._first_positional(rest, ms._UVX_VALUE_FLAGS)
-    extra = [item.strip() for value in ms._flag_values(rest, ("--with",)) for item in value.split(",")]
-    return [item for item in (spec, *extra) if item]
-
-
-def _npm_runner_specs(tokens: list[str], value_flags: frozenset[str]) -> list[str]:
-    from skillevaluator.validators import mcp_static as ms
-
-    packages = ms._flag_values(tokens, ("-p", "--package"))
-    if packages:
-        return packages
-    spec = ms._first_positional(tokens, value_flags)
-    return [spec] if spec else []
-
-
 def npm_spec_declaration(spec: str, role: str) -> NpmDeclaration | None:
-    """An npm runner spec (``pkg``, ``@scope/pkg@1.2.3``, git or URL) as a declaration; ``None`` for a local path."""
-    from skillevaluator.validators import mcp_static as ms
+    """An npm runner spec (``pkg``, ``@scope/pkg@1.2.3``, git or URL) as a declaration; ``None`` for a local path.
 
+    Its version is exact when the MCP pinning check calls the spec pinned: both
+    use :func:`~skillevaluator.validators.mcp_static.exact_npm_version`.
+    """
     text = spec.strip()
-    if not text or ms._is_local_spec(text):
+    if not text or is_local_spec(text):
         return None
-    if text.startswith(ms._REMOTE_SPEC_PREFIXES) or (not text.startswith("@") and "/" in text):
+    if is_remote_npm_spec(text):
         return NpmDeclaration(text[:214], text[:200], role, None)
-    at = text.find("@", 1) if text.startswith("@") else text.find("@")
-    name, version = (text[:at], text[at + 1 :]) if at > 0 else (text, "")
+    name, version = split_npm_spec(text)
     exact = exact_npm_version(version) if version and _NPM_NAME_RE.match(name) else None
     return NpmDeclaration(name, text[:200], role, exact)
 
@@ -405,41 +339,36 @@ def image_registry_problem(
     also resolved, and every answer is classified the same way.
     """
     from skillevaluator.validators import endpoint_resolution as er
-    from skillevaluator.validators.mcp_static import classify_endpoint_host, host_is_allowlisted
 
     registry = image_registry(image)
     if registry is None:
         return None, False
     host, _colon, port_text = registry.rpartition(":") if ":" in registry else (registry, "", "")
-    allowed = tuple(allowed_hosts)
-    static = classify_endpoint_host(host)
-    if static is not None:
-        if static.kind == "metadata":
-            return f"registry {registry} is a cloud instance-metadata endpoint, which is never contacted", False
-        if not host_is_allowlisted(static, allowed):
-            return (
-                f"registry {registry} is a {static.reason} address; allow it with mcp.allowed_private_hosts "
-                "to audit images from it",
-                False,
-            )
-        return None, True
-    if not resolve:
-        return None, False
+    port = int(port_text) if port_text.isdecimal() else 443  # isdigit() also admits '²', which int() refuses
     try:
-        addresses = er._resolve(host, int(port_text) if port_text.isdigit() else 443, er.DNS_TIMEOUT_SECONDS)
+        verdict = er.classify_host(host, port, allowed_hosts, resolve=er.dns_resolver() if resolve else None)
     except (OSError, UnicodeError) as exc:
         return f"registry host {host!r} could not be resolved ({type(exc).__name__})", False
-    non_public = er._classify_addresses(addresses)
-    blocked = er.blocked_address(host, non_public, allowed)
+    blocked = verdict.blocked
+    if verdict.static is not None:
+        if blocked is None:
+            return None, True
+        if blocked[0] == "metadata":
+            return f"registry {registry} is a cloud instance-metadata endpoint, which is never contacted", False
+        return (
+            f"registry {registry} is a {verdict.static.reason} address; allow it with mcp.allowed_private_hosts "
+            "to audit images from it",
+            False,
+        )
     if blocked is not None and blocked[0] == "metadata":
         return f"registry {registry} resolves to a cloud instance-metadata address ({blocked[2]})", False
     if blocked is not None:
         return (
-            f"registry {registry} resolves to {er._where(blocked)} ({blocked[2] or 'unclassified'}); allow it with "
-            "mcp.allowed_private_hosts to audit images from it",
+            f"registry {registry} resolves to {er.describe_address(blocked)} ({blocked[2] or 'unclassified'}); "
+            "allow it with mcp.allowed_private_hosts to audit images from it",
             False,
         )
-    return None, bool(non_public)
+    return None, bool(verdict.non_public)
 
 
 def is_dockerfile_name(name: str) -> bool:
@@ -467,9 +396,13 @@ class AuditOutcome:
     # Exact pins past MAX_NPM_PACKAGES that were not audited; the caller records them as INCOMPLETE.
     unaudited: int = 0
 
+    def count(self, severity: Severity) -> None:
+        """Tally one vulnerability of ``severity``."""
+        self.vulnerabilities[severity.value] = self.vulnerabilities.get(severity.value, 0) + 1
+
     def add(self, finding: Finding) -> None:
-        severity = finding.severity.value if isinstance(finding.severity, Severity) else str(finding.severity)
-        self.vulnerabilities[severity] = self.vulnerabilities.get(severity, 0) + 1
+        """Tally one vulnerability and keep its finding (the first ``MAX_VULN_FINDINGS_PER_SOURCE``)."""
+        self.count(finding.severity)
         if len(self.findings) < MAX_VULN_FINDINGS_PER_SOURCE:
             self.findings.append(finding)
         else:
@@ -495,22 +428,34 @@ def unverified_finding(
     role: str,
     kind: str,
     line_number: int | None = None,
+    reason: str | None = None,
 ) -> Finding:
+    """The INFO finding for a declaration the audit cannot match to one release.
+
+    ``reason`` says why an exact pin could not be audited (pip-audit's skip
+    reason); without one, the declaration is floating. ``label`` and ``raw`` are
+    shown the way reports show plugin values
+    (:func:`~skillevaluator.validators.url_policy.report_value`), so a git or
+    URL spec never carries its userinfo or a token into the message or metadata.
+    """
+    package = report_value(label)
+    shown = report_value(raw, 120)
+    if reason is None:
+        problem = f"cannot audit a floating {kind} ('{shown}' is not an exact version or digest)"
+    else:
+        problem = f"cannot audit '{shown}' ({report_value(reason)})"
     return Finding(
         category="DEPENDENCY",
         severity=Severity.INFO,
         check_name=UNVERIFIED_CHECK_NAME,
-        message=(
-            f"{label}: cannot audit a floating {kind} ('{raw[:120]}' is not an exact version or digest); "
-            "vulnerability applicability was not asserted"
-        ),
+        message=f"{package}: {problem}; vulnerability applicability was not asserted",
         file_path=source,
         line_number=line_number,
         suggestion=_UNVERIFIED_SUGGESTIONS.get(ecosystem, _DEFAULT_UNVERIFIED_SUGGESTION),
         metadata={
             "ecosystem": ecosystem,
-            "package_name": label,
-            "declared_constraint": raw[:200],
+            "package_name": package,
+            "declared_constraint": report_value(raw),
             "dependency_role": role,
             "resolution_status": "unverified",
         },
@@ -923,7 +868,7 @@ def parse_npm_audit_output(data: Any, pins: dict[str, str], *, source: str, outc
         return "npm audit produced no JSON report"
     error = data.get("error")
     if isinstance(error, dict):
-        return str(error.get("summary") or error.get("code") or "npm audit failed")[:300]
+        return str(error.get("summary") or error.get("code") or "npm audit failed")[:MAX_ERROR_CHARS]
     vulnerabilities = data.get("vulnerabilities")
     if isinstance(vulnerabilities, dict):
         for name, entry in vulnerabilities.items():
@@ -1042,16 +987,22 @@ def parse_trivy_output(data: Any, *, image: str, source: str, outcome: AuditOutc
 # --------------------------------------------------------------------------- #
 # Runners                                                                     #
 # --------------------------------------------------------------------------- #
-def _npm_batches(pins: Iterable[tuple[str, str]]) -> list[dict[str, str]]:
-    """Group exact pins so no batch names one package twice."""
+def split_conflicting_pins(pins: Iterable[tuple[str, str]]) -> list[dict[str, str]]:
+    """Group ``(package, pin)`` pairs so no group pins one package twice.
+
+    Scanners that audit a flat set of pins (a synthesized npm lockfile,
+    ``pip-audit --no-deps``) reject one package pinned to two versions, as
+    marker-split or per-directory pins can be, so each conflicting pin goes to
+    the first group that does not pin its package yet.
+    """
     batches: list[dict[str, str]] = []
-    for name, version in pins:
+    for package, pin in pins:
         for batch in batches:
-            if batch.get(name) in (None, version):
-                batch[name] = version
+            if batch.get(package) in (None, pin):
+                batch[package] = pin
                 break
         else:
-            batches.append({name: version})
+            batches.append({package: pin})
     return batches
 
 
@@ -1107,7 +1058,7 @@ def _run_osv_lockfile(tool: ExternalTool, lockfile: Path, *, source: str, outcom
     data = parse_json_output(run.stdout)
     if run.exit_code not in (0, 1) or not isinstance(data, dict):
         detail = (run.stderr or "").strip().splitlines()
-        return f"osv-scanner failed: {detail[-1][:300] if detail else f'exit code {run.exit_code}'}"
+        return f"osv-scanner failed: {detail[-1][:MAX_ERROR_CHARS] if detail else f'exit code {run.exit_code}'}"
     parse_osv_output(data, ecosystem="npm", source=source, check=NPM_VULN_CHECK, outcome=outcome)
     return None
 
@@ -1126,7 +1077,9 @@ def _run_npm_audit(
     data = parse_json_output(run.stdout)
     if not isinstance(data, dict):
         detail = (run.stderr or "").strip().splitlines()
-        reason = f"exit code {run.exit_code}: {detail[-1][:300]}" if detail else f"exit code {run.exit_code}"
+        reason = (
+            f"exit code {run.exit_code}: {detail[-1][:MAX_ERROR_CHARS]}" if detail else f"exit code {run.exit_code}"
+        )
         return f"npm audit produced no JSON report ({reason})"
     return parse_npm_audit_output(data, pins, source=source, outcome=outcome)
 
@@ -1158,7 +1111,7 @@ def audit_npm_pins(pins: list[tuple[str, str]], *, source: str) -> AuditOutcome:
         attempt = AuditOutcome(scanner=label)
         failed: str | None = None
         with tempfile.TemporaryDirectory(prefix="skillevaluator-npm-audit-") as temp_dir:
-            for index, batch in enumerate(_npm_batches(unique)):
+            for index, batch in enumerate(split_conflicting_pins(unique)):
                 batch_dir = Path(temp_dir) / f"batch-{index}"
                 batch_dir.mkdir()
                 lockfile = _write_npm_project(batch_dir, batch)
@@ -1305,11 +1258,15 @@ def record_outcome(
     audited: int,
     unverified: int,
     new_source: bool = True,
+    partial: bool = False,
 ) -> None:
     """Fold one source's evidence into an ecosystem summary (status: audited, incomplete, no_exact, unverified).
 
     ``new_source=False`` adds to the source already counted (for example, the
-    packages of a lockfile that were past the audit cap).
+    packages of a lockfile that were past the audit cap). An INCOMPLETE
+    outcome adds no audited packages or vulnerabilities unless ``partial`` is
+    set: pip-audit audits a source in batches, and the batches that ran keep
+    their evidence when another batch fails.
     """
     if new_source:
         summary["sources"] += 1
@@ -1323,9 +1280,10 @@ def record_outcome(
         summary["scanners"].append(outcome.scanner)
     if outcome.status == "incomplete":
         summary["status"] = "incomplete"
-        if outcome.error and len(summary["errors"]) < 8:
-            summary["errors"].append(outcome.error[:300])
-        return
+        if outcome.error and len(summary["errors"]) < MAX_SUMMARY_ERRORS:
+            summary["errors"].append(outcome.error[:MAX_ERROR_CHARS])
+        if not partial:
+            return
     summary["audited"] += audited
     for key, value in outcome.vulnerabilities.items():
         summary["vulnerabilities"][key] = summary["vulnerabilities"].get(key, 0) + value

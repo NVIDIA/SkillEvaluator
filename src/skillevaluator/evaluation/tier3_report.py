@@ -79,8 +79,12 @@ _INTEGRATION_REASON_NO_WORKSPACE = "The run recorded no plugin workspace, so no 
 _INTEGRATION_REASON_NO_COMPONENTS = "The run staged no member components, so no member-skills arm could be compared."
 _INTEGRATION_REASON_NO_ARM = "The member-skills (sum-of-parts) arm was not run, so Integration was not measured."
 _INTEGRATION_REASON_NO_SCORE = "The member-skills (sum-of-parts) arm produced no comparable score."
-# Report-only statistics produced by the collector (shared C4 contract).
-_STATISTICS_FIELDS = ("lift_uncertainty", "reliability", "cost", "token_efficiency", "context_cost_measured")
+# The per-trial rewards list of each arm in the loaded agent data.
+_ARM_REWARDS_FIELDS = {
+    "with_skill": "rewards",
+    "without_skill": "rewards_baseline",
+    "sum_of_parts": "rewards_sum_of_parts",
+}
 
 # Canonical reports are self-contained HTML/JSON artifacts, so untrusted custom
 # grader cardinality must not multiply metric-by-trial detail without bound. The
@@ -530,31 +534,21 @@ def agent_eval_result_from_directory(
     return _validation_result_from_payload(payload)
 
 
-def _incomplete_skip_reason(provenance: dict[str, Any]) -> str:
-    """Return a stable explanation for a partial plugin evaluation."""
-    from skillevaluator.reporting.plugin_sections import sidecar_error_reason
+def incomplete_reason(provenance: dict[str, Any]) -> str:
+    """Return why a partial plugin run is INCOMPLETE, worded as every report words it.
 
-    if sidecar_reason := sidecar_error_reason(provenance):
-        return f"INCOMPLETE: {sidecar_reason}"
-    # A plugin run that did not complete, or whose native plugin load was never
-    # confirmed in any with-plugin trial, keeps its evidence but is INCOMPLETE.
-    notes = [str(provenance.get("execution_incomplete") or "").strip()]
-    unverified = provenance.get("native_load_unverified")
-    if isinstance(unverified, dict):
-        notes.extend(str(reason) for reason in unverified.values())
-    if notes := [note for note in notes if note]:
-        return "INCOMPLETE: " + "; ".join(notes)
-    counts = (
-        ("unresolved skill ref(s)", len(provenance.get("unresolved_skill_refs") or [])),
-        ("unresolved rule ref(s)", len(provenance.get("unresolved_rule_refs") or [])),
-        ("unresolved provider MCP server(s)", len(provenance.get("provider_only_mcp_servers") or [])),
-        (
-            "MCP server(s) declaring config the runtime cannot apply",
-            len(provenance.get("mcp_unsupported_config") or []),
-        ),
-    )
-    detail = ", ".join(f"{count} {label}" for label, count in counts if count) or "required declared components"
-    return f"INCOMPLETE: {detail} could not be resolved/evaluated at Tier 3"
+    The text is the completeness view's reason: an unreadable provenance
+    sidecar, otherwise why the run did not complete or its native plugin load
+    was never confirmed, followed by the declared components it deferred.
+    """
+    return f"INCOMPLETE: {_plugin_completeness(provenance)['reason']}"
+
+
+def _plugin_completeness(provenance: dict[str, Any]) -> dict[str, Any]:
+    from skillevaluator.reporting.plugin_sections import completeness_view
+
+    # An empty record still belongs to a partial run, for a reason nobody recorded.
+    return completeness_view(provenance or {"partial": True}) or {}
 
 
 def _validation_result_from_payload(payload: dict[str, Any] | None) -> ValidationResult | None:
@@ -579,7 +573,7 @@ def _validation_result_from_payload(payload: dict[str, Any] | None) -> Validatio
         if partial:
             result.passed = False
             result.metadata["execution_status"] = "skipped"
-            result.metadata["skip_reason"] = _incomplete_skip_reason(plugin_provenance)
+            result.metadata["skip_reason"] = incomplete_reason(plugin_provenance)
         # A run fails its gate on a FAIL verdict or a confirmed Skill Lift regression,
         # even when it is partial: the parts it did evaluate already failed, so it is
         # FAIL rather than INCOMPLETE on every surface. ``validate`` counts this only
@@ -769,25 +763,10 @@ def build_agent_eval_payload(
     and ``provenance`` (raw evaluators, raw lift, raw trial rewards) feeds the
     Diagnostics tab.
     """
-    from skillevaluator.tier3.harbor.report_data import (
-        build_dataset_snapshot,
-        deduplicate_dataset_entries,
-        metrics_for_condition,
-    )
+    from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot, deduplicate_dataset_entries
 
     report_budget = _ReportBudget(artifact_loading=_artifact_loading_reasons(agents, dataset))
-    agent_payloads: dict[str, dict[str, Any]] = {}
-    for name in sorted(agents):
-        info = agents[name]
-        model = _agent_model(name, info, run_config)
-        agent_payloads[name] = _build_agent(
-            name,
-            info,
-            metrics_for_condition(info, "with_skill"),
-            metrics_for_condition(info, "without_skill"),
-            model,
-            sum_of_parts_baseline=_baseline_is_sum_of_parts(run_config, plugin_provenance),
-        )
+    agent_payloads = _agent_payloads(agents, run_config, plugin_provenance)
 
     if not agent_payloads:
         return None
@@ -978,7 +957,7 @@ def build_agent_eval_payload(
     if plugin_provenance:
         payload["plugin_provenance"] = plugin_provenance
         summary["plugin_provenance"] = plugin_provenance
-    for field_name in _STATISTICS_FIELDS:
+    for field_name in _statistics_fields():
         if isinstance(best.get(field_name), dict):
             payload[field_name] = best[field_name]
     if _is_plugin_target(run_config) or plugin_provenance:
@@ -1010,6 +989,53 @@ def build_agent_eval_payload(
     payload = _sanitize_json_numbers(payload)
     _enforce_report_payload_budget(payload, report_budget)
     return payload
+
+
+def integration_reports_for(
+    agents: dict[str, dict[str, Any]],
+    run_config: dict[str, Any] | None,
+    plugin_provenance: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, dict[str, Any]]]:
+    """Return the Integration blocks the report for this run carries, without building the report.
+
+    The first is the run-level block (``payload["integration"]``), ``None``
+    when Integration was neither measured nor requested; the second maps each
+    agent with a block to its own named block
+    (``payload["agents"][name]["integration"]``). *agents* is what
+    :func:`build_agent_eval_payload` takes. A caller that needs only these
+    blocks (the run summary) skips the payload's evaluator cards, evidence,
+    insights and size budget.
+    """
+    agent_payloads = _agent_payloads(agents, run_config, plugin_provenance)
+    integration, per_agent = _integration_reports(
+        agent_payloads, _pick_best_agent(agent_payloads), run_config, plugin_provenance
+    )
+    return (
+        _sanitize_json_numbers(integration) if integration is not None else None,
+        {name: _sanitize_json_numbers(block) for name, block in per_agent.items()},
+    )
+
+
+def _agent_payloads(
+    agents: dict[str, dict[str, Any]],
+    run_config: dict[str, Any] | None,
+    plugin_provenance: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Build each agent's scores, in name order."""
+    from skillevaluator.tier3.harbor.report_data import metrics_for_condition
+
+    sum_of_parts_baseline = _baseline_is_sum_of_parts(run_config, plugin_provenance)
+    return {
+        name: _build_agent(
+            name,
+            info,
+            metrics_for_condition(info, "with_skill"),
+            metrics_for_condition(info, "without_skill"),
+            _agent_model(name, info, run_config),
+            sum_of_parts_baseline=sum_of_parts_baseline,
+        )
+        for name, info in sorted(agents.items())
+    }
 
 
 def _layer_llm_insights(
@@ -1507,7 +1533,7 @@ def _lift_note(
 
 def _agent_statistics(info: dict[str, Any], *, sum_of_parts_baseline: bool) -> dict[str, Any]:
     """The collector's report-only statistics; a legacy members interval is filed under Integration."""
-    fields = {field: info[field] for field in _STATISTICS_FIELDS if isinstance(info.get(field), dict)}
+    fields = {field: info[field] for field in _statistics_fields() if isinstance(info.get(field), dict)}
     uncertainty = fields.get("lift_uncertainty")
     if sum_of_parts_baseline and isinstance(uncertainty, dict) and uncertainty.get("effectiveness"):
         # Older runs filed the plugin-vs-member-skills interval as "effectiveness".
@@ -1585,17 +1611,12 @@ def _build_agent(
         # contracts, the dimension mean covers only standard rows and can
         # overstate Harbor's logical attempt score used by pass@k. In both
         # cases, prefer the collector-owned logical overall.
-        overall_ws = _finite_float(info.get("overall_with_skill"))
-        if overall_ws is None and info.get("rewards_complete") is not False:
-            overall_ws = _logical_reward_mean(info.get("rewards"), "overall")
+        overall_ws = _arm_logical_overall(info, "with_skill")
         with_dimensions = {"overall": overall_ws}
     if baseline_mixed_contract or (
         not baseline_metrics and baseline_quality_available and _mean(list(baseline_dimensions.values())) is None
     ):
-        overall_without = _finite_float(info.get("overall_without_skill"))
-        if overall_without is None and info.get("rewards_baseline_complete") is not False:
-            overall_without = _logical_reward_mean(info.get("rewards_baseline"), "overall")
-        baseline_dimensions = {"overall": overall_without}
+        baseline_dimensions = {"overall": _arm_logical_overall(info, "without_skill")}
     # A logical overall on one side compares only with the other side's overall.
     if set(with_dimensions) == {"overall"} and "overall" not in baseline_dimensions:
         baseline_dimensions = {"overall": _mean(list(baseline_dimensions.values()))}
@@ -1630,21 +1651,11 @@ def _build_agent(
     )
 
     sum_of_parts_quality_available = _condition_quality_available(info, "sum_of_parts")
-    sum_of_parts_scores = info.get("sum_of_parts") or {}
-    if not sum_of_parts_quality_available:
-        sum_of_parts_scores = {}
-    sum_of_parts_dimensions = _build_dimensions(
-        sum_of_parts_scores,
-        {},
-        info.get("dimensions_sum_of_parts") or {},
-        {},
-    )
-    sum_of_parts_overall = _mean([dimension["with_skill"] for dimension in sum_of_parts_dimensions])
-    sum_of_parts_by_dimension = {str(d["id"]): d["with_skill"] for d in sum_of_parts_dimensions}
+    sum_of_parts_scores = (info.get("sum_of_parts") or {}) if sum_of_parts_quality_available else {}
+    sum_of_parts_by_dimension = _dimension_scores(sum_of_parts_scores, info.get("dimensions_sum_of_parts") or {})
+    sum_of_parts_overall = _mean(list(sum_of_parts_by_dimension.values()))
     if sum_of_parts_overall is None and not with_metrics and sum_of_parts_quality_available:
-        sum_of_parts_overall = _finite_float(info.get("overall_sum_of_parts"))
-        if sum_of_parts_overall is None and info.get("rewards_sum_of_parts_complete") is not False:
-            sum_of_parts_overall = _logical_reward_mean(info.get("rewards_sum_of_parts"), "overall")
+        sum_of_parts_overall = _arm_logical_overall(info, "sum_of_parts")
         sum_of_parts_by_dimension = {"overall": sum_of_parts_overall}
     if set(with_dimensions) == {"overall"} and "overall" not in sum_of_parts_by_dimension:
         sum_of_parts_by_dimension = {"overall": sum_of_parts_overall}
@@ -1716,6 +1727,26 @@ def _build_agent(
     }
 
 
+# Per arm: the engine's overall-score field and the flag that says the arm's rewards list is complete.
+_ARM_OVERALL_FIELDS = {
+    "with_skill": ("overall_with_skill", "rewards_complete"),
+    "without_skill": ("overall_without_skill", "rewards_baseline_complete"),
+    "sum_of_parts": ("overall_sum_of_parts", "rewards_sum_of_parts_complete"),
+}
+
+
+def _arm_logical_overall(info: dict[str, Any], arm: str) -> float | None:
+    """Return the collector's own overall score for an arm, else its mean logical-trial reward.
+
+    The reward mean is used only when the arm's rewards list is complete.
+    """
+    overall_field, complete_field = _ARM_OVERALL_FIELDS[arm]
+    overall = _finite_float(info.get(overall_field))
+    if overall is None and info.get(complete_field) is not False:
+        overall = _logical_reward_mean(info.get(_ARM_REWARDS_FIELDS[arm]), "overall")
+    return overall
+
+
 def _attach_agent_report_details(
     agent_payload: dict[str, Any],
     info: dict[str, Any],
@@ -1741,14 +1772,22 @@ def _attach_agent_report_details(
     )
 
 
+def _statistics_fields() -> tuple[str, ...]:
+    """The report-only statistics blocks the collector stores for an agent (``STATISTICS_BLOCKS``), copied as is.
+
+    Integration completeness is left out: an agent's payload sets it on its own,
+    and the payload reports it in the Integration block, not at the top level.
+    """
+    from skillevaluator.tier3.harbor.stats import STATISTICS_BLOCKS
+
+    return tuple(block for block in STATISTICS_BLOCKS if block != "integration_completeness")
+
+
 def _arm_not_applicable(info: dict[str, Any], condition: str) -> list[str]:
     """Judged metrics an arm recorded as not applicable in every trial."""
-    from skillevaluator.tier3.harbor.metrics import NOT_APPLICABLE_ELIGIBLE_METRICS
+    from skillevaluator.tier3.harbor.metrics import not_applicable_list
 
-    raw = info.get(f"not_applicable_{condition}")
-    if not isinstance(raw, list):
-        return []
-    return [metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric in raw]
+    return not_applicable_list(info.get(f"not_applicable_{condition}"))
 
 
 def _not_applicable_evaluators(
@@ -1813,6 +1852,23 @@ def _build_evaluators(
     return evaluators
 
 
+def _arm_dimension_score(scores: dict[str, Any], precomputed: dict[str, Any], dim_id: str) -> float | None:
+    """Return one arm's score for a dimension: the engine's, else the weighted evaluator scores."""
+    from skillevaluator.tier3.harbor.metrics import weighted_dimension_score
+
+    score = _precomputed_score(precomputed, dim_id)
+    return score if score is not None else weighted_dimension_score(scores.get, DIMENSION_MAPPING[dim_id])
+
+
+def _dimension_scores(scores: dict[str, Any], precomputed: dict[str, Any]) -> dict[str, float]:
+    """Return one arm's scored dimensions, rounded as the dimension rows round them."""
+    return {
+        dim_id: round(score, 4)
+        for dim_id in _DIMENSION_IDS
+        if (score := _arm_dimension_score(scores, precomputed, dim_id)) is not None
+    }
+
+
 def _build_dimensions(
     with_scores: dict[str, Any],
     without_scores: dict[str, Any],
@@ -1834,12 +1890,8 @@ def _build_dimensions(
     dimensions: list[dict[str, Any]] = []
     for dim_id in _DIMENSION_IDS:
         cfg = DIMENSION_MAPPING[dim_id]
-        ws = _precomputed_score(precomputed_with, dim_id)
-        if ws is None:
-            ws = _dimension_score(with_scores, cfg)
-        bl = _precomputed_score(precomputed_without, dim_id)
-        if bl is None:
-            bl = _dimension_score(without_scores, cfg)
+        ws = _arm_dimension_score(with_scores, precomputed_with, dim_id)
+        bl = _arm_dimension_score(without_scores, precomputed_without, dim_id)
         if ws is None and bl is None:
             continue
         lift = round(ws - bl, 4) if ws is not None and bl is not None else None
@@ -3016,59 +3068,37 @@ def _build_conclusions(
 
 
 def _plugin_incompleteness_conclusion(plugin_provenance: dict[str, Any]) -> dict[str, str]:
-    """Build the leading deterministic conclusion for a partial plugin run."""
-    from skillevaluator.reporting.plugin_sections import sidecar_error_reason
+    """Build the leading deterministic conclusion for a partial plugin run.
 
-    if sidecar_reason := sidecar_error_reason(plugin_provenance):
-        return {
-            "severity": "fail",
-            "title": "Evaluation INCOMPLETE - plugin provenance unreadable",
-            "message": (
-                f"This plugin run is INCOMPLETE: {sidecar_reason}. "
-                "The score is not a full evaluation and must not be read as a pass."
-            ),
-        }
-    unresolved = []
-    for label, key in (
-        ("skill ref(s)", "unresolved_skill_refs"),
-        ("rule ref(s)", "unresolved_rule_refs"),
-        ("provider MCP server(s)", "provider_only_mcp_servers"),
-        ("MCP server config(s)", "mcp_unsupported_config"),
-    ):
-        count = len(plugin_provenance.get(key) or [])
-        if count:
-            unresolved.append(f"{count} {label}")
-    if not unresolved:
-        # Nothing was deferred: the run is INCOMPLETE because it did not complete or a native load was unconfirmed.
-        from skillevaluator.reporting.plugin_sections import text
+    The message states the same reason as every report (see :func:`incomplete_reason`);
+    the title names the main cause.
+    """
+    from skillevaluator.reporting.plugin_sections import text
 
-        execution = text(plugin_provenance.get("execution_incomplete"))
-        unverified_map = plugin_provenance.get("native_load_unverified")
-        unverified = (
-            [text(reason) for reason in (unverified_map or {}).values()] if isinstance(unverified_map, dict) else []
+    completeness = _plugin_completeness(plugin_provenance)
+    if completeness["sidecar_error"]:
+        title = "plugin provenance unreadable"
+        consequence = "The score is not a full evaluation and must not be read as a pass."
+    elif completeness["run_notes"] and not completeness["deferred"]:
+        title = (
+            "the run did not complete"
+            if text(plugin_provenance.get("execution_incomplete"))
+            else "native plugin load not confirmed"
         )
-        details = [note for note in (execution, *unverified) if note]
-        if details:
-            title = "the run did not complete" if execution else "native plugin load not confirmed"
-            return {
-                "severity": "fail",
-                "title": f"Evaluation INCOMPLETE - {title}",
-                "message": (
-                    f"This plugin run is INCOMPLETE: {'; '.join(details)}. No declared component was deferred, "
-                    "but the score is not a full evaluation and must not be read as a pass."
-                ),
-            }
-    unresolved_text = ", ".join(unresolved) or "required components"
-    resolved_skills = len(plugin_provenance.get("evaluated_member_skills") or [])
-    resolved_rules = len(plugin_provenance.get("staged_rules") or [])
+        consequence = (
+            "No declared component was deferred, but the score is not a full evaluation and must not be read as a pass."
+        )
+    else:
+        counts = completeness["counts"]
+        title = "unresolved dependencies"
+        consequence = (
+            f"The score reflects only the resolved components ({counts['skills_resolved']} skill(s), "
+            f"{counts['rules_resolved']} rule(s)) and must not be read as a full pass."
+        )
     return {
         "severity": "fail",
-        "title": "Evaluation INCOMPLETE - unresolved dependencies",
-        "message": (
-            f"This plugin run is INCOMPLETE: {unresolved_text} could not be fully evaluated at Tier 3. "
-            f"The score reflects only the resolved components ({resolved_skills} skill(s), "
-            f"{resolved_rules} rule(s)) and must not be read as a full pass."
-        ),
+        "title": f"Evaluation INCOMPLETE - {title}",
+        "message": f"This plugin run is INCOMPLETE: {completeness['reason']}. {consequence}",
     }
 
 
@@ -3104,25 +3134,6 @@ def _pass_threshold_from_policy(attempt_policy: dict[str, Any]) -> float:
 # ---------------------------------------------------------------------------
 # Scoring helpers
 # ---------------------------------------------------------------------------
-
-
-def _dimension_score(scores: dict[str, Any], cfg: dict[str, Any]) -> float | None:
-    value = _weighted(scores, cfg.get("evaluators", []), cfg.get("weights", []))
-    if value is None and cfg.get("fallback_evaluators"):
-        value = _weighted(scores, cfg["fallback_evaluators"], cfg.get("fallback_weights", []))
-    return value
-
-
-def _weighted(scores: dict[str, Any], evaluators: list[str], weights: list[float]) -> float | None:
-    num = 0.0
-    den = 0.0
-    for evaluator, weight in zip(evaluators, weights, strict=False):
-        value = _finite_float(scores.get(evaluator))
-        finite_weight = _finite_float(weight)
-        if value is not None and finite_weight is not None:
-            num += value * finite_weight
-            den += finite_weight
-    return (num / den) if den > 0 else None
 
 
 def _precomputed_score(precomputed: dict[str, Any], dim_id: str) -> float | None:
@@ -3685,16 +3696,36 @@ def _attach_integration_reports(
     ``payload["integration"]`` stays the run-level block (the best agent's,
     or the first agent with an Integration comparison) and names its agent.
     """
+    integration, per_agent = _integration_reports(agents, best_agent, run_config, plugin_provenance)
+    for name, block in per_agent.items():
+        agents[name]["integration"] = block
+    if integration is not None:
+        payload["integration"] = integration
+
+
+def _integration_reports(
+    agents: dict[str, dict[str, Any]],
+    best_agent: str,
+    run_config: dict[str, Any] | None,
+    plugin_provenance: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, dict[str, Any]]]:
+    """Return the run-level Integration block and each agent's own block, each naming its agent.
+
+    The run-level block is a copy of the Integration agent's block
+    (:func:`_integration_agent`), or ``None`` when that agent has none.
+    """
     primary = _integration_agent(agents, best_agent)
-    primary_name = next((name for name, agent in agents.items() if agent is primary), "")
+    integration: dict[str, Any] | None = None
+    per_agent: dict[str, dict[str, Any]] = {}
     for name, agent in agents.items():
         block = _build_integration_report(agent, run_config, plugin_provenance)
         if block is None:
             continue
         block["agent"] = name
-        agent["integration"] = block
-        if name == primary_name:
-            payload["integration"] = dict(block)
+        per_agent[name] = block
+        if agent is primary:
+            integration = dict(block)
+    return integration, per_agent
 
 
 def _integration_agent(agents: dict[str, dict[str, Any]], best_agent: str) -> dict[str, Any]:
@@ -3932,11 +3963,6 @@ def _bounded_report_copy(value: Any, *, depth: int = 0) -> Any:
 
 
 _MAX_TOP_ARGUMENT_FAILURES = 5
-_SIGNAL_REWARD_FIELDS = {
-    "with_skill": "rewards",
-    "without_skill": "rewards_baseline",
-    "sum_of_parts": "rewards_sum_of_parts",
-}
 
 
 def _top_argument_failures(rewards: object) -> list[dict[str, Any]]:
@@ -3980,10 +4006,10 @@ def _attach_plugin_report_fields(payload: dict[str, Any], agents: dict[str, dict
                 isinstance(arguments, dict)
                 and "failures" not in arguments
                 and not arguments.get("top_failures")
-                and arm in _SIGNAL_REWARD_FIELDS
+                and arm in _ARM_REWARDS_FIELDS
             ):
                 # The collector's exact counts win; the bounded rewards are only a fallback for older runs.
-                top = _top_argument_failures(raw_agent.get(_SIGNAL_REWARD_FIELDS[arm]))
+                top = _top_argument_failures(raw_agent.get(_ARM_REWARDS_FIELDS[arm]))
                 if top:
                     arguments["top_failures"] = top
         agent_payload.setdefault("plugin_signals_summary", summaries)
@@ -4215,5 +4241,7 @@ __all__ = [
     "advisory_skip_result",
     "agent_eval_result_from_run",
     "build_agent_eval_payload",
+    "incomplete_reason",
+    "integration_reports_for",
     "refresh_plugin_run_report",
 ]

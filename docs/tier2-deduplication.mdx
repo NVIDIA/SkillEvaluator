@@ -200,8 +200,8 @@ changes the separate path, input-byte, catalog-file, vector, or result limits.
 
 Collection discovery allows up to 20,000 paths, independently of the
 4,096-path limit inside one skill. Each visited directory and file counts,
-including files that are not selected as manifests; excluded directories count
-once, but their contents are pruned. This accommodates all 5,000 supported
+including files that are not selected as manifests; excluded directories and
+their contents are pruned and do not count. This accommodates all 5,000 supported
 entries when each skill has a directory and `SKILL.md`. Collections with more
 supporting files or deeper layouts may reach the path ceiling before the
 selected-entry budget.

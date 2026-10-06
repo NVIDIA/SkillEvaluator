@@ -102,3 +102,63 @@ def test_partial_plugin_payload_is_never_reported_as_a_pass() -> None:
     assert result.passed is False
     assert result.metadata["execution_status"] == "skipped"
     assert result.metadata["skip_reason"].startswith("INCOMPLETE:")
+
+
+_SUM_OF_PARTS_RAN = {"conditions": {"sum_of_parts": {"execution_status": "succeeded"}}, "execution_status": "succeeded"}
+
+
+def test_sum_of_parts_overall_averages_the_rounded_dimension_scores() -> None:
+    info = {
+        **_SUM_OF_PARTS_RAN,
+        "dimensions_sum_of_parts": {
+            "security": {"score": 0.00004},
+            "correctness": {"score": 0.00004},
+            "discoverability": {"score": 0.00007},
+        },
+    }
+
+    # Each dimension rounds to four places first (0.0, 0.0, 0.0001), as the dimension rows do.
+    assert _build_agent("codex", info, ["accuracy"], ["accuracy"], None)["sum_of_parts"] == 0.0
+
+
+def test_an_arm_without_metrics_falls_back_to_the_engine_overall_only_when_it_ran() -> None:
+    ran = {**_SUM_OF_PARTS_RAN, "overall_sum_of_parts": 0.42, "overall_with_skill": 0.9}
+    failed = {**ran, "conditions": {"sum_of_parts": {"execution_status": "failed"}}}
+
+    assert _build_agent("codex", ran, [], [], None)["sum_of_parts"] == 0.42
+    assert _build_agent("codex", ran, [], [], None)["integration_lift"] == 0.48
+    assert _build_agent("codex", failed, [], [], None)["sum_of_parts"] is None
+
+
+def test_integration_reports_for_match_the_report_payload() -> None:
+    from skillevaluator.evaluation.tier3_report import build_agent_eval_payload, integration_reports_for
+
+    succeeded = {"execution_status": "succeeded"}
+
+    def agent(with_plugin: float) -> dict:
+        return {
+            "with_skill": {"accuracy": with_plugin},
+            "without_skill": {"accuracy": 0.5},
+            "sum_of_parts": {"accuracy": 0.7},
+            "execution_status": "succeeded",
+            "conditions": {"with_skill": succeeded, "without_skill": succeeded, "sum_of_parts": succeeded},
+            "integration_completeness": {"complete": True, "ratio": float("nan")},
+        }
+
+    agents = {"claude-code": agent(0.75), "codex": agent(0.9)}
+    run_config = {
+        "eval_target": {"kind": "plugin"},
+        "lift_mode": {"requested": "both", "effective": "both"},
+        "skill_workspace": {"sum_of_parts_arm": True, "staged_skills": ["skills/a", "skills/b"]},
+    }
+
+    payload = build_agent_eval_payload("demo-plugin", agents, run_config=run_config, use_llm_judge=False)
+    integration, per_agent = integration_reports_for(agents, run_config)
+
+    assert payload is not None and integration is not None
+    # The run-level block is the best agent's, and each agent keeps its own named block.
+    assert integration == payload["integration"]
+    assert integration["agent"] == payload["best_agent"] == "codex"
+    assert per_agent == {name: payload["agents"][name]["integration"] for name in agents}
+    assert integration["completeness"]["ratio"] is None  # sanitized like the payload
+    assert integration_reports_for(agents, {**run_config, "eval_target": {"kind": "skill"}}) == (None, {})

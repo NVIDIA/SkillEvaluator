@@ -211,7 +211,7 @@ def test_unreadable_sidecar_keeps_the_rerendered_run_incomplete(tmp_path: Path, 
 
 
 def test_unreadable_sidecar_reason_reaches_every_report_view() -> None:
-    from skillevaluator.evaluation.tier3_report import _incomplete_skip_reason
+    from skillevaluator.evaluation.tier3_report import incomplete_reason
     from skillevaluator.reporting.plugin_sections import tier3_plugin_view
 
     record = {"partial": True, "sidecar_error": "file_size_limit"}
@@ -225,7 +225,7 @@ def test_unreadable_sidecar_reason_reaches_every_report_view() -> None:
     assert view["excluded"] == [
         "Plugin provenance sidecar unreadable (file_size_limit), so the components evaluated at Tier 3 are unknown"
     ]
-    assert _incomplete_skip_reason(record) == f"INCOMPLETE: {view['incomplete_reason']}"
+    assert incomplete_reason(record) == f"INCOMPLETE: {view['incomplete_reason']}"
 
 
 def test_recorded_sidecar_error_stays_partial(tmp_path: Path) -> None:
@@ -311,6 +311,8 @@ def _prepared_package(tmp_path: Path, record: dict) -> SimpleNamespace:
         unresolved_skill_refs=tuple(record["unresolved_skill_refs"]),
         unresolved_rule_refs=(),
         unresolved_mcp_servers=tuple(record["provider_only_mcp_servers"]),
+        native_source=None,
+        mcp_probe_targets=(),
         integration_evidence_error=lambda: None,
         provenance=lambda: dict(record),
     )
@@ -522,3 +524,36 @@ def test_an_incomplete_run_with_deferred_components_still_names_them(tmp_path: P
     assert result.metadata["agent_eval"]["conclusions"][0]["title"] == "Evaluation INCOMPLETE - unresolved dependencies"
     html = HTMLReporter(include_timestamp=False).render_all([result])
     assert "could not be resolved at Tier 3" in (element_text(html, "tier3-plugin-completeness") or "")
+
+
+def test_every_report_gives_the_same_incomplete_reason() -> None:
+    """A run that did not complete and also deferred a component names both causes everywhere."""
+    from skillevaluator.evaluation.tier3_report import _plugin_incompleteness_conclusion, incomplete_reason
+    from skillevaluator.reporting.plugin_sections import tier3_plugin_view
+
+    record = {"partial": True, "execution_incomplete": _FAILED_RUN, "unresolved_skill_refs": ["remote"]}
+    reason = f"{_FAILED_RUN}; 1 unresolved skill ref could not be resolved or evaluated at Tier 3"
+
+    assert incomplete_reason(record) == f"INCOMPLETE: {reason}"
+    view = tier3_plugin_view({"plugin_provenance": record})
+    assert view is not None and view["incomplete_reason"] == reason
+    conclusion = _plugin_incompleteness_conclusion(record)
+    assert conclusion["title"] == "Evaluation INCOMPLETE - unresolved dependencies"
+    assert conclusion["message"].startswith(f"This plugin run is INCOMPLETE: {reason}. ")
+
+
+def test_incomplete_reason_counts_each_deferral_with_its_own_plural() -> None:
+    from skillevaluator.evaluation.tier3_report import incomplete_reason
+
+    record = {"partial": True, "provider_only_mcp_servers": ["docs"], "mcp_unsupported_config": ["a", "b"]}
+
+    assert incomplete_reason(record) == (
+        "INCOMPLETE: 1 provider-only MCP server, 2 MCP servers declaring config the runtime cannot apply "
+        "could not be resolved or evaluated at Tier 3"
+    )
+
+
+def test_the_sidecar_reader_and_the_reports_agree_on_the_deferral_fields() -> None:
+    from skillevaluator.reporting.plugin_sections import DEFERRAL_FIELDS
+
+    assert tier3_report._PLUGIN_PROVENANCE_DEFERRAL_FIELDS == DEFERRAL_FIELDS

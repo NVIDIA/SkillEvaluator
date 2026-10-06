@@ -10,8 +10,9 @@ is intentionally untouched -- duplicate MCP ``(name, provider)`` pairs are
 already rejected as a blocking schema error by
 :meth:`skillevaluator.models.plugin.PluginManifest.check_dependencies_and_mcp`.
 
-This module is deliberately offline: it imports only stdlib + ``yaml`` + the
-result/base models, so it runs on a base install without the ``tier2`` extra.
+This module is deliberately offline: it reads the manifest through the bounded,
+no-follow plugin manifest reader and needs nothing from the ``tier2`` extra, so
+it runs on a base install.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from typing import Any
 
 from skillevaluator.constants import PLUGIN_MANIFEST_TYPE
 from skillevaluator.deduplication.plugin.ref_utils import find_duplicate_refs
+from skillevaluator.deduplication.result_status import mark_advisory_skip, mark_security_failure
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.plugin_manifest import PluginManifestLocation, PluginManifestPathError, locate_plugin_manifest
 from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_yaml
@@ -75,7 +77,7 @@ class IntraPluginValidator(ValidatorBase):
             # Unparseable YAML (or a manifest that is not a mapping) means Check A
             # never ran. Record an advisory optional skip -- not a bare pass -- so
             # CLI/Markdown/HTML never show a fake "no duplicate references" green.
-            self._mark_skipped(
+            mark_advisory_skip(
                 result,
                 "Plugin manifest could not be parsed as a YAML mapping; skipping dependency-reference dedup.",
             )
@@ -92,25 +94,6 @@ class IntraPluginValidator(ValidatorBase):
         return result
 
     @staticmethod
-    def _mark_skipped(result: ValidationResult, reason: str) -> None:
-        """Record Check A as an advisory optional skip (never a silent pass).
-
-        Used when the manifest cannot be parsed as a mapping. Marking
-        ``execution_status="skipped"`` keeps every
-        reporter consistent -- CLI/Markdown/HTML all show a non-blocking skip
-        instead of a false-green "no duplicate references" pass -- and
-        ``optional=True`` keeps it from counting as an incomplete requested run.
-        """
-        result.add_warning(reason)
-        result.metadata.update(
-            {
-                "execution_status": "skipped",
-                "skip_reason": reason,
-                "optional": True,
-            }
-        )
-
-    @staticmethod
     def _mark_security_failure(result: ValidationResult, reason: str) -> None:
         """Keep unsafe input visible as a failed, non-optional per-check result."""
         safe_reason = f"Unsafe plugin manifest refused: {reason}"
@@ -124,13 +107,7 @@ class IntraPluginValidator(ValidatorBase):
                 suggestion="Replace links/hardlinks/special manifests with one regular file inside the plugin root.",
             )
         )
-        result.metadata.update(
-            {
-                "security_failure": True,
-                "execution_status": "failed",
-                "optional": False,
-            }
-        )
+        mark_security_failure(result)
 
     @staticmethod
     def _load_manifest(location: PluginManifestLocation) -> dict | None:

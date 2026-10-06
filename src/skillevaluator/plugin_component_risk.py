@@ -37,12 +37,11 @@ import bisect
 import functools
 import posixpath
 import re
-import shlex
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse, urlsplit
+from typing import Any, NamedTuple
+from urllib.parse import unquote, urlparse, urlsplit
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_FILE_BYTES,
@@ -51,20 +50,32 @@ from skillevaluator.constants import (
     PLUGIN_CURSOR_MANIFEST_TYPE,
 )
 from skillevaluator.models.result import Finding, Severity
-from skillevaluator.utils.redaction import redact_sensitive_text
+from skillevaluator.plugin_paths import PLUGIN_CATEGORY
 from skillevaluator.validators.mcp_static import (
+    TRUTHY_VALUES,
+    EndpointClass,
+    HostAllowlist,
     OverrideIssue,
+    _split_words,
     classify_endpoint_host,
     classify_mcp_pinning,
-    host_is_allowlisted,
-    is_env_reference,
     iter_config_strings,
+    shell_program,
+    unwrap_launch_command,
+)
+from skillevaluator.validators.url_policy import (
+    DEFAULT_PORTS,
+    is_env_reference,
     looks_like_inline_secret,
+    report_text,
+    safe_url,
     url_ambiguities,
+    url_credentials,
     whatwg_url,
 )
 
-CATEGORY = "PLUGIN_SCHEMA"
+# Report text: whitespace collapsed, URL userinfo removed, credentials redacted, length bounded.
+_bounded = report_text
 
 # Documented Claude Code hook events (hooks reference). Unknown events are still
 # recorded, with the ``unknown_event`` flag, because newer releases add events.
@@ -135,16 +146,18 @@ MAX_SCRIPT_REFERENCES = 256
 MAX_RUN_SITES = 2048
 MAX_TOOL_ENTRIES = 256
 MAX_MATCHER_CHARS = 256
-MAX_TARGET_CHARS = 200
 MAX_OUTSIDE_REFS = 5
+# Tool grants, allow rules, or server names one finding message quotes (the finding covers them all).
+MAX_QUOTED_ENTRIES = 8
 
 _WILDCARD_TOOLS = frozenset({"*", "*(*)", "mcp__*", "mcp__*__*"})
 # Claude Code reads a matcher of only these characters as an exact tool name or '|' list, not a regex.
 _EXACT_MATCHER_RE = re.compile(r"[A-Za-z0-9_|]+")
+_MATCHER_NAME_SEPARATOR_RE = re.compile(r"[|,]")
 # A looser name list ('Edit, Bash'): one that names Bash is treated as matching Bash.
 _NAME_LIST_RE = re.compile(r"[A-Za-z0-9_\- ,|]+")
-# A regex matcher that matches all of these tool names (and a shell tool) is treated as "every tool".
-_SAMPLE_TOOLS: tuple[str, ...] = ("Bash", "Read", "Write", "Edit", "WebFetch", "mcp__server__tool")
+# A regex matcher that matches a shell tool and all of these other tool names is treated as "every tool".
+_NON_SHELL_SAMPLE_TOOLS: tuple[str, ...] = ("Read", "Write", "Edit", "WebFetch", "mcp__server__tool")
 # Tools whose auto-approval skips a prompt that guards writes, network fetches, or MCP side effects. Codex's
 # file-edit tool is apply_patch (its hooks also accept Edit and Write as aliases); Codex reads a Claude Code
 # plugin's hooks/hooks.json too, so every dialect counts it.
@@ -193,8 +206,8 @@ _DANGEROUS_BASH_PREFIXES: tuple[str, ...] = (
 # 'python -m pkg.module *' is the one option-prefixed interpreter rule Claude Code treats as scoped.
 _PYTHON_DOTTED_MODULE_RE = re.compile(r"-m\s+\w+\.[\w.]+(?:\s*:|\s+)")
 _ENV_REF_ANYWHERE_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
-# 'user:password@' in a URL authority (through its last '@'); scrubbed from every text a report shows.
-_URL_USERINFO_RE = re.compile(r"//[^/?#\s]*@")
+# The auth scheme in front of a header value's literal part ('Bearer ', 'Basic ', 'token ').
+_AUTH_SCHEME_PREFIX_RE = re.compile(r"(?i)^\s*(bearer|basic|token)\s*")
 _URL_IN_TEXT_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^\s'\"`<>]{1,2048}")
 
 # Hook output that approves a tool call or a permission request: Claude Code's and Codex's shapes
@@ -253,6 +266,7 @@ _SHELL_COMMAND_RE = re.compile(r"""(?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|\|(?!\|)&?|[
 _FETCHER_RE = re.compile(rf"\b{_FETCHERS}\b", re.IGNORECASE)
 # A pipeline stage that starts with an interpreter: '| sh', '| sudo bash', '|& /usr/bin/env python3'.
 _STAGE_INTERPRETER_RE = re.compile(rf"&?\s*(?P<interpreter>{_INTERPRETER})", re.IGNORECASE)
+_XARGS_RE = re.compile(r"\bxargs\b", re.IGNORECASE)
 # A pipeline stage that sources its standard input: '| source /dev/stdin', '| . /dev/fd/0'.
 _STAGE_SOURCE_STDIN_RE = re.compile(
     r"&?\s*(?:source|\.)\s+[\"']?(?:/dev/stdin|/dev/fd/0|/proc/self/fd/0|-)[\"']?(?:\s|$)"
@@ -328,12 +342,6 @@ _MAX_DIR_DEPTH = 8
 # Where Claude Code (CLAUDE_PLUGIN_DATA) and Codex (PLUGIN_DATA) keep a plugin's persistent data: code run
 # from there is not code the plugin ships.
 _PLUGIN_DATA_REFS: tuple[str, ...] = ("$CLAUDE_PLUGIN_DATA", "$PLUGIN_DATA")
-# Package runners that fetch and run a package (the MCP pinning classifier decides each one).
-_RUNNER_HINT_RE = re.compile(r"\b(?:npx|bunx|pnpx|pnpm|yarn|npm|uvx|uv|pipx|deno)\b", re.IGNORECASE)
-_RUNNER_NAMES = frozenset({"npx", "bunx", "pnpx", "pnpm", "yarn", "npm", "uvx", "uv", "pipx", "deno"})
-_COMMAND_PREFIX_WORDS = frozenset(
-    {"sudo", "doas", "env", "exec", "command", "nohup", "nice", "time", "then", "do", "else", "if", "!", "(", "{"}
-)
 _ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_]\w*=")
 _SYSTEM_PATH_PREFIXES: tuple[str, ...] = (
     "/bin/",
@@ -501,21 +509,24 @@ class HookScriptUnreadable(Exception):
     """
 
 
-def _finding(
+def component_finding(
     severity: Severity,
     check_name: str,
     message: str,
     file_path: str,
     suggestion: str,
     *,
-    component: tuple[str, str],
+    component: tuple[str, str] | None,
     extra: dict[str, Any] | None = None,
 ) -> Finding:
-    metadata: dict[str, Any] = {"plugin_component": {"type": component[0], "name": component[1]}}
+    """A ``PLUGIN_SCHEMA`` finding attributed to a plugin ``component`` (``(type, name)``) in its metadata."""
+    metadata: dict[str, Any] = {}
+    if component is not None:
+        metadata["plugin_component"] = {"type": component[0], "name": component[1]}
     if extra:
         metadata.update(extra)
     return Finding(
-        category=CATEGORY,
+        category=PLUGIN_CATEGORY,
         severity=severity,
         check_name=check_name,
         message=message,
@@ -523,17 +534,6 @@ def _finding(
         suggestion=suggestion,
         metadata=metadata,
     )
-
-
-def _bounded(value: str, limit: int = MAX_TARGET_CHARS) -> str:
-    """Report text: whitespace collapsed, URL ``user:password@`` removed, credentials redacted, length bounded.
-
-    Userinfo is removed from the whole text; only a window of twice the limit is
-    redacted (the result keeps at most ``limit`` characters), because the
-    redaction patterns can take quadratic time on long unbroken input.
-    """
-    text = _URL_USERINFO_RE.sub("//", " ".join(value.split()))
-    return redact_sensitive_text(text[: 2 * limit], max_len=limit)
 
 
 # --------------------------------------------------------------------------- #
@@ -627,35 +627,6 @@ def is_broad_allow_rule(rule: str) -> bool:
 # Claude Code permission modes that approve some tool calls without a prompt ('bypassPermissions', which
 # approves every call, is a HIGH permission-bypass flag of its own).
 PERMISSIVE_PERMISSION_MODES: frozenset[str] = frozenset({"acceptEdits", "auto"})
-_PERMISSION_MODE_FLAG_RE = re.compile(r"(?<![\w-])--permission-mode(?:=|\s+)[\"']?(acceptEdits|auto)(?![\w-])")
-_LIST_ITEM_PATH_RE = re.compile(r"^(?P<parent>.*)\[(?P<index>\d+)\]$")
-
-
-def permission_mode_flag_issues(value: Any) -> list[OverrideIssue]:
-    """``--permission-mode auto`` or ``acceptEdits`` in any config string or argv list (MEDIUM each)."""
-    hits: dict[tuple[str, str], None] = {}
-    items: dict[str, dict[int, str]] = {}
-    for path, text in iter_config_strings(value):
-        for match in _PERMISSION_MODE_FLAG_RE.finditer(text):
-            hits.setdefault((path, match.group(1)))
-        item = _LIST_ITEM_PATH_RE.match(path)
-        if item is not None:
-            items.setdefault(item.group("parent"), {})[int(item.group("index"))] = text
-    for parent, tokens in items.items():
-        for index, token in tokens.items():
-            mode = tokens.get(index + 1, "").strip().strip("\"'")
-            if token.strip() == "--permission-mode" and mode in PERMISSIVE_PERMISSION_MODES:
-                hits.setdefault((f"{parent}[{index}]", mode))
-    return [
-        OverrideIssue(
-            "permission_mode_flag",
-            Severity.MEDIUM,
-            f"agent-CLI flag '--permission-mode {mode}'{f' in {path!r}' if path else ''} lets the launched agent "
-            "approve some tool calls without a prompt",
-            "Remove the flag; let the user choose the permission mode of any agent CLI the plugin launches.",
-        )
-        for path, mode in hits
-    ]
 
 
 # Claude Code's CLI pre-approval flag: '--allowedTools Bash', '--allowed-tools "Bash(python3:*) Edit"'.
@@ -664,6 +635,8 @@ _ALLOWED_TOOLS_FLAG_RE = re.compile(
     re.IGNORECASE,
 )
 _ALLOWED_TOOLS_FLAGS = frozenset({"--allowedtools", "--allowed-tools"})
+# The JSON path of an argv token ('hooks.PreToolUse[0].args[2]'): the flag and its value are adjacent items.
+_LIST_ITEM_PATH_RE = re.compile(r"^(?P<parent>.*)\[(?P<index>\d+)\]$")
 
 
 def allowed_tools_flag_issues(value: Any) -> list[OverrideIssue]:
@@ -767,7 +740,6 @@ def _is_true_flag(value: Any) -> bool:
 # Subagents and commands                                                      #
 # --------------------------------------------------------------------------- #
 _READ_ONLY_FLAGS = frozenset({"--read-only", "--readonly", "--read_only"})
-_TRUTHY_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSY_VALUES = frozenset({"0", "false", "no", "off"})
 
 
@@ -778,7 +750,7 @@ def _declares_read_only_flag(tokens: list[str]) -> bool:
         if name not in _READ_ONLY_FLAGS:
             continue
         if separator:
-            if value.strip().strip("'\"") in _TRUTHY_VALUES:
+            if value.strip().strip("'\"") in TRUTHY_VALUES:
                 return True
             continue
         following = tokens[index + 1].strip("'\"") if index + 1 < len(tokens) else ""
@@ -807,7 +779,7 @@ def mcp_server_is_read_only(config: Any) -> bool:
         for key, value in env.items():
             normalized = str(key).upper().replace("-", "_")
             read_only_key = normalized in {"READ_ONLY", "READONLY"} or normalized.endswith("_READ_ONLY")
-            if read_only_key and str(value).strip().lower() in {"1", "true", "yes", "on"}:
+            if read_only_key and str(value).strip().lower() in TRUTHY_VALUES:
                 return True
     return False
 
@@ -870,6 +842,7 @@ def plugin_mcp_tool_prefix(plugin_name: str, server: str) -> str:
 
 
 def _disallows_all_mcp(disallowed: list[str] | None, write_servers: Iterable[str], plugin_name: str | None) -> bool:
+    """Whether ``disallowedTools`` entries (whitespace removed, lower-cased) deny every one of the servers' tools."""
     entries = {"".join(entry.split()).lower() for entry in disallowed or []}
     if "mcp__*" in entries or "mcp__*__*" in entries:
         return True
@@ -878,6 +851,43 @@ def _disallows_all_mcp(disallowed: list[str] | None, write_servers: Iterable[str
         return False
     prefixes = [plugin_mcp_tool_prefix(plugin_name, server) for server in servers]
     return all(prefix in entries or f"{prefix}__*" in entries for prefix in prefixes)
+
+
+class _ModeRisk(NamedTuple):
+    """What a subagent's ``permissionMode`` value does: its record flag and finding."""
+
+    flag: str
+    severity: Severity
+    check: str
+    effect: str
+    suggestion: str
+
+
+# Subagent permission modes that skip permission prompts. Claude Code ignores permissionMode for plugin
+# subagents, but it applies if the file is copied into a project.
+_PERMISSION_MODE_RISKS: dict[str, _ModeRisk] = {
+    "bypassPermissions": _ModeRisk(
+        "bypass_permissions",
+        Severity.HIGH,
+        "plugin_agent_bypass_permissions",
+        "skips every permission prompt",
+        "Remove permissionMode from the subagent.",
+    ),
+    "acceptEdits": _ModeRisk(
+        "accept_edits",
+        Severity.MEDIUM,
+        "plugin_agent_accept_edits",
+        "auto-accepts file edits and filesystem commands",
+        "Remove permissionMode from the subagent, or let the user choose the mode.",
+    ),
+    "auto": _ModeRisk(
+        "auto_mode",
+        Severity.MEDIUM,
+        "plugin_agent_auto_mode",
+        "lets a classifier approve tool calls without a prompt",
+        "Remove permissionMode from the subagent, or let the user choose the mode.",
+    ),
+}
 
 
 def analyze_agent(
@@ -926,7 +936,7 @@ def analyze_agent(
             else f"{omits_tools}, so it inherits every tool, including unrestricted Bash"
         )
         findings.append(
-            _finding(
+            component_finding(
                 Severity.LOW,
                 "plugin_agent_unrestricted_bash",
                 f"subagent '{name}' {grant}; it can ask to run any shell command (the session's permission "
@@ -942,10 +952,10 @@ def analyze_agent(
         if wildcards:
             record.flags.append("wildcard_tools")
             findings.append(
-                _finding(
+                component_finding(
                     Severity.MEDIUM,
                     "plugin_agent_wildcard_tools",
-                    f"subagent '{name}' lists a wildcard tool grant ({', '.join(wildcards[:8])})",
+                    f"subagent '{name}' lists a wildcard tool grant ({', '.join(wildcards[:MAX_QUOTED_ENTRIES])})",
                     file_path,
                     "List the specific tools the subagent needs instead of a wildcard.",
                     component=component,
@@ -953,14 +963,14 @@ def analyze_agent(
             )
     elif write_capable_mcp and not _disallows_all_mcp(disallowed_tools, write_capable_mcp, plugin_name):
         record.flags.append("inherits_all_tools_with_write_mcp")
-        servers = ", ".join(write_capable_mcp[:8])
+        servers = ", ".join(write_capable_mcp[:MAX_QUOTED_ENTRIES])
         example = (
             plugin_mcp_tool_prefix(plugin_name, write_capable_mcp[0])
             if plugin_name and plugin_name.strip()
             else "mcp__plugin_<plugin>_<server>"
         )
         findings.append(
-            _finding(
+            component_finding(
                 Severity.MEDIUM,
                 "plugin_agent_inherits_all_tools",
                 f"subagent '{name}' {omits_tools}, so it inherits every tool, including the tools of the plugin's "
@@ -973,48 +983,22 @@ def analyze_agent(
                 extra={"mcp_servers": write_capable_mcp[:32]},
             )
         )
-    elif record.inherits_all_tools:
+    else:
         record.flags.append("inherits_all_tools")
 
     # Read the mode the way Tier 3 native staging does (case, '-' and '_' ignored), so both tiers agree.
     mode = normalized_permission_mode(record.permission_mode) or ""
-    if mode == "bypassPermissions":
-        record.flags.append("bypass_permissions")
+    risk = _PERMISSION_MODE_RISKS.get(mode)
+    if risk is not None:
+        record.flags.append(risk.flag)
         findings.append(
-            _finding(
-                Severity.HIGH,
-                "plugin_agent_bypass_permissions",
-                f"subagent '{name}' sets permissionMode: bypassPermissions, which skips every permission prompt "
-                "(Claude Code ignores permissionMode for plugin subagents, but it applies if the file is copied "
-                "into a project)",
+            component_finding(
+                risk.severity,
+                risk.check,
+                f"subagent '{name}' sets permissionMode: {mode}, which {risk.effect} (Claude Code ignores "
+                "permissionMode for plugin subagents, but it applies if the file is copied into a project)",
                 file_path,
-                "Remove permissionMode from the subagent.",
-                component=component,
-            )
-        )
-    elif mode == "acceptEdits":
-        record.flags.append("accept_edits")
-        findings.append(
-            _finding(
-                Severity.MEDIUM,
-                "plugin_agent_accept_edits",
-                f"subagent '{name}' sets permissionMode: acceptEdits, which auto-accepts file edits and filesystem "
-                "commands (ignored for plugin subagents, but it applies if the file is copied into a project)",
-                file_path,
-                "Remove permissionMode from the subagent, or let the user choose the mode.",
-                component=component,
-            )
-        )
-    elif mode == "auto":
-        record.flags.append("auto_mode")
-        findings.append(
-            _finding(
-                Severity.MEDIUM,
-                "plugin_agent_auto_mode",
-                f"subagent '{name}' sets permissionMode: auto, which lets a classifier approve tool calls without "
-                "a prompt (ignored for plugin subagents, but it applies if the file is copied into a project)",
-                file_path,
-                "Remove permissionMode from the subagent, or let the user choose the mode.",
+                risk.suggestion,
                 component=component,
             )
         )
@@ -1116,7 +1100,7 @@ def _analyze_allowed_tools(
                     f"command runs without a prompt while it is active; {invocation}"
                 )
             findings.append(
-                _finding(
+                component_finding(
                     Severity.MEDIUM if claude_only else Severity.HIGH,
                     f"plugin_{kind}_unrestricted_bash",
                     message,
@@ -1132,10 +1116,11 @@ def _analyze_allowed_tools(
     if mcp_wildcards:
         record.flags.append("wildcard_tools")
         findings.append(
-            _finding(
+            component_finding(
                 Severity.MEDIUM,
                 f"plugin_{kind}_wildcard_tools",
-                f"{kind} '{name}' pre-approves a wildcard tool grant ({', '.join(mcp_wildcards[:8])}); "
+                f"{kind} '{name}' pre-approves a wildcard tool grant "
+                f"({', '.join(mcp_wildcards[:MAX_QUOTED_ENTRIES])}); "
                 + (
                     f"{loader} ignores allowed-tools, so this applies only if Claude Code loads this {kind}"
                     if claude_only
@@ -1151,7 +1136,7 @@ def _analyze_allowed_tools(
         # Claude Code pre-approves allowed-tools entries by tool name, and no tool is named '*'.
         record.flags.append("wildcard_ignored")
         findings.append(
-            _finding(
+            component_finding(
                 Severity.LOW,
                 f"plugin_{kind}_wildcard_tools",
                 f"{kind} '{name}' lists '*' in allowed-tools, which pre-approves nothing in Claude Code (no tool "
@@ -1183,6 +1168,11 @@ class HookRecord:
     risk_flags: list[str] = field(default_factory=list)
     # Raw http handler URL for the opt-in endpoint resolution; never serialized.
     url: str | None = field(default=None, repr=False)
+
+    def add_flag(self, flag: str) -> None:
+        """Record a risk flag; each flag is listed (and counted in the summary) once per handler."""
+        if flag not in self.risk_flags:
+            self.risk_flags.append(flag)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1470,6 +1460,16 @@ class _MatcherParser:
         return 0x08 if char == "b" else self._escaped_code(char)
 
 
+@functools.lru_cache(maxsize=512)
+def _compiled_matcher(text: str) -> _Node:
+    """The parsed regex of a matcher (cached; ``_UnsupportedMatcher`` and ``_InvalidMatcher`` propagate uncached).
+
+    Parse trees are immutable, so the scope and sensitive-tool checks share one;
+    each check evaluates it with its own :class:`_MatcherEvaluator` and work budget.
+    """
+    return _MatcherParser(text).parse()
+
+
 def _class_matches(node: _Node, code: int) -> bool:
     hit = any(any(low <= code <= high for low, high in ranges) != negated for ranges, negated in node[1])
     return hit != node[2]
@@ -1611,7 +1611,7 @@ def matcher_scope(matcher: str | None, shell_tools: tuple[str, ...] = ("Bash",))
 
 
 def _matcher_names(text: str) -> set[str]:
-    return {part.strip() for part in re.split(r"[|,]", text)}
+    return {part.strip() for part in _MATCHER_NAME_SEPARATOR_RE.split(text)}
 
 
 def _name_list_scope(text: str, shell_tools: tuple[str, ...] = ("Bash",)) -> str:
@@ -1625,10 +1625,10 @@ def _matcher_scope(text: str, shell_tools: tuple[str, ...] = ("Bash",)) -> str:
     if _EXACT_MATCHER_RE.fullmatch(text):
         return scope
     try:
-        evaluator = _MatcherEvaluator(_MatcherParser(text).parse())
+        evaluator = _MatcherEvaluator(_compiled_matcher(text))
         if not any(evaluator.matches(tool) for tool in shell_tools):
             return scope
-        return "all" if all(evaluator.matches(tool) for tool in _SAMPLE_TOOLS[1:]) else "bash"
+        return "all" if all(evaluator.matches(tool) for tool in _NON_SHELL_SAMPLE_TOOLS) else "bash"
     except _UnsupportedMatcher:
         return "all"
     except _InvalidMatcher:
@@ -1658,7 +1658,7 @@ def matcher_sensitive_tools(matcher: str | None) -> tuple[str, ...]:
         return _SENSITIVE_TOOLS
     names_mcp = "mcp" in text.lower()
     try:
-        evaluator = _MatcherEvaluator(_MatcherParser(text).parse())
+        evaluator = _MatcherEvaluator(_compiled_matcher(text))
         return tuple(
             tool
             for tool in _SENSITIVE_TOOLS
@@ -1712,19 +1712,11 @@ def _matcher_selects(matcher: str | None, tool: str) -> bool:
     if len(text) > MAX_MATCHER_CHARS:
         return True
     try:
-        return _MatcherEvaluator(_MatcherParser(text).parse()).matches(tool)
+        return _MatcherEvaluator(_compiled_matcher(text)).matches(tool)
     except _UnsupportedMatcher:
         return True
     except _InvalidMatcher:
         return False
-
-
-def _split_words(text: str) -> list[str]:
-    """Shell words of ``text`` (quotes removed); whitespace split when the quoting is unbalanced."""
-    try:
-        return shlex.split(text, comments=False, posix=True)
-    except ValueError:
-        return text.split()
 
 
 def _command_tokens(handler: dict[str, Any], keys: tuple[str, ...] = ("command",)) -> list[str]:
@@ -2105,6 +2097,25 @@ class _ShellFacts:
 
 
 def _shell_facts(text: str) -> _ShellFacts:
+    """What shell ``text`` does; ``remote_code`` says whether it runs downloaded content.
+
+    Covers a fetch piped into an interpreter that reads its program from
+    standard input, possibly through other stages (``curl … | sh``,
+    ``wget -qO- … | tee x | /usr/bin/env bash``, ``| $SHELL``, ``| busybox sh``,
+    ``| source /dev/stdin``), a fetch in a command substitution or here-string
+    (``bash -c "$(curl …)"``, ``sh <(wget …)``, ``source /dev/stdin <<< "$(curl …)"``),
+    a variable that holds a download and is evaluated (``c=$(curl …); eval "$c"``),
+    Python or JavaScript that evaluates a download (``exec(urlopen(…).read())``),
+    PowerShell's ``iex (iwr …)``, a download to a file (or unpacked into a
+    directory) that the text also runs (``curl -o /tmp/x … && sh /tmp/x``), and a
+    package runner of a git or URL spec (``npx github:user/repo``,
+    ``deno run https://…``). An interpreter that gets its program from ``-m`` or
+    a script path, or from ``-c`` / ``-e`` with a program that does not
+    evaluate its standard input, only reads the download as data
+    (``curl … | python3 -m json.tool``), so it does not count; a ``-c`` / ``-e``
+    program that does (``| python3 -c 'exec(sys.stdin.read())'``,
+    ``| bash -c "$(cat)"``) does. Linear in the text.
+    """
     commands = [match.group(0) for match in _SHELL_COMMAND_RE.finditer(text)]
     packages = _package_runs(commands)
     remote_code = _EXEC_FETCHED_RE.search(text) is not None or any(package.remote for package in packages)
@@ -2129,29 +2140,6 @@ def _shell_facts(text: str) -> _ShellFacts:
     facts.remote_code = remote_code
     facts.downloads = downloads
     return facts
-
-
-def _fetches_remote_code(text: str) -> bool:
-    """Whether shell ``text`` runs downloaded content.
-
-    Covers a fetch piped into an interpreter that reads its program from
-    standard input, possibly through other stages (``curl … | sh``,
-    ``wget -qO- … | tee x | /usr/bin/env bash``, ``| $SHELL``, ``| busybox sh``,
-    ``| source /dev/stdin``), a fetch in a command substitution or here-string
-    (``bash -c "$(curl …)"``, ``sh <(wget …)``, ``source /dev/stdin <<< "$(curl …)"``),
-    a variable that holds a download and is evaluated (``c=$(curl …); eval "$c"``),
-    Python or JavaScript that evaluates a download (``exec(urlopen(…).read())``),
-    PowerShell's ``iex (iwr …)``, a download to a file (or unpacked into a
-    directory) that the text also runs (``curl -o /tmp/x … && sh /tmp/x``), and a
-    package runner of a git or URL spec (``npx github:user/repo``,
-    ``deno run https://…``). An interpreter that gets its program from ``-m`` or
-    a script path, or from ``-c`` / ``-e`` with a program that does not
-    evaluate its standard input, only reads the download as data
-    (``curl … | python3 -m json.tool``), so it does not count; a ``-c`` / ``-e``
-    program that does (``| python3 -c 'exec(sys.stdin.read())'``,
-    ``| bash -c "$(cat)"``) does. Linear in the text.
-    """
-    return _shell_facts(text).remote_code
 
 
 def _has_substitution(text: str) -> bool:
@@ -2265,7 +2253,7 @@ def _stage_runs_stdin(stage: str, depth: int = 0) -> bool:
     if match is None:
         return False
     head = match.group("interpreter")
-    if re.search(r"\bxargs\b", head, re.IGNORECASE):
+    if _XARGS_RE.search(head):
         return True  # xargs hands the downloaded text to the interpreter as arguments
     name = head.split()[-1].strip("\"'").replace("\\", "/").rsplit("/", 1)[-1].lower().strip("${}")
     return _program_from_stdin(_interpreter_family(name), _stage_arguments(stage[match.end() :][:2048]), depth)
@@ -2565,8 +2553,6 @@ def _package_runs(commands: list[str], depth: int = 0) -> tuple[_PackageRun, ...
     versions and digests are pinned, and a moving tag (``@latest``, ``:main``)
     is ``floating``. A git or URL spec without a commit is ``remote``.
     """
-    from skillevaluator.validators.mcp_static import shell_program, unwrap_launch_command
-
     runs: list[_PackageRun] = []
     for command in commands:
         if not _PACKAGE_RUN_HINT_RE.search(command):
@@ -2589,14 +2575,10 @@ def _package_runs(commands: list[str], depth: int = 0) -> tuple[_PackageRun, ...
             else:
                 pin = classify_mcp_pinning({"command": argv[0], "args": argv[1:]})
                 if pin.status == "unpinned":
-                    remote = "git/URL" in pin.detail or "remote module" in pin.detail
-                    runs.append(_PackageRun(_bounded(pin.detail, 160), remote, pin.floating))
+                    runs.append(_PackageRun(_bounded(pin.detail, 160), pin.remote, pin.floating))
             if len(runs) >= MAX_OUTSIDE_REFS:
                 return tuple(runs[:MAX_OUTSIDE_REFS])
     return tuple(runs)
-
-
-_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 def _url_parts(url: str) -> tuple[str, str, int | None, str] | None:
@@ -2615,7 +2597,7 @@ def _url_parts(url: str) -> tuple[str, str, int | None, str] | None:
     if not scheme or not host:
         return None
     path = posixpath.normpath("/" + unquote(parsed.path).lstrip("/"))
-    return scheme, host.rstrip(".").lower(), port or _DEFAULT_PORTS.get(scheme), path
+    return scheme, host.rstrip(".").lower(), port or DEFAULT_PORTS.get(scheme), path
 
 
 def hook_url_entry_problem(entry: str) -> str | None:
@@ -2639,47 +2621,50 @@ def hook_url_entry_problem(entry: str) -> str | None:
     return None
 
 
-def _url_under_prefix(url: str, entry: str) -> bool:
-    """Whether ``url`` is under the ``hooks.allowed_urls`` URL prefix ``entry``.
+_UrlParts = tuple[str, str, int | None, str]
 
-    Scheme, host, and effective port must be equal (so ``https://hooks.example.com``
-    does not admit ``https://hooks.example.com.evil.net`` or
-    ``https://hooks.example.com@evil.net``), and the path must be the entry's
-    path or below it on a ``/`` segment boundary (``/hooks`` admits
-    ``/hooks/x`` but not ``/hooksx``). An entry without a path admits every path;
-    an entry with userinfo, a query, or a fragment admits nothing.
-    """
-    if hook_url_entry_problem(entry) is not None:
-        return False
-    target = _url_parts(url)
-    prefix = _url_parts(entry)
-    if target is None or prefix is None or target[:3] != prefix[:3]:
+
+@dataclass(frozen=True)
+class _HookUrlAllowlist:
+    """``hooks.allowed_urls``, parsed once: URL prefixes, and host patterns read like ``mcp.allowed_private_hosts``."""
+
+    # Usable URL prefixes as _url_parts; an entry with userinfo, a query, or a fragment admits nothing.
+    prefixes: tuple[_UrlParts, ...] = ()
+    hosts: HostAllowlist = field(default_factory=HostAllowlist)
+
+    @classmethod
+    def from_entries(cls, entries: Iterable[str]) -> _HookUrlAllowlist:
+        prefixes: list[_UrlParts] = []
+        hosts: list[str] = []
+        for raw in entries:
+            entry = raw.strip()
+            if "://" not in entry:
+                hosts.append(entry)
+            elif hook_url_entry_problem(entry) is None and (parts := _url_parts(entry)) is not None:
+                prefixes.append(parts)
+        return cls(tuple(prefixes), HostAllowlist.from_entries(hosts))
+
+    def matches(self, url: str, host: str | None, endpoint: EndpointClass | None) -> bool:
+        """Whether a hook may post to ``url``, whose client host is ``host`` and static class ``endpoint``.
+
+        A URL prefix needs the same scheme, host, and effective port (so
+        ``https://hooks.example.com`` does not admit ``https://hooks.example.com.evil.net``
+        or ``https://hooks.example.com@evil.net``), and the path must be the
+        prefix's path or below it on a ``/`` segment boundary (``/hooks`` admits
+        ``/hooks/x`` but not ``/hooksx``); a prefix without a path admits every
+        path. A host pattern never admits a cloud metadata host.
+        """
+        target = _url_parts(url) if self.prefixes else None
+        if target is not None and any(_url_is_under(target, prefix) for prefix in self.prefixes):
+            return True
+        return host is not None and self.hosts.allows_host(host, endpoint)
+
+
+def _url_is_under(target: _UrlParts, prefix: _UrlParts) -> bool:
+    if target[:3] != prefix[:3]:
         return False
     base = prefix[3].rstrip("/")
     return not base or target[3] == base or target[3].startswith(base + "/")
-
-
-def _url_matches_allowlist(url: str, host: str | None, allowed: Iterable[str]) -> bool:
-    for raw in allowed:
-        entry = raw.strip()
-        if not entry:
-            continue
-        if "://" in entry:
-            if _url_under_prefix(url, entry):
-                return True
-            continue
-        if host is None:
-            continue
-        endpoint = classify_endpoint_host(host)
-        if endpoint is not None and endpoint.kind == "metadata":
-            continue
-        candidate = host.strip().lower().rstrip(".")
-        pattern = entry.lower().rstrip(".")
-        if pattern == candidate or (pattern.startswith("*.") and candidate.endswith(pattern[1:])):
-            return True
-        if endpoint is not None and host_is_allowlisted(endpoint, [entry]):
-            return True
-    return False
 
 
 def hook_allowlist_hosts(allowed_urls: Iterable[str]) -> list[str]:
@@ -2701,63 +2686,9 @@ def hook_allowlist_hosts(allowed_urls: Iterable[str]) -> list[str]:
     return hosts
 
 
-def safe_url(url: str) -> str:
-    """A URL for reports: no userinfo, query, or fragment; bounded (also for a URL that does not parse).
-
-    An http(s) or ws(s) URL is shown the way a WHATWG client (Node) reads it, so
-    the report names the host a client would actually contact.
-    """
-    try:
-        parsed = urlparse(whatwg_url(url))
-        host = parsed.hostname or ""
-        port = f":{parsed.port}" if parsed.port else ""
-    except ValueError:
-        return _unparsed_url(url)
-    if not parsed.scheme or not host:
-        return _unparsed_url(url)
-    display_host = f"[{host}]" if ":" in host else host
-    return _bounded(f"{parsed.scheme}://{display_host}{port}{parsed.path}")
-
-
-def _unparsed_url(url: str) -> str:
-    """A malformed URL for reports: the query, fragment, and userinfo (through the authority's last ``@``) removed."""
-    text = url.strip().split("#", 1)[0].split("?", 1)[0]
-    prefix, slashes, rest = text.partition("//")
-    if not slashes:
-        prefix, rest = "", text
-    authority, slash, path = rest.partition("/")
-    return _bounded(f"{prefix}{slashes}{authority.rpartition('@')[2]}{slash}{path}")
-
-
-def _url_embeds_credentials(url: str, *, any_userinfo: bool = False) -> bool:
-    """Whether ``url`` carries credentials in its userinfo or in a credential query parameter.
-
-    Read from the raw text, so a malformed port or bracket cannot hide them. With
-    ``any_userinfo``, every ``user@`` counts (an http hook sends it as Basic
-    auth); otherwise a user name counts only when it looks like a token, and a
-    password only when it is a literal, not a ``$VAR`` reference.
-    """
-    authority = re.split(r"[/?#]", url.partition("//")[2], maxsplit=1)[0]
-    userinfo, at, _host = authority.rpartition("@")
-    if at:
-        user, _colon, password = userinfo.partition(":")
-        if any_userinfo and (user or password):
-            return True
-        if password and not password.startswith("$") and looks_like_inline_secret("password", unquote(password)):
-            return True
-        if user and looks_like_inline_secret("user", unquote(user)):
-            return True
-    query = url.partition("?")[2].partition("#")[0]
-    return any(
-        value and looks_like_inline_secret(key, value)
-        for key, values in parse_qs(query, keep_blank_values=True).items()
-        for value in values
-    )
-
-
 def _command_url_credentials(text: str) -> bool:
     """Whether a command line embeds credentials in a URL (``https://user:password@host``, ``?token=...``)."""
-    return any(_url_embeds_credentials(match.group(0)) for match in _URL_IN_TEXT_RE.finditer(text))
+    return any(url_credentials(match.group(0), userinfo_rule="secret") for match in _URL_IN_TEXT_RE.finditer(text))
 
 
 def _header_secret(key: str, value: str) -> bool:
@@ -2767,7 +2698,7 @@ def _header_secret(key: str, value: str) -> bool:
         return False
     if _ENV_REF_ANYWHERE_RE.search(stripped):
         literal = _ENV_REF_ANYWHERE_RE.sub("", stripped)
-        literal = re.sub(r"(?i)^\s*(bearer|basic|token)\s*", "", literal).strip()
+        literal = _AUTH_SCHEME_PREFIX_RE.sub("", literal).strip()
         return bool(literal) and looks_like_inline_secret("value", literal)
     return looks_like_inline_secret(key, stripped)
 
@@ -2776,6 +2707,38 @@ def _header_secret(key: str, value: str) -> bool:
 class HookAnalysis:
     records: list[HookRecord] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
+
+
+@dataclass
+class _HookSite:
+    """One hook handler under analysis: its record, where its findings go, and what it may approve."""
+
+    record: HookRecord
+    analysis: HookAnalysis
+    # The message prefix that locates the handler: "hook PreToolUse (matcher 'Bash') in hooks/hooks.json".
+    where: str
+    # The file path findings show.
+    display: str
+    dialect: HookDialect
+    # What an approval hook can approve (HookAnalyzer._scope): all, bash, scoped, or narrow; None for other events.
+    scope: str | None
+    # The write, fetch, or MCP tools a "scoped" approval hook covers.
+    scoped_tools: tuple[str, ...] = ()
+
+    def report(self, flag: str, severity: Severity, check: str, message: str, suggestion: str) -> None:
+        """Flag the handler (each flag once) and add a finding attributed to it."""
+        self.record.add_flag(flag)
+        self.analysis.findings.append(
+            component_finding(
+                severity,
+                check,
+                f"{self.where}: {message}",
+                self.display,
+                suggestion,
+                component=("hook", self.record.source),
+                extra={"hook_id": self.record.id, "hook_event": self.record.event},
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -2964,7 +2927,11 @@ class HookAnalyzer:
     ) -> None:
         self.read_script = read_script
         self.hook_allowed_urls = tuple(hook_allowed_urls)
-        self.allowed_private_hosts = (*tuple(allowed_private_hosts), *hook_allowlist_hosts(self.hook_allowed_urls))
+        self._allowed_urls = _HookUrlAllowlist.from_entries(self.hook_allowed_urls)
+        # Private hosts a hook may post to: mcp.allowed_private_hosts and the hosts hooks.allowed_urls names.
+        self._private_hosts = HostAllowlist.from_entries(
+            (*allowed_private_hosts, *hook_allowlist_hosts(self.hook_allowed_urls))
+        )
         self.root_refs = _plugin_root_refs(root_prefixes)
         self._root_ref_re = re.compile(
             "(?:"
@@ -3173,8 +3140,7 @@ class HookAnalyzer:
         self._index_runs(record, facts)
         if other is None or other is record:
             return None, truncated
-        if "remote_code" not in other.risk_flags:
-            other.risk_flags.append("remote_code")  # the other half of the pair runs remote code too
+        other.add_flag("remote_code")  # the other half of the pair runs remote code too
         return other.id, truncated
 
     def _cross_hit(self, fact: _ShellFacts) -> HookRecord | None:
@@ -3218,7 +3184,6 @@ class HookAnalyzer:
         truncated: list[str] = []
         for event, group_index, matcher, handler_index, handler in iter_hook_handlers(config, truncated):
             hook_id = f"{source}#{event}[{group_index}].hooks[{handler_index}]"
-            component = ("hook", source)
             if not isinstance(handler, dict):
                 analysis.records.append(HookRecord(hook_id, source, file, event, matcher, "invalid", "", ["invalid"]))
                 continue
@@ -3226,8 +3191,7 @@ class HookAnalyzer:
             handler_type = raw_type if isinstance(raw_type, str) and raw_type in HANDLER_TYPES else "unknown"
             record = HookRecord(hook_id, source, file, event, matcher, handler_type, "")
             if event not in dialect.events:
-                record.risk_flags.append("unknown_event")
-            extra = {"hook_id": hook_id, "hook_event": event}
+                record.add_flag("unknown_event")
             monitor = dialect is MONITOR_HOOKS
             where = "monitor command" if monitor else f"hook {event}"
             if matcher:
@@ -3237,19 +3201,18 @@ class HookAnalyzer:
                 where += f" (if {_bounded(condition, 60)!r})"
             where += f" in {source}"
             scope, scoped_tools = self._scope(dialect, event, matcher, condition)
+            site = _HookSite(record, analysis, where, display, dialect, scope, scoped_tools)
 
             if handler_type == "command":
-                self._command_hook(
-                    handler, record, analysis, where, display, component, extra, scope, scoped_tools, dialect
-                )
+                self._command_hook(handler, site)
             elif handler_type == "http":
-                self._http_hook(handler, record, analysis, where, display, component, extra, scope)
+                self._http_hook(handler, site)
             elif handler_type == "mcp_tool":
                 server = handler.get("server") if isinstance(handler.get("server"), str) else ""
                 tool = handler.get("tool") if isinstance(handler.get("tool"), str) else ""
                 record.target = _bounded(f"{server}/{tool}")
                 if scope in {"all", "bash"}:
-                    self._remote_approval(record, analysis, where, display, component, extra, "an MCP tool")
+                    self._remote_approval(site, "an MCP tool")
             elif handler_type in {"prompt", "agent"}:
                 prompt = handler.get("prompt") if isinstance(handler.get("prompt"), str) else ""
                 record.target = _bounded(prompt, 80)
@@ -3260,23 +3223,18 @@ class HookAnalyzer:
                 and handler_type in runs_here
                 and "context_injection" not in record.risk_flags
             ):
-                record.risk_flags.append("context_injection")
                 injected = (
                     "every line the monitor prints is sent to the model while it runs"
                     if monitor
                     else f"the {handler_type} handler's output is injected into the agent's context on every {event}"
                 )
-                analysis.findings.append(
-                    _finding(
-                        Severity.LOW,
-                        "plugin_hook_context_injection",
-                        f"{where}: {injected}",
-                        display,
-                        "Review what the hook emits; keep injected context minimal and never derived from untrusted "
-                        "remote content.",
-                        component=component,
-                        extra=extra,
-                    )
+                site.report(
+                    "context_injection",
+                    Severity.LOW,
+                    "plugin_hook_context_injection",
+                    injected,
+                    "Review what the hook emits; keep injected context minimal and never derived from untrusted "
+                    "remote content.",
                 )
             analysis.records.append(record)
         if truncated:
@@ -3347,7 +3305,7 @@ class HookAnalyzer:
             )
         )
         analysis.findings.append(
-            _finding(
+            component_finding(
                 Severity.HIGH,
                 "plugin_hook_scan_truncated",
                 f"hooks in {source}: {reason}; the handlers past the static scan limits were not analyzed, so padding "
@@ -3367,88 +3325,62 @@ class HookAnalyzer:
             )
         )
 
-    def _command_hook(
-        self,
-        handler: dict[str, Any],
-        record: HookRecord,
-        analysis: HookAnalysis,
-        where: str,
-        display: str,
-        component: tuple[str, str],
-        extra: dict[str, Any],
-        scope: str | None,
-        scoped_tools: tuple[str, ...] = (),
-        dialect: HookDialect = CLAUDE_HOOKS,
-    ) -> None:
-        text = _command_text(handler, dialect.command_keys)
+    def _command_hook(self, handler: dict[str, Any], site: _HookSite) -> None:
+        record = site.record
+        text = _command_text(handler, site.dialect.command_keys)
         record.target = _bounded(text)
-        tokens = _command_tokens(handler, dialect.command_keys)
+        tokens = _command_tokens(handler, site.dialect.command_keys)
         scripts, unanalyzed, found_script = self._script_evidence(tokens)
         facts = [_shell_facts(text), *scripts]
         local = any(fact.remote_code for fact in facts) or self._runs_download(facts)
         other, others_truncated = self._cross_handler_download(record, facts)
         if local or other is not None:
-            record.risk_flags.append("remote_code")
             how = (
                 "fetches remote content and executes it (for example 'curl ... | sh')"
                 if local
                 else f"runs a file that another hook ({_bounded(str(other), 120)}) downloads, or downloads a file "
                 "that hook runs"
             )
-            analysis.findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "plugin_hook_remote_code",
-                    f"{where}: the command {how}, so the code that runs is not part of the reviewed plugin",
-                    display,
-                    "Ship the script inside the plugin and run it from ${CLAUDE_PLUGIN_ROOT}; never pipe downloads "
-                    "into an interpreter or run downloaded files.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "remote_code",
+                Severity.CRITICAL,
+                "plugin_hook_remote_code",
+                f"the command {how}, so the code that runs is not part of the reviewed plugin",
+                "Ship the script inside the plugin and run it from ${CLAUDE_PLUGIN_ROOT}; never pipe downloads "
+                "into an interpreter or run downloaded files.",
             )
         else:
-            self._unshipped_code(facts, record, analysis, where, display, component, extra)
+            self._unshipped_code(facts, site)
             if others_truncated or any(fact.runs_truncated for fact in facts):
                 unanalyzed.append(
                     f"it or another hook runs more than {MAX_RUN_SITES} distinct files, so not every run was "
                     "matched against the plugin's downloads"
                 )
-        self._auto_approve(facts, record, analysis, where, display, component, extra, scope, scoped_tools, dialect)
-        self._context_output(facts, record, analysis, where, display, component, extra, dialect)
-        if scope in {"all", "bash", "scoped"} and not found_script and self._names_root(text):
+        self._auto_approve(facts, site)
+        self._context_output(facts, site)
+        if site.scope in {"all", "bash", "scoped"} and not found_script and self._names_root(text):
             unanalyzed.append("it names the plugin root, but no plugin script it runs could be found and read")
         if unanalyzed:
             # HIGH, not lower: an unread script can hide an auto-approval (HIGH) or remote code (CRITICAL).
-            record.risk_flags.append("script_unanalyzed")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_script_unanalyzed",
-                    f"{where}: the command runs plugin scripts that were not analyzed ({'; '.join(unanalyzed[:5])}), "
-                    "so an auto-approval or remote code in them would go unreported",
-                    display,
-                    "Ship hook scripts as regular files (no symlinks) under ${CLAUDE_PLUGIN_ROOT}, run them by "
-                    "their ${CLAUDE_PLUGIN_ROOT} path, and keep their number and size small; review the script, "
-                    "then override with severity_overrides PLUGIN_SCHEMA.plugin_hook_script_unanalyzed if intended.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "script_unanalyzed",
+                Severity.HIGH,
+                "plugin_hook_script_unanalyzed",
+                f"the command runs plugin scripts that were not analyzed ({'; '.join(unanalyzed[:5])}), so an "
+                "auto-approval or remote code in them would go unreported",
+                "Ship hook scripts as regular files (no symlinks) under ${CLAUDE_PLUGIN_ROOT}, run them by "
+                "their ${CLAUDE_PLUGIN_ROOT} path, and keep their number and size small; review the script, "
+                "then override with severity_overrides PLUGIN_SCHEMA.plugin_hook_script_unanalyzed if intended.",
             )
         if _command_url_credentials(text):
-            record.risk_flags.append("inline_secret")
-            analysis.findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "plugin_hook_inline_secret",
-                    f"{where}: the command embeds a credential in a URL (user:password@ or a credential query "
-                    "parameter)",
-                    display,
-                    "Remove the credential from the hook command; read it from an environment variable or a "
-                    "credential helper when the hook runs.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "inline_secret",
+                Severity.CRITICAL,
+                "plugin_hook_inline_secret",
+                "the command embeds a credential in a URL (user:password@, or a credential query or fragment "
+                "parameter)",
+                "Remove the credential from the hook command; read it from an environment variable or a "
+                "credential helper when the hook runs.",
             )
         outside = []
         for token in tokens:
@@ -3463,215 +3395,129 @@ class HookAnalyzer:
                         "working directory, the user's project, not the plugin root)"
                     )
         if outside:
-            record.risk_flags.append("outside_root")
-            analysis.findings.append(
-                _finding(
-                    Severity.MEDIUM,
-                    "plugin_hook_outside_root",
-                    f"{where}: the command references files outside the plugin root: {'; '.join(outside)}",
-                    display,
-                    "Reference bundled files through ${CLAUDE_PLUGIN_ROOT}; do not read or execute files the "
-                    "plugin does not ship.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "outside_root",
+                Severity.MEDIUM,
+                "plugin_hook_outside_root",
+                f"the command references files outside the plugin root: {'; '.join(outside)}",
+                "Reference bundled files through ${CLAUDE_PLUGIN_ROOT}; do not read or execute files the "
+                "plugin does not ship.",
             )
 
-    def _unshipped_code(
-        self,
-        facts: list[_ShellFacts],
-        record: HookRecord,
-        analysis: HookAnalysis,
-        where: str,
-        display: str,
-        component: tuple[str, str],
-        extra: dict[str, Any],
-    ) -> None:
-        """MEDIUM findings for code a hook runs that the plugin does not ship (and that is not remote code)."""
+    @staticmethod
+    def _unshipped_code(facts: list[_ShellFacts], site: _HookSite) -> None:
+        """Findings for code a hook runs that the plugin does not ship (and that is not remote code).
+
+        A package or image with a floating version or tag is HIGH, like an MCP or
+        LSP server's, and is not reported again as unpinned; other unpinned
+        packages and code run from the plugin's data directory are MEDIUM.
+        """
         packages = [package for fact in facts for package in fact.packages]
         floating = [package for package in packages if package.floating]
         if floating:
             # Same rule as MCP and LSP servers: a moving tag blocks, and is not reported again as unpinned.
-            record.risk_flags.append("unpinned_package")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_command_floating_version",
-                    f"{where}: the command runs a package or image with a floating version or tag "
-                    f"({'; '.join(dict.fromkeys(package.detail for package in floating[:3]))}); each run may fetch "
-                    "different code",
-                    display,
-                    "Pin the package or image to an exact version or digest, not a moving tag such as latest.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "unpinned_package",
+                Severity.HIGH,
+                "plugin_hook_command_floating_version",
+                "the command runs a package or image with a floating version or tag "
+                f"({'; '.join(dict.fromkeys(package.detail for package in floating[:3]))}); each run may fetch "
+                "different code",
+                "Pin the package or image to an exact version or digest, not a moving tag such as latest.",
             )
             packages = [package for package in packages if not package.floating]
         if packages:
-            if "unpinned_package" not in record.risk_flags:
-                record.risk_flags.append("unpinned_package")
             details = "; ".join(dict.fromkeys(package.detail for package in packages[:3]))
-            analysis.findings.append(
-                _finding(
-                    Severity.MEDIUM,
-                    "plugin_hook_unpinned_package",
-                    f"{where}: the command runs a package that is not pinned to an exact version ({details}); "
-                    "each run may fetch different code",
-                    display,
-                    "Pin the package to an exact version (pkg@1.2.3, pkg==1.2.3), or ship the code in the plugin.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "unpinned_package",
+                Severity.MEDIUM,
+                "plugin_hook_unpinned_package",
+                f"the command runs a package that is not pinned to an exact version ({details}); each run may "
+                "fetch different code",
+                "Pin the package to an exact version (pkg@1.2.3, pkg==1.2.3), or ship the code in the plugin.",
             )
         unshipped = sorted({path for fact in facts for path in fact.unshipped_runs})
         if unshipped:
-            record.risk_flags.append("unshipped_code")
             shown = ", ".join(_bounded(path, 80) for path in unshipped[:MAX_OUTSIDE_REFS])
-            analysis.findings.append(
-                _finding(
-                    Severity.MEDIUM,
-                    "plugin_hook_runs_unshipped_code",
-                    f"{where}: the command runs code from the plugin's data directory ({shown}); the plugin does "
-                    "not ship that code, so it was not reviewed",
-                    display,
-                    "Run code the plugin ships under ${CLAUDE_PLUGIN_ROOT}; keep ${CLAUDE_PLUGIN_DATA} for data.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "unshipped_code",
+                Severity.MEDIUM,
+                "plugin_hook_runs_unshipped_code",
+                f"the command runs code from the plugin's data directory ({shown}); the plugin does not ship that "
+                "code, so it was not reviewed",
+                "Run code the plugin ships under ${CLAUDE_PLUGIN_ROOT}; keep ${CLAUDE_PLUGIN_DATA} for data.",
             )
 
-    def _auto_approve(
-        self,
-        facts: list[_ShellFacts],
-        record: HookRecord,
-        analysis: HookAnalysis,
-        where: str,
-        display: str,
-        component: tuple[str, str],
-        extra: dict[str, Any],
-        scope: str | None,
-        scoped_tools: tuple[str, ...],
-        dialect: HookDialect,
-    ) -> None:
+    @staticmethod
+    def _auto_approve(facts: list[_ShellFacts], site: _HookSite) -> None:
         shapes = frozenset().union(*(fact.allow_shapes for fact in facts))
-        if scope is None or not shapes & set(dialect.allow_shapes):
+        if site.scope is None or not shapes & set(site.dialect.allow_shapes):
             return
-        record.risk_flags.append("auto_approve")
-        if scope in {"all", "bash"}:
-            target = "every tool call" if scope == "all" else "shell commands"
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_auto_approve",
-                    f"{where}: the command emits an allow decision for {target}, which skips the user's "
-                    "permission prompt",
-                    display,
-                    "Do not auto-approve tool calls from a plugin hook; narrow the matcher and return 'ask' or "
-                    "no decision.",
-                    component=component,
-                    extra=extra,
-                )
+        site.record.add_flag("auto_approve")  # also for a narrow matcher, which gets no finding
+        if site.scope in {"all", "bash"}:
+            target = "every tool call" if site.scope == "all" else "shell commands"
+            site.report(
+                "auto_approve",
+                Severity.HIGH,
+                "plugin_hook_auto_approve",
+                f"the command emits an allow decision for {target}, which skips the user's permission prompt",
+                "Do not auto-approve tool calls from a plugin hook; narrow the matcher and return 'ask' or "
+                "no decision.",
             )
-        elif scope == "scoped":
-            analysis.findings.append(
-                _finding(
-                    Severity.MEDIUM,
-                    "plugin_hook_auto_approve_scoped",
-                    f"{where}: the command emits an allow decision for {', '.join(scoped_tools)}, which skips the "
-                    "user's permission prompt for file writes, web fetches, or MCP tool calls (and, for edits, the "
-                    "working-directory limit that acceptEdits keeps)",
-                    display,
-                    "Do not auto-approve write, fetch, or MCP tool calls from a plugin hook; return 'ask' or no "
-                    "decision.",
-                    component=component,
-                    extra=extra,
-                )
+        elif site.scope == "scoped":
+            site.report(
+                "auto_approve",
+                Severity.MEDIUM,
+                "plugin_hook_auto_approve_scoped",
+                f"the command emits an allow decision for {', '.join(site.scoped_tools)}, which skips the user's "
+                "permission prompt for file writes, web fetches, or MCP tool calls (and, for edits, the "
+                "working-directory limit that acceptEdits keeps)",
+                "Do not auto-approve write, fetch, or MCP tool calls from a plugin hook; return 'ask' or no decision.",
             )
 
-    def _context_output(
-        self,
-        facts: list[_ShellFacts],
-        record: HookRecord,
-        analysis: HookAnalysis,
-        where: str,
-        display: str,
-        component: tuple[str, str],
-        extra: dict[str, Any],
-        dialect: HookDialect,
-    ) -> None:
+    @staticmethod
+    def _context_output(facts: list[_ShellFacts], site: _HookSite) -> None:
         """LOW when the command emits JSON that puts text in front of the model on an event whose plain output
         does not: ``additionalContext``, a replaced tool output, or a Stop or PostToolUse block reason."""
-        event = str(extra.get("hook_event", ""))
-        if event in dialect.context_events:
+        event = site.record.event
+        if event in site.dialect.context_events:
             return  # every output of a context event is already reported
         outputs = set().union(*(fact.context_outputs for fact in facts))
         if event not in _BLOCK_REASON_EVENTS:
             outputs.discard("a block reason")  # a PreToolUse block reason is a guard's denial message
         if not outputs:
             return
-        record.risk_flags.append("context_injection")
         shown = ", ".join(label for label, _pattern in _CONTEXT_OUTPUT_RES if label in outputs)
-        analysis.findings.append(
-            _finding(
-                Severity.LOW,
-                "plugin_hook_context_injection",
-                f"{where}: the command emits {shown}, which is added to the agent's context",
-                display,
-                "Review what the hook emits; keep injected context minimal and never derived from untrusted "
-                "remote content.",
-                component=component,
-                extra=extra,
-            )
+        site.report(
+            "context_injection",
+            Severity.LOW,
+            "plugin_hook_context_injection",
+            f"the command emits {shown}, which is added to the agent's context",
+            "Review what the hook emits; keep injected context minimal and never derived from untrusted "
+            "remote content.",
         )
 
-    def _remote_approval(
-        self,
-        record: HookRecord,
-        analysis: HookAnalysis,
-        where: str,
-        display: str,
-        component: tuple[str, str],
-        extra: dict[str, Any],
-        decider: str,
-    ) -> None:
-        record.risk_flags.append("remote_approval")
-        analysis.findings.append(
-            _finding(
-                Severity.MEDIUM,
-                "plugin_hook_remote_approval",
-                f"{where}: {decider} decides this broad-matcher approval hook, so it can return "
-                "permissionDecision: allow for tool calls without a user prompt",
-                display,
-                "Narrow the matcher, or keep approval decisions in reviewed plugin code.",
-                component=component,
-                extra=extra,
-            )
+    @staticmethod
+    def _remote_approval(site: _HookSite, decider: str) -> None:
+        site.report(
+            "remote_approval",
+            Severity.MEDIUM,
+            "plugin_hook_remote_approval",
+            f"{decider} decides this broad-matcher approval hook, so it can return permissionDecision: allow for "
+            "tool calls without a user prompt",
+            "Narrow the matcher, or keep approval decisions in reviewed plugin code.",
         )
 
-    def _http_hook(
-        self,
-        handler: dict[str, Any],
-        record: HookRecord,
-        analysis: HookAnalysis,
-        where: str,
-        display: str,
-        component: tuple[str, str],
-        extra: dict[str, Any],
-        scope: str | None,
-    ) -> None:
+    def _http_hook(self, handler: dict[str, Any], site: _HookSite) -> None:
+        record = site.record
         url = handler.get("url")
         if not isinstance(url, str) or not url.strip():
-            record.risk_flags.append("invalid_url")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_http_url_invalid",
-                    f"{where}: the http handler has no 'url'",
-                    display,
-                    "Set 'url' to the https:// endpoint that receives the hook input.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "invalid_url",
+                Severity.HIGH,
+                "plugin_hook_http_url_invalid",
+                "the http handler has no 'url'",
+                "Set 'url' to the https:// endpoint that receives the hook input.",
             )
             return
         record.target = safe_url(url)
@@ -3682,160 +3528,108 @@ class HookAnalyzer:
         client_url = whatwg_url(url)
         problems = url_ambiguities(url, percent_in_host=True)
         if problems:
-            record.risk_flags.append("invalid_url")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_http_url_invalid",
-                    f"{where}: the http handler url contains {', and '.join(problems)}, so URL parsers disagree on "
-                    f"where it points; Claude Code posts to {record.target!r}",
-                    display,
-                    "Write the URL as a plain https://host/path without backslashes, whitespace, control "
-                    "characters, or percent-encoding in the host.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "invalid_url",
+                Severity.HIGH,
+                "plugin_hook_http_url_invalid",
+                f"the http handler url contains {', and '.join(problems)}, so URL parsers disagree on where it "
+                f"points; Claude Code posts to {record.target!r}",
+                "Write the URL as a plain https://host/path without backslashes, whitespace, control "
+                "characters, or percent-encoding in the host.",
             )
         # Read from the URL text, so credentials are flagged even when the authority is malformed. Both
         # readings count: any userinfo Claude Code would send, and a literal password or token in the
         # raw text (committed with the plugin even when a backslash moves it out of the client's userinfo).
-        if _url_embeds_credentials(client_url, any_userinfo=True) or _url_embeds_credentials(record.url):
-            record.risk_flags.append("inline_secret")
-            analysis.findings.append(
-                _finding(
-                    Severity.CRITICAL,
-                    "plugin_hook_inline_secret",
-                    f"{where}: the http handler url embeds credentials (user:password or a credential query parameter)",
-                    display,
-                    "Remove credentials from the URL; pass them through headers with $VAR interpolation and "
-                    "allowedEnvVars.",
-                    component=component,
-                    extra=extra,
-                )
+        if url_credentials(client_url, userinfo_rule="any") or url_credentials(record.url, userinfo_rule="secret"):
+            site.report(
+                "inline_secret",
+                Severity.CRITICAL,
+                "plugin_hook_inline_secret",
+                "the http handler url embeds credentials (user:password, or a credential query or fragment parameter)",
+                "Remove credentials from the URL; pass them through headers with $VAR interpolation and "
+                "allowedEnvVars.",
             )
         try:
             parsed = urlparse(client_url)
             host = parsed.hostname
             _ = parsed.port
         except ValueError:
-            if "invalid_url" not in record.risk_flags:
-                record.risk_flags.append("invalid_url")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_http_url_invalid",
-                    f"{where}: the http handler url has a malformed authority: {record.target!r}",
-                    display,
-                    "Use a valid https://host[:port]/path URL.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "invalid_url",
+                Severity.HIGH,
+                "plugin_hook_http_url_invalid",
+                f"the http handler url has a malformed authority: {record.target!r}",
+                "Use a valid https://host[:port]/path URL.",
             )
             return
         scheme = (parsed.scheme or "").lower()
         endpoint = classify_endpoint_host(host) if host else None
         if scheme not in {"http", "https"} or not host:
-            if "invalid_url" not in record.risk_flags:
-                record.risk_flags.append("invalid_url")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_http_url_invalid",
-                    f"{where}: the http handler url {record.target!r} must be an http(s) URL with a host",
-                    display,
-                    "Use an https:// URL with a host.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "invalid_url",
+                Severity.HIGH,
+                "plugin_hook_http_url_invalid",
+                f"the http handler url {record.target!r} must be an http(s) URL with a host",
+                "Use an https:// URL with a host.",
             )
             return
-        if scheme == "http" and not (endpoint is not None and endpoint.reason == "loopback"):
-            record.risk_flags.append("insecure_scheme")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_http_insecure_scheme",
-                    f"{where}: hook input (tool arguments, prompts) is posted over plaintext http to {record.target!r}",
-                    display,
-                    "Use https:// for any non-loopback hook endpoint.",
-                    component=component,
-                    extra=extra,
-                )
+        if scheme == "http" and not (endpoint is not None and endpoint.is_loopback):
+            site.report(
+                "insecure_scheme",
+                Severity.HIGH,
+                "plugin_hook_http_insecure_scheme",
+                f"hook input (tool arguments, prompts) is posted over plaintext http to {record.target!r}",
+                "Use https:// for any non-loopback hook endpoint.",
             )
         headers = handler.get("headers")
         if isinstance(headers, dict):
             # Every header is read: the hook config is already size-bounded, and a cap would hide a later secret.
             for key, value in headers.items():
                 if isinstance(value, str) and _header_secret(str(key), value):
-                    record.risk_flags.append("inline_secret")
-                    analysis.findings.append(
-                        _finding(
-                            Severity.CRITICAL,
-                            "plugin_hook_inline_secret",
-                            f"{where}: header '{key}' carries an inline credential",
-                            display,
-                            "Reference the secret as $VAR and list it in allowedEnvVars; never inline a credential.",
-                            component=component,
-                            extra=extra,
-                        )
+                    site.report(
+                        "inline_secret",
+                        Severity.CRITICAL,
+                        "plugin_hook_inline_secret",
+                        f"header '{key}' carries an inline credential",
+                        "Reference the secret as $VAR and list it in allowedEnvVars; never inline a credential.",
                     )
                     break
-        allowlisted = bool(self.hook_allowed_urls) and _url_matches_allowlist(client_url, host, self.hook_allowed_urls)
+        allowlisted = bool(self.hook_allowed_urls) and self._allowed_urls.matches(client_url, host, endpoint)
         if endpoint is not None and endpoint.kind == "metadata":
-            record.risk_flags.append("metadata_endpoint")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_http_endpoint_metadata",
-                    f"{where}: the http handler targets a cloud instance-metadata endpoint {record.target!r}",
-                    display,
-                    "Remove the instance-metadata endpoint; it can never be allowlisted.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "metadata_endpoint",
+                Severity.HIGH,
+                "plugin_hook_http_endpoint_metadata",
+                f"the http handler targets a cloud instance-metadata endpoint {record.target!r}",
+                "Remove the instance-metadata endpoint; it can never be allowlisted.",
             )
-        elif endpoint is not None and not allowlisted and not host_is_allowlisted(endpoint, self.allowed_private_hosts):
-            record.risk_flags.append("private_endpoint")
-            analysis.findings.append(
-                _finding(
-                    Severity.MEDIUM,
-                    "plugin_hook_http_endpoint_private",
-                    f"{where}: the http handler targets a {endpoint.reason} address {record.target!r} (a static "
-                    "check of the URL's host; --resolve-endpoints adds DNS and redirect checks of public hosts)",
-                    display,
-                    "Allow the intended host through hooks.allowed_urls or mcp.allowed_private_hosts in the policy.",
-                    component=component,
-                    extra=extra,
-                )
+        elif endpoint is not None and not allowlisted and not self._private_hosts.allows(endpoint):
+            site.report(
+                "private_endpoint",
+                Severity.MEDIUM,
+                "plugin_hook_http_endpoint_private",
+                f"the http handler targets a {endpoint.reason} address {record.target!r} (a static check of the "
+                "URL's host; --resolve-endpoints adds DNS and redirect checks of public hosts)",
+                "Allow the intended host through hooks.allowed_urls or mcp.allowed_private_hosts in the policy.",
             )
         if self.hook_allowed_urls and not allowlisted and not (endpoint is not None and endpoint.kind == "metadata"):
-            record.risk_flags.append("not_allowlisted")
-            analysis.findings.append(
-                _finding(
-                    Severity.HIGH,
-                    "plugin_hook_http_url_not_allowed",
-                    f"{where}: the http handler url {record.target!r} is not in the policy's hooks.allowed_urls",
-                    display,
-                    "Point the hook at an allowed endpoint, or add the endpoint to hooks.allowed_urls.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "not_allowlisted",
+                Severity.HIGH,
+                "plugin_hook_http_url_not_allowed",
+                f"the http handler url {record.target!r} is not in the policy's hooks.allowed_urls",
+                "Point the hook at an allowed endpoint, or add the endpoint to hooks.allowed_urls.",
             )
         elif not self.hook_allowed_urls:
-            record.risk_flags.append("remote_endpoint")
-            analysis.findings.append(
-                _finding(
-                    Severity.MEDIUM,
-                    "plugin_hook_http_endpoint",
-                    f"{where}: hook input (tool arguments, prompts, file paths) is posted to {record.target!r}",
-                    display,
-                    "Review the endpoint; allow it explicitly with hooks.allowed_urls in the validation policy.",
-                    component=component,
-                    extra=extra,
-                )
+            site.report(
+                "remote_endpoint",
+                Severity.MEDIUM,
+                "plugin_hook_http_endpoint",
+                f"hook input (tool arguments, prompts, file paths) is posted to {record.target!r}",
+                "Review the endpoint; allow it explicitly with hooks.allowed_urls in the validation policy.",
             )
-        if scope in {"all", "bash"}:
-            self._remote_approval(record, analysis, where, display, component, extra, "a remote HTTP endpoint")
+        if site.scope in {"all", "bash"}:
+            self._remote_approval(site, "a remote HTTP endpoint")
 
 
 def hook_risk_summary(records: Iterable[HookRecord]) -> dict[str, Any]:
@@ -3869,6 +3663,12 @@ def hook_risk_summary(records: Iterable[HookRecord]) -> dict[str, Any]:
     }
 
 
+# Privilege flags that describe a component without raising a risk; they do not count as flagged.
+_BENIGN_FLAGS = frozenset(
+    {"no_frontmatter", "inherits_all_tools", "ignored_hooks", "ignored_mcpServers", "wildcard_ignored"}
+)
+
+
 def privilege_summary(records: Iterable[PrivilegeRecord]) -> dict[str, Any]:
     """The ``plugin.privileges`` metadata block."""
     rows = [record.to_dict() for record in records]
@@ -3890,8 +3690,3 @@ def privilege_summary(records: Iterable[PrivilegeRecord]) -> dict[str, Any]:
             "by_flag": dict(sorted(by_flag.items())),
         },
     }
-
-
-_BENIGN_FLAGS = frozenset(
-    {"no_frontmatter", "inherits_all_tools", "ignored_hooks", "ignored_mcpServers", "wildcard_ignored"}
-)

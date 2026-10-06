@@ -24,9 +24,10 @@ from skillevaluator.constants import (
     CONTENT_TYPE_PLUGIN,
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
     PLUGIN_CONTAINED_MANIFEST_TYPE,
+    PLUGIN_MANIFEST_TYPE,
 )
 from skillevaluator.models.result import Severity, ValidationResult
-from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
+from skillevaluator.plugin_manifest import PluginManifestLocation, PluginManifestPathError, locate_plugin_manifest
 from skillevaluator.tier1.commands import run_validation
 from skillevaluator.validators import plugin_schema
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
@@ -231,7 +232,7 @@ def test_additional_manifest_that_changes_after_discovery_stays_high(
 
 
 # --------------------------------------------------------------------------- #
-# Selected manifest (PluginSchemaValidator._load_contained_json, _load_yaml)  #
+# Selected manifest (PluginSchemaValidator._load_manifest)                     #
 # --------------------------------------------------------------------------- #
 _LATIN1_CLAUDE = json.dumps(
     {"name": "demo", "description": "caf\xe9", "mcpServers": {"evil": {"type": "http", "url": "http://mcp.invalid/"}}},
@@ -322,6 +323,56 @@ def test_policy_can_downgrade_a_selected_manifest_that_was_read_leniently(tmp_pa
     assert _checks(result) == {"manifest_unreadable": Severity.LOW}
     assert "security_failure" not in result.metadata
     assert result.passed
+
+
+@pytest.mark.parametrize(
+    ("files", "manifest_type"),
+    [
+        ({".claude-plugin/plugin.json": {"name": "demo"}}, PLUGIN_CONTAINED_MANIFEST_TYPE),
+        ({"plugin.json": {"$schema": _AP_SCHEMA, "name": "demo"}}, PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE),
+        (
+            {"agent_plugin.yaml": b"name: demo\nauthor:\n  email: a@example.com\nmcp:\n  - name: t\n    provider: p\n"},
+            PLUGIN_MANIFEST_TYPE,
+        ),
+    ],
+    ids=["claude", "agent-plugins", "bundle"],
+)
+def test_selected_manifest_is_read_once_per_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, files: dict[str, bytes | dict], manifest_type: str
+) -> None:
+    """The manifest check, the manifest declarations, and the inventory share one read and parse."""
+    root = _write(tmp_path / "p", files)
+    reads: list[str] = []
+    real_read_text = PluginManifestLocation.read_text
+
+    def counting_read_text(self: PluginManifestLocation, **kwargs: object) -> str:
+        reads.append(self.manifest_filename)
+        return real_read_text(self, **kwargs)
+
+    monkeypatch.setattr(PluginManifestLocation, "read_text", counting_read_text)
+    result = PluginSchemaValidator().validate(root)
+
+    assert result.metadata["manifest_type"] == manifest_type
+    assert result.passed, result.errors
+    assert reads == [next(iter(files))]
+    [row] = result.metadata["plugin"]["manifest_declarations"]["manifests"]
+    assert row["name"] == "demo"
+
+
+def test_selected_manifest_declaration_row_comes_from_the_validated_parse(tmp_path: Path) -> None:
+    """The declaration row shows what validation parsed, even for a YAML file with a doubled byte-order mark.
+
+    The YAML parser skips one leading BOM, so the second one becomes part of the first key ('\ufeffname'), and
+    validation reports that the manifest has no name. The row used to come from a separate read that stripped
+    one more BOM, and showed the name.
+    """
+    manifest = "\ufeff\ufeffname: demo\nauthor:\n  email: a@example.com\nmcp:\n  - name: t\n    provider: p\n"
+    root = _write(tmp_path / "p", {"agent_plugin.yaml": manifest.encode()})
+
+    result = PluginSchemaValidator().validate(root)
+    assert {"schema:name:missing", "schema:\ufeffname:extra_forbidden"} <= _checks(result).keys()
+    [row] = result.metadata["plugin"]["manifest_declarations"]["manifests"]
+    assert row["name"] is None
 
 
 def test_selected_manifest_replaced_by_a_link_after_discovery_stays_a_security_failure(

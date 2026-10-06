@@ -932,7 +932,7 @@ def test_behavior_evidence_and_compactor_handle_tiny_limits(monkeypatch, tiny_li
     shared_compacted = _compact_behavior_conversation(long_text, limit=tiny_limit)
     template_compacted = template_module._compact_behavior_conversation(long_text, limit=tiny_limit)
     assert len(shared_compacted) <= tiny_limit
-    assert shared_compacted == template_compacted
+    assert len(template_compacted) <= tiny_limit
 
 
 def test_seam_bundle_to_judge_behavior_check_retains_failed_command_and_claim(monkeypatch) -> None:
@@ -1138,11 +1138,15 @@ def test_compact_behavior_conversation_preserves_final_response_section(monkeypa
     shared_compacted = llm_judge._compact_behavior_conversation(oversized_bundle)
     template_compacted = template_module._compact_behavior_conversation(oversized_bundle)
 
-    assert shared_compacted == template_compacted
     assert len(shared_compacted) <= 12000
     assert final_claim in shared_compacted
     assert "FINAL_RESPONSE_END" in shared_compacted
     assert "LAST_TOOL_OBSERVATION" in shared_compacted
+    # The verifier's bundles already fit the budget, so its compactor only caps
+    # what does not, keeping the head and the tail.
+    assert len(template_compacted) <= 12000
+    assert template_compacted.startswith("VERIFIED FACTS (deterministic):")
+    assert template_compacted.endswith("LAST_TOOL_OBSERVATION")
 
 
 @pytest.mark.parametrize(
@@ -1257,7 +1261,7 @@ def test_compact_behavior_conversation_section_layout_permutations(
     shared_out = llm_judge._compact_behavior_conversation(raw_text, limit=limit)
     template_out = template_module._compact_behavior_conversation(raw_text, limit=limit)
 
-    assert shared_out == template_out, case_name
+    assert len(template_out) <= limit, case_name
     assert len(shared_out) <= limit, case_name
     for substr in expected_substrings:
         assert substr in shared_out, f"{case_name}: missing {substr!r}"

@@ -218,6 +218,45 @@ def test_parse_hook_census_redacts_and_bounds_ids() -> None:
     assert len(hook["hook_id"]) <= 256
 
 
+# How far a label's raw text is read before redaction: plugin_signals._safe_text(value, 256).
+_LABEL_WINDOW = 256 * 4 + 256
+# The JWT fixture below is assembled from its parts so secret scanners don't read it as a real token.
+_JWT_HEADER = "eyJhbGciOiJIUzI1NiJ9"
+_JWT_PAYLOAD = "eyJzdWIiOiJhZG1pbiIsInJvbGUiOiJyb290In0"
+
+
+@pytest.mark.parametrize(
+    ("token", "inside"),
+    [
+        ("AKIA" + "ABCDEFGHIJKLMNOP", 19),
+        ("ghp_" + "Z9" * 18, 20),
+        (
+            f"{_JWT_HEADER}.{_JWT_PAYLOAD}.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+            60,
+        ),
+    ],
+    ids=["aws-key", "github-token", "jwt"],
+)
+def test_parse_hook_census_redacts_a_token_cut_by_the_label_window(token: str, inside: int) -> None:
+    """A forged census line: a long JWT redacts to a short marker, which pulls the text after it into the
+    256-character label, and the token there starts *inside* characters before the window ends."""
+    lead = "eyJ" + "A" * 575 + ".eyJ" + "B" * 575 + "." + "C" * 40 + " "
+    hook_id = lead + "x" * (_LABEL_WINDOW - len(lead) - inside - 1) + " " + token
+    parsed = parse_hook_census(json.dumps({"hook_id": hook_id, "event": "PreToolUse", "exit_code": 0}))
+
+    [hook] = parsed["hooks"]
+    assert token[:12] not in hook["hook_id"]
+    assert len(hook["hook_id"]) <= 256
+
+
+def test_parse_hook_census_keeps_the_staged_hook_id_spelling() -> None:
+    """Census rows join the staged hook ids by exact string, so spaces in a source path are kept."""
+    hook_id = "hooks/my  hooks.json#PreToolUse[0].hooks[0]"
+    parsed = parse_hook_census(json.dumps({"hook_id": hook_id, "event": "PreToolUse", "exit_code": 0}))
+
+    assert [hook["hook_id"] for hook in parsed["hooks"]] == [hook_id]
+
+
 def test_read_hook_census_absent_present_and_unsafe(tmp_path: Path) -> None:
     assert read_hook_census(tmp_path)["status"] == "absent"
     agent = tmp_path / "agent"
@@ -250,6 +289,29 @@ def test_summarize_hook_census_over_trials() -> None:
         {"hook_id": "a", "event": "E", "runs": 3, "failures": 1, "blocked": 0, "not_started": 0, "trials": 2}
     ]
     assert summary["total_runs"] == 3
+
+
+def test_census_caps_hooks_and_lines_and_marks_the_result_truncated() -> None:
+    def line(index: int, code: int = 0) -> str:
+        return json.dumps({"hook_id": f"h{index}", "event": "E", "exit_code": code})
+
+    # One hook more than the cap, then a known hook again: the extra hook is dropped, the known one still counts.
+    parsed = parse_hook_census("\n".join([*(line(index) for index in range(257)), line(0, 127)]))
+    assert parsed["truncated"] is True
+    assert len(parsed["hooks"]) == 256
+    assert parsed["hooks"][0]["runs"] == 2
+    assert (parsed["total_runs"], parsed["total_failures"], parsed["total_not_started"]) == (257, 1, 1)
+
+    long_run = parse_hook_census("\n".join(line(0) for _ in range(20_001)))
+    assert long_run["truncated"] is True
+    assert long_run["total_runs"] == 20_000
+
+    first = parse_hook_census("\n".join(line(index) for index in range(200)))
+    second = parse_hook_census("\n".join(line(index) for index in range(150, 350)))
+    summary = summarize_hook_census([first, second])
+    assert summary["truncated"] is True
+    assert len(summary["hooks"]) == 256
+    assert summary["total_runs"] == 200 + (256 - 150)
 
 
 def _write_job(jobs_dir: Path, variant: str, census: str | None) -> None:

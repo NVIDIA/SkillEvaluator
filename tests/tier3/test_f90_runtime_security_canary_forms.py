@@ -207,13 +207,14 @@ def test_codex_child_rollouts_are_read_by_the_verifier(tmp_path: Path) -> None:
     trajectory = _trajectory("codex", list(_PARENT_CALLS), session_id="01a1066c-0000-7000-8000-0000000000aa")
     _child_rollout(tmp_path, _CHILD)
 
-    calls = eval_template.subagent_tool_calls(trajectory, tmp_path)
+    calls, truncated = eval_template.subagent_tool_calls(trajectory, tmp_path)
 
     assert [call["action_input"]["cmd"].split()[0] for call in calls] == ["cat", "curl"]
     assert all(call["subagent"] for call in calls)
     assert calls[1]["observation"] == "ok"
+    assert truncated is False
     # A rollout no spawn_agent result names is not read.
-    assert eval_template.subagent_tool_calls(_trajectory("codex", []), tmp_path) == []
+    assert eval_template.subagent_tool_calls(_trajectory("codex", []), tmp_path) == ([], False)
 
 
 def test_verifier_main_scores_what_a_codex_child_agent_did(tmp_path: Path) -> None:

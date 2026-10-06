@@ -24,7 +24,7 @@ from skillevaluator.reporting.base import (
     is_advisory_agent_eval_skip,
     passes_required_gate,
 )
-from skillevaluator.reporting.plugin_sections import json_safe
+from skillevaluator.reporting.plugin_sections import json_safe, plugin_attributable_leaks
 from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
@@ -66,7 +66,6 @@ class JSONReporter(ReporterBase):
     def render_all(self, results: list[ValidationResult]) -> str:
         """Render all results to JSON with overall summary."""
         from skillevaluator.reporting.html import HTMLReporter
-        from skillevaluator.reporting.sarif_reporter import plugin_attributable_canary_leaks
 
         all_passed = all(passes_required_gate(r) for r in results)
         advisory_skip_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
@@ -103,7 +102,10 @@ class JSONReporter(ReporterBase):
             "total_warnings": total_warnings,
             "severity_counts": {
                 # A plugin-attributable canary leak is critical, as in SARIF and BENCHMARK.md.
-                "critical": sum(r.summary.critical_count + len(plugin_attributable_canary_leaks(r)) for r in results),
+                "critical": sum(
+                    r.summary.critical_count + len(plugin_attributable_leaks(r.metadata.get("agent_eval")))
+                    for r in results
+                ),
                 "high": sum(r.summary.high_count for r in results),
                 "medium": sum(r.summary.medium_count for r in results),
                 "low": sum(r.summary.low_count for r in results),

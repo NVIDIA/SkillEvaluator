@@ -25,9 +25,9 @@ from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRICS,
     DIMENSION_DISPLAY,
     METRIC_DISPLAY,
-    NOT_APPLICABLE_ELIGIBLE_METRICS,
     dimension_is_not_applicable,
     finite_number,
+    not_applicable_list,
 )
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.tier3.harbor.runner import format_harbor_view_command
@@ -78,9 +78,7 @@ def _not_applicable_metrics(data: Mapping[str, Any], variant: str) -> frozenset[
         return frozenset()
     by_variant = data.get("not_applicable_metrics")
     raw = by_variant.get(variant) if isinstance(by_variant, Mapping) else None
-    if not isinstance(raw, list | tuple):
-        return frozenset()
-    return frozenset(metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric in raw)
+    return frozenset(not_applicable_list(raw))
 
 
 def _delta_cell(value: object) -> Text:
@@ -814,48 +812,46 @@ def _redact_strings(value: Any, safe: Any) -> Any:
 
 
 def _with_report_integration(result: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Add the report payload's Integration block to a raw engine result.
+    """Add the report payload's Integration blocks to a raw engine result.
 
     The engine result has no ``integration`` block: the reports build it from
     the per-agent scores, the run config and the plugin provenance. Without it
     the CLI said Integration "recorded no sum-of-parts comparison" right above a
-    measured Integration lift. This builds it with the same payload builder the
-    reports use, so the CLI and the reports agree.
+    measured Integration lift. This adds the blocks the report for this run
+    carries (:func:`~skillevaluator.evaluation.tier3_report.integration_reports_for`):
+    the run-level block, and in a multi-agent run each agent's own named block,
+    so the CLI and the reports agree.
     """
     from skillevaluator.reporting.plugin_sections import is_plugin_payload
 
     if isinstance(result.get("integration"), Mapping) or not is_plugin_payload(result):
         return result
-    agents = result.get("agents")
-    if not isinstance(agents, Mapping):
-        return result
+    raw_agents = result.get("agents")
+    agents = (
+        {str(name): dict(agent) for name, agent in raw_agents.items() if isinstance(agent, Mapping)}
+        if isinstance(raw_agents, Mapping)
+        else {}
+    )
+    if not agents:
+        return result  # without agents the report carries no Integration block either
     run_config = result.get("run_config")
     provenance = result.get("plugin_provenance")
     try:
-        from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+        from skillevaluator.evaluation.tier3_report import integration_reports_for
 
-        payload = build_agent_eval_payload(
-            str(result.get("skill_name") or "plugin"),
-            {str(name): dict(agent) for name, agent in agents.items() if isinstance(agent, Mapping)},
-            run_config=dict(run_config) if isinstance(run_config, Mapping) else None,
-            plugin_provenance=dict(provenance) if isinstance(provenance, Mapping) else None,
-            use_llm_judge=False,
+        integration, per_agent = integration_reports_for(
+            agents,
+            dict(run_config) if isinstance(run_config, Mapping) else None,
+            dict(provenance) if isinstance(provenance, Mapping) else None,
         )
     except Exception:  # advisory block: never break the run summary
         logging.getLogger(__name__).debug("Integration block for the run summary skipped", exc_info=True)
         return result
-    integration = (payload or {}).get("integration")
-    if not isinstance(integration, Mapping):
+    if integration is None:
         return result
     # Multi-agent runs: each agent keeps its own named Integration block.
-    payload_agents = (payload or {}).get("agents") or {}
     named_agents = {
-        str(name): (
-            {**agent, "integration": payload_agents[str(name)]["integration"]}
-            if isinstance(payload_agents.get(str(name)), Mapping)
-            and isinstance(payload_agents[str(name)].get("integration"), Mapping)
-            else agent
-        )
+        name: {**agent, "integration": per_agent[name]} if name in per_agent else agent
         for name, agent in agents.items()
     }
     return {**result, "integration": integration, "agents": named_agents}

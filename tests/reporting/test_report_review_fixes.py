@@ -215,9 +215,7 @@ HOOK_RISK = {
     ],
     "counts": {"total": 1, "flagged": 1},
 }
-UNSUPPORTED_NOTE = (
-    "Tier 3 does not stage these types in wrapper mode; Tier 1 checks hooks, subagents and commands statically."
-)
+UNSUPPORTED_NOTE = "Tier 3 does not stage these types in wrapper mode; Tier 1 checks hooks statically."
 
 
 def _tier1_with_hook_risk(*, hook_risk: bool = True) -> ValidationResult:
@@ -286,6 +284,124 @@ def test_benchmark_lists_a_hook_nothing_checks_as_not_evaluated(tmp_path: Path) 
     card = _card([_tier1_with_hook_risk(hook_risk=False), _tier3_with_hook_state(tmp_path, "unsupported")])
 
     assert any("no check evaluates them: hook" in line for line in _excluded_lines(card))
+
+
+def test_markdown_does_not_claim_a_static_check_the_benchmark_says_did_not_run(tmp_path: Path) -> None:
+    """Without hook-risk rows, Markdown said Tier 1 checked hooks while BENCHMARK.md said nothing evaluated them."""
+    tier1 = _tier1_with_hook_risk(hook_risk=False)
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([tier1])
+    card = _card([tier1, _tier3_with_hook_state(tmp_path, "unsupported")])
+
+    assert (
+        "**Unsupported component types present:** hook. "
+        "Tier 3 does not stage these types in wrapper mode, and SkillEvaluator only lists them."
+    ) in markdown
+    assert "Tier 1 checks" not in markdown
+    assert any("no check evaluates them: hook" in line for line in _excluded_lines(card))
+
+
+def test_unsupported_type_split_names_only_the_types_tier1_checked() -> None:
+    from skillevaluator.reporting.plugin_sections import unsupported_type_split, unsupported_types_note
+
+    block = tier1_plugin_result().metadata["plugin"]
+    block["component_inventory"]["unsupported_types_present"] = ["hook", "agent", "lsp"]
+    block["privileges"] = {"components": [{"type": "agent", "name": "reviewer", "path": "agents/reviewer.md"}]}
+    coverage = {"rows": [{"type": "lsp", "staged": True}]}
+
+    tier1_split = unsupported_type_split(block)
+    tier3_split = unsupported_type_split(block, coverage)
+
+    assert tier1_split == {"static_only": ["agent"], "unevaluated": ["hook", "lsp"]}
+    assert tier3_split == {"static_only": ["agent"], "unevaluated": ["hook"]}
+    assert unsupported_types_note(tier1_split) == (
+        "Tier 3 does not stage these types in wrapper mode; Tier 1 checks subagents statically and only lists "
+        "hook, lsp."
+    )
+
+
+def test_tier1_names_monitors_statically_checked_from_their_hook_risk_rows(tmp_path: Path) -> None:
+    """Tier 1 checks each monitor's command like a command hook on the event Monitor.
+
+    The plugin schema check also evaluates every LSP server it inventories, so
+    neither type is one SkillEvaluator only lists.
+    """
+    from skillevaluator.reporting.plugin_sections import tier1_plugin_view, unsupported_type_split
+
+    plugin = tmp_path / "plug"
+    (plugin / ".claude-plugin").mkdir(parents=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "plug", "version": "1.0.0", "description": "demo"}), encoding="utf-8"
+    )
+    (plugin / "monitors").mkdir()
+    (plugin / "monitors" / "monitors.json").write_text(
+        json.dumps({"monitors": [{"name": "watch", "command": "tail -f build.log"}]}), encoding="utf-8"
+    )
+    (plugin / ".lsp.json").write_text(json.dumps({"py": {"command": "pylsp"}}), encoding="utf-8")
+
+    results = tier1_commands.run_validation(plugin, checks="schema", content_type="plugin")
+    block = next(result.metadata["plugin"] for result in results if isinstance(result.metadata.get("plugin"), dict))
+    view = tier1_plugin_view(block)
+
+    assert unsupported_type_split(block) == {"static_only": ["lsp", "monitor"], "unevaluated": []}
+    assert view is not None
+    assert view["inventory"]["unsupported_note"] == (
+        "Tier 3 does not stage these types in wrapper mode; Tier 1 checks LSP servers and monitors statically."
+    )
+
+
+def test_a_monitor_hook_risk_row_does_not_mark_hooks_statically_checked() -> None:
+    from skillevaluator.reporting.plugin_sections import unsupported_type_split
+
+    block = tier1_plugin_result().metadata["plugin"]
+    block["component_inventory"]["unsupported_types_present"] = ["hook", "monitor"]
+    monitor_row = {"id": "monitor:watch#Monitor[0].hooks[0]", "source": "monitor:watch", "event": "Monitor"}
+    block["hook_risk"] = {"hooks": [monitor_row]}
+
+    assert unsupported_type_split(block) == {"static_only": ["monitor"], "unevaluated": ["hook"]}
+
+    hook_row = {"id": "hooks/hooks.json#PreToolUse[0].hooks[0]", "source": "hooks/hooks.json", "event": "PreToolUse"}
+    block["hook_risk"] = {"hooks": [monitor_row, hook_row]}
+
+    assert unsupported_type_split(block) == {"static_only": ["hook", "monitor"], "unevaluated": []}
+
+
+def _static_risk_block(*, unsupported: list[str]) -> dict:
+    block = tier1_plugin_result().metadata["plugin"]
+    block["component_inventory"]["unsupported_types_present"] = unsupported
+    block["hook_risk"] = {
+        "hooks": [{"id": "hooks.json#PreToolUse[0].hooks[0]", "event": "PreToolUse", "handler_type": "command"}]
+    }
+    block["privileges"] = {"components": [{"type": "agent", "name": "reviewer", "path": "agents/reviewer.md"}]}
+    return block
+
+
+@pytest.mark.parametrize("unsupported", [["hook", "agent"], []])
+def test_tier1_plugin_view_builds_the_static_risk_rows_once(
+    monkeypatch: pytest.MonkeyPatch, unsupported: list[str]
+) -> None:
+    """Which unsupported types Tier 1 checked is read from the raw rows, not from a second set of display rows."""
+    from skillevaluator.reporting import plugin_sections
+
+    built: list[str] = []
+    for name in ("hook_risk_view", "privileges_view"):
+        view_builder = getattr(plugin_sections, name)
+        monkeypatch.setattr(
+            plugin_sections,
+            name,
+            lambda value, _name=name, _build=view_builder: built.append(_name) or _build(value),
+        )
+
+    view = plugin_sections.tier1_plugin_view(_static_risk_block(unsupported=unsupported))
+
+    assert view is not None
+    assert sorted(built) == ["hook_risk_view", "privileges_view"]
+    assert view["static_risk"]["hooks"]["total"] == 1
+    assert view["inventory"]["unsupported_note"] == (
+        "Tier 3 does not stage these types in wrapper mode; Tier 1 checks hooks and subagents statically."
+        if unsupported
+        else ""
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -726,6 +842,203 @@ def test_sarif_bundled_skill_findings_get_repository_relative_uris(tmp_path: Pat
     ]
 
 
+def _validate_dot_plugin_result() -> ValidationResult:
+    """Tier 1 results for ``validate .`` in a plugin with skills/foo and hooks/hooks.json."""
+    result = ValidationResult(validator_name="Plugin Schema", validator_description="Tier 1 plugin validation")
+    result.metadata.update(
+        {
+            "manifest_type": "claude",
+            "plugin_mode": "bundle",
+            "plugin": {
+                "manifest_filename": ".claude-plugin/plugin.json",
+                # The root as typed: ``validate .``.
+                "root": ".",
+                "name": "demo",
+                "component_inventory": {
+                    "components": [
+                        {"type": "skill", "name": "foo", "path": "skills/foo", "support": "evaluated"},
+                        {
+                            "type": "hook",
+                            "name": "hooks/hooks.json",
+                            "path": "hooks/hooks.json",
+                            "support": "unsupported",
+                        },
+                    ]
+                },
+            },
+        }
+    )
+    return result
+
+
+def _finding(file_path: str, check_name: str) -> Finding:
+    return Finding(
+        category="SECURITY", severity=Severity.HIGH, check_name=check_name, message="issue", file_path=file_path
+    )
+
+
+def test_sarif_does_not_join_a_root_relative_bundled_skill_path_onto_the_skill(tmp_path: Path) -> None:
+    """Validators rebase bundled-skill paths onto the plugin root; Tier 2 reports them relative to the skill."""
+    result = _validate_dot_plugin_result()
+    for file_path, check in (
+        ("[foo] skills/foo/SKILL.md", "rebased"),
+        ("[foo] SKILL.md", "skill_relative"),
+        ("[foo] hooks/hooks.json", "skill_file_named_like_a_root_component"),
+        (str(tmp_path / "hooks" / "hooks.json"), "absolute_root_file"),
+    ):
+        result.add_finding(_finding(file_path, check))
+
+    document = _sarif([result], tmp_path)
+
+    located = {
+        item["properties"]["checkName"]: (
+            item["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            item["properties"].get("pluginComponent", {}).get("name"),
+        )
+        for item in document["runs"][0]["results"]
+    }
+    assert located == {
+        "rebased": ("skills/foo/SKILL.md", "foo"),
+        "skill_relative": ("skills/foo/SKILL.md", "foo"),
+        "skill_file_named_like_a_root_component": ("skills/foo/hooks/hooks.json", "foo"),
+        "absolute_root_file": ("hooks/hooks.json", "hooks/hooks.json"),
+    }
+
+
+def test_sarif_resolves_each_finding_path_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A finding's location and plugin component share one resolved path, and the roots are resolved once."""
+    result = _validate_dot_plugin_result()
+    findings = 20
+    for index in range(findings):
+        # Absolute paths miss the inventory (its root is "." as typed), so the scan-root fallback places them.
+        result.add_finding(_finding(str(tmp_path / "skills" / "foo" / f"file{index}.md"), f"check{index}"))
+    resolved: list[Path] = []
+    resolve = Path.resolve
+
+    def counting_resolve(path: Path, *args: object, **kwargs: object) -> Path:
+        resolved.append(path)
+        return resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", counting_resolve)
+
+    document = _sarif([result], tmp_path)
+
+    assert set(_placed(document).values()) == {
+        (f"skills/foo/file{index}.md", "skills/foo") for index in range(findings)
+    }
+    # One per finding, plus the workspace root, the scan root, and the manifest's canary location.
+    assert len(resolved) <= findings + 3
+
+
+def _plugin_with_skills(*skills: tuple[str, str], root: str = ".") -> ValidationResult:
+    """Tier 1 results for a plugin whose inventory lists these ``(name, path)`` bundled skills."""
+    result = ValidationResult(validator_name="Plugin Schema", validator_description="Tier 1 plugin validation")
+    components = [{"type": "skill", "name": name, "path": path, "support": "evaluated"} for name, path in skills]
+    result.metadata.update(
+        {
+            "manifest_type": "claude",
+            "plugin_mode": "bundle",
+            "plugin": {"root": root, "name": "demo", "component_inventory": {"components": components}},
+        }
+    )
+    return result
+
+
+def _placed(document: dict) -> dict[str, tuple[str, str | None]]:
+    return {
+        item["properties"]["checkName"]: (
+            item["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            item["properties"].get("pluginComponent", {}).get("path"),
+        )
+        for item in document["runs"][0]["results"]
+    }
+
+
+def test_sarif_keeps_a_walker_finding_in_the_skill_that_contains_it_when_labels_collide(tmp_path: Path) -> None:
+    """The tree walker labels skills/js/lint's findings "[lint]", which is also skills/lint's name."""
+    result = _plugin_with_skills(("lint", "skills/lint"), ("js/lint", "skills/js/lint"))
+    for file_path, check in (
+        ("[lint] skills/js/lint/run.sh", "walker_nested"),
+        ("[lint] skills/lint/run.sh", "walker_top"),
+        ("[js/lint] SKILL.md", "tier2_nested"),
+        ("[lint] SKILL.md", "tier2_top"),
+    ):
+        result.add_finding(_finding(file_path, check))
+
+    assert _placed(_sarif([result], tmp_path)) == {
+        "walker_nested": ("skills/js/lint/run.sh", "skills/js/lint"),
+        "walker_top": ("skills/lint/run.sh", "skills/lint"),
+        "tier2_nested": ("skills/js/lint/SKILL.md", "skills/js/lint"),
+        "tier2_top": ("skills/lint/SKILL.md", "skills/lint"),
+    }
+
+
+def test_sarif_places_findings_of_two_bundled_skills_that_share_a_name(tmp_path: Path) -> None:
+    """A declared ./extra-skills/pdf and the default skills/pdf are both named "pdf"."""
+    result = _plugin_with_skills(("pdf", "extra-skills/pdf"), ("pdf", "skills/pdf"))
+    for file_path, check in (
+        ("[pdf] skills/pdf/run.sh", "walker"),
+        # Tier 2 labels a bundled skill with its folder under skills/.
+        ("[pdf] references/guide.md", "tier2"),
+        ("[extra-skills/pdf] extra-skills/pdf/SKILL.md", "declared_rebased"),
+        ("[extra-skills/pdf] SKILL.md", "declared_skill_relative"),
+    ):
+        result.add_finding(_finding(file_path, check))
+
+    assert _placed(_sarif([result], tmp_path)) == {
+        "walker": ("skills/pdf/run.sh", "skills/pdf"),
+        "tier2": ("skills/pdf/references/guide.md", "skills/pdf"),
+        "declared_rebased": ("extra-skills/pdf/SKILL.md", "extra-skills/pdf"),
+        "declared_skill_relative": ("extra-skills/pdf/SKILL.md", "extra-skills/pdf"),
+    }
+
+
+def test_component_index_does_not_guess_between_skills_a_label_could_name() -> None:
+    from skillevaluator.reporting.plugin_sections import ComponentIndex
+
+    block = _plugin_with_skills(
+        ("pdf", "extra-skills/pdf"),
+        ("pdf", "vendor/pdf"),
+        # "lint" is one skill's name and the other's directory name.
+        ("lint", "skills/a/tool"),
+        ("tool", "skills/b/lint"),
+    ).metadata["plugin"]
+    index = ComponentIndex(block)
+
+    for label in ("pdf", "lint", "tool"):
+        assert index.artifact_path(f"[{label}] SKILL.md") == "SKILL.md"
+        assert index.component(f"[{label}] SKILL.md") is None
+    # A whole-skill finding points at the skill directory.
+    assert index.artifact_path("[b/lint] .") == "skills/b/lint"
+
+
+@pytest.mark.parametrize(
+    "file_path",
+    ["skills//foo/x.md", "./skills/./foo/x.md", "/work/p/skills//foo/x.md", "[foo] skills//foo/x.md"],
+)
+def test_component_index_reads_a_finding_path_as_the_inventory_finding_counts_do(file_path: str) -> None:
+    """SARIF's pluginComponent and the inventory's per-component finding count place a path alike."""
+    from skillevaluator.plugin_components import Component, attribute_findings
+    from skillevaluator.reporting.plugin_sections import ComponentIndex
+
+    block = _plugin_with_skills(("foo", "skills/foo"), root="/work/p").metadata["plugin"]
+    components = [Component("skill", "foo", "packaged", "skills/foo", "evaluated")]
+    attribute_findings(components, [_finding(file_path, "check")], Path("/work/p"))
+
+    assert components[0].findings == 1
+    assert (ComponentIndex(block).component(file_path) or {}).get("path") == "skills/foo"
+
+
+def test_component_index_keeps_a_labelled_path_that_starts_with_the_root_as_typed() -> None:
+    """``run_validation(Path("p1"))`` reports bundled-skill paths through the root as typed."""
+    from skillevaluator.reporting.plugin_sections import ComponentIndex
+
+    index = ComponentIndex(_plugin_with_skills(("js/lint", "skills/js/lint"), root="p1").metadata["plugin"])
+
+    assert index.artifact_path("[js/lint] p1/skills/js/lint/SKILL.md") == "p1/skills/js/lint/SKILL.md"
+    assert (index.component("[js/lint] p1/skills/js/lint/SKILL.md") or {}).get("path") == "skills/js/lint"
+
+
 def test_sarif_marks_a_failed_tier3_run_as_unsuccessful() -> None:
     result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Tier 3")
     result.metadata["agent_eval"] = {"execution_status": "failed", "execution_errors": ["harbor job crashed"]}
@@ -836,6 +1149,34 @@ def test_sarif_skips_a_canary_leak_the_baseline_also_had(tmp_path: Path) -> None
     assert not [r for r in document["runs"][0]["results"] if r["ruleId"] == "AGENT_EVAL/canary_exfiltration"]
 
 
+def test_sarif_canary_rule_covers_a_plugin_arm_that_leaked_more_often(tmp_path: Path) -> None:
+    """Both arms leaked, the plugin arm more often: the rule must not claim the baseline never leaked."""
+    result = _canary_run(tmp_path, baseline_leaked=1)
+    arms = result.metadata["agent_eval"]["agents"]["codex"]["canary_summary"]["arms"]
+    arms["with_skill"]["leaked"] = 2
+
+    document = _sarif([tier1_plugin_result(), result])
+
+    run = document["runs"][0]
+    [canary] = [r for r in run["results"] if r["ruleId"] == "AGENT_EVAL/canary_exfiltration"]
+    assert "more often than the baseline (2 of 2 vs 1 of 2)" in canary["message"]["text"]
+    [rule] = [rule for rule in run["tool"]["driver"]["rules"] if rule["id"] == "AGENT_EVAL/canary_exfiltration"]
+    description = rule["fullDescription"]["text"]
+    assert "the no-plugin baseline did not" not in description
+    assert "leaked more often than the baseline arm, including when the baseline did not leak" in description
+
+
+def test_sarif_canary_message_names_a_sum_of_parts_baseline(tmp_path: Path) -> None:
+    result = _canary_run(tmp_path, baseline_leaked=0)
+    payload = result.metadata["agent_eval"]
+    payload["lift_mode_requested"] = payload["lift_mode_effective"] = "integration"
+
+    document = _sarif([tier1_plugin_result(), result])
+
+    [canary] = [r for r in document["runs"][0]["results"] if r["ruleId"] == "AGENT_EVAL/canary_exfiltration"]
+    assert "the plugin arm leaked the canary and the sum-of-parts baseline did not" in canary["message"]["text"]
+
+
 @pytest.mark.parametrize(("baseline_leaked", "critical"), [(0, 1), (1, 0)])
 def test_json_counts_a_plugin_attributable_canary_leak_as_critical(
     tmp_path: Path, baseline_leaked: int, critical: int
@@ -873,7 +1214,7 @@ def test_cli_prints_the_tier3_plugin_block_for_a_passing_agent_eval(tmp_path: Pa
 
     assert "[AGENT_EVAL] Tier 3 plugin evaluation" in plain
     assert "Verdict: FAIL" in plain
-    assert "Component coverage: 0 components not staged (of 4; 4 staged" in plain
+    assert "Component coverage: 0 components not staged (of 4 declared or packaged component(s); 4 staged" in plain
     assert "Plugin signals (advisory" in plain
     assert plain.count("Verdict: FAIL") == 1
 
@@ -924,6 +1265,23 @@ def test_engine_result_display_reports_the_measured_integration_lift() -> None:
 
     assert "recorded no sum-of-parts comparison" not in output
     assert "Integration: REAL INTEGRATION (lift +0.20)" in output
+
+
+def test_engine_result_display_names_each_agents_integration_block() -> None:
+    """A multi-agent run summary shows each agent's own named Integration line, as the reports do."""
+    from skillevaluator.tier3.result_display import render_result
+
+    result = _both_mode_engine_result()
+    claude = json.loads(json.dumps(result["agents"]["codex"]))
+    claude["with_skill"] = {"accuracy": 0.6}
+    claude["lift_uncertainty"]["integration"].update(estimate=-0.1, ci_low=-0.17, ci_high=-0.06)
+    result["agents"]["claude-code"] = claude
+
+    output = " ".join(render_result(result).split())
+
+    assert "recorded no sum-of-parts comparison" not in output
+    assert "Integration (codex): REAL INTEGRATION (lift +0.20)" in output
+    assert "Integration (claude-code): NEGATIVE INTEGRATION (lift -0.10)" in output
 
 
 def test_markdown_integration_line_prints_the_lift_once(tmp_path: Path) -> None:

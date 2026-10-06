@@ -27,13 +27,17 @@ from skillevaluator.constants import CONTENT_TYPE_PLUGIN, CONTENT_TYPE_SKILL
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.tier1.commands import run_validation
 from skillevaluator.utils.tool_runner import GITLEAKS_FINDINGS_EXIT_CODE, ToolResult, Tools
-from skillevaluator.validators.base import iter_scannable_files
+from skillevaluator.validators.base import ValidatorBase, iter_scannable_files
+from skillevaluator.validators.code_risk import CodeRiskValidator
 from skillevaluator.validators.plugin_tree import (
+    SCAN_VIEW_FALLBACK_WARNING,
+    ScanView,
     plugin_tree_exclusions,
     plugin_tree_scan_view,
     plugin_tree_scope,
     rebase_relative_finding_paths,
 )
+from skillevaluator.validators.secrets import SecretsValidator
 
 # Split so this test file does not itself look like it ships a credential.
 AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
@@ -464,6 +468,30 @@ def test_linked_root_content_fails_closed_alongside_the_schema_result(tmp_path: 
     assert scanners.scanned == {}
 
 
+def test_unsafe_bundled_skill_run_still_recounts_component_findings(tmp_path: Path) -> None:
+    """Regression: a run stopped by an unsafe entry under skills/ skipped the component finding recount.
+
+    The schema check counts component findings before it validates declared skill folders, so only the
+    recount every other run path makes counted the finding of the declared skill below.
+    """
+    plugin = _plugin(tmp_path, root_script=None)
+    (plugin / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "probe-plugin", "skills": "./my-skills/"}), encoding="utf-8"
+    )
+    (plugin / "my-skills" / "x").mkdir(parents=True)
+    (plugin / "my-skills" / "x" / "SKILL.md").write_text("---\nname: x\n---\nNo description.\n", encoding="utf-8")
+    (tmp_path / "outside").mkdir()
+    _link_or_skip(plugin / "skills" / "foo" / "linked", tmp_path / "outside")
+
+    [result] = run_validation(plugin, checks="schema", content_type=CONTENT_TYPE_PLUGIN)
+
+    assert result.metadata["security_failure"] is True
+    assert "bundled_skill_path_unsafe" in {finding.check_name for finding in result.findings}
+    rows = result.metadata["plugin"]["component_inventory"]["components"]
+    [declared] = [row for row in rows if row["path"] == "my-skills/x"]
+    assert declared["findings"] == 1
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX special files")
 def test_special_root_file_is_rejected(tmp_path: Path, scanners: FakeScanners) -> None:
     plugin = _plugin(tmp_path)
@@ -513,10 +541,36 @@ def test_scan_view_drops_bundled_skills_and_links(tmp_path: Path) -> None:
 
     with plugin_tree_scope(plugin, [plugin / "skills" / "foo"]):
         with plugin_tree_scan_view(plugin, excluded_dir_names={"results"}) as view:
-            assert view is not None
-            staged = {p.relative_to(view).as_posix() for p in view.rglob("*") if not p.is_dir()}
+            assert view.staged
+            staged = {p.relative_to(view.path).as_posix() for p in view.path.rglob("*") if not p.is_dir()}
         with plugin_tree_scan_view(plugin / "skills" / "foo") as skill_view:
-            assert skill_view is None
+            assert skill_view == ScanView(plugin / "skills" / "foo", staged=False)
 
     assert staged == {".claude-plugin/plugin.json", "scripts/evil.py"}
-    assert not view.exists()
+    assert not view.path.exists()
+
+
+@pytest.mark.parametrize(
+    ("validator", "tools"),
+    [(CodeRiskValidator(), ("bandit", "semgrep")), (SecretsValidator(), ("gitleaks",))],
+    ids=["code-risk", "secrets"],
+)
+def test_failed_staging_scans_in_place_with_one_warning(
+    tmp_path: Path,
+    scanners: FakeScanners,
+    monkeypatch: pytest.MonkeyPatch,
+    validator: ValidatorBase,
+    tools: tuple[str, ...],
+) -> None:
+    def _fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("skillevaluator.validators.plugin_tree.shutil.copytree", _fail)
+    plugin = _plugin(tmp_path)
+
+    with plugin_tree_scope(plugin, [plugin / "skills" / "foo"]):
+        result = validator.validate(plugin)
+
+    assert result.warnings.count(SCAN_VIEW_FALLBACK_WARNING) == 1
+    for tool in tools:
+        assert plugin.resolve() in [path.resolve() for path in scanners.calls(tool)]

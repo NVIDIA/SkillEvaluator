@@ -34,6 +34,7 @@ import yaml
 
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity, ValidationResult
+from skillevaluator.validators.url_policy import safe_url
 
 logger = get_logger(__name__)
 
@@ -198,35 +199,34 @@ MAX_MCP_ALLOWED_PRIVATE_HOSTS = 256
 MAX_HOOK_ALLOWED_URLS = 256
 
 
-def _coerce_allowed_private_hosts(value: Any, source: str) -> tuple[str, ...]:
-    """Normalize ``mcp.allowed_private_hosts`` to a bounded tuple of non-empty strings."""
+def _coerce_string_list(value: Any, key: str, source: str, *, max_entries: int, max_length: int) -> tuple[str, ...]:
+    """Normalize a list of strings at policy ``key`` to a bounded, de-duplicated tuple of stripped strings.
+
+    A value that is not a list, an entry that is not a non-empty string of at
+    most *max_length* characters, and entries past the first *max_entries* are
+    ignored with a warning.
+    """
     if value is None:
         return ()
     if not isinstance(value, list):
-        logger.warning("Ignoring non-list 'mcp.allowed_private_hosts' in %s.", source)
+        logger.warning("Ignoring non-list '%s' in %s.", key, source)
         return ()
-    hosts: list[str] = []
-    for entry in value[:MAX_MCP_ALLOWED_PRIVATE_HOSTS]:
-        if isinstance(entry, str) and entry.strip() and len(entry) <= 255:
-            hosts.append(entry.strip())
+    entries: list[str] = []
+    for entry in value[:max_entries]:
+        if isinstance(entry, str) and entry.strip() and len(entry) <= max_length:
+            entries.append(entry.strip())
         else:
-            logger.warning("Ignoring invalid 'mcp.allowed_private_hosts' entry %r in %s.", entry, source)
-    if len(value) > MAX_MCP_ALLOWED_PRIVATE_HOSTS:
-        logger.warning(
-            "Ignoring 'mcp.allowed_private_hosts' entries beyond the first %d in %s.",
-            MAX_MCP_ALLOWED_PRIVATE_HOSTS,
-            source,
-        )
-    return tuple(dict.fromkeys(hosts))
+            logger.warning("Ignoring invalid '%s' entry %r in %s.", key, entry, source)
+    if len(value) > max_entries:
+        logger.warning("Ignoring '%s' entries beyond the first %d in %s.", key, max_entries, source)
+    return tuple(dict.fromkeys(entries))
 
 
-def _mcp_block(data: dict[str, Any], source: str) -> dict[str, Any]:
-    block = data.get("mcp") or {}
-    if not isinstance(block, dict):
-        logger.warning("Ignoring non-mapping 'mcp' block in %s.", source)
-        return {}
-    _warn_unknown_keys(block, _KNOWN_MCP_KEYS, "mcp", source)
-    return block
+def _coerce_allowed_private_hosts(value: Any, source: str) -> tuple[str, ...]:
+    """Normalize ``mcp.allowed_private_hosts`` to a bounded tuple of non-empty strings."""
+    return _coerce_string_list(
+        value, "mcp.allowed_private_hosts", source, max_entries=MAX_MCP_ALLOWED_PRIVATE_HOSTS, max_length=255
+    )
 
 
 def _named_block(data: dict[str, Any], name: str, known: set[str], source: str) -> dict[str, Any]:
@@ -244,27 +244,18 @@ def _coerce_hook_allowed_urls(value: Any, source: str) -> tuple[str, ...]:
     A URL entry with userinfo, a query, or a fragment is kept, so the allowlist
     stays enforced, but it matches no hook URL, and a warning is logged.
     """
-    from skillevaluator.plugin_component_risk import hook_url_entry_problem, safe_url
+    from skillevaluator.plugin_component_risk import hook_url_entry_problem
 
-    if value is None:
-        return ()
-    if not isinstance(value, list):
-        logger.warning("Ignoring non-list 'hooks.allowed_urls' in %s.", source)
-        return ()
-    entries: list[str] = []
-    for entry in value[:MAX_HOOK_ALLOWED_URLS]:
-        if isinstance(entry, str) and entry.strip() and len(entry) <= 2048:
-            entries.append(entry.strip())
-            problem = hook_url_entry_problem(entry)
-            if problem:
-                logger.warning(
-                    "'hooks.allowed_urls' entry %r in %s %s; it matches no hook URL.", safe_url(entry), source, problem
-                )
-        else:
-            logger.warning("Ignoring invalid 'hooks.allowed_urls' entry %r in %s.", entry, source)
-    if len(value) > MAX_HOOK_ALLOWED_URLS:
-        logger.warning("Ignoring 'hooks.allowed_urls' entries beyond the first %d in %s.", MAX_HOOK_ALLOWED_URLS, source)
-    return tuple(dict.fromkeys(entries))
+    entries = _coerce_string_list(
+        value, "hooks.allowed_urls", source, max_entries=MAX_HOOK_ALLOWED_URLS, max_length=2048
+    )
+    for entry in entries:
+        problem = hook_url_entry_problem(entry)
+        if problem:
+            logger.warning(
+                "'hooks.allowed_urls' entry %r in %s %s; it matches no hook URL.", safe_url(entry), source, problem
+            )
+    return entries
 
 
 def _coerce_resolve_endpoints(value: Any, source: str) -> bool:
@@ -309,13 +300,7 @@ def _policy_from_data(
 
     profile_name = str(data.get("profile") or fallback_profile)
 
-    identity = data.get("identity") or {}
-    if not isinstance(identity, dict):
-        logger.warning("Ignoring non-mapping 'identity' block in %s.", source_str)
-        identity = {}
-    else:
-        _warn_unknown_keys(identity, _KNOWN_IDENTITY_KEYS, "identity", source_str)
-
+    identity = _named_block(data, "identity", _KNOWN_IDENTITY_KEYS, source_str)
     author_email_regex = _coerce_email_regex(identity.get("author_email_regex"), source_str)
 
     overrides_raw = data.get("severity_overrides") or {}
@@ -335,7 +320,7 @@ def _policy_from_data(
             if sev is not None:
                 severity_overrides[key] = sev
 
-    mcp_block = _mcp_block(data, source_str)
+    mcp_block = _named_block(data, "mcp", _KNOWN_MCP_KEYS, source_str)
     hooks_block = _named_block(data, "hooks", _KNOWN_HOOKS_KEYS, source_str)
     endpoints_block = _named_block(data, "endpoints", _KNOWN_ENDPOINTS_KEYS, source_str)
     return ValidationPolicy(
@@ -365,6 +350,12 @@ def load_profile(name: str = DEFAULT_PROFILE_NAME) -> ValidationPolicy:
     return _policy_from_data(data, fallback_profile=name, source=path)
 
 
+def _overlay_sets(data: dict[str, Any], block: str, key: str) -> bool:
+    """Whether a policy overlay sets ``block.key`` itself (an explicit ``null`` or empty list counts)."""
+    value = data.get(block)
+    return isinstance(value, dict) and key in value
+
+
 def load_policy_file(
     path: Path,
     *,
@@ -387,21 +378,15 @@ def load_policy_file(
     merged_overrides = dict(base.severity_overrides)
     merged_overrides.update(custom.severity_overrides)
 
-    # The overlay only takes precedence on author_email_regex when the *key*
-    # itself is present (including an explicit ``null`` to disable the domain
-    # check). A bare ``identity:`` block must NOT silently null the base regex.
-    identity_block = custom_data.get("identity")
-    if not isinstance(identity_block, dict):
-        identity_block = {}
-    overlay_sets_email_regex = "author_email_regex" in identity_block
-    # Like author_email_regex, the overlay replaces the base allowlist only when
-    # it sets the key (an explicit empty list clears it).
-    mcp_block = custom_data.get("mcp") if isinstance(custom_data, dict) else None
-    overlay_sets_private_hosts = isinstance(mcp_block, dict) and "allowed_private_hosts" in mcp_block
-    hooks_overlay = custom_data.get("hooks") if isinstance(custom_data, dict) else None
-    overlay_sets_hook_urls = isinstance(hooks_overlay, dict) and "allowed_urls" in hooks_overlay
-    endpoints_overlay = custom_data.get("endpoints") if isinstance(custom_data, dict) else None
-    overlay_sets_resolve = isinstance(endpoints_overlay, dict) and "resolve" in endpoints_overlay
+    # The overlay takes precedence on a setting only when it sets the *key*
+    # itself, including an explicit ``null`` that disables the domain check or
+    # an empty list that clears an allowlist. A bare ``identity:`` block must
+    # NOT silently null the base regex. (_policy_from_data has checked that
+    # custom_data is a mapping.)
+    overlay_sets_email_regex = _overlay_sets(custom_data, "identity", "author_email_regex")
+    overlay_sets_private_hosts = _overlay_sets(custom_data, "mcp", "allowed_private_hosts")
+    overlay_sets_hook_urls = _overlay_sets(custom_data, "hooks", "allowed_urls")
+    overlay_sets_resolve = _overlay_sets(custom_data, "endpoints", "resolve")
 
     return ValidationPolicy(
         profile=custom.profile,
@@ -480,9 +465,7 @@ def apply_policy(
         security_failure = isinstance(result.metadata, dict) and result.metadata.get("security_failure")
         changed = False
         for finding in result.findings:
-            current = (
-                finding.severity if isinstance(finding.severity, Severity) else Severity(str(finding.severity).lower())
-            )
+            current = finding.severity
             # Security failures describe unsafe input that was refused before a
             # validator could run. Policy overrides must not hide that failure.
             new_severity = current if security_failure else policy.severity_for(
@@ -490,7 +473,7 @@ def apply_policy(
                 finding.check_name,
                 current,
             )
-            if advisory and not security_failure and new_severity in (Severity.CRITICAL, Severity.HIGH):
+            if advisory and not security_failure and new_severity.is_error():
                 new_severity = Severity.MEDIUM
             if new_severity != current:
                 finding.severity = new_severity

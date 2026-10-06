@@ -22,7 +22,7 @@ from skillevaluator.utils.tool_runner import (
     parse_json_output,
 )
 from skillevaluator.validators.base import Finding, ValidationResult, ValidatorBase
-from skillevaluator.validators.plugin_tree import plugin_tree_exclusions, plugin_tree_scan_view
+from skillevaluator.validators.plugin_tree import plugin_tree_scan_view
 
 
 class SecretsValidator(ValidatorBase):
@@ -105,10 +105,8 @@ tags = ["nvidia", "api-key"]
         # staged view without bundled-skill subtrees, which their own pass
         # covers. Findings stay relative to the scan root, so no path mapping
         # is needed.
-        with plugin_tree_scan_view(skill_path, excluded_dir_names=SCAN_EXCLUDED_DIRS) as view:
-            if view is None and plugin_tree_exclusions(skill_path):
-                result.add_warning("Could not stage the plugin root without bundled skills; scanning in place")
-            return self._run_gitleaks((view if view is not None else skill_path).resolve(), result)
+        with plugin_tree_scan_view(skill_path, on_fallback=result.add_warning) as view:
+            return self._run_gitleaks(view.path.resolve(), result)
 
     def _run_gitleaks(self, scan_root: Path, result: ValidationResult) -> ValidationResult:
         """Run Gitleaks on *scan_root* and record its outcome on *result*."""

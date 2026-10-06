@@ -33,7 +33,8 @@ def test_terminal_marks_a_partial_tier3_run_incomplete() -> None:
 
     assert re.search(r"AGENT_EVAL\s*│\s*INCOMPLETE", output)
     assert re.search(r"AGENT_EVAL\s*│\s*FAIL", output) is None
-    assert "1 unresolved skill ref(s)" in output
+    # The one INCOMPLETE reason every report gives (plugin_sections.completeness_view).
+    assert "INCOMPLETE: 1 unresolved skill ref could not be resolved or evaluated at Tier 3" in output
 
 
 @pytest.mark.parametrize(

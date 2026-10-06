@@ -2616,7 +2616,7 @@
 
             {% endif %}
             {%- if tier3_plugin %}
-            {%- if tier3_plugin.integration %}{{ integration_section(tier3_plugin.integration) }}{% elif tier3_plugin.lift_modes %}{{ lift_modes_line(tier3_plugin.lift_modes) }}{% endif %}
+            {%- if tier3_plugin.integration %}{{ integration_section(tier3_plugin.integration, tier3_plugin.lift_modes) }}{% elif tier3_plugin.lift_modes %}{{ lift_modes_line(tier3_plugin.lift_modes) }}{% endif %}
             {%- if tier3_plugin.statistics %}{{ statistics_section(tier3_plugin.statistics) }}{% endif %}
             {%- if tier3_plugin.signals %}{{ signals_section(tier3_plugin.signals) }}{% endif %}
             {%- if tier3_plugin.canary %}{{ canary_section(tier3_plugin.canary) }}{% endif %}

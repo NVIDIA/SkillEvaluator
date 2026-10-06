@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -404,6 +405,92 @@ def test_collector_credits_codex_mcp_calls_from_the_codex_logs(tmp_path: Path, l
     assert summary["tool_selection"]["recall"] == 1.0
 
 
+def test_codex_session_walk_lists_session_logs_in_order_without_following_links(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.collector import _codex_session_files
+
+    sessions = tmp_path / "agent" / "sessions"
+    for relative in ("2026/10/05/rollout-b.jsonl", "2026/10/04/rollout-a.jsonl", "top.jsonl", "notes.txt"):
+        _write(sessions / relative, SESSION_LOG)
+    outside = tmp_path / "outside"
+    _write(outside / "rollout-outside.jsonl", SESSION_LOG)
+    (sessions / "linked-dir").symlink_to(outside, target_is_directory=True)
+    (sessions / "linked.jsonl").symlink_to(outside / "rollout-outside.jsonl")
+
+    assert _codex_session_files(sessions) == [
+        sessions / "top.jsonl",
+        sessions / "2026" / "10" / "04" / "rollout-a.jsonl",
+        sessions / "2026" / "10" / "05" / "rollout-b.jsonl",
+    ]
+    linked_sessions = tmp_path / "linked-agent" / "sessions"
+    linked_sessions.parent.mkdir()
+    linked_sessions.symlink_to(sessions, target_is_directory=True)
+    assert _codex_session_files(linked_sessions) == []
+
+
+def test_codex_session_walk_stops_at_its_entry_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.harbor import collector
+
+    sessions = tmp_path / "agent" / "sessions"
+    for index in range(200):
+        (sessions / f"empty-{index:03d}").mkdir(parents=True)
+    _write(sessions / "zz" / "rollout.jsonl", SESSION_LOG)
+    assert collector._codex_session_files(sessions) == [sessions / "zz" / "rollout.jsonl"]
+
+    listed: list[str] = []
+    real_scandir = os.scandir
+
+    def counting_scandir(path: os.PathLike[str] | str):
+        listed.append(os.fspath(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(collector, "_CODEX_SESSION_WALK_ENTRIES", 64)
+    monkeypatch.setattr(collector.os, "scandir", counting_scandir)
+
+    # The root alone holds more entries than the budget, so nothing below it is listed.
+    assert collector._codex_session_files(sessions) == []
+    assert listed == [os.fspath(sessions)]
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["sorted-listing", "reverse-listing"])
+def test_codex_session_walk_does_not_depend_on_the_listing_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reverse: bool
+) -> None:
+    from skillevaluator.tier3.harbor import collector
+
+    sessions = tmp_path / "agent" / "sessions"
+    day = sessions / "2026" / "10" / "05"
+    _write(day / "rollout-a.jsonl", SESSION_LOG)
+    for index in range(99):
+        _write(day / f"zz-junk-{index:02d}.txt", "")
+    real_scandir = os.scandir
+
+    class _ListedInOrder:
+        """``os.scandir`` that returns a directory's entries in one name order, as a filesystem may."""
+
+        def __init__(self, path: os.PathLike[str] | str) -> None:
+            with real_scandir(path) as iterator:
+                self._entries = iter(sorted(iterator, key=lambda entry: entry.name, reverse=reverse))
+
+        def __iter__(self) -> _ListedInOrder:
+            return self
+
+        def __next__(self) -> os.DirEntry[str]:
+            return next(self._entries)
+
+        def __enter__(self) -> _ListedInOrder:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(collector, "_CODEX_SESSION_WALK_ENTRIES", 64)
+    monkeypatch.setattr(collector.os, "scandir", _ListedInOrder)
+
+    # The day directory holds more entries than the budget has left, so the walk
+    # ends there, whichever names the filesystem would have listed first.
+    assert collector._codex_session_files(sessions) == []
+
+
 # --------------------------------------------------------------------------- #
 # Harbor verifier: namespaced skill and command names                         #
 # --------------------------------------------------------------------------- #
@@ -552,11 +639,15 @@ def test_the_native_prefix_does_not_depend_on_the_skill_alias_rule(
 ) -> None:
     from skillevaluator.tier3.plugin_native import ClaudeCodeAdapter
 
-    def staged_skill_aliases(self: ClaudeCodeAdapter, source: Any, names: Any) -> list[str]:
-        # An alias rule that lists only the skills the staged plugin loads and ignores ``names``.
-        return [f"{self.plugin_name(source)}:{name}" for name in ("acme", "billing")]
+    build = ClaudeCodeAdapter.build
 
-    monkeypatch.setattr(ClaudeCodeAdapter, "workspace_skill_aliases", staged_skill_aliases)
+    def build_with_staged_skill_aliases(self: ClaudeCodeAdapter, source: Any) -> Any:
+        bundle = build(self, source)
+        # An alias rule that lists only the skills the staged plugin loads.
+        bundle.skill_aliases = [f"{self.plugin_name(source)}:{name}" for name in ("acme", "billing")]
+        return bundle
+
+    monkeypatch.setattr(ClaudeCodeAdapter, "build", build_with_staged_skill_aliases)
     entry = {
         **_native_task_entry(tmp_path, "claude-code"),
         "expected_skill": "billing",

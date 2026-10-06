@@ -256,6 +256,117 @@ def test_repo_root_that_is_not_the_git_top_level_fails_closed(tmp_path: Path) ->
     assert _rows(result)[f"github::{REPO}::skills::shared"]["state"] == "unresolved"
 
 
+@requires_git
+def test_repository_identity_runs_two_git_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The top-level and the origin remote; the branch and HEAD a browse link needs are never asked for."""
+    repo = _git_repo(tmp_path / "repo")
+    plugin = _manifest(repo / "plugins" / "p", skills=[f"github::{REPO}::skills::shared"])
+    commands: list[list[str]] = []
+    real_check_output = subprocess.check_output
+
+    def recording_check_output(args, *more, **kwargs):
+        commands.append(list(args))
+        return real_check_output(args, *more, **kwargs)
+
+    monkeypatch.setattr(subprocess, "check_output", recording_check_output)
+
+    identity = resolve_repository_identity(plugin)
+
+    assert identity.local_slug == REPO
+    assert commands == [["git", "rev-parse", "--show-toplevel"], ["git", "remote", "get-url", "origin"]]
+
+
+@requires_git
+@pytest.mark.parametrize(
+    ("origin", "slug"),
+    [
+        (ORIGIN, REPO),
+        ("git@github.com:Example-Org/example-repo.git", REPO),
+        # An SCP-style remote without a user gave the slug "github.com:example-org/example-repo", so every
+        # same-repository ref was "external" and a missing one passed.
+        ("github.com:Example-Org/example-repo.git", REPO),
+        ("ssh://git@github.com/Example-Org/example-repo.git", REPO),
+        # http:// and git:// origins name their repository as well as https:// does.
+        ("http://github.com/Example-Org/example-repo.git", REPO),
+        # Once read as an SCP-style "user@host:path" remote, giving "host/8080/group/repo".
+        ("http://user:example-secret@github.com:8080/Example-Org/example-repo.git", REPO),
+        ("git://git@github.com:9418/Example-Org/example-repo.git", REPO),
+        ("file:///srv/git/Example-Org/example-repo.git", None),
+        ("/srv/git/example-repo.git", None),
+        # Regression: credentials plus a port gave the slug "8443/example-org/example-repo".
+        ("https://gitlab-ci-token:example-token@gitlab.example.com:8443/Example-Org/example-repo.git", REPO),
+        ("https://user@gitlab.example.com:8443/Example-Org/example-repo.git", REPO),
+        ("ssh://git@gitlab.example.com:2222/Example-Org/example-repo.git", REPO),
+    ],
+)
+def test_hosted_origins_establish_identity_and_local_paths_do_not(
+    tmp_path: Path, origin: str, slug: str | None
+) -> None:
+    repo = _git_repo(tmp_path / "repo", origin=origin)
+
+    assert local_repo_slug(repo) == slug
+
+
+@requires_git
+def test_https_origin_with_credentials_and_a_port_keeps_the_missing_dependency_gate(tmp_path: Path) -> None:
+    """Regression: a mangled slug made same-repository refs 'external', so a missing one passed."""
+    origin = "https://gitlab-ci-token:example-token@gitlab.example.com:8443/Example-Org/example-repo.git"
+    repo = _git_repo(tmp_path / "repo", origin=origin)
+    _skill(repo / "skills" / "shared")
+    plugin = _manifest(repo / "plugins" / "p", skills=[f"git::{REPO}::skills::shared", f"git::{REPO}::skills::ghost"])
+
+    result = PluginSchemaValidator().validate(plugin)
+
+    rows = _rows(result)
+    assert rows[f"git::{REPO}::skills::shared"]["state"] == "referenced"
+    assert rows[f"git::{REPO}::skills::ghost"]["state"] == "missing"
+    assert [f.check_name for f in result.findings if f.check_name == "plugin_dependency_missing"] == [
+        "plugin_dependency_missing"
+    ]
+    assert not result.passed
+
+
+@requires_git
+@pytest.mark.parametrize(
+    "origin",
+    ["/srv/git/example-repo.git", "file:///srv/git/Example-Org/example-repo.git"],
+    ids=["local-path", "file-url"],
+)
+def test_unsupported_origin_is_named_as_the_reason_identity_is_unknown(tmp_path: Path, origin: str) -> None:
+    """Regression: the reason said the clone had no 'origin' remote, and advised what could not help."""
+    repo = _git_repo(tmp_path / "repo", origin=origin)
+    plugin = _manifest(repo / "plugins" / "p", skills=[f"git::{REPO}::skills::shared"])
+
+    identity = resolve_repository_identity(plugin)
+    result = PluginSchemaValidator(repo_root=repo).validate(plugin)
+
+    assert identity.local_slug is None
+    assert "the 'origin' remote of 'repo' is a local path" in identity.reason
+    assert "is not the git top-level" not in identity.reason
+    assert "--repo-root" not in identity.reason
+    assert identity.reason in _rows(result)[f"git::{REPO}::skills::shared"]["reason"]
+    # The gate did not run: an unverified finding whose advice fits the cause, never a passing row.
+    [unverified] = [f for f in result.findings if f.check_name == "plugin_dependency_unverified"]
+    assert unverified.severity == Severity.MEDIUM
+    assert "is a local path" in unverified.message
+    assert unverified.suggestion == identity.remedy
+    assert "point the 'origin' remote" in unverified.suggestion
+    assert "--repo-root" not in unverified.suggestion
+    assert not [detail for detail in result.success_details if detail.check_name == "plugin_dependencies"]
+    assert result.passed
+
+
+@requires_git
+def test_missing_origin_advises_adding_one(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path / "repo", origin=None)
+    plugin = _manifest(repo / "plugins" / "p", skills=[f"git::{REPO}::skills::shared"])
+
+    identity = resolve_repository_identity(plugin)
+
+    assert "the git repository 'repo' has no 'origin' remote" in identity.reason
+    assert "git remote add origin <url>" in identity.remedy
+
+
 @pytest.mark.parametrize(
     ("ref", "reason"),
     [

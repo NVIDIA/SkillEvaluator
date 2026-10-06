@@ -47,7 +47,7 @@ def test_local_launches_install_no_package(config: dict) -> None:
 
 def test_direct_runners_are_unchanged() -> None:
     assert mcp_runner_packages({"command": "npx", "args": ["-y", "pkg@1.0.0"]}) == ("npm", ["pkg@1.0.0"])
-    assert mcp_runner_packages({"command": "uvx", "args": ["--from", "a==1.0", "a-cli", "--with", "b==2.0"]}) == (
+    assert mcp_runner_packages({"command": "uvx", "args": ["--from", "a==1.0", "--with", "b==2.0", "a-cli"]}) == (
         "pypi",
         ["a==1.0", "b==2.0"],
     )

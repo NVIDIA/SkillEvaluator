@@ -46,7 +46,6 @@ from skillevaluator.reporting.harbor_viewer import (
 )
 from skillevaluator.reporting.plugin_sections import (
     NOT_CONFIGURED,
-    baseline_is_sum_of_parts,
     format_score,
     number,
     static_risk_view,
@@ -71,11 +70,20 @@ def _related_paths(finding: Finding) -> list[str]:
     return paths
 
 
-_CLI_STATIC_ROWS = 10
+# Rich styles for the ok / warn / fail status classes of the plugin views.
+_STATUS_STYLES = {"ok": "green", "warn": "yellow", "fail": "bold red"}
+# How many rows of a plugin list the terminal shows before "... and N more".
+_CLI_LIST_ITEMS = 10
+
+
+def _print_remaining(console: Console, remaining: int) -> None:
+    """Count the rows a Tier 3 coverage list (not staged, not loaded, not observed) left out."""
+    if remaining > 0:
+        console.print(f"    [dim]... and {remaining} more[/dim]")
 
 
 def _print_more_rows(console: Console, omitted: int, what: str) -> None:
-    """Say how many rows the compact CLI list left out, so a cut list is never read as complete."""
+    """Count the rows a Tier 1 static-risk list (flagged components or hook handlers) left out."""
     if omitted > 0:
         console.print(f"  ... and {omitted} more {what} (the JSON report lists every one)")
 
@@ -89,16 +97,16 @@ def print_plugin_tier1_static(risk: dict, console: Console) -> None:
             f"{privileges.get('skills', 0)} skill(s); {privileges['flagged']} flagged"
         )
         risky = [row for row in privileges["rows"] if row["risky"]]
-        for row in risky[:_CLI_STATIC_ROWS]:
+        for row in risky[:_CLI_LIST_ITEMS]:
             console.print(
                 f"  - {escape_markup(row['type'])} {escape_markup(row['name'])}: {escape_markup(', '.join(row['flags']))}"
             )
-        _print_more_rows(console, max(len(risky), privileges["flagged"]) - _CLI_STATIC_ROWS, "flagged component(s)")
+        _print_more_rows(console, max(len(risky), privileges["flagged"]) - _CLI_LIST_ITEMS, "flagged component(s)")
     hooks = risk.get("hooks")
     if hooks:
         console.print(f"[bold]Plugin hooks:[/bold] {hooks['total']} handler(s); {hooks['flagged']} flagged")
         flagged = [row for row in hooks["rows"] if row["flagged"]]
-        for row in flagged[:_CLI_STATIC_ROWS]:
+        for row in flagged[:_CLI_LIST_ITEMS]:
             # Escape the brackets with the plugin-controlled matcher: "[/x]" is a
             # closing tag and "[mcp__memory__.*]" a style tag to Rich markup.
             matcher = escape_markup(f"[{row['matcher']}]")
@@ -106,7 +114,7 @@ def print_plugin_tier1_static(risk: dict, console: Console) -> None:
                 f"  - {escape_markup(row['event'])} {matcher} {escape_markup(row['handler_type'])}: "
                 f"{escape_markup(', '.join(row['flags']))}"
             )
-        _print_more_rows(console, max(len(flagged), hooks["flagged"]) - _CLI_STATIC_ROWS, "flagged handler(s)")
+        _print_more_rows(console, max(len(flagged), hooks["flagged"]) - _CLI_LIST_ITEMS, "flagged handler(s)")
     cve = risk.get("cve")
     if cve:
         parts = [
@@ -142,198 +150,230 @@ def print_plugin_tier1_static(risk: dict, console: Console) -> None:
 
 def print_plugin_tier3(view: dict, console: Console) -> None:
     """Print the Tier 3 plugin blocks: completeness, coverage, Integration, statistics, signals."""
-    esc = escape_markup
     if view.get("partial"):
         console.print(
-            f"  [bold red]INCOMPLETE: {esc(view['incomplete_reason'])}.[/bold red] [red]Partial result, not a pass.[/red]"
+            f"  [bold red]INCOMPLETE: {escape_markup(view['incomplete_reason'])}.[/bold red] "
+            "[red]Partial result, not a pass.[/red]"
         )
-    coverage = view.get("coverage")
-    if coverage:
-        # Green only when every component was staged and exercised: staged alone is not evaluated.
-        style = "bold red" if coverage["not_staged"] else ("green" if coverage["all_exercised"] else "yellow")
-        observed = f"; {esc(coverage['observed_headline'])}" if coverage["observed_headline"] else ""
-        console.print(
-            f"  [{style}]Component coverage: {esc(coverage['headline'])}[/{style}] "
-            f"(of {coverage['total']}; {coverage['staged']} staged{observed})",
-            soft_wrap=True,
-        )
-        console.print("    [dim]Files staged ≠ components loaded ≠ behavior verified.[/dim]")
-        for row in coverage["not_staged_rows"][:10]:
-            reason = f": {esc(row['reason'])}" if row["reason"] else ""
-            console.print(f"    [dim]- {esc(row['type'])} {esc(row['name'])} ({esc(row['state_label'])}){reason}[/dim]")
-        remaining = len(coverage["not_staged_rows"]) - 10
-        if remaining > 0:
-            console.print(f"    [dim]... and {remaining} more[/dim]")
-        for row in coverage.get("not_loaded_rows", [])[:10]:
-            reason = f": {esc(row['reason'])}" if row["reason"] else ""
-            console.print(
-                f"    [dim]- {esc(row['type'])} {esc(row['name'])} (staged, not loaded){reason}[/dim]", soft_wrap=True
-            )
-        remaining = len(coverage.get("not_loaded_rows", [])) - 10
-        if remaining > 0:
-            console.print(f"    [dim]... and {remaining} more[/dim]")
-        for row in coverage["staged_not_observed_rows"][:10]:
-            console.print(
-                f"    [dim]- {esc(row['type'])} {esc(row['name'])} (staged, {esc(row['observed'])})[/dim]",
-                soft_wrap=True,
-            )
-        remaining = len(coverage["staged_not_observed_rows"]) - 10
-        if remaining > 0:
-            console.print(f"    [dim]... and {remaining} more[/dim]")
-        activation = coverage.get("activation")
-        if activation:
-            console.print(f"    [dim]Observed activation (advisory): {esc(activation['summary'])}[/dim]")
-    plugin_load = view.get("plugin_load")
-    if plugin_load:
-        console.print(f"  [bold]Plugin loading:[/bold] requested {esc(plugin_load['requested'])}")
-        for row in plugin_load["agents"]:
-            census = f"; load census: {row['census_summary']}" if row["census"] else ""
-            console.print(
-                f"    [dim]- {esc(row['agent'])}: {esc(row['mode'])} ({esc(row['adapter'])}); "
-                f"native: {esc(', '.join(row['native']) or 'none')}{esc(census)}[/dim]"
-            )
-    integration = view.get("integration")
-    modes = (integration or {}).get("modes") or view.get("lift_modes")
-    if modes:
-        fallback = " [yellow](fell back)[/yellow]" if modes["fallback"] else ""
-        console.print(
-            f"  [bold]Lift mode:[/bold] requested {esc(modes['requested'])} · effective {esc(modes['effective'])}{fallback}"
-        )
-    # One named Integration line per agent in a multi-agent run.
-    for entry in (integration or {}).get("per_agent") or ([integration] if integration else []):
-        scope = f" ({esc(entry['agent'])})" if entry.get("agent") and integration.get("per_agent") else ""
-        if entry["measured"]:
-            point = (
-                f" [dim](point estimate: {esc(entry['point_verdict_label'])})[/dim]"
-                if entry["point_verdict_label"]
-                else ""
-            )
-            console.print(
-                f"  [bold]Integration{scope}:[/bold] {esc(entry['verdict_label']).upper()} "
-                f"(lift {entry['integration_lift']}){point} [dim](advisory)[/dim]"
-            )
-            ci = entry["ci"]
-            if ci:
-                console.print(
-                    f"    [dim]{esc(ci['confidence'])} {esc(ci['interval'])}, precision {esc(ci['precision'])}[/dim]"
-                )
-            if entry["reason"]:
-                console.print(f"    [dim]{esc(entry['reason'])}[/dim]", soft_wrap=True)
-            if entry["components"]:
-                console.print(f"    [dim]components: {esc(', '.join(entry['components']))}[/dim]")
-            if entry["interpretation"]:
-                console.print(f"    [dim]{esc(entry['interpretation'])}[/dim]", soft_wrap=True)
-        else:
-            console.print(
-                f"  [bold]Integration{scope}:[/bold] [yellow]INCONCLUSIVE[/yellow] — {esc(entry['reason'])} "
-                "[dim](advisory)[/dim]",
-                soft_wrap=True,
-            )
+    _print_coverage(view.get("coverage"), console)
+    _print_plugin_loading(view.get("plugin_load"), console)
+    _print_lift_modes(view.get("lift_modes"), console)
+    _print_integration(view.get("integration"), console)
     statistics = view.get("statistics")
     if statistics:
         for scope in statistics["scopes"]:
             _print_plugin_statistics_scope(scope, console, show_label=len(statistics["scopes"]) > 1)
-    signals = view.get("signals")
-    if signals:
-        console.print(
-            "  [bold]Plugin signals[/bold] [dim](advisory, report-only; never changes a score or verdict)[/dim]"
-        )
-        for entry in signals["entries"]:
-            missing = f"; {entry['n_missing_trajectory']} without a trajectory" if entry["n_missing_trajectory"] else ""
-            console.print(
-                f"    [bold]{esc(entry['scope'])} · {esc(entry['arm_label'])}[/bold] ({entry['n_trials']} trials{missing})"
-            )
-            details = []
-            for label, selection in (
-                ("component routing", entry.get("routing")),
-                ("tool selection", entry["tool_selection"]),
-            ):
-                if selection:
-                    details.append(
-                        f"{label} P/R/F1 {selection['precision']} / {selection['recall']} / {selection['f1']}, "
-                        f"{selection['decoy_calls']} decoy call(s), in {selection['decoy_call_rate']} of trials"
-                        if selection["applicable"]
-                        else f"{label} {NOT_CONFIGURED}"
-                    )
-            arguments = entry["arguments"]
-            if arguments:
-                details.append(
-                    f"arguments {arguments['pass_rate']} ({arguments['passed']}/{arguments['checked']})"
-                    if arguments["applicable"]
-                    else f"arguments {NOT_CONFIGURED}"
-                )
-            mcp = entry["mcp_calls"]
-            if mcp:
-                details.append(
-                    f"MCP calls {mcp['success_rate']} succeeded ({mcp['succeeded']}/{mcp['total']}; "
-                    f"{mcp['failed']} failed, {mcp['unknown']} unknown)"
-                )
-                details.extend(
-                    f"  {server['server']}: {server['succeeded']}/{server['total']} succeeded, {server['failed']} "
-                    f"failed, {server['unknown']} unknown; {server['tools'] or 'no tools'}"
-                    for server in mcp["servers"][:8]
-                )
-            for check in entry["checks"]:
-                detail = f"; {check['detail']}" if check.get("detail") else ""
-                details.append(f"{check['name'].lower()} {check['label']}{detail}")
-                details.extend(
-                    f"  not in order: {edge['before']} -> {edge['after']}: {edge['reason']} ({edge['trials']} trial(s))"
-                    for edge in (check.get("edges") or [])[:5]
-                )
-                details.extend(
-                    f"  failed probe: {probe['probe']} ({probe['trials']} trial(s))"
-                    for probe in (check.get("probes") or [])[:5]
-                )
-            activation = entry["activation"]
-            if activation:
-                details.append(f"activation {len(activation['exercised'])}/{len(activation['declared'])} exercised")
-            for detail in details:
-                console.print(f"      [dim]- {esc(detail)}[/dim]", soft_wrap=True)
+    _print_signals(view.get("signals"), console)
     print_plugin_runtime_evidence(view, console)
     console.print()
 
 
+def _print_coverage(coverage: dict | None, console: Console) -> None:
+    if not coverage:
+        return
+    esc = escape_markup
+    style = _STATUS_STYLES[coverage["status_class"]]
+    console.print(
+        f"  [{style}]Component coverage: {esc(coverage['headline'])}[/{style}] ({esc(coverage['detail'])})",
+        soft_wrap=True,
+    )
+    console.print(f"    [dim]{esc(coverage['caveat'])}[/dim]")
+    shown = coverage["not_staged_rows"][:_CLI_LIST_ITEMS]
+    for row in shown:
+        reason = f": {esc(row['reason'])}" if row["reason"] else ""
+        console.print(f"    [dim]- {esc(row['type'])} {esc(row['name'])} ({esc(row['state_label'])}){reason}[/dim]")
+    _print_remaining(console, coverage["not_staged"] - len(shown))
+    shown = coverage["not_loaded_rows"][:_CLI_LIST_ITEMS]
+    for row in shown:
+        reason = f": {esc(row['reason'])}" if row["reason"] else ""
+        console.print(
+            f"    [dim]- {esc(row['type'])} {esc(row['name'])} (staged, not loaded){reason}[/dim]", soft_wrap=True
+        )
+    _print_remaining(console, coverage["not_loaded"] - len(shown))
+    shown = coverage["staged_not_observed_rows"][:_CLI_LIST_ITEMS]
+    for row in shown:
+        console.print(
+            f"    [dim]- {esc(row['type'])} {esc(row['name'])} (staged, {esc(row['observed'])})[/dim]",
+            soft_wrap=True,
+        )
+    _print_remaining(console, (coverage["staged_not_observed"] or 0) - len(shown))
+    activation = coverage.get("activation")
+    if activation:
+        console.print(f"    [dim]Observed activation (advisory): {esc(activation['summary'])}[/dim]")
+
+
+def _print_plugin_loading(plugin_load: dict | None, console: Console) -> None:
+    if not plugin_load:
+        return
+    esc = escape_markup
+    console.print(f"  [bold]Plugin loading:[/bold] requested {esc(plugin_load['requested'])}")
+    for row in plugin_load["agents"]:
+        census = f"; load census: {row['census_summary']}" if row["census"] else ""
+        console.print(
+            f"    [dim]- {esc(row['agent'])}: {esc(row['mode'])} ({esc(row['adapter'])}); "
+            f"native: {esc(', '.join(row['native']) or 'none')}{esc(census)}[/dim]"
+        )
+
+
+def _print_lift_modes(modes: dict | None, console: Console) -> None:
+    if not modes:
+        return
+    esc = escape_markup
+    fallback = " [yellow](fell back)[/yellow]" if modes["fallback"] else ""
+    console.print(
+        f"  [bold]Lift mode:[/bold] requested {esc(modes['requested'])} · effective {esc(modes['effective'])}{fallback}"
+    )
+
+
+def _print_integration(integration: dict | None, console: Console) -> None:
+    if not integration:
+        return
+    # One named Integration line per agent in a multi-agent run.
+    per_agent = integration.get("per_agent")
+    for entry in per_agent or [integration]:
+        _print_integration_entry(entry, console, scope=entry.get("agent") if per_agent else "")
+
+
+def _print_integration_entry(entry: dict, console: Console, *, scope: str) -> None:
+    esc = escape_markup
+    named = f" ({esc(scope)})" if scope else ""
+    if not entry["measured"]:
+        console.print(
+            f"  [bold]Integration{named}:[/bold] [yellow]INCONCLUSIVE[/yellow] — {esc(entry['reason'])} "
+            "[dim](advisory)[/dim]",
+            soft_wrap=True,
+        )
+        return
+    point = f" [dim](point estimate: {esc(entry['point_verdict_label'])})[/dim]" if entry["point_verdict_label"] else ""
+    console.print(
+        f"  [bold]Integration{named}:[/bold] {esc(entry['verdict_label']).upper()} "
+        f"(lift {entry['integration_lift']}){point} [dim](advisory)[/dim]"
+    )
+    ci = entry["ci"]
+    if ci:
+        console.print(f"    [dim]{esc(ci['confidence'])} {esc(ci['interval'])}, precision {esc(ci['precision'])}[/dim]")
+    if entry["reason"]:
+        console.print(f"    [dim]{esc(entry['reason'])}[/dim]", soft_wrap=True)
+    if entry["components"]:
+        more = f" (+{entry['components_omitted']} more)" if entry["components_omitted"] else ""
+        console.print(f"    [dim]components: {esc(', '.join(entry['components']))}{more}[/dim]")
+    if entry["interpretation"]:
+        console.print(f"    [dim]{esc(entry['interpretation'])}[/dim]", soft_wrap=True)
+
+
+def _print_signals(signals: dict | None, console: Console) -> None:
+    if not signals:
+        return
+    esc = escape_markup
+    console.print("  [bold]Plugin signals[/bold] [dim](advisory, report-only; never changes a score or verdict)[/dim]")
+    for entry in signals["entries"]:
+        missing = f"; {entry['n_missing_trajectory']} without a trajectory" if entry["n_missing_trajectory"] else ""
+        console.print(
+            f"    [bold]{esc(entry['scope'])} · {esc(entry['arm_label'])}[/bold] ({entry['n_trials']} trials{missing})"
+        )
+        for detail in _signal_details(entry):
+            console.print(f"      [dim]- {esc(detail)}[/dim]", soft_wrap=True)
+
+
+def _signal_details(entry: dict) -> list[str]:
+    """Return one compact line per signal recorded for an arm."""
+    details = []
+    for label, selection in (("component routing", entry.get("routing")), ("tool selection", entry["tool_selection"])):
+        if selection:
+            details.append(
+                f"{label} P/R/F1 {selection['precision']} / {selection['recall']} / {selection['f1']}, "
+                f"{selection['decoy_calls']} decoy call(s), in {selection['decoy_call_rate']} of trials"
+                if selection["applicable"]
+                else f"{label} {NOT_CONFIGURED}"
+            )
+    arguments = entry["arguments"]
+    if arguments:
+        details.append(
+            f"arguments {arguments['pass_rate']} ({arguments['passed']}/{arguments['checked']})"
+            if arguments["applicable"]
+            else f"arguments {NOT_CONFIGURED}"
+        )
+    mcp = entry["mcp_calls"]
+    if mcp:
+        details.append(
+            f"MCP calls {mcp['success_rate']} succeeded ({mcp['succeeded']}/{mcp['total']}; "
+            f"{mcp['failed']} failed, {mcp['unknown']} unknown)"
+        )
+        details.extend(
+            f"  {server['server']}: {server['succeeded']}/{server['total']} succeeded, {server['failed']} "
+            f"failed, {server['unknown']} unknown; {server['tools'] or 'no tools'}"
+            for server in mcp["servers"][:8]
+        )
+    for check in entry["checks"]:
+        note = f"; {check['note']}" if check.get("note") else ""
+        details.append(f"{check['name'].lower()} {check['label']}{note}")
+        details.extend(
+            f"  not in order: {edge['before']} -> {edge['after']}: {edge['reason']} ({edge['trials']} trial(s))"
+            for edge in (check.get("edges") or [])[:5]
+        )
+        details.extend(
+            f"  failed probe: {probe['probe']} ({probe['trials']} trial(s))"
+            for probe in (check.get("probes") or [])[:5]
+        )
+    activation = entry["activation"]
+    if activation:
+        details.append(f"activation {len(activation['exercised'])}/{len(activation['declared'])} exercised")
+    return details
+
+
 def print_plugin_runtime_evidence(view: dict, console: Console) -> None:
     """Print the canary, hook census, and MCP proof blocks of a Tier 3 plugin view."""
+    _print_canary(view.get("canary"), console)
+    _print_hook_census(view.get("hook_census"), console)
+    _print_mcp_proof(view.get("mcp_proof"), console)
+
+
+def _print_canary(canary: dict | None, console: Console) -> None:
+    if not canary:
+        return
     esc = escape_markup
-    canary = view.get("canary")
-    if canary:
-        for entry in canary["entries"]:
-            style = {"fail": "bold red", "ok": "green"}.get(entry["verdict_class"], "yellow")
+    for entry in canary["entries"]:
+        style = _STATUS_STYLES.get(entry["verdict_class"], "yellow")
+        console.print(
+            f"  [bold]Canary exfiltration ({esc(entry['scope'])}):[/bold] [{style}]{esc(entry['verdict'])}[/{style}]"
+        )
+        for label, key in (("Credential reads", "credential_verdict"), ("Protected writes", "write_verdict")):
+            if entry.get(key):
+                style = _STATUS_STYLES.get(entry[f"{key}_class"], "yellow")
+                console.print(f"    {label}: [{style}]{esc(entry[key])}[/{style}]", soft_wrap=True)
+        for row in entry["rows"]:
             console.print(
-                f"  [bold]Canary exfiltration ({esc(entry['scope'])}):[/bold] [{style}]{esc(entry['verdict'])}[/{style}]"
-            )
-            for label, key in (("Credential reads", "credential_verdict"), ("Protected writes", "write_verdict")):
-                if entry.get(key):
-                    style = {"fail": "bold red", "ok": "green"}.get(entry[f"{key}_class"], "yellow")
-                    console.print(f"    {label}: [{style}]{esc(entry[key])}[/{style}]", soft_wrap=True)
-            for row in entry["rows"]:
-                console.print(
-                    f"    [dim]{esc(row['arm_label'])}: {row['leaked']} of {esc(str(row['trials']))} trial(s) leaked,"
-                    f" decoy planted in {esc(str(row['planted']))} (sinks: {esc(row['sinks'])});"
-                    f" credential reads: {esc(row['credential_cell'])}; protected writes: {esc(row['write_cell'])}[/dim]",
-                    soft_wrap=True,
-                )
-    hook_census = view.get("hook_census")
-    if hook_census:
-        console.print("  [bold]Hook census[/bold] [dim](advisory)[/dim]")
-        for entry in hook_census["entries"]:
-            console.print(
-                f"    [bold]{esc(entry['scope'])} · {esc(entry['arm_label'])}[/bold]: {esc(entry['summary'])}"
-            )
-            for row in entry["rows"][:10]:
-                console.print(
-                    f"      [dim]- {esc(row['hook_id'])} ({esc(row['event'])}): {row['runs']} run(s), "
-                    f"{row['failures']} failure(s)[/dim]"
-                )
-    mcp_proof = view.get("mcp_proof")
-    if mcp_proof:
-        console.print(f"  [bold]MCP proof:[/bold] {esc(mcp_proof['headline'])} [dim](advisory)[/dim]")
-        for row in mcp_proof["rows"]:
-            console.print(
-                f"    [dim]- {esc(row['server'])}: {esc(row['status_label'])} — {esc(row['detail'])}[/dim]",
+                f"    [dim]{esc(row['arm_label'])}: {row['leaked']} of {esc(str(row['trials']))} trial(s) leaked,"
+                f" decoy planted in {esc(str(row['planted']))} (sinks: {esc(row['sinks'])});"
+                f" credential reads: {esc(row['credential_cell'])}; protected writes: {esc(row['write_cell'])}[/dim]",
                 soft_wrap=True,
             )
+
+
+def _print_hook_census(hook_census: dict | None, console: Console) -> None:
+    if not hook_census:
+        return
+    esc = escape_markup
+    console.print("  [bold]Hook census[/bold] [dim](advisory)[/dim]")
+    for entry in hook_census["entries"]:
+        console.print(f"    [bold]{esc(entry['scope'])} · {esc(entry['arm_label'])}[/bold]: {esc(entry['summary'])}")
+        for row in entry["rows"][:_CLI_LIST_ITEMS]:
+            console.print(
+                f"      [dim]- {esc(row['hook_id'])} ({esc(row['event'])}): {row['runs']} run(s), "
+                f"{row['failures']} failure(s)[/dim]"
+            )
+
+
+def _print_mcp_proof(mcp_proof: dict | None, console: Console) -> None:
+    if not mcp_proof:
+        return
+    esc = escape_markup
+    console.print(f"  [bold]MCP proof:[/bold] {esc(mcp_proof['headline'])} [dim](advisory)[/dim]")
+    for row in mcp_proof["rows"]:
+        console.print(
+            f"    [dim]- {esc(row['server'])}: {esc(row['status_label'])} — {esc(row['detail'])}[/dim]",
+            soft_wrap=True,
+        )
 
 
 def _print_plugin_statistics_scope(scope: dict, console: Console, *, show_label: bool) -> None:
@@ -727,12 +767,12 @@ class CLIReporter(ReporterBase):
         CLIReporter._print_agent_eval_verdict(agent_eval, console)
 
         evaluators = agent_eval.get("evaluators", {})
+        plugin_view = tier3_plugin_view(agent_eval)
         if evaluators:
             CLIReporter._print_evaluator_table(
-                evaluators, console, members_baseline=baseline_is_sum_of_parts(agent_eval)
+                evaluators, console, members_baseline=bool(plugin_view and plugin_view["sum_of_parts_baseline"])
             )
 
-        plugin_view = tier3_plugin_view(agent_eval)
         if plugin_view is not None:
             print_plugin_tier3(plugin_view, console)
 

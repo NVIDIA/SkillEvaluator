@@ -14,9 +14,21 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any
+from collections.abc import Iterator
+from typing import Any, NamedTuple
 
 from skillevaluator.evidence import evidence_ref_identity
+from skillevaluator.tier3.eval_core.checks import (
+    _APPLY_PATCH_COMMAND_RE,
+    _APPLY_PATCH_HEADER_RE,
+    _CANARY_NON_FILE_TARGETS,
+    _FD_REDIRECT_TARGET_RE,
+    _PROCESS_SUBSTITUTION,
+    _SED_IN_PLACE_FLAG_RE,
+    _SED_OPERANDS_RE,
+    _SHELL_WORD,
+    _TEE_OPERANDS_RE,
+)
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     iter_normalized_tool_calls as iter_tool_calls,
 )
@@ -26,7 +38,7 @@ from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     normalized_tool_call_wrapper_observation as _tool_call_wrapper_observation,
 )
-from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
+from skillevaluator.tier3.eval_core.secret_redaction import _configured_secret_values, redact_secrets_in_log_line
 
 
 def get_all_tool_calls(traj: dict[str, Any]) -> list[dict[str, Any]]:
@@ -60,38 +72,6 @@ def get_skill_tool_calls(traj: dict[str, Any]) -> list[str]:
     return skills
 
 
-def get_read_calls(traj: dict[str, Any]) -> list[str]:
-    """Get file paths from read calls and shell commands that inspect ``SKILL.md``."""
-    paths: list[str] = []
-    for tc in get_all_tool_calls(traj):
-        fn = tc["fn"].lower()
-        if fn in ("read", "read_file"):
-            path = tc["args"].get("path", tc["args"].get("file_path", ""))
-            if path:
-                paths.append(str(path))
-        elif fn in ("bash", "execute", "exec_command", "run", "run_code", "shell", "command"):
-            cmd = tc["args"].get("command", "") or tc["args"].get("cmd", "") or tc["args"].get("code", "")
-            if "skill.md" in str(cmd).lower():
-                paths.append(str(cmd))
-    return paths
-
-
-def get_bash_commands(traj: dict[str, Any]) -> list[str]:
-    """Extract command strings from bash/execute/run_code tool calls."""
-    cmds: list[str] = []
-    for _, tc in iter_tool_calls(traj):
-        fn = (tc.get("function_name") or "").lower()
-        if fn in ("bash", "execute", "exec_command", "run_code", "run", "shell", "command"):
-            cmd = (tc.get("arguments") or {}).get("command", "")
-            if not cmd:
-                cmd = (tc.get("arguments") or {}).get("cmd", "")
-            if not cmd:
-                cmd = (tc.get("arguments") or {}).get("code", "")
-            if cmd:
-                cmds.append(str(cmd))
-    return cmds
-
-
 def get_agent_text(traj: dict[str, Any]) -> str:
     """Concatenate all agent message text from the trajectory."""
     parts: list[str] = []
@@ -103,27 +83,30 @@ def get_agent_text(traj: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def get_final_response(traj: dict[str, Any]) -> str:
-    """Get the last non-empty agent message from the trajectory."""
-    for step in reversed(traj.get("steps", [])):
+def _agent_tool_calls(traj: dict[str, Any]) -> Iterator[tuple[int, dict[str, Any], dict[str, Any]]]:
+    """``(step index, step, tool call)`` for each normalized tool call of the agent's steps, in order."""
+    for step_index, step in enumerate(traj.get("steps", [])):
+        if step.get("source") == "agent":
+            for _, tool_call in iter_tool_calls({"steps": [step]}):
+                yield step_index, step, tool_call
+
+
+def _final_response_index(steps: list[dict[str, Any]]) -> int | None:
+    """Index of the final response: the last agent step with a non-empty message, or ``None``."""
+    for index in range(len(steps) - 1, -1, -1):
+        step = steps[index]
         if step.get("source") == "agent":
             msg = step.get("message") or ""
             if isinstance(msg, str) and msg.strip():
-                return msg
-    return ""
+                return index
+    return None
 
 
-def get_output_tokens(traj: dict[str, Any]) -> int:
-    """Extract total completion tokens from trajectory metrics."""
-    final = traj.get("final_metrics") or {}
-    if final.get("total_completion_tokens"):
-        return int(final["total_completion_tokens"])
-    last = 0
-    for step in traj.get("steps", []):
-        m = step.get("metrics") or {}
-        if m.get("completion_tokens"):
-            last = int(m["completion_tokens"])
-    return last
+def get_final_response(traj: dict[str, Any]) -> str:
+    """Get the last non-empty agent message from the trajectory."""
+    steps = traj.get("steps", [])
+    index = _final_response_index(steps)
+    return "" if index is None else steps[index]["message"]
 
 
 def build_conversation_summary(
@@ -145,7 +128,7 @@ def build_conversation_summary(
     return _fit_history(_history_entries(traj, question), max_chars)
 
 
-def _fit_history(entries: list[list[Any]], max_chars: int | None) -> str:
+def _fit_history(entries: list[_Entry], max_chars: int | None) -> str:
     return _fit_entries(
         entries,
         max_chars,
@@ -225,12 +208,24 @@ _BEHAVIOR_EXEC_TOOLS = {
     "execute_code",
 }
 _BEHAVIOR_EXEC_COMMAND_KEYS = ("command", "cmd", "code")
-_BEHAVIOR_WRITE_COMMAND_MARKERS = ("tee ", "apply_patch")
-_BEHAVIOR_WRITE_REDIRECT_RE = re.compile(r"(?:^|[\s;])(?:>|>>)\s*(?![&0-9])[^&\s;|]+")
 _BEHAVIOR_PYTHON_WRITE_RE = re.compile(
     r"\b(?:write_text|write_bytes)\s*\(|\bopen\s*\([^)]*,\s*['\"][wa]",
     re.IGNORECASE,
 )
+# sed options that give the script, so every operand of a ``sed -i`` is a file it edits.
+_SED_SCRIPT_OPTIONS = ("-e", "--expression", "-f", "--file")
+# Output redirections the judges are shown as writes, read as the security
+# extractor reads them (``_REDIRECT_TARGET_RE``), glued ones such as
+# ``echo hi>out.txt`` included. A quoted span, an escaped character and a
+# comment are read whole and never hold one, so the ``>`` in ``awk 'NR>1'``,
+# ``echo '<b>'``, ``\>`` or ``# > note`` is not a redirection; nor is an
+# ``->`` or ``=>`` arrow. A quote left open runs to the end of the text, so
+# the scan stays linear.
+_JUDGE_REDIRECT_TARGET_RE = re.compile(
+    r"'[^']*'?|\"(?:[^\"\\]|\\[\s\S])*\"?|\\[\s\S]|(?:^|(?<=[\s;&|(]))#[^\n]*"
+    r"|(?<![-=])(?:&>>?|(?<![0-9])[0-9]*>>?[|&]?)\s*(?P<target>" + _SHELL_WORD + ")"
+)
+_PROCESS_SUBSTITUTION_RE = re.compile(_PROCESS_SUBSTITUTION)
 _TOOL_NAME_SEPARATORS = (".", ":", "/", "__")
 # Harnesses name the written file and text differently: Claude Code uses
 # file_path, content, new_string, notebook_path, and new_source; OpenCode uses
@@ -239,11 +234,8 @@ _WRITE_PATH_KEYS = ("file_path", "filePath", "path", "filename", "target_file", 
 _WRITE_BODY_KEYS = ("content", "contents", "new_string", "newString", "new_source", "patch", "patchText", "code")
 _APPLY_PATCH_BODY_KEYS = ("input", "raw", "value")
 _WRITE_MAX_EDITS = 5
-_PATCH_FILE_HEADER_RE = re.compile(
-    r"^[^\S\n]*\*\*\* (?:Add File|Update File|Delete File|Move to):[ \t]*([^\n]*)",
-    re.MULTILINE,
-)
-_TEE_TARGET_RE = re.compile(r"(?<![\w.-])tee\s+(?:-a\s+|--append\s+)?([^\s;&|<>]+)")
+# The security extractor's drift-pinned apply_patch file headers.
+_PATCH_FILE_HEADER_RE = _APPLY_PATCH_HEADER_RE
 
 # What the judges see of each tool-history entry before any budget applies.
 _HISTORY_ARGS_CHARS = 200
@@ -273,6 +265,27 @@ _RANK_LOW = 0  # tool results, reasoning, and non-write tool calls
 _RANK_MESSAGE = 1  # the user request, intermediate agent messages, and a final answer shown elsewhere
 _RANK_OLD_WRITE = 2  # a write to a path the agent wrote again later
 _RANK_KEEP = 3  # the final answer and the latest write to each path
+
+
+class _Entry(NamedTuple):
+    """One line of evidence: its text, its fitting rank (a ``_RANK_*``), and the files it writes."""
+
+    text: str
+    rank: int
+    paths: tuple[str, ...] = ()
+
+
+class _FileChange(NamedTuple):
+    """A FILE CHANGES entry: ``text`` joins the call line and paths (``head``), the written ``body``, and the
+    tool result (``tail``). ``body_cut`` says the body was already cut to ``_write_body_max_chars()``."""
+
+    text: str
+    rank: int
+    paths: tuple[str, ...]
+    head: str
+    body: str
+    tail: str
+    body_cut: bool
 
 
 def _cut_sizes(limit: int) -> tuple[int, int] | None:
@@ -324,6 +337,15 @@ def _judge_excerpt(text: Any, limit: int) -> str:
     return f"{head_text[:head]}{_TRUNCATION_MARKER.format(len(text) - head - tail)}{tail_text[-tail:]}"
 
 
+def _section_text(title: str, body: str, limit: int | None) -> str:
+    """*title* and the redacted head and tail of *body* in under *limit* chars (all of it with no limit),
+    or ``""`` when no body fits."""
+    if not body.strip() or (limit is not None and limit <= len(title) + 2):
+        return ""
+    excerpt = _redact_evidence_text(body) if limit is None else _judge_excerpt(body, limit - len(title) - 2)
+    return f"{title}\n{excerpt}" if excerpt else ""
+
+
 def _append_section_with_budget(
     parts: list[str],
     title: str,
@@ -331,16 +353,23 @@ def _append_section_with_budget(
     max_chars: int,
     *,
     section_limit: int | None = None,
-) -> int:
-    budget = max_chars if section_limit is None else min(max_chars, section_limit)
-    if budget <= len(title) + 2 or not body.strip():
-        return max_chars
-    excerpt = _judge_excerpt(body, budget - len(title) - 2)
-    if not excerpt:
-        return max_chars
-    section = f"{title}\n{excerpt}"
-    parts.append(section)
-    return max(0, max_chars - len(section) - 2)
+    reserve: int = 0,
+) -> tuple[int, bool]:
+    """Append the section *title* with what fits of *body*; return ``(chars left, cut)``.
+
+    The section takes at most *section_limit* chars and what is left of
+    *max_chars* after *reserve* chars for later sections. ``cut`` says that
+    budget left the section out, or shorter than *section_limit* alone (or
+    no limit) would.
+    """
+    limit = max(0, max_chars - reserve)
+    if section_limit is not None:
+        limit = min(limit, section_limit)
+    section = _section_text(title, body, limit)
+    if section:
+        parts.append(section)
+        max_chars = max(0, max_chars - len(section) - 2)
+    return max_chars, limit != section_limit and section != _section_text(title, body, section_limit)
 
 
 def _section_room(title: str, body: str, section_limit: int) -> int:
@@ -375,18 +404,58 @@ def _tool_write_body(args: dict[str, Any]) -> str:
     return "\n\n".join(str(s) for s in snippets if str(s).strip())
 
 
-def _command_arg_text(value: Any) -> str:
-    """A command argument as text. Codex can pass an argv list such as ``["bash", "-lc", script]``."""
+def _exec_command(args: dict[str, Any]) -> tuple[str, str]:
+    """``(key, command)``: the first of ``_BEHAVIOR_EXEC_COMMAND_KEYS`` set in *args*, as text, or ``("", "")``.
+
+    Codex can pass the command as an argv list such as ``["bash", "-lc", script]``.
+    """
+    key = next((key for key in _BEHAVIOR_EXEC_COMMAND_KEYS if args.get(key)), "")
+    value = args[key] if key else ""
     if isinstance(value, (list, tuple)):
-        return " ".join(str(part) for part in value)
-    return str(value or "")
+        return key, " ".join(str(part) for part in value)
+    return key, str(value)
 
 
-def _command_looks_like_write(command: str) -> bool:
-    lower = command.lower()
-    return any(marker in lower for marker in _BEHAVIOR_WRITE_COMMAND_MARKERS) or bool(
-        _BEHAVIOR_WRITE_REDIRECT_RE.search(command) or _BEHAVIOR_PYTHON_WRITE_RE.search(command)
-    )
+def _sed_in_place_files(words: list[str]) -> list[str]:
+    """The files a ``sed`` command line (its *words* after ``sed``) edits in place; none without ``-i``."""
+    if not any(_SED_IN_PLACE_FLAG_RE.fullmatch(word.lower()) for word in words):
+        return []
+    operands: list[str] = []
+    script_given = False  # by -e/-f, so the first operand is a file too
+    option_argument = False
+    for word in words:
+        if option_argument:
+            option_argument = False
+        elif word in _SED_SCRIPT_OPTIONS:
+            script_given = option_argument = True
+        elif word.startswith(("--expression=", "--file=")):
+            script_given = True
+        elif not word.startswith("-"):
+            operands.append(word)
+    return operands if script_given else operands[1:]
+
+
+def _shell_write_words(text: str) -> list[str]:
+    """Files *text* writes as a shell command: redirect targets, ``tee`` operands, and ``sed -i`` files.
+
+    Redirections are read outside quotes and comments (``_JUDGE_REDIRECT_TARGET_RE``),
+    ``tee`` and ``sed -i`` operands with the security extractor's patterns, a process
+    substitution among them stepped over. Each path is kept as written, without its
+    quotes. A target that is not a file (``/dev/null``, ``/dev/stderr``, ``/dev/fd/3``)
+    is not a file change; a file under ``/dev/shm`` is.
+    """
+    words = []
+    for match in _JUDGE_REDIRECT_TARGET_RE.finditer(text):
+        target = match.group("target")
+        if target and not _FD_REDIRECT_TARGET_RE.fullmatch(target):
+            words.append(target)
+    for match in _TEE_OPERANDS_RE.finditer(text):
+        operands = _PROCESS_SUBSTITUTION_RE.sub(" ", match.group(1))
+        words.extend(word for word in re.findall(_SHELL_WORD, operands) if not word.startswith("-"))
+    for match in _SED_OPERANDS_RE.finditer(text):
+        words.extend(_sed_in_place_files(re.findall(_SHELL_WORD, match.group(1))))
+    paths = (word.strip("'\"") for word in words)
+    return [path for path in paths if path and not path.startswith(_CANARY_NON_FILE_TARGETS)]
 
 
 def _tool_name_candidates(fn_lower: str) -> set[str]:
@@ -402,6 +471,11 @@ def _tool_name_looks_like_write(fn_lower: str) -> bool:
     return not _tool_name_candidates(fn_lower).isdisjoint(_BEHAVIOR_WRITE_TOOLS)
 
 
+def _tool_name_looks_like_exec(fn_lower: str) -> bool:
+    """A shell or code tool, also under a namespace (``functions.exec_command``, ``mcp__shell__bash``)."""
+    return not _tool_name_candidates(fn_lower).isdisjoint(_BEHAVIOR_EXEC_TOOLS)
+
+
 def _patch_file_paths(text: str) -> list[str]:
     """Files an apply_patch body adds, updates, deletes, or moves to."""
     paths = (match.group(1).strip() for match in _PATCH_FILE_HEADER_RE.finditer(text))
@@ -409,16 +483,13 @@ def _patch_file_paths(text: str) -> list[str]:
 
 
 def _shell_write_paths(command: str) -> list[str]:
-    """Files a shell command writes through a redirect, ``tee``, or an apply_patch heredoc."""
+    """Files a shell command writes through a redirect, ``tee``, ``sed -i``, or an apply_patch heredoc."""
     # Read redirects only up to the end of the line that opens a heredoc, so a
     # quoted "> line" inside the heredoc body is not taken for a target.
     heredoc = command.find("<<")
     line_end = command.find("\n", heredoc) if heredoc >= 0 else -1
     head = command if line_end < 0 else command[:line_end]
-    targets = [match.group(0).lstrip(" \t\r\n\x0b\x0c;>") for match in _BEHAVIOR_WRITE_REDIRECT_RE.finditer(head)]
-    targets.extend(match.group(1) for match in _TEE_TARGET_RE.finditer(head))
-    paths = [target.strip("'\"") for target in targets]
-    return list(dict.fromkeys(path for path in (*paths, *_patch_file_paths(command)) if path))
+    return list(dict.fromkeys((*_shell_write_words(head), *_patch_file_paths(command))))
 
 
 def _write_call_parts(fn: str, args: Any) -> tuple[list[str], str, dict[str, Any]] | None:
@@ -438,41 +509,32 @@ def _write_call_parts(fn: str, args: Any) -> tuple[list[str], str, dict[str, Any
                     used.add(key)
                     break
         paths = [path] if path else _patch_file_paths(body)
-    elif fn_lower in _BEHAVIOR_EXEC_TOOLS:
-        key = next((key for key in _BEHAVIOR_EXEC_COMMAND_KEYS if args.get(key)), "")
-        command = _command_arg_text(args.get(key)) if key else ""
-        if not _command_looks_like_write(command):
+    elif _tool_name_looks_like_exec(fn_lower):
+        key, command = _exec_command(args)
+        # Program text (``code``) is not shell: its ``>`` compare values rather than redirect output.
+        written = _patch_file_paths(command) if key == "code" else _shell_write_paths(command)
+        if not (written or _APPLY_PATCH_COMMAND_RE.search(command) or _BEHAVIOR_PYTHON_WRITE_RE.search(command)):
             return None
         body = f"command:\n{command}"
         used = {key}
-        paths = list(dict.fromkeys(p for p in (path, *_shell_write_paths(command)) if p))
+        paths = list(dict.fromkeys(p for p in (path, *written) if p))
     else:
         return None
     return paths, body, {key: value for key, value in args.items() if key not in used}
 
 
-def _demote_superseded_writes(entries: list[list[Any]]) -> None:
+def _demote_superseded_writes(entries: list[_Entry] | list[_FileChange]) -> None:
     """Rank a write below the latest write to each of its paths."""
     last_writer: dict[str, int] = {}
     for index, entry in enumerate(entries):
-        for path in entry[2]:
+        for path in entry.paths:
             last_writer[path] = index
     for index, entry in enumerate(entries):
-        if entry[2] and all(last_writer[path] != index for path in entry[2]):
-            entry[1] = _RANK_OLD_WRITE
+        if entry.paths and all(last_writer[path] != index for path in entry.paths):
+            entries[index] = entry._replace(rank=_RANK_OLD_WRITE)
 
 
-def _final_response_index(steps: list[dict[str, Any]]) -> int | None:
-    for index in range(len(steps) - 1, -1, -1):
-        step = steps[index]
-        if step.get("source") == "agent":
-            msg = step.get("message") or ""
-            if isinstance(msg, str) and msg.strip():
-                return index
-    return None
-
-
-def _history_call_entry(tc: dict[str, Any], write_bodies: bool) -> list[Any]:
+def _history_call_entry(tc: dict[str, Any], write_bodies: bool) -> _Entry:
     fn = str(tc.get("function_name") or "")
     name = _judge_excerpt(fn, _HISTORY_ARGS_CHARS)
     args = tc.get("arguments") or {}
@@ -481,13 +543,13 @@ def _history_call_entry(tc: dict[str, Any], write_bodies: bool) -> list[Any]:
         # Without write bodies (FILE CHANGES shows them), a write is a short line like any other call.
         shown = _judge_excerpt(json.dumps(args, default=str), _HISTORY_ARGS_CHARS)
         note = " [written content is under FILE CHANGES]" if write is not None else ""
-        return [f"Agent called: {name}({shown}){note}", _RANK_LOW, ()]
+        return _Entry(f"Agent called: {name}({shown}){note}", _RANK_LOW)
     paths, body, other_args = write
     shown = _judge_excerpt(json.dumps(other_args, default=str), _HISTORY_ARGS_CHARS) if other_args else ""
     text = f"Agent called: {name}({shown})"
     if body:
         text = f"{text}\n{_judge_excerpt(body, _WRITE_BODY_CHARS)}"
-    return [text, _RANK_KEEP, tuple(paths)]
+    return _Entry(text, _RANK_KEEP, tuple(paths))
 
 
 def _history_entries(
@@ -497,8 +559,8 @@ def _history_entries(
     write_bodies: bool = True,
     final_chars: int = _HISTORY_MESSAGE_CHARS,
     final_rank: int = _RANK_KEEP,
-) -> list[list[Any]]:
-    """``[text, rank, written paths]`` per history line, in trajectory order.
+) -> list[_Entry]:
+    """An ``_Entry`` per history line, in trajectory order.
 
     Without *write_bodies*, write calls are short lines ranked like other tool
     calls, for evidence that shows the bodies under FILE CHANGES. The final
@@ -506,7 +568,7 @@ def _history_entries(
     under FINAL RESPONSE passes less, and a lower rank so the history's copy
     shrinks before skill calls and test runs are dropped.
     """
-    entries: list[list[Any]] = [[f"User: {_judge_excerpt(question, _HISTORY_MESSAGE_CHARS)}", _RANK_MESSAGE, ()]]
+    entries: list[_Entry] = [_Entry(f"User: {_judge_excerpt(question, _HISTORY_MESSAGE_CHARS)}", _RANK_MESSAGE)]
     steps = traj.get("steps", [])
     final_index = _final_response_index(steps)
     final_listed = False
@@ -516,7 +578,7 @@ def _history_entries(
 
         reasoning = _judge_excerpt(step.get("reasoning_content"), _HISTORY_REASONING_CHARS)
         if reasoning:
-            entries.append([f"Agent reasoning: {reasoning}", _RANK_LOW, ()])
+            entries.append(_Entry(f"Agent reasoning: {reasoning}", _RANK_LOW))
 
         for _, tc in iter_tool_calls({"steps": [step]}):
             entries.append(_history_call_entry(tc, write_bodies))
@@ -524,7 +586,7 @@ def _history_entries(
         for result in (step.get("observation") or {}).get("results") or []:
             content = _judge_excerpt(result.get("content") if isinstance(result, dict) else "", _HISTORY_RESULT_CHARS)
             if content:
-                entries.append([f"Tool returned: {content}", _RANK_LOW, ()])
+                entries.append(_Entry(f"Tool returned: {content}", _RANK_LOW))
 
         msg = step.get("message") or ""
         if isinstance(msg, str) and msg.strip() and not step.get("tool_calls"):
@@ -532,11 +594,11 @@ def _history_entries(
             final_listed = final_listed or is_final
             rank = final_rank if is_final else _RANK_MESSAGE
             limit = final_chars if is_final else _HISTORY_MESSAGE_CHARS
-            entries.append([f"Agent: {_judge_excerpt(msg, limit)}", rank, ()])
+            entries.append(_Entry(f"Agent: {_judge_excerpt(msg, limit)}", rank))
 
     if final_index is not None and not final_listed:
         final = _judge_excerpt(steps[final_index].get("message"), final_chars)
-        entries.append([f"Agent final answer: {final}", final_rank, ()])
+        entries.append(_Entry(f"Agent final answer: {final}", final_rank))
     _demote_superseded_writes(entries)
     return entries
 
@@ -558,7 +620,7 @@ def _render_entries(texts: list[str], dropped: list[bool], sep: str, noun: str) 
 
 
 def _fit_entries(
-    entries: list[list[Any]],
+    entries: list[_Entry],
     max_chars: int | None,
     *,
     sep: str,
@@ -567,7 +629,7 @@ def _fit_entries(
     middle_first: bool = False,
     exact_shrink: bool = False,
 ) -> str:
-    """Join ``[text, rank, ...]`` entries, fitting them into *max_chars* by rank.
+    """Join the text of *entries*, fitting them into *max_chars* by rank.
 
     Over budget, entries below ``_RANK_KEEP`` shrink to *stub_chars*, lowest rank
     and oldest first (with *middle_first*, the middle of the list first, so both
@@ -578,12 +640,12 @@ def _fit_entries(
     (the final answer, or the latest write) is cut only by the last-resort
     head-and-tail cut of the whole text.
     """
-    texts = [str(entry[0]) for entry in entries]
+    texts = [entry.text for entry in entries]
     if max_chars is None:
         return sep.join(texts)
     if max_chars <= 0 or not texts:
         return ""
-    ranks = [entry[1] for entry in entries]
+    ranks = [entry.rank for entry in entries]
     dropped = [False] * len(texts)
     marker_cost = len(_OMITTED_MARKER.format(len(texts), noun)) + len(sep)
     total = sum(len(text) for text in texts) + len(sep) * (len(texts) - 1)
@@ -605,27 +667,29 @@ def _fit_entries(
             total += marker_cost
         dropped[index] = True
 
+    def needed(index: int) -> int:
+        """The size the entry can shrink to and leave the text as long as the budget allows."""
+        return max(stub_chars, len(texts[index]) - (total - max_chars))
+
     order = list(range(len(texts)))
     if middle_first:
         order.sort(key=lambda index: abs(2 * index - len(texts) + 1))
-    for action in (shrink, drop):
-        for rank in range(_RANK_KEEP):
-            for index in order:
-                if total <= max_chars:
-                    break
-                if ranks[index] == rank:
-                    if action is shrink:
-                        floor = stub_chars
-                        if exact_shrink:
-                            floor = max(stub_chars, len(texts[index]) - (total - max_chars))
-                        shrink(index, floor)
-                    else:
-                        drop(index)
+    # Entries below the top rank, lowest rank first: shrink them, then drop them.
+    lower = [index for rank in range(_RANK_KEEP) for index in order if ranks[index] == rank]
+    for index in lower:
+        if total <= max_chars:
+            break
+        shrink(index, needed(index) if exact_shrink else stub_chars)
+    for index in lower:
+        if total <= max_chars:
+            break
+        drop(index)
+    # Then the older top-rank entries; the newest is left to the last-resort cut.
     keepers = [index for index in range(len(texts)) if ranks[index] >= _RANK_KEEP][:-1]
     for index in keepers:
         if total <= max_chars:
             break
-        shrink(index, max(stub_chars, len(texts[index]) - (total - max_chars)))
+        shrink(index, needed(index))
     for index in keepers:
         if total <= max_chars:
             break
@@ -638,33 +702,39 @@ def _write_body_max_chars() -> int:
     return max(_WRITE_BODY_CHARS, *_bundle_budgets().values())
 
 
-def _file_change_entries(traj: dict[str, Any]) -> list[list[Any]]:
-    """``[text, rank, written paths, head, body, tail, body cut]`` per write call, in trajectory order.
+def _file_change_entries(traj: dict[str, Any]) -> list[_FileChange]:
+    """A ``_FileChange`` per write call, in trajectory order.
 
     ``body`` keeps up to ``_write_body_max_chars()``; ``_fit_file_changes`` sizes it to the room.
     """
     body_max = _write_body_max_chars()
-    entries: list[list[Any]] = []
-    for step in traj.get("steps", []):
-        if step.get("source") != "agent":
+    entries: list[_FileChange] = []
+    for _, step, tc in _agent_tool_calls(traj):
+        fn = str(tc.get("function_name") or "")
+        write = _write_call_parts(fn, tc.get("arguments") or {})
+        if write is None:
             continue
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            fn = str(tc.get("function_name") or "")
-            write = _write_call_parts(fn, tc.get("arguments") or {})
-            if write is None:
-                continue
-            paths, body, _ = write
-            if not body and not paths:
-                continue
+        paths, body, _ = write
+        if not body and not paths:
+            continue
 
-            head = f"Agent called: {_judge_excerpt(fn, _HISTORY_ARGS_CHARS)}"
-            if paths:
-                head = f"{head}\nPath: {_judge_excerpt(', '.join(paths), _HISTORY_ARGS_CHARS)}"
-            shown = _judge_excerpt(body, body_max)
-            obs = _judge_excerpt(_tool_call_observation(step, tc), _WRITE_RESULT_CHARS)
-            tail = f"Tool returned: {obs}" if obs else ""
-            text = _file_change_text(head, shown, tail)
-            entries.append([text, _RANK_KEEP, tuple(paths), head, shown, tail, len(body) > body_max])
+        head = f"Agent called: {_judge_excerpt(fn, _HISTORY_ARGS_CHARS)}"
+        if paths:
+            head = f"{head}\nPath: {_judge_excerpt(', '.join(paths), _HISTORY_ARGS_CHARS)}"
+        shown = _judge_excerpt(body, body_max)
+        obs = _judge_excerpt(_tool_call_observation(step, tc), _WRITE_RESULT_CHARS)
+        tail = f"Tool returned: {obs}" if obs else ""
+        entries.append(
+            _FileChange(
+                text=_file_change_text(head, shown, tail),
+                rank=_RANK_KEEP,
+                paths=tuple(paths),
+                head=head,
+                body=shown,
+                tail=tail,
+                body_cut=len(body) > body_max,
+            )
+        )
     _demote_superseded_writes(entries)
     return entries
 
@@ -683,27 +753,27 @@ def _even_share(lengths: list[int], room: int) -> int:
     return max(lengths, default=0)
 
 
-def _fit_file_changes(entries: list[list[Any]], max_chars: int | None) -> tuple[str, bool]:
-    """Fit file changes into *max_chars*; also say whether any was cut or dropped.
+def _fit_file_changes(entries: list[_FileChange], max_chars: int | None) -> tuple[str, bool]:
+    """Fit file changes into *max_chars* (``None``: no budget); also say whether any was cut or dropped.
 
     Write bodies share the room evenly, and the latest write to each path gets
     what earlier writes to it leave. Each keeps at least ``_WRITE_BODY_CHARS``
-    before older writes shrink and drop.
+    before older writes shrink and drop; an earlier write to a path never gets
+    more, even without a budget.
     """
     sep = "\n\n"
-    full = sep.join(str(entry[0]) for entry in entries)
-    if max_chars is None:
-        return full, any(entry[6] for entry in entries)
-    fixed = sum(len(entry[0]) - len(entry[4]) for entry in entries) + len(sep) * (len(entries) - 1)
-    old_bodies = sum(min(len(entry[4]), _WRITE_BODY_CHARS) for entry in entries if entry[1] < _RANK_KEEP)
-    latest_bodies = [len(entry[4]) for entry in entries if entry[1] >= _RANK_KEEP]
-    cap = max(_WRITE_BODY_CHARS, _even_share(latest_bodies, max_chars - fixed - old_bodies))
-    fitted = []
+    fixed = sum(len(entry.text) - len(entry.body) for entry in entries) + len(sep) * (len(entries) - 1)
+    old_bodies = sum(min(len(entry.body), _WRITE_BODY_CHARS) for entry in entries if entry.rank < _RANK_KEEP)
+    latest_bodies = [len(entry.body) for entry in entries if entry.rank >= _RANK_KEEP]
+    room = sum(latest_bodies) if max_chars is None else max_chars - fixed - old_bodies
+    cap = max(_WRITE_BODY_CHARS, _even_share(latest_bodies, room))
+    fitted: list[_Entry] = []
     for entry in entries:
-        body = _truncate_for_behavior(entry[4], cap if entry[1] >= _RANK_KEEP else _WRITE_BODY_CHARS)
-        fitted.append([_file_change_text(entry[3], body, entry[5]), entry[1], entry[2]])
+        body = _truncate_for_behavior(entry.body, cap if entry.rank >= _RANK_KEEP else _WRITE_BODY_CHARS)
+        fitted.append(_Entry(_file_change_text(entry.head, body, entry.tail), entry.rank, entry.paths))
     text = _fit_entries(fitted, max_chars, sep=sep, stub_chars=_FILE_CHANGE_STUB_CHARS, noun="file changes")
-    return text, text != full or any(entry[6] for entry in entries)
+    full = sep.join(entry.text for entry in entries)
+    return text, text != full or any(entry.body_cut for entry in entries)
 
 
 def build_behavior_evidence(
@@ -730,7 +800,7 @@ def build_behavior_evidence(
             max_chars = _behavior_check_budget()
         else:
             max_chars = max(_BEHAVIOR_EVIDENCE_MAX_CHARS, final_limit + _MIN_BEHAVIOR_HISTORY_HEADROOM)
-    return _behavior_evidence(traj, question, max_chars, final_limit, _file_change_entries(traj), {})
+    return _behavior_evidence(traj, question, max_chars, final_limit, _file_change_entries(traj))[0]
 
 
 def _behavior_evidence(
@@ -738,14 +808,15 @@ def _behavior_evidence(
     question: str,
     max_chars: int,
     final_limit: int,
-    file_entries: list[list[Any]],
-    histories: dict[tuple[bool, int, int], list[list[Any]]],
-) -> str:
-    """``build_behavior_evidence`` with built file changes; *histories* caches the tool history.
+    file_entries: list[_FileChange],
+) -> tuple[str, bool]:
+    """``build_behavior_evidence`` with built file changes, as ``(text, truncated)``.
 
     The final response gets up to *final_limit* chars, but leaves the user
     request and the tool history up to ``_MIN_BEHAVIOR_HISTORY_HEADROOM``
     chars (at most half of what is left, and no more than they need).
+    ``truncated`` says *max_chars* cut or left out part of a section, or a
+    file change body was cut before.
     """
 
     # A final response limit of at least the history's message room shows the
@@ -757,13 +828,14 @@ def _behavior_evidence(
     final_shown = bool(final.strip()) and final_limit > len(_SECTION_FINAL_RESPONSE) + 2
     final_rank = _RANK_MESSAGE if final_shown else _RANK_KEEP
 
-    def history_entries(write_bodies: bool) -> list[list[Any]]:
-        key = (write_bodies, final_chars, final_rank)
-        if key not in histories:
-            histories[key] = _history_entries(
+    histories: dict[bool, list[_Entry]] = {}  # the tool history with and without write bodies, each built once
+
+    def history_entries(write_bodies: bool) -> list[_Entry]:
+        if write_bodies not in histories:
+            histories[write_bodies] = _history_entries(
                 traj, question, write_bodies=write_bodies, final_chars=final_chars, final_rank=final_rank
             )
-        return histories[key]
+        return histories[write_bodies]
 
     def tail_room(write_bodies: bool) -> int:
         """Room the user request and the whole tool history would take."""
@@ -777,6 +849,7 @@ def _behavior_evidence(
     parts: list[str] = []
     remaining = max_chars
     write_bodies = True
+    truncated = any(entry.body_cut for entry in file_entries)
 
     if file_entries:
         final_cap = min(final_limit, max(1, max_chars - min(_MIN_BEHAVIOR_HISTORY_HEADROOM, max_chars // 2)))
@@ -790,33 +863,40 @@ def _behavior_evidence(
         # A long configured final response never pushes file changes out entirely.
         room = max(room, min(_BEHAVIOR_SECTION_CHARS, remaining // 3) - len(_SECTION_FILE_CHANGES) - 3)
         file_changes, _ = _fit_file_changes(file_entries, room)
-        remaining = _append_section_with_budget(parts, _SECTION_FILE_CHANGES, file_changes, remaining)
+        remaining, cut = _append_section_with_budget(parts, _SECTION_FILE_CHANGES, file_changes, remaining)
+        truncated = truncated or cut or file_changes != _fit_file_changes(file_entries, None)[0]
         write_bodies = not parts  # the history shows write bodies only when FILE CHANGES does not
 
     if final:
         headroom = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, remaining // 2, tail_room(write_bodies))
         if max_chars > final_limit:
             headroom = min(headroom, max(_BEHAVIOR_SECTION_CHARS, remaining - final_limit))
-        remaining = _append_section_with_budget(
+        remaining, cut = _append_section_with_budget(
             parts,
             _SECTION_FINAL_RESPONSE,
             final,
             remaining,
-            section_limit=min(final_limit, max(1, remaining - headroom)),
+            section_limit=final_limit,
+            reserve=headroom,
         )
+        truncated = truncated or cut
 
-    remaining = _append_section_with_budget(
+    remaining, cut = _append_section_with_budget(
         parts,
         _SECTION_USER_REQUEST,
         question,
         remaining,
         section_limit=_BEHAVIOR_SECTION_CHARS,
     )
+    truncated = truncated or cut
 
-    history_text = _fit_history(history_entries(write_bodies), remaining - len(_SECTION_COMPACT_TOOL_HISTORY) - 3)
-    remaining = _append_section_with_budget(parts, _SECTION_COMPACT_TOOL_HISTORY, history_text, remaining)
+    history = history_entries(write_bodies)
+    history_text = _fit_history(history, remaining - len(_SECTION_COMPACT_TOOL_HISTORY) - 3)
+    remaining, cut = _append_section_with_budget(parts, _SECTION_COMPACT_TOOL_HISTORY, history_text, remaining)
+    truncated = truncated or cut or history_text != _fit_history(history, None)
 
-    return "\n\n".join(parts)[:max_chars]
+    text = "\n\n".join(parts)
+    return text[:max_chars], truncated or len(text) > max_chars
 
 
 _METRIC_EVIDENCE_REF_METRICS = ("accuracy", "goal_accuracy", "behavior_check")
@@ -829,21 +909,24 @@ _EXPECTED_ARTIFACT_PATH_RE = re.compile(
 )
 
 
-# A placeholder key such as sk-your-key-here or nvapi-REPLACE_ME: letters of
-# one case in words joined by - or _. No real key looks like this, and a task
-# can ask for one in a config file, so the judges see it as written.
+# A placeholder key such as sk-your-key-here, nvapi-REPLACE_ME,
+# xoxb-your-bot-token or glpat-xxxxxxxxxxxxxxxxxxxx: a key or token prefix, then
+# letters of one case in words joined by - or _. No real key or token looks like
+# this, and a task can ask for one in a config file, so the judges see it as
+# written.
 _KEY_PLACEHOLDER_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])((?:sk|nvapi)-(?:[a-z]+(?:[-_][a-z]+)*|[A-Z]+(?:[-_][A-Z]+)*))(?![A-Za-z0-9_-])"
+    r"(?<![A-Za-z0-9_-])((?:sk-|nvapi-|gh[pousr]_|github_pat_|glpat-|xox[abeprs]-|hf_|npm_)"
+    r"(?:[a-z]+(?:[-_][a-z]+)*|[A-Z]+(?:[-_][A-Z]+)*))(?![A-Za-z0-9_-])"
 )
 
 
 def _redact_evidence_text(text: str) -> str:
-    # Mirror harbor/templates/eval.py: also redact the RUNTIME values of the
-    # API keys this process holds, which need not match sk-/nvapi- patterns.
+    # Mirror harbor/templates/eval.py: also redact the exact values of the
+    # configured credentials, which need not match the sk-/nvapi- shapes.
     text = str(text or "")
-    secrets = [os.environ.get("NVIDIA_API_KEY", "")]
-    # Keep placeholder keys, unless the text holds a runtime key: then redact everything.
-    parts = [text] if any(secret and secret in text for secret in secrets) else _KEY_PLACEHOLDER_RE.split(text)
+    secrets = _configured_secret_values()
+    # Keep placeholder keys, unless the text holds a secret value: then redact everything.
+    parts = [text] if any(secret in text for secret in secrets) else _KEY_PLACEHOLDER_RE.split(text)
     parts[::2] = [redact_secrets_in_log_line(part, extra_secret_values=secrets) for part in parts[::2]]
     return "".join(parts).replace("\x00", "").strip()
 
@@ -899,22 +982,18 @@ def _dedupe_evidence_refs(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _final_response_ref(traj: dict[str, Any]) -> list[dict[str, Any]]:
     steps = traj.get("steps", [])
-    for step_idx in range(len(steps) - 1, -1, -1):
-        step = steps[step_idx]
-        if step.get("source") != "agent":
-            continue
-        msg = step.get("message") or ""
-        if isinstance(msg, str) and msg.strip():
-            return [
-                _evidence_ref(
-                    source="trajectory.json",
-                    json_pointer=f"/steps/{step_idx}",
-                    kind="final_response",
-                    label="Final response",
-                    excerpt=msg,
-                )
-            ]
-    return []
+    index = _final_response_index(steps)
+    if index is None:
+        return []
+    return [
+        _evidence_ref(
+            source="trajectory.json",
+            json_pointer=f"/steps/{index}",
+            kind="final_response",
+            label="Final response",
+            excerpt=steps[index]["message"],
+        )
+    ]
 
 
 def _tool_call_ref(step_idx: int, tc: dict[str, Any], *, kind: str) -> dict[str, Any]:
@@ -923,8 +1002,8 @@ def _tool_call_ref(step_idx: int, tc: dict[str, Any], *, kind: str) -> dict[str,
     if not isinstance(args, dict):
         args = {}
     command = ""
-    if fn.lower() in _BEHAVIOR_EXEC_TOOLS:
-        command = _command_arg_text(args.get("command") or args.get("cmd") or args.get("code"))
+    if _tool_name_looks_like_exec(fn.lower()):
+        _, command = _exec_command(args)
     path = _tool_file_path(args)
     if not path and command:
         path = _first_expected_artifact_path(command)
@@ -945,13 +1024,10 @@ def _tool_call_ref(step_idx: int, tc: dict[str, Any], *, kind: str) -> dict[str,
 
 def _tool_call_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
-    for step_idx, step in enumerate(traj.get("steps", [])):
-        if step.get("source") != "agent":
-            continue
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
-                return refs
-            refs.append(_tool_call_ref(step_idx, tc, kind="tool_call"))
+    for step_idx, _, tc in _agent_tool_calls(traj):
+        if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
+            return refs
+        refs.append(_tool_call_ref(step_idx, tc, kind="tool_call"))
     return refs
 
 
@@ -981,23 +1057,10 @@ def _tool_observation_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _file_change_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
-    for step_idx, step in enumerate(traj.get("steps", [])):
-        if step.get("source") != "agent":
-            continue
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            if len(refs) >= _METRIC_EVIDENCE_MAX_FILE_REFS:
-                return refs
-            fn = str(tc.get("function_name") or "")
-            fn_lower = fn.lower()
-            args = tc.get("arguments") or {}
-            if not isinstance(args, dict):
-                args = {}
-            command = _command_arg_text(args.get("command") or args.get("cmd") or args.get("code"))
-            is_write = _tool_name_looks_like_write(fn_lower) or (
-                fn_lower in _BEHAVIOR_EXEC_TOOLS and _command_looks_like_write(command)
-            )
-            if not is_write:
-                continue
+    for step_idx, _, tc in _agent_tool_calls(traj):
+        if len(refs) >= _METRIC_EVIDENCE_MAX_FILE_REFS:
+            break
+        if _write_call_parts(str(tc.get("function_name") or ""), tc.get("arguments") or {}) is not None:
             refs.append(_tool_call_ref(step_idx, tc, kind="file_change"))
     return refs
 
@@ -1139,11 +1202,6 @@ def attach_metric_evidence_refs(
 _BUNDLE_ITEM_CHARS = 1500  # per-item excerpt for the judge prompt (refs use 300)
 _DEFAULT_ACCURACY_BUDGET = 8000
 _DEFAULT_GOAL_ACCURACY_BUDGET = 12000
-_BUNDLE_BUDGETS = {
-    "accuracy": _DEFAULT_ACCURACY_BUDGET,
-    "goal_accuracy": _DEFAULT_GOAL_ACCURACY_BUDGET,
-    "behavior_check": _DEFAULT_BEHAVIOR_CHECK_BUDGET,
-}
 _BUNDLE_ACCURACY_MAX_OBS = 6  # newest observations fed to accuracy (<= ~6x1500 <= budget)
 _BUNDLE_GOAL_MAX_OBS = 12  # newest observations fed to goal_accuracy (end-state)
 _BUNDLE_RESERVED_OBS = 2  # newest observations file changes always leave room for
@@ -1187,7 +1245,7 @@ def _late_observation_excerpts(traj: dict[str, Any], limit: int, max_items: int)
 
 def _assemble_bundle(
     final: str,
-    entries: list[list[Any]],
+    entries: list[_FileChange],
     files_title: str,
     observations: list[str],
     obs_title: str,
@@ -1223,50 +1281,33 @@ def _assemble_bundle(
         if used + len(obs_title) + 1 + len("\n---\n".join([*kept, obs])) > budget:
             break
         kept.append(obs)
-    text, dropped, truncated = _assemble(
+    text, dropped = _assemble(
         [(_SECTION_FINAL_RESPONSE, final), (files_title, files), (obs_title, "\n---\n".join(kept))], budget
     )
     omitted = dropped + len(observations) - len(kept) + (1 if entries and not files else 0) + (1 if final_cut else 0)
-    return text, omitted, truncated or files_cut or omitted > 0
+    return text, omitted, files_cut or omitted > 0
 
 
-def _assemble(sections: list[tuple[str, str]], budget: int) -> tuple[str, int, bool]:
-    """Join (title, body) sections under a char budget. Returns (text, dropped, truncated).
+def _assemble(sections: list[tuple[str, str]], budget: int) -> tuple[str, int]:
+    """Join the non-empty (title, body) sections that fit under a char budget, in order.
 
-    A FINAL RESPONSE that does not fit is cut to its head and tail rather than
-    dropped (and counted as dropped), leaving room for the smallest later
-    section when the budget allows.
+    Returns (text, dropped): how many sections did not fit. ``_assemble_bundle``
+    has already cut FINAL RESPONSE, the first section, to fit.
     """
     parts: list[str] = []
     used = 0
     dropped = 0
-    truncated = False
-    non_empty = [(title, str(body or "").strip()) for title, body in sections if str(body or "").strip()]
-    for idx, (title, body) in enumerate(non_empty):
+    for title, body in sections:
+        body = str(body or "").strip()
+        if not body:
+            continue
         block = f"{title}\n{body}"
         if used + len(block) <= budget:
             parts.append(block)
             used += len(block) + 2
-        elif title == _SECTION_FINAL_RESPONSE and budget - used > 0:
-            avail = budget - used
-            later_blocks = [len(f"{t}\n{b}") + 2 for t, b in non_empty[idx + 1 :]]
-            if later_blocks and avail >= _BUNDLE_FINAL_SHARE_MIN_BUDGET:
-                reserve_later = min(avail // 2, *later_blocks)
-                if avail - reserve_later > len(title) + 16:
-                    avail -= reserve_later
-            header = f"{title}\n"
-            if avail > len(header):
-                clipped_block = f"{header}{_truncate_for_behavior(body, avail - len(header), recount=False)}"
-            else:
-                clipped_block = block[:avail]
-            parts.append(clipped_block)
-            used += len(clipped_block) + 2
-            dropped += 1
-            truncated = True
         else:
             dropped += 1
-            truncated = True
-    return "\n\n".join(parts), dropped, truncated
+    return "\n\n".join(parts), dropped
 
 
 _BACKTICK_TOKEN_RE = re.compile(r"`([^`]{4,})`")
@@ -1314,17 +1355,14 @@ def build_verified_facts(
     # 2. Read each tool call's checkable text once: command/cmd/code, the
     # file-path argument, and the written body.
     calls: list[tuple[int, str, str, str]] = []
-    for idx, step in enumerate(traj.get("steps", [])):
-        if step.get("source") != "agent":
+    for idx, _, tc in _agent_tool_calls(traj):
+        args = tc.get("arguments") or {}
+        if not isinstance(args, dict):
             continue
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            args = tc.get("arguments") or {}
-            if not isinstance(args, dict):
-                continue
-            command = _command_arg_text(args.get("command") or args.get("cmd") or args.get("code"))
-            write = _write_call_parts(str(tc.get("function_name") or ""), args)
-            write_body = write[1] if write else _tool_write_body(args)
-            calls.append((idx, command, _tool_file_path(args), write_body))
+        _, command = _exec_command(args)
+        write = _write_call_parts(str(tc.get("function_name") or ""), args)
+        write_body = write[1] if write else _tool_write_body(args)
+        calls.append((idx, command, _tool_file_path(args), write_body))
 
     # 3. Scan the calls for each token
     facts: list[dict[str, Any]] = []
@@ -1468,11 +1506,7 @@ def build_metric_evidence_bundles(
 
     # Leave room for the facts header so the judge never has to re-cut this.
     bc_budget = max(1, budgets["behavior_check"] - (len(facts_section) + 2 if facts_section else 0))
-    final_limit = _behavior_final_response_limit()
-    histories: dict[tuple[bool, int, int], list[list[Any]]] = {}
-    bc_text = _behavior_evidence(traj, question, bc_budget, final_limit, file_entries, histories)
-    bc_full = _behavior_evidence(traj, question, 10**9, final_limit, file_entries, histories)
-    bc_trunc = len(bc_full) > len(bc_text) or any(entry[6] for entry in file_entries)
+    bc_text, bc_trunc = _behavior_evidence(traj, question, bc_budget, _behavior_final_response_limit(), file_entries)
     bundles["behavior_check"] = {
         "prompt_evidence": _prepend_facts(bc_text),
         "evidence_refs": refs["behavior_check"],
@@ -1491,20 +1525,17 @@ def extract_tool_calls_as_dicts(traj: dict[str, Any]) -> list[dict[str, Any]]:
     format consumed by ``eval_core.checks``.
     """
     result: list[dict[str, Any]] = []
-    for step in traj.get("steps", []):
-        if step.get("source") != "agent":
-            continue
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            call = {
-                "action": tc.get("function_name", ""),
-                "action_input": tc.get("arguments") or {},
-                "observation": _tool_call_observation(step, tc),
-            }
-            if status := tc.get("_atif_normalization_status"):
-                call["normalization_status"] = status
-            if status := tc.get("_atif_observation_status"):
-                call["observation_status"] = status
-            if wrapper_observation := _tool_call_wrapper_observation(step, tc):
-                call["wrapper_observation"] = wrapper_observation
-            result.append(call)
+    for _, step, tc in _agent_tool_calls(traj):
+        call = {
+            "action": tc.get("function_name", ""),
+            "action_input": tc.get("arguments") or {},
+            "observation": _tool_call_observation(step, tc),
+        }
+        if status := tc.get("_atif_normalization_status"):
+            call["normalization_status"] = status
+        if status := tc.get("_atif_observation_status"):
+            call["observation_status"] = status
+        if wrapper_observation := _tool_call_wrapper_observation(step, tc):
+            call["wrapper_observation"] = wrapper_observation
+        result.append(call)
     return result

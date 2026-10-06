@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -170,7 +171,8 @@ class TestIntraSkillValidatorValidate:
         assert result.passed is False
         finding = result.findings[0]
         assert finding.check_name == "scalar_comparison_limit"
-        assert finding.file_path == skill_dir.name
+        # A finding about the whole skill points at its root, relative to the skill like every Tier 2 path.
+        assert finding.file_path == "."
         assert finding.metadata == {
             "pair_count": 1,
             "vector_dimension": 2,
@@ -226,8 +228,61 @@ class TestIntraSkillValidatorValidate:
         assert result.passed is False
         assert result.findings[0].check_name == "llm_cluster_count_limit"
         assert result.findings[0].metadata == {"actual": 2, "limit": 1}
-        assert result.findings[0].file_path == skill_dir.name
+        assert result.findings[0].file_path == "."
         mock_llm.assert_not_called()
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_each_cluster_is_reviewed_with_its_own_prompt_and_reported_in_cluster_order(
+        self, mock_embed, mock_build_clusters, _mock_llm, mock_analyze, tmp_path: Path
+    ) -> None:
+        from skillevaluator.deduplication.intra_skill.llm_analyzer import build_user_prompt
+
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+        first = ContentCluster(
+            [
+                ContentChunk("SKILL.md", "## A", 1, 2, "a" * 100, "markdown"),
+                ContentChunk("guide.md", "## A again", 1, 2, "a" * 100, "markdown"),
+            ],
+            0.99,
+            0.99,
+            True,
+            {"markdown"},
+        )
+        second = ContentCluster(
+            [
+                ContentChunk("notes.md", "## B", 3, 4, "b" * 100, "markdown"),
+                ContentChunk("other.md", "## B again", 3, 4, "b" * 100, "markdown"),
+            ],
+            0.95,
+            0.95,
+            True,
+            {"markdown"},
+        )
+        mock_build_clusters.return_value = [first, second]
+        first_review_released = threading.Event()
+        prompts: dict[str, str] = {}
+
+        def analyze(_llm, cluster: ContentCluster, *, user_prompt: str) -> LLMVerdict:
+            prompts[cluster.members[0].source_file] = user_prompt
+            if cluster is first:
+                # The first cluster's review finishes last.
+                assert first_review_released.wait(timeout=5)
+            else:
+                first_review_released.set()
+            return LLMVerdict(verdict="DUPLICATE", confidence=0.9, reasoning="Same", suggestion="Merge")
+
+        mock_analyze.side_effect = analyze
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert prompts == {"SKILL.md": build_user_prompt(first), "notes.md": build_user_prompt(second)}
+        assert [finding.file_path for finding in result.findings] == ["SKILL.md", "notes.md"]
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
     def test_embedding_error_is_incomplete_without_skill_finding(self, mock_embed, tmp_path: Path) -> None:

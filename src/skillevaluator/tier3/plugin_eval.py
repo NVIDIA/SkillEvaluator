@@ -60,7 +60,7 @@ import tempfile
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import yaml
 
@@ -71,7 +71,6 @@ from skillevaluator.constants import (
     DESCRIPTION_MAX_LENGTH,
     NAME_MAX_LENGTH,
     PLUGIN_CONTAINED_MANIFEST_TYPE,
-    PLUGIN_CONTAINED_MANIFEST_TYPES,
     PLUGIN_CURSOR_MANIFEST_TYPE,
     PLUGIN_MANIFEST_RELATIVE_PATHS,
     PLUGIN_NAME_MAX_REPORT_CHARS,
@@ -86,8 +85,6 @@ from skillevaluator.plugin_components import (
     PluginRootReader,
     build_plugin_inventory,
     coverage_row,
-    manifest_rel_for,
-    mcp_pinning_summary,
     normalize_declared_path,
     parse_markdown,
     problem_reason,
@@ -113,12 +110,44 @@ from skillevaluator.plugin_dependencies import parse_canonical_ref as _parse_can
 from skillevaluator.plugin_dependencies import ref_label as _ref_label
 from skillevaluator.plugin_dependencies import ref_name as _ref_name
 from skillevaluator.plugin_dependencies import ref_source as _ref_source
-from skillevaluator.plugin_dependencies import slug_from_remote_url as _slug_from_remote_url  # noqa: F401
-from skillevaluator.plugin_formats import manifest_syntax, normalized_component_manifest, profile_for
+from skillevaluator.plugin_formats import (
+    CLAUDE_PROFILE,
+    manifest_syntax,
+    normalized_component_manifest,
+    parse_manifest_text,
+    profile_for,
+)
+from skillevaluator.plugin_mcp import mcp_pinning_summary
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries, normalize_dataset_entries
 from skillevaluator.tier3.eval_core.plugin_signals import validate_plugin_case_fields
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
+
+# The generated with-plugin files the Harbor adapter reads (and their name cap).
+# PLUGIN_MCP_SERVERS_FILENAME stays distinct from the task-environment
+# ``mcp_servers.toml`` so the adapter can stage it for the with-plugin arm only.
+from skillevaluator.tier3.harbor.adapter import (
+    MAX_PLUGIN_RUNTIME_NAMES,
+    PLUGIN_MCP_SERVERS_FILENAME,
+    PLUGIN_RUNTIME_COMPONENTS_FILENAME,
+)
 from skillevaluator.tier3.harbor.secure_copy import UnsafeStagingError, copy_file_secure, copytree_secure
+from skillevaluator.tier3.plugin_native import (
+    HARNESS_ADAPTERS,
+    AgentLoadDecision,
+    ClaudeCodeAdapter,
+    NativePluginSource,
+    PluginLoadError,
+    adapter_for,
+    apply_native_refusals,
+    build_native_source,
+    foreign_root_var_re,
+    member_skill_hook_refusal,
+    native_component_types,
+    opencode_agent_name,
+    plugin_root_var_names,
+    resolve_plugin_load,
+    to_claude_root,
+)
 from skillevaluator.utils.helpers import find_bundled_plugin_skills
 from skillevaluator.utils.secure_fs import (
     SecurePathError,
@@ -138,18 +167,16 @@ from skillevaluator.utils.structured_data import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from skillevaluator.plugin_formats import FormatProfile
     from skillevaluator.plugin_manifest import PluginManifestLocation
+
+#: The generated package directory is ``<plugin><PLUGIN_EVAL_PACKAGE_SUFFIX>``; the Harbor
+#: runner strips the suffix to recognize the wrapper skill by the plugin's name.
+PLUGIN_EVAL_PACKAGE_SUFFIX = "-plugin-eval"
 
 # Shared with Harbor's runtime find_evals_file() and the report loader so a
 # dataset accepted/staged here is resolvable downstream.
 _EVAL_DATASET_NAMES = tuple(f"evals{extension}" for extension in DATASET_EXTENSIONS)
-
-# Filename for the plugin's own runnable MCP servers. Kept distinct from the
-# task-environment ``mcp_servers.toml`` so the adapter can stage it for the
-# with-plugin arm only (see ``adapter.generate_harbor_tasks``).
-PLUGIN_MCP_SERVERS_FILENAME = "plugin_mcp_servers.toml"
-# Declared subagent and command names for activation coverage (read by the runner).
-PLUGIN_RUNTIME_COMPONENTS_FILENAME = "plugin_runtime_components.json"
 
 # Install-time variables a harness expands when it loads an installed plugin
 # (Claude Code's CLAUDE_PLUGIN_ROOT/DATA, plus each manifest format's own root
@@ -157,8 +184,6 @@ PLUGIN_RUNTIME_COMPONENTS_FILENAME = "plugin_runtime_components.json"
 # that point into the plugin tree. The wrapper runtime expands none of them and
 # never copies the plugin tree into the task environment, so an MCP server
 # launched through them cannot start there (see _launches_from_plugin_files).
-_CLAUDE_PLUGIN_VARS = ("CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA")
-_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _RELATIVE_PATH_PREFIXES = ("./", "../", ".\\", "..\\")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:/")
 # ``${user_config.<key>}`` values Claude Code fills from the plugin's userConfig.
@@ -167,27 +192,11 @@ _USER_CONFIG_REF_RE = re.compile(r"\$\{user_config\.([A-Za-z0-9_.-]+)\}")
 _ROOTED_PLACEHOLDER = "/plugin-root"
 
 
-def _plugin_root_var_names(root_prefixes: tuple[str, ...] = ()) -> tuple[str, ...]:
-    """Variable names that name the plugin root: the format's placeholders plus Claude Code's."""
-    names = {prefix.strip().removeprefix("$").removeprefix("{").removesuffix("}") for prefix in root_prefixes}
-    return tuple(sorted({name for name in names if _ENV_NAME_RE.fullmatch(name)} | set(_CLAUDE_PLUGIN_VARS)))
-
-
 @functools.lru_cache(maxsize=16)
 def _plugin_install_var_re(root_prefixes: tuple[str, ...] = ()) -> re.Pattern[str]:
     """Match a plugin-root variable, braced (``${PLUGIN_ROOT}``) or bare (``$PLUGIN_ROOT``)."""
-    names = "|".join(re.escape(name) for name in _plugin_root_var_names(root_prefixes))
+    names = "|".join(re.escape(name) for name in plugin_root_var_names(root_prefixes))
     return re.compile(r"\$\{?(?:" + names + r")\b")
-
-
-@functools.lru_cache(maxsize=16)
-def _foreign_root_var_re(root_prefixes: tuple[str, ...] = ()) -> re.Pattern[str] | None:
-    """Match a format's own root placeholder that Claude Code does not expand (``${PLUGIN_ROOT}``)."""
-    foreign = [name for name in _plugin_root_var_names(root_prefixes) if name not in _CLAUDE_PLUGIN_VARS]
-    if not foreign:
-        return None
-    names = "|".join(re.escape(name) for name in foreign)
-    return re.compile(r"\$\{(?:" + names + r")\}|\$(?:" + names + r")\b")
 
 
 @dataclass(frozen=True)
@@ -203,7 +212,6 @@ class PluginEvalPackage:
     include_skills: tuple[Path, ...]
     unresolved_mcp_servers: tuple[str, ...]
     runnable_mcp_servers: tuple[str, ...]
-    rule_refs: tuple[str, ...]
     staged_rules: tuple[str, ...] = ()
     unresolved_skill_refs: tuple[str, ...] = ()
     unresolved_rule_refs: tuple[str, ...] = ()
@@ -216,7 +224,7 @@ class PluginEvalPackage:
     # Native plugin loading (``--plugin-load native|auto``): the bounded plugin
     # snapshot the harness adapters stage for the with-plugin arm. ``None`` in
     # the default wrapper mode.
-    native_source: Any = dataclass_field(default=None, compare=False, hash=False, repr=False)
+    native_source: NativePluginSource | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
     # Report-only static inventory outputs (C2). ``None`` for packages built
     # without an inventory (e.g. constructed directly in tests).
     component_coverage: dict[str, Any] | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
@@ -381,183 +389,79 @@ def prepare_plugin_eval_package(
         ValueError: If the manifest is malformed, or local components exist but
             no eval dataset/task source can be found.
     """
-    location = _manifest_location(plugin_path)
-    manifest_path = location.path
-    contained_form = location.contained
-    profile = profile_for(location.manifest_type)
-    plugin_dir = location.root
-    plugin_root = location.secure_file.root
-    manifest_text = location.read_text()
-    manifest = _load_manifest_text(manifest_text, manifest_path, location.manifest_type)
-    plugin_name = _plugin_name(manifest, plugin_dir)
-    plugin_description = _plugin_description(manifest, plugin_name)
-    # Static inventory of every declared/packaged component (the selected
-    # manifest plus any additional manifests): supplies the MCP declarations
-    # from every mcpServers form and default MCP file for staging, the declared
-    # skills and rules of the newer formats, and the report-only coverage /
-    # context-cost / pinning provenance.
     if policy is None:
         from skillevaluator.validators.policy import resolve_policy
 
         policy = resolve_policy()
-    inventory = build_plugin_inventory(
-        plugin_root,
-        manifest,
-        contained=contained_form,
-        manifest_rel=manifest_rel_for(manifest_path, plugin_dir),
-        allowed_private_hosts=tuple(policy.mcp_allowed_private_hosts),
-        manifest_type=location.manifest_type,
-        additional=_additional_manifests(location),
-    )
-    stage_from_inventory = contained_form and profile.stage_from_inventory
-
+    plugin = _locate_plugin(plugin_path, allowed_private_hosts=tuple(policy.mcp_allowed_private_hosts))
     # Layer-1 intra-repo resolver: canonical skill/rule refs whose <repo> is the
     # plugin's own clone are resolved to real dirs/files under the clone root
     # (widened, slug-verified containment); everything else stays unresolved.
     # It uses Tier 1's repository identity, so both tiers resolve the same root.
-    resolver = _make_intra_repo_resolver(plugin_dir, plugin_root, repo_root, stage_root)
+    resolver = _make_intra_repo_resolver(plugin.plugin_dir, plugin.plugin_root, repo_root, stage_root)
     dependency_status_counts = (
         ()
-        if contained_form
+        if plugin.contained
         else tuple(
-            dependency_status_counts_for_manifest(manifest, plugin_dir, repo_root, identity=resolver.identity).items()
+            dependency_status_counts_for_manifest(
+                plugin.manifest, plugin.plugin_dir, repo_root, identity=resolver.identity
+            ).items()
         )
     )
-
-    # Contained skills: symlink-safe discovery shared with Tier 1/2, plus any
-    # caller-supplied local skills, plus the bundle skill refs Tier 1 proves.
-    # Canonical refs to OTHER repos are never treated as paths.
-    contained_skills = (
-        _inventory_skill_dirs(inventory, plugin_root)
-        if stage_from_inventory
-        else tuple(path.resolve() for path in find_bundled_plugin_skills(plugin_dir))
-    )
-    extra_skills = tuple(dict.fromkeys(path.expanduser().resolve() for path in include_skills))
-    # Contained plugins bundle their skills under skills/ (discovered above); the
-    # manifest 'skills' key is a directory pointer (e.g. "./skills/"), not a
-    # canonical ref list, so there are no unresolved remote skill refs. A
-    # bundle-reference ref is covered only when Tier 1 would call it provided or
-    # referenced, or (external/unresolved) by a same-named --include-skills
-    # directory. A same-named bundled skill never covers a missing or external ref.
-    intra_repo_skills: tuple[Path, ...] = ()
-    unresolved_skill_refs: tuple[str, ...] = ()
-    if not contained_form:
-        intra_repo_skills, unresolved_skill_refs = _resolve_skill_refs(
-            manifest.get("skills"),
-            resolver=resolver,
-            plugin_dir=plugin_dir,
-            contained=contained_skills,
-            included=extra_skills,
-        )
-    member_skills = tuple(dict.fromkeys((*contained_skills, *extra_skills, *intra_repo_skills)))
+    member_skills, unresolved_skill_refs = _resolve_member_skills(plugin, include_skills, resolver)
     _refuse_member_skill_hooks(member_skills)
-
-    # A contained manifest may express 'rules' as a directory pointer (e.g.
-    # "./rules/") rather than a canonical ref list. That string must not reach
-    # ref-parsing (_iter_raw_refs would raise "refs must be a list"); instead, like
-    # contained skills (discovered from skills/ on disk), contained rule files are
-    # discovered from <plugin>/rules/ and staged so they are actually exercised --
-    # honoring the contained-plugin contract rather than silently dropping them.
-    # Bundle-reference plugins resolve their refs as before.
-    rules_section = manifest.get("rules")
-    if stage_from_inventory:
-        contained_rules = _inventory_rule_files(inventory, plugin_root)
-        staged_rules = tuple(contained_rules)
-        unresolved_rule_refs = ()
-        all_rule_refs = tuple(rule.name for rule in contained_rules)
-    elif contained_form and not isinstance(rules_section, list):
-        contained_rules = _discover_contained_rule_files(plugin_root)
-        staged_rules = tuple(contained_rules)
-        unresolved_rule_refs = ()
-        all_rule_refs = tuple(rule.name for rule in contained_rules)
-    else:
-        staged_rules, unresolved_rule_refs, all_rule_refs = _resolve_rules(
-            rules_section, plugin_dir, plugin_root, resolver
-        )
-    component_manifest = (
-        normalized_component_manifest(location.manifest_type, manifest) or {} if contained_form else manifest
-    )
+    staged_rules, unresolved_rule_refs = _resolve_plugin_rules(plugin, resolver)
     mcp = _split_mcp_servers(
-        component_manifest,
-        inventory,
-        contained_form,
-        plugin_root=plugin_root,
-        root_prefixes=profile.root_prefixes,
+        plugin.component_manifest,
+        plugin.inventory,
+        plugin.contained,
+        plugin_root=plugin.plugin_root,
+        root_prefixes=plugin.profile.root_prefixes,
         policy=policy,
-        manifest_type=location.manifest_type,
+        manifest_type=plugin.location.manifest_type,
     )
-    runnable_mcp, provider_mcp = mcp.runnable, mcp.provider_only
 
-    # Native plugin loading: resolve the per-agent plan first and snapshot the
-    # plugin only when some agent loads it natively. The skip decision and the
-    # INCOMPLETE rule then follow what each with-plugin arm really stages.
-    resolved_source = _resolve_evals_source(plugin_dir, evals_source) if plugin_load != "wrapper" else None
-    native_plan = _preview_plugin_load_plan(plugin_load, agents, env_mode, _preview_task_source(resolved_source))
-    native_source = refusal_source = None
-    # A wrapper run stages no native source, but its coverage rows still name the components that
-    # --plugin-load native would refuse (a permission bypass), so it reads the refusals the same way.
-    refusal_only = plugin_load == "wrapper"
-    if refusal_only or native_plan is None or any(d.native for d in native_plan.values()):
-        from skillevaluator.tier3.plugin_native import build_native_source
-
-        # Newer contained formats stage through their Claude-field-name view; the
-        # Claude Code and bundle-reference manifests stage as before.
-        native_manifest = (
-            (component_manifest or {})
-            if contained_form and location.manifest_type != PLUGIN_CONTAINED_MANIFEST_TYPE
-            else manifest
-        )
-        build_source = functools.partial(
-            build_native_source,
-            inventory=inventory,
-            manifest=native_manifest,
-            plugin_root=plugin_root,
-            contained=contained_form,
-            manifest_rel=manifest_rel_for(manifest_path, plugin_dir),
-            plugin_name=plugin_name,
-            description=plugin_description,
-            member_skills=member_skills,
-            rules=tuple((rule.name, rule.content) for rule in staged_rules),
-            mcp_servers=runnable_mcp,
-            plugin_file_mcp_servers=mcp.plugin_file,
-            mcp_declared=mcp.declared,
-            nest_flat_hooks=location.manifest_type == PLUGIN_CURSOR_MANIFEST_TYPE,
-            hook_dialect="cursor" if location.manifest_type == PLUGIN_CURSOR_MANIFEST_TYPE else "claude",
-            hook_root_prefixes=profile.root_prefixes,
-            # An --evals-source inside the plugin root must not reach the agent
-            # through the native whole-plugin copy.
-            excluded_paths=_native_excluded_evals_paths(resolved_source, plugin_root),
-        )
-        if refusal_only:
-            try:
-                refusal_source = build_source()
-            except (ValueError, OSError):
-                refusal_source = None  # a file native loading cannot read: no native hint either
-        else:
-            native_source = build_source()
-            native_plan = _apply_native_refusals(plugin_load, native_plan, native_source)
-    claude_native = _claude_native_arm(native_plan)
-    user_config_defaults = _user_config_defaults(manifest)
+    # Native and auto loading need the evals source before the load plan: the
+    # task source it pins decides whether an agent can load the plugin natively,
+    # and the native whole-plugin copy must leave it out. The wrapper resolves it
+    # only when it stages the package, so a plugin with nothing locally
+    # evaluable is skipped without its eval source being read or validated.
+    resolved_source = _resolve_evals_source(plugin.plugin_dir, evals_source) if plugin_load != "wrapper" else None
+    native_plan, native_source, staging_source = _native_snapshot(
+        plugin,
+        plugin_load=plugin_load,
+        agents=agents,
+        env_mode=env_mode,
+        evals_source=resolved_source,
+        member_skills=member_skills,
+        staged_rules=staged_rules,
+        mcp=mcp,
+    )
+    claude_native = _claude_native_arms(native_plan)
+    user_config_defaults = _user_config_defaults(plugin.manifest)
     mcp_unsupported_config = _unsupported_mcp_for_plan(mcp, native_plan, user_config_defaults)
     skipped = not (
-        member_skills or staged_rules or runnable_mcp or _native_loaded_types(plugin_load, native_plan, native_source)
+        member_skills or staged_rules or mcp.runnable or _native_loaded_types(plugin_load, native_plan, native_source)
+    )
+    mcp_coverage = _McpCoverage(
+        mcp,
+        unsupported=tuple(mcp_unsupported_config),
+        plugin_file_agents=claude_native,
+        plugin_file_gap_notes=_plugin_file_gap_notes(mcp, native_plan, user_config_defaults, mcp_unsupported_config),
     )
     report_only = _inventory_provenance(
-        inventory,
-        plugin_root=plugin_root,
-        contained=contained_form,
+        plugin.inventory,
+        plugin_root=plugin.plugin_root,
+        contained=plugin.contained,
+        skipped=skipped,
         member_skills=member_skills,
         staged_rule_names=tuple(rule.name for rule in staged_rules),
         unresolved_skill_refs=unresolved_skill_refs,
         unresolved_rule_refs=unresolved_rule_refs,
-        runnable_names=tuple(server["name"] for server in runnable_mcp),
-        provider_names=tuple(server["name"] for server in provider_mcp),
-        unsupported_config=tuple(mcp_unsupported_config),
-        skipped=skipped,
-        plugin_file_names=tuple(server["name"] for server in mcp.plugin_file) if claude_native else (),
-        plugin_file_gap_notes=_plugin_file_gap_notes(mcp, native_plan, user_config_defaults, mcp_unsupported_config),
+        mcp=mcp_coverage,
         claude_skill_dirs=_claude_skill_dirs(native_source) if claude_native else (),
-        arm_staging=_arm_staging(plugin_load, native_plan, refusal_source if refusal_only else native_source),
+        claude_native_agents=claude_native,
+        arm_staging=_arm_staging(plugin_load, native_plan, staging_source),
         cost_agents=_cost_agents(agents),
     )
 
@@ -565,12 +469,11 @@ def prepare_plugin_eval_package(
     # than a with-plugin run identical to baseline (a meaningless zero lift).
     if skipped:
         return PluginEvalPackage(
-            plugin_name=plugin_name,
+            plugin_name=plugin.name,
             package_path=None,
             include_skills=(),
-            unresolved_mcp_servers=tuple(server["name"] for server in provider_mcp),
+            unresolved_mcp_servers=mcp.provider_names,
             runnable_mcp_servers=(),
-            rule_refs=tuple(all_rule_refs),
             unresolved_skill_refs=unresolved_skill_refs,
             unresolved_rule_refs=unresolved_rule_refs,
             mcp_unsupported_config=tuple(mcp_unsupported_config),
@@ -579,77 +482,294 @@ def prepare_plugin_eval_package(
             skip_reason=_skip_reason(
                 unresolved_skill_refs,
                 unresolved_rule_refs,
-                provider_mcp,
+                mcp.provider_only,
                 [name for name, gaps in mcp.gaps.items() if gaps[0].startswith("plugin_files")],
                 unrooted_mcp=[name for name, gaps in mcp.gaps.items() if gaps[0] == "plugin_files_unrooted"],
             ),
             **report_only,
         )
 
-    package_path = _fresh_package_dir(stage_root, plugin_name)
+    package_path = _fresh_package_dir(stage_root, plugin.name)
+    if plugin_load == "wrapper":
+        resolved_source = _resolve_evals_source(plugin.plugin_dir, evals_source)
+    dataset_cases = _stage_package_files(
+        package_path,
+        plugin,
+        member_skills=member_skills,
+        staged_rules=staged_rules,
+        unresolved_skill_refs=unresolved_skill_refs,
+        unresolved_rule_refs=unresolved_rule_refs,
+        mcp=mcp,
+        evals_source=resolved_source,
+    )
+    return PluginEvalPackage(
+        plugin_name=plugin.name,
+        native_source=native_source,
+        package_path=package_path,
+        include_skills=member_skills,
+        unresolved_mcp_servers=mcp.provider_names,
+        runnable_mcp_servers=mcp.runnable_names,
+        mcp_unsupported_config=tuple(mcp_unsupported_config),
+        staged_rules=tuple(rule.name for rule in staged_rules),
+        unresolved_skill_refs=unresolved_skill_refs,
+        unresolved_rule_refs=unresolved_rule_refs,
+        dataset_case_count=len(dataset_cases),
+        cross_component_case_count=_cross_component_case_count(dataset_cases, member_skills),
+        dependency_status_counts=dependency_status_counts,
+        mcp_probe_targets=tuple(mcp.probe_targets[:MAX_PLUGIN_MANIFEST_ITEMS]),
+        **report_only,
+    )
+
+
+@dataclass(frozen=True)
+class _LocatedPlugin:
+    """The selected plugin manifest, read and parsed once, with the plugin's static inventory."""
+
+    location: PluginManifestLocation
+    manifest_text: str
+    manifest: dict[str, Any]
+    name: str
+    description: str
+    #: Every declared and packaged component (the selected manifest plus any
+    #: additional manifests): the MCP declarations from every mcpServers form and
+    #: default MCP file for staging, the declared skills and rules of the newer
+    #: formats, and the report-only coverage / context-cost / pinning provenance.
+    inventory: PluginInventory
+
+    @property
+    def contained(self) -> bool:
+        return self.location.contained
+
+    @property
+    def plugin_dir(self) -> Path:
+        return self.location.root
+
+    @property
+    def plugin_root(self) -> Path:
+        return self.location.secure_file.root
+
+    @property
+    def manifest_rel(self) -> str:
+        return self.location.manifest_filename
+
+    @property
+    def profile(self) -> FormatProfile:
+        return profile_for(self.location.manifest_type)
+
+    @property
+    def stage_from_inventory(self) -> bool:
+        """Whether this format's skills and rules are staged from what the inventory found."""
+        return self.contained and self.profile.stage_from_inventory
+
+    @property
+    def component_manifest(self) -> dict[str, Any]:
+        """The manifest's component declarations in Claude Code field names (a contained format's own view)."""
+        if not self.contained:
+            return self.manifest
+        return normalized_component_manifest(self.location.manifest_type, self.manifest) or {}
+
+
+def _locate_plugin(plugin_path: Path, *, allowed_private_hosts: tuple[str, ...] = ()) -> _LocatedPlugin:
+    """Read the selected manifest and inventory the plugin; *allowed_private_hosts* is the policy's MCP allowlist."""
+    location = _manifest_location(plugin_path)
+    manifest_text = location.read_text()
+    manifest = _load_manifest_text(manifest_text, location.path, location.manifest_type)
+    name = _plugin_name(manifest, location.root)
+    description = _plugin_description(manifest, name)
+    inventory = build_plugin_inventory(
+        location.secure_file.root,
+        manifest,
+        contained=location.contained,
+        manifest_rel=location.manifest_filename,
+        allowed_private_hosts=allowed_private_hosts,
+        manifest_type=location.manifest_type,
+        # Inventoried, never staged, so coverage reports what only another client loads.
+        additional=location.parsed_additional(),
+    )
+    return _LocatedPlugin(location, manifest_text, manifest, name, description, inventory)
+
+
+def _resolve_member_skills(
+    plugin: _LocatedPlugin, include_skills: tuple[Path, ...], resolver: _IntraRepoResolver
+) -> tuple[tuple[Path, ...], tuple[str, ...]]:
+    """The member skills to stage, and the skill refs that stay unresolved.
+
+    Members are the plugin's own skills (symlink-safe discovery shared with
+    Tier 1/2, or what the inventory found for the newer formats), the
+    caller-supplied local skills, and the bundle skill refs Tier 1 proves
+    (:func:`_resolve_skill_refs`). Canonical refs to OTHER repos are never
+    treated as paths.
+    """
+    contained_skills = (
+        _inventory_skill_dirs(plugin.inventory, plugin.plugin_root)
+        if plugin.stage_from_inventory
+        else tuple(path.resolve() for path in find_bundled_plugin_skills(plugin.plugin_dir))
+    )
+    extra_skills = tuple(dict.fromkeys(path.expanduser().resolve() for path in include_skills))
+    if plugin.contained:
+        # A contained manifest's 'skills' key is a directory pointer (e.g.
+        # "./skills/"), not a canonical ref list, so there are no remote skill refs.
+        return tuple(dict.fromkeys((*contained_skills, *extra_skills))), ()
+
+    # A bundle-reference ref is covered only when Tier 1 would call it provided or
+    # referenced, or (external/unresolved) by a same-named --include-skills
+    # directory. A same-named bundled skill never covers a missing or external ref.
+    intra_repo_skills, unresolved = _resolve_skill_refs(
+        plugin.manifest.get("skills"),
+        resolver=resolver,
+        plugin_dir=plugin.plugin_dir,
+        contained=contained_skills,
+        included=extra_skills,
+    )
+    return tuple(dict.fromkeys((*contained_skills, *extra_skills, *intra_repo_skills))), unresolved
+
+
+def _resolve_plugin_rules(
+    plugin: _LocatedPlugin, resolver: _IntraRepoResolver
+) -> tuple[tuple[_StagedRule, ...], tuple[str, ...]]:
+    """The rule files to stage (read once, bounded), and the rule refs that stay unresolved.
+
+    A contained manifest may express 'rules' as a directory pointer (e.g.
+    "./rules/") rather than a canonical ref list. That string must not reach
+    ref-parsing (_iter_raw_refs would raise "refs must be a list"); instead, like
+    contained skills (discovered from skills/ on disk), contained rule files are
+    discovered from <plugin>/rules/ and staged so they are actually exercised --
+    honoring the contained-plugin contract rather than silently dropping them.
+    Bundle-reference plugins resolve their refs.
+    """
+    rules_section = plugin.manifest.get("rules")
+    if plugin.stage_from_inventory:
+        return tuple(_inventory_rule_files(plugin.inventory, plugin.plugin_root)), ()
+    if plugin.contained and not isinstance(rules_section, list):
+        return tuple(_discover_contained_rule_files(plugin.plugin_root)), ()
+    return _resolve_rules(rules_section, plugin.plugin_dir, plugin.plugin_root, resolver)
+
+
+def _native_snapshot(
+    plugin: _LocatedPlugin,
+    *,
+    plugin_load: str,
+    agents: str | Sequence[str] | None,
+    env_mode: str | None,
+    evals_source: Path | None,
+    member_skills: tuple[Path, ...],
+    staged_rules: tuple[_StagedRule, ...],
+    mcp: _McpSplit,
+) -> tuple[dict[str, AgentLoadDecision] | None, NativePluginSource | None, NativePluginSource | None]:
+    """The per-agent load plan, the plugin snapshot for the native adapters, and the snapshot the coverage reads.
+
+    The plan comes first, and the plugin is snapshotted only when some agent
+    loads it natively, so the skip decision and the INCOMPLETE rule follow what
+    each with-plugin arm really stages. A component that enables a permission
+    bypass then refuses (``native``) or falls back (``auto``) for the agents
+    that would stage it. A wrapper run stages no native source, but its
+    coverage rows still name the components that ``--plugin-load native``
+    would refuse, so it reads the refusals from a snapshot it never stages
+    (none when native loading cannot read the plugin: no native hint either).
+    """
+    plan = _preview_plugin_load_plan(plugin_load, agents, env_mode, _preview_task_source(evals_source))
+    refusal_only = plugin_load == "wrapper"
+    if not refusal_only and plan is not None and not any(decision.native for decision in plan.values()):
+        return plan, None, None
+    manifest_type = plugin.location.manifest_type
+    # Newer contained formats stage through their Claude-field-name view; the
+    # Claude Code and bundle-reference manifests stage as they are.
+    newer_contained_format = plugin.contained and manifest_type != PLUGIN_CONTAINED_MANIFEST_TYPE
+    build_source = functools.partial(
+        build_native_source,
+        inventory=plugin.inventory,
+        manifest=plugin.component_manifest if newer_contained_format else plugin.manifest,
+        plugin_root=plugin.plugin_root,
+        contained=plugin.contained,
+        manifest_rel=plugin.manifest_rel,
+        plugin_name=plugin.name,
+        description=plugin.description,
+        member_skills=member_skills,
+        rules=tuple((rule.name, rule.content) for rule in staged_rules),
+        mcp_servers=mcp.runnable,
+        plugin_file_mcp_servers=mcp.plugin_file,
+        mcp_declared=mcp.declared,
+        nest_flat_hooks=manifest_type == PLUGIN_CURSOR_MANIFEST_TYPE,
+        hook_dialect="cursor" if manifest_type == PLUGIN_CURSOR_MANIFEST_TYPE else "claude",
+        hook_root_prefixes=plugin.profile.root_prefixes,
+        # An --evals-source inside the plugin root must not reach the agent
+        # through the native whole-plugin copy.
+        excluded_paths=_native_excluded_evals_paths(evals_source, plugin.plugin_root),
+    )
+    if refusal_only:
+        try:
+            return plan, None, build_source()
+        except (ValueError, OSError):
+            return plan, None, None
+    source = build_source()
+    return _apply_native_refusals(plugin_load, plan, source), source, source
+
+
+def _stage_package_files(
+    package_path: Path,
+    plugin: _LocatedPlugin,
+    *,
+    member_skills: tuple[Path, ...],
+    staged_rules: tuple[_StagedRule, ...],
+    unresolved_skill_refs: tuple[str, ...],
+    unresolved_rule_refs: tuple[str, ...],
+    mcp: _McpSplit,
+    evals_source: Path | None,
+) -> list[dict[str, Any]]:
+    """Write the package: the staged manifest, the wrapper ``SKILL.md``, the evals, and the generated files.
+
+    The evals are a copy of *evals_source*, or the member skills' datasets
+    combined when there is none. Returns the dataset cases, after checking
+    their advisory plugin-signal fields.
+    """
     _stage_agent_plugin_manifest(
         package_path / "agent_plugin.yaml",
-        manifest_text,
-        manifest,
-        contained_form=contained_form,
+        plugin.manifest_text,
+        plugin.manifest,
+        contained_form=plugin.contained,
     )
     _write_plugin_skill_md(
         package_path / "SKILL.md",
-        plugin_name=plugin_name,
-        plugin_description=plugin_description,
+        plugin_name=plugin.name,
+        plugin_description=plugin.description,
         include_skills=member_skills,
         staged_rules=staged_rules,
         unresolved_skill_refs=unresolved_skill_refs,
         unresolved_rule_refs=unresolved_rule_refs,
-        provider_mcp_servers=tuple(server["name"] for server in provider_mcp),
+        provider_mcp_servers=mcp.provider_names,
     )
-
-    if plugin_load == "wrapper":
-        resolved_source = _resolve_evals_source(plugin_dir, evals_source)
-
     evals_dir = package_path / "evals"
-    if resolved_source is not None:
-        _copy_evals_source(resolved_source, evals_dir)
+    if evals_source is not None:
+        _copy_evals_source(evals_source, evals_dir)
     else:
-        _write_combined_member_evals(evals_dir, member_skills, plugin_name=plugin_name)
+        _write_combined_member_evals(evals_dir, member_skills, plugin_name=plugin.name)
 
     dataset_path = next((evals_dir / name for name in _EVAL_DATASET_NAMES if (evals_dir / name).exists()), None)
     if dataset_path is None and not (evals_dir / "harbor").exists():
         raise ValueError(f"Prepared plugin package has no evaluation dataset: {package_path}")
-    # Native Harbor sources can be valid for effectiveness without carrying the
-    # structured composition metadata required for an Integration claim.
     dataset_cases = load_dataset_entries(dataset_path) if dataset_path is not None else []
     _reject_invalid_plugin_signal_fields(dataset_cases)
-    # A composition case must name two or more of the plugin's own member skills:
-    # names that are not members cannot be staged in the member-skills arm.
+
+    _write_plugin_mcp_servers_toml(evals_dir, mcp.runnable)
+    _write_plugin_runtime_components(evals_dir, plugin.inventory, plugin_name=plugin.name)
+    return dataset_cases
+
+
+def _cross_component_case_count(dataset_cases: list[dict[str, Any]], member_skills: tuple[Path, ...]) -> int:
+    """Cases that can support an Integration claim: ``cross_component`` naming two or more member skills.
+
+    A composition case must name two or more of the plugin's own member
+    skills: names that are not members cannot be staged in the member-skills
+    arm. Native Harbor sources can be valid for effectiveness without carrying
+    this structured composition metadata.
+    """
     member_names = {skill.name.strip().casefold() for skill in member_skills}
-    cross_component_case_count = sum(
+    return sum(
         1
         for case in dataset_cases
         if case.get("cross_component") is True
         and isinstance(case.get("expected_skills"), list)
         and len({str(name).strip().casefold() for name in case["expected_skills"]} & member_names) >= 2
-    )
-
-    _write_plugin_mcp_servers_toml(evals_dir, runnable_mcp)
-    _write_plugin_runtime_components(evals_dir, inventory, plugin_name=plugin_name)
-    return PluginEvalPackage(
-        plugin_name=plugin_name,
-        native_source=native_source,
-        package_path=package_path,
-        include_skills=member_skills,
-        unresolved_mcp_servers=tuple(server["name"] for server in provider_mcp),
-        runnable_mcp_servers=tuple(server["name"] for server in runnable_mcp),
-        mcp_unsupported_config=tuple(mcp_unsupported_config),
-        rule_refs=tuple(all_rule_refs),
-        staged_rules=tuple(rule.name for rule in staged_rules),
-        unresolved_skill_refs=unresolved_skill_refs,
-        unresolved_rule_refs=unresolved_rule_refs,
-        dataset_case_count=len(dataset_cases),
-        cross_component_case_count=cross_component_case_count,
-        dependency_status_counts=dependency_status_counts,
-        mcp_probe_targets=_mcp_probe_targets(manifest, inventory, runnable_mcp),
-        **report_only,
     )
 
 
@@ -715,7 +835,7 @@ def _pinned_task_source(source: Path | None) -> str | None:
 
 def _preview_plugin_load_plan(
     plugin_load: str, agents: str | Sequence[str] | None, env_mode: str | None, task_source: str
-) -> dict[str, Any] | None:
+) -> dict[str, AgentLoadDecision] | None:
     """Per-agent load decisions for this run, or ``None`` when the agents or environment are unknown.
 
     Raises ``PluginLoadError`` for ``native`` with an agent or environment that
@@ -726,47 +846,39 @@ def _preview_plugin_load_plan(
     planned = _planned_agents(agents)
     if not planned:
         return None
-    from skillevaluator.tier3.plugin_native import resolve_plugin_load
-
     return dict(resolve_plugin_load(plugin_load, planned, env_mode=env_mode, task_source=task_source))
 
 
-def _apply_native_refusals(plugin_load: str, plan: dict[str, Any] | None, source: Any) -> dict[str, Any] | None:
+def _apply_native_refusals(
+    plugin_load: str, plan: dict[str, AgentLoadDecision] | None, source: NativePluginSource
+) -> dict[str, AgentLoadDecision] | None:
     """Turn bypass refusals into errors (``native``) or wrapper fallbacks (``auto``), per agent.
 
     Only the component types an agent's adapter stages natively count. With an
     unknown plan, ``native`` refuses any bypass (every adapter might stage it)
     and ``auto`` leaves the decision to the runner.
     """
-    from skillevaluator.tier3.plugin_native import PluginLoadError, adapter_for, native_refusal, wrapper_decision
-
     if plan is None:
         if plugin_load == "native" and source.refusals:
             raise PluginLoadError(source.refusals[0][2])
         return None
-    updated = dict(plan)
-    for agent, decision in plan.items():
-        adapter = adapter_for(agent)
-        reason = native_refusal(adapter, source) if decision.native and adapter is not None else None
-        if reason is None:
-            continue
-        if plugin_load == "native":
-            raise PluginLoadError(f"--plugin-load native is not supported for {agent}: {reason}")
-        updated[agent] = wrapper_decision(agent, f"auto: {reason}; using the generated wrapper")
-    return updated
+    return apply_native_refusals(plugin_load, plan, source)
 
 
-def _claude_native_arm(plan: dict[str, Any] | None) -> bool:
-    """Whether some with-plugin arm loads the plugin natively through a copied plugin tree (Claude Code)."""
-    from skillevaluator.tier3.plugin_native import adapter_for
-
-    return any(
-        decision.native and getattr(adapter_for(agent), "copies_plugin_tree", False)
-        for agent, decision in (plan or {}).items()
-    )
+def _copies_tree(agent: str, decision: AgentLoadDecision) -> bool:
+    """Whether this with-plugin arm loads the plugin natively through a copied plugin tree (Claude Code)."""
+    adapter = adapter_for(agent)
+    return decision.native and adapter is not None and adapter.copies_plugin_tree
 
 
-def _unsupported_mcp_for_plan(mcp: _McpSplit, plan: dict[str, Any] | None, defaults: set[str]) -> list[str]:
+def _claude_native_arms(plan: dict[str, AgentLoadDecision] | None) -> tuple[str, ...]:
+    """The with-plugin arms that load the plugin natively through a copied plugin tree (Claude Code)."""
+    return tuple(sorted(agent for agent, decision in (plan or {}).items() if _copies_tree(agent, decision)))
+
+
+def _unsupported_mcp_for_plan(
+    mcp: _McpSplit, plan: dict[str, AgentLoadDecision] | None, defaults: set[str]
+) -> list[str]:
     """MCP servers some with-plugin arm cannot fully apply (the run is then INCOMPLETE).
 
     When every arm is a native Claude Code arm (the plugin tree is copied, and
@@ -780,18 +892,13 @@ def _unsupported_mcp_for_plan(mcp: _McpSplit, plan: dict[str, Any] | None, defau
     ]
 
 
-def _every_arm_claude_native(plan: dict[str, Any] | None) -> bool:
+def _every_arm_claude_native(plan: dict[str, AgentLoadDecision] | None) -> bool:
     """Whether every with-plugin arm is a native Claude Code arm (a known plan only)."""
-    from skillevaluator.tier3.plugin_native import adapter_for
-
-    return bool(plan) and all(
-        decision.native and getattr(adapter_for(agent), "copies_plugin_tree", False)
-        for agent, decision in (plan or {}).items()
-    )
+    return bool(plan) and all(_copies_tree(agent, decision) for agent, decision in (plan or {}).items())
 
 
 def _plugin_file_gap_notes(
-    mcp: _McpSplit, plan: dict[str, Any] | None, defaults: set[str], unsupported: Sequence[str]
+    mcp: _McpSplit, plan: dict[str, AgentLoadDecision] | None, defaults: set[str], unsupported: Sequence[str]
 ) -> dict[str, str]:
     """Why each unsupported plugin-file MCP server leaves the run INCOMPLETE, from its own gaps."""
     every_arm_claude = _every_arm_claude_native(plan)
@@ -811,10 +918,10 @@ def _plugin_file_gap_notes(
     return notes
 
 
-def _native_loaded_types(plugin_load: str, plan: dict[str, Any] | None, source: Any) -> set[str]:
+def _native_loaded_types(
+    plugin_load: str, plan: dict[str, AgentLoadDecision] | None, source: NativePluginSource | None
+) -> set[str]:
     """Component types some native with-plugin arm loads (with an unknown plan: any adapter under ``native``)."""
-    from skillevaluator.tier3.plugin_native import HARNESS_ADAPTERS, adapter_for, native_component_types
-
     if source is None:
         return set()
     if plan is None:
@@ -828,10 +935,8 @@ def _native_loaded_types(plugin_load: str, plan: dict[str, Any] | None, source: 
     return loaded
 
 
-def _claude_skill_dirs(source: Any) -> tuple[str, ...]:
+def _claude_skill_dirs(source: NativePluginSource | None) -> tuple[str, ...]:
     """Plugin-relative skill directories the native Claude Code plugin loads in place."""
-    from skillevaluator.tier3.plugin_native import ClaudeCodeAdapter
-
     if source is None:
         return ()
     return tuple(rel for _name, rel, copy_from in ClaudeCodeAdapter().staged_skills(source) if copy_from is None)
@@ -856,17 +961,25 @@ _TIER3_COVERAGE_NOTE = (
 _WRAPPER_RULE_REASON = "rule embedded in the generated wrapper SKILL.md"
 
 
+class _NativeArm(NamedTuple):
+    """One native with-plugin arm: its adapter, that adapter's component modes, and what it stages here."""
+
+    adapter_id: str
+    modes: dict[str, str]
+    #: The component types this arm stages natively from this plugin.
+    types: frozenset[str]
+
+
 @dataclass(frozen=True)
 class _ArmStaging:
     """How the with-plugin arms stage the plugin, for the coverage reasons.
 
-    ``native`` maps each native arm's agent to its adapter id, its component
-    modes, and the component types it stages from this plugin; ``wrapper``
-    lists the arms that load the generated wrapper (empty for a wrapper run,
-    where every arm does).
+    ``native`` maps each native arm's agent to its :class:`_NativeArm`;
+    ``wrapper`` lists the arms that load the generated wrapper (empty for a
+    wrapper run, where every arm does).
     """
 
-    native: dict[str, tuple[str, dict[str, str], frozenset[str]]]
+    native: dict[str, _NativeArm]
     wrapper: tuple[str, ...]
     #: ``(type, name)`` of components native staging refuses (a permission bypass).
     refused: frozenset[tuple[str, str]] = frozenset()
@@ -874,23 +987,23 @@ class _ArmStaging:
     refusals_known: bool = True
 
     def native_for(self, component_type: str) -> list[str]:
-        return sorted(agent for agent, (_id, _modes, types) in self.native.items() if component_type in types)
+        return sorted(agent for agent, arm in self.native.items() if component_type in arm.types)
 
     def wrapper_rule_arms(self) -> list[str]:
-        wrapped = [agent for agent, (_id, modes, _types) in self.native.items() if modes.get("rule") == "wrapper"]
+        wrapped = [agent for agent, arm in self.native.items() if arm.modes.get("rule") == "wrapper"]
         return sorted([*self.wrapper, *wrapped])
 
 
-def _arm_staging(plugin_load: str, plan: dict[str, Any] | None, source: Any) -> _ArmStaging | None:
+def _arm_staging(
+    plugin_load: str, plan: dict[str, AgentLoadDecision] | None, source: NativePluginSource | None
+) -> _ArmStaging | None:
     """The per-arm staging for the coverage reasons; ``None`` when a native or auto plan is not known."""
-    from skillevaluator.tier3.plugin_native import adapter_for, native_component_types
-
     refused = frozenset((kind, name) for kind, name, _message in getattr(source, "refusals", ()) or ())
     if plugin_load == "wrapper":
         return _ArmStaging(native={}, wrapper=(), refused=refused, refusals_known=source is not None)
     if plan is None:
         return None
-    native: dict[str, tuple[str, dict[str, str], frozenset[str]]] = {}
+    native: dict[str, _NativeArm] = {}
     wrapper: list[str] = []
     for agent, decision in plan.items():
         adapter = adapter_for(agent) if decision.native else None
@@ -898,7 +1011,7 @@ def _arm_staging(plugin_load: str, plan: dict[str, Any] | None, source: Any) -> 
             wrapper.append(agent)
             continue
         types = frozenset(native_component_types(adapter, source))
-        native[agent] = (adapter.adapter_id, adapter.component_modes(), types)
+        native[agent] = _NativeArm(adapter.adapter_id, adapter.component_modes(), types)
     return _ArmStaging(native=native, wrapper=tuple(sorted(wrapper)), refused=refused)
 
 
@@ -916,9 +1029,18 @@ def _rule_reason(staging: _ArmStaging | None, wrapper_reason: str = _WRAPPER_RUL
     return reason
 
 
-def _native_capable_agents(component_type: str) -> list[str]:
-    from skillevaluator.tier3.plugin_native import HARNESS_ADAPTERS
+def _natively_staged(row: dict[str, Any], agents: list[str]) -> dict[str, Any]:
+    """Record on a coverage row the agents whose native arm stages it.
 
+    The load census compares these agents, never the reason text, to tell
+    whether the plan already said the row is staged natively for them.
+    """
+    if agents:
+        row["native_agents"] = agents
+    return row
+
+
+def _native_capable_agents(component_type: str) -> list[str]:
     return sorted(
         agent
         for agent, adapter in HARNESS_ADAPTERS.items()
@@ -928,14 +1050,12 @@ def _native_capable_agents(component_type: str) -> list[str]:
 
 def _refuse_member_skill_hooks(member_skills: tuple[Path, ...]) -> None:
     """Every load mode stages member skills as written, so a bypass flag in their frontmatter hooks blocks staging."""
-    from skillevaluator.tier3.plugin_native import PluginLoadError, member_skill_hook_refusal
-
     refusal = member_skill_hook_refusal(member_skills)
     if refusal is not None:
         raise PluginLoadError(refusal)
 
 
-def _other_type_row(component: Any, staging: _ArmStaging | None) -> dict[str, Any]:
+def _other_type_row(component: Component, staging: _ArmStaging | None) -> dict[str, Any]:
     """Coverage row of a hook, subagent, command, or other type the generated wrapper does not stage.
 
     The reason follows the resolved plan: ``staged natively for <agents>`` when
@@ -973,20 +1093,35 @@ def _other_type_row(component: Any, staging: _ArmStaging | None) -> dict[str, An
             hint = ""
         return coverage_row(component, "unsupported", wrapper_note + hint)
     others = [f"{agent} ({wrapper_note})" for agent in staging.wrapper]
-    for agent, (adapter_id, modes, types) in sorted(staging.native.items()):
-        if kind in types:
+    for agent, arm in sorted(staging.native.items()):
+        if kind in arm.types:
             continue
-        if modes.get(kind) == "native":
-            others.append(f"{agent} (its native adapter ({adapter_id}) found nothing of this type to load)")
+        if arm.modes.get(kind) == "native":
+            others.append(f"{agent} (its native adapter ({arm.adapter_id}) found nothing of this type to load)")
         else:
-            others.append(f"{agent} (unsupported by the {agent} native adapter ({adapter_id}))")
+            others.append(f"{agent} (unsupported by the {agent} native adapter ({arm.adapter_id}))")
     native = staging.native_for(kind)
     if not native:
         return coverage_row(component, "unsupported", "not staged for " + "; ".join(others))
     reason = "staged natively for " + ", ".join(native)
     if others:
         reason += "; not staged for " + "; ".join(others)
-    return coverage_row(component, "staged", reason)
+    return _natively_staged(coverage_row(component, "staged", reason), native)
+
+
+_SKIPPED_PACKAGE_NOTE = "the plugin package was skipped (nothing locally evaluable)"
+
+
+class _McpCoverage(NamedTuple):
+    """The plugin's MCP servers as the coverage rows report them for the resolved plan."""
+
+    split: _McpSplit
+    #: Servers some with-plugin arm cannot fully apply (the run is reported INCOMPLETE).
+    unsupported: tuple[str, ...]
+    #: The native Claude Code arms, which start the servers that launch from plugin files.
+    plugin_file_agents: tuple[str, ...]
+    #: Why each unsupported plugin-file server still leaves the run INCOMPLETE.
+    plugin_file_gap_notes: dict[str, str]
 
 
 def _inventory_provenance(
@@ -994,126 +1129,57 @@ def _inventory_provenance(
     *,
     plugin_root: Path,
     contained: bool,
+    skipped: bool,
     member_skills: tuple[Path, ...],
     staged_rule_names: tuple[str, ...],
     unresolved_skill_refs: tuple[str, ...],
     unresolved_rule_refs: tuple[str, ...],
-    runnable_names: tuple[str, ...],
-    provider_names: tuple[str, ...],
-    unsupported_config: tuple[str, ...],
-    skipped: bool,
-    plugin_file_names: tuple[str, ...] = (),
+    mcp: _McpCoverage,
     claude_skill_dirs: tuple[str, ...] = (),
-    plugin_file_gap_notes: dict[str, str] | None = None,
+    claude_native_agents: tuple[str, ...] = (),
     arm_staging: _ArmStaging | None = None,
     cost_agents: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Build the report-only C2 ``component_coverage`` / ``context_cost`` / ``mcp_pinning``.
 
-    *plugin_file_names* and *claude_skill_dirs* are what a native Claude Code
-    arm stages beyond the wrapper: MCP servers that launch from the copied
-    plugin files, and the skill directories its staged ``plugin.json`` loads.
-    *plugin_file_gap_notes* says why an unsupported plugin-file server still
-    leaves the run INCOMPLETE. *arm_staging* (the resolved per-agent plan) says
-    where each arm stages rules, hooks, subagents, and commands, so a native
-    arm's rows do not describe the wrapper.
+    *claude_skill_dirs* are the skill directories a native Claude Code arm's
+    staged ``plugin.json`` loads beyond the wrapper, and *claude_native_agents*
+    the native Claude Code arms that load them. *arm_staging* (the
+    resolved per-agent plan) says where each arm stages rules, hooks,
+    subagents, and commands, so a native arm's rows do not describe the
+    wrapper.
     """
     member_resolved = {path.resolve() for path in member_skills}
-    claude_dirs = set(claude_skill_dirs)
-    staged_rules = set(staged_rule_names)
     rows: list[dict[str, Any]] = []
-    skip_note = "the plugin package was skipped (nothing locally evaluable)"
     for component in inventory.components:
         if component.problem is not None:
             rows.append(coverage_row(component, "invalid", problem_reason(component)))
-            continue
-        if component.declared_by:
-            state = "unsupported" if component.support == "unsupported" else "not_staged"
-            # A cross-client row is one another client loads through its own rules or defaults.
-            source = (
-                f"loaded only by {component.loaded_by}"
-                if component.loaded_by
-                else f"declared only by the additional manifest {component.declared_by}"
-            )
-            rows.append(coverage_row(component, state, f"{source}; Tier 3 stages the selected manifest's components"))
-            continue
-        if component.type == "skill":
-            if component.path == ".":
-                rows.append(
-                    coverage_row(
-                        component,
-                        "not_staged",
-                        "a root SKILL.md single-skill plugin is inventoried only; Tier 3 stages skill directories",
-                    )
-                )
-            elif component.path is None:
-                if component.name in unresolved_skill_refs:
-                    rows.append(
-                        coverage_row(component, "unavailable", "remote skill reference is not resolvable offline")
-                    )
-                elif skipped:
-                    rows.append(coverage_row(component, "not_staged", skip_note))
-                else:
-                    rows.append(coverage_row(component, "staged", "skill reference resolved to a local member skill"))
-            elif (plugin_root / component.path).resolve() in member_resolved:
-                rows.append(coverage_row(component, "staged", "bundled skill staged as a plugin member skill"))
-            elif not skipped and component.path in claude_dirs:
-                rows.append(
-                    coverage_row(
-                        component,
-                        "staged",
-                        "declared skill directory staged by the native claude-code arm only (Claude Code loads the "
-                        "skill directories plugin.json declares); the other arms do not stage it",
-                    )
-                )
-            else:
-                rows.append(
-                    coverage_row(
-                        component,
-                        "not_staged",
-                        skip_note
-                        if skipped
-                        else "only skills under skills/ are staged by Tier 3 for this manifest format; this "
-                        "declared skill directory is inventoried only",
-                    )
-                )
-        elif component.type == "rule":
-            if component.path is None:
-                if component.name in unresolved_rule_refs:
-                    rows.append(
-                        coverage_row(component, "unavailable", "remote rule reference is not resolvable offline")
-                    )
-                elif skipped:
-                    rows.append(coverage_row(component, "not_staged", skip_note))
-                else:
-                    reason = _rule_reason(arm_staging, "embedded in the wrapper")
-                    rows.append(coverage_row(component, "staged", f"rule reference resolved and {reason}"))
-            elif {
-                component.name,
-                PurePosixPath(component.path).name,
-                component.path.removeprefix("rules/"),
-            } & staged_rules:
-                rows.append(coverage_row(component, "staged", _rule_reason(arm_staging)))
-            else:
-                rows.append(
-                    coverage_row(
-                        component,
-                        "not_staged",
-                        skip_note if skipped else "rule file is inventoried but was not staged by Tier 3",
-                    )
-                )
-        elif component.type == "mcp":
+        elif component.declared_by:
+            rows.append(_cross_client_row(component))
+        elif component.type == "skill":
             rows.append(
-                _mcp_coverage_row(
+                _skill_row(
                     component,
-                    contained,
-                    runnable_names,
-                    provider_names,
-                    unsupported_config,
-                    plugin_file_names,
-                    plugin_file_gap_notes or {},
+                    plugin_root=plugin_root,
+                    member_skills=member_resolved,
+                    claude_skill_dirs=set(claude_skill_dirs),
+                    claude_native_agents=claude_native_agents,
+                    unresolved_refs=unresolved_skill_refs,
+                    skipped=skipped,
                 )
             )
+        elif component.type == "rule":
+            rows.append(
+                _rule_row(
+                    component,
+                    staged_rule_names=set(staged_rule_names),
+                    unresolved_refs=unresolved_rule_refs,
+                    skipped=skipped,
+                    arm_staging=arm_staging,
+                )
+            )
+        elif component.type == "mcp":
+            rows.append(_mcp_coverage_row(component, contained, mcp))
         else:
             rows.append(_other_type_row(component, arm_staging))
     return {
@@ -1126,15 +1192,87 @@ def _inventory_provenance(
     }
 
 
-def _mcp_coverage_row(
-    component: Any,
-    contained: bool,
-    runnable_names: tuple[str, ...],
-    provider_names: tuple[str, ...],
-    unsupported_config: tuple[str, ...],
-    plugin_file_names: tuple[str, ...] = (),
-    plugin_file_gap_notes: dict[str, str] | None = None,
+def _cross_client_row(component: Component) -> dict[str, Any]:
+    """Coverage row of a component another client loads, through its own rules or an additional manifest."""
+    state = "unsupported" if component.support == "unsupported" else "not_staged"
+    source = (
+        f"loaded only by {component.loaded_by}"
+        if component.loaded_by
+        else f"declared only by the additional manifest {component.declared_by}"
+    )
+    return coverage_row(component, state, f"{source}; Tier 3 stages the selected manifest's components")
+
+
+def _skill_row(
+    component: Component,
+    *,
+    plugin_root: Path,
+    member_skills: set[Path],
+    claude_skill_dirs: set[str],
+    claude_native_agents: tuple[str, ...],
+    unresolved_refs: tuple[str, ...],
+    skipped: bool,
 ) -> dict[str, Any]:
+    """Coverage row of one skill: a staged member skill, a native Claude Code skill directory, or neither."""
+    if component.path == ".":
+        return coverage_row(
+            component,
+            "not_staged",
+            "a root SKILL.md single-skill plugin is inventoried only; Tier 3 stages skill directories",
+        )
+    if component.path is None:
+        if component.name in unresolved_refs:
+            return coverage_row(component, "unavailable", "remote skill reference is not resolvable offline")
+        if skipped:
+            return coverage_row(component, "not_staged", _SKIPPED_PACKAGE_NOTE)
+        return coverage_row(component, "staged", "skill reference resolved to a local member skill")
+    if (plugin_root / component.path).resolve() in member_skills:
+        return coverage_row(component, "staged", "bundled skill staged as a plugin member skill")
+    if skipped:
+        return coverage_row(component, "not_staged", _SKIPPED_PACKAGE_NOTE)
+    if component.path in claude_skill_dirs:
+        row = coverage_row(
+            component,
+            "staged",
+            "declared skill directory staged by the native claude-code arm only (Claude Code loads the skill "
+            "directories plugin.json declares); the other arms do not stage it",
+        )
+        return _natively_staged(row, list(claude_native_agents))
+    return coverage_row(
+        component,
+        "not_staged",
+        "only skills under skills/ are staged by Tier 3 for this manifest format; this declared skill directory "
+        "is inventoried only",
+    )
+
+
+def _rule_row(
+    component: Component,
+    *,
+    staged_rule_names: set[str],
+    unresolved_refs: tuple[str, ...],
+    skipped: bool,
+    arm_staging: _ArmStaging | None,
+) -> dict[str, Any]:
+    """Coverage row of one rule: staged (natively or in the wrapper), unavailable, or not staged."""
+    native_agents = arm_staging.native_for("rule") if arm_staging is not None else []
+    if component.path is None:
+        if component.name in unresolved_refs:
+            return coverage_row(component, "unavailable", "remote rule reference is not resolvable offline")
+        if skipped:
+            return coverage_row(component, "not_staged", _SKIPPED_PACKAGE_NOTE)
+        reason = f"rule reference resolved and {_rule_reason(arm_staging, 'embedded in the wrapper')}"
+        return _natively_staged(coverage_row(component, "staged", reason), native_agents)
+    if {component.name, PurePosixPath(component.path).name, component.path.removeprefix("rules/")} & staged_rule_names:
+        return _natively_staged(coverage_row(component, "staged", _rule_reason(arm_staging)), native_agents)
+    return coverage_row(
+        component,
+        "not_staged",
+        _SKIPPED_PACKAGE_NOTE if skipped else "rule file is inventoried but was not staged by Tier 3",
+    )
+
+
+def _mcp_coverage_row(component: Component, contained: bool, mcp: _McpCoverage) -> dict[str, Any]:
     if component.bundle:
         return coverage_row(component, "unsupported", "MCP bundles (.mcpb/.dxt) are not unpacked or staged")
     declaration = component.mcp
@@ -1142,23 +1280,23 @@ def _mcp_coverage_row(
         return coverage_row(
             component, "not_staged", "agent_plugin.yaml plugins stage MCP servers from their 'mcp' list only"
         )
-    if component.name in runnable_names:
+    if component.name in mcp.split.runnable_names:
         reason = "runnable MCP server staged for the with-plugin arm only"
-        if component.name in unsupported_config:
+        if component.name in mcp.unsupported:
             reason += (
                 "; its env/headers or ${user_config.*} values are not applied by the runtime (run reported INCOMPLETE)"
             )
         return coverage_row(component, "staged", reason)
-    if component.name in plugin_file_names:
+    if mcp.plugin_file_agents and component.name in mcp.split.plugin_file_names:
         reason = (
             "MCP server launches from plugin files; staged for the native claude-code arm, which copies the plugin "
             "tree and expands ${CLAUDE_PLUGIN_ROOT}"
         )
-        if component.name in unsupported_config:
-            note = (plugin_file_gap_notes or {}).get(component.name, "not started in the other with-plugin arms")
+        if component.name in mcp.unsupported:
+            note = mcp.plugin_file_gap_notes.get(component.name, "not started in the other with-plugin arms")
             reason += f"; {note} (run reported INCOMPLETE)"
-        return coverage_row(component, "staged", reason)
-    if component.name in unsupported_config:
+        return _natively_staged(coverage_row(component, "staged", reason), list(mcp.plugin_file_agents))
+    if component.name in mcp.unsupported:
         # Not runnable: _split_mcp_servers keeps plugin-file launches out of the toml.
         return coverage_row(
             component,
@@ -1166,7 +1304,7 @@ def _mcp_coverage_row(
             "MCP server launches from plugin files (a plugin-root variable, a relative path, or cwd) that Tier 3 "
             "does not stage into the task environment; not started (run reported INCOMPLETE)",
         )
-    if component.name in provider_names:
+    if component.name in mcp.split.provider_names:
         return coverage_row(component, "unavailable", "provider-only MCP server is not runnable offline")
     return coverage_row(component, "not_staged", "MCP server was not staged")
 
@@ -1265,35 +1403,6 @@ def write_plugin_provenance(run_dir: Path, provenance: dict[str, Any]) -> Path |
         return None
 
 
-def _is_contained_manifest(path: Path) -> bool:
-    """Whether *path* names a contained-plugin manifest (any supported JSON format).
-
-    Mirrors the Tier 1 detection (``plugin_manifest.manifest_relative_path``) so
-    the plugin-eval path accepts exactly the manifest forms Tier 1 does.
-    """
-    from skillevaluator.plugin_manifest import manifest_relative_path, manifest_type_for_relative_path
-
-    relative = manifest_relative_path(path)
-    return relative is not None and manifest_type_for_relative_path(relative) in PLUGIN_CONTAINED_MANIFEST_TYPES
-
-
-def _additional_manifests(location: PluginManifestLocation) -> list[tuple[str, str, dict[str, Any] | None]]:
-    """Best-effort bounded parse of the other supported manifests in the root.
-
-    Their components are inventoried (never staged) so coverage reports them.
-    A client manifest over the 1 MiB read bound or not UTF-8 is read leniently,
-    like Tier 1 does, so its hooks and MCP servers still show in coverage. An
-    unsafe or unparseable additional manifest is skipped here; Tier 1 reports
-    it (``manifest_unsafe``, ``plugin_manifest_additional_invalid``).
-    """
-    parsed: list[tuple[str, str, dict[str, Any] | None]] = []
-    for candidate in location.additional:
-        data = candidate.parse_for_audit()
-        if data is not None:
-            parsed.append((candidate.manifest_type, candidate.manifest_filename, data))
-    return parsed
-
-
 def _stageable_component(component: Component, component_type: str) -> bool:
     return (
         component.type == component_type
@@ -1322,8 +1431,7 @@ def _inventory_skill_dirs(inventory: PluginInventory, plugin_root: Path) -> tupl
 def _inventory_rule_files(inventory: PluginInventory, plugin_root: Path) -> list[_StagedRule]:
     """Read the selected manifest's rule files through the anchored, no-follow plugin root."""
     rules = [component for component in inventory.components if _stageable_component(component, "rule")]
-    if len(rules) > MAX_PLUGIN_MANIFEST_ITEMS:
-        raise ValueError(f"Plugin rules exceed the {MAX_PLUGIN_MANIFEST_ITEMS}-file limit")
+    _check_rule_bounds(count=len(rules))
     staged: list[_StagedRule] = []
     total = 0
     try:
@@ -1331,16 +1439,11 @@ def _inventory_rule_files(inventory: PluginInventory, plugin_root: Path) -> list
             for component in rules:
                 content = secure_root.read_text(Path(str(component.path)), CONTENT_DEDUP_MAX_FILE_BYTES).strip()
                 total += len(content.encode("utf-8"))
-                if total > CONTENT_DEDUP_MAX_TOTAL_BYTES:
-                    raise ValueError(f"Plugin rules exceed the {CONTENT_DEDUP_MAX_TOTAL_BYTES}-byte total limit")
+                _check_rule_bounds(total_bytes=total)
                 staged.append(_StagedRule(name=component.name, content=content))
     except SecurePathError as exc:
         raise ValueError(f"Refusing unsafe or unbounded plugin rules: {exc}") from exc
     return staged
-
-
-def _manifest_path(plugin_path: Path) -> Path:
-    return _manifest_location(plugin_path).path
 
 
 def _manifest_location(plugin_path: Path) -> PluginManifestLocation:
@@ -1354,15 +1457,14 @@ def _manifest_location(plugin_path: Path) -> PluginManifestLocation:
     return located
 
 
-def _load_manifest_text(raw_text: str, manifest_path: Path, manifest_type: str | None = None) -> dict[str, Any]:
-    json_syntax = (
-        manifest_syntax(manifest_type) == "json" if manifest_type is not None else _is_contained_manifest(manifest_path)
-    )
+def _load_manifest_text(raw_text: str, manifest_path: Path, manifest_type: str) -> dict[str, Any]:
+    syntax = manifest_syntax(manifest_type)
+    # The YAML parser skips a leading byte-order mark itself; the JSON parser does not.
+    text = raw_text.lstrip("\ufeff") if syntax == "json" else raw_text
     try:
-        data = load_bounded_json(raw_text.lstrip("\ufeff")) if json_syntax else load_bounded_yaml(raw_text)
+        data = parse_manifest_text(manifest_type, text)
     except StructuredDataError as exc:
-        syntax = "JSON" if json_syntax else "YAML"
-        raise ValueError(f"{manifest_path} is not valid bounded {syntax}: {exc}") from exc
+        raise ValueError(f"{manifest_path} is not valid bounded {syntax.upper()}: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError(f"{manifest_path} must contain a manifest object")
     return data
@@ -1612,10 +1714,10 @@ def _resolve_skill_refs(
 
 def _resolve_rules(
     section: Any, plugin_dir: Path, plugin_root: Path, resolver: _IntraRepoResolver
-) -> tuple[tuple[_StagedRule, ...], tuple[str, ...], tuple[str, ...]]:
+) -> tuple[tuple[_StagedRule, ...], tuple[str, ...]]:
     """Resolve rule refs to contained files; report remote/unresolved ones.
 
-    Returns ``(staged_rule_files, unresolved_labels, all_labels)``. A canonical
+    Returns ``(staged_rule_files, unresolved_labels)``. A canonical
     remote ref is classified by the Tier 1 classifier with the resolver's
     identity (same root, same case-exact probe), so both tiers agree: a
     ``provided`` rule (inside the plugin root) is staged from the plugin, a
@@ -1631,19 +1733,16 @@ def _resolve_rules(
 
     staged: list[_StagedRule] = []
     unresolved: list[str] = []
-    all_labels: list[str] = []
     seen: set[Path] = set()
     total_bytes = 0
 
     def _stage(path: Path) -> None:
         nonlocal total_bytes
         rule = _load_rule_path(path)
-        # Every staged body is held in memory and embedded in the wrapper (the
-        # with-plugin arm's skill context), so MAX_PLUGIN_MANIFEST_ITEMS
-        # per-file-bounded refs must not add up to a wrapper the contained
-        # rules/ form would reject.
+        # MAX_PLUGIN_MANIFEST_ITEMS per-file-bounded refs must not add up to a
+        # wrapper the contained rules/ form would reject.
         total_bytes += len(rule.content.encode("utf-8"))
-        _reject_rules_over_total_limit(total_bytes)
+        _check_rule_bounds(total_bytes=total_bytes)
         staged.append(rule)
         seen.add(path)
 
@@ -1651,7 +1750,6 @@ def _resolve_rules(
     classified: set[str] = set()
     for ref in _iter_raw_refs(section):
         label = _ref_label(ref)
-        all_labels.append(label)
         if _ref_source(ref) in _REMOTE_REF_SOURCES:
             key = normalize_ref(ref) if isinstance(ref, str | dict) else None
             if key is not None:
@@ -1679,7 +1777,7 @@ def _resolve_rules(
             _stage(resolved)
         elif resolved is None:
             unresolved.append(label)
-    return tuple(staged), tuple(unresolved), tuple(all_labels)
+    return tuple(staged), tuple(unresolved)
 
 
 def _resolve_contained_file(ref: Any, plugin_dir: Path, plugin_root: Path) -> Path | None:
@@ -1710,8 +1808,15 @@ def _resolve_contained_file(ref: Any, plugin_dir: Path, plugin_root: Path) -> Pa
     return None
 
 
-def _reject_rules_over_total_limit(total_bytes: int) -> None:
-    """Fail closed once staged plugin rules exceed the shared aggregate byte bound."""
+def _check_rule_bounds(*, count: int = 0, total_bytes: int = 0) -> None:
+    """Fail closed once the staged plugin rules exceed the shared file-count or aggregate byte bound.
+
+    Every staged rule body is held in memory and embedded in the generated
+    wrapper (the with-plugin arm's skill context), so the contained ``rules/``
+    form, the inventory's rule files, and resolved rule refs share these bounds.
+    """
+    if count > MAX_PLUGIN_MANIFEST_ITEMS:
+        raise ValueError(f"Plugin rules exceed the {MAX_PLUGIN_MANIFEST_ITEMS}-file limit")
     if total_bytes > CONTENT_DEDUP_MAX_TOTAL_BYTES:
         raise ValueError(f"Plugin rules exceed the {CONTENT_DEDUP_MAX_TOTAL_BYTES}-byte total limit")
 
@@ -1749,9 +1854,7 @@ def _discover_contained_rule_files(plugin_root: Path) -> list[_StagedRule]:
             max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
             allow_context_alias=False,
         )
-        if len(files) > MAX_PLUGIN_MANIFEST_ITEMS:
-            raise ValueError(f"Plugin rules exceed the {MAX_PLUGIN_MANIFEST_ITEMS}-file limit")
-        _reject_rules_over_total_limit(sum(file.metadata.st_size for file in files))
+        _check_rule_bounds(count=len(files), total_bytes=sum(file.metadata.st_size for file in files))
         with SecureRoot(rules_root) as secure_root:
             return [
                 _StagedRule(
@@ -1979,30 +2082,28 @@ def _plugin_root_launch(server: dict[str, Any], *, root_prefixes: tuple[str, ...
         probe["args"] = [_rooted(arg) for arg in server["args"]]
     if _launches_from_plugin_files(probe, root_prefixes=root_prefixes):
         return None
-    foreign = _foreign_root_var_re(root_prefixes)
-
-    def _claude(value: Any) -> Any:
-        return (
-            foreign.sub(lambda _match: "${CLAUDE_PLUGIN_ROOT}", value) if foreign and isinstance(value, str) else value
-        )
-
-    rewritten = {key: _claude(value) for key, value in server.items() if key != "args"}
+    foreign = foreign_root_var_re(tuple(root_prefixes))
+    rewritten = {key: to_claude_root(value, foreign) for key, value in server.items() if key != "args"}
     if isinstance(server.get("args"), list):
-        rewritten["args"] = [_claude(arg) for arg in server["args"]]
+        rewritten["args"] = [to_claude_root(arg, foreign) for arg in server["args"]]
     return rewritten
 
 
 def _unstaged_root_mcp_json(manifest: dict[str, Any], plugin_root: Path) -> str | None:
     """Finding path of an ``agent_plugin.yaml`` plugin's implicit root ``.mcp.json``, or ``None``.
 
-    Mirrors :func:`~skillevaluator.plugin_components.collect_mcp_declarations`: the
+    Mirrors :func:`~skillevaluator.plugin_mcp.collect_mcp_declarations`: the
     root file is inventoried as the default ``mcp_json`` source (never staged for
     this manifest form) unless an ``mcpServers`` path names it explicitly -- then it
-    is a staged ``path_ref`` source whose findings must keep blocking.
+    is a staged ``path_ref`` source whose findings must keep blocking. Paths are
+    read with the Claude Code profile's placeholders, as the inventory reads this
+    manifest form: none, so ``${CLAUDE_PLUGIN_ROOT}/.mcp.json`` is a broken
+    placeholder path (blocking on its own), not an explicit name for the root file.
     """
     declared = manifest.get("mcpServers")
     entries = declared if isinstance(declared, list) else [declared]
-    if any(isinstance(entry, str) and normalize_declared_path(entry).rel == MCP_JSON for entry in entries):
+    prefixes = CLAUDE_PROFILE.manifest_path_prefixes
+    if any(isinstance(entry, str) and normalize_declared_path(entry, prefixes).rel == MCP_JSON for entry in entries):
         return None
     return PluginRootReader(plugin_root).display(MCP_JSON)
 
@@ -2029,6 +2130,10 @@ def _normalize_mcp_entries(
     bounded, no-follow plugin-root reader; here every declaration (including a
     shadowed one) must pass the blocking static checks before the effective
     servers are flattened to the list shape :func:`_split_mcp_servers` expects.
+
+    This is the one validation of the MCP entries: every returned entry has a
+    stripped, bounded string ``name``, and its launch fields passed
+    :func:`_reject_unsafe_mcp_declaration`.
     """
     raw_servers = manifest.get("mcp")
     if raw_servers:
@@ -2041,14 +2146,9 @@ def _normalize_mcp_entries(
             if not isinstance(entry, dict):
                 raise ValueError(f"Plugin manifest mcp[{idx}] must be an object")
             _reject_runnable_yaml_mcp_entry(entry, idx)
-            name = entry.get("name")
-            _reject_unsafe_mcp_declaration(
-                name,
-                {key: value for key, value in entry.items() if key != "name"},
-                policy=policy,
-                manifest_type=manifest_type,
-            )
-            normalized_entries.append(entry)
+            config = {key: value for key, value in entry.items() if key != "name"}
+            _reject_unsafe_mcp_declaration(entry.get("name"), config, policy=policy, manifest_type=manifest_type)
+            normalized_entries.append({**entry, "name": entry["name"].strip()})
         _reject_unloaded_mcp_findings(inventory, policy)
         return normalized_entries
 
@@ -2091,13 +2191,9 @@ def _normalize_mcp_entries(
     for declaration in collection.effective:
         if not _stageable(declaration.source):
             continue
+        # Validated above: the effective declarations are some of the stageable ones.
         config = declaration.config
-        safe_name = require_bounded_string(
-            declaration.name,
-            "Plugin MCP server name",
-            max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
-        ).strip()
-        entry: dict[str, Any] = {"name": safe_name}
+        entry: dict[str, Any] = {"name": declaration.name.strip()}
         # env/headers are declared config the eval runtime cannot apply (Harbor's
         # per-server MCPServerConfig has no such field). Record their presence so a
         # server evaluated WITHOUT its declared config marks the run INCOMPLETE
@@ -2148,7 +2244,8 @@ class _McpSplit:
     start it, and ``plugin_file`` holds the rewritten launch), ``plugin_files_unrooted``
     (relative paths or ``cwd`` nothing can start), ``env``/``headers`` and other
     declared fields the wrapper runtime drops, and ``user_config`` (a
-    ``${user_config.*}`` value only Claude Code fills in).
+    ``${user_config.*}`` value only Claude Code fills in). ``probe_targets`` are
+    the runnable URL servers for the opt-in ``--probe-mcp`` host probe.
     """
 
     runnable: list[dict[str, Any]]
@@ -2157,11 +2254,24 @@ class _McpSplit:
     gaps: dict[str, tuple[str, ...]]
     declared: dict[str, dict[str, Any]]
     user_config: dict[str, tuple[str, ...]]
+    probe_targets: list[dict[str, Any]]
 
     @property
     def unsupported_config(self) -> list[str]:
         """Servers with config the wrapper runtime cannot apply (the run is INCOMPLETE)."""
         return list(self.gaps)
+
+    @property
+    def runnable_names(self) -> tuple[str, ...]:
+        return tuple(server["name"] for server in self.runnable)
+
+    @property
+    def provider_names(self) -> tuple[str, ...]:
+        return tuple(server["name"] for server in self.provider_only)
+
+    @property
+    def plugin_file_names(self) -> tuple[str, ...]:
+        return tuple(server["name"] for server in self.plugin_file)
 
 
 # What a native Claude Code arm applies itself (it copies the plugin tree and
@@ -2169,31 +2279,36 @@ class _McpSplit:
 _CLAUDE_NATIVE_APPLIES = frozenset({"plugin_files", "env", "headers"})
 
 
-def _bounded_mcp_server(raw: dict[str, Any], idx: int, name: str) -> dict[str, Any]:
-    server: dict[str, Any] = {"name": name}
+def _runnable_server(entry: dict[str, Any]) -> dict[str, Any]:
+    """The launch fields of a validated MCP entry that reach the staged server list (``stdio`` by default)."""
+    server: dict[str, Any] = {"name": entry["name"]}
     for key in ("url", "command", "transport"):
-        if raw.get(key):
-            server[key] = require_bounded_string(
-                raw[key],
-                f"Plugin manifest mcp[{idx}].{key}",
-                max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
-            )
-    if raw.get("args"):
-        args = raw["args"]
-        if not isinstance(args, list) or len(args) > MAX_PLUGIN_MANIFEST_ITEMS:
-            raise ValueError(f"Plugin manifest mcp[{idx}].args must be a bounded list")
-        server["args"] = [
-            require_bounded_string(
-                arg,
-                f"Plugin manifest mcp[{idx}].args[{arg_index}]",
-                max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
-                allow_empty=True,
-            )
-            for arg_index, arg in enumerate(args)
-        ]
+        if entry.get(key):
+            server[key] = entry[key]
+    if entry.get("args"):
+        server["args"] = list(entry["args"])
     if "command" in server and "transport" not in server:
         server["transport"] = "stdio"
     return server
+
+
+def _probe_target(entry: dict[str, Any], declared: dict[str, Any]) -> dict[str, Any]:
+    """A runnable URL server for the ``--probe-mcp`` host probe: its transport and declared header references.
+
+    Header values are the declared literals or ``${VAR}`` references; they are never persisted.
+    """
+    raw_headers = declared.get("headers")
+    headers = (
+        {str(key): str(value) for key, value in list(raw_headers.items())[:32] if isinstance(value, str)}
+        if isinstance(raw_headers, dict)
+        else {}
+    )
+    return {
+        "name": entry["name"],
+        "url": entry["url"],
+        "transport": entry.get("transport") or entry.get("type") or "",
+        "headers": headers,
+    }
 
 
 def _user_config_keys(raw: dict[str, Any], declared: dict[str, Any]) -> tuple[str, ...]:
@@ -2226,37 +2341,20 @@ def _split_mcp_servers(
     the skip decision as runnable; the ones a copied plugin tree can start are
     kept in ``plugin_file`` for the native Claude Code adapter.
     """
-    raw_servers = _normalize_mcp_entries(
-        manifest, inventory, contained_form, plugin_root=plugin_root, policy=policy, manifest_type=manifest_type
-    )
-
     runnable: list[dict[str, Any]] = []
     provider_only: list[dict[str, str]] = []
     plugin_file: list[dict[str, Any]] = []
     gaps: dict[str, tuple[str, ...]] = {}
     declared_by_name: dict[str, dict[str, Any]] = {}
     user_config: dict[str, tuple[str, ...]] = {}
-    for idx, raw in enumerate(raw_servers):
-        if not isinstance(raw, dict):
-            raise ValueError(f"Plugin manifest mcp[{idx}] must be an object")
-        name = require_bounded_string(
-            raw.get("name"),
-            f"Plugin manifest mcp[{idx}].name",
-            max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
-        ).strip()
+    probe_targets: list[dict[str, Any]] = []
+    # Every entry was validated (bounded strings, blocking static checks) by _normalize_mcp_entries.
+    for raw in _normalize_mcp_entries(
+        manifest, inventory, contained_form, plugin_root=plugin_root, policy=policy, manifest_type=manifest_type
+    ):
+        name = raw["name"]
         if not (raw.get("command") or raw.get("url")):
-            provider = raw.get("provider") or ""
-            provider_only.append(
-                {
-                    "name": name,
-                    "provider": require_bounded_string(
-                        provider,
-                        f"Plugin manifest mcp[{idx}].provider",
-                        max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
-                        allow_empty=True,
-                    ),
-                }
-            )
+            provider_only.append({"name": name, "provider": raw.get("provider") or ""})
             continue
         declared = raw.get("_declared")
         if not isinstance(declared, dict):
@@ -2267,7 +2365,7 @@ def _split_mcp_servers(
         if keys := _user_config_keys(raw, declared):
             user_config[name] = keys
             server_gaps.append("user_config")
-        server = _bounded_mcp_server(raw, idx, name)
+        server = _runnable_server(raw)
         if _launches_from_plugin_files(raw, root_prefixes=root_prefixes):
             # Staged verbatim, this server could not start in a wrapper arm, yet it
             # would count as runnable: a plugin whose only component it is would run
@@ -2283,9 +2381,11 @@ def _split_mcp_servers(
                 server_gaps.insert(0, "plugin_files_unrooted")
         else:
             runnable.append(server)
+            if server.get("url"):
+                probe_targets.append(_probe_target(raw, declared))
         if server_gaps:
             gaps[name] = tuple(dict.fromkeys(server_gaps))
-    return _McpSplit(runnable, provider_only, plugin_file, gaps, declared_by_name, user_config)
+    return _McpSplit(runnable, provider_only, plugin_file, gaps, declared_by_name, user_config, probe_targets)
 
 
 def _claude_applies(gaps: tuple[str, ...], user_config: tuple[str, ...], defaults: set[str]) -> bool:
@@ -2368,7 +2468,7 @@ def _skip_reason(
 
 def _fresh_package_dir(stage_root: Path, plugin_name: str) -> Path:
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", plugin_name).strip("-._")[:_PACKAGE_NAME_MAX_CHARS] or "plugin"
-    package_path = stage_root.expanduser().resolve() / f"{safe_name}-plugin-eval"
+    package_path = stage_root.expanduser().resolve() / f"{safe_name}{PLUGIN_EVAL_PACKAGE_SUFFIX}"
     if package_path.exists():
         raise ValueError(f"Plugin evaluation staging path already exists: {package_path}")
     package_path.mkdir(parents=True)
@@ -2762,15 +2862,13 @@ def _write_plugin_runtime_components(evals_dir: Path, inventory: PluginInventory
     (OpenCode stages an agent named like a built-in as ``<plugin>-<name>``) back
     to the declared name. The key is written only when some agent is renamed.
     """
-    from skillevaluator.tier3.plugin_native import opencode_agent_name
-
     names: dict[str, Any] = {"subagents": [], "commands": []}
     aliases: dict[str, str] = {}
     for component in inventory.components:
         key = {"agent": "subagents", "command": "commands"}.get(component.type)
         if key is None or component.problem is not None or not component.name:
             continue
-        if component.name not in names[key] and len(names[key]) < 256:
+        if component.name not in names[key] and len(names[key]) < MAX_PLUGIN_RUNTIME_NAMES:
             names[key].append(component.name)
             staged = opencode_agent_name(plugin_name, component.name) if key == "subagents" else component.name
             if staged.casefold() != component.name.casefold():
@@ -2783,39 +2881,3 @@ def _write_plugin_runtime_components(evals_dir: Path, inventory: PluginInventory
         return
     env_dir.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(names, indent=2), encoding="utf-8")
-
-
-def _mcp_probe_targets(
-    manifest: dict[str, Any], inventory: PluginInventory, runnable_mcp: list[dict[str, Any]]
-) -> tuple[dict[str, Any], ...]:
-    """Runnable URL MCP servers with their declared transport and header references."""
-    configs: dict[str, dict[str, Any]] = {}
-    raw_servers = manifest.get("mcp")
-    if isinstance(raw_servers, list):
-        for entry in raw_servers:
-            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
-                configs.setdefault(entry["name"].strip(), entry)
-    for declaration in inventory.mcp.effective:
-        if isinstance(declaration.config, dict):
-            configs[str(declaration.name).strip()] = declaration.config
-    targets: list[dict[str, Any]] = []
-    for server in runnable_mcp:
-        url = server.get("url")
-        if not isinstance(url, str) or not url:
-            continue
-        config = configs.get(server["name"], {})
-        raw_headers = config.get("headers")
-        headers = (
-            {str(key): str(value) for key, value in list(raw_headers.items())[:32] if isinstance(value, str)}
-            if isinstance(raw_headers, dict)
-            else {}
-        )
-        targets.append(
-            {
-                "name": server["name"],
-                "url": url,
-                "transport": server.get("transport") or config.get("transport") or config.get("type") or "",
-                "headers": headers,
-            }
-        )
-    return tuple(targets[:MAX_PLUGIN_MANIFEST_ITEMS])

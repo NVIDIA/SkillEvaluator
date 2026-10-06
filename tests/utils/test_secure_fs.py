@@ -614,3 +614,139 @@ def test_atomic_write_failure_never_unlinks_swapped_temporary_canary(
     assert temporary_name.read_text() == "INNOCENT_CANARY"
     assert saved_payload.read_text() == "PAYLOAD"
     assert not destination.exists()
+
+
+@pytest.mark.parametrize("listing_order", ["forward", "reversed"])
+def test_path_budget_is_consumed_in_name_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listing_order: str
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    for name in ("b.bin", "c.bin", "a.bin"):
+        (root / name).write_bytes(b"x")
+    real_scandir = os.scandir
+
+    class OrderedScandir:
+        def __init__(self, path) -> None:
+            with real_scandir(path) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+            self._entries = entries if listing_order == "forward" else entries[::-1]
+
+        def __enter__(self):
+            return iter(self._entries)
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(secure_fs.os, "scandir", OrderedScandir)
+
+    # Unused excluded names let the whole listing in, so the budget runs out
+    # while entries are admitted, not while the directory is listed.
+    with pytest.raises(SecurePathError) as caught:
+        discover_secure_files(root, selected=lambda _relative: False, excluded_dirs=("x", "y"), max_paths=2)
+
+    assert caught.value.code == "path_count_limit"
+    assert caught.value.relative_path == "c.bin"
+    assert caught.value.metadata == {"actual": 3, "limit": 2}
+
+
+def test_directory_listing_stops_once_the_budget_cannot_fit(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "nested").mkdir(parents=True)
+    for index in range(3):
+        (root / "nested" / f"file-{index}.md").write_text("x")
+
+    with pytest.raises(SecurePathError) as caught:
+        discover_secure_files(root, selected=lambda _relative: False, max_paths=3)
+
+    # "nested" used one path; listing a third name in it cannot fit the two left.
+    assert caught.value.code == "path_count_limit"
+    assert caught.value.relative_path == "nested"
+    assert caught.value.metadata == {"actual": 4, "limit": 3}
+
+
+def _read_descriptor(path: Path, max_bytes: int, **options: object) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        return secure_fs.read_bounded(descriptor, max_bytes, **options)
+    finally:
+        os.close(descriptor)
+
+
+def test_read_bounded_accepts_the_limit_and_refuses_one_byte_more(tmp_path: Path) -> None:
+    exact = tmp_path / "exact.bin"
+    exact.write_bytes(b"x" * 70_000)
+
+    assert _read_descriptor(exact, 70_000) == b"x" * 70_000
+    with pytest.raises(SecurePathError) as caught:
+        _read_descriptor(exact, 69_999, relative_path="nested/exact.bin")
+
+    assert caught.value.code == "file_size_limit"
+    assert caught.value.relative_path == "nested/exact.bin"
+    assert caught.value.metadata == {"actual_bytes": 70_000, "limit_bytes": 69_999}
+    with pytest.raises(ValueError, match="non-negative"):
+        _read_descriptor(exact, -1)
+
+
+def test_read_bounded_truncates_without_reading_past_the_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    large = tmp_path / "large.bin"
+    large.write_bytes(bytes(range(256)) * 1_000)
+    requested: list[int] = []
+    real_read = os.read
+
+    def recording_read(descriptor: int, count: int) -> bytes:
+        requested.append(count)
+        return real_read(descriptor, count)
+
+    monkeypatch.setattr(secure_fs.os, "read", recording_read)
+
+    assert _read_descriptor(large, 100_000, truncate=True) == (bytes(range(256)) * 1_000)[:100_000]
+    assert sum(requested) == 100_000
+    assert _read_descriptor(large, 0, truncate=True) == b""
+
+
+def test_secure_root_reads_a_hard_linked_file_only_when_allowed(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    store = tmp_path / "store.js"
+    store.write_text("console.log('hook')")
+    os.link(store, root / "hook.js")
+
+    with SecureRoot(root) as secure_root:
+        with pytest.raises(SecurePathError, match=r"hard-linked"):
+            secure_root.read_bytes(Path("hook.js"), 1024)
+        content, metadata = secure_root.read_bytes(Path("hook.js"), 1024, allow_hardlinks=True)
+
+    assert content == b"console.log('hook')"
+    assert metadata.st_nlink == 2
+
+
+def test_secure_root_read_checks_the_open_descriptor_once_before_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "guide.md").write_text("safe")
+    real_open = os.open
+    real_fstat = os.fstat
+    file_descriptors: list[int] = []
+    file_fstats: list[int] = []
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        descriptor = real_open(path, flags, mode) if dir_fd is None else real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == "guide.md":
+            file_descriptors.append(descriptor)
+        return descriptor
+
+    def tracked_fstat(descriptor: int):
+        if descriptor in file_descriptors:
+            file_fstats.append(descriptor)
+        return real_fstat(descriptor)
+
+    with SecureRoot(root) as secure_root:
+        monkeypatch.setattr(secure_fs.os, "open", tracked_open)
+        monkeypatch.setattr(secure_fs.os, "fstat", tracked_fstat)
+        assert secure_root.read_text(Path("guide.md"), 1024) == "safe"
+
+    # One snapshot when the file is opened and one after it is read.
+    assert len(file_fstats) == 2

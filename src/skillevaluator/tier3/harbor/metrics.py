@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Callable, Collection, Iterable, Mapping
 from typing import Any
 
 from skillevaluator.constants import DIMENSION_MAPPING
@@ -317,6 +318,16 @@ def not_applicable_metrics(
     ]
 
 
+def not_applicable_list(raw: object) -> list[str]:
+    """Return the N/A-eligible metrics a stored ``not_applicable_metrics`` list names, in canonical order.
+
+    A value that is not a list or tuple, and any name that cannot be N/A, is ignored.
+    """
+    if not isinstance(raw, list | tuple):
+        return []
+    return [metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric in raw]
+
+
 def not_applicable_counts(
     rewards: list[dict[str, Any]],
     metrics: tuple[str, ...] | list[str] | None = None,
@@ -470,6 +481,56 @@ def score_definition(metrics: tuple[str, ...] = DEFAULT_METRICS) -> str:
     if any(metric in NOT_APPLICABLE_ELIGIBLE_METRICS for metric in metrics):
         definition += ", excluding metrics that are not applicable to a case"
     return definition
+
+
+def weighted_dimension_score(
+    value_of: Callable[[str], object],
+    config: Mapping[str, Any],
+    *,
+    active_metrics: Collection[str] | None = None,
+) -> float | None:
+    """Return one dimension's weighted evaluator mean, or ``None`` when no evaluator is scored.
+
+    *config* is a ``DIMENSION_MAPPING`` entry and *value_of* returns an
+    evaluator's score; anything other than a finite number counts as unscored.
+    Unscored evaluators and non-finite weights are skipped, so the remaining
+    weights renormalize.
+
+    The ``fallback_evaluators`` (``behavior_check`` for a legacy reward without
+    ``security``) replace the primary evaluators when none of those belongs to
+    *active_metrics* (a reward's metric set). Without *active_metrics*, they
+    replace them when no primary evaluator is scored. Both rules agree for a
+    complete reward, which scores every metric of its set that is not N/A.
+    """
+    evaluators = config.get("evaluators") or ()
+    weights = config.get("weights") or ()
+    fallback_evaluators = config.get("fallback_evaluators") or ()
+    fallback_weights = config.get("fallback_weights") or ()
+    if active_metrics is not None:
+        if fallback_evaluators and not any(evaluator in active_metrics for evaluator in evaluators):
+            return _weighted_mean(value_of, fallback_evaluators, fallback_weights)
+        return _weighted_mean(value_of, evaluators, weights)
+    score = _weighted_mean(value_of, evaluators, weights)
+    if score is None and fallback_evaluators:
+        score = _weighted_mean(value_of, fallback_evaluators, fallback_weights)
+    return score
+
+
+def _weighted_mean(
+    value_of: Callable[[str], object],
+    evaluators: Iterable[str],
+    weights: Iterable[object],
+) -> float | None:
+    numerator = 0.0
+    denominator = 0.0
+    for evaluator, weight in zip(evaluators, weights, strict=False):
+        value = finite_number(value_of(evaluator))
+        numeric_weight = finite_number(weight)
+        if value is None or numeric_weight is None:
+            continue
+        numerator += value * numeric_weight
+        denominator += numeric_weight
+    return numerator / denominator if denominator > 0 else None
 
 
 def dimension_scores(

@@ -19,6 +19,7 @@ import math
 import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 from skillevaluator.constants import (
@@ -30,7 +31,13 @@ from skillevaluator.constants import (
     LIFT_CI_MIN_PAIRED_CASES,
     TOKEN_EFFICIENCY_HALF_LIFE,
 )
-from skillevaluator.tier3.harbor.metrics import finite_number, metric_set_for_reward, metric_value, overall_score
+from skillevaluator.tier3.harbor.metrics import (
+    finite_number,
+    metric_set_for_reward,
+    metric_value,
+    overall_score,
+    weighted_dimension_score,
+)
 
 LIFT_UNCERTAINTY_METHOD = "paired_case_bootstrap"
 CONTEXT_COST_METHOD = "paired_first_turn_prompt_tokens"
@@ -42,6 +49,17 @@ PRECISION_INSUFFICIENT = "insufficient"
 ARM_WITH = "with_skill"
 ARM_WITHOUT = "without_skill"
 ARM_SUM_OF_PARTS = "sum_of_parts"
+
+# The statistics blocks of one agent, in the order build_agent_statistics()
+# returns them. Each is persisted in statistics.json and in the agent's results.
+STATISTICS_BLOCKS = (
+    "lift_uncertainty",
+    "reliability",
+    "cost",
+    "token_efficiency",
+    "context_cost_measured",
+    "integration_completeness",
+)
 
 _SUCCEEDED = "succeeded"
 
@@ -99,19 +117,6 @@ def _round(value: float | None, digits: int = 4) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def _weighted_score(reward: dict[str, Any], evaluators: Sequence[str], weights: Sequence[Any]) -> float | None:
-    numerator = 0.0
-    denominator = 0.0
-    for evaluator, weight in zip(evaluators, weights, strict=False):
-        value = metric_value(reward, evaluator)
-        numeric_weight = finite_number(weight)
-        if value is None or numeric_weight is None:
-            continue
-        numerator += value * numeric_weight
-        denominator += numeric_weight
-    return numerator / denominator if denominator > 0 else None
-
-
 OVERALL_DIMENSION = "overall"
 
 
@@ -129,14 +134,9 @@ def trial_dimension_scores(reward: Mapping[str, Any]) -> dict[str, float]:
     _, active_metrics = metric_set_for_reward(payload)
     scores: dict[str, float] = {}
     if active_metrics:
+        value_of = partial(metric_value, payload)
         for dimension, config in DIMENSION_MAPPING.items():
-            evaluators = list(config.get("evaluators") or [])
-            weights = list(config.get("weights") or [])
-            fallback = list(config.get("fallback_evaluators") or [])
-            if fallback and not any(evaluator in active_metrics for evaluator in evaluators):
-                evaluators = fallback
-                weights = list(config.get("fallback_weights") or [])
-            value = _weighted_score(payload, evaluators, weights)
+            value = weighted_dimension_score(value_of, config, active_metrics=active_metrics)
             if value is not None:
                 scores[dimension] = value
     if not scores:

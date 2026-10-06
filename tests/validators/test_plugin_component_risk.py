@@ -14,17 +14,17 @@ import pytest
 
 from skillevaluator.models.result import Severity, ValidationResult
 from skillevaluator.plugin_component_risk import (
-    _fetches_remote_code,
+    _HookUrlAllowlist,
     _outside_root_reference,
-    _url_matches_allowlist,
+    _shell_facts,
     hook_allowlist_hosts,
     matcher_scope,
     mcp_server_is_read_only,
     parse_tool_list,
-    safe_url,
 )
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.policy import ValidationPolicy, apply_policy
+from skillevaluator.validators.url_policy import safe_url
 
 _PINNED_FS = {"command": "npx", "args": ["-y", "@scope/fs@1.2.3"]}
 
@@ -367,7 +367,7 @@ def test_remote_code_hooks_are_critical(tmp_path: Path, command: str) -> None:
     ],
 )
 def test_remote_code_forms(command: str) -> None:
-    assert _fetches_remote_code(command)
+    assert _shell_facts(command).remote_code
 
 
 @pytest.mark.parametrize(
@@ -383,7 +383,7 @@ def test_remote_code_forms(command: str) -> None:
     ],
 )
 def test_benign_downloads_are_not_remote_code(command: str) -> None:
-    assert not _fetches_remote_code(command)
+    assert not _shell_facts(command).remote_code
 
 
 def test_remote_code_in_a_referenced_script_is_found(tmp_path: Path) -> None:
@@ -409,6 +409,29 @@ def test_downloads_without_execution_are_not_remote_code(tmp_path: Path) -> None
         },
     )
     assert "plugin_hook_remote_code" not in _checks(_validate(root))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "npx -y github:example/hook-tool#main",
+        "uvx --from git+https://github.com/example/hook-tool@main hook-tool",
+    ],
+)
+def test_git_package_on_a_moving_ref_is_remote_code(tmp_path: Path, command: str) -> None:
+    """A hook package from git is code the plugin does not ship, also when its ref is a moving branch.
+
+    The hook check reads the pin's ``remote`` field, not its wording, so a git
+    spec that follows a branch (a floating version too) must be marked remote:
+    CRITICAL remote code, not a HIGH floating version.
+    """
+    root = _plugin(
+        tmp_path,
+        files={"hooks/hooks.json": _hooks({"PostToolUse": [{"hooks": [{"type": "command", "command": command}]}]})},
+    )
+    checks = _checks(_validate(root))
+    assert checks["plugin_hook_remote_code"] == Severity.CRITICAL
+    assert "plugin_hook_command_floating_version" not in checks
 
 
 def test_context_injection_hooks_are_low(tmp_path: Path) -> None:
@@ -498,6 +521,13 @@ def test_http_hook_endpoint_policy(tmp_path: Path) -> None:
     assert checks["plugin_hook_http_endpoint_private"] == Severity.MEDIUM
 
 
+def test_http_hook_unicode_wildcard_host_pattern_is_allowed(tmp_path: Path) -> None:
+    """Regression: '*.bücher.example' in hooks.allowed_urls never matched, since hosts are compared in punycode."""
+    root = _plugin(tmp_path, files={"hooks/hooks.json": _http_hook("https://sub.bücher.example/x")})
+    policy = ValidationPolicy(hook_allowed_urls=("*.bücher.example",))
+    assert "plugin_hook_http_url_not_allowed" not in _checks(_validate(root, policy))
+
+
 def test_http_hook_allowlist_policy(tmp_path: Path) -> None:
     root = _plugin(
         tmp_path,
@@ -559,7 +589,18 @@ def test_http_hook_allowlist_policy(tmp_path: Path) -> None:
     ],
 )
 def test_hook_url_allowlist_compares_parsed_urls(entry: str, url: str, allowed: bool) -> None:
-    assert _url_matches_allowlist(url, urlparse(url).hostname, [entry]) is allowed
+    assert _HookUrlAllowlist.from_entries([entry]).matches(url, urlparse(url).hostname, None) is allowed
+
+
+def test_hook_host_patterns_match_the_host_clients_connect_to(tmp_path: Path) -> None:
+    # Node posts 'https://\uff48\uff4f\uff4f\uff4b\uff53.example.com/' to hooks.example.com (IDNA maps full-width letters).
+    url = "https://\uff48\uff4f\uff4f\uff4b\uff53.example.com/x"
+    root = _plugin(tmp_path, files={"hooks/hooks.json": _http_hook(url)})
+
+    result = _validate(root, ValidationPolicy(hook_allowed_urls=("hooks.example.com",)))
+
+    assert "plugin_hook_http_url_not_allowed" not in _checks(result)
+    assert _HookUrlAllowlist.from_entries(["*.example.com"]).matches(url, urlparse(url).hostname, None)
 
 
 def test_unusable_hook_url_entries_imply_no_allowed_host() -> None:
@@ -603,6 +644,30 @@ def test_http_hook_inline_credentials(tmp_path: Path) -> None:
     result = _validate(root)
     assert "plugin_hook_inline_secret" in _checks(result)
     assert "zzz" not in json.dumps(result.metadata["plugin"]["hook_risk"])
+
+
+def test_hook_records_never_keep_a_token_from_the_command_line(tmp_path: Path) -> None:
+    """Regression: 'ghp_' and 'glpat-' tokens in a hook command were kept in its report target."""
+    github, gitlab = "ghp_" + "0123456789abcdefghij0123456789abcdef", "glpat-" + "a" * 24
+    command = f"gh auth login --with-token {github} && GITLAB={gitlab} ./sync.sh"
+    hooks = _hooks({"Stop": [{"hooks": [{"type": "command", "command": command}]}]})
+
+    result = _validate(_plugin(tmp_path, files={"hooks/hooks.json": hooks}))
+
+    dumped = json.dumps(result.metadata["plugin"]["hook_risk"])
+    assert github not in dumped and gitlab not in dumped
+    assert "gh auth login --with-token ghp_<redacted>" in _hook_rows(result)[0]["target"]
+
+
+def test_a_hook_flag_is_counted_once_however_many_findings_raise_it(tmp_path: Path) -> None:
+    """Regression: URL credentials and a secret header listed 'inline_secret' twice, so by_flag counted 2."""
+    hook = _http_hook("https://deploy:hunter2@hooks.example.com/x", headers={"X-Api-Key": "abcd1234secretvalue"})
+    result = _validate(_plugin(tmp_path, files={"hooks/hooks.json": hook}))
+
+    secrets = [f for f in result.findings if f.check_name == "plugin_hook_inline_secret"]
+    assert [f.severity for f in secrets] == [Severity.CRITICAL, Severity.CRITICAL]
+    assert _hook_rows(result)[0]["risk_flags"].count("inline_secret") == 1
+    assert result.metadata["plugin"]["hook_risk"]["counts"]["by_flag"]["inline_secret"] == 1
 
 
 @pytest.mark.parametrize(
@@ -659,6 +724,34 @@ def test_command_hook_url_credentials_are_critical_and_redacted(tmp_path: Path, 
     assert _checks(result)["plugin_hook_inline_secret"] == Severity.CRITICAL
     assert "inline_secret" in _hook_rows(result)[0]["risk_flags"]
     assert "s3cr3tPassw0rd" not in _dumped(result)
+
+
+_BARE_QUERY_TOKEN = "ghp_" + "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2"
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [
+        _http_hook(f"https://hooks.example.com/notify?{_BARE_QUERY_TOKEN}"),
+        _hooks(
+            {
+                "PostToolUse": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": f"curl -s https://api.example.com/x?{_BARE_QUERY_TOKEN}"}
+                        ]
+                    }
+                ]
+            }
+        ),
+    ],
+)
+def test_hook_url_query_component_shaped_like_a_secret_is_critical(tmp_path: Path, hooks: dict) -> None:
+    """Regression: a bare '?ghp_...' query component parsed to an empty value and was never flagged."""
+    result = _validate(_plugin(tmp_path, files={"hooks/hooks.json": hooks}))
+
+    assert _checks(result)["plugin_hook_inline_secret"] == Severity.CRITICAL
+    assert _BARE_QUERY_TOKEN not in _dumped(result)
 
 
 @pytest.mark.parametrize(

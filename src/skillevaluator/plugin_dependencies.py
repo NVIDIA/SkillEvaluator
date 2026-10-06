@@ -50,8 +50,9 @@ from urllib.parse import urlparse
 
 from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
 from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
+from skillevaluator.plugin_states import DEPENDENCY_STATES
 from skillevaluator.utils.helpers import resolve_git_root
-from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
+from skillevaluator.utils.secure_fs import lstat_walk, stat_is_link_or_reparse
 from skillevaluator.utils.structured_data import require_bounded_string
 
 # Canonical dependency-ref sources. These mirror ``PluginSelector.source`` in
@@ -76,7 +77,6 @@ MAX_PLUGIN_MANIFEST_TEXT_CHARS = 16_384
 # staging limit still reaches the missing-dependency gate.
 MAX_CLASSIFIED_REFS = 1_024
 
-DEPENDENCY_STATES = ("provided", "referenced", "missing", "external", "unresolved")
 # Reported ref labels are truncated so a pathological ref cannot bloat reports.
 MAX_REF_LABEL_CHARS = 512
 
@@ -104,7 +104,11 @@ def parse_canonical_ref(ref: Any) -> tuple[str, str, str, str] | None:
     :func:`~skillevaluator.models.plugin._validate_canonical_ref` validator. A ref
     that is not a confidently-parseable 4-segment canonical ID returns ``None``.
     """
-    canonical = normalize_ref(ref)
+    return _split_canonical(normalize_ref(ref))
+
+
+def _split_canonical(canonical: str | None) -> tuple[str, str, str, str] | None:
+    """Split a :func:`normalize_ref` result into ``(source, repo, kind, name)`` (see :func:`parse_canonical_ref`)."""
     if not canonical:
         return None
     segments = canonical.split("::")
@@ -119,14 +123,12 @@ def parse_canonical_ref(ref: Any) -> tuple[str, str, str, str] | None:
 def slug_from_remote_url(url: str) -> str | None:
     """Extract the ``<group>/<repo>`` slug from a git-remote URL.
 
-    The sole caller (:func:`local_repo_slug`) passes a URL that
-    :func:`~skillevaluator.utils.helpers.resolve_git_remote_url` has already
-    normalized to HTTPS -- SSH ``ssh://`` and SCP-style (``git@host:group/repo``)
-    remotes are converted by ``_ssh_to_https`` first -- so in practice this
-    receives an ``https://host/group/repo[/-/tree/...]`` URL. The SCP and
-    ``ssh://`` forms are nonetheless handled directly here as defense-in-depth,
-    so the slug is correct no matter how the URL reaches this function (a
-    standard URI would otherwise dump an SCP string verbatim into ``path``).
+    :func:`local_repo_slug` passes the raw ``origin`` URL of a hosted remote
+    (see :data:`_HOSTED_REMOTE_RE`): ``https://``, ``http://``, ``ssh://``, or
+    ``git://`` with any credentials, port, or browse suffix, or the SCP-style
+    ``[user@]host:group/repo``. Only the path is kept, so credentials never
+    reach the slug (a standard URI would otherwise dump an SCP string verbatim
+    into ``path``).
     """
     text = url.strip()
     if "://" in text:
@@ -134,7 +136,7 @@ def slug_from_remote_url(url: str) -> str | None:
     else:
         # SCP-style SSH shorthand ([user@]host:group/repo(.git)) is not a URI, so
         # take the segment after the first ':' when the string looks like one.
-        scp = re.match(r"^[^/@]+@[^/:]+:(?P<path>.+)$", text)
+        scp = re.match(r"^(?:[^/@]+@)?[^/:]+:(?P<path>.+)$", text)
         path = scp.group("path") if scp else text
     path = path.strip("/")
     if "/-/" in path:  # strip GitLab web suffixes like '/-/tree/main'
@@ -171,55 +173,73 @@ def origin_remote_url(clone_root: Path) -> str | None:
     return url or None
 
 
-def _identity_of(clone_root: Path) -> tuple[str | None, str | None]:
-    """``(slug, None)`` when ``clone_root`` is a git top-level with a hosted ``origin``, else ``(None, reason)``.
+def _identity_of(clone_root: Path, git_root: Path | None = None) -> tuple[str | None, str | None, str | None]:
+    """``(slug, None, None)`` when ``clone_root`` is a git top-level with a hosted ``origin``.
 
-    The reason names the actual problem, so the advice fits: not a git
-    repository, not its top-level, no ``origin`` remote, or an ``origin`` that
-    is a local path. An ``http://`` origin names its repository as well as an
-    ``https://`` one does, so it proves identity too.
+    Otherwise ``(None, problem, remedy)``: the problem names the actual cause,
+    and the remedy is the advice that fits it: not a git repository, not its
+    top-level, no ``origin`` remote, or an ``origin`` that is a local path. An
+    ``http://`` origin names its repository as well as an ``https://`` one does,
+    so it proves identity too. Neither text repeats the remote, which may hold
+    credentials. A caller that already resolved the git top-level of
+    ``clone_root`` passes it as ``git_root``, so only ``git remote get-url
+    origin`` runs.
     """
     name = clone_root.name or str(clone_root)
-    try:
-        git_root = resolve_git_root(clone_root)
-    except (OSError, RuntimeError):
-        git_root = None
     if git_root is None:
-        return None, (
+        try:
+            git_root = resolve_git_root(clone_root)
+        except (OSError, RuntimeError):
+            git_root = None
+    if git_root is None:
+        return (
+            None,
             f"'{name}' is not inside a git repository, so same-repository references cannot be told apart "
-            "from external ones (validate from the plugin's git clone, or pass --repo-root <git top-level>)"
+            "from external ones",
+            "Validate from the plugin's git clone, or pass --repo-root <git top-level>.",
         )
     if git_root != clone_root.resolve():
-        return None, (
+        return (
+            None,
             f"'{name}' is not the git top-level (the top-level is '{git_root.name}'), so repository-relative "
-            f"references would resolve against the wrong folder (pass --repo-root <the '{git_root.name}' folder>)"
+            "references would resolve against the wrong folder",
+            f"Pass --repo-root <the '{git_root.name}' folder>.",
         )
     url = origin_remote_url(clone_root)
     if url is None:
-        return None, (
-            f"the git repository '{name}' has no 'origin' remote, so its <owner>/<repo> is unknown "
-            "(add one with 'git remote add origin <url>', or validate from a clone that has it)"
+        return (
+            None,
+            f"the git repository '{name}' has no 'origin' remote, so its <owner>/<repo> is unknown",
+            "Add an 'origin' remote with 'git remote add origin <url>', or validate from a clone that has one.",
         )
     if not _HOSTED_REMOTE_RE.match(url):
-        return None, (
+        return (
+            None,
             f"the 'origin' remote of '{name}' is a local path, not a hosted <owner>/<repo>, so it cannot be "
-            "compared with references (validate from a clone of the hosted repository)"
+            "compared with references",
+            "Validate from a clone of the hosted repository, or point the 'origin' remote at its URL.",
         )
     slug = slug_from_remote_url(url)
     if not slug or "/" not in slug:
-        return None, f"the 'origin' remote of '{name}' does not name an <owner>/<repo>"
-    return slug, None
+        return (
+            None,
+            f"the 'origin' remote of '{name}' does not name an <owner>/<repo>",
+            "Point the 'origin' remote at the hosted repository's URL.",
+        )
+    return slug, None, None
 
 
-def local_repo_slug(clone_root: Path) -> str | None:
+def local_repo_slug(clone_root: Path, *, git_root: Path | None = None) -> str | None:
     """Return the ``<group>/<repo>`` slug of ``clone_root``'s git origin, or ``None``.
 
     Fails closed: the slug is trusted only when ``clone_root`` is itself the git
-    top-level. For a subdirectory the remote URL would carry a browse-path
-    suffix and, more importantly, repository-relative refs would be resolved
-    against the wrong base.
+    top-level with a hosted ``origin`` (see :func:`_identity_of`). For a
+    subdirectory the remote URL would carry a browse-path suffix and, more
+    importantly, repository-relative refs would be resolved against the wrong
+    base. A caller that already resolved the git top-level of ``clone_root``
+    passes it as ``git_root``, so only ``git remote get-url origin`` runs.
     """
-    return _identity_of(clone_root)[0]
+    return _identity_of(clone_root, git_root)[0]
 
 
 def iter_raw_refs(section: Any, *, limit: int | None = MAX_PLUGIN_MANIFEST_ITEMS) -> list[Any]:
@@ -284,7 +304,11 @@ def ref_name(ref: Any) -> str | None:
 
 def ref_label(ref: Any) -> str:
     """Return a stable, human-readable label for reporting a ref."""
-    canonical = normalize_ref(ref)
+    return _ref_label_from(ref, normalize_ref(ref))
+
+
+def _ref_label_from(ref: Any, canonical: str | None) -> str:
+    """:func:`ref_label` of a ref whose :func:`normalize_ref` result is ``canonical``."""
     if canonical:
         return canonical
     name = ref_name(ref)
@@ -318,6 +342,8 @@ class RepositoryIdentity:
     local_slug: str | None
     reason: str | None = None
     repo_root_ignored: bool = False
+    # What would establish the identity, when it is unknown (a suggestion sentence).
+    remedy: str | None = None
 
 
 def resolve_repository_identity(
@@ -338,6 +364,8 @@ def resolve_repository_identity(
     plugin_real = plugin_root.expanduser().resolve()
     ignored = False
     clone_root: Path | None = None
+    # The git top-level of clone_root, when it is already known.
+    clone_git_root: Path | None = None
     if repo_root is not None:
         override = repo_root.expanduser().resolve()
         if plugin_real.is_relative_to(override):
@@ -347,19 +375,24 @@ def resolve_repository_identity(
     if clone_root is None:
         git_root = resolve_git_root(plugin_real)
         if git_root is not None and plugin_real.is_relative_to(git_root):
-            clone_root = git_root
+            clone_root = clone_git_root = git_root
         else:
             clone_root = find_repo_root(plugin_real).resolve()
 
+    remedy: str | None = None
     if slug_for is not None:
         slug = slug_for(clone_root)
         problem = None if slug else "no <owner>/<repo> could be read from the repository's 'origin' remote"
     else:
-        slug, problem = _identity_of(clone_root)
+        slug, problem, remedy = _identity_of(clone_root, clone_git_root)
     reason = None
     if slug is None:
         reason = f"repository identity unknown: {problem}"
-    return RepositoryIdentity(clone_root=clone_root, local_slug=slug, reason=reason, repo_root_ignored=ignored)
+        if remedy:
+            reason += f" ({remedy[0].lower()}{remedy[1:].removesuffix('.')})"
+    return RepositoryIdentity(
+        clone_root=clone_root, local_slug=slug, reason=reason, repo_root_ignored=ignored, remedy=remedy
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -420,31 +453,31 @@ def probe_repository_path(
     re-verifies with its own secure copy).
     """
     listings = {} if listings is None else listings
-    current = clone_root
-    metadata = None
+    walk = lstat_walk(clone_root, relative)
+    # The walk stops at the first component that is missing, cannot be inspected,
+    # is a link, or (before the last) is not a directory. Every component up to
+    # there must also be spelled exactly as on disk, so a case-only typo is
+    # missing on every filesystem: a case-sensitive one finds nothing, and a
+    # missing component names the other spelling too.
+    parent = clone_root
     for index, part in enumerate(relative.parts):
-        parent = current
-        current = current / part
         so_far = Path(*relative.parts[: index + 1]).as_posix()
-        metadata, error = _lstat(current)
-        if error is not None:
-            return _Probe("error", f"cannot inspect '{so_far}': {error}")
-        if metadata is None:
-            # On a case-sensitive filesystem a case-only typo is simply absent, so
-            # name the other spelling here too; otherwise only macOS/Windows say why.
-            other = _exact_entry(parent, part, listings)
-            spelled = f" ('{other}' differs only in letter case)" if other else ""
-            return _Probe("absent", f"'{so_far}' does not exist{spelled}")
+        failing = index == walk.failing_index
+        if failing and walk.outcome == "error":
+            return _Probe("error", f"cannot inspect '{so_far}': {walk.error}")
         other = _exact_entry(parent, part, listings)
-        if other is not None:
+        if other is not None or (failing and walk.outcome == "missing"):
             spelled = f" ('{other}' differs only in letter case)" if other else ""
             return _Probe("absent", f"'{so_far}' does not exist{spelled}")
-        if stat_is_link_or_reparse(metadata):
-            return _Probe("link", f"'{so_far}' is a symlink or reparse point")
-        if index < len(relative.parts) - 1 and not stat.S_ISDIR(metadata.st_mode):
+        if failing:
+            if walk.outcome == "link":
+                return _Probe("link", f"'{so_far}' is a symlink or reparse point")
             return _Probe("absent", f"'{so_far}' is not a directory")
+        parent = parent / part
+    metadata = walk.metadata
     if metadata is None:
         return _Probe("absent", "empty reference path")
+    current = clone_root / relative
 
     if want_skill_dir:
         if not stat.S_ISDIR(metadata.st_mode):
@@ -556,10 +589,34 @@ def classify_ref(
     bundled_by_leaf: Mapping[str, str] | None = None,
     listings: dict[Path, frozenset[str] | None] | None = None,
 ) -> DependencyRow:
-    """Classify one ``skills``/``rules`` reference (``kind``) without network access."""
+    """Classify one ``skills``/``rules`` reference (``kind``) without network access.
+
+    ``listings`` caches directory listings across the refs of one manifest.
+    """
+    return _classify_ref(
+        ref,
+        kind=kind,
+        plugin_real=plugin_root.expanduser().resolve(),
+        identity=identity,
+        bundled_by_leaf=bundled_by_leaf,
+        listings=listings,
+    )
+
+
+def _classify_ref(
+    ref: Any,
+    *,
+    kind: str,
+    plugin_real: Path,
+    identity: RepositoryIdentity,
+    bundled_by_leaf: Mapping[str, str] | None,
+    listings: dict[Path, frozenset[str] | None] | None,
+) -> DependencyRow:
+    """:func:`classify_ref` for a plugin root that is already resolved (``plugin_real``)."""
     hints = bundled_by_leaf if kind == "skills" and bundled_by_leaf else {}
+    canonical = normalize_ref(ref)
     try:
-        label = ref_label(ref)
+        label = _ref_label_from(ref, canonical)
         leaf = ref_name(ref)
     except ValueError as exc:
         return DependencyRow(
@@ -568,7 +625,7 @@ def classify_ref(
     if len(label) > MAX_REF_LABEL_CHARS:
         label = label[: MAX_REF_LABEL_CHARS - 3] + "..."
 
-    parsed = parse_canonical_ref(ref)
+    parsed = _split_canonical(canonical)
     if parsed is None:
         return DependencyRow(
             label,
@@ -615,7 +672,6 @@ def classify_ref(
         )
 
     relative = Path(ref_kind) / relative_name
-    plugin_real = plugin_root.expanduser().resolve()
     target = identity.clone_root / relative
     # Outside the plugin root a ref may only reach a recognized content root
     # (never .git/, secrets/, ...); inside it, any bundled path is eligible.
@@ -681,15 +737,16 @@ def classify_section(
     counted, gated, or reported twice.
     """
     listings = {} if listings is None else listings
+    plugin_real = plugin_root.expanduser().resolve()
     order: list[str] = []
     first: dict[str, Any] = {}
     rows: dict[str, DependencyRow] = {}
     counts: dict[str, int] = {}
     for index, ref in enumerate(refs):
-        row = classify_ref(
+        row = _classify_ref(
             ref,
             kind=kind,
-            plugin_root=plugin_root,
+            plugin_real=plugin_real,
             identity=identity,
             bundled_by_leaf=bundled_by_leaf,
             listings=listings,
@@ -866,7 +923,9 @@ def record_unverified_dependencies(resolution: DependencyResolution, manifest_pa
                     check_name="plugin_dependency_unverified",
                     message=(f"The missing-dependency gate did not run for {len(rows)} declared ref(s): {advice}."),
                     file_path=manifest_path,
-                    suggestion=(
+                    # The advice that fits the cause (an unsupported origin needs a new remote, not --repo-root).
+                    suggestion=resolution.identity.remedy
+                    or (
                         "Validate from the plugin's git clone whose 'origin' remote names the hosted repository, "
                         "or pass --repo-root <git top-level>."
                     ),

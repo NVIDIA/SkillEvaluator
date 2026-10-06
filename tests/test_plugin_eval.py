@@ -10,6 +10,7 @@ import pytest
 
 from skillevaluator.cli import _plugin_lift_mode_for_evidence
 from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES, CONTENT_DEDUP_MAX_TOTAL_BYTES
+from skillevaluator.plugin_dependencies import MAX_PLUGIN_MANIFEST_ITEMS, slug_from_remote_url
 from skillevaluator.plugin_manifest import locate_plugin_manifest
 from skillevaluator.tier3 import plugin_eval as plugin_eval_module
 from skillevaluator.tier3.plugin_eval import (
@@ -100,7 +101,6 @@ def test_both_lift_falls_back_without_composition_evidence() -> None:
         include_skills=(),
         unresolved_mcp_servers=(),
         runnable_mcp_servers=(),
-        rule_refs=(),
         dataset_case_count=1,
         cross_component_case_count=0,
     )
@@ -172,7 +172,7 @@ skills:
     ],
 )
 def test_remote_slug_matches_normalized_canonical_repo(url: str) -> None:
-    assert plugin_eval_module._slug_from_remote_url(url) == "nvidia/skillevaluator"
+    assert slug_from_remote_url(url) == "nvidia/skillevaluator"
 
 
 def test_same_repo_public_ref_resolves_without_remote_fetch(
@@ -198,9 +198,9 @@ skills:
     assert package.include_skills[0].name == member.name
     assert package.include_skills[0] != member.resolve()
     assert package.include_skills[0].is_relative_to(tmp_path / "stage")
-    assert (package.include_skills[0] / "SKILL.md").read_text(encoding="utf-8") == (
-        member / "SKILL.md"
-    ).read_text(encoding="utf-8")
+    assert (package.include_skills[0] / "SKILL.md").read_text(encoding="utf-8") == (member / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
     assert package.unresolved_skill_refs == ()
 
 
@@ -557,4 +557,30 @@ def test_oversized_contained_rule_is_rejected(tmp_path: Path) -> None:
     (rules / "policy.md").write_bytes(b"x" * (CONTENT_DEDUP_MAX_FILE_BYTES + 1))
 
     with pytest.raises(ValueError, match=r"limit|unbounded|exceed"):
+        prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
+
+
+@pytest.mark.parametrize(
+    ("files", "size", "message"),
+    [
+        (MAX_PLUGIN_MANIFEST_ITEMS + 1, 1, f"{MAX_PLUGIN_MANIFEST_ITEMS}-file limit"),
+        (
+            CONTENT_DEDUP_MAX_TOTAL_BYTES // CONTENT_DEDUP_MAX_FILE_BYTES + 1,
+            CONTENT_DEDUP_MAX_FILE_BYTES - 16,
+            f"{CONTENT_DEDUP_MAX_TOTAL_BYTES}-byte total limit",
+        ),
+    ],
+    ids=["file-count", "aggregate-bytes"],
+)
+def test_contained_rules_directory_shares_the_rule_bounds(tmp_path: Path, files: int, size: int, message: str) -> None:
+    plugin = tmp_path / "plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "p", "rules": "./rules"}), encoding="utf-8")
+    rules = plugin / "rules"
+    rules.mkdir()
+    for index in range(files):
+        (rules / f"r{index}.md").write_text("x" * size, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
         prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")

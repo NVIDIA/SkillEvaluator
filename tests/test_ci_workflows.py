@@ -206,6 +206,41 @@ def test_gitleaks_synthetic_harbor_allowlists_are_exactly_scoped() -> None:
         }
 
 
+def test_gitleaks_history_allowlists_cover_one_commit_file_and_rule_each() -> None:
+    # Fixtures that a later commit rewrote stay in the scanned history; each allowlist covers only the
+    # commit that added one, in that one file, for the one rule it tripped.
+    config = tomllib.loads(GITLEAKS_CONFIG.read_text(encoding="utf-8"))
+    allowlists = {entry["description"]: entry for entry in config["allowlists"]}
+
+    expected = {
+        "Synthetic JWT in the first revision of the hook-census label-window test; "
+        "the test now assembles it from its parts": (
+            "jwt",
+            "6dab46f91eb7323b27d0e90ecb7c90f5c38e7da4",
+            r"^tests/tier3/test_hook_census\.py$",
+        ),
+        "Synthetic deploy token in the first revision of the MCP bundle userinfo test; the test now splits it": (
+            "generic-api-key",
+            "79a8fc2eb731bb155bb6b725e3655790eae2fa02",
+            r"^tests/validators/test_plugin_components\.py$",
+        ),
+        "Synthetic OpenSSH private-key fixtures in the first revision of the report-text redaction tests; "
+        "the tests now assemble the PEM label": (
+            "private-key",
+            "2c5afed9274221fb8a408eeee0601ad53bad9090",
+            r"^tests/validators/test_url_policy\.py$",
+        ),
+    }
+    for description, (rule, commit, path) in expected.items():
+        assert allowlists[description] == {
+            "description": description,
+            "condition": "AND",
+            "targetRules": [rule],
+            "commits": [commit],
+            "paths": [path],
+        }
+
+
 def test_gitleaks_uses_event_specific_full_history_scopes() -> None:
     job = _load("security.yml")["jobs"]["gitleaks"]
     checkout = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@"))

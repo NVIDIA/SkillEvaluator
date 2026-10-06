@@ -2183,8 +2183,10 @@ def test_local_callback_streams_safe_partial_line_before_process_exit(tmp_path: 
     async def exercise() -> object:
         await environment.start()
         with environment.scoped_output_callback(on_output):
-            task = asyncio.create_task(environment.exec("printf safe-partial-output; sleep 1; printf done"))
-            await asyncio.wait_for(partial_output.wait(), timeout=0.5)
+            # The command keeps running well past the wait, so seeing the partial line proves it streamed
+            # before exit even when a loaded machine is slow to start the process.
+            task = asyncio.create_task(environment.exec("printf safe-partial-output; sleep 5; printf done"))
+            await asyncio.wait_for(partial_output.wait(), timeout=4)
             assert not task.done()
             return await task
 

@@ -612,7 +612,7 @@ def test_an_unscored_trial_that_never_launched_does_not_downgrade_the_census(tmp
 
 
 def test_a_native_arm_with_no_census_in_any_trial_is_incomplete(tmp_path: Path, package) -> None:
-    from skillevaluator.evaluation.tier3_report import _incomplete_skip_reason
+    from skillevaluator.evaluation.tier3_report import incomplete_reason
     from skillevaluator.reporting.markdown import MarkdownReporter
     from skillevaluator.reporting.plugin_sections import tier3_plugin_view
 
@@ -628,7 +628,7 @@ def test_a_native_arm_with_no_census_in_any_trial_is_incomplete(tmp_path: Path, 
 
     assert provenance["partial"] is True
     assert "no load census in any of 2" in provenance["native_load_unverified"]["claude-code"]
-    assert _incomplete_skip_reason(provenance).startswith("INCOMPLETE: claude-code: no load census")
+    assert incomplete_reason(provenance).startswith("INCOMPLETE: claude-code: no load census")
     view = tier3_plugin_view({"plugin_provenance": provenance})
     assert view is not None and view["partial"]
     lines: list[str] = []
@@ -753,6 +753,39 @@ def test_evaluate_plugin_writes_provenance_before_failing(
     assert sidecar["load_census"]["claude-code"]["loaded"][0]["name"] == "ok-mcp"
     assert sidecar["partial"] is True
     assert refreshed and refreshed[0]["execution_incomplete"] == sidecar["execution_incomplete"]
+
+
+@pytest.mark.parametrize("provenance_builds", [True, False], ids=["with-provenance", "provenance-failed"])
+def test_evaluate_plugin_fails_with_the_incomplete_reason_the_reports_give(
+    tmp_path: Path, package, monkeypatch: pytest.MonkeyPatch, provenance_builds: bool
+) -> None:
+    from skillevaluator.evaluation.tier3_report import incomplete_reason
+
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    engine, run_dir = _failed_engine(tmp_path, package)
+    prepared = _prepared(tmp_path, package)
+    prepared.provenance = lambda: {**package.provenance(), "unresolved_skill_refs": ["org/repo/a", "org/repo/b"]}
+    monkeypatch.setattr("skillevaluator.tier3.plugin_eval.prepare_plugin_eval_package", lambda *_a, **_k: prepared)
+    monkeypatch.setattr(EvaluationService, "evaluate", lambda _self, _options, **_kwargs: engine)
+    monkeypatch.setattr("skillevaluator.tier3.result_display.render_evaluation_result", lambda *_a, **_k: None)
+    monkeypatch.setattr("skillevaluator.evaluation.tier3_report.refresh_plugin_run_report", lambda *_a, **_k: None)
+    if not provenance_builds:
+
+        def broken_provenance(*_args: Any) -> dict[str, Any]:
+            raise RuntimeError("provenance could not be built")
+
+        monkeypatch.setattr(cli_module, "_plugin_provenance_with_runtime_evidence", broken_provenance)
+
+    outcome = CliRunner().invoke(cli_module.cli, ["tier3", "evaluate-plugin", str(plugin), "--progress", "off"])
+
+    assert outcome.exit_code == 1
+    failure = "Tier 3 plugin evaluation did not complete: claude-code without-skill Harbor run failed"
+    assert f"Error: INCOMPLETE: {failure}" in outcome.output
+    if provenance_builds:
+        sidecar = json.loads((run_dir / "plugin_provenance.json").read_text(encoding="utf-8"))
+        assert f"Error: {incomplete_reason(sidecar)}" in outcome.output
+        assert "2 unresolved skill refs could not be resolved or evaluated at Tier 3" in outcome.output
 
 
 def test_a_crash_in_the_report_only_sum_of_parts_arm_keeps_the_other_arms(
@@ -973,12 +1006,21 @@ def _botocore_cert_error(*, chained: bool) -> BaseException:
             id="chained-cert",
         ),
         pytest.param(urllib.error.URLError("unknown url type: ftp"), False, id="url-not-network"),
-        pytest.param(TimeoutError("LLM judge time budget exhausted"), False, id="budget-exhausted"),
         pytest.param(ValueError("bad json"), False, id="value-error"),
     ],
 )
 def test_the_verifier_judge_classifies_transient_errors(verifier, error: BaseException, transient: bool) -> None:
     assert verifier._is_transient_judge_error(error) is transient
+
+
+def test_the_verifier_judge_never_retries_once_its_time_budget_is_spent(verifier) -> None:
+    exhausted = verifier._JudgeBudgetExhausted("LLM judge time budget exhausted")
+
+    assert verifier._is_transient_judge_error(exhausted) is False
+    assert verifier._is_transient_judge_error(urllib.error.URLError(exhausted)) is False
+    assert verifier._classify_bedrock_retry_error(exhausted)[0] is False
+    # The type decides, not the message: a read timeout is retried whatever it says.
+    assert verifier._is_transient_judge_error(TimeoutError("LLM judge time budget exhausted")) is True
 
 
 @pytest.mark.parametrize(

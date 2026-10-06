@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from skillevaluator.plugin_components import parse_markdown
 from skillevaluator.tier3.harbor.native_staging import build_native_task_staging, stage_native_bundle
 from skillevaluator.tier3.plugin_eval import prepare_plugin_eval_package
 from skillevaluator.tier3.plugin_native import (
@@ -30,18 +31,21 @@ from skillevaluator.tier3.plugin_native import (
     STAGED_EVIDENCE,
     WRAPPER_COMPONENTS,
     NativeHookSource,
+    NativePluginSource,
     PluginLoadError,
     apply_load_census,
-    component_support_matrix,
+    apply_native_refusals,
     fallback_census,
     finalize_native_provenance,
+    foreign_root_var_re,
     hook_id,
     native_agent_import_path,
     normalize_census,
-    parse_frontmatter_yaml,
     plugin_load_provenance,
+    refuse_or_fall_back,
     resolve_plugin_load,
     summarize_censuses,
+    to_claude_root,
     wrap_hook_handler,
     wrap_hook_sources,
 )
@@ -194,6 +198,48 @@ def test_native_fails_fast_in_local_mode_and_auto_falls_back_with_a_reason() -> 
         resolve_plugin_load("native", ["cursor-cli"], env_mode="docker")
 
 
+def test_refuse_or_fall_back_raises_for_native_and_falls_back_for_auto() -> None:
+    with pytest.raises(PluginLoadError, match="--plugin-load native is not supported for codex: no adapter"):
+        refuse_or_fall_back("native", "codex", "no adapter")
+    decision = refuse_or_fall_back("auto", "codex", "no adapter")
+    assert (decision.mode, decision.reason) == ("wrapper", "auto: no adapter; using the generated wrapper")
+    assert decision.components == WRAPPER_COMPONENTS
+
+
+def test_native_refusals_block_only_the_adapters_that_stage_the_refused_type(tmp_path: Path) -> None:
+    source = NativePluginSource(
+        plugin_name="demo",
+        description="Demo",
+        contained=True,
+        plugin_root=tmp_path,
+        manifest={},
+        manifest_rel=".claude-plugin/plugin.json",
+        refusals=(("hook", "hooks/hooks.json", "the hook enables a permission bypass"),),
+    )
+    decisions = resolve_plugin_load("auto", ["claude-code", "codex"], env_mode="docker")
+
+    checked = apply_native_refusals("auto", decisions, source)
+
+    # Claude Code stages hooks natively, so it falls back; Codex never stages hooks.
+    assert checked["claude-code"].reason == "auto: the hook enables a permission bypass; using the generated wrapper"
+    assert checked["codex"] == decisions["codex"]
+    with pytest.raises(PluginLoadError, match="not supported for claude-code: the hook enables"):
+        apply_native_refusals("native", resolve_plugin_load("native", ["claude-code"], env_mode="docker"), source)
+
+
+def test_native_decisions_without_a_snapshot_fall_back_and_wrapper_decisions_stay() -> None:
+    # Hermes resolves to the wrapper under auto; Codex resolves to its native adapter.
+    decisions = resolve_plugin_load("auto", ["codex", "hermes"], env_mode="docker")
+    assert decisions["codex"].native and not decisions["hermes"].native
+
+    checked = apply_native_refusals("auto", decisions, None)
+
+    assert checked["codex"].reason == (
+        "auto: no native plugin snapshot was prepared for this run; using the generated wrapper"
+    )
+    assert checked["hermes"] == decisions["hermes"]
+
+
 def test_plugin_load_provenance_matches_the_contract_shape() -> None:
     decisions = resolve_plugin_load("auto", ["claude-code", "codex"], env_mode="docker")
     provenance = plugin_load_provenance("auto", decisions)
@@ -208,7 +254,7 @@ def test_plugin_load_provenance_matches_the_contract_shape() -> None:
 
 
 def test_component_support_matrix() -> None:
-    matrix = component_support_matrix()
+    matrix = {agent: adapter.component_modes() for agent, adapter in HARNESS_ADAPTERS.items()}
     native = {agent: sorted(k for k, v in modes.items() if v == "native") for agent, modes in matrix.items()}
     # Claude Code also loads a plugin's LSP servers and its settings.json (agent, subagentStatusLine).
     assert native["claude-code"] == [
@@ -295,6 +341,18 @@ def test_wrapped_hooks_merge_sources_with_ids_that_match_the_static_hook_risk_ro
         "inline#Stop[0].hooks[0]",
     ]
     assert len(wrapped.config["hooks"]["Stop"]) == 2
+
+
+def test_a_formats_own_root_placeholder_is_rewritten_to_the_claude_root() -> None:
+    pattern = foreign_root_var_re(("${PLUGIN_ROOT}", "${CLAUDE_PLUGIN_ROOT}"))
+
+    assert to_claude_root("${PLUGIN_ROOT}/bin/x $PLUGIN_ROOT/y $PLUGIN_ROOTS", pattern) == (
+        "${CLAUDE_PLUGIN_ROOT}/bin/x ${CLAUDE_PLUGIN_ROOT}/y $PLUGIN_ROOTS"
+    )
+    assert to_claude_root(["${PLUGIN_ROOT}"], pattern) == ["${PLUGIN_ROOT}"]
+    # Claude Code expands its own variables, so a Claude-only format has nothing to rewrite.
+    assert foreign_root_var_re(("${CLAUDE_PLUGIN_ROOT}",)) is None
+    assert to_claude_root("${CLAUDE_PLUGIN_ROOT}/x", None) == "${CLAUDE_PLUGIN_ROOT}/x"
 
 
 def test_wrapped_hook_runs_through_the_census_script(tmp_path: Path) -> None:
@@ -394,7 +452,7 @@ def test_claude_code_stages_a_plugin_dir_with_wrapped_hooks_and_no_eval_data(tmp
     assert (bundle / "hook_census.sh").read_bytes() == HOOK_CENSUS_TEMPLATE.read_bytes()
     assert (bundle / "native" / "claude-code" / "rules" / "style.md").read_text() == "Always cite ticket IDs.\n"
     assert staging.stage_member_skills is False and staging.stage_wrapper_skill is False
-    assert staging.workspace_skill_aliases(["ticket-triage"]) == ["release-helper:ticket-triage"]
+    assert staging.workspace_skill_aliases() == ["release-helper:ticket-triage"]
     _assert_no_bypass(bundle)
 
 
@@ -410,6 +468,35 @@ def test_claude_code_plugin_copy_skips_env_files_in_any_letter_case(tmp_path: Pa
     files = _files(bundle / "native" / "claude-code" / "plugin")
     assert {"scripts/.ENV", "config/.Env.local"}.isdisjoint(files)
     assert {"config/.env.example", "templates/.ENV.EXAMPLE"} <= files
+
+
+@pytest.mark.parametrize(
+    ("monitors", "copied"),
+    [
+        ("./config/monitors.json", False),
+        # Claude Code expands no root placeholder in manifest component paths
+        # (Tier 1 reports these as invalid), so they name no plugin file.
+        ("$CLAUDE_PLUGIN_ROOT/config/monitors.json", True),
+        ("${CLAUDE_PLUGIN_ROOT}/config/monitors.json", True),
+    ],
+)
+def test_claude_code_plugin_copy_skips_only_declared_lsp_and_monitor_files_inside_the_root(
+    tmp_path: Path, monitors: str, copied: bool
+) -> None:
+    plugin = _contained_plugin(tmp_path)
+    manifest = json.loads((plugin / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    manifest.update({"lspServers": "/servers.lsp.json", "monitors": monitors})
+    _write(plugin / ".claude-plugin" / "plugin.json", json.dumps(manifest))
+    _write(plugin / "servers.lsp.json", "{}")
+    _write(plugin / "config" / "monitors.json", "[]")
+    package = prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage", plugin_load="native")
+
+    bundle, _, _ = _stage(tmp_path, "claude-code", package.native_source)
+
+    files = _files(bundle / "native" / "claude-code" / "plugin")
+    # An absolute path names no plugin file, while a './' path names one inside the root.
+    assert "servers.lsp.json" in files
+    assert ("config/monitors.json" in files) is copied
 
 
 def test_claude_code_plugin_copy_skips_results_generated_output_and_the_evals_source(tmp_path: Path) -> None:
@@ -462,6 +549,45 @@ def test_claude_code_plugin_copy_skips_datasets_when_the_evals_source_is_the_plu
     files = _files(bundle / "native" / "claude-code" / "plugin")
     assert "skills/ticket-triage/SKILL.md" in files
     assert "evals.json" not in files
+
+
+@pytest.mark.parametrize(
+    ("name", "content", "always_on", "claude_rule"),
+    [
+        ("plain.md", "  Indented first line.\n", "Indented first line.", "  Indented first line.\n"),
+        ("always.mdc", "---\nalwaysApply: true\n---\nBody\n", "Body", "Body\n"),
+        (
+            "scoped.mdc",
+            "---\nglobs: '*.py, *.ts'\n---\nBody\n",
+            None,
+            '---\npaths:\n  - "*.py"\n  - "*.ts"\n---\n\nBody\n',
+        ),
+        (
+            "both.md",
+            "---\npaths: [src/**]\nglobs: '*.py'\n---\nBody\n",
+            None,
+            '---\npaths:\n  - "src/**"\n---\n\nBody\n',
+        ),
+        ("no-patterns.md", "---\nglobs: ','\n---\nBody\n", "Body", "Body\n"),
+        ("no-patterns.mdc", "---\nglobs: ','\n---\nBody\n", None, None),
+        ("requested.mdc", "---\ndescription: Use for releases\n---\nBody\n", None, None),
+    ],
+)
+def test_every_rules_channel_classifies_a_rule_the_same_way(
+    name: str, content: str, always_on: str | None, claude_rule: str | None
+) -> None:
+    """An always-on rules channel and Claude Code user rules agree on which rules are scoped or on request."""
+    from skillevaluator.tier3.plugin_native import _always_on_rule, _claude_user_rule
+
+    always_on_body, always_on_reason = _always_on_rule(name, content)
+    claude_body, claude_reason = _claude_user_rule(name, content)
+
+    assert (always_on_body, claude_body) == (always_on, claude_rule)
+    if name.startswith("scoped"):
+        assert always_on_reason is not None and "matching *.py, *.ts" in always_on_reason
+    if name.startswith("requested"):
+        assert always_on_reason is not None and always_on_reason.startswith("agent-requested rule")
+        assert claude_reason is not None and claude_reason.startswith("agent-requested rule")
 
 
 def test_claude_code_setup_copies_rules_and_census_lists_the_plugin_dir(tmp_path: Path, native_source) -> None:
@@ -595,14 +721,14 @@ def test_opencode_stages_config_instructions_agents_and_commands(tmp_path: Path,
     }
     agent = (native / "config" / "agents" / "helper.md").read_text(encoding="utf-8")
     # `tools: Read` keeps the subagent read-only in OpenCode.
-    assert parse_frontmatter_yaml(agent) == {
+    assert parse_markdown(agent).frontmatter == {
         "description": "Helps",
         "mode": "subagent",
         "permission": {"*": "deny", "read": "allow"},
     }
     assert "tools" not in agent
     command = (native / "config" / "commands" / "review.md").read_text(encoding="utf-8")
-    assert parse_frontmatter_yaml(command) == {"description": "Review a change"}
+    assert parse_markdown(command).frontmatter == {"description": "Review a change"}
     assert HARNESS_ADAPTERS["opencode"].launch_env() == {
         "OPENCODE_CONFIG": "/skilleval/native/opencode/opencode.json",
         "OPENCODE_CONFIG_DIR": "/skilleval/native/opencode/config",

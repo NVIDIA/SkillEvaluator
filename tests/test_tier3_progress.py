@@ -1061,6 +1061,52 @@ def _configure_native_task_source(
     monkeypatch.setattr(runner, "stage_native_harbor_tasks", emit_native)
 
 
+class _StopAtPluginLoadProvenance(Exception):
+    """Raised by a stub to end a run once its plugin-load decisions are final."""
+
+
+@pytest.mark.parametrize("plugin_load", ["native", "auto"])
+def test_agent_route_without_a_native_wrapper_fails_native_and_falls_back_under_auto(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, plugin_load: str
+) -> None:
+    """A route with no native Harbor wrapper fails a ``native`` run and uses the generated wrapper under ``auto``."""
+    from skillevaluator.tier3 import plugin_native
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner, "_agent_import_path", lambda *_args: "custom.agents:RoutedCodex")
+    decisions: dict[str, Any] = {}
+
+    def record_decisions(_requested: str, final: dict[str, Any]) -> dict[str, Any]:
+        decisions.update(final)
+        raise _StopAtPluginLoadProvenance
+
+    monkeypatch.setattr(plugin_native, "plugin_load_provenance", record_decisions)
+    reporter = _RecordingReporter()
+    missing = "native plugin loading has no Harbor wrapper for codex over custom.agents:RoutedCodex"
+
+    def run() -> dict[str, Any]:
+        return runner.run_harbor_eval(
+            skill,
+            ["codex"],
+            eval_target_kind="plugin",
+            plugin_load=plugin_load,
+            native_plugin_source=SimpleNamespace(refusals=()),
+            output_dir=tmp_path / "results",
+            progress_reporter=reporter,
+        )
+
+    if plugin_load == "native":
+        assert run() == {"error": [f"--plugin-load native is not supported for codex: {missing}"]}
+        events = [(event.stage, event.state, event.detail) for event in reporter.events]
+        assert ("credential-validation", "failed", missing) in events
+        assert decisions == {}
+    else:
+        with pytest.raises(_StopAtPluginLoadProvenance):
+            run()
+        assert decisions["codex"].mode == "wrapper"
+        assert decisions["codex"].reason == f"auto: {missing}; using the generated wrapper"
+
+
 def test_ack_eval_preflight_uses_the_exact_prospective_bedrock_child_environment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

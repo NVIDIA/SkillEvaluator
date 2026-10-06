@@ -31,9 +31,7 @@ from skillevaluator.tier3.plugin_native import (
     SETUP_SCRIPT,
     NativePluginSource,
     NativeTextComponent,
-    component_support_matrix,
     normalize_census,
-    parse_frontmatter_yaml,
     resolve_plugin_load,
 )
 
@@ -329,7 +327,7 @@ def test_a_broken_plugin_mcp_file_fails_instead_of_dropping_every_plugin_server(
 # OpenCode: built-in agent names and subagent tool limits                      #
 # --------------------------------------------------------------------------- #
 def _opencode_agent(bundle: Any, stem: str) -> dict[str, Any]:
-    return parse_frontmatter_yaml(bundle.generated[f"native/opencode/config/agents/{stem}.md"])
+    return parse_markdown(bundle.generated[f"native/opencode/config/agents/{stem}.md"]).frontmatter
 
 
 def test_opencode_plugin_agents_named_like_built_ins_do_not_replace_them(tmp_path: Path) -> None:
@@ -402,7 +400,7 @@ def test_hermes_is_labeled_wrapper_and_auto_picks_the_wrapper() -> None:
     explicit = resolve_plugin_load("native", ["hermes"], env_mode="docker")["hermes"]
     assert explicit.adapter == "hermes-home"
     assert {explicit.components[kind] for kind in ("skill", "rule", "mcp")} == {"wrapper"}
-    assert "native" not in component_support_matrix()["hermes"].values()
+    assert "native" not in HARNESS_ADAPTERS["hermes"].component_modes().values()
 
 
 # --------------------------------------------------------------------------- #

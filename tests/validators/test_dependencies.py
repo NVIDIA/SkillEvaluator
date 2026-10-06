@@ -11,9 +11,12 @@ from unittest.mock import patch
 
 import pytest
 
+from skillevaluator.constants import CONTENT_TYPE_PLUGIN
 from skillevaluator.models.result import Severity
+from skillevaluator.tier1.commands import run_validation
 from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators.dependencies import (
+    NOT_AUDITED_CHECK_NAME,
     UNVERIFIED_CHECK_NAME,
     DependencySecurityValidator,
     parse_dependency_declaration,
@@ -204,6 +207,78 @@ def test_pip_audit_failure_without_json_is_a_warning(tmp_path: Path, pip_audit_a
     assert not result.is_incomplete
 
 
+_SKIPPED_REQUESTS = json.dumps(
+    {
+        "dependencies": [
+            {
+                "name": "requests",
+                "skip_reason": "Dependency not found on PyPI and could not be audited: requests (2.31.0+corp)",
+            },
+            {"name": "pyyaml", "version": "6.0.1", "vulns": []},
+        ],
+        "fixes": [],
+    }
+)
+
+
+def test_pin_pip_audit_skipped_is_not_counted_as_audited(tmp_path: Path, pip_audit_available) -> None:
+    """Regression: a pin pip-audit could not audit (a local version, a package not on PyPI) was reported as
+    'No vulnerabilities found' and counted as audited."""
+    skill = _skill(tmp_path)
+    (skill / "requirements.txt").write_text("requests==2.31.0+corp\npyyaml==6.0.1\n", encoding="utf-8")
+    validator = DependencySecurityValidator(use_safety=False)
+
+    with patch.object(Tools.pip_audit, "run", side_effect=_RecordingPipAudit(stdout=_SKIPPED_REQUESTS)):
+        result = validator.validate(skill)
+
+    [finding] = [f for f in result.findings if f.check_name == NOT_AUDITED_CHECK_NAME]
+    assert finding.severity == Severity.MEDIUM and finding.line_number == 1
+    assert (finding.metadata["package_name"], finding.metadata["resolution_status"]) == ("requests", "not_audited")
+    assert "Dependency not found on PyPI" in finding.metadata["skip_reason"]
+    assert not [f for f in result.findings if f.check_name == UNVERIFIED_CHECK_NAME]
+    assert any("No vulnerabilities found; 1 pin(s) could not be audited (pip-audit)" in m for m in result.messages)
+    # pyyaml was audited, requests was not.
+    python = validator._summary["python"]
+    assert (python["status"], python["declarations"], python["audited"], python["unverified"]) == ("audited", 2, 1, 1)
+
+
+def test_source_whose_every_pin_pip_audit_skipped_is_unverified(tmp_path: Path, pip_audit_available) -> None:
+    """Exact pins that pip-audit could not audit at all leave the Python audit ``unverified``, never ``audited``."""
+    skill = _skill(tmp_path)
+    (skill / "requirements.txt").write_text("requests==2.31.0+corp\n", encoding="utf-8")
+    stdout = json.dumps({"dependencies": [json.loads(_SKIPPED_REQUESTS)["dependencies"][0]], "fixes": []})
+    validator = DependencySecurityValidator(use_safety=False)
+
+    with patch.object(Tools.pip_audit, "run", side_effect=_RecordingPipAudit(stdout=stdout)):
+        result = validator.validate(skill)
+
+    assert [f.metadata["package_name"] for f in result.findings if f.check_name == NOT_AUDITED_CHECK_NAME] == [
+        "requests"
+    ]
+    python = validator._summary["python"]
+    assert (python["status"], python["audited"], python["unverified"], python["scanners"]) == ("unverified", 0, 1, [])
+    assert not result.is_incomplete
+
+
+def test_with_requirements_that_mcp_runners_install_are_audited(tmp_path: Path, pip_audit_available) -> None:
+    """``uv run --with`` and ``uvx --with`` install packages next to the server, so each exact one is audited."""
+    root = tmp_path / "demo"
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "demo"}), encoding="utf-8")
+    servers = {
+        "project": {"command": "uv", "args": ["run", "--with", "requests==2.31.0", "server.py"]},
+        "tool": {"command": "uvx", "args": ["--with", "pyyaml==6.0.1", "mcp-tool==1.0.0"]},
+    }
+    (root / ".mcp.json").write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+    fake = _RecordingPipAudit()
+
+    with patch.object(Tools.pip_audit, "run", side_effect=fake):
+        [result] = run_validation(root, checks="dependency", content_type=CONTENT_TYPE_PLUGIN)
+
+    assert [call["content"] for call in fake.calls] == ["mcp-tool==1.0.0\npyyaml==6.0.1\nrequests==2.31.0\n"]
+    assert not [f for f in result.findings if f.check_name == UNVERIFIED_CHECK_NAME]
+
+
 def test_linked_dependency_file_is_refused(tmp_path: Path, pip_audit_available) -> None:
     skill = _skill(tmp_path)
     outside = tmp_path / "outside-requirements.txt"
@@ -247,13 +322,34 @@ def test_poetry_bare_versions_are_exact(tmp_path: Path, pip_audit_available) -> 
     assert unverified == ["httpx"]
 
 
+def test_every_pep440_spelling_of_an_exact_pin_is_audited(tmp_path: Path, pip_audit_available) -> None:
+    """Regression: ``===`` and non-canonical PEP 440 spellings were unverified although they name one release."""
+    skill = _skill(tmp_path)
+    (skill / "requirements.txt").write_text(
+        "alpha===1.0\nbeta==v2.0\ndelta==1.2.3-beta.1\ngamma===local-build\n", encoding="utf-8"
+    )
+    fake = _RecordingPipAudit()
+
+    with patch.object(Tools.pip_audit, "run", side_effect=fake):
+        result = DependencySecurityValidator(use_safety=False).validate(skill)
+
+    assert [call["content"] for call in fake.calls] == ["alpha==1.0\nbeta==v2.0\ndelta==1.2.3-beta.1\n"]
+    unverified = [f.metadata["package_name"] for f in result.findings if f.check_name == UNVERIFIED_CHECK_NAME]
+    assert unverified == ["gamma"]
+
+
 @pytest.mark.parametrize(
     ("raw", "name", "exact"),
     [
         ("requests==2.31.0", "requests", "2.31.0"),
         ("Foo_Bar[extra]==1.0.post1 ; sys_platform == 'linux'", "foo-bar", "1.0.post1"),
         ("pkg==1.0.*", "pkg", None),
-        ("pkg===1.0", "pkg", None),
+        ("pkg===1.0", "pkg", "1.0"),
+        ("pkg===local-build", "pkg", None),
+        ("pkg==v1.0", "pkg", "v1.0"),
+        ("pkg==1.0-1", "pkg", "1.0-1"),
+        ("pkg==1.2.3-beta.1", "pkg", "1.2.3-beta.1"),
+        ("pkg (==1.0)", "pkg", "1.0"),
         ("pkg>=1,<2", "pkg", None),
         ("pkg==1.0,==1.0", "pkg", None),
         ("pkg", "pkg", None),

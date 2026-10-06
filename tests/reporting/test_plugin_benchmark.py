@@ -69,7 +69,7 @@ def _tier3(*, partial: bool, integration: dict[str, Any] | None = None, coverage
         result.passed = False
         result.metadata["execution_status"] = "skipped"
         result.metadata["skip_reason"] = (
-            "INCOMPLETE: 1 unresolved skill ref(s) could not be resolved/evaluated at Tier 3"
+            "INCOMPLETE: 1 unresolved skill ref, 1 provider-only MCP server could not be resolved or evaluated at Tier 3"
         )
     result.metadata["gating"] = {"tier": 3, "blocking": False}
     return result
@@ -190,7 +190,10 @@ def test_partial_plugin_card_is_incomplete_and_lists_excluded_behavior(tmp_path:
     assert "- Plugin run: INCOMPLETE (partial)" in rendered
     assert "| Integration (plugin vs. its own parts) | INCONCLUSIVE — No cross-component case completed. |" in rendered
     assert "**2 components not staged** of 4 declared or packaged component(s); 2 staged." in rendered
-    assert "- mcp docs (Unavailable) — provider-only MCP server" in rendered
+    assert "| docs | mcp | Unavailable | provider-only MCP server |" in rendered
+    # The coverage table and the excluded list already name each component that was not staged.
+    assert "Not staged:" not in rendered
+    assert "- 2 components not staged: mcp docs, hook pre-commit" in rendered
     assert "- Status: **INCOMPLETE** — 1 unresolved skill ref, 1 provider-only MCP server" in rendered
     assert "- Provider-only MCP servers were not exercised: docs" in rendered
     assert "- Unresolved skill refs were not evaluated: github::org/repo::skills::remote" in rendered
@@ -198,6 +201,32 @@ def test_partial_plugin_card_is_incomplete_and_lists_excluded_behavior(tmp_path:
         rendered
     )
     assert "| Tier 3 | Live agent evaluation | **INCOMPLETE** | Partial plugin run:" in rendered
+    assert _gate(tmp_path, rendered) == []
+
+
+def test_plugin_card_names_each_not_staged_component_the_coverage_table_leaves_out(tmp_path: Path) -> None:
+    """The table keeps 200 rows, and inventory order puts unsupported hooks, LSP servers and monitors last."""
+    staged = [
+        {"type": "skill", "name": f"skill{i:03d}", "path": f"skills/skill{i:03d}", "state": "staged", "reason": ""}
+        for i in range(200)
+    ]
+    unsupported = [
+        {"type": "lsp", "name": f"lsp{i:02d}", "path": None, "state": "unsupported", "reason": f"reason-lsp{i:02d}"}
+        for i in range(40)
+    ]
+    tier3 = _tier3(partial=False)
+    tier3.metadata["agent_eval"]["plugin_provenance"]["component_coverage"] = {
+        "components": staged + unsupported,
+        "counts": {"staged": 200, "unsupported": 40},
+        "not_evaluated": 40,
+    }
+
+    rendered = _render([tier1_plugin_result(), tier3])
+
+    assert "| 40 more component(s) | | | |" in rendered
+    assert "Not staged, beyond the 200 rows above:" in rendered
+    for i in range(40):
+        assert f"- lsp lsp{i:02d} (Unsupported) — reason-lsp{i:02d}" in rendered
     assert _gate(tmp_path, rendered) == []
 
 
@@ -274,3 +303,15 @@ def test_validate_writes_plugin_benchmark_card(monkeypatch: pytest.MonkeyPatch, 
     card = output / "BENCHMARK.md"
     assert card.is_file(), outcome.output
     assert card.read_text(encoding="utf-8").startswith("# Plugin Benchmark: demo-plugin\n")
+
+
+def test_card_treats_an_overflowing_score_as_missing(tmp_path: Path) -> None:
+    tier3 = _tier3(partial=False, integration=_MEASURED_INTEGRATION)
+    payload = tier3.metadata["agent_eval"]
+    payload["overall_lift"] = 10**400
+    payload["agents"]["codex"]["baseline"] = 10**400
+
+    rendered = _render([tier1_plugin_result(), tier3])
+
+    assert "| Plugin lift (plugin vs. no plugin) | Not available |" in rendered
+    assert _gate(tmp_path, rendered) == []

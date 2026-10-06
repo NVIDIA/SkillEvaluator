@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from skillevaluator.constants import (
+    NAME_MAX_LENGTH,
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE,
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
     PLUGIN_CODEX_MANIFEST_DIR,
@@ -53,6 +54,7 @@ from skillevaluator.constants import (
     PLUGIN_CURSOR_MANIFEST_TYPE,
     PLUGIN_MANIFEST_TYPE,
 )
+from skillevaluator.utils.structured_data import load_bounded_json, load_bounded_yaml
 
 IssueLevel = Literal["error", "warning", "note"]
 
@@ -109,12 +111,18 @@ def declares_agent_plugins_schema(data: Any) -> bool:
 # --------------------------------------------------------------------------- #
 # Profiles                                                                    #
 # --------------------------------------------------------------------------- #
+# The default skills folder of every format (skills/<name>/SKILL.md). A format
+# whose declared skills replace it says so in its profile.
+DEFAULT_SKILLS_DIR = "skills"
+
+
 @dataclass(frozen=True)
 class FormatProfile:
     """Where one manifest format declares components and where they live by default.
 
     Every default path is root-relative POSIX. ``None`` means the format has no
-    such default location, so the inventory does not look there.
+    such default location, so the inventory does not look there. Skills live in
+    :data:`DEFAULT_SKILLS_DIR` in every format.
     """
 
     manifest_type: str
@@ -153,7 +161,6 @@ class FormatProfile:
     merged_default_fields: frozenset[str] = frozenset()
     # Manifest fields that declare components (the builder reads only these).
     component_fields: frozenset[str] = frozenset()
-    default_skills_dir: str | None = "skills"
     # Agent Plugins discovers only immediate children of skills/.
     skills_immediate_children_only: bool = False
     # Declared skill folders are searched at any depth (Codex), not one level.
@@ -374,6 +381,19 @@ def manifest_syntax(manifest_type: str) -> Literal["json", "yaml"]:
     return "yaml" if manifest_type == PLUGIN_MANIFEST_TYPE else "json"
 
 
+def parse_manifest_text(manifest_type: str, text: str) -> Any:
+    """Parse manifest text with the bounded parser of its format's syntax (:func:`manifest_syntax`).
+
+    Raises :class:`~skillevaluator.utils.structured_data.StructuredDataError`
+    (a ``ValueError``) when the text does not parse or exceeds the
+    structured-data bounds; the bounded parsers report parser recursion that
+    way too.
+    """
+    if manifest_syntax(manifest_type) == "json":
+        return load_bounded_json(text)
+    return load_bounded_yaml(text)
+
+
 # --------------------------------------------------------------------------- #
 # Field validation                                                            #
 # --------------------------------------------------------------------------- #
@@ -390,6 +410,16 @@ class ManifestIssue:
     message: str
     level: IssueLevel = "error"
     suggestion: str = ""
+
+
+# Unknown top-level fields reported one by one (in name order); a note counts the rest.
+_MAX_UNKNOWN_FIELD_ISSUES = 32
+# Agent Plugins extension namespaces whose value is checked to be an object.
+_MAX_CHECKED_EXTENSIONS = 64
+# Characters of a field value quoted in a message. A name is quoted past the
+# 64-character name limit, so a value that is too long shows that it is.
+_MAX_QUOTED_NAME_CHARS = 80
+_MAX_QUOTED_VERSION_CHARS = 64
 
 
 def _issue(
@@ -506,7 +536,7 @@ def _check_unknown_fields(
 ) -> None:
     """MEDIUM for each top-level field the format does not define (``ignored`` fields are skipped silently)."""
     unknown = sorted(str(key) for key in data if key not in allowed and key not in ignored)
-    for key in unknown[:32]:
+    for key in unknown[:_MAX_UNKNOWN_FIELD_ISSUES]:
         closest = _closest_field(key, allowed)
         suggestion = (
             f"Did you mean '{closest}'? Rename '{key}' to '{closest}'."
@@ -520,6 +550,18 @@ def _check_unknown_fields(
                 f"{label} does not define the top-level field '{key}'; {consequence}.",
                 "warning",
                 suggestion,
+            )
+        )
+    if len(unknown) > _MAX_UNKNOWN_FIELD_ISSUES:
+        omitted = len(unknown) - _MAX_UNKNOWN_FIELD_ISSUES
+        issues.append(
+            _issue(
+                "<root>",
+                "unknown_fields_truncated",
+                f"{label} has {len(unknown)} top-level fields it does not define; only the first "
+                f"{_MAX_UNKNOWN_FIELD_ISSUES} (by name) are reported, and {omitted} more are not listed.",
+                "note",
+                "Remove the fields the format does not define.",
             )
         )
 
@@ -564,7 +606,8 @@ def _check_semver(data: dict[str, Any], issues: list[ManifestIssue], *, label: s
             _issue(
                 "version",
                 "not_semver",
-                f"{label} 'version' {version[:64]!r} is not a semantic version (MAJOR.MINOR.PATCH).",
+                f"{label} 'version' {version[:_MAX_QUOTED_VERSION_CHARS]!r} is not a semantic version "
+                "(MAJOR.MINOR.PATCH).",
                 level,
                 "Use a semantic version such as 1.0.0.",
             )
@@ -1451,13 +1494,13 @@ def _validate_agent_plugins(data: dict[str, Any]) -> list[ManifestIssue]:
             )
         )
     name = _check_string(data, "name", issues, required=True, label=label)
-    if name is not None and (not name or len(name) > 64 or not _AGENT_PLUGINS_NAME_RE.match(name)):
+    if name is not None and (not name or len(name) > NAME_MAX_LENGTH or not _AGENT_PLUGINS_NAME_RE.match(name)):
         issues.append(
             _issue(
                 "name",
                 "pattern",
-                f"{label} 'name' {name[:80]!r} must be 1-64 characters of a-z, 0-9, '-' and '.', start and end "
-                "with a letter or digit, and contain no '--' or '..'.",
+                f"{label} 'name' {name[:_MAX_QUOTED_NAME_CHARS]!r} must be 1-{NAME_MAX_LENGTH} characters of a-z, "
+                "0-9, '-' and '.', start and end with a letter or digit, and contain no '--' or '..'.",
                 suggestion="Rename the plugin, for example 'my-plugin'.",
             )
         )
@@ -1477,7 +1520,7 @@ def _validate_agent_plugins(data: dict[str, Any]) -> list[ManifestIssue]:
                 )
             )
         else:
-            for namespace, value in list(extensions.items())[:64]:
+            for namespace, value in list(extensions.items())[:_MAX_CHECKED_EXTENSIONS]:
                 if not isinstance(value, dict):
                     issues.append(
                         _issue(
@@ -1534,8 +1577,8 @@ def _validate_cursor(data: dict[str, Any]) -> list[ManifestIssue]:
             _issue(
                 "name",
                 "pattern",
-                f"{label} 'name' {name[:80]!r} must be lowercase kebab-case: a-z, 0-9, '-' and '.', starting and "
-                "ending with a letter or digit.",
+                f"{label} 'name' {name[:_MAX_QUOTED_NAME_CHARS]!r} must be lowercase kebab-case: a-z, 0-9, '-' "
+                "and '.', starting and ending with a letter or digit.",
                 suggestion="Rename the plugin, for example 'my-plugin'.",
             )
         )
@@ -1669,6 +1712,34 @@ _CODEX_INTERFACE_ALLOWED = frozenset(
 )
 _CODEX_REFUSES = "; Codex refuses the manifest (missing or invalid plugin.json)"
 _CODEX_IGNORES = "; Codex ignores the value and still installs the plugin"
+# The types Codex accepts for its component fields, the rule a type error states,
+# and its level: a wrong 'apps' makes Codex refuse the manifest; a wrong
+# 'mcpServers', 'hooks', or 'extensions' is dropped and the plugin still installs.
+_CODEX_FIELD_TYPES: dict[str, tuple[tuple[type, ...], str, IssueLevel]] = {
+    "apps": ((str,), f"must be a './'-relative path to an .app.json file{_CODEX_REFUSES}", "error"),
+    "mcpServers": (
+        (str, dict),
+        f"must be a './'-relative path or an inline server map{_CODEX_IGNORES}, without these servers",
+        "warning",
+    ),
+    "hooks": (
+        (str, dict, list),
+        f"must be a path, an array, or an inline object{_CODEX_IGNORES}, without these hooks",
+        "warning",
+    ),
+    "extensions": ((dict,), f"must be an object{_CODEX_IGNORES}", "warning"),
+}
+
+
+def _check_codex_types(
+    data: dict[str, Any], issues: list[ManifestIssue], fields: tuple[str, ...], *, label: str
+) -> None:
+    """Report each of *fields* that is set to a type Codex does not accept (see ``_CODEX_FIELD_TYPES``)."""
+    for key in fields:
+        accepted, rule, level = _CODEX_FIELD_TYPES[key]
+        value = data.get(key)
+        if value is not None and not isinstance(value, accepted):
+            issues.append(_issue(key, "type", f"{label} '{key}' {rule}.", level))
 
 
 def _check_codex_name(data: dict[str, Any], issues: list[ManifestIssue], *, label: str) -> None:
@@ -1680,7 +1751,8 @@ def _check_codex_name(data: dict[str, Any], issues: list[ManifestIssue], *, labe
             _issue(
                 "name",
                 "pattern",
-                f"{label} 'name' {name[:80]!r} may use only ASCII letters, digits, '_' and '-'{_CODEX_REFUSES}.",
+                f"{label} 'name' {name[:_MAX_QUOTED_NAME_CHARS]!r} may use only ASCII letters, digits, '_' and "
+                f"'-'{_CODEX_REFUSES}.",
                 suggestion="Rename the plugin in kebab-case, for example 'my-plugin'.",
             )
         )
@@ -1701,7 +1773,8 @@ def _check_codex_name(data: dict[str, Any], issues: list[ManifestIssue], *, labe
             _issue(
                 "name",
                 "not_kebab_case",
-                f"{label} 'name' {name[:80]!r} is not lowercase kebab-case, which Codex plugin packaging expects.",
+                f"{label} 'name' {name[:_MAX_QUOTED_NAME_CHARS]!r} is not lowercase kebab-case, which Codex plugin "
+                "packaging expects.",
                 "warning",
                 "Use lowercase letters, digits, and single hyphens.",
             )
@@ -1739,8 +1812,9 @@ def _check_codex_version(data: dict[str, Any], issues: list[ManifestIssue], *, l
             _issue(
                 "version",
                 "invalid",
-                f"{label} 'version' {version[:64]!r} may use only ASCII letters, digits, '.', '+', '_' and '-'; "
-                "Codex stores the plugin in a folder named after it, so it does not install the plugin.",
+                f"{label} 'version' {version[:_MAX_QUOTED_VERSION_CHARS]!r} may use only ASCII letters, digits, "
+                "'.', '+', '_' and '-'; Codex stores the plugin in a folder named after it, so it does not install "
+                "the plugin.",
                 suggestion="Use a semantic version such as 1.0.0.",
             )
         )
@@ -1882,38 +1956,9 @@ def _validate_codex(data: dict[str, Any]) -> list[ManifestIssue]:
     _check_codex_keywords(data, issues, label=label)
     for key in ("skills", "commands"):
         _check_string_or_list(data, key, issues, label=label, level="warning", consequence=_CODEX_IGNORES)
-    apps = data.get("apps")
-    if apps is not None and not isinstance(apps, str):
-        issues.append(
-            _issue("apps", "type", f"{label} 'apps' must be a './'-relative path to an .app.json file{_CODEX_REFUSES}.")
-        )
-    mcp_servers = data.get("mcpServers")
-    if mcp_servers is not None and not isinstance(mcp_servers, str | dict):
-        issues.append(
-            _issue(
-                "mcpServers",
-                "type",
-                f"{label} 'mcpServers' must be a './'-relative path or an inline server map{_CODEX_IGNORES}, "
-                "without these servers.",
-                "warning",
-            )
-        )
-    hooks = data.get("hooks")
-    if hooks is not None and not isinstance(hooks, str | dict | list):
-        issues.append(
-            _issue(
-                "hooks",
-                "type",
-                f"{label} 'hooks' must be a path, an array, or an inline object{_CODEX_IGNORES}, without these hooks.",
-                "warning",
-            )
-        )
+    _check_codex_types(data, issues, ("apps", "mcpServers", "hooks"), label=label)
     _check_codex_interface(data.get("interface"), issues, label=label)
-    extensions = data.get("extensions")
-    if extensions is not None and not isinstance(extensions, dict):
-        issues.append(
-            _issue("extensions", "type", f"{label} 'extensions' must be an object{_CODEX_IGNORES}.", "warning")
-        )
+    _check_codex_types(data, issues, ("extensions",), label=label)
     _check_unknown_fields(
         data,
         _CODEX_FIELDS,
@@ -1937,21 +1982,7 @@ def _validate_codex_overlay(data: dict[str, Any]) -> list[ManifestIssue]:
     """
     label = "Codex overlay manifest"
     issues: list[ManifestIssue] = []
-    apps = data.get("apps")
-    if apps is not None and not isinstance(apps, str):
-        issues.append(
-            _issue("apps", "type", f"{label} 'apps' must be a './'-relative path to an .app.json file{_CODEX_REFUSES}.")
-        )
-    hooks = data.get("hooks")
-    if hooks is not None and not isinstance(hooks, str | dict | list):
-        issues.append(
-            _issue(
-                "hooks",
-                "type",
-                f"{label} 'hooks' must be a path, an array, or an inline object{_CODEX_IGNORES}, without these hooks.",
-                "warning",
-            )
-        )
+    _check_codex_types(data, issues, ("apps", "hooks"), label=label)
     _check_codex_keywords(data, issues, label=label)
     _check_codex_interface(data.get("interface"), issues, label=label, require_complete=False)
     return issues

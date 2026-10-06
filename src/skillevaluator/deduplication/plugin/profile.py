@@ -13,36 +13,38 @@ locator and the bounded embedding extractor; nothing is fetched remotely.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from skillevaluator.constants import (
-    CONTENT_DEDUP_MAX_TOTAL_BYTES,
     DESCRIPTION_MAX_LENGTH,
-    PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE,
+    PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
     PLUGIN_CATALOG_MAX_MEMBER_CHARS,
     PLUGIN_CATALOG_MAX_MEMBERS,
-    PLUGIN_CONTAINED_MANIFEST_FILE,
-    PLUGIN_CONTAINED_MANIFEST_TYPES,
-    PLUGIN_MANIFEST_FILES,
     PLUGIN_NAME_MAX_REPORT_CHARS,
-    PLUGIN_NATIVE_MANIFEST_DIRS,
     SCAN_EXCLUDED_DIRS,
     SIMILARITY_MAX_DISCOVERED_PATHS,
 )
 from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
-from skillevaluator.embedding.extractor import ContentEntry, extract_from_skill
-from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
-from skillevaluator.utils.helpers import find_bundled_plugin_skills
-from skillevaluator.utils.secure_fs import SecurePathError, discover_secure_files
-from skillevaluator.utils.structured_data import (
-    StructuredDataError,
-    load_bounded_json,
-    load_bounded_yaml,
-    require_bounded_string,
+from skillevaluator.embedding.extractor import (
+    CollectionLimitError,
+    ContentEntry,
+    ExtractionBudget,
+    extract_skill_manifest,
 )
+from skillevaluator.plugin_formats import parse_manifest_text
+from skillevaluator.plugin_manifest import (
+    PluginManifestPathError,
+    locate_plugin_manifest,
+    manifest_relative_path,
+    manifest_root_for,
+    manifest_type_for_relative_path,
+)
+from skillevaluator.utils.helpers import find_bundled_plugin_skill_manifests
+from skillevaluator.utils.secure_fs import SecureFile, SecurePathError, SecureRoot, discover_secure_files
+from skillevaluator.utils.structured_data import StructuredDataError, require_bounded_string
 
 MAX_PLUGIN_MEMBERS = PLUGIN_CATALOG_MAX_MEMBERS
 MAX_PLUGIN_MEMBER_CHARS = PLUGIN_CATALOG_MAX_MEMBER_CHARS
@@ -55,18 +57,10 @@ class PluginProfileError(ValueError):
 class PluginSkillLimitError(PluginProfileError):
     """Raised before reading more bundled skills than the caller allows."""
 
-
-class ProfileByteBudget:
-    """Aggregate byte budget shared by the manifests and skills of a plugin collection."""
-
-    def __init__(self, max_bytes: int = CONTENT_DEDUP_MAX_TOTAL_BYTES) -> None:
-        self.max_bytes = max_bytes
-        self.used = 0
-
-    def consume(self, text: str) -> None:
-        self.used += len(text.encode("utf-8"))
-        if self.used > self.max_bytes:
-            raise ValueError(f"Collection total byte limit exceeded ({self.max_bytes}) before embedding")
+    def __init__(self, actual: int, limit: int) -> None:
+        super().__init__(f"Plugin bundles {actual} skills, exceeding the limit of {limit}")
+        self.actual = actual
+        self.limit = limit
 
 
 @dataclass(frozen=True)
@@ -134,7 +128,7 @@ def _ref_member_name(ref: Any) -> str | None:
     return leaf or None
 
 
-def _load_manifest_data(plugin_root: Path, budget: ProfileByteBudget | None) -> tuple[dict[str, Any], str, str]:
+def _load_manifest_data(plugin_root: Path, budget: ExtractionBudget | None) -> tuple[dict[str, Any], str, str]:
     located = locate_plugin_manifest(plugin_root)
     if located is None:
         raise PluginProfileError(
@@ -143,13 +137,9 @@ def _load_manifest_data(plugin_root: Path, budget: ProfileByteBudget | None) -> 
         )
     raw = located.read_text()
     if budget is not None:
-        budget.consume(raw)
+        budget.consume_bytes(len(raw.encode("utf-8")))
     try:
-        data: Any = (
-            load_bounded_json(raw)
-            if located.manifest_type in PLUGIN_CONTAINED_MANIFEST_TYPES
-            else load_bounded_yaml(raw)
-        )
+        data: Any = parse_manifest_text(located.manifest_type, raw)
     except StructuredDataError as exc:
         raise PluginProfileError("Plugin manifest could not be parsed within structured-data limits") from exc
     if not isinstance(data, dict):
@@ -162,27 +152,35 @@ def _bundled_skills(
     plugin_root: Path,
     *,
     max_skills: int | None,
-    budget: ProfileByteBudget | None,
+    budget: ExtractionBudget | None,
+    skill_manifests: Sequence[SecureFile] | None,
 ) -> tuple[BundledSkill, ...]:
-    skill_dirs = find_bundled_plugin_skills(plugin_root)
-    if max_skills is not None and len(skill_dirs) > max_skills:
-        raise PluginSkillLimitError(f"Plugin bundles {len(skill_dirs)} skills, exceeding the limit of {max_skills}")
+    manifests = find_bundled_plugin_skill_manifests(plugin_root) if skill_manifests is None else skill_manifests
+    if max_skills is not None and len(manifests) > max_skills:
+        raise PluginSkillLimitError(len(manifests), max_skills)
+    if not manifests:
+        return ()
     skills_root = plugin_root / "skills"
     bundled: list[BundledSkill] = []
-    for skill_dir in skill_dirs:
-        rel = skill_dir.relative_to(skills_root).as_posix()
-        try:
-            entry = extract_from_skill(skill_dir)
-        except SecurePathError:
-            raise
-        except ValueError as exc:
-            # Tier 1 owns malformed skill metadata; this comparison skips it.
-            bundled.append(BundledSkill(rel=rel, path=skill_dir, entry=None, skip_reason=str(exc)))
-            continue
-        if entry is not None and budget is not None:
-            budget.consume(entry.full_text)
-        reason = None if entry is not None else "SKILL.md lacks a name or description in its frontmatter"
-        bundled.append(BundledSkill(rel=rel, path=skill_dir, entry=entry, skip_reason=reason))
+    # One anchored root reads every manifest, each against its discovery identity.
+    with SecureRoot(skills_root) as secure_root:
+        for manifest in manifests:
+            folder = manifest.relative_path.parent
+            rel = folder.as_posix()
+            # Without a collection budget (one plugin, at most ``max_skills``
+            # manifests) each manifest is bounded on its own.
+            manifest_budget = ExtractionBudget() if budget is None else budget
+            try:
+                entry = extract_skill_manifest(secure_root, manifest, budget=manifest_budget, display_root=skills_root)
+            except (SecurePathError, CollectionLimitError):
+                raise
+            except ValueError as exc:
+                # Tier 1 owns malformed skill metadata; this comparison skips it.
+                # Its bytes were already reserved in the budget before the read.
+                bundled.append(BundledSkill(rel=rel, path=skills_root / folder, entry=None, skip_reason=str(exc)))
+                continue
+            reason = None if entry is not None else "SKILL.md lacks a name or description in its frontmatter"
+            bundled.append(BundledSkill(rel=rel, path=skills_root / folder, entry=entry, skip_reason=reason))
     return tuple(bundled)
 
 
@@ -190,13 +188,19 @@ def load_plugin_profile(
     plugin_root: Path,
     *,
     max_skills: int | None = None,
-    budget: ProfileByteBudget | None = None,
+    budget: ExtractionBudget | None = None,
+    skill_manifests: Sequence[SecureFile] | None = None,
 ) -> PluginProfile:
     """Load one plugin's comparable profile through the secure bounded readers.
 
-    Raises :class:`PluginManifestPathError` (or ``SecurePathError``) for unsafe
-    inputs, ``ValueError`` for unsafe bundled skill discovery, and
-    :class:`PluginProfileError` when the manifest cannot supply a profile.
+    ``budget`` bounds the bytes read across a collection of plugins: the
+    manifest and every bundled skill manifest count, including one that cannot
+    be parsed. ``skill_manifests`` are the plugin's bundled skill manifests
+    (from :func:`find_bundled_plugin_skill_manifests`) when the caller has
+    already discovered them. Raises :class:`PluginManifestPathError` (or
+    ``SecurePathError``) for unsafe inputs, ``ValueError`` for unsafe bundled
+    skill discovery or an exhausted budget, and :class:`PluginProfileError`
+    when the manifest cannot supply a profile.
     """
     data, manifest, fingerprint = _load_manifest_data(plugin_root, budget)
 
@@ -232,7 +236,7 @@ def load_plugin_profile(
             if leaf:
                 members.add(_member_name(leaf))
 
-    bundled = _bundled_skills(plugin_root, max_skills=max_skills, budget=budget)
+    bundled = _bundled_skills(plugin_root, max_skills=max_skills, budget=budget, skill_manifests=skill_manifests)
     for skill in bundled:
         label = skill.entry.name if skill.entry is not None else PurePosixPath(skill.rel).name
         if label.strip():
@@ -256,38 +260,30 @@ def discover_plugin_roots(root: Path, *, max_plugins: int) -> list[Path]:
 
     ``root`` itself is returned when it is a plugin. Otherwise every regular
     plugin manifest below it (bounded by the similarity path budget) marks a
-    plugin root. Unsafe links fail closed through the secure discovery walk.
+    plugin root. Manifests are matched with the plugin locator's lexical rule
+    (:func:`~skillevaluator.plugin_manifest.manifest_relative_path`), so a
+    client manifest spelled in another case (``.Claude-Plugin/plugin.json``)
+    counts, as it does for content detection and validation. Unsafe links fail
+    closed through the secure discovery walk.
     """
     if locate_plugin_manifest(root) is not None:
         return [root]
 
-    def _is_vendor_manifest(posix: PurePosixPath) -> bool:
-        return (
-            posix.name == PLUGIN_CONTAINED_MANIFEST_FILE
-            and len(posix.parts) >= 2
-            and posix.parts[-2] in PLUGIN_NATIVE_MANIFEST_DIRS
-        )
-
-    def _selected(relative: Path) -> bool:
-        posix = PurePosixPath(relative.as_posix())
-        return (
-            posix.name in PLUGIN_MANIFEST_FILES
-            or posix.name == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE
-            or _is_vendor_manifest(posix)
-        )
-
     files = discover_secure_files(
         root,
-        selected=_selected,
+        selected=lambda relative: manifest_relative_path(relative) is not None,
         excluded_dirs=SCAN_EXCLUDED_DIRS,
         max_paths=SIMILARITY_MAX_DISCOVERED_PATHS,
     )
     plugin_dirs: set[PurePosixPath] = set()
     for file in files:
-        relative = PurePosixPath(file.relative_path.as_posix())
-        plugin_dir = relative.parent.parent if _is_vendor_manifest(relative) else relative.parent
+        manifest = manifest_relative_path(file.relative_path)
+        manifest_root = manifest_root_for(file.relative_path)
+        if manifest is None or manifest_root is None:  # not reached: the walk selects manifests only
+            continue
+        plugin_dir = PurePosixPath(manifest_root.as_posix())
         # A root plugin.json roots a plugin only when it is an Agent Plugins manifest.
-        if not _is_vendor_manifest(relative) and relative.name == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE:
+        if manifest_type_for_relative_path(manifest) == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE:
             try:
                 located = locate_plugin_manifest(root / Path(*plugin_dir.parts))
             except PluginManifestPathError:
@@ -311,7 +307,6 @@ __all__ = [
     "PluginProfile",
     "PluginProfileError",
     "PluginSkillLimitError",
-    "ProfileByteBudget",
     "discover_plugin_roots",
     "load_plugin_profile",
     "member_overlap",

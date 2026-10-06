@@ -13,6 +13,7 @@ from fractions import Fraction
 
 import pytest
 
+from skillevaluator.constants import DIMENSION_MAPPING
 from skillevaluator.tier3 import results_location
 from skillevaluator.tier3.harbor import collector as collector_module
 from skillevaluator.tier3.harbor.collector import (
@@ -46,6 +47,7 @@ from skillevaluator.tier3.harbor.metrics import (
     metric_value,
     overall_score,
     rewards_have_mixed_metric_contracts,
+    weighted_dimension_score,
 )
 
 
@@ -161,6 +163,34 @@ def test_metric_inputs_reject_nonfinite_values(invalid: float | int) -> None:
     assert metric_value({"security": invalid}, "security") is None
     assert metric_value({"metrics": {"security": {"score": invalid}}}, "security") is None
     assert extract_custom_metrics({"custom_metrics": {"latency": invalid}}) == {}
+
+
+def test_weighted_dimension_score_renormalizes_over_scored_evaluators() -> None:
+    effectiveness = DIMENSION_MAPPING["effectiveness"]
+
+    assert weighted_dimension_score({"goal_accuracy": 0.4, "behavior_check": 0.8}.get, effectiveness) == pytest.approx(
+        0.6
+    )
+    assert weighted_dimension_score({"goal_accuracy": 0.4, "behavior_check": None}.get, effectiveness) == 0.4
+    assert weighted_dimension_score({"goal_accuracy": float("nan")}.get, effectiveness) is None
+    assert (
+        weighted_dimension_score({"security": 0.5}.get, {"evaluators": ["security"], "weights": [float("inf")]}) is None
+    )
+
+
+def test_weighted_dimension_score_fallback_follows_the_metric_set_when_given() -> None:
+    security = DIMENSION_MAPPING["security"]
+    only_behavior = {"behavior_check": 0.8}.get
+    both = {"security": 0.2, "behavior_check": 0.8}.get
+
+    # Without a metric set, behavior_check stands in for an unscored security.
+    assert weighted_dimension_score(both, security) == 0.2
+    assert weighted_dimension_score(only_behavior, security) == 0.8
+    # With one, it stands in only when security is not part of the set (a legacy reward).
+    assert weighted_dimension_score(only_behavior, security, active_metrics=LEGACY_METRICS) == 0.8
+    assert weighted_dimension_score(both, security, active_metrics=LEGACY_METRICS) == 0.8
+    assert weighted_dimension_score(both, security, active_metrics=DEFAULT_METRICS) == 0.2
+    assert weighted_dimension_score(only_behavior, security, active_metrics=DEFAULT_METRICS) is None
 
 
 @pytest.mark.parametrize("invalid", [-0.01, 1.01, 1e308])

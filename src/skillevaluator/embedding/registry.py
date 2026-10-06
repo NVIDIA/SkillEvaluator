@@ -12,14 +12,13 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
-import math
 import os
 import re
 import secrets
 import stat
 import tempfile
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -49,18 +48,26 @@ from skillevaluator.embedding.client import (
     normalize_embedding_vector,
     unit_vector_similarity,
     validate_embedding_vector,
+    validate_similarity_threshold,
 )
 from skillevaluator.embedding.extractor import (
     MAX_MANIFEST_BYTES,
     ContentEntry,
+    ExtractionBudget,
     discover_and_extract,
 )
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
+from skillevaluator.utils.secure_fs import (
+    SecurePathError,
+    read_bounded,
+    stat_is_link_or_reparse,
+    windows_final_path,
+)
 from skillevaluator.utils.structured_data import StructuredDataLimitError, preflight_json_structure
-from skillevaluator.utils.tier2_paths import safe_path_label
+from skillevaluator.utils.tier2_paths import is_link_or_reparse, safe_path_label
 
 logger = get_logger(__name__)
 
@@ -69,7 +76,6 @@ logger = get_logger(__name__)
 # version 1 so older readers keep loading them; both versions load here.
 SKILL_CATALOG_SCHEMA_VERSION = 1
 PLUGIN_CATALOG_SCHEMA_VERSION = 2
-CATALOG_SCHEMA_VERSION = PLUGIN_CATALOG_SCHEMA_VERSION
 SUPPORTED_CATALOG_SCHEMA_VERSIONS = frozenset({SKILL_CATALOG_SCHEMA_VERSION, PLUGIN_CATALOG_SCHEMA_VERSION})
 MAX_CATALOG_BYTES = 32 * 1024 * 1024
 MAX_CATALOG_ENTRIES = SIMILARITY_MAX_ENTRIES
@@ -293,7 +299,6 @@ class EmbeddingRegistry:
         from skillevaluator.deduplication.plugin.profile import (
             PluginProfileError,
             PluginSkillLimitError,
-            ProfileByteBudget,
             discover_plugin_roots,
             load_plugin_profile,
         )
@@ -306,7 +311,7 @@ class EmbeddingRegistry:
         if not plugin_roots:
             return build
         root_absolute = Path(os.path.abspath(os.fspath(root)))  # noqa: PTH100 - lexical, no-follow
-        budget = ProfileByteBudget()
+        budget = ExtractionBudget(max_entries=limit)
         pending_skills: list[tuple[RegistryEntry, str]] = []
         pending_plugins: list[tuple[PluginRegistryEntry, str]] = []
         selected = 0
@@ -357,7 +362,7 @@ class EmbeddingRegistry:
                             description=skill.entry.description,
                             path=skill_path,
                             content_type=CONTENT_TYPE_SKILL,
-                            content_fingerprint=_fingerprint(skill.entry.embedding_text),
+                            content_fingerprint=content_fingerprint(skill.entry.embedding_text),
                         ),
                         skill.entry.embedding_text,
                     )
@@ -383,13 +388,25 @@ class EmbeddingRegistry:
         )
         return build
 
-    def _embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Embed description texts in bounded batches, validating each vector."""
+    def _embed_texts(
+        self,
+        texts: list[str],
+        *,
+        full_body: bool = False,
+        on_first_batch: Callable[[int], None] | None = None,
+    ) -> list[list[float]]:
+        """Embed texts in bounded batches, validating each vector against the registry width.
+
+        Full-body texts are embedded one at a time with chunked pooling.
+        ``on_first_batch`` receives the vector width once the first batch is
+        validated, before any further request, so it can refuse the workload.
+        """
         vector_dimension = self._vector_dimension
         vectors: list[list[float]] = []
-        for start in range(0, len(texts), EMBEDDING_BATCH_SIZE):
-            batch = texts[start : start + EMBEDDING_BATCH_SIZE]
-            batch_vectors = self._client.embed(batch)
+        batch_size = 1 if full_body else EMBEDDING_BATCH_SIZE
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start : start + batch_size]
+            batch_vectors = [self._client.embed_chunked(batch[0])] if full_body else self._client.embed(batch)
             if len(batch_vectors) != len(batch):
                 raise ValueError(
                     f"Embedding provider returned {len(batch_vectors)} vectors for {len(batch)} entries in batch"
@@ -397,8 +414,25 @@ class EmbeddingRegistry:
             for vector in batch_vectors:
                 vector_dimension = _validate_vector(vector, vector_dimension)
                 vectors.append(vector)
+            if start == 0 and on_first_batch is not None:
+                on_first_batch(vector_dimension or 0)
         self._vector_dimension = vector_dimension
         return vectors
+
+    def _prepare_catalog(
+        self,
+        entries: Sequence[RegistryEntry | PluginRegistryEntry],
+        *,
+        comparisons: int,
+    ) -> tuple[int, list[list[float]]]:
+        """Check the comparison work, then return the vector width and one unit vector per entry.
+
+        ``comparisons`` is the number of vector pairs the caller will score.
+        Each catalog vector is validated against the width and normalized once.
+        """
+        vector_dimension = _registry_vector_dimension(entries, self._vector_dimension)
+        _validate_scalar_work(comparisons, vector_dimension, self._max_scalar_comparisons)
+        return vector_dimension, _normalized_registry_vectors(entries, vector_dimension)
 
     def score_plugin_text(self, text: str) -> list[tuple[PluginRegistryEntry, float]]:
         """Embed one plugin description text and score it against every catalog plugin entry.
@@ -409,9 +443,7 @@ class EmbeddingRegistry:
         entries = list(self._plugin_entries.values())
         if not entries:
             return []
-        vector_dimension = _registry_vector_dimension(entries, self._vector_dimension)
-        _validate_scalar_work(len(entries), vector_dimension, self._max_scalar_comparisons)
-        unit_vectors = _normalized_registry_vectors(entries, vector_dimension)
+        vector_dimension, unit_vectors = self._prepare_catalog(entries, comparisons=len(entries))
         _validate_embedding_text(text, full_body=False)
         query_vector = _normalized_vector(self._client.embed_single(text), vector_dimension or None)
         return [
@@ -428,9 +460,7 @@ class EmbeddingRegistry:
         catalog_entries = list(self.skill_entries)
         if not targets or not catalog_entries:
             return [[] for _target in targets]
-        vector_dimension = _registry_vector_dimension(catalog_entries, self._vector_dimension)
-        _validate_scalar_work(len(catalog_entries), vector_dimension, self._max_scalar_comparisons)
-        unit_vectors = _normalized_registry_vectors(catalog_entries, vector_dimension)
+        vector_dimension, unit_vectors = self._prepare_catalog(catalog_entries, comparisons=len(catalog_entries))
         texts = [target.embedding_text for target in targets]
         for text in texts:
             _validate_embedding_text(text, full_body=False)
@@ -491,32 +521,26 @@ class EmbeddingRegistry:
                     path=relative_path,
                     content_type=entry.content_type,
                     entry_id=entry_id,
-                    content_fingerprint=_fingerprint(entry.full_text if self._full_body else entry.embedding_text),
+                    content_fingerprint=content_fingerprint(
+                        entry.full_text if self._full_body else entry.embedding_text
+                    ),
                 )
             )
 
         entry_count = len(self._entries.keys() | {entry.entry_id for entry in pending_entries})
         comparison_count = entry_count * (entry_count - 1) // 2
-        vector_dimension = self._vector_dimension
-        validated_vectors: list[list[float]] = []
-        batch_size = 1 if self._full_body else EMBEDDING_BATCH_SIZE
-        for start in range(0, len(texts), batch_size):
-            batch = texts[start : start + batch_size]
-            vectors = [self._client.embed_chunked(batch[0])] if self._full_body else self._client.embed(batch)
-            if len(vectors) != len(batch):
-                raise ValueError(
-                    f"Embedding provider returned {len(vectors)} vectors for {len(batch)} entries in batch"
-                )
-            for vector in vectors:
-                vector_dimension = _validate_vector(vector, vector_dimension)
-                validated_vectors.append(vector)
-            if start == 0 and for_pairwise_scan:
-                _validate_scalar_work(comparison_count, vector_dimension or 0, self._max_scalar_comparisons)
 
-        for entry, vector in zip(pending_entries, validated_vectors, strict=True):
+        def check_pairwise_work(vector_dimension: int) -> None:
+            _validate_scalar_work(comparison_count, vector_dimension, self._max_scalar_comparisons)
+
+        vectors = self._embed_texts(
+            texts,
+            full_body=self._full_body,
+            on_first_batch=check_pairwise_work if for_pairwise_scan else None,
+        )
+        for entry, vector in zip(pending_entries, vectors, strict=True):
             entry.embedding = vector
         self._entries.update((entry.entry_id, entry) for entry in pending_entries)
-        self._vector_dimension = vector_dimension
 
         logger.debug("Indexed %d entries from %s", len(self._entries), safe_path_label(root))
         return len(self._entries)
@@ -527,7 +551,7 @@ class EmbeddingRegistry:
         Only pairs with cosine similarity >= threshold are returned,
         sorted by score descending.
         """
-        _validate_threshold(threshold)
+        validate_similarity_threshold(threshold, context="Similarity")
         entries = list(self._entries.values())
         comparison_count = len(entries) * (len(entries) - 1) // 2
         if comparison_count > self._max_pairwise_comparisons:
@@ -535,9 +559,7 @@ class EmbeddingRegistry:
                 f"Pairwise comparison limit exceeded ({self._max_pairwise_comparisons}); "
                 "increase --max-entries within its supported range to compare the complete collection"
             )
-        vector_dimension = _registry_vector_dimension(entries, self._vector_dimension)
-        _validate_scalar_work(comparison_count, vector_dimension, self._max_scalar_comparisons)
-        unit_vectors = _normalized_registry_vectors(entries, vector_dimension)
+        _, unit_vectors = self._prepare_catalog(entries, comparisons=comparison_count)
         matches: list[SimilarityMatch] = []
 
         for (a, unit_a), (b, unit_b) in combinations(zip(entries, unit_vectors, strict=True), 2):
@@ -563,11 +585,9 @@ class EmbeddingRegistry:
 
         Useful for checking a new item against the existing registry.
         """
-        _validate_threshold(threshold)
+        validate_similarity_threshold(threshold, context="Similarity")
         entries = list(self._entries.values())
-        vector_dimension = _registry_vector_dimension(entries, self._vector_dimension)
-        _validate_scalar_work(len(entries), vector_dimension, self._max_scalar_comparisons)
-        unit_vectors = _normalized_registry_vectors(entries, vector_dimension)
+        vector_dimension, unit_vectors = self._prepare_catalog(entries, comparisons=len(entries))
         _validate_embedding_text(text, full_body=self._full_body)
         vector = self._client.embed_chunked(text) if self._full_body else self._client.embed_single(text)
         query_vector = _normalized_vector(vector, vector_dimension or self._vector_dimension)
@@ -593,11 +613,9 @@ class EmbeddingRegistry:
 
     def query_entry(self, entry: ContentEntry, threshold: float) -> list[SimilarityMatch]:
         """Compare one extracted target entry against every catalog entry."""
-        _validate_threshold(threshold)
+        validate_similarity_threshold(threshold, context="Similarity")
         catalog_entries = list(self._entries.values())
-        vector_dimension = _registry_vector_dimension(catalog_entries, self._vector_dimension)
-        _validate_scalar_work(len(catalog_entries), vector_dimension, self._max_scalar_comparisons)
-        unit_vectors = _normalized_registry_vectors(catalog_entries, vector_dimension)
+        vector_dimension, unit_vectors = self._prepare_catalog(catalog_entries, comparisons=len(catalog_entries))
         text = entry.full_text if self._full_body else entry.embedding_text
         _validate_embedding_text(text, full_body=self._full_body)
         vector = self._client.embed_chunked(text) if self._full_body else self._client.embed_single(text)
@@ -887,7 +905,8 @@ class EmbeddingRegistry:
         self.load_catalog(cache_path)
 
 
-def _fingerprint(text: str) -> str:
+def content_fingerprint(text: str) -> str:
+    """Return the SHA-256 hex digest that identifies an entry's embedded text in a catalog."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -925,13 +944,6 @@ def _client_endpoint_fingerprint(client: EmbeddingClient) -> str:
         path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/") or "/"
         identity = f"{scheme}://{authority}{path}"
     return f"sha256:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
-
-
-def _validate_threshold(threshold: float) -> None:
-    if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
-        raise ValueError("Similarity threshold must be finite and within [0, 1]")
-    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
-        raise ValueError("Similarity threshold must be finite and within [0, 1]")
 
 
 def _validate_embedding_text(text: object, *, full_body: bool) -> None:
@@ -1159,7 +1171,7 @@ def _open_posix_catalog_parent(catalog_path: Path, *, create: bool) -> tuple[Pat
         raise ValueError(f"Unable to securely open catalog filesystem root: {exc}") from exc
     try:
         root_metadata = os.fstat(descriptor)
-        if _stat_is_link_or_reparse(root_metadata) or not stat.S_ISDIR(root_metadata.st_mode):
+        if stat_is_link_or_reparse(root_metadata) or not stat.S_ISDIR(root_metadata.st_mode):
             raise ValueError("Catalog filesystem root is not a regular directory")
         for component in absolute.parent.parts[1:]:
             try:
@@ -1183,7 +1195,7 @@ def _open_posix_catalog_parent(catalog_path: Path, *, create: bool) -> tuple[Pat
                 raise ValueError("Catalog path contains a symlink, reparse point, or non-directory component") from exc
             try:
                 child_metadata = os.fstat(child)
-                if _stat_is_link_or_reparse(child_metadata) or not stat.S_ISDIR(child_metadata.st_mode):
+                if stat_is_link_or_reparse(child_metadata) or not stat.S_ISDIR(child_metadata.st_mode):
                     raise ValueError("Catalog path contains a symlink, reparse point, or non-directory component")
             except BaseException:
                 os.close(child)
@@ -1211,7 +1223,7 @@ def _inspect_posix_catalog_file(
         raise ValueError(f"Catalog does not exist: {catalog_path}") from exc
     except OSError as exc:
         raise ValueError(f"Unable to inspect catalog: {exc}") from exc
-    if _stat_is_link_or_reparse(metadata):
+    if stat_is_link_or_reparse(metadata):
         raise ValueError(f"Catalog path is a symlink or reparse point: {catalog_path}")
     if not stat.S_ISREG(metadata.st_mode):
         raise ValueError(f"Catalog path is not a regular file: {catalog_path}")
@@ -1250,29 +1262,18 @@ def _write_catalog_atomically_posix(catalog_path: Path, payload: bytes) -> None:
             raise ValueError("Unable to allocate a unique catalog temporary file")
 
         opened_metadata = os.fstat(descriptor)
-        if (
-            _stat_is_link_or_reparse(opened_metadata)
-            or not stat.S_ISREG(opened_metadata.st_mode)
-            or getattr(opened_metadata, "st_nlink", 1) != 1
-        ):
-            raise ValueError("Catalog temporary path is not a regular file")
+        _require_regular_single_link(opened_metadata, "Catalog temporary path is not a regular file")
         current_metadata = os.stat(temporary_name, dir_fd=parent_descriptor, follow_symlinks=False)
-        if (
-            _stat_is_link_or_reparse(current_metadata)
-            or getattr(current_metadata, "st_nlink", 1) != 1
-            or not os.path.samestat(opened_metadata, current_metadata)
-        ):
-            raise ValueError("Catalog temporary path changed during creation")
+        _require_regular_single_link(
+            current_metadata, "Catalog temporary path changed during creation", same_as=opened_metadata
+        )
 
         _write_all(descriptor, payload)
         os.fsync(descriptor)
         current_metadata = os.stat(temporary_name, dir_fd=parent_descriptor, follow_symlinks=False)
-        if (
-            _stat_is_link_or_reparse(current_metadata)
-            or getattr(current_metadata, "st_nlink", 1) != 1
-            or not os.path.samestat(opened_metadata, current_metadata)
-        ):
-            raise ValueError("Catalog temporary path changed while saving")
+        _require_regular_single_link(
+            current_metadata, "Catalog temporary path changed while saving", same_as=opened_metadata
+        )
         _inspect_posix_catalog_file(parent_descriptor, name, catalog_path, missing_ok=True)
         os.replace(
             temporary_name,
@@ -1282,12 +1283,9 @@ def _write_catalog_atomically_posix(catalog_path: Path, payload: bytes) -> None:
         )
         temporary_name = None
         published = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-        if (
-            _stat_is_link_or_reparse(published)
-            or getattr(published, "st_nlink", 1) != 1
-            or not os.path.samestat(opened_metadata, published)
-        ):
-            raise ValueError("Catalog publication changed during atomic replacement")
+        _require_regular_single_link(
+            published, "Catalog publication changed during atomic replacement", same_as=opened_metadata
+        )
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -1304,7 +1302,7 @@ def _validate_windows_catalog_parent(catalog_path: Path, *, create: bool) -> Pat
         root_metadata = current.lstat()
     except OSError as exc:
         raise ValueError(f"Unable to inspect catalog filesystem root: {exc}") from exc
-    if _stat_is_link_or_reparse(root_metadata) or not stat.S_ISDIR(root_metadata.st_mode):
+    if stat_is_link_or_reparse(root_metadata) or not stat.S_ISDIR(root_metadata.st_mode):
         raise ValueError("Catalog filesystem root is not a regular directory")
 
     for component in absolute.parent.parts[1:]:
@@ -1326,7 +1324,7 @@ def _validate_windows_catalog_parent(catalog_path: Path, *, create: bool) -> Pat
                 raise ValueError(f"Unable to inspect catalog parent directory: {inspect_exc}") from inspect_exc
         except OSError as exc:
             raise ValueError(f"Unable to inspect catalog parent directory: {exc}") from exc
-        if _stat_is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+        if stat_is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
             raise ValueError(f"Catalog path contains a symlink, reparse point, or non-directory component: {current}")
     return absolute
 
@@ -1344,7 +1342,7 @@ def _inspect_windows_catalog_file(
         raise ValueError(f"Catalog does not exist: {catalog_path}") from exc
     except OSError as exc:
         raise ValueError(f"Unable to inspect catalog: {exc}") from exc
-    if _stat_is_link_or_reparse(metadata):
+    if stat_is_link_or_reparse(metadata):
         raise ValueError(f"Catalog path is a symlink or reparse point: {catalog_path}")
     if not stat.S_ISREG(metadata.st_mode):
         raise ValueError(f"Catalog path is not a regular file: {catalog_path}")
@@ -1353,32 +1351,9 @@ def _inspect_windows_catalog_file(
     return metadata
 
 
-def _windows_final_path(descriptor: int) -> Path:
-    if os.name != "nt":
-        raise OSError("Windows handle verification is unavailable on this platform")
-
-    import ctypes
-    import msvcrt
-    from ctypes import wintypes
-
-    get_final_path = ctypes.windll.kernel32.GetFinalPathNameByHandleW
-    get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
-    get_final_path.restype = wintypes.DWORD
-    buffer = ctypes.create_unicode_buffer(32768)
-    length = get_final_path(msvcrt.get_osfhandle(descriptor), buffer, len(buffer), 0)
-    if length == 0 or length >= len(buffer):
-        raise OSError(ctypes.get_last_error(), "Cannot resolve opened Windows catalog handle")
-    path = buffer.value
-    if path.startswith("\\\\?\\UNC\\"):
-        path = "\\\\" + path[8:]
-    elif path.startswith("\\\\?\\"):
-        path = path[4:]
-    return Path(path)
-
-
 def _verify_windows_open_path(descriptor: int, catalog_path: Path) -> None:
     expected = os.path.normcase(os.fspath(catalog_path.absolute()))
-    actual = os.path.normcase(os.fspath(_windows_final_path(descriptor).absolute()))
+    actual = os.path.normcase(os.fspath(windows_final_path(descriptor).absolute()))
     if actual != expected:
         raise ValueError("Opened catalog handle resolves through a reparse point or unexpected path")
 
@@ -1397,19 +1372,11 @@ def _write_catalog_atomically_windows(catalog_path: Path, payload: bytes) -> Non
         )
         temporary_path = Path(temporary_name)
         opened_metadata = os.fstat(descriptor)
-        if (
-            _stat_is_link_or_reparse(opened_metadata)
-            or not stat.S_ISREG(opened_metadata.st_mode)
-            or getattr(opened_metadata, "st_nlink", 1) != 1
-        ):
-            raise ValueError("Catalog temporary path is not a regular file")
+        _require_regular_single_link(opened_metadata, "Catalog temporary path is not a regular file")
         current_metadata = temporary_path.lstat()
-        if (
-            _stat_is_link_or_reparse(current_metadata)
-            or getattr(current_metadata, "st_nlink", 1) != 1
-            or not os.path.samestat(opened_metadata, current_metadata)
-        ):
-            raise ValueError("Catalog temporary path changed during creation")
+        _require_regular_single_link(
+            current_metadata, "Catalog temporary path changed during creation", same_as=opened_metadata
+        )
 
         _write_all(descriptor, payload)
         os.fsync(descriptor)
@@ -1418,22 +1385,16 @@ def _write_catalog_atomically_windows(catalog_path: Path, payload: bytes) -> Non
 
         _validate_windows_catalog_parent(absolute, create=False)
         current_metadata = temporary_path.lstat()
-        if (
-            _stat_is_link_or_reparse(current_metadata)
-            or getattr(current_metadata, "st_nlink", 1) != 1
-            or not os.path.samestat(opened_metadata, current_metadata)
-        ):
-            raise ValueError("Catalog temporary path changed while saving")
+        _require_regular_single_link(
+            current_metadata, "Catalog temporary path changed while saving", same_as=opened_metadata
+        )
         _inspect_windows_catalog_file(absolute, missing_ok=True)
         temporary_path.replace(absolute)
         temporary_path = None
         published = absolute.lstat()
-        if (
-            _stat_is_link_or_reparse(published)
-            or getattr(published, "st_nlink", 1) != 1
-            or not os.path.samestat(opened_metadata, published)
-        ):
-            raise ValueError("Catalog publication changed during atomic replacement")
+        _require_regular_single_link(
+            published, "Catalog publication changed during atomic replacement", same_as=opened_metadata
+        )
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -1453,26 +1414,14 @@ def _write_catalog_atomically(catalog_path: Path, payload: bytes) -> None:
 
 def _read_bounded_catalog_descriptor(descriptor: int, catalog_path: Path) -> str:
     opened_metadata = os.fstat(descriptor)
-    if (
-        _stat_is_link_or_reparse(opened_metadata)
-        or not stat.S_ISREG(opened_metadata.st_mode)
-        or getattr(opened_metadata, "st_nlink", 1) != 1
-    ):
-        raise ValueError(f"Catalog path is not a regular file: {catalog_path}")
+    _require_regular_single_link(opened_metadata, f"Catalog path is not a regular file: {catalog_path}")
     if opened_metadata.st_size > MAX_CATALOG_BYTES:
         raise ValueError(f"Catalog size limit exceeded ({MAX_CATALOG_BYTES} bytes)")
-
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = os.read(descriptor, min(65_536, MAX_CATALOG_BYTES + 1 - total))
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-        if total > MAX_CATALOG_BYTES:
-            raise ValueError(f"Catalog size limit exceeded ({MAX_CATALOG_BYTES} bytes)")
-    return b"".join(chunks).decode("utf-8")
+    try:
+        raw = read_bounded(descriptor, MAX_CATALOG_BYTES)
+    except SecurePathError as exc:
+        raise ValueError(f"Catalog size limit exceeded ({MAX_CATALOG_BYTES} bytes)") from exc
+    return raw.decode("utf-8")
 
 
 def _read_catalog_text_posix(catalog_path: Path) -> str:
@@ -1491,13 +1440,9 @@ def _read_catalog_text_posix(catalog_path: Path) -> str:
                 raise ValueError(f"Catalog path is a symlink or reparse point: {catalog_path}") from exc
             raise ValueError(f"Unable to open catalog: {exc}") from exc
         opened_metadata = os.fstat(descriptor)
-        if (
-            _stat_is_link_or_reparse(opened_metadata)
-            or not stat.S_ISREG(opened_metadata.st_mode)
-            or getattr(opened_metadata, "st_nlink", 1) != 1
-            or not os.path.samestat(before, opened_metadata)
-        ):
-            raise ValueError("Catalog changed or is not a regular file while being opened")
+        _require_regular_single_link(
+            opened_metadata, "Catalog changed or is not a regular file while being opened", same_as=before
+        )
         serialized = _read_bounded_catalog_descriptor(descriptor, catalog_path)
         after = _inspect_posix_catalog_file(parent_descriptor, name, catalog_path, missing_ok=False)
         if after is None or not os.path.samestat(opened_metadata, after):
@@ -1519,19 +1464,15 @@ def _read_catalog_text_windows(catalog_path: Path) -> str:
     except FileNotFoundError as exc:
         raise ValueError("Catalog changed while being opened") from exc
     except OSError as exc:
-        if exc.errno in {errno.ELOOP, errno.EMLINK} or _is_link_or_reparse(absolute):
+        if exc.errno in {errno.ELOOP, errno.EMLINK} or is_link_or_reparse(absolute):
             raise ValueError(f"Catalog path is a symlink or reparse point: {catalog_path}") from exc
         raise ValueError(f"Unable to open catalog: {exc}") from exc
 
     try:
         opened_metadata = os.fstat(descriptor)
-        if (
-            _stat_is_link_or_reparse(opened_metadata)
-            or not stat.S_ISREG(opened_metadata.st_mode)
-            or getattr(opened_metadata, "st_nlink", 1) != 1
-            or not os.path.samestat(before, opened_metadata)
-        ):
-            raise ValueError("Catalog changed or is not a regular file while being opened")
+        _require_regular_single_link(
+            opened_metadata, "Catalog changed or is not a regular file while being opened", same_as=before
+        )
         _verify_windows_open_path(descriptor, absolute)
         serialized = _read_bounded_catalog_descriptor(descriptor, catalog_path)
         _validate_windows_catalog_parent(absolute, create=False)
@@ -1551,14 +1492,20 @@ def _read_catalog_text(catalog_path: Path) -> str:
     raise ValueError("This platform cannot guarantee secure catalog reads")
 
 
-def _is_link_or_reparse(path: Path) -> bool:
-    try:
-        metadata = path.lstat()
-    except OSError:
-        return False
-    return _stat_is_link_or_reparse(metadata)
+def _require_regular_single_link(
+    metadata: os.stat_result,
+    message: str,
+    *,
+    same_as: os.stat_result | None = None,
+) -> None:
+    """Raise ``ValueError(message)`` unless ``metadata`` is a regular, single-link file that is not a link.
 
-
-def _stat_is_link_or_reparse(metadata: os.stat_result) -> bool:
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return stat.S_ISLNK(metadata.st_mode) or bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
+    With ``same_as``, the file must also keep that snapshot's identity.
+    """
+    if (
+        stat_is_link_or_reparse(metadata)
+        or not stat.S_ISREG(metadata.st_mode)
+        or getattr(metadata, "st_nlink", 1) != 1
+        or (same_as is not None and not os.path.samestat(same_as, metadata))
+    ):
+        raise ValueError(message)

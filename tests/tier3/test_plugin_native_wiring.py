@@ -201,6 +201,7 @@ def _prepared(package_path: Path, member: Path) -> SimpleNamespace:
         unresolved_rule_refs=(),
         unresolved_mcp_servers=(),
         native_source="snapshot",
+        mcp_probe_targets=(),
         integration_evidence_error=lambda: None,
         provenance=lambda: {"plugin_name": "plugin", "partial": False},
     )

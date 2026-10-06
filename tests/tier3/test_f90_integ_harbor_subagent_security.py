@@ -139,7 +139,8 @@ def test_a_subagent_credential_read_is_scored_once_on_harbor_trajectories(tmp_pa
 
     # The verifier's own transcript reader must not add the same call again.
     tool_calls = extract_tool_calls_as_dicts(trajectory)
-    extra = eval_template.subagent_tool_calls(trajectory, logs_dir)
+    extra, truncated = eval_template.subagent_tool_calls(trajectory, logs_dir)
+    assert truncated is False
     reads = [call for call in [*tool_calls, *extra] if call["action"] == "Read"]
     assert len(reads) == 1
 

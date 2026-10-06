@@ -15,7 +15,7 @@ case-insensitive filesystem, such as the macOS default, a client that opens
 ``.codex-plugin/plugin.json`` reads ``.Codex-Plugin/plugin.json``, so that
 spelling is the client's manifest too. A case variant is used only when the
 exact spelling is absent, and it is flagged (see
-:attr:`PluginManifestCandidate.case_variant`).
+:attr:`PluginManifestFile.case_variant`).
 """
 
 from __future__ import annotations
@@ -41,7 +41,11 @@ from skillevaluator.constants import (
     PLUGIN_NATIVE_MANIFEST_DIRS,
     SCAN_EXCLUDED_DIRS,
 )
-from skillevaluator.plugin_formats import AGENT_PLUGINS_SCHEMA_PREFIX, declares_agent_plugins_schema, manifest_syntax
+from skillevaluator.plugin_formats import (
+    AGENT_PLUGINS_SCHEMA_PREFIX,
+    declares_agent_plugins_schema,
+    parse_manifest_text,
+)
 from skillevaluator.utils.secure_fs import (
     SecureFile,
     SecurePathError,
@@ -49,7 +53,7 @@ from skillevaluator.utils.secure_fs import (
     discover_secure_files,
     stat_is_link_or_reparse,
 )
-from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json, load_bounded_yaml
+from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json
 
 _MANIFEST_TYPES_BY_PATH: dict[Path, str] = {
     Path(path): manifest_type for path, manifest_type in PLUGIN_MANIFEST_PRECEDENCE
@@ -62,7 +66,9 @@ _CLIENT_MANIFEST_PATHS_FOLDED: dict[str, Path] = {
     for path, manifest_type in PLUGIN_MANIFEST_PRECEDENCE
     if manifest_type in PLUGIN_CONTAINED_MANIFEST_TYPES
 }
-_NATIVE_DIRS_FOLDED = frozenset(name.casefold() for name in PLUGIN_NATIVE_MANIFEST_DIRS)
+# Vendor manifest directories by case-folded name: clients on a case-insensitive
+# filesystem open .Claude-Plugin/plugin.json as .claude-plugin/plugin.json.
+NATIVE_MANIFEST_DIRS_FOLDED = frozenset(name.casefold() for name in PLUGIN_NATIVE_MANIFEST_DIRS)
 # Bytes of a root plugin.json read to decide the Agent Plugins opt-in. Clients
 # read the whole file, so this is the lenient read bound, not the 1 MiB manifest
 # bound. A larger file opts in, so it fails as an unreadable manifest.
@@ -148,37 +154,6 @@ def _read_secure_manifest(
         ) from exc
 
 
-def _read_prefix(root: Path, relative: Path, max_bytes: int, *, expected: os.stat_result | None = None) -> bytes:
-    """First ``max_bytes`` bytes of a regular single-link file below ``root``.
-
-    The file is opened through the anchored root descriptor without following
-    links, like every other manifest read; only the read itself is shorter, so
-    an oversize file can still show what it starts with. Raises
-    :class:`SecurePathError`.
-    """
-    with SecureRoot(root) as secure_root:
-        opener = secure_root._open_posix if os.name == "posix" else secure_root._open_windows
-        descriptor = opener(relative, expected)
-        try:
-            chunks: list[bytes] = []
-            total = 0
-            while total < max_bytes:
-                chunk = os.read(descriptor, min(65_536, max_bytes - total))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-            return b"".join(chunks)
-        finally:
-            os.close(descriptor)
-
-
-def read_path_prefix(path: Path, max_bytes: int) -> bytes:
-    """First ``max_bytes`` bytes of the regular single-link file at ``path`` (anchored at its parent, no-follow)."""
-    absolute = Path(os.path.abspath(os.fspath(path)))  # noqa: PTH100 - lexical, never resolved
-    return _read_prefix(absolute.parent, Path(absolute.name), max_bytes)
-
-
 def decode_manifest_leniently(raw: bytes) -> str:
     """Decode manifest bytes the way a lenient client does, never failing.
 
@@ -206,8 +181,13 @@ def _read_lenient_manifest(secure_file: SecureFile, declared_path: Path, *, max_
 
 
 @dataclass(frozen=True)
-class PluginManifestCandidate:
-    """An additional supported manifest found beside the selected one."""
+class PluginManifestFile:
+    """A supported manifest, kept as the inode that no-follow discovery found.
+
+    The base of :class:`PluginManifestLocation` (the selected manifest) and
+    :class:`PluginManifestCandidate` (an additional one); every read goes
+    through the anchored plugin root descriptor and checks that inode.
+    """
 
     declared_path: Path
     manifest_type: str
@@ -242,37 +222,41 @@ class PluginManifestCandidate:
 
         The bounded strict read comes first. A client JSON manifest that is over
         the 1 MiB read bound or not UTF-8 is then read leniently, as Tier 1 does
-        (``plugin_manifest_additional_unreadable``), because the client that
-        loads it shares neither limit: its hooks and MCP servers must not
-        disappear from Tier 3 coverage or the dependency audit. A link,
-        special file, or changed inode is never read (it raises, and Tier 1
-        fails it closed); anything that still does not parse gives ``None``.
+        (``manifest_unreadable`` for the selected manifest,
+        ``plugin_manifest_additional_unreadable`` for an additional one),
+        because the client that loads it shares neither limit: its hooks and
+        MCP servers must not disappear from Tier 3 coverage or the dependency
+        audit. A link, special file, or changed inode is never read (it raises,
+        and Tier 1 fails it closed); anything that still does not parse gives
+        ``None``.
         """
-        syntax = manifest_syntax(self.manifest_type)
         try:
             text = self.read_text(encoding="utf-8-sig")
         except PluginManifestPathError as exc:
-            if not exc.content_error or syntax != "json" or self.manifest_type not in PLUGIN_CONTAINED_MANIFEST_TYPES:
+            # Only client (JSON) manifests are read leniently; agent_plugin.yaml/.yml is SkillEvaluator's own.
+            if not exc.content_error or self.manifest_type not in PLUGIN_CONTAINED_MANIFEST_TYPES:
                 return None
             try:
                 text = self.read_lenient_text().removeprefix("\ufeff")
             except PluginManifestPathError:
                 return None
         try:
-            data = load_bounded_json(text) if syntax == "json" else load_bounded_yaml(text)
-        except (StructuredDataError, ValueError, RecursionError):
+            data = parse_manifest_text(self.manifest_type, text)
+        except (StructuredDataError, ValueError):
             return None
         return data if isinstance(data, dict) else None
 
 
 @dataclass(frozen=True)
-class PluginManifestLocation:
-    """A manifest identity retained from no-follow discovery through reads."""
+class PluginManifestCandidate(PluginManifestFile):
+    """An additional supported manifest found beside the selected one."""
 
-    declared_path: Path
+
+@dataclass(frozen=True)
+class PluginManifestLocation(PluginManifestFile):
+    """The selected manifest, retained from no-follow discovery through reads."""
+
     root: Path
-    manifest_type: str
-    secure_file: SecureFile
     # Other supported manifests in the same root, in precedence order.
     additional: tuple[PluginManifestCandidate, ...] = ()
 
@@ -282,31 +266,25 @@ class PluginManifestLocation:
         return self.declared_path
 
     @property
-    def manifest_filename(self) -> str:
-        """Root-relative POSIX path of the selected manifest."""
-        return self.secure_file.relative_path.as_posix()
-
-    @property
     def contained(self) -> bool:
         """Whether the selected manifest describes a contained plugin."""
         return self.manifest_type in PLUGIN_CONTAINED_MANIFEST_TYPES
 
-    @property
-    def case_variant(self) -> bool:
-        """Whether the file is spelled differently from the supported path (only case-insensitive clients load it)."""
-        return self.secure_file.relative_path not in _MANIFEST_TYPES_BY_PATH
+    def parsed_additional(self) -> list[tuple[str, str, dict[str, Any]]]:
+        """``(manifest_type, manifest_filename, data)`` of each additional manifest a client can read.
 
-    def read_text(self, *, encoding: str = "utf-8", max_bytes: int = CONTENT_DEDUP_MAX_FILE_BYTES) -> str:
-        """Read the discovered inode through the anchored plugin root descriptor."""
-        return _read_secure_manifest(self.secure_file, self.declared_path, encoding=encoding, max_bytes=max_bytes)
-
-    def read_lenient_text(self, *, max_bytes: int = CONTENT_DEDUP_MAX_TOTAL_BYTES) -> str:
-        """Read the selected manifest with a larger bound and lenient decoding, like a client does.
-
-        See :meth:`PluginManifestCandidate.read_lenient_text`. Link,
-        special-file, and identity-change problems still raise.
+        Each one is parsed with :meth:`~PluginManifestFile.parse_for_audit`, so
+        an oversize or non-UTF-8 client manifest is read leniently, and an
+        unsafe or unparseable one is left out (Tier 1 reports it). The rows
+        are the ``additional`` argument of
+        :func:`~skillevaluator.plugin_components.build_plugin_inventory`.
         """
-        return _read_lenient_manifest(self.secure_file, self.declared_path, max_bytes=max_bytes)
+        parsed: list[tuple[str, str, dict[str, Any]]] = []
+        for candidate in self.additional:
+            data = candidate.parse_for_audit()
+            if data is not None:
+                parsed.append((candidate.manifest_type, candidate.manifest_filename, data))
+        return parsed
 
 
 _AGENT_PLUGINS_RELATIVE = Path(PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE)
@@ -322,18 +300,16 @@ _AGENT_PLUGINS_HOST_MARKERS: tuple[bytes, ...] = tuple(
 def agent_plugins_opt_in(raw: bytes) -> bool:
     """Whether the bytes of a root ``plugin.json`` opt into Agent Plugins semantics.
 
-    ``raw`` is the whole file, read up to :data:`AGENT_PLUGINS_OPT_IN_MAX_BYTES`
-    plus one byte. A longer read opts in: clients read any size, so the file is
-    treated as the Agent Plugins manifest and then fails as unreadable. The
-    bytes are decoded leniently (:func:`decode_manifest_leniently`) and parsed;
-    a JSON object opts in when it declares an Agent Plugins ``$schema``, however
-    much whitespace comes first and however its slashes are escaped. JSON that
-    does not parse still counts when its bytes name the schema host in UTF-8,
-    UTF-16, or UTF-32, so its syntax or encoding error is reported rather than
-    hidden.
+    ``raw`` is the whole file. Callers do not read a file over
+    :data:`AGENT_PLUGINS_OPT_IN_MAX_BYTES`: it opts in unread, because clients
+    read any size, so the file is treated as the Agent Plugins manifest and
+    then fails as unreadable. The bytes are decoded leniently
+    (:func:`decode_manifest_leniently`) and parsed; a JSON object opts in when
+    it declares an Agent Plugins ``$schema``, however much whitespace comes
+    first and however its slashes are escaped. JSON that does not parse still
+    counts when its bytes name the schema host in UTF-8, UTF-16, or UTF-32, so
+    its syntax or encoding error is reported rather than hidden.
     """
-    if len(raw) > AGENT_PLUGINS_OPT_IN_MAX_BYTES:
-        return True
     try:
         return declares_agent_plugins_schema(load_bounded_json(decode_manifest_leniently(raw)))
     except (StructuredDataError, ValueError):
@@ -344,10 +320,21 @@ def agent_plugins_opt_in(raw: bytes) -> bool:
 def agent_plugins_path_opt_in(path: Path) -> bool:
     """:func:`agent_plugins_opt_in` for the root ``plugin.json`` at ``path`` (bounded, anchored, no-follow read).
 
-    Raises :class:`SecurePathError` or :class:`OSError` when the file cannot
-    be read safely (a link, special file, or missing file).
+    The file is read like every other manifest, through the descriptor of its
+    parent directory, and a file over :data:`AGENT_PLUGINS_OPT_IN_MAX_BYTES`
+    opts in unread. Raises :class:`SecurePathError` or :class:`OSError` when
+    the file cannot be read safely (a link, special or hard-linked file, a file
+    that changes while it is read, or a missing file).
     """
-    return agent_plugins_opt_in(read_path_prefix(path, AGENT_PLUGINS_OPT_IN_MAX_BYTES + 1))
+    absolute = Path(os.path.abspath(os.fspath(path)))  # noqa: PTH100 - lexical, never resolved
+    try:
+        with SecureRoot(absolute.parent) as secure_root:
+            raw, _metadata = secure_root.read_bytes(Path(absolute.name), AGENT_PLUGINS_OPT_IN_MAX_BYTES)
+    except SecurePathError as exc:
+        if exc.code != "file_size_limit":
+            raise
+        return True
+    return agent_plugins_opt_in(raw)
 
 
 def _is_agent_plugins_manifest(secure_file: SecureFile, declared_path: Path) -> bool:
@@ -391,11 +378,25 @@ def manifest_relative_path(path: Path) -> Path | None:
     if path.name in PLUGIN_MANIFEST_FILES:
         return Path(path.name)
     name = path.name.casefold()
-    if name == PLUGIN_CONTAINED_MANIFEST_FILE and path.parent.name.casefold() in _NATIVE_DIRS_FOLDED:
+    if name == PLUGIN_CONTAINED_MANIFEST_FILE and path.parent.name.casefold() in NATIVE_MANIFEST_DIRS_FOLDED:
         return Path(path.parent.name) / path.name
     if name == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE:
         return Path(path.name)
     return None
+
+
+def manifest_root_for(path: Path) -> Path | None:
+    """Return the plugin root that a manifest path names, or ``None`` if *path* names no manifest.
+
+    A lexical check (see :func:`manifest_relative_path`): the root is the
+    manifest's directory, or the parent of its vendor directory. Nothing is
+    read, so a root ``plugin.json`` names a root whether or not it opts into
+    Agent Plugins.
+    """
+    relative = manifest_relative_path(path)
+    if relative is None:
+        return None
+    return path.parent if len(relative.parts) == 1 else path.parent.parent
 
 
 def manifest_type_for_relative_path(relative: Path | str) -> str | None:
@@ -428,9 +429,9 @@ def locate_plugin_manifest(path: Path) -> PluginManifestLocation | None:
     # secure selected-file checks and fail explicitly.
     if not stat_is_link_or_reparse(target_metadata) and stat.S_ISDIR(target_metadata.st_mode):
         root = target
-    elif (relative := manifest_relative_path(target)) is not None:
-        direct_relative = relative
-        root = target.parent if len(relative.parts) == 1 else target.parent.parent
+    elif (manifest_root := manifest_root_for(target)) is not None:
+        root = manifest_root
+        direct_relative = target.relative_to(root)
     else:
         if stat_is_link_or_reparse(target_metadata):
             raise PluginManifestPathError(f"Plugin root is a symlink, junction, or reparse point: {target}")

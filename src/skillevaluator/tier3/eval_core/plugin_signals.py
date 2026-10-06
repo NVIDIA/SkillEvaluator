@@ -18,7 +18,9 @@ Each normalized tool call is mapped to zero or more component activations:
   reader command (``cat``/``sed``/``head``...). Shell reads are recognized only
   when the manifest is an operand of a known reader verb, so ``rm``/``ls``/
   ``grep``/``printf``/``cp``/``sed -i`` of the same path, or ``<`` input to a
-  non-reader, never count. Each read of a shell list has its own outcome: a
+  non-reader, never count. The scored skill-read check is stricter (see
+  ``_FILE_READER_VERBS``), so a read credited here may not count toward a
+  score. Each read of a shell list has its own outcome: a
   read after a failed ``&&`` part never ran, and a read whose own error line
   names it failed. Skill, subagent and command names are this plugin's
   declared names with or without its ``<plugin>:`` namespace; another plugin's
@@ -92,9 +94,11 @@ result names the sidechain's ``agentId``, else the parent's latest subagent call
   rather than from the producer. Later user steps (Claude Code's skill-load
   step, a subagent's prompt) are written by the harness or the agent.
 * ``artifact``: a producer-attributed call must write the path (write/edit
-  tools, shell redirects/``tee``/``cp``/``mv``/``touch``/``sed -i``,
+  tools, the ``Add File``/``Update File``/``Move to`` headers of an
+  ``apply_patch`` body, shell redirects/``tee``/``cp``/``mv``/``touch``/``sed -i``,
   interpreter code given inline or as a here-document, or an MCP tool whose
-  name or argument key says it writes),
+  name or argument key says it writes; a patch that only deletes the path, or
+  moves it away, does not write it),
   and a consumer-attributed call in a later step must read it (read tools,
   shell readers/interpreters/globs, or an MCP tool taking the path as input).
   Paths resolve against the call's working directory and the task's; when a
@@ -121,16 +125,19 @@ import posixpath
 import re
 import shlex
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
+from functools import cached_property
+from typing import Any, NamedTuple
 
 import regex
 
+from skillevaluator.tier3.eval_core.checks import _APPLY_PATCH_COMMAND_RE, _APPLY_PATCH_HEADER_RE, _FILE_READ_VERBS
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     MAPPED_OUTER_EXEC_OBSERVATION,
     normalize_tool_call,
 )
+from skillevaluator.tier3.harbor.stats import ARM_SUM_OF_PARTS, ARM_WITH, ARM_WITHOUT
 from skillevaluator.utils.redaction import redact_sensitive_text
 
 COMPONENT_SKILL = "skill"
@@ -142,19 +149,9 @@ COMPONENT_RULE_READ = "rule_read"
 STATUS_SCORED = "scored"
 STATUS_NOT_APPLICABLE = "not_applicable"
 
-ARM_WITH_SKILL = "with_skill"
-ARM_WITHOUT_SKILL = "without_skill"
-ARM_SUM_OF_PARTS = "sum_of_parts"
-
-PLUGIN_CASE_FIELDS = (
-    "expected_tools",
-    "acceptable_tools",
-    "decoy_tools",
-    "tool_arguments",
-    "expected_order",
-    "handoffs",
-    "conflict_probes",
-)
+# The arm names are harbor.stats'; these aliases keep the names the collector and tests import.
+ARM_WITH_SKILL = ARM_WITH
+ARM_WITHOUT_SKILL = ARM_WITHOUT
 
 # -- dataset field bounds ----------------------------------------------------
 MAX_TOOL_PATTERNS = 64
@@ -183,6 +180,12 @@ MAX_COMPONENT_NAME_CHARS = 256
 # -- trajectory bounds ---------------------------------------------------------
 _MAX_STEPS = 10_000
 _MAX_CALLS = 4_000
+_MAX_STEP_RESULTS = 256
+_MAX_CONTENT_BLOCKS = 256
+# String values (never key names) read from a JSON argument, result or ``contains`` object.
+_MAX_STRING_LEAVES = 1_024
+# List elements a ``contains`` argument check looks at.
+_MAX_CONTAINS_ITEMS = 1_024
 _MAX_OBSERVATION_CHARS = 64 * 1024
 _MAX_ARGS_TEXT_CHARS = 64 * 1024
 _MAX_ARGS_JSON_CHARS = 256 * 1024
@@ -202,6 +205,8 @@ _MAX_CALLED = 128
 _MAX_SERVER_TOOLS = 64
 _MAX_LABEL_CHARS = 256
 _MAX_DETAIL_CHARS = 240
+# How much of an unsupported dataset key a problem message quotes.
+_MAX_KEY_PREVIEW_CHARS = 64
 _MAX_PREVIEW_CHARS = 80
 _MAX_SCHEMA_ERRORS_PER_CALL = 5
 
@@ -229,22 +234,31 @@ _SHELL_TOOLS = frozenset(
 _READ_TOOLS = frozenset(
     {"read", "read_file", "read_text_file", "view", "open", "open_file", "cat", "get_file_contents", "view_file"}
 )
-_WRITE_TOOLS = frozenset(
-    {
-        "write",
-        "write_file",
-        "create_file",
-        "edit",
-        "edit_file",
-        "multiedit",
-        "multi_edit",
-        "notebookedit",
-        "notebook_edit",
-        "apply_patch",
-        "str_replace_editor",
-        "str_replace_based_edit_tool",
-        "save_file",
-    }
+# Edit tools that take an apply_patch body: Codex ``apply_patch``/``applypatch``
+# and the Hermes ``patch`` tool (whose ``replace`` mode names a ``path`` instead).
+_PATCH_TOOLS = frozenset({"apply_patch", "applypatch", "patch"})
+# Where harnesses put that body: Codex ``input``, OpenCode ``patchText``, Hermes
+# ``patch``, and ``raw`` or ``value`` for a tool input that was not a JSON object.
+_PATCH_BODY_KEYS = ("input", "patch", "patchText", "content", "raw", "value")
+# Text editor tools: they write, except for their ``view`` command, which reads.
+_STR_REPLACE_EDITORS = frozenset({"str_replace_editor", "str_replace_based_edit_tool"})
+_WRITE_TOOLS = (
+    _PATCH_TOOLS
+    | _STR_REPLACE_EDITORS
+    | frozenset(
+        {
+            "write",
+            "write_file",
+            "create_file",
+            "edit",
+            "edit_file",
+            "multiedit",
+            "multi_edit",
+            "notebookedit",
+            "notebook_edit",
+            "save_file",
+        }
+    )
 )
 _PATH_ARG_KEYS = (
     "file_path",
@@ -258,10 +272,13 @@ _PATH_ARG_KEYS = (
 )
 _SHELL_COMMAND_KEYS = ("cmd", "command", "code", "script", "input")
 _TOOL_NAME_SEPARATORS = ("__", ".", ":", "/")
-# MCP tool-name spellings (see ``_mcp_identity``). Hermes names MCP tools
+# MCP tool-name spellings (see ``_McpNames.identity``). Hermes names MCP tools
 # ``mcp_<server>_<tool>`` with every character outside ``[A-Za-z0-9_]`` as ``_``;
 # Claude Code names plugin servers ``plugin_<plugin>_<server>``.
 _HERMES_NAME_RE = re.compile(r"[^a-z0-9_]")
+# Claude Code and OpenCode write a server name with every character outside ``[A-Za-z0-9_-]`` as ``_``.
+_SANITIZED_NAME_RE = re.compile(r"[^a-z0-9_-]")
+_MCP_PREFIX = "mcp__"
 _CLAUDE_PLUGIN_SERVER_PREFIX = "plugin_"
 # Harnesses that never name an MCP tool ``<server>_<tool>`` (only OpenCode does).
 _NO_BARE_MCP_PREFIX_AGENTS = frozenset({"claude-code", "codex", "hermes"})
@@ -290,15 +307,19 @@ _BUILTIN_TOOL_NAMES = (
 )
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 _SHELL_PREFIX_WORDS = frozenset({"sudo", "env", "time", "nohup", "command", "exec", "builtin", "nice"})
-_FILE_READER_VERBS = frozenset(
-    {"cat", "bat", "batcat", "less", "more", "head", "tail", "view", "nl", "sed", "awk", "xxd", "od", "tac"}
-)
+# Shell commands that read a SKILL.md: the scored check's reader verbs plus a few
+# more viewers. This report-only detector is deliberately more lenient than the
+# scored checks._cmd_reads_skill_md: it also looks past prefix words (``sudo``,
+# ``env``...) and into ``bash -c`` payloads. Unlike the scored check it does not
+# expand shell variables, so ``D=skills/x; cat $D/SKILL.md`` counts only there.
+_FILE_READER_VERBS = frozenset(_FILE_READ_VERBS) | frozenset({"batcat", "view", "xxd", "od", "tac"})
 _ARTIFACT_CONSUMER_VERBS = _FILE_READER_VERBS | frozenset(
     {"jq", "yq", "python", "python3", "node", "grep", "rg", "wc", "sort", "uniq", "cut", "diff", "cmp", "base64"}
 )
 _SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "(", ")", ";;", "|&", ";&"})
 _OUTPUT_REDIRECTS = frozenset({">", ">>", ">|", "&>", "&>>", "1>", "2>"})
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_REPEATED_SLASHES_RE = re.compile(r"/{2,}")
 # ``<<EOF``/``<<-'EOF'``/``<<"EOF"`` (not ``<<<`` here-strings); the groups hold the delimiter.
 _HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)-?[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z_][A-Za-z0-9_]*))")
 _WRITE_VERB_RE = re.compile(
@@ -556,6 +577,38 @@ def _check_description(raw: Mapping[str, Any], where: str, errors: _FieldErrors)
     return True
 
 
+def _check_list(value: Any, where: str, errors: _FieldErrors, *, items: str, limit: int, unit: str) -> list[Any] | None:
+    """``value`` if it is a list of at most ``limit`` entries; otherwise the problem is recorded."""
+    if not isinstance(value, list):
+        errors.add(where, f"must be a list of {items}")
+        return None
+    if len(value) > limit:
+        errors.add(where, f"must list at most {limit} {unit}")
+        return None
+    return value
+
+
+def _check_object(raw: Any, where: str, errors: _FieldErrors, allowed_keys: frozenset[str]) -> bool:
+    """Whether ``raw`` is an object with no keys outside ``allowed_keys``; otherwise the problem is recorded."""
+    if not isinstance(raw, dict):
+        errors.add(where, "must be an object")
+        return False
+    unknown = sorted(str(key)[:_MAX_KEY_PREVIEW_CHARS] for key in raw if key not in allowed_keys)
+    if unknown:
+        errors.add(where, f"unsupported keys: {', '.join(unknown)}")
+        return False
+    return True
+
+
+def _is_name(value: Any) -> bool:
+    """An argument or property name: a non-empty string of at most ``MAX_ARGUMENT_NAME_CHARS``."""
+    return isinstance(value, str) and 0 < len(value) <= MAX_ARGUMENT_NAME_CHARS
+
+
+def _is_name_list(value: Any) -> bool:
+    return isinstance(value, list) and len(value) <= MAX_ARGUMENT_NAMES and all(_is_name(item) for item in value)
+
+
 def _check_ref_string(value: Any, where: str, errors: _FieldErrors) -> str | None:
     if not isinstance(value, str) or not value.strip():
         errors.add(where, "must be a non-empty string")
@@ -634,14 +687,11 @@ def _check_ref_alternatives(value: Any, where: str, errors: _FieldErrors) -> lis
 
 
 def _check_tool_patterns(value: Any, where: str, errors: _FieldErrors) -> list[str] | None:
-    if not isinstance(value, list):
-        errors.add(where, "must be a list of tool refs")
-        return None
-    if len(value) > MAX_TOOL_PATTERNS:
-        errors.add(where, f"must list at most {MAX_TOOL_PATTERNS} tool refs")
+    items = _check_list(value, where, errors, items="tool refs", limit=MAX_TOOL_PATTERNS, unit="tool refs")
+    if items is None:
         return None
     patterns: list[str] = []
-    for index, item in enumerate(value):
+    for index, item in enumerate(items):
         ref = _check_ref_string(item, f"{where}[{index}]", errors)
         if ref is None:
             return None
@@ -657,10 +707,17 @@ def _check_regex(value: Any, where: str, errors: _FieldErrors) -> str | None:
     if len(value) > MAX_REGEX_CHARS:
         errors.add(where, f"must be at most {MAX_REGEX_CHARS} characters")
         return None
+    # Checked with the engine that runs it (see _regex_search): ``re`` rejects
+    # ``\p{L}``, which ``regex`` runs, and accepts ``[[:alpha:]``, which it does not.
     try:
-        re.compile(value)
-    except (re.error, RecursionError, OverflowError) as exc:
+        regex.compile(value)
+    except (regex.error, ValueError, RecursionError, OverflowError) as exc:
         errors.add(where, f"is not a valid regular expression ({exc})")
+        return None
+    except Exception as exc:
+        # Some malformed patterns raise other errors: KeyError for ``(?V0)(?V1)``,
+        # RuntimeError for a fuzzy count the engine cannot compile.
+        errors.add(where, f"is not a valid regular expression (the regex engine raised {type(exc).__name__})")
         return None
     return value
 
@@ -696,7 +753,8 @@ def _check_schema(schema: Any, where: str, errors: _FieldErrors, *, depth: int, 
         if key not in _SCHEMA_KEYWORDS and key not in _SCHEMA_ANNOTATIONS:
             errors.add(
                 where,
-                f"unsupported JSON-Schema keyword {str(key)[:64]!r}; supported: {', '.join(sorted(_SCHEMA_KEYWORDS))}",
+                f"unsupported JSON-Schema keyword {str(key)[:_MAX_KEY_PREVIEW_CHARS]!r}; "
+                f"supported: {', '.join(sorted(_SCHEMA_KEYWORDS))}",
             )
             ok = False
     if "type" in schema:
@@ -709,15 +767,9 @@ def _check_schema(schema: Any, where: str, errors: _FieldErrors, *, depth: int, 
         ):
             errors.add(f"{where}.type", f"must be one of {', '.join(sorted(_SCHEMA_TYPES))} or a list of them")
             ok = False
-    if "required" in schema:
-        required = schema["required"]
-        if (
-            not isinstance(required, list)
-            or len(required) > MAX_ARGUMENT_NAMES
-            or not all(isinstance(item, str) and 0 < len(item) <= MAX_ARGUMENT_NAME_CHARS for item in required)
-        ):
-            errors.add(f"{where}.required", "must be a list of property names")
-            ok = False
+    if "required" in schema and not _is_name_list(schema["required"]):
+        errors.add(f"{where}.required", "must be a list of property names")
+        ok = False
     if "enum" in schema:
         enum = schema["enum"]
         if not isinstance(enum, list) or not enum or len(enum) > MAX_ENUM_ITEMS:
@@ -746,7 +798,7 @@ def _check_schema(schema: Any, where: str, errors: _FieldErrors, *, depth: int, 
             ok = False
         else:
             for name, sub in properties.items():
-                if not isinstance(name, str) or not name or len(name) > MAX_ARGUMENT_NAME_CHARS:
+                if not _is_name(name):
                     errors.add(f"{where}.properties", "property names must be non-empty short strings")
                     ok = False
                     continue
@@ -764,7 +816,7 @@ def _check_arg_mapping(value: Any, where: str, errors: _FieldErrors, *, kind: st
         return None
     parsed: dict[str, Any] = {}
     for name, item in value.items():
-        if not isinstance(name, str) or not name or len(name) > MAX_ARGUMENT_NAME_CHARS:
+        if not _is_name(name):
             errors.add(where, "argument names must be non-empty strings")
             return None
         item_where = f"{where}.{name}"
@@ -783,12 +835,7 @@ def _check_arg_mapping(value: Any, where: str, errors: _FieldErrors, *, kind: st
 
 
 def _parse_argument_rule(raw: Any, rule_where: str, errors: _FieldErrors) -> dict[str, Any] | None:
-    if not isinstance(raw, dict):
-        errors.add(rule_where, "must be an object")
-        return None
-    unknown = sorted(str(key)[:64] for key in raw if key not in _ARGUMENT_RULE_KEYS)
-    if unknown:
-        errors.add(rule_where, f"unsupported keys: {', '.join(unknown)}")
+    if not _check_object(raw, rule_where, errors, _ARGUMENT_RULE_KEYS):
         return None
     tool = _check_ref_string(raw.get("tool"), f"{rule_where}.tool", errors)
     if tool is None or not _check_description(raw, rule_where, errors):
@@ -796,11 +843,7 @@ def _parse_argument_rule(raw: Any, rule_where: str, errors: _FieldErrors) -> dic
     rule: dict[str, Any] = {"tool": tool}
     if "required" in raw:
         required = raw["required"]
-        if (
-            not isinstance(required, list)
-            or len(required) > MAX_ARGUMENT_NAMES
-            or not all(isinstance(item, str) and 0 < len(item) <= MAX_ARGUMENT_NAME_CHARS for item in required)
-        ):
+        if not _is_name_list(required):
             errors.add(f"{rule_where}.required", "must be a list of argument names")
             return None
         if required:
@@ -821,18 +864,14 @@ def _parse_argument_rule(raw: Any, rule_where: str, errors: _FieldErrors) -> dic
     return rule
 
 
-def _parse_tool_arguments(value: Any, errors: _FieldErrors) -> list[dict[str, Any]] | None:
+def _parse_tool_arguments(value: Any, where: str, errors: _FieldErrors) -> list[dict[str, Any]] | None:
     """Every valid rule, or ``None`` when any rule is bad; each bad rule is reported, not only the first."""
-    where = "tool_arguments"
-    if not isinstance(value, list):
-        errors.add(where, "must be a list of argument rules")
-        return None
-    if len(value) > MAX_ARGUMENT_RULES:
-        errors.add(where, f"must list at most {MAX_ARGUMENT_RULES} rules")
+    items = _check_list(value, where, errors, items="argument rules", limit=MAX_ARGUMENT_RULES, unit="rules")
+    if items is None:
         return None
     rules: list[dict[str, Any]] = []
     valid = True
-    for index, raw in enumerate(value):
+    for index, raw in enumerate(items):
         rule = _parse_argument_rule(raw, f"{where}[{index}]", errors)
         if rule is None:
             valid = False
@@ -864,7 +903,7 @@ def sanitize_input_schema(schema: Any, *, depth: int = 1, budget: list[int] | No
         out["type"] = types
     required = schema.get("required")
     if isinstance(required, list):
-        names = [item for item in required if isinstance(item, str) and 0 < len(item) <= MAX_ARGUMENT_NAME_CHARS]
+        names = [item for item in required if _is_name(item)]
         if names:
             out["required"] = list(dict.fromkeys(names))[:MAX_ARGUMENT_NAMES]
     enum = schema.get("enum")
@@ -883,7 +922,7 @@ def sanitize_input_schema(schema: Any, *, depth: int = 1, budget: list[int] | No
     if isinstance(properties, Mapping):
         kept: dict[str, Any] = {}
         for name, sub in list(properties.items())[:MAX_ARGUMENT_NAMES]:
-            if isinstance(name, str) and 0 < len(name) <= MAX_ARGUMENT_NAME_CHARS:
+            if _is_name(name):
                 cleaned = sanitize_input_schema(sub, depth=depth + 1, budget=budget)
                 if cleaned:
                     kept[name] = cleaned
@@ -892,16 +931,12 @@ def sanitize_input_schema(schema: Any, *, depth: int = 1, budget: list[int] | No
     return out or None
 
 
-def _parse_expected_order(value: Any, errors: _FieldErrors) -> list[list[list[str]]] | None:
-    where = "expected_order"
-    if not isinstance(value, list):
-        errors.add(where, "must be a list of [before, after] edges")
-        return None
-    if len(value) > MAX_ORDER_EDGES:
-        errors.add(where, f"must list at most {MAX_ORDER_EDGES} edges")
+def _parse_expected_order(value: Any, where: str, errors: _FieldErrors) -> list[list[list[str]]] | None:
+    items = _check_list(value, where, errors, items="[before, after] edges", limit=MAX_ORDER_EDGES, unit="edges")
+    if items is None:
         return None
     edges: list[list[list[str]]] = []
-    for index, edge in enumerate(value):
+    for index, edge in enumerate(items):
         edge_where = f"{where}[{index}]"
         if not isinstance(edge, list) or len(edge) != 2:
             errors.add(edge_where, "must be a two-item [before, after] list")
@@ -919,23 +954,14 @@ def _parse_expected_order(value: Any, errors: _FieldErrors) -> list[list[list[st
     return edges
 
 
-def _parse_handoffs(value: Any, errors: _FieldErrors) -> list[dict[str, Any]] | None:
-    where = "handoffs"
-    if not isinstance(value, list):
-        errors.add(where, "must be a list of handoff objects")
-        return None
-    if len(value) > MAX_HANDOFFS:
-        errors.add(where, f"must list at most {MAX_HANDOFFS} handoffs")
+def _parse_handoffs(value: Any, where: str, errors: _FieldErrors) -> list[dict[str, Any]] | None:
+    items = _check_list(value, where, errors, items="handoff objects", limit=MAX_HANDOFFS, unit="handoffs")
+    if items is None:
         return None
     handoffs: list[dict[str, Any]] = []
-    for index, raw in enumerate(value):
+    for index, raw in enumerate(items):
         item_where = f"{where}[{index}]"
-        if not isinstance(raw, dict):
-            errors.add(item_where, "must be an object")
-            return None
-        unknown = sorted(str(key)[:64] for key in raw if key not in _HANDOFF_KEYS)
-        if unknown:
-            errors.add(item_where, f"unsupported keys: {', '.join(unknown)}")
+        if not _check_object(raw, item_where, errors, _HANDOFF_KEYS):
             return None
         producer = _check_ref_alternatives(raw.get("producer"), f"{item_where}.producer", errors)
         consumer = _check_ref_alternatives(raw.get("consumer"), f"{item_where}.consumer", errors)
@@ -978,24 +1004,15 @@ def _parse_handoffs(value: Any, errors: _FieldErrors) -> list[dict[str, Any]] | 
     return handoffs
 
 
-def _parse_conflict_probes(value: Any, errors: _FieldErrors) -> list[dict[str, Any]] | None:
-    where = "conflict_probes"
-    if not isinstance(value, list):
-        errors.add(where, "must be a list of probe objects")
-        return None
-    if len(value) > MAX_CONFLICT_PROBES:
-        errors.add(where, f"must list at most {MAX_CONFLICT_PROBES} probes")
+def _parse_conflict_probes(value: Any, where: str, errors: _FieldErrors) -> list[dict[str, Any]] | None:
+    items = _check_list(value, where, errors, items="probe objects", limit=MAX_CONFLICT_PROBES, unit="probes")
+    if items is None:
         return None
     probes: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    for index, raw in enumerate(value):
+    for index, raw in enumerate(items):
         item_where = f"{where}[{index}]"
-        if not isinstance(raw, dict):
-            errors.add(item_where, "must be an object")
-            return None
-        unknown = sorted(str(key)[:64] for key in raw if key not in _PROBE_KEYS)
-        if unknown:
-            errors.add(item_where, f"unsupported keys: {', '.join(unknown)}")
+        if not _check_object(raw, item_where, errors, _PROBE_KEYS):
             return None
         probe_id = raw.get("id")
         if not isinstance(probe_id, str) or not probe_id.strip() or len(probe_id) > MAX_PROBE_ID_CHARS:
@@ -1028,25 +1045,18 @@ def _parse_conflict_probes(value: Any, errors: _FieldErrors) -> list[dict[str, A
     return probes
 
 
-def _parse_case_field(name: str, value: Any, errors: _FieldErrors) -> Any:
-    if name in {"expected_tools", "acceptable_tools", "decoy_tools"}:
-        return _check_tool_patterns(value, name, errors)
-    if name == "tool_arguments":
-        return _parse_tool_arguments(value, errors)
-    if name == "expected_order":
-        return _parse_expected_order(value, errors)
-    if name == "handoffs":
-        return _parse_handoffs(value, errors)
-    return _parse_conflict_probes(value, errors)
-
-
-def _spec_field(spec: Mapping[str, Any] | None, name: str) -> list[Any]:
-    """One normalized case field (raw entries and :func:`plugin_case_spec` output both work)."""
-    if not isinstance(spec, Mapping) or spec.get(name) is None:
-        return []
-    errors = _FieldErrors()
-    parsed = _parse_case_field(name, spec[name], errors)
-    return list(parsed) if parsed is not None and not errors.messages else []
+# Each advisory case field and its parser: ``parser(value, field_name, errors)``
+# returns the normalized value, or ``None`` after recording the problem.
+_FIELD_PARSERS: dict[str, Callable[[Any, str, _FieldErrors], list[Any] | None]] = {
+    "expected_tools": _check_tool_patterns,
+    "acceptable_tools": _check_tool_patterns,
+    "decoy_tools": _check_tool_patterns,
+    "tool_arguments": _parse_tool_arguments,
+    "expected_order": _parse_expected_order,
+    "handoffs": _parse_handoffs,
+    "conflict_probes": _parse_conflict_probes,
+}
+PLUGIN_CASE_FIELDS = tuple(_FIELD_PARSERS)
 
 
 def validate_plugin_case_fields(entry: Any) -> list[str]:
@@ -1059,12 +1069,12 @@ def validate_plugin_case_fields(entry: Any) -> list[str]:
         return []
     errors = _FieldErrors()
     parsed: dict[str, Any] = {}
-    for name in PLUGIN_CASE_FIELDS:
+    for name, parse in _FIELD_PARSERS.items():
         value = entry.get(name)
         if value is None:
             continue
         before = len(errors.messages)
-        result = _parse_case_field(name, value, errors)
+        result = parse(value, name, errors)
         if result is not None and len(errors.messages) == before:
             parsed[name] = result
     _check_selection_overlap(parsed, errors)
@@ -1106,12 +1116,12 @@ def plugin_case_spec(entry: Any) -> dict[str, Any]:
     if not isinstance(entry, Mapping):
         return {}
     spec: dict[str, Any] = {}
-    for name in PLUGIN_CASE_FIELDS:
+    for name, parse in _FIELD_PARSERS.items():
         value = entry.get(name)
         if value is None:
             continue
         errors = _FieldErrors()
-        parsed = _parse_case_field(name, value, errors)
+        parsed = parse(value, name, errors)
         if parsed is not None and not errors.messages:
             spec[name] = parsed
     return spec
@@ -1167,14 +1177,14 @@ class PluginSignalsContext:
     plugin_names: tuple[str, ...] = ()
 
     def arm_enabled(self, arm: str) -> bool:
-        if arm in {ARM_WITH_SKILL, ARM_SUM_OF_PARTS}:
+        if arm in {ARM_WITH, ARM_SUM_OF_PARTS}:
             return True
-        return arm == ARM_WITHOUT_SKILL and self.baseline_has_members
+        return arm == ARM_WITHOUT and self.baseline_has_members
 
     def declared_for(self, arm: str) -> dict[str, list[str]]:
         """Declared components staged in ``arm`` (MCP is wired into the with-plugin arm only)."""
         declared: dict[str, list[str]] = {COMPONENT_SKILL: list(self.member_skills)}
-        with_plugin = arm == ARM_WITH_SKILL
+        with_plugin = arm == ARM_WITH
         declared[COMPONENT_MCP] = list(self.mcp_servers) if with_plugin else []
         if with_plugin and self.subagents:
             declared[COMPONENT_SUBAGENT] = list(self.subagents)
@@ -1199,7 +1209,7 @@ class PluginSignalsContext:
 
     def aliases_for(self, arm: str) -> Mapping[str, str]:
         """Subagent name aliases for ``arm`` (declared subagents count in the with-plugin arm only)."""
-        return self.subagent_aliases if arm == ARM_WITH_SKILL and self.subagents else {}
+        return self.subagent_aliases if arm == ARM_WITH and self.subagents else {}
 
     def case_spec(self, case_id: str) -> Mapping[str, Any]:
         return self.cases.get(case_id) or {}
@@ -1243,7 +1253,7 @@ def build_plugin_signals_context(
         cases=cases,
         baseline_has_members=bool(baseline_has_members),
         subagents=declared_subagents,
-        commands=_clean_names(str(name).lstrip("/") for name in commands if isinstance(name, str)),
+        commands=_clean_names(name.lstrip("/") for name in commands if isinstance(name, str)),
         subagent_aliases=_clean_aliases(subagent_aliases, declared_subagents),
         plugin_names=_clean_names([plugin_name] if plugin_name else _plugin_names_from_wrappers(wrappers)),
     )
@@ -1325,16 +1335,64 @@ class _Ident:
         candidates.extend(f"{namespace}:{short}" for namespace in self.namespaces)
         return list(dict.fromkeys(candidates))
 
+    @cached_property
+    def typed_names(self) -> tuple[str, ...]:
+        """What a ``<Type>:<pattern>`` ref of this identity's type is matched against."""
+        if self.kind == COMPONENT_MCP:
+            return _match_names(_mcp_ref_candidates(self))
+        return _match_names(self.name_candidates)
+
+    @cached_property
+    def untyped_names(self) -> tuple[str, ...]:
+        """What any other ref is matched against (see :func:`_ref_matches`)."""
+        if self.kind is None:
+            names = [self.label, self.fn, *self.aliases]
+        elif self.kind == COMPONENT_MCP:
+            # The bare tool name is what Codex and the MCP server call the tool (``list_changes``).
+            names = [self.label, self.fn, *_mcp_ref_candidates(self), self.tool or ""]
+        else:
+            names = [self.label, *self.name_candidates]
+            if self.kind == COMPONENT_COMMAND and self.name:
+                names.append(f"/{self.name}")
+        return _match_names(names)
+
+
+class _ShellPaths(NamedTuple):
+    reads: list[str]
+    writes: list[str]
+
+
+class _Result(NamedTuple):
+    """One tool result of a step.
+
+    ``scan`` is the part of ``text`` that failure text is checked against, and
+    ``flagged`` the structured outcome of :func:`_result_flagged`.
+    """
+
+    call_id: str
+    text: str
+    scan: str
+    flagged: bool | None
+
 
 @dataclass
 class _Call:
+    """One normalized tool call.
+
+    ``mcp`` is the call's MCP identity, however the harness spelled the tool
+    name, and ``fn_base`` is the bare tool name: the MCP tool's for an MCP
+    call, so every spelling of one MCP call is treated alike.
+    """
+
     seq: int
     step_index: int
     fn: str
+    fn_base: str
     args: dict[str, Any]
-    observation: str | None
-    succeeded: bool | None
     idents: list[_Ident]
+    mcp: _Ident | None = None
+    observation: str | None = None
+    succeeded: bool | None = None
     # The result says the called tool, skill, command, or agent does not exist.
     missing_tool: bool = False
     # A subagent's own call (Claude Code sidechain step), and the parent's subagent call that started it.
@@ -1349,34 +1407,30 @@ class _Call:
     # Components a shell call used without its tool: a JSON-RPC ``tools/call`` piped to an MCP server,
     # or a member skill's script run directly (see ``_side_channel_idents``).
     side_idents: list[_Ident] = field(default_factory=list)
-    _args_text: str | None = None
-    _shell_paths: tuple[list[str], list[str]] | None = None
-    _result_texts: list[str] | None = None
-    _argument_texts: list[str] | None = None
 
     @property
-    def args_text(self) -> str:
-        if self._args_text is None:
-            try:
-                text = json.dumps(self.args, ensure_ascii=False, sort_keys=True, default=str)
-            except (TypeError, ValueError, RecursionError):
-                text = ""
-            self._args_text = text[:_MAX_ARGS_TEXT_CHARS]
-        return self._args_text
+    def is_shell(self) -> bool:
+        """A local shell call (an MCP tool named like a shell is still an MCP call)."""
+        return self.fn_base in _SHELL_TOOLS and self.mcp is None
 
     @property
+    def is_content_read(self) -> bool:
+        """A skill load or a plain file read: its result is file or skill text, not a status message."""
+        if self.mcp is not None:
+            return False
+        if self.fn.casefold() in _SKILL_TOOLS or any(ident.kind == COMPONENT_SKILL for ident in self.idents):
+            return True
+        return self.fn_base in _READ_TOOLS
+
+    @cached_property
     def result_texts(self) -> list[str]:
         """The result text plus the string values of JSON inside it, decoded once per call."""
-        if self._result_texts is None:
-            self._result_texts = _decoded_texts(self.observation) if self.observation else []
-        return self._result_texts
+        return _decoded_texts(self.observation) if self.observation else []
 
-    @property
+    @cached_property
     def argument_texts(self) -> list[str]:
         """The argument string values (and JSON inside them), decoded once per call."""
-        if self._argument_texts is None:
-            self._argument_texts = [text for leaf in _string_values(self.args) for text in _decoded_texts(leaf)]
-        return self._argument_texts
+        return [text for leaf in _string_values(self.args) for text in _decoded_texts(leaf)]
 
     @property
     def component_idents(self) -> list[_Ident]:
@@ -1386,23 +1440,20 @@ class _Call:
         """Whether this identity's activation did not fail (``None`` outcomes count as not failed)."""
         return self.succeeded is not False and not ident.failed
 
-    @property
-    def shell_paths(self) -> tuple[list[str], list[str]]:
-        """Distinct ``(read, written)`` shell paths, resolved against the call's directory, parsed once per call.
+    @cached_property
+    def shell_paths(self) -> _ShellPaths:
+        """Distinct shell paths this call reads and writes, resolved against the call's directory.
 
         A path may be a glob (``out/*.json``); see :func:`_observed_path_matches`.
         """
-        if self._shell_paths is None:
-            reads: dict[str, None] = {}
-            writes: dict[str, None] = {}
-            fn_base = _base_tool_name(self.fn)
-            if fn_base in _SHELL_TOOLS and not any(ident.kind == COMPONENT_MCP for ident in self.idents):
-                for text in _shell_texts(fn_base, self.args):
-                    text_reads, text_writes = _shell_file_io(text, self.cwd)
-                    reads.update(dict.fromkeys(text_reads))
-                    writes.update(dict.fromkeys(text_writes))
-            self._shell_paths = (list(reads), list(writes))
-        return self._shell_paths
+        reads: dict[str, None] = {}
+        writes: dict[str, None] = {}
+        if self.is_shell:
+            for text in _shell_texts(self.fn_base, self.args):
+                text_reads, text_writes = _shell_file_io(text, self.cwd)
+                reads.update(dict.fromkeys(text_reads))
+                writes.update(dict.fromkeys(text_writes))
+        return _ShellPaths(list(reads), list(writes))
 
 
 def _safe_text(value: Any, limit: int = _MAX_LABEL_CHARS) -> str:
@@ -1449,7 +1500,7 @@ def _content_parts(content: Any) -> list[str]:
     if isinstance(content, list):
         parts: list[str] = []
         size = 0
-        for block in content[:256]:
+        for block in content[:_MAX_CONTENT_BLOCKS]:
             if isinstance(block, dict) and isinstance(block.get("text"), str):
                 part = block["text"]
             elif isinstance(block, str):
@@ -1626,8 +1677,8 @@ def _result_flagged(result: Mapping[str, Any]) -> bool | None:
     return None
 
 
-def _observations(step: Mapping[str, Any]) -> list[tuple[str, str, str, bool | None]]:
-    """``(source_call_id, text, failure_scan_text, flagged)`` for each result of ``step``.
+def _observations(step: Mapping[str, Any]) -> list[_Result]:
+    """Each result of ``step``.
 
     ``flagged`` is the structured outcome of :func:`_result_flagged`. Harbor
     puts the flag of an orphan Claude Code result on its single-call step's
@@ -1646,8 +1697,8 @@ def _observations(step: Mapping[str, Any]) -> list[tuple[str, str, str, bool | N
         if isinstance(calls, list) and len(calls) == 1 and isinstance(step_extra, Mapping)
         else None
     )
-    entries: list[tuple[str, str, str, bool | None]] = []
-    for result in results[:256]:
+    entries: list[_Result] = []
+    for result in results[:_MAX_STEP_RESULTS]:
         if not isinstance(result, Mapping):
             continue
         parts = _content_parts(result.get("content"))
@@ -1655,20 +1706,25 @@ def _observations(step: Mapping[str, Any]) -> list[tuple[str, str, str, bool | N
         flagged = _result_flagged(result)
         if step_flag is True or (flagged is None and step_flag is False):
             flagged = step_flag
-        entries.append((str(result.get("source_call_id") or ""), text, _failure_scan_text(parts, text), flagged))
+        entries.append(
+            _Result(
+                call_id=str(result.get("source_call_id") or ""),
+                text=text,
+                scan=_failure_scan_text(parts, text),
+                flagged=flagged,
+            )
+        )
     return entries
 
 
-def _results_for_call(
-    results: list[tuple[str, str, str, bool | None]], call_id: str, *, call_count: int
-) -> list[tuple[str, str, bool | None]]:
+def _results_for_call(results: Sequence[_Result], call_id: str, *, call_count: int) -> list[_Result]:
     """Results attributable to ``call_id``; id matches win, ambiguity stays unknown."""
     if call_id:
-        matched = [(text, scan, flagged) for rid, text, scan, flagged in results if rid == call_id]
+        matched = [result for result in results if result.call_id == call_id]
         if matched:
             return matched
-    if call_count == 1 and len(results) == 1 and not results[0][0]:
-        return [results[0][1:]]
+    if call_count == 1 and len(results) == 1 and not results[0].call_id:
+        return [results[0]]
     return []
 
 
@@ -1698,7 +1754,7 @@ def _content_read_scan(text: str, *, shell: bool) -> str:
 
 
 def _outcome(
-    correlated: list[tuple[str, str, bool | None]], *, shell: bool, content_read: bool = False
+    correlated: Sequence[_Result], *, shell: bool, content_read: bool = False
 ) -> tuple[str | None, bool | None]:
     """``(observation text, succeeded)`` for one call (see the module docs).
 
@@ -1712,8 +1768,8 @@ def _outcome(
     """
     if not correlated:
         return None, None
-    text = "".join(item for item, _, _ in correlated)[:_MAX_OBSERVATION_CHARS]
-    flags = [flag for _, _, flag in correlated]
+    text = "".join(result.text for result in correlated)[:_MAX_OBSERVATION_CHARS]
+    flags = [result.flagged for result in correlated]
     if any(flag is True for flag in flags):
         return text, False
     if any(flag is False for flag in flags):
@@ -1721,9 +1777,9 @@ def _outcome(
     if not text.strip():
         return text, None
     if content_read:
-        scan = "\n".join(_content_read_scan(item, shell=shell) for item, _, _ in correlated)
+        scan = "\n".join(_content_read_scan(result.text, shell=shell) for result in correlated)
     else:
-        scan = "\n".join(window for _, window, _ in correlated)
+        scan = "\n".join(result.scan for result in correlated)
     failed = any(_line_failed(line.strip(), shell=shell) for line in scan.splitlines() if line.strip())
     return text, not failed
 
@@ -1737,7 +1793,7 @@ def _base_tool_name(fn: str) -> str:
 
 
 def _norm_server(value: str) -> str:
-    return re.sub(r"[^a-z0-9_-]", "_", value.casefold())
+    return _SANITIZED_NAME_RE.sub("_", value.casefold())
 
 
 def _server_spellings(server: str) -> tuple[str, ...]:
@@ -1750,6 +1806,120 @@ def _server_spellings(server: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys((low, _norm_server(server), _HERMES_NAME_RE.sub("_", low))))
 
 
+class _McpPrefix(NamedTuple):
+    """A tool-name prefix that names a declared MCP server (see :meth:`_McpNames.identity`)."""
+
+    order: int  # scan order: declared server, then its spelling, then the prefix form
+    length: int
+    rank: int  # 0 for the server's exact spelling, 1 or 2 for a harness-normalized one
+    server: str
+    spelling: str
+    bare: bool  # OpenCode's ``<server>_<tool>``, a form other harnesses never use
+
+
+class _McpNames:
+    """The declared MCP servers of one arm, indexed by every spelling and tool-name prefix harnesses give them.
+
+    Built once per trajectory (or per batch of lookups), so naming the server
+    of a call takes a few dictionary lookups however many servers are
+    declared. The tool-name prefix table is built on the first
+    :meth:`identity`, since :meth:`match` does not use it.
+    """
+
+    def __init__(self, declared: Iterable[Any]) -> None:
+        self.names = list(dict.fromkeys(name for name in declared if isinstance(name, str) and name))
+        self._exact: dict[str, str] = {}  # casefolded name -> first declared name
+        self._spelled: dict[str, list[str]] = {}  # spelling -> the declared names that have it
+        for name in self.names:
+            self._exact.setdefault(name.casefold(), name)
+            for spelling in _server_spellings(name):
+                holders = self._spelled.setdefault(spelling, [])
+                if name not in holders:
+                    holders.append(name)
+
+    @cached_property
+    def _prefixes(self) -> dict[str, list[_McpPrefix]]:
+        """Tool-name prefix -> the declared-server entries it names (see :meth:`identity`)."""
+        prefixes: dict[str, list[_McpPrefix]] = {}
+        order = 0
+        for name in self.names:
+            for rank, spelling in enumerate(_server_spellings(name)):
+                forms = [(spelling + separator, False) for separator in _TOOL_NAME_SEPARATORS]
+                forms += [(f"mcp_{spelling}_", False), (spelling + "_", True)]
+                for prefix, bare in forms:
+                    entry = _McpPrefix(order, len(prefix), rank, name, spelling, bare)
+                    prefixes.setdefault(prefix, []).append(entry)
+                    order += 1
+        return prefixes
+
+    @cached_property
+    def _prefix_ends(self) -> frozenset[str]:
+        return frozenset(prefix[-1] for prefix in self._prefixes)
+
+    def match(self, observed: str) -> str | None:
+        """See :func:`match_declared_mcp_server`."""
+        low = observed.casefold()
+        if not low or not self.names:
+            return None
+        exact = self._exact.get(low)
+        if exact is not None:
+            return exact
+        spelled = self._spelled.get(low, [])
+        if len(spelled) == 1:
+            return spelled[0]
+        if spelled or not low.startswith(_CLAUDE_PLUGIN_SERVER_PREFIX):
+            return None
+        rest = low[len(_CLAUDE_PLUGIN_SERVER_PREFIX) :]
+        slug, sep, server = rest.partition("_")
+        if slug and sep and server:
+            found = self.match(server)
+            if found is not None:
+                return found
+        # The longest declared spelling ``rest`` ends with, after a ``_`` that is not its first character.
+        for index in range(1, len(rest)):
+            if rest[index] == "_" and (longest := self._spelled.get(rest[index + 1 :])):
+                return longest[0] if len(longest) == 1 else None
+        return None
+
+    def identity(self, fn: str, *, agent: str) -> tuple[str, str] | None:
+        """``(server, tool)`` of an MCP tool call, with the server mapped to its declared name when known.
+
+        Recognized spellings: ``mcp__<server>__<tool>`` (Claude Code, Codex;
+        Claude Code plugin servers appear as ``plugin_<plugin>_<server>``), and
+        for declared servers ``<server>__<tool>``/``.``/``/``/``:``, Hermes
+        ``mcp_<server>_<tool>``, and OpenCode ``<server>_<tool>`` (not for
+        harnesses that never use it). The longest matching prefix wins; on a tie
+        an exact spelling beats a normalized one, and a remaining tie between
+        servers is left unattributed.
+        """
+        low = fn.casefold()
+        if low.startswith(_MCP_PREFIX):
+            server, _, tool = fn[len(_MCP_PREFIX) :].partition("__")
+            if not server:
+                return None
+            return self.match(server) or server, tool
+        bare_allowed = agent.casefold() not in _NO_BARE_MCP_PREFIX_AGENTS and low not in _BUILTIN_TOOL_NAMES
+        matches: list[_McpPrefix] = []
+        for end in range(1, len(low)):  # a prefix leaves at least one character of tool name
+            if low[end - 1] in self._prefix_ends:
+                matches.extend(self._prefixes.get(low[:end], ()))
+        best: tuple[int, int] | None = None
+        best_spelling = ""
+        winners: list[str] = []
+        for entry in sorted(matches):
+            if entry.bare and not bare_allowed:
+                continue
+            key = (entry.length, -min(entry.rank, 1))
+            if best is None or key > best:
+                best, best_spelling, winners = key, entry.spelling, [entry.server]
+            elif key == best and entry.server not in winners:
+                winners.append(entry.server)
+        if best is None:
+            return None
+        # Two declared servers share this spelling: count the call under the spelling itself.
+        return (winners[0] if len(winners) == 1 else best_spelling), fn[best[0] :]
+
+
 def match_declared_mcp_server(observed: str, declared: Iterable[str]) -> str | None:
     """The one declared server that ``observed`` (a server name taken from a tool name) refers to.
 
@@ -1760,73 +1930,12 @@ def match_declared_mcp_server(observed: str, declared: Iterable[str]) -> str | N
     ``_``, so the server is what follows the first ``_`` (a longest declared
     suffix is the fallback).
     """
-    names = [name for name in declared if isinstance(name, str) and name]
-    low = observed.casefold()
-    if not low or not names:
-        return None
-    exact = [name for name in names if name.casefold() == low]
-    if exact:
-        return exact[0]
-    spelled = list(dict.fromkeys(name for name in names if low in _server_spellings(name)))
-    if len(spelled) == 1:
-        return spelled[0]
-    if spelled or not low.startswith(_CLAUDE_PLUGIN_SERVER_PREFIX):
-        return None
-    rest = low[len(_CLAUDE_PLUGIN_SERVER_PREFIX) :]
-    slug, sep, server = rest.partition("_")
-    if slug and sep and server:
-        found = match_declared_mcp_server(server, names)
-        if found is not None:
-            return found
-    suffixes: dict[int, list[str]] = {}
-    for name in names:
-        for spelling in _server_spellings(name):
-            if rest.endswith("_" + spelling) and len(rest) > len(spelling) + 1:
-                suffixes.setdefault(len(spelling), []).append(name)
-    if not suffixes:
-        return None
-    longest = list(dict.fromkeys(suffixes[max(suffixes)]))
-    return longest[0] if len(longest) == 1 else None
+    return _McpNames(declared).match(observed)
 
 
-def _mcp_identity(fn: str, declared_mcp: Sequence[str], *, agent: str = "") -> tuple[str, str] | None:
-    """``(server, tool)`` of an MCP tool call, with the server mapped to its declared name when known.
-
-    Recognized spellings: ``mcp__<server>__<tool>`` (Claude Code, Codex; Claude
-    Code plugin servers appear as ``plugin_<plugin>_<server>``), and for
-    declared servers ``<server>__<tool>``/``.``/``/``/``:``, Hermes
-    ``mcp_<server>_<tool>``, and OpenCode ``<server>_<tool>`` (not for
-    harnesses that never use it). The longest matching prefix wins; on a tie an
-    exact spelling beats a normalized one, and a remaining tie between servers
-    is left unattributed.
-    """
-    low = fn.casefold()
-    if low[:5] == "mcp__":
-        server, _, tool = fn[5:].partition("__")
-        if not server:
-            return None
-        return match_declared_mcp_server(server, declared_mcp) or server, tool
-    bare_prefix = agent.casefold() not in _NO_BARE_MCP_PREFIX_AGENTS and low not in _BUILTIN_TOOL_NAMES
-    best: tuple[int, int] | None = None
-    best_spelling = ""
-    winners: list[str] = []
-    for server in declared_mcp:
-        for rank, spelling in enumerate(_server_spellings(server)):
-            prefixes = [spelling + separator for separator in _TOOL_NAME_SEPARATORS] + [f"mcp_{spelling}_"]
-            if bare_prefix:
-                prefixes.append(spelling + "_")
-            for prefix in prefixes:
-                if not (low.startswith(prefix) and len(low) > len(prefix)):
-                    continue
-                key = (len(prefix), -min(rank, 1))
-                if best is None or key > best:
-                    best, best_spelling, winners = key, spelling, [server]
-                elif key == best and server not in winners:
-                    winners.append(server)
-    if best is None:
-        return None
-    # Two declared servers share this spelling: count the call under the spelling itself.
-    return (winners[0] if len(winners) == 1 else best_spelling), fn[best[0] :]
+def declared_mcp_server_matcher(declared: Iterable[str]) -> Callable[[str], str | None]:
+    """:func:`match_declared_mcp_server` for one set of declared servers, indexed once for many lookups."""
+    return _McpNames(declared).match
 
 
 def _first_string(args: Mapping[str, Any], keys: Sequence[str]) -> str:
@@ -1839,7 +1948,7 @@ def _first_string(args: Mapping[str, Any], keys: Sequence[str]) -> str:
 
 def _normalize_path(value: str) -> str:
     text = value.strip().strip("'\"").replace("\\", "/")
-    text = re.sub(r"/{2,}", "/", text)
+    text = _REPEATED_SLASHES_RE.sub("/", text)
     while text.startswith("./"):
         text = text[2:]
     return text.rstrip("/") if len(text) > 1 else text
@@ -1852,26 +1961,6 @@ def _path_args(args: Mapping[str, Any]) -> list[str]:
         if isinstance(value, str) and value.strip():
             paths.append(value)
     return paths
-
-
-def _string_values(value: Any, *, limit: int = 256, depth: int = 0) -> list[str]:
-    """Bounded list of string leaves in a JSON-ish value."""
-    found: list[str] = []
-    if depth > 8:
-        return found
-    if isinstance(value, str):
-        return [value[:_MAX_ARGS_TEXT_CHARS]]
-    if isinstance(value, Mapping):
-        items: Iterable[Any] = list(value.values())[:limit]
-    elif isinstance(value, list):
-        items = value[:limit]
-    else:
-        return found
-    for item in items:
-        found.extend(_string_values(item, limit=limit, depth=depth + 1))
-        if len(found) >= limit:
-            break
-    return found[:limit]
 
 
 def _shell_texts(fn_base: str, args: Mapping[str, Any]) -> list[str]:
@@ -2166,11 +2255,14 @@ def _shell_file_io(text: str, cwd: str | None) -> tuple[list[str], list[str]]:
     script.py <path>``...) and ``<`` input; writes are output redirects,
     ``tee``, ``cp``/``mv``/``install`` targets, ``touch``, and ``sed -i`` (also a
     read). Interpreter code, inline (``-c``/``-e``) or fed as a here-document,
-    is scanned for the paths it opens. A glob operand stays a glob.
+    is scanned for the paths it opens. A glob operand stays a glob. A shell
+    ``apply_patch`` (Codex) writes the files its patch headers name (see
+    :func:`_patch_written_paths`).
     """
     reads: list[str] = []
     writes: list[str] = []
     pending = _split_heredocs(text.replace("\r\n", "\n").replace("\r", "\n"))[1]
+    patched = False
     for command, _ in _shell_chain(text):
         io = _command_io(command)
         verb, operands = io.verb, io.operands
@@ -2181,6 +2273,11 @@ def _shell_file_io(text: str, cwd: str | None) -> tuple[list[str], list[str]]:
             continue
         command_reads = list(io.inputs)
         command_writes = list(io.outputs)
+        if not patched and any(_APPLY_PATCH_COMMAND_RE.fullmatch(word.rsplit("/", 1)[-1]) for word in command):
+            # The patch may be a here-document, an argument or piped text, so its headers are read from
+            # the whole script, against the directory this command runs in.
+            patched = True
+            command_writes += _patch_written_paths(text)
         if verb in _INTERPRETERS and any(flag in _INLINE_CODE_FLAGS for flag in io.flags):
             code_reads, code_writes = _inline_code_io(operands[0] if operands else "")
             command_reads += code_reads
@@ -2220,6 +2317,11 @@ def _manifest_operands(command: Sequence[str]) -> list[str]:
     return [*io.operands, *io.inputs]
 
 
+def _is_editor_view(fn_base: str, args: Mapping[str, Any]) -> bool:
+    """A text editor tool call running its ``view`` command (a read)."""
+    return fn_base in _STR_REPLACE_EDITORS and str(args.get("command") or "").casefold() == "view"
+
+
 def _member_manifest_match(path: str, members: Sequence[str]) -> str | None:
     normalized = _normalize_path(path).casefold()
     for member in members:
@@ -2245,14 +2347,14 @@ class _ManifestReads:
     joiners: tuple[str, ...] = ()
 
 
-def _manifest_reads(fn: str, fn_base: str, args: Mapping[str, Any], members: Sequence[str]) -> _ManifestReads:
+def _manifest_reads(fn_base: str, args: Mapping[str, Any], members: Sequence[str], *, is_mcp: bool) -> _ManifestReads:
     """The declared members whose ``SKILL.md`` this call reads, in order (every one in a chained shell command)."""
     if not members:
         return _ManifestReads()
-    is_mcp = fn[:5].casefold() == "mcp__"
-    reads_file = fn_base in _READ_TOOLS or (is_mcp and bool(_READ_VERB_RE.search(fn_base)))
-    if fn_base in {"str_replace_editor", "str_replace_based_edit_tool"}:
-        reads_file = str(args.get("command") or "").casefold() == "view"
+    if fn_base in _STR_REPLACE_EDITORS:
+        reads_file = _is_editor_view(fn_base, args)
+    else:
+        reads_file = fn_base in _READ_TOOLS or (is_mcp and bool(_READ_VERB_RE.search(fn_base)))
     found: list[_ManifestRead] = []
     joiners: list[str] = []
     if reads_file:
@@ -2402,19 +2504,37 @@ def _persistable_name(name: str, members: Sequence[str]) -> bool:
     return any(member.casefold() == folded for member in members)
 
 
+def _mcp_ident(fn: str, mcp_names: _McpNames, *, agent: str) -> _Ident | None:
+    """The MCP identity of a call named ``fn``, labeled ``mcp__<server>__<tool>`` (see :meth:`_McpNames.identity`)."""
+    identity = mcp_names.identity(fn, agent=agent)
+    if identity is None:
+        return None
+    server, tool = identity
+    canonical = f"mcp__{server}__{tool}" if tool else f"mcp__{server}"
+    return _Ident(
+        label=canonical,
+        kind=COMPONENT_MCP,
+        name=server,
+        fn=fn,
+        server=server,
+        tool=tool,
+        tool_label=canonical,
+    )
+
+
 def _identities(
     fn: str,
+    fn_base: str,
+    mcp: _Ident | None,
     args: Mapping[str, Any],
     declared: Mapping[str, Sequence[str]],
     *,
-    agent: str = "",
     subagent_aliases: Mapping[str, str] | None = None,
     wrapper_skills: Sequence[str] = (),
     manifest: Sequence[tuple[_ManifestRead, bool]] | None = None,
 ) -> list[_Ident]:
     """The identities of one call. ``manifest`` is the call's resolved ``SKILL.md`` reads, if known."""
     low = fn.casefold()
-    fn_base = _base_tool_name(fn)
     idents: list[_Ident] = []
     named = {"declared": declared, "wrapper_skills": wrapper_skills}
     if low in _SKILL_TOOLS:
@@ -2432,27 +2552,14 @@ def _identities(
         name = (subagent_aliases or {}).get(name.casefold(), name)
         idents.append(_component_ident(COMPONENT_SUBAGENT, name, fn, fn, persist=_persistable_name(name, ()), **named))
     elif low in _COMMAND_TOOLS:
-        command = _first_string(args, ("command", "name"))
-        name = command.split()[0].lstrip("/") if command.split() else ""
+        words = _first_string(args, ("command", "name")).split()
+        name = words[0].lstrip("/") if words else ""
         idents.append(_component_ident(COMPONENT_COMMAND, name, fn, fn, persist=_persistable_name(name, ()), **named))
-    mcp = _mcp_identity(fn, declared.get(COMPONENT_MCP) or (), agent=agent)
     if mcp is not None:
-        server, tool = mcp
-        canonical = f"mcp__{server}__{tool}" if tool else f"mcp__{server}"
-        idents.append(
-            _Ident(
-                label=canonical,
-                kind=COMPONENT_MCP,
-                name=server,
-                fn=fn,
-                server=server,
-                tool=tool,
-                tool_label=canonical,
-            )
-        )
+        idents.append(mcp)
     if not any(ident.kind in {COMPONENT_SKILL, COMPONENT_COMMAND} for ident in idents):
         if manifest is None:
-            reads = _manifest_reads(fn, fn_base, args, declared.get(COMPONENT_SKILL) or ())
+            reads = _manifest_reads(fn_base, args, declared.get(COMPONENT_SKILL) or (), is_mcp=mcp is not None)
             manifest = [(read, False) for read in reads.reads]
         # One identity per member, in first-read order; it failed only when every read of it failed.
         members: dict[str, bool] = {}
@@ -2471,7 +2578,7 @@ def _identities(
                     **named,
                 )
             )
-    if not any(ident.kind == COMPONENT_MCP for ident in idents):
+    if mcp is None:
         # The tool itself is a plain identity too, so ``Bash`` or ``Read`` refs see a call that also
         # loaded a skill, without that skill answering to the tool's name.
         aliases = _TOOL_ALIASES.get(fn_base, ())
@@ -2485,18 +2592,92 @@ def _trajectory_agent(trajectory: Mapping[str, Any]) -> str:
     return name.strip()[:_MAX_LABEL_CHARS] if isinstance(name, str) else ""
 
 
-def _is_content_read(fn: str, idents: Sequence[_Ident]) -> bool:
-    """A skill load or a plain file read: its result is file or skill text, not a status message."""
-    if any(ident.kind == COMPONENT_MCP for ident in idents):
-        return False
-    if fn.casefold() in _SKILL_TOOLS or any(ident.kind == COMPONENT_SKILL for ident in idents):
-        return True
-    return _base_tool_name(fn) in _READ_TOOLS
+def _step_tool_calls(step: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(step, Mapping) or not isinstance(step.get("tool_calls"), list):
+        return []
+    return [item for item in step["tool_calls"] if isinstance(item, Mapping)]
+
+
+def _expanded_tool_calls(raw: Mapping[str, Any], outer_id: str, mcp_call_servers: Mapping[str, str]) -> list[Any]:
+    """One raw tool call as normalized calls: a Codex ``exec`` wrapper becomes the calls it made."""
+    name = _tool_name(raw)
+    server = mcp_call_servers.get(outer_id) if outer_id else None
+    if server and name and not name.casefold().startswith(_MCP_PREFIX):
+        # The harness log names the server this bare MCP tool name came from (Codex).
+        name = f"mcp__{server}__{name}"[:_MAX_LABEL_CHARS]
+    prepared = {**raw, "function_name": name, "arguments": _arguments(raw)}
+    try:
+        return normalize_tool_call(prepared)
+    except (TypeError, ValueError, RecursionError):
+        return [prepared]
+
+
+def _claimable_results(
+    tool_call: Mapping[str, Any], results: Sequence[_Result], outer_id: str, *, call_count: int
+) -> list[_Result]:
+    """The step results this call may claim: an unwrapped inner call only when the normalizer proved it owns them."""
+    status = tool_call.get("_atif_observation_status")
+    if status is None or status == MAPPED_OUTER_EXEC_OBSERVATION:
+        return _results_for_call(results, outer_id, call_count=call_count)
+    return []
+
+
+def _identify_call(
+    tool_call: Mapping[str, Any],
+    correlated: Sequence[_Result],
+    declared: Mapping[str, Sequence[str]],
+    mcp_names: _McpNames,
+    *,
+    seq: int,
+    step_index: int,
+    agent: str,
+    step_cwd: str | None,
+    root_cwd: str | None,
+    subagent_aliases: Mapping[str, str] | None,
+    wrapper_skills: Sequence[str],
+) -> _Call:
+    """A normalized tool call with its identities and outcome (its subagent fields are filled in later)."""
+    fn = str(tool_call.get("function_name") or "")[:_MAX_LABEL_CHARS]
+    args = tool_call.get("arguments")
+    args = args if isinstance(args, dict) else {}
+    mcp = _mcp_ident(fn, mcp_names, agent=agent)
+    fn_base = _base_tool_name(mcp.tool if mcp is not None and mcp.tool else fn)
+    manifest = _manifest_reads(fn_base, args, declared.get(COMPONENT_SKILL) or (), is_mcp=mcp is not None)
+    named = {"subagent_aliases": subagent_aliases, "wrapper_skills": wrapper_skills}
+    unresolved = [(read, False) for read in manifest.reads]
+    call = _Call(
+        seq=seq,
+        step_index=step_index,
+        fn=fn,
+        fn_base=fn_base,
+        args=args,
+        idents=_identities(fn, fn_base, mcp, args, declared, manifest=unresolved, **named),
+        mcp=mcp,
+        cwd=_call_cwd(args, step_cwd, root_cwd),
+    )
+    call.observation, call.succeeded = _outcome(correlated, shell=call.is_shell, content_read=call.is_content_read)
+    if call.is_shell and manifest.reads:
+        # Each SKILL.md read of a shell list has its own outcome: its own error line, or a
+        # failed ``&&`` part before it (then it never ran).
+        resolved = _resolve_manifest_reads(manifest, call.observation)
+        if resolved != unresolved:
+            call.idents = _identities(fn, fn_base, mcp, args, declared, manifest=resolved, **named)
+    call.missing_tool = _says_missing_tool(call.observation, call.succeeded)
+    call.opener = _window_opener(call, declared)
+    if call.is_shell:
+        call.side_idents = _side_channel_idents(fn_base, args, declared)
+        if _writes_a_file(call):
+            call.idents = [
+                replace(ident, aliases=(*ident.aliases, *_SHELL_WRITE_ALIASES)) if ident.kind is None else ident
+                for ident in call.idents
+            ]
+    return call
 
 
 def _extract_calls(
     trajectory: Mapping[str, Any],
     declared: Mapping[str, Sequence[str]],
+    mcp_names: _McpNames,
     mcp_call_servers: Mapping[str, str] | None = None,
     subagent_aliases: Mapping[str, str] | None = None,
     wrapper_skills: Sequence[str] = (),
@@ -2506,6 +2687,7 @@ def _extract_calls(
         return None
     agent = _trajectory_agent(trajectory)
     root_cwd = _trajectory_cwd(trajectory)
+    named = {"subagent_aliases": subagent_aliases, "wrapper_skills": wrapper_skills}
     calls: list[_Call] = []
     # The parent's latest subagent call: a sidechain run that follows it is that subagent's work,
     # unless the parent's call result names the subagent's ``agentId`` (see ``_spawned_agent_id``).
@@ -2531,74 +2713,33 @@ def _extract_calls(
             spawner = spawn_by_agent.get(str(agent_id)[:_MAX_LABEL_CHARS]) if known else None
             spawned_by.setdefault(chain, list(last_spawn if spawner is None else spawner))
         previous_sidechain = sidechain
-        raw_calls = step.get("tool_calls")
-        if not isinstance(raw_calls, list) or not raw_calls:
+        raw_calls = _step_tool_calls(step)
+        if not raw_calls:
             continue
-        raw_calls = [item for item in raw_calls if isinstance(item, Mapping)]
         results = _observations(step)
         step_cwd = extra.get("cwd") if isinstance(extra, Mapping) and isinstance(extra.get("cwd"), str) else None
         for raw in raw_calls:
             outer_id = str(raw.get("tool_call_id") or raw.get("id") or "")
-            name = _tool_name(raw)
-            server = (mcp_call_servers or {}).get(outer_id) if outer_id else None
-            if server and name and name[:5].casefold() != "mcp__":
-                # The harness log names the server this bare MCP tool name came from (Codex).
-                name = f"mcp__{server}__{name}"[:_MAX_LABEL_CHARS]
-            prepared = {**raw, "function_name": name, "arguments": _arguments(raw)}
-            try:
-                normalized = normalize_tool_call(prepared)
-            except (TypeError, ValueError, RecursionError):
-                normalized = [prepared]
-            for tool_call in normalized:
+            for tool_call in _expanded_tool_calls(raw, outer_id, mcp_call_servers or {}):
                 if len(calls) >= _MAX_CALLS:
                     return calls
-                status = tool_call.get("_atif_observation_status")
-                if status is None or status == MAPPED_OUTER_EXEC_OBSERVATION:
-                    correlated = _results_for_call(results, outer_id, call_count=len(raw_calls))
-                else:
-                    correlated = []
-                fn = str(tool_call.get("function_name") or "")[:_MAX_LABEL_CHARS]
-                args = tool_call.get("arguments")
-                args = args if isinstance(args, dict) else {}
-                fn_base = _base_tool_name(fn)
-                manifest = _manifest_reads(fn, fn_base, args, declared.get(COMPONENT_SKILL) or ())
-                options = {"agent": agent, "subagent_aliases": subagent_aliases, "wrapper_skills": wrapper_skills}
-                unresolved = [(read, False) for read in manifest.reads]
-                idents = _identities(fn, args, declared, manifest=unresolved, **options)
-                shell = fn_base in _SHELL_TOOLS and not any(ident.kind == COMPONENT_MCP for ident in idents)
-                observation, succeeded = _outcome(correlated, shell=shell, content_read=_is_content_read(fn, idents))
-                if shell and manifest.reads:
-                    # Each SKILL.md read of a shell list has its own outcome: its own error line, or a
-                    # failed ``&&`` part before it (then it never ran).
-                    resolved = _resolve_manifest_reads(manifest, observation)
-                    if resolved != unresolved:
-                        idents = _identities(fn, args, declared, manifest=resolved, **options)
-                call = _Call(
+                call = _identify_call(
+                    tool_call,
+                    _claimable_results(tool_call, results, outer_id, call_count=len(raw_calls)),
+                    declared,
+                    mcp_names,
                     seq=len(calls),
                     step_index=step_index,
-                    fn=fn,
-                    args=args,
-                    observation=observation,
-                    succeeded=succeeded,
-                    idents=idents,
-                    missing_tool=_says_missing_tool(observation, succeeded),
-                    sidechain=sidechain,
-                    chain=chain,
-                    spawner=list(spawned_by.get(chain, [])) if sidechain else [],
-                    cwd=_call_cwd(args, step_cwd, root_cwd),
+                    agent=agent,
+                    step_cwd=step_cwd,
+                    root_cwd=root_cwd,
+                    **named,
                 )
-                call.opener = _window_opener(call, declared)
-                if shell:
-                    call.side_idents = _side_channel_idents(fn_base, args, declared)
-                    if _writes_a_file(call):
-                        call.idents = [
-                            replace(ident, aliases=(*ident.aliases, *_SHELL_WRITE_ALIASES))
-                            if ident.kind is None
-                            else ident
-                            for ident in call.idents
-                        ]
-                if not sidechain and any(ident.kind == COMPONENT_SUBAGENT for ident in idents):
-                    last_spawn = [ident for ident in idents if ident.kind == COMPONENT_SUBAGENT]
+                call.sidechain = sidechain
+                call.chain = chain
+                call.spawner = list(spawned_by.get(chain, [])) if sidechain else []
+                if not sidechain and any(ident.kind == COMPONENT_SUBAGENT for ident in call.idents):
+                    last_spawn = [ident for ident in call.idents if ident.kind == COMPONENT_SUBAGENT]
                     spawned_id = _spawned_agent_id(step, outer_id)
                     if spawned_id:
                         spawn_by_agent[spawned_id] = last_spawn
@@ -2611,7 +2752,7 @@ def _writes_a_file(call: _Call) -> bool:
 
     Writes to devices such as ``/dev/null`` do not count.
     """
-    return any(path and not path.startswith("/dev/") for path in call.shell_paths[1])
+    return any(path and not path.startswith("/dev/") for path in call.shell_paths.writes)
 
 
 _AGENT_ID_RE = re.compile(r'"agentId"\s*:\s*"([A-Za-z0-9_.:-]{1,128})"')
@@ -2631,7 +2772,7 @@ def _spawned_agent_id(step: Mapping[str, Any], call_id: str) -> str | None:
     results = observation.get("results") if isinstance(observation, Mapping) else None
     if not call_id or not isinstance(results, list):
         return None
-    for result in results[:256]:
+    for result in results[:_MAX_STEP_RESULTS]:
         if not isinstance(result, Mapping) or str(result.get("source_call_id") or "") != call_id:
             continue
         extra = result.get("extra")
@@ -2816,7 +2957,12 @@ def _prompt_texts(trajectory: Mapping[str, Any]) -> list[str]:
 class _Ref:
     raw: str
     kind: str | None
-    pattern: str
+    pattern: str  # a casefolded ``fnmatch`` glob
+
+    @cached_property
+    def glob(self) -> re.Pattern[str]:
+        """The compiled glob, as :func:`fnmatch.fnmatchcase` compiles it."""
+        return re.compile(fnmatch.translate(self.pattern))
 
 
 def _parse_ref(raw: str) -> _Ref:
@@ -2829,8 +2975,9 @@ def _parse_ref(raw: str) -> _Ref:
     return _Ref(raw=text, kind=None, pattern=text.casefold())
 
 
-def _glob(value: str, pattern: str) -> bool:
-    return bool(value) and fnmatch.fnmatchcase(value.casefold(), pattern)
+def _match_names(values: Iterable[str]) -> tuple[str, ...]:
+    """The non-empty ``values``, casefolded: refs match case-insensitively."""
+    return tuple(value.casefold() for value in values if value)
 
 
 def _name_candidates(name: str) -> list[str]:
@@ -2849,22 +2996,13 @@ def _ref_matches(ref: _Ref, ident: _Ident) -> bool:
     """
     if ident.wrapper:
         return False
-    if ref.kind is not None:
-        if ident.kind != ref.kind:
-            return False
-        if ident.kind == COMPONENT_MCP:
-            return any(_glob(candidate, ref.pattern) for candidate in _mcp_ref_candidates(ident))
-        return any(_glob(candidate, ref.pattern) for candidate in ident.name_candidates)
-    if ident.kind is None:
-        candidates = [ident.label, ident.fn, *ident.aliases]
-    elif ident.kind == COMPONENT_MCP:
-        # The bare tool name is what Codex and the MCP server call the tool (``list_changes``).
-        candidates = [ident.label, ident.fn, *_mcp_ref_candidates(ident), ident.tool or ""]
+    if ref.kind is None:
+        names = ident.untyped_names
+    elif ref.kind == ident.kind:
+        names = ident.typed_names
     else:
-        candidates = [ident.label, *ident.name_candidates]
-        if ident.kind == COMPONENT_COMMAND and ident.name:
-            candidates.append(f"/{ident.name}")
-    return any(_glob(candidate, ref.pattern) for candidate in candidates)
+        return False
+    return any(ref.glob.match(name) for name in names)
 
 
 def _mcp_ref_candidates(ident: _Ident) -> list[str]:
@@ -2994,12 +3132,12 @@ def _routing_ref(ref: _Ref, component_names: Sequence[str]) -> bool:
     """
     if ref.kind is not None:
         return ref.kind in _ROUTING_KINDS
-    return any(_glob(name, ref.pattern) for name in component_names)
+    return any(ref.glob.match(name) for name in component_names)
 
 
 def _grade_selection(
     calls: Sequence[_Call],
-    spec: Mapping[str, Any] | None,
+    spec: Mapping[str, Any],
     *,
     routing: bool,
     component_names: Sequence[str],
@@ -3008,9 +3146,9 @@ def _grade_selection(
     def _family(values: Sequence[str]) -> list[str]:
         return [value for value in values if _routing_ref(_parse_ref(value), component_names) == routing]
 
-    expected = _family(_spec_field(spec, "expected_tools"))
-    acceptable = _family(_spec_field(spec, "acceptable_tools"))
-    decoys = _family(_spec_field(spec, "decoy_tools"))
+    expected = _family(spec.get("expected_tools", []))
+    acceptable = _family(spec.get("acceptable_tools", []))
+    decoys = _family(spec.get("decoy_tools", []))
     expected_refs, acceptable_refs, decoy_refs = _refs(expected), _refs(acceptable), _refs(decoys)
     # Expected refs to a component type this arm cannot carry are reported, not counted against recall.
     applicable = [ref for ref in expected_refs if ref.kind not in unavailable]
@@ -3072,9 +3210,9 @@ def _grade_selection(
     }
 
 
-def grade_routing(
+def _grade_routing(
     calls: Sequence[_Call],
-    spec: Mapping[str, Any] | None,
+    spec: Mapping[str, Any],
     *,
     declared: Mapping[str, Sequence[str]] | None = None,
     agent: str = "",
@@ -3098,11 +3236,10 @@ def grade_routing(
     )
 
 
-def grade_tool_selection(
+def _grade_tool_selection(
     calls: Sequence[_Call],
-    spec: Mapping[str, Any] | None,
+    spec: Mapping[str, Any],
     *,
-    wrapper_skills: Sequence[str] = (),
     declared: Mapping[str, Sequence[str]] | None = None,
     agent: str = "",
 ) -> dict[str, Any]:
@@ -3114,10 +3251,8 @@ def grade_tool_selection(
     do not dilute precision, and skills never do. A call to a tool that does
     not exist is a wrong choice. ``precision`` is ``None`` when nothing in
     scope was called; ``recall``/``f1`` are ``None`` when nothing applicable is
-    expected. ``wrapper_skills`` is accepted for compatibility (the wrapper is
-    marked when calls are extracted).
+    expected. The wrapper skill is marked when calls are extracted.
     """
-    del wrapper_skills
     declared_map = declared or {}
     return _grade_selection(
         calls,
@@ -3229,7 +3364,9 @@ def _regex_search(pattern: str, value: Any, budget: list[float]) -> bool | str:
         return regex.search(pattern, text, timeout=timeout) is not None
     except TimeoutError:
         return "pattern check timed out"
-    except (regex.error, RecursionError, OverflowError, ValueError):
+    except Exception:
+        # A pattern the engine cannot run fails the check: besides regex.error and
+        # ValueError it can raise KeyError, RuntimeError..., and grading never raises.
         return False
     finally:
         budget[0] -= time.monotonic() - started
@@ -3272,7 +3409,7 @@ def _schema_errors(
                     _schema_errors(value[name], sub, f"{path}.{name}", errors, depth + 1, budget)
 
 
-def _string_values(value: Any, *, limit: int = 1024) -> list[str]:
+def _string_values(value: Any, *, limit: int = _MAX_STRING_LEAVES) -> list[str]:
     """String values inside a JSON object or list (bounded, depth first), never key names."""
     found: list[str] = []
     stack = [value]
@@ -3314,7 +3451,9 @@ def _argument_failures(
         if isinstance(actual, str):
             found = needle in actual
         elif isinstance(actual, list):
-            found = any(item == needle or (isinstance(item, str) and needle in item) for item in actual[:1024])
+            found = any(
+                item == needle or (isinstance(item, str) and needle in item) for item in actual[:_MAX_CONTAINS_ITEMS]
+            )
         elif isinstance(actual, Mapping):
             # The object's string values, never its key names.
             found = any(needle in text for text in _string_values(actual))
@@ -3358,19 +3497,15 @@ def _call_input_schema(
     call: _Call, schemas: Mapping[str, Mapping[str, Mapping[str, Any]]]
 ) -> tuple[str, Mapping[str, Any]] | None:
     """``(label, schema)`` when the server this MCP call went to published an input schema for its tool."""
-    for ident in call.idents:
-        if ident.kind != COMPONENT_MCP or not ident.server:
-            continue
-        tools = schemas.get(ident.server)
-        if tools is None:
-            continue
-        schema = tools.get(ident.tool or "")
-        if schema is not None:
-            return ident.persisted_label, schema
-    return None
+    if call.mcp is None or not call.mcp.server:
+        return None
+    schema = schemas.get(call.mcp.server, {}).get(call.mcp.tool or "")
+    return (call.mcp.persisted_label, schema) if schema is not None else None
 
 
-def grade_arguments(calls: Sequence[_Call], spec: Mapping[str, Any] | None) -> dict[str, Any]:
+def _grade_arguments(
+    calls: Sequence[_Call], spec: Mapping[str, Any], schemas: Mapping[str, Mapping[str, Mapping[str, Any]]]
+) -> dict[str, Any]:
     """Check ``tool_arguments`` rules, and the servers' own input schemas, against every matching call.
 
     ``checked``/``passed`` count (call, rule) pairs. A rule that matched no
@@ -3378,13 +3513,12 @@ def grade_arguments(calls: Sequence[_Call], spec: Mapping[str, Any] | None) -> d
     failure, so a rate can never be 100% while a rule's tool was never called.
     A call that failed (the harness refused it, or the server rejected it)
     never passes, with a ``call_failed`` failure. When the probe recorded a
-    server's ``inputSchema`` for a tool (``MCP_INPUT_SCHEMAS_KEY``), every call
-    to that tool is also checked against it, as an ``input_schema`` pair.
-    Pattern checks share one time budget; a check that runs out of time is a
-    failure, never a pass.
+    server's ``inputSchema`` for a tool (``schemas``, from ``MCP_INPUT_SCHEMAS_KEY``),
+    every call to that tool is also checked against it, as an ``input_schema``
+    pair. Pattern checks share one time budget; a check that runs out of time is
+    a failure, never a pass.
     """
-    rules = _spec_field(spec, "tool_arguments")
-    schemas = _server_input_schemas(spec)
+    rules = spec.get("tool_arguments", [])
     failures: list[dict[str, str]] = []
     checked = 0
     passed = 0
@@ -3471,8 +3605,11 @@ def top_argument_failures(signals: Iterable[Any], limit: int = 5) -> list[dict[s
     return sorted(counts.values(), key=lambda row: (-row["count"], row["tool"], row["arg"]))[:limit]
 
 
+_OUTCOME_KEYS = ("total", "succeeded", "failed", "unknown")
+
+
 def _outcome_counts() -> dict[str, Any]:
-    return {"total": 0, "succeeded": 0, "failed": 0, "unknown": 0}
+    return dict.fromkeys(_OUTCOME_KEYS, 0)
 
 
 def _count_outcome(bucket: dict[str, Any], succeeded: bool | None) -> None:
@@ -3486,11 +3623,22 @@ def _count_outcome(bucket: dict[str, Any], succeeded: bool | None) -> None:
 
 
 def _with_success_rate(bucket: dict[str, Any]) -> dict[str, Any]:
+    """``bucket`` with ``success_rate``, ``succeeded / (succeeded + failed)``: an unknown outcome counts as neither."""
     bucket["success_rate"] = _ratio(bucket["succeeded"], bucket["succeeded"] + bucket["failed"])
     return bucket
 
 
-def grade_mcp_calls(calls: Sequence[_Call]) -> dict[str, Any]:
+def _server_bucket(by_server: dict[str, dict[str, Any]], server: str) -> dict[str, Any]:
+    """The outcome counts, tool labels and per-tool counts of ``server``, added empty the first time."""
+    return by_server.setdefault(server, {**_outcome_counts(), "tools": [], "by_tool": {}})
+
+
+def _add_server_tool(bucket: dict[str, Any], label: str) -> None:
+    if label not in bucket["tools"] and len(bucket["tools"]) < _MAX_SERVER_TOOLS:
+        bucket["tools"].append(label)
+
+
+def _grade_mcp_calls(calls: Sequence[_Call]) -> dict[str, Any]:
     """Outcome counts across every MCP call (any server), with per-server and per-tool breakdowns.
 
     ``success_rate`` is ``succeeded / (succeeded + failed)``: calls whose outcome
@@ -3501,16 +3649,13 @@ def grade_mcp_calls(calls: Sequence[_Call]) -> dict[str, Any]:
     totals = _outcome_counts()
     by_server: dict[str, dict[str, Any]] = {}
     for call in calls:
-        ident = next((item for item in call.idents if item.kind == COMPONENT_MCP), None)
-        if ident is None:
+        if call.mcp is None:
             continue
         _count_outcome(totals, call.succeeded)
-        server = _safe_text(ident.server or "")
-        bucket = by_server.setdefault(server, {**_outcome_counts(), "tools": [], "by_tool": {}})
+        bucket = _server_bucket(by_server, _safe_text(call.mcp.server or ""))
         _count_outcome(bucket, call.succeeded)
-        label = _safe_text(ident.label)
-        if label not in bucket["tools"] and len(bucket["tools"]) < _MAX_SERVER_TOOLS:
-            bucket["tools"].append(label)
+        label = _safe_text(call.mcp.label)
+        _add_server_tool(bucket, label)
         if label in bucket["tools"]:
             _count_outcome(bucket["by_tool"].setdefault(label, _outcome_counts()), call.succeeded)
     for bucket in by_server.values():
@@ -3593,9 +3738,9 @@ def _edge_reason(before: Sequence[_Ref], after: Sequence[_Ref], calls: Sequence[
     return ORDER_REVERSED
 
 
-def grade_order(
+def _grade_order(
     calls: Sequence[_Call],
-    spec: Mapping[str, Any] | None,
+    spec: Mapping[str, Any],
     *,
     declared: Mapping[str, Sequence[str]] | None = None,
     agent: str = "",
@@ -3616,7 +3761,7 @@ def grade_order(
     counted = 0
     violated: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []
-    for before, after in _spec_field(spec, "expected_order"):
+    for before, after in spec.get("expected_order", []):
         before_refs, after_refs = _refs(before), _refs(after)
         labels = {"before": _ref_label(before), "after": _ref_label(after)}
         if _side_unavailable(before_refs, unavailable) or _side_unavailable(after_refs, unavailable):
@@ -3676,34 +3821,61 @@ def _path_matches(observed: str, artifact: str, cwd: str | None = None) -> bool:
     return _observed_path_matches(_resolve_path(observed, cwd), artifact)
 
 
-def _is_mcp_call(call: _Call) -> bool:
-    return any(ident.kind == COMPONENT_MCP for ident in call.idents)
+def _patch_written_paths(text: str) -> list[str]:
+    """Files an apply_patch body writes: the ``Add File``, ``Update File`` and ``Move to`` headers.
+
+    A file the patch only deletes is not written, and neither is a file it
+    moves away: ``*** Update File: a`` followed by ``*** Move to: b`` writes
+    only ``b``. A file the patch deletes and adds again is still written.
+    """
+    written: dict[str, None] = {}
+    pending_update = ""  # an ``Update File`` path, written unless the next header moves it away
+    for match in _APPLY_PATCH_HEADER_RE.finditer(text):
+        operation = text[match.start() : match.start(1)]
+        path = match.group(1).strip()
+        if pending_update and "Move to" not in operation:
+            written[pending_update] = None
+        pending_update = ""
+        if "Update File" in operation:
+            pending_update = path
+        elif "Delete File" not in operation and path:
+            written[path] = None
+    if pending_update:
+        written[pending_update] = None
+    return list(written)
+
+
+def _patch_targets(args: Mapping[str, Any]) -> list[str]:
+    """Paths an apply_patch tool call writes (see :func:`_patch_written_paths`)."""
+    paths: list[str] = []
+    for key in _PATCH_BODY_KEYS:
+        body = args.get(key)
+        if isinstance(body, str):
+            paths.extend(_patch_written_paths(body[:_MAX_ARGS_TEXT_CHARS]))
+    return paths
 
 
 def _call_writes(call: _Call, artifact: str) -> bool:
     """Whether a call that did not fail wrote ``artifact`` (resolved)."""
     if call.succeeded is False:
         return False
-    fn_base = _base_tool_name(call.fn)
+    fn_base = call.fn_base
     if fn_base in _WRITE_TOOLS:
-        if fn_base in {"str_replace_editor", "str_replace_based_edit_tool"} and (
-            str(call.args.get("command") or "").casefold() == "view"
-        ):
+        if _is_editor_view(fn_base, call.args):
             return False
         if any(_path_matches(path, artifact, call.cwd) for path in _path_args(call.args)):
             return True
-        if fn_base == "apply_patch":
-            patch = _first_string(call.args, ("input", "patch", "content"))
-            for match in re.finditer(r"^\*\*\* (?:Add|Update) File: (.+)$", patch[:_MAX_ARGS_TEXT_CHARS], re.MULTILINE):
-                if _path_matches(match.group(1), artifact, call.cwd):
-                    return True
+        if fn_base in _PATCH_TOOLS and any(
+            _path_matches(path, artifact, call.cwd) for path in _patch_targets(call.args)
+        ):
+            return True
+        # An MCP write tool (``write_file``...) may name its file under another key, such as
+        # ``destination``: the MCP rules below still apply to it.
+    elif call.is_shell:
+        return any(_observed_path_matches(path, artifact) for path in call.shell_paths.writes)
+    if call.mcp is None:
         return False
-    if fn_base in _SHELL_TOOLS and not _is_mcp_call(call):
-        return any(_observed_path_matches(path, artifact) for path in call.shell_paths[1])
-    ident = next((item for item in call.idents if item.kind == COMPONENT_MCP), None)
-    if ident is None:
-        return False
-    tool = (ident.tool or "").casefold()
+    tool = (call.mcp.tool or "").casefold()
     for key, value in call.args.items():
         if not isinstance(value, str) or not _path_matches(value, artifact, call.cwd):
             continue
@@ -3722,25 +3894,20 @@ def _call_reads(call: _Call, artifact: str) -> bool:
     """
     if call.succeeded is False:
         return False
-    fn_base = _base_tool_name(call.fn)
-    if (
-        fn_base in _READ_TOOLS
-        or (
-            fn_base in {"str_replace_editor", "str_replace_based_edit_tool"}
-            and str(call.args.get("command") or "").casefold() == "view"
-        )
-    ) and any(_path_matches(path, artifact, call.cwd) for path in _path_args(call.args)):
+    fn_base = call.fn_base
+    if (fn_base in _READ_TOOLS or _is_editor_view(fn_base, call.args)) and any(
+        _path_matches(path, artifact, call.cwd) for path in _path_args(call.args)
+    ):
         return True
-    if fn_base in _SHELL_TOOLS and not _is_mcp_call(call):
+    if call.is_shell:
         # A shell read whose own error line names the file did not read it (``cat: x: No such file``).
         name = artifact.rsplit("/", 1)[-1]
-        return any(_observed_path_matches(path, artifact) for path in call.shell_paths[0]) and not _failed_operands(
+        return any(_observed_path_matches(path, artifact) for path in call.shell_paths.reads) and not _failed_operands(
             call.observation or "", {name}
         )
-    ident = next((item for item in call.idents if item.kind == COMPONENT_MCP), None)
-    if ident is None:
+    if call.mcp is None:
         return False
-    tool = (ident.tool or "").casefold()
+    tool = (call.mcp.tool or "").casefold()
     if _LOCAL_WRITE_VERB_RE.search(tool):
         return False
     reads_by_name = bool(_READ_VERB_RE.search(tool))
@@ -3815,10 +3982,8 @@ def _handoff_value_failure(
     produced = next((call for call in producer_calls if _value_produced(value, call)), None)
     if produced is None:
         return "value was not observed in producer output"
-    received = any(
-        call.seq != produced.seq and call.step_index > produced.step_index and _value_received(value, call)
-        for call in consumer_calls
-    )
+    # A call in a later step is never the producing call itself.
+    received = any(call.step_index > produced.step_index and _value_received(value, call) for call in consumer_calls)
     if not received:
         return "value did not reach consumer input after the producer produced it"
     return ""
@@ -3837,15 +4002,15 @@ def _handoff_artifact_failure(
     return ""
 
 
-def grade_handoff(
+def _grade_handoff(
     calls: Sequence[_Call],
-    spec: Mapping[str, Any] | None,
+    spec: Mapping[str, Any],
     *,
     prompts: Sequence[str] = (),
     root_cwd: str | None = None,
 ) -> dict[str, Any]:
     """Verify each ``handoffs[i]`` carried producer output into consumer input (see module docs)."""
-    handoffs = _spec_field(spec, "handoffs")
+    handoffs = spec.get("handoffs", [])
     failures: list[dict[str, str]] = []
     passed = 0
     for handoff in handoffs:
@@ -3888,9 +4053,9 @@ def grade_handoff(
     }
 
 
-def grade_conflict(
+def _grade_conflict(
     calls: Sequence[_Call],
-    spec: Mapping[str, Any] | None,
+    spec: Mapping[str, Any],
     *,
     declared: Mapping[str, Sequence[str]] | None = None,
     agent: str = "",
@@ -3909,7 +4074,7 @@ def grade_conflict(
     skipped: list[str] = []
     checked = 0
     passed = 0
-    for probe in _spec_field(spec, "conflict_probes"):
+    for probe in spec.get("conflict_probes", []):
         must_use, must_not_use = _refs(probe["must_use"]), _refs(probe["must_not_use"])
         if _side_unavailable(must_use, unavailable):
             skipped.append(_safe_text(probe["id"]))
@@ -3939,49 +4104,63 @@ def grade_conflict(
 
 
 def _declared_keys(declared: Mapping[str, Sequence[str]] | None) -> list[tuple[str, str]]:
-    keys: list[tuple[str, str]] = []
+    keys: dict[tuple[str, str], None] = {}
     for kind in (COMPONENT_SKILL, COMPONENT_MCP, COMPONENT_SUBAGENT, COMPONENT_COMMAND):
         for name in (declared or {}).get(kind) or ():
-            if isinstance(name, str) and name and (kind, name) not in keys:
-                keys.append((kind, name))
-    return keys
+            if isinstance(name, str) and name:
+                keys[kind, name] = None
+    return list(keys)
 
 
-def _ident_is_component(ident: _Ident, kind: str, name: str, declared_mcp: Sequence[str] = ()) -> bool:
-    if ident.kind != kind or ident.wrapper:
-        return False
-    if kind == COMPONENT_MCP:
-        # ``_mcp_identity`` already maps a recognizable server to its declared name.
-        return match_declared_mcp_server(ident.server or "", declared_mcp or (name,)) == name
+def _ident_components(
+    ident: _Ident, mcp_names: _McpNames, by_folded_name: Mapping[tuple[str, str], Sequence[str]]
+) -> set[tuple[str, str]]:
+    """The declared ``(type, name)`` components that ``ident`` activates (the wrapper skill activates none)."""
+    if ident.wrapper:
+        return set()
+    if ident.kind == COMPONENT_MCP:
+        # ``_McpNames.identity`` already maps a recognizable server to its declared name.
+        server = mcp_names.match(ident.server or "")
+        return {(COMPONENT_MCP, server)} if server is not None else set()
     # Another plugin's ``<plugin>:<name>`` only answers to its full name, never to this plugin's.
-    return name.casefold() in ident.name_candidates
+    kind = ident.kind or ""
+    return {(kind, name) for candidate in ident.name_candidates for name in by_folded_name.get((kind, candidate), ())}
 
 
-def grade_activation_coverage(calls: Sequence[_Call], declared: Mapping[str, Sequence[str]] | None) -> dict[str, Any]:
+def _grade_activation_coverage(
+    calls: Sequence[_Call], declared: Mapping[str, Sequence[str]], mcp_names: _McpNames
+) -> dict[str, Any]:
     """Declared components exercised, never activated, or whose every activation failed.
 
     Entries are ``"<type>:<name>"``. The three outcome lists do not overlap: a
     component whose every activation failed (a failed call, or a ``SKILL.md``
     read whose own error line says it failed) is ``unavailable``, not
-    ``exercised``.
+    ``exercised``. ``mcp_names`` indexes the declared MCP servers.
     """
+    keys = _declared_keys(declared)
+    # A skill, subagent or command activation names its component case-insensitively.
+    by_folded_name: dict[tuple[str, str], list[str]] = {}
+    for kind, name in keys:
+        if kind != COMPONENT_MCP:
+            by_folded_name.setdefault((kind, name.casefold()), []).append(name)
+    activated: set[tuple[str, str]] = set()
+    worked: set[tuple[str, str]] = set()  # activated by at least one identity that did not fail
+    for call in calls:
+        for ident in call.component_idents:
+            components = _ident_components(ident, mcp_names, by_folded_name)
+            activated |= components
+            if call.ident_ok(ident):
+                worked |= components
     declared_labels: list[str] = []
     exercised: list[str] = []
     unverified: list[str] = []
     unavailable: list[str] = []
-    declared_mcp = [name for kind, name in _declared_keys(declared) if kind == COMPONENT_MCP]
-    for kind, name in _declared_keys(declared):
+    for kind, name in keys:
         label = _safe_text(f"{kind}:{name}")
         declared_labels.append(label)
-        outcomes = [
-            call.ident_ok(ident)
-            for call in calls
-            for ident in call.idents
-            if _ident_is_component(ident, kind, name, declared_mcp)
-        ]
-        if not outcomes:
+        if (kind, name) not in activated:
             unverified.append(label)
-        elif any(outcomes):
+        elif (kind, name) in worked:
             exercised.append(label)
         else:
             unavailable.append(label)
@@ -4007,22 +4186,6 @@ def _activations(calls: Sequence[_Call]) -> list[dict[str, Any]]:
     return activations
 
 
-def detect_component_activations(
-    trajectory: Mapping[str, Any],
-    declared: Mapping[str, Sequence[str]] | None = None,
-    *,
-    mcp_call_servers: Mapping[str, str] | None = None,
-    subagent_aliases: Mapping[str, str] | None = None,
-) -> list[dict[str, Any]]:
-    """Ordered component activations (C3 ``activations``) in one ATIF trajectory."""
-    calls = (
-        _extract_calls(trajectory, _with_plugin_names(declared or {}, ()), mcp_call_servers, subagent_aliases)
-        if isinstance(trajectory, Mapping)
-        else None
-    )
-    return _activations(calls or [])
-
-
 def _with_plugin_names(
     declared: Mapping[str, Sequence[str]], wrapper_skills: Sequence[str]
 ) -> Mapping[str, Sequence[str]]:
@@ -4044,8 +4207,10 @@ def compute_plugin_signals(
 ) -> dict[str, Any] | None:
     """Per-trial C3 ``plugin_signals`` for one ATIF trajectory, or ``None`` if unreadable.
 
-    ``case`` is a :func:`plugin_case_spec` result (raw entries are normalized
-    defensively). ``declared`` maps ``skill``/``mcp`` (and, in the with-plugin
+    ``case`` is a dataset case entry or a :func:`plugin_case_spec` result; it is
+    normalized once here, and invalid fields are ignored. Its
+    ``MCP_INPUT_SCHEMAS_KEY`` holds the probed servers' tool input schemas.
+    ``declared`` maps ``skill``/``mcp`` (and, in the with-plugin
     arm, ``subagent``/``command``) to the declared component names in this arm.
     ``mcp_call_servers`` maps a tool call id to the MCP server the harness log
     says it went to, for harnesses whose trajectory keeps only the bare tool
@@ -4055,21 +4220,29 @@ def compute_plugin_signals(
     if not isinstance(trajectory, Mapping):
         return None
     declared_map = _with_plugin_names(declared or {}, wrapper_skills)
-    calls = _extract_calls(trajectory, declared_map, mcp_call_servers, subagent_aliases, wrapper_skills)
+    mcp_names = _McpNames(declared_map.get(COMPONENT_MCP) or ())
+    calls = _extract_calls(trajectory, declared_map, mcp_names, mcp_call_servers, subagent_aliases, wrapper_skills)
     if calls is None:
         return None
-    spec: Mapping[str, Any] = case if isinstance(case, Mapping) else {}
+    spec = plugin_case_spec(case)
+    # The prompts only matter to rule out a handoff value the consumer could have copied from them.
+    has_value = any(handoff.get("value") is not None for handoff in spec.get("handoffs", []))
     agent = _trajectory_agent(trajectory)
     return {
         "activations": _activations(calls),
-        "routing": grade_routing(calls, spec, declared=declared_map, agent=agent),
-        "tool_selection": grade_tool_selection(calls, spec, declared=declared_map, agent=agent),
-        "arguments": grade_arguments(calls, spec),
-        "mcp_calls": grade_mcp_calls(calls),
-        "order": grade_order(calls, spec, declared=declared_map, agent=agent),
-        "handoff": grade_handoff(calls, spec, prompts=_prompt_texts(trajectory), root_cwd=_trajectory_cwd(trajectory)),
-        "conflict": grade_conflict(calls, spec, declared=declared_map, agent=agent),
-        "activation_coverage": grade_activation_coverage(calls, declared_map),
+        "routing": _grade_routing(calls, spec, declared=declared_map, agent=agent),
+        "tool_selection": _grade_tool_selection(calls, spec, declared=declared_map, agent=agent),
+        "arguments": _grade_arguments(calls, spec, _server_input_schemas(case)),
+        "mcp_calls": _grade_mcp_calls(calls),
+        "order": _grade_order(calls, spec, declared=declared_map, agent=agent),
+        "handoff": _grade_handoff(
+            calls,
+            spec,
+            prompts=_prompt_texts(trajectory) if has_value else (),
+            root_cwd=_trajectory_cwd(trajectory),
+        ),
+        "conflict": _grade_conflict(calls, spec, declared=declared_map, agent=agent),
+        "activation_coverage": _grade_activation_coverage(calls, declared_map, mcp_names),
     }
 
 
@@ -4181,7 +4354,7 @@ def _summarize_mcp(signals: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         block = item.get("mcp_calls")
         if not isinstance(block, Mapping):
             continue
-        for key in ("total", "succeeded", "failed", "unknown"):
+        for key in _OUTCOME_KEYS:
             totals[key] += _int(block.get(key))
         servers = block.get("by_server")
         if not isinstance(servers, Mapping):
@@ -4189,18 +4362,18 @@ def _summarize_mcp(signals: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         for server, counts in servers.items():
             if not isinstance(counts, Mapping):
                 continue
-            bucket = by_server.setdefault(str(server), {**_outcome_counts(), "tools": [], "by_tool": {}})
-            for key in ("total", "succeeded", "failed", "unknown"):
+            bucket = _server_bucket(by_server, str(server))
+            for key in _OUTCOME_KEYS:
                 bucket[key] += _int(counts.get(key))
             for tool in counts.get("tools") or ():
-                if isinstance(tool, str) and tool not in bucket["tools"] and len(bucket["tools"]) < _MAX_SERVER_TOOLS:
-                    bucket["tools"].append(tool)
+                if isinstance(tool, str):
+                    _add_server_tool(bucket, tool)
             tools = counts.get("by_tool")
             for tool, tool_counts in tools.items() if isinstance(tools, Mapping) else ():
                 if not isinstance(tool_counts, Mapping) or tool not in bucket["tools"]:
                     continue
                 tool_bucket = bucket["by_tool"].setdefault(tool, _outcome_counts())
-                for key in ("total", "succeeded", "failed", "unknown"):
+                for key in _OUTCOME_KEYS:
                     tool_bucket[key] += _int(tool_counts.get(key))
     for bucket in by_server.values():
         _with_success_rate(bucket)
@@ -4299,7 +4472,7 @@ __all__ = [
     "PluginSignalsContext",
     "build_plugin_signals_context",
     "compute_plugin_signals",
-    "detect_component_activations",
+    "declared_mcp_server_matcher",
     "match_declared_mcp_server",
     "plugin_case_spec",
     "summarize_plugin_signals",

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 
 # Prefix-style key detectors match either (a) a prefix at a token boundary
@@ -39,10 +40,74 @@ LOG_JWT_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?=(?P<lead>(?:\b|[A-Za-z0-9_-]*?-)(?=eyJ)))(?P=lead)"
     r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"
 )
-# GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained (github_pat_) tokens.
-# Single bounded character classes keep both patterns linear.
-LOG_GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,255}\b")
-LOG_GITHUB_PAT_RE = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,255}\b")
+# Tokens whose prefix names their service: GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and
+# fine-grained (github_pat_) tokens, GitLab personal access tokens (glpat-), Slack tokens
+# (xoxa-/xoxb-/xoxp-/xoxr-/xoxs-, and xoxe- refresh tokens), Hugging Face tokens (hf_), and
+# npm tokens (npm_). Redaction keeps the ``prefix`` group. Each pattern is the prefix and one
+# character class of at most 255 characters, so a match attempt reads a bounded number of
+# characters and a scan stays linear in the text. AWS access key IDs (AKIA long-term, ASIA
+# temporary) are redacted whole. They are defined here, in a module that imports nothing from
+# the package, so that eval_core loads on its own; skillevaluator.utils.redaction redacts
+# artifacts with the same patterns, and the standalone Harbor verifier keeps a copy that a
+# drift test pins.
+LOG_GITHUB_TOKEN_RE = re.compile(r"\b(?P<prefix>gh[pousr]_)[A-Za-z0-9]{36,255}\b")
+LOG_GITHUB_PAT_RE = re.compile(r"\b(?P<prefix>github_pat_)[A-Za-z0-9_]{22,255}\b")
+LOG_GITLAB_PAT_RE = re.compile(r"\b(?P<prefix>glpat-)[A-Za-z0-9_-]{20,255}")
+LOG_SLACK_TOKEN_RE = re.compile(r"\b(?P<prefix>xox[abeprs]-)[A-Za-z0-9-]{10,255}")
+LOG_HUGGING_FACE_TOKEN_RE = re.compile(r"\b(?P<prefix>hf_)[A-Za-z0-9]{30,255}")
+LOG_NPM_TOKEN_RE = re.compile(r"\b(?P<prefix>npm_)[A-Za-z0-9]{36}\b")
+LOG_PREFIXED_TOKEN_PATTERNS = (
+    LOG_GITHUB_TOKEN_RE,
+    LOG_GITHUB_PAT_RE,
+    LOG_GITLAB_PAT_RE,
+    LOG_SLACK_TOKEN_RE,
+    LOG_HUGGING_FACE_TOKEN_RE,
+    LOG_NPM_TOKEN_RE,
+)
+LOG_AWS_ACCESS_KEY_RE = re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}")
+# All of the prefixed patterns in one pass over the text. Each pattern's ``prefix`` group is
+# renamed for its alternative, so the alternative that matched is the match's last group.
+LOG_PREFIXED_TOKEN_RE = re.compile(
+    "|".join(
+        pattern.pattern.replace("(?P<prefix>", f"(?P<prefix{index}>", 1)
+        for index, pattern in enumerate(LOG_PREFIXED_TOKEN_PATTERNS)
+    )
+)
+
+
+def keep_token_prefix(match: re.Match[str]) -> str:
+    """The replacement for a ``LOG_PREFIXED_TOKEN_RE`` match: its prefix, then ``<redacted>``."""
+    return f"{match.group(match.lastgroup)}<redacted>"
+
+
+# Match verifier log redaction; shorter placeholders can corrupt ordinary diagnostic text.
+_MIN_EXACT_SECRET_LENGTH = 8
+_CREDENTIAL_ENV_VARS = (
+    "OPENAI_API_KEY",
+    "NVIDIA_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "SKILL_EVAL_LLM_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SECURITY_TOKEN",
+    "AWS_SESSION_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+)
+
+
+def _configured_secret_values(extra_secret_values: tuple[str | None, ...] = ()) -> list[str]:
+    """The credential values this process holds, plus *extra_secret_values*, longest first."""
+    values = {
+        value
+        for name in _CREDENTIAL_ENV_VARS
+        if (value := os.environ.get(name, "")) and len(value) >= _MIN_EXACT_SECRET_LENGTH
+    }
+    for value in extra_secret_values:
+        text = str(value) if value else ""
+        if len(text) >= _MIN_EXACT_SECRET_LENGTH:
+            values.add(text)
+    return sorted(values, key=len, reverse=True)
 
 
 def redact_secrets_in_log_line(
@@ -52,13 +117,13 @@ def redact_secrets_in_log_line(
 ) -> str:
     """Best-effort mask common key shapes in Layer 2 output text."""
     for secret in sorted(set(extra_secret_values or ()), key=len, reverse=True):
-        if secret and len(secret) >= 8:
+        if secret and len(secret) >= _MIN_EXACT_SECRET_LENGTH:
             line = line.replace(secret, "<redacted>")
     line = LOG_SK_RE.sub("sk-<redacted>", line)
     line = LOG_NVAPI_RE.sub("nvapi-<redacted>", line)
     line = LOG_CRSR_RE.sub("crsr_<redacted>", line)
-    line = LOG_GITHUB_TOKEN_RE.sub(lambda match: match.group()[:4] + "<redacted>", line)
-    line = LOG_GITHUB_PAT_RE.sub("github_pat_<redacted>", line)
+    line = LOG_PREFIXED_TOKEN_RE.sub(keep_token_prefix, line)
+    line = LOG_AWS_ACCESS_KEY_RE.sub("aws-access-key-<redacted>", line)
     line = OPENSHIFT_TOKEN_RE.sub("sha256~<redacted>", line)
     if "eyJ" not in line:  # every JWT match contains "eyJ"; skip the scan on ordinary lines
         return line

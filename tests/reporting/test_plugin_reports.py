@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
+import textwrap
 from copy import deepcopy
 from pathlib import Path
 
@@ -28,9 +31,10 @@ from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting.cli import CLIReporter
 from skillevaluator.reporting.markdown import MarkdownReporter
 from skillevaluator.reporting.plugin_sections import (
-    component_for_path,
+    ComponentIndex,
     coverage_view,
     is_plugin_payload,
+    split_display_prefix,
     statistics_view,
     tier3_plugin_view,
 )
@@ -168,8 +172,15 @@ def test_markdown_tier3_plugin_blocks_state_what_was_not_evaluated(tmp_path: Pat
     markdown = MarkdownReporter(include_timestamp=False).render_all([_tier3_result(tmp_path, integration=integration)])
 
     assert "INCOMPLETE: 1 unresolved skill ref, 1 provider-only MCP server" in markdown
-    assert "**2 components not staged** of 4 component(s); 2 staged." in markdown
+    assert "**2 components not staged** of 4 declared or packaged component(s); 2 staged." in markdown
     assert "| mcp | docs | Unavailable | provider-only MCP server |" in markdown
+    excluded = markdown.split("**Not evaluated by this run:**", 1)[1].split("###", 1)[0]
+    assert "- 2 components not staged: mcp docs, hook pre-commit" in excluded
+    assert "- Unresolved skill refs were not evaluated: github::org/repo::skills::remote" in excluded
+    assert "- Provider-only MCP servers were not exercised: docs" in excluded
+    assert "- Integration (the plugin versus its own parts) was not measured: No cross-component case completed." in (
+        excluded
+    )
     assert "**Lift mode:** requested <code>both</code>, effective <code>effectiveness</code>" in markdown
     assert "**INCONCLUSIVE:** No cross-component case completed." in markdown
     assert "Effectiveness lift: +0.30 [-0.02, +0.55] (95% CI), precision low — ⚠️ CI includes zero" in markdown
@@ -235,17 +246,35 @@ def test_sarif_without_plugin_has_no_run_properties() -> None:
         ("./skills/loader/scripts/run.py", "loader"),
         ("/work/demo-plugin/hooks/pre.sh", "pre-commit"),
         ("[loader] skills/loader/SKILL.md", "loader"),
+        # A bundled skill's path relative to the skill, as Tier 2 reports it.
+        ("[loader] SKILL.md", "loader"),
+        # A file inside the skill, not the plugin's own hooks/pre.sh.
+        ("[loader] hooks/pre.sh", "loader"),
+        ("[loader] /work/demo-plugin/skills/loader/SKILL.md", "loader"),
         ("README.md", None),
         ("/elsewhere/skills/loader/SKILL.md", None),
         ("skills/loader-extra/SKILL.md", None),
     ],
 )
-def test_component_for_path_maps_findings_to_components(file_path: str, expected: str | None) -> None:
+def test_component_index_maps_findings_to_components(file_path: str, expected: str | None) -> None:
     block = tier1_plugin_result().metadata["plugin"]
 
-    component = component_for_path(file_path, block)
+    component = ComponentIndex(block).component(file_path)
 
     assert (component or {}).get("name") == expected
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("[loader] skills/loader/SKILL.md", ("loader", "skills/loader/SKILL.md")),
+        ("[a] [b] SKILL.md", ("a", "[b] SKILL.md")),
+        ("skills/loader/SKILL.md", (None, "skills/loader/SKILL.md")),
+        ("[draft]notes.md", (None, "[draft]notes.md")),
+    ],
+)
+def test_split_display_prefix_splits_only_the_merge_label(path: str, expected: tuple[str | None, str]) -> None:
+    assert split_display_prefix(path) == expected
 
 
 def test_html_tier1_plugin_section_renders_and_escapes() -> None:
@@ -304,6 +333,34 @@ def test_html_tier3_coverage_states_what_was_not_demonstrated(tmp_path: Path) ->
     assert element_text(html, "tier3-plugin-not-evaluated").startswith("2 components not staged")
 
 
+def test_markdown_names_every_staged_component_no_plugin_trial_exercised(tmp_path: Path) -> None:
+    from skillevaluator.reporting.plugin_sections import plugin_provenance
+
+    result = _tier3_result(tmp_path, partial=False, statistics=False)
+    payload = result.metadata["agent_eval"]
+    names = [f"stg{i:02d}" for i in range(30)]
+    plugin_provenance(payload)["component_coverage"] = {
+        "components": [
+            {"type": "skill", "name": name, "path": f"skills/{name}", "state": "staged", "reason": ""} for name in names
+        ],
+        "counts": {"staged": 30},
+        "not_evaluated": 0,
+    }
+    declared = [f"skill:{name}" for name in names]
+    payload["agents"]["codex"]["plugin_signals_summary"]["with_skill"]["activation_coverage"] = {
+        "declared": declared,
+        "exercised": [],
+        "unverified": declared,
+        "unavailable": [],
+    }
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+
+    assert "Staged but not observed in any plugin trial:" in markdown
+    for name in names:
+        assert f"- skill {name} (unverified)" in markdown
+
+
 def test_staged_but_unexercised_components_are_not_reported_as_evaluated(tmp_path: Path) -> None:
     """Every component staged, none exercised: the headline counts staging and the rest is listed as excluded."""
     from io import StringIO
@@ -339,17 +396,18 @@ def test_staged_but_unexercised_components_are_not_reported_as_evaluated(tmp_pat
         "0 components not staged of 4 declared or packaged component(s); 4 staged; "
         "4 staged components not observed in any plugin trial."
     ) in section
-    assert '<span class="t3-pill warning">0 components not staged</span>' in html
+    assert '<span class="t3-pill warn">0 components not staged</span>' in html
     assert "4 staged, not observed" in section
     assert unobserved in (element_text(html, "tier3-plugin-excluded") or "")
     markdown = MarkdownReporter(include_timestamp=False).render_all([result])
     assert (
-        "**0 components not staged** of 4 component(s); 4 staged; 4 staged components not observed in any plugin trial."
+        "**0 components not staged** of 4 declared or packaged component(s); 4 staged; 4 staged components not observed in any plugin "
+        "trial."
     ) in markdown
     console = Console(file=StringIO(), width=200, color_system=None)
     print_plugin_tier3(view, console)
     assert (
-        "Component coverage: 0 components not staged (of 4; 4 staged; "
+        "Component coverage: 0 components not staged (of 4 declared or packaged component(s); 4 staged; "
         "4 staged components not observed in any plugin trial)"
     ) in " ".join(console.file.getvalue().split())
     sarif = json.loads(SARIFReporter(include_timestamp=False).render_all([tier1_plugin_result(), result]))
@@ -637,7 +695,7 @@ def test_cli_reporter_prints_tier3_plugin_blocks(tmp_path: Path) -> None:
     plain = " ".join(plain.split())
 
     assert "INCOMPLETE: 1 unresolved skill ref" in plain
-    assert "Component coverage: 2 components not staged (of 4; 2 staged)" in plain
+    assert "Component coverage: 2 components not staged (of 4 declared or packaged component(s); 2 staged)" in plain
     assert "Files staged ≠ components loaded ≠ behavior verified." in plain
     assert "Lift mode: requested both · effective effectiveness (fell back)" in plain
     assert "Integration: INCONCLUSIVE — No cross-component case completed. (advisory)" in plain
@@ -752,3 +810,148 @@ def test_html_activation_coverage_reads_the_per_component_rate_the_arm_summary_s
     signals = element_text(html, "tier3-plugin-signals") or ""
     assert "Activation coverage 67% exercised declared 3, exercised 2, unverified 1, unavailable 0" in signals
     assert "n/a exercised" not in signals
+
+
+def _many_components_view(count: int) -> dict:
+    coverage = {"components": [{"type": "hook", "name": f"h{index}", "state": "unsupported"} for index in range(count)]}
+    view = tier3_plugin_view({"plugin_provenance": {"plugin_name": "p", "component_coverage": coverage}})
+    assert view is not None
+    return view
+
+
+def test_cli_counts_the_not_staged_components_past_the_row_limit() -> None:
+    from io import StringIO
+
+    from rich.console import Console
+
+    from skillevaluator.reporting.cli import print_plugin_tier3
+
+    view = _many_components_view(205)
+    console = Console(file=StringIO(), width=200, color_system=None)
+
+    print_plugin_tier3(view, console)
+
+    plain = " ".join(console.file.getvalue().split())
+    assert "Component coverage: 205 components not staged" in plain
+    # Ten are listed; the other 195 are counted, not just the 190 left of the 200 kept rows.
+    assert "... and 195 more" in plain
+
+
+def test_the_not_staged_statement_counts_the_components_it_does_not_name() -> None:
+    view = _many_components_view(15)
+
+    [statement] = [line for line in view["excluded"] if line.startswith("15 components not staged")]
+
+    assert statement.endswith("h11 (+3 more)")
+
+
+def test_html_and_cli_say_how_many_integration_components_were_left_out(tmp_path: Path) -> None:
+    from io import StringIO
+
+    from rich.console import Console
+
+    from skillevaluator.reporting.cli import print_plugin_tier3
+
+    integration = {
+        "verdict": "real_integration",
+        "measured": True,
+        "with_plugin": 0.8,
+        "sum_of_parts": 0.6,
+        "integration_lift": 0.2,
+        "components": [f"skill-{index}" for index in range(70)],
+    }
+    result = _tier3_result(tmp_path, integration=integration)
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    view = tier3_plugin_view(result.metadata["agent_eval"])
+    assert view is not None
+    console = Console(file=StringIO(), width=400, color_system=None)
+    print_plugin_tier3(view, console)
+
+    assert "skill-63 (+6 more)" in (element_text(html, "tier3-integration") or "")
+    assert "skill-63 (+6 more)" in " ".join(console.file.getvalue().split())
+
+
+def test_a_partial_plugin_run_recorded_only_under_the_summary_is_incomplete() -> None:
+    from skillevaluator.reporting.base import ReporterBase, is_partial_plugin_agent_eval
+
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Tier 3")
+    result.metadata["agent_eval"] = {"summary": {"plugin_provenance": provenance(partial=True)}}
+
+    assert is_partial_plugin_agent_eval(result) is True
+    assert ReporterBase._plugin_status([tier1_plugin_result(), result]) == "incomplete"
+    assert tier3_plugin_view(result.metadata["agent_eval"])["partial"] is True
+
+
+def test_similarity_views_carry_their_title_columns_and_summary() -> None:
+    from skillevaluator.reporting.plugin_sections import similarity_view
+
+    skills = similarity_view({"status": "compared", "catalog_entries": 1, "matches": []}, kind="skills")
+    plugins = similarity_view(tier2_plugin_result().metadata["plugin"]["inter_plugin_similarity"], kind="plugins")
+
+    assert skills is not None and plugins is not None
+    assert skills["title"] == "Bundled skills vs. local skills catalog"
+    assert skills["summary"] == "1 catalog entry compared. No similar entries found."
+    assert [column["label"] for column in plugins["columns"]] == [
+        "Catalog plugin",
+        "Similarity",
+        "Member overlap",
+        "Verdict",
+    ]
+    markdown = MarkdownReporter(include_timestamp=False).render_all([tier1_plugin_result(), tier2_plugin_result()])
+    assert "### Plugin vs. other plugins in the local catalog (advisory)" in markdown
+    assert "**Status:** Compared · 3 catalog entries compared." in markdown
+    assert "| Catalog plugin | Similarity | Member overlap | Verdict |" in markdown
+
+
+def test_component_index_places_a_folder_walker_label_only_when_it_is_unambiguous() -> None:
+    skills = [("nested/bar", "skills/nested/bar"), ("a/x", "skills/a/x"), ("b/x", "skills/b/x")]
+    block = {
+        "root": "/work/p",
+        "component_inventory": {"components": [{"type": "skill", "name": n, "path": p} for n, p in skills]},
+    }
+    index = ComponentIndex(block)
+
+    # Folder walkers label a bundled skill with its directory name only.
+    assert index.artifact_path("[bar] SKILL.md") == "skills/nested/bar/SKILL.md"
+    # Two skills end in "x": the path is left as it is rather than guessed.
+    assert index.artifact_path("[x] SKILL.md") == "SKILL.md"
+    assert (index.component("[nested/bar] SKILL.md") or {}).get("path") == "skills/nested/bar"
+    assert (index.component("/work/p/skills/b/x/run.py") or {}).get("name") == "b/x"
+
+
+def test_report_state_vocabularies_are_the_producers() -> None:
+    """Reports and producers share one definition, in plugin_states."""
+    from skillevaluator import plugin_components, plugin_dependencies, plugin_states
+    from skillevaluator.reporting import plugin_sections
+
+    assert plugin_sections.DEPENDENCY_STATES is plugin_dependencies.DEPENDENCY_STATES is plugin_states.DEPENDENCY_STATES
+    assert plugin_sections.COVERAGE_STATES is plugin_components.COVERAGE_STATES is plugin_states.COVERAGE_STATES
+    assert plugin_sections.EVALUATED_COVERAGE_STATES is plugin_components.EVALUATED_COVERAGE_STATES
+
+
+def test_report_state_vocabularies_load_no_validators() -> None:
+    """plugin_states imports nothing, so the reporting leaf still loads no producer, validator, or Tier 3 helper.
+
+    Every reporter, and so every CLI command, imports plugin_sections.
+    """
+    code = textwrap.dedent(
+        """
+        import sys
+        import skillevaluator.plugin_states
+        print(sorted(name for name in sys.modules if name.startswith("skillevaluator")))
+        import skillevaluator.reporting.plugin_sections
+        heavy = (
+            "skillevaluator.plugin_components",
+            "skillevaluator.plugin_dependencies",
+            "skillevaluator.validators",
+            "skillevaluator.tier3.eval_core",
+            "skillevaluator.tier3.harbor",
+        )
+        print(sorted(name for name in sys.modules if name.startswith(heavy)))
+        """
+    )
+    completed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == ["['skillevaluator', 'skillevaluator.plugin_states']", "[]"]

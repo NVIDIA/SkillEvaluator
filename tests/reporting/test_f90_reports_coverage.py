@@ -241,9 +241,16 @@ def test_plugin_missing_from_every_init_marks_its_components_not_loaded(tmp_path
     assert provenance["partial"] is True
 
     reports = _all_reports(results)
-    assert "Component coverage: 0 components not staged, 5 not loaded (of 5; 0 staged" in reports["cli"]
+    # Every format states the coverage in one sentence (the view's ``detail``).
+    assert (
+        "Component coverage: 0 components not staged, 5 not loaded "
+        "(of 5 declared or packaged component(s); 0 staged" in reports["cli"]
+    )
     assert "- skill notes (staged, not loaded): " in reports["cli"]
-    assert "**0 components not staged, 5 not loaded** of 5 component(s); 0 staged." in reports["markdown"]
+    assert (
+        "**0 components not staged, 5 not loaded** of 5 declared or packaged component(s); 0 staged."
+        in reports["markdown"]
+    )
     assert "| skill | notes | Not loaded |" in reports["markdown"]
     assert "| notes | skill | Not loaded |" in reports["benchmark"]
     assert "Staged but not loaded (the harness reported it did not load):" in reports["benchmark"]

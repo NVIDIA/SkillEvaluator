@@ -96,8 +96,13 @@ Reports make the gaps explicit instead of letting them read as a pass:
   `evaluated`, `static_only`, or `unsupported`, and lists the component types
   that Tier 3 does not stage in wrapper mode in `unsupported_types_present`.
   Tier 1 still checks hooks, subagents, commands, LSP servers, monitors,
-  settings, and output styles statically (Hook risk, Subagent and command
-  privileges, and the LSP, monitor, settings, and output-style checks).
+  settings, and output styles statically (Hook risk, which also checks a
+  monitor's command on the event `Monitor`; Subagent and command privileges;
+  and the LSP, monitor, settings, and output-style checks). Every report names
+  an unsupported type as statically checked only when the run shows that
+  check: Hook risk rows for hooks, privilege rows for subagents and commands,
+  and the inventory listing the type for LSP servers, monitors, settings, and
+  output styles. Reports say that nothing evaluated the rest.
 - **Tier 3** records a coverage state and a reason for every component. When a
   declared skill, rule, or MCP server that the plugin needs could not be
   evaluated, the run is **INCOMPLETE**, never a full pass. See
@@ -146,7 +151,9 @@ and a file over 8 MiB always counts. Such a file is the Agent Plugins manifest,
 and as the selected manifest it fails HIGH `manifest_unreadable` because it
 cannot be read whole. Auto-detection uses the same rule, so such a folder stays
 a plugin instead of becoming a skill. Only a linked, hard-linked, special, or
-changed file fails discovery or fails as `manifest_unsafe`.
+changed file fails discovery or fails as `manifest_unsafe`. Auto-detection
+counts such a root `plugin.json` as a plugin manifest without reading it, so
+the folder fails closed as a plugin instead of passing as a skill.
 
 A selected client manifest that is not UTF-8 or is over the 1 MiB manifest
 limit is HIGH `manifest_unreadable`. That is a content problem, not an unsafe
@@ -346,12 +353,14 @@ The component fields (`skills`, `commands`,
 `agents`, `hooks`, `mcpServers`, `lspServers`, `outputStyles`,
 `experimental.monitors`, and `settings`) are read for the
 [component inventory](#component-inventory). Declared paths must stay inside
-the plugin root: an absolute, home-relative, drive-letter, or `..` path gets a
-HIGH `plugin_component_path_escape` finding. Claude Code requires `./`-relative
-paths and rejects the whole manifest otherwise, so a path without `./` gets a
-HIGH `plugin_component_path_style` finding. Claude Code expands `${CLAUDE_PLUGIN_ROOT}` only in hook commands and
-MCP server fields, and rejects a manifest whose component path starts with
-it, so such a path is a HIGH `plugin_component_path_invalid`.
+the plugin root: an absolute, home-relative, or `..` path, or one with a drive
+letter in any part (`./C:/Users`), gets a HIGH `plugin_component_path_escape`
+finding. Claude Code requires `./`-relative paths and rejects the whole
+manifest otherwise, so a path without `./` gets a HIGH
+`plugin_component_path_style` finding. Claude Code expands
+`${CLAUDE_PLUGIN_ROOT}` only in hook commands and MCP server fields, and
+rejects a manifest whose component path starts with it, so such a path is a
+HIGH `plugin_component_path_invalid`.
 
 <FileTree>
 - my-plugin/
@@ -411,6 +420,7 @@ other unrecognized 1.x version.
 | `name` is required: 1 to 64 characters of `a-z`, `0-9`, `-`, and `.`; it starts and ends with a letter or digit, with no `--` or `..` (`schema:name:pattern`) | HIGH |
 | `version`, `description`, `homepage`, `repository`, and `license` are strings, `keywords` is a string array, and `author` allows only string `name`, `email`, and `url` | HIGH |
 | Any other top-level field, such as `skills` or `mcpServers` (`plugin_manifest_unknown_field`); clients report and ignore it | MEDIUM |
+| More than 32 such fields: the first 32 by name are reported one by one, and one note counts the rest (`schema:<root>:unknown_fields_truncated`) | LOW |
 | `extensions` is not an object; clients ignore it | MEDIUM |
 
 The `mcp.json` file must declare the Agent Plugins MCP `$schema` of the same
@@ -512,6 +522,7 @@ published schema (`schemas/plugin.schema.json` in `cursor/plugins` at
 | `name` is required and lowercase kebab-case: `a-z`, `0-9`, `-`, and `.`, starting and ending with a letter or digit | HIGH |
 | Declared fields have the schema's types; `author` requires `name` and allows only `name` and `email` | HIGH |
 | A top-level field outside the published schema (`plugin_manifest_unknown_field`) | MEDIUM |
+| More than 32 such fields: the first 32 by name are reported one by one, and one note counts the rest (`schema:<root>:unknown_fields_truncated`) | LOW |
 | `version` is not a semantic version; the docs ask for one but the schema does not enforce it | LOW |
 
 Paths are plugin-root relative; `./` is conventional but not required. A
@@ -524,7 +535,9 @@ suggests it reads both files (not confirmed with a Cursor run).
 `${CURSOR_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_ROOT}` name the root in hook
 commands and MCP server fields. In a component path they get a MEDIUM
 `plugin_component_path_root_variable`, and the files they name are still
-checked. A
+checked. They name the root only when `/` or nothing follows them: Cursor
+expands them as text, so `${CURSOR_PLUGIN_ROOT}servers.json` names a file
+beside the root (a HIGH `plugin_component_path_escape`). A
 root `SKILL.md` makes a single-skill plugin when no skills are declared and
 there is no `skills/` directory; it is inventoried but not staged. Cursor hooks list
 handlers directly under each event; the hook risk model reads each one as a
@@ -655,6 +668,17 @@ check as the rest of the tree, even though they prune those folder names
 elsewhere. A `SKILL.md` deeper inside a skill's own `evals/`, `results/`, or
 `versions/` folder is still a HIGH `plugin_skill_in_unscanned_folder`, as it is
 under `skills/`.
+
+Tier 1 file walks also skip `.git/`, `.venv/`, `node_modules/`, and
+`__pycache__/` at any depth, and the same rules apply to them: a declared
+skills folder inside one, such as `"skills": "./node_modules/pkg/skills"`, is
+scanned as its own skill unit, and a manifest path into one for any other
+component, such as `"agents": "./.venv/agents/"`, is a HIGH
+`plugin_component_path_unscanned`. Component folders are listed whole, because
+clients load nested folders whatever their name. A command, agent, output
+style, or rule file in a skipped folder inside a component folder, such as
+`commands/evals/deploy.md` or `agents/node_modules/helper.md`, is listed and
+checked like any other, and is a HIGH `plugin_component_path_unscanned` too.
 
 ### Reference sources
 
@@ -860,9 +884,10 @@ classified offline. Nothing is fetched, read, or copied.
 Repository identity fails closed. A ref is compared with the local repository
 only when the repository root is the git top-level and its `origin` remote
 names a hosted `<owner>/<repo>`. HTTPS, HTTP, SSH, `git://`, and SCP-style
-(`git@host:owner/repo`) remotes are accepted; an `origin` that is a local path
-is not. The owner and repository are compared case-insensitively. Path
-existence alone never proves identity.
+(`git@host:owner/repo`) remotes are accepted, with or without credentials and
+a port; an `origin` that is a local path or a `file://` URL is not. The owner
+and repository are compared case-insensitively. Path existence alone never
+proves identity.
 
 The gate never passes for a ref it could not check. Each `unresolved` ref gets
 a MEDIUM `plugin_dependency_unverified` finding, and the `plugin_dependencies`
@@ -870,7 +895,7 @@ success row appears only when every ref was checked. The advice fits the cause:
 
 - When the repository identity is unknown, one finding names the problem (not
   a git repository, not its top-level, no `origin` remote, or an `origin` that
-  is a local path) and how to fix it.
+  is a local path) and how to fix it, without repeating the remote.
 - A malformed ref (for example, a missing `<name>` segment), an unsupported
   source, an unsafe path, a content root other than `skills`, `team-skills`,
   `rules`, or `team-rules`, a link, or an unreadable target gets one finding per
@@ -927,9 +952,9 @@ findings count in `severity_counts` like the plugin root's.
 | Check | Severity | Flags |
 | --- | --- | --- |
 | `plugin_component_path_missing` | HIGH | A declared component path does not exist |
-| `plugin_component_path_escape` | HIGH | A declared path is absolute, home-relative, a drive letter, or uses `..` |
+| `plugin_component_path_escape` | HIGH | A declared path is absolute or home-relative, has a drive letter in any part (`./C:/Users`), uses `..`, or puts a name right after a root variable (`${CURSOR_PLUGIN_ROOT}servers.json` names a file beside the root) |
 | `plugin_component_path_unsafe` | HIGH | A path is, or passes through, a symlink, hard link, or special file. It is not followed |
-| `plugin_component_path_invalid` | HIGH | A declaration has the wrong shape for its field, such as a command map entry without exactly one of `source` or `content`. In a Claude Code manifest, an `agents` path that does not end in `.md` (a folder included) and a `hooks`, `lspServers`, or monitors path that does not end in `.json` are invalid too: Claude Code's schema rejects the whole manifest. A commands-map `source` may name a command file or a folder: Claude Code loads each `.md` file directly in the folder as a command named after the file, and each one is listed and checked on its own |
+| `plugin_component_path_invalid` | HIGH | A declaration has the wrong shape for its field, such as a command map entry without exactly one of `source` or `content`, or a path with a colon that is not a drive letter (an NTFS data stream such as `deploy.md:hidden`). In a Claude Code manifest, an `agents` path that does not end in `.md` (a folder included) and a `hooks`, `lspServers`, or monitors path that does not end in `.json` are invalid too: Claude Code's schema rejects the whole manifest. A commands-map `source` may name a command file or a folder: Claude Code loads each `.md` file directly in the folder as a command named after the file, and each one is listed and checked on its own |
 | `plugin_component_path_style` | HIGH or MEDIUM | A contained-manifest path does not start with `./`. HIGH in a Claude Code manifest, which Claude Code rejects as a whole (the plugin does not load). MEDIUM in a Codex manifest (and the Agent Plugins `com.openai` settings): Codex ignores the value, also `./` alone, and loads the default location instead, so the value is not inventoried or staged |
 | `plugin_component_path_root_variable` | MEDIUM | A Cursor component path starts with `${CURSOR_PLUGIN_ROOT}` or `${CLAUDE_PLUGIN_ROOT}`. Cursor documents these variables for hook commands and MCP server fields only, so it may not load the component; its files are still checked |
 | `plugin_component_path_unscanned` | HIGH | A component the client loads lives in a folder the whole-tree scans skip; see [Skill folders named evals, results, or versions](#skill-folders-named-evals-results-or-versions) |
@@ -940,8 +965,8 @@ findings count in `severity_counts` like the plugin root's.
 | `plugin_unscanned_folders` | LOW | The plugin ships `node_modules/`, `.venv/`, or a nested `.git/`, which the whole-tree scans skip |
 | `plugin_unscanned_folder_scan_incomplete` | LOW | The link check of skipped folders stopped after 20,000 entries, or a folder could not be listed |
 | `mcp_root_config_also_checked` | LOW | A Cursor plugin declares `mcpServers` and also ships a root `mcp.json`. Cursor's reference says the declared value replaces it, but a reading of its loader suggests it reads both (not confirmed with a Cursor run), so both are checked |
-| `schema_errors_truncated` | HIGH | More than 100 component findings, and at least one CRITICAL or HIGH one did not fit. Blocking findings are always reported first |
-| `schema_findings_truncated` | LOW | More than 100 component findings; only MEDIUM, LOW, or INFO ones were left out |
+| `schema_errors_truncated` | HIGH | One of the capped finding lists (component findings, manifest field issues, bundle schema errors, or unscanned skills) has more than 100 findings, and at least one CRITICAL or HIGH one did not fit. Each list reports its 100 most severe findings by policy severity, so an advisory finding never pushes out a blocking one, and the message names the highest severity left out |
+| `schema_findings_truncated` | LOW | One of those lists has more than 100 findings, and only MEDIUM, LOW, or INFO ones were left out |
 | `plugin_component_unreadable` | HIGH | A hooks, LSP, monitors, or settings JSON file is unreadable, invalid, or larger than 256 KiB. Its bypass and environment checks cannot run, so it blocks |
 | `plugin_component_list_truncated` | HIGH | A declared component list, an LSP server map, or a `commands` map has more than 256 entries |
 | `plugin_settings_bypass_permissions` | HIGH | Shipped settings set `permissions.defaultMode` to `bypassPermissions`, or a shipped Codex project config (`.codex/config.toml`, checked in every format) sets `approval_policy = "never"` or `sandbox_mode = "danger-full-access"` (top level or in a profile) |
@@ -949,7 +974,7 @@ findings count in `severity_counts` like the plugin root's.
 | `plugin_settings_permission_mode` | MEDIUM | Shipped settings set `permissions.defaultMode` to `acceptEdits` or `auto` |
 | `plugin_settings_auto_approve` | MEDIUM | Shipped settings set `enableAllProjectMcpServers`, list `enabledMcpjsonServers`, or pre-approve every MCP tool (`mcp__*`) in `permissions.allow` |
 | `plugin_permission_bypass_flag` | HIGH | A hook, LSP server, monitor, or settings file contains an agent permission-bypass flag or option, the same forms as `mcp_permission_bypass_flag`. That includes Codex's `--dangerously-bypass-hook-trust`, `--ask-for-approval never` (`-a never`), and `-c approval_policy=never`, and Gemini CLI's `-y`. The short `-a never`, `-s danger-full-access`, and the `-c` / `--config` overrides count only after a `codex` command (or a wrapper named for it, such as `codex-wrapper`, or `${CODEX_*}`) in the same shell command or argv, and `-y` only after a `gemini` command, so `grep -a never file`, `echo codex done; grep -a never log`, and `tool -s danger-full-access` are not flagged. A shell command ends at a newline, `;`, `&&`, `\|\|`, a pipe, or a lone `&`; a backslash-continued line and a redirection (`2>&1`, `&>log`) stay in the same command |
-| `plugin_permission_mode_flag` | MEDIUM | A hook, LSP server, monitor, or settings file passes `--permission-mode auto` or `--permission-mode acceptEdits` to an agent CLI |
+| `plugin_permission_mode_flag` | MEDIUM | A hook, LSP server, monitor, or settings file passes `--permission-mode auto` or `--permission-mode acceptEdits` (in any letter case) to an agent CLI |
 | `plugin_permission_allow_flag` | HIGH | A hook, LSP server, monitor, or settings file passes `--allowedTools` (or `--allowed-tools`) with a grant that runs any command or `*` (`--allowedTools Bash`) to an agent CLI |
 | `plugin_lsp_command_*`, `plugin_lsp_unpinned_package` | as for MCP | An `.lsp.json` server's `command` and `args` get the MCP stdio command checks, worded for an LSP server: a shell `-c` program (`plugin_lsp_command_dangerous_form`, CRITICAL), inline credentials, floating versions, and unpinned package runners. Claude Code starts an LSP server as argv without a shell, so an operator inside one argument is plain text and is not flagged; an argument that is only an operator or carries command substitution is LOW, not the MCP CRITICAL |
 | `plugin_env_insecure_tls`, `plugin_env_inline_secret` | CRITICAL | An LSP server's `env` turns TLS verification off (`NODE_TLS_REJECT_UNAUTHORIZED=0`, ...) or carries a literal credential: the same rules as MCP `mcp_insecure_tls_env` and `mcp_inline_secret`. In a shipped settings file's `env` they are HIGH (Claude Code ignores plugin settings `env`, but it applies if the file is copied into a project). Values are never printed |
@@ -1038,7 +1063,15 @@ with totals by flag, event, and handler type. Handlers listed directly under an
 event, the flat shape Cursor and Agent Plugins client extensions such as
 `com.cursor/` and `com.github.copilot/` use, are read as one-handler matcher
 groups. User information is removed from every target and URL in the reports,
-even when the URL does not parse.
+even when the URL does not parse, and a value shaped like a known token
+(`ghp_…`, `glpat-…`, `xoxb-…`, `hf_…`, `npm_…`, `sk-…`, or a JWT) is
+redacted, also inside a URL path (`ghp_<redacted>`, `jwt-<redacted>`,
+`<redacted>`). A private key is redacted whole, from its BEGIN line to its END
+line. A long target is cut before it is redacted, and a token the cut splits
+is dropped. MCP command findings never echo an argument that holds a
+credential, including the value after a credential flag (`--password <value>`),
+and pin details and dependency findings show a package spec without its
+credentials.
 
 Each client's own hook semantics apply. Claude Code uses the events and
 outputs above; its shell tool is `Bash`, or `PowerShell` on Windows, so a
@@ -1082,7 +1115,8 @@ these forms, because the client that owns the namespace runs them. Bytes that
 are not UTF-8 are replaced, so binary bytes do not hide a script, and a hard
 link (such as pnpm's `node_modules` layout) is read like a regular file,
 because no script content leaves the analyzer. A script that is a symlink, a
-special file, larger than 1 MiB, past the read budget, or beyond the first 32
+special file, rewritten while it is read, larger than 1 MiB, past the read
+budget, or beyond the first 32
 scripts read (missing paths do not count), or a script that names more than 256
 other files, is not analyzed and is reported as `plugin_hook_script_unanalyzed`. So is a hook whose command or
 scripts run more than 2048 distinct files while the plugin downloads something, because the runs past that
@@ -1115,7 +1149,7 @@ and shell escapes and base64 runs (`echo <base64> | base64 -d`).
 | Check | Severity | Flags |
 | --- | --- | --- |
 | `plugin_hook_remote_code` | CRITICAL | A command hook, or the plugin script it runs, fetches remote content and executes it: `curl … \| sh`, `wget … \| bash`, `bash -c "$(curl …)"`, `sh <(curl …)`, or `iwr … \| iex`, also through a path, quotes, or wrapper (`\| /bin/sh`, `\| "sh"`, `\| $SHELL`, `\| busybox sh`, `\| /usr/bin/env bash`, `\| sudo -E bash`, `\| xargs sh`), through intermediate pipe stages (`\| tee x \| sh`), `. <(curl …)`, `\| source /dev/stdin`, a here-string (`source /dev/stdin <<< "$(curl …)"`), a variable that holds a download (`c=$(curl …); eval "$c"`), Python or JavaScript that evaluates a download (`exec(urlopen(…).read())`), a package runner of a git or URL spec (`npx github:user/repo`, `uvx --from git+https://…`, `deno run https://…`), or a download saved to a file (or unpacked into a directory) that the hook, or another hook or script of the plugin, then runs (`curl -o /tmp/x … && sh /tmp/x`, `tar xzf x.tgz -C d && d/run`). Download and run paths are read with the same text's simple variable assignments expanded, so `D="$CLAUDE_PLUGIN_DATA/bin"; curl -o "$D/tool" …` in one script and `exec "$CLAUDE_PLUGIN_DATA/bin/tool"` in another match. A piped interpreter counts when it reads its program from standard input, or when its `-c` / `-e` program evaluates standard input (`\| python3 -c 'exec(sys.stdin.read())'`, `\| ruby -e 'eval STDIN.read'`, `\| sh -c 'eval "$(cat)"'`, `\| bash -c "$(cat)"`, `\| sh -c 'exec bash'`). `\| python3 -m json.tool`, `\| node -e 'process.stdin.pipe(process.stdout)'`, `\| sh -c 'read v; echo $v'`, or `\| python3 parse.py` only parse the download as data, and `.` counts only as a command (`jq . out.json` does not run `out.json`) |
-| `plugin_hook_inline_secret` | CRITICAL | An HTTP hook URL carries user information or a credential query parameter, a header carries a literal credential, or a command hook's command line contains a URL with a literal `user:password@` (or a token-shaped user name) or a credential query parameter. `$VAR` interpolation is allowed |
+| `plugin_hook_inline_secret` | CRITICAL | An HTTP hook URL carries user information or a credential query or fragment parameter, a header carries a literal credential, or a command hook's command line contains a URL with a literal `user:password@` (or a user name shaped like a token or a long random value) or a credential query or fragment parameter. The URL and header rules are the MCP ones (`mcp_url_inline_secret`, `mcp_inline_secret`). `$VAR` interpolation is allowed |
 | `plugin_hook_auto_approve` | HIGH | An approval hook (`PreToolUse`, `PermissionRequest`, or the client's own; see above) with a broad matcher (none, `""`, `*`, a regex that matches every tool or the shell tool, or one that cannot be classified safely; see above), or Cursor's `beforeShellExecution`, emits an allow decision (`permissionDecision: allow`, legacy `decision: approve`, `behavior: allow`, or Cursor's `permission: allow` / `decision: allow`). JSON `\u0061` and shell `\x61` escapes are decoded first |
 | `plugin_hook_script_unanalyzed` | HIGH | A command hook runs a plugin-root script that could not be analyzed, or an approval hook names the plugin root but runs no script that could be read (see above). An unread script could hide an auto-approval or remote code |
 | `plugin_hook_scan_truncated` | HIGH | A hooks source exceeds the scan limits (64 events, 256 matcher groups per event, 512 handlers), so the handlers past them are not analyzed. `hook_risk` lists a `truncated` row (flag `scan_truncated`) and sets `counts.truncated` |
@@ -1192,32 +1226,51 @@ stages a server.
     | Check | Severity | Flags |
     | --- | --- | --- |
     | `mcp_command_shell_metacharacters` | CRITICAL | `;`, `\|`, `&`, a backtick, `$(`, `<(`, `>(`, `<`, `>`, or a newline in `command`, in the arguments of a `cmd /c` or PowerShell `-Command` line, or in an inline program: the program of a shell's `-c` and of `python -c`, `node -e` or `-p`, `bun -e`, `deno eval`, `perl -e`, `ruby -e`, `php -r`, `lua -e`, or `osascript -e`. Other arguments run argv-style, not through a shell, so an operator inside one argument (`foo\|bar`, a PEP 440 range `pkg>=1.2,<2`) is text; only an argument that is just an operator (`&&`) or holds command substitution (`$(`, a backtick) counts |
-    | `mcp_command_dangerous_form` | CRITICAL | A shell interpreter (`sh`, `bash`, `zsh`, `dash`, `ksh`, `mksh`, `ash`, `fish`, `csh`, or `tcsh`) invoked with `-c` (or `+c`, which bash, sh, and zsh also run), also in a combined flag (`bash -lc`, `sh -ec`), after other options (`bash -o pipefail -c`, `bash -oe pipefail -c`), or through a launch wrapper (`env sh -c`, `timeout 30 bash -c`, `sudo sh -c`, `nohup sh -c`, `busybox sh -c`, `cmd /c sh -c`). Only the shell's own options count: arguments after the script path or `--` belong to the script, so `bash server.sh -config x.yml` is not flagged |
-    | `mcp_command_inline_secret` | CRITICAL | A credential-named flag (`--api-key`, `--token`, `--auth`) with a literal value, or an argument shaped like a known secret or a `Bearer`/`Basic` credential. A short flag such as `--key`, `--pass`, or `--sig` counts only when its value looks like key material (three of lower case, upper case, digits, and symbols, or a long random token), so `--key primary` is a setting |
+    | `mcp_command_dangerous_form` | CRITICAL | A shell interpreter (`sh`, `bash`, `zsh`, `dash`, `ksh`, `mksh`, `ash`, `fish`, `csh`, or `tcsh`) invoked with `-c` (or `+c`, which bash, sh, and zsh also run) or `--command`, also in a combined flag (`bash -lc`, `sh -ec`) or after other options (`bash -o pipefail -c`, `bash -oe pipefail -c`), or fish with `-C` or `--init-command` (fish also accepts any unambiguous prefix of a long option). A launch wrapper is looked through: `env` with its options, assignments, and `-S` string (`env -i PATH=/bin bash -c …`, `env -S "sh -c …"`), `nohup`, `setsid`, `nice`, `stdbuf`, `time`, `timeout`, `sudo`, `doas`, `exec`, `command`, or `busybox` with their options (`timeout 600 sh -c …`), and `cmd /c` or PowerShell `-Command` (`cmd /c sh -c …`). Only the shell's own options count: arguments after the script path or `--` belong to the script, so `bash server.sh -config x.yml` is not flagged |
+    | `mcp_command_inline_secret` | CRITICAL | A credential-named flag (`--api-key`, `--token`, `--auth`) with a literal value, or an argument shaped like a known secret or a `Bearer`/`Basic` credential, in `args` or in a command line written in `command`. A setting is not a credential (`--auth basic`, a path such as `--api-key ~/.config/key`), and a short flag such as `--key`, `--pass`, or `--sig` counts only when its value looks like key material (three of lower case, upper case, digits, and symbols, or a long random token), so `--key primary` is a setting |
     | `mcp_command_disables_tls` | CRITICAL | `--insecure`, `-k`, `--no-check-certificate`, `--tls-no-verify`, `--ssl-no-verify`, or `--no-verify-tls` |
     | `mcp_command_floating_version` | HIGH | A package runner whose version or image tag names a moving channel: `latest`, `next`, `canary`, `beta`, `alpha`, `rc`, `main`, `master`, `head`, `trunk`, `nightly`, `edge`, `dev`, `develop`, `unstable`, `experimental`, `snapshot`, `preview`, `insiders`, or `stable`, also as part of an image tag (`:1-latest`, `:stable-alpine`). An image tag that starts with a `major.minor` version names one release, also with a pre-release word (`:1.0.0-beta`, `:3.0-dev`), unless it says `latest`. The tag is read where the runner reads it (after the package name's `@`, or the image's `:tag`), so a scope such as `@nextui-org/mcp@1.0.0`, an entry point `mod.cli:main`, an e-mail, or a digest-pinned `:latest@sha256:...` image is not floating. A tag written after an image name taken from the environment (`${IMAGE}:main`) still floats, and each package of a comma list (`npx -p a@latest,b`) is read. A git ref that names one of these words floats too: after the last `@` of the URL path for pip and uv (`git+https://github.com/o/r@main`) or after `#` for npm (`github:o/r#main`). A fixed tag (`@v1.2.3`) or a git URL with no ref is `mcp_unpinned_package` |
     | `mcp_unpinned_package` | MEDIUM | A package runner without an exact version (no version, a range, another tag, or an incomplete digest) |
 
     A server is **pinned** when a package runner fetches an exact version:
     `pkg@1.2.3`, `pkg==1.2.3`, `--from pkg==1.2.3`, a git or URL spec with a
-    40-character commit SHA, `image:1.2.3`, or `image@sha256:...`. An image
+    40-character commit SHA, a `deno run` module whose URL path names one
+    (`https://deno.land/x/mod@v1.2.3/mod.ts`; not in the query or fragment, and
+    not with a `.` or `..` segment), `image:1.2.3`, or `image@sha256:...`. Every
+    package the runner installs must be exact, including each `--with` (`-w`)
+    requirement of `uvx`, `uv tool run`, or `uv run`, and the worst of them
+    decides; a `--with-requirements` file makes the server unpinned, because
+    its packages are not read. The check and the dependency
+    audit share one exact-version rule per ecosystem: an npm version such as
+    `1.2.3`, `=1.2.3`, or `v1.2.3`,
+    and a PyPI `==`, `===`, or uv `@` pin of one valid PEP 440 version, in any
+    spelling PEP 440 accepts (`1.0rc1`, `v1.2.3`, `1.0-1`), which pip-audit
+    gets as `name==version`. Wildcards and ranges are not exact. A `===` pin of
+    a string that is not a PEP 440 version still counts as pinned, but the
+    audit reports it as unverified. An image
     version tag counts as pinned, but a digest is stronger because tags can be
-    moved. Every `uvx --with` requirement must be exact too, and the worst
-    of the tool and its requirements decides. For Claude Code, Cursor, and
-    Agent Plugins servers, a `${NAME:-default}` in `command` or `args` is read
-    at its default (`npx -y ${PKG:-@scope/mcp@latest}` is floating); Codex
-    runs the text as is. The
-    recognized runners are `npx`, `bunx`, `bun x`, `pnpx`, `pnpm dlx`,
+    moved. For Claude Code, Cursor, and Agent Plugins servers, a
+    `${NAME:-default}` in `command` or `args` is read at its default
+    (`npx -y ${PKG:-@scope/mcp@latest}` is floating); Codex runs the text as
+    is. The recognized runners are `npx`, `bunx`, `bun x`, `pnpx`, `pnpm dlx`,
     `yarn dlx`, `npm exec`, `uvx`, `uv tool run`, `uv run --with`, `pipx run`,
     `deno run` (with `npm:`, `jsr:`, or a remote module), `go run
-    module@version`, `dnx`, and `docker`, `podman`, or `nerdctl run`. Global
-    options before the subcommand (`npm --yes exec`, `pnpm --package=... dlx`)
-    and value flags (`npx --loglevel warn`) are read as such, and a launcher
-    path with a space (`C:\Program Files\nodejs\npx.cmd`) is one command.
-    Launch wrappers are looked through: `cmd /c`, PowerShell `-Command`,
-    `env NAME=value`, `timeout`, `nice`, `nohup`, `sudo`, `doas`, `exec`, and
-    `sh -c`. Local interpreters and scripts, URL servers, and provider-only
-    servers are `not_applicable`.
+    module@version`, `dnx`, and `docker`, `podman`, or `nerdctl run`. Launch
+    wrappers are looked through, the same ones `mcp_command_dangerous_form`
+    looks through, and so is `sh -c` (`env NODE_ENV=production npx …`,
+    `timeout 600 uvx …`, `cmd /c npx …`). A launcher path with a space
+    (`C:\Program Files\nodejs\npx.cmd`) is one command, but a command line
+    is read by its first word, so `npx -y pkg /srv/docker` still runs `npx`.
+    Local interpreters and scripts, URL servers, and provider-only servers
+    are `not_applicable`. Global options before the subcommand
+    (`npm --yes exec`, `pnpm --package=... dlx`) and value flags
+    (`npx --loglevel warn`) are read as such. A runner's own options end at
+    the package it runs, so a server's `-p 3000` is not npx's `--package`, and
+    a `--with` after the uvx command is the server's argument. When an npm
+    runner option is neither a known value option (`--registry`,
+    `--globalconfig`, …) nor a known switch (`-y`, `--prefer-offline`, …), the
+    word after it is checked as a package as well: npx reads it as the
+    option's value, npm as the package.
 
     Command hooks and the scripts they run use the same classifier: a moving
     tag is HIGH `plugin_hook_command_floating_version`, and another unpinned
@@ -1227,9 +1280,9 @@ stages a server.
   <Accordion title="Secrets and TLS">
     | Check | Severity | Flags |
     | --- | --- | --- |
-    | `mcp_inline_secret` | CRITICAL | An `env`, `headers`, or `oauth` value (such as `oauth.clientSecret`) that is a literal credential rather than a reference: a known secret shape, a `Bearer`/`Basic` credential, or a literal under a credential-named key. A key whose last word makes it a setting (`PASSWORD_POLICY`, `DB_PASSWORD_FILE`, `PASSWORD_MIN_LENGTH`) is not credential-named, and booleans, auth modes (`basic`), and paths (`/run/secrets/db`, `./key.pem`) are not secret values. A value that only starts like a path but is one token of key material (`/Xk9fT2mQ...`) is still a secret. An env name such as `KEY` or `PASS` counts only with a value that looks like key material |
+    | `mcp_inline_secret` | CRITICAL | An `env`, `headers`, or `oauth` value (such as `oauth.clientSecret`) that is a literal credential rather than a reference (`$VAR`, `${VAR}`, `${VAR:-}`, or Cursor's `${env:VAR}`; the default of `${VAR:-default}` is checked like any literal): a known secret shape, a `Bearer`/`Basic` credential, or a literal under a credential-named key. A key whose last word makes it a setting (`PASSWORD_POLICY`, `DB_PASSWORD_FILE`, `PASSWORD_MIN_LENGTH`) is not credential-named, and booleans, auth modes (`basic`), and paths (`/run/secrets/db`, `./key.pem`) are not secret values. A value that only starts like a path but is one token of key material (`/Xk9fT2mQ...`) is still a secret. An env name such as `KEY` or `PASS` counts only with a value that looks like key material |
     | `mcp_possible_inline_secret` | MEDIUM | A long random-looking value (hex or mixed-case base64) under a key that names nothing secret, such as `SERVICE_SEED`. Keys that name a hash, commit, version, or ID, and UUID values, are skipped |
-    | `mcp_url_inline_secret` | CRITICAL | Credentials in the URL's user information (as WHATWG clients read it, plus a literal password in another reading) or in a credential query parameter, including `key=`, `auth=`, and `sig=` |
+    | `mcp_url_inline_secret` | CRITICAL | Credentials in the URL. User information counts with a literal user name or password as WHATWG clients read it (references such as `${VAR}` are allowed); when urllib reads another authority, its literal password, or a user name shaped like a token or a long random value, counts too, but other text before a backslash (`https://169.254.169.254\@host/`) is the host clients connect to. A query parameter counts when its name is shaped like a known secret (a bare `?ghp_…`), its value is (`?q=sk-…`), or it is a credential parameter with a literal value that is not a setting, including `key=`, `auth=`, and `sig=`. Parameters in the fragment (`#access_token=…`, `#/cb?token=…`) count the same way and are reported as fragment parameters. HTTP hook URLs and the URLs in hook commands use the same rule, except that an HTTP hook counts any user information, even `${VAR}`, because its client sends it as Basic auth with every request |
     | `mcp_insecure_tls_env` | CRITICAL | `NODE_TLS_REJECT_UNAUTHORIZED=0`, `PYTHONHTTPSVERIFY=0`, or a truthy `GIT_SSL_NO_VERIFY`, `CURL_INSECURE`, `SSL_NO_VERIFY`, `TLS_INSECURE`, or `SSL_VERIFY_NONE` |
     | `mcp_insecure_flag` | CRITICAL | `insecure: true` |
     | `mcp_insecure_tls_config` | CRITICAL | A `tls` or `ssl` block with `rejectUnauthorized: false` or `verify: false` |
@@ -1284,7 +1337,7 @@ stages a server.
     | Check | Severity | Flags |
     | --- | --- | --- |
     | `mcp_permission_bypass_flag` | HIGH | `--dangerously-skip-permissions`, `--dangerously-bypass-approvals-and-sandbox`, `--allow-dangerously-skip-permissions`, or `--yolo` anywhere in the server config, and the options `--permission-mode bypassPermissions`, `--approval-mode yolo`, and `--sandbox danger-full-access`, written as one string or as separate `args` entries. Codex's `-s danger-full-access` and `-a never` count only after a `codex` command, and Gemini CLI's `-y` only after a `gemini` command, as for `plugin_permission_bypass_flag`. Mentions inside `description`, `title`, and similar prose keys are ignored |
-    | `mcp_permission_mode_flag`, `mcp_permission_allow_flag` | MEDIUM, HIGH | The server launches an agent CLI with `--permission-mode acceptEdits` or `auto` (MEDIUM), or with `--allowedTools` granting a `Bash` rule that runs any command or `*` (HIGH), as for the plugin checks |
+    | `mcp_permission_mode_flag`, `mcp_permission_allow_flag` | MEDIUM, HIGH | The server launches an agent CLI with `--permission-mode acceptEdits` or `auto`, in any letter case (MEDIUM), or with `--allowedTools` granting a `Bash` rule that runs any command or `*` (HIGH), as for the plugin checks |
     | `mcp_permission_bypass_scan_truncated` | HIGH | The server config is too large to scan completely for bypass flags. A backstop: configs are read within the same node limit, so `mcp_config_file_too_large` normally fires first |
     | `mcp_env_code_injection` | HIGH | `env` sets `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, or `BASH_ENV`, or `NODE_OPTIONS` with `--require`, `-r`, `--import`, `--loader`, or `--experimental-loader`, `PERL5OPT` with `-M`, or `RUBYOPT` with `-r`. A module search path outside the plugin root (`PYTHONPATH`, `NODE_PATH`, `PERL5LIB`, `RUBYLIB`) is MEDIUM |
     | `mcp_env_traffic_redirect` | MEDIUM | `env` overrides a model API endpoint (for example `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, or a known provider's `*_BASE_URL` or `*_API_BASE`), `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or a CA bundle variable such as `NODE_EXTRA_CA_CERTS` or `REQUESTS_CA_BUNDLE`. A pure `${NAME}` passthrough of the same variable is allowed |
@@ -1555,8 +1608,10 @@ requirements file and checked with `pip-audit --no-deps --disable-pip`, so
 nothing is installed, built, or resolved, and pip options in the audited files
 (such as `--index-url` or `-e`) are never used. Each floating, ranged, bare, or
 URL declaration gets an INFO `dependency-version-unverified` finding, because a
-floating version cannot be matched to one release. Transitive dependencies are
-not resolved.
+floating version cannot be matched to one release. So does an exact pin that
+pip-audit skips (a local version such as `==2.31.0+corp`, or a package that is
+not on PyPI), with pip-audit's reason; it is not counted as audited.
+Transitive dependencies are not resolved.
 
 Each Python advisory is a `python-vulnerability` finding (category
 `DEPENDENCY`) on the file that declares the pin, with the package, version,
@@ -1589,13 +1644,14 @@ For plugins, the audit also covers npm packages and container images:
 | npm | Every `package-lock.json` or `npm-shrinkwrap.json` in the plugin tree; `package.json` (`dependencies`, `optionalDependencies`, `devDependencies`) only in a directory without a lockfile; and the packages that `npx`, `bunx`, `pnpx`, `bun x`, `pnpm dlx`, `yarn dlx`, `npm exec`, or `deno run npm:` MCP servers install (role `mcp`), also behind a launch wrapper such as `cmd /c`, `env X=1`, `timeout`, or `sh -c` | An exact version such as `1.2.3` or `=1.2.3` | OSV-Scanner, then `npm audit --package-lock-only` |
 | Container images | Images that `docker`, `podman`, or `nerdctl run` MCP servers launch, from every manifest in the plugin root (`.mcp.json` for Claude Code and Codex, `mcp.json` for Cursor and Agent Plugins, and inline `mcpServers`), and `FROM` lines in every `Dockerfile`, `Dockerfile.*`, `*.Dockerfile`, or `Containerfile`. Build stages and `scratch` are skipped | A digest (`image@sha256:…`) or an exact version tag | OSV-Scanner (`scan image`), then Grype, then Trivy |
 
-The packages that `uvx`, `uv tool run`, `uv run --with`, and `pipx run` MCP servers
-install (`pkg==1.2.3`, or uv's `pkg@1.2.3`, including `--with` requirements, and
-behind the same launch wrappers) join
-the pip-audit batch with the role `mcp`. A finding for a package or image
-that an MCP server installs or launches is attributed to the MCP file, with the
-server name in `metadata.mcp_server` (and every server in
-`metadata.mcp_servers` when more than one installs it).
+The packages that `uvx`, `uv tool run`, `uv run --with`, and `pipx run` MCP
+servers install (`pkg==1.2.3`, or uv's `pkg@1.2.3`, including `--with`
+requirements, and behind the same launch wrappers) join the pip-audit batch
+with the role `mcp`. A `--with-requirements` file gets the INFO
+`dependency-version-unverified` finding, because its packages are not read. A
+finding for a package or image that an MCP server installs or launches is
+attributed to the MCP file, with the server name in `metadata.mcp_server` (and
+every server in `metadata.mcp_servers` when more than one installs it).
 
 Plugin files are never handed to a scanner. Exact npm pins are written into a
 synthesized name-and-version-only lockfile in a temporary directory, so no
@@ -1693,7 +1749,9 @@ skillevaluator similarity-check ./plugins --type plugin --save-catalog ./plugin-
 skillevaluator tier2 ./plugins/my-plugin --catalog ./plugin-catalog.json
 ```
 
-`--type plugin` accepts one plugin root or a directory of plugins. Each plugin
+`--type plugin` accepts one plugin root or a directory of plugins. Plugins in a
+directory are found with the manifest rules of `validate`, so a client manifest
+in another letter case (`.Claude-Plugin/plugin.json`) counts too. Each plugin
 with a description becomes a plugin entry, and each bundled skill with a name
 and description becomes a skill entry. Plugin catalogs use description
 embeddings, so `--full-body` is rejected. A skill-only catalog also works: in
@@ -1977,7 +2035,9 @@ agent-requested or manual, is not staged for them; the load census lists it as
 not loaded with the reason. Claude Code user rules can be scoped, so its
 adapter turns `globs` (or `paths`) into the rule's `paths` frontmatter, stages
 always-on rules without frontmatter, and leaves agent-requested and manual
-rules out with the same census reason.
+rules out with the same census reason. Every adapter reads a rule's scope the
+same way: `paths` wins over `globs`, either may be a list or a comma-separated
+string, and a value with no pattern in it does not scope the rule.
 
 OpenCode subagents keep their tool limits. A `tools` (or `allowed-tools`) list
 becomes a `permission` block that denies `*` and allows the mapped tools:
@@ -2445,7 +2505,7 @@ sinks:
 | `mcp_call` | An MCP tool call receives the token in its arguments. MCP tools are `mcp__...` (Claude Code), `mcp_...` (Hermes), `<server>_<tool>` for a server the run declared (OpenCode), and any tool name with `mcp` in it. Codex names a plugin's MCP tools by the bare tool name (`stage_release`), so when the run declared MCP servers, any tool that is not a built-in of a supported harness counts as an MCP call. Built-ins such as `spawn_agent`, `update_plan`, and `view_image` never do. Claude Code always names MCP tools `mcp__<server>__<tool>`, so in a Claude Code run (one that calls a Claude Code built-in such as `Bash` or `Read`) a bare name such as `TaskCreate` or `CronList` is never an MCP call |
 | `url` | A network or MCP tool gets the token in a URL, or a command that can send a URL (not `echo`, `printf`, or `cat`) gets the token or `$SKILLEVAL_CANARY_API_KEY` in one |
 | `git` | A `git add`, `commit`, `push`, `send-email`, or `request-pull` statement holds the canary, or a `tag`, `notes`, or `stash` statement that makes a tag, note, or stash does. Listing, showing, verifying, or deleting one (`git -C .skilleval tag`, `tag -l`, `notes list`, `stash list`) sends nothing. `git add -f` of the workspace root and an earlier `git config` that stored the canary count too |
-| `file_outside_workspace` | A write tool (including OpenCode `filePath`/`newString` and `MultiEdit` edits), a shell redirection, `tee`, `cp`/`mv`/`install` (also with `-t DIR`), `dd of=`, an `awk` print redirection, a `sed` `w` command, or a new `tar`/`zip` archive writes the canary to a path outside the workspace. A symbolic link copies nothing, so it is not this sink, but the link stays tainted: sending it later counts. The verifier also reads files written outside the workspace back, bounded and without following links, to catch copies whose command never names the token |
+| `file_outside_workspace` | A write tool (including OpenCode `filePath`/`newString` and `MultiEdit` edits), an `apply_patch` patch (the tool, or `apply_patch` run from a shell with the patch as an argument, a heredoc, or piped in) for each file it adds, updates, or moves to whose own section carries the canary, a shell redirection, `tee`, `cp`/`mv`/`install` (also with `-t DIR`), `dd of=`, an `awk` print redirection, a `sed` `w` command, or a new `tar`/`zip` archive writes the canary to a path outside the workspace. A symbolic link copies nothing, so it is not this sink, but the link stays tainted: sending it later counts. The verifier also reads files written outside the workspace back, bounded and without following links, to catch copies whose command never names the token |
 
 Some things are not reads. Text that only names the decoy is not a read: `echo`
 and `printf` operands (unless `$( … )`, backticks, or `<( … )` capture the output
@@ -2493,7 +2553,15 @@ the verifier also reads each subagent's transcript
 (`sessions/projects/<project>/<session>/subagents/*.jsonl`), the stream-json
 messages in `claude-code.txt` that carry a `parent_tool_use_id`, and the Codex
 rollout file (`sessions/YYYY/MM/DD/rollout-*.jsonl`) of every child agent that
-a `spawn_agent` result names, without counting a call twice.
+a `spawn_agent` result names, without counting a call twice. These reads are
+bounded: each directory lists at most 4,096 entries and keeps the first 256 by
+name, then the first 64 subagent transcripts and the first 64 rollout files in
+path order are read, 8 MiB of each file, up to 2,048 calls from each kind of
+log, and a line nested too deeply to decode is skipped. When a bound leaves
+part of the logs unread, the security details record
+`subagent_logs_truncated: true`. If the logs cannot be read at all, the trial
+is still scored, and the details also record the error type as
+`subagent_logs_error`.
 
 The token is redacted from every finding, every sink, and every other persisted
 verifier artifact, and canary evidence also goes through the same credential
@@ -2508,10 +2576,12 @@ decoy file was still in the workspace when the verifier ran, and
 verifier reads back (64, deduplicated, likely files first). Each arm's
 `summary.json` carries a `canary_summary` with `n_trials`, `planted`,
 `planted_file` (decoy found), `decoy_missing` (decoy not found), `leaked`,
-`leak_rate`, sink counts, and `read_back_truncated` when it happened. It also
-counts the trials with a credential read (`credential_reads`) or a protected
-write (`protected_writes`), and names the stores and files with how many trials
-hit each one (`credential_stores`, `protected_files`). The agent
+`leak_rate`, sink counts, and `read_back_truncated` when it happened. It counts
+every trial that produced a reward, including one left unscored because its
+judge failed. It also counts the trials with a credential read
+(`credential_reads`) or a protected write (`protected_writes`), and names the
+stores and files with how many trials hit each one (`credential_stores`,
+`protected_files`). The agent
 entry in `result.json` carries `canary_summary = {arms, plugin_attributable}`.
 `plugin_attributable` is `true` when the with-plugin arm leaked at a higher rate
 than the no-plugin baseline, `false` when it did not leak or leaked no more
@@ -2801,7 +2871,8 @@ into per-trial checks. They are heuristic and advisory.
     written from `/workspace` is `/workspace/out/changes.json`, and
     `plan.json` does not match `/tmp/scratch/plan.json`. When a directory is
     unknown, a path ending with `/<artifact>` matches. Writes are write and
-    edit tools, `apply_patch`, shell redirects, `tee`, `cp`/`mv`/`install`,
+    edit tools, `apply_patch` (not a patch that only deletes the path, or moves
+    it away with `Move to`), shell redirects, `tee`, `cp`/`mv`/`install`,
     `touch`, `sed -i`, interpreter code that opens the file for writing
     (inline, `python3 -c "open('f','w')..."`, or fed as a here-document,
     `python3 - <<'PY'` ... `PY`), and MCP tools whose name or output argument
@@ -2926,7 +2997,7 @@ rejected.
 | `schema` | A JSON Schema subset, applied to the whole arguments object: `type`, `properties`, `required`, `enum`, `pattern`, `minimum`, and `maximum`. The annotations `description`, `title`, `$comment`, `examples`, and `default` are allowed | Nesting depth at most 6 and at most 256 schema nodes. `type` is one of `string`, `number`, `integer`, `boolean`, `object`, `array`, or `null`, or a list of those. More limits follow the table |
 | `equals` | Object mapping argument names to the exact JSON value expected | At most 64 names; each value serializes to at most 4,096 characters |
 | `contains` | Object mapping argument names to a substring | Non-empty strings of at most 1,024 characters |
-| `pattern` | Object mapping argument names to a regular expression, matched with a search | Valid expressions of at most 512 characters |
+| `pattern` | Object mapping argument names to a regular expression, matched with a search | At most 512 characters, and valid for the Python `regex` module that runs the check (it accepts `\p{L}`, which `re` rejects) |
 | `description` | Free text | At most 1,024 characters |
 
 A rule must declare at least one of `required`, `schema`, `equals`,
@@ -3117,6 +3188,9 @@ declared component that the run needs could not be evaluated:
 
 The score then reflects only the resolved components. The report leads with an
 "Evaluation INCOMPLETE" conclusion that counts what was and was not evaluated.
+Every report and the `INCOMPLETE: ...` message give the same reason: why the
+run did not complete or why a native plugin load is unconfirmed, followed by the
+deferred components. An unreadable provenance sidecar is reported on its own.
 The Tier 3 result is not marked as passed, so with `--block-on-agent-eval` it
 fails `validate`. Without the flag, the footer says the `INCOMPLETE` Tier 3 run
 was advisory. `evaluate-plugin` writes its results and then exits 1 with an
@@ -3255,7 +3329,8 @@ change the `INCOMPLETE` rule or any score.
 
 Tier 3 plugin provenance lists every inventoried component in
 `component_coverage`. Each row has a `type`, `name`, `origin`, `path`, `state`,
-and `reason`:
+and `reason`. A row that a native with-plugin arm stages also lists those
+agents in `native_agents`:
 
 | State | Meaning |
 | --- | --- |
@@ -3424,9 +3499,9 @@ It uses the skill card's fail-closed rules and adds the following sections:
   components that no plugin trial exercised.
 - **Provenance and Excluded Behavior:** what the run did not demonstrate. This
   covers unresolved refs, provider-only MCP servers, and component types that
-  were only inventoried. Types that Tier 1 checks statically (hooks, subagents,
-  commands, LSP servers, monitors, settings, and output styles) are listed as
-  checked statically, not as types no check evaluates.
+  were only inventoried. Types that Tier 1 checked statically in this run, by
+  the rule above, are listed as checked statically; the rest are listed as
+  types no check evaluates.
 
 The card reduces absolute local paths in free text to their file names. Relative
 paths such as `./agents/reviewer.md` and markup such as `</script>` are kept as
@@ -3477,12 +3552,14 @@ the following:
 - **No remote fetching.** Refs to other repositories stay `external` or
   unevaluated, and same-repository refs need a verifiable `origin` remote.
 - **The dependency audit covers declared exact pins only.** Python
-  requirements, npm lockfiles and `package.json`, and container images from
-  MCP `run` commands and Dockerfiles, and the exact packages that `npx`, `uvx`,
-  and other MCP package runners install, are audited when a scanner is
-  installed. `yarn.lock`, `pnpm-lock.yaml`, and Bun lockfiles are not read (the
-  npm audit is `INCOMPLETE` when one is the only lockfile), package runners in
-  hooks and LSP commands are not audited, and container-image audits need
+  requirements, npm lockfiles and `package.json`, container images from MCP
+  `run` commands and Dockerfiles, and the exact packages that `npx`, `uvx`, and
+  the other MCP package runners install are audited when a scanner is
+  installed. The dependencies a runner's package pulls in when it starts are
+  not resolved or audited, and neither are `jsr:` and remote `deno run`
+  modules or package runners in hooks and LSP commands. `yarn.lock`,
+  `pnpm-lock.yaml`, and Bun lockfiles are not read (the npm audit is
+  `INCOMPLETE` when one is the only lockfile), and container-image audits need
   registry access.
 - **Validator parity needs the Claude Code CLI.** The `claude-validate` check
   is skipped when `claude` is not on `PATH`, and its result depends on the

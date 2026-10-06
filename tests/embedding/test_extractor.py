@@ -217,6 +217,16 @@ class TestDiscoverAndExtract:
         names = {e.name for e in entries}
         assert names == {"skill-a", "skill-b"}
 
+    def test_skills_are_extracted_in_posix_folder_path_order(self, tmp_path: Path) -> None:
+        """Folders sort as POSIX path strings: a-b before a/b (part by part, as paths compare, a/b comes first)."""
+        for folder, name in (("a/b", "nested"), ("a-b", "dashed")):
+            (tmp_path / folder).mkdir(parents=True)
+            (tmp_path / folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: The {name} skill\n---\n")
+
+        entries = discover_and_extract(tmp_path, "skill")
+
+        assert [entry.name for entry in entries] == ["dashed", "nested"]
+
     def test_openclaw_compatibility_alias_does_not_abort_skill_discovery(self, tmp_path: Path, write_skill) -> None:
         skill_dir = write_skill(tmp_path, "autoreview", "Review changes with multiple agents")
         (skill_dir / "AGENTS.md").write_text("# Shared agent instructions\n")

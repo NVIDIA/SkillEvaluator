@@ -144,7 +144,6 @@ def test_a_plugin_without_member_skills_is_warned_up_front() -> None:
         include_skills=(),
         unresolved_mcp_servers=(),
         runnable_mcp_servers=("docs",),
-        rule_refs=(),
         dataset_case_count=2,
         cross_component_case_count=1,
     )

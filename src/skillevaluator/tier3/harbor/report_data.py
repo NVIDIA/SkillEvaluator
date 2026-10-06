@@ -17,6 +17,7 @@ import math
 import os
 import stat
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -24,9 +25,10 @@ from typing import Any
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRICS,
     LEGACY_METRICS,
-    NOT_APPLICABLE_ELIGIBLE_METRICS,
     metric_set_for_reward,
+    not_applicable_list,
 )
+from skillevaluator.tier3.harbor.stats import STATISTICS_BLOCKS
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +46,52 @@ _MAX_STAGED_PATHS_SCANNED = 32_768
 _MAX_DATASET_RECORDS = 4096
 _MAX_DIAGNOSTIC_REASONS = 8
 _INVALID_JSON = object()
-_STATISTICS_KEYS = (
-    "lift_uncertainty",
-    "reliability",
-    "cost",
-    "token_efficiency",
-    "context_cost_measured",
-    "integration_completeness",
+
+
+@dataclass(frozen=True)
+class _ReportArm:
+    """Where one evaluation arm's collected results live, and the agent fields they fill."""
+
+    # Results subdirectory holding the arm's summary.json and trials/.
+    directory: str
+    # Condition key; the arm's metric scores load under this key too.
+    key: str
+    # Prefix of the arm's execution errors.
+    label: str
+    # Agent fields for the arm's scored logical trial count, its collected
+    # reward-row count and its saved reward rows.
+    trial_count_key: str
+    reward_row_count_key: str
+    rewards_key: str
+    # A report-only arm never decides the agent's execution status.
+    report_only: bool = False
+
+    @property
+    def score_fields(self) -> tuple[str, ...]:
+        """Agent fields holding the arm's scores; they are cleared unless the arm succeeded."""
+        key = self.key
+        return (key, f"custom_{key}", f"overall_{key}", f"dimensions_{key}", f"pass_{key}", self.rewards_key)
+
+
+_REPORT_ARMS = (
+    _ReportArm("with-skill", "with_skill", "With skill", "num_trials", "num_reward_rows", "rewards"),
+    _ReportArm(
+        "without-skill",
+        "without_skill",
+        "Without skill",
+        "num_trials_baseline",
+        "num_reward_rows_baseline",
+        "rewards_baseline",
+    ),
+    _ReportArm(
+        "sum-of-parts",
+        "sum_of_parts",
+        "Sum of parts",
+        "num_trials_sum_of_parts",
+        "num_reward_rows_sum_of_parts",
+        "rewards_sum_of_parts",
+        report_only=True,
+    ),
 )
 
 DATASET_SNAPSHOT_MAX_BYTES = _MAX_JSON_BYTES
@@ -559,13 +600,6 @@ def logical_trial_reward_groups(rewards: list[dict[str, Any]]) -> list[list[dict
     return list(groups.values())
 
 
-def _not_applicable_metric_list(value: Any) -> list[str]:
-    """Return the judged metrics a summary recorded as N/A for its whole arm."""
-    if not isinstance(value, list):
-        return []
-    return [metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric in value]
-
-
 def _nonnegative_counter(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
@@ -672,13 +706,9 @@ def load_agent_data(
         condition_execution: dict[str, dict[str, Any]] = {}
         canary_arms: dict[str, dict[str, Any]] = {}
 
-        variants = {
-            "with-skill": "with_skill",
-            "without-skill": "without_skill",
-            "sum-of-parts": "sum_of_parts",
-        }
-        for variant, key in variants.items():
-            condition_dir = agent_dir / variant
+        for arm in _REPORT_ARMS:
+            key = arm.key
+            condition_dir = agent_dir / arm.directory
             if not _is_safe_directory(condition_dir, results_dir):
                 continue
             summary = condition_dir / "summary.json"
@@ -704,7 +734,7 @@ def load_agent_data(
                     dimension_key = f"dimensions_{key}"
                     if "dimensions" in data:
                         agent_info[dimension_key] = data.get("dimensions", {})
-                    not_applicable = _not_applicable_metric_list(data.get("not_applicable_metrics"))
+                    not_applicable = not_applicable_list(data.get("not_applicable_metrics"))
                     if not_applicable:
                         agent_info[f"not_applicable_{key}"] = not_applicable
                     pass_key = f"pass_{key}"
@@ -725,14 +755,9 @@ def load_agent_data(
                         status = "unknown"
                     errors = data.get("execution_errors")
                     condition_errors = [str(error) for error in errors] if isinstance(errors, list) else []
-                    label = {
-                        "with-skill": "With skill",
-                        "without-skill": "Without skill",
-                        "sum-of-parts": "Sum of parts",
-                    }[variant]
                     job_failure = data.get("job_failure")
                     if job_failure:
-                        condition_errors.append(f"{label} aggregate job: {job_failure}")
+                        condition_errors.append(f"{arm.label} aggregate job: {job_failure}")
                     trial_failures = data.get("trial_failures")
                     if isinstance(trial_failures, list):
                         for failure in trial_failures:
@@ -740,7 +765,7 @@ def load_agent_data(
                                 continue
                             trial = failure.get("trial") or "unknown"
                             reason = failure.get("reason") or "Unknown Harbor trial failure"
-                            condition_errors.append(f"{label} trial {trial}: {reason}")
+                            condition_errors.append(f"{arm.label} trial {trial}: {reason}")
                     condition_execution[key] = {
                         "execution_status": status,
                         "execution_errors": condition_errors,
@@ -748,26 +773,16 @@ def load_agent_data(
                         "expected_attempts": _nonnegative_counter(data.get("expected_attempts")),
                         "scored_attempts": _nonnegative_counter(data.get("scored_attempts")),
                     }
-                    count_key = {
-                        "with-skill": "num_trials",
-                        "without-skill": "num_trials_baseline",
-                        "sum-of-parts": "num_trials_sum_of_parts",
-                    }[variant]
                     num_trials = data.get("num_trials")
                     if isinstance(num_trials, int) and not isinstance(num_trials, bool) and num_trials >= 0:
-                        agent_info[count_key] = num_trials
-                    reward_row_count_key = {
-                        "with-skill": "num_reward_rows",
-                        "without-skill": "num_reward_rows_baseline",
-                        "sum-of-parts": "num_reward_rows_sum_of_parts",
-                    }[variant]
+                        agent_info[arm.trial_count_key] = num_trials
                     num_reward_rows = data.get("num_reward_rows")
                     if (
                         isinstance(num_reward_rows, int)
                         and not isinstance(num_reward_rows, bool)
                         and num_reward_rows >= 0
                     ):
-                        agent_info[reward_row_count_key] = num_reward_rows
+                        agent_info[arm.reward_row_count_key] = num_reward_rows
 
         if canary_arms:
             from skillevaluator.tier3.eval_core.runtime_evidence import canary_arm_comparison
@@ -800,30 +815,16 @@ def load_agent_data(
         if statistics_file.exists():
             statistics = _load_bounded_json(statistics_file, agent_diagnostics, artifact="statistics")
             if isinstance(statistics, dict):
-                for key in _STATISTICS_KEYS:
-                    if isinstance(statistics.get(key), dict):
-                        agent_info[key] = statistics[key]
+                for block in STATISTICS_BLOCKS:
+                    if isinstance(statistics.get(block), dict):
+                        agent_info[block] = statistics[block]
 
-        for variant_key, variant_dir_name in (
-            ("rewards", "with-skill"),
-            ("rewards_baseline", "without-skill"),
-            ("rewards_sum_of_parts", "sum-of-parts"),
-        ):
+        for arm in _REPORT_ARMS:
             trial_list: list[dict[str, Any]] = []
-            count_key = {
-                "rewards": "num_trials",
-                "rewards_baseline": "num_trials_baseline",
-                "rewards_sum_of_parts": "num_trials_sum_of_parts",
-            }[variant_key]
-            reward_row_count_key = {
-                "rewards": "num_reward_rows",
-                "rewards_baseline": "num_reward_rows_baseline",
-                "rewards_sum_of_parts": "num_reward_rows_sum_of_parts",
-            }[variant_key]
-            expected_logical_trials = agent_info.get(count_key)
-            expected_reward_rows = agent_info.get(reward_row_count_key)
+            expected_logical_trials = agent_info.get(arm.trial_count_key)
+            expected_reward_rows = agent_info.get(arm.reward_row_count_key)
             rewards_complete = isinstance(expected_logical_trials, int)
-            trials_dir = agent_dir / variant_dir_name / "trials"
+            trials_dir = agent_dir / arm.directory / "trials"
             if _is_safe_directory(trials_dir, results_dir):
                 try:
                     trial_dirs, trials_truncated, trial_scan_truncated = _bounded_smallest(
@@ -841,14 +842,14 @@ def load_agent_data(
                     _record_truncation(
                         agent_diagnostics,
                         code="trial_limit",
-                        artifact=variant_dir_name,
+                        artifact=arm.directory,
                         limit=_MAX_TRIALS_PER_CONDITION,
                     )
                 if trial_scan_truncated:
                     _record_truncation(
                         agent_diagnostics,
                         code="trial_scan_limit",
-                        artifact=variant_dir_name,
+                        artifact=arm.directory,
                         limit=_MAX_TRIAL_PATHS_SCANNED,
                     )
                 for trial_dir in trial_dirs:
@@ -890,14 +891,16 @@ def load_agent_data(
                 rewards_complete = False
             if isinstance(expected_reward_rows, int) and expected_reward_rows != len(trial_list):
                 rewards_complete = False
-            agent_info[variant_key] = trial_list
-            agent_info[f"{variant_key}_complete"] = rewards_complete
+            agent_info[arm.rewards_key] = trial_list
+            agent_info[f"{arm.rewards_key}_complete"] = rewards_complete
 
         if "with_skill" not in agent_info:
             continue
 
         active_conditions = [
-            condition_execution[key] for key in ("with_skill", "without_skill") if key in condition_execution
+            condition_execution[arm.key]
+            for arm in _REPORT_ARMS
+            if not arm.report_only and arm.key in condition_execution
         ]
         execution_errors = [
             error for condition in active_conditions for error in condition.get("execution_errors", []) if error
@@ -926,39 +929,13 @@ def load_agent_data(
             }
         )
 
-        condition_quality_fields = {
-            "with_skill": (
-                "with_skill",
-                "custom_with_skill",
-                "overall_with_skill",
-                "dimensions_with_skill",
-                "pass_with_skill",
-                "rewards",
-            ),
-            "without_skill": (
-                "without_skill",
-                "custom_without_skill",
-                "overall_without_skill",
-                "dimensions_without_skill",
-                "pass_without_skill",
-                "rewards_baseline",
-            ),
-            "sum_of_parts": (
-                "sum_of_parts",
-                "custom_sum_of_parts",
-                "overall_sum_of_parts",
-                "dimensions_sum_of_parts",
-                "pass_sum_of_parts",
-                "rewards_sum_of_parts",
-            ),
-        }
-        for condition, fields in condition_quality_fields.items():
-            condition_status = _condition_status(agent_info, condition)
+        for arm in _REPORT_ARMS:
+            condition_status = _condition_status(agent_info, arm.key)
             if condition_status == "succeeded":
                 continue
-            agent_info.pop(f"not_applicable_{condition}", None)
-            condition_info = condition_execution.get(condition, {})
-            for field in fields:
+            agent_info.pop(f"not_applicable_{arm.key}", None)
+            condition_info = condition_execution.get(arm.key, {})
+            for field in arm.score_fields:
                 if field.startswith("pass_") and condition_status in {"failed", "unknown"}:
                     agent_info[field] = {
                         "attempts_used": _nonnegative_counter(condition_info.get("scored_attempts")),

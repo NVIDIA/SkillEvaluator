@@ -35,6 +35,7 @@ from skillevaluator.tier3.harbor.metrics import (
     dimension_scores,
     metric_is_not_applicable,
     not_applicable_counts,
+    not_applicable_list,
     not_applicable_metrics,
     overall_score,
 )
@@ -238,6 +239,14 @@ def test_arm_averages_and_counts_exclude_not_applicable_trials() -> None:
     }
     assert not_applicable_metrics(rewards, metrics) == ["behavior_check"]
     assert not_applicable_counts(rewards, metrics) == {"accuracy": 1, "goal_accuracy": 1, "behavior_check": 2}
+
+
+def test_stored_not_applicable_list_keeps_judged_metrics_in_canonical_order() -> None:
+    assert not_applicable_list(["behavior_check", "security", "accuracy", 7, None]) == ["accuracy", "behavior_check"]
+    assert not_applicable_list(("goal_accuracy",)) == ["goal_accuracy"]
+    assert not_applicable_list("accuracy") == []
+    assert not_applicable_list({"accuracy": True}) == []
+    assert not_applicable_list(None) == []
 
 
 def test_dimension_scores_renormalize_over_applicable_sources() -> None:
@@ -577,6 +586,15 @@ def test_report_data_loads_arm_not_applicable_metrics(partial_run: tuple[Path, d
 
     assert agents["opencode"]["not_applicable_with_skill"] == ["behavior_check"]
     assert agents["opencode"]["not_applicable_without_skill"] == ["behavior_check"]
+
+
+def test_report_reads_an_arms_not_applicable_list_with_the_loaders_reader() -> None:
+    """The report reads the stored list with not_applicable_list, as report_data does (a tuple counts too)."""
+    from skillevaluator.evaluation.tier3_report import _arm_not_applicable
+
+    info = {"not_applicable_with_skill": ("behavior_check", "accuracy"), "not_applicable_without_skill": "accuracy"}
+    assert _arm_not_applicable(info, "with_skill") == ["accuracy", "behavior_check"]
+    assert _arm_not_applicable(info, "without_skill") == []
 
 
 def _render_cli(result: dict[str, Any]) -> str:

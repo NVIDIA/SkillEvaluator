@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -245,6 +246,25 @@ def test_integration_baseline_with_members_gets_signals(tmp_path: Path) -> None:
     assert set(results["agents"][AGENT]["plugin_signals_summary"]) == {"with_skill", "without_skill", "sum_of_parts"}
     baseline = _trial_reward(tmp_path, "plugin", "without-skill")["plugin_signals"]
     assert baseline["activation_coverage"]["declared"] == ["skill:alpha", "skill:beta"]
+
+
+def test_each_trial_hook_census_is_read_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scored-trial signals and the with-plugin every-trial summary share one read of a trial's census."""
+    from skillevaluator.tier3.harbor import collector
+
+    reads: Counter[str] = Counter()
+    read_hook_census = collector.read_hook_census
+
+    def counted(trial_root: Path) -> dict[str, Any]:
+        reads[f"{trial_root.parent.name}/{trial_root.name}"] += 1
+        return read_hook_census(trial_root)
+
+    monkeypatch.setattr(collector, "read_hook_census", counted)
+
+    results = _collect(tmp_path, _jobs(tmp_path), "plugin", plugin_signals=_context())
+
+    assert results["agents"][AGENT]["plugin_signals_summary"]["with_skill"]["hook_census"]["n_trials"] == 1
+    assert reads == {f"demo-{AGENT}-with/case-1__AbCd123": 1, f"demo-{AGENT}-sumofparts/case-1__AbCd123": 1}
 
 
 def test_missing_trajectory_is_counted_not_fabricated(tmp_path: Path) -> None:

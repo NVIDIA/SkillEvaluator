@@ -37,6 +37,7 @@ and ``.env`` files are checked, and ``metadata['plugin']`` gains
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -59,10 +60,12 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.plugin import PluginManifest
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.plugin_formats import (
+    DEFAULT_SKILLS_DIR,
     agent_plugins_schema_version,
     declared_value_replaces_default,
     manifest_syntax,
     normalized_component_manifest,
+    parse_manifest_text,
     profile_for,
     validate_manifest_fields,
 )
@@ -70,6 +73,7 @@ from skillevaluator.plugin_manifest import (
     CLAUDE_DEPENDENCY_MAX_ENTRIES,
     ClaudeMarketplace,
     PluginManifestCandidate,
+    PluginManifestFile,
     PluginManifestLocation,
     PluginManifestPathError,
     canonical_manifest_relative,
@@ -78,12 +82,12 @@ from skillevaluator.plugin_manifest import (
     locate_plugin_manifest,
     manifest_relative_path,
 )
+from skillevaluator.plugin_paths import PLUGIN_CATEGORY
 from skillevaluator.utils.secure_fs import SecurePathError
 from skillevaluator.utils.structured_data import (
     StructuredDataLimitError,
     StructuredDataSyntaxError,
     load_bounded_json,
-    load_bounded_yaml,
 )
 from skillevaluator.validators.base import ValidatorBase
 from skillevaluator.validators.frontmatter_parser import format_validation_location
@@ -94,7 +98,177 @@ if TYPE_CHECKING:
     from skillevaluator.validators.policy import ValidationPolicy
 
 logger = get_logger(__name__)
+VALIDATOR_NAME = "Plugin Schema & Bundle References"
 MAX_PLUGIN_SCHEMA_FINDINGS = 100
+# Most severe first.
+_SEVERITY_ORDER = (Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO)
+
+
+def _schema_finding(
+    check_name: str,
+    *,
+    message: str,
+    file_path: Path | str,
+    suggestion: str,
+    severity: Severity = Severity.HIGH,
+    metadata: dict[str, Any] | None = None,
+) -> Finding:
+    """One ``PLUGIN_SCHEMA`` finding, HIGH unless *severity* says otherwise."""
+    return Finding(
+        category=PLUGIN_CATEGORY,
+        severity=severity,
+        check_name=check_name,
+        message=message,
+        file_path=str(file_path),
+        suggestion=suggestion,
+        metadata=metadata or {},
+    )
+
+
+def _policy_severity(finding: Finding, policy: ValidationPolicy | None) -> Severity:
+    """The severity *finding* ends up with once the active *policy* is applied to the result."""
+    if policy is None:
+        return finding.severity
+    return policy.severity_for(finding.category, finding.check_name, finding.severity)
+
+
+def _add_capped(
+    result: ValidationResult,
+    findings: list[Finding],
+    *,
+    policy: ValidationPolicy | None,
+    source: str,
+    noun: str,
+    file_path: Path | str,
+    suggestion: str,
+) -> None:
+    """Add at most ``MAX_PLUGIN_SCHEMA_FINDINGS`` findings, the most severe, then one finding that counts the rest.
+
+    The cap bounds report size. Severities are the ones the active *policy*
+    gives: the policy is applied only after validation, and never sees the
+    findings left out here. Past the cap the findings are ranked most severe
+    first (truncation notes before the other findings of their severity, then
+    in their order), so advisory findings never push a blocking one out; the
+    reported ones keep their order. The rest are counted by a HIGH
+    ``schema_errors_truncated`` when one of them blocks, and otherwise by a LOW
+    ``schema_findings_truncated`` note, so findings past the cap that are all
+    MEDIUM or lower never fail validation on their own. The message reads
+    "<source> produced <count> <noun>; only the <cap> most severe are
+    reported" and names the highest severity among the unreported findings.
+    """
+    if len(findings) <= MAX_PLUGIN_SCHEMA_FINDINGS:
+        for finding in findings:
+            result.add_finding(finding)
+        return
+    severities = [_policy_severity(finding, policy) for finding in findings]
+
+    def priority(index: int) -> tuple[int, int, int]:
+        note = findings[index].check_name.endswith("_truncated")
+        return (_SEVERITY_ORDER.index(severities[index]), 0 if note else 1, index)
+
+    ranked = sorted(range(len(findings)), key=priority)
+    reported = set(ranked[:MAX_PLUGIN_SCHEMA_FINDINGS])
+    for index, finding in enumerate(findings):
+        if index in reported:
+            result.add_finding(finding)
+    unreported = ranked[MAX_PLUGIN_SCHEMA_FINDINGS:]
+    highest = severities[unreported[0]]  # the ranking is most severe first
+    blocking = highest.is_error()
+    result.add_finding(
+        _schema_finding(
+            "schema_errors_truncated" if blocking else "schema_findings_truncated",
+            message=(
+                f"{source} produced {len(findings)} {noun}; only the {MAX_PLUGIN_SCHEMA_FINDINGS} most severe are "
+                f"reported. The most severe of the {len(unreported)} not reported is {highest.value.upper()}."
+            ),
+            file_path=file_path,
+            suggestion=suggestion,
+            severity=Severity.HIGH if blocking else Severity.LOW,
+            metadata={
+                "actual": len(findings),
+                "reported": MAX_PLUGIN_SCHEMA_FINDINGS,
+                "highest_unreported_severity": highest.value,
+            },
+        )
+    )
+
+
+def _unsafe_read_finding(manifest: PluginManifestFile, exc: PluginManifestPathError, *, subject: str) -> Finding:
+    """HIGH ``manifest_unsafe``: the discovered *subject* is now a link, a special file, or another inode."""
+    return _schema_finding(
+        "manifest_unsafe",
+        message=f"Could not securely read {subject}: {exc}",
+        file_path=manifest.declared_path,
+        suggestion="Replace links/hardlinks/special manifests with one regular file inside the plugin root.",
+    )
+
+
+@dataclass(frozen=True)
+class _ManifestSyntax:
+    """How the selected manifest of one syntax is read, and the findings its load problems produce."""
+
+    encoding: str
+    # Clients read their JSON manifests whatever the size or encoding, so such a
+    # manifest is read again leniently. Only SkillEvaluator reads its own YAML,
+    # so its own limits apply.
+    read_leniently: bool
+    # How messages name the manifest, and the name of its syntax.
+    subject: str
+    language: str
+    complexity_suggestion: str
+    invalid_check: str
+    invalid_suggestion: str
+    not_mapping_check: str
+    not_mapping_message: str
+    not_mapping_suggestion: str
+
+
+# Keyed by plugin_formats.manifest_syntax; "{filename}" is the manifest's root-relative path.
+_MANIFEST_SYNTAXES: dict[str, _ManifestSyntax] = {
+    "yaml": _ManifestSyntax(
+        # The YAML parser skips a leading byte-order mark itself.
+        encoding="utf-8",
+        read_leniently=False,
+        subject="Plugin manifest",
+        language="YAML",
+        complexity_suggestion="Reduce manifest nesting, collection sizes, or YAML aliases.",
+        invalid_check="manifest_invalid_yaml",
+        invalid_suggestion="Fix the YAML syntax in the plugin manifest.",
+        not_mapping_check="manifest_not_mapping",
+        not_mapping_message="Plugin manifest must be a non-empty YAML mapping.",
+        not_mapping_suggestion="Populate the manifest with at least name, author, and a dependency.",
+    ),
+    "json": _ManifestSyntax(
+        encoding="utf-8-sig",
+        read_leniently=True,
+        subject="Contained plugin manifest",
+        language="JSON",
+        complexity_suggestion="Reduce JSON nesting or collection sizes in {filename}.",
+        invalid_check="manifest_invalid_json",
+        invalid_suggestion="Fix the JSON syntax in {filename}.",
+        not_mapping_check="manifest_not_object",
+        not_mapping_message="Contained plugin manifest must be a non-empty JSON object.",
+        not_mapping_suggestion="Populate {filename} with at least a non-empty 'name'.",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class _LoadedManifest:
+    """The selected manifest, read and parsed once per validation (see ``_load_manifest``)."""
+
+    # The mapping the strict, bounded read parsed to, even an empty one or one
+    # that fails validation; None when the strict read or parse failed. The
+    # manifest declaration row and the bundle-reference inventory use it.
+    parsed: dict[str, Any] | None = None
+    # What validation continues with: the strict mapping when it is not empty,
+    # or, after manifest_unreadable, what the lenient read of a client manifest
+    # parsed to (readable is then False). None after any other load problem.
+    data: dict[str, Any] | None = None
+    readable: bool = False
+    # The text of a numeric YAML version ("1.10", which YAML reads as 1.1);
+    # parsed and data hold this text in place of the number.
+    version_literal: str | None = None
 
 
 class PluginSchemaValidator(ValidatorBase):
@@ -115,7 +289,7 @@ class PluginSchemaValidator(ValidatorBase):
 
     @property
     def name(self) -> str:
-        return "Plugin Schema & Bundle References"
+        return VALIDATOR_NAME
 
     @property
     def description(self) -> str:
@@ -138,31 +312,20 @@ class PluginSchemaValidator(ValidatorBase):
                     "Replace linked, reparse-point, or special bundled plugin paths with regular files and "
                     "directories contained by the plugin root."
                 )
-            result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name=check_name,
-                    message=message,
-                    file_path=str(path),
-                    suggestion=suggestion,
-                )
-            )
+            result.add_finding(_schema_finding(check_name, message=message, file_path=path, suggestion=suggestion))
             return result
         if located is None:
             if self._inventory_manifestless(path, result):
                 return result
             result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="manifest_missing",
+                _schema_finding(
+                    "manifest_missing",
                     message=(
                         "No plugin manifest found. Expected one of "
                         f"{', '.join(PLUGIN_MANIFEST_RELATIVE_PATHS)} at the plugin root. A root plugin.json is an "
                         "Agent Plugins manifest only when it declares an https://agent-plugins.org/schemas/ $schema."
                     ),
-                    file_path=str(path),
+                    file_path=path,
                     suggestion=(
                         "Add an agent_plugin.yaml (or agent_plugin.yml), a .claude-plugin/, .codex-plugin/, or "
                         ".cursor-plugin/ plugin.json, or an Agent Plugins root plugin.json, at the plugin root."
@@ -176,13 +339,14 @@ class PluginSchemaValidator(ValidatorBase):
         self._stamp_manifest_metadata(located.manifest_filename, root, manifest_type, result)
         self._report_case_variants(located, result)
 
+        loaded = self._load_manifest(located, result)
         validated_manifest: dict[str, Any] | None = None
         contained_data: dict[str, Any] | None = None
         manifest_valid = True
         if manifest_type in PLUGIN_CONTAINED_MANIFEST_TYPES:
-            contained_data, manifest_valid = self._validate_contained_manifest(located, result)
+            contained_data, manifest_valid = self._validate_contained_manifest(located, loaded, result)
         else:
-            validated_manifest = self._validate_bundle_manifest(located, result)
+            validated_manifest = self._validate_bundle_manifest(located, loaded, result)
 
         # A manifest error must not hide problems in skills bundled alongside it.
         replaced_by = self._skills_dir_replaced_by(manifest_type, contained_data)
@@ -191,9 +355,13 @@ class PluginSchemaValidator(ValidatorBase):
             self._resolve_dependencies(located, validated_manifest, result)
         elif manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE and contained_data is not None:
             self._resolve_claude_dependencies(located, contained_data, result)
-        additional = self._record_manifest_declarations(located, result)
+        additional = self._record_manifest_declarations(located, loaded.parsed, result)
         inventory = self._inventory_components(
-            located, contained_data, result, additional, manifest_valid=manifest_valid
+            located,
+            contained_data if located.contained else loaded.parsed,
+            result,
+            additional,
+            manifest_valid=manifest_valid,
         )
         self._validate_inventory_skills(inventory, root, result)
         return result
@@ -213,16 +381,14 @@ class PluginSchemaValidator(ValidatorBase):
             canonical_path = canonical_manifest_relative(item.secure_file.relative_path)
             canonical = canonical_path.as_posix() if canonical_path is not None else item.manifest_filename
             result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="manifest_case_variant",
+                _schema_finding(
+                    "manifest_case_variant",
                     message=(
                         f"{item.manifest_filename} is a case variant of {canonical}. Clients on a case-insensitive "
                         f"filesystem (the macOS default) load it as {canonical}, and clients on a case-sensitive "
                         "filesystem ignore it, so the plugin differs by platform"
                     ),
-                    file_path=str(item.declared_path),
+                    file_path=item.declared_path,
                     suggestion=f"Rename it to exactly {canonical}.",
                     metadata={"manifest_filename": item.manifest_filename, "canonical": canonical},
                 )
@@ -231,7 +397,7 @@ class PluginSchemaValidator(ValidatorBase):
     def _inventory_components(
         self,
         location: PluginManifestLocation,
-        contained_data: dict[str, Any] | None,
+        manifest: dict[str, Any] | None,
         result: ValidationResult,
         additional: list[tuple[str, str, dict[str, Any] | None]] | None = None,
         *,
@@ -239,6 +405,8 @@ class PluginSchemaValidator(ValidatorBase):
     ) -> PluginInventory:
         """Inventory declared + packaged components and run the static component checks.
 
+        ``manifest`` is the selected manifest's data: what validation accepted
+        for a contained manifest, the parsed mapping for ``agent_plugin.yaml``.
         Adds the MCP (all ``mcpServers`` forms and the root ``.mcp.json``),
         component-path, shipped-settings, and ``.env`` findings, then stamps
         ``component_inventory`` / ``mcp`` / ``context_cost`` into
@@ -247,10 +415,9 @@ class PluginSchemaValidator(ValidatorBase):
         """
         # Imported lazily: plugin_components imports validators.mcp_static, and the
         # validators package imports this module at package-import time.
-        from skillevaluator.plugin_components import attribute_findings, build_plugin_inventory, manifest_rel_for
+        from skillevaluator.plugin_components import attribute_findings, build_plugin_inventory
 
         contained = location.contained
-        manifest = contained_data if contained else self._bundle_manifest_data(location)
         root = location.secure_file.root
         allowed_hosts = self.policy.mcp_allowed_private_hosts if self.policy is not None else ()
         hook_allowed_urls = self.policy.hook_allowed_urls if self.policy is not None else ()
@@ -258,7 +425,7 @@ class PluginSchemaValidator(ValidatorBase):
             root,
             manifest,
             contained=contained,
-            manifest_rel=manifest_rel_for(location.path, location.root),
+            manifest_rel=location.manifest_filename,
             allowed_private_hosts=allowed_hosts,
             hook_allowed_urls=hook_allowed_urls,
             manifest_type=location.manifest_type,
@@ -276,13 +443,12 @@ class PluginSchemaValidator(ValidatorBase):
                 from skillevaluator.validators.endpoint_resolution import INCOMPLETE_SCAN
 
                 result.mark_scan_incomplete(INCOMPLETE_SCAN)
-        self._report_component_findings(findings, result, str(location.path))
-        if contained and contained_data is not None:
-            blocking_mcp = [
-                finding
+        self._report_component_findings(findings, result, location.path)
+        if contained and manifest is not None:
+            blocking_mcp = any(
+                finding.category == MCP_CATEGORY and _policy_severity(finding, self.policy).is_error()
                 for finding in findings
-                if finding.category == MCP_CATEGORY and finding.severity in (Severity.CRITICAL, Severity.HIGH)
-            ]
+            )
             if not blocking_mcp and manifest_valid:
                 name = result.metadata.get("plugin", {}).get("name", "")
                 profile = profile_for(location.manifest_type)
@@ -298,46 +464,18 @@ class PluginSchemaValidator(ValidatorBase):
             result.metadata["plugin"]["endpoint_resolution"] = endpoint_resolution
         return inventory
 
-    @staticmethod
-    def _report_component_findings(findings: list[Finding], result: ValidationResult, file_path: str) -> None:
-        """Add the component findings, at most ``MAX_PLUGIN_SCHEMA_FINDINGS``, keeping every blocking one first.
-
-        The cap bounds report size. It keeps CRITICAL and HIGH findings before
-        any MEDIUM, LOW, or INFO one (and truncation notes before other notes
-        of their severity), so many advisory findings never push a blocking one
-        out, and never fail Tier 1 on their own. The HIGH ``schema_errors_truncated``
-        is added only when blocking findings were dropped; dropped advisory
-        findings get a LOW ``schema_findings_truncated`` note.
-        """
-        blocking = {Severity.CRITICAL, Severity.HIGH}
-        rank = {Severity.CRITICAL: 0, Severity.HIGH: 0, Severity.MEDIUM: 1, Severity.LOW: 2, Severity.INFO: 3}
-
-        def priority(index: int) -> tuple[int, int, int]:
-            finding = findings[index]
-            return (rank.get(finding.severity, 3), 0 if finding.check_name.endswith("_truncated") else 1, index)
-
-        kept = set(sorted(range(len(findings)), key=priority)[:MAX_PLUGIN_SCHEMA_FINDINGS])
-        for index, finding in enumerate(findings):
-            if index in kept:
-                result.add_finding(finding)
-        dropped = [finding for index, finding in enumerate(findings) if index not in kept]
-        if not dropped:
-            return
-        dropped_blocking = any(finding.severity in blocking for finding in dropped)
-        result.add_finding(
-            Finding(
-                category="PLUGIN_SCHEMA",
-                severity=Severity.HIGH if dropped_blocking else Severity.LOW,
-                check_name="schema_errors_truncated" if dropped_blocking else "schema_findings_truncated",
-                message=(
-                    f"Plugin component validation produced {len(findings)} findings; only "
-                    f"{MAX_PLUGIN_SCHEMA_FINDINGS} are reported"
-                    + ("." if dropped_blocking else f" (the {len(dropped)} not shown are MEDIUM or lower).")
-                ),
-                file_path=file_path,
-                suggestion="Fix the reported plugin component and MCP declaration errors, then rerun validation.",
-                metadata={"actual": len(findings), "reported": MAX_PLUGIN_SCHEMA_FINDINGS},
-            )
+    def _report_component_findings(
+        self, findings: list[Finding], result: ValidationResult, file_path: Path | str
+    ) -> None:
+        """Add the component findings through the reporting cap (see :func:`_add_capped`)."""
+        _add_capped(
+            result,
+            findings,
+            policy=self.policy,
+            source="Plugin component validation",
+            noun="findings",
+            file_path=file_path,
+            suggestion="Fix the reported plugin component and MCP declaration errors, then rerun validation.",
         )
 
     @staticmethod
@@ -401,20 +539,19 @@ class PluginSchemaValidator(ValidatorBase):
         result.metadata["plugin_mode"] = PLUGIN_CONTAINED_MODE
         result.metadata["plugin"] = {"manifest_filename": None, "root": str(root), "manifestless": True}
         result.add_finding(
-            Finding(
-                category="PLUGIN_SCHEMA",
-                severity=Severity.MEDIUM,
-                check_name="manifest_missing",
+            _schema_finding(
+                "manifest_missing",
                 message=(
                     "No plugin manifest found, but the folder ships Claude Code plugin components in their default "
                     f"locations ({', '.join(markers)}). Claude Code --plugin-dir loads it as a plugin named after the "
                     "folder; Codex and Cursor do not load it. Its components are checked as Claude Code loads them"
                 ),
-                file_path=str(path),
+                file_path=path,
                 suggestion=(
                     "Add .claude-plugin/plugin.json (and .codex-plugin/ or .cursor-plugin/ manifests for other "
                     "clients) so the plugin has an explicit name and version."
                 ),
+                severity=Severity.MEDIUM,
                 metadata={"markers": markers},
             )
         )
@@ -430,7 +567,7 @@ class PluginSchemaValidator(ValidatorBase):
             hook_allowed_urls=hook_allowed_urls,
             manifestless=True,
         )
-        self._report_component_findings(list(inventory.findings), result, str(path))
+        self._report_component_findings(list(inventory.findings), result, path)
         attribute_findings(inventory.components, result.findings, root)
         result.metadata["plugin"].update(inventory.metadata())
         self._validate_inventory_skills(inventory, root, result)
@@ -438,17 +575,18 @@ class PluginSchemaValidator(ValidatorBase):
 
     @staticmethod
     def _resolve_endpoints(
-        inventory: Any,
+        inventory: PluginInventory,
         root: Path,
         allowed_hosts: tuple[str, ...],
         hook_allowed_urls: tuple[str, ...],
     ) -> tuple[dict[str, Any], list[Finding]]:
         """Opt-in DNS + single-HEAD redirect checks for MCP URLs (and OAuth metadata URLs) and HTTP hooks.
 
-        MCP servers come from the selected manifest and from every additional
-        manifest (merged into the inventory as components with ``declared_by``),
-        because the client that loads an additional manifest connects to its
-        servers too. A server is checked once per ``(name, url)``.
+        MCP servers are every server some client may start
+        (:meth:`~skillevaluator.plugin_components.PluginInventory.all_mcp_declarations`):
+        the selected manifest's, and those only an additional manifest or
+        another client's default files declare, because the client that loads
+        them connects to them too. A server is checked once per ``(name, url)``.
         """
         from skillevaluator.plugin_component_risk import hook_allowlist_hosts
         from skillevaluator.plugin_components import PluginRootReader
@@ -457,16 +595,8 @@ class PluginSchemaValidator(ValidatorBase):
 
         reader = PluginRootReader(root)
         targets: list[EndpointTarget] = []
-        declarations = [
-            *inventory.mcp.effective,
-            *(
-                component.mcp
-                for component in inventory.components
-                if component.type == "mcp" and component.declared_by and component.mcp is not None
-            ),
-        ]
         seen_servers: set[tuple[str, str]] = set()
-        for declaration in declarations:
+        for declaration in inventory.all_mcp_declarations():
             config = declaration.config
             if not isinstance(config, dict):
                 continue
@@ -553,8 +683,8 @@ class PluginSchemaValidator(ValidatorBase):
             )
         return "manifest_outside_root", str(exc), suggestion
 
-    @classmethod
-    def note_requested_manifest(cls, results: list[ValidationResult], requested: Path) -> None:
+    @staticmethod
+    def note_requested_manifest(results: list[ValidationResult], requested: Path) -> None:
         """Tell the user when the manifest file they named is not the one evaluated.
 
         ``validate`` resolves a manifest path to its plugin root and selects
@@ -569,7 +699,7 @@ class PluginSchemaValidator(ValidatorBase):
         named = canonical_manifest_relative(relative)
         named_text = (named or relative).as_posix()
         for result in results:
-            if result.validator_name != cls().name or not isinstance(result.metadata, dict):
+            if result.validator_name != VALIDATOR_NAME or not isinstance(result.metadata, dict):
                 continue
             selected = (result.metadata.get("plugin") or {}).get("manifest_filename")
             if not isinstance(selected, str):
@@ -578,19 +708,18 @@ class PluginSchemaValidator(ValidatorBase):
             if (canonical_selected.as_posix() if canonical_selected else selected) == named_text:
                 return
             result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.INFO,
-                    check_name="manifest_named_not_selected",
+                _schema_finding(
+                    "manifest_named_not_selected",
                     message=(
                         f"You named {named_text}, but validate evaluates the plugin root and selected {selected} by "
                         f"precedence. {named_text} is checked as an additional manifest, and Tier 3 stages {selected}."
                     ),
-                    file_path=str(requested),
+                    file_path=requested,
                     suggestion=(
                         "To evaluate the other client's manifest, validate a copy of the plugin without the "
                         "higher-precedence manifest."
                     ),
+                    severity=Severity.INFO,
                     metadata={"named": named_text, "selected": selected},
                 )
             )
@@ -613,20 +742,13 @@ class PluginSchemaValidator(ValidatorBase):
             return None
         return literal if same and literal != str(value) else None
 
-    def _numeric_yaml_version(self, location: PluginManifestLocation, data: dict[str, Any]) -> str | None:
-        try:
-            return self._yaml_version_literal(location.read_text(), data.get("version"))
-        except PluginManifestPathError:
-            return None
-
     @staticmethod
-    def _bundle_manifest_data(location: PluginManifestLocation) -> dict[str, Any] | None:
-        """Best-effort bounded re-parse of ``agent_plugin.yaml`` for the inventory."""
-        try:
-            data = load_bounded_yaml(location.read_text())
-        except (PluginManifestPathError, StructuredDataLimitError, StructuredDataSyntaxError, ValueError):
-            return None
-        return data if isinstance(data, dict) else None
+    def _keep_yaml_version_text(manifest_type: str, text: str, data: Any) -> tuple[Any, str | None]:
+        """*data* with a numeric YAML ``version`` kept as written, and that text (``None`` when nothing changed)."""
+        if not isinstance(data, dict) or manifest_syntax(manifest_type) != "yaml":
+            return data, None
+        literal = PluginSchemaValidator._yaml_version_literal(text, data.get("version"))
+        return (data, None) if literal is None else ({**data, "version": literal}, literal)
 
     @staticmethod
     def _stamp_manifest_metadata(
@@ -649,7 +771,7 @@ class PluginSchemaValidator(ValidatorBase):
         }
 
     def _validate_bundle_manifest(
-        self, location: PluginManifestLocation, result: ValidationResult
+        self, location: PluginManifestLocation, loaded: _LoadedManifest, result: ValidationResult
     ) -> dict[str, Any] | None:
         """Validate a bundle-reference manifest against ``PluginManifest``.
 
@@ -657,24 +779,22 @@ class PluginSchemaValidator(ValidatorBase):
         refs can be classified, else ``None``.
         """
         manifest_path = location.path
-        data = self._load_yaml(location, result)
+        data = loaded.data
         if data is None:
             return None
-        literal = self._numeric_yaml_version(location, data)
+        literal = loaded.version_literal
         if literal is not None:
-            data = {**data, "version": literal}
             result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.LOW,
-                    check_name="schema:version:numeric",
+                _schema_finding(
+                    "schema:version:numeric",
                     message=(
                         f"{location.manifest_filename} declares 'version: {literal}' as a YAML number, which YAML "
                         f"readers turn into {float(literal.replace('_', ''))!r}. SkillEvaluator keeps the text "
                         f"'{literal}'."
                     ),
-                    file_path=str(manifest_path),
+                    file_path=manifest_path,
                     suggestion=f'Quote the version: version: "{literal}".',
+                    severity=Severity.LOW,
                     metadata={"field": "version"},
                 )
             )
@@ -747,10 +867,8 @@ class PluginSchemaValidator(ValidatorBase):
             for row in rows:
                 if row.state == "missing":
                     result.add_finding(
-                        Finding(
-                            category="PLUGIN_SCHEMA",
-                            severity=Severity.HIGH,
-                            check_name="plugin_dependency_missing",
+                        _schema_finding(
+                            "plugin_dependency_missing",
                             message=f"Declared {section} dependency '{row.ref}' is missing: {row.reason}.",
                             file_path=manifest_path,
                             suggestion=(
@@ -852,10 +970,8 @@ class PluginSchemaValidator(ValidatorBase):
         for row in rows:
             if row.state == "missing":
                 result.add_finding(
-                    Finding(
-                        category="PLUGIN_SCHEMA",
-                        severity=Severity.HIGH,
-                        check_name="plugin_dependency_missing",
+                    _schema_finding(
+                        "plugin_dependency_missing",
                         message=(
                             f"Declared plugin dependency '{row.ref}' is missing: {row.reason}. Claude Code cannot "
                             "install it, so it refuses to load this plugin."
@@ -867,10 +983,8 @@ class PluginSchemaValidator(ValidatorBase):
                 )
             elif row.state in {"external", "unresolved"}:
                 result.add_finding(
-                    Finding(
-                        category="PLUGIN_SCHEMA",
-                        severity=Severity.MEDIUM,
-                        check_name="plugin_dependency_unverified",
+                    _schema_finding(
+                        "plugin_dependency_unverified",
                         message=(
                             f"Claude Code loads this plugin only when dependency '{row.ref}' is installed and "
                             f"enabled, and that cannot be checked offline: {row.reason}."
@@ -880,6 +994,7 @@ class PluginSchemaValidator(ValidatorBase):
                             "Publish the plugin in a marketplace that also lists the dependency, or tell users to "
                             "install the dependency first."
                         ),
+                        severity=Severity.MEDIUM,
                         metadata={"ref": row.ref, "state": row.state, "section": "plugins"},
                     )
                 )
@@ -897,86 +1012,89 @@ class PluginSchemaValidator(ValidatorBase):
         plugin_meta["dependency_resolution"] = {"plugins": [row.to_dict() for row in rows]}
         plugin_meta["dependency_status_counts"] = counts
 
-    def _load_yaml(self, location: PluginManifestLocation, result: ValidationResult) -> dict | None:
-        """Parse manifest YAML, recording a finding on failure."""
-        manifest_path = location.path
+    def _load_manifest(self, location: PluginManifestLocation, result: ValidationResult) -> _LoadedManifest:
+        """Read and parse the selected manifest once, recording a HIGH finding for each problem.
+
+        A link, special file, or changed inode is ``manifest_unsafe`` and a
+        security failure. A manifest that is not UTF-8 or is over the manifest
+        size bound is ``manifest_unreadable``. That is a content problem of a
+        regular file, not an unsafe path, so the other Tier 1 checks and the
+        parity check still run. Clients do not share these limits (Claude Code
+        reads a Latin-1 manifest, Codex one of any size), so a client (JSON)
+        manifest is then parsed leniently, as the clients that load it read it,
+        and its fields and components are still checked; only when even that
+        parse yields nothing is it also a security failure, so a policy override
+        cannot pass a plugin whose declared components were never checked. Only
+        SkillEvaluator reads ``agent_plugin.yaml``, so its own limits apply: it
+        is not read leniently, so for it that is a security failure at once.
+        Then the manifest must parse within the structured-data bounds to a
+        non-empty mapping. A numeric YAML ``version`` keeps its text (``1.10``).
+        """
+        syntax = _MANIFEST_SYNTAXES[manifest_syntax(location.manifest_type)]
+        filename = location.manifest_filename
         try:
-            raw = location.read_text()
+            raw = location.read_text(encoding=syntax.encoding)
         except PluginManifestPathError as exc:
-            if exc.content_error:
-                # Only SkillEvaluator reads agent_plugin.yaml, so its own limits apply. It is not read
-                # leniently, so nothing it declares is checked: a policy override must not turn this
-                # finding into a pass, and Tier 1 stops here as for an unsafe manifest.
+            if not exc.content_error:
                 result.metadata["security_failure"] = True
+                result.add_finding(_unsafe_read_finding(location, exc, subject="plugin manifest"))
+                return _LoadedManifest()
+            problem = self._content_problem(exc)
+            data: dict[str, Any] | None = None
+            if syntax.read_leniently:
+                data, _status = self._parse_unreadable(location, problem, result, selected=True, reason=exc.reason)
+            else:
                 result.add_finding(
-                    Finding(
-                        category="PLUGIN_SCHEMA",
-                        severity=Severity.HIGH,
-                        check_name="manifest_unreadable",
-                        message=f"Plugin manifest {location.manifest_filename} {self._content_problem(exc)}.",
-                        file_path=str(manifest_path),
+                    _schema_finding(
+                        "manifest_unreadable",
+                        message=f"{syntax.subject} {filename} {problem}.",
+                        file_path=location.path,
                         suggestion=(
-                            f"Save {location.manifest_filename} as UTF-8 YAML under "
-                            f"{CONTENT_DEDUP_MAX_FILE_BYTES} bytes."
+                            f"Save {filename} as UTF-8 {syntax.language} under {CONTENT_DEDUP_MAX_FILE_BYTES} bytes."
                         ),
-                        metadata={"manifest_filename": location.manifest_filename, "reason": exc.reason},
+                        metadata={"manifest_filename": filename, "reason": exc.reason},
                     )
                 )
-                return None
-            result.metadata["security_failure"] = True
-            result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="manifest_unsafe",
-                    message=f"Could not securely read plugin manifest: {exc}",
-                    file_path=str(manifest_path),
-                    suggestion="Replace links/hardlinks/special manifests with one regular file inside the plugin root.",
-                )
-            )
-            return None
+            if data is None:
+                result.metadata["security_failure"] = True
+            return _LoadedManifest(data=data)
 
         try:
-            data = load_bounded_yaml(raw)
+            parsed = parse_manifest_text(location.manifest_type, raw)
         except StructuredDataLimitError as exc:
             result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="manifest_complexity_limit",
-                    message=f"Plugin manifest exceeds structured-data complexity limits: {exc}",
-                    file_path=str(manifest_path),
-                    suggestion="Reduce manifest nesting, collection sizes, or YAML aliases.",
+                _schema_finding(
+                    "manifest_complexity_limit",
+                    message=f"{syntax.subject} exceeds structured-data complexity limits: {exc}",
+                    file_path=location.path,
+                    suggestion=syntax.complexity_suggestion.format(filename=filename),
                 )
             )
-            return None
+            return _LoadedManifest()
         except StructuredDataSyntaxError as exc:
             result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="manifest_invalid_yaml",
-                    message=f"Plugin manifest is not valid YAML: {exc}",
-                    file_path=str(manifest_path),
-                    suggestion="Fix the YAML syntax in the plugin manifest.",
+                _schema_finding(
+                    syntax.invalid_check,
+                    message=f"{syntax.subject} is not valid {syntax.language}: {exc}",
+                    file_path=location.path,
+                    suggestion=syntax.invalid_suggestion.format(filename=filename),
                 )
             )
-            return None
+            return _LoadedManifest()
 
-        if not data or not isinstance(data, dict):
+        mapping = parsed if isinstance(parsed, dict) else None
+        if not mapping:
             result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="manifest_not_mapping",
-                    message="Plugin manifest must be a non-empty YAML mapping.",
-                    file_path=str(manifest_path),
-                    suggestion="Populate the manifest with at least name, author, and a dependency.",
+                _schema_finding(
+                    syntax.not_mapping_check,
+                    message=syntax.not_mapping_message,
+                    file_path=location.path,
+                    suggestion=syntax.not_mapping_suggestion.format(filename=filename),
                 )
             )
-            return None
-
-        return data
+            return _LoadedManifest(parsed=mapping)
+        mapping, version_literal = self._keep_yaml_version_text(location.manifest_type, raw, mapping)
+        return _LoadedManifest(parsed=mapping, data=mapping, readable=True, version_literal=version_literal)
 
     def _add_validation_findings(
         self,
@@ -985,17 +1103,15 @@ class PluginSchemaValidator(ValidatorBase):
         result: ValidationResult,
     ) -> None:
         """Translate a Pydantic validation error into structured findings."""
-        errors = exc.errors()
-        for error in errors[:MAX_PLUGIN_SCHEMA_FINDINGS]:
+        findings: list[Finding] = []
+        for error in exc.errors():
             location = format_validation_location(error) or "<root>"
             error_type = error.get("type", "value_error")
-            result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name=f"schema:{location}:{error_type}",
+            findings.append(
+                _schema_finding(
+                    f"schema:{location}:{error_type}",
                     message=f"Field '{location}': {error['msg']}",
-                    file_path=str(manifest_path),
+                    file_path=manifest_path,
                     suggestion=(
                         "Fix the plugin manifest to satisfy the bundle-reference contract "
                         "(allowed fields, required name + author.email, at least one "
@@ -1003,118 +1119,18 @@ class PluginSchemaValidator(ValidatorBase):
                     ),
                 )
             )
-        if len(errors) > MAX_PLUGIN_SCHEMA_FINDINGS:
-            result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="schema_errors_truncated",
-                    message=(
-                        f"Plugin schema produced {len(errors)} errors; only the first "
-                        f"{MAX_PLUGIN_SCHEMA_FINDINGS} are reported."
-                    ),
-                    file_path=str(manifest_path),
-                    suggestion="Fix the reported schema errors, then rerun validation.",
-                    metadata={"actual": len(errors), "reported": MAX_PLUGIN_SCHEMA_FINDINGS},
-                )
-            )
-
-    def _blocks_after_policy(self, check_name: str, severity: Severity) -> bool:
-        """Whether a manifest finding blocks once the active policy's severity overrides apply.
-
-        The policy is applied to every finding later (in ``emit_reports``), so
-        the manifest success row must not say "passed" next to a finding the
-        policy raises to HIGH, nor be withheld for one it lowers.
-        """
-        if self.policy is not None:
-            severity = self.policy.severity_for("PLUGIN_SCHEMA", check_name, severity)
-        return severity in (Severity.CRITICAL, Severity.HIGH)
-
-    def _load_contained_json(
-        self, location: PluginManifestLocation, result: ValidationResult
-    ) -> tuple[dict[str, Any] | None, bool]:
-        """Read and parse a contained JSON manifest; record a HIGH finding on failure.
-
-        Returns ``(data, readable)``; ``readable`` is ``False`` when the manifest
-        could only be read leniently, so it never gets a clean pass.
-
-        A manifest that is not UTF-8 or is over the manifest size bound is HIGH
-        ``manifest_unreadable``. That is a content problem of a regular file, not
-        an unsafe path, so the other Tier 1 checks and the parity check still
-        run. Clients do not share these limits (Claude Code reads a Latin-1
-        manifest, Codex one of any size), so it is parsed leniently and its
-        fields and components are still checked. Only when even the lenient
-        parse yields nothing is it also a security failure, so a policy override
-        cannot pass a plugin whose declared components were never checked.
-        """
-        manifest_path = location.path
-        filename = location.manifest_filename
-        try:
-            raw = location.read_text(encoding="utf-8-sig")
-        except PluginManifestPathError as exc:
-            if exc.content_error:
-                data, _status = self._parse_unreadable(
-                    location, self._content_problem(exc), result, selected=True, reason=exc.reason
-                )
-                if data is None:
-                    result.metadata["security_failure"] = True
-                return data, False
-            result.metadata["security_failure"] = True
-            result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="manifest_unsafe",
-                    message=f"Could not securely read plugin manifest: {exc}",
-                    file_path=str(manifest_path),
-                    suggestion="Replace links/hardlinks/special manifests with one regular file inside the plugin root.",
-                )
-            )
-            return None, False
-
-        try:
-            data: Any = load_bounded_json(raw)
-        except StructuredDataLimitError as exc:
-            result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="manifest_complexity_limit",
-                    message=f"Contained plugin manifest exceeds structured-data complexity limits: {exc}",
-                    file_path=str(manifest_path),
-                    suggestion=f"Reduce JSON nesting or collection sizes in {filename}.",
-                )
-            )
-            return None, False
-        except StructuredDataSyntaxError as exc:
-            result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="manifest_invalid_json",
-                    message=f"Contained plugin manifest is not valid JSON: {exc}",
-                    file_path=str(manifest_path),
-                    suggestion=f"Fix the JSON syntax in {filename}.",
-                )
-            )
-            return None, False
-
-        if not isinstance(data, dict) or not data:
-            result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="manifest_not_object",
-                    message="Contained plugin manifest must be a non-empty JSON object.",
-                    file_path=str(manifest_path),
-                    suggestion=f"Populate {filename} with at least a non-empty 'name'.",
-                )
-            )
-            return None, False
-        return data, True
+        _add_capped(
+            result,
+            findings,
+            policy=self.policy,
+            source="Plugin schema",
+            noun="errors",
+            file_path=manifest_path,
+            suggestion="Fix the reported schema errors, then rerun validation.",
+        )
 
     def _validate_contained_manifest(
-        self, location: PluginManifestLocation, result: ValidationResult
+        self, location: PluginManifestLocation, loaded: _LoadedManifest, result: ValidationResult
     ) -> tuple[dict[str, Any] | None, bool]:
         """Validate a Claude Code, Agent Plugins v1, Codex, or Cursor manifest against its format's rules.
 
@@ -1129,39 +1145,44 @@ class PluginSchemaValidator(ValidatorBase):
         Runnable MCP servers get their blocking static checks in
         :meth:`_inventory_components`, which also records the success row.
         """
-        data, readable = self._load_contained_json(location, result)
+        data = loaded.data
         if data is None:
             return None, False
         profile = profile_for(location.manifest_type)
         # A selected manifest read leniently (not UTF-8, or over the size bound) is never a clean pass.
-        blocking = not readable
+        blocking = not loaded.readable
         severities = {"error": Severity.HIGH, "warning": Severity.MEDIUM, "note": Severity.LOW}
-        issues = validate_manifest_fields(location.manifest_type, data)
-        for issue in issues[:MAX_PLUGIN_SCHEMA_FINDINGS]:
-            severity = severities[issue.level]
-            check_name = (
-                "plugin_manifest_unknown_field"
-                if issue.error == "unknown_field" and "." not in issue.field
-                else f"schema:{issue.field}:{issue.error}"
+        findings: list[Finding] = []
+        for issue in validate_manifest_fields(location.manifest_type, data):
+            finding = _schema_finding(
+                (
+                    "plugin_manifest_unknown_field"
+                    if issue.error == "unknown_field" and "." not in issue.field
+                    else f"schema:{issue.field}:{issue.error}"
+                ),
+                message=issue.message,
+                file_path=location.path,
+                suggestion=issue.suggestion or f"Fix {location.manifest_filename} to satisfy the {profile.reference}.",
+                severity=severities[issue.level],
+                metadata={"manifest_type": location.manifest_type, "field": issue.field},
             )
-            blocking = blocking or self._blocks_after_policy(check_name, severity)
+            # Over every problem, at the severity the policy gives it.
+            blocking = blocking or _policy_severity(finding, self.policy).is_error()
             if self._scalar_component_value(location.manifest_type, issue.field, data):
                 # One defect, one finding: the inventory reports a number or boolean in a component field
                 # (plugin_component_path_invalid or mcp_servers_not_object) at the client's severity: HIGH
                 # where the client refuses the manifest, MEDIUM where Codex drops the value and installs.
                 continue
-            result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=severity,
-                    check_name=check_name,
-                    message=issue.message,
-                    file_path=str(location.path),
-                    suggestion=issue.suggestion
-                    or f"Fix {location.manifest_filename} to satisfy the {profile.reference}.",
-                    metadata={"manifest_type": location.manifest_type, "field": issue.field},
-                )
-            )
+            findings.append(finding)
+        _add_capped(
+            result,
+            findings,
+            policy=self.policy,
+            source=f"{profile.label} manifest validation",
+            noun="findings",
+            file_path=location.path,
+            suggestion=f"Fix the reported {location.manifest_filename} field problems, then rerun validation.",
+        )
         plugin_meta = result.metadata.setdefault("plugin", {})
         name = data.get("name")
         if isinstance(name, str) and name.strip():
@@ -1179,9 +1200,14 @@ class PluginSchemaValidator(ValidatorBase):
         return data, not blocking
 
     def _record_manifest_declarations(
-        self, location: PluginManifestLocation, result: ValidationResult
+        self, location: PluginManifestLocation, selected_data: dict[str, Any] | None, result: ValidationResult
     ) -> list[tuple[str, str, dict[str, Any] | None]]:
         """Record every supported manifest in the root and flag name/version conflicts.
+
+        ``selected_data`` is what the strict read of the selected manifest
+        parsed to (``_LoadedManifest.parsed``), so a selected manifest that
+        could only be read leniently shows no name or version here and is not
+        compared.
 
         Returns the parsed additional manifests for the inventory merge. An
         additional manifest that cannot be parsed or fails its required fields
@@ -1193,7 +1219,6 @@ class PluginSchemaValidator(ValidatorBase):
         failure. A ``.codex-plugin/plugin.json`` beside a root Agent Plugins
         manifest is validated as the documented Codex overlay.
         """
-        selected_data = self._best_effort_parse(location.manifest_type, location.read_text)
         rows: list[dict[str, Any]] = [
             self._declaration_row(location.manifest_type, location.manifest_filename, selected_data, selected=True)
         ]
@@ -1226,17 +1251,16 @@ class PluginSchemaValidator(ValidatorBase):
                         }
                     )
                     result.add_finding(
-                        Finding(
-                            category="PLUGIN_SCHEMA",
-                            severity=Severity.MEDIUM,
-                            check_name="plugin_manifest_conflict",
+                        _schema_finding(
+                            "plugin_manifest_conflict",
                             message=(
                                 f"{candidate.manifest_filename} declares {field_name} {other_value!r}, but the "
                                 f"selected manifest {location.manifest_filename} declares {selected_value!r}; "
                                 "clients that load different manifests see different plugins"
                             ),
-                            file_path=str(candidate.declared_path),
+                            file_path=candidate.declared_path,
                             suggestion=f"Keep the plugin {field_name} identical in every manifest.",
+                            severity=Severity.MEDIUM,
                             metadata={"field": field_name, "manifest_filename": candidate.manifest_filename},
                         )
                     )
@@ -1258,21 +1282,6 @@ class PluginSchemaValidator(ValidatorBase):
             )
         return additional
 
-    @staticmethod
-    def _best_effort_parse(manifest_type: str, read_text: Any) -> dict[str, Any] | None:
-        try:
-            text = read_text(encoding="utf-8-sig")
-            data = load_bounded_json(text) if manifest_syntax(manifest_type) == "json" else load_bounded_yaml(text)
-        except (PluginManifestPathError, StructuredDataLimitError, StructuredDataSyntaxError, ValueError):
-            return None
-        if not isinstance(data, dict):
-            return None
-        if manifest_syntax(manifest_type) == "yaml":
-            literal = PluginSchemaValidator._yaml_version_literal(text, data.get("version"))
-            if literal is not None:
-                data = {**data, "version": literal}
-        return data
-
     def _parse_additional(
         self, candidate: PluginManifestCandidate, result: ValidationResult, *, overlay: bool = False
     ) -> tuple[dict[str, Any] | None, str]:
@@ -1283,18 +1292,7 @@ class PluginSchemaValidator(ValidatorBase):
         except PluginManifestPathError as exc:
             if not exc.content_error:
                 result.metadata["security_failure"] = True
-                result.add_finding(
-                    Finding(
-                        category="PLUGIN_SCHEMA",
-                        severity=Severity.HIGH,
-                        check_name="manifest_unsafe",
-                        message=f"Could not securely read additional plugin manifest: {exc}",
-                        file_path=str(candidate.declared_path),
-                        suggestion=(
-                            "Replace links/hardlinks/special manifests with one regular file inside the plugin root."
-                        ),
-                    )
-                )
+                result.add_finding(_unsafe_read_finding(candidate, exc, subject="additional plugin manifest"))
                 return None, "unsafe"
             # A regular file that is not UTF-8 or is over the size bound is invalid content, not an unsafe path.
             problem = self._content_problem(exc)
@@ -1302,18 +1300,11 @@ class PluginSchemaValidator(ValidatorBase):
                 return self._parse_unreadable(candidate, problem, result, reason=exc.reason)
         else:
             try:
-                data = (
-                    load_bounded_json(text)
-                    if manifest_syntax(candidate.manifest_type) == "json"
-                    else load_bounded_yaml(text)
-                )
+                data = parse_manifest_text(candidate.manifest_type, text)
             except (StructuredDataLimitError, StructuredDataSyntaxError, ValueError) as exc:
                 problem = f"could not be parsed: {exc}"
-            if isinstance(data, dict) and manifest_syntax(candidate.manifest_type) == "yaml":
-                # Keep a numeric YAML version as written (1.10, not 1.1), as for the selected manifest.
-                literal = self._yaml_version_literal(text, data.get("version"))
-                if literal is not None:
-                    data = {**data, "version": literal}
+            # Keep a numeric YAML version as written (1.10, not 1.1), as for the selected manifest.
+            data, _literal = self._keep_yaml_version_text(candidate.manifest_type, text, data)
         if problem is None and not isinstance(data, dict):
             problem = "is not a JSON/YAML object"
         if problem is None:
@@ -1332,17 +1323,16 @@ class PluginSchemaValidator(ValidatorBase):
                 return data, "invalid"
         if problem is not None:
             result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.MEDIUM,
-                    check_name="plugin_manifest_additional_invalid",
+                _schema_finding(
+                    "plugin_manifest_additional_invalid",
                     message=(
                         f"Additional manifest {candidate.manifest_filename} {problem.rstrip('.')}. It is not the "
                         "manifest SkillEvaluator evaluates, but the client that loads it rejects or misreads the "
                         "plugin."
                     ),
-                    file_path=str(candidate.declared_path),
+                    file_path=candidate.declared_path,
                     suggestion=f"Fix {candidate.manifest_filename}, or remove it if the plugin does not target that client.",
+                    severity=Severity.MEDIUM,
                     metadata={"manifest_filename": candidate.manifest_filename},
                 )
             )
@@ -1381,7 +1371,7 @@ class PluginSchemaValidator(ValidatorBase):
 
     @staticmethod
     def _parse_unreadable(
-        manifest: PluginManifestLocation | PluginManifestCandidate,
+        manifest: PluginManifestFile,
         problem: str,
         result: ValidationResult,
         *,
@@ -1408,22 +1398,11 @@ class PluginSchemaValidator(ValidatorBase):
             scope = "the components it declares are"
         data: dict[str, Any] | None = None
         try:
-            parsed = load_bounded_json(manifest.read_lenient_text().removeprefix("﻿"))
+            parsed = load_bounded_json(manifest.read_lenient_text().removeprefix("\ufeff"))
         except PluginManifestPathError as exc:
             if not exc.content_error:
                 result.metadata["security_failure"] = True
-                result.add_finding(
-                    Finding(
-                        category="PLUGIN_SCHEMA",
-                        severity=Severity.HIGH,
-                        check_name="manifest_unsafe",
-                        message=f"Could not securely read {subject.lower()}: {exc}",
-                        file_path=str(manifest.declared_path),
-                        suggestion=(
-                            "Replace links/hardlinks/special manifests with one regular file inside the plugin root."
-                        ),
-                    )
-                )
+                result.add_finding(_unsafe_read_finding(manifest, exc, subject=subject.lower()))
                 return None, "unsafe"
         except (StructuredDataLimitError, StructuredDataSyntaxError, ValueError):
             pass
@@ -1436,15 +1415,13 @@ class PluginSchemaValidator(ValidatorBase):
             "components it declares are not checked"
         )
         result.add_finding(
-            Finding(
-                category="PLUGIN_SCHEMA",
-                severity=Severity.HIGH,
-                check_name=check_name,
+            _schema_finding(
+                check_name,
                 message=(
                     f"{subject} {manifest.manifest_filename} {problem.rstrip('.')}. Clients without this "
                     f"limit still load it. {checked}."
                 ),
-                file_path=str(manifest.declared_path),
+                file_path=manifest.declared_path,
                 suggestion=(
                     f"Save {manifest.manifest_filename} as UTF-8 JSON under {CONTENT_DEDUP_MAX_FILE_BYTES} bytes"
                     f"{alternative}."
@@ -1493,11 +1470,10 @@ class PluginSchemaValidator(ValidatorBase):
         value = (normalized_component_manifest(manifest_type, data) or {}).get("skills")
         if not declared_value_replaces_default(profile, "skills", value):
             return None
-        default_dir = profile.default_skills_dir or "skills"
         for raw in value if isinstance(value, list) else [value]:
             if isinstance(raw, str):
                 declared = normalize_declared_path(raw, profile.manifest_path_prefixes)
-                if declared.rel is not None and declared.rel.as_posix() == default_dir:
+                if declared.rel is not None and declared.rel.as_posix() == DEFAULT_SKILLS_DIR:
                     return None
         return profile.label
 
@@ -1513,23 +1489,21 @@ class PluginSchemaValidator(ValidatorBase):
         scans skip (``evals/``, ``results/``, ``versions/`` within a skill) is
         HIGH, because clients that search ``skills/`` recursively load it.
         """
-        skills_dir = root / "skills"
+        skills_dir = root / DEFAULT_SKILLS_DIR
         from skillevaluator.utils.helpers import (
             find_bundled_plugin_skill_manifests,
             find_unscanned_plugin_skill_manifests,
         )
 
         try:
-            skill_manifests = find_bundled_plugin_skill_manifests(root)
+            skill_manifests = find_bundled_plugin_skill_manifests(root, DEFAULT_SKILLS_DIR)
         except ValueError as exc:
             result.metadata["security_failure"] = True
             result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="bundled_skill_path_unsafe",
+                _schema_finding(
+                    "bundled_skill_path_unsafe",
                     message=f"Could not securely discover bundled skills: {exc}",
-                    file_path=str(skills_dir),
+                    file_path=skills_dir,
                     suggestion="Replace linked/junction bundled skill directories with regular contained directories.",
                 )
             )
@@ -1539,8 +1513,8 @@ class PluginSchemaValidator(ValidatorBase):
         plugin_meta = result.metadata.setdefault("plugin", {})
         plugin_meta["in_plugin_skills"] = len(skill_dirs)
         # Plugin-root-relative ids (``skills/<name>``).
-        plugin_meta["bundled_skills"] = [f"skills/{name}" for name in skill_names]
-        self._report_unscanned_skills(find_unscanned_plugin_skill_manifests(root), root, result)
+        plugin_meta["bundled_skills"] = [f"{DEFAULT_SKILLS_DIR}/{name}" for name in skill_names]
+        self._report_unscanned_skills(find_unscanned_plugin_skill_manifests(root, DEFAULT_SKILLS_DIR), root, result)
         self._report_dependency_folder_skills(root, result)
         if not skill_manifests:
             return
@@ -1570,39 +1544,46 @@ class PluginSchemaValidator(ValidatorBase):
             find_dependency_folder_skills,
         )
 
-        found, complete = find_dependency_folder_skills(root)
-        for finding in dependency_folder_skill_findings(PluginRootReader(root).display, "skills", found, complete):
+        found, complete = find_dependency_folder_skills(root, DEFAULT_SKILLS_DIR)
+        for finding in dependency_folder_skill_findings(
+            PluginRootReader(root).display, DEFAULT_SKILLS_DIR, found, complete
+        ):
             result.add_finding(finding)
 
-    @staticmethod
-    def _report_unscanned_skills(unscanned: list[Any], root: Path, result: ValidationResult) -> None:
+    def _report_unscanned_skills(self, unscanned: list[Any], root: Path, result: ValidationResult) -> None:
         """HIGH for each ``SKILL.md`` in a skill's own ``evals/``, ``results/``, or ``versions/`` folder."""
-        for rel in unscanned[:MAX_PLUGIN_SCHEMA_FINDINGS]:
-            result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="plugin_skill_in_unscanned_folder",
-                    message=(
-                        f"'{rel}' is a skill inside a folder that Tier 1 scans skip (evals/, results/, versions/). "
-                        "Codex searches skills/ recursively and loads it, but SkillEvaluator does not check it"
-                    ),
-                    file_path=str(root / str(rel)),
-                    suggestion=(
-                        "Move evaluation output and version snapshots out of the plugin (for Tier 3 results, use "
-                        "--results-dir or SKILLEVALUATOR_RESULTS_DIR), or give a real skill a different folder name."
-                    ),
-                    metadata={"path": str(rel)},
-                )
+        suggestion = (
+            "Move evaluation output and version snapshots out of the plugin (for Tier 3 results, use "
+            "--results-dir or SKILLEVALUATOR_RESULTS_DIR), or give a real skill a different folder name."
+        )
+        findings = [
+            _schema_finding(
+                "plugin_skill_in_unscanned_folder",
+                message=(
+                    f"'{rel}' is a skill inside a folder that Tier 1 scans skip (evals/, results/, versions/). "
+                    "Codex searches skills/ recursively and loads it, but SkillEvaluator does not check it"
+                ),
+                file_path=root / str(rel),
+                suggestion=suggestion,
+                metadata={"path": str(rel)},
             )
+            for rel in unscanned
+        ]
+        _add_capped(
+            result,
+            findings,
+            policy=self.policy,
+            source="The search for skills in folders that Tier 1 scans skip",
+            noun="findings",
+            file_path=root / DEFAULT_SKILLS_DIR,
+            suggestion=suggestion,
+        )
 
     @staticmethod
     def _skill_not_utf8_finding(skill_name: str, skill_dir: Path) -> Finding:
         """HIGH for a skill manifest that is not UTF-8 text (its own finding; the other scans still run)."""
-        return Finding(
-            category="PLUGIN_SCHEMA",
-            severity=Severity.HIGH,
-            check_name="bundled_skill_not_utf8",
+        return _schema_finding(
+            "bundled_skill_not_utf8",
             message=(
                 f"Skill '{skill_name}' has a SKILL.md that is not valid UTF-8, so its frontmatter and instructions "
                 "cannot be checked. Clients may still load it with replacement characters"
@@ -1630,10 +1611,8 @@ class PluginSchemaValidator(ValidatorBase):
                 return
             result.metadata["security_failure"] = True
             result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="bundled_skill_path_unsafe",
+                _schema_finding(
+                    "bundled_skill_path_unsafe",
                     message=f"Bundled skill '{skill_name}' changed or became unsafe after discovery: {exc}",
                     file_path=f"[{skill_name}] {skill_dir}",
                     suggestion="Replace linked, hard-linked, or special manifests with regular contained files.",
@@ -1643,10 +1622,8 @@ class PluginSchemaValidator(ValidatorBase):
         except Exception as exc:
             logger.warning("In-plugin skill validation failed for %s: %s", skill_dir, exc)
             result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="in_plugin_skill_error",
+                _schema_finding(
+                    "in_plugin_skill_error",
                     message=f"Could not validate bundled skill '{skill_name}': {exc}",
                     file_path=f"[{skill_name}] {skill_dir}",
                     suggestion="Inspect the bundled skill directory; it may be malformed.",
@@ -1681,7 +1658,7 @@ class PluginSchemaValidator(ValidatorBase):
             path = component.path
             if component.type != "skill" or component.problem is not None or path is None:
                 continue
-            if path == "skills" or path.startswith("skills/") or path in seen:
+            if path == DEFAULT_SKILLS_DIR or path.startswith(f"{DEFAULT_SKILLS_DIR}/") or path in seen:
                 continue
             seen.add(path)
             skill_dir = root if path == "." else root / path
@@ -1690,12 +1667,10 @@ class PluginSchemaValidator(ValidatorBase):
             except ValueError as exc:
                 result.metadata["security_failure"] = True
                 result.add_finding(
-                    Finding(
-                        category="PLUGIN_SCHEMA",
-                        severity=Severity.HIGH,
-                        check_name="bundled_skill_path_unsafe",
+                    _schema_finding(
+                        "bundled_skill_path_unsafe",
                         message=f"Could not securely read declared skill '{path}': {exc}",
-                        file_path=str(skill_dir),
+                        file_path=skill_dir,
                         suggestion="Replace linked or special entries in the skill folder with regular files.",
                     )
                 )
@@ -1713,7 +1688,7 @@ def _advisory_result(skill_result: ValidationResult, note: str) -> ValidationRes
     """Copy a skill result with blocking findings lowered to MEDIUM and errors kept as warnings."""
     advisory = ValidationResult()
     for finding in skill_result.findings:
-        blocking = finding.severity in (Severity.CRITICAL, Severity.HIGH)
+        blocking = finding.severity.is_error()
         advisory.add_finding(
             Finding(
                 category=finding.category,

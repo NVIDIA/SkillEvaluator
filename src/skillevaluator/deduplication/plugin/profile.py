@@ -21,12 +21,9 @@ from typing import Any
 from skillevaluator.constants import (
     DESCRIPTION_MAX_LENGTH,
     NAME_MAX_LENGTH,
-    PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE,
+    PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
     PLUGIN_CATALOG_MAX_MEMBER_CHARS,
     PLUGIN_CATALOG_MAX_MEMBERS,
-    PLUGIN_CONTAINED_MANIFEST_FILE,
-    PLUGIN_MANIFEST_FILES,
-    PLUGIN_NATIVE_MANIFEST_DIRS,
     SCAN_EXCLUDED_DIRS,
     SIMILARITY_MAX_DISCOVERED_PATHS,
 )
@@ -38,7 +35,13 @@ from skillevaluator.embedding.extractor import (
     extract_skill_manifest,
 )
 from skillevaluator.plugin_formats import parse_manifest_text
-from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
+from skillevaluator.plugin_manifest import (
+    PluginManifestPathError,
+    locate_plugin_manifest,
+    manifest_relative_path,
+    manifest_root_for,
+    manifest_type_for_relative_path,
+)
 from skillevaluator.utils.helpers import find_bundled_plugin_skill_manifests
 from skillevaluator.utils.secure_fs import SecureFile, SecurePathError, SecureRoot, discover_secure_files
 from skillevaluator.utils.structured_data import StructuredDataError, require_bounded_string
@@ -256,38 +259,30 @@ def discover_plugin_roots(root: Path, *, max_plugins: int) -> list[Path]:
 
     ``root`` itself is returned when it is a plugin. Otherwise every regular
     plugin manifest below it (bounded by the similarity path budget) marks a
-    plugin root. Unsafe links fail closed through the secure discovery walk.
+    plugin root. Manifests are matched with the plugin locator's lexical rule
+    (:func:`~skillevaluator.plugin_manifest.manifest_relative_path`), so a
+    client manifest spelled in another case (``.Claude-Plugin/plugin.json``)
+    counts, as it does for content detection and validation. Unsafe links fail
+    closed through the secure discovery walk.
     """
     if locate_plugin_manifest(root) is not None:
         return [root]
 
-    def _is_vendor_manifest(posix: PurePosixPath) -> bool:
-        return (
-            posix.name == PLUGIN_CONTAINED_MANIFEST_FILE
-            and len(posix.parts) >= 2
-            and posix.parts[-2] in PLUGIN_NATIVE_MANIFEST_DIRS
-        )
-
-    def _selected(relative: Path) -> bool:
-        posix = PurePosixPath(relative.as_posix())
-        return (
-            posix.name in PLUGIN_MANIFEST_FILES
-            or posix.name == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE
-            or _is_vendor_manifest(posix)
-        )
-
     files = discover_secure_files(
         root,
-        selected=_selected,
+        selected=lambda relative: manifest_relative_path(relative) is not None,
         excluded_dirs=SCAN_EXCLUDED_DIRS,
         max_paths=SIMILARITY_MAX_DISCOVERED_PATHS,
     )
     plugin_dirs: set[PurePosixPath] = set()
     for file in files:
-        relative = PurePosixPath(file.relative_path.as_posix())
-        plugin_dir = relative.parent.parent if _is_vendor_manifest(relative) else relative.parent
+        manifest = manifest_relative_path(file.relative_path)
+        manifest_root = manifest_root_for(file.relative_path)
+        if manifest is None or manifest_root is None:  # not reached: the walk selects manifests only
+            continue
+        plugin_dir = PurePosixPath(manifest_root.as_posix())
         # A root plugin.json roots a plugin only when it is an Agent Plugins manifest.
-        if not _is_vendor_manifest(relative) and relative.name == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE:
+        if manifest_type_for_relative_path(manifest) == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE:
             try:
                 located = locate_plugin_manifest(root / Path(*plugin_dir.parts))
             except PluginManifestPathError:

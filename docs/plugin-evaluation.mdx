@@ -1269,7 +1269,9 @@ skillevaluator similarity-check ./plugins --type plugin --save-catalog ./plugin-
 skillevaluator tier2 ./plugins/my-plugin --catalog ./plugin-catalog.json
 ```
 
-`--type plugin` accepts one plugin root or a directory of plugins. Each plugin
+`--type plugin` accepts one plugin root or a directory of plugins. Plugins in a
+directory are found with the manifest rules of `validate`, so a client manifest
+in another letter case (`.Claude-Plugin/plugin.json`) counts too. Each plugin
 with a description becomes a plugin entry, and each bundled skill with a name
 and description becomes a skill entry. Plugin catalogs use description
 embeddings, so `--full-body` is rejected. A skill-only catalog also works: in

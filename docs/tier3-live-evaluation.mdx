@@ -112,6 +112,11 @@ using Harbor 0.24:
   tests. SkillEvaluator validates that Compose model against the verifier's
   environment allowlist, and rejects `docker-compose.yml` verifier definitions,
   which Harbor ignores.
+- Harbor 0.24 rejects a `reward.json` whose top-level values are not all
+  numbers. SkillEvaluator's verifier and wrapped custom graders already write
+  numeric rewards; a native task's own test script must do the same. When
+  Harbor records such a failure on a step, the failed job names that step's
+  exception instead of reporting only a trial count.
 
 ## Start with one command
 

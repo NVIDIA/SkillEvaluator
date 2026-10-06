@@ -41,6 +41,9 @@ All notable changes to SkillEvaluator are documented in this file.
   unmodified native task schemas remain compatible, while collection accepts
   Harbor 0.24 job, trial, reward, and ATIF v1.8 artifacts. Multimodal tool
   output reaches judges and reports as text with `[image]`/`[audio]` markers.
+  Native tasks' own test scripts must write numeric `reward.json` values, which
+  Harbor 0.24 enforces; a failed job now names the trial or step exception that
+  Harbor recorded.
 - Exposed 23 Harbor 0.24 backends alongside local mode. `cua-cloud`,
   `opensandbox`, `hf-sandbox`, `podman`, `kata`, `runta`, `prime`, `mosaic`,
   and `smol` remain disabled until generated tasks can be projected through a

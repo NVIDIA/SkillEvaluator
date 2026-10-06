@@ -555,16 +555,8 @@ class ReporterBase(ABC):
         )
 
     @classmethod
-    def _plugin_child_names(cls, results: list[ValidationResult], block: dict[str, Any] | None = None) -> list[str]:
-        """Return canonical root-relative bundled-skill identifiers.
-
-        *block* is the merged plugin block when the caller already has it.
-        """
-        if block is None:
-            block = cls._plugin_block_from_results(results)
-        if block is None:
-            return []
-
+    def _plugin_child_names(cls, results: list[ValidationResult], block: dict[str, Any]) -> list[str]:
+        """Return the canonical root-relative bundled-skill identifiers of the merged plugin *block*."""
         bundled = block.get("bundled_skills")
         if isinstance(bundled, list):
             return list(dict.fromkeys(name for name in bundled if isinstance(name, str) and name))

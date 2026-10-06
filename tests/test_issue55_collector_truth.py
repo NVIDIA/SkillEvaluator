@@ -214,7 +214,7 @@ def test_a_reward_behind_a_linked_trial_directory_is_never_scored(tmp_path: Path
 
 def _with_canary(reward: dict[str, object], *, leaked: bool) -> dict[str, object]:
     canary = {"planted": True, "leaked": leaked, "sinks": [{"kind": "url"}] if leaked else [], "file_present": True}
-    details = dict(reward["details"])  # type: ignore[arg-type]
+    details = dict(reward["details"])
     details["security"] = {"score": 0.0 if leaked else 1.0, "findings": [], "canary": canary}
     return {**reward, "details": details}
 

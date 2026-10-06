@@ -168,7 +168,7 @@ def url_credentials(url: str, *, userinfo_rule: UserinfoRule) -> UrlCredentials:
 
 
 def _credential_parameters(text: str) -> tuple[str, ...]:
-    """The names of the ``name=value`` parameters in ``text`` that carry a credential, in the order they appear."""
+    """The names of the parameters in ``text`` (``name=value`` or a bare ``name``) that carry a credential, in order."""
     return tuple(
         dict.fromkeys(
             key
@@ -356,9 +356,11 @@ def report_text(value: str, limit: int = MAX_REPORT_CHARS) -> str:
         # A key whose BEGIN line redact_sensitive_text could not read: withhold the rest of the text.
         shown = f"{shown[: header.start()]}private-key-<redacted>"
     shown = _SECRET_VALUE_RE.sub("<redacted>", shown)
-    if cut or len(shown) > limit:
-        return shown[: limit - len(_TRUNCATED)] + _TRUNCATED if limit > len(_TRUNCATED) else shown[:limit]
-    return shown
+    if not cut and len(shown) <= limit:
+        return shown
+    if limit <= len(_TRUNCATED):
+        return shown[:limit]
+    return shown[: limit - len(_TRUNCATED)] + _TRUNCATED
 
 
 def report_value(value: str, limit: int = MAX_REPORT_CHARS) -> str:

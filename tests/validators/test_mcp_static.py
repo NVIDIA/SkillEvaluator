@@ -660,6 +660,23 @@ def test_command_findings_never_echo_a_credential_flag_value(config: dict, secre
     assert not any(secret in f.message for f in findings)
 
 
+@pytest.mark.parametrize(
+    ("command", "message"),
+    [
+        ("node server.js --password hunter2", "command line argument 'password' carries an inline credential"),
+        ("node server.js --api-key=hunter2", "command line argument 'api-key' carries an inline credential"),
+        (f"node server.js {_GITHUB_TOKEN}", "command line contains an inline credential (value withheld)"),
+    ],
+)
+def test_command_line_written_in_command_is_checked_for_inline_credentials(command: str, message: str) -> None:
+    findings = validate_mcp_server_declaration("s", {"command": command}, "p.json")
+
+    assert [f.check_name for f in findings] == ["mcp_command_inline_secret"]
+    assert message in findings[0].message
+    assert "hunter2" not in findings[0].message and _GITHUB_TOKEN not in findings[0].message
+    assert validate_mcp_server_declaration("s", {"command": "node server.js --api-key ${KEY}"}, "p.json") == []
+
+
 _ACCESS_TOKEN = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
 
 

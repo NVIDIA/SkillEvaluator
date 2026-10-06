@@ -338,20 +338,25 @@ def _check_command(server: _ServerFindings, config: dict[str, Any]) -> None:
                 "Pin the referenced package/image to an exact version, not latest/main.",
             )
 
-    for where, credentials in (("command line", command_credentials), ("command argument", arg_credentials)):
-        for index, flag in credentials:
-            if flag is not None:
-                message = f"{where} {flag!r} carries an inline credential; only ${{ENV}} references are allowed"
-            elif where == "command argument":
-                message = f"command argument args[{index}] contains an inline credential (value withheld)"
-            else:
-                message = "command line contains an inline credential (value withheld)"
-            server.report(
-                Severity.CRITICAL,
-                "mcp_command_inline_secret",
-                message,
-                'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
-            )
+    messages = [
+        f"command line argument {flag!r} carries an inline credential; only ${{ENV}} references are allowed"
+        if flag is not None
+        else "command line contains an inline credential (value withheld)"
+        for _index, flag in command_credentials
+    ]
+    messages += [
+        f"command argument {flag!r} carries an inline credential; only ${{ENV}} references are allowed"
+        if flag is not None
+        else f"command argument args[{index}] contains an inline credential (value withheld)"
+        for index, flag in arg_credentials
+    ]
+    for message in messages:
+        server.report(
+            Severity.CRITICAL,
+            "mcp_command_inline_secret",
+            message,
+            'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
+        )
 
     # Shell interpreter invoked with an inline program string (`sh -c "..."`, `bash -lc "..."`).
     shell = _shell_invocation(command, arg_list)

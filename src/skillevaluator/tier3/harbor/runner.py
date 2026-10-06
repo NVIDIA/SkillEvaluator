@@ -23,7 +23,7 @@ import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
@@ -890,10 +890,15 @@ _HARBOR_ENV_MODE_VARS = {
     "hyperbrowser": _DOCKER_HOST_ENV_VARS | frozenset({"HYPERBROWSER_API_KEY", "HYPERBROWSER_BASE_URL"}),
     "vercel": frozenset({"VERCEL_OIDC_TOKEN", "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID", "VERCEL_TOKEN"}),
     "runta": frozenset({"RUNTA_CONFIG", "RUNTA_ENDPOINT", "RUNTA_TOKEN"}),
+    # The Mosaic SDK still reads the MAR_* names its MOSAIC_* names replaced.
     "mosaic": frozenset(
         {
+            "MAR_API_TOKEN",
+            "MAR_CONFIG",
+            "MAR_ENDPOINT",
             "MOSAIC_API_TOKEN",
             "MOSAIC_API_URL",
+            "MOSAIC_CONFIG",
             "MOSAIC_REGISTRY_PASSWORD",
             "MOSAIC_REGISTRY_USERNAME",
             "MOSAIC_RETRIES",
@@ -971,9 +976,12 @@ _HARBOR_HOST_PATH_ENV_VARS = frozenset(
         "DOCKER_CONFIG",
         "GOOGLE_APPLICATION_CREDENTIALS",
         "LANGSMITH_CONFIG_FILE",
+        "MAR_CONFIG",
         "MODAL_CONFIG_PATH",
+        "MOSAIC_CONFIG",
         "NETRC",
         "REQUESTS_CA_BUNDLE",
+        "RUNTA_CONFIG",
         "SINGULARITY_AUTHFILE",
         "SINGULARITY_CONFIGDIR",
         "SKYPILOT_GLOBAL_CONFIG",
@@ -1583,6 +1591,62 @@ def _environment_kwarg_prerequisite_errors(
     return []
 
 
+# Backend SDK configuration files that operators may name in the host environment.
+_BACKEND_CONFIG_FILE_ENV_VARS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {"mosaic": ("MOSAIC_CONFIG", "MAR_CONFIG"), "runta": ("RUNTA_CONFIG",)}
+)
+
+
+def _backend_config_prerequisite_errors(env_mode: str) -> list[str]:
+    """Check Runta and Mosaic credential inputs against what Harbor's child will see."""
+    errors: list[str] = []
+    for name in _BACKEND_CONFIG_FILE_ENV_VARS.get(env_mode, ()):
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        try:
+            is_file = bool(raw.strip()) and Path(raw).expanduser().is_file()
+        except (OSError, RuntimeError):
+            is_file = False
+        if not is_file:
+            errors.append(f"Harbor environment '{env_mode}' requires {name} to name an existing regular file.")
+    if env_mode == "mosaic" and not errors:
+        try:
+            from mosaic_sandbox.credentials import resolve_token
+        except ImportError:
+            return errors  # Harbor's preflight reports the missing extra.
+        _token, source = resolve_token()
+        # The SDK accepts a Mosaic token in E2B_API_KEY for E2B migrations, but
+        # that variable belongs to the e2b backend and never reaches Mosaic.
+        if source == "e2b_environment":
+            errors.append(
+                "Harbor environment 'mosaic' does not forward E2B_API_KEY; set MOSAIC_API_TOKEN or run `mos login`."
+            )
+    return errors
+
+
+def _staged_task_environment_error(env_mode: str, task_dirs: Iterable[Path]) -> str | None:
+    """Reject staged task environments the selected backend cannot run."""
+    if env_mode != "mosaic":
+        return None
+    for task_dir in task_dirs:
+        if (task_dir / "environment" / "docker-compose.yaml").exists():
+            return (
+                f"Harbor environment 'mosaic' runs one VM per trial and cannot run Docker Compose task "
+                f"'{task_dir.name}'; use a Dockerfile-only environment or another backend."
+            )
+    return None
+
+
+def _harbor_missing_dependency_summary(exc: ImportError) -> str:
+    """Keep Harbor's diagnosis, without its unpinned install commands or cloud-bundle hint."""
+    lines = str(exc).strip().splitlines()
+    summary = lines[0] if lines else type(exc).__name__
+    for suffix in (" Install it with:", " Install them with:"):
+        summary = summary.removesuffix(suffix)
+    return summary.strip().rstrip(".")
+
+
 def _cwsandbox_prerequisite_errors(env_mode: str) -> list[str]:
     """Check what Harbor's cwsandbox backend needs; Harbor 0.24 no longer checks it."""
     if harbor_environment_type(env_mode) != "cwsandbox":
@@ -1855,6 +1919,8 @@ def _check_prerequisites(
 
         if cwsandbox_errors := _cwsandbox_prerequisite_errors(env_mode):
             return cwsandbox_errors
+        if backend_config_errors := _backend_config_prerequisite_errors(env_mode):
+            return backend_config_errors
         EnvironmentFactory.run_preflight(EnvironmentType(harbor_environment_type(env_mode)))
         if env_mode == "ack":
             ack_subprocess_env = (
@@ -1871,7 +1937,7 @@ def _check_prerequisites(
             )
     except ImportError as exc:
         detail = redact_progress_detail(
-            exc,
+            _harbor_missing_dependency_summary(exc),
             secret_values=secret_values_from_environment(os.environ),
         )
         return [
@@ -4184,6 +4250,8 @@ def _run_harbor_eval_impl(
                 evaluator_skill_path=evaluator_skill_path,
                 arm_suffix=with_arm_suffix,
             )
+            if staged_environment_error := _staged_task_environment_error(env_mode, task_paths):
+                raise ValueError(staged_environment_error)
             task_selectors = validate_case_ids(task.name for task in task_paths)
             logical_case_ids = validate_case_ids(_native_entry_id(task) for task in task_paths)
             case_id_by_task_selector = dict(zip(task_selectors, logical_case_ids, strict=True))

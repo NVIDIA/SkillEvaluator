@@ -48,10 +48,10 @@ All notable changes to SkillEvaluator are documented in this file.
   Native tasks' own test scripts must write numeric `reward.json` values, which
   Harbor 0.24 enforces; a failed job now names the trial or step exception that
   Harbor recorded.
-- Exposed 23 Harbor 0.24 backends alongside local mode. `cua-cloud`,
-  `opensandbox`, `hf-sandbox`, `podman`, `kata`, `runta`, `prime`, `mosaic`,
-  and `smol` remain disabled until generated tasks can be projected through a
-  trusted image or backend-native provisioning path. Non-secret backend
+- Exposed 25 Harbor 0.24 backends alongside local mode. `cua-cloud`,
+  `opensandbox`, `hf-sandbox`, `podman`, `kata`, `prime`, and `smol` remain
+  disabled until generated tasks can be projected through a trusted image or
+  backend-native provisioning path. Non-secret backend
   constructor options can be supplied with repeatable, operator-only
   `--environment-kwarg` / `--ek` flags; skill-owned configuration,
   credentials, and sandbox-policy overrides remain outside that surface.

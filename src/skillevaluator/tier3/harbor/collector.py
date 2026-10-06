@@ -798,8 +798,8 @@ class _JudgeSidecarFindings:
 def _judge_sidecar_findings(trial_dir: Path) -> _JudgeSidecarFindings:
     """Scan and read a trial's judge sidecars once, keeping only what collection uses.
 
-    Each sidecar is projected as soon as it is read, so at most one parsed
-    sidecar (up to 5 MiB of JSON) is held at a time.
+    Each sidecar is projected as soon as it is read and then dropped, so
+    memory does not grow with the number of sidecars.
     """
     sidecar_paths, scan_failure = _failed_judge_sidecar_paths(trial_dir)
     diagnostic = _JudgeFailureDiagnostic(scan_failure)

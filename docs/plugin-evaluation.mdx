@@ -929,7 +929,9 @@ stages a server.
 
     A server is **pinned** when a package runner fetches an exact version:
     `pkg@1.2.3`, `pkg==1.2.3`, `--from pkg==1.2.3`, a git or URL spec with a
-    40-character commit SHA, `image:1.2.3`, or `image@sha256:...`. Every
+    40-character commit SHA, a `deno run` module whose URL path names one
+    (`https://deno.land/x/mod@v1.2.3/mod.ts`; not in the query or fragment, and
+    not with a `.` or `..` segment), `image:1.2.3`, or `image@sha256:...`. Every
     package the runner installs must be exact, including each `uvx --with`
     (`-w`) requirement; a `uvx --with-requirements` file makes the server
     unpinned, because its packages are not read. The check and the dependency

@@ -32,7 +32,7 @@ import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Literal
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, urlsplit
 
 import idna
 
@@ -806,8 +806,8 @@ _PIN_SPECIFIER_RE = re.compile(r"(?P<operator>===|==|@)\s*(?P<version>\S+)")
 _GIT_SHA_RE = re.compile(r"(?:#|@)[0-9a-fA-F]{40}(?:$|[&#])")
 _DOCKER_DIGEST_RE = re.compile(r"@sha256:[0-9a-fA-F]{64}$")
 _VERSION_TAG_RE = re.compile(r"^v?\d+(?:\.\d+)*(?:[-+._][0-9A-Za-z.]+)*$")
-# A remote module URL that names an exact version (``https://deno.land/x/mod@v1.2.3/mod.ts``).
-_DENO_EXACT_MODULE_RE = re.compile(r"@v?\d+\.\d+\.\d+(?:[/?#]|$)")
+# A remote module path that names an exact version (``/x/mod@v1.2.3/mod.ts``).
+_DENO_EXACT_MODULE_PATH_RE = re.compile(r"@v?\d+\.\d+\.\d+(?:/|$)")
 _PLUGIN_PATH_REFS: tuple[str, ...] = ("${CLAUDE_PLUGIN_ROOT}", "${CLAUDE_PLUGIN_DATA}", "${CLAUDE_PROJECT_DIR}")
 _LOCAL_SPEC_PREFIXES: tuple[str, ...] = (".", "/", "~", "file:", *_PLUGIN_PATH_REFS)
 _REMOTE_SPEC_PREFIXES: tuple[str, ...] = ("git+", "git:", "github:", "gitlab:", "bitbucket:", "http://", "https://")
@@ -1394,10 +1394,26 @@ def _classify_deno_module(module: str | None) -> McpPinning:
     if module and module.startswith(("npm:", "jsr:")):
         return _prefixed("deno run: ", _classify_npm_spec(module.split(":", 1)[1]))
     if module and module.startswith(("http://", "https://")):
-        if _DENO_EXACT_MODULE_RE.search(module):
+        if _module_path_names_exact_version(module):
             return McpPinning("pinned", f"deno run: remote module pinned to an exact version: {module!r}", remote=True)
         return McpPinning("unpinned", f"deno run: remote module without an exact version: {module!r}", remote=True)
     return McpPinning("not_applicable", "deno run of a local script")
+
+
+def _module_path_names_exact_version(url: str) -> bool:
+    """Whether a remote module URL names an exact version in its path (``/x/mod@v1.2.3/mod.ts``).
+
+    Only the path counts, the part the server reads: the query and fragment do
+    not, and neither does a path with ``.`` or ``..`` segments (also
+    percent-encoded), which the client resolves away.
+    """
+    try:
+        path = urlsplit(whatwg_url(url)).path
+    except ValueError:
+        return False
+    if any(unquote(segment) in {".", ".."} for segment in path.split("/")):
+        return False
+    return _DENO_EXACT_MODULE_PATH_RE.search(path) is not None
 
 
 def _classify_image(image: str) -> McpPinning:

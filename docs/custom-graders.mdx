@@ -191,6 +191,15 @@ Edit `instruction.md` for the agent-facing task, `environment/Dockerfile` for
 the container, and `tests/grader.py` for the scoring — the same reward
 contract as BYOG applies.
 
+A `custom_only` task that keeps its own Harbor test script instead of
+`tests/grader.py` runs that script unchanged, so the script must follow
+Harbor's reward contract. Harbor 0.24 requires every top-level value in its
+`reward.json` to be a number, for example
+`{"overall": 1.0, "native_quality": 1.0}`; SkillEvaluator reports each numeric
+key other than `overall` as a custom metric. Nested objects such as
+`custom_metrics` or `details` make Harbor reject the reward with
+`VerifierOutputParseError`, so use `tests/grader.py` when you need them.
+
 Two rules keep BYOT predictable:
 
 - **Case IDs must match dataset entries.** When the grading mode is `default`

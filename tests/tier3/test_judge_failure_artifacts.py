@@ -21,6 +21,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from skillevaluator.tier3.harbor import collector, report
 from skillevaluator.tier3.harbor.adapter import _EVALUATOR_TESTS_SUBDIR, _write_test_sh
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,

@@ -43,7 +43,7 @@ from skillevaluator.tier3.harbor.runner import (
     build_harbor_run_command,
 )
 from skillevaluator.tier3.harbor.runtime_preflight import ModelProbeResult
-from skillevaluator.tier3_environments import HARBOR_NATIVE_ENV_MODES
+from skillevaluator.tier3_environments import HARBOR_ENV_MODES, HARBOR_NATIVE_ENV_MODES
 
 
 def _load_verifier_template():
@@ -191,7 +191,7 @@ def test_native_environment_kwargs_round_trip_through_real_harbor_parser() -> No
 
 @pytest.mark.parametrize("env_mode", sorted(HARBOR_NATIVE_ENV_MODES - {"docker"}))
 def test_native_environment_kwargs_reject_unknown_harbor_022_names(env_mode: str) -> None:
-    with pytest.raises(ValueError, match=rf"Harbor 0\.22\.0 environment '{env_mode}'.*totally_ignored"):
+    with pytest.raises(ValueError, match=rf"Harbor 0\.24\.0 environment '{env_mode}'.*totally_ignored"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="codex",
@@ -331,13 +331,11 @@ def test_environment_kwargs_cannot_override_sandbox_or_runtime_policy(
         ("ack", "service_account", "cluster-admin"),
         ("ack", "use_buildkit", True),
         ("blaxel", "dind_extra_args", {"host": "tcp://0.0.0.0:2375"}),
-        ("cua-cloud", "claim_spec", {"serviceAccountName": "cluster-admin"}),
         ("daytona", "network_block_all", False),
         ("ec2", "iam_instance_profile", "administrator"),
         ("ec2", "strict_host_key_checking", "no"),
         ("gke", "memory_limit_multiplier", 0),
         ("modal", "volumes", {"/workspace": "shared"}),
-        ("opensandbox", "volumes", [{"host_path": "/"}]),
         ("openshift", "service_account_name", "cluster-admin"),
         ("singularity", "singularity_no_mount", ""),
         ("use-computer", "resources", {"cpu": 128, "memory": 1048576}),
@@ -395,14 +393,6 @@ def test_backend_aliases_cannot_bypass_sandbox_runtime_policy(
                 "registry_name": "skill-evals",
                 "cloud_build_machine_type": "E2_HIGHCPU_32",
                 "cloud_build_disk_size_gb": 500,
-            },
-        ),
-        (
-            "opensandbox",
-            {
-                "entrypoint": ["/bin/sh", "-lc", "sleep infinity"],
-                "extensions": {"provider.example/feature": "enabled"},
-                "sandbox_timeout_sec": 7200,
             },
         ),
     ],
@@ -561,39 +551,19 @@ def test_ec2_private_ephemeral_environment_accepts_nonempty_subnet() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("environment_kwargs", "subprocess_env", "ready"),
-    [
-        ({}, {}, False),
-        ({}, {"OPENSANDBOX_DOMAIN": "sandbox.example.test"}, True),
-        ({"domain": "sandbox.example.test"}, {}, True),
-        ({"domain": None}, {}, False),
-        ({"domain": None}, {"OPENSANDBOX_DOMAIN": "sandbox.example.test"}, True),
-        ({"domain": ""}, {"OPENSANDBOX_DOMAIN": "sandbox.example.test"}, False),
-        ({"domain": "   "}, {"OPENSANDBOX_DOMAIN": "sandbox.example.test"}, False),
-    ],
-)
-def test_opensandbox_domain_preflight_uses_effective_child_configuration(
-    monkeypatch: pytest.MonkeyPatch,
-    environment_kwargs: dict[str, object],
-    subprocess_env: dict[str, str],
-    ready: bool,
-) -> None:
-    from harbor.environments.factory import EnvironmentFactory
+@pytest.mark.parametrize("env_mode", ["cua-cloud", "opensandbox", "hf-sandbox"])
+def test_unprovisionable_harbor_backends_are_not_publicly_supported(env_mode: str) -> None:
+    with pytest.raises(ValueError, match="env_mode must be one of"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="codex",
+            job_name="unsupported-backend",
+            env_mode=env_mode,
+        )
 
-    monkeypatch.setattr(EnvironmentFactory, "run_preflight", lambda *_args, **_kwargs: None)
-
-    errors = _check_prerequisites(
-        env_mode="opensandbox",
-        agents=[],
-        environment_kwargs=environment_kwargs,
-        subprocess_env=subprocess_env,
-    )
-
-    assert (errors == []) is ready
-    if not ready:
-        assert len(errors) == 1
-        assert "domain" in errors[0]
+    assert _check_prerequisites(env_mode=env_mode, agents=[]) == [
+        f"Unsupported Harbor environment '{env_mode}'. Choose one of: " + ", ".join(sorted(HARBOR_ENV_MODES))
+    ]
 
 
 def test_native_environment_required_kwargs_reject_whitespace_padded_ec2_launch_mode() -> None:
@@ -606,9 +576,9 @@ def test_native_environment_required_kwargs_reject_whitespace_padded_ec2_launch_
 
 
 def test_native_environment_install_hints_use_real_harbor_022_extra_names() -> None:
-    assert "harbor[gke]==0.22.0" in _environment_extra_install_hint("ack")
-    assert "harbor[cloud]==0.22.0" not in _environment_extra_install_hint("ack")
-    assert "harbor[cua]==0.22.0" in _environment_extra_install_hint("cua-cloud")
+    assert "harbor[gke]==0.24.0" in _environment_extra_install_hint("ack")
+    assert "harbor[cloud]==0.24.0" not in _environment_extra_install_hint("ack")
+    assert "harbor[cwsandbox]==0.24.0" in _environment_extra_install_hint("wandb")
     assert "no Python extra" in _environment_extra_install_hint("openshift")
 
 
@@ -710,11 +680,23 @@ def test_custom_agent_import_path_preserves_native_cloud_environment(env_mode: s
         model=model,
     )
 
-    assert command[command.index("--agent-import-path") + 1] == import_path
+    assert command[command.index("--agent") + 1] == import_path
     assert command[command.index("--env") + 1] == env_mode
     assert command[command.index("--model") + 1] == model
     assert "-a" not in command
+    assert "--agent-import-path" not in command
     assert "--environment-import-path" not in command
+
+
+def test_custom_agent_import_path_is_rejected_for_native_cloud() -> None:
+    with pytest.raises(ValueError, match="agent_import_path is supported only with --env docker or local"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="codex",
+            job_name="bridge-test",
+            env_mode="e2b",
+            agent_import_path="example:Agent",
+        )
 
 
 def test_evaluate_forwards_native_environment_without_legacy_sandbox_configuration(monkeypatch, tmp_path) -> None:
@@ -2463,49 +2445,58 @@ def test_native_harbor_metadata_entry_id_seam_across_runner_collector_and_datase
         agent_import_path: str | None = None,
         verifier_env: object = None,
         include_task_names: list[str] | None = None,
+        environment_kwargs: object = None,
     ) -> tuple[bool, str]:
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from harbor.models.job.result import JobResult, JobStats
+        from harbor.models.trial.result import TrialResult
+
         seen_include_task_names.append(include_task_names)
         job_dir = jobs_dir / job_name
         is_with = "-with-" in job_name or job_name.endswith("-with")
         arm_suffix = "-with-skill" if is_with else "-without-skill"
         selected_folders = include_task_names or ["physical-case", "zero-case"]
-        trial_names: list[str] = []
+        now = datetime(2026, 9, 12, tzinfo=UTC)
+        trial_results: list[TrialResult] = []
         for idx, folder in enumerate(selected_folders, start=1):
             trial_name = f"trial-{idx}-{folder}__attempt1"
-            trial_names.append(trial_name)
             trial_dir = job_dir / trial_name
             trial_dir.mkdir(parents=True, exist_ok=True)
-            # Notice result.json only has task_name derived from the staged [task].name (physical-case),
-            # not [metadata].entry_id, exercising collector's staged task.toml entry_id lookup!
-            (trial_dir / "result.json").write_text(
-                json.dumps(
-                    {
-                        "trial_name": trial_name,
-                        "task_name": f"nvidia/{folder}{arm_suffix}_attempt1",
-                        "verifier_result": {"rewards": {"reward": 1.0 if is_with else 0.25}},
-                    }
-                ),
-                encoding="utf-8",
-            )
-        (job_dir / "result.json").write_text(
-            json.dumps(
+            # Harbor persists the staged task path, while task_name carries the
+            # suffixed display name; only the runner's selector map may turn the
+            # staged directory into the authored [metadata].entry_id.
+            task_path = str(dataset / folder)
+            trial_result = TrialResult.model_validate(
                 {
-                    "n_total_trials": len(trial_names),
-                    "stats": {
-                        "n_trials": len(trial_names),
-                        "n_errors": 0,
-                        "evals": {
-                            agent: {
-                                "n_trials": len(trial_names),
-                                "n_errors": 0,
-                                "reward_stats": {"reward": {"1.0": trial_names}},
-                            }
-                        },
-                    },
+                    "id": uuid4(),
+                    "task_name": f"nvidia/{folder}{arm_suffix}_attempt1",
+                    "trial_name": trial_name,
+                    "trial_uri": trial_dir.as_uri(),
+                    "task_id": {"path": task_path},
+                    "task_checksum": "native-entry-id-seam-fixture",
+                    "config": {"task": {"path": task_path}, "trial_name": trial_name, "trials_dir": str(job_dir)},
+                    "agent_info": {"name": agent, "version": "test", "model_info": {"name": "test-model"}},
+                    "agent_result": {},
+                    "verifier_result": {"rewards": {"reward": 1.0 if is_with else 0.25}},
+                    "started_at": now,
+                    "finished_at": now,
                 }
-            ),
-            encoding="utf-8",
+            )
+            (trial_dir / "result.json").write_text(trial_result.model_dump_json(indent=2), encoding="utf-8")
+            (trial_dir / "config.json").write_text(trial_result.config.model_dump_json(indent=2), encoding="utf-8")
+            trial_results.append(trial_result)
+        job_result = JobResult(
+            id=uuid4(),
+            started_at=now,
+            updated_at=now,
+            finished_at=now,
+            n_total_trials=len(trial_results),
+            stats=JobStats.from_trial_results(trial_results, n_total_trials=len(trial_results)),
+            trial_results=[],
         )
+        (job_dir / "result.json").write_text(job_result.model_dump_json(indent=2), encoding="utf-8")
         return True, ""
 
     monkeypatch.setattr(runner, "_run_harbor", fake_run_harbor)
@@ -2611,3 +2602,50 @@ def test_write_task_toml_forwards_retry_env(tmp_path: Path) -> None:
     assert verifier_env["SKILL_EVAL_LLM_RETRY_BASE_DELAY"] == "${SKILL_EVAL_LLM_RETRY_BASE_DELAY}"
     assert verifier_env["SKILL_EVAL_LLM_RETRY_MAX_DELAY"] == "${SKILL_EVAL_LLM_RETRY_MAX_DELAY}"
     assert "UNRELATED_CUSTOM_VAR" not in verifier_env
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "agent_import_path"),
+    [
+        ("docker", None),
+        ("docker", "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex"),
+        ("local", None),
+        ("e2b", None),
+        ("daytona", "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayCodex"),
+    ],
+)
+def test_codex_runs_pin_harbor_022_reasoning_effort(env_mode: str, agent_import_path: str | None) -> None:
+    from harbor.cli.utils import parse_kwargs
+
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="codex",
+        job_name="effort",
+        env_mode=env_mode,
+        agent_import_path=agent_import_path,
+    )
+
+    agent_kwargs = [command[index + 1] for index, value in enumerate(command) if value == "--ak"]
+    assert parse_kwargs(agent_kwargs) == {"reasoning_effort": "high"}
+
+
+@pytest.mark.parametrize("agent", ["claude-code", "opencode"])
+def test_non_codex_runs_pass_no_agent_kwargs(agent: str) -> None:
+    command = build_harbor_run_command(dataset_path="/tmp/dataset", agent=agent, job_name="effort", env_mode="docker")
+
+    assert "--ak" not in command
+
+
+def test_codex_agents_render_the_pinned_reasoning_effort(tmp_path: Path) -> None:
+    from harbor.agents.installed.codex import Codex
+
+    from skillevaluator.tier3.harbor import local_agents
+
+    for agent_class in (
+        Codex,
+        local_agents.SkillEvaluatorGatewayCodex,
+        local_agents.SkillEvaluatorLocalCodex,
+        local_agents.SkillEvaluatorNvidiaBuildCodex,
+    ):
+        agent = agent_class(logs_dir=tmp_path, model_name="openai/gpt-5", reasoning_effort="high")
+        assert "-c model_reasoning_effort=high" in agent.build_cli_flags(), agent_class.__name__

@@ -32,7 +32,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 import yaml
 from harbor.environments.base import (
@@ -43,6 +43,7 @@ from harbor.environments.base import (
     ServiceOperationsUnsupportedError,
 )
 from harbor.environments.docker.docker import DockerEnvironment, _sanitize_docker_compose_project_name
+from harbor.environments.docker.runtime import DOCKER_RUNTIME, ContainerRuntime
 
 from skillevaluator.tier3.harbor.progress import secret_values_from_environment
 from skillevaluator.tier3.harbor.secure_copy import (
@@ -57,6 +58,9 @@ from skillevaluator.tier3.harbor.sensitive_stdin import (
 )
 from skillevaluator.tier3.harbor.stream_redaction import CommandOutputByteBudget
 from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
+
+if TYPE_CHECKING:
+    from harbor.environments.capabilities import EnvironmentCapabilities
 
 SECURE_DOCKER_ENV_IMPORT_PATH = (
     "skillevaluator.tier3.harbor.secure_docker_environment:SkillEvaluatorSecureDockerEnvironment"
@@ -199,6 +203,23 @@ for _compose_override_tag in ("!reset", "!override"):
         _compose_override_tag,
         _construct_compose_override_value,
     )
+
+
+def _validate_compose_model_parse_budget(content: str) -> None:
+    """Reject oversized YAML graphs before PyYAML constructs them."""
+    node_count = 0
+    depth = 0
+    for event in yaml.parse(content, Loader=_ComposeModelLoader):
+        if isinstance(event, yaml.events.NodeEvent):
+            node_count += 1
+            if node_count > _MAX_COMPOSE_MODEL_NODES:
+                raise RuntimeError("could not inspect Docker Compose interpolation inputs")
+        if isinstance(event, yaml.events.CollectionStartEvent):
+            depth += 1
+            if depth > _MAX_COMPOSE_MODEL_DEPTH:
+                raise RuntimeError("could not inspect Docker Compose interpolation inputs")
+        elif isinstance(event, yaml.events.CollectionEndEvent):
+            depth -= 1
 
 
 class _SecretTrieNode:
@@ -1277,6 +1298,24 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         self._compose_model_metadata()
         await super().start(force_build)
 
+    @classmethod
+    def runtime(cls) -> ContainerRuntime:
+        """Stay on Docker: the hardened Compose runner and containment use the Docker CLI."""
+        return DOCKER_RUNTIME
+
+    @property
+    def capabilities(self) -> EnvironmentCapabilities:
+        """Disable SSH streaming and GPU device reservations, which bypass the hardened runner."""
+        return super().capabilities.model_copy(update={"stream": False, "gpus": False})
+
+    async def download_file(self, source_path: str, target_path: Path | str) -> None:
+        """Download from the main container without Harbor's raw ``docker cp`` fallback."""
+        await self.service_download_file(source_path, target_path, service=None)
+
+    async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
+        """Download from the main container without Harbor's raw ``docker cp`` fallback."""
+        await self.service_download_dir(source_dir, target_dir, service=None)
+
     @staticmethod
     async def _collect_streamed_output(
         process: asyncio.subprocess.Process,
@@ -1890,7 +1929,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         user: str | int | None = None,
     ) -> ExecResult:
         user = self._resolve_user(user)
-        merged_environment = self._merge_env(env)
+        merged_environment = self._merge_env(env) or {}
         environment_args, subprocess_environment = _secure_exec_arguments(merged_environment)
         exact_secret_values = _sensitive_environment_values(merged_environment)
         exact_secret_values.update(_credential_uri_environment_values(merged_environment))
@@ -2042,12 +2081,16 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                 if len(content) > remaining_bytes:
                     raise RuntimeError("could not inspect Docker Compose interpolation inputs")
                 total_bytes += len(content)
+                decoded_content = content.decode("utf-8")
+                # Scan PyYAML's incremental event stream before composing the object
+                # graph. This keeps compact, deeply nested, or high-node YAML from
+                # exhausting memory or recursion before the post-load metadata walk.
+                _validate_compose_model_parse_budget(decoded_content)
                 # _ComposeModelLoader subclasses yaml.SafeLoader and registers only
                 # scalar, sequence, and mapping constructors for Compose's !reset and
                 # !override tags, so arbitrary Python-object construction stays disabled.
-                # Depth and node-count bounds are enforced separately after parsing.
                 model = yaml.load(  # nosec B506
-                    content.decode("utf-8"),
+                    decoded_content,
                     Loader=_ComposeModelLoader,
                 )
             except (OSError, RecursionError, UnicodeDecodeError, yaml.YAMLError) as exc:

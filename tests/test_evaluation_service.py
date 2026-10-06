@@ -109,6 +109,13 @@ def test_engine_kwargs_excludes_skill_path() -> None:
     assert kwargs["env_mode"] == "docker"
 
 
+def test_evaluation_options_preserves_legacy_positional_skip_baseline() -> None:
+    options = EvaluationOptions(Path("/tmp/x"), "codex", "docker", True)
+
+    assert options.skip_baseline is True
+    assert options.environment_kwarg == ()
+
+
 def test_evaluation_options_leave_agent_selection_to_the_provider() -> None:
     assert EvaluationOptions(skill_path=Path("/tmp/x")).agents is None
 
@@ -211,6 +218,7 @@ def test_cli_validate_forwards_environment_kwargs_to_tier3(monkeypatch: pytest.M
         cli,
         [
             "validate",
+            "--no-autopilot",
             str(FIXTURE),
             "--no-llm",
             "--no-tier2",

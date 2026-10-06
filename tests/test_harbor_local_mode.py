@@ -447,10 +447,29 @@ def test_local_is_a_registered_env_mode() -> None:
     assert "local" in HARBOR_ENV_MODES
 
 
-def test_registered_native_env_modes_match_pinned_harbor_release() -> None:
+def test_registered_native_env_modes_are_supported_subset_of_pinned_harbor_release() -> None:
     from harbor.models.environment_type import EnvironmentType
 
-    assert frozenset(environment.value for environment in EnvironmentType) == HARBOR_NATIVE_ENV_MODES
+    from skillevaluator.tier3_environments import harbor_environment_type
+
+    harbor_modes = frozenset(environment.value for environment in EnvironmentType)
+    harbor_types = frozenset(harbor_environment_type(mode) for mode in HARBOR_NATIVE_ENV_MODES)
+
+    assert harbor_modes > harbor_types
+    # Each SkillEvaluator mode maps to a pinned Harbor type; only aliases are not types themselves.
+    assert HARBOR_NATIVE_ENV_MODES - harbor_modes == {"wandb"}
+    # Harbor backends SkillEvaluator does not expose until it can project task bundles safely.
+    assert harbor_modes - harbor_types == {
+        "cua-cloud",
+        "opensandbox",
+        "hf-sandbox",
+        "podman",
+        "kata",
+        "runta",
+        "prime",
+        "mosaic",
+        "smol",
+    }
 
 
 def test_build_command_uses_unified_flags_for_local_imports() -> None:
@@ -3991,6 +4010,15 @@ def test_output_redaction_balances_component_names_and_legacy_fallback(
         assert callback_output == value
 
 
+@pytest.mark.parametrize("name", ["BASH_ENV", "ENV", "LD_PRELOAD", "PYTHONPATH"])
+def test_empty_runtime_injection_env_is_dropped(name: str) -> None:
+    assert SkillEvaluatorLocalEnvironment._filter_command_env({name: ""}, protected=set()) == {}
+
+
+def test_unblocked_empty_runtime_env_is_preserved() -> None:
+    assert SkillEvaluatorLocalEnvironment._filter_command_env({"EXAMPLE": ""}, protected=set()) == {"EXAMPLE": ""}
+
+
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 def test_persistent_runtime_injection_env_is_blocked_before_launcher(tmp_path: Path) -> None:
     environment = _local_environment(tmp_path, persistent_env={"NODE_OPTIONS": "--require=/tmp/attack.js"})
@@ -5725,8 +5753,9 @@ def test_ack_subprocess_probe_uses_exact_harbor_environment_and_stdin(
         subprocess_env=child_env,
     )
 
-    assert captured["env"] == child_env
+    assert captured["env"] == {**child_env, "HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_DISABLED": "1"}
     assert "ALIBABA_CLOUD_ACCESS_KEY_ID" not in captured["env"]
+    assert Path(str(captured["cwd"])) != Path.cwd()
     assert json.loads(str(captured["input"])) == {
         "namespace": "skill-evals",
         "context": "production",
@@ -5740,7 +5769,7 @@ def test_ack_subprocess_probe_uses_exact_harbor_environment_and_stdin(
     assert captured["start_new_session"] is (os.name == "posix")
     command = captured["command"]
     assert isinstance(command, list)
-    assert command[:2] == [sys.executable, "-c"]
+    assert command[:3] == [sys.executable, "-P", "-c"]
     assert "production" not in " ".join(command)
     assert "/config/ack" not in " ".join(command)
 
@@ -5909,3 +5938,22 @@ def test_docker_prerequisite_accepts_compose_v2(monkeypatch: pytest.MonkeyPatch)
     )
 
     assert _check_prerequisites(env_mode="docker", agents=[]) == []
+
+
+def test_local_nvidia_opencode_config_disables_oauth_for_remote_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    agent = object.__new__(SkillEvaluatorLocalOpenCode)
+    agent.mcp_servers = [
+        SimpleNamespace(name="remote-tools", transport="streamable-http", url="https://tools.example/mcp"),
+        SimpleNamespace(name="local-tools", transport="stdio", command="tool-server", args=["--stdio"]),
+    ]
+    agent._opencode_config = {}
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://integrate.api.nvidia.com/v1")
+
+    command = agent._nvidia_provider_config_command("nvidia/model")
+
+    payload = shlex.split(command.split("&&", 1)[1])[1]
+    config = json.loads(payload)
+    assert config["mcp"]["remote-tools"] == {"type": "remote", "url": "https://tools.example/mcp", "oauth": False}
+    assert config["mcp"]["local-tools"] == {"type": "local", "command": ["tool-server", "--stdio"]}

@@ -2274,3 +2274,17 @@ def test_trajectory_redaction_masks_plural_and_nonnumeric_token_fields(tmp_path:
     }
     assert persisted["final_metrics"]["total_prompt_tokens"] == 10
     Trajectory.model_validate(persisted)
+
+
+@pytest.mark.parametrize(
+    ("versions", "expected"),
+    [
+        (("ATIF-v1.2", "ATIF-v1.6"), "ATIF-v1.7"),
+        (("ATIF-v1.7", "ATIF-v1.8"), "ATIF-v1.8"),
+        (("ATIF-v1.8", None, "unexpected"), "ATIF-v1.8"),
+    ],
+)
+def test_merged_trajectories_keep_the_newest_source_schema(versions: tuple, expected: str) -> None:
+    from skillevaluator.tier3.harbor.collector import _merged_atif_schema_version
+
+    assert _merged_atif_schema_version(*({"schema_version": version} for version in versions)) == expected

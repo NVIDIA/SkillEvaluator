@@ -25,7 +25,7 @@ import time
 import tomllib
 from collections.abc import Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import wraps
@@ -46,6 +46,7 @@ from skillevaluator.provider_config import (
     _normalize_anthropic_base_url,
     resolve_llm_provider,
 )
+from skillevaluator.source_identity import normalized_evaluated_source
 from skillevaluator.tier3.case_ids import validate_case_ids
 from skillevaluator.tier3.evals_config import (
     MAX_HARBOR_TIMEOUT_MULTIPLIER,
@@ -57,8 +58,10 @@ from skillevaluator.tier3.evals_config import (
 from skillevaluator.tier3.harbor.adapter import (
     _RUNTIME_PROCESS_CONTROL_ENV_NAMES,
     _RUNTIME_PROCESS_CONTROL_ENV_PREFIXES,
+    _VERIFIER_BUDGET_ENV_VARS,
     _VERIFIER_JUDGE_CONTROL_ENV_VARS,
     _VERIFIER_JUDGE_MODEL_ENV_VARS,
+    _VERIFIER_RETRY_ENV_VARS,
     _native_entry_id,
     _prevalidate_baseline_skill_candidates,
     build_eval_base_image,
@@ -78,6 +81,7 @@ from skillevaluator.tier3.harbor.collector import (
 )
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_definition
 from skillevaluator.tier3.harbor.progress import (
+    MIN_EXACT_SECRET_CHARS,
     NullProgressReporter,
     ProgressEvent,
     ProgressReporter,
@@ -118,8 +122,11 @@ from skillevaluator.tier3_environments import (
     DEFAULT_ENV_MODE,
     ENV_MODE_LOCAL,
     HARBOR_ENV_MODES,
+    HARBOR_ENVIRONMENT_ALIAS_KWARGS,
     HARBOR_ENVIRONMENT_EXTRAS,
-    HARBOR_V022_ENVIRONMENT_KWARGS,
+    HARBOR_ENVIRONMENT_KWARGS,
+    HARBOR_VERSION,
+    harbor_environment_type,
 )
 from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
@@ -576,8 +583,11 @@ def _persist_dataset_truth(run_dir: Path, *, fallback_task_ids: list[str]) -> di
 
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
-_NVIDIA_BUILD_BRIDGED_AGENT_DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b"
-_HARBOR_RUN_TIMEOUT_SECONDS = 7200.0
+_NVIDIA_BUILD_AGENT_DEFAULT_MODEL = CHAT_DEFAULT_NVIDIA
+_GATEWAY_CODEX_IMPORT_PATH = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayCodex"
+# The OpenAI-compatible gateway Codex wrapper only routes the stock agent to the
+# operator's gateway, so it is the one custom agent allowed on Harbor-native backends.
+_NATIVE_BACKEND_AGENT_IMPORT_PATHS = frozenset({_GATEWAY_CODEX_IMPORT_PATH})
 _HARBOR_RUN_OUTPUT_MAX_BYTES = MAX_COMMAND_OUTPUT_BYTES
 _HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS = 16 * 1024
 _HARBOR_RUN_OUTPUT_READ_BYTES = 64 * 1024
@@ -845,16 +855,6 @@ _HARBOR_ENV_MODE_VARS = {
     "use-computer": frozenset(
         {"USE_COMPUTER_API_KEY", "USE_COMPUTER_HOST", "USE_COMPUTER_SNAPSHOT", "USE_COMPUTER_VERSION"}
     ),
-    "cua-cloud": frozenset(
-        {
-            "CUA_BASE_URL",
-            "CUA_CLIENT_ID",
-            "CUA_CLIENT_SECRET",
-            "CUA_CLOUD_NAMESPACE",
-            "CUA_CLOUD_STARTUP_COMMAND",
-            "CUA_TOKEN_URL",
-        }
-    ),
     "blaxel": frozenset(
         {
             "BL_API_KEY",
@@ -865,7 +865,6 @@ _HARBOR_ENV_MODE_VARS = {
             "BL_WORKSPACE",
         }
     ),
-    "opensandbox": frozenset({"OPENSANDBOX_API_KEY", "OPENSANDBOX_DOMAIN"}),
     "beam": frozenset(
         {
             "API_HOST",
@@ -888,7 +887,6 @@ _HARBOR_ENV_MODE_VARS = {
             "SKYPILOT_SERVICE_ACCOUNT_TOKEN",
         }
     ),
-    "hf-sandbox": frozenset({"HF_ENDPOINT", "HF_HOME", "HF_TOKEN", "HF_TOKEN_PATH", "HUGGING_FACE_HUB_TOKEN"}),
     "hyperbrowser": _DOCKER_HOST_ENV_VARS | frozenset({"HYPERBROWSER_API_KEY", "HYPERBROWSER_BASE_URL"}),
     "vercel": frozenset({"VERCEL_OIDC_TOKEN", "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID", "VERCEL_TOKEN"}),
 }
@@ -900,10 +898,7 @@ _BEDROCK_HOST_ENV_VARS = _AWS_HOST_ENV_VARS | {
     "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
 }
 _RUNTIME_ENV_HOST_CONTROL_NAMES = (
-    _RUNTIME_PROCESS_CONTROL_ENV_NAMES
-    | _BEDROCK_HOST_ENV_VARS
-    | _VERIFIER_JUDGE_CONTROL_ENV_VARS
-    | frozenset().union(*_HARBOR_ENV_MODE_VARS.values())
+    _RUNTIME_PROCESS_CONTROL_ENV_NAMES | _BEDROCK_HOST_ENV_VARS | _VERIFIER_JUDGE_CONTROL_ENV_VARS
 )
 _RUNTIME_ENV_HOST_CONTROL_PREFIXES = _RUNTIME_PROCESS_CONTROL_ENV_PREFIXES
 _OPERATOR_OWNED_AGENT_ENV = frozenset(
@@ -933,6 +928,95 @@ def _harbor_bin() -> str:
     """Return the Harbor executable installed with the active interpreter."""
     candidate = Path(os.sys.executable).parent / "harbor"
     return str(candidate) if candidate.exists() else (shutil.which("harbor") or "harbor")
+
+
+# Harbor loads ``.env.local`` from its working directory, and Harbor and LiteLLM
+# call ``load_dotenv()`` on import. Every Harbor process therefore starts in an
+# empty evaluator-owned directory with dotenv loading and telemetry disabled, so
+# no file outside the allowlisted environment can add credentials or settings.
+# These controls are applied at launch, outside the secret-tracked environment.
+_HARBOR_LAUNCH_ENV = MappingProxyType({"HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_DISABLED": "1"})
+# Harbor 0.22's Codex agent ran with ``model_reasoning_effort=high``; later
+# releases defer to Codex's own default. Pin the effort SkillEvaluator was
+# validated with so scores and cost stay comparable across Harbor upgrades.
+_HARBOR_AGENT_KWARGS: Mapping[str, Mapping[str, str]] = MappingProxyType(
+    {"codex": MappingProxyType({"reasoning_effort": "high"})}
+)
+# Allowlisted host variables that name a file or directory. A relative value keeps
+# its meaning by being anchored to the operator's working directory.
+_HARBOR_HOST_PATH_ENV_VARS = frozenset(
+    {
+        "APPTAINER_AUTHFILE",
+        "APPTAINER_CONFIGDIR",
+        "AWS_CA_BUNDLE",
+        "AWS_CONFIG_FILE",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+        "AWS_CREDENTIAL_FILE",
+        "AWS_LOGIN_CACHE_DIRECTORY",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+        "CLOUDSDK_CONFIG",
+        "DOCKER_CERT_PATH",
+        "DOCKER_CONFIG",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "LANGSMITH_CONFIG_FILE",
+        "MODAL_CONFIG_PATH",
+        "NETRC",
+        "REQUESTS_CA_BUNDLE",
+        "SINGULARITY_AUTHFILE",
+        "SINGULARITY_CONFIGDIR",
+        "SKYPILOT_GLOBAL_CONFIG",
+        "SKYPILOT_PROJECT_CONFIG",
+        "SSL_CERT_FILE",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+    }
+)
+_HARBOR_HOST_PATH_LIST_ENV_VARS = frozenset({"AWS_DATA_PATH", "KUBECONFIG", "SSL_CERT_DIR"})
+_HOST_PATH_ENVIRONMENT_KWARGS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "ack": frozenset({"kubeconfig"}),
+        "ec2": frozenset({"ssh_key_path", "ssh_known_hosts_path"}),
+        "singularity": frozenset({"singularity_image_cache_dir"}),
+    }
+)
+
+
+def _absolute_host_path(value: str) -> str:
+    """Anchor a relative host path to the operator's working directory."""
+    if not value or value.startswith("~"):
+        return value
+    path = Path(value)
+    return value if path.is_absolute() else str(path.absolute())
+
+
+def _harbor_launch_environment(env: Mapping[str, str]) -> dict[str, str]:
+    """Return a Harbor child environment that no longer depends on the caller's directory."""
+    launch_env = dict(env)
+    for name in _HARBOR_HOST_PATH_ENV_VARS & launch_env.keys():
+        launch_env[name] = _absolute_host_path(launch_env[name])
+    for name in _HARBOR_HOST_PATH_LIST_ENV_VARS & launch_env.keys():
+        launch_env[name] = os.pathsep.join(_absolute_host_path(entry) for entry in launch_env[name].split(os.pathsep))
+    launch_env.update(_HARBOR_LAUNCH_ENV)
+    return launch_env
+
+
+def _absolute_host_path_kwargs(env_mode: str, environment_kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """Anchor relative host-path constructor kwargs before Harbor changes directory."""
+    anchored = dict(environment_kwargs)
+    for name in _HOST_PATH_ENVIRONMENT_KWARGS.get(env_mode, frozenset()) & anchored.keys():
+        if isinstance(anchored[name], str):
+            anchored[name] = _absolute_host_path(anchored[name])
+    return anchored
+
+
+@contextmanager
+def _harbor_launch_cwd() -> Iterator[Path]:
+    """Yield a private, empty working directory for one Harbor process."""
+    with tempfile.TemporaryDirectory(prefix="skillevaluator-harbor-", ignore_cleanup_errors=True) as directory:
+        yield Path(directory)
 
 
 def _harbor_supports_yes() -> bool:
@@ -982,6 +1066,7 @@ _HARBOR_RUNTIME_POLICY_KWARGS = frozenset(
         "context_id",
         "cpu_enforcement_policy",
         "delete",
+        "enable_environment_dir_upload",
         "environment_dir",
         "environment_name",
         "extra_allowed_hosts",
@@ -1007,6 +1092,7 @@ _HARBOR_RUNTIME_POLICY_KWARGS = frozenset(
         "pod_run_as_user",
         "phase_network_policies",
         "session_id",
+        "stream",
         "suppress_override_warnings",
         "extra_env",
         "extra_volume_mounts",
@@ -1032,16 +1118,17 @@ _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS: dict[str, frozenset[str]] = {
         }
     ),
     "blaxel": frozenset({"dind_extra_args"}),
-    "cua-cloud": frozenset({"claim_spec"}),
+    # Credential strategy selection; SkillEvaluator sets it only for the wandb alias.
+    "cwsandbox": frozenset({"auth"}),
     "daytona": frozenset({"network_block_all"}),
     "ec2": frozenset({"iam_instance_profile", "strict_host_key_checking"}),
     "gke": frozenset({"memory_limit_multiplier"}),
     "modal": frozenset({"volumes"}),
-    "opensandbox": frozenset({"volumes"}),
     "openshift": frozenset({"service_account_name"}),
     "singularity": frozenset({"singularity_no_mount"}),
     "use-computer": frozenset({"resources"}),
     "vercel": frozenset({"ports"}),
+    "wandb": frozenset({"auth"}),
 }
 
 
@@ -1055,8 +1142,10 @@ def _environment_kwarg_policy_error(env_mode: str, environment_kwargs: Mapping[s
     reserved = _HARBOR_RUNTIME_POLICY_KWARGS | _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS.get(env_mode, frozenset())
     if collisions := sorted(reserved & environment_kwargs.keys()):
         return "Environment kwarg(s) reserved for Harbor runtime policy: " + ", ".join(collisions)
-    if unknown := sorted(environment_kwargs.keys() - HARBOR_V022_ENVIRONMENT_KWARGS[env_mode]):
-        return f"Harbor 0.22.0 environment '{env_mode}' does not accept environment kwarg(s): " + ", ".join(unknown)
+    if unknown := sorted(environment_kwargs.keys() - HARBOR_ENVIRONMENT_KWARGS[env_mode]):
+        return f"Harbor {HARBOR_VERSION} environment '{env_mode}' does not accept environment kwarg(s): " + ", ".join(
+            unknown
+        )
     return None
 
 
@@ -1112,7 +1201,11 @@ def build_harbor_run_command(
     if env_mode not in HARBOR_ENV_MODES:
         raise ValueError(f"env_mode must be one of: {', '.join(sorted(HARBOR_ENV_MODES))}")
     timeout_multiplier = _validated_timeout_multiplier(timeout_multiplier)
-    if agent_import_path and env_mode not in {"docker", ENV_MODE_LOCAL}:
+    if (
+        agent_import_path
+        and env_mode not in {"docker", ENV_MODE_LOCAL}
+        and agent_import_path not in _NATIVE_BACKEND_AGENT_IMPORT_PATHS
+    ):
         raise ValueError("agent_import_path is supported only with --env docker or local")
     validated_environment_kwargs = validate_environment_kwargs(
         dict(environment_kwargs or {}),
@@ -1120,6 +1213,7 @@ def build_harbor_run_command(
     )
     if policy_error := _environment_kwarg_policy_error(env_mode, validated_environment_kwargs):
         raise ValueError(policy_error)
+    validated_environment_kwargs = _absolute_host_path_kwargs(env_mode, validated_environment_kwargs)
 
     command = [
         _harbor_bin(),
@@ -1131,7 +1225,7 @@ def build_harbor_run_command(
         "--n-concurrent",
         str(n_concurrent),
         "-p",
-        str(dataset_path),
+        str(Path(dataset_path).absolute()),
     ]
     if env_mode == ENV_MODE_LOCAL:
         # Local mode is a custom SkillEvaluator environment + agent wrappers,
@@ -1175,11 +1269,16 @@ def build_harbor_run_command(
             command.extend(["--agent", agent])
         command.extend(["--env", SECURE_DOCKER_ENV_IMPORT_PATH])
     else:
-        command.extend(["--agent", agent, "--env", env_mode])
+        command.extend(["--agent", agent_import_path or agent, "--env", harbor_environment_type(env_mode)])
+    for name, value in sorted(_HARBOR_AGENT_KWARGS.get(agent, {}).items()):
+        command.extend(["--ak", encode_environment_kwarg(name, value)])
     for name, value in sorted(validated_environment_kwargs.items()):
         command.extend(["--ek", encode_environment_kwarg(name, value)])
+    # Alias kwargs come after operator kwargs, which may never set them.
+    for name, value in sorted(HARBOR_ENVIRONMENT_ALIAS_KWARGS.get(env_mode, {}).items()):
+        command.extend(["--ek", encode_environment_kwarg(name, value)])
     if jobs_dir is not None:
-        command.extend(["--jobs-dir", str(jobs_dir)])
+        command.extend(["--jobs-dir", str(Path(jobs_dir).absolute())])
     if disable_verification:
         command.append("--disable-verification")
     for task_name in include_task_names or []:
@@ -1208,7 +1307,11 @@ def _provider_environment(config: ProviderConfig) -> dict[str, str]:
         "SKILL_EVAL_LLM_MODEL": config.model,
     }
     environment.update(
-        {name: value for name in _VERIFIER_JUDGE_CONTROL_ENV_VARS if (value := os.environ.get(name, "").strip())}
+        {
+            name: value
+            for name in (_VERIFIER_JUDGE_CONTROL_ENV_VARS | _VERIFIER_BUDGET_ENV_VARS | _VERIFIER_RETRY_ENV_VARS)
+            if (value := os.environ.get(name, "").strip())
+        }
     )
     if config.provider == "anthropic":
         environment["ANTHROPIC_API_KEY"] = config.api_key or ""
@@ -1439,8 +1542,6 @@ def _environment_kwarg_prerequisite_errors(
         invalid := invalid_strings(*(name for name in ("context", "kubeconfig") if name in kwargs))
     ):
         return ["Harbor environment 'ack' requires non-empty string --environment-kwarg for: " + ", ".join(invalid)]
-    if env_mode == "opensandbox" and kwargs.get("domain") is not None and invalid_strings("domain"):
-        return ["Harbor environment 'opensandbox' requires domain to be a non-empty string when provided"]
     if env_mode == "ec2":
         launch_mode_value = kwargs.get("launch_mode", "ephemeral")
         if not isinstance(launch_mode_value, str):
@@ -1465,10 +1566,31 @@ def _environment_kwarg_prerequisite_errors(
     return []
 
 
+def _cwsandbox_prerequisite_errors(env_mode: str) -> list[str]:
+    """Check what Harbor's cwsandbox backend needs; Harbor 0.24 no longer checks it."""
+    if harbor_environment_type(env_mode) != "cwsandbox":
+        return []
+    required_modules = ("cwsandbox", "wandb") if env_mode == "wandb" else ("cwsandbox",)
+    if missing := [name for name in required_modules if importlib.util.find_spec(name) is None]:
+        return [
+            f"Harbor environment '{env_mode}' needs optional dependencies: {', '.join(missing)}. "
+            f"{_environment_extra_install_hint(env_mode)}"
+        ]
+    if env_mode == "wandb":
+        netrc_paths = [os.environ.get("NETRC", ""), str(Path.home() / ".netrc"), str(Path.home() / "_netrc")]
+        if not os.environ.get("WANDB_API_KEY", "").strip() and not any(
+            path and Path(path).expanduser().is_file() for path in netrc_paths
+        ):
+            return ["Harbor environment 'wandb' requires WANDB_API_KEY or a netrc file from `wandb login`."]
+    elif not os.environ.get("CWSANDBOX_API_KEY", "").strip():
+        return ["Harbor environment 'cwsandbox' requires CWSANDBOX_API_KEY."]
+    return []
+
+
 def _environment_extra_install_hint(env_mode: str) -> str:
     extra = HARBOR_ENVIRONMENT_EXTRAS.get(env_mode)
     if extra is not None:
-        return f"Install 'harbor[{extra}]==0.22.0'."
+        return f"Install 'harbor[{extra}]=={HARBOR_VERSION}'."
     system_hints = {
         "apple-container": "Install the Apple container CLI; Harbor has no Python extra for this backend.",
         "openshift": "Install the OpenShift oc CLI; Harbor has no Python extra for this backend.",
@@ -1543,6 +1665,7 @@ def _check_ack_cluster_readiness_subprocess(
     validated = validate_environment_kwargs(dict(environment_kwargs), env_mode="ack")
     if policy_error := _environment_kwarg_policy_error("ack", validated):
         raise ValueError(policy_error)
+    validated = _absolute_host_path_kwargs("ack", validated)
     payload = {name: validated[name] for name in ("namespace", "context", "kubeconfig") if name in validated}
     encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
     child_env = dict(subprocess_env)
@@ -1550,19 +1673,22 @@ def _check_ack_cluster_readiness_subprocess(
     redacted_values.update(str(value) for value in payload.values() if isinstance(value, str) and value)
     process: subprocess.Popen[str] | None = None
     try:
-        process = subprocess.Popen(
-            [sys.executable, "-c", _ACK_CLUSTER_READINESS_PROBE_CODE],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=child_env,
-            start_new_session=os.name == "posix",
-        )
-        stdout, stderr = process.communicate(
-            encoded,
-            timeout=_ACK_CLUSTER_READINESS_SUBPROCESS_TIMEOUT_SECONDS,
-        )
+        with _harbor_launch_cwd() as launch_cwd:
+            # ``-P`` keeps the probe's working directory off ``sys.path``.
+            process = subprocess.Popen(
+                [sys.executable, "-P", "-c", _ACK_CLUSTER_READINESS_PROBE_CODE],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=str(launch_cwd),
+                env=_harbor_launch_environment(child_env),
+                start_new_session=os.name == "posix",
+            )
+            stdout, stderr = process.communicate(
+                encoded,
+                timeout=_ACK_CLUSTER_READINESS_SUBPROCESS_TIMEOUT_SECONDS,
+            )
     except subprocess.TimeoutExpired:
         assert process is not None
         _terminate_ack_readiness_process(process)
@@ -1597,6 +1723,23 @@ def _modal_custom_config_status() -> tuple[bool, str | None]:
     return True, None
 
 
+def _python_dotenv_prerequisite_error() -> str | None:
+    """Require the python-dotenv release that honors ``PYTHON_DOTENV_DISABLED``."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        installed = version("python-dotenv")
+    except PackageNotFoundError:
+        return None
+    release = re.match(r"(\d+)\.(\d+)", installed)
+    if release is None or (int(release[1]), int(release[2])) >= (1, 2):
+        return None
+    return (
+        f"python-dotenv {installed} cannot disable Harbor's .env loading; "
+        "install skillevaluator[tier3] to upgrade it to 1.2.0 or newer."
+    )
+
+
 def _check_prerequisites(
     env_mode: str = DEFAULT_ENV_MODE,
     agents: list[str] | None = None,
@@ -1606,6 +1749,8 @@ def _check_prerequisites(
     """Check Harbor and the selected environment (built-in or local mode)."""
     if env_mode not in HARBOR_ENV_MODES:
         return [f"Unsupported Harbor environment '{env_mode}'. Choose one of: {', '.join(sorted(HARBOR_ENV_MODES))}"]
+    if dotenv_error := _python_dotenv_prerequisite_error():
+        return [dotenv_error]
     if kwarg_errors := _environment_kwarg_prerequisite_errors(env_mode, environment_kwargs):
         return kwarg_errors
     if env_mode == ENV_MODE_LOCAL:
@@ -1626,21 +1771,6 @@ def _check_prerequisites(
         return ["Harbor environment 'singularity' requires the singularity CLI on PATH."]
     if env_mode == "islo" and not os.environ.get("ISLO_API_KEY", "").strip():
         return ["Harbor environment 'islo' requires a non-empty ISLO_API_KEY in the host environment."]
-    if env_mode == "opensandbox" and (environment_kwargs or {}).get("domain") is None:
-        opensandbox_env = (
-            subprocess_env
-            if subprocess_env is not None
-            else _selected_host_environment(
-                _HARBOR_BASE_ENV_VARS | _HARBOR_ENV_MODE_VARS["opensandbox"],
-                os.environ,
-            )
-        )
-        if not opensandbox_env.get("OPENSANDBOX_DOMAIN", "").strip():
-            return [
-                "Harbor environment 'opensandbox' requires a non-empty domain --environment-kwarg "
-                "or child-visible OPENSANDBOX_DOMAIN."
-            ]
-
     if env_mode == "modal":
         _, modal_config_error = _modal_custom_config_status()
         if modal_config_error:
@@ -1706,7 +1836,9 @@ def _check_prerequisites(
         from harbor.environments.factory import EnvironmentFactory
         from harbor.models.environment_type import EnvironmentType
 
-        EnvironmentFactory.run_preflight(EnvironmentType(env_mode))
+        if cwsandbox_errors := _cwsandbox_prerequisite_errors(env_mode):
+            return cwsandbox_errors
+        EnvironmentFactory.run_preflight(EnvironmentType(harbor_environment_type(env_mode)))
         if env_mode == "ack":
             ack_subprocess_env = (
                 dict(subprocess_env)
@@ -1747,21 +1879,26 @@ def _check_prerequisites(
     return []
 
 
-def _is_operator_owned_runtime_name(name: str) -> bool:
+def _is_operator_owned_runtime_name(name: str, *, env_mode: str) -> bool:
     normalized = name.upper()
     return (
         is_sensitive_key(name)
         or normalized in _RUNTIME_ENV_HOST_CONTROL_NAMES
+        or normalized in _HARBOR_ENV_MODE_VARS.get(env_mode, frozenset())
         or normalized in _OPERATOR_OWNED_AGENT_ENV
         or normalized.startswith(_RUNTIME_ENV_HOST_CONTROL_PREFIXES)
     )
 
 
-def _resolve_runtime_env(templates: dict[str, str] | None) -> tuple[dict[str, str], list[str]]:
+def _resolve_runtime_env(
+    templates: dict[str, str] | None,
+    *,
+    env_mode: str,
+) -> tuple[dict[str, str], list[str]]:
     resolved: dict[str, str] = {}
     errors: list[str] = []
     for name, template in (templates or {}).items():
-        if _is_operator_owned_runtime_name(name):
+        if _is_operator_owned_runtime_name(name, env_mode=env_mode):
             errors.append(f"harbor.runtime_env.{name} controls the host process and is not allowed")
             continue
         template_value = str(template)
@@ -1774,7 +1911,9 @@ def _resolve_runtime_env(templates: dict[str, str] | None) -> tuple[dict[str, st
         }
         percent_references = set(re.findall(r"%([A-Za-z_][A-Za-z0-9_]*)%", template_value))
         references = dollar_references | percent_references
-        owned_references = sorted(reference for reference in references if _is_operator_owned_runtime_name(reference))
+        owned_references = sorted(
+            reference for reference in references if _is_operator_owned_runtime_name(reference, env_mode=env_mode)
+        )
         if owned_references:
             errors.append(
                 f"harbor.runtime_env.{name} references operator-owned credential(s): " + ", ".join(owned_references)
@@ -2305,7 +2444,7 @@ def _model_for_agent(
 def _agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> str | None:
     """Select only the provider-specific wrappers required for this environment."""
     if provider.provider == "openai-compatible" and agent == "codex" and env_mode != ENV_MODE_LOCAL:
-        return "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayCodex"
+        return _GATEWAY_CODEX_IMPORT_PATH
     if provider.provider == "openai-compatible" and agent == "opencode" and env_mode == "docker":
         return "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayOpenCode"
     return _nvidia_build_agent_import_path(provider, agent, env_mode)
@@ -2455,14 +2594,15 @@ def _run_bounded_harbor_process(
     command: list[str],
     *,
     env: Mapping[str, str],
+    cwd: Path,
     stdin_text: str | None,
-    timeout_seconds: float,
+    timeout_seconds: float | None,
     max_output_bytes: int,
     diagnostic_tail_chars: int,
     secret_values: set[str],
 ) -> _BoundedHarborProcessResult:
-    """Run Harbor with bounded merged output and platform cleanup ownership."""
-    if timeout_seconds <= 0:
+    """Run Harbor with bounded merged output and optional cleanup deadline."""
+    if timeout_seconds is not None and timeout_seconds <= 0:
         raise ValueError("Harbor run timeout must be positive")
     if max_output_bytes <= 0:
         raise ValueError("Harbor output byte limit must be positive")
@@ -2475,7 +2615,8 @@ def _run_bounded_harbor_process(
         stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        env=dict(env),
+        cwd=str(cwd),
+        env=_harbor_launch_environment(env),
         start_new_session=os.name == "posix",
         creationflags=creation_flags,
     )
@@ -2488,7 +2629,7 @@ def _run_bounded_harbor_process(
     reader_error: list[BaseException] = []
     stdin_error: list[BaseException] = []
     output_tail = ""
-    deadline = time.monotonic() + timeout_seconds
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
 
     def append_tail(text: str) -> None:
         nonlocal output_tail
@@ -2567,6 +2708,9 @@ def _run_bounded_harbor_process(
                 break
             if reader_done.is_set() and process.poll() is not None:
                 break
+            if deadline is None:
+                reader_done.wait(_HARBOR_RUN_POLL_SECONDS)
+                continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
@@ -2588,6 +2732,7 @@ def _run_bounded_harbor_process(
         if stdin_error:
             raise RuntimeError("Harbor stdin delivery failed") from stdin_error[0]
         if timed_out:
+            assert timeout_seconds is not None
             detail = f"Harbor run timed out after {timeout_seconds:g} seconds"
             safe_tail = redact_progress_detail(output_tail, secret_values=secret_values)
             if safe_tail:
@@ -2646,7 +2791,7 @@ def _run_harbor(
     # Preserve the historical exact-value protection for every selected child
     # value, and additionally protect detached credential URI/proxy userinfo
     # (including percent-decoded and schemeless proxy components).
-    secret_values = set(run_env.values())
+    secret_values = {value for value in run_env.values() if len(value) >= MIN_EXACT_SECRET_CHARS}
     secret_values.update(secret_values_from_environment(run_env))
     command = build_harbor_run_command(
         dataset_path=dataset,
@@ -2668,15 +2813,20 @@ def _run_harbor(
     )
     try:
         handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
-        result = _run_bounded_harbor_process(
-            command,
-            env=handoff.subprocess_env,
-            stdin_text=handoff.stdin_text,
-            timeout_seconds=_HARBOR_RUN_TIMEOUT_SECONDS,
-            max_output_bytes=_HARBOR_RUN_OUTPUT_MAX_BYTES,
-            diagnostic_tail_chars=_HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS,
-            secret_values=secret_values,
-        )
+        # Harbor owns its phase deadlines, and native tasks may intentionally
+        # leave the agent unbounded. Keep bounded streaming and process-tree
+        # cleanup without imposing an outer orchestration deadline.
+        with _harbor_launch_cwd() as launch_cwd:
+            result = _run_bounded_harbor_process(
+                command,
+                env=handoff.subprocess_env,
+                cwd=launch_cwd,
+                stdin_text=handoff.stdin_text,
+                timeout_seconds=None,
+                max_output_bytes=_HARBOR_RUN_OUTPUT_MAX_BYTES,
+                diagnostic_tail_chars=_HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS,
+                secret_values=secret_values,
+            )
     except (OSError, RuntimeError, UnicodeError) as exc:
         detail = _redact_harbor_diagnostic(exc, secret_values=secret_values)
         if not detail:
@@ -3563,7 +3713,10 @@ def _run_harbor_eval_impl(
         model_resolution[agent] = {"agent": agent, "model": selected, "source": source}
 
     provider_env = _provider_environment(provider)
-    configured_runtime_env, runtime_errors = _resolve_runtime_env(harbor_config.get("runtime_env"))
+    configured_runtime_env, runtime_errors = _resolve_runtime_env(
+        harbor_config.get("runtime_env"),
+        env_mode=env_mode,
+    )
     reporter.set_secret_values(secret_values_from_environment(provider_env) | set(configured_runtime_env.values()))
     reporter.emit(ProgressEvent(stage="model-resolution", state="complete", detail="agent models resolved"))
     reporter.start(
@@ -3582,7 +3735,7 @@ def _run_harbor_eval_impl(
     )
 
     prerequisite_subprocess_env: dict[str, str] | None = None
-    if env_mode in {"ack", "opensandbox"} and agents:
+    if env_mode == "ack" and agents:
         preflight_agent = agents[0]
         runtime_provider_env = {
             name: value for name, value in provider_env.items() if name not in _VERIFIER_JUDGE_CONTROL_ENV_VARS
@@ -4149,7 +4302,7 @@ def _run_harbor_eval_impl(
                 override_cpus=override_cpus,
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
-                agent_import_path=nvidia_build_agent_import_paths.get(agent),
+                agent_import_path=agent_import_paths.get(agent),
                 environment_kwargs=effective_environment_kwargs,
             )
             if not preflight.ok:

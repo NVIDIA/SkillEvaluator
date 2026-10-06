@@ -775,7 +775,7 @@ def _stub_runner(
     monkeypatch.setattr(runner, "find_evals_file", lambda _path: evals_file)
     monkeypatch.setattr(runner, "generate_harbor_tasks", task_emitter or emit_tasks)
     monkeypatch.setattr(runner, "_provider_environment", lambda _provider: {"OPENAI_API_KEY": provider.api_key})
-    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates: ({}, []))
+    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates, **_kwargs: ({}, []))
     monkeypatch.setattr(
         runner,
         "_validate_agent_provider_credentials",
@@ -938,7 +938,11 @@ def test_ack_eval_preflight_uses_the_exact_prospective_bedrock_child_environment
     monkeypatch.setattr(runner, "resolve_llm_provider", lambda: provider)
     monkeypatch.setattr(runner, "_provider_environment", real_provider_environment)
     monkeypatch.setattr(runner, "_harbor_subprocess_environment", real_harbor_subprocess_environment)
-    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates: ({"SAFE_RUNTIME_FLAG": "enabled"}, []))
+    monkeypatch.setattr(
+        runner,
+        "_resolve_runtime_env",
+        lambda _templates, **_kwargs: ({"SAFE_RUNTIME_FLAG": "enabled"}, []),
+    )
 
     result = runner.run_harbor_eval(
         skill,
@@ -2314,7 +2318,7 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
     monkeypatch.setattr(runner, "find_evals_file", lambda _path: evals_file)
     monkeypatch.setattr(runner, "generate_harbor_tasks", _emit_tasks)
     monkeypatch.setattr(runner, "_provider_environment", lambda _provider: {"OPENAI_API_KEY": "sk-test-secret"})
-    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates: ({}, []))
+    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates, **_kwargs: ({}, []))
     monkeypatch.setattr(runner, "_validate_agent_provider_credentials", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(runner, "_harbor_subprocess_environment", lambda **_kwargs: {})
     from skillevaluator.tier3.harbor import runtime_preflight
@@ -2808,7 +2812,11 @@ def test_runner_registers_exact_secrets_before_skill_and_model_render(
         skill_name=secret,
         provider_model=secret,
     )
-    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates: ({"CUSTOM_VALUE": secret}, []))
+    monkeypatch.setattr(
+        runner,
+        "_resolve_runtime_env",
+        lambda _templates, **_kwargs: ({"CUSTOM_VALUE": secret}, []),
+    )
     output = io.StringIO()
     reporter = _progress_module().PlainProgressReporter(stream=output, refresh_interval=60)
 
@@ -3127,3 +3135,29 @@ def test_command_runner_terminalizes_inherited_configuration_stage(
         ("run-finished", "failed"),
     ]
     assert transitions.count(("run-finished", "failed")) == 1
+
+
+def test_short_credential_named_flags_do_not_redact_counts() -> None:
+    from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
+
+    secrets = secret_values_from_environment(
+        {
+            "SDK_HAS_HOST_AUTH_REFRESH": "1",
+            "FEATURE_TOKEN_ENABLED": "yes",
+            "SERVICE_API_KEY": "service-key-123456",
+            "HTTPS_PROXY": "http://u:p@proxy.example:8080",
+        }
+    )
+
+    assert "1" not in secrets
+    assert "yes" not in secrets
+    assert "service-key-123456" in secrets
+    detail = redact_progress_detail(
+        "Harbor job did not complete successfully: 1 errored; codex with-skill (0/1 scored) "
+        "via http://u:p@proxy.example:8080 using service-key-123456",
+        secret_values=secrets,
+    )
+    assert "1 errored" in detail
+    assert "(0/1 scored)" in detail
+    assert "service-key-123456" not in detail
+    assert "u:p@" not in detail

@@ -26,7 +26,6 @@ class EvaluationOptions:
     skill_path: Path
     agents: str | None = None
     env_mode: str = "docker"
-    environment_kwarg: tuple[str, ...] = ()
     skip_baseline: bool = False
     n_attempts: int | None = None
     pass_threshold: float | None = None
@@ -47,6 +46,7 @@ class EvaluationOptions:
     override_cpus: int | None = None
     override_memory_mb: int | None = None
     override_storage_mb: int | None = None
+    environment_kwarg: tuple[str, ...] = ()
     # Supplied by the orchestration input, never inferred from repository state:
     # the tree that runs the evaluator is not the tree being evaluated.
     evaluated_source: dict[str, str] | None = None

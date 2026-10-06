@@ -921,6 +921,8 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
     env_mode = params.get("env_mode", "docker")
     if env_mode != "docker":
         argv.extend(["--env-mode", str(env_mode)])
+    for environment_kwarg in params.get("environment_kwarg") or ():
+        argv.extend(["--environment-kwarg", str(environment_kwarg)])
     if params.get("skip_baseline"):
         argv.append("--skip-baseline")
     if params.get("n_concurrent") is not None:
@@ -2773,7 +2775,7 @@ def models_command(limit: int, as_json: bool) -> None:
     help="Check resolved agent-model catalog reachability with a live credential-bearing request.",
 )
 def doctor(
-    agents: str,
+    agents: str | None,
     env_mode: str,
     environment_kwarg: tuple[str, ...],
     agent_model: tuple[str, ...],
@@ -2794,7 +2796,12 @@ def doctor(
 
 
 @cli.command("health-check")
-@click.option("-a", "--agents", default="codex", show_default=True)
+@click.option(
+    "-a",
+    "--agents",
+    default=None,
+    help="Agent list; default follows the configured provider.",
+)
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE, metavar="MODE")
 @click.option(
     "--environment-kwarg",
@@ -2802,7 +2809,7 @@ def doctor(
     multiple=True,
     help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
 )
-def health_check(agents: str, env_mode: str, environment_kwarg: tuple[str, ...]) -> None:
+def health_check(agents: str | None, env_mode: str, environment_kwarg: tuple[str, ...]) -> None:
     """Quick readiness check for the CLI and selected live-eval backend."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 

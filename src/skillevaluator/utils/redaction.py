@@ -227,6 +227,21 @@ def credential_uri_secret_values(value: str, *, allow_schemeless: bool = False) 
     return {item for item in protected if item}
 
 
+def _redact_unterminated_private_key(text: str) -> str:
+    """Redact from the first private-key header with no later ``-----END `` to the end of the text."""
+    # Same result as substituting ``HEADER(?![\s\S]*-----END )[\s\S]*\Z``, whose
+    # lookahead rescanned the rest of the text from every header. A header qualifies
+    # when the last "-----END " in the text starts before the header ends.
+    last_end = text.rfind("-----END ")
+    match = _PRIVATE_KEY_HEADER_RE.search(text)
+    while match is not None:
+        if match.end() > last_end:
+            return f"{text[: match.start()]}private-key-<redacted>"
+        # Headers can overlap ("...PRIVATE KEY-----BEGIN ..."), so resume inside this one.
+        match = _PRIVATE_KEY_HEADER_RE.search(text, match.start() + 1)
+    return text
+
+
 def redact_sensitive_text(value: str, *, max_len: int | None = None) -> str:
     """Best-effort masking for credentials before writing logs or artifacts."""
     out = value
@@ -234,6 +249,7 @@ def redact_sensitive_text(value: str, *, max_len: int | None = None) -> str:
     # or header rule can consume only its BEGIN delimiter and orphan the body.
     for pattern, replacement in _PEM_REDACTIONS:
         out = pattern.sub(replacement, out)
+    out = _redact_unterminated_private_key(out)
     if "://" in out:
         out = _CREDENTIAL_URI_USERINFO_RE.sub(r"\g<scheme><redacted>@", out)
     out = _AUTH_HEADER_RE.sub(_redact_auth_header, out)

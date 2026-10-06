@@ -6,6 +6,7 @@ import json
 import pytest
 
 from skillevaluator.tier3.harbor import report
+from skillevaluator.tier3.harbor.metrics import CUSTOM_ONLY_METRIC_SET, DEFAULT_METRIC_SET, DEFAULT_METRICS
 
 
 def _reward(metric_score=0.1):
@@ -204,6 +205,94 @@ def test_findings_best_agent_ignores_invalid_legacy_summary_numbers(invalid: flo
     assert report._pick_best_agent(agents) == "valid"
 
 
+def test_findings_best_agent_matches_canonical_dimension_ranking_and_suggestion_identity(tmp_path, monkeypatch):
+    from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+
+    standard_scores = dict(zip(DEFAULT_METRICS, (1.0, 1.0, 1.0, 1.0, 0.0, 0.0), strict=True))
+    standard_reward = _reward(0.0)
+    standard_reward.update(
+        {
+            "entry_id": "standard-case",
+            "metric_set": DEFAULT_METRIC_SET,
+            "behavior_check": 0.0,
+        }
+    )
+    custom_reward = {
+        "entry_id": "custom-case",
+        "metric_set": CUSTOM_ONLY_METRIC_SET,
+        "overall": 0.75,
+        "custom_metrics": {"domain_quality": 0.75},
+        "custom_details": {"domain_quality": {"reason": "custom evidence"}},
+    }
+    specs = {
+        "standard-agent": (standard_scores, {}, list(DEFAULT_METRICS), 4 / 6, standard_reward),
+        "custom-agent": ({}, {"domain_quality": 0.75}, [], 0.75, custom_reward),
+    }
+    live_agents = {}
+    for agent, (scores, custom_scores, metrics, overall, reward) in specs.items():
+        condition_dir = tmp_path / agent / "with-skill"
+        trial_dir = condition_dir / "trials" / f"{reward['entry_id']}__attempt"
+        trial_dir.mkdir(parents=True)
+        (condition_dir / "summary.json").write_text(
+            json.dumps(
+                {
+                    "agent": agent,
+                    "scores": scores,
+                    "custom_scores": custom_scores,
+                    "overall_score": overall,
+                    "metrics": metrics,
+                    "execution_status": "succeeded",
+                    "execution_errors": [],
+                    "expected_attempts": 1,
+                    "scored_attempts": 1,
+                    "num_trials": 1,
+                    "num_reward_rows": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (trial_dir / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+        live_agents[agent] = {
+            "execution_status": "succeeded",
+            "with_skill": scores,
+            "custom_with_skill": custom_scores,
+            "conditions": {"with_skill": {"execution_status": "succeeded"}},
+        }
+
+    loaded_agents = report.report_data.load_agent_data(tmp_path)
+    canonical = build_agent_eval_payload(
+        "demo",
+        loaded_agents,
+        use_llm_judge=False,
+    )
+    assert canonical is not None
+    assert canonical["agents"]["standard-agent"]["with_skill"] == 0.8
+    assert canonical["agents"]["custom-agent"]["with_skill"] == 0.75
+    assert canonical["best_agent"] == "standard-agent"
+    assert report._pick_best_agent(live_agents, loaded_agents) == canonical["best_agent"]
+
+    selected_reward_ids = []
+
+    def fake_suggestions(_skill, _findings, rewards):
+        selected_reward_ids.extend(reward["entry_id"] for reward in rewards)
+        return [{"suggestion": "Fix the standard case.", "dimension": "effectiveness", "evidence_refs": []}]
+
+    monkeypatch.setattr(report, "_generate_suggestions_structured", fake_suggestions)
+    report.display_findings_report(
+        {"agents": live_agents},
+        "demo",
+        ["custom-agent", "standard-agent"],
+        tmp_path,
+    )
+
+    assert selected_reward_ids == ["standard-case"]
+    standard_artifact = json.loads((tmp_path / "standard-agent" / "findings.json").read_text(encoding="utf-8"))
+    custom_artifact = json.loads((tmp_path / "custom-agent" / "findings.json").read_text(encoding="utf-8"))
+    assert standard_artifact["suggestions_v2"][0]["suggestion"] == "Fix the standard case."
+    assert custom_artifact["suggestions_v2"] == []
+    assert custom_artifact["suggestion_mode"] == "not_generated"
+
+
 def test_passing_suggestions_count_mixed_current_and_legacy_logical_trials():
     suggestions = report._passing_skill_suggestions(
         [],
@@ -375,6 +464,68 @@ def test_suggestions_evidence_refs_lookup_uses_all_metrics(monkeypatch):
     assert refs and isinstance(refs[0], dict)
     assert refs[0]["json_pointer"] == "/steps/5"
     assert refs[0]["kind"] == "tool_call"
+
+
+@pytest.mark.parametrize("metric_set", [DEFAULT_METRIC_SET, CUSTOM_ONLY_METRIC_SET])
+def test_suggestions_evidence_lookup_prefers_custom_detail_for_custom_metric_collision(monkeypatch, metric_set):
+    compact_ref = "trajectory.json#/steps/8"
+    reward = {
+        "entry_id": "custom-case",
+        "metric_set": metric_set,
+        "overall": 0.2,
+        "custom_metrics": {"domain_quality": 0.2},
+        "details": {
+            "domain_quality": {
+                "reason": "stale ordinary detail",
+                "evidence_refs": [
+                    {
+                        "source": "trajectory.json",
+                        "json_pointer": "/steps/8",
+                        "kind": "stale",
+                        "excerpt": "stale evidence",
+                    }
+                ],
+            }
+        },
+        "custom_details": {
+            "domain_quality": {
+                "reason": "authoritative custom detail",
+                "evidence_refs": [
+                    {
+                        "source": "trajectory.json",
+                        "json_pointer": "/steps/8",
+                        "kind": "custom_evidence",
+                        "excerpt": "authoritative evidence",
+                    }
+                ],
+            }
+        },
+    }
+    if metric_set == DEFAULT_METRIC_SET:
+        reward.update(dict.fromkeys(DEFAULT_METRICS, 1.0))
+    monkeypatch.setattr(
+        "skillevaluator.tier3.eval_core.llm_judge.call_public_llm",
+        lambda _prompt, **_kw: (
+            '[{"suggestion": "Fix custom scoring", "dimension": "domain_quality", '
+            f'"evidence_refs": ["{compact_ref}"]}}]',
+            None,
+        ),
+    )
+
+    findings = report._extract_findings([reward])
+    suggestion = report._generate_suggestions_structured("demo", findings, [reward])[0]
+
+    assert next(item for item in findings if item["metric"] == "domain_quality")["reasons"] == [
+        "authoritative custom detail"
+    ]
+    assert suggestion["evidence_refs"] == [
+        {
+            "source": "trajectory.json",
+            "json_pointer": "/steps/8",
+            "kind": "custom_evidence",
+            "excerpt": "authoritative evidence",
+        }
+    ]
 
 
 def test_normalized_tool_evidence_refs_remain_distinct_and_resolve_by_compact_identity(monkeypatch):

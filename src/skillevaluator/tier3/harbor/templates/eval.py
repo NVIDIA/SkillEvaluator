@@ -74,6 +74,7 @@ try:
         AMBIGUOUS_OUTER_EXEC_OBSERVATION,
         UNOBSERVED_INNER_CALL,
         UNSUPPORTED_NATIVE_CODEX_EXEC,
+        atif_content_text,
         iter_normalized_tool_calls,
         normalized_tool_call_observation,
         normalized_tool_call_wrapper_observation,
@@ -83,6 +84,7 @@ except ImportError:  # pragma: no cover -- source-tree import only
         AMBIGUOUS_OUTER_EXEC_OBSERVATION,
         UNOBSERVED_INNER_CALL,
         UNSUPPORTED_NATIVE_CODEX_EXEC,
+        atif_content_text,
         iter_normalized_tool_calls,
         normalized_tool_call_observation,
         normalized_tool_call_wrapper_observation,
@@ -467,7 +469,7 @@ def build_conversation_summary(traj, question):
             parts.append(f"Agent called: {fn}({json.dumps(args)[:200]})")
         obs = step.get("observation") or {}
         for r in obs.get("results") or []:
-            content = str(r.get("content", ""))
+            content = atif_content_text(r.get("content"))
             if content:
                 parts.append(f"Tool returned: {content[:400]}")
         msg = step.get("message") or ""
@@ -855,7 +857,7 @@ def _tool_observation_refs(traj):
         for result_idx, result in enumerate((step.get("observation") or {}).get("results") or []):
             if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
                 return refs
-            content = str(result.get("content") or "")
+            content = atif_content_text(result.get("content"))
             if not content.strip():
                 continue
             call_id = str(result.get("source_call_id") or f"result-{result_idx}")
@@ -1051,7 +1053,7 @@ def _late_observation_excerpts(traj, limit):
         if step.get("source") != "agent":
             continue
         for result in reversed((step.get("observation") or {}).get("results") or []):
-            content = str(result.get("content") or "").strip()
+            content = atif_content_text(result.get("content")).strip()
             if content:
                 out.append(_clip(content, limit))
     return out
@@ -4201,7 +4203,7 @@ def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None
     findings = []
     agent_text = get_agent_text(traj)
     user_text = "\n".join(
-        str(step.get("message") or "") for step in traj.get("steps", []) if step.get("source") == "user"
+        atif_content_text(step.get("message")) for step in traj.get("steps", []) if step.get("source") == "user"
     )
 
     if user_text and any(pattern.search(user_text) for pattern in _PROMPT_INJECTION_PATTERNS):

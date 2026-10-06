@@ -194,6 +194,10 @@ def test_gitleaks_synthetic_harbor_allowlists_are_exactly_scoped() -> None:
             r"^main-(persistent|task|scoped)-secret-[0-9]{5}$",
             r"^tests/test_harbor_secure_docker_environment\.py$",
         ),
+        "Synthetic cwsandbox API key used by Harbor environment contract tests": (
+            "^cw-key-123456$",
+            r"^tests/test_harbor_environment_contract\.py$",
+        ),
     }
     for description, (regex, path) in expected.items():
         entry = allowlists[description]
@@ -204,6 +208,37 @@ def test_gitleaks_synthetic_harbor_allowlists_are_exactly_scoped() -> None:
             "regexes": [regex],
             "paths": [path],
         }
+
+
+def test_gitleaks_uses_event_specific_full_history_scopes() -> None:
+    job = _load("security.yml")["jobs"]["gitleaks"]
+    checkout = next(
+        step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@")
+    )
+    verify = next(step for step in job["steps"] if step.get("name") == "Verify full Git checkout")
+    scan = next(step for step in job["steps"] if step.get("name") == "Scan Git history")
+
+    assert str(checkout["with"]["fetch-depth"]) == "0"
+    assert 'test "$(git rev-parse --is-shallow-repository)" = "false"' in verify["run"]
+    assert 'git rev-parse --verify "HEAD^{commit}"' in verify["run"]
+    assert (
+        "gitleaks:v8.30.0@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9"
+        in scan["run"]
+    )
+    scan_run = scan["run"]
+    head_opts = "--full-history --diff-filter=tuxdb HEAD --"
+    audit_opts = "--full-history --all --diff-filter=tuxdb --"
+    assignments = re.findall(r'log_opts="([^"]+)"', scan_run)
+
+    assert assignments == [head_opts, audit_opts]
+    assert scan["shell"] == "bash"
+    assert "set -euo pipefail" in scan_run
+    assert 'case "$GITHUB_EVENT_NAME" in' in scan_run
+    assert re.search(
+        rf'pull_request\|push\)\s+log_opts="{re.escape(head_opts)}"\s+;;', scan_run
+    )
+    assert re.search(rf'\*\)\s+log_opts="{re.escape(audit_opts)}"\s+;;', scan_run)
+    assert '--log-opts="$log_opts"' in scan_run
 
 
 def test_dco_stays_unconditional_and_has_no_path_filter() -> None:
@@ -231,8 +266,8 @@ def test_all_workflows_pin_every_action_to_a_commit() -> None:
             assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", uses), uses
 
 
-def test_changed_workflows_do_not_persist_checkout_credentials() -> None:
-    for workflow_name in ("ci.yml", "security.yml"):
+def test_all_workflows_do_not_persist_checkout_credentials() -> None:
+    for workflow_name in _workflow_names():
         checkout_steps = [
             step for step in _all_steps(_load(workflow_name)) if step.get("uses", "").startswith("actions/checkout@")
         ]

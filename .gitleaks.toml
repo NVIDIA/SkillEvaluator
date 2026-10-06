@@ -23,3 +23,10 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 regexes = ['''^main-(persistent|task|scoped)-secret-[0-9]{5}$''']
 paths = ['''^tests/test_harbor_secure_docker_environment\.py$''']
+
+[[allowlists]]
+description = "Synthetic cwsandbox API key used by Harbor environment contract tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^cw-key-123456$''']
+paths = ['''^tests/test_harbor_environment_contract\.py$''']

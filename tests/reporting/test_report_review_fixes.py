@@ -821,6 +821,98 @@ def test_sarif_does_not_join_a_root_relative_bundled_skill_path_onto_the_skill(t
     }
 
 
+def _plugin_with_skills(*skills: tuple[str, str], root: str = ".") -> ValidationResult:
+    """Tier 1 results for a plugin whose inventory lists these ``(name, path)`` bundled skills."""
+    result = ValidationResult(validator_name="Plugin Schema", validator_description="Tier 1 plugin validation")
+    components = [{"type": "skill", "name": name, "path": path, "support": "evaluated"} for name, path in skills]
+    result.metadata.update(
+        {
+            "manifest_type": "claude",
+            "plugin_mode": "bundle",
+            "plugin": {"root": root, "name": "demo", "component_inventory": {"components": components}},
+        }
+    )
+    return result
+
+
+def _placed(document: dict) -> dict[str, tuple[str, str | None]]:
+    return {
+        item["properties"]["checkName"]: (
+            item["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            item["properties"].get("pluginComponent", {}).get("path"),
+        )
+        for item in document["runs"][0]["results"]
+    }
+
+
+def test_sarif_keeps_a_walker_finding_in_the_skill_that_contains_it_when_labels_collide(tmp_path: Path) -> None:
+    """The tree walker labels skills/js/lint's findings "[lint]", which is also skills/lint's name."""
+    result = _plugin_with_skills(("lint", "skills/lint"), ("js/lint", "skills/js/lint"))
+    for file_path, check in (
+        ("[lint] skills/js/lint/run.sh", "walker_nested"),
+        ("[lint] skills/lint/run.sh", "walker_top"),
+        ("[js/lint] SKILL.md", "tier2_nested"),
+        ("[lint] SKILL.md", "tier2_top"),
+    ):
+        result.add_finding(_finding(file_path, check))
+
+    assert _placed(_sarif([result], tmp_path)) == {
+        "walker_nested": ("skills/js/lint/run.sh", "skills/js/lint"),
+        "walker_top": ("skills/lint/run.sh", "skills/lint"),
+        "tier2_nested": ("skills/js/lint/SKILL.md", "skills/js/lint"),
+        "tier2_top": ("skills/lint/SKILL.md", "skills/lint"),
+    }
+
+
+def test_sarif_places_findings_of_two_bundled_skills_that_share_a_name(tmp_path: Path) -> None:
+    """A declared ./extra-skills/pdf and the default skills/pdf are both named "pdf"."""
+    result = _plugin_with_skills(("pdf", "extra-skills/pdf"), ("pdf", "skills/pdf"))
+    for file_path, check in (
+        ("[pdf] skills/pdf/run.sh", "walker"),
+        # Tier 2 labels a bundled skill with its folder under skills/.
+        ("[pdf] references/guide.md", "tier2"),
+        ("[extra-skills/pdf] extra-skills/pdf/SKILL.md", "declared_rebased"),
+        ("[extra-skills/pdf] SKILL.md", "declared_skill_relative"),
+    ):
+        result.add_finding(_finding(file_path, check))
+
+    assert _placed(_sarif([result], tmp_path)) == {
+        "walker": ("skills/pdf/run.sh", "skills/pdf"),
+        "tier2": ("skills/pdf/references/guide.md", "skills/pdf"),
+        "declared_rebased": ("extra-skills/pdf/SKILL.md", "extra-skills/pdf"),
+        "declared_skill_relative": ("extra-skills/pdf/SKILL.md", "extra-skills/pdf"),
+    }
+
+
+def test_component_index_does_not_guess_between_skills_a_label_could_name() -> None:
+    from skillevaluator.reporting.plugin_sections import ComponentIndex
+
+    block = _plugin_with_skills(
+        ("pdf", "extra-skills/pdf"),
+        ("pdf", "vendor/pdf"),
+        # "lint" is one skill's name and the other's directory name.
+        ("lint", "skills/a/tool"),
+        ("tool", "skills/b/lint"),
+    ).metadata["plugin"]
+    index = ComponentIndex(block)
+
+    for label in ("pdf", "lint", "tool"):
+        assert index.artifact_path(f"[{label}] SKILL.md") == "SKILL.md"
+        assert index.component(f"[{label}] SKILL.md") is None
+    # A whole-skill finding points at the skill directory.
+    assert index.artifact_path("[b/lint] .") == "skills/b/lint"
+
+
+def test_component_index_keeps_a_labelled_path_that_starts_with_the_root_as_typed() -> None:
+    """``run_validation(Path("p1"))`` reports bundled-skill paths through the root as typed."""
+    from skillevaluator.reporting.plugin_sections import ComponentIndex
+
+    index = ComponentIndex(_plugin_with_skills(("js/lint", "skills/js/lint"), root="p1").metadata["plugin"])
+
+    assert index.artifact_path("[js/lint] p1/skills/js/lint/SKILL.md") == "p1/skills/js/lint/SKILL.md"
+    assert (index.component("[js/lint] p1/skills/js/lint/SKILL.md") or {}).get("path") == "skills/js/lint"
+
+
 def test_sarif_marks_a_failed_tier3_run_as_unsuccessful() -> None:
     result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Tier 3")
     result.metadata["agent_eval"] = {"execution_status": "failed", "execution_errors": ["harbor job crashed"]}

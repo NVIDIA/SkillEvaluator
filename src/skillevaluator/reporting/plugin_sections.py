@@ -787,27 +787,42 @@ class ComponentIndex:
                     "path": path,
                     "support": text(component.get("support"), limit=_KEYWORD_CHARS),
                 }
-        self._skill_by_name: dict[str, str] = {}
-        # Folder walkers label a skill with its directory name ("bar" for skills/nested/bar),
-        # so every trailing part of a skill directory maps back to it.
-        self._skills_by_suffix: dict[str, list[str]] = {}
+        self._skill_dirs: set[str] = set()
+        # Besides its path, a label can name a skill by its name or by a trailing part of its
+        # directory: folder walkers label a skill with its directory name ("bar" for skills/nested/bar).
+        self._skills_by_label: dict[str, set[str]] = {}
         for component in components:
             if component.get("type") != "skill":
                 continue
             path = _component_path(component)
-            name = text(component.get("name"))
-            if path and name not in self._skill_by_name:
-                self._skill_by_name[name] = path
+            if not path:
+                continue
+            self._skill_dirs.add(path)
             parts = path.split("/")
-            for start in range(len(parts)):
-                self._skills_by_suffix.setdefault("/".join(parts[start:]), []).append(path)
+            labels = {text(component.get("name")), *("/".join(parts[start:]) for start in range(len(parts)))}
+            for label in labels - {""}:
+                self._skills_by_label.setdefault(label, set()).add(path)
 
     def _bundled_skill_dir(self, label: str) -> str | None:
-        """Return the root-relative directory of the bundled skill a finding label names."""
-        if label in self._skill_by_name:
-            return self._skill_by_name[label]
-        matches = self._skills_by_suffix.get(label, [])
-        return matches[0] if len(matches) == 1 else None
+        """Return the root-relative directory of the bundled skill a finding label names.
+
+        Tier 2 labels a skill with its folder under ``skills/`` and Plugin
+        Schema with its plugin-relative path, so an exact path wins. Otherwise
+        the label must be the name or a trailing part of the directory of one
+        skill only; a label that fits several skills is not guessed.
+        """
+        for path in (f"skills/{label}", label):
+            if path in self._skill_dirs:
+                return path
+        matches = self._skills_by_label.get(label, set())
+        return next(iter(matches)) if len(matches) == 1 else None
+
+    def _anchored(self, relative: str) -> bool:
+        """Return whether a relative path already starts at the root as typed or inside a bundled skill."""
+        if self._root not in ("", ".") and (relative == self._root or relative.startswith(f"{self._root}/")):
+            return True
+        parts = relative.split("/")
+        return any("/".join(parts[:end]) in self._skill_dirs for end in range(1, len(parts) + 1))
 
     def artifact_path(self, file_path: str) -> str:
         """Return the file a finding points at: its path without the ``[skill] `` label.
@@ -815,8 +830,9 @@ class ComponentIndex:
         Validators rebase a bundled skill's relative paths onto the plugin root
         (``skills/foo/SKILL.md``), but some report them relative to the skill
         (Tier 2 says ``SKILL.md``). A relative path that is not already inside
-        the labelled skill's directory is joined onto that directory. Absolute
-        and unlabelled paths are returned unchanged.
+        a bundled skill's directory is joined onto the directory of the skill
+        its label names; a label that names no single skill is not guessed.
+        Absolute and unlabelled paths are returned unchanged.
         """
         skill, inner = split_display_prefix(file_path)
         inner = inner.strip()
@@ -824,11 +840,14 @@ class ComponentIndex:
             return file_path
         if _is_absolute(inner):
             return inner
-        skill_dir = self._bundled_skill_dir(skill)
         relative = inner.replace("\\", "/").removeprefix("./")
-        if skill_dir in (None, ".") or relative == skill_dir or relative.startswith(f"{skill_dir}/"):
+        if self._anchored(relative):
             return inner
-        return f"{skill_dir}/{relative}"
+        skill_dir = self._bundled_skill_dir(skill)
+        if skill_dir in (None, "."):
+            return inner
+        # A finding about the whole skill (".") points at its directory.
+        return skill_dir if relative == "." else f"{skill_dir}/{relative}"
 
     def component(self, file_path: object) -> dict[str, str] | None:
         """Return the inventory component whose root-relative path contains *file_path*.

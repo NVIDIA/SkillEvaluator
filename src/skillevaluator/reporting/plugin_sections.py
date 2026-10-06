@@ -756,6 +756,15 @@ def _is_absolute(path: str) -> bool:
     return PurePosixPath(path.replace("\\", "/")).is_absolute() or PureWindowsPath(path).is_absolute()
 
 
+def _posix_path(path: str) -> str:
+    """Return a finding path with ``/`` separators, read as the inventory's finding counts read it.
+
+    Repeated separators and ``.`` parts are dropped (``./skills//foo/./x.md``
+    is ``skills/foo/x.md``); ``..`` parts are kept.
+    """
+    return PurePosixPath(path.replace("\\", "/")).as_posix() if path else ""
+
+
 def _inventory_components(block: object) -> list[Mapping[str, Any]]:
     inventory = _mapping(_mapping(block).get("component_inventory"))
     return [component for component in _sequence(inventory.get("components")) if isinstance(component, Mapping)]
@@ -775,7 +784,7 @@ class ComponentIndex:
 
     def __init__(self, block: object) -> None:
         source = _mapping(block)
-        self._root = text(source.get("root"), limit=_PATH_CHARS).replace("\\", "/").rstrip("/")
+        self._root = _posix_path(text(source.get("root"), limit=_PATH_CHARS)).rstrip("/")
         components = _inventory_components(source)
         self._by_path: dict[str, dict[str, str]] = {}
         for component in components[: MAX_TABLE_ROWS * 5]:
@@ -840,7 +849,7 @@ class ComponentIndex:
             return file_path
         if _is_absolute(inner):
             return inner
-        relative = inner.replace("\\", "/").removeprefix("./")
+        relative = _posix_path(inner)
         if self._anchored(relative):
             return inner
         skill_dir = self._bundled_skill_dir(skill)
@@ -859,12 +868,12 @@ class ComponentIndex:
         raw = self.artifact_path(text(file_path, limit=_PATH_CHARS))
         if not raw:
             return None
-        normalized = raw.replace("\\", "/")
+        normalized = _posix_path(raw)
         if self._root and (normalized == self._root or normalized.startswith(self._root + "/")):
             normalized = normalized[len(self._root) :].lstrip("/")
         elif _is_absolute(raw):
             return None
-        parts = normalized.removeprefix("./").split("/")
+        parts = normalized.split("/")
         # The longest leading run of path parts that names a component.
         for end in range(len(parts), 0, -1):
             component = self._by_path.get("/".join(parts[:end]))

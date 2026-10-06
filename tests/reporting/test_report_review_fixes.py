@@ -903,6 +903,23 @@ def test_component_index_does_not_guess_between_skills_a_label_could_name() -> N
     assert index.artifact_path("[b/lint] .") == "skills/b/lint"
 
 
+@pytest.mark.parametrize(
+    "file_path",
+    ["skills//foo/x.md", "./skills/./foo/x.md", "/work/p/skills//foo/x.md", "[foo] skills//foo/x.md"],
+)
+def test_component_index_reads_a_finding_path_as_the_inventory_finding_counts_do(file_path: str) -> None:
+    """SARIF's pluginComponent and the inventory's per-component finding count place a path alike."""
+    from skillevaluator.plugin_components import Component, attribute_findings
+    from skillevaluator.reporting.plugin_sections import ComponentIndex
+
+    block = _plugin_with_skills(("foo", "skills/foo"), root="/work/p").metadata["plugin"]
+    components = [Component("skill", "foo", "packaged", "skills/foo", "evaluated")]
+    attribute_findings(components, [_finding(file_path, "check")], Path("/work/p"))
+
+    assert components[0].findings == 1
+    assert (ComponentIndex(block).component(file_path) or {}).get("path") == "skills/foo"
+
+
 def test_component_index_keeps_a_labelled_path_that_starts_with_the_root_as_typed() -> None:
     """``run_validation(Path("p1"))`` reports bundled-skill paths through the root as typed."""
     from skillevaluator.reporting.plugin_sections import ComponentIndex

@@ -31,7 +31,7 @@ from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting.cli import CLIReporter
 from skillevaluator.reporting.markdown import MarkdownReporter
 from skillevaluator.reporting.plugin_sections import (
-    component_for_path,
+    ComponentIndex,
     coverage_view,
     is_plugin_payload,
     split_display_prefix,
@@ -256,10 +256,10 @@ def test_sarif_without_plugin_has_no_run_properties() -> None:
         ("skills/loader-extra/SKILL.md", None),
     ],
 )
-def test_component_for_path_maps_findings_to_components(file_path: str, expected: str | None) -> None:
+def test_component_index_maps_findings_to_components(file_path: str, expected: str | None) -> None:
     block = tier1_plugin_result().metadata["plugin"]
 
-    component = component_for_path(file_path, block)
+    component = ComponentIndex(block).component(file_path)
 
     assert (component or {}).get("name") == expected
 
@@ -331,6 +331,34 @@ def test_html_tier3_coverage_states_what_was_not_demonstrated(tmp_path: Path) ->
     assert "Provider-only MCP servers were not exercised: docs" in excluded
     assert "Unresolved skill refs were not evaluated: github::org/repo::skills::remote" in excluded
     assert element_text(html, "tier3-plugin-not-evaluated").startswith("2 components not staged")
+
+
+def test_markdown_names_every_staged_component_no_plugin_trial_exercised(tmp_path: Path) -> None:
+    from skillevaluator.reporting.plugin_sections import plugin_provenance
+
+    result = _tier3_result(tmp_path, partial=False, statistics=False)
+    payload = result.metadata["agent_eval"]
+    names = [f"stg{i:02d}" for i in range(30)]
+    plugin_provenance(payload)["component_coverage"] = {
+        "components": [
+            {"type": "skill", "name": name, "path": f"skills/{name}", "state": "staged", "reason": ""} for name in names
+        ],
+        "counts": {"staged": 30},
+        "not_evaluated": 0,
+    }
+    declared = [f"skill:{name}" for name in names]
+    payload["agents"]["codex"]["plugin_signals_summary"]["with_skill"]["activation_coverage"] = {
+        "declared": declared,
+        "exercised": [],
+        "unverified": declared,
+        "unavailable": [],
+    }
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+
+    assert "Staged but not observed in any plugin trial:" in markdown
+    for name in names:
+        assert f"- skill {name} (unverified)" in markdown
 
 
 def test_staged_but_unexercised_components_are_not_reported_as_evaluated(tmp_path: Path) -> None:
@@ -875,8 +903,6 @@ def test_similarity_views_carry_their_title_columns_and_summary() -> None:
 
 
 def test_component_index_places_a_folder_walker_label_only_when_it_is_unambiguous() -> None:
-    from skillevaluator.reporting.plugin_sections import ComponentIndex
-
     skills = [("nested/bar", "skills/nested/bar"), ("a/x", "skills/a/x"), ("b/x", "skills/b/x")]
     block = {
         "root": "/work/p",
@@ -903,14 +929,23 @@ def test_report_state_vocabularies_are_the_producers() -> None:
 
 
 def test_report_state_vocabularies_load_no_validators() -> None:
-    """plugin_states imports nothing, so the reporting leaf still loads no producer or validator."""
+    """plugin_states imports nothing, so the reporting leaf still loads no producer, validator, or Tier 3 helper.
+
+    Every reporter, and so every CLI command, imports plugin_sections.
+    """
     code = textwrap.dedent(
         """
         import sys
         import skillevaluator.plugin_states
         print(sorted(name for name in sys.modules if name.startswith("skillevaluator")))
         import skillevaluator.reporting.plugin_sections
-        heavy = ("skillevaluator.plugin_components", "skillevaluator.plugin_dependencies", "skillevaluator.validators")
+        heavy = (
+            "skillevaluator.plugin_components",
+            "skillevaluator.plugin_dependencies",
+            "skillevaluator.validators",
+            "skillevaluator.tier3.eval_core",
+            "skillevaluator.tier3.harbor",
+        )
         print(sorted(name for name in sys.modules if name.startswith(heavy)))
         """
     )

@@ -808,7 +808,83 @@ def test_plugin_dedup_scan_records_catalog_checks_without_a_catalog(plugins: Pat
     assert results[3].metadata["plugin"]["inter_plugin_similarity"]["status"] == "skipped"
 
 
-def test_plugin_dedup_scan_discovers_bundled_skills_once(plugins: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _edit_each_skill_during_c_intra(monkeypatch: pytest.MonkeyPatch, edit) -> None:
+    """Replace C-intra with an offline validator that calls *edit* on each skill's SKILL.md, as an editor would."""
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.tier2 import commands
+
+    class EditingContextValidator:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def validate(self, skill_dir: Path) -> ValidationResult:
+            edit(skill_dir / "SKILL.md")
+            return ValidationResult(validator_name="Context Deduplication")
+
+    monkeypatch.setattr(commands, "IntraSkillValidator", EditingContextValidator)
+
+
+@pytest.mark.parametrize("change", ["rewrite", "chmod"])
+def test_plugin_dedup_scan_compares_a_skill_saved_while_c_intra_ran(
+    plugins: Path, monkeypatch: pytest.MonkeyPatch, embed_calls: list[list[str]], change: str
+) -> None:
+    catalog = plugins.parent / "catalog.json"
+    _save_catalog(plugins, catalog)
+    embed_calls.clear()
+
+    def save(manifest: Path) -> None:
+        if change == "chmod":
+            manifest.chmod(0o600)  # contents unchanged; only the inode's ctime moves
+        else:
+            name = manifest.parent.name
+            manifest.write_text(
+                f"---\nname: {name}\ndescription: Deploy {name} saved by an editor during C-intra\n---\n# {name}\n",
+                encoding="utf-8",
+            )
+
+    _edit_each_skill_during_c_intra(monkeypatch, save)
+
+    results = _by_name(run_plugin_dedup_scan(plugins / "alpha", catalog=catalog))
+
+    for name, key in (
+        ("Inter-Skill Deduplication", "catalog_skill_similarity"),
+        ("Inter-Plugin Deduplication", "inter_plugin_similarity"),
+    ):
+        result = results[name]
+        assert result.passed, result.findings
+        assert not result.metadata.get("security_failure")
+        assert result.metadata["plugin"][key]["status"] == "compared"
+    embedded = " ".join(text for call in embed_calls for text in call)
+    assert ("saved by an editor during C-intra" in embedded) is (change == "rewrite")
+
+
+def test_plugin_dedup_scan_refuses_a_skill_manifest_swapped_for_a_link_while_c_intra_ran(
+    plugins: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    catalog = plugins.parent / "catalog.json"
+    _save_catalog(plugins, catalog)
+    outside = tmp_path / "outside.md"
+    outside.write_text("---\nname: deploy-app\ndescription: Read from outside the plugin\n---\n", encoding="utf-8")
+
+    def swap_for_link(manifest: Path) -> None:
+        if manifest.parent.name == "deploy-app":
+            manifest.unlink()
+            manifest.symlink_to(outside)
+
+    _edit_each_skill_during_c_intra(monkeypatch, swap_for_link)
+
+    results = _by_name(run_plugin_dedup_scan(plugins / "alpha", catalog=catalog))
+
+    for name in ("Inter-Skill Deduplication", "Inter-Plugin Deduplication"):
+        result = results[name]
+        assert not result.passed
+        assert result.metadata["security_failure"] is True
+        assert [finding.check_name for finding in result.findings] == ["unsafe_plugin_filesystem"]
+
+
+def test_plugin_dedup_scan_discovers_bundled_skills_before_c_intra_and_before_the_catalog_reads(
+    plugins: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from skillevaluator.deduplication.plugin import profile as profile_module
     from skillevaluator.models.result import ValidationResult
     from skillevaluator.tier2 import commands
@@ -836,7 +912,9 @@ def test_plugin_dedup_scan_discovers_bundled_skills_once(plugins: Path, monkeypa
 
     results = _by_name(run_plugin_dedup_scan(plugins / "alpha", catalog=catalog))
 
-    assert discovered == [plugins / "alpha"]
+    # Once for the safety check and C-intra, once right before the catalog checks read
+    # the manifests (C-intra can run for minutes); the over-limit count reuses the latter.
+    assert discovered == [plugins / "alpha", plugins / "alpha"]
     assert results["Inter-Skill Deduplication"].metadata["plugin"]["catalog_skill_similarity"]["status"] == "compared"
 
 

@@ -873,6 +873,7 @@ class BenchmarkReporter(ReporterBase):
         if coverage["omitted"]:
             lines.append(f"| {coverage['omitted']} more component(s) | | | |")
         lines.append("")
+        lines.extend(_not_staged_past_table_lines(coverage, private_labels))
         if coverage["staged_not_observed_rows"]:
             lines.extend(["Staged but not observed in any plugin trial:", ""])
             lines.extend(
@@ -1171,6 +1172,30 @@ def _plugin_metadata_lines(
         )
     if view is not None:
         lines.append(f"- Plugin run: {'INCOMPLETE (partial)' if view['partial'] else 'complete'}")
+    return lines
+
+
+def _not_staged_past_table_lines(coverage: dict[str, Any], private_labels: tuple[str, ...]) -> list[str]:
+    """Name, with its reason, each not-staged component past the coverage table's last row.
+
+    The table names the rest, so a plugin with more components than the table
+    holds still has every not-staged component named on its card.
+    """
+    past_table = coverage["not_staged_past_table"]
+    if not past_table:
+        return []
+    lines = [f"Not staged, beyond the {len(coverage['rows'])} rows above:", ""]
+    for row in past_table:
+        reason = f" — {_publication_safe_inline(row['reason'], private_labels)}" if row["reason"] else ""
+        lines.append(
+            f"- {_publication_safe_inline(row['type'], private_labels)} "
+            f"{_publication_safe_inline(row['name'], private_labels)} "
+            f"({_publication_safe_inline(row['state_label'], private_labels)}){reason}"
+        )
+    listed = len(past_table) + sum(1 for row in coverage["rows"] if not row["staged"])
+    if coverage["not_staged"] > listed:
+        lines.append(f"- {coverage['not_staged'] - listed} more component(s) not staged")
+    lines.append("")
     return lines
 
 

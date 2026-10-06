@@ -204,6 +204,32 @@ def test_partial_plugin_card_is_incomplete_and_lists_excluded_behavior(tmp_path:
     assert _gate(tmp_path, rendered) == []
 
 
+def test_plugin_card_names_each_not_staged_component_the_coverage_table_leaves_out(tmp_path: Path) -> None:
+    """The table keeps 200 rows, and inventory order puts unsupported hooks, LSP servers and monitors last."""
+    staged = [
+        {"type": "skill", "name": f"skill{i:03d}", "path": f"skills/skill{i:03d}", "state": "staged", "reason": ""}
+        for i in range(200)
+    ]
+    unsupported = [
+        {"type": "lsp", "name": f"lsp{i:02d}", "path": None, "state": "unsupported", "reason": f"reason-lsp{i:02d}"}
+        for i in range(40)
+    ]
+    tier3 = _tier3(partial=False)
+    tier3.metadata["agent_eval"]["plugin_provenance"]["component_coverage"] = {
+        "components": staged + unsupported,
+        "counts": {"staged": 200, "unsupported": 40},
+        "not_evaluated": 40,
+    }
+
+    rendered = _render([tier1_plugin_result(), tier3])
+
+    assert "| 40 more component(s) | | | |" in rendered
+    assert "Not staged, beyond the 200 rows above:" in rendered
+    for i in range(40):
+        assert f"- lsp lsp{i:02d} (Unsupported) — reason-lsp{i:02d}" in rendered
+    assert _gate(tmp_path, rendered) == []
+
+
 def test_partial_plugin_card_still_fails_on_blocking_findings(tmp_path: Path) -> None:
     tier1 = tier1_plugin_result()
     tier1.passed = False

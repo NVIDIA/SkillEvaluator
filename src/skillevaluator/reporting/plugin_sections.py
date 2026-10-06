@@ -28,15 +28,14 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from functools import cache
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
 
-# The plugin state vocabularies and the Tier 3 signal, runtime-evidence, and statistics producers are
-# pure modules that import no reporting code.
+# The plugin state vocabularies are a module that imports nothing. Every reporter, and so
+# every CLI command, imports this module, so the Tier 3 signal, runtime-evidence, and
+# statistics helpers are imported only inside the Tier 3 views that use them.
 from skillevaluator.plugin_states import COVERAGE_STATES, DEPENDENCY_STATES, EVALUATED_COVERAGE_STATES
-from skillevaluator.tier3.eval_core.plugin_signals import COMPONENT_RULE_READ, COMPONENT_SUBAGENT
-from skillevaluator.tier3.eval_core.runtime_evidence import canary_leak_rate
-from skillevaluator.tier3.harbor.stats import STATISTICS_BLOCKS
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 MAX_TABLE_ROWS = 200
@@ -578,7 +577,11 @@ def _unsupported_types(inventory: Mapping[str, Any]) -> list[str]:
 
 # The component types Tier 1 checks statically (Hook risk, Subagent and command
 # privileges) when the plugin block carries rows for them, as reports name them.
-_STATIC_RISK_TYPE_NAMES = {"hook": "hooks", "agent": "subagents", "command": "commands"}
+_STATIC_RISK_TYPE_NAMES = {"hook": "hooks", "monitor": "monitors", "agent": "subagents", "command": "commands"}
+# Tier 1 checks a plugin monitor's command like a command hook on this event
+# (plugin_component_risk.MONITOR_EVENT), so a Hook risk row on it is the
+# monitor's, not a hook's.
+_MONITOR_HOOK_EVENT = "Monitor"
 
 
 def unsupported_type_split(block: object, coverage: Mapping[str, Any] | None = None) -> dict[str, list[str]]:
@@ -593,8 +596,10 @@ def unsupported_type_split(block: object, coverage: Mapping[str, Any] | None = N
     """
     source = _mapping(block)
     staged = {row.get("type") for row in _sequence(_mapping(coverage).get("rows")) if row.get("staged")}
-    static = _statically_checked_types(source)
     remaining = [name for name in _unsupported_types(_mapping(source.get("component_inventory"))) if name not in staged]
+    if not remaining:
+        return {"static_only": [], "unevaluated": []}
+    static = _statically_checked_types(source)
     return {
         "static_only": [name for name in remaining if name in static],
         "unevaluated": [name for name in remaining if name not in static],
@@ -602,11 +607,18 @@ def unsupported_type_split(block: object, coverage: Mapping[str, Any] | None = N
 
 
 def _statically_checked_types(block: Mapping[str, Any]) -> set[str]:
-    """Return the component types this Tier 1 plugin block carries static-risk rows for."""
-    checked = {"hook"} if hook_risk_view(block.get("hook_risk")) else set()
-    privileges = privileges_view(block.get("privileges"))
-    if privileges:
-        checked.update(row["type"] for row in privileges["rows"] if row["type"] in _STATIC_RISK_TYPE_NAMES)
+    """Return the component types this Tier 1 plugin block carries static-risk rows for.
+
+    Reads the raw rows: :func:`static_risk_view` builds their display rows.
+    """
+    checked: set[str] = set()
+    for hook in _sequence(_mapping(block.get("hook_risk")).get("hooks")):
+        if isinstance(hook, Mapping):
+            checked.add("monitor" if hook.get("event") == _MONITOR_HOOK_EVENT else "hook")
+    for row in _sequence(_mapping(block.get("privileges")).get("components")):
+        component_type = text(row.get("type"), limit=_KEYWORD_CHARS) if isinstance(row, Mapping) else ""
+        if component_type in _STATIC_RISK_TYPE_NAMES:
+            checked.add(component_type)
     return checked
 
 
@@ -756,6 +768,15 @@ def _is_absolute(path: str) -> bool:
     return PurePosixPath(path.replace("\\", "/")).is_absolute() or PureWindowsPath(path).is_absolute()
 
 
+def _posix_path(path: str) -> str:
+    """Return a finding path with ``/`` separators, read as the inventory's finding counts read it.
+
+    Repeated separators and ``.`` parts are dropped (``./skills//foo/./x.md``
+    is ``skills/foo/x.md``); ``..`` parts are kept.
+    """
+    return PurePosixPath(path.replace("\\", "/")).as_posix() if path else ""
+
+
 def _inventory_components(block: object) -> list[Mapping[str, Any]]:
     inventory = _mapping(_mapping(block).get("component_inventory"))
     return [component for component in _sequence(inventory.get("components")) if isinstance(component, Mapping)]
@@ -775,7 +796,7 @@ class ComponentIndex:
 
     def __init__(self, block: object) -> None:
         source = _mapping(block)
-        self._root = text(source.get("root"), limit=_PATH_CHARS).replace("\\", "/").rstrip("/")
+        self._root = _posix_path(text(source.get("root"), limit=_PATH_CHARS)).rstrip("/")
         components = _inventory_components(source)
         self._by_path: dict[str, dict[str, str]] = {}
         for component in components[: MAX_TABLE_ROWS * 5]:
@@ -787,27 +808,42 @@ class ComponentIndex:
                     "path": path,
                     "support": text(component.get("support"), limit=_KEYWORD_CHARS),
                 }
-        self._skill_by_name: dict[str, str] = {}
-        # Folder walkers label a skill with its directory name ("bar" for skills/nested/bar),
-        # so every trailing part of a skill directory maps back to it.
-        self._skills_by_suffix: dict[str, list[str]] = {}
+        self._skill_dirs: set[str] = set()
+        # Besides its path, a label can name a skill by its name or by a trailing part of its
+        # directory: folder walkers label a skill with its directory name ("bar" for skills/nested/bar).
+        self._skills_by_label: dict[str, set[str]] = {}
         for component in components:
             if component.get("type") != "skill":
                 continue
             path = _component_path(component)
-            name = text(component.get("name"))
-            if path and name not in self._skill_by_name:
-                self._skill_by_name[name] = path
+            if not path:
+                continue
+            self._skill_dirs.add(path)
             parts = path.split("/")
-            for start in range(len(parts)):
-                self._skills_by_suffix.setdefault("/".join(parts[start:]), []).append(path)
+            labels = {text(component.get("name")), *("/".join(parts[start:]) for start in range(len(parts)))}
+            for label in labels - {""}:
+                self._skills_by_label.setdefault(label, set()).add(path)
 
     def _bundled_skill_dir(self, label: str) -> str | None:
-        """Return the root-relative directory of the bundled skill a finding label names."""
-        if label in self._skill_by_name:
-            return self._skill_by_name[label]
-        matches = self._skills_by_suffix.get(label, [])
-        return matches[0] if len(matches) == 1 else None
+        """Return the root-relative directory of the bundled skill a finding label names.
+
+        Tier 2 labels a skill with its folder under ``skills/`` and Plugin
+        Schema with its plugin-relative path, so an exact path wins. Otherwise
+        the label must be the name or a trailing part of the directory of one
+        skill only; a label that fits several skills is not guessed.
+        """
+        for path in (f"skills/{label}", label):
+            if path in self._skill_dirs:
+                return path
+        matches = self._skills_by_label.get(label, set())
+        return next(iter(matches)) if len(matches) == 1 else None
+
+    def _anchored(self, relative: str) -> bool:
+        """Return whether a relative path already starts at the root as typed or inside a bundled skill."""
+        if self._root not in ("", ".") and (relative == self._root or relative.startswith(f"{self._root}/")):
+            return True
+        parts = relative.split("/")
+        return any("/".join(parts[:end]) in self._skill_dirs for end in range(1, len(parts) + 1))
 
     def artifact_path(self, file_path: str) -> str:
         """Return the file a finding points at: its path without the ``[skill] `` label.
@@ -815,8 +851,9 @@ class ComponentIndex:
         Validators rebase a bundled skill's relative paths onto the plugin root
         (``skills/foo/SKILL.md``), but some report them relative to the skill
         (Tier 2 says ``SKILL.md``). A relative path that is not already inside
-        the labelled skill's directory is joined onto that directory. Absolute
-        and unlabelled paths are returned unchanged.
+        a bundled skill's directory is joined onto the directory of the skill
+        its label names; a label that names no single skill is not guessed.
+        Absolute and unlabelled paths are returned unchanged.
         """
         skill, inner = split_display_prefix(file_path)
         inner = inner.strip()
@@ -824,11 +861,14 @@ class ComponentIndex:
             return file_path
         if _is_absolute(inner):
             return inner
-        skill_dir = self._bundled_skill_dir(skill)
-        relative = inner.replace("\\", "/").removeprefix("./")
-        if skill_dir in (None, ".") or relative == skill_dir or relative.startswith(f"{skill_dir}/"):
+        relative = _posix_path(inner)
+        if self._anchored(relative):
             return inner
-        return f"{skill_dir}/{relative}"
+        skill_dir = self._bundled_skill_dir(skill)
+        if skill_dir in (None, "."):
+            return inner
+        # A finding about the whole skill (".") points at its directory.
+        return skill_dir if relative == "." else f"{skill_dir}/{relative}"
 
     def component(self, file_path: object) -> dict[str, str] | None:
         """Return the inventory component whose root-relative path contains *file_path*.
@@ -840,32 +880,18 @@ class ComponentIndex:
         raw = self.artifact_path(text(file_path, limit=_PATH_CHARS))
         if not raw:
             return None
-        normalized = raw.replace("\\", "/")
+        normalized = _posix_path(raw)
         if self._root and (normalized == self._root or normalized.startswith(self._root + "/")):
             normalized = normalized[len(self._root) :].lstrip("/")
         elif _is_absolute(raw):
             return None
-        parts = normalized.removeprefix("./").split("/")
+        parts = normalized.split("/")
         # The longest leading run of path parts that names a component.
         for end in range(len(parts), 0, -1):
             component = self._by_path.get("/".join(parts[:end]))
             if component is not None:
                 return dict(component)
         return None
-
-
-def finding_artifact_path(file_path: str, block: object) -> str:
-    """Return the file a finding points at (see :meth:`ComponentIndex.artifact_path`)."""
-    return ComponentIndex(block).artifact_path(file_path)
-
-
-def component_for_path(file_path: object, block: object) -> dict[str, str] | None:
-    """Return the inventory component that contains a finding's file (see :meth:`ComponentIndex.component`).
-
-    Findings carry either root-relative or absolute paths, and a bundled
-    skill's findings carry a ``[skill] `` label.
-    """
-    return ComponentIndex(block).component(file_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1170,6 +1196,8 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
     rows: list[dict[str, Any]] = []
     total = 0
     not_staged_rows: list[dict[str, Any]] = []
+    # The not-staged rows that the table (``rows``) leaves out.
+    not_staged_past_table: list[dict[str, Any]] = []
     unobserved_rows: list[dict[str, Any]] = []
     unobserved = 0
     computed_counts: dict[str, int] = {}
@@ -1193,11 +1221,14 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
         }
         if activation:
             row["observed"] = _observed_activation(row, observations)
-        if len(rows) < MAX_TABLE_ROWS:
+        in_table = len(rows) < MAX_TABLE_ROWS
+        if in_table:
             rows.append(row)
         if state not in EVALUATED_COVERAGE_STATES:
             if len(not_staged_rows) < MAX_TABLE_ROWS:
                 not_staged_rows.append(row)
+            if not in_table and len(not_staged_past_table) < MAX_TABLE_ROWS:
+                not_staged_past_table.append(row)
         elif activation and state != "exercised" and row["observed"] != "exercised":
             unobserved += 1
             if len(unobserved_rows) < MAX_TABLE_ROWS:
@@ -1224,6 +1255,8 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
         "counts": [row for row in counts if row["count"] or row["state"] in COVERAGE_STATES],
         "not_staged": not_staged,
         "not_staged_rows": not_staged_rows,
+        # For a format that prints the table but no list of the not-staged rows.
+        "not_staged_past_table": not_staged_past_table,
         "headline": f"{_plural(not_staged, 'component')} not staged",
         # The sentence every format prints after the headline.
         "detail": f"of {total} declared or packaged component(s); {staged} staged"
@@ -1246,8 +1279,12 @@ def _coverage_state_class(state: str) -> str:
     return "fail" if state in {"invalid", "unavailable"} else "warn"
 
 
-# Plugin signals record a rule read and a subagent call under their own activation types.
-_ACTIVATION_TYPE_ALIASES = {"rule": ("rule", COMPONENT_RULE_READ), "agent": ("agent", COMPONENT_SUBAGENT)}
+@cache
+def _activation_type_aliases() -> dict[str, tuple[str, str]]:
+    """Return the activation types plugin signals record a rule read and a subagent call under."""
+    from skillevaluator.tier3.eval_core.plugin_signals import COMPONENT_RULE_READ, COMPONENT_SUBAGENT
+
+    return {"rule": ("rule", COMPONENT_RULE_READ), "agent": ("agent", COMPONENT_SUBAGENT)}
 
 
 # What trials observed of a component, strongest evidence first.
@@ -1261,7 +1298,7 @@ def _observation_sets(activation: Mapping[str, Any]) -> tuple[tuple[str, frozens
 
 def _observed_activation(row: Mapping[str, Any], observations: tuple[tuple[str, frozenset[str]], ...]) -> str:
     """Return whether trials observed a coverage row's component (advisory)."""
-    keys = {f"{kind}:{row['name']}" for kind in _ACTIVATION_TYPE_ALIASES.get(row["type"], (row["type"],))}
+    keys = {f"{kind}:{row['name']}" for kind in _activation_type_aliases().get(row["type"], (row["type"],))}
     return next((observation for observation, recorded in observations if keys & recorded), "not observed")
 
 
@@ -1387,6 +1424,8 @@ def _has_completeness_issue_keys(value: object) -> bool:
 
 
 def _statistics_block(source: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    from skillevaluator.tier3.harbor.stats import STATISTICS_BLOCKS
+
     return {
         key: value
         for key in STATISTICS_BLOCKS
@@ -1402,6 +1441,8 @@ def statistics_view(payload: object, *, context: _Tier3Context | None = None) ->
     blocks win, the top level only fills gaps for the best agent (or stands in
     when no agent carries its own block), and the best agent's scope is primary.
     """
+    from skillevaluator.tier3.harbor.stats import STATISTICS_BLOCKS
+
     source = _mapping(payload)
     context = context or _tier3_context(source)
     best = context.best_agent
@@ -2304,6 +2345,8 @@ def hook_census_view(payload: object, *, context: _Tier3Context | None = None) -
 
 
 def _canary_arm_row(arm: str, summary: Mapping[str, Any], *, sum_of_parts_baseline: bool) -> dict[str, Any]:
+    from skillevaluator.tier3.eval_core.runtime_evidence import canary_leak_rate
+
     sinks = _mapping(summary.get("sinks"))
     sink_labels = [
         f"{CANARY_SINK_LABELS.get(str(kind), text(kind, limit=_LABEL_CHARS))} ({count(amount) or 0})"

@@ -370,6 +370,15 @@ def _component_coverage(coverage: dict | None, lines: list[str]) -> None:
                 f"| {cell(row['type'])} | {cell(row['name'])} | {cell(row['state_label'])} | {cell(row['reason'])} |"
             )
         lines.append("")
+    # The "Not evaluated" statement names only the first few of these.
+    if coverage["staged_not_observed_rows"]:
+        lines.append("Staged but not observed in any plugin trial:")
+        lines.append("")
+        lines.extend(
+            f"- {cell(row['type'])} {cell(row['name'])} ({cell(row['observed'])})"
+            for row in coverage["staged_not_observed_rows"]
+        )
+        lines.append("")
 
 
 def _not_evaluated(statements: list[str], lines: list[str]) -> None:

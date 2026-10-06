@@ -1112,6 +1112,37 @@ def test_harbor_022_multistep_result_without_root_aggregate_is_not_reconstructed
     assert "statistics account for 0/1 completed trials" in " ".join(condition["execution_errors"])
 
 
+def test_job_statistics_failure_names_the_recorded_step_exception(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(
+        job_dir,
+        verifier_mode="missing",
+        step_rewards=(1.0,),
+        step_exception_type="VerifierOutputParseError",
+    )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    condition = results["agents"]["opencode"]["conditions"]["with_skill"]
+    errors = " ".join(condition["execution_errors"])
+    assert results["execution_status"] == "failed"
+    assert condition["scored_attempts"] == 0
+    assert (
+        "statistics account for 0/1 completed trials; "
+        f"trial {trial_name} recorded VerifierOutputParseError: provider step operation failed"
+    ) in errors
+
+
 def test_harbor_022_complete_envelope_accepts_final_reward_strategy(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     job_dir = jobs_dir / "demo-opencode-with"

@@ -246,6 +246,45 @@ class TestClassifierCodexStyle:
 
         assert signals["handoff"]["passed"] == 1
 
+    @pytest.mark.parametrize(
+        ("agent", "fn", "key"),
+        [
+            ("claude-code", "mcp__fs__write_file", "destination"),
+            ("hermes", "mcp_fs_write_file", "destination"),
+            ("hermes", "mcp_fs_save_file", "output"),
+            ("opencode", "fs_write_file", "destination"),
+            ("opencode", "fs_write_file", "file"),
+            ("opencode", "fs_edit_file", "target"),
+        ],
+    )
+    def test_mcp_write_tools_without_a_path_key_still_write_the_artifact(self, agent: str, fn: str, key: str) -> None:
+        traj = _traj(
+            _one("Skill", {"skill": "alpha"}),
+            _one(fn, {key: "out/report.json", "content": "{}"}, call_id="c2"),
+            _one("Skill", {"skill": "beta"}, call_id="c3"),
+            _one("Read", {"file_path": "out/report.json"}, call_id="c4"),
+        )
+        case = {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "artifact": "out/report.json"}]}
+
+        signals = _signals({**traj, "agent": {"name": agent}}, case, declared={**DECLARED, "mcp": ["fs"]})
+
+        assert (signals["handoff"]["passed"], signals["handoff"]["failures"]) == (1, [])
+
+    def test_an_mcp_editor_view_does_not_write_the_artifact(self) -> None:
+        traj = _traj(
+            _one("Skill", {"skill": "alpha"}),
+            _one("mcp__fs__str_replace_editor", {"command": "view", "target": "out/report.json"}, call_id="c2"),
+            _one("Skill", {"skill": "beta"}, call_id="c3"),
+            _one("Read", {"file_path": "out/report.json"}, call_id="c4"),
+        )
+        case = {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "artifact": "out/report.json"}]}
+
+        signals = _signals(traj, case, declared={**DECLARED, "mcp": ["fs"]})
+
+        assert [failure["detail"] for failure in signals["handoff"]["failures"]] == [
+            "artifact was not written by the producer"
+        ]
+
     def test_declared_server_alternate_spellings_are_canonicalized(self) -> None:
         traj = _traj(
             _one("github.search_code", {"q": "x"}),

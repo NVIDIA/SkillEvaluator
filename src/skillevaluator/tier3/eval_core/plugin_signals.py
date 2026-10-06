@@ -2298,8 +2298,11 @@ def _call_writes(call: _Call, artifact: str) -> bool:
             return False
         if any(_path_matches(path, artifact) for path in _path_args(call.args)):
             return True
-        return fn_base in _PATCH_TOOLS and any(_path_matches(path, artifact) for path in _patch_targets(call.args))
-    if call.is_shell:
+        if fn_base in _PATCH_TOOLS and any(_path_matches(path, artifact) for path in _patch_targets(call.args)):
+            return True
+        # An MCP write tool (``write_file``...) may name its file under another key, such as
+        # ``destination``: the MCP rules below still apply to it.
+    elif call.is_shell:
         return any(_normalized_path_matches(path, artifact) for path in call.shell_paths.writes)
     if call.mcp is None:
         return False

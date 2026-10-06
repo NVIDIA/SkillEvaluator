@@ -165,6 +165,51 @@ def _collect(
     )
 
 
+@pytest.mark.parametrize(
+    "forged",
+    [
+        # Harbor mounts /logs/agent from <trial>/agent and /logs/artifacts from <trial>/artifacts.
+        "agent/x/verifier/reward.json",
+        "agent/steps/x/verifier/reward.json",
+        "artifacts/verifier/reward.json",
+        # A multi-step trial relocates /logs/agent into steps/<step>/agent.
+        "steps/finish/agent/verifier/reward.json",
+    ],
+)
+def test_a_reward_the_agent_writes_outside_the_verifier_layouts_is_never_scored(tmp_path: Path, forged: str) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    _write_reward(job_dir, trial_name, _default_reward("case-001", 0.1))
+    _write_complete_job_result(job_dir, [trial_name])
+    forged_reward = job_dir / trial_name / forged
+    forged_reward.parent.mkdir(parents=True)
+    forged_reward.write_text(json.dumps(_default_reward("case-001", 1.0)), encoding="utf-8")
+
+    assert [(row["_trial_name"], row["overall"]) for row in _extract_rewards(job_dir)] == [(trial_name, 0.1)]
+    assert collector_module.harbor_job_passed(job_dir, 0.5) is False
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    with_skill = result["agents"]["opencode"]["conditions"]["with_skill"]
+    assert (with_skill["execution_status"], with_skill["scored_attempts"]) == ("succeeded", 1)
+    trials_dir = tmp_path / "results" / "opencode" / "with-skill" / "trials"
+    assert [path.name for path in trials_dir.iterdir()] == [trial_name]
+
+
+@pytest.mark.parametrize(("link", "target"), [("verifier", "verifier"), ("steps", "steps/finish/verifier")])
+def test_a_reward_behind_a_linked_trial_directory_is_never_scored(tmp_path: Path, link: str, target: str) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    _write_reward(job_dir, "case-001__attempt", _default_reward("case-001", 0.1))
+    outside = tmp_path / "outside"
+    (outside / target).mkdir(parents=True)
+    (outside / target / "reward.json").write_text(json.dumps(_default_reward("case-002", 1.0)), encoding="utf-8")
+    linked_trial = job_dir / "case-002__attempt"
+    linked_trial.mkdir()
+    (linked_trial / link).symlink_to(outside / link, target_is_directory=True)
+
+    assert [(row["_trial_name"], row["overall"]) for row in _extract_rewards(job_dir)] == [("case-001__attempt", 0.1)]
+
+
 def test_failed_judge_sidecar_is_merged_but_never_scored_and_reason_is_safe(tmp_path: Path) -> None:
     job_dir = tmp_path / "jobs" / "demo-opencode-with"
     trial_name = "case-001__attempt"

@@ -1309,21 +1309,34 @@ def _save_unscored_trials(
             logger.debug("Failed to write Harbor failure artifact %s: %s", failure_file, e)
 
 
-def _reward_trial_context(reward_file: Path) -> tuple[Path, str, str | None]:
-    """Return ``(trial_root, trial_name, step_name)`` for a Harbor reward file.
+# Where Harbor's verifier writes rewards, relative to the job directory: single-step
+# tasks write ``<trial>/verifier/reward.json`` and native multi-step tasks write
+# ``<trial>/steps/<step>/verifier/reward.json``.
+_HARBOR_REWARD_FILE_PATTERNS = ("*/verifier/reward.json", "*/steps/*/verifier/reward.json")
 
-    Harbor single-step tasks write ``<trial>/verifier/reward.json``. Native
-    multi-step tasks may write ``<trial>/steps/<step>/verifier/reward.json``.
+
+def _harbor_reward_files(job_dir: Path) -> list[Path]:
+    """Return the reward files in Harbor's trial layouts, in sorted order.
+
+    The rest of a trial directory is agent-writable (Harbor mounts
+    ``/logs/agent`` from ``<trial>/agent``), so a ``reward.json`` anywhere else
+    is not a verifier result and is never scored.
+    """
+    return sorted(path for pattern in _HARBOR_REWARD_FILE_PATTERNS for path in job_dir.glob(pattern))
+
+
+def _reward_trial_context(job_dir: Path, reward_file: Path) -> tuple[Path, str, str | None]:
+    """Return ``(trial_root, trial_name, step_name)`` for a reward file from :func:`_harbor_reward_files`.
+
     Keep the real trial root for artifacts while making the persisted result
     name unique per step.
     """
-    verifier_dir = reward_file.parent
-    reward_parent = verifier_dir.parent
-    if reward_parent.parent.name == "steps":
-        step_name = reward_parent.name
-        trial_root = reward_parent.parent.parent
-        return trial_root, f"{trial_root.name}__{step_name}", step_name
-    return reward_parent, reward_parent.name, None
+    trial_name, *layout = reward_file.relative_to(job_dir).parts
+    trial_root = job_dir / trial_name
+    if layout[0] == "steps":
+        step_name = layout[1]
+        return trial_root, f"{trial_name}__{step_name}", step_name
+    return trial_root, trial_name, None
 
 
 def _reward_trajectory_path(trial_root: Path, step_name: str | None) -> Path:
@@ -1965,42 +1978,43 @@ def _extract_rewards(
         rewards.append(data)
         authoritative_trial_roots.add(trial_dir)
 
-    for reward_file in sorted(job_dir.rglob("reward.json")):
-        if reward_file.parent.name == "verifier":
-            try:
-                trial_dir, trial_name, step_name = _reward_trial_context(reward_file)
-                if artifacts.unscoreable(trial_dir):
-                    continue
-                if trial_dir in authoritative_trial_roots:
-                    continue
-                data = _read_json(reward_file)
-                if not isinstance(data, dict):
-                    logger.warning("Ignoring invalid or oversized Harbor reward: %s", reward_file)
-                    continue
-                _merge_reward_sidecars(data, reward_file.parent)
-                _merge_trial_evaluation_failures(data, trial_dir, artifacts)
-                data["_trial_name"] = trial_name
-                data["_trial_root_name"] = trial_dir.name
-                if arm_suffix:
-                    data["_arm_suffix"] = arm_suffix
-                if step_name:
-                    data["_step_name"] = step_name
-                result_file = trial_dir / "result.json"
-                parsed_result: dict[str, Any] | None = None
-                if result_file.exists():
-                    result = _read_json(result_file)
-                    if isinstance(result, dict):
-                        parsed_result = result
-                        _merge_constituent_default_reward_failure(data, result, trial_dir, artifacts)
-                        data["_started_at"] = result.get("started_at")
-                _populate_reward_entry_id(data, parsed_result, trial_name)
-                traj_file = _reward_trajectory_path(trial_dir, step_name)
-                if traj_file.exists():
-                    data["_has_trajectory"] = True
-                rewards.append(data)
-                scored_trial_roots.add(trial_dir)
-            except OSError as e:
-                logger.warning("Failed to read %s: %s", reward_file, e)
+    for reward_file in _harbor_reward_files(job_dir):
+        try:
+            trial_dir, trial_name, step_name = _reward_trial_context(job_dir, reward_file)
+            if artifacts.unscoreable(trial_dir):
+                continue
+            if trial_dir in authoritative_trial_roots:
+                continue
+            # Read without following a link anywhere below the job directory: a
+            # linked trial, steps, or verifier directory is not Harbor's layout.
+            data = _read_json(reward_file, root=job_dir)
+            if not isinstance(data, dict):
+                logger.warning("Ignoring invalid or oversized Harbor reward: %s", reward_file)
+                continue
+            _merge_reward_sidecars(data, reward_file.parent)
+            _merge_trial_evaluation_failures(data, trial_dir, artifacts)
+            data["_trial_name"] = trial_name
+            data["_trial_root_name"] = trial_dir.name
+            if arm_suffix:
+                data["_arm_suffix"] = arm_suffix
+            if step_name:
+                data["_step_name"] = step_name
+            result_file = trial_dir / "result.json"
+            parsed_result: dict[str, Any] | None = None
+            if result_file.exists():
+                result = _read_json(result_file)
+                if isinstance(result, dict):
+                    parsed_result = result
+                    _merge_constituent_default_reward_failure(data, result, trial_dir, artifacts)
+                    data["_started_at"] = result.get("started_at")
+            _populate_reward_entry_id(data, parsed_result, trial_name)
+            traj_file = _reward_trajectory_path(trial_dir, step_name)
+            if traj_file.exists():
+                data["_has_trajectory"] = True
+            rewards.append(data)
+            scored_trial_roots.add(trial_dir)
+        except OSError as e:
+            logger.warning("Failed to read %s: %s", reward_file, e)
 
     for result_file in sorted(job_dir.glob("*/result.json")):
         trial_dir = result_file.parent

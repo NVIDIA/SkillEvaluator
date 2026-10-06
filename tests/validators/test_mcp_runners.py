@@ -672,6 +672,24 @@ def test_audit_reports_a_uvx_requirements_file_as_unverified(tmp_path: Path, pip
     assert unverified == ["--with-requirements reqs.txt"]
 
 
+def test_audit_findings_never_echo_a_credential_in_a_runner_spec(
+    tmp_path: Path, pip_audit: _FakeTool, osv_scanner: _FakeTool
+) -> None:
+    """Regression: dependency-version-unverified quoted a git spec's userinfo in its message and metadata."""
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    servers = {
+        "a": {"command": "npx", "args": ["-y", f"git+https://x-access-token:{token}@github.com/org/repo.git"]},
+        "b": {"command": "uvx", "args": ["--from", "git+https://oauth2:hunter2pass@gitlab.example.com/o/r.git", "t"]},
+    }
+    result = _audit(tmp_path / "demo", servers)
+
+    unverified = [f for f in result.findings if f.check_name == "dependency-version-unverified"]
+    assert len(unverified) == 2
+    dumped = json.dumps([(f.message, f.metadata) for f in result.findings], default=str)
+    assert token not in dumped and "hunter2pass" not in dumped
+    assert "git+https://gitlab.example.com/o/r.git" in dumped
+
+
 def test_pip_audit_gets_every_exact_pep440_spelling_as_name_equals_version(
     tmp_path: Path, pip_audit: _FakeTool
 ) -> None:

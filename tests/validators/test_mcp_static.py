@@ -18,6 +18,7 @@ import pytest
 from skillevaluator.models.result import Severity
 from skillevaluator.plugin_components import PluginRootReader, collect_mcp_declarations
 from skillevaluator.validators.mcp_static import (
+    classify_mcp_pinning,
     validate_mcp_command,
     validate_mcp_pinning,
     validate_mcp_server_declaration,
@@ -636,6 +637,70 @@ def test_url_findings_never_show_userinfo_that_a_backslash_turns_into_the_host(u
     assert not any(userinfo in f.message or userinfo.rpartition(":")[2] in f.message for f in findings)
     malformed = next(f for f in findings if f.check_name == "mcp_url_malformed_authority")
     assert "read part of its user information as the host" in malformed.message
+
+
+@pytest.mark.parametrize(
+    ("config", "secret"),
+    [
+        ({"command": "node", "args": ["server.js", "--password", "p4ss`w0rd"]}, "p4ss`w0rd"),
+        ({"command": "node", "args": ["server.js", "--client-secret", "s3cr3t<x"]}, "s3cr3t"),
+        ({"command": "node", "args": ["server.js", "--api-key", "abcd1234&x"]}, "abcd1234"),
+        ({"command": "node", "args": ["server.js", "--token", "Sup3rS3cretValue@latest"]}, "Sup3rS3cretValue"),
+        ({"command": "node", "args": ["server.js", "--passwd=p4ss;w0rd"]}, "p4ss;w0rd"),
+        ({"command": "node server.js --password p4ss`w0rd"}, "p4ss`w0rd"),
+    ],
+)
+def test_command_findings_never_echo_a_credential_flag_value(config: dict, secret: str) -> None:
+    """Regression: a credential flag's value given as its own argument ('--password <value>') was withheld by
+    mcp_command_inline_secret but printed by the shell-metacharacter and floating-version findings."""
+    findings = validate_mcp_server_declaration("s", config, "p.json")
+
+    assert "mcp_command_inline_secret" in _checks(findings)
+    assert _checks(findings) & {"mcp_command_shell_metacharacters", "mcp_command_floating_version"}
+    assert not any(secret in f.message for f in findings)
+
+
+_ACCESS_TOKEN = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "npx", "args": ["-y", f"git+https://x-access-token:{_ACCESS_TOKEN}@github.com/o/r"]},
+        {"command": "uvx", "args": ["--from", f"git+https://{_ACCESS_TOKEN}@github.com/o/r", "tool"]},
+        {"command": "npx", "args": ["-y", f"pkg@{_ACCESS_TOKEN}"]},
+        {"command": "deno", "args": ["run", f"https://x.example/mod.ts?token={_ACCESS_TOKEN}"]},
+        {"command": "uvx", "args": ["--from", "git+https://oauth2:hunter2pass@gitlab.example.com/o/r.git", "tool"]},
+        {"command": "docker", "args": ["run", f"registry.example.com/app:{_ACCESS_TOKEN}"]},
+    ],
+)
+def test_pinning_details_never_echo_a_credential_in_the_spec(config: dict) -> None:
+    """Regression: mcp_unpinned_package quoted the whole runner spec, credential and all."""
+    pin = classify_mcp_pinning(config)
+    findings = validate_mcp_server_declaration("s", config, "p.json")
+
+    assert pin.status == "unpinned"
+    assert "mcp_unpinned_package" in _checks(findings)
+    for text in (pin.detail, *(f.message for f in findings)):
+        assert _ACCESS_TOKEN not in text and "hunter2pass" not in text
+
+
+def test_lsp_and_inventory_never_echo_a_credential_in_a_runner_spec(tmp_path: Path) -> None:
+    spec = f"git+https://x-access-token:{_ACCESS_TOKEN}@github.com/o/r"
+    root = tmp_path / "demo"
+    (root / ".claude-plugin").mkdir(parents=True)
+    manifest = {
+        "name": "demo",
+        "mcpServers": {"git": {"command": "npx", "args": ["-y", spec]}},
+        "lspServers": {"ls": {"command": "node", "args": ["ls.js", "--password", "p4ss`w0rd"]}},
+    }
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps(manifest))
+
+    result = PluginSchemaValidator().validate(root)
+
+    assert {"mcp_unpinned_package", "plugin_lsp_command_shell_metacharacters"} <= _checks(result.findings)
+    dumped = json.dumps([result.metadata, [(f.message, f.metadata) for f in result.findings]], default=str)
+    assert _ACCESS_TOKEN not in dumped and "p4ss`w0rd" not in dumped
 
 
 def test_url_userinfo_written_as_references_is_allowed() -> None:

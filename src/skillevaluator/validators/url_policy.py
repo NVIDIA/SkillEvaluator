@@ -361,6 +361,16 @@ def report_text(value: str, limit: int = MAX_REPORT_CHARS) -> str:
     return shown
 
 
+def report_value(value: str, limit: int = MAX_REPORT_CHARS) -> str:
+    """A value from plugin config (a command argument, a package spec) for reports.
+
+    It is withheld whole as ``<value withheld>`` when it is shaped like a
+    secret (:func:`has_secret_shape`), and otherwise shown as :func:`report_text`,
+    which also removes URL userinfo and redacts ``key=value`` credentials.
+    """
+    return "<value withheld>" if has_secret_shape(value) else report_text(value, limit)
+
+
 def safe_url(url: str) -> str:
     """A URL for reports: no userinfo, query, or fragment; bounded (also for a URL that does not parse).
 

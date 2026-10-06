@@ -45,6 +45,7 @@ from skillevaluator.validators.mcp_static import (
     is_remote_npm_spec,
     split_npm_spec,
 )
+from skillevaluator.validators.url_policy import report_value
 
 UNVERIFIED_CHECK_NAME = "dependency-version-unverified"
 NPM_VULN_CHECK = "npm-vulnerability"
@@ -355,21 +356,28 @@ def unverified_finding(
     kind: str,
     line_number: int | None = None,
 ) -> Finding:
+    """The INFO finding for a declaration the audit cannot match to one release.
+
+    ``label`` and ``raw`` are shown the way reports show plugin values
+    (:func:`~skillevaluator.validators.url_policy.report_value`), so a git or
+    URL spec never carries its userinfo or a token into the message or metadata.
+    """
+    package = report_value(label)
     return Finding(
         category="DEPENDENCY",
         severity=Severity.INFO,
         check_name=UNVERIFIED_CHECK_NAME,
         message=(
-            f"{label}: cannot audit a floating {kind} ('{raw[:120]}' is not an exact version or digest); "
-            "vulnerability applicability was not asserted"
+            f"{package}: cannot audit a floating {kind} ('{report_value(raw, 120)}' is not an exact version or "
+            "digest); vulnerability applicability was not asserted"
         ),
         file_path=source,
         line_number=line_number,
         suggestion=_UNVERIFIED_SUGGESTIONS.get(ecosystem, _DEFAULT_UNVERIFIED_SUGGESTION),
         metadata={
             "ecosystem": ecosystem,
-            "package_name": label,
-            "declared_constraint": raw[:200],
+            "package_name": package,
+            "declared_constraint": report_value(raw),
             "dependency_role": role,
             "resolution_status": "unverified",
         },

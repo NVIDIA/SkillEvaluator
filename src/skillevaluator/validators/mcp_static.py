@@ -44,7 +44,7 @@ from skillevaluator.validators.url_policy import (
     is_credential_name,
     is_env_reference,
     looks_like_inline_secret,
-    report_text,
+    report_value,
     safe_url,
     url_ambiguities,
     url_credentials,
@@ -221,8 +221,35 @@ def _is_insecure_tls_env(key: str, value: str) -> bool:
 
 
 def _shown(text: str) -> str:
-    """A command token or command line for messages: bounded and redacted, withheld whole when shaped like a secret."""
-    return "<value withheld>" if has_secret_shape(text) else report_text(text, 120)
+    """A command token, command line, or package spec for messages (:func:`report_value`, at most 120 characters)."""
+    return report_value(text, 120)
+
+
+def _inline_credentials(words: list[str]) -> list[tuple[int, str | None]]:
+    """``(index, flag)`` for each of ``words`` that holds an inline credential, in order.
+
+    The literal value of a credential-named flag counts: ``--token=x`` itself,
+    or the word after ``--token`` unless it looks like another flag
+    (``--api-key --verbose``); ``flag`` names the flag. Any other word shaped
+    like a secret or an inline ``Bearer``/``Basic`` credential counts with
+    ``flag`` ``None``. ``${ENV}`` references never count.
+    """
+    found: list[tuple[int, str | None]] = []
+    value_index = -1
+    for index, word in enumerate(words):
+        flag = _credential_flag_name(word)
+        if flag is not None:
+            if "=" in word:
+                value, value_index = word.split("=", 1)[1], index
+            elif index + 1 < len(words) and not words[index + 1].startswith("-"):
+                value, value_index = words[index + 1], index + 1
+            else:
+                value, value_index = "", -1
+            if value and not is_env_reference(value):
+                found.append((value_index, flag))
+        elif index != value_index and has_secret_shape(word):
+            found.append((index, None))
+    return found
 
 
 def _iter_command_tokens(config: dict[str, Any]) -> list[str]:
@@ -276,74 +303,64 @@ def _check_command(server: _ServerFindings, config: dict[str, Any]) -> None:
             "Express command arguments as a JSON array of strings.",
         )
 
-    tokens = _iter_command_tokens(config)
-    for token in tokens:
+    # Inline credentials: a credential-named flag (--api-key, --token, --password, ...)
+    # must reference an env var, never a raw literal, and any argument shaped like a
+    # secret or an inline "Bearer/Basic <token>" is flagged whatever the flag name. A
+    # command line written in 'command' is read the same way. ${ENV} references are
+    # always allowed. The tokens that hold one are never shown in any finding.
+    arg_list = [str(a) for a in args] if isinstance(args, list) else []
+    command_credentials = _inline_credentials(command.split())
+    arg_credentials = _inline_credentials(arg_list)
+    # Positions in _iter_command_tokens: the command, then each argument.
+    withheld = {index + 1 for index, _flag in arg_credentials} | ({0} if command_credentials else set())
+
+    for position, token in enumerate(_iter_command_tokens(config)):
+        shown = "<value withheld>" if position in withheld else _shown(token)
         if _SHELL_METACHAR_RE.search(token):
             server.report(
                 Severity.CRITICAL,
                 "mcp_command_shell_metacharacters",
-                f"command token contains shell metacharacters: {_shown(token)!r}",
+                f"command token contains shell metacharacters: {shown!r}",
                 "Remove shell operators (; | & ` $() < >). MCP commands run argv-style, not via a shell.",
             )
         if token in _INSECURE_TLS_FLAGS:
             server.report(
                 Severity.CRITICAL,
                 "mcp_command_disables_tls",
-                f"command disables TLS/certificate verification: {_shown(token)!r}",
+                f"command disables TLS/certificate verification: {shown!r}",
                 "Remove insecure-TLS flags; do not disable certificate verification.",
             )
         if _FLOATING_MARKER_RE.search(token):
             server.report(
                 Severity.HIGH,
                 "mcp_command_floating_version",
-                f"command token uses a floating (unpinned) version: {_shown(token)!r}",
+                f"command token uses a floating (unpinned) version: {shown!r}",
                 "Pin the referenced package/image to an exact version, not latest/main.",
             )
 
-    # Inline credentials carried in command arguments. A credential-named flag
-    # (--api-key, --token, --password, ...) must reference an env var, never a raw
-    # literal; and any argument whose *value* has a known secret shape or is an
-    # inline "Bearer/Basic <token>" is flagged regardless of the flag name.
-    # ${ENV} references are always allowed.
-    arg_list = [str(a) for a in args] if isinstance(args, list) else []
-    flagged_value_idx = -1
-    for idx, token in enumerate(arg_list):
-        flag = _credential_flag_name(token)
-        if flag is not None:
-            if "=" in token:
-                value, value_idx = token.split("=", 1)[1], idx
-            elif idx + 1 < len(arg_list) and not arg_list[idx + 1].startswith("-"):
-                # A following token that looks like another flag is NOT this flag's
-                # value (avoids flagging e.g. `--api-key --verbose`).
-                value, value_idx = arg_list[idx + 1], idx + 1
+    for where, credentials in (("command line", command_credentials), ("command argument", arg_credentials)):
+        for index, flag in credentials:
+            if flag is not None:
+                message = f"{where} {flag!r} carries an inline credential; only ${{ENV}} references are allowed"
+            elif where == "command argument":
+                message = f"command argument args[{index}] contains an inline credential (value withheld)"
             else:
-                value, value_idx = "", -1
-            if value and not is_env_reference(value):
-                server.report(
-                    Severity.CRITICAL,
-                    "mcp_command_inline_secret",
-                    f"command argument {flag!r} carries an inline credential; only ${{ENV}} references are allowed",
-                    'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
-                )
-                flagged_value_idx = value_idx
-            continue
-        if idx == flagged_value_idx:
-            continue  # already reported as the preceding flag's value
-        if has_secret_shape(token):
+                message = "command line contains an inline credential (value withheld)"
             server.report(
                 Severity.CRITICAL,
                 "mcp_command_inline_secret",
-                f"command argument args[{idx}] contains an inline credential (value withheld)",
+                message,
                 'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
             )
 
     # Shell interpreter invoked with an inline program string (`sh -c "..."`, `bash -lc "..."`).
     shell = _shell_invocation(command, arg_list)
     if shell is not None and _shell_runs_inline_program(shell[1], shell=shell[0]):
+        shown_command = "<value withheld>" if 0 in withheld else _shown(command)
         server.report(
             Severity.CRITICAL,
             "mcp_command_dangerous_form",
-            f"command invokes a shell interpreter with '-c' ({_shown(command)!r}); this executes an arbitrary "
+            f"command invokes a shell interpreter with '-c' ({shown_command!r}); this executes an arbitrary "
             "program string",
             "Invoke the server binary directly instead of wrapping it in a shell '-c' string.",
         )
@@ -1358,35 +1375,40 @@ def pypi_pin(requirement: str) -> PypiPin | None:
     return None if pin is None else specifier_pin(pin.group("operator"), pin.group("version"))
 
 
+# Each classification's detail shows the spec as _shown does (bounded, credentials
+# removed, withheld when shaped like a secret): findings, the inventory's pin_detail,
+# and the reports all show the detail as it is.
 def _classify_npm_spec(spec: str) -> McpPinning:
     """Classify an npm package spec (``pkg``, ``@scope/pkg@1.2.3``, git/URL, local path)."""
+    shown = _shown(spec)
     if is_local_spec(spec):
-        return McpPinning("not_applicable", f"local package path {spec!r}")
+        return McpPinning("not_applicable", f"local package path {shown!r}")
     if is_remote_npm_spec(spec):
         if _GIT_SHA_RE.search(spec):
-            return McpPinning("pinned", f"git/URL spec pinned to a commit: {spec!r}", remote=True)
-        return McpPinning("unpinned", f"git/URL/GitHub spec without a commit SHA: {spec!r}", remote=True)
+            return McpPinning("pinned", f"git/URL spec pinned to a commit: {shown!r}", remote=True)
+        return McpPinning("unpinned", f"git/URL/GitHub spec without a commit SHA: {shown!r}", remote=True)
     _name, version = split_npm_spec(spec)
     if version is None:
-        return McpPinning("unpinned", f"package {spec!r} has no version (resolves to the latest release)")
+        return McpPinning("unpinned", f"package {shown!r} has no version (resolves to the latest release)")
     if exact_npm_version(version):
-        return McpPinning("pinned", f"exact version {spec!r}")
-    return McpPinning("unpinned", f"package {spec!r} uses a version range or dist-tag, not an exact version")
+        return McpPinning("pinned", f"exact version {shown!r}")
+    return McpPinning("unpinned", f"package {shown!r} uses a version range or dist-tag, not an exact version")
 
 
 def _classify_python_spec(spec: str) -> McpPinning:
     """Classify a PyPI requirement spec as used by ``uvx`` / ``pipx run``."""
+    shown = _shown(spec)
     if is_local_spec(spec):
-        return McpPinning("not_applicable", f"local package path {spec!r}")
+        return McpPinning("not_applicable", f"local package path {shown!r}")
     if is_remote_pypi_spec(spec):
         if _GIT_SHA_RE.search(spec) or "#sha256=" in spec:
-            return McpPinning("pinned", f"git/URL spec pinned to a commit or hash: {spec!r}", remote=True)
-        return McpPinning("unpinned", f"git/URL spec without a commit SHA or hash: {spec!r}", remote=True)
+            return McpPinning("pinned", f"git/URL spec pinned to a commit or hash: {shown!r}", remote=True)
+        return McpPinning("unpinned", f"git/URL spec without a commit SHA or hash: {shown!r}", remote=True)
     if pypi_pin(spec) is not None:
-        return McpPinning("pinned", f"exact version {spec!r}")
+        return McpPinning("pinned", f"exact version {shown!r}")
     if any(marker in spec for marker in ("<", ">", "~", "!", "*", ",", "=", "@")):
-        return McpPinning("unpinned", f"requirement {spec!r} is a range or tag, not an exact '==' version")
-    return McpPinning("unpinned", f"package {spec!r} has no version (resolves to the latest release)")
+        return McpPinning("unpinned", f"requirement {shown!r} is a range or tag, not an exact '==' version")
+    return McpPinning("unpinned", f"package {shown!r} has no version (resolves to the latest release)")
 
 
 def _classify_deno_module(module: str | None) -> McpPinning:
@@ -1394,9 +1416,10 @@ def _classify_deno_module(module: str | None) -> McpPinning:
     if module and module.startswith(("npm:", "jsr:")):
         return _prefixed("deno run: ", _classify_npm_spec(module.split(":", 1)[1]))
     if module and module.startswith(("http://", "https://")):
+        shown = _shown(module)
         if _module_path_names_exact_version(module):
-            return McpPinning("pinned", f"deno run: remote module pinned to an exact version: {module!r}", remote=True)
-        return McpPinning("unpinned", f"deno run: remote module without an exact version: {module!r}", remote=True)
+            return McpPinning("pinned", f"deno run: remote module pinned to an exact version: {shown!r}", remote=True)
+        return McpPinning("unpinned", f"deno run: remote module without an exact version: {shown!r}", remote=True)
     return McpPinning("not_applicable", "deno run of a local script")
 
 
@@ -1418,19 +1441,20 @@ def _module_path_names_exact_version(url: str) -> bool:
 
 def _classify_image(image: str) -> McpPinning:
     """Classify a container image reference."""
+    shown = _shown(image)
     if _DOCKER_DIGEST_RE.search(image):
-        return McpPinning("pinned", f"image pinned by digest {image!r}")
+        return McpPinning("pinned", f"image pinned by digest {shown!r}")
     if "${" in image or image.startswith("$"):
-        return McpPinning("unpinned", f"image {image!r} is taken from an environment reference")
+        return McpPinning("unpinned", f"image {shown!r} is taken from an environment reference")
     last = image.rsplit("/", 1)[-1]
     tag = last.split(":", 1)[1] if ":" in last else None
     if tag is None:
-        return McpPinning("unpinned", f"image {image!r} has no tag or digest (implicit ':latest')")
+        return McpPinning("unpinned", f"image {shown!r} has no tag or digest (implicit ':latest')")
     if tag.lower() == "latest":
-        return McpPinning("unpinned", f"image {image!r} uses the mutable 'latest' tag")
+        return McpPinning("unpinned", f"image {shown!r} uses the mutable 'latest' tag")
     if _VERSION_TAG_RE.match(tag):
-        return McpPinning("pinned", f"image {image!r} uses a version tag (tags are mutable; a digest is stronger)")
-    return McpPinning("unpinned", f"image {image!r} uses the non-version tag {tag!r}")
+        return McpPinning("pinned", f"image {shown!r} uses a version tag (tags are mutable; a digest is stronger)")
+    return McpPinning("unpinned", f"image {shown!r} uses the non-version tag {_shown(tag)!r}")
 
 
 def _classify_spec_list(specs: Iterable[str], classify: Any) -> McpPinning:

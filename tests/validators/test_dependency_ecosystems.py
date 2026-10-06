@@ -667,6 +667,30 @@ def test_pip_audit_evidence_keeps_the_plugin_python_audit_complete(
     )
 
 
+def test_pin_pip_audit_skipped_makes_the_plugin_python_audit_incomplete(
+    tmp_path: Path, tools: dict[str, FakeTool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a skipped pin was counted as audited, so the plugin's Python audit passed as complete."""
+    skipped = {
+        "name": "requests",
+        "skip_reason": "Dependency not found on PyPI and could not be audited: requests (2.31.0+corp)",
+    }
+    _fake_pip_audit(monkeypatch, _ok({"dependencies": [skipped, {"name": "pyyaml", "version": "6.0.1", "vulns": []}]}))
+    files = {"requirements.txt": "requests==2.31.0+corp\npyyaml==6.0.1\n"}
+
+    result = _dependency_result(_bare_plugin(tmp_path / "demo", files))
+
+    assert result.incomplete_scans == ["pip-audit"]
+    python = _summary(result, "python")
+    assert (python["status"], python["declarations"], python["audited"], python["unverified"]) == (
+        "incomplete",
+        2,
+        1,
+        1,
+    )
+    assert python["errors"] == ["requirements.txt: pip-audit could not audit 1 pin(s): requests==2.31.0+corp"]
+
+
 def test_one_failed_pip_audit_batch_counts_only_the_audited_pins(
     tmp_path: Path, tools: dict[str, FakeTool], monkeypatch: pytest.MonkeyPatch
 ) -> None:

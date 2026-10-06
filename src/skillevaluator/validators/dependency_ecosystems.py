@@ -355,22 +355,27 @@ def unverified_finding(
     role: str,
     kind: str,
     line_number: int | None = None,
+    reason: str | None = None,
 ) -> Finding:
     """The INFO finding for a declaration the audit cannot match to one release.
 
-    ``label`` and ``raw`` are shown the way reports show plugin values
+    ``reason`` says why an exact pin could not be audited (pip-audit's skip
+    reason); without one, the declaration is floating. ``label`` and ``raw`` are
+    shown the way reports show plugin values
     (:func:`~skillevaluator.validators.url_policy.report_value`), so a git or
     URL spec never carries its userinfo or a token into the message or metadata.
     """
     package = report_value(label)
+    shown = report_value(raw, 120)
+    if reason is None:
+        problem = f"cannot audit a floating {kind} ('{shown}' is not an exact version or digest)"
+    else:
+        problem = f"cannot audit '{shown}' ({report_value(reason)})"
     return Finding(
         category="DEPENDENCY",
         severity=Severity.INFO,
         check_name=UNVERIFIED_CHECK_NAME,
-        message=(
-            f"{package}: cannot audit a floating {kind} ('{report_value(raw, 120)}' is not an exact version or "
-            "digest); vulnerability applicability was not asserted"
-        ),
+        message=f"{package}: {problem}; vulnerability applicability was not asserted",
         file_path=source,
         line_number=line_number,
         suggestion=_UNVERIFIED_SUGGESTIONS.get(ecosystem, _DEFAULT_UNVERIFIED_SUGGESTION),

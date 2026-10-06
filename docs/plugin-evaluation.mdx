@@ -1182,8 +1182,10 @@ requirements file and checked with `pip-audit --no-deps --disable-pip`, so
 nothing is installed, built, or resolved, and pip options in the audited files
 (such as `--index-url` or `-e`) are never used. Each floating, ranged, bare, or
 URL declaration gets an INFO `dependency-version-unverified` finding, because a
-floating version cannot be matched to one release. Transitive dependencies are
-not resolved.
+floating version cannot be matched to one release. So does an exact pin that
+pip-audit skips (a local version such as `==2.31.0+corp`, or a package that is
+not on PyPI), with pip-audit's reason; it is not counted as audited.
+Transitive dependencies are not resolved.
 
 For plugins, the audit also covers npm packages and container images:
 
@@ -1233,7 +1235,8 @@ and redirect URLs that registry returns.
 
 When no scanner is installed for an ecosystem that has auditable pins
 (pip-audit included), every installed scanner fails (for example, the npm
-registry cannot be reached or pip-audit times out), a `package.json`, lockfile,
+registry cannot be reached or pip-audit times out), pip-audit skips an exact
+pin, a `package.json`, lockfile,
 or Dockerfile cannot be read or parsed within its bounds, a manifest declares
 more than 5,000 npm packages (the first 5,000 are audited), an image's
 registry is refused, or the plugin has more than 64 npm manifests, 64

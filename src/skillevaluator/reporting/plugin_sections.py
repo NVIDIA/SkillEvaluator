@@ -882,20 +882,6 @@ class ComponentIndex:
         return None
 
 
-def finding_artifact_path(file_path: str, block: object) -> str:
-    """Return the file a finding points at (see :meth:`ComponentIndex.artifact_path`)."""
-    return ComponentIndex(block).artifact_path(file_path)
-
-
-def component_for_path(file_path: object, block: object) -> dict[str, str] | None:
-    """Return the inventory component that contains a finding's file (see :meth:`ComponentIndex.component`).
-
-    Findings carry either root-relative or absolute paths, and a bundled
-    skill's findings carry a ``[skill] `` label.
-    """
-    return ComponentIndex(block).component(file_path)
-
-
 # ---------------------------------------------------------------------------
 # Tier 3 (canonical agent_eval payload or raw engine result)
 # ---------------------------------------------------------------------------

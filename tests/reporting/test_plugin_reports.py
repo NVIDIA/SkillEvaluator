@@ -31,7 +31,7 @@ from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting.cli import CLIReporter
 from skillevaluator.reporting.markdown import MarkdownReporter
 from skillevaluator.reporting.plugin_sections import (
-    component_for_path,
+    ComponentIndex,
     coverage_view,
     is_plugin_payload,
     split_display_prefix,
@@ -256,10 +256,10 @@ def test_sarif_without_plugin_has_no_run_properties() -> None:
         ("skills/loader-extra/SKILL.md", None),
     ],
 )
-def test_component_for_path_maps_findings_to_components(file_path: str, expected: str | None) -> None:
+def test_component_index_maps_findings_to_components(file_path: str, expected: str | None) -> None:
     block = tier1_plugin_result().metadata["plugin"]
 
-    component = component_for_path(file_path, block)
+    component = ComponentIndex(block).component(file_path)
 
     assert (component or {}).get("name") == expected
 
@@ -875,8 +875,6 @@ def test_similarity_views_carry_their_title_columns_and_summary() -> None:
 
 
 def test_component_index_places_a_folder_walker_label_only_when_it_is_unambiguous() -> None:
-    from skillevaluator.reporting.plugin_sections import ComponentIndex
-
     skills = [("nested/bar", "skills/nested/bar"), ("a/x", "skills/a/x"), ("b/x", "skills/b/x")]
     block = {
         "root": "/work/p",

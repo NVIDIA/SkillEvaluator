@@ -666,7 +666,10 @@ def validate_harbor_job_result(
             rewarded_trial_names.update(metric_trial_names)
 
     if eval_trials != total:
-        return False, f"Harbor evaluation statistics account for {eval_trials}/{total} completed trials"
+        detail = f"Harbor evaluation statistics account for {eval_trials}/{total} completed trials"
+        if recorded := _first_recorded_trial_exception(result_path.parent):
+            detail = f"{detail}; {recorded}"
+        return False, detail
     if eval_errors != 0:
         return False, f"Harbor evaluation statistics contain {eval_errors} errored trials"
     if not rewarded_trial_names:
@@ -772,6 +775,31 @@ def _trial_step_exception_details(trial_dir: Path) -> list[tuple[str, str]]:
         if isinstance(step, dict)
         if (details := _exception_details(step.get("exception_info"))) != ("", "")
     ]
+
+
+def _first_recorded_trial_exception(job_dir: Path) -> str:
+    """Name the first trial or step exception Harbor recorded under a failed job.
+
+    Harbor 0.24 records a multi-step failure, such as a verifier ``reward.json``
+    it cannot parse, on the failing step rather than on the trial, and still
+    counts the trial as completed. Without this, a job reports only a trial count.
+    """
+    try:
+        entries = sorted(job_dir.iterdir())
+    except OSError:
+        return ""
+    for ordinal, trial_dir in enumerate(entries, start=1):
+        kind, _unsafe_reason = _inspect_trial_directory(trial_dir)
+        if kind != "directory":
+            continue
+        for _exception_type, reason in (
+            _trial_exception_details(trial_dir),
+            *_trial_step_exception_details(trial_dir),
+        ):
+            if reason:
+                label = _published_trial_label(trial_dir.name, alias_ordinal=ordinal)
+                return redact_sensitive_text(f"trial {label} recorded {reason}")[:600]
+    return ""
 
 
 def _agent_log_runtime_failure_reason(

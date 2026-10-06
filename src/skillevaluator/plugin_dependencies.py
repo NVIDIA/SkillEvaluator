@@ -50,7 +50,7 @@ from urllib.parse import urlparse
 from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
 from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
 from skillevaluator.plugin_states import DEPENDENCY_STATES
-from skillevaluator.utils.helpers import git_origin_https_url, resolve_git_root
+from skillevaluator.utils.helpers import git_origin, resolve_git_root
 from skillevaluator.utils.secure_fs import lstat_walk, stat_is_link_or_reparse
 from skillevaluator.utils.structured_data import require_bounded_string
 
@@ -119,10 +119,10 @@ def slug_from_remote_url(url: str) -> str | None:
     """Extract the ``<group>/<repo>`` slug from a git-remote URL.
 
     :func:`local_repo_slug` passes a URL that
-    :func:`~skillevaluator.utils.helpers.git_origin_https_url` has already
+    :func:`~skillevaluator.utils.helpers.git_origin` has already
     normalized to HTTPS -- SSH ``ssh://`` and SCP-style (``git@host:group/repo``)
     remotes are converted by ``_ssh_to_https`` first -- so in practice this
-    receives an ``https://host/group/repo`` URL. The SCP and
+    receives an ``https://host[:port]/group/repo`` URL. The SCP and
     ``ssh://`` forms are nonetheless handled directly here as defense-in-depth,
     so the slug is correct no matter how the URL reaches this function (a
     standard URI would otherwise dump an SCP string verbatim into ``path``).
@@ -155,17 +155,35 @@ def local_repo_slug(clone_root: Path, *, git_root: Path | None = None) -> str | 
     against the wrong base. A caller that already resolved the git top-level
     of ``clone_root`` passes it as ``git_root``, so only ``git remote get-url
     origin`` runs. Only ssh, SCP-style, and https origins give a slug
-    (:func:`~skillevaluator.utils.helpers.git_origin_https_url`).
+    (:func:`~skillevaluator.utils.helpers.git_origin`).
+    """
+    slug, _unsupported_origin = _origin_slug(clone_root, git_root)
+    return slug
+
+
+def _origin_slug(clone_root: Path, git_root: Path | None) -> tuple[str | None, str | None]:
+    """:func:`local_repo_slug`, and how the origin is written when it is one that gives no slug.
+
+    The second value is ``"uses http://"`` (any scheme but ssh and https) or
+    ``"is a local path or another unsupported form"``, and ``None`` when there
+    is a slug, no origin, or ``clone_root`` is not the git top-level. It never
+    repeats the remote, which may hold credentials.
     """
     try:
         if git_root is None:
             git_root = resolve_git_root(clone_root)
         if git_root is None or git_root != clone_root.resolve():
-            return None
+            return None, None
     except (OSError, RuntimeError):
-        return None
-    url = git_origin_https_url(git_root)
-    return slug_from_remote_url(url) if url else None
+        return None, None
+    origin = git_origin(git_root)
+    if origin.https_url is not None:
+        return slug_from_remote_url(origin.https_url), None
+    if not origin.configured:
+        return None, None
+    if origin.scheme is not None:
+        return None, f"uses {origin.scheme}://"
+    return None, "is a local path or another unsupported form"
 
 
 def iter_raw_refs(section: Any) -> list[Any]:
@@ -262,6 +280,8 @@ class RepositoryIdentity:
     local_slug: str | None
     reason: str | None = None
     repo_root_ignored: bool = False
+    # What would establish the identity, when it is unknown.
+    remedy: str | None = None
 
 
 def resolve_repository_identity(plugin_root: Path, repo_root: Path | None = None) -> RepositoryIdentity:
@@ -290,15 +310,26 @@ def resolve_repository_identity(plugin_root: Path, repo_root: Path | None = None
         else:
             clone_root = find_repo_root(plugin_real).resolve()
 
-    slug = local_repo_slug(clone_root, git_root=clone_git_root)
-    reason = None
-    if slug is None:
-        reason = (
-            f"repository identity unknown: '{clone_root.name or clone_root}' is not a git top-level with an "
-            "'origin' remote, so same-repository references cannot be told apart from external ones "
-            "(run inside the plugin's git clone or pass --repo-root <git top-level>)"
+    slug, unsupported_origin = _origin_slug(clone_root, clone_git_root)
+    if slug is not None:
+        return RepositoryIdentity(clone_root=clone_root, local_slug=slug, repo_root_ignored=ignored)
+    name = clone_root.name or clone_root
+    if unsupported_origin is not None:
+        problem = (
+            f"the 'origin' remote of '{name}' {unsupported_origin}, and only ssh, SCP-style (git@host:owner/repo), "
+            "and https remotes establish repository identity"
         )
-    return RepositoryIdentity(clone_root=clone_root, local_slug=slug, reason=reason, repo_root_ignored=ignored)
+        remedy = "point the 'origin' remote at an ssh or https URL"
+    else:
+        problem = f"'{name}' is not a git top-level with an 'origin' remote"
+        remedy = "run inside the plugin's git clone or pass --repo-root <git top-level>"
+    reason = (
+        f"repository identity unknown: {problem}, so same-repository references cannot be told apart from "
+        f"external ones ({remedy})"
+    )
+    return RepositoryIdentity(
+        clone_root=clone_root, local_slug=None, reason=reason, repo_root_ignored=ignored, remedy=remedy
+    )
 
 
 # ---------------------------------------------------------------------------

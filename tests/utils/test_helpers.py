@@ -11,8 +11,10 @@ import pytest
 
 from skillevaluator.utils import find_skills_in_directory, get_skill_name_from_path
 from skillevaluator.utils.helpers import (
+    GitOrigin,
     _ssh_to_https,
     find_bundled_plugin_skill_manifests,
+    git_origin,
     git_origin_https_url,
     preferred_skill_manifests,
     resolve_git_remote_url,
@@ -340,6 +342,23 @@ class TestGitOriginHttpsUrl:
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
 
         assert git_origin_https_url(tmp_path) is None
+        assert git_origin(tmp_path) == GitOrigin()
+
+    @pytest.mark.parametrize(
+        ("origin", "scheme"),
+        [
+            ("http://user:example-secret@github.com:8080/example/project.git", "http"),
+            ("GIT://github.com/example/project.git", "git"),
+            ("file:///srv/git/example/project.git", "file"),
+            ("/srv/git/example/project.git", None),
+        ],
+    )
+    def test_names_the_scheme_of_an_unsupported_origin(self, tmp_path: Path, origin: str, scheme: str | None) -> None:
+        """An unsupported origin is told apart from a missing one by its scheme alone, never its text."""
+        repo_root = tmp_path / "repo"
+        _init_git_repo(repo_root, origin)
+
+        assert git_origin(repo_root) == GitOrigin(configured=True, https_url=None, scheme=scheme)
 
 
 class TestResolveGitRemoteUrl:

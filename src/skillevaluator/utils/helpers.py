@@ -8,6 +8,7 @@ import re
 import stat
 import subprocess
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
@@ -358,14 +359,31 @@ def resolve_git_remote_url(local_path: Path) -> str | None:
         return None
 
 
-def git_origin_https_url(git_root: Path) -> str | None:
-    """Return the ``origin`` remote of the repository at *git_root* as an HTTPS URL, or ``None``.
+@dataclass(frozen=True)
+class GitOrigin:
+    """The ``origin`` remote of a repository (see :func:`git_origin`).
 
-    Runs one ``git remote get-url origin``. Only ``ssh://``, SCP-style
-    (``git@host:group/repo``), and ``https://`` remotes are accepted, with any
-    credentials stripped (see :func:`_ssh_to_https`). Any other remote, such
-    as ``http://``, ``git://``, ``file://``, or a local path, gives ``None``,
-    so repository identity derived from it fails closed.
+    ``https_url`` is set for an ssh, SCP-style, or https remote. For any other
+    remote only ``scheme`` describes it (``"http"``, or ``None`` for a local
+    path), never its text, which may hold credentials.
+    """
+
+    configured: bool = False
+    https_url: str | None = None
+    scheme: str | None = None
+
+
+_URL_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*")
+
+
+def git_origin(git_root: Path) -> GitOrigin:
+    """Read the ``origin`` remote of the repository at *git_root* with one ``git remote get-url origin``.
+
+    Only ``ssh://``, SCP-style (``git@host:group/repo``), and ``https://``
+    remotes give an HTTPS URL, with any credentials stripped (see
+    :func:`_ssh_to_https`). Any other remote, such as ``http://``, ``git://``,
+    ``file://``, or a local path, gives none, so repository identity derived
+    from it fails closed.
     """
     try:
         remote_url = subprocess.check_output(
@@ -375,8 +393,19 @@ def git_origin_https_url(git_root: Path) -> str | None:
             text=True,
         ).strip()
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return None
-    return _ssh_to_https(remote_url)
+        return GitOrigin()
+    https_url = _ssh_to_https(remote_url)
+    if https_url is not None:
+        return GitOrigin(configured=True, https_url=https_url)
+    scheme, separator, _rest = remote_url.partition("://")
+    if separator and _URL_SCHEME_RE.fullmatch(scheme):
+        return GitOrigin(configured=True, scheme=scheme.lower())
+    return GitOrigin(configured=True)
+
+
+def git_origin_https_url(git_root: Path) -> str | None:
+    """Return the ``origin`` remote at *git_root* as an HTTPS URL, or ``None`` (see :func:`git_origin`)."""
+    return git_origin(git_root).https_url
 
 
 def _ssh_to_https(remote_url: str) -> str | None:

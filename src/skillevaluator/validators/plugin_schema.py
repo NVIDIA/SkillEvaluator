@@ -625,10 +625,12 @@ class PluginSchemaValidator(ValidatorBase):
             summary = ", ".join(f"{counts[state]} {state}" for state in counts if counts[state])
             advisory = ""
             if counts["unresolved"]:
+                remedy = identity.remedy or (
+                    "validate from the plugin's git clone with an 'origin' remote, or pass --repo-root"
+                )
                 advisory = (
                     f"; {counts['unresolved']} unresolved ref(s) are advisory only -- the missing-dependency "
-                    "gate could not be evaluated for them (validate from the plugin's git clone with an "
-                    "'origin' remote, or pass --repo-root)"
+                    f"gate could not be evaluated for them ({remedy})"
                 )
             result.add_success(
                 check_name="plugin_dependencies",

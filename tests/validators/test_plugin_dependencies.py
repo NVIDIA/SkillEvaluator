@@ -317,6 +317,45 @@ def test_https_origin_with_credentials_and_a_port_keeps_the_missing_dependency_g
     assert not result.passed
 
 
+@requires_git
+@pytest.mark.parametrize(
+    ("origin", "form"),
+    [
+        ("http://user:example-secret@gitlab.example.com:8080/Example-Org/example-repo.git", "uses http://"),
+        ("git://gitlab.example.com/Example-Org/example-repo.git", "uses git://"),
+        ("/srv/git/example-repo.git", "is a local path or another unsupported form"),
+    ],
+)
+def test_unsupported_origin_is_named_as_the_reason_identity_is_unknown(tmp_path: Path, origin: str, form: str) -> None:
+    """Regression: the reason said the clone had no 'origin' remote, and advised what could not help."""
+    repo = _git_repo(tmp_path / "repo", origin=origin)
+    plugin = _manifest(repo / "plugins" / "p", skills=[f"git::{REPO}::skills::shared"])
+
+    identity = resolve_repository_identity(plugin)
+    result = PluginSchemaValidator(repo_root=repo).validate(plugin)
+
+    assert identity.local_slug is None
+    assert f"the 'origin' remote of 'repo' {form}" in identity.reason
+    assert "is not a git top-level" not in identity.reason
+    assert "--repo-root" not in identity.reason
+    assert "example-secret" not in identity.reason
+    assert identity.reason in _rows(result)[f"git::{REPO}::skills::shared"]["reason"]
+    [summary] = [detail for detail in result.success_details if detail.check_name == "plugin_dependencies"]
+    assert "point the 'origin' remote at an ssh or https URL" in summary.message
+    assert "--repo-root" not in summary.message
+
+
+@requires_git
+def test_missing_origin_still_advises_the_git_clone_or_repo_root(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path / "repo", origin=None)
+    plugin = _manifest(repo / "plugins" / "p", skills=[f"git::{REPO}::skills::shared"])
+
+    identity = resolve_repository_identity(plugin)
+
+    assert "'repo' is not a git top-level with an 'origin' remote" in identity.reason
+    assert "pass --repo-root <git top-level>" in identity.reason
+
+
 @pytest.mark.parametrize(
     ("ref", "reason"),
     [

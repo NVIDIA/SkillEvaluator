@@ -17,6 +17,7 @@ import functools
 import os
 import secrets
 import stat
+import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePath
@@ -1302,13 +1303,27 @@ def _validate_windows_parent_components(path: Path) -> None:
     )
 
 
-@functools.cache
+# Held while the native Windows structures and API are first built. On its own,
+# functools.cache runs a builder twice when two threads miss at once, so the
+# API prototypes could be bound to structure classes other than the cached
+# ones, and every later native call would fail with ctypes.ArgumentError.
+# Reentrant, because binding the API builds the structures.
+_WINDOWS_CTYPES_LOCK = threading.RLock()
+
+
 def _windows_types() -> SimpleNamespace:
     """ctypes structures for the native Windows calls, defined once per process.
 
     ``ctypes.POINTER`` keeps every structure class it is given for the life of
     the process, so structures defined inside each call would accumulate.
     """
+    with _WINDOWS_CTYPES_LOCK:
+        return _define_windows_types()
+
+
+@functools.cache
+def _define_windows_types() -> SimpleNamespace:
+    """Define the structures; only :func:`_windows_types` calls this, under the lock."""
     import ctypes
     from ctypes import wintypes
 
@@ -1370,15 +1385,22 @@ def _windows_types() -> SimpleNamespace:
     )
 
 
-@functools.cache
 def _windows_api() -> SimpleNamespace:
     """Native Windows functions with their prototypes, bound once per process.
 
     The private kernel32 handle uses ``use_last_error`` so that
     ``ctypes.get_last_error()`` reports the failed call's own error, and its
     prototypes never touch the process-wide ``ctypes.windll`` functions. The
-    ntdll calls return an NTSTATUS instead.
+    ntdll calls return an NTSTATUS instead. The prototypes take the structures
+    :func:`_windows_types` returns.
     """
+    with _WINDOWS_CTYPES_LOCK:
+        return _bind_windows_api()
+
+
+@functools.cache
+def _bind_windows_api() -> SimpleNamespace:
+    """Bind the functions; only :func:`_windows_api` calls this, under the lock."""
     if os.name != "nt":
         raise OSError("Windows handle operations are unavailable on this platform")
     import ctypes

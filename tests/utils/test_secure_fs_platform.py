@@ -5,6 +5,7 @@ import ctypes
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
@@ -564,6 +565,65 @@ def test_windows_atomic_write_cleans_unpublished_stage_by_handle(
 
 def test_windows_structures_are_defined_once_per_process() -> None:
     assert secure_fs._windows_types() is secure_fs._windows_types()
+
+
+# Run in a fresh interpreter, so the ctypes caches start cold. The patched
+# namespace constructor holds the first builder until a second thread arrives
+# (or one second passes), so two threads that both missed a cache would
+# build two structure sets.
+_RACE_PRELUDE = """
+import threading
+from skillevaluator.utils import secure_fs
+
+barrier = threading.Barrier(2, timeout=1.0)
+real_namespace = secure_fs.SimpleNamespace
+
+def namespace_after_a_racer(**fields):
+    try:
+        barrier.wait()
+    except threading.BrokenBarrierError:
+        pass
+    return real_namespace(**fields)
+
+secure_fs.SimpleNamespace = namespace_after_a_racer
+
+def race(function):
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(function())) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return results
+"""
+
+
+def _run_race(check: str) -> str:
+    completed = subprocess.run(
+        [sys.executable, "-c", _RACE_PRELUDE + check], capture_output=True, text=True, check=True, timeout=120
+    )
+    return completed.stdout.strip()
+
+
+def test_windows_structures_are_defined_once_when_two_threads_race() -> None:
+    """Regression: two threads that both missed the cache defined two structure sets.
+
+    The native API binds its prototypes to the set it sees, so a cache that kept
+    the other set failed every later native call with ctypes.ArgumentError.
+    """
+    check = "results = race(secure_fs._windows_types)\nprint(all(r is secure_fs._windows_types() for r in results))\n"
+    assert _run_race(check) == "True"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the native API binds only on Windows")
+def test_windows_api_is_bound_to_the_cached_structures_when_two_threads_race() -> None:
+    check = (
+        "results = race(secure_fs._windows_api)\n"
+        "api, types = secure_fs._windows_api(), secure_fs._windows_types()\n"
+        "bound = api.get_file_information.argtypes[1]._type_ is types.ByHandleFileInformation\n"
+        "print(bound and all(r is api for r in results))\n"
+    )
+    assert _run_race(check) == "True"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the native API binds only on Windows")

@@ -68,8 +68,9 @@ def normalize_declared_path(raw: str, root_prefixes: Iterable[str]) -> DeclaredP
     placeholder names the root only when a separator (``/`` or ``\\``) or
     nothing follows it: a client expands it as text, so
     ``${CURSOR_PLUGIN_ROOT}foo/x.sh`` loads ``<root>foo/x.sh`` beside the root,
-    an escape. Absolute paths, home-relative paths, drive letters, and ``..``
-    segments are escapes.
+    an escape. Absolute paths, home-relative paths, a drive letter in any part
+    (``./C:/Users``), and ``..`` segments are escapes; any other colon (an NTFS
+    data stream, ``x.md:hidden``) is ``invalid``.
     """
     text = raw.strip()
     if not text:
@@ -92,8 +93,12 @@ def normalize_declared_path(raw: str, root_prefixes: Iterable[str]) -> DeclaredP
     if "${" in normalized or normalized.startswith("$"):
         return DeclaredPath(raw, None, "invalid")
     parts = [part for part in normalized.split("/") if part not in {"", "."}]
-    if any(part == ".." for part in parts):
+    # Windows reads a character and a colon as a drive in any part, so joining
+    # "./C:/Users/x" to the root leaves it; any other colon names a data stream.
+    if any(part == ".." or part[1:2] == ":" for part in parts):
         return DeclaredPath(raw, None, "escape")
+    if any(":" in part for part in parts):
+        return DeclaredPath(raw, None, "invalid")
     rel = PurePosixPath(*parts) if parts else PurePosixPath(".")
     return DeclaredPath(raw, rel, None, dot_relative)
 

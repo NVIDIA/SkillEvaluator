@@ -427,6 +427,42 @@ def test_normalize_declared_path() -> None:
 
 
 @pytest.mark.parametrize(
+    ("raw", "problem"),
+    [
+        # Regression: a drive letter was an escape only at the start of the path.
+        ("./C:/Users/alice/.claude/skills", "escape"),
+        ("a/C:/x", "escape"),
+        ("./skills/d:", "escape"),
+        ("C:Users", "escape"),
+        # Windows reads any character before a colon as a drive.
+        ("./a:b/x.md", "escape"),
+        ("./1:x", "escape"),
+        # An NTFS alternate data stream, not a file in the plugin.
+        ("./commands/deploy.md:hidden", "invalid"),
+        ("./ab:c/x.md", "invalid"),
+    ],
+)
+def test_colon_in_any_path_part_is_rejected(raw: str, problem: str) -> None:
+    """On Windows a part with a drive leaves the plugin root when joined, and other colons name data streams."""
+    from pathlib import PureWindowsPath
+
+    declared = normalize_declared_path(raw, CLAUDE_PROFILE.manifest_path_prefixes)
+
+    assert (declared.rel, declared.problem) == (None, problem)
+    # What every accepted path is checked against: joined on Windows, it stays below the root.
+    for accepted in ("./C/Users/x", "./skills/d", "./commands/deploy.md"):
+        rel = normalize_declared_path(accepted, CLAUDE_PROFILE.manifest_path_prefixes).rel
+        root = PureWindowsPath("D:/plugins/p")
+        assert (root / rel.as_posix()).is_relative_to(root)
+
+
+def test_declared_skills_path_through_a_drive_letter_is_an_escape(tmp_path: Path) -> None:
+    root = _plugin(tmp_path / "p", {"skills": "./C:/Users/alice/.claude/skills"})
+
+    assert _checks(_validate(root))["plugin_component_path_escape"] == Severity.HIGH
+
+
+@pytest.mark.parametrize(
     ("raw", "rel"),
     [("${CURSOR_PLUGIN_ROOT}", "."), ("${CURSOR_PLUGIN_ROOT}/", "."), ("${CLAUDE_PLUGIN_ROOT}\\x.json", "x.json")],
 )

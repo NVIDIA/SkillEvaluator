@@ -282,8 +282,9 @@ plugin schema is not validated. The component fields (`skills`, `commands`,
 `agents`, `hooks`, `mcpServers`, `lspServers`, `outputStyles`,
 `experimental.monitors`, and `settings`) are read for the
 [component inventory](#component-inventory). Declared paths must stay inside
-the plugin root: an absolute, home-relative, drive-letter, or `..` path gets a
-HIGH `plugin_component_path_escape` finding. Claude Code expects `./`-relative
+the plugin root: an absolute, home-relative, or `..` path, or one with a drive
+letter in any part (`./C:/Users`), gets a HIGH `plugin_component_path_escape`
+finding. Claude Code expects `./`-relative
 paths, so a path without `./` gets a MEDIUM `plugin_component_path_style`
 finding. Claude Code expands `${CLAUDE_PLUGIN_ROOT}` only in hook commands and
 MCP server fields, and rejects a manifest whose component path starts with
@@ -725,9 +726,9 @@ checks are skipped when a plugin bundles no skills.
 | Check | Severity | Flags |
 | --- | --- | --- |
 | `plugin_component_path_missing` | HIGH | A declared component path does not exist |
-| `plugin_component_path_escape` | HIGH | A declared path is absolute, home-relative, or a drive letter, uses `..`, or puts a name right after a root variable (`${CURSOR_PLUGIN_ROOT}servers.json` names a file beside the root) |
+| `plugin_component_path_escape` | HIGH | A declared path is absolute or home-relative, has a drive letter in any part (`./C:/Users`), uses `..`, or puts a name right after a root variable (`${CURSOR_PLUGIN_ROOT}servers.json` names a file beside the root) |
 | `plugin_component_path_unsafe` | HIGH | A path is, or passes through, a symlink, hard link, or special file. It is not followed |
-| `plugin_component_path_invalid` | HIGH | A declaration has the wrong shape for its field, such as a command map entry without exactly one of `source` or `content` |
+| `plugin_component_path_invalid` | HIGH | A declaration has the wrong shape for its field, such as a command map entry without exactly one of `source` or `content`, or a path with a colon that is not a drive letter (an NTFS data stream such as `deploy.md:hidden`) |
 | `plugin_component_path_style` | MEDIUM | A contained-manifest path does not start with `./` |
 | `plugin_component_unreadable` | HIGH | A hooks, LSP, monitors, or settings JSON file is unreadable, invalid, or larger than 256 KiB. Its bypass and environment checks cannot run, so it blocks |
 | `plugin_component_list_truncated` | HIGH | A declared component list, an LSP server map, or a `commands` map has more than 256 entries |

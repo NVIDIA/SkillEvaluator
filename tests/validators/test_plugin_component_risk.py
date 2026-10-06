@@ -490,6 +490,13 @@ def test_http_hook_endpoint_policy(tmp_path: Path) -> None:
     assert checks["plugin_hook_http_endpoint_private"] == Severity.MEDIUM
 
 
+def test_http_hook_unicode_wildcard_host_pattern_is_allowed(tmp_path: Path) -> None:
+    """Regression: '*.bücher.example' in hooks.allowed_urls never matched, since hosts are compared in punycode."""
+    root = _plugin(tmp_path, files={"hooks/hooks.json": _http_hook("https://sub.bücher.example/x")})
+    policy = ValidationPolicy(hook_allowed_urls=("*.bücher.example",))
+    assert "plugin_hook_http_url_not_allowed" not in _checks(_validate(root, policy))
+
+
 def test_http_hook_allowlist_policy(tmp_path: Path) -> None:
     root = _plugin(
         tmp_path,
@@ -618,7 +625,7 @@ def test_hook_records_never_keep_a_token_from_the_command_line(tmp_path: Path) -
 
     dumped = json.dumps(result.metadata["plugin"]["hook_risk"])
     assert github not in dumped and gitlab not in dumped
-    assert "gh auth login --with-token <redacted>" in _hook_rows(result)[0]["target"]
+    assert "gh auth login --with-token ghp_<redacted>" in _hook_rows(result)[0]["target"]
 
 
 def test_a_hook_flag_is_counted_once_however_many_findings_raise_it(tmp_path: Path) -> None:
@@ -685,6 +692,34 @@ def test_command_hook_url_credentials_are_critical_and_redacted(tmp_path: Path, 
     assert _checks(result)["plugin_hook_inline_secret"] == Severity.CRITICAL
     assert "inline_secret" in _hook_rows(result)[0]["risk_flags"]
     assert "s3cr3tPassw0rd" not in _dumped(result)
+
+
+_BARE_QUERY_TOKEN = "ghp_" + "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2"
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [
+        _http_hook(f"https://hooks.example.com/notify?{_BARE_QUERY_TOKEN}"),
+        _hooks(
+            {
+                "PostToolUse": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": f"curl -s https://api.example.com/x?{_BARE_QUERY_TOKEN}"}
+                        ]
+                    }
+                ]
+            }
+        ),
+    ],
+)
+def test_hook_url_query_component_shaped_like_a_secret_is_critical(tmp_path: Path, hooks: dict) -> None:
+    """Regression: a bare '?ghp_...' query component parsed to an empty value and was never flagged."""
+    result = _validate(_plugin(tmp_path, files={"hooks/hooks.json": hooks}))
+
+    assert _checks(result)["plugin_hook_inline_secret"] == Severity.CRITICAL
+    assert _BARE_QUERY_TOKEN not in _dumped(result)
 
 
 @pytest.mark.parametrize(

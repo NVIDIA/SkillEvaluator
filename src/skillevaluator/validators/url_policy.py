@@ -20,6 +20,7 @@ Nothing here touches the network.
 from __future__ import annotations
 
 import re
+import string
 import unicodedata
 from dataclasses import dataclass
 from typing import Literal
@@ -49,6 +50,11 @@ _SECRET_KEY_RE = re.compile(
 _INLINE_AUTH_SCHEME_RE = re.compile(r"(?i)^(?:bearer|basic)\s+[A-Za-z0-9+/._=~-]{12,}$")
 # Known inline-secret value shapes. Only ``search`` truthiness is used.
 #
+# The short prefixes 'sk-', 'hf_', and 'npm_' also end ordinary words and ids
+# ('task-<hex>', 'disk-<hex>', 'pnpm_...'), so they match only where a word
+# starts. The longer prefixes match anywhere, so a token glued to other text
+# ('%3Dghp_...') is still found.
+#
 # The JWT-like alternative starts only where a run of token characters starts
 # and scans to the run's first ``eyJ`` without ever stepping past one. A later
 # ``eyJ`` in the same run has fewer characters before the run ends, so it can
@@ -56,13 +62,15 @@ _INLINE_AUTH_SCHEME_RE = re.compile(r"(?i)^(?:bearer|basic)\s+[A-Za-z0-9+/._=~-]
 # tried at every ``eyJ`` and scanned to the end of the run each time, which is
 # quadratic on a long ``eyJeyJ...`` value (about 1 s per 64 KB value).
 _SECRET_VALUE_RE = re.compile(
-    r"(sk-[A-Za-z0-9]{16,}"
+    r"((?<![A-Za-z0-9_-])sk-[A-Za-z0-9]{16,}"
     r"|gh[pousr]_[A-Za-z0-9]{20,}"
     r"|github_pat_[A-Za-z0-9_]{22,}"
     r"|glpat-[A-Za-z0-9_-]{20,}"
-    r"|AKIA[0-9A-Z]{16}"
-    r"|xox[baprs]-[A-Za-z0-9-]{10,}"
+    r"|(?:AKIA|ASIA)[0-9A-Z]{16}"
+    r"|xox[abeprs]-[A-Za-z0-9-]{10,}"
     r"|nvapi-[A-Za-z0-9_-]{16,}"
+    r"|(?<![A-Za-z0-9_-])hf_[A-Za-z0-9]{30,}"
+    r"|(?<![A-Za-z0-9_-])npm_[A-Za-z0-9]{36}"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
     r"|(?<![A-Za-z0-9_-])(?:(?!eyJ)[A-Za-z0-9_-])*eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"
 )
@@ -113,11 +121,13 @@ class UrlCredentials:
 
     # The userinfo ('user:password@') carries one.
     userinfo: bool = False
-    # Query parameters whose value is one, in the order they appear.
+    # Query parameters that carry one, in the order they appear.
     query_keys: tuple[str, ...] = ()
+    # Parameters in the fragment ('#access_token=...', '#/cb?token=...') that carry one.
+    fragment_keys: tuple[str, ...] = ()
 
     def __bool__(self) -> bool:
-        return self.userinfo or bool(self.query_keys)
+        return self.userinfo or bool(self.query_keys) or bool(self.fragment_keys)
 
 
 # Which userinfo counts as a credential; see ``url_credentials``.
@@ -125,7 +135,7 @@ UserinfoRule = Literal["any", "literal", "secret"]
 
 
 def url_credentials(url: str, *, userinfo_rule: UserinfoRule) -> UrlCredentials:
-    """Credentials written into the text of ``url``: in its userinfo and in its query parameters.
+    """Credentials written into the text of ``url``: in its userinfo, query parameters, and fragment parameters.
 
     The URL is read as raw text, so a malformed port or bracket cannot hide a
     credential: the authority runs from ``//`` to the next ``/``, ``?``, or
@@ -141,23 +151,54 @@ def url_credentials(url: str, *, userinfo_rule: UserinfoRule) -> UrlCredentials:
         a token (a URL inside a command line), so
         ``https://x-access-token:${GITHUB_TOKEN}@github.com/...`` does not.
     * Query: a parameter counts when it has a literal value under a credential
-      name (``api_key=literal``) or a value shaped like a secret under any name
-      (``q=sk-...``). A ``$VAR`` / ``${VAR}`` reference never counts.
+      name (``api_key=literal``), a value shaped like a secret under any name
+      (``q=sk-...``), or a name shaped like a secret (a bare ``?ghp_...``). A
+      ``$VAR`` / ``${VAR}`` reference never counts. The query ends at the
+      fragment; the fragment's parameters (after its last ``?``, as in
+      ``#/cb?access_token=...``) are read the same way, as ``fragment_keys``.
     """
-    authority = _RAW_AUTHORITY_END_RE.split(url.partition("//")[2], maxsplit=1)[0]
-    userinfo, at, _host = authority.rpartition("@")
+    userinfo, _rest = _split_raw_userinfo(url)
     user, _colon, password = userinfo.partition(":")
-    query = url.partition("?")[2].partition("#")[0]
+    before_fragment, _hash, fragment = url.partition("#")
     return UrlCredentials(
-        userinfo=bool(at) and _userinfo_carries_credential(user, password, rule=userinfo_rule),
-        query_keys=tuple(
-            dict.fromkeys(
-                key
-                for key, values in parse_qs(query, keep_blank_values=True).items()
-                if any(_query_value_is_credential(key, value) for value in values)
-            )
-        ),
+        userinfo=_userinfo_carries_credential(user, password, rule=userinfo_rule),
+        query_keys=_credential_parameters(before_fragment.partition("?")[2]),
+        fragment_keys=_credential_parameters(fragment.rpartition("?")[2]),
     )
+
+
+def _credential_parameters(text: str) -> tuple[str, ...]:
+    """The names of the parameters in ``text`` (``name=value`` or a bare ``name``) that carry a credential, in order."""
+    return tuple(
+        dict.fromkeys(
+            key
+            for key, values in parse_qs(text, keep_blank_values=True).items()
+            if has_secret_shape(key) or any(_query_value_is_credential(key, value) for value in values)
+        )
+    )
+
+
+def _split_raw_userinfo(url: str) -> tuple[str, str]:
+    """``(userinfo, the URL without it)``, read from the raw text as :func:`url_credentials` reads it.
+
+    The authority runs from ``//`` to the next ``/``, ``?``, or ``#`` (a
+    backslash does not end it), and the userinfo through its last ``@``.
+    """
+    prefix, slashes, rest = url.partition("//")
+    authority = _RAW_AUTHORITY_END_RE.split(rest, maxsplit=1)[0]
+    userinfo, at, _host = authority.rpartition("@")
+    if not at:
+        return "", url
+    return userinfo, f"{prefix}{slashes}{rest[len(userinfo) + 1 :]}"
+
+
+def without_userinfo(url: str) -> str:
+    """``url`` without the userinfo of its raw text, which :func:`url_credentials` checks for credentials.
+
+    A WHATWG client can read part of that userinfo as the host: it reads a
+    backslash as ``/``, so ``https://token\\@example.com/`` is host ``token``.
+    """
+    return _split_raw_userinfo(url)[1]
 
 
 def _userinfo_carries_credential(user: str, password: str, *, rule: UserinfoRule) -> bool:
@@ -285,6 +326,12 @@ def url_ambiguities(url: str, *, percent_in_host: bool = False) -> list[str]:
 MAX_REPORT_CHARS = 200
 # 'user:password@' in a URL authority (through its last '@'); scrubbed from every text a report shows.
 _URL_USERINFO_RE = re.compile(r"//[^/?#\s]*@")
+# The characters tokens are written with. A token that the redaction window cuts can
+# be too short for its pattern to match, so report_text drops the cut token.
+_TOKEN_CHARACTERS = string.ascii_letters + string.digits + "_-.~+/="
+# A private-key header that redact_sensitive_text did not read as the start of a key block.
+_PRIVATE_KEY_HEADER_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_TRUNCATED = "...<truncated>"
 
 
 def report_text(value: str, limit: int = MAX_REPORT_CHARS) -> str:
@@ -292,13 +339,38 @@ def report_text(value: str, limit: int = MAX_REPORT_CHARS) -> str:
 
     Userinfo is removed from the whole text; only a window of twice the limit is
     redacted (the result keeps at most ``limit`` characters), because the
-    redaction patterns can take quadratic time on long unbroken input. Every
-    secret shape the inline-credential checks know (``ghp_…``, ``glpat-…``,
-    ``xoxb-…``, ...) is redacted, as well as what ``redact_sensitive_text`` covers.
+    redaction patterns can take quadratic time on long unbroken input. A token
+    that the window cuts is dropped, and a cut text ends in ``...<truncated>``.
+    ``redact_sensitive_text`` runs first, so a private key is redacted whole,
+    BEGIN line to END line, and so is a JWT; then every other secret shape the
+    inline-credential checks know (``ghp_…``, ``glpat-…``, ``xoxe-…``, ...) is.
     """
     text = _URL_USERINFO_RE.sub("//", " ".join(value.split()))
-    window = _SECRET_VALUE_RE.sub("<redacted>", text[: 2 * limit])
-    return redact_sensitive_text(window, max_len=limit)
+    window = text[: 2 * limit]
+    cut = len(window) < len(text)
+    if cut:
+        window = window.rstrip(_TOKEN_CHARACTERS)
+    shown = redact_sensitive_text(window)
+    header = _PRIVATE_KEY_HEADER_RE.search(shown)
+    if header is not None:
+        # A key whose BEGIN line redact_sensitive_text could not read: withhold the rest of the text.
+        shown = f"{shown[: header.start()]}private-key-<redacted>"
+    shown = _SECRET_VALUE_RE.sub("<redacted>", shown)
+    if not cut and len(shown) <= limit:
+        return shown
+    if limit <= len(_TRUNCATED):
+        return shown[:limit]
+    return shown[: limit - len(_TRUNCATED)] + _TRUNCATED
+
+
+def report_value(value: str, limit: int = MAX_REPORT_CHARS) -> str:
+    """A value from plugin config (a command argument, a package spec) for reports.
+
+    It is withheld whole as ``<value withheld>`` when it is shaped like a
+    secret (:func:`has_secret_shape`), and otherwise shown as :func:`report_text`,
+    which also removes URL userinfo and redacts ``key=value`` credentials.
+    """
+    return "<value withheld>" if has_secret_shape(value) else report_text(value, limit)
 
 
 def safe_url(url: str) -> str:
@@ -306,16 +378,20 @@ def safe_url(url: str) -> str:
 
     An http(s), ws(s), or ftp URL is shown the way a WHATWG client (Node, the MCP
     SDKs) reads it, so the report names the host a client would actually contact.
-    A token in the path is redacted like any other report text (:func:`report_text`).
+    The userinfo of the raw text is removed first (:func:`without_userinfo`), so
+    text the URL holds as its userinfo is never shown, even where a backslash
+    makes a client read it as the host. A token in the path is redacted like any
+    other report text (:func:`report_text`).
     """
+    text = without_userinfo(url)
     try:
-        parsed = urlparse(whatwg_url(url))
+        parsed = urlparse(whatwg_url(text))
         host = parsed.hostname or ""
         port = f":{parsed.port}" if parsed.port else ""
     except ValueError:
-        return _unparsed_url(url)
+        return _unparsed_url(text)
     if not parsed.scheme or not host:
-        return _unparsed_url(url)
+        return _unparsed_url(text)
     display_host = f"[{host}]" if ":" in host else host
     return report_text(f"{parsed.scheme}://{display_host}{port}{parsed.path}")
 

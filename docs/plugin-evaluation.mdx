@@ -801,9 +801,14 @@ event, the flat shape Cursor and Agent Plugins client extensions such as
 `com.cursor/` and `com.github.copilot/` use, are read as one-handler matcher
 groups. User information is removed from every target and URL in the reports,
 even when the URL does not parse, and a value shaped like a known token
-(`ghp_…`, `glpat-…`, `xoxb-…`, `sk-…`, a JWT, or a private key) is shown as
-`<redacted>`, also inside a URL path. MCP command findings never echo an
-argument that holds a credential.
+(`ghp_…`, `glpat-…`, `xoxb-…`, `hf_…`, `npm_…`, `sk-…`, or a JWT) is
+redacted, also inside a URL path (`ghp_<redacted>`, `jwt-<redacted>`,
+`<redacted>`). A private key is redacted whole, from its BEGIN line to its END
+line. A long target is cut before it is redacted, and a token the cut splits
+is dropped. MCP command findings never echo an argument that holds a
+credential, including the value after a credential flag (`--password <value>`),
+and pin details and dependency findings show a package spec without its
+credentials.
 
 Each client's own hook semantics apply. Claude Code and Codex use the events
 and outputs above. Cursor (and an Agent Plugins `com.cursor/` namespace) adds
@@ -861,7 +866,7 @@ flags) is treated as matching every tool.
 | Check | Severity | Flags |
 | --- | --- | --- |
 | `plugin_hook_remote_code` | CRITICAL | A command hook, or the plugin script it runs, fetches remote content and executes it: `curl … \| sh`, `wget … \| bash`, `bash -c "$(curl …)"`, `sh <(curl …)`, or `iwr … \| iex`, also through a path, quotes, or wrapper (`\| /bin/sh`, `\| "sh"`, `\| $SHELL`, `\| busybox sh`, `\| /usr/bin/env bash`, `\| sudo -E bash`, `\| xargs sh`), through intermediate pipe stages (`\| tee x \| sh`), `. <(curl …)`, `\| source /dev/stdin`, a here-string (`source /dev/stdin <<< "$(curl …)"`), a variable that holds a download (`c=$(curl …); eval "$c"`), Python or JavaScript that evaluates a download (`exec(urlopen(…).read())`), a package runner of a git or URL spec (`npx github:user/repo`, `uvx --from git+https://…`, `deno run https://…`), or a download saved to a file (or unpacked into a directory) that the hook, or another hook or script of the plugin, then runs (`curl -o /tmp/x … && sh /tmp/x`, `tar xzf x.tgz -C d && d/run`). Download and run paths are read with the same text's simple variable assignments expanded, so `D="$CLAUDE_PLUGIN_DATA/bin"; curl -o "$D/tool" …` in one script and `exec "$CLAUDE_PLUGIN_DATA/bin/tool"` in another match. A piped interpreter counts when it reads its program from standard input, or when its `-c` / `-e` program evaluates standard input (`\| python3 -c 'exec(sys.stdin.read())'`, `\| ruby -e 'eval STDIN.read'`, `\| sh -c 'eval "$(cat)"'`, `\| bash -c "$(cat)"`, `\| sh -c 'exec bash'`). `\| python3 -m json.tool`, `\| node -e 'process.stdin.pipe(process.stdout)'`, `\| sh -c 'read v; echo $v'`, or `\| python3 parse.py` only parse the download as data, and `.` counts only as a command (`jq . out.json` does not run `out.json`) |
-| `plugin_hook_inline_secret` | CRITICAL | An HTTP hook URL carries user information or a credential query parameter, a header carries a literal credential, or a command hook's command line contains a URL with a literal `user:password@` (or a token-shaped user name) or a credential query parameter. `$VAR` interpolation is allowed |
+| `plugin_hook_inline_secret` | CRITICAL | An HTTP hook URL carries user information or a credential query or fragment parameter, a header carries a literal credential, or a command hook's command line contains a URL with a literal `user:password@` (or a token-shaped user name) or a credential query or fragment parameter. `$VAR` interpolation is allowed |
 | `plugin_hook_auto_approve` | HIGH | An approval hook (`PreToolUse`, `PermissionRequest`, or the client's own; see above) with a broad matcher (none, `""`, `*`, a regex that matches every tool or the shell tool, or one that cannot be classified safely; see above), or Cursor's `beforeShellExecution`, emits an allow decision (`permissionDecision: allow`, legacy `decision: approve`, `behavior: allow`, or Cursor's `permission: allow` / `decision: allow`). JSON `\u0061` and shell `\x61` escapes are decoded first |
 | `plugin_hook_script_unanalyzed` | HIGH | A command hook runs a plugin-root script that could not be analyzed, or an approval hook names the plugin root but runs no script that could be read (see above). An unread script could hide an auto-approval or remote code |
 | `plugin_hook_scan_truncated` | HIGH | A hooks source exceeds the scan limits (64 events, 256 matcher groups per event, 512 handlers), so the handlers past them are not analyzed. `hook_risk` lists a `truncated` row (flag `scan_truncated`) and sets `counts.truncated` |
@@ -936,18 +941,22 @@ stages a server.
     | Check | Severity | Flags |
     | --- | --- | --- |
     | `mcp_command_shell_metacharacters` | CRITICAL | `;`, `\|`, `&`, a backtick, `$(`, `<(`, `>(`, `<`, `>`, or a newline in `command` or `args`. MCP commands run argv-style, not through a shell |
-    | `mcp_command_dangerous_form` | CRITICAL | A shell interpreter (`sh`, `bash`, `zsh`, `dash`, `ksh`, or `fish`) invoked with `-c` (or `+c`), alone or in a short-option cluster such as `-lc`, or fish with `-C`, `--command`, or `--init-command`. An `env` wrapper is looked through (`env -i PATH=/bin bash -c …`, `env -S "sh -c …"`). Only the shell's own options count: arguments after the script path or `--` belong to the script, so `bash server.sh -config x.yml` is not flagged |
-    | `mcp_command_inline_secret` | CRITICAL | A credential-named flag with a literal value, or an argument shaped like a known secret or a `Bearer`/`Basic` credential |
+    | `mcp_command_dangerous_form` | CRITICAL | A shell interpreter (`sh`, `bash`, `zsh`, `dash`, `ksh`, or `fish`) invoked with `-c` (or `+c`), alone or in a short-option cluster such as `-lc`, or fish with `-C`, `--command`, or `--init-command`. A wrapper is looked through: `env` with its options, assignments, and `-S` string (`env -i PATH=/bin bash -c …`, `env -S "sh -c …"`), and `nohup`, `setsid`, `nice`, `stdbuf`, `time`, `timeout`, `sudo`, or `doas` with their options (`timeout 600 sh -c …`). Only the shell's own options count: arguments after the script path or `--` belong to the script, so `bash server.sh -config x.yml` is not flagged |
+    | `mcp_command_inline_secret` | CRITICAL | A credential-named flag with a literal value, or an argument shaped like a known secret or a `Bearer`/`Basic` credential, in `args` or in a command line written in `command` |
     | `mcp_command_disables_tls` | CRITICAL | `--insecure`, `-k`, `--no-check-certificate`, `--tls-no-verify`, `--ssl-no-verify`, or `--no-verify-tls` |
     | `mcp_command_floating_version` | HIGH | A floating marker on a package or image name: `@latest`, `@main`, `@master`, `@head`, `@next`, `@canary`, `:latest`, or `:main`. An npm scope such as `@nextcloud/` is not a marker |
     | `mcp_unpinned_package` | MEDIUM | A package runner without an exact version. Not reported again when a floating marker already raised the HIGH finding |
 
     A server is **pinned** when a package runner fetches an exact version:
     `pkg@1.2.3`, `pkg==1.2.3`, `--from pkg==1.2.3`, a git or URL spec with a
-    40-character commit SHA, `image:1.2.3`, or `image@sha256:...`. Every
+    40-character commit SHA, a `deno run` module whose URL path names one
+    (`https://deno.land/x/mod@v1.2.3/mod.ts`; not in the query or fragment, and
+    not with a `.` or `..` segment), `image:1.2.3`, or `image@sha256:...`. Every
     package the runner installs must be exact, including each `uvx --with`
-    requirement. The check and the dependency audit share one exact-version
-    rule per ecosystem: an npm version such as `1.2.3`, `=1.2.3`, or `v1.2.3`,
+    (`-w`) requirement; a `uvx --with-requirements` file makes the server
+    unpinned, because its packages are not read. The check and the dependency
+    audit share one exact-version rule per ecosystem: an npm version such as
+    `1.2.3`, `=1.2.3`, or `v1.2.3`,
     and a PyPI `==`, `===`, or uv `@` pin of one valid PEP 440 version, in any
     spelling PEP 440 accepts (`1.0rc1`, `v1.2.3`, `1.0-1`), which pip-audit
     gets as `name==version`. Wildcards and ranges are not exact. A `===` pin of
@@ -957,15 +966,22 @@ stages a server.
     moved. The
     recognized runners are `npx`, `bunx`, `pnpx`, `pnpm dlx`, `yarn dlx`,
     `npm exec`, `uvx`, `uv tool run`, `pipx run`, `deno run` (with `npm:`,
-    `jsr:`, or a remote module), and `docker`, `podman`, or `nerdctl run`. Local
-    interpreters and scripts, URL servers, and provider-only servers are
-    `not_applicable`.
+    `jsr:`, or a remote module), and `docker`, `podman`, or `nerdctl run`, also
+    behind a wrapper such as `env NODE_ENV=production npx …` or
+    `timeout 600 uvx …` (the wrappers `mcp_command_dangerous_form` looks
+    through). Local interpreters and scripts, URL servers, and provider-only
+    servers are `not_applicable`. A runner's own options end at the package it
+    runs, so a server's `-p 3000` is not npx's `--package`. When an npm runner
+    option is neither a known value option (`--registry`, `--globalconfig`, …)
+    nor a known switch (`-y`, `--prefer-offline`, …), the word after it is
+    checked as a package as well: npx reads it as the option's value, npm as
+    the package.
   </Accordion>
   <Accordion title="Secrets and TLS">
     | Check | Severity | Flags |
     | --- | --- | --- |
     | `mcp_inline_secret` | CRITICAL | An `env` or `headers` value that is a literal credential rather than a `$VAR` or `${VAR}` reference |
-    | `mcp_url_inline_secret` | CRITICAL | Credentials in the URL: user information with a literal user name or password (`${VAR}` references are allowed), a credential-named query parameter with a literal value, or a query value shaped like a known secret under any name (`?q=sk-…`). HTTP hooks use the same query rules but count any user information, even `${VAR}`, because the client sends it as Basic auth with every request |
+    | `mcp_url_inline_secret` | CRITICAL | Credentials in the URL: user information with a literal user name or password (`${VAR}` references are allowed), a credential-named query parameter with a literal value, or a query parameter whose value or name is shaped like a known secret (`?q=sk-…`, a bare `?ghp_…`). Parameters in the fragment (`#access_token=…`, `#/cb?token=…`) count the same way and are reported as fragment parameters. HTTP hooks use the same query and fragment rules but count any user information, even `${VAR}`, because the client sends it as Basic auth with every request |
     | `mcp_insecure_tls_env` | CRITICAL | `NODE_TLS_REJECT_UNAUTHORIZED=0`, `PYTHONHTTPSVERIFY=0`, or a truthy `GIT_SSL_NO_VERIFY`, `CURL_INSECURE`, `SSL_NO_VERIFY`, `TLS_INSECURE`, or `SSL_VERIFY_NONE` |
     | `mcp_insecure_flag` | CRITICAL | `insecure: true` |
     | `mcp_insecure_tls_config` | CRITICAL | A `tls` or `ssl` block with `rejectUnauthorized: false` or `verify: false` |
@@ -1184,8 +1200,10 @@ requirements file and checked with `pip-audit --no-deps --disable-pip`, so
 nothing is installed, built, or resolved, and pip options in the audited files
 (such as `--index-url` or `-e`) are never used. Each floating, ranged, bare, or
 URL declaration gets an INFO `dependency-version-unverified` finding, because a
-floating version cannot be matched to one release. Transitive dependencies are
-not resolved.
+floating version cannot be matched to one release. So does an exact pin that
+pip-audit skips (a local version such as `==2.31.0+corp`, or a package that is
+not on PyPI), with pip-audit's reason; it is not counted as audited.
+Transitive dependencies are not resolved.
 
 For plugins, the audit also covers npm packages and container images:
 
@@ -1196,7 +1214,9 @@ For plugins, the audit also covers npm packages and container images:
 
 The packages that `uvx`, `uv tool run`, and `pipx run` MCP servers install
 (`pkg==1.2.3`, or uv's `pkg@1.2.3`, including `uvx --with` requirements) join
-the pip-audit batch with the role `mcp`.
+the pip-audit batch with the role `mcp`. A `uvx --with-requirements` file gets
+the INFO `dependency-version-unverified` finding, because its packages are not
+read.
 
 Plugin files are never handed to a scanner. Exact npm pins are written into a
 synthesized name-and-version-only lockfile in a temporary directory, so no
@@ -1233,7 +1253,8 @@ and redirect URLs that registry returns.
 
 When no scanner is installed for an ecosystem that has auditable pins
 (pip-audit included), every installed scanner fails (for example, the npm
-registry cannot be reached or pip-audit times out), a `package.json`, lockfile,
+registry cannot be reached or pip-audit times out), pip-audit skips an exact
+pin, a `package.json`, lockfile,
 or Dockerfile cannot be read or parsed within its bounds, a manifest declares
 more than 5,000 npm packages (the first 5,000 are audited), an image's
 registry is refused, or the plugin has more than 64 npm manifests, 64

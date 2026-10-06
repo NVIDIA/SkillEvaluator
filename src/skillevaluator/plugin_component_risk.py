@@ -35,7 +35,6 @@ import bisect
 import functools
 import posixpath
 import re
-import shlex
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -53,6 +52,7 @@ from skillevaluator.validators.mcp_static import (
     TRUTHY_VALUES,
     EndpointClass,
     HostAllowlist,
+    _split_words,
     classify_endpoint_host,
     classify_mcp_pinning,
     parse_mcp_runner,
@@ -304,9 +304,9 @@ _MAX_DIR_DEPTH = 8
 _PLUGIN_DATA_REFS: tuple[str, ...] = ("$CLAUDE_PLUGIN_DATA",)
 # Package runners that fetch and run a package (the MCP pinning classifier decides each one).
 _RUNNER_HINT_RE = re.compile(r"\b(?:npx|bunx|pnpx|pnpm|yarn|npm|uvx|uv|pipx|deno)\b", re.IGNORECASE)
-_COMMAND_PREFIX_WORDS = frozenset(
-    {"sudo", "doas", "env", "exec", "command", "nohup", "nice", "time", "then", "do", "else", "if", "!", "(", "{"}
-)
+# Shell words before a command. Wrapper programs (env, nohup, sudo, ...) are not skipped here: the
+# MCP runner reader looks through them with their options ('env -u HOME npx ...', 'nice -n 5 npx ...').
+_COMMAND_PREFIX_WORDS = frozenset({"exec", "command", "then", "do", "else", "if", "!", "(", "{"})
 _ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_]\w*=")
 _SYSTEM_PATH_PREFIXES: tuple[str, ...] = (
     "/bin/",
@@ -1461,14 +1461,6 @@ def matcher_sensitive_tools(matcher: str | None) -> tuple[str, ...]:
         return _SENSITIVE_TOOLS
     except _InvalidMatcher:
         return listed
-
-
-def _split_words(text: str) -> list[str]:
-    """Shell words of ``text`` (quotes removed); whitespace split when the quoting is unbalanced."""
-    try:
-        return shlex.split(text, comments=False, posix=True)
-    except ValueError:
-        return text.split()
 
 
 def _command_tokens(handler: dict[str, Any], keys: tuple[str, ...] = ("command",)) -> list[str]:
@@ -2951,7 +2943,8 @@ class HookAnalyzer:
                 "inline_secret",
                 Severity.CRITICAL,
                 "plugin_hook_inline_secret",
-                "the command embeds a credential in a URL (user:password@ or a credential query parameter)",
+                "the command embeds a credential in a URL (user:password@, or a credential query or fragment "
+                "parameter)",
                 "Remove the credential from the hook command; read it from an environment variable or a "
                 "credential helper when the hook runs.",
             )
@@ -3071,7 +3064,7 @@ class HookAnalyzer:
                 "inline_secret",
                 Severity.CRITICAL,
                 "plugin_hook_inline_secret",
-                "the http handler url embeds credentials (user:password or a credential query parameter)",
+                "the http handler url embeds credentials (user:password, or a credential query or fragment parameter)",
                 "Remove credentials from the URL; pass them through headers with $VAR interpolation and "
                 "allowedEnvVars.",
             )

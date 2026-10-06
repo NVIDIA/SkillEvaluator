@@ -343,6 +343,10 @@ def test_remote_code_evasions_are_caught(command: str) -> None:
         "uvx some-linter check",
         # Regression: the hook check knew only the .exe and .cmd runner shims; the MCP checks also read .ps1.
         "npx.ps1 -y some-formatter --write .",
+        # Regression: a wrapper's own option value ('-u HOME', '-n 5', '60') was read as the command.
+        "env -u HOME npx -y some-formatter --write .",
+        "nice -n 5 npx -y some-formatter --write .",
+        "timeout 60 npx -y some-formatter --write .",
     ],
 )
 def test_unpinned_package_runner_hooks_are_medium(tmp_path: Path, command: str) -> None:
@@ -602,6 +606,18 @@ def test_lsp_servers_get_stdio_command_form_checks(tmp_path: Path) -> None:
     assert checks["plugin_lsp_command_dangerous_form"] == Severity.CRITICAL
     assert checks["plugin_lsp_command_shell_metacharacters"] == Severity.CRITICAL
     assert not result.passed
+
+
+def test_lsp_command_line_is_read_by_its_first_word(tmp_path: Path) -> None:
+    """Regression: 'bash -c node /usr/bin/env' read as one 'env' program, and 'npx -y github:evil/npx' as npx
+    with the next argument as its package, so neither LSP server got a finding."""
+    lsp = {
+        "sh": {"command": "bash -c node /usr/bin/env", "extensionToLanguage": {".sh": "shell"}},
+        "js": {"command": "npx -y github:evil/npx", "args": ["left-pad@1.3.0"], "extensionToLanguage": {".js": "js"}},
+    }
+    checks = _checks(_validate(_claude(tmp_path, {".lsp.json": lsp})))
+    assert checks["plugin_lsp_command_dangerous_form"] == Severity.CRITICAL
+    assert checks["plugin_lsp_unpinned_package"] == Severity.MEDIUM
 
 
 def test_lsp_server_with_non_list_args_is_reported_not_crashed(tmp_path: Path) -> None:

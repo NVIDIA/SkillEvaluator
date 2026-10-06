@@ -11,9 +11,9 @@ import pytest
 
 from skillevaluator.models.result import Severity
 from skillevaluator.validators.mcp_static import (
+    HostAllowlist,
     classify_endpoint_host,
     classify_mcp_pinning,
-    host_is_allowlisted,
     validate_mcp_server_declaration,
 )
 from skillevaluator.validators.policy import ValidationPolicy, load_policy_file
@@ -364,7 +364,31 @@ def test_allowlist_does_not_cover_other_hosts_or_metadata() -> None:
     )
     assert "mcp_endpoint_metadata" in _checks(metadata)
     endpoint = classify_endpoint_host("169.254.169.254")
-    assert endpoint is not None and not host_is_allowlisted(endpoint, ["169.254.169.254"])
+    assert endpoint is not None and not HostAllowlist.from_entries(["169.254.169.254"]).allows(endpoint)
+
+
+@pytest.mark.parametrize(
+    ("entry", "host"),
+    [
+        ("*.bücher.example", "sub.bücher.example"),
+        ("*.bücher.example", "sub.xn--bcher-kva.example"),
+        ("*.xn--bcher-kva.example", "sub.bücher.example"),
+        ("*.STRAẞE.example", "a.straße.example"),
+        ("*\u3002corp.example", "mcp.corp.example"),
+    ],
+)
+def test_unicode_wildcard_entry_matches_hosts_below_it(entry: str, host: str) -> None:
+    """Regression: IDNA rejects the '*' label, so a Unicode '*.<name>' entry stayed Unicode and matched nothing."""
+    allowlist = HostAllowlist.from_entries([entry])
+    assert allowlist.allows_host(host, classify_endpoint_host(host))
+    assert not allowlist.allows_host("bücher.example", classify_endpoint_host("bücher.example"))
+
+
+def test_unicode_wildcard_private_host_entry_is_allowed() -> None:
+    findings = validate_mcp_server_declaration(
+        "s", {"url": "https://mcp.bücher.localhost/x"}, "p.json", allowed_private_hosts=["*.bücher.localhost"]
+    )
+    assert "mcp_endpoint_private" not in _checks(findings)
 
 
 # --------------------------------------------------------------------------- #

@@ -32,7 +32,7 @@ import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Literal
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, urlsplit
 
 import idna
 
@@ -44,11 +44,12 @@ from skillevaluator.validators.url_policy import (
     is_credential_name,
     is_env_reference,
     looks_like_inline_secret,
-    report_text,
+    report_value,
     safe_url,
     url_ambiguities,
     url_credentials,
     whatwg_url,
+    without_userinfo,
 )
 
 CATEGORY = "MCP_DECLARATION"
@@ -150,6 +151,9 @@ def _client_reading(url: str) -> str:
         return "reject it as invalid"
     if not host:
         return "find no host in it"
+    if host != _whatwg_hostname(without_userinfo(url)):
+        # 'https://token\@host': the host they read is text that the URL holds as its userinfo.
+        return "read part of its user information as the host"
     return f"read it as {safe_url(url)!r}"
 
 
@@ -160,8 +164,16 @@ def _safe_hostname(parsed: Any) -> str | None:
         return None
 
 
+def _whatwg_hostname(url: str) -> str | None:
+    """The host a WHATWG client reads from ``url``; ``None`` when it finds none or cannot parse the URL."""
+    try:
+        return urlparse(whatwg_url(url)).hostname
+    except ValueError:
+        return None
+
+
 def _check_url_inline_secrets(server: _ServerFindings, url: str, *, ambiguous: bool = False) -> None:
-    """Flag credentials written into a URL's userinfo or query string.
+    """Flag credentials written into a URL's userinfo, query string, or fragment.
 
     The URL is read as written and, when it is ``ambiguous``, also the way WHATWG
     clients read it: they find userinfo that urllib does not see, for example in
@@ -179,14 +191,18 @@ def _check_url_inline_secrets(server: _ServerFindings, url: str, *, ambiguous: b
             "${ENV} references are allowed",
             'Remove user:password@ from the URL; pass credentials by reference (e.g. header "${MY_TOKEN}").',
         )
-    for key in dict.fromkeys(key for reading in readings for key in reading.query_keys):
-        shown = "<redacted>" if has_secret_shape(key) else key[:64]
-        server.report(
-            Severity.CRITICAL,
-            "mcp_url_inline_secret",
-            f"url query parameter {shown!r} carries an inline credential; only ${{ENV}} references are allowed",
-            "Do not put credentials in the URL query string; reference a secret handle/env var instead.",
-        )
+    for part, keys in (
+        ("query", [key for reading in readings for key in reading.query_keys]),
+        ("fragment", [key for reading in readings for key in reading.fragment_keys]),
+    ):
+        for key in dict.fromkeys(keys):
+            shown = "<redacted>" if has_secret_shape(key) else key[:64]
+            server.report(
+                Severity.CRITICAL,
+                "mcp_url_inline_secret",
+                f"url {part} parameter {shown!r} carries an inline credential; only ${{ENV}} references are allowed",
+                "Do not put credentials in the URL query or fragment; reference a secret handle/env var instead.",
+            )
 
 
 def _is_insecure_tls_env(key: str, value: str) -> bool:
@@ -205,8 +221,35 @@ def _is_insecure_tls_env(key: str, value: str) -> bool:
 
 
 def _shown(text: str) -> str:
-    """A command token or command line for messages: bounded and redacted, withheld whole when shaped like a secret."""
-    return "<value withheld>" if has_secret_shape(text) else report_text(text, 120)
+    """A command token, command line, or package spec for messages (:func:`report_value`, at most 120 characters)."""
+    return report_value(text, 120)
+
+
+def _inline_credentials(words: list[str]) -> list[tuple[int, str | None]]:
+    """``(index, flag)`` for each of ``words`` that holds an inline credential, in order.
+
+    The literal value of a credential-named flag counts: ``--token=x`` itself,
+    or the word after ``--token`` unless it looks like another flag
+    (``--api-key --verbose``); ``flag`` names the flag. Any other word shaped
+    like a secret or an inline ``Bearer``/``Basic`` credential counts with
+    ``flag`` ``None``. ``${ENV}`` references never count.
+    """
+    found: list[tuple[int, str | None]] = []
+    value_index = -1
+    for index, word in enumerate(words):
+        flag = _credential_flag_name(word)
+        if flag is not None:
+            if "=" in word:
+                value, value_index = word.split("=", 1)[1], index
+            elif index + 1 < len(words) and not words[index + 1].startswith("-"):
+                value, value_index = words[index + 1], index + 1
+            else:
+                value, value_index = "", -1
+            if value and not is_env_reference(value):
+                found.append((value_index, flag))
+        elif index != value_index and has_secret_shape(word):
+            found.append((index, None))
+    return found
 
 
 def _iter_command_tokens(config: dict[str, Any]) -> list[str]:
@@ -260,74 +303,69 @@ def _check_command(server: _ServerFindings, config: dict[str, Any]) -> None:
             "Express command arguments as a JSON array of strings.",
         )
 
-    tokens = _iter_command_tokens(config)
-    for token in tokens:
+    # Inline credentials: a credential-named flag (--api-key, --token, --password, ...)
+    # must reference an env var, never a raw literal, and any argument shaped like a
+    # secret or an inline "Bearer/Basic <token>" is flagged whatever the flag name. A
+    # command line written in 'command' is read the same way. ${ENV} references are
+    # always allowed. The tokens that hold one are never shown in any finding.
+    arg_list = [str(a) for a in args] if isinstance(args, list) else []
+    command_credentials = _inline_credentials(command.split())
+    arg_credentials = _inline_credentials(arg_list)
+    # Positions in _iter_command_tokens: the command, then each argument.
+    withheld = {index + 1 for index, _flag in arg_credentials} | ({0} if command_credentials else set())
+
+    for position, token in enumerate(_iter_command_tokens(config)):
+        shown = "<value withheld>" if position in withheld else _shown(token)
         if _SHELL_METACHAR_RE.search(token):
             server.report(
                 Severity.CRITICAL,
                 "mcp_command_shell_metacharacters",
-                f"command token contains shell metacharacters: {_shown(token)!r}",
+                f"command token contains shell metacharacters: {shown!r}",
                 "Remove shell operators (; | & ` $() < >). MCP commands run argv-style, not via a shell.",
             )
         if token in _INSECURE_TLS_FLAGS:
             server.report(
                 Severity.CRITICAL,
                 "mcp_command_disables_tls",
-                f"command disables TLS/certificate verification: {_shown(token)!r}",
+                f"command disables TLS/certificate verification: {shown!r}",
                 "Remove insecure-TLS flags; do not disable certificate verification.",
             )
         if _FLOATING_MARKER_RE.search(token):
             server.report(
                 Severity.HIGH,
                 "mcp_command_floating_version",
-                f"command token uses a floating (unpinned) version: {_shown(token)!r}",
+                f"command token uses a floating (unpinned) version: {shown!r}",
                 "Pin the referenced package/image to an exact version, not latest/main.",
             )
 
-    # Inline credentials carried in command arguments. A credential-named flag
-    # (--api-key, --token, --password, ...) must reference an env var, never a raw
-    # literal; and any argument whose *value* has a known secret shape or is an
-    # inline "Bearer/Basic <token>" is flagged regardless of the flag name.
-    # ${ENV} references are always allowed.
-    arg_list = [str(a) for a in args] if isinstance(args, list) else []
-    flagged_value_idx = -1
-    for idx, token in enumerate(arg_list):
-        flag = _credential_flag_name(token)
-        if flag is not None:
-            if "=" in token:
-                value, value_idx = token.split("=", 1)[1], idx
-            elif idx + 1 < len(arg_list) and not arg_list[idx + 1].startswith("-"):
-                # A following token that looks like another flag is NOT this flag's
-                # value (avoids flagging e.g. `--api-key --verbose`).
-                value, value_idx = arg_list[idx + 1], idx + 1
-            else:
-                value, value_idx = "", -1
-            if value and not is_env_reference(value):
-                server.report(
-                    Severity.CRITICAL,
-                    "mcp_command_inline_secret",
-                    f"command argument {flag!r} carries an inline credential; only ${{ENV}} references are allowed",
-                    'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
-                )
-                flagged_value_idx = value_idx
-            continue
-        if idx == flagged_value_idx:
-            continue  # already reported as the preceding flag's value
-        if has_secret_shape(token):
-            server.report(
-                Severity.CRITICAL,
-                "mcp_command_inline_secret",
-                f"command argument args[{idx}] contains an inline credential (value withheld)",
-                'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
-            )
+    messages = [
+        f"command line argument {flag!r} carries an inline credential; only ${{ENV}} references are allowed"
+        if flag is not None
+        else "command line contains an inline credential (value withheld)"
+        for _index, flag in command_credentials
+    ]
+    messages += [
+        f"command argument {flag!r} carries an inline credential; only ${{ENV}} references are allowed"
+        if flag is not None
+        else f"command argument args[{index}] contains an inline credential (value withheld)"
+        for index, flag in arg_credentials
+    ]
+    for message in messages:
+        server.report(
+            Severity.CRITICAL,
+            "mcp_command_inline_secret",
+            message,
+            'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
+        )
 
     # Shell interpreter invoked with an inline program string (`sh -c "..."`, `bash -lc "..."`).
     shell = _shell_invocation(command, arg_list)
     if shell is not None and _shell_runs_inline_program(shell[1], shell=shell[0]):
+        shown_command = "<value withheld>" if 0 in withheld else _shown(command)
         server.report(
             Severity.CRITICAL,
             "mcp_command_dangerous_form",
-            f"command invokes a shell interpreter with '-c' ({_shown(command)!r}); this executes an arbitrary "
+            f"command invokes a shell interpreter with '-c' ({shown_command!r}); this executes an arbitrary "
             "program string",
             "Invoke the server binary directly instead of wrapping it in a shell '-c' string.",
         )
@@ -352,24 +390,81 @@ _ENV_VALUE_LONG_OPTIONS: tuple[str, ...] = ("unset", "chdir", "argv0")
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_]\w*=")
 
 
+@dataclass(frozen=True)
+class _Wrapper:
+    """A program that runs the command after its own options: ``nohup cmd``, ``timeout 60 cmd``."""
+
+    # Options that take the next word as their value.
+    value_options: frozenset[str] = frozenset()
+    # Words between the options and the command: timeout's duration.
+    operands: int = 0
+    # NAME=value words before the command set its environment (sudo).
+    assignments: bool = False
+
+    def command(self, words: list[str]) -> list[str]:
+        """The command line this wrapper runs, given the wrapper's own arguments."""
+        index = 0
+        while index < len(words) and words[index].startswith("-") and words[index] != "-":
+            if words[index] == "--":
+                index += 1
+                break
+            index += 2 if words[index] in self.value_options else 1
+        while self.assignments and index < len(words) and _ENV_ASSIGNMENT_RE.match(words[index]):
+            index += 1
+        return words[index + self.operands :]
+
+
+# Programs that run the command after their options; env, which also reads NAME=value
+# assignments and a '-S' string, is read by _env_command.
+_WRAPPERS: dict[str, _Wrapper] = {
+    "nohup": _Wrapper(),
+    "setsid": _Wrapper(),
+    "nice": _Wrapper(frozenset({"-n", "--adjustment"})),
+    "stdbuf": _Wrapper(frozenset({"-i", "--input", "-o", "--output", "-e", "--error"})),
+    "time": _Wrapper(frozenset({"-f", "--format", "-o", "--output"})),
+    "timeout": _Wrapper(frozenset({"-k", "--kill-after", "-s", "--signal"}), operands=1),
+    "sudo": _Wrapper(
+        frozenset(
+            {
+                *("-u", "--user", "-g", "--group", "-U", "--other-user", "-C", "--close-from", "-D", "--chdir"),
+                *("-p", "--prompt", "-r", "--role", "-t", "--type", "-T", "--command-timeout"),
+            }
+        ),
+        assignments=True,
+    ),
+    "doas": _Wrapper(frozenset({"-u", "-C", "-a"})),
+}
+
+
 def _shell_invocation(command: str, args: list[str]) -> tuple[str, list[str]] | None:
     """``(shell, its arguments)`` when an MCP command runs a shell interpreter, else ``None``.
 
-    'command' may name only the program, possibly as a path with spaces such as
-    "C:\\Program Files\\Git\\bin\\bash.exe", so every option is in 'args'; or it may hold a
-    whole command line ("bash -c node"), which is read argv-style as classify_mcp_pinning
-    does. An ``env`` wrapper is looked through: its options, ``NAME=value`` assignments,
-    and ``-S`` string (``env -i PATH=/bin bash -c ...``, ``/usr/bin/env -S "sh -c ..."``).
+    The command is read like every other MCP command (:func:`_command_argv`),
+    through any wrapper (``env -i PATH=/bin bash -c ...``, ``/usr/bin/env -S "sh -c ..."``,
+    ``nohup bash -c ...``, ``timeout 600 sh -c ...``).
     """
-    if _command_basename(command) in _SHELL_INTERPRETERS | {"env"}:
-        argv = [command, *args]
-    else:
-        argv = [*command.split(), *args]
-    while argv and _command_basename(argv[0]) == "env":
-        argv = _env_command(argv[1:])
+    argv = _command_argv(command, args)
     if argv and _command_basename(argv[0]) in _SHELL_INTERPRETERS:
         return _command_basename(argv[0]), argv[1:]
     return None
+
+
+def _wrapped_command(argv: list[str]) -> list[str]:
+    """The command that ``argv`` runs through its wrappers: ``env -i A=1 nohup sh -c x`` runs ``sh -c x``.
+
+    ``env`` is read with its options, ``NAME=value`` assignments, and ``-S``
+    string (:func:`_env_command`), and the other wrappers in ``_WRAPPERS`` with
+    their own options. Empty when a wrapper names no command.
+    """
+    while argv:
+        name = _command_basename(argv[0])
+        if name == "env":
+            argv = _env_command(argv[1:])
+        elif name in _WRAPPERS:
+            argv = _WRAPPERS[name].command(argv[1:])
+        else:
+            break
+    return argv
 
 
 def _env_command(words: list[str]) -> list[str]:
@@ -733,22 +828,44 @@ _PIN_SPECIFIER_RE = re.compile(r"(?P<operator>===|==|@)\s*(?P<version>\S+)")
 _GIT_SHA_RE = re.compile(r"(?:#|@)[0-9a-fA-F]{40}(?:$|[&#])")
 _DOCKER_DIGEST_RE = re.compile(r"@sha256:[0-9a-fA-F]{64}$")
 _VERSION_TAG_RE = re.compile(r"^v?\d+(?:\.\d+)*(?:[-+._][0-9A-Za-z.]+)*$")
-# A remote module URL that names an exact version (``https://deno.land/x/mod@v1.2.3/mod.ts``).
-_DENO_EXACT_MODULE_RE = re.compile(r"@v?\d+\.\d+\.\d+(?:[/?#]|$)")
+# A remote module path that names an exact version (``/x/mod@v1.2.3/mod.ts``).
+_DENO_EXACT_MODULE_PATH_RE = re.compile(r"@v?\d+\.\d+\.\d+(?:/|$)")
 _PLUGIN_PATH_REFS: tuple[str, ...] = ("${CLAUDE_PLUGIN_ROOT}", "${CLAUDE_PLUGIN_DATA}", "${CLAUDE_PROJECT_DIR}")
 _LOCAL_SPEC_PREFIXES: tuple[str, ...] = (".", "/", "~", "file:", *_PLUGIN_PATH_REFS)
 _REMOTE_SPEC_PREFIXES: tuple[str, ...] = ("git+", "git:", "github:", "gitlab:", "bitbucket:", "http://", "https://")
 
 # Value-taking flags per package runner, so a flag's value is never mistaken for
-# the package spec. Unknown flags are treated as boolean.
+# the package spec. The npm runners read an option missing from both their value
+# flags and _NPM_SWITCHES fail-closed (see _npm_invocation); the other runners
+# read it as a switch.
 _NPX_VALUE_FLAGS = frozenset(
-    {"-p", "--package", "-c", "--call", "--registry", "--cache", "--userconfig", "--prefix", "-w", "--workspace"}
+    {
+        *("-p", "--package", "-c", "--call", "--registry", "--cache", "--userconfig", "--globalconfig"),
+        *("--prefix", "-C", "-w", "--workspace", "--loglevel", "--node-options", "--script-shell", "--shell"),
+        *("--location", "-L", "--before", "--tag", "--omit", "--include", "-n", "--node-arg", "--npm"),
+    }
 )
 _DLX_VALUE_FLAGS = frozenset({"-p", "--package", "--registry", "--allow-build"})
+# Options of the npm runners that take no value: npx's own switches, npm's Boolean
+# options and the shorthands that expand to one, and the bunx and pnpm dlx switches.
+# A runner's value flags win, so npx's '-c' (--call) still takes a value.
+_NPM_SWITCHES = frozenset(
+    {
+        *("-y", "--yes", "--no-install", "--ignore-existing", "--always-spawn", "--shell-auto-fallback"),
+        *("-q", "--quiet", "-s", "--silent", "-d", "-dd", "-ddd", "--verbose", "-g", "--global", "-f", "--force"),
+        *("--offline", "--prefer-offline", "--prefer-online", "--ignore-scripts", "--foreground-scripts"),
+        *("--legacy-peer-deps", "--strict-peer-deps", "--install-links", "--package-lock", "--strict-ssl"),
+        *("--dry-run", "--json", "--parseable", "-l", "--long", "-ws", "--workspaces", "-iwr"),
+        *("--include-workspace-root", "--audit", "--fund", "--progress", "--color", "--unicode", "--timing"),
+        *("--update-notifier", "-v", "--version", "-h", "--help", "--usage", "--bun", "-c", "--shell-mode"),
+    }
+)
+_PACKAGE_FLAGS = frozenset({"-p", "--package"})
 _UVX_VALUE_FLAGS = frozenset(
     {
         "--from",
         "--with",
+        "-w",
         "--with-editable",
         "--with-requirements",
         "-p",
@@ -764,6 +881,9 @@ _UVX_VALUE_FLAGS = frozenset(
         "--constraints",
         "--overrides",
         "--build-constraints",
+        "-b",
+        "--config-setting",
+        "-C",
         "--env-file",
         "--directory",
         "--project",
@@ -890,6 +1010,8 @@ _CONTAINER_RUNTIMES = frozenset({"docker", "podman", "nerdctl"})
 _RUNNER_COMMANDS = frozenset(
     {"npx", "bunx", "pnpx", "pnpm", "yarn", "npm", "uvx", "uv", "pipx", "deno", *_CONTAINER_RUNTIMES}
 )
+# The programs whose name tells _command_argv that a 'command' with spaces is one program path.
+_NAMED_PROGRAMS = frozenset({*_RUNNER_COMMANDS, *_SHELL_INTERPRETERS, "env", *_WRAPPERS})
 
 
 @dataclass(frozen=True)
@@ -925,7 +1047,8 @@ class RunnerInvocation:
       positional argument;
     * ``pypi`` (``uvx``, ``uv tool run``, ``pipx run``): the ``--from`` or
       ``--spec`` requirement, else the first positional argument, then every
-      ``uvx --with`` requirement;
+      ``uvx --with`` (``-w``) requirement; the files of ``uvx
+      --with-requirements`` are ``requirement_files``, whose packages are not read;
     * ``deno`` (``deno run``): the module it runs, an ``npm:`` or ``jsr:``
       spec, a URL, or a local script;
     * ``container`` (``docker``, ``podman``, or ``nerdctl run``): the image.
@@ -938,6 +1061,7 @@ class RunnerInvocation:
     ecosystem: RunnerEcosystem
     runner: str
     specs: tuple[str, ...]
+    requirement_files: tuple[str, ...] = ()
 
     @property
     def npm_specs(self) -> tuple[str, ...]:
@@ -957,15 +1081,35 @@ def _command_basename(command: str) -> str:
     return base
 
 
-def _argv(config: Any) -> list[str] | None:
-    """The argv a runnable MCP declaration runs, or ``None`` when it has no command.
+def _command_argv(command: str, args: list[str]) -> list[str]:
+    """The argv that an MCP server's ``command`` and ``args`` run.
 
-    A ``command`` whose whole string names a package runner is one executable,
-    possibly a path with spaces such as ``C:\\Program Files\\nodejs\\npx.cmd``
-    (:func:`validate_mcp_command` reads a shell the same way). Any other command with
-    spaces is a whole command line (``"npx -y pkg"``) and is split into words,
-    so it reads like the argv form.
+    ``command`` may name only the program, possibly as a path with spaces such as
+    ``C:\\Program Files\\nodejs\\npx.cmd``, so every option is in ``args``; or it
+    may hold a whole command line (``npx -y pkg``, ``bash -c node``), which is
+    split into words. Its first word decides. The string is one program only when
+    it reads as a path with spaces (its first word has a ``/`` or ``\\``, and no
+    later word is an option) whose first word names no runner, shell, or
+    wrapper, while the whole string does. So ``npx -y pkg /srv/docker`` and
+    ``bash -c x /usr/bin/env`` are command lines, whatever their last path
+    segment names.
+
+    A wrapper such as ``env``, ``nohup``, or ``timeout`` is looked through
+    (:func:`_wrapped_command`); a wrapper that names no command is the program.
     """
+    words = command.split()
+    path_with_spaces = (
+        ("/" in words[0] or "\\" in words[0])
+        and not any(word.startswith("-") for word in words[1:])
+        and _command_basename(words[0]) not in _NAMED_PROGRAMS
+        and _command_basename(command) in _NAMED_PROGRAMS
+    )
+    argv = [command, *args] if path_with_spaces else [*words, *args]
+    return _wrapped_command(argv) or argv
+
+
+def _argv(config: Any) -> list[str] | None:
+    """The argv a runnable MCP declaration runs (:func:`_command_argv`), or ``None`` when it has no command."""
     if not isinstance(config, dict):
         return None
     command = config.get("command")
@@ -973,9 +1117,7 @@ def _argv(config: Any) -> list[str] | None:
         return None
     raw_args = config.get("args")
     args = [str(arg) for arg in raw_args] if isinstance(raw_args, list) else []
-    if _command_basename(command) in _RUNNER_COMMANDS:
-        return [command, *args]
-    return [*command.split(), *args]
+    return _command_argv(command, args)
 
 
 def _positionals(tokens: list[str], value_flags: frozenset[str]) -> Iterator[tuple[int, str]]:
@@ -1096,32 +1238,65 @@ def _npm_invocation(
     """An npm package runner: every ``-p``/``--package`` value, else the first positional argument.
 
     The runner's options end at the package it runs, or, with
-    *options_until_separator*, at ``--``.
+    *options_until_separator*, at ``--``. A value flag takes the next word and
+    a switch (``_NPM_SWITCHES``) takes none. Any other option takes the next
+    word unless it starts with ``-``, as npx reads it; but npm reads an option
+    it does not know as a switch, so that word may be the package too and is
+    kept as one more spec. The specs can only gain a package this way, never
+    lose the one the runner installs.
     """
-    if options_until_separator:
-        options, spec = args, _first_positional(args, value_flags)
-    else:
-        options, spec = _runner_options(args, value_flags)
-    packages = _flag_values(options, ("-p", "--package"))
-    if packages:
-        return RunnerInvocation("npm", runner, tuple(packages))
-    return RunnerInvocation("npm", runner, () if spec is None else (spec,))
+    packages: list[str] = []
+    maybe_packages: list[str] = []
+    first: str | None = None
+    index = 0
+    while index < len(args):
+        word = args[index]
+        index += 1
+        if word == "--":
+            if first is None and index < len(args):
+                first = args[index]
+            break
+        if word == "-" or not word.startswith("-"):
+            if first is None:
+                first = word
+            if options_until_separator:
+                continue
+            break
+        name, equals, value = word.partition("=")
+        if equals:
+            if name in _PACKAGE_FLAGS:
+                packages.append(value)
+        elif name in value_flags:
+            if index < len(args) and name in _PACKAGE_FLAGS:
+                packages.append(args[index])
+            index += 1
+        elif name not in _NPM_SWITCHES and index < len(args) and not args[index].startswith("-"):
+            maybe_packages.append(args[index])
+            index += 1
+    specs = packages or ([] if first is None else [first])
+    return RunnerInvocation("npm", runner, tuple(dict.fromkeys([*specs, *maybe_packages])))
 
 
 def _uv_invocation(runner: str, args: list[str]) -> RunnerInvocation:
     """``uvx`` / ``uv tool run``: the ``--from`` requirement (else the command), then every ``--with`` requirement.
 
-    Both options count only before the command; after it they are the
-    server's arguments. ``--with`` takes one or more comma-separated
-    requirements, and uv installs them next to the package. Without a command
-    uv only lists the installed tools, so it installs nothing.
+    These options count only before the command; after it they are the
+    server's arguments. ``--with`` (``-w``) takes one or more comma-separated
+    requirements, and uv installs them next to the package, as it does the
+    requirements in each ``--with-requirements`` file. Without a command uv
+    only lists the installed tools, so it installs nothing.
     """
     options, command = _runner_options(args, _UVX_VALUE_FLAGS)
     package = _package_argument(options, command, "--from")
     if package is None:
         return RunnerInvocation("pypi", runner, ())
-    extras = (item.strip() for value in _flag_values(options, ("--with",)) for item in value.split(","))
-    return RunnerInvocation("pypi", runner, (package, *(item for item in extras if item)))
+    extras = (item.strip() for value in _flag_values(options, ("--with", "-w")) for item in value.split(","))
+    return RunnerInvocation(
+        "pypi",
+        runner,
+        (package, *(item for item in extras if item)),
+        requirement_files=tuple(_flag_values(options, ("--with-requirements",))),
+    )
 
 
 def is_local_spec(spec: str) -> bool:
@@ -1207,35 +1382,40 @@ def pypi_pin(requirement: str) -> PypiPin | None:
     return None if pin is None else specifier_pin(pin.group("operator"), pin.group("version"))
 
 
+# Each classification's detail shows the spec as _shown does (bounded, credentials
+# removed, withheld when shaped like a secret): findings, the inventory's pin_detail,
+# and the reports all show the detail as it is.
 def _classify_npm_spec(spec: str) -> McpPinning:
     """Classify an npm package spec (``pkg``, ``@scope/pkg@1.2.3``, git/URL, local path)."""
+    shown = _shown(spec)
     if is_local_spec(spec):
-        return McpPinning("not_applicable", f"local package path {spec!r}")
+        return McpPinning("not_applicable", f"local package path {shown!r}")
     if is_remote_npm_spec(spec):
         if _GIT_SHA_RE.search(spec):
-            return McpPinning("pinned", f"git/URL spec pinned to a commit: {spec!r}", remote=True)
-        return McpPinning("unpinned", f"git/URL/GitHub spec without a commit SHA: {spec!r}", remote=True)
+            return McpPinning("pinned", f"git/URL spec pinned to a commit: {shown!r}", remote=True)
+        return McpPinning("unpinned", f"git/URL/GitHub spec without a commit SHA: {shown!r}", remote=True)
     _name, version = split_npm_spec(spec)
     if version is None:
-        return McpPinning("unpinned", f"package {spec!r} has no version (resolves to the latest release)")
+        return McpPinning("unpinned", f"package {shown!r} has no version (resolves to the latest release)")
     if exact_npm_version(version):
-        return McpPinning("pinned", f"exact version {spec!r}")
-    return McpPinning("unpinned", f"package {spec!r} uses a version range or dist-tag, not an exact version")
+        return McpPinning("pinned", f"exact version {shown!r}")
+    return McpPinning("unpinned", f"package {shown!r} uses a version range or dist-tag, not an exact version")
 
 
 def _classify_python_spec(spec: str) -> McpPinning:
     """Classify a PyPI requirement spec as used by ``uvx`` / ``pipx run``."""
+    shown = _shown(spec)
     if is_local_spec(spec):
-        return McpPinning("not_applicable", f"local package path {spec!r}")
+        return McpPinning("not_applicable", f"local package path {shown!r}")
     if is_remote_pypi_spec(spec):
         if _GIT_SHA_RE.search(spec) or "#sha256=" in spec:
-            return McpPinning("pinned", f"git/URL spec pinned to a commit or hash: {spec!r}", remote=True)
-        return McpPinning("unpinned", f"git/URL spec without a commit SHA or hash: {spec!r}", remote=True)
+            return McpPinning("pinned", f"git/URL spec pinned to a commit or hash: {shown!r}", remote=True)
+        return McpPinning("unpinned", f"git/URL spec without a commit SHA or hash: {shown!r}", remote=True)
     if pypi_pin(spec) is not None:
-        return McpPinning("pinned", f"exact version {spec!r}")
+        return McpPinning("pinned", f"exact version {shown!r}")
     if any(marker in spec for marker in ("<", ">", "~", "!", "*", ",", "=", "@")):
-        return McpPinning("unpinned", f"requirement {spec!r} is a range or tag, not an exact '==' version")
-    return McpPinning("unpinned", f"package {spec!r} has no version (resolves to the latest release)")
+        return McpPinning("unpinned", f"requirement {shown!r} is a range or tag, not an exact '==' version")
+    return McpPinning("unpinned", f"package {shown!r} has no version (resolves to the latest release)")
 
 
 def _classify_deno_module(module: str | None) -> McpPinning:
@@ -1243,27 +1423,45 @@ def _classify_deno_module(module: str | None) -> McpPinning:
     if module and module.startswith(("npm:", "jsr:")):
         return _prefixed("deno run: ", _classify_npm_spec(module.split(":", 1)[1]))
     if module and module.startswith(("http://", "https://")):
-        if _DENO_EXACT_MODULE_RE.search(module):
-            return McpPinning("pinned", f"deno run: remote module pinned to an exact version: {module!r}", remote=True)
-        return McpPinning("unpinned", f"deno run: remote module without an exact version: {module!r}", remote=True)
+        shown = _shown(module)
+        if _module_path_names_exact_version(module):
+            return McpPinning("pinned", f"deno run: remote module pinned to an exact version: {shown!r}", remote=True)
+        return McpPinning("unpinned", f"deno run: remote module without an exact version: {shown!r}", remote=True)
     return McpPinning("not_applicable", "deno run of a local script")
+
+
+def _module_path_names_exact_version(url: str) -> bool:
+    """Whether a remote module URL names an exact version in its path (``/x/mod@v1.2.3/mod.ts``).
+
+    Only the path counts, the part the server reads: the query and fragment do
+    not, and neither does a path with ``.`` or ``..`` segments (also
+    percent-encoded), which the client resolves away.
+    """
+    try:
+        path = urlsplit(whatwg_url(url)).path
+    except ValueError:
+        return False
+    if any(unquote(segment) in {".", ".."} for segment in path.split("/")):
+        return False
+    return _DENO_EXACT_MODULE_PATH_RE.search(path) is not None
 
 
 def _classify_image(image: str) -> McpPinning:
     """Classify a container image reference."""
+    shown = _shown(image)
     if _DOCKER_DIGEST_RE.search(image):
-        return McpPinning("pinned", f"image pinned by digest {image!r}")
+        return McpPinning("pinned", f"image pinned by digest {shown!r}")
     if "${" in image or image.startswith("$"):
-        return McpPinning("unpinned", f"image {image!r} is taken from an environment reference")
+        return McpPinning("unpinned", f"image {shown!r} is taken from an environment reference")
     last = image.rsplit("/", 1)[-1]
     tag = last.split(":", 1)[1] if ":" in last else None
     if tag is None:
-        return McpPinning("unpinned", f"image {image!r} has no tag or digest (implicit ':latest')")
+        return McpPinning("unpinned", f"image {shown!r} has no tag or digest (implicit ':latest')")
     if tag.lower() == "latest":
-        return McpPinning("unpinned", f"image {image!r} uses the mutable 'latest' tag")
+        return McpPinning("unpinned", f"image {shown!r} uses the mutable 'latest' tag")
     if _VERSION_TAG_RE.match(tag):
-        return McpPinning("pinned", f"image {image!r} uses a version tag (tags are mutable; a digest is stronger)")
-    return McpPinning("unpinned", f"image {image!r} uses the non-version tag {tag!r}")
+        return McpPinning("pinned", f"image {shown!r} uses a version tag (tags are mutable; a digest is stronger)")
+    return McpPinning("unpinned", f"image {shown!r} uses the non-version tag {_shown(tag)!r}")
 
 
 def _classify_spec_list(specs: Iterable[str], classify: Any) -> McpPinning:
@@ -1295,7 +1493,11 @@ def _classify_invocation(invocation: RunnerInvocation) -> McpPinning:
         status: PinStatus = "not_applicable" if invocation.ecosystem == "npm" else "unpinned"
         return McpPinning(status, f"{runner} invocation without a package spec")
     classify = _classify_npm_spec if invocation.ecosystem == "npm" else _classify_python_spec
-    return _prefixed(f"{runner}: ", _classify_spec_list(specs, classify))
+    pin = _prefixed(f"{runner}: ", _classify_spec_list(specs, classify))
+    if pin.status != "unpinned" and invocation.requirement_files:
+        shown = _shown(f"--with-requirements {invocation.requirement_files[0]}")
+        return McpPinning("unpinned", f"{runner}: the packages of {shown!r} are not read, so they cannot be checked")
+    return pin
 
 
 def classify_mcp_pinning(config: Any) -> McpPinning:
@@ -1609,10 +1811,16 @@ class HostAllowlist:
         suffixes: list[str] = []
         networks: list[IPNetwork] = []
         for raw in entries:
-            entry = _normalize_host(raw) if isinstance(raw, str) else ""
-            if entry.startswith("*."):
-                suffixes.append(entry[1:])
-            elif entry:
+            text = raw.strip().translate(_DOT_LOOKALIKES) if isinstance(raw, str) else ""
+            if text.startswith("*."):
+                # The suffix is normalized on its own: IDNA rejects the '*' label, which would
+                # leave a Unicode suffix that never matches a host normalized to punycode.
+                suffix = _normalize_host(text[2:])
+                if suffix:
+                    suffixes.append(f".{suffix}")
+                continue
+            entry = _normalize_host(text)
+            if entry:
                 names.add(entry)
                 with contextlib.suppress(ValueError):  # a host name, not an IP literal or network
                     networks.append(ipaddress.ip_network(entry, strict=False))
@@ -1648,20 +1856,11 @@ class HostAllowlist:
         return bool(normalized) and (normalized in self.names or normalized.endswith(self.suffixes))
 
 
-def host_is_allowlisted(endpoint: EndpointClass, allowed_hosts: HostAllowlist | Iterable[str]) -> bool:
-    """True when a policy entry allows this private host.
-
-    Entries are exact host names, ``*.suffix`` wildcards, IP literals, or CIDR
-    networks (e.g. ``10.0.0.0/8``). Cloud metadata endpoints are never allowlisted.
-    """
-    return HostAllowlist.of(allowed_hosts).allows(endpoint)
-
-
 def host_name_is_allowlisted(host: str, allowed_hosts: HostAllowlist | Iterable[str]) -> bool:
     """True when a policy entry names this host (exact name or ``*.suffix``).
 
     Only host names match here: IP literals and CIDR entries are checked against
-    resolved addresses with :func:`host_is_allowlisted`, and cloud metadata host
+    resolved addresses with :meth:`HostAllowlist.allows`, and cloud metadata host
     names are never allowlisted.
     """
     normalized = _normalize_host(host)

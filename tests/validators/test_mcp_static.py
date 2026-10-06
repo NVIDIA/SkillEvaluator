@@ -18,6 +18,7 @@ import pytest
 from skillevaluator.models.result import Severity
 from skillevaluator.plugin_components import PluginRootReader, collect_mcp_declarations
 from skillevaluator.validators.mcp_static import (
+    classify_mcp_pinning,
     validate_mcp_command,
     validate_mcp_pinning,
     validate_mcp_server_declaration,
@@ -111,6 +112,54 @@ def test_command_shell_interpreter_dash_c_is_blocked() -> None:
 def test_command_shell_inline_program_forms_are_blocked(config) -> None:
     findings = validate_mcp_server_declaration("s", config, "p.json")
     assert "mcp_command_dangerous_form" in _checks(findings)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "nohup", "args": ["bash", "-c", "python3 -m http.server"]},
+        {"command": "env", "args": ["nohup", "bash", "-c", "python3 -m http.server"]},
+        {"command": "timeout", "args": ["600", "sh", "-c", "python3 -m http.server"]},
+        {"command": "timeout --signal KILL 600 sh -c startserver"},
+        {"command": "nice", "args": ["-n", "5", "bash", "-c", "startserver"]},
+        {"command": "stdbuf", "args": ["-oL", "sh", "-c", "startserver"]},
+        {"command": "setsid", "args": ["-w", "sh", "-c", "startserver"]},
+        {"command": "time", "args": ["-p", "sh", "-c", "startserver"]},
+        {"command": "sudo", "args": ["-u", "app", "VAR=1", "bash", "-c", "startserver"]},
+        {"command": "doas", "args": ["-u", "app", "sh", "-c", "startserver"]},
+    ],
+)
+def test_shell_behind_a_command_wrapper_is_still_read_as_a_shell(config: dict) -> None:
+    """Regression: only env was looked through, so nohup, timeout, and other wrappers hid 'bash -c'."""
+    assert "mcp_command_dangerous_form" in _checks(validate_mcp_server_declaration("s", config, "p.json"))
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "nohup", "args": ["node", "server.js"]},
+        {"command": "timeout", "args": ["60", "bash", "server.sh", "-c"]},
+        {"command": "sudo", "args": ["-u", "bash", "node", "server.js"]},
+        {"command": "nohup"},
+    ],
+)
+def test_a_wrapped_command_without_an_inline_program_is_not_dangerous_form(config: dict) -> None:
+    assert "mcp_command_dangerous_form" not in _checks(validate_mcp_server_declaration("s", config, "p.json"))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -c 'node server.js' /usr/bin/env",
+        "sh -c startserver /usr/bin/env",
+        "bash -c node-server /usr/bin/env",
+        "bash -c startserver --env-file /etc/env",
+        "bash -c startserver /bin/sh",
+    ],
+)
+def test_shell_command_line_that_ends_in_a_program_path_is_still_read_as_a_shell(command: str) -> None:
+    """Regression: a command line whose last path segment was 'env' or 'sh' was read as that one program."""
+    assert "mcp_command_dangerous_form" in _checks(validate_mcp_server_declaration("s", {"command": command}, "p.json"))
 
 
 @pytest.mark.parametrize(
@@ -531,6 +580,29 @@ def test_url_query_value_shaped_like_a_secret_is_blocked_under_any_name(query: s
     assert not any(_GITHUB_TOKEN in f.message or _OPENAI_KEY in f.message for f in findings)
 
 
+@pytest.mark.parametrize("query", ["session=task-550e8400e29b41d4a716446655440000", "vol=disk-0123456789abcdef0123"])
+def test_url_query_ids_that_end_in_sk_are_not_credentials(query: str) -> None:
+    """Regression: 'task-<hex>' matched the 'sk-' API-key shape, a CRITICAL finding that blocked the server."""
+    assert validate_mcp_server_declaration("s", {"url": f"https://mcp.example.com/sse?{query}"}, "p.json") == []
+
+
+@pytest.mark.parametrize("query", [_GITHUB_TOKEN, f"{_GITHUB_TOKEN}=1"])
+def test_url_query_component_shaped_like_a_secret_is_blocked(query: str) -> None:
+    """Regression: a bare '?ghp_...' query component parsed to an empty value and was never flagged."""
+    findings = validate_mcp_server_declaration("s", {"url": f"https://mcp.example.com/sse?{query}"}, "p.json")
+
+    assert [(f.check_name, f.severity) for f in findings] == [("mcp_url_inline_secret", Severity.CRITICAL)]
+    assert _GITHUB_TOKEN not in findings[0].message
+
+
+def test_url_fragment_credential_is_reported_as_a_fragment_parameter() -> None:
+    """Regression: '#/cb?access_token=...' was reported as a query parameter."""
+    findings = validate_mcp_server_declaration("s", {"url": "https://h.example/mcp#/cb?access_token=abc"}, "p.json")
+
+    assert [(f.check_name, f.severity) for f in findings] == [("mcp_url_inline_secret", Severity.CRITICAL)]
+    assert "url fragment parameter 'access_token' carries an inline credential" in findings[0].message
+
+
 def test_url_query_keys_shaped_like_a_secret_are_not_echoed() -> None:
     url = f"https://h.example/mcp?{_GITHUB_TOKEN}={_OPENAI_KEY}"
     findings = validate_mcp_server_declaration("s", {"url": url}, "p.json")
@@ -554,6 +626,98 @@ def test_command_findings_never_echo_an_inline_credential(config: dict) -> None:
 
     assert "mcp_command_inline_secret" in _checks(findings) or "mcp_command_dangerous_form" in _checks(findings)
     assert not any(_GITHUB_TOKEN in f.message or _OPENAI_KEY in f.message for f in findings)
+
+
+@pytest.mark.parametrize("userinfo", ["3f2a9c1be47d8a05f6e2b9c4d1a7e3f0b8c6d2a1", "deploy:31337"])
+def test_url_findings_never_show_userinfo_that_a_backslash_turns_into_the_host(userinfo: str) -> None:
+    """Regression: WHATWG clients read 'https://<userinfo>\\@host' as host <userinfo>, and the findings showed it."""
+    findings = validate_mcp_server_declaration("s", {"url": f"https://{userinfo}\\@api.example.com/mcp"}, "p.json")
+
+    assert {"mcp_url_inline_secret", "mcp_url_malformed_authority"} <= _checks(findings)
+    assert not any(userinfo in f.message or userinfo.rpartition(":")[2] in f.message for f in findings)
+    malformed = next(f for f in findings if f.check_name == "mcp_url_malformed_authority")
+    assert "read part of its user information as the host" in malformed.message
+
+
+@pytest.mark.parametrize(
+    ("config", "secret"),
+    [
+        ({"command": "node", "args": ["server.js", "--password", "p4ss`w0rd"]}, "p4ss`w0rd"),
+        ({"command": "node", "args": ["server.js", "--client-secret", "s3cr3t<x"]}, "s3cr3t"),
+        ({"command": "node", "args": ["server.js", "--api-key", "abcd1234&x"]}, "abcd1234"),
+        ({"command": "node", "args": ["server.js", "--token", "Sup3rS3cretValue@latest"]}, "Sup3rS3cretValue"),
+        ({"command": "node", "args": ["server.js", "--passwd=p4ss;w0rd"]}, "p4ss;w0rd"),
+        ({"command": "node server.js --password p4ss`w0rd"}, "p4ss`w0rd"),
+    ],
+)
+def test_command_findings_never_echo_a_credential_flag_value(config: dict, secret: str) -> None:
+    """Regression: a credential flag's value given as its own argument ('--password <value>') was withheld by
+    mcp_command_inline_secret but printed by the shell-metacharacter and floating-version findings."""
+    findings = validate_mcp_server_declaration("s", config, "p.json")
+
+    assert "mcp_command_inline_secret" in _checks(findings)
+    assert _checks(findings) & {"mcp_command_shell_metacharacters", "mcp_command_floating_version"}
+    assert not any(secret in f.message for f in findings)
+
+
+@pytest.mark.parametrize(
+    ("command", "message"),
+    [
+        ("node server.js --password hunter2", "command line argument 'password' carries an inline credential"),
+        ("node server.js --api-key=hunter2", "command line argument 'api-key' carries an inline credential"),
+        (f"node server.js {_GITHUB_TOKEN}", "command line contains an inline credential (value withheld)"),
+    ],
+)
+def test_command_line_written_in_command_is_checked_for_inline_credentials(command: str, message: str) -> None:
+    findings = validate_mcp_server_declaration("s", {"command": command}, "p.json")
+
+    assert [f.check_name for f in findings] == ["mcp_command_inline_secret"]
+    assert message in findings[0].message
+    assert "hunter2" not in findings[0].message and _GITHUB_TOKEN not in findings[0].message
+    assert validate_mcp_server_declaration("s", {"command": "node server.js --api-key ${KEY}"}, "p.json") == []
+
+
+_ACCESS_TOKEN = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "npx", "args": ["-y", f"git+https://x-access-token:{_ACCESS_TOKEN}@github.com/o/r"]},
+        {"command": "uvx", "args": ["--from", f"git+https://{_ACCESS_TOKEN}@github.com/o/r", "tool"]},
+        {"command": "npx", "args": ["-y", f"pkg@{_ACCESS_TOKEN}"]},
+        {"command": "deno", "args": ["run", f"https://x.example/mod.ts?token={_ACCESS_TOKEN}"]},
+        {"command": "uvx", "args": ["--from", "git+https://oauth2:hunter2pass@gitlab.example.com/o/r.git", "tool"]},
+        {"command": "docker", "args": ["run", f"registry.example.com/app:{_ACCESS_TOKEN}"]},
+    ],
+)
+def test_pinning_details_never_echo_a_credential_in_the_spec(config: dict) -> None:
+    """Regression: mcp_unpinned_package quoted the whole runner spec, credential and all."""
+    pin = classify_mcp_pinning(config)
+    findings = validate_mcp_server_declaration("s", config, "p.json")
+
+    assert pin.status == "unpinned"
+    assert "mcp_unpinned_package" in _checks(findings)
+    for text in (pin.detail, *(f.message for f in findings)):
+        assert _ACCESS_TOKEN not in text and "hunter2pass" not in text
+
+
+def test_lsp_and_inventory_never_echo_a_credential_in_a_runner_spec(tmp_path: Path) -> None:
+    spec = f"git+https://x-access-token:{_ACCESS_TOKEN}@github.com/o/r"
+    root = tmp_path / "demo"
+    (root / ".claude-plugin").mkdir(parents=True)
+    manifest = {
+        "name": "demo",
+        "mcpServers": {"git": {"command": "npx", "args": ["-y", spec]}},
+        "lspServers": {"ls": {"command": "node", "args": ["ls.js", "--password", "p4ss`w0rd"]}},
+    }
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps(manifest))
+
+    result = PluginSchemaValidator().validate(root)
+
+    assert {"mcp_unpinned_package", "plugin_lsp_command_shell_metacharacters"} <= _checks(result.findings)
+    dumped = json.dumps([result.metadata, [(f.message, f.metadata) for f in result.findings]], default=str)
+    assert _ACCESS_TOKEN not in dumped and "p4ss`w0rd" not in dumped
 
 
 def test_url_userinfo_written_as_references_is_allowed() -> None:

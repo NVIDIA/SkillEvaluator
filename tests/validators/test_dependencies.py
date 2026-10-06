@@ -199,6 +199,36 @@ def test_pip_audit_failure_without_json_is_a_warning(tmp_path: Path, pip_audit_a
     assert not result.is_incomplete
 
 
+_SKIPPED_REQUESTS = json.dumps(
+    {
+        "dependencies": [
+            {
+                "name": "requests",
+                "skip_reason": "Dependency not found on PyPI and could not be audited: requests (2.31.0+corp)",
+            },
+            {"name": "pyyaml", "version": "6.0.1", "vulns": []},
+        ],
+        "fixes": [],
+    }
+)
+
+
+def test_pin_pip_audit_skipped_is_unverified_not_audited(tmp_path: Path, pip_audit_available) -> None:
+    """Regression: a pin pip-audit could not audit (a local version, a package not on PyPI) was reported as
+    'No vulnerabilities found' and counted as audited."""
+    skill = _skill(tmp_path)
+    (skill / "requirements.txt").write_text("requests==2.31.0+corp\npyyaml==6.0.1\n", encoding="utf-8")
+
+    with patch.object(Tools.pip_audit, "run", side_effect=_RecordingPipAudit(stdout=_SKIPPED_REQUESTS)):
+        result = DependencySecurityValidator(use_safety=False).validate(skill)
+
+    [finding] = [f for f in result.findings if f.check_name == UNVERIFIED_CHECK_NAME]
+    assert finding.severity == Severity.INFO and finding.line_number == 1
+    assert finding.metadata["package_name"] == "requests"
+    assert "Dependency not found on PyPI" in finding.message
+    assert any("pip-audit could not audit requests==2.31.0+corp" in w for w in result.warnings)
+
+
 def test_linked_dependency_file_is_refused(tmp_path: Path, pip_audit_available) -> None:
     skill = _skill(tmp_path)
     outside = tmp_path / "outside-requirements.txt"

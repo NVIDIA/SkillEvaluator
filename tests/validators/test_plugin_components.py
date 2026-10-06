@@ -297,6 +297,23 @@ def test_remote_mcp_urls_are_reported_without_query_credentials(tmp_path: Path) 
     assert all(secret not in row["name"] for row in _components(result, "mcp"))
 
 
+def test_remote_mcp_bundle_urls_never_show_userinfo_that_a_backslash_turns_into_the_host(tmp_path: Path) -> None:
+    """Regression: 'https://<token>\\@cdn.example.com/x.mcpb' was shown as 'https://<token>/@cdn.example.com/...'."""
+    token = "3f2a9c1be47d8a05f6e2b9c4d1a7e3f0b8c6d2a1"
+    refs = [f"https://{token}\\@cdn.example.com/server.mcpb", "https://deploy:31337\\@evil.example/server.mcpb"]
+
+    result = _validate(_plugin(tmp_path, {"mcpServers": refs}))
+
+    assert [f.check_name for f in result.findings].count("mcp_bundle_not_inspected") == 2
+    assert {row["name"] for row in _components(result, "mcp")} == {
+        "https://cdn.example.com/server.mcpb",
+        "https://evil.example/server.mcpb",
+    }
+    metadata = json.dumps(result.metadata, default=str)
+    assert token not in metadata and "31337" not in metadata
+    assert not any(token in f.message or "31337" in f.message for f in result.findings)
+
+
 def test_unparseable_remote_mcp_url_is_reported_not_raised(tmp_path: Path) -> None:
     result = _validate(_plugin(tmp_path, {"mcpServers": ["https://[bad/srv.mcpb", "https://[bad/servers.json"]}))
     checks = _checks(result)

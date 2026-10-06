@@ -461,9 +461,9 @@ class DependencySecurityValidator(ValidatorBase):
             )
 
         outcome: eco.AuditOutcome | None = None
-        audited = 0
+        audited = skipped = 0
         if exact:
-            outcome, audited = self._audit_exact_pins(result, source, exact)
+            outcome, audited, skipped = self._audit_exact_pins(result, source, exact)
         else:
             result.add_message(f"{source}: no exactly pinned dependencies to audit")
         eco.record_outcome(
@@ -471,7 +471,7 @@ class DependencySecurityValidator(ValidatorBase):
             outcome,
             declarations=len(declarations),
             audited=audited,
-            unverified=len(unverified),
+            unverified=len(unverified) + skipped,
             partial=True,
         )
         if outcome is not None and outcome.status == "incomplete" and active_plugin_tree() is not None:
@@ -482,29 +482,36 @@ class DependencySecurityValidator(ValidatorBase):
 
     def _audit_exact_pins(
         self, result: ValidationResult, source: str, exact: list[DependencyDeclaration]
-    ) -> tuple[eco.AuditOutcome, int]:
-        """Audit exact pins with pip-audit (and Safety); return the outcome and how many pins pip-audit audited.
+    ) -> tuple[eco.AuditOutcome, int, int]:
+        """Audit exact pins with pip-audit (and Safety).
 
-        A batch that produced no evidence (pip-audit missing, timeout, offline,
-        crash, no JSON report) makes the outcome INCOMPLETE with its error; the
-        batches that ran keep their evidence.
+        Returns the outcome, how many pins pip-audit audited, and how many it
+        skipped. A batch that produced no evidence (pip-audit missing, timeout,
+        offline, crash, no JSON report) makes the outcome INCOMPLETE with its
+        error; the batches that ran keep their evidence. A pin that pip-audit
+        skips (a local version such as ``2.31.0+corp``, or a package not on
+        PyPI) is not audited either: it gets the INFO unverified finding with
+        pip-audit's reason, and the outcome is INCOMPLETE.
         """
         outcome = eco.AuditOutcome()
         batches = self._exact_batches(exact)
         audited_lines: set[str] = set()
+        skipped_lines: dict[str, str] = {}
         errors: list[str] = []
         with tempfile.TemporaryDirectory(prefix="skillevaluator-pip-audit-") as temp_dir:
             audit_files = self._write_audit_files(Path(temp_dir), batches)
             if Tools.pip_audit.is_available:
                 for lines, audit_file in zip(batches, audit_files, strict=True):
-                    batch_result, error = self._run_pip_audit_on_file(
+                    batch_result, error, skipped = self._run_pip_audit_on_file(
                         audit_file, source=source, cwd=Path(temp_dir), outcome=outcome
                     )
                     result.merge(batch_result)
-                    if error is None:
-                        audited_lines.update(lines)
-                    else:
+                    if error is not None:
                         errors.append(error)
+                        continue
+                    batch_skipped = self._skipped_lines(lines, skipped)
+                    skipped_lines.update(batch_skipped)
+                    audited_lines.update(line for line in lines if line not in batch_skipped)
             else:
                 error = f"pip-audit not installed. {Tools.pip_audit.get_install_hint()}"
                 result.add_warning(error)
@@ -513,12 +520,61 @@ class DependencySecurityValidator(ValidatorBase):
             if self.use_safety and Tools.safety.is_available:
                 for audit_file in audit_files:
                     result.merge(self._run_safety(audit_file))
+        skipped = self._report_skipped_pins(result, source, exact, skipped_lines)
+        if skipped_lines:
+            errors.append(f"pip-audit could not audit {len(skipped_lines)} pin(s): {', '.join(skipped_lines)}")
         if audited_lines:
             outcome.scanner = PIP_AUDIT_SCAN
         if errors:
             outcome.status = "incomplete"
             outcome.error = f"{source}: {'; '.join(dict.fromkeys(errors))}"
-        return outcome, sum(1 for declaration in exact if declaration.audit_line in audited_lines)
+        return outcome, sum(1 for declaration in exact if declaration.audit_line in audited_lines), skipped
+
+    @staticmethod
+    def _report_skipped_pins(
+        result: ValidationResult, source: str, exact: list[DependencyDeclaration], skipped_lines: dict[str, str]
+    ) -> int:
+        """Warn about and report each exact pin pip-audit skipped as unverified; return how many there are."""
+        skipped = [
+            (declaration, declaration.audit_line) for declaration in exact if declaration.audit_line in skipped_lines
+        ]
+        for declaration, line in skipped[: eco.MAX_UNVERIFIED_PER_SOURCE]:
+            reason = skipped_lines[line]
+            result.add_warning(f"{source}: pip-audit could not audit {line}: {reason[: eco.MAX_ERROR_CHARS]}")
+            result.add_finding(
+                eco.unverified_finding(
+                    declaration.name or declaration.raw[:80],
+                    line,
+                    source,
+                    ecosystem="python",
+                    role=declaration.role,
+                    kind="version",
+                    line_number=declaration.line_number,
+                    reason=reason,
+                )
+            )
+        if len(skipped) > eco.MAX_UNVERIFIED_PER_SOURCE:
+            result.add_message(
+                f"{source}: {len(skipped) - eco.MAX_UNVERIFIED_PER_SOURCE} more pin(s) that pip-audit could not "
+                "audit, not listed individually"
+            )
+        return len(skipped)
+
+    @staticmethod
+    def _skipped_lines(lines: list[str], skipped: list[tuple[str, str]]) -> dict[str, str]:
+        """The ``name==version`` lines of one batch that pip-audit skipped, with its reason for each.
+
+        A batch names each package once. A skipped name that matches no line
+        skips the whole batch, so no pin is credited as audited by mistake.
+        """
+        by_name = {canonicalize_package_name(line.split("==", 1)[0]): line for line in lines}
+        found: dict[str, str] = {}
+        for name, reason in skipped:
+            line = by_name.get(canonicalize_package_name(name))
+            if line is None:
+                return dict.fromkeys(lines, reason)
+            found[line] = reason
+        return found
 
     @staticmethod
     def _exact_batches(exact: list[DependencyDeclaration]) -> list[list[str]]:
@@ -542,13 +598,14 @@ class DependencySecurityValidator(ValidatorBase):
 
     def _run_pip_audit_on_file(
         self, audit_file: Path, *, source: str, cwd: Path, outcome: eco.AuditOutcome
-    ) -> tuple[ValidationResult, str | None]:
+    ) -> tuple[ValidationResult, str | None, list[tuple[str, str]]]:
         """Run pip-audit on a normalized pinned requirements file.
 
         ``--no-deps --disable-pip`` audits exactly the listed pins without
         creating a virtual environment, invoking pip, or building packages.
-        Vulnerabilities are tallied on *outcome*. Returns the result and, when
-        the run produced no evidence, the error.
+        Vulnerabilities are tallied on *outcome*. Returns the result, the error
+        when the run produced no evidence, and ``(name, reason)`` for each pin
+        that pip-audit skipped.
         """
         result = ValidationResult()
         tool_result = Tools.pip_audit.run(
@@ -567,35 +624,50 @@ class DependencySecurityValidator(ValidatorBase):
         )
 
         error: str | None = None
+        skipped: list[tuple[str, str]] = []
         if tool_result.error_message:
             error = tool_result.error_message
         elif tool_result.exit_code != 0 and parse_json_output(tool_result.stdout) is None:
             detail = (tool_result.stderr or "").strip().splitlines()
             reason = detail[-1][: eco.MAX_ERROR_CHARS] if detail else f"exit code {tool_result.exit_code}"
             error = f"pip-audit failed: {reason}"
-        elif not self._process_pip_audit(tool_result.stdout, result, source, outcome):
-            error = "pip-audit produced no JSON report"
+        else:
+            report = self._process_pip_audit(tool_result.stdout, result, source, outcome)
+            if report is None:
+                error = "pip-audit produced no JSON report"
+            else:
+                skipped = report
         if error is not None:
             result.add_warning(f"{source}: {error}")
-        return result, error
+        return result, error, skipped
 
-    def _process_pip_audit(self, output: str, result: ValidationResult, source: str, outcome: eco.AuditOutcome) -> bool:
-        """Parse pip-audit output and report vulnerabilities; ``False`` when there is no report."""
+    def _process_pip_audit(
+        self, output: str, result: ValidationResult, source: str, outcome: eco.AuditOutcome
+    ) -> list[tuple[str, str]] | None:
+        """Parse pip-audit output and report vulnerabilities.
+
+        Returns ``(name, reason)`` for each dependency pip-audit skipped (its
+        ``skip_reason``), or ``None`` when there is no report.
+        """
         data = parse_json_output(output, on_error="No known vulnerabilities found")
         if data is None:
-            return False
+            return None
 
         # Handle both list and dict output formats
         dependencies = data if isinstance(data, list) else data.get("dependencies", [])
 
         vuln_count = 0
         seen: set[tuple[str, str, str]] = set()
+        skipped: list[tuple[str, str]] = []
         for dep in dependencies:
             if not isinstance(dep, dict):
                 continue
 
             pkg_name = dep.get("name", "unknown")
             pkg_version = dep.get("version", "unknown")
+            if dep.get("skip_reason"):
+                skipped.append((str(pkg_name), str(dep["skip_reason"])))
+                continue
 
             for vuln in dep.get("vulns", []):
                 # pip-audit can list the same advisory twice for one package.
@@ -615,8 +687,9 @@ class DependencySecurityValidator(ValidatorBase):
                 )
 
         status = f"Found {vuln_count} vulnerability(ies)" if vuln_count else "No vulnerabilities found"
-        result.add_message(f"{source}: {status} (pip-audit)")
-        return True
+        not_audited = f"; {len(skipped)} pin(s) could not be audited" if skipped else ""
+        result.add_message(f"{source}: {status} (pip-audit){not_audited}")
+        return skipped
 
     def _run_safety(self, req_file: Path) -> ValidationResult:
         """Run Safety check for supplementary coverage."""
@@ -1070,7 +1143,8 @@ class DependencySecurityValidator(ValidatorBase):
         the reader the pinning check uses. Exact npm specs (``pkg@1.2.3``) join
         the npm audit and exact PyPI specs (``pkg==1.2.3`` or ``pkg@1.2.3``,
         including ``uvx --with`` requirements) the pip-audit batch, with the role
-        ``mcp``, one audit per MCP config file; floating specs get the INFO
+        ``mcp``, one audit per MCP config file; floating specs, and each ``uvx
+        --with-requirements`` file (its packages are not read), get the INFO
         ``dependency-version-unverified`` finding. Local paths are skipped.
         """
         result = ValidationResult()
@@ -1091,6 +1165,10 @@ class DependencySecurityValidator(ValidatorBase):
                     python_declaration = _python_runner_declaration(spec)
                     if python_declaration is not None:
                         pypi.setdefault(label, []).append(python_declaration)
+                for requirements in invocation.requirement_files:
+                    # The file's packages are not read, so they are reported unverified rather than skipped.
+                    unread = DependencyDeclaration(f"--with-requirements {requirements}", None, None, "mcp", None)
+                    pypi.setdefault(label, []).append(unread)
         summary = self._summary.setdefault("npm", eco.empty_ecosystem_summary())
         for label, declarations in npm.items():
             result.add_message(f"Auditing {label} ({len(declarations)} npm package(s) an MCP runner installs)")

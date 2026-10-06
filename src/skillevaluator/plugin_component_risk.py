@@ -35,7 +35,6 @@ import bisect
 import functools
 import posixpath
 import re
-import shlex
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -53,6 +52,7 @@ from skillevaluator.validators.mcp_static import (
     TRUTHY_VALUES,
     EndpointClass,
     HostAllowlist,
+    _split_words,
     classify_endpoint_host,
     classify_mcp_pinning,
     parse_mcp_runner,
@@ -1461,14 +1461,6 @@ def matcher_sensitive_tools(matcher: str | None) -> tuple[str, ...]:
         return _SENSITIVE_TOOLS
     except _InvalidMatcher:
         return listed
-
-
-def _split_words(text: str) -> list[str]:
-    """Shell words of ``text`` (quotes removed); whitespace split when the quoting is unbalanced."""
-    try:
-        return shlex.split(text, comments=False, posix=True)
-    except ValueError:
-        return text.split()
 
 
 def _command_tokens(handler: dict[str, Any], keys: tuple[str, ...] = ("command",)) -> list[str]:

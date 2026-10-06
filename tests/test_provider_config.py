@@ -468,7 +468,7 @@ def test_no_credential_llm_error_leads_with_copyable_setup() -> None:
     assert message.startswith("No provider is configured.\n\n")
     assert "  export SKILL_EVAL_LLM_PROVIDER=nv_build\n" in message
     assert "  export NVIDIA_API_KEY='your-api-key'\n" in message
-    assert "build.nvidia.com" in message
+    assert "  Get a key: https://build.nvidia.com" in message.splitlines()
     assert "OPENAI_API_KEY" in message
     assert "ANTHROPIC_API_KEY" in message
     assert "https://docs.nvidia.com/skills/skillevaluator/configuration" in message

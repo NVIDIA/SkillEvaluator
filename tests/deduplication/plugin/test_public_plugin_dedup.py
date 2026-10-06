@@ -307,7 +307,9 @@ def test_skill_level_finding_points_at_the_bundled_skill_in_every_report(
         catch_exceptions=False,
     )
 
-    report = json.loads(next(path for path in out.glob("*.json") if not path.name.endswith(".sarif.json")).read_text())
+    report = json.loads(
+        next(path for path in out.glob("*.json") if not path.name.endswith(".sarif.json")).read_text(encoding="utf-8")
+    )
     [finding] = [
         finding
         for result in report["results"]
@@ -315,11 +317,11 @@ def test_skill_level_finding_points_at_the_bundled_skill_in_every_report(
         if finding["check_name"] == "scalar_comparison_limit"
     ]
     assert finding["file_path"] == "[foo] ."
-    sarif = json.loads(next(out.glob("*.sarif.json")).read_text())
+    sarif = json.loads(next(out.glob("*.sarif.json")).read_text(encoding="utf-8"))
     [located] = [
         item for item in sarif["runs"][0]["results"] if item["properties"]["checkName"] == "scalar_comparison_limit"
     ]
     assert located["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "skills/foo"
     assert located["properties"]["pluginComponent"]["path"] == "skills/foo"
     [markdown] = [path for path in out.glob("*.md") if path.name != "BENCHMARK.md"]
-    assert "<code>[foo] .</code>" in markdown.read_text()
+    assert "<code>[foo] .</code>" in markdown.read_text(encoding="utf-8")

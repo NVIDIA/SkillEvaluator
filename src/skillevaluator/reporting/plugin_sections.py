@@ -28,15 +28,14 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from functools import cache
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
 
-# The plugin state vocabularies and the Tier 3 signal, runtime-evidence, and statistics producers are
-# pure modules that import no reporting code.
+# The plugin state vocabularies are a module that imports nothing. Every reporter, and so
+# every CLI command, imports this module, so the Tier 3 signal, runtime-evidence, and
+# statistics helpers are imported only inside the Tier 3 views that use them.
 from skillevaluator.plugin_states import COVERAGE_STATES, DEPENDENCY_STATES, EVALUATED_COVERAGE_STATES
-from skillevaluator.tier3.eval_core.plugin_signals import COMPONENT_RULE_READ, COMPONENT_SUBAGENT
-from skillevaluator.tier3.eval_core.runtime_evidence import canary_leak_rate
-from skillevaluator.tier3.harbor.stats import STATISTICS_BLOCKS
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 MAX_TABLE_ROWS = 200
@@ -1267,8 +1266,12 @@ def _coverage_state_class(state: str) -> str:
     return "fail" if state in {"invalid", "unavailable"} else "warn"
 
 
-# Plugin signals record a rule read and a subagent call under their own activation types.
-_ACTIVATION_TYPE_ALIASES = {"rule": ("rule", COMPONENT_RULE_READ), "agent": ("agent", COMPONENT_SUBAGENT)}
+@cache
+def _activation_type_aliases() -> dict[str, tuple[str, str]]:
+    """Return the activation types plugin signals record a rule read and a subagent call under."""
+    from skillevaluator.tier3.eval_core.plugin_signals import COMPONENT_RULE_READ, COMPONENT_SUBAGENT
+
+    return {"rule": ("rule", COMPONENT_RULE_READ), "agent": ("agent", COMPONENT_SUBAGENT)}
 
 
 # What trials observed of a component, strongest evidence first.
@@ -1282,7 +1285,7 @@ def _observation_sets(activation: Mapping[str, Any]) -> tuple[tuple[str, frozens
 
 def _observed_activation(row: Mapping[str, Any], observations: tuple[tuple[str, frozenset[str]], ...]) -> str:
     """Return whether trials observed a coverage row's component (advisory)."""
-    keys = {f"{kind}:{row['name']}" for kind in _ACTIVATION_TYPE_ALIASES.get(row["type"], (row["type"],))}
+    keys = {f"{kind}:{row['name']}" for kind in _activation_type_aliases().get(row["type"], (row["type"],))}
     return next((observation for observation, recorded in observations if keys & recorded), "not observed")
 
 
@@ -1408,6 +1411,8 @@ def _has_completeness_issue_keys(value: object) -> bool:
 
 
 def _statistics_block(source: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    from skillevaluator.tier3.harbor.stats import STATISTICS_BLOCKS
+
     return {
         key: value
         for key in STATISTICS_BLOCKS
@@ -1423,6 +1428,8 @@ def statistics_view(payload: object, *, context: _Tier3Context | None = None) ->
     blocks win, the top level only fills gaps for the best agent (or stands in
     when no agent carries its own block), and the best agent's scope is primary.
     """
+    from skillevaluator.tier3.harbor.stats import STATISTICS_BLOCKS
+
     source = _mapping(payload)
     context = context or _tier3_context(source)
     best = context.best_agent
@@ -2325,6 +2332,8 @@ def hook_census_view(payload: object, *, context: _Tier3Context | None = None) -
 
 
 def _canary_arm_row(arm: str, summary: Mapping[str, Any], *, sum_of_parts_baseline: bool) -> dict[str, Any]:
+    from skillevaluator.tier3.eval_core.runtime_evidence import canary_leak_rate
+
     sinks = _mapping(summary.get("sinks"))
     sink_labels = [
         f"{CANARY_SINK_LABELS.get(str(kind), text(kind, limit=_LABEL_CHARS))} ({count(amount) or 0})"

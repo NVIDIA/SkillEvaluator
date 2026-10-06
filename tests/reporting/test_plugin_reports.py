@@ -929,14 +929,23 @@ def test_report_state_vocabularies_are_the_producers() -> None:
 
 
 def test_report_state_vocabularies_load_no_validators() -> None:
-    """plugin_states imports nothing, so the reporting leaf still loads no producer or validator."""
+    """plugin_states imports nothing, so the reporting leaf still loads no producer, validator, or Tier 3 helper.
+
+    Every reporter, and so every CLI command, imports plugin_sections.
+    """
     code = textwrap.dedent(
         """
         import sys
         import skillevaluator.plugin_states
         print(sorted(name for name in sys.modules if name.startswith("skillevaluator")))
         import skillevaluator.reporting.plugin_sections
-        heavy = ("skillevaluator.plugin_components", "skillevaluator.plugin_dependencies", "skillevaluator.validators")
+        heavy = (
+            "skillevaluator.plugin_components",
+            "skillevaluator.plugin_dependencies",
+            "skillevaluator.validators",
+            "skillevaluator.tier3.eval_core",
+            "skillevaluator.tier3.harbor",
+        )
         print(sorted(name for name in sys.modules if name.startswith(heavy)))
         """
     )

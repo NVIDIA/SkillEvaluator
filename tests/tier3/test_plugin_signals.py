@@ -853,6 +853,8 @@ class TestHandoff:
             ),
             ("apply_patch", {"patchText": "*** Begin Patch\n*** Add File: out/report.json\n+{}\n*** End Patch"}),
             ("apply_patch", {"raw": "*** Begin Patch\n*** Add File: out/report.json\n+{}\n*** End Patch"}),
+            # Harbor's converters wrap a tool input that is not a JSON object as {"value": ...}.
+            ("apply_patch", {"value": "*** Begin Patch\n*** Add File: out/report.json\n+{}\n*** End Patch"}),
             ("applypatch", {"input": "*** Begin Patch\n*** Add File: out/report.json\n+{}\n*** End Patch"}),
             ("patch", {"mode": "patch", "patch": "*** Begin Patch\n*** Update File: out/report.json\n*** End Patch"}),
             ("patch", {"mode": "replace", "path": "out/report.json", "old_string": "a", "new_string": "b"}),
@@ -862,6 +864,7 @@ class TestHandoff:
             "move-to",
             "opencode-patch-text",
             "raw-input",
+            "value-input",
             "applypatch",
             "hermes-patch",
             "hermes-replace",
@@ -887,11 +890,25 @@ class TestHandoff:
             ("*** Update File: out/other.json\n@@\n-a\n+b\n*** Delete File: out/report.json", 0),
             ("*** Delete File: out/report.json\n*** Add File: out/report.json\n+{}", 1),
             ("*** Add File: out/report.json\n+{}\n*** Delete File: out/report.json", 1),
+            ("*** Update File: out/report.json\n*** Move to: archive/report.json\n@@\n-a\n+b", 0),
+            ("  *** Update File: out/report.json\n  *** Move to: archive/report.json", 0),
+            ("*** Update File: out/report.json\n*** Move to: archive/report.json\n*** Add File: out/report.json", 1),
         ],
-        ids=["add", "update", "move-to", "delete", "delete-beside-update", "delete-then-add", "add-then-delete"],
+        ids=[
+            "add",
+            "update",
+            "move-to",
+            "delete",
+            "delete-beside-update",
+            "delete-then-add",
+            "add-then-delete",
+            "moved-away",
+            "moved-away-indented",
+            "moved-away-then-added",
+        ],
     )
     @pytest.mark.parametrize("form", ["tool", "shell"])
-    def test_a_patch_that_only_deletes_the_artifact_does_not_write_it(
+    def test_a_patch_that_deletes_or_moves_the_artifact_away_does_not_write_it(
         self, headers: str, passed: int, form: str
     ) -> None:
         patch = f"*** Begin Patch\n{headers}\n*** End Patch"

@@ -81,11 +81,11 @@ result.
   tools, the ``Add File``/``Update File``/``Move to`` headers of an
   ``apply_patch`` body, shell redirects/``tee``/``cp``/``mv``/``touch``, or an
   MCP tool whose name or argument key says it writes; a patch that only
-  deletes the path does not write it), and a later consumer-attributed call
-  must read it (read tools, shell readers/interpreters, or an MCP/subagent
-  call whose arguments name the path). Relative artifact paths match an
-  observed path equal to it or ending with ``/<artifact>``; absolute ones must
-  match exactly.
+  deletes the path, or moves it away, does not write it), and a later
+  consumer-attributed call must read it (read tools, shell
+  readers/interpreters, or an MCP/subagent call whose arguments name the
+  path). Relative artifact paths match an observed path equal to it or ending
+  with ``/<artifact>``; absolute ones must match exactly.
 * When both are given, both must hold.
 
 Trajectory content is untrusted: step, call, text and regex-subject sizes are
@@ -111,8 +111,7 @@ from typing import Any, NamedTuple
 
 import regex
 
-from skillevaluator.tier3.eval_core.atif_helpers import _patch_file_paths
-from skillevaluator.tier3.eval_core.checks import _APPLY_PATCH_COMMAND_RE, _FILE_READ_VERBS
+from skillevaluator.tier3.eval_core.checks import _APPLY_PATCH_COMMAND_RE, _APPLY_PATCH_HEADER_RE, _FILE_READ_VERBS
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     MAPPED_OUTER_EXEC_OBSERVATION,
     normalize_tool_call,
@@ -215,10 +214,8 @@ _READ_TOOLS = frozenset(
 # and the Hermes ``patch`` tool (whose ``replace`` mode names a ``path`` instead).
 _PATCH_TOOLS = frozenset({"apply_patch", "applypatch", "patch"})
 # Where harnesses put that body: Codex ``input``, OpenCode ``patchText``, Hermes
-# ``patch``, and ``raw`` for a tool input that was not a JSON object.
-_PATCH_BODY_KEYS = ("input", "patch", "patchText", "content", "raw")
-# An apply_patch "*** Delete File:" header line, spelled as atif_helpers._patch_file_paths reads headers.
-_PATCH_DELETE_HEADER_RE = re.compile(r"^[^\S\n]*\*\*\* Delete File:[^\n]*", re.MULTILINE)
+# ``patch``, and ``raw`` or ``value`` for a tool input that was not a JSON object.
+_PATCH_BODY_KEYS = ("input", "patch", "patchText", "content", "raw", "value")
 # Text editor tools: they write, except for their ``view`` command, which reads.
 _STR_REPLACE_EDITORS = frozenset({"str_replace_editor", "str_replace_based_edit_tool"})
 _WRITE_TOOLS = (
@@ -2281,11 +2278,25 @@ def _path_matches(observed: str, artifact: str) -> bool:
 def _patch_written_paths(text: str) -> list[str]:
     """Files an apply_patch body writes: the ``Add File``, ``Update File`` and ``Move to`` headers.
 
-    A file the patch only deletes is not written, so its ``Delete File``
-    header is dropped before the headers are read. A file the patch deletes
-    and adds again is still written.
+    A file the patch only deletes is not written, and neither is a file it
+    moves away: ``*** Update File: a`` followed by ``*** Move to: b`` writes
+    only ``b``. A file the patch deletes and adds again is still written.
     """
-    return _patch_file_paths(_PATCH_DELETE_HEADER_RE.sub("", text))
+    written: dict[str, None] = {}
+    pending_update = ""  # an ``Update File`` path, written unless the next header moves it away
+    for match in _APPLY_PATCH_HEADER_RE.finditer(text):
+        operation = text[match.start() : match.start(1)]
+        path = match.group(1).strip()
+        if pending_update and "Move to" not in operation:
+            written[pending_update] = None
+        pending_update = ""
+        if "Update File" in operation:
+            pending_update = path
+        elif "Delete File" not in operation and path:
+            written[path] = None
+    if pending_update:
+        written[pending_update] = None
+    return list(written)
 
 
 def _patch_targets(args: Mapping[str, Any]) -> list[str]:

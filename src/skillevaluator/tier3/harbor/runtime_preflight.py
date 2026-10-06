@@ -73,7 +73,12 @@ from skillevaluator.model_catalog import (
     fetch_model_records,
 )
 from skillevaluator.tier3.harbor.progress import redact_progress_detail
-from skillevaluator.tier3.harbor.runner import _nvidia_build_key_handoff, build_harbor_run_command
+from skillevaluator.tier3.harbor.runner import (
+    _harbor_launch_cwd,
+    _harbor_launch_environment,
+    _nvidia_build_key_handoff,
+    build_harbor_run_command,
+)
 
 if TYPE_CHECKING:
     from skillevaluator.provider_config import ProviderConfig
@@ -1500,15 +1505,17 @@ def run_agent_runtime_preflight(
     )
     try:
         handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            input=handoff.stdin_text,
-            env=handoff.subprocess_env,
-            timeout=timeout_seconds,
-            check=False,
-        )
+        with _harbor_launch_cwd() as launch_cwd:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                input=handoff.stdin_text,
+                cwd=launch_cwd,
+                env=_harbor_launch_environment(handoff.subprocess_env),
+                timeout=timeout_seconds,
+                check=False,
+            )
     except subprocess.TimeoutExpired:
         return PreflightResult(
             False,

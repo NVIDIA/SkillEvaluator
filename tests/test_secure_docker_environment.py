@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import hashlib
 import importlib
@@ -353,9 +354,22 @@ def test_harbor_subprocess_receives_nvidia_key_only_over_stdin(monkeypatch, tmp_
         raise AssertionError("NVIDIA key handoff must not create a temporary directory")
 
     monkeypatch.setattr(runner.tempfile, "TemporaryDirectory", reject_temporary_directory)
+    launch_dirs: list[Path] = []
+
+    @contextlib.contextmanager
+    def recording_launch_cwd():
+        # The evaluator-owned launch directory is allowed, but must stay empty.
+        launch_dir = tmp_path / f"launch-{len(launch_dirs)}"
+        launch_dir.mkdir()
+        launch_dirs.append(launch_dir)
+        yield launch_dir
+
+    monkeypatch.setattr(runner, "_harbor_launch_cwd", recording_launch_cwd)
 
     def fake_run(command, **kwargs):
         environment = kwargs["env"]
+        assert kwargs["cwd"] in launch_dirs
+        assert not any(Path(kwargs["cwd"]).iterdir())
         assert secret not in command
         assert secret not in environment.values()
         assert environment["NVIDIA_API_KEY"] == runner._NVIDIA_BUILD_STDIN_SENTINEL
@@ -387,6 +401,8 @@ def test_harbor_subprocess_receives_nvidia_key_only_over_stdin(monkeypatch, tmp_
     )
 
     assert (ok, detail) == (True, "")
+    assert launch_dirs
+    assert all(not any(launch_dir.iterdir()) for launch_dir in launch_dirs)
     handoff = runner._nvidia_build_key_handoff(
         {"SKILL_EVAL_LLM_PROVIDER": "nv_build", "NVIDIA_API_KEY": secret},
         env_mode="docker",

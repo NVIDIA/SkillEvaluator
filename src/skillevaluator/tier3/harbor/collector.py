@@ -28,10 +28,9 @@ from itertools import islice
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from harbor.models.trajectories import Trajectory
-
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts, get_skill_tool_calls
 from skillevaluator.tier3.eval_core.checks import check_negative_case
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
 from skillevaluator.tier3.eval_core.plugin_signals import (
     PluginSignalsContext,
     compute_plugin_signals,
@@ -129,6 +128,13 @@ UNSAFE_CUSTOM_METRIC_UNION_REASON = (
 )
 MISSING_MULTI_STEP_REWARD_REASON = (
     "Authoritative multi-step verifier reward is missing; it was not reconstructed or scored"
+)
+# Identity controls the collector derives itself; grader-authored rewards cannot set them.
+_COLLECTOR_IDENTITY_KEYS = (
+    "_arm_suffix",
+    "_authoritative_entry_id",
+    "_result_entry_id",
+    "_trusted_case_identity_unresolved",
 )
 TRIAL_DIAGNOSTIC_ARTIFACTS = ("result.json", "config.json", "exception.txt", "trial.log")
 AGENT_LOG_ARTIFACTS = (
@@ -750,7 +756,10 @@ def validate_harbor_job_result(
             rewarded_trial_names.update(metric_trial_names)
 
     if eval_trials != total:
-        return False, f"Harbor evaluation statistics account for {eval_trials}/{total} completed trials"
+        detail = f"Harbor evaluation statistics account for {eval_trials}/{total} completed trials"
+        if recorded := _first_recorded_trial_exception(result_path.parent):
+            detail = f"{detail}; {recorded}"
+        return False, detail
     if eval_errors != 0:
         return False, f"Harbor evaluation statistics contain {eval_errors} errored trials"
     if not rewarded_trial_names:
@@ -815,7 +824,7 @@ def _trajectory_agent_runtime_failure_reason(trajectory: Any) -> str:
     for step in steps:
         if not isinstance(step, dict):
             continue
-        message = str(step.get("message") or "")
+        message = atif_content_text(step.get("message"))
         reason = _text_contains_agent_runtime_failure(message)
         if reason and tokenless:
             return reason
@@ -856,6 +865,31 @@ def _trial_step_exception_details(trial_dir: Path) -> list[tuple[str, str]]:
         if isinstance(step, dict)
         if (details := _exception_details(step.get("exception_info"))) != ("", "")
     ]
+
+
+def _first_recorded_trial_exception(job_dir: Path) -> str:
+    """Name the first trial or step exception Harbor recorded under a failed job.
+
+    Harbor 0.24 records a multi-step failure, such as a verifier ``reward.json``
+    it cannot parse, on the failing step rather than on the trial, and still
+    counts the trial as completed. Without this, a job reports only a trial count.
+    """
+    try:
+        entries = sorted(job_dir.iterdir())
+    except OSError:
+        return ""
+    for ordinal, trial_dir in enumerate(entries, start=1):
+        kind, _unsafe_reason = _inspect_trial_directory(trial_dir)
+        if kind != "directory":
+            continue
+        for _exception_type, reason in (
+            _trial_exception_details(trial_dir),
+            *_trial_step_exception_details(trial_dir),
+        ):
+            if reason:
+                label = _published_trial_label(trial_dir.name, alias_ordinal=ordinal)
+                return redact_sensitive_text(f"trial {label} recorded {reason}")[:600]
+    return ""
 
 
 def _agent_log_runtime_failure_reason(
@@ -1999,6 +2033,21 @@ def _validate_generated_json_value(
         raise ValueError("encoded JSON exceeds limit")
 
 
+_ATIF_SCHEMA_VERSION_RE = re.compile(r"ATIF-v(?P<major>\d+)\.(?P<minor>\d+)")
+# Merged trajectories emit v1.7 fields such as trajectory_id and subagent refs.
+_MERGED_ATIF_SCHEMA_FLOOR = (1, 7)
+
+
+def _merged_atif_schema_version(*trajectories: Mapping[str, Any]) -> str:
+    """Label a merged trajectory with the newest source ATIF version, never below v1.7."""
+    newest = _MERGED_ATIF_SCHEMA_FLOOR
+    for trajectory in trajectories:
+        match = _ATIF_SCHEMA_VERSION_RE.fullmatch(str(trajectory.get("schema_version") or ""))
+        if match:
+            newest = max(newest, (int(match["major"]), int(match["minor"])))
+    return f"ATIF-v{newest[0]}.{newest[1]}"
+
+
 def _validated_trajectory_dict(data: Any) -> dict[str, Any]:
     try:
         # Bound traversal before deepcopy so hostile ATIF cannot amplify work
@@ -2097,6 +2146,8 @@ def _validated_trajectory_dict(data: Any) -> dict[str, Any]:
             max_nodes=ATIF_JSON_MAX_NODES,
             max_bytes=GENERATED_JSON_MAX_BYTES,
         )
+        from harbor.models.trajectories import Trajectory
+
         validated = Trajectory.model_validate(candidate).to_json_dict()
         _validate_generated_json_value(
             validated,
@@ -2429,7 +2480,7 @@ def _combine_continuation_trajectories(
         appended_steps = continuation_steps
 
     combined = copy.deepcopy(scoped_base)
-    combined["schema_version"] = "ATIF-v1.7"
+    combined["schema_version"] = _merged_atif_schema_version(base, continuation)
     combined["agent"] = copy.deepcopy(scoped_continuation["agent"])
     combined["steps"] = [copy.deepcopy(step) for step in (*base_steps, *appended_steps)]
     for index, step in enumerate(combined["steps"], start=1):
@@ -2985,7 +3036,7 @@ def _merged_step_trajectory(trial_root: Path) -> dict[str, Any] | None:
             json.dumps(source_identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
         ).hexdigest()[:20]
         merged: dict[str, Any] = {
-            "schema_version": "ATIF-v1.7",
+            "schema_version": _merged_atif_schema_version(*(trajectory for _, trajectory in trajectories)),
             "session_id": f"skillevaluator-multistep-{digest}",
             "trajectory_id": f"skillevaluator-multistep-{digest}",
             "agent": copy.deepcopy(trajectories[-1][1]["agent"]),
@@ -3694,17 +3745,16 @@ def _extract_rewards(
             else:
                 reward_data["_result_entry_id"] = entry_id
 
-    def _assign_case_identity(
-        reward_data: dict[str, Any],
-        result_payload: dict[str, Any] | None,
-        trial_name_val: str,
-    ) -> None:
-        """Bind the reward to its case: trusted staged selector first, legacy lookups otherwise."""
-        if arm_suffix:
-            reward_data["_arm_suffix"] = arm_suffix
+    def _assign_case_identity(data: dict[str, Any], result: dict[str, Any], trial_name: str) -> None:
+        for key in _COLLECTOR_IDENTITY_KEYS:
+            data.pop(key, None)
         if case_id_by_task_selector is None:
-            _populate_reward_entry_id(reward_data, result_payload, trial_name_val)
-        _apply_harbor_result_case_identity(reward_data, result_payload or {}, case_id_by_task_selector)
+            # Direct callers and older artifacts have no runner-owned selector map;
+            # resolve them from Harbor's persisted task path or the staged tasks.
+            if arm_suffix:
+                data["_arm_suffix"] = arm_suffix
+            _populate_reward_entry_id(data, result or None, trial_name)
+        _apply_harbor_result_case_identity(data, result, case_id_by_task_selector)
 
     # Native multi-step Harbor tasks can persist an authoritative aggregate at
     # the trial root in addition to one reward file per step. Materialize that
@@ -3754,8 +3804,6 @@ def _extract_rewards(
             _merge_trial_evaluation_failures(data, trial_dir, artifacts)
             data["_trial_name"] = trial_name
             data["_trial_root_name"] = trial_dir.name
-            if arm_suffix:
-                data["_arm_suffix"] = arm_suffix
             if step_name:
                 data["_step_name"] = step_name
             result_file = trial_dir / "result.json"
@@ -4302,7 +4350,6 @@ def _apply_harbor_result_case_identity(
         if entry_id:
             data["entry_id"] = entry_id
             data["_authoritative_entry_id"] = True
-            data.pop("_result_entry_id", None)
             data.pop("_trusted_case_identity_unresolved", None)
         else:
             # A grader-authored identity is not authoritative. If Harbor's
@@ -4716,6 +4763,9 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
         }
         if first.get("_trusted_task_selector") is not None:
             logical_reward["_trusted_task_selector"] = first["_trusted_task_selector"]
+        for key in _COLLECTOR_IDENTITY_KEYS:
+            if key in first:
+                logical_reward[key] = first[key]
         if (attempt_ordinal := _attempt_ordinal(first)) is not None:
             logical_reward["_attempt_ordinal"] = attempt_ordinal
         if metric_set:
@@ -7304,11 +7354,17 @@ def _collect_arm(
             job_dir,
             collection.case_id_by_task_selector,
             arm_suffix=arm.arm_suffix,
-            task_entry_id_map=_staged_task_entry_id_map(
-                collection.output_dir,
-                collection.agent,
-                arm.variant,
-                arm_suffix=arm.arm_suffix,
+            # Runner-owned selector maps are authoritative; staged task files only
+            # resolve identities for direct callers that do not supply one.
+            task_entry_id_map=(
+                _staged_task_entry_id_map(
+                    collection.output_dir,
+                    collection.agent,
+                    arm.variant,
+                    arm_suffix=arm.arm_suffix,
+                )
+                if collection.case_id_by_task_selector is None
+                else None
             ),
             artifacts=artifacts,
         )

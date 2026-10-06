@@ -263,8 +263,7 @@ def test_cli_environment_kwargs_reject_extreme_json_nesting_without_traceback() 
             {"secrets": [{"store": "team-store", "name": "runtime-key", "field": "value", "env_var": "API_KEY"}]},
         ),
         (
-            # W&B sandboxes are cwsandbox with ``auth=wandb`` since Harbor 0.24; the store may be omitted.
-            "cwsandbox",
+            "wandb",
             'secrets=[{"name":"runtime-key","env_var":"API_KEY"}]',
             {"secrets": [{"name": "runtime-key", "env_var": "API_KEY"}]},
         ),

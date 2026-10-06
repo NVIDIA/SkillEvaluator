@@ -73,44 +73,10 @@ All notable changes to SkillEvaluator are documented in this file.
   host variable in to `${NAME}` header expansion.
 - Plugin reports render the hook census, canary results, and MCP proof.
 - `harbor.plugin_canary: false` in `evals/config.yml` turns off the canary decoy for a plugin run, and the run config records the choice.
-- Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for
-  LLM judges in both the Harbor container verifier (`eval.py`) and host runtime
-  (`LLMClient`). Features zero-dependency full jitter exponential backoff,
-  RFC-7231 `Retry-After` header parsing, finite-value environment overrides
-  (`SKILL_EVAL_LLM_MAX_RETRIES`, `SKILL_EVAL_LLM_RETRY_BASE_DELAY`, and
-  `SKILL_EVAL_LLM_RETRY_MAX_DELAY`), and
-  automatic container forwarding via Harbor `task.toml`, and a per-judge
-  verifier time budget that leaves room for failure artifacts, without altering
-  benchmark metrics or scoring formulas.
-- Provider-aware structured JSON schema enforcement (`response_format` for
-  OpenAI-compatible / Gemini Vertex / NVIDIA NIM endpoints and `output_config`
-  for Anthropic `/v1/messages`) across the custom `judge_accuracy`,
-  `judge_goal_accuracy`, and `judge_behavior_check` paths, with automatic
-  schema-specific `HTTP 400`/`422` downgrade and per-target memoization
-  (`_SCHEMA_UNSUPPORTED_TARGETS`), boolean prompt alignment, and a guard for
-  missing `message` fields on reasoning token exhaustion. The canonical OpenAI
-  RAGAS goal scorer retains its separate scoring path.
-- Configurable evidence bundle budgets (`SKILL_EVAL_ACCURACY_BUDGET`, `SKILL_EVAL_GOAL_ACCURACY_BUDGET`, `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`) and final response limit (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`).
-- Tier 3 log converters now rebuild ATIF trajectories from OpenCode JSON streams
-  (`opencode.txt`) and structured Codex tee logs (`codex.txt`) when
-  `trajectory.json` is missing or empty.
 
 ### Fixed
 
 - Tier 3 no longer treats flag values of credential-named variables (for example `XDG_SESSION_ID=1` or `FOO_AUTH_ENABLED=true`) as secrets, so progress counts are not redacted and the Docker sidecar no longer refuses values such as `127.0.0.1` or `python:3.13-slim`.
-- Report non-string YAML keys as validation errors in skills, rules, workflows,
-  and plugin manifests instead of raising a `TypeError`, including frontmatter
-  `metadata` keys. Show boolean, null, and date keys in a readable YAML form.
-- Harbor ``result.json`` case ids now prefer canonical ``task_id.path`` metadata
-  over repository-prefixed ``task_name`` values when resolving eval entries.
-- Codex log synthesis maps ``web_search`` action payloads and ``collab_tool_call``
-  thread items into ATIF, and error-recovery checks recognize ``status=failed`` /
-  ``exit_code=`` terminal evidence emitted by Codex converters.
-- Tier 3 Harbor dual-arm evaluation propagates arm suffixes (`-with-skill`,
-  `-without-skill`) to `[task] name` in staged native `task.toml` files,
-  normalizes external repository and namespace prefixes, and commutatively
-  resolves canonical case IDs across attempt and arm suffix combinations
-  while preserving expected case IDs.
 
 ### Changed
 
@@ -372,13 +338,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - A hook that pipes a download into a shell or interpreter is CRITICAL remote code again when a comment or a redirection follows the shell (`curl … | sh # install`, `| sh > /dev/null 2>&1`, `| python3 # c`); only a real script path makes the download plain data.
 - Decoding `\uXXXX` and `\xXX` escapes in hook scripts is linear: a hook script that is a long run of backslashes no longer stalls every Tier 1 check that builds the plugin inventory (a 1 MiB script took hours).
 - The canary check stays linear on code padded with blank lines: a plugin could steer the agent into one large code or shell call that made the verifier spend minutes on the environment-copy pattern and hit its timeout, losing the trial's canary result.
-- Tier 3 uses Harbor 0.24.0 (was 0.13.2) with its compatible LiteLLM 1.92-1.93 window, building on the Harbor 0.22 port ([#83](https://github.com/NVIDIA/SkillEvaluator/pull/83)). Agent and environment options use Harbor's unified selectors; installed Codex adapters keep merged user and MCP configuration; Docker and local execution stream redacted callbacks under a 16 MiB per-command output limit, and the parent Harbor process has its own 16 MiB limit; Docker supports stdin and isolated sidecar operations without putting environment values on Compose argv. Collection accepts Harbor job, trial, reward, and ATIF v1.7 artifacts.
 - Plugin Tier 3 runs no longer lose agent data in Harbor's trajectory conversion: Codex agent steps carry their per-step token counts, so the measured first-turn context cost works for Codex; Claude Code subagent transcripts (`<session>/subagents/*.jsonl`) are converted, so the steps and MCP calls a subagent makes count for handoff, conflict, MCP, and security checks; and parallel Codex tool calls from one model request stay in one step, so check 18's same-step guard holds. A Codex run whose agent calls `spawn_agent` is converted from the main thread's rollout: Harbor converts only the newest rollout, which is the subagent's, so the main agent's calls, final answer, and first-turn tokens were lost and the judge graded the subagent's last message. Every Codex run (plain `codex` included) now goes through SkillEvaluator's Harbor Codex wrapper, which picks the main thread and adds each subagent's own steps as sidechain steps (`extra.is_sidechain`, `extra.agent_id`), never after the main agent's final answer.
 - Native Claude Code plugin loading recognizes Harbor's current launch, which pipes the prompt in from an environment variable instead of passing it after `--`; without this, every native Claude Code run failed with "did not find the Harbor launch command".
-- Harbor 0.24 removed the `wandb` environment mode; use `--env-mode cwsandbox --ek auth=wandb` (the W&B credentials are forwarded to `cwsandbox`). Harbor 0.24's new `podman`, `kata`, `mosaic`, `prime`, `runta`, and `smol` backends are not exposed yet, and its `stream` and `enable_environment_dir_upload` environment options are reserved for the runtime policy. Native task staging follows Harbor 0.24's separate-verifier rule (the first `tests/` directory that defines an image, step then task, else the agent environment), so it checks the Compose model Harbor really starts and no longer rejects a step `tests/` folder that only holds data.
 - Non-secret Harbor backend constructor options can be passed with the repeatable, operator-only `--environment-kwarg` / `--ek` flag on `validate` (skills and plugins), `evaluate`, `doctor`, and `health-check`; skill-owned configuration, credentials, and sandbox-policy fields stay outside that surface.
-- Tier 3 collection keeps Harbor's staged task selector, the logical case id, and the display name apart: with the runner's selector map an unknown or inconsistent selector fails coverage instead of trusting a grader-written id, and attempt ordinals are carried structurally. It also fails closed on unsafe reward identities and malformed custom-metric contracts, and publishes bounded, redacted failure and case details with exact truncation counts.
-- Tier 3 Harbor subprocess, Docker, and local diagnostics redact raw and percent-decoded URI and proxy userinfo; timeout multipliers that are non-finite or overflow Harbor's lifecycle timeouts are rejected; paired-baseline isolation rejects skill-owned pre-agent setup, native healthchecks, step workdir overlays, and task-shipped prior trajectories; and reports use the collector's logical attempt overall when a condition mixes standard and custom rewards.
 - A Claude Code `.claude-plugin/plugin.json` is now checked against the manifest schema Claude Code applies, not only its name: wrong field types, a padded or spaced name, a bad `dependencies` value, an invalid inline `lspServers` or monitor entry, and other schema errors are HIGH (Claude Code refuses the whole plugin), unknown top-level fields are MEDIUM, and a long name is no longer HIGH (Claude Code has no length limit). Empty, missing, and non-string names get their own messages.
 - A Claude Code plugin's `dependencies` are now resolved offline against the plugin's own `.claude-plugin/marketplace.json`, like `agent_plugin.yaml` refs: a dependency the marketplace does not list is HIGH `plugin_dependency_missing` (Claude Code cannot install it and refuses to load the plugin), and one in another marketplace or with no marketplace in sight is MEDIUM `plugin_dependency_unverified`.
 - Codex manifest severities now follow what Codex does: a wrong-typed `interface` field (`capabilities`, `displayName`, `shortDescription`, `category`, `websiteURL`, ...) or a blank or unsafe `version` is HIGH because Codex refuses the manifest, while a 65-character or `-abc` name and a wrong-typed `homepage`, `extensions`, `skills`, `commands`, `mcpServers`, or `hooks` value are MEDIUM because Codex still installs the plugin. Unknown top-level and `interface` fields are now MEDIUM, with a did-you-mean hint.
@@ -504,6 +466,136 @@ All notable changes to SkillEvaluator are documented in this file.
 - An MCP server whose `args` is not a list no longer crashes the Cursor `${env:NAME}` check; it gets HIGH `mcp_args_not_list`.
 - A git spec on a moving branch or tag is HIGH `mcp_command_floating_version` again, as it was before the pinning rewrite: `uvx --from git+https://github.com/o/r@main`, `@latest`, `@next`, and npm's `github:o/r#main`. A fixed tag or no ref stays MEDIUM `mcp_unpinned_package`.
 - `validate <relative folder>` lists each blocking finding once again. Making finding paths relative to the content root left the matching `errors` and `warnings` strings on the old path, so CLI and Markdown reports printed them a second time in an extra `Errors:` list, and the JSON `errors` kept the old path. Those strings now move with their finding.
+
+## 0.5.0 - 2026-10-06
+
+### Added
+
+- Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for
+  LLM judges in both the Harbor container verifier (`eval.py`) and host runtime
+  (`LLMClient`). Features zero-dependency full jitter exponential backoff,
+  RFC-7231 `Retry-After` header parsing, finite-value environment overrides
+  (`SKILL_EVAL_LLM_MAX_RETRIES`, `SKILL_EVAL_LLM_RETRY_BASE_DELAY`, and
+  `SKILL_EVAL_LLM_RETRY_MAX_DELAY`), and
+  automatic container forwarding via Harbor `task.toml`, and a per-judge
+  verifier time budget that leaves room for failure artifacts, without altering
+  benchmark metrics or scoring formulas.
+- Provider-aware structured JSON schema enforcement (`response_format` for
+  OpenAI-compatible / Gemini Vertex / NVIDIA NIM endpoints and `output_config`
+  for Anthropic `/v1/messages`) across the custom `judge_accuracy`,
+  `judge_goal_accuracy`, and `judge_behavior_check` paths, with automatic
+  schema-specific `HTTP 400`/`422` downgrade and per-target memoization
+  (`_SCHEMA_UNSUPPORTED_TARGETS`), boolean prompt alignment, and a guard for
+  missing `message` fields on reasoning token exhaustion. The canonical OpenAI
+  RAGAS goal scorer retains its separate scoring path.
+- Configurable evidence bundle budgets (`SKILL_EVAL_ACCURACY_BUDGET`, `SKILL_EVAL_GOAL_ACCURACY_BUDGET`, `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`) and final response limit (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`).
+- Tier 3 log converters now rebuild ATIF trajectories from OpenCode JSON streams
+  (`opencode.txt`) and structured Codex tee logs (`codex.txt`) when
+  `trajectory.json` is missing or empty.
+
+### Changed
+
+- Upgraded the optional Tier 3 backend to Harbor 0.24.0 and its compatible
+  LiteLLM 1.92-1.93 window. Existing SkillEvaluator agent and environment
+  options now use Harbor's unified selectors; installed Codex adapters preserve
+  merged user and MCP configuration; Docker and local execution stream redacted
+  callbacks under a shared 16 MiB per-command output limit, while the parent
+  Harbor orchestration process has a separate 16 MiB combined stdout/stderr
+  limit; and Docker supports stdin plus isolated sidecar operations without
+  exposing environment values on Compose argv. Generated schema 1.3 and
+  unmodified native task schemas remain compatible, while collection accepts
+  Harbor 0.24 job, trial, reward, and ATIF v1.8 artifacts. Multimodal tool
+  output reaches judges and reports as text with `[image]`/`[audio]` markers.
+  Native tasks' own test scripts must write numeric `reward.json` values, which
+  Harbor 0.24 enforces; a failed job now names the trial or step exception that
+  Harbor recorded.
+- Exposed 23 Harbor 0.24 backends alongside local mode. `cua-cloud`,
+  `opensandbox`, `hf-sandbox`, `podman`, `kata`, `runta`, `prime`, `mosaic`,
+  and `smol` remain disabled until generated tasks can be projected through a
+  trusted image or backend-native provisioning path. Non-secret backend
+  constructor options can be supplied with repeatable, operator-only
+  `--environment-kwarg` / `--ek` flags; skill-owned configuration,
+  credentials, and sandbox-policy overrides remain outside that surface.
+  Harbor's `stream` and `enable_environment_dir_upload` options are reserved,
+  and Modal's `modal_sandbox_v2` option no longer exists.
+- `--env-mode wandb` now runs Harbor's `cwsandbox` backend with W&B
+  authentication, because Harbor 0.24 merged the two. Install
+  `harbor[cwsandbox]==0.24.0` instead of the removed `harbor[wandb]` extra.
+- Harbor now always starts in an empty, evaluator-owned working directory with
+  `.env` loading and Harbor telemetry disabled. A `.env.local` or `.env` file
+  near the operator's project can no longer add credentials or settings that
+  SkillEvaluator's allowlisted environment removed. The `tier3` extra requires
+  python-dotenv 1.2.0.
+- Codex runs with `reasoning_effort=high`, the default under Harbor 0.22, so
+  scores and cost stay comparable after Harbor stopped pinning it.
+- Native tasks follow Harbor 0.24's separate-verifier precedence. A dedicated
+  verifier image or build definition must ship its own test script and never
+  receives SkillEvaluator's grader. Otherwise the verifier is built from
+  `environment/`, whose Compose model must stay within the verifier's
+  environment allowlist. `docker-compose.yml` verifier definitions, which
+  Harbor ignores, are rejected.
+
+### Fixed
+
+- Report non-string YAML keys as validation errors in skills, rules, workflows,
+  and plugin manifests instead of raising a `TypeError`, including frontmatter
+  `metadata` keys. Show boolean, null, and date keys in a readable YAML form.
+- Harbor ``result.json`` case ids now prefer canonical ``task_id.path`` metadata
+  over repository-prefixed ``task_name`` values when resolving eval entries.
+- Codex log synthesis maps ``web_search`` action payloads and ``collab_tool_call``
+  thread items into ATIF, and error-recovery checks recognize ``status=failed`` /
+  ``exit_code=`` terminal evidence emitted by Codex converters.
+- Tier 3 Harbor dual-arm evaluation propagates arm suffixes (`-with-skill`,
+  `-without-skill`) to `[task] name` in staged native `task.toml` files,
+  normalizes external repository and namespace prefixes, and commutatively
+  resolves canonical case IDs across attempt and arm suffix combinations
+  while preserving expected case IDs.
+- Tier 3 native-task collection now keeps Harbor's staged directory selector,
+  logical dataset ID, and display name separate; ambiguous or unresolved
+  persisted identities fail closed instead of trusting grader-authored IDs.
+  Runner-owned attempt ordinals are carried structurally, so `attempt`-like
+  text in authored selectors, logical IDs, or display names cannot corrupt
+  pass@k or `stop_on_pass` accounting, including truncated aggregate names.
+- Tier 3 Harbor subprocess, Docker, and local diagnostics now redact raw and
+  percent-decoded URI/proxy userinfo components across streamed callbacks,
+  nonzero exits, timeouts, output limits, and persisted launch errors.
+- Tier 3 local OpenCode runs routed through NVIDIA Build now retain the rendered
+  user instruction for ATIF conversion and fail on OpenCode error events, in
+  parity with Harbor's upstream agent lifecycle. Remote MCP servers in that
+  configuration disable OAuth, as Harbor's own OpenCode configuration does.
+- Tier 3 reports now use the collector's logical attempt overall whenever a
+  condition mixes standard and custom rewards, including across separate
+  trials, and aggregate execution summaries preserve child-declared hidden
+  error counts and truncation through launch-error overlays.
+- Tier 3 now rejects non-finite, overflowing, and finite-but-unscalable timeout
+  multipliers at YAML, programmatic, and Harbor command boundaries.
+- Tier 3 now preserves paired baseline isolation by rejecting skill-owned
+  pre-agent setup, native task/step healthchecks, native step workdir overlays,
+  and Harbor task-shipped prior trajectories whenever the baseline arm is
+  enabled. Native standard grading also fails closed on step test overlays,
+  separate verifier contexts, post-agent collect hooks, and task-controlled
+  verifier executable-path, shell, loader, proxy/TLS, provider, and judge
+  environment controls; exact operator-staged provider/judge placeholders and
+  unrelated verifier variables remain compatible. Operator-configured judge
+  fallback models are forwarded only to standard verifier jobs, not agent or
+  `custom_only` environments. Its Python payload now runs from a replaced
+  evaluator-owned directory in isolated mode. `custom_only`
+  retains Harbor-native collect hooks and Harbor's shared/separate
+  step-test resolution, and fully authored native test paths are left untouched
+  instead of replacing their unused `tests/skill_evaluator/` package.
+  All native grading modes reject Windows agent or effective verifier
+  environments until evaluator projection and verifier scripts are OS-aware.
+- Tier 3 collection now fails closed on unsafe reward identities and malformed
+  custom-metric contracts, publishes exact truncation metadata for bounded
+  case and failure-detail samples, and keeps findings, attribution, and
+  per-trial JSON inside the report loader's artifact envelope.
+- Tier 3 progress output, diagnostics, and result summaries no longer redact
+  counts such as `0/1 scored` or `1 errored` when a credential-named
+  environment variable holds a short flag value such as `1`. Short credential
+  fragments in proxy URLs are still redacted.
+- `create-eval-dataset --refine` no longer requires the `tier3` extra to read
+  case IDs from Harbor result files, and no longer fails on multimodal
+  trajectory messages.
 
 ## 0.4.0 - 2026-09-30
 

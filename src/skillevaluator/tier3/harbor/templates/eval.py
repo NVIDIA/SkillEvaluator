@@ -81,6 +81,7 @@ try:
         AMBIGUOUS_OUTER_EXEC_OBSERVATION,
         UNOBSERVED_INNER_CALL,
         UNSUPPORTED_NATIVE_CODEX_EXEC,
+        atif_content_text,
         iter_normalized_tool_calls,
         normalized_tool_call_observation,
         normalized_tool_call_wrapper_observation,
@@ -90,6 +91,7 @@ except ImportError:  # pragma: no cover -- source-tree import only
         AMBIGUOUS_OUTER_EXEC_OBSERVATION,
         UNOBSERVED_INNER_CALL,
         UNSUPPORTED_NATIVE_CODEX_EXEC,
+        atif_content_text,
         iter_normalized_tool_calls,
         normalized_tool_call_observation,
         normalized_tool_call_wrapper_observation,
@@ -1015,7 +1017,8 @@ def _history_entries(traj, question, *, write_bodies=True, final_chars=_HISTORY_
             entries.append(_history_call_entry(tc, write_bodies))
 
         for result in (step.get("observation") or {}).get("results") or []:
-            content = _judge_excerpt(result.get("content") if isinstance(result, dict) else "", _HISTORY_RESULT_CHARS)
+            raw = atif_content_text(result.get("content")) if isinstance(result, dict) else ""
+            content = _judge_excerpt(raw, _HISTORY_RESULT_CHARS)
             if content:
                 entries.append(_Entry(f"Tool returned: {content}", _RANK_LOW))
 
@@ -1440,7 +1443,7 @@ def _tool_observation_refs(traj):
         for result_idx, result in enumerate((step.get("observation") or {}).get("results") or []):
             if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
                 return refs
-            content = str(result.get("content") or "")
+            content = atif_content_text(result.get("content"))
             if not content.strip():
                 continue
             call_id = str(result.get("source_call_id") or f"result-{result_idx}")
@@ -1619,7 +1622,7 @@ def _late_observation_excerpts(traj, limit, max_items):
         for result in reversed((step.get("observation") or {}).get("results") or []):
             if len(out) >= max_items:
                 return out
-            content = _judge_excerpt(result.get("content"), limit)
+            content = _judge_excerpt(atif_content_text(result.get("content")), limit)
             if content:
                 out.append(content)
     return out
@@ -8836,7 +8839,7 @@ def _codex_spawned_agents(traj):
         results = observation.get("results") if isinstance(observation, dict) else None
         for result in results if isinstance(results, list) else []:
             if isinstance(result, dict):
-                content = str(result.get("content") or "")[:_CODEX_ROLLOUT_OUTPUT_CHARS]
+                content = atif_content_text(result.get("content"))[:_CODEX_ROLLOUT_OUTPUT_CHARS]
                 wanted.update(_CODEX_AGENT_ID_RE.findall(content))
     return wanted
 
@@ -8903,7 +8906,7 @@ def check_security(
         tool_calls,
         agent_text=get_agent_text(traj),
         user_messages=[
-            str(step.get("message") or "") for step in traj.get("steps", []) if step.get("source") == "user"
+            atif_content_text(step.get("message")) for step in traj.get("steps", []) if step.get("source") == "user"
         ],
         expected_skill=expected_skill or "",
         acceptable_skills=acceptable_skills,

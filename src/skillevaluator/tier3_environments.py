@@ -9,10 +9,9 @@ show its command help without importing Harbor or any optional dependencies.
 
 from __future__ import annotations
 
-#: The exact Harbor release the ``tier3`` extra pins. Its CLI, Python models,
-#: result artifacts, and agent/environment subclass interfaces are one
-#: compatibility surface, so SkillEvaluator supports exactly this version.
-HARBOR_PINNED_VERSION = "0.24.0"
+#: The exact Harbor release whose CLI, models, and environment interfaces this
+#: SkillEvaluator release targets; the ``tier3`` extra pins it.
+HARBOR_VERSION = "0.24.0"
 
 HARBOR_ENVIRONMENTS = (
     "docker",
@@ -31,6 +30,7 @@ HARBOR_ENVIRONMENTS = (
     "islo",
     "tensorlake",
     "cwsandbox",
+    "wandb",
     "use-computer",
     "blaxel",
     "beam",
@@ -45,9 +45,22 @@ HARBOR_ENVIRONMENTS = (
 HARBOR_ENV_MODES = frozenset(HARBOR_ENVIRONMENTS)
 #: Public env modes that Harbor accepts natively via ``--env`` (everything except ``local``).
 HARBOR_NATIVE_ENV_MODES = frozenset(m for m in HARBOR_ENVIRONMENTS if m != "local")
-# Exact Harbor 0.24 ``Provides-Extra`` names. ``ack`` reuses the Kubernetes
-# dependencies supplied by ``gke``. Of the four ``None`` entries, Docker needs
-# no additional Python extra and the other three are system-CLI backends.
+#: SkillEvaluator modes that run as a different Harbor environment type. Harbor
+#: 0.24 merged its W&B sandbox into ``cwsandbox``, selected with ``auth=wandb``.
+HARBOR_ENVIRONMENT_TYPE_ALIASES: dict[str, str] = {"wandb": "cwsandbox"}
+#: Constructor kwargs SkillEvaluator supplies for an alias; operators cannot set them.
+HARBOR_ENVIRONMENT_ALIAS_KWARGS: dict[str, dict[str, str]] = {"wandb": {"auth": "wandb"}}
+
+
+def harbor_environment_type(env_mode: str) -> str:
+    """Return the Harbor ``--env`` type that implements a SkillEvaluator mode."""
+    return HARBOR_ENVIRONMENT_TYPE_ALIASES.get(env_mode, env_mode)
+
+
+# Exact Harbor ``Provides-Extra`` names. ``ack`` reuses the Kubernetes
+# dependencies supplied by ``gke``, and ``wandb`` the W&B-capable ``cwsandbox``
+# extra. Of the four ``None`` entries, Docker needs no additional Python extra
+# and the other three are system-CLI backends.
 HARBOR_ENVIRONMENT_EXTRAS: dict[str, str | None] = {
     "docker": None,
     "daytona": "daytona",
@@ -65,6 +78,7 @@ HARBOR_ENVIRONMENT_EXTRAS: dict[str, str | None] = {
     "islo": "islo",
     "tensorlake": "tensorlake",
     "cwsandbox": "cwsandbox",
+    "wandb": "cwsandbox",
     "use-computer": "use-computer",
     "blaxel": "blaxel",
     "beam": "beam",
@@ -73,10 +87,12 @@ HARBOR_ENVIRONMENT_EXTRAS: dict[str, str | None] = {
     "vercel": "vercel",
 }
 
-# Constructor kwargs consumed by Harbor 0.24.0. Keep this static so importing
-# the base SkillEvaluator CLI never imports Harbor or optional provider SDKs.
-# The packaging parity test AST-reads the pinned Harbor sources and catches
+# Constructor kwargs consumed by the pinned Harbor release. Keep this static so
+# importing the base SkillEvaluator CLI never imports Harbor or optional provider
+# SDKs. The packaging parity test AST-reads the pinned Harbor sources and catches
 # additions, removals, and provider kwargs that are consumed through **kwargs.
+# Registry-only entries (cua-cloud, opensandbox, hf-sandbox, podman, kata, runta,
+# prime, mosaic, smol) keep that parity exact; those modes are not exposed.
 _HARBOR_BASE_ENVIRONMENT_KWARGS = frozenset(
     {
         "cpu_enforcement_policy",
@@ -105,7 +121,6 @@ _HARBOR_BASE_ENVIRONMENT_KWARGS = frozenset(
 
 _HARBOR_BACKEND_ENVIRONMENT_KWARGS = {
     "docker": "keep_containers",
-    "podman": "keep_containers",
     "daytona": (
         "assume_global_snapshot auto_delete_interval_mins auto_labels auto_snapshot auto_stop_interval_mins "
         "connection_pool_maxsize dind_image dind_snapshot expose_sandbox_id labels network_block_all secrets "
@@ -172,9 +187,10 @@ _HARBOR_BACKEND_ENVIRONMENT_KWARGS = {
         "ports post_cancel_command_timeout_sec process_cancel_grace_sec process_wait_retry_delay_sec project_name "
         "sandbox_lifetime_seconds task_bootstrap task_image transfer_timeout_sec"
     ),
+    "podman": "keep_containers",
+    "kata": "kata_dns kata_runtime keep_containers",
     "runta": "endpoint mode request_timeout_sec startup_timeout_sec token",
     "prime": "api_key compose_host_image gpu_type region team_id timeout_minutes",
-    "kata": "kata_dns kata_runtime keep_containers",
     "mosaic": "build_args build_target enable_ssh metadata persist replicas secrets ttl_seconds volume",
     "smol": (
         "api_key auto_checkpoint base_url checkpoints fork_batch_size fork_batch_window_ms gpu_mode ready_timeout_sec "
@@ -185,6 +201,11 @@ HARBOR_ENVIRONMENT_KWARGS: dict[str, frozenset[str]] = {
     mode: _HARBOR_BASE_ENVIRONMENT_KWARGS | frozenset(names.split())
     for mode, names in _HARBOR_BACKEND_ENVIRONMENT_KWARGS.items()
 }
+# An alias accepts its Harbor type's kwargs except the ones SkillEvaluator sets.
+for _alias, _harbor_type in HARBOR_ENVIRONMENT_TYPE_ALIASES.items():
+    HARBOR_ENVIRONMENT_KWARGS[_alias] = (
+        HARBOR_ENVIRONMENT_KWARGS[_harbor_type] - HARBOR_ENVIRONMENT_ALIAS_KWARGS[_alias].keys()
+    )
 ENV_MODE_LOCAL = "local"
 DEFAULT_ENV_MODE = "docker"
 

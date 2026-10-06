@@ -216,6 +216,8 @@ _COMPOSE_ALLOWED_BUILD_KEYS = frozenset(
 _COMPOSE_ALLOWED_NETWORK_KEYS = frozenset({"attachable", "enable_ipv4", "enable_ipv6", "internal", "labels"})
 _COMPOSE_ALLOWED_VOLUME_KEYS = frozenset({"labels"})
 _VERIFIER_JUDGE_MODEL_ENV_VARS = frozenset({"LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"})
+_VERIFIER_JUDGE_FALLBACK_ENV_VARS = frozenset({"LLM_JUDGE_FALLBACK_MODELS"})
+_VERIFIER_JUDGE_CONTROL_ENV_VARS = _VERIFIER_JUDGE_MODEL_ENV_VARS | _VERIFIER_JUDGE_FALLBACK_ENV_VARS
 _VERIFIER_BUDGET_ENV_VARS = frozenset(
     {
         "SKILL_EVAL_ACCURACY_BUDGET",
@@ -232,14 +234,20 @@ _VERIFIER_RETRY_ENV_VARS = frozenset(
         "SKILL_EVAL_LLM_RETRY_MAX_DELAY",
     }
 )
-_VERIFIER_JUDGE_FALLBACK_ENV_VARS = frozenset({"LLM_JUDGE_FALLBACK_MODELS"})
-_VERIFIER_JUDGE_CONTROL_ENV_VARS = _VERIFIER_JUDGE_MODEL_ENV_VARS | _VERIFIER_JUDGE_FALLBACK_ENV_VARS
 _VERIFIER_PROVIDER_ENV_VARS = frozenset(
     {
+        "SKILL_EVAL_LLM_PROVIDER",
+        "SKILL_EVAL_LLM_MODEL",
+        "SKILL_EVAL_LLM_API_KEY",
+        "SKILL_EVAL_LLM_BASE_URL",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_BASE_URL",
+        "NVIDIA_API_KEY",
         "AWS_ACCOUNT_ID",
         "AWS_ACCOUNT_ID_ENDPOINT_MODE",
+        "AWS_REGION",
         "AWS_ACCESS_KEY_ID",
         "AWS_AUTH_SCHEME_PREFERENCE",
         "AWS_BEARER_TOKEN_BEDROCK",
@@ -282,7 +290,6 @@ _VERIFIER_PROVIDER_ENV_VARS = frozenset(
         "AWS_METADATA_SERVICE_TIMEOUT",
         "AWS_NEW_RETRIES_2026",
         "AWS_PROFILE",
-        "AWS_REGION",
         "AWS_REQUEST_CHECKSUM_CALCULATION",
         "AWS_REQUEST_MIN_COMPRESSION_SIZE_BYTES",
         "AWS_RESPONSE_CHECKSUM_VALIDATION",
@@ -301,15 +308,8 @@ _VERIFIER_PROVIDER_ENV_VARS = frozenset(
         "AWS_USE_FIPS_ENDPOINT",
         "AWS_WEB_IDENTITY_TOKEN_FILE",
         "BOTOCORE_TCP_KEEPALIVE",
-        "NVIDIA_API_KEY",
-        "OPENAI_API_KEY",
-        "OPENAI_BASE_URL",
         *_VERIFIER_BUDGET_ENV_VARS,
         *_VERIFIER_RETRY_ENV_VARS,
-        "SKILL_EVAL_LLM_API_KEY",
-        "SKILL_EVAL_LLM_BASE_URL",
-        "SKILL_EVAL_LLM_MODEL",
-        "SKILL_EVAL_LLM_PROVIDER",
     }
 )
 _RUNTIME_PROCESS_CONTROL_ENV_NAMES = frozenset(
@@ -4630,10 +4630,9 @@ def _native_entry_id(task_dir: Path) -> str:
         data = tomllib.loads(task_toml.read_text(encoding="utf-8"))
     except Exception:
         return task_dir.name
-    metadata = data.get("metadata") if isinstance(data, dict) else None
-    if isinstance(metadata, dict) and metadata.get("entry_id") is not None:
-        return validate_case_id(metadata["entry_id"])
-    return validate_case_id(task_dir.name)
+    metadata = data.get("metadata", {}) if isinstance(data, dict) else {}
+    raw_entry_id = metadata.get("entry_id", task_dir.name) if isinstance(metadata, dict) else task_dir.name
+    return validate_case_id(raw_entry_id)
 
 
 _TOML_DOUBLE_QUOTE = '"'
@@ -5081,36 +5080,28 @@ def _validate_native_verifier_compose_boundaries(
 ) -> None:
     """Keep separate-verifier Compose models inside the verifier env boundary."""
     from harbor.models.task.config import TaskConfig
-    from harbor.models.task.paths import TaskPaths
-    from harbor.models.task.verifier_mode import (
-        resolve_effective_verifier_env_config,
-        resolve_verifier_environment_definition,
-    )
 
     allowed_env = set(verifier_env if verifier_env is not None else runtime_env or {})
     allowed_env.update(_VERIFIER_JUDGE_CONTROL_ENV_VARS)
     config = TaskConfig.model_validate(data)
-    paths = TaskPaths(task_dir)
+    paths, steps = _validated_native_task_steps(task_dir, config)
     contexts: list[Path] = []
-
-    def add_verifier_context(step: Any | None) -> None:
-        # Harbor 0.24 builds the separate verifier from the first tests directory
-        # that defines an image (the step's, then the task's); otherwise it reuses
-        # the agent environment, whose Compose model is validated on its own.
-        definition = resolve_verifier_environment_definition(config, paths, step)
-        if definition is not None and definition.bundled_tests:
-            contexts.append(definition.directory)
-
-    if config.steps:
-        for step in config.steps:
-            if resolve_effective_verifier_env_config(config, step) is None:
-                continue
-            step_context = paths.step_tests_dir(step.name)
-            if not _path_is_canonically_contained(step_context, paths.steps_dir):
-                raise ValueError(f"Native Harbor task step verifier path escapes the task: {task_dir / 'task.toml'}")
-            add_verifier_context(step)
-    elif resolve_effective_verifier_env_config(config, step_cfg=None) is not None:
-        add_verifier_context(None)
+    for verifier_pass in _native_verifier_passes(task_dir, config, paths, steps):
+        definition = verifier_pass.definition
+        if definition is None:
+            continue
+        # Harbor only recognizes docker-compose.yaml when choosing a verifier
+        # definition; a .yml file would silently fall back to environment/.
+        candidates = [paths.tests_dir]
+        if verifier_pass.step is not None:
+            candidates.insert(0, paths.step_tests_dir(verifier_pass.step.name))
+        for candidate in candidates:
+            if os.path.lexists(candidate / "docker-compose.yml"):
+                raise ValueError(
+                    "Native Harbor verifier Compose files must be named docker-compose.yaml, which Harbor "
+                    f"recognizes for {verifier_pass.scope}: {candidate / 'docker-compose.yml'}"
+                )
+        contexts.append(definition.directory if definition.bundled_tests else paths.environment_dir)
 
     for context in dict.fromkeys(contexts):
         if _has_symlink_component(context, paths.task_dir):
@@ -5163,11 +5154,31 @@ def _validated_native_task_steps(task_dir: Path, config: Any) -> tuple[Any, list
     return paths, steps
 
 
-def _effective_native_verifiers(config: Any, steps: list[Any]) -> list[tuple[str, Any | None]]:
-    from harbor.models.task.verifier_mode import resolve_effective_verifier_env_config
+@dataclass(frozen=True)
+class _NativeVerifierPass:
+    """One Harbor verify pass and the environment definition Harbor builds for it."""
+
+    scope: str
+    step: Any | None
+    #: ``VerifierEnvironmentDefinition`` for a separate verifier, ``None`` when shared.
+    definition: Any | None
+
+
+def _native_verifier_passes(task_dir: Path, config: Any, paths: Any, steps: list[Any]) -> list[_NativeVerifierPass]:
+    """Resolve every verify pass with Harbor's own separate-verifier precedence."""
+    from harbor.models.task.verifier_mode import resolve_verifier_environment_definition
 
     scopes = [("task", None)] if not steps else [(f"step {step.name!r}", step) for step in steps]
-    return [(scope, resolve_effective_verifier_env_config(config, step)) for scope, step in scopes]
+    passes: list[_NativeVerifierPass] = []
+    for scope, step in scopes:
+        try:
+            definition = resolve_verifier_environment_definition(config, paths, step)
+        except ValueError as exc:
+            raise ValueError(
+                f"Native Harbor verifier inputs for {scope} must stay inside the task: {task_dir / 'task.toml'}"
+            ) from exc
+        passes.append(_NativeVerifierPass(scope, step, definition))
+    return passes
 
 
 def _native_custom_only_tests_are_complete(task_dir: Path) -> bool:
@@ -5177,40 +5188,41 @@ def _native_custom_only_tests_are_complete(task_dir: Path) -> bool:
         tomllib.loads((task_dir / "task.toml").read_text(encoding="utf-8")),
     )
     paths, steps = _validated_native_task_steps(task_dir, config)
-    if not steps:
-        return paths.discovered_test_path_for(config.environment.os) is not None
-
-    from harbor.models.task.verifier_mode import (
-        resolve_effective_verifier_env_config,
-        resolve_verifier_environment_definition,
-    )
-
-    for step in steps:
-        verifier_environment = resolve_effective_verifier_env_config(config, step)
-        task_os = verifier_environment.os if verifier_environment is not None else config.environment.os
-        step_test = paths.discovered_step_test_path_for(step.name, task_os)
-        definition = (
-            resolve_verifier_environment_definition(config, paths, step) if verifier_environment is not None else None
-        )
+    for verifier_pass in _native_verifier_passes(task_dir, config, paths, steps):
+        definition = verifier_pass.definition
+        task_os = definition.config.os if definition is not None else config.environment.os
         if definition is not None and definition.bundled_tests:
-            # Harbor 0.24 builds a separate verifier image from the first tests
-            # directory that defines one (the step's, then the task's) and runs
-            # the test script that image carries instead of uploading tests.
-            if definition.directory == paths.step_tests_dir(step.name):
-                if step_test is None:
-                    return False
-            elif paths.discovered_test_path_for(task_os) is None:
+            # A dedicated verifier image runs its own /tests script and Harbor
+            # uploads nothing, so only a script in its definition can count.
+            bundled_test = definition.directory / paths.test_path_for(task_os).name
+            if _path_is_link_or_reparse(bundled_test) or not bundled_test.is_file():
                 return False
             continue
-        if step_test is None and paths.discovered_test_path_for(task_os) is None:
+        if verifier_pass.step is not None and paths.discovered_step_test_path_for(verifier_pass.step.name, task_os):
+            continue
+        if paths.discovered_test_path_for(task_os) is None:
             return False
     return True
+
+
+def _native_dedicated_verifier_scopes(task_dir: Path) -> list[str]:
+    """Return verify passes whose dedicated image never receives uploaded tests."""
+    config = _validated_native_task_model(
+        task_dir,
+        tomllib.loads((task_dir / "task.toml").read_text(encoding="utf-8")),
+    )
+    paths, steps = _validated_native_task_steps(task_dir, config)
+    return [
+        verifier_pass.scope
+        for verifier_pass in _native_verifier_passes(task_dir, config, paths, steps)
+        if verifier_pass.definition is not None and verifier_pass.definition.bundled_tests
+    ]
 
 
 def _reject_native_windows_execution(
     task_toml: Path,
     config: Any,
-    effective_verifiers: list[tuple[str, Any | None]],
+    verifier_passes: list[_NativeVerifierPass],
 ) -> None:
     from harbor.models.task.config import TaskOS
 
@@ -5219,11 +5231,12 @@ def _reject_native_windows_execution(
             "Native Harbor agent environments using Windows are unsupported until "
             f"SkillEvaluator's task projection and verifier scripts are OS-aware: {task_toml}"
         )
-    for scope, verifier_environment in effective_verifiers:
-        if verifier_environment is not None and verifier_environment.os == TaskOS.WINDOWS:
+    for verifier_pass in verifier_passes:
+        definition = verifier_pass.definition
+        if definition is not None and definition.config.os == TaskOS.WINDOWS:
             raise ValueError(
-                f"Native Harbor effective verifier for {scope} uses Windows, which is unsupported until "
-                f"SkillEvaluator's verifier projection is OS-aware: {task_toml}"
+                f"Native Harbor effective verifier for {verifier_pass.scope} uses Windows, which is unsupported "
+                f"until SkillEvaluator's verifier projection is OS-aware: {task_toml}"
             )
 
 
@@ -5251,10 +5264,7 @@ def _native_standard_grader_environment_controls(
     allowed_operator_references: set[str] | None = None,
 ) -> set[str]:
     """Return task-owned names that can redirect or poison the standard verifier."""
-    # Judge budget and retry knobs only tune the verifier; a task may author them,
-    # and a host value still replaces the authored one.
-    tuning = _VERIFIER_BUDGET_ENV_VARS | _VERIFIER_RETRY_ENV_VARS
-    operator_controls = (_VERIFIER_PROVIDER_ENV_VARS - tuning) | _VERIFIER_JUDGE_CONTROL_ENV_VARS
+    operator_controls = _VERIFIER_PROVIDER_ENV_VARS | _VERIFIER_JUDGE_CONTROL_ENV_VARS
     reserved = (
         operator_controls
         | _RUNTIME_PROCESS_CONTROL_ENV_NAMES
@@ -5264,8 +5274,6 @@ def _native_standard_grader_environment_controls(
     controls: set[str] = set()
     for name, value in environment.items():
         upper_name = name.upper()
-        if upper_name in tuning:
-            continue
         if (
             upper_name in operator_controls
             and name in (allowed_operator_references or set())
@@ -5288,7 +5296,7 @@ def _reject_native_standard_grading_overrides(
     config: Any,
     paths: Any,
     steps: list[Any],
-    effective_verifiers: list[tuple[str, Any | None]],
+    verifier_passes: list[_NativeVerifierPass],
     allowed_verifier_env: set[str],
 ) -> None:
     if grading_mode not in {"default", "default_plus_custom"}:
@@ -5324,11 +5332,11 @@ def _reject_native_standard_grading_overrides(
                 "Native Harbor step tests overlay is incompatible with SkillEvaluator standard grading; "
                 f"keep {step_tests} empty or use grading.mode=custom_only"
             )
-    for scope, verifier_environment in effective_verifiers:
-        if verifier_environment is not None:
+    for verifier_pass in verifier_passes:
+        if verifier_pass.definition is not None:
             raise ValueError(
                 "Native Harbor separate verifier context is unsupported with SkillEvaluator standard grading; "
-                f"use a shared verifier for {scope} or grading.mode=custom_only: {task_toml}"
+                f"use a shared verifier for {verifier_pass.scope} or grading.mode=custom_only: {task_toml}"
             )
 
 
@@ -5340,12 +5348,12 @@ def _validate_native_task_execution_compatibility(
     grading_mode: str,
     allowed_verifier_env: set[str],
 ) -> None:
-    """Fail closed where Harbor 0.22 execution can bypass evaluator projections."""
+    """Fail closed where Harbor execution can bypass evaluator projections."""
     task_toml = task_dir / "task.toml"
     config = _validated_native_task_model(task_dir, data)
     paths, steps = _validated_native_task_steps(task_dir, config)
-    effective_verifiers = _effective_native_verifiers(config, steps)
-    _reject_native_windows_execution(task_toml, config, effective_verifiers)
+    verifier_passes = _native_verifier_passes(task_dir, config, paths, steps)
+    _reject_native_windows_execution(task_toml, config, verifier_passes)
     if not with_skill:
         _reject_native_baseline_setup(task_toml, config, paths, steps)
     _reject_native_standard_grading_overrides(
@@ -5354,7 +5362,7 @@ def _validate_native_task_execution_compatibility(
         config,
         paths,
         steps,
-        effective_verifiers,
+        verifier_passes,
         allowed_verifier_env,
     )
 
@@ -5782,6 +5790,12 @@ def _stage_native_harbor_tasks_into(
             )
             _write_test_sh(task_dir, grading_mode=grading_mode, custom_grader=custom_grader)
         elif custom_grader:
+            if dedicated_scopes := _native_dedicated_verifier_scopes(task_dir):
+                raise ValueError(
+                    f"custom_only native Harbor task '{entry_id}' uses a dedicated verifier image for "
+                    f"{', '.join(dedicated_scopes)}, which never receives SkillEvaluator's grader payload; "
+                    "bundle the grader in that image or remove the verifier image definition"
+                )
             _write_entry_json(
                 task_dir,
                 entry or {"id": entry_id},

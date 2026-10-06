@@ -3348,3 +3348,29 @@ def test_command_runner_terminalizes_inherited_configuration_stage(
         ("run-finished", "failed"),
     ]
     assert transitions.count(("run-finished", "failed")) == 1
+
+
+def test_short_credential_named_flags_do_not_redact_counts() -> None:
+    from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
+
+    secrets = secret_values_from_environment(
+        {
+            "SDK_HAS_HOST_AUTH_REFRESH": "1",
+            "FEATURE_TOKEN_ENABLED": "yes",
+            "SERVICE_API_KEY": "service-key-123456",
+            "HTTPS_PROXY": "http://u:p@proxy.example:8080",
+        }
+    )
+
+    assert "1" not in secrets
+    assert "yes" not in secrets
+    assert "service-key-123456" in secrets
+    detail = redact_progress_detail(
+        "Harbor job did not complete successfully: 1 errored; codex with-skill (0/1 scored) "
+        "via http://u:p@proxy.example:8080 using service-key-123456",
+        secret_values=secrets,
+    )
+    assert "1 errored" in detail
+    assert "(0/1 scored)" in detail
+    assert "service-key-123456" not in detail
+    assert "u:p@" not in detail

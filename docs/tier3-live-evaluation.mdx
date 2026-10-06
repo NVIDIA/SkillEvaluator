@@ -51,33 +51,6 @@ depth.
 | The agent and its credential | Same `doctor` run, with your agents; `tier3 evaluate` re-validates before any run | [Agents & Sandboxes](agents-and-sandboxes.mdx) |
 | Docker running (the default environment) | `docker info` | [Agents & Sandboxes](agents-and-sandboxes.mdx) |
 
-## Start with one command
-
-After the [provider setup](configuration.mdx) and runtime prerequisites above:
-
-```bash title="Run Tier 3"
-skillevaluator tier3 ./my-skill
-```
-
-The direct workflow uses Docker and selects an agent from the provider: OpenCode
-for NVIDIA Build, Codex for OpenAI, or Claude Code for Anthropic. If no accepted
-dataset or task source exists, it generates one starter case and proceeds to the
-live with-skill and without-skill comparison. It reuses valid existing sources
-unchanged; invalid sources produce an error rather than being replaced.
-A generated starter case lets you try the pipeline, but does not establish
-broad positive and negative coverage.
-
-The same agent, model, environment, grading, and reporting options described for
-`tier3 evaluate` apply to this direct workflow. For example:
-
-```bash title="Choose the agent"
-skillevaluator tier3 ./my-skill --agents opencode --env-mode docker
-```
-
-`tier3 evaluate` remains available for explicit execution; its missing-source
-generation requires `--autopilot`. To prepare and review a fuller dataset before
-running, follow the steps below.
-
 ## Harbor 0.24 compatibility
 
 The `tier3` extra installs Harbor 0.24.0, the supported Tier 3 backend for this
@@ -117,6 +90,13 @@ shows it.
 The integration preserves SkillEvaluator's runtime and artifact contracts while
 using Harbor 0.24:
 
+- Every Harbor process starts in an empty, evaluator-owned working directory
+  with `.env` loading and Harbor telemetry disabled. Harbor ignores `.env.local`
+  and `.env` files around your project, so it sees only SkillEvaluator's
+  allowlisted environment. Relative host paths such as `KUBECONFIG` keep their
+  meaning.
+- Codex runs with `reasoning_effort=high`, the effort Harbor 0.22 used by
+  default, so results stay comparable across Harbor upgrades.
 - Installed Codex adapters merge existing user and MCP configuration before the
   selected runtime provider and endpoint take precedence over conflicting route
   keys.
@@ -142,12 +122,51 @@ using Harbor 0.24:
   Windows path spellings fail closed before publication.
 - Generated tasks retain schema 1.3, which Harbor 0.24 accepts. User-owned native
   tasks, including schema 1.4, are staged without a schema rewrite. Collection
-  accepts Harbor job, trial, reward, and ATIF v1.7 artifacts, including
-  single-step `step_results: null` and authoritative multi-step results.
+  accepts Harbor 0.24 job, trial, reward, and ATIF v1.8 artifacts, including
+  single-step `step_results: null`, authoritative multi-step results, and
+  multimodal tool output, which judges and reports see as text with
+  `[image]`/`[audio]` markers.
+- Native tasks follow Harbor 0.24's separate-verifier precedence: a verifier
+  image, or a `Dockerfile` or `docker-compose.yaml` in the step or task `tests/`
+  directory, defines a dedicated verifier that must ship its own test script.
+  Otherwise the verifier is built from `environment/` and receives the uploaded
+  tests. SkillEvaluator validates that Compose model against the verifier's
+  environment allowlist, and rejects `docker-compose.yml` verifier definitions,
+  which Harbor ignores.
+- Harbor 0.24 rejects a `reward.json` whose top-level values are not all
+  numbers. SkillEvaluator's verifier and wrapped custom graders already write
+  numeric rewards; a native task's own test script must do the same. When
+  Harbor records such a failure on a step, the failed job names that step's
+  exception instead of reporting only a trial count.
 - Harbor 0.24's `stream` and `enable_environment_dir_upload` environment
   options are reserved for the runtime policy and cannot be set with `--ek`.
-  Harbor 0.24 removed the `wandb` backend; use `--env-mode cwsandbox --ek
-  auth=wandb` instead.
+
+## Start with one command
+
+After the [provider setup](configuration.mdx) and runtime prerequisites above:
+
+```bash title="Run Tier 3"
+skillevaluator tier3 ./my-skill
+```
+
+The direct workflow uses Docker and selects an agent from the provider: OpenCode
+for NVIDIA Build, Codex for OpenAI, or Claude Code for Anthropic. If no accepted
+dataset or task source exists, it generates one starter case and proceeds to the
+live with-skill and without-skill comparison. It reuses valid existing sources
+unchanged; invalid sources produce an error rather than being replaced.
+A generated starter case lets you try the pipeline, but does not establish
+broad positive and negative coverage.
+
+The same agent, model, environment, grading, and reporting options described for
+`tier3 evaluate` apply to this direct workflow. For example:
+
+```bash title="Choose the agent"
+skillevaluator tier3 ./my-skill --agents opencode --env-mode docker
+```
+
+`tier3 evaluate` remains available for explicit execution; its missing-source
+generation requires `--autopilot`. To prepare and review a fuller dataset before
+running, follow the steps below.
 
 ## Prepare and review a fuller evaluation
 
@@ -387,21 +406,22 @@ explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
 ## Where agents run
 
-`--env-mode` selects one of 23 environment modes: 22 Harbor-native backends,
+`--env-mode` selects one of 24 environment modes: 23 Harbor-native backends,
 including the default Docker backend, plus SkillEvaluator's **local mode**,
 which runs the agent CLI directly on the host under an OS-sandbox policy.
 Managed backends such as `daytona`, `e2b`, and `modal` require their mapped
 Harbor 0.24 extra; OpenShift, Apple Container, and Singularity instead use
 system CLIs and have no Harbor Python extra. These are selectable integration
 modes, not evidence that every managed backend was exercised end to end for
-this release. Harbor transport verification covers Docker and local;
+this release. Harbor 0.24 transport verification covers Docker and local;
 validate any managed backend's extra, credentials, infrastructure, and
 constructor settings with `doctor` and its Harbor preflight before relying on
 it.
 
-Harbor's `cua-cloud`, `opensandbox`, and `hf-sandbox` backends are not
-selectable because they cannot yet receive SkillEvaluator's complete generated
-task bundle through a trusted image or backend-native provisioning path.
+Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `kata`, `runta`,
+`prime`, `mosaic`, and `smol` backends are not selectable because they cannot
+yet receive SkillEvaluator's complete generated task bundle through a trusted
+image or backend-native provisioning path.
 
 Environment kwargs are only for Harbor-native non-Docker backends. Pass
 non-secret constructor settings with the repeatable, operator-only

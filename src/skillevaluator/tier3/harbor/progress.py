@@ -35,9 +35,11 @@ _SECRET_ASSIGNMENT_RE = re.compile(
 )
 _SECRET_ENV_NAME_RE = re.compile(r"(?i)(?:api[_-]?key|access[_-]?key|auth|credential|password|secret|token)")
 _LIVE_MIN_EVENT_ROWS = 6
+# Whole environment values shorter than this are never treated as exact secrets;
+# shorter credential fragments come only from URI userinfo.
+MIN_EXACT_SECRET_CHARS = 4
 # Values of credential-named variables that are plainly flags, not secrets.
 _FLAG_LIKE_VALUE_RE = re.compile(r"(?i)^(?:[0-9]+|true|false|yes|no|on|off|enabled|disabled|none|null)$")
-_MIN_NAMED_SECRET_LENGTH = 4
 _CREDENTIAL_URI_USERINFO_RE = re.compile(r"(?i)(?P<scheme>[a-z][a-z0-9+.-]{0,31}://)(?P<userinfo>[^\s/?#]+@)")
 
 
@@ -107,7 +109,7 @@ def redact_progress_detail(detail: object, *, secret_values: set[str] | None = N
     if "://" in text:
         text = _CREDENTIAL_URI_USERINFO_RE.sub(r"\g<scheme><redacted>@", text)
     for secret in sorted(secret_values or (), key=len, reverse=True):
-        if len(secret) >= 4:
+        if len(secret) >= MIN_EXACT_SECRET_CHARS:
             text = text.replace(secret, "<redacted>")
         elif secret:
             # Exact credential-derived fragments can legitimately be short
@@ -129,13 +131,14 @@ def secret_values_from_environment(environment: Mapping[str, str]) -> set[str]:
         if not value:
             continue
         rendered = str(value)
+        # Short values of credential-named variables, and flags such as
+        # FOO_AUTH_ENABLED=true, are not credentials; redacting them would erase
+        # counts and words in ordinary progress text.
         if (
             _SECRET_ENV_NAME_RE.search(name)
-            and len(rendered) >= _MIN_NAMED_SECRET_LENGTH
+            and len(rendered) >= MIN_EXACT_SECRET_CHARS
             and not _FLAG_LIKE_VALUE_RE.match(rendered.strip())
         ):
-            # A credential-named flag such as FOO_AUTH_ENABLED=1 is not a secret;
-            # treating "1" as one would redact ordinary progress text.
             protected.add(rendered)
         if name.upper().endswith("_PROXY") or "://" in rendered:
             protected.update(

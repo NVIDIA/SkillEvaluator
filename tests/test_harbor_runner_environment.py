@@ -1768,15 +1768,8 @@ def test_harbor_backend_environment_allowlist_covers_every_native_022_mode() -> 
             "TENSORLAKE_PROJECT_ID",
             "TENSORLAKE_SANDBOX_PROXY_URL",
         },
-        "cwsandbox": {
-            "CWSANDBOX_API_KEY",
-            "CWSANDBOX_BASE_URL",
-            "NETRC",
-            "WANDB_API_KEY",
-            "WANDB_BASE_URL",
-            "WANDB_ENTITY",
-            "WANDB_PROJECT",
-        },
+        "cwsandbox": {"CWSANDBOX_API_KEY", "CWSANDBOX_BASE_URL"},
+        "wandb": {"NETRC", "WANDB_API_KEY", "WANDB_BASE_URL", "WANDB_ENTITY", "WANDB_PROJECT"},
         "use-computer": {
             "USE_COMPUTER_API_KEY",
             "USE_COMPUTER_HOST",
@@ -2053,7 +2046,7 @@ def test_skip_baseline_keeps_normalized_skill_owned_setup_enabled(
         ("skypilot", "DOCKER_CONFIG"),
         ("hyperbrowser", "HYPERBROWSER_API_KEY"),
         ("hyperbrowser", "DOCKER_HOST"),
-        ("cwsandbox", "NETRC"),
+        ("wandb", "NETRC"),
         ("vercel", "VERCEL_OIDC_TOKEN"),
     ],
 )

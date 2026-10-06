@@ -49,6 +49,8 @@ from skillevaluator.tier3.harbor.progress import (
 from skillevaluator.tier3.harbor.runner import (
     _check_prerequisites,
     _harbor_bin,
+    _harbor_launch_cwd,
+    _harbor_launch_environment,
     _model_for_agent,
     _resolve_agent_runtime_plan,
     run_harbor_eval,
@@ -1025,7 +1027,8 @@ def harbor_view(jobs_dir: Path) -> int:
     """Open retained Harbor job artifacts with Harbor's trajectory browser."""
     cmd = [_harbor_bin(), "view", str(jobs_dir.resolve())]
     try:
-        return subprocess.call(cmd)
+        with _harbor_launch_cwd() as launch_cwd:
+            return subprocess.call(cmd, cwd=launch_cwd, env=_harbor_launch_environment(os.environ))
     except FileNotFoundError:
         console.print("[red]Error: harbor binary not found.[/red]")
         return 1

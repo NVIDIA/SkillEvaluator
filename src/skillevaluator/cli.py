@@ -1487,8 +1487,8 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
     env_mode = params.get("env_mode", "docker")
     if env_mode != "docker":
         argv.extend(["--env-mode", str(env_mode)])
-    for value in params.get("environment_kwarg") or ():
-        argv.extend(["--environment-kwarg", str(value)])
+    for environment_kwarg in params.get("environment_kwarg") or ():
+        argv.extend(["--environment-kwarg", str(environment_kwarg)])
     lift_mode = params.get("lift_mode", "effectiveness")
     if lift_mode != "effectiveness":
         argv.extend(["--lift-mode", str(lift_mode)])

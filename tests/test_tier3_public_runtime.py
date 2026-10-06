@@ -44,7 +44,7 @@ from skillevaluator.tier3.harbor.runner import (
     build_harbor_run_command,
 )
 from skillevaluator.tier3.harbor.runtime_preflight import ModelProbeResult
-from skillevaluator.tier3_environments import HARBOR_ENV_MODES, HARBOR_NATIVE_ENV_MODES, HARBOR_PINNED_VERSION
+from skillevaluator.tier3_environments import HARBOR_ENV_MODES, HARBOR_NATIVE_ENV_MODES, HARBOR_VERSION
 
 
 def _load_verifier_template():
@@ -195,7 +195,7 @@ def test_native_environment_kwargs_round_trip_through_real_harbor_parser() -> No
 
 @pytest.mark.parametrize("env_mode", sorted(HARBOR_NATIVE_ENV_MODES - {"docker"}))
 def test_native_environment_kwargs_reject_unknown_harbor_names(env_mode: str) -> None:
-    version = re.escape(HARBOR_PINNED_VERSION)
+    version = re.escape(HARBOR_VERSION)
     with pytest.raises(ValueError, match=rf"Harbor {version} environment '{env_mode}'.*totally_ignored"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
@@ -581,8 +581,9 @@ def test_native_environment_required_kwargs_reject_whitespace_padded_ec2_launch_
 
 
 def test_native_environment_install_hints_use_real_harbor_extra_names() -> None:
-    assert f"harbor[gke]=={HARBOR_PINNED_VERSION}" in _environment_extra_install_hint("ack")
-    assert f"harbor[cloud]=={HARBOR_PINNED_VERSION}" not in _environment_extra_install_hint("ack")
+    assert f"harbor[gke]=={HARBOR_VERSION}" in _environment_extra_install_hint("ack")
+    assert f"harbor[cloud]=={HARBOR_VERSION}" not in _environment_extra_install_hint("ack")
+    assert f"harbor[cwsandbox]=={HARBOR_VERSION}" in _environment_extra_install_hint("wandb")
     assert "no Python extra" in _environment_extra_install_hint("openshift")
 
 
@@ -684,13 +685,23 @@ def test_custom_agent_import_path_preserves_native_cloud_environment(env_mode: s
         model=model,
     )
 
-    # Harbor 0.22+ takes an import path through its unified ``--agent`` flag.
     assert command[command.index("--agent") + 1] == import_path
     assert command[command.index("--env") + 1] == env_mode
     assert command[command.index("--model") + 1] == model
     assert "-a" not in command
     assert "--agent-import-path" not in command
     assert "--environment-import-path" not in command
+
+
+def test_custom_agent_import_path_is_rejected_for_native_cloud() -> None:
+    with pytest.raises(ValueError, match="agent_import_path is supported only with --env docker or local"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="codex",
+            job_name="bridge-test",
+            env_mode="e2b",
+            agent_import_path="example:Agent",
+        )
 
 
 def test_evaluate_forwards_native_environment_without_legacy_sandbox_configuration(monkeypatch, tmp_path) -> None:
@@ -2373,12 +2384,6 @@ def test_native_harbor_metadata_entry_id_seam_across_runner_collector_and_datase
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify native custom-only tasks with [metadata].entry_id != directory name align across runner, collector, and dataset_snapshot.json."""
-    from datetime import UTC, datetime
-    from uuid import UUID
-
-    from harbor.models.job.result import JobResult, JobStats
-    from harbor.models.trial.result import TrialResult
-
     from skillevaluator.provider_config import ProviderConfig
     from skillevaluator.tier3.harbor import runner, runtime_preflight
 
@@ -2444,48 +2449,57 @@ def test_native_harbor_metadata_entry_id_seam_across_runner_collector_and_datase
         expected_trials: int,
         agent_import_path: str | None = None,
         verifier_env: object = None,
-        environment_kwargs: object = None,
         include_task_names: list[str] | None = None,
+        environment_kwargs: object = None,
     ) -> tuple[bool, str]:
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from harbor.models.job.result import JobResult, JobStats
+        from harbor.models.trial.result import TrialResult
+
         seen_include_task_names.append(include_task_names)
         job_dir = jobs_dir / job_name
         is_with = "-with-" in job_name or job_name.endswith("-with")
         arm_suffix = "-with-skill" if is_with else "-without-skill"
         selected_folders = include_task_names or ["physical-case", "zero-case"]
-        trial_results = []
-        now = datetime(2026, 10, 4, tzinfo=UTC)
+        now = datetime(2026, 9, 12, tzinfo=UTC)
+        trial_results: list[TrialResult] = []
         for idx, folder in enumerate(selected_folders, start=1):
             trial_name = f"trial-{idx}-{folder}__attempt1"
             trial_dir = job_dir / trial_name
             trial_dir.mkdir(parents=True, exist_ok=True)
-            # The task name carries the staged [task].name (physical-case plus the arm suffix),
-            # not [metadata].entry_id; Harbor's persisted task path is the staged selector.
+            # Harbor persists the staged task path, while task_name carries the
+            # suffixed display name; only the runner's selector map may turn the
+            # staged directory into the authored [metadata].entry_id.
             task_path = str(dataset / folder)
             trial_result = TrialResult.model_validate(
                 {
-                    "id": UUID(int=idx),
+                    "id": uuid4(),
+                    "task_name": f"nvidia/{folder}{arm_suffix}_attempt1",
                     "trial_name": trial_name,
                     "trial_uri": trial_dir.as_uri(),
-                    "task_name": f"nvidia/{folder}{arm_suffix}_attempt1",
                     "task_id": {"path": task_path},
-                    "task_checksum": "seam-fixture",
-                    "config": {"task": {"path": task_path}, "trial_name": trial_name},
+                    "task_checksum": "native-entry-id-seam-fixture",
+                    "config": {"task": {"path": task_path}, "trial_name": trial_name, "trials_dir": str(job_dir)},
                     "agent_info": {"name": agent, "version": "test", "model_info": {"name": "test-model"}},
+                    "agent_result": {},
+                    "verifier_result": {"rewards": {"reward": 1.0 if is_with else 0.25}},
                     "started_at": now,
                     "finished_at": now,
-                    "verifier_result": {"rewards": {"reward": 1.0 if is_with else 0.25}},
                 }
             )
             (trial_dir / "result.json").write_text(trial_result.model_dump_json(indent=2), encoding="utf-8")
+            (trial_dir / "config.json").write_text(trial_result.config.model_dump_json(indent=2), encoding="utf-8")
             trial_results.append(trial_result)
         job_result = JobResult(
-            id=UUID(int=100),
+            id=uuid4(),
             started_at=now,
             updated_at=now,
             finished_at=now,
             n_total_trials=len(trial_results),
             stats=JobStats.from_trial_results(trial_results, n_total_trials=len(trial_results)),
-            trial_results=trial_results,
+            trial_results=[],
         )
         (job_dir / "result.json").write_text(job_result.model_dump_json(indent=2), encoding="utf-8")
         return True, ""
@@ -2593,3 +2607,50 @@ def test_write_task_toml_forwards_retry_env(tmp_path: Path) -> None:
     assert verifier_env["SKILL_EVAL_LLM_RETRY_BASE_DELAY"] == "${SKILL_EVAL_LLM_RETRY_BASE_DELAY}"
     assert verifier_env["SKILL_EVAL_LLM_RETRY_MAX_DELAY"] == "${SKILL_EVAL_LLM_RETRY_MAX_DELAY}"
     assert "UNRELATED_CUSTOM_VAR" not in verifier_env
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "agent_import_path"),
+    [
+        ("docker", None),
+        ("docker", "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex"),
+        ("local", None),
+        ("e2b", None),
+        ("daytona", "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayCodex"),
+    ],
+)
+def test_codex_runs_pin_harbor_022_reasoning_effort(env_mode: str, agent_import_path: str | None) -> None:
+    from harbor.cli.utils import parse_kwargs
+
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="codex",
+        job_name="effort",
+        env_mode=env_mode,
+        agent_import_path=agent_import_path,
+    )
+
+    agent_kwargs = [command[index + 1] for index, value in enumerate(command) if value == "--ak"]
+    assert parse_kwargs(agent_kwargs) == {"reasoning_effort": "high"}
+
+
+@pytest.mark.parametrize("agent", ["claude-code", "opencode"])
+def test_non_codex_runs_pass_no_agent_kwargs(agent: str) -> None:
+    command = build_harbor_run_command(dataset_path="/tmp/dataset", agent=agent, job_name="effort", env_mode="docker")
+
+    assert "--ak" not in command
+
+
+def test_codex_agents_render_the_pinned_reasoning_effort(tmp_path: Path) -> None:
+    from harbor.agents.installed.codex import Codex
+
+    from skillevaluator.tier3.harbor import local_agents
+
+    for agent_class in (
+        Codex,
+        local_agents.SkillEvaluatorGatewayCodex,
+        local_agents.SkillEvaluatorLocalCodex,
+        local_agents.SkillEvaluatorNvidiaBuildCodex,
+    ):
+        agent = agent_class(logs_dir=tmp_path, model_name="openai/gpt-5", reasoning_effort="high")
+        assert "-c model_reasoning_effort=high" in agent.build_cli_flags(), agent_class.__name__

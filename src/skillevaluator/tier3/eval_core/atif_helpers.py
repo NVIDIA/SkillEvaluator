@@ -29,6 +29,7 @@ from skillevaluator.tier3.eval_core.checks import (
     _SHELL_WORD,
     _TEE_OPERANDS_RE,
 )
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     iter_normalized_tool_calls as iter_tool_calls,
 )
@@ -584,7 +585,8 @@ def _history_entries(
             entries.append(_history_call_entry(tc, write_bodies))
 
         for result in (step.get("observation") or {}).get("results") or []:
-            content = _judge_excerpt(result.get("content") if isinstance(result, dict) else "", _HISTORY_RESULT_CHARS)
+            raw = atif_content_text(result.get("content")) if isinstance(result, dict) else ""
+            content = _judge_excerpt(raw, _HISTORY_RESULT_CHARS)
             if content:
                 entries.append(_Entry(f"Tool returned: {content}", _RANK_LOW))
 
@@ -1039,7 +1041,7 @@ def _tool_observation_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
         for result_idx, result in enumerate((step.get("observation") or {}).get("results") or []):
             if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
                 return refs
-            content = str(result.get("content") or "")
+            content = atif_content_text(result.get("content"))
             if not content.strip():
                 continue
             call_id = str(result.get("source_call_id") or f"result-{result_idx}")
@@ -1237,7 +1239,7 @@ def _late_observation_excerpts(traj: dict[str, Any], limit: int, max_items: int)
         for result in reversed((step.get("observation") or {}).get("results") or []):
             if len(out) >= max_items:
                 return out
-            content = _judge_excerpt(result.get("content"), limit)
+            content = _judge_excerpt(atif_content_text(result.get("content")), limit)
             if content:
                 out.append(content)
     return out

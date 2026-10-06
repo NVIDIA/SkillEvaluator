@@ -194,14 +194,11 @@ def test_cli_evaluate_uses_shared_service(monkeypatch: pytest.MonkeyPatch) -> No
     assert opts.skip_baseline is True
 
 
-def test_cli_validate_forwards_environment_kwargs_to_tier3(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_cli_validate_forwards_environment_kwargs_to_tier3(monkeypatch: pytest.MonkeyPatch) -> None:
     from skillevaluator import cli as cli_module
     from skillevaluator.models.result import ValidationResult
 
     captured: dict[str, object] = {}
-    # validate may create a starter dataset; keep it out of the shared fixture.
-    skill = tmp_path / "simple"
-    shutil.copytree(FIXTURE, skill)
 
     def _tier1(*_args: object, **_kwargs: object) -> list[ValidationResult]:
         result = ValidationResult(validator_name="SCHEMA")
@@ -221,7 +218,8 @@ def test_cli_validate_forwards_environment_kwargs_to_tier3(monkeypatch: pytest.M
         cli,
         [
             "validate",
-            str(skill),
+            "--no-autopilot",
+            str(FIXTURE),
             "--no-llm",
             "--no-tier2",
             "--tier3",

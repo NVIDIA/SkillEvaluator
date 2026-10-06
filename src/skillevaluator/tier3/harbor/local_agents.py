@@ -560,7 +560,8 @@ class SkillEvaluatorLocalOpenCode(OpenCode):
                     cmd_list = [server.command, *server.args] if server.command else []
                     mcp[server.name] = {"type": "local", "command": cmd_list}
                 else:
-                    mcp[server.name] = {"type": "remote", "url": server.url}
+                    # Match Harbor's OpenCode config: headless trials cannot complete OAuth.
+                    mcp[server.name] = {"type": "remote", "url": server.url, "oauth": False}
             config["mcp"] = mcp
 
         config["provider"] = {

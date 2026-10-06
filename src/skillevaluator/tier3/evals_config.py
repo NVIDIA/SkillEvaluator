@@ -68,11 +68,11 @@ _URI_AUTHORITY_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]{0,31}://(?P<authority>[^
 _SCHEMELESS_CREDENTIAL_AUTHORITY_RE = re.compile(r"[^\s/:@]+:[^\s/@]+@[^\s/?#]+")
 _REFERENCE_KWARG_NAMES_BY_ENV_MODE = {
     "ack": frozenset({"image_pull_secret"}),
-    # ``auth`` picks the credential strategy (Harbor 0.24 folded W&B sandboxes into cwsandbox).
-    "cwsandbox": frozenset({"auth", "secrets"}),
+    "cwsandbox": frozenset({"secrets"}),
     "daytona": frozenset({"secrets"}),
     "modal": frozenset({"registry_secret", "secrets"}),
     "skypilot": frozenset({"secrets"}),
+    "wandb": frozenset({"secrets"}),
 }
 _CWSANDBOX_SECRET_REFERENCE_KEYS = frozenset({"env_var", "field", "name", "store"})
 _KUBERNETES_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
@@ -472,9 +472,6 @@ def _secret_reference_name_error(value: Any, *, label: str) -> str | None:
 
 def _reference_kwarg_error(env_mode: str | None, name: str, value: Any) -> str | None:
     """Validate Harbor fields whose values name provider-managed secrets."""
-    if env_mode == "cwsandbox" and name == "auth":
-        # Harbor's only strategy name; the W&B credentials stay in the host environment.
-        return None if value == "wandb" else 'auth must be "wandb"; pass credentials through the host environment'
     if name == "image_pull_secret":
         if env_mode != "ack":
             return "image_pull_secret is supported only for Harbor environment 'ack'"
@@ -502,7 +499,7 @@ def _reference_kwarg_error(env_mode: str | None, name: str, value: Any) -> str |
             if error := _secret_reference_name_error(secret_name, label="secrets value"):
                 return error
         return None
-    if env_mode == "cwsandbox" and name == "secrets":
+    if env_mode in {"cwsandbox", "wandb"} and name == "secrets":
         if not isinstance(value, list):
             return f"secrets must be a list of provider secret reference mappings for Harbor environment '{env_mode}'"
         for item in value:

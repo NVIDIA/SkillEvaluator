@@ -194,6 +194,10 @@ def test_gitleaks_synthetic_harbor_allowlists_are_exactly_scoped() -> None:
             r"^main-(persistent|task|scoped)-secret-[0-9]{5}$",
             r"^tests/test_harbor_secure_docker_environment\.py$",
         ),
+        "Synthetic cwsandbox API key used by Harbor environment contract tests": (
+            "^cw-key-123456$",
+            r"^tests/test_harbor_environment_contract\.py$",
+        ),
     }
     for description, (regex, path) in expected.items():
         entry = allowlists[description]

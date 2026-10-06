@@ -1169,6 +1169,37 @@ def test_harbor_022_multistep_result_without_root_aggregate_is_not_reconstructed
     assert "statistics account for 0/1 completed trials" in " ".join(condition["execution_errors"])
 
 
+def test_job_statistics_failure_names_the_recorded_step_exception(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(
+        job_dir,
+        verifier_mode="missing",
+        step_rewards=(1.0,),
+        step_exception_type="VerifierOutputParseError",
+    )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    condition = results["agents"]["opencode"]["conditions"]["with_skill"]
+    errors = " ".join(condition["execution_errors"])
+    assert results["execution_status"] == "failed"
+    assert condition["scored_attempts"] == 0
+    assert (
+        "statistics account for 0/1 completed trials; "
+        f"trial {trial_name} recorded VerifierOutputParseError: provider step operation failed"
+    ) in errors
+
+
 def test_harbor_022_complete_envelope_accepts_final_reward_strategy(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     job_dir = jobs_dir / "demo-opencode-with"
@@ -2004,23 +2035,33 @@ def test_result_derived_case_ids_exercise_partial_pairing_through_collector(tmp_
     assert "mcnemar_exact" not in paired
 
 
-def test_legacy_result_identity_prefers_task_directory_without_trusted_selector_mapping() -> None:
-    # Without the runner's selector map (direct callers, older artifacts), the
-    # staged task directory is canonical and the task name is only a fallback (#161).
+def test_legacy_result_identity_prefers_task_path_without_trusted_selector_mapping() -> None:
     result = {
         "task_name": "publisher/logical-native-id",
         "task_id": {"path": "/trusted/staging/native-selector"},
         "config": {"task": {"path": "/trusted/staging/native-selector"}},
     }
 
+    # Without a runner-owned selector map, Harbor's persisted task directory is the
+    # canonical identity; repository-prefixed task names are only a fallback.
     assert collector_module._entry_id_from_harbor_result(result) == "native-selector"
-    assert collector_module._entry_id_from_harbor_result({"task_name": "publisher/logical-native-id"}) == (
-        "logical-native-id"
-    )
-    assert (
-        collector_module._entry_id_from_harbor_result(result, {"native-selector": "logical-native-id"})
-        == "logical-native-id"
-    )
+
+
+def test_legacy_result_identity_falls_back_to_task_name_without_task_path() -> None:
+    result = {"task_name": "publisher/logical-native-id"}
+
+    assert collector_module._entry_id_from_harbor_result(result) == "logical-native-id"
+
+
+def test_trusted_selector_mapping_ignores_task_name_and_unmapped_paths() -> None:
+    result = {
+        "task_name": "publisher/victim-case",
+        "task_id": {"path": "/trusted/staging/native-selector"},
+        "config": {"task": {"path": "/trusted/staging/native-selector"}},
+    }
+
+    assert collector_module._entry_id_from_harbor_result(result, {"native-selector": "logical-id"}) == "logical-id"
+    assert collector_module._entry_id_from_harbor_result(result, {"other-selector": "other-id"}) == ""
 
 
 @pytest.mark.parametrize("separator", ["-", "_"])
@@ -2615,3 +2656,87 @@ def test_credential_shaped_trial_name_uses_collision_safe_output_alias(tmp_path:
     assert credential_trial not in generated_json
     assert credential_trial not in trial_dirs
     assert trial_dirs == ["skillevaluator-trial-collision-000001"]
+
+
+@pytest.mark.parametrize("trusted_map", [None, {"native-selector": "logical-case"}])
+def test_grader_authored_reward_cannot_set_collector_identity_controls(
+    tmp_path: Path,
+    trusted_map: dict[str, str] | None,
+) -> None:
+    trial = tmp_path / "job" / "native-selector__abc1234"
+    verifier_dir = trial / "verifier"
+    verifier_dir.mkdir(parents=True)
+    (verifier_dir / "reward.json").write_text(
+        json.dumps(
+            {
+                "overall": 1.0,
+                "entry_id": "victim-case-attempt3",
+                "_authoritative_entry_id": True,
+                "_result_entry_id": "victim-case",
+                "_arm_suffix": "-attempt3",
+                "_trusted_case_identity_unresolved": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (trial / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial.name,
+                "task_id": {"path": "/trusted/staging/native-selector"},
+                "config": {"task": {"path": "/trusted/staging/native-selector"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    [reward] = collector_module._extract_rewards(tmp_path / "job", trusted_map)
+
+    assert "_result_entry_id" not in reward
+    assert "_arm_suffix" not in reward
+    if trusted_map is None:
+        # Legacy callers keep a grader-authored entry_id, but only as a
+        # non-authoritative value that is canonicalized like any other.
+        assert "_authoritative_entry_id" not in reward
+        assert collector_module._entry_id(reward) == "victim-case"
+    else:
+        assert reward["entry_id"] == "logical-case"
+        assert reward["_authoritative_entry_id"] is True
+        assert collector_module._entry_id(reward) == "logical-case"
+
+
+@pytest.mark.parametrize(
+    "exception_type",
+    ["VerifierTimeoutError", "EnvironmentStartTimeoutError", "VerifierOutputParseError", "RewardFileNotFoundError"],
+)
+@pytest.mark.parametrize("multistep", [False, True])
+def test_harbor_verifier_and_environment_failures_are_unscored_not_agent_failures(
+    tmp_path: Path,
+    exception_type: str,
+    multistep: bool,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    _write_actual_harbor_022_result(
+        job_dir,
+        reward=1.0,
+        exception_type=None if multistep else exception_type,
+        step_rewards=(1.0, 1.0) if multistep else None,
+        step_exception_type=exception_type if multistep else None,
+    )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    opencode = results["agents"]["opencode"]
+    assert opencode["num_trials_with"] == 0
+    assert opencode["agent_runtime_failures"]["with_skill"] == []
+    assert results["execution_status"] == "failed"

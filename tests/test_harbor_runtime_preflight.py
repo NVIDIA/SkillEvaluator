@@ -151,6 +151,7 @@ def test_runtime_preflight_runs_one_case_once_without_verification(monkeypatch, 
     def run(command, **kwargs):
         captured["command"] = command
         captured["run_kwargs"] = kwargs
+        captured["cwd_entries"] = sorted(path.name for path in Path(kwargs["cwd"]).iterdir())
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(runtime_preflight, "build_harbor_run_command", build)
@@ -160,6 +161,10 @@ def test_runtime_preflight_runs_one_case_once_without_verification(monkeypatch, 
         "validate_harbor_agent_only_job_result",
         lambda *_args, **_kwargs: (True, "ok"),
     )
+    operator_dir = tmp_path / "operator"
+    operator_dir.mkdir()
+    (operator_dir / ".env.local").write_text("SE_DOTENV_SENTINEL=leaked\n", encoding="utf-8")
+    monkeypatch.chdir(operator_dir)
 
     result = runtime_preflight.run_agent_runtime_preflight(
         dataset=_dataset(tmp_path),
@@ -181,7 +186,11 @@ def test_runtime_preflight_runs_one_case_once_without_verification(monkeypatch, 
     run_kwargs = captured["run_kwargs"]
     assert isinstance(run_kwargs, dict)
     assert run_kwargs["timeout"] == 321
-    assert run_kwargs["env"] == {"NVIDIA_API_KEY": "secret"}
+    assert run_kwargs["env"] == {"NVIDIA_API_KEY": "secret", "HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_DISABLED": "1"}
+    # Harbor starts in an empty evaluator-owned directory, never the operator's.
+    assert Path(run_kwargs["cwd"]) != operator_dir
+    assert captured["cwd_entries"] == []
+    assert not Path(run_kwargs["cwd"]).exists()
 
 
 def test_runtime_preflight_hands_nvidia_build_key_only_over_stdin(monkeypatch, tmp_path: Path) -> None:

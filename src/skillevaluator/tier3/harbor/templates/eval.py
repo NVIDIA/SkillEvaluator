@@ -1313,11 +1313,14 @@ _EXPECTED_ARTIFACT_PATH_RE = re.compile(
 )
 
 
-# A placeholder key such as sk-your-key-here or nvapi-REPLACE_ME: letters of
-# one case in words joined by - or _. No real key looks like this, and a task
-# can ask for one in a config file, so the judges see it as written.
+# A placeholder key such as sk-your-key-here, nvapi-REPLACE_ME,
+# xoxb-your-bot-token or glpat-xxxxxxxxxxxxxxxxxxxx: a key or token prefix, then
+# letters of one case in words joined by - or _. No real key or token looks like
+# this, and a task can ask for one in a config file, so the judges see it as
+# written.
 _KEY_PLACEHOLDER_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])((?:sk|nvapi)-(?:[a-z]+(?:[-_][a-z]+)*|[A-Z]+(?:[-_][A-Z]+)*))(?![A-Za-z0-9_-])"
+    r"(?<![A-Za-z0-9_-])((?:sk-|nvapi-|gh[pousr]_|github_pat_|glpat-|xox[abeprs]-|hf_|npm_)"
+    r"(?:[a-z]+(?:[-_][a-z]+)*|[A-Z]+(?:[-_][A-Z]+)*))(?![A-Za-z0-9_-])"
 )
 
 

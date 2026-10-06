@@ -624,9 +624,9 @@ Secrets are redacted before the evidence reaches a judge: key-shaped text
 such as `sk-…`, `ghp_…`, `glpat-…`, `xoxb-…`, `hf_…`, `npm_…`, or an AWS key
 ID (`AKIA…`, `ASIA…`), the exact value of every
 provider credential in the verifier's environment, and the run's canary
-token. Placeholder keys such as
-`sk-your-key-here` or `nvapi-REPLACE_ME` are left as written, so a config file
-the task asks for still matches the expected answer. Each judged
+token. Placeholder keys and tokens such as `sk-your-key-here`,
+`nvapi-REPLACE_ME`, or `xoxb-your-bot-token` are left as written, so a config
+file the task asks for still matches the expected answer. Each judged
 metric's `omitted` field records whether evidence was dropped or shortened to
 fit the budget.
 

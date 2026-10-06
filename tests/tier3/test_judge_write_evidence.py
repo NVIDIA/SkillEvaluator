@@ -756,6 +756,27 @@ def test_placeholder_keys_reach_the_judge_as_written(copy, monkeypatch):
 
 
 @COPIES
+@pytest.mark.parametrize(
+    "placeholder",
+    [
+        "SLACK_BOT_TOKEN=xoxb-your-bot-token",
+        "SLACK_APP_TOKEN=xoxp-REPLACE-WITH-YOUR-TOKEN",
+        "GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx",
+        "GITHUB_TOKEN=ghp_your_token_here",
+        "GH_PAT=github_pat_YOUR_TOKEN",
+        "HF_TOKEN=hf_your_hugging_face_token_goes_here",
+    ],
+)
+def test_placeholder_tokens_of_every_service_reach_the_judge_as_written(copy, monkeypatch, placeholder):
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    real = "glpat-" + _fixture_secret("aB3dE6gH9j", "K2mN5pQ8sT")
+
+    redacted = copy._redact_evidence_text(f"{placeholder}\nREAL={real}")
+
+    assert redacted == f"{placeholder}\nREAL=glpat-<redacted>"
+
+
+@COPIES
 def test_runtime_key_is_redacted_even_when_it_looks_like_a_placeholder(copy, monkeypatch):
     runtime_key = _fixture_secret("nvapi-", "local-test-key")
     monkeypatch.setenv("NVIDIA_API_KEY", runtime_key)

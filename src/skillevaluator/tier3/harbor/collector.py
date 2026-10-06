@@ -4212,7 +4212,9 @@ def _collect_arm(
     )
     if plugin_signals_summary is not None and arm.hook_census_every_trial:
         plugin_signals_summary["hook_census"] = _arm_hook_census(job_dir, artifacts)
-    canary_summary = summarize_canary(rewards)
+    # The canary is checked without the judge, so a trial set aside as unscoreable
+    # (its judge failed) still counts: its leak is evidence, not a score.
+    canary_summary = summarize_canary(collected_rewards)
     collection.save_trials(arm, collected_rewards, job_dir)
     collection.write_summary(
         arm,

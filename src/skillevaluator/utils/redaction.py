@@ -9,6 +9,18 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from skillevaluator.tier3.eval_core.secret_redaction import (
+    LOG_AWS_ACCESS_KEY_RE,
+    LOG_GITHUB_PAT_RE,
+    LOG_GITHUB_TOKEN_RE,
+    LOG_GITLAB_PAT_RE,
+    LOG_HUGGING_FACE_TOKEN_RE,
+    LOG_NPM_TOKEN_RE,
+    LOG_PREFIXED_TOKEN_RE,
+    LOG_SLACK_TOKEN_RE,
+    keep_token_prefix,
+)
+
 _SECRET_KEY_PARTS = {
     "auth",
     "authorization",
@@ -110,27 +122,36 @@ _JWT_RE = re.compile(
     rf"(?<!{_JWT_CHAR})(?P<lead>(?>(?:\b|{_JWT_CHAR}*?-)(?=eyJ)))"
     rf"eyJ{_JWT_CHAR}{{10,}}+\.eyJ{_JWT_CHAR}{{10,}}+\.{_JWT_CHAR}{{10,}}\b"
 )
-# Tokens whose prefix names their service: GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and
-# fine-grained (github_pat_) tokens, GitLab personal access tokens (glpat-), and Slack
-# tokens (xoxa-/xoxb-/xoxp-/xoxr-/xoxs-). Redaction keeps the ``prefix`` group. Each
-# pattern is the prefix and one character class of at most 255 characters, so a match
-# attempt reads a bounded number of characters and a scan stays linear in the text.
-# tier3/eval_core/secret_redaction.py redacts log lines with these patterns, and the
-# standalone Harbor verifier keeps a copy that a drift test pins.
-GITHUB_TOKEN_RE = re.compile(r"\b(?P<prefix>gh[pousr]_)[A-Za-z0-9]{36,255}\b")
-GITHUB_PAT_RE = re.compile(r"\b(?P<prefix>github_pat_)[A-Za-z0-9_]{22,255}\b")
-GITLAB_PAT_RE = re.compile(r"\b(?P<prefix>glpat-)[A-Za-z0-9_-]{20,255}")
-SLACK_TOKEN_RE = re.compile(r"\b(?P<prefix>xox[abprs]-)[A-Za-z0-9-]{10,255}")
-PREFIXED_TOKEN_PATTERNS = (GITHUB_TOKEN_RE, GITHUB_PAT_RE, GITLAB_PAT_RE, SLACK_TOKEN_RE)
+# Tokens whose prefix names their service (GitHub, GitLab, Slack, Hugging Face, npm), whose
+# redaction keeps the ``prefix`` group, and AWS access key IDs. The patterns are the log
+# redactor's (tier3/eval_core/secret_redaction.py), which defines them so that it loads
+# without this package's __init__.
+GITHUB_TOKEN_RE = LOG_GITHUB_TOKEN_RE
+GITHUB_PAT_RE = LOG_GITHUB_PAT_RE
+GITLAB_PAT_RE = LOG_GITLAB_PAT_RE
+SLACK_TOKEN_RE = LOG_SLACK_TOKEN_RE
+HUGGING_FACE_TOKEN_RE = LOG_HUGGING_FACE_TOKEN_RE
+NPM_TOKEN_RE = LOG_NPM_TOKEN_RE
+PREFIXED_TOKEN_PATTERNS = (
+    GITHUB_TOKEN_RE,
+    GITHUB_PAT_RE,
+    GITLAB_PAT_RE,
+    SLACK_TOKEN_RE,
+    HUGGING_FACE_TOKEN_RE,
+    NPM_TOKEN_RE,
+)
+# All of them in one pass; ``keep_token_prefix`` writes the matched prefix back.
+PREFIXED_TOKEN_RE = LOG_PREFIXED_TOKEN_RE
+AWS_ACCESS_KEY_RE = LOG_AWS_ACCESS_KEY_RE
 _REDACTIONS = (
     (_JWT_RE, r"\g<lead>jwt-<redacted>"),
-    (re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}"), "aws-access-key-<redacted>"),
+    (AWS_ACCESS_KEY_RE, "aws-access-key-<redacted>"),
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer <redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])sk-[a-zA-Z0-9_-]{8,}"), "sk-<redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])nvapi-[a-zA-Z0-9_-]{8,}"), "nvapi-<redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])crsr_[a-f0-9]{16,}"), "crsr_<redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])sha256~[A-Za-z0-9._~-]+"), "sha256~<redacted>"),
-    *((pattern, r"\g<prefix><redacted>") for pattern in PREFIXED_TOKEN_PATTERNS),
+    (PREFIXED_TOKEN_RE, keep_token_prefix),
 )
 
 

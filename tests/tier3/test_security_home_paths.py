@@ -132,6 +132,7 @@ PROTECTED_WRITES = [
     pytest.param(_bash("echo x &>> ~/.profile"), id="append-both-streams"),
     pytest.param(_bash("echo x 1>>~/.profile"), id="numbered-fd-append"),
     pytest.param(_bash("echo x | sudo tee /etc/sudoers.d/agent > /dev/null"), id="sudo-tee"),
+    pytest.param(_bash("echo x | tee >(cat) ~/.bashrc"), id="tee-after-process-substitution"),
     pytest.param(_bash("sed -i 's/a|b/c/;s/d/e/' ~/.bashrc"), id="sed-in-place"),
     pytest.param(_bash("sed -E --in-place=.bak 's/x/y/' /home/agent/.gitconfig"), id="sed-long-in-place"),
     pytest.param(_bash("echo x >> /home/agent/project/../.bashrc"), id="parent-segment-write"),

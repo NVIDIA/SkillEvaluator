@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from skillevaluator.tier3.eval_core.plugin_signals import _safe_text
+from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 
 HOOK_CENSUS_FILENAME = "skilleval-hook-census.jsonl"
@@ -76,6 +77,17 @@ def _census_row(
         row = {"hook_id": key[0], "event": key[1], **dict.fromkeys(_CENSUS_COUNTERS, 0), **extra}
         rows[key] = row
     return row
+
+
+def _census_label(value: str, limit: int) -> str:
+    """*value* redacted whole, then made a label of at most *limit* characters.
+
+    ``_safe_text`` redacts only a window of the raw text, and a token the window's
+    end cuts in two no longer matches its pattern, so its head could reach the label
+    once redaction shortens the text before it. A census line is at most
+    ``MAX_HOOK_CENSUS_LINE_CHARS``, which bounds the value redacted here.
+    """
+    return _safe_text(redact_sensitive_text(value), limit)
 
 
 def _census_totals(rows: Collection[Mapping[str, Any]]) -> dict[str, int]:
@@ -134,7 +146,7 @@ def parse_hook_census(text: str) -> dict[str, Any]:
             continue
         key = keys.get((hook_id, event))
         if key is None:
-            key = (_safe_text(hook_id, MAX_HOOK_ID_CHARS), _safe_text(event, MAX_HOOK_EVENT_CHARS))
+            key = (_census_label(hook_id, MAX_HOOK_ID_CHARS), _census_label(event, MAX_HOOK_EVENT_CHARS))
             keys[hook_id, event] = key
         row = _census_row(rows, key, total_duration_ms=0)
         if row is None:

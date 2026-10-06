@@ -218,6 +218,34 @@ def test_parse_hook_census_redacts_and_bounds_ids() -> None:
     assert len(hook["hook_id"]) <= 256
 
 
+# How far a label's raw text is read before redaction: plugin_signals._safe_text(value, 256).
+_LABEL_WINDOW = 256 * 4 + 256
+
+
+@pytest.mark.parametrize(
+    ("token", "inside"),
+    [
+        ("AKIA" + "ABCDEFGHIJKLMNOP", 19),
+        ("ghp_" + "Z9" * 18, 20),
+        (
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiIsInJvbGUiOiJyb290In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+            60,
+        ),
+    ],
+    ids=["aws-key", "github-token", "jwt"],
+)
+def test_parse_hook_census_redacts_a_token_cut_by_the_label_window(token: str, inside: int) -> None:
+    """A forged census line: a long JWT redacts to a short marker, which pulls the text after it into the
+    256-character label, and the token there starts *inside* characters before the window ends."""
+    lead = "eyJ" + "A" * 575 + ".eyJ" + "B" * 575 + "." + "C" * 40 + " "
+    hook_id = lead + "x" * (_LABEL_WINDOW - len(lead) - inside - 1) + " " + token
+    parsed = parse_hook_census(json.dumps({"hook_id": hook_id, "event": "PreToolUse", "exit_code": 0}))
+
+    [hook] = parsed["hooks"]
+    assert token[:12] not in hook["hook_id"]
+    assert len(hook["hook_id"]) <= 256
+
+
 def test_parse_hook_census_keeps_the_staged_hook_id_spelling() -> None:
     """Census rows join the staged hook ids by exact string, so spaces in a source path are kept."""
     hook_id = "hooks/my  hooks.json#PreToolUse[0].hooks[0]"

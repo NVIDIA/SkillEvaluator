@@ -286,12 +286,35 @@ def test_repository_identity_runs_two_git_commands(tmp_path: Path, monkeypatch: 
         ("http://user@github.com:8080/Example-Org/example-repo.git", None),
         ("git://git@github.com:9418/Example-Org/example-repo.git", None),
         ("file:///srv/git/Example-Org/example-repo.git", None),
+        # Regression: credentials plus a port gave the slug "8443/example-org/example-repo".
+        ("https://gitlab-ci-token:example-token@gitlab.example.com:8443/Example-Org/example-repo.git", REPO),
+        ("https://user@gitlab.example.com:8443/Example-Org/example-repo.git", REPO),
+        ("ssh://git@gitlab.example.com:2222/Example-Org/example-repo.git", REPO),
     ],
 )
 def test_only_ssh_and_https_origins_establish_identity(tmp_path: Path, origin: str, slug: str | None) -> None:
     repo = _git_repo(tmp_path / "repo", origin=origin)
 
     assert local_repo_slug(repo) == slug
+
+
+@requires_git
+def test_https_origin_with_credentials_and_a_port_keeps_the_missing_dependency_gate(tmp_path: Path) -> None:
+    """Regression: a mangled slug made same-repository refs 'external', so a missing one passed."""
+    origin = "https://gitlab-ci-token:example-token@gitlab.example.com:8443/Example-Org/example-repo.git"
+    repo = _git_repo(tmp_path / "repo", origin=origin)
+    _skill(repo / "skills" / "shared")
+    plugin = _manifest(repo / "plugins" / "p", skills=[f"git::{REPO}::skills::shared", f"git::{REPO}::skills::ghost"])
+
+    result = PluginSchemaValidator().validate(plugin)
+
+    rows = _rows(result)
+    assert rows[f"git::{REPO}::skills::shared"]["state"] == "referenced"
+    assert rows[f"git::{REPO}::skills::ghost"]["state"] == "missing"
+    assert [f.check_name for f in result.findings if f.check_name == "plugin_dependency_missing"] == [
+        "plugin_dependency_missing"
+    ]
+    assert not result.passed
 
 
 @pytest.mark.parametrize(

@@ -10,6 +10,7 @@ import subprocess
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
@@ -375,45 +376,39 @@ def git_origin_https_url(git_root: Path) -> str | None:
         ).strip()
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None
-    # Checked here because _ssh_to_https reads "http://user@host:8080/group/repo"
-    # as an SCP-style "user@host:path" remote.
-    scheme, separator, _rest = remote_url.partition("://")
-    if separator and scheme.lower() not in {"https", "ssh"}:
-        return None
     return _ssh_to_https(remote_url)
 
 
 def _ssh_to_https(remote_url: str) -> str | None:
-    """Convert a git remote URL to a browsable HTTPS URL.
+    """Convert a git remote URL to a browsable HTTPS URL, without credentials.
 
     Handles:
-        ssh://git@host:port/group/repo.git -> https://host/group/repo
-        git@host:group/repo.git            -> https://host/group/repo
-        https://host/group/repo.git        -> https://host/group/repo
+        ssh://git@host:port/group/repo.git        -> https://host/group/repo
+        git@host:group/repo.git                   -> https://host/group/repo
+        https://user:token@host:port/group/repo.git -> https://host:port/group/repo
+
+    The SSH port is dropped (it is not the web port); an HTTPS port is kept.
+    Any other remote gives ``None``.
     """
-    url = remote_url.strip().rstrip("/")
-
-    # Remove .git suffix
-    url = url.removesuffix(".git")
-
-    # ssh://git@host:port/path
-    match = re.match(r"ssh://[^@]+@([^:/]+)(?::\d+)?(/.*)", url)
-    if match:
-        return f"https://{match.group(1)}{match.group(2)}"
-
-    # git@host:path
-    match = re.match(r"[^@]+@([^:]+):(.+)", url)
-    if match:
-        return f"https://{match.group(1)}/{match.group(2)}"
-
-    # Already HTTPS — strip any embedded credentials before rendering a link.
-    if url.startswith("https://"):
-        match = re.match(r"https://[^@]+@(.+)", url)
-        if match:
-            return f"https://{match.group(1)}"
-        return url
-
-    return None
+    url = remote_url.strip().rstrip("/").removesuffix(".git")
+    if "://" not in url:
+        # SCP-style user@host:path. Only a string without a scheme can be one:
+        # "https://user@host:8443/group/repo" would otherwise read as the path
+        # "8443/group/repo" on host "host".
+        match = re.match(r"[^@]+@([^:]+):(.+)", url)
+        return f"https://{match.group(1)}/{match.group(2)}" if match else None
+    try:
+        parts = urlsplit(url)
+        hostname, port = parts.hostname, parts.port
+    except ValueError:  # an unparseable host or port
+        return None
+    if parts.scheme not in {"https", "ssh"} or not hostname:
+        return None
+    if ":" in hostname:  # an IPv6 address
+        hostname = f"[{hostname}]"
+    if parts.scheme == "https" and port is not None:
+        hostname = f"{hostname}:{port}"
+    return f"https://{hostname}{parts.path}"
 
 
 def get_skill_name_from_path(skill_path: Path) -> str:

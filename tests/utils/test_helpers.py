@@ -237,6 +237,28 @@ class TestSshToHttps:
         for remote_url, expected in cases:
             assert _ssh_to_https(remote_url) == expected, remote_url
 
+    @pytest.mark.parametrize(
+        ("remote_url", "expected"),
+        [
+            # Regression: credentials and a port were read as an SCP-style
+            # "user@host:path" remote, so the port became a path segment.
+            (
+                "https://gitlab-ci-token:example-token@gitlab.example.com:8443/group/repo.git",
+                "https://gitlab.example.com:8443/group/repo",
+            ),
+            ("https://user@gitlab.example.com:8443/group/repo.git", "https://gitlab.example.com:8443/group/repo"),
+            ("https://gitlab.example.com:8443/group/repo.git", "https://gitlab.example.com:8443/group/repo"),
+            ("https://user@[2001:db8::1]:8443/group/repo.git", "https://[2001:db8::1]:8443/group/repo"),
+            # The SSH port is not the web port, and the scheme matches in any case.
+            ("ssh://git@gitlab.example.com:2222/group/repo.git", "https://gitlab.example.com/group/repo"),
+            ("SSH://git@gitlab.example.com:2222/group/repo.git", "https://gitlab.example.com/group/repo"),
+            ("http://user@gitlab.example.com:8080/group/repo.git", None),
+            ("https://gitlab.example.com:notaport/group/repo.git", None),
+        ],
+    )
+    def test_url_with_credentials_and_port(self, remote_url: str, expected: str | None) -> None:
+        assert _ssh_to_https(remote_url) == expected
+
 
 class TestMakeTimestampedBasename:
     """Tests for ``make_timestamped_basename`` filename construction."""
@@ -298,6 +320,14 @@ class TestGitOriginHttpsUrl:
             ("http://user@github.com:8080/example/project.git", None),
             ("git://git@github.com:9418/example/project.git", None),
             ("file:///srv/git/example/project.git", None),
+            (
+                "https://gitlab-ci-token:example-token@gitlab.example.com:8443/example/project.git",
+                "https://gitlab.example.com:8443/example/project",
+            ),
+            (
+                "https://user@gitlab.example.com:8443/example/project.git",
+                "https://gitlab.example.com:8443/example/project",
+            ),
         ],
     )
     def test_accepts_only_ssh_and_https_origins(self, tmp_path: Path, origin: str, expected: str | None) -> None:

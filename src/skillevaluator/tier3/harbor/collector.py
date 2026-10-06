@@ -3329,7 +3329,9 @@ def _codex_session_files(sessions: Path) -> list[Path]:
 
     The tree is agent-writable, so the walk never follows a link or reparse
     point and lists at most ``_CODEX_SESSION_WALK_ENTRIES`` entries. It visits
-    names in sorted order, a directory's files before its subdirectories.
+    names in sorted order, a directory's files before its subdirectories. A
+    directory with more entries than the budget has left ends the walk, so the
+    logs found never depend on the order the filesystem lists names in.
     """
     if not (_is_real_directory(sessions.parent) and _is_real_directory(sessions)):
         return []
@@ -3340,12 +3342,15 @@ def _codex_session_files(sessions: Path) -> list[Path]:
         directory = pending.pop()
         try:
             with os.scandir(directory) as iterator:
-                entries = sorted(islice(iterator, budget), key=lambda entry: entry.name)
+                # One entry past the budget shows that the directory does not fit in it.
+                entries = list(islice(iterator, budget + 1))
         except OSError:
             continue
+        if len(entries) > budget:
+            break
         budget -= len(entries)
         subdirectories: list[Path] = []
-        for entry in entries:
+        for entry in sorted(entries, key=lambda entry: entry.name):
             try:
                 metadata = entry.stat(follow_symlinks=False)
             except OSError:

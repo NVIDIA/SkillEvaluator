@@ -35,6 +35,7 @@ from skillevaluator.tier1.commands import run_validation
 from skillevaluator.utils.helpers import find_bundled_plugin_skills
 from skillevaluator.utils.structured_data import StructuredDataError
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
+from skillevaluator.validators.policy import ValidationPolicy, apply_policy
 
 _AP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
 _AP_MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
@@ -498,14 +499,14 @@ def test_unscanned_skills_past_the_reporting_cap_are_counted(tmp_path: Path) -> 
     [truncated] = [f for f in result.findings if f.check_name == "schema_errors_truncated"]
     assert truncated.severity == Severity.HIGH
     assert truncated.metadata == {"actual": 105, "reported": 100, "highest_unreported_severity": "high"}
-    assert "produced 105 findings; only the first 100 are reported" in truncated.message
+    assert "produced 105 findings; only the 100 most severe are reported" in truncated.message
     assert "The most severe of the 5 not reported is HIGH." in truncated.message
 
 
-def test_manifest_field_error_past_the_reporting_cap_still_blocks(
+def test_manifest_field_error_after_the_reporting_cap_is_reported_and_blocks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Whether the manifest passed its field checks is decided over every problem, not the 100 reported."""
+    """A field error after 100 warnings is reported ahead of them, and the manifest fails its field checks."""
     from skillevaluator.plugin_formats import ManifestIssue
     from skillevaluator.validators import plugin_schema
 
@@ -515,11 +516,11 @@ def test_manifest_field_error_past_the_reporting_cap_still_blocks(
     root = _write(tmp_path / "p", {".codex-plugin/plugin.json": _CODEX})
 
     result = _validate(root)
-    assert "schema:name:pattern" not in _checks(result)  # past the cap: counted, not listed
+    assert _checks(result)["schema:name:pattern"] == Severity.HIGH  # ranked ahead of the warnings
     [truncated] = [f for f in result.findings if f.check_name == "schema_errors_truncated"]
-    # The 100 reported findings are MEDIUM; the one past the cap is HIGH, and so is the note that counts it.
-    assert truncated.severity == Severity.HIGH
-    assert truncated.metadata == {"actual": 101, "reported": 100, "highest_unreported_severity": "high"}
+    # The last MEDIUM warning is past the cap, so the note that counts it is MEDIUM.
+    assert truncated.severity == Severity.MEDIUM
+    assert truncated.metadata == {"actual": 101, "reported": 100, "highest_unreported_severity": "medium"}
     assert "plugin_manifest" not in [detail.check_name for detail in result.success_details]
     assert not result.passed
 
@@ -567,12 +568,90 @@ def test_reporting_cap_finding_takes_the_highest_unreported_severity(
     ]
     result = ValidationResult(validator_name="test")
 
-    _add_capped(result, findings, source="Test", noun="findings", file_path="f", suggestion="s")
+    _add_capped(result, findings, policy=None, source="Test", noun="findings", file_path="f", suggestion="s")
 
     [truncated] = [f for f in result.findings if f.check_name == "schema_errors_truncated"]
     assert truncated.severity == expected
     assert truncated.metadata["highest_unreported_severity"] == expected.value
     assert truncated.severity.is_error() == any(severity.is_error() for severity in unreported)
+
+
+def _escalating_policy(*checks: str) -> ValidationPolicy:
+    return ValidationPolicy(profile="custom", severity_overrides=dict.fromkeys(checks, Severity.HIGH))
+
+
+def test_policy_escalation_past_the_reporting_cap_still_blocks(tmp_path: Path) -> None:
+    """Regression: a finding a policy escalates must block even when the cap would push it out of the report.
+
+    The .env finding (MEDIUM) comes after 100 LOW agent findings. The policy is
+    applied after validation and never saw it, so the truncation note was MEDIUM
+    and the plugin passed.
+    """
+    files: dict[str, bytes | str | dict | list] = {".claude-plugin/plugin.json": {"name": "demo"}, ".env": "MODE=dev\n"}
+    for index in range(100):
+        files[f"agents/a{index:03}.md"] = f"---\nname: a{index:03}\ndescription: Helper\ntools: Bash\n---\nYou help.\n"
+    root = _write(tmp_path / "p", files)
+    policy = _escalating_policy("PLUGIN_SCHEMA.plugin_env_file_shipped")
+
+    [result] = apply_policy([PluginSchemaValidator(policy=policy).validate(root)], policy)
+
+    assert not result.passed
+    # The 100 most severe findings are reported, so the escalated one is listed.
+    assert _checks(result)["plugin_env_file_shipped"] == Severity.HIGH
+    [truncated] = [f for f in result.findings if f.check_name == "schema_errors_truncated"]
+    assert truncated.severity == Severity.LOW
+    assert truncated.metadata == {"actual": 101, "reported": 100, "highest_unreported_severity": "low"}
+    assert "produced 101 findings; only the 100 most severe are reported" in truncated.message
+
+
+def test_reporting_cap_ranks_findings_by_the_policy_severity() -> None:
+    """Past the cap, the findings the policy makes the most severe are the ones reported."""
+    from skillevaluator.validators.plugin_schema import MAX_PLUGIN_SCHEMA_FINDINGS, _add_capped, _schema_finding
+
+    findings = [
+        _schema_finding(f"note{index}", message="m", file_path="f", suggestion="s", severity=Severity.LOW)
+        for index in range(MAX_PLUGIN_SCHEMA_FINDINGS)
+    ]
+    findings.append(_schema_finding("escalated", message="m", file_path="f", suggestion="s", severity=Severity.MEDIUM))
+    policy = _escalating_policy("PLUGIN_SCHEMA.escalated")
+    result = ValidationResult(validator_name="test")
+
+    _add_capped(result, findings, policy=policy, source="Test", noun="findings", file_path="f", suggestion="s")
+    apply_policy([result], policy)
+
+    assert [f.check_name for f in result.findings[:2]] == ["escalated", "note0"]
+    assert result.findings[0].severity == Severity.HIGH
+    assert [f.check_name for f in result.findings[-2:]] == ["note98", "schema_errors_truncated"]
+    assert result.findings[-1].severity == Severity.LOW
+    assert not result.passed
+
+
+def test_manifest_success_row_follows_the_policy_severity(tmp_path: Path) -> None:
+    """A field warning the policy escalates to HIGH means the manifest did not pass its field checks."""
+    codex = {key: value for key, value in _CODEX.items() if key != "author"}
+    root = _write(tmp_path / "p", {".codex-plugin/plugin.json": codex})
+    assert "plugin_manifest" in [detail.check_name for detail in _validate(root).success_details]
+    policy = _escalating_policy("PLUGIN_SCHEMA.schema:author:missing")
+
+    [result] = apply_policy([PluginSchemaValidator(policy=policy).validate(root)], policy)
+
+    assert _checks(result)["schema:author:missing"] == Severity.HIGH
+    assert "plugin_manifest" not in [detail.check_name for detail in result.success_details]
+    assert not result.passed
+
+
+def test_manifest_success_row_follows_the_policy_severity_of_mcp_findings(tmp_path: Path) -> None:
+    """An MCP finding the policy escalates to HIGH withholds the manifest success row, like a default HIGH one."""
+    server = {"mcpServers": {"srv": {"command": "npx", "args": ["-y", "some-mcp-server"]}}}
+    root = _write(tmp_path / "p", {".claude-plugin/plugin.json": {"name": "demo"}, ".mcp.json": server})
+    assert "plugin_manifest" in [detail.check_name for detail in _validate(root).success_details]
+    policy = _escalating_policy("MCP_DECLARATION.mcp_unpinned_package")
+
+    [result] = apply_policy([PluginSchemaValidator(policy=policy).validate(root)], policy)
+
+    assert _checks(result)["mcp_unpinned_package"] == Severity.HIGH
+    assert "plugin_manifest" not in [detail.check_name for detail in result.success_details]
+    assert not result.passed
 
 
 def test_declared_component_in_an_unscanned_folder_is_high(tmp_path: Path) -> None:
@@ -585,6 +664,98 @@ def test_declared_component_in_an_unscanned_folder_is_high(tmp_path: Path) -> No
     )
 
     assert _checks(_validate(root))["plugin_component_path_unscanned"] == Severity.HIGH
+
+
+_PRIVILEGED_COMMAND = "---\ndescription: Deploy\nallowed-tools: Bash(*)\n---\nDeploy now\u202e please.\n"
+_BYPASS_AGENT = (
+    "---\nname: helper\ndescription: Helps\ntools: Bash\npermissionMode: bypassPermissions\n---\nYou help.\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("field", "declared", "rel", "content"),
+    [
+        ("commands", "./node_modules/.cache/cmds/", "node_modules/.cache/cmds/deploy.md", _PRIVILEGED_COMMAND),
+        ("agents", "./.venv/agents/", ".venv/agents/helper.md", _BYPASS_AGENT),
+        ("agents", "./__pycache__/agents/", "__pycache__/agents/helper.md", _BYPASS_AGENT),
+    ],
+    ids=["node_modules-commands", "venv-agents", "pycache-agents"],
+)
+def test_declared_component_in_a_vendor_folder_is_high(
+    tmp_path: Path, field: str, declared: str, rel: str, content: str
+) -> None:
+    """Regression: the scans also prune node_modules/, .venv/, .git/, and __pycache__/, so these were never scanned."""
+    root = _write(tmp_path / "p", {".claude-plugin/plugin.json": {"name": "demo", field: declared}, rel: content})
+
+    assert _checks(_validate(root))["plugin_component_path_unscanned"] == Severity.HIGH
+
+
+@pytest.mark.parametrize(
+    ("rel", "check"),
+    [
+        ("commands/evals/deploy.md", "plugin_command_unrestricted_bash"),
+        ("commands/results/deploy.md", "plugin_command_unrestricted_bash"),
+        ("agents/node_modules/helper.md", "plugin_agent_bypass_permissions"),
+    ],
+)
+def test_component_in_a_pruned_folder_inside_a_component_folder_is_listed_and_high(
+    tmp_path: Path, rel: str, check: str
+) -> None:
+    """Regression: listing skipped commands/evals/ and the like, so a loaded command had no inventory row or finding.
+
+    Claude Code loads nested command and agent folders, and the whole-tree
+    scans prune these names, so the file is listed with its checks and the
+    unscanned folder is HIGH.
+    """
+    content = _PRIVILEGED_COMMAND if rel.startswith("commands/") else _BYPASS_AGENT
+    root = _write(tmp_path / "p", {".claude-plugin/plugin.json": {"name": "demo"}, rel: content})
+
+    result = _validate(root)
+
+    assert rel in {row["path"] for row in _rows(result)}
+    checks = _checks(result)
+    assert checks[check] == Severity.HIGH
+    assert checks["plugin_component_path_unscanned"] == Severity.HIGH
+    [unscanned] = [f for f in result.findings if f.check_name == "plugin_component_path_unscanned"]
+    assert unscanned.metadata == {"path": rel}
+    assert unscanned.file_path == str(root / rel)
+    assert not result.passed
+
+
+def test_component_in_an_ordinary_nested_folder_is_not_unscanned(tmp_path: Path) -> None:
+    root = _write(
+        tmp_path / "p",
+        {".claude-plugin/plugin.json": {"name": "demo"}, "commands/ops/deploy.md": _PRIVILEGED_COMMAND},
+    )
+
+    checks = _checks(_validate(root))
+    assert checks["plugin_command_unrestricted_bash"] == Severity.HIGH
+    assert "plugin_component_path_unscanned" not in checks
+
+
+@pytest.mark.parametrize(
+    ("rel", "unscanned"),
+    [
+        ("evals/agents", True),
+        ("node_modules/pkg/skills/x", True),
+        (".venv/agents/a.md", True),
+        ("lib/.git/x.md", True),
+        ("a/__pycache__/x.md", True),
+        ("commands/evals/deploy.md", True),
+        # Bundled-skill discovery scans a skills/<name> folder whatever its name.
+        ("skills/evals", False),
+        ("skills/evals/references/x.md", False),
+        ("skills/node_modules", True),
+        ("skills/a/evals/x", True),
+        ("commands/ops/deploy.md", False),
+    ],
+)
+def test_in_unscanned_folder_matches_every_folder_the_scans_prune(rel: str, unscanned: bool) -> None:
+    from pathlib import PurePosixPath
+
+    from skillevaluator.plugin_paths import _in_unscanned_folder
+
+    assert _in_unscanned_folder(PurePosixPath(rel)) is unscanned
 
 
 def _hidden_skill(name: str) -> str:
@@ -612,6 +783,22 @@ def test_declared_skills_folder_inside_an_artifact_folder_is_scanned(tmp_path: P
     assert _UNSCANNED_CHECK not in checks
     unicode = _unicode_result(root)
     assert any("evals/x" in str(finding.file_path) for finding in unicode.findings)
+    assert not unicode.passed
+
+
+def test_declared_skills_folder_inside_a_vendor_folder_is_scanned(tmp_path: Path) -> None:
+    """Regression: a skills folder declared under node_modules/ was loaded but pruned from every scan."""
+    root = _write(
+        tmp_path / "p",
+        {
+            ".claude-plugin/plugin.json": {"name": "demo", "skills": "./node_modules/pkg/skills"},
+            "node_modules/pkg/skills/x/SKILL.md": _hidden_skill("x"),
+        },
+    )
+
+    assert "plugin_component_path_unscanned" not in _checks(_validate(root))
+    unicode = _unicode_result(root)
+    assert any("node_modules/pkg/skills/x" in str(finding.file_path) for finding in unicode.findings)
     assert not unicode.passed
 
 

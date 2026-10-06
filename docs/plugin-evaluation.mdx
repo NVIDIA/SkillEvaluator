@@ -154,7 +154,9 @@ the components it declares are checked. Then `severity_overrides` cannot lower
 `manifest_unreadable`, and Tier 1 stops after the schema check, as for an unsafe
 manifest. Auto-detection uses the same rule, so such a folder stays a plugin
 instead of becoming a skill. Only a linked, hard-linked, special, or changed
-file fails discovery or fails as `manifest_unsafe`.
+file fails discovery or fails as `manifest_unsafe`. Auto-detection counts such
+a root `plugin.json` as a plugin manifest without reading it, so the folder
+fails closed as a plugin instead of passing as a skill.
 
 Clients open fixed manifest paths. On a case-insensitive filesystem, such as
 the macOS default, a client that opens `.codex-plugin/plugin.json` reads
@@ -281,8 +283,9 @@ plugin schema is not validated. The component fields (`skills`, `commands`,
 `agents`, `hooks`, `mcpServers`, `lspServers`, `outputStyles`,
 `experimental.monitors`, and `settings`) are read for the
 [component inventory](#component-inventory). Declared paths must stay inside
-the plugin root: an absolute, home-relative, drive-letter, or `..` path gets a
-HIGH `plugin_component_path_escape` finding. Claude Code expects `./`-relative
+the plugin root: an absolute, home-relative, or `..` path, or one with a drive
+letter in any part (`./C:/Users`), gets a HIGH `plugin_component_path_escape`
+finding. Claude Code expects `./`-relative
 paths, so a path without `./` gets a MEDIUM `plugin_component_path_style`
 finding. Claude Code expands `${CLAUDE_PLUGIN_ROOT}` only in hook commands and
 MCP server fields, and rejects a manifest whose component path starts with
@@ -536,6 +539,17 @@ elsewhere. A `SKILL.md` deeper inside a skill's own `evals/`, `results/`, or
 `versions/` folder is still a HIGH `plugin_skill_in_unscanned_folder`, as it is
 under `skills/`.
 
+Tier 1 file walks also skip `.git/`, `.venv/`, `node_modules/`, and
+`__pycache__/` at any depth, and the same rules apply to them: a declared
+skills folder inside one, such as `"skills": "./node_modules/pkg/skills"`, is
+scanned as its own skill unit, and a manifest path into one for any other
+component, such as `"agents": "./.venv/agents/"`, is a HIGH
+`plugin_component_path_unscanned`. Component folders are listed whole, because
+clients load nested folders whatever their name. A command, agent, output
+style, or rule file in a skipped folder inside a component folder, such as
+`commands/evals/deploy.md` or `agents/node_modules/helper.md`, is listed and
+checked like any other, and is a HIGH `plugin_component_path_unscanned` too.
+
 ### Reference sources
 
 A skill or rule reference names a public source-control system and a
@@ -680,8 +694,10 @@ classified offline. Nothing is fetched, read, or copied.
 Repository identity fails closed. A ref is compared with the local repository
 only when the repository root is the git top-level and its `origin` remote
 yields an `<owner>/<repo>` slug. SSH (`ssh://` or `git@host:owner/repo`) and
-HTTPS remotes are accepted; any other remote, such as `http://`, `git://`,
-`file://`, or a local path, yields no slug. Comparison is case-insensitive.
+HTTPS remotes are accepted, with or without credentials and a port; any other
+remote, such as `http://`, `git://`, `file://`, or a local path, yields no
+slug, and the reason recorded for each `unresolved` ref names that form (never
+the remote itself). Comparison is case-insensitive.
 Path existence alone never proves identity.
 Without a verified slug, every ref stays `unresolved` and advisory, and the
 success message says the missing-dependency gate could not be evaluated for
@@ -711,9 +727,9 @@ checks are skipped when a plugin bundles no skills.
 | Check | Severity | Flags |
 | --- | --- | --- |
 | `plugin_component_path_missing` | HIGH | A declared component path does not exist |
-| `plugin_component_path_escape` | HIGH | A declared path is absolute, home-relative, or a drive letter, uses `..`, or puts a name right after a root variable (`${CURSOR_PLUGIN_ROOT}servers.json` names a file beside the root) |
+| `plugin_component_path_escape` | HIGH | A declared path is absolute or home-relative, has a drive letter in any part (`./C:/Users`), uses `..`, or puts a name right after a root variable (`${CURSOR_PLUGIN_ROOT}servers.json` names a file beside the root) |
 | `plugin_component_path_unsafe` | HIGH | A path is, or passes through, a symlink, hard link, or special file. It is not followed |
-| `plugin_component_path_invalid` | HIGH | A declaration has the wrong shape for its field, such as a command map entry without exactly one of `source` or `content` |
+| `plugin_component_path_invalid` | HIGH | A declaration has the wrong shape for its field, such as a command map entry without exactly one of `source` or `content`, or a path with a colon that is not a drive letter (an NTFS data stream such as `deploy.md:hidden`) |
 | `plugin_component_path_style` | MEDIUM | A contained-manifest path does not start with `./` |
 | `plugin_component_unreadable` | HIGH | A hooks, LSP, monitors, or settings JSON file is unreadable, invalid, or larger than 256 KiB. Its bypass and environment checks cannot run, so it blocks |
 | `plugin_component_list_truncated` | HIGH | A declared component list, an LSP server map, or a `commands` map has more than 256 entries |
@@ -823,7 +839,8 @@ these forms, because the client that owns the namespace runs them. Bytes that
 are not UTF-8 are replaced, so binary bytes do not hide a script, and a hard
 link (such as pnpm's `node_modules` layout) is read like a regular file,
 because no script content leaves the analyzer. A script that is a symlink, a
-special file, larger than 1 MiB, past the read budget, or beyond the first 32
+special file, rewritten while it is read, larger than 1 MiB, past the read
+budget, or beyond the first 32
 scripts read (missing paths do not count), or a script that names more than 256
 other files, is not analyzed and is reported as `plugin_hook_script_unanalyzed`. So is a hook whose command or
 scripts run more than 2048 distinct files while the plugin downloads something, because the runs past that
@@ -1253,7 +1270,9 @@ skillevaluator similarity-check ./plugins --type plugin --save-catalog ./plugin-
 skillevaluator tier2 ./plugins/my-plugin --catalog ./plugin-catalog.json
 ```
 
-`--type plugin` accepts one plugin root or a directory of plugins. Each plugin
+`--type plugin` accepts one plugin root or a directory of plugins. Plugins in a
+directory are found with the manifest rules of `validate`, so a client manifest
+in another letter case (`.Claude-Plugin/plugin.json`) counts too. Each plugin
 with a description becomes a plugin entry, and each bundled skill with a name
 and description becomes a skill entry. Plugin catalogs use description
 embeddings, so `--full-body` is rejected. A skill-only catalog also works: in

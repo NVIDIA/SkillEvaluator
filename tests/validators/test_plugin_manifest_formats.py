@@ -668,6 +668,28 @@ def test_tier2_profile_and_catalog_discovery_support_new_formats(tmp_path: Path)
     assert profile.members == ("beta",)
 
 
+def test_tier2_catalog_discovery_matches_client_manifests_in_any_case(tmp_path: Path) -> None:
+    """Regression: case variants were left out of catalog comparisons, although detection and the locator take them.
+
+    ``.Claude-Plugin/plugin.json`` was read as the root plugin.json of the
+    ``.Claude-Plugin`` folder, and ``.codex-plugin/Plugin.json`` was not
+    selected at all.
+    """
+    catalog = tmp_path / "plugins"
+    for name, manifest in (
+        ("p1", ".Claude-Plugin/plugin.json"),
+        ("p2", ".claude-plugin/plugin.json"),
+        ("p3", ".codex-plugin/Plugin.json"),
+    ):
+        _write(catalog / name, {manifest: {"name": name}, "skills/s/SKILL.md": _SKILL.format(name="s")})
+        assert detect_content_type(catalog / name) == CONTENT_TYPE_PLUGIN
+    _write(catalog / "legacy", {"Plugin.json": {"name": "legacy"}})
+
+    roots = discover_plugin_roots(catalog, max_plugins=10)
+
+    assert [root.name for root in roots] == ["p1", "p2", "p3"]
+
+
 def test_manifest_declarations_view_and_markdown(tmp_path: Path) -> None:
     single = _validate(_codex(tmp_path / "single"))
     assert manifest_declarations_view(single.metadata["plugin"]["manifest_declarations"]) is None

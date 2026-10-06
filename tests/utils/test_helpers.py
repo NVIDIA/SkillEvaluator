@@ -11,8 +11,10 @@ import pytest
 
 from skillevaluator.utils import find_skills_in_directory, get_skill_name_from_path
 from skillevaluator.utils.helpers import (
+    GitOrigin,
     _ssh_to_https,
     find_bundled_plugin_skill_manifests,
+    git_origin,
     git_origin_https_url,
     preferred_skill_manifests,
     resolve_git_remote_url,
@@ -237,6 +239,28 @@ class TestSshToHttps:
         for remote_url, expected in cases:
             assert _ssh_to_https(remote_url) == expected, remote_url
 
+    @pytest.mark.parametrize(
+        ("remote_url", "expected"),
+        [
+            # Regression: credentials and a port were read as an SCP-style
+            # "user@host:path" remote, so the port became a path segment.
+            (
+                "https://gitlab-ci-token:example-token@gitlab.example.com:8443/group/repo.git",
+                "https://gitlab.example.com:8443/group/repo",
+            ),
+            ("https://user@gitlab.example.com:8443/group/repo.git", "https://gitlab.example.com:8443/group/repo"),
+            ("https://gitlab.example.com:8443/group/repo.git", "https://gitlab.example.com:8443/group/repo"),
+            ("https://user@[2001:db8::1]:8443/group/repo.git", "https://[2001:db8::1]:8443/group/repo"),
+            # The SSH port is not the web port, and the scheme matches in any case.
+            ("ssh://git@gitlab.example.com:2222/group/repo.git", "https://gitlab.example.com/group/repo"),
+            ("SSH://git@gitlab.example.com:2222/group/repo.git", "https://gitlab.example.com/group/repo"),
+            ("http://user@gitlab.example.com:8080/group/repo.git", None),
+            ("https://gitlab.example.com:notaport/group/repo.git", None),
+        ],
+    )
+    def test_url_with_credentials_and_port(self, remote_url: str, expected: str | None) -> None:
+        assert _ssh_to_https(remote_url) == expected
+
 
 class TestMakeTimestampedBasename:
     """Tests for ``make_timestamped_basename`` filename construction."""
@@ -298,6 +322,14 @@ class TestGitOriginHttpsUrl:
             ("http://user@github.com:8080/example/project.git", None),
             ("git://git@github.com:9418/example/project.git", None),
             ("file:///srv/git/example/project.git", None),
+            (
+                "https://gitlab-ci-token:example-token@gitlab.example.com:8443/example/project.git",
+                "https://gitlab.example.com:8443/example/project",
+            ),
+            (
+                "https://user@gitlab.example.com:8443/example/project.git",
+                "https://gitlab.example.com:8443/example/project",
+            ),
         ],
     )
     def test_accepts_only_ssh_and_https_origins(self, tmp_path: Path, origin: str, expected: str | None) -> None:
@@ -310,6 +342,23 @@ class TestGitOriginHttpsUrl:
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
 
         assert git_origin_https_url(tmp_path) is None
+        assert git_origin(tmp_path) == GitOrigin()
+
+    @pytest.mark.parametrize(
+        ("origin", "scheme"),
+        [
+            ("http://user:example-secret@github.com:8080/example/project.git", "http"),
+            ("GIT://github.com/example/project.git", "git"),
+            ("file:///srv/git/example/project.git", "file"),
+            ("/srv/git/example/project.git", None),
+        ],
+    )
+    def test_names_the_scheme_of_an_unsupported_origin(self, tmp_path: Path, origin: str, scheme: str | None) -> None:
+        """An unsupported origin is told apart from a missing one by its scheme alone, never its text."""
+        repo_root = tmp_path / "repo"
+        _init_git_repo(repo_root, origin)
+
+        assert git_origin(repo_root) == GitOrigin(configured=True, https_url=None, scheme=scheme)
 
 
 class TestResolveGitRemoteUrl:

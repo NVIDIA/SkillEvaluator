@@ -57,19 +57,19 @@ class DeclaredPath:
     dot_relative: bool = True
 
 
-def normalize_declared_path(raw: str, root_prefixes: Iterable[str] = ("${CLAUDE_PLUGIN_ROOT}",)) -> DeclaredPath:
+def normalize_declared_path(raw: str, root_prefixes: Iterable[str]) -> DeclaredPath:
     """Normalize one manifest path to a contained root-relative POSIX path.
 
     Claude Code requires ``./``-relative paths (``"."``/``"./"`` names the root).
-    A root placeholder in ``root_prefixes`` names the root only when a separator
-    (``/`` or ``\\``) or nothing follows it: a client expands it as text, so
-    ``${CURSOR_PLUGIN_ROOT}foo/x.sh`` loads ``<root>foo/x.sh`` beside the root,
-    an escape. The inventory passes only the placeholders a format's client
-    expands in manifest paths (:attr:`FormatProfile.manifest_path_prefixes`,
-    Cursor's), so any other leading ``${...}`` is the ``placeholder`` problem.
-    The ``${CLAUDE_PLUGIN_ROOT}`` default is kept for existing callers; Claude
-    Code itself expands no placeholder there. Absolute paths, home-relative
-    paths, drive letters, and ``..`` segments are escapes.
+    ``root_prefixes`` are the root placeholders the format's client expands in
+    manifest paths: callers pass :attr:`FormatProfile.manifest_path_prefixes`,
+    which only Cursor's profile fills, so any other leading ``${...}`` is the
+    ``placeholder`` problem. A root placeholder names the root only when a
+    separator (``/`` or ``\\``) or nothing follows it: a client expands it as
+    text, so ``${CURSOR_PLUGIN_ROOT}foo/x.sh`` loads ``<root>foo/x.sh`` beside
+    the root, an escape. Absolute paths, home-relative paths, a drive letter in
+    any part (``./C:/Users``), and ``..`` segments are escapes; any other colon
+    (an NTFS data stream, ``x.md:hidden``) is ``invalid``.
     """
     text = raw.strip()
     if not text:
@@ -92,8 +92,12 @@ def normalize_declared_path(raw: str, root_prefixes: Iterable[str] = ("${CLAUDE_
     if "${" in normalized or normalized.startswith("$"):
         return DeclaredPath(raw, None, "invalid")
     parts = [part for part in normalized.split("/") if part not in {"", "."}]
-    if any(part == ".." for part in parts):
+    # Windows reads a character and a colon as a drive in any part, so joining
+    # "./C:/Users/x" to the root leaves it; any other colon names a data stream.
+    if any(part == ".." or part[1:2] == ":" for part in parts):
         return DeclaredPath(raw, None, "escape")
+    if any(":" in part for part in parts):
+        return DeclaredPath(raw, None, "invalid")
     rel = PurePosixPath(*parts) if parts else PurePosixPath(".")
     return DeclaredPath(raw, rel, None, dot_relative)
 
@@ -137,10 +141,13 @@ class PluginRootReader:
             return "file" if allow_hard_links or getattr(metadata, "st_nlink", 1) == 1 else "special"
         return "special"
 
-    def _read_bytes(self, rel: PurePosixPath, max_bytes: int, *, config: bool = False) -> bytes:
+    def _read_bytes(
+        self, rel: PurePosixPath, max_bytes: int, *, config: bool = False, allow_hardlinks: bool = False
+    ) -> bytes:
         """Bounded, anchored, no-follow read counted against a read budget; raises :class:`SecurePathError`.
 
         ``config`` charges the read to the separate config budget.
+        ``allow_hardlinks`` also reads a regular file with more than one link.
         """
         used = self.config_bytes_read if config else self.bytes_read
         budget = "config" if config else "inventory"
@@ -149,7 +156,9 @@ class PluginRootReader:
             raise SecurePathError("total_size_limit", f"Plugin {budget} read budget exhausted.")
         try:
             with SecureRoot(self.root) as secure_root:
-                raw, _metadata = secure_root.read_bytes(Path(*rel.parts), min(max_bytes, remaining))
+                raw, _metadata = secure_root.read_bytes(
+                    Path(*rel.parts), min(max_bytes, remaining), allow_hardlinks=allow_hardlinks
+                )
         except SecurePathError as exc:
             if exc.code == "file_size_limit" and remaining < max_bytes:
                 raise SecurePathError(
@@ -181,54 +190,20 @@ class PluginRootReader:
         A hook script is only scanned for evidence (no file content leaves the
         hook risk analyzer), so a hard-linked file, such as a ``node_modules``
         file pnpm links to its store, is read like any other regular file. Links
-        anywhere in the path, special files, a file over ``max_bytes``, and an
-        exhausted read budget raise :class:`SecurePathError`. Platforms without
-        descriptor-anchored ``openat`` keep :class:`SecureRoot`'s single-link rule.
+        anywhere in the path, special files, a file that changes while it is
+        read, a file over ``max_bytes``, and an exhausted read budget raise
+        :class:`SecurePathError`.
         """
-        if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
-            return self._read_bytes(rel, max_bytes)
-        remaining = CONTENT_DEDUP_MAX_TOTAL_BYTES - self.bytes_read
-        if remaining <= 0:
-            raise SecurePathError("total_size_limit", "Plugin inventory read budget exhausted.")
-        limit = min(max_bytes, remaining)
-        shown = rel.as_posix()
-        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-        with SecureRoot(self.root) as secure_root:
-            directory = secure_root.duplicate_posix_root_descriptor()
-            try:
-                for part in rel.parts[:-1]:
-                    child = os.open(part, flags | os.O_DIRECTORY, dir_fd=directory)
-                    os.close(directory)
-                    directory = child
-                descriptor = os.open(
-                    rel.parts[-1], flags | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0), dir_fd=directory
-                )
-            except OSError as exc:
-                raise SecurePathError("unsafe_path", f"Cannot open {shown} without following links: {exc}") from exc
-            finally:
-                os.close(directory)
-        try:
-            metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode):
-                raise SecurePathError("unsafe_path", f"Refusing a path that is not a regular file: {shown}")
-            chunks: list[bytes] = []
-            total = 0
-            while total <= limit:
-                chunk = os.read(descriptor, min(65_536, limit + 1 - total))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-        finally:
-            os.close(descriptor)
-        if total > limit:
-            code = "total_size_limit" if remaining < max_bytes else "file_size_limit"
-            raise SecurePathError(code, f"{shown} is larger than the {limit}-byte read limit", relative_path=shown)
-        self.bytes_read += total
-        return b"".join(chunks)
+        return self._read_bytes(rel, max_bytes, allow_hardlinks=True)
 
     def list_files(self, rel_dir: PurePosixPath, *, suffixes: tuple[str, ...] | None = None) -> list[PurePosixPath]:
-        """Securely list regular files below a contained directory (raises on links)."""
+        """Securely list regular files below a contained directory (raises on links).
+
+        Nothing is pruned: a client loads a nested component folder whatever its
+        name, so ``commands/evals/`` and ``agents/node_modules/`` are listed too,
+        although the Tier 1 whole-tree scans skip them (see
+        :func:`_in_unscanned_folder`).
+        """
         start = self.root if str(rel_dir) == "." else self.root / rel_dir.as_posix()
 
         def _selected(relative: Path) -> bool:
@@ -237,7 +212,6 @@ class PluginRootReader:
         files = discover_secure_files(
             start,
             selected=_selected,
-            excluded_dirs=SCAN_EXCLUDED_DIRS,
             max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
             allow_context_alias=False,
         )
@@ -332,17 +306,29 @@ def _path_problem_finding(
     )
 
 
+# The folders named in plugin_component_path_unscanned messages.
+_UNSCANNED_FOLDERS = "evals/, results/, versions/, .git/, .venv/, node_modules/, __pycache__/"
+_UNSCANNED_SUGGESTION = (
+    "Move the component out of evaluation-output, version-snapshot, VCS, virtualenv, package, and bytecode-cache "
+    "folders."
+)
+
+
 def _in_unscanned_folder(rel: PurePosixPath) -> bool:
     """Whether a plugin-root-relative path is inside a folder that Tier 1 whole-tree scans skip.
 
-    The scans prune ``evals/``, ``results/``, and ``versions/`` (and their
-    dotted forms) at any depth. Only ``skills/<name>`` at the first level of
-    ``skills/`` is scanned anyway, because bundled-skill discovery scans it as
-    a skill.
+    The security, secret, and Unicode scans prune every folder in
+    :data:`~skillevaluator.constants.SCAN_EXCLUDED_DIRS` at any depth:
+    ``evals/``, ``results/``, and ``versions/`` (and their dotted forms),
+    ``.git/``, ``.venv/``, ``node_modules/``, and ``__pycache__/``. Only an
+    evaluation-output or snapshot name at the first level of ``skills/``
+    (``skills/evals/``) is scanned anyway, because bundled-skill discovery
+    scans it as a skill.
     """
     parts = rel.parts
     return any(
-        part in SCAN_ARTIFACT_DIRS and not (index == 1 and parts[0] == DEFAULT_SKILLS_DIR)
+        part in SCAN_EXCLUDED_DIRS
+        and not (index == 1 and parts[0] == DEFAULT_SKILLS_DIR and part in SCAN_ARTIFACT_DIRS)
         for index, part in enumerate(parts)
     )
 
@@ -352,11 +338,9 @@ def _unscanned_path_finding(
 ) -> Finding | None:
     """HIGH when a declared component lives in a folder that Tier 1 whole-tree scans skip.
 
-    ``evals/``, ``results/``, and ``versions/`` (and their dotted forms) hold
-    evaluation output and snapshots, so the security, secret, and Unicode
-    scans prune them. A component the manifest loads from there would never be
-    scanned. Only ``skills/<name>`` at the first level of ``skills/`` is
-    searched, because bundled-skill discovery scans it as a skill.
+    The scans prune evaluation output, snapshots, VCS metadata, virtualenvs,
+    packages, and bytecode caches (:func:`_in_unscanned_folder`), so a
+    component the manifest loads from there would never be scanned.
     """
     rel = declared.rel
     if rel is None or not _in_unscanned_folder(rel):
@@ -364,11 +348,29 @@ def _unscanned_path_finding(
     return _plugin_finding(
         Severity.HIGH,
         "plugin_component_path_unscanned",
-        f"'{field_name}' path {declared.raw!r} is inside a folder that Tier 1 whole-tree scans skip (evals/, "
-        "results/, versions/), so the client loads files that are never security-scanned",
+        f"'{field_name}' path {declared.raw!r} is inside a folder that Tier 1 whole-tree scans skip "
+        f"({_UNSCANNED_FOLDERS}), so the client loads files that are never security-scanned",
         reader.display(manifest_rel),
-        "Move the component out of evaluation-output and version-snapshot folders.",
+        _UNSCANNED_SUGGESTION,
         metadata={"plugin_component_ref": declared.raw},
+    )
+
+
+def _unscanned_file_finding(reader: PluginRootReader, component_type: str, rel: PurePosixPath) -> Finding:
+    """HIGH for a component file a client loads from a nested folder that Tier 1 whole-tree scans skip.
+
+    For example ``commands/evals/deploy.md``: clients load nested component
+    folders whatever their name (:meth:`PluginRootReader.list_files`), and the
+    scans prune that one (:func:`_in_unscanned_folder`).
+    """
+    return _plugin_finding(
+        Severity.HIGH,
+        "plugin_component_path_unscanned",
+        f"{component_type} file '{rel.as_posix()}' is inside a folder that Tier 1 whole-tree scans skip "
+        f"({_UNSCANNED_FOLDERS}), so the client loads a file that is never security-scanned",
+        reader.display(rel),
+        _UNSCANNED_SUGGESTION,
+        metadata={"path": rel.as_posix()},
     )
 
 

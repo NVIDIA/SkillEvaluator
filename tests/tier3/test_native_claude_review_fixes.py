@@ -571,21 +571,60 @@ def test_declared_skill_dirs_claude_code_loads_are_tracked(tmp_path: Path) -> No
 
 
 def test_declared_skill_dirs_that_climb_out_or_are_absolute_are_not_loaded(tmp_path: Path) -> None:
-    """Declared skill paths are normalized like the Tier 1 inventory: '..' and absolute paths are escapes."""
+    """Declared skill paths are normalized like the Tier 1 inventory: '..' and absolute paths are escapes.
+
+    Claude Code expands no root placeholder in manifest component paths, so a
+    skills path that starts with one is not loaded either (Tier 1 reports it as
+    HIGH plugin_component_path_invalid).
+    """
     plugin = _claude(
         tmp_path / "esc-plugin",
-        {"skills": ["./skills/", "./skills/../extra/", "/abs/", "$CLAUDE_PLUGIN_ROOT/more/"]},
+        {
+            "skills": [
+                "./skills/",
+                "./skills/../extra/",
+                "/abs/",
+                "$CLAUDE_PLUGIN_ROOT/more/",
+                "${CLAUDE_PLUGIN_ROOT}/braced/",
+            ]
+        },
         {
             "skills/in-skill/SKILL.md": SKILL.format(name="in-skill"),
             "extra/extra-skill/SKILL.md": SKILL.format(name="extra-skill"),
             "abs/abs-skill/SKILL.md": SKILL.format(name="abs-skill"),
             "more/more-skill/SKILL.md": SKILL.format(name="more-skill"),
+            "braced/braced-skill/SKILL.md": SKILL.format(name="braced-skill"),
         },
     )
 
     staged = ClaudeCodeAdapter().staged_skills(_prepare(plugin, tmp_path).native_source)
 
-    assert sorted(name for name, _rel, _copy_from in staged) == ["in-skill", "more-skill"]
+    assert sorted(name for name, _rel, _copy_from in staged) == ["in-skill"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "./extra-skills",
+        "extra-skills/",
+        "${CLAUDE_PLUGIN_ROOT}/extra-skills",
+        "$CLAUDE_PLUGIN_ROOT/extra-skills",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "../extra-skills",
+    ],
+)
+def test_native_declared_paths_follow_the_tier1_rule(raw: str) -> None:
+    """Tier 3 staging reads a plugin.json path exactly as the Tier 1 inventory does (CLAUDE_PROFILE)."""
+    from pathlib import PurePosixPath
+
+    from skillevaluator.plugin_formats import CLAUDE_PROFILE
+    from skillevaluator.plugin_paths import normalize_declared_path
+    from skillevaluator.tier3.plugin_native import declared_plugin_paths
+
+    tier1 = normalize_declared_path(raw, CLAUDE_PROFILE.manifest_path_prefixes).rel
+    expected = [tier1] if tier1 is not None and tier1 != PurePosixPath(".") else []
+
+    assert declared_plugin_paths(raw) == expected
 
 
 def test_member_skill_whose_name_is_already_taken_fails_closed(tmp_path: Path) -> None:

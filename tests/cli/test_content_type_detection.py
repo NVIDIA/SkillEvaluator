@@ -508,14 +508,73 @@ class TestAgentPluginsRootManifestDetection:
         assert _detect_from_file(root / "plugin.json") == CONTENT_TYPE_PLUGIN
         assert detect_content_type(root) == CONTENT_TYPE_PLUGIN
 
-    def test_hard_linked_manifest_is_not_read_for_the_opt_in(self, tmp_path: Path) -> None:
-        """The opt-in reads plugin.json like every other manifest read, so a hard link is refused, not parsed."""
+    def test_hard_linked_manifest_is_a_plugin_that_fails_closed(self, tmp_path: Path) -> None:
+        """Regression: a hard-linked root plugin.json was detected as a skill, so no plugin check ran.
+
+        The opt-in reads plugin.json like every other manifest read, so a hard
+        link is refused, not parsed. The locator refuses it too, so detection
+        counts it as a plugin manifest and validation fails closed.
+        """
+        from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
+
         root = self._plugin_with_skills(tmp_path / "p", f'{{"$schema": "{self._SCHEMA}", "name": "x"}}'.encode())
         os.link(root / "plugin.json", tmp_path / "alias.json")
 
         with pytest.raises(SecurePathError):
             agent_plugins_path_opt_in(root / "plugin.json")
-        assert _detect_from_file(root / "plugin.json") is None
+        assert _detect_from_file(root / "plugin.json") == CONTENT_TYPE_PLUGIN
+        assert detect_content_type(root) == CONTENT_TYPE_PLUGIN
+        with pytest.raises(PluginManifestPathError):
+            locate_plugin_manifest(root)
+
+    @pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+    @pytest.mark.parametrize("name", ["plugin.json", "Plugin.json"])
+    def test_symlinked_manifest_is_a_plugin_that_fails_closed(self, tmp_path: Path, name: str) -> None:
+        """A linked root plugin.json is never read, opted in or not; the locator refuses it, so it marks a plugin."""
+        from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
+
+        root = self._plugin_with_skills(tmp_path / "p", b'{"name": "legacy"}')
+        (root / "plugin.json").unlink()
+        (root / "real.json").write_text(f'{{"$schema": "{self._SCHEMA}", "name": "x"}}')
+        (root / name).symlink_to("real.json")
+
+        assert _detect_from_file(root / name) == CONTENT_TYPE_PLUGIN
+        assert detect_content_type(root) == CONTENT_TYPE_PLUGIN
+        with pytest.raises(PluginManifestPathError):
+            locate_plugin_manifest(root)
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are unavailable")
+    def test_special_file_manifest_is_a_plugin_that_fails_closed(self, tmp_path: Path) -> None:
+        """A root plugin.json that is a named pipe is not opened; the locator refuses it, so it marks a plugin."""
+        from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
+
+        root = self._plugin_with_skills(tmp_path / "p", b"{}")
+        (root / "plugin.json").unlink()
+        os.mkfifo(root / "plugin.json")
+
+        assert _detect_from_file(root / "plugin.json") == CONTENT_TYPE_PLUGIN
+        assert detect_content_type(root) == CONTENT_TYPE_PLUGIN
+        with pytest.raises(PluginManifestPathError):
+            locate_plugin_manifest(root)
+
+    def test_hard_linked_manifest_fails_validation_as_a_plugin(self, tmp_path: Path) -> None:
+        """End to end: the hard-linked manifest's hook used to pass unchecked as a skill; now the run fails closed."""
+        from skillevaluator.tier1.commands import run_validation
+
+        root = self._plugin_with_skills(tmp_path / "p", b"{}")
+        (root / "plugin.json").unlink()
+        manifest = f'{{"$schema": "{self._SCHEMA}", "name": "x", "hooks": "./hooks/hooks.json"}}'
+        (root / "real").mkdir()
+        (root / "real" / "manifest.json").write_text(manifest)
+        os.link(root / "real" / "manifest.json", root / "plugin.json")
+
+        content_type = detect_content_type(root)
+        results = run_validation(root, checks="schema", content_type=content_type)
+
+        assert content_type == CONTENT_TYPE_PLUGIN
+        [schema] = results
+        assert not schema.passed
+        assert [finding.check_name for finding in schema.findings] == ["manifest_outside_root"]
 
     def test_manifest_over_the_opt_in_bound_opts_in_unread(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -153,7 +153,9 @@ the components it declares are checked. Then `severity_overrides` cannot lower
 `manifest_unreadable`, and Tier 1 stops after the schema check, as for an unsafe
 manifest. Auto-detection uses the same rule, so such a folder stays a plugin
 instead of becoming a skill. Only a linked, hard-linked, special, or changed
-file fails discovery or fails as `manifest_unsafe`.
+file fails discovery or fails as `manifest_unsafe`. Auto-detection counts such
+a root `plugin.json` as a plugin manifest without reading it, so the folder
+fails closed as a plugin instead of passing as a skill.
 
 Clients open fixed manifest paths. On a case-insensitive filesystem, such as
 the macOS default, a client that opens `.codex-plugin/plugin.json` reads

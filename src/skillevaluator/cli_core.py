@@ -44,7 +44,7 @@ from skillevaluator.utils.secure_fs import SecurePathError, stat_is_link_or_repa
 
 
 def _root_plugin_json_opts_in(path: Path) -> bool:
-    """Return whether the root ``plugin.json`` at *path* declares an Agent Plugins ``$schema``.
+    """Return whether the root ``plugin.json`` at *path* marks a plugin.
 
     A root ``plugin.json`` is an Agent Plugins v1 manifest only when it opts in
     with that ``$schema``; any other ``plugin.json`` is not a plugin manifest.
@@ -53,13 +53,15 @@ def _root_plugin_json_opts_in(path: Path) -> bool:
     detection and validation always agree: unparseable or non-UTF-8 JSON that
     names the Agent Plugins schema host still marks a plugin, so its error is
     reported rather than hidden, and a file over the manifest size bound is
-    parsed whole up to the lenient bound. Only a file that cannot be read
-    safely (a link or special file) does not count.
+    parsed whole up to the lenient bound. A file that cannot be read safely (a
+    link, a hard-linked or special file, or one that changes while it is read)
+    also marks a plugin: the locator refuses it, so validation fails closed
+    instead of checking the folder as a skill without the plugin checks.
     """
     try:
         return agent_plugins_path_opt_in(path)
     except (OSError, SecurePathError, ValueError):
-        return False
+        return True
 
 
 def _detect_from_file(path: Path) -> str | None:
@@ -181,9 +183,11 @@ def _root_markers(path: Path) -> _RootMarkers | None:
                 elif name in PLUGIN_MANIFEST_FILES and non_directory:
                     plugin = True
                 elif folded == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE:
-                    # Only a regular root plugin.json that declares the Agent
-                    # Plugins $schema marks a plugin (bounded, no-follow read).
-                    if stat.S_ISREG(metadata.st_mode) and _root_plugin_json_opts_in(path / name):
+                    # A regular root plugin.json marks a plugin when it declares
+                    # the Agent Plugins $schema (bounded, no-follow read). A link
+                    # or special file is never read: the locator refuses it, so
+                    # it marks a plugin that then fails closed.
+                    if non_directory and (not stat.S_ISREG(metadata.st_mode) or _root_plugin_json_opts_in(path / name)):
                         plugin = True
                 elif folded in NATIVE_MANIFEST_DIRS_FOLDED:
                     # Presence is enough for auto-detection (any spelling: a

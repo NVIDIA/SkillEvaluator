@@ -4,6 +4,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 0.5.0 - 2026-10-06
+
 ### Added
 
 - Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for

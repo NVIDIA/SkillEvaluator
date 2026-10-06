@@ -931,8 +931,10 @@ stages a server.
     `pkg@1.2.3`, `pkg==1.2.3`, `--from pkg==1.2.3`, a git or URL spec with a
     40-character commit SHA, `image:1.2.3`, or `image@sha256:...`. Every
     package the runner installs must be exact, including each `uvx --with`
-    requirement. The check and the dependency audit share one exact-version
-    rule per ecosystem: an npm version such as `1.2.3`, `=1.2.3`, or `v1.2.3`,
+    (`-w`) requirement; a `uvx --with-requirements` file makes the server
+    unpinned, because its packages are not read. The check and the dependency
+    audit share one exact-version rule per ecosystem: an npm version such as
+    `1.2.3`, `=1.2.3`, or `v1.2.3`,
     and a PyPI `==`, `===`, or uv `@` pin of one valid PEP 440 version, in any
     spelling PEP 440 accepts (`1.0rc1`, `v1.2.3`, `1.0-1`), which pip-audit
     gets as `name==version`. Wildcards and ranges are not exact. A `===` pin of
@@ -1188,7 +1190,9 @@ For plugins, the audit also covers npm packages and container images:
 
 The packages that `uvx`, `uv tool run`, and `pipx run` MCP servers install
 (`pkg==1.2.3`, or uv's `pkg@1.2.3`, including `uvx --with` requirements) join
-the pip-audit batch with the role `mcp`.
+the pip-audit batch with the role `mcp`. A `uvx --with-requirements` file gets
+the INFO `dependency-version-unverified` finding, because its packages are not
+read.
 
 Plugin files are never handed to a scanner. Exact npm pins are written into a
 synthesized name-and-version-only lockfile in a temporary directory, so no

@@ -843,6 +843,7 @@ _UVX_VALUE_FLAGS = frozenset(
     {
         "--from",
         "--with",
+        "-w",
         "--with-editable",
         "--with-requirements",
         "-p",
@@ -858,6 +859,9 @@ _UVX_VALUE_FLAGS = frozenset(
         "--constraints",
         "--overrides",
         "--build-constraints",
+        "-b",
+        "--config-setting",
+        "-C",
         "--env-file",
         "--directory",
         "--project",
@@ -1021,7 +1025,8 @@ class RunnerInvocation:
       positional argument;
     * ``pypi`` (``uvx``, ``uv tool run``, ``pipx run``): the ``--from`` or
       ``--spec`` requirement, else the first positional argument, then every
-      ``uvx --with`` requirement;
+      ``uvx --with`` (``-w``) requirement; the files of ``uvx
+      --with-requirements`` are ``requirement_files``, whose packages are not read;
     * ``deno`` (``deno run``): the module it runs, an ``npm:`` or ``jsr:``
       spec, a URL, or a local script;
     * ``container`` (``docker``, ``podman``, or ``nerdctl run``): the image.
@@ -1034,6 +1039,7 @@ class RunnerInvocation:
     ecosystem: RunnerEcosystem
     runner: str
     specs: tuple[str, ...]
+    requirement_files: tuple[str, ...] = ()
 
     @property
     def npm_specs(self) -> tuple[str, ...]:
@@ -1250,17 +1256,23 @@ def _npm_invocation(
 def _uv_invocation(runner: str, args: list[str]) -> RunnerInvocation:
     """``uvx`` / ``uv tool run``: the ``--from`` requirement (else the command), then every ``--with`` requirement.
 
-    Both options count only before the command; after it they are the
-    server's arguments. ``--with`` takes one or more comma-separated
-    requirements, and uv installs them next to the package. Without a command
-    uv only lists the installed tools, so it installs nothing.
+    These options count only before the command; after it they are the
+    server's arguments. ``--with`` (``-w``) takes one or more comma-separated
+    requirements, and uv installs them next to the package, as it does the
+    requirements in each ``--with-requirements`` file. Without a command uv
+    only lists the installed tools, so it installs nothing.
     """
     options, command = _runner_options(args, _UVX_VALUE_FLAGS)
     package = _package_argument(options, command, "--from")
     if package is None:
         return RunnerInvocation("pypi", runner, ())
-    extras = (item.strip() for value in _flag_values(options, ("--with",)) for item in value.split(","))
-    return RunnerInvocation("pypi", runner, (package, *(item for item in extras if item)))
+    extras = (item.strip() for value in _flag_values(options, ("--with", "-w")) for item in value.split(","))
+    return RunnerInvocation(
+        "pypi",
+        runner,
+        (package, *(item for item in extras if item)),
+        requirement_files=tuple(_flag_values(options, ("--with-requirements",))),
+    )
 
 
 def is_local_spec(spec: str) -> bool:
@@ -1434,7 +1446,11 @@ def _classify_invocation(invocation: RunnerInvocation) -> McpPinning:
         status: PinStatus = "not_applicable" if invocation.ecosystem == "npm" else "unpinned"
         return McpPinning(status, f"{runner} invocation without a package spec")
     classify = _classify_npm_spec if invocation.ecosystem == "npm" else _classify_python_spec
-    return _prefixed(f"{runner}: ", _classify_spec_list(specs, classify))
+    pin = _prefixed(f"{runner}: ", _classify_spec_list(specs, classify))
+    if pin.status != "unpinned" and invocation.requirement_files:
+        shown = _shown(f"--with-requirements {invocation.requirement_files[0]}")
+        return McpPinning("unpinned", f"{runner}: the packages of {shown!r} are not read, so they cannot be checked")
+    return pin
 
 
 def classify_mcp_pinning(config: Any) -> McpPinning:

@@ -1070,7 +1070,8 @@ class DependencySecurityValidator(ValidatorBase):
         the reader the pinning check uses. Exact npm specs (``pkg@1.2.3``) join
         the npm audit and exact PyPI specs (``pkg==1.2.3`` or ``pkg@1.2.3``,
         including ``uvx --with`` requirements) the pip-audit batch, with the role
-        ``mcp``, one audit per MCP config file; floating specs get the INFO
+        ``mcp``, one audit per MCP config file; floating specs, and each ``uvx
+        --with-requirements`` file (its packages are not read), get the INFO
         ``dependency-version-unverified`` finding. Local paths are skipped.
         """
         result = ValidationResult()
@@ -1091,6 +1092,10 @@ class DependencySecurityValidator(ValidatorBase):
                     python_declaration = _python_runner_declaration(spec)
                     if python_declaration is not None:
                         pypi.setdefault(label, []).append(python_declaration)
+                for requirements in invocation.requirement_files:
+                    # The file's packages are not read, so they are reported unverified rather than skipped.
+                    unread = DependencyDeclaration(f"--with-requirements {requirements}", None, None, "mcp", None)
+                    pypi.setdefault(label, []).append(unread)
         summary = self._summary.setdefault("npm", eco.empty_ecosystem_summary())
         for label, declarations in npm.items():
             result.add_message(f"Auditing {label} ({len(declarations)} npm package(s) an MCP runner installs)")

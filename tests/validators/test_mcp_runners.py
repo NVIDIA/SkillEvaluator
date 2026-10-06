@@ -139,6 +139,39 @@ def test_uv_tool_run_reads_with_requirements_too() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("config", "specs"),
+    [
+        ({"command": "uvx", "args": ["-w", "dep==1.0.0", "server-tool"]}, ("server-tool", "dep==1.0.0")),
+        ({"command": "uv", "args": ["tool", "run", "-w", "dep==1.0.0", "server-tool"]}, ("server-tool", "dep==1.0.0")),
+        (
+            {"command": "uvx", "args": ["-w", "floating-dep", "server-tool==1.0.0"]},
+            ("server-tool==1.0.0", "floating-dep"),
+        ),
+        ({"command": "uvx", "args": ["-b", "constraints.txt", "-C", "k=v", "srv==1.0"]}, ("srv==1.0",)),
+    ],
+)
+def test_uvx_short_options_are_read_like_their_long_forms(config: dict[str, Any], specs: tuple[str, ...]) -> None:
+    """Regression: '-w' (--with), '-b', and '-C' were read as switches, so their value became the package."""
+    invocation = parse_mcp_runner(config)
+    assert invocation is not None and invocation.specs == specs
+    assert classify_mcp_pinning(config).status == ("pinned" if specs == ("srv==1.0",) else "unpinned")
+
+
+def test_uvx_with_requirements_file_is_unpinned() -> None:
+    """Regression: the packages of '--with-requirements reqs.txt' were never checked, yet the server was pinned."""
+    config = {"command": "uvx", "args": ["--with-requirements", "reqs.txt", "mcp-server==1.0.0"]}
+
+    invocation = parse_mcp_runner(config)
+    pin = classify_mcp_pinning(config)
+
+    assert invocation is not None and invocation.requirement_files == ("reqs.txt",)
+    assert (pin.status, pin.detail) == (
+        "unpinned",
+        "uvx: the packages of '--with-requirements reqs.txt' are not read, so they cannot be checked",
+    )
+
+
 # --------------------------------------------------------------------------- #
 # A runner's options end at the package it runs                               #
 # --------------------------------------------------------------------------- #
@@ -596,6 +629,18 @@ def test_audit_reads_a_runner_through_its_wrapper(tmp_path: Path, pip_audit: _Fa
     assert packages["node_modules/lodash"] == {"version": "4.17.20"}
     [pip_call] = pip_audit.calls
     assert pip_call["files"] == {"requirements-0.txt": "mcp-server-fetch==2024.11.25\n"}
+
+
+def test_audit_reports_a_uvx_requirements_file_as_unverified(tmp_path: Path, pip_audit: _FakeTool) -> None:
+    server = {"command": "uvx", "args": ["--with-requirements", "reqs.txt", "mcp-server==1.0.0"]}
+    result = _audit(tmp_path / "demo", {"srv": server})
+
+    [call] = pip_audit.calls
+    assert call["files"] == {"requirements-0.txt": "mcp-server==1.0.0\n"}
+    unverified = [
+        f.metadata["declared_constraint"] for f in result.findings if f.check_name == "dependency-version-unverified"
+    ]
+    assert unverified == ["--with-requirements reqs.txt"]
 
 
 def test_pip_audit_gets_every_exact_pep440_spelling_as_name_equals_version(

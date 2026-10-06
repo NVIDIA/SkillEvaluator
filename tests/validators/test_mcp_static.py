@@ -114,6 +114,39 @@ def test_command_shell_inline_program_forms_are_blocked(config) -> None:
 
 
 @pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "nohup", "args": ["bash", "-c", "python3 -m http.server"]},
+        {"command": "env", "args": ["nohup", "bash", "-c", "python3 -m http.server"]},
+        {"command": "timeout", "args": ["600", "sh", "-c", "python3 -m http.server"]},
+        {"command": "timeout --signal KILL 600 sh -c startserver"},
+        {"command": "nice", "args": ["-n", "5", "bash", "-c", "startserver"]},
+        {"command": "stdbuf", "args": ["-oL", "sh", "-c", "startserver"]},
+        {"command": "setsid", "args": ["-w", "sh", "-c", "startserver"]},
+        {"command": "time", "args": ["-p", "sh", "-c", "startserver"]},
+        {"command": "sudo", "args": ["-u", "app", "VAR=1", "bash", "-c", "startserver"]},
+        {"command": "doas", "args": ["-u", "app", "sh", "-c", "startserver"]},
+    ],
+)
+def test_shell_behind_a_command_wrapper_is_still_read_as_a_shell(config: dict) -> None:
+    """Regression: only env was looked through, so nohup, timeout, and other wrappers hid 'bash -c'."""
+    assert "mcp_command_dangerous_form" in _checks(validate_mcp_server_declaration("s", config, "p.json"))
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "nohup", "args": ["node", "server.js"]},
+        {"command": "timeout", "args": ["60", "bash", "server.sh", "-c"]},
+        {"command": "sudo", "args": ["-u", "bash", "node", "server.js"]},
+        {"command": "nohup"},
+    ],
+)
+def test_a_wrapped_command_without_an_inline_program_is_not_dangerous_form(config: dict) -> None:
+    assert "mcp_command_dangerous_form" not in _checks(validate_mcp_server_declaration("s", config, "p.json"))
+
+
+@pytest.mark.parametrize(
     "command",
     [
         "bash -c 'node server.js' /usr/bin/env",

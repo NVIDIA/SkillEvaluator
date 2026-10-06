@@ -343,6 +343,10 @@ def test_remote_code_evasions_are_caught(command: str) -> None:
         "uvx some-linter check",
         # Regression: the hook check knew only the .exe and .cmd runner shims; the MCP checks also read .ps1.
         "npx.ps1 -y some-formatter --write .",
+        # Regression: a wrapper's own option value ('-u HOME', '-n 5', '60') was read as the command.
+        "env -u HOME npx -y some-formatter --write .",
+        "nice -n 5 npx -y some-formatter --write .",
+        "timeout 60 npx -y some-formatter --write .",
     ],
 )
 def test_unpinned_package_runner_hooks_are_medium(tmp_path: Path, command: str) -> None:

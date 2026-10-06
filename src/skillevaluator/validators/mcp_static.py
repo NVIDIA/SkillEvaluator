@@ -368,19 +368,81 @@ _ENV_VALUE_LONG_OPTIONS: tuple[str, ...] = ("unset", "chdir", "argv0")
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_]\w*=")
 
 
+@dataclass(frozen=True)
+class _Wrapper:
+    """A program that runs the command after its own options: ``nohup cmd``, ``timeout 60 cmd``."""
+
+    # Options that take the next word as their value.
+    value_options: frozenset[str] = frozenset()
+    # Words between the options and the command: timeout's duration.
+    operands: int = 0
+    # NAME=value words before the command set its environment (sudo).
+    assignments: bool = False
+
+    def command(self, words: list[str]) -> list[str]:
+        """The command line this wrapper runs, given the wrapper's own arguments."""
+        index = 0
+        while index < len(words) and words[index].startswith("-") and words[index] != "-":
+            if words[index] == "--":
+                index += 1
+                break
+            index += 2 if words[index] in self.value_options else 1
+        while self.assignments and index < len(words) and _ENV_ASSIGNMENT_RE.match(words[index]):
+            index += 1
+        return words[index + self.operands :]
+
+
+# Programs that run the command after their options; env, which also reads NAME=value
+# assignments and a '-S' string, is read by _env_command.
+_WRAPPERS: dict[str, _Wrapper] = {
+    "nohup": _Wrapper(),
+    "setsid": _Wrapper(),
+    "nice": _Wrapper(frozenset({"-n", "--adjustment"})),
+    "stdbuf": _Wrapper(frozenset({"-i", "--input", "-o", "--output", "-e", "--error"})),
+    "time": _Wrapper(frozenset({"-f", "--format", "-o", "--output"})),
+    "timeout": _Wrapper(frozenset({"-k", "--kill-after", "-s", "--signal"}), operands=1),
+    "sudo": _Wrapper(
+        frozenset(
+            {
+                *("-u", "--user", "-g", "--group", "-U", "--other-user", "-C", "--close-from", "-D", "--chdir"),
+                *("-p", "--prompt", "-r", "--role", "-t", "--type", "-T", "--command-timeout"),
+            }
+        ),
+        assignments=True,
+    ),
+    "doas": _Wrapper(frozenset({"-u", "-C", "-a"})),
+}
+
+
 def _shell_invocation(command: str, args: list[str]) -> tuple[str, list[str]] | None:
     """``(shell, its arguments)`` when an MCP command runs a shell interpreter, else ``None``.
 
-    The command is read like every other MCP command (:func:`_command_argv`). An
-    ``env`` wrapper is looked through: its options, ``NAME=value`` assignments,
-    and ``-S`` string (``env -i PATH=/bin bash -c ...``, ``/usr/bin/env -S "sh -c ..."``).
+    The command is read like every other MCP command (:func:`_command_argv`),
+    through any wrapper (``env -i PATH=/bin bash -c ...``, ``/usr/bin/env -S "sh -c ..."``,
+    ``nohup bash -c ...``, ``timeout 600 sh -c ...``).
     """
     argv = _command_argv(command, args)
-    while argv and _command_basename(argv[0]) == "env":
-        argv = _env_command(argv[1:])
     if argv and _command_basename(argv[0]) in _SHELL_INTERPRETERS:
         return _command_basename(argv[0]), argv[1:]
     return None
+
+
+def _wrapped_command(argv: list[str]) -> list[str]:
+    """The command that ``argv`` runs through its wrappers: ``env -i A=1 nohup sh -c x`` runs ``sh -c x``.
+
+    ``env`` is read with its options, ``NAME=value`` assignments, and ``-S``
+    string (:func:`_env_command`), and the other wrappers in ``_WRAPPERS`` with
+    their own options. Empty when a wrapper names no command.
+    """
+    while argv:
+        name = _command_basename(argv[0])
+        if name == "env":
+            argv = _env_command(argv[1:])
+        elif name in _WRAPPERS:
+            argv = _WRAPPERS[name].command(argv[1:])
+        else:
+            break
+    return argv
 
 
 def _env_command(words: list[str]) -> list[str]:
@@ -902,7 +964,7 @@ _RUNNER_COMMANDS = frozenset(
     {"npx", "bunx", "pnpx", "pnpm", "yarn", "npm", "uvx", "uv", "pipx", "deno", *_CONTAINER_RUNTIMES}
 )
 # The programs whose name tells _command_argv that a 'command' with spaces is one program path.
-_NAMED_PROGRAMS = frozenset({*_RUNNER_COMMANDS, *_SHELL_INTERPRETERS, "env"})
+_NAMED_PROGRAMS = frozenset({*_RUNNER_COMMANDS, *_SHELL_INTERPRETERS, "env", *_WRAPPERS})
 
 
 @dataclass(frozen=True)
@@ -978,9 +1040,12 @@ def _command_argv(command: str, args: list[str]) -> list[str]:
     may hold a whole command line (``npx -y pkg``, ``bash -c node``), which is
     split into words. Its first word decides. The string is one program only when
     it starts like a path (its first word has a ``/`` or ``\\``) that names no
-    runner, shell, or ``env``, while the whole string does. So ``npx -y pkg
+    runner, shell, or wrapper, while the whole string does. So ``npx -y pkg
     /srv/docker`` and ``bash -c x /usr/bin/env`` are command lines, whatever
     their last path segment names.
+
+    A wrapper such as ``env``, ``nohup``, or ``timeout`` is looked through
+    (:func:`_wrapped_command`); a wrapper that names no command is the program.
     """
     words = command.split()
     path_with_spaces = (
@@ -988,7 +1053,8 @@ def _command_argv(command: str, args: list[str]) -> list[str]:
         and _command_basename(words[0]) not in _NAMED_PROGRAMS
         and _command_basename(command) in _NAMED_PROGRAMS
     )
-    return [command, *args] if path_with_spaces else [*words, *args]
+    argv = [command, *args] if path_with_spaces else [*words, *args]
+    return _wrapped_command(argv) or argv
 
 
 def _argv(config: Any) -> list[str] | None:

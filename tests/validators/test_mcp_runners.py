@@ -281,6 +281,47 @@ def test_a_command_line_that_only_ends_in_a_runner_path_is_not_that_runner() -> 
 
 
 # --------------------------------------------------------------------------- #
+# A wrapper such as env, nohup, or timeout is looked through                  #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (
+            {"command": "env", "args": ["NODE_ENV=production", "npx", "-y", "some-mcp-server"]},
+            ("npm", "npx", ("some-mcp-server",)),
+        ),
+        ({"command": "/usr/bin/env", "args": ["npx", "-y", "some-mcp-server"]}, ("npm", "npx", ("some-mcp-server",))),
+        (
+            {"command": "env", "args": ["-i", "PATH=/usr/bin", "uvx", "mcp-server-fetch"]},
+            ("pypi", "uvx", ("mcp-server-fetch",)),
+        ),
+        ({"command": "env -u HOME npx -y some-mcp-server"}, ("npm", "npx", ("some-mcp-server",))),
+        ({"command": "env", "args": ["docker", "run", "img"]}, ("container", "docker run", ("img",))),
+        ({"command": "nohup", "args": ["npx", "-y", "pkg"]}, ("npm", "npx", ("pkg",))),
+        ({"command": "timeout", "args": ["-s", "KILL", "600", "uvx", "pkg"]}, ("pypi", "uvx", ("pkg",))),
+        ({"command": "nice", "args": ["-n", "10", "npx", "pkg"]}, ("npm", "npx", ("pkg",))),
+        ({"command": "stdbuf", "args": ["-o", "L", "npx", "pkg"]}, ("npm", "npx", ("pkg",))),
+        ({"command": "setsid", "args": ["-f", "time", "-p", "npx", "pkg"]}, ("npm", "npx", ("pkg",))),
+        ({"command": "sudo", "args": ["-u", "app", "-E", "MODE=1", "npx", "pkg"]}, ("npm", "npx", ("pkg",))),
+        ({"command": "doas", "args": ["-u", "app", "env", "nohup", "npx", "pkg"]}, ("npm", "npx", ("pkg",))),
+    ],
+)
+def test_a_wrapped_runner_is_read_through_its_wrapper(config: dict[str, Any], expected: tuple) -> None:
+    """Regression: 'env ... npx -y pkg' was a local binary ('env'), so pinning, the image lookup, and the audit
+    skipped the package that the wrapped runner installs."""
+    invocation = parse_mcp_runner(config)
+    assert invocation is not None
+    assert (invocation.ecosystem, invocation.runner, invocation.specs) == expected
+    assert classify_mcp_pinning(config).status == "unpinned"
+
+
+@pytest.mark.parametrize("command", ["env", "nohup", "timeout"])
+def test_a_wrapper_that_runs_nothing_is_a_local_binary(command: str) -> None:
+    pin = classify_mcp_pinning({"command": command, "args": ["60"] if command == "timeout" else []})
+    assert (pin.status, pin.detail) == ("not_applicable", f"local interpreter, script, or binary ({command!r})")
+
+
+# --------------------------------------------------------------------------- #
 # One exact-version matcher per ecosystem                                     #
 # --------------------------------------------------------------------------- #
 def test_npm_equals_pin_is_pinned_like_the_audit_reads_it() -> None:
@@ -491,6 +532,21 @@ def test_audit_reads_runner_paths_with_spaces(tmp_path: Path, pip_audit: _FakeTo
     servers = {
         "web": {"command": _NPX_WITH_SPACES, "args": ["-y", "lodash@4.17.20"]},
         "py": {"command": _UVX_WITH_SPACES, "args": ["mcp-server-fetch==2024.11.25"]},
+    }
+    _audit(tmp_path / "demo", servers)
+
+    [npm_call] = osv_scanner.calls
+    packages = json.loads(npm_call["files"]["package-lock.json"])["packages"]
+    assert packages["node_modules/lodash"] == {"version": "4.17.20"}
+    [pip_call] = pip_audit.calls
+    assert pip_call["files"] == {"requirements-0.txt": "mcp-server-fetch==2024.11.25\n"}
+
+
+def test_audit_reads_a_runner_through_its_wrapper(tmp_path: Path, pip_audit: _FakeTool, osv_scanner: _FakeTool) -> None:
+    """Regression: 'env NODE_ENV=production npx -y pkg' was a local binary, so its package was never audited."""
+    servers = {
+        "web": {"command": "env", "args": ["NODE_ENV=production", "npx", "-y", "lodash@4.17.20"]},
+        "py": {"command": "nohup", "args": ["uvx", "mcp-server-fetch==2024.11.25"]},
     }
     _audit(tmp_path / "demo", servers)
 

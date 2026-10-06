@@ -21,8 +21,9 @@ from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.tier3.eval_core.checks import (
     _APPLY_PATCH_COMMAND_RE,
     _APPLY_PATCH_HEADER_RE,
+    _CANARY_NON_FILE_TARGETS,
     _FD_REDIRECT_TARGET_RE,
-    _REDIRECT_TARGET_RE,
+    _PROCESS_SUBSTITUTION,
     _SED_IN_PLACE_FLAG_RE,
     _SED_OPERANDS_RE,
     _SHELL_WORD,
@@ -213,6 +214,18 @@ _BEHAVIOR_PYTHON_WRITE_RE = re.compile(
 )
 # sed options that give the script, so every operand of a ``sed -i`` is a file it edits.
 _SED_SCRIPT_OPTIONS = ("-e", "--expression", "-f", "--file")
+# Output redirections the judges are shown as writes, read as the security
+# extractor reads them (``_REDIRECT_TARGET_RE``), glued ones such as
+# ``echo hi>out.txt`` included. A quoted span, an escaped character and a
+# comment are read whole and never hold one, so the ``>`` in ``awk 'NR>1'``,
+# ``echo '<b>'``, ``\>`` or ``# > note`` is not a redirection; nor is an
+# ``->`` or ``=>`` arrow. A quote left open runs to the end of the text, so
+# the scan stays linear.
+_JUDGE_REDIRECT_TARGET_RE = re.compile(
+    r"'[^']*'?|\"(?:[^\"\\]|\\[\s\S])*\"?|\\[\s\S]|(?:^|(?<=[\s;&|(]))#[^\n]*"
+    r"|(?<![-=])(?:&>>?|(?<![0-9])[0-9]*>>?[|&]?)\s*(?P<target>" + _SHELL_WORD + ")"
+)
+_PROCESS_SUBSTITUTION_RE = re.compile(_PROCESS_SUBSTITUTION)
 _TOOL_NAME_SEPARATORS = (".", ":", "/", "__")
 # Harnesses name the written file and text differently: Claude Code uses
 # file_path, content, new_string, notebook_path, and new_source; OpenCode uses
@@ -425,29 +438,24 @@ def _sed_in_place_files(words: list[str]) -> list[str]:
 def _shell_write_words(text: str) -> list[str]:
     """Files *text* writes as a shell command: redirect targets, ``tee`` operands, and ``sed -i`` files.
 
-    Reads the command with the security extractor's patterns (``_shell_write_targets``)
-    but keeps each path as written, without its quotes. A device such as ``/dev/null``
-    is not a file change.
+    Redirections are read outside quotes and comments (``_JUDGE_REDIRECT_TARGET_RE``),
+    ``tee`` and ``sed -i`` operands with the security extractor's patterns, a process
+    substitution among them stepped over. Each path is kept as written, without its
+    quotes. A target that is not a file (``/dev/null``, ``/dev/stderr``, ``/dev/fd/3``)
+    is not a file change; a file under ``/dev/shm`` is.
     """
-    words = [
-        match.group(1)
-        for match in _REDIRECT_TARGET_RE.finditer(text)
-        if not _FD_REDIRECT_TARGET_RE.fullmatch(match.group(1))
-    ]
+    words = []
+    for match in _JUDGE_REDIRECT_TARGET_RE.finditer(text):
+        target = match.group("target")
+        if target and not _FD_REDIRECT_TARGET_RE.fullmatch(target):
+            words.append(target)
     for match in _TEE_OPERANDS_RE.finditer(text):
-        words.extend(word for word in re.findall(_SHELL_WORD, match.group(1)) if not word.startswith("-"))
+        operands = _PROCESS_SUBSTITUTION_RE.sub(" ", match.group(1))
+        words.extend(word for word in re.findall(_SHELL_WORD, operands) if not word.startswith("-"))
     for match in _SED_OPERANDS_RE.finditer(text):
         words.extend(_sed_in_place_files(re.findall(_SHELL_WORD, match.group(1))))
     paths = (word.strip("'\"") for word in words)
-    return [path for path in paths if path and not path.startswith("/dev/")]
-
-
-def _command_looks_like_write(command: str) -> bool:
-    return bool(
-        _shell_write_words(command)
-        or _APPLY_PATCH_COMMAND_RE.search(command)
-        or _BEHAVIOR_PYTHON_WRITE_RE.search(command)
-    )
+    return [path for path in paths if path and not path.startswith(_CANARY_NON_FILE_TARGETS)]
 
 
 def _tool_name_candidates(fn_lower: str) -> set[str]:
@@ -503,11 +511,13 @@ def _write_call_parts(fn: str, args: Any) -> tuple[list[str], str, dict[str, Any
         paths = [path] if path else _patch_file_paths(body)
     elif _tool_name_looks_like_exec(fn_lower):
         key, command = _exec_command(args)
-        if not _command_looks_like_write(command):
+        # Program text (``code``) is not shell: its ``>`` compare values rather than redirect output.
+        written = _patch_file_paths(command) if key == "code" else _shell_write_paths(command)
+        if not (written or _APPLY_PATCH_COMMAND_RE.search(command) or _BEHAVIOR_PYTHON_WRITE_RE.search(command)):
             return None
         body = f"command:\n{command}"
         used = {key}
-        paths = list(dict.fromkeys(p for p in (path, *_shell_write_paths(command)) if p))
+        paths = list(dict.fromkeys(p for p in (path, *written) if p))
     else:
         return None
     return paths, body, {key: value for key, value in args.items() if key not in used}

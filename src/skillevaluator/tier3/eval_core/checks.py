@@ -103,10 +103,13 @@ _PATH_WORD_RE = re.compile(r"[^\s;|&<>()`]+")
 # "cat ~/.bashrc 2>/dev/null" writes /dev/null, and an fd duplication or close
 # ("2>&1", ">&2", "2>&-") has no file target at all. An fd number is matched
 # only from the start of its digit run, so a long run of digits is scanned once.
+# A process substitution among tee's operands ("tee >(grep err) build.log") is
+# stepped over: it is not a file, and the operands after it still are.
 _SHELL_WORD = r"(?:\"[^\"]*\"|'[^']*'|[^\s;|&<>()'\"`])+"
+_PROCESS_SUBSTITUTION = r"[<>]\([^()]*\)"
 _REDIRECT_TARGET_RE = re.compile(r"(?:&>>?|(?<![0-9])[0-9]*>>?[|&]?)\s*(" + _SHELL_WORD + ")")
 _FD_REDIRECT_TARGET_RE = re.compile(r"[0-9]*-?")
-_TEE_OPERANDS_RE = re.compile(r"(?<![\w.-])tee((?:\s+" + _SHELL_WORD + r")+)")
+_TEE_OPERANDS_RE = re.compile(r"(?<![\w.-])tee((?:\s+(?:" + _SHELL_WORD + "|" + _PROCESS_SUBSTITUTION + r"))+)")
 _SED_OPERANDS_RE = re.compile(r"(?<![\w.-])sed((?:\s+" + _SHELL_WORD + r")+)")
 _SED_IN_PLACE_FLAG_RE = re.compile(r"--in-place\b.*|-[a-z]*i.*")
 

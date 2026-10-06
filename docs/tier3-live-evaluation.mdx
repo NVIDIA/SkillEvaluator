@@ -607,7 +607,10 @@ verifier's not-applicable marker still leaves the trial unscored.
 
 The judges read evidence the verifier builds from the trajectory, not the raw
 trajectory. Every judge gets the agent's final answer and what it wrote: the
-body of each write, edit, `apply_patch`, or shell write. Write bodies share
+body of each write, edit, `apply_patch`, or shell write. A shell write is an
+output redirection outside quotes, or a `tee` or `sed -i` operand, to a file
+rather than a device such as `/dev/null`; a code tool's `code` argument is
+read as a program, so its `>` comparisons are not writes. Write bodies share
 the room the evidence has left, at least 1,800 characters each. `accuracy` and
 `goal_accuracy` also get the newest tool results, and file changes always leave
 room for the newest two. `behavior_check` also gets a compact tool history;

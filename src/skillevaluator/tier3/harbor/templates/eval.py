@@ -222,14 +222,27 @@ LOG_JWT_RE = re.compile(
     r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"
 )
 # GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained (github_pat_) tokens,
-# GitLab personal access tokens (glpat-), and Slack tokens (xoxa-/xoxb-/xoxp-/xoxr-/xoxs-).
-# Kept in sync with skillevaluator.utils.redaction, which this standalone verifier cannot
-# import -- see the drift guard in test_harbor_template_secret_patterns.py. Each pattern is
-# the prefix and one character class of at most 255 characters, so a scan stays linear.
+# GitLab personal access tokens (glpat-), Slack tokens (xoxa-/xoxb-/xoxp-/xoxr-/xoxs-, and
+# xoxe- refresh tokens), Hugging Face tokens (hf_), npm tokens (npm_), and AWS access key IDs
+# (AKIA, ASIA). Kept in sync with skillevaluator.tier3.eval_core.secret_redaction, which this
+# standalone verifier cannot import -- see the drift guard in
+# test_harbor_template_secret_patterns.py. Each pattern is the prefix and one character class
+# of at most 255 characters, so a scan stays linear.
 LOG_GITHUB_TOKEN_RE = re.compile(r"\b(?P<prefix>gh[pousr]_)[A-Za-z0-9]{36,255}\b")
 LOG_GITHUB_PAT_RE = re.compile(r"\b(?P<prefix>github_pat_)[A-Za-z0-9_]{22,255}\b")
 LOG_GITLAB_PAT_RE = re.compile(r"\b(?P<prefix>glpat-)[A-Za-z0-9_-]{20,255}")
-LOG_SLACK_TOKEN_RE = re.compile(r"\b(?P<prefix>xox[abprs]-)[A-Za-z0-9-]{10,255}")
+LOG_SLACK_TOKEN_RE = re.compile(r"\b(?P<prefix>xox[abeprs]-)[A-Za-z0-9-]{10,255}")
+LOG_HUGGING_FACE_TOKEN_RE = re.compile(r"\b(?P<prefix>hf_)[A-Za-z0-9]{30,255}")
+LOG_NPM_TOKEN_RE = re.compile(r"\b(?P<prefix>npm_)[A-Za-z0-9]{36}\b")
+LOG_PREFIXED_TOKEN_PATTERNS = (
+    LOG_GITHUB_TOKEN_RE,
+    LOG_GITHUB_PAT_RE,
+    LOG_GITLAB_PAT_RE,
+    LOG_SLACK_TOKEN_RE,
+    LOG_HUGGING_FACE_TOKEN_RE,
+    LOG_NPM_TOKEN_RE,
+)
+LOG_AWS_ACCESS_KEY_RE = re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}")
 
 
 def redact_secrets_in_log_line(line, *, extra_secret_values=None):
@@ -240,8 +253,9 @@ def redact_secrets_in_log_line(line, *, extra_secret_values=None):
     line = LOG_SK_RE.sub("sk-<redacted>", line)
     line = LOG_NVAPI_RE.sub("nvapi-<redacted>", line)
     line = LOG_CRSR_RE.sub("crsr_<redacted>", line)
-    for pattern in (LOG_GITHUB_TOKEN_RE, LOG_GITHUB_PAT_RE, LOG_GITLAB_PAT_RE, LOG_SLACK_TOKEN_RE):
+    for pattern in LOG_PREFIXED_TOKEN_PATTERNS:
         line = pattern.sub(r"\g<prefix><redacted>", line)
+    line = LOG_AWS_ACCESS_KEY_RE.sub("aws-access-key-<redacted>", line)
     line = OPENSHIFT_TOKEN_RE.sub("sha256~<redacted>", line)
     if "eyJ" not in line:  # every JWT match contains "eyJ"; skip the scan on ordinary lines
         return line

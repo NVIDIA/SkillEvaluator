@@ -203,6 +203,9 @@ def test_security_constants_stay_in_sync_with_eval_core(name):
         "LOG_GITHUB_PAT_RE",
         "LOG_GITLAB_PAT_RE",
         "LOG_SLACK_TOKEN_RE",
+        "LOG_HUGGING_FACE_TOKEN_RE",
+        "LOG_NPM_TOKEN_RE",
+        "LOG_AWS_ACCESS_KEY_RE",
     ],
 )
 def test_log_redaction_patterns_stay_in_sync_with_eval_core(name):
@@ -230,6 +233,10 @@ def test_log_redaction_patterns_stay_in_sync_with_eval_core(name):
         "github github_pat_" + "11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123",
         "gitlab glpat-" + "aB3dE6gH9jK2mN5pQ8sT" + " and glpat-short",
         "slack xoxb-" + "123456789012-AbCdEfGhIjKl" + " and xoxo-hugs",
+        "slack refresh xoxe-" + "1-123456789012-AbCdEfGhIjKl",
+        "hugging face hf_" + "AbCdEfGhIjKlMnOpQrStUvWxYz01234567" + " and npm_config_cache",
+        "npm npm_" + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+        "aws AKIA" + "IOSFODNN7EXAMPLE" + " and ASIA" + "IOSFODNN7EXAMPLE",
     ],
 )
 def test_template_log_redaction_matches_eval_core(line):

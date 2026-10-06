@@ -621,7 +621,8 @@ cut. When the evidence is over budget, earlier writes shrink or drop first,
 and the tool history drops its middle first. The history's copy of the final
 answer, which FINAL RESPONSE already shows, shrinks before any tool call drops.
 Secrets are redacted before the evidence reaches a judge: key-shaped text
-such as `sk-…`, `ghp_…`, `glpat-…`, or `xoxb-…`, the exact value of every
+such as `sk-…`, `ghp_…`, `glpat-…`, `xoxb-…`, `hf_…`, `npm_…`, or an AWS key
+ID (`AKIA…`, `ASIA…`), the exact value of every
 provider credential in the verifier's environment, and the run's canary
 token. Placeholder keys such as
 `sk-your-key-here` or `nvapi-REPLACE_ME` are left as written, so a config file

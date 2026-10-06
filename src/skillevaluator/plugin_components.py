@@ -37,7 +37,7 @@ from collections import Counter
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
@@ -105,11 +105,7 @@ from skillevaluator.plugin_paths import (
     _unscanned_path_finding,
     normalize_declared_path,
 )
-from skillevaluator.plugin_states import (
-    COVERAGE_STATE_RANK,  # noqa: F401 - re-exported
-    COVERAGE_STATES,
-    EVALUATED_COVERAGE_STATES,
-)
+from skillevaluator.plugin_states import COVERAGE_STATES, EVALUATED_COVERAGE_STATES
 from skillevaluator.utils.secure_fs import SecurePathError, stat_is_link_or_reparse
 from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json, load_bounded_yaml
 from skillevaluator.validators.mcp_static import (
@@ -119,9 +115,6 @@ from skillevaluator.validators.mcp_static import (
     validate_mcp_command,
     validate_mcp_pinning,
 )
-
-if TYPE_CHECKING:
-    from skillevaluator.plugin_manifest import PluginManifestLocation
 
 Support = Literal["evaluated", "static_only", "unsupported"]
 Origin = Literal["declared", "packaged", "declared+packaged"]
@@ -1813,11 +1806,6 @@ def _find_env_files(root: Path) -> tuple[list[PurePosixPath], bool]:
 # --------------------------------------------------------------------------- #
 # Public entry points                                                         #
 # --------------------------------------------------------------------------- #
-def parsed_additional_manifests(location: PluginManifestLocation) -> list[tuple[str, str, dict[str, Any]]]:
-    """Alias of :meth:`~skillevaluator.plugin_manifest.PluginManifestLocation.parsed_additional`, kept for importers."""
-    return location.parsed_additional()
-
-
 def plugin_inventory_for_root(root: Path) -> PluginInventory | None:
     """The component inventory of the plugin at ``root``, read the way the audits read it (``None`` if unsafe).
 

@@ -1849,20 +1849,11 @@ class HostAllowlist:
         return bool(normalized) and (normalized in self.names or normalized.endswith(self.suffixes))
 
 
-def host_is_allowlisted(endpoint: EndpointClass, allowed_hosts: HostAllowlist | Iterable[str]) -> bool:
-    """True when a policy entry allows this private host.
-
-    Entries are exact host names, ``*.suffix`` wildcards, IP literals, or CIDR
-    networks (e.g. ``10.0.0.0/8``). Cloud metadata endpoints are never allowlisted.
-    """
-    return HostAllowlist.of(allowed_hosts).allows(endpoint)
-
-
 def host_name_is_allowlisted(host: str, allowed_hosts: HostAllowlist | Iterable[str]) -> bool:
     """True when a policy entry names this host (exact name or ``*.suffix``).
 
     Only host names match here: IP literals and CIDR entries are checked against
-    resolved addresses with :func:`host_is_allowlisted`, and cloud metadata host
+    resolved addresses with :meth:`HostAllowlist.allows`, and cloud metadata host
     names are never allowlisted.
     """
     normalized = _normalize_host(host)

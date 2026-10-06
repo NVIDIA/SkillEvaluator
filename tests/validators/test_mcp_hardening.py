@@ -14,7 +14,6 @@ from skillevaluator.validators.mcp_static import (
     HostAllowlist,
     classify_endpoint_host,
     classify_mcp_pinning,
-    host_is_allowlisted,
     validate_mcp_server_declaration,
 )
 from skillevaluator.validators.policy import ValidationPolicy, load_policy_file
@@ -365,7 +364,7 @@ def test_allowlist_does_not_cover_other_hosts_or_metadata() -> None:
     )
     assert "mcp_endpoint_metadata" in _checks(metadata)
     endpoint = classify_endpoint_host("169.254.169.254")
-    assert endpoint is not None and not host_is_allowlisted(endpoint, ["169.254.169.254"])
+    assert endpoint is not None and not HostAllowlist.from_entries(["169.254.169.254"]).allows(endpoint)
 
 
 @pytest.mark.parametrize(

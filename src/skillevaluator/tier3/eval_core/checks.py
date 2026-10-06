@@ -3124,13 +3124,17 @@ def _canary_patch_sections(patch):
     return [(destination, patch[start:end]) for destination, start, end in sections if destination]
 
 
-def _canary_patch_writes(args, strong, spec):
-    """``(path, carried)`` for each file an ``apply_patch`` command's patch (its argument or heredoc) writes.
+def _canary_patch_writes(args, unit_words, piped, strong, spec):
+    """``(path, carried)`` for each file an ``apply_patch`` command's patch writes.
 
-    A file is ``carried`` when the statement is ``strong`` and the file's own section
-    holds the token or an expansion (``$``, a backquote) the shell may fill with it.
+    The patch is the command's argument or heredoc, or, when it has none there, the
+    text piped into it (``cat <<EOF | apply_patch``). A file is ``carried`` when the
+    statement is ``strong`` and the file's own section holds the token or an
+    expansion (``$``, a backquote) the shell may fill with it.
     """
     patch = "\n".join(args)
+    if piped and not _APPLY_PATCH_HEADER_RE.search(patch):
+        patch = "\n".join(unit_words)
     return [
         (path, strong and any(mark in text for mark in (spec["token"], "$", "`")))
         for path, text in _canary_patch_sections(patch)
@@ -3644,7 +3648,7 @@ def _canary_unit_sinks(unit, isolated, spec, state, shell, found):
     for simple, name, args, _assignments in parsed:
         writes = [(target, strong) for target in _canary_write_targets(simple, name, args)]
         if _APPLY_PATCH_COMMAND_RE.fullmatch(name):
-            writes.extend(_canary_patch_writes(args, strong, spec))
+            writes.extend(_canary_patch_writes(args, words, piped, strong, spec))
         for target, carried in writes:
             resolved = _canary_resolve(target, state["cwd"], spec)
             if not target.startswith(_CANARY_NON_FILE_TARGETS):

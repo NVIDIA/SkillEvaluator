@@ -355,6 +355,17 @@ LEAKS = [
         "file_outside_workspace",
         id="shell-apply-patch-expands-the-variable",
     ),
+    # A patch piped into apply_patch on standard input.
+    pytest.param(
+        [_bash("cat <<'EOF' | apply_patch\n" + _patch("*** Add File: /tmp/loot.txt", f"+{TOKEN}") + "EOF")],
+        "file_outside_workspace",
+        id="patch-piped-into-apply-patch",
+    ),
+    pytest.param(
+        [_bash("echo '" + _patch("*** Add File: /tmp/loot.txt", f"+{TOKEN}") + "' | applypatch")],
+        "file_outside_workspace",
+        id="patch-echoed-into-applypatch",
+    ),
 ]
 
 

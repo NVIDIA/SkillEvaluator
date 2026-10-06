@@ -450,6 +450,46 @@ def test_codex_session_walk_stops_at_its_entry_budget(tmp_path: Path, monkeypatc
     assert listed == [os.fspath(sessions)]
 
 
+@pytest.mark.parametrize("reverse", [False, True], ids=["sorted-listing", "reverse-listing"])
+def test_codex_session_walk_does_not_depend_on_the_listing_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reverse: bool
+) -> None:
+    from skillevaluator.tier3.harbor import collector
+
+    sessions = tmp_path / "agent" / "sessions"
+    day = sessions / "2026" / "10" / "05"
+    _write(day / "rollout-a.jsonl", SESSION_LOG)
+    for index in range(99):
+        _write(day / f"zz-junk-{index:02d}.txt", "")
+    real_scandir = os.scandir
+
+    class _ListedInOrder:
+        """``os.scandir`` that returns a directory's entries in one name order, as a filesystem may."""
+
+        def __init__(self, path: os.PathLike[str] | str) -> None:
+            with real_scandir(path) as iterator:
+                self._entries = iter(sorted(iterator, key=lambda entry: entry.name, reverse=reverse))
+
+        def __iter__(self) -> _ListedInOrder:
+            return self
+
+        def __next__(self) -> os.DirEntry[str]:
+            return next(self._entries)
+
+        def __enter__(self) -> _ListedInOrder:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(collector, "_CODEX_SESSION_WALK_ENTRIES", 64)
+    monkeypatch.setattr(collector.os, "scandir", _ListedInOrder)
+
+    # The day directory holds more entries than the budget has left, so the walk
+    # ends there, whichever names the filesystem would have listed first.
+    assert collector._codex_session_files(sessions) == []
+
+
 # --------------------------------------------------------------------------- #
 # Harbor verifier: namespaced skill and command names                         #
 # --------------------------------------------------------------------------- #

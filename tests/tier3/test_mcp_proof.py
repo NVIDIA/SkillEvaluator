@@ -463,6 +463,38 @@ def test_in_agent_evidence_upgrades_and_never_downgrades() -> None:
     assert apply_in_agent_mcp_proof(upgraded, None) == upgraded
 
 
+def test_in_agent_evidence_indexes_the_declared_servers_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.eval_core import plugin_signals
+
+    builds: list[object] = []
+    build = plugin_signals._McpNames.__init__
+
+    def counting_build(self: Any, declared: Any) -> None:
+        builds.append(self)
+        build(self, declared)
+
+    monkeypatch.setattr(plugin_signals._McpNames, "__init__", counting_build)
+    by_server = {
+        "docs": {"total": 1, "succeeded": 1},
+        "plugin_demo_tracker": {"total": 2, "succeeded": 0},
+        "slack": {"total": 1, "succeeded": 1},
+    }
+    engine = {
+        "agents": {
+            agent: {"plugin_signals_summary": {"with_skill": {"mcp_calls": {"by_server": by_server}}}}
+            for agent in ("claude-code", "codex", "opencode")
+        }
+    }
+    proof = {name: {"status": "declared", "tools": [], "detail": NOT_REQUESTED_DETAIL} for name in ("docs", "tracker")}
+
+    upgraded = apply_in_agent_mcp_proof(proof, engine)
+
+    assert len(builds) == 1
+    assert upgraded["docs"]["status"] == "used-successfully"
+    assert upgraded["tracker"]["status"] == "reachable-in-agent"
+    assert upgraded["tracker"]["detail"].startswith("agent made 6 call(s), 0 succeeded")
+
+
 def test_declared_default_without_probe() -> None:
     proof = declared_mcp_proof([{"name": "docs", "url": "https://docs.example.com/mcp"}])
 

@@ -81,11 +81,11 @@ result.
   tools, the ``Add File``/``Update File``/``Move to`` headers of an
   ``apply_patch`` body, shell redirects/``tee``/``cp``/``mv``/``touch``, or an
   MCP tool whose name or argument key says it writes; a patch that only
-  deletes the path does not write it), and a later consumer-attributed call
-  must read it (read tools, shell readers/interpreters, or an MCP/subagent
-  call whose arguments name the path). Relative artifact paths match an
-  observed path equal to it or ending with ``/<artifact>``; absolute ones must
-  match exactly.
+  deletes the path, or moves it away, does not write it), and a later
+  consumer-attributed call must read it (read tools, shell
+  readers/interpreters, or an MCP/subagent call whose arguments name the
+  path). Relative artifact paths match an observed path equal to it or ending
+  with ``/<artifact>``; absolute ones must match exactly.
 * When both are given, both must hold.
 
 Trajectory content is untrusted: step, call, text and regex-subject sizes are
@@ -111,8 +111,7 @@ from typing import Any, NamedTuple
 
 import regex
 
-from skillevaluator.tier3.eval_core.atif_helpers import _patch_file_paths
-from skillevaluator.tier3.eval_core.checks import _APPLY_PATCH_COMMAND_RE, _FILE_READ_VERBS
+from skillevaluator.tier3.eval_core.checks import _APPLY_PATCH_COMMAND_RE, _APPLY_PATCH_HEADER_RE, _FILE_READ_VERBS
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     MAPPED_OUTER_EXEC_OBSERVATION,
     normalize_tool_call,
@@ -215,10 +214,8 @@ _READ_TOOLS = frozenset(
 # and the Hermes ``patch`` tool (whose ``replace`` mode names a ``path`` instead).
 _PATCH_TOOLS = frozenset({"apply_patch", "applypatch", "patch"})
 # Where harnesses put that body: Codex ``input``, OpenCode ``patchText``, Hermes
-# ``patch``, and ``raw`` for a tool input that was not a JSON object.
-_PATCH_BODY_KEYS = ("input", "patch", "patchText", "content", "raw")
-# An apply_patch "*** Delete File:" header line, spelled as atif_helpers._patch_file_paths reads headers.
-_PATCH_DELETE_HEADER_RE = re.compile(r"^[^\S\n]*\*\*\* Delete File:[^\n]*", re.MULTILINE)
+# ``patch``, and ``raw`` or ``value`` for a tool input that was not a JSON object.
+_PATCH_BODY_KEYS = ("input", "patch", "patchText", "content", "raw", "value")
 # Text editor tools: they write, except for their ``view`` command, which reads.
 _STR_REPLACE_EDITORS = frozenset({"str_replace_editor", "str_replace_based_edit_tool"})
 _WRITE_TOOLS = (
@@ -508,6 +505,11 @@ def _check_regex(value: Any, where: str, errors: _FieldErrors) -> str | None:
         regex.compile(value)
     except (regex.error, ValueError, RecursionError, OverflowError) as exc:
         errors.add(where, f"is not a valid regular expression ({exc})")
+        return None
+    except Exception as exc:
+        # Some malformed patterns raise other errors: KeyError for ``(?V0)(?V1)``,
+        # RuntimeError for a fuzzy count the engine cannot compile.
+        errors.add(where, f"is not a valid regular expression (the regex engine raised {type(exc).__name__})")
         return None
     return value
 
@@ -1271,29 +1273,41 @@ class _McpPrefix(NamedTuple):
 class _McpNames:
     """The declared MCP servers of one arm, indexed by every spelling and tool-name prefix harnesses give them.
 
-    Built once per trajectory, so naming the server of a call takes a few
-    dictionary lookups however many servers are declared.
+    Built once per trajectory (or per batch of lookups), so naming the server
+    of a call takes a few dictionary lookups however many servers are
+    declared. The tool-name prefix table is built on the first
+    :meth:`identity`, since :meth:`match` does not use it.
     """
 
     def __init__(self, declared: Iterable[Any]) -> None:
         self.names = list(dict.fromkeys(name for name in declared if isinstance(name, str) and name))
         self._exact: dict[str, str] = {}  # casefolded name -> first declared name
         self._spelled: dict[str, list[str]] = {}  # spelling -> the declared names that have it
-        self._prefixes: dict[str, list[_McpPrefix]] = {}
-        order = 0
         for name in self.names:
             self._exact.setdefault(name.casefold(), name)
-            for rank, spelling in enumerate(_server_spellings(name)):
+            for spelling in _server_spellings(name):
                 holders = self._spelled.setdefault(spelling, [])
                 if name not in holders:
                     holders.append(name)
+
+    @cached_property
+    def _prefixes(self) -> dict[str, list[_McpPrefix]]:
+        """Tool-name prefix -> the declared-server entries it names (see :meth:`identity`)."""
+        prefixes: dict[str, list[_McpPrefix]] = {}
+        order = 0
+        for name in self.names:
+            for rank, spelling in enumerate(_server_spellings(name)):
                 forms = [(spelling + separator, False) for separator in _TOOL_NAME_SEPARATORS]
                 forms += [(f"mcp_{spelling}_", False), (spelling + "_", True)]
                 for prefix, bare in forms:
                     entry = _McpPrefix(order, len(prefix), rank, name, spelling, bare)
-                    self._prefixes.setdefault(prefix, []).append(entry)
+                    prefixes.setdefault(prefix, []).append(entry)
                     order += 1
-        self._prefix_ends = frozenset(prefix[-1] for prefix in self._prefixes)
+        return prefixes
+
+    @cached_property
+    def _prefix_ends(self) -> frozenset[str]:
+        return frozenset(prefix[-1] for prefix in self._prefixes)
 
     def match(self, observed: str) -> str | None:
         """See :func:`match_declared_mcp_server`."""
@@ -1370,6 +1384,11 @@ def match_declared_mcp_server(observed: str, declared: Iterable[str]) -> str | N
     suffix is the fallback).
     """
     return _McpNames(declared).match(observed)
+
+
+def declared_mcp_server_matcher(declared: Iterable[str]) -> Callable[[str], str | None]:
+    """:func:`match_declared_mcp_server` for one set of declared servers, indexed once for many lookups."""
+    return _McpNames(declared).match
 
 
 def _first_string(args: Mapping[str, Any], keys: Sequence[str]) -> str:
@@ -1744,6 +1763,7 @@ def _claimable_results(
 def _extract_calls(
     trajectory: Mapping[str, Any],
     declared: Mapping[str, Sequence[str]],
+    mcp_names: _McpNames,
     mcp_call_servers: Mapping[str, str] | None = None,
     subagent_aliases: Mapping[str, str] | None = None,
 ) -> list[_Call] | None:
@@ -1751,7 +1771,6 @@ def _extract_calls(
     if not isinstance(steps, list):
         return None
     agent = _trajectory_agent(trajectory)
-    mcp_names = _McpNames(declared.get(COMPONENT_MCP) or ())
     calls: list[_Call] = []
     owner: int | None = None  # the latest skill/command activation: it opens a window for the calls after it
     for step_index, step in enumerate(steps[:_MAX_STEPS]):
@@ -2044,7 +2063,9 @@ def _regex_search(pattern: str, value: Any, budget: list[float]) -> bool | str:
         return regex.search(pattern, text, timeout=timeout) is not None
     except TimeoutError:
         return "pattern check timed out"
-    except (regex.error, RecursionError, OverflowError, ValueError):
+    except Exception:
+        # A pattern the engine cannot run fails the check: besides regex.error and
+        # ValueError it can raise KeyError, RuntimeError..., and grading never raises.
         return False
     finally:
         budget[0] -= time.monotonic() - started
@@ -2274,11 +2295,25 @@ def _path_matches(observed: str, artifact: str) -> bool:
 def _patch_written_paths(text: str) -> list[str]:
     """Files an apply_patch body writes: the ``Add File``, ``Update File`` and ``Move to`` headers.
 
-    A file the patch only deletes is not written, so its ``Delete File``
-    header is dropped before the headers are read. A file the patch deletes
-    and adds again is still written.
+    A file the patch only deletes is not written, and neither is a file it
+    moves away: ``*** Update File: a`` followed by ``*** Move to: b`` writes
+    only ``b``. A file the patch deletes and adds again is still written.
     """
-    return _patch_file_paths(_PATCH_DELETE_HEADER_RE.sub("", text))
+    written: dict[str, None] = {}
+    pending_update = ""  # an ``Update File`` path, written unless the next header moves it away
+    for match in _APPLY_PATCH_HEADER_RE.finditer(text):
+        operation = text[match.start() : match.start(1)]
+        path = match.group(1).strip()
+        if pending_update and "Move to" not in operation:
+            written[pending_update] = None
+        pending_update = ""
+        if "Update File" in operation:
+            pending_update = path
+        elif "Delete File" not in operation and path:
+            written[path] = None
+    if pending_update:
+        written[pending_update] = None
+    return list(written)
 
 
 def _patch_targets(args: Mapping[str, Any]) -> list[str]:
@@ -2298,8 +2333,11 @@ def _call_writes(call: _Call, artifact: str) -> bool:
             return False
         if any(_path_matches(path, artifact) for path in _path_args(call.args)):
             return True
-        return fn_base in _PATCH_TOOLS and any(_path_matches(path, artifact) for path in _patch_targets(call.args))
-    if call.is_shell:
+        if fn_base in _PATCH_TOOLS and any(_path_matches(path, artifact) for path in _patch_targets(call.args)):
+            return True
+        # An MCP write tool (``write_file``...) may name its file under another key, such as
+        # ``destination``: the MCP rules below still apply to it.
+    elif call.is_shell:
         return any(_normalized_path_matches(path, artifact) for path in call.shell_paths.writes)
     if call.mcp is None:
         return False
@@ -2449,13 +2487,15 @@ def _activated_components(
     return activated
 
 
-def _grade_activation_coverage(calls: Sequence[_Call], declared: Mapping[str, Sequence[str]]) -> dict[str, Any]:
+def _grade_activation_coverage(
+    calls: Sequence[_Call], declared: Mapping[str, Sequence[str]], mcp_names: _McpNames
+) -> dict[str, Any]:
     """Declared components exercised, never activated, or whose every activation failed.
 
     Entries are ``"<type>:<name>"``. ``unavailable`` is a subset of ``exercised``.
+    ``mcp_names`` indexes the declared MCP servers.
     """
     keys = _declared_keys(declared)
-    mcp_names = _McpNames(name for kind, name in keys if kind == COMPONENT_MCP)
     # A skill, subagent or command activation names its component case-insensitively.
     by_folded_name: dict[tuple[str, str], list[str]] = {}
     for kind, name in keys:
@@ -2525,7 +2565,8 @@ def compute_plugin_signals(
     if not isinstance(trajectory, Mapping):
         return None
     declared_map: Mapping[str, Sequence[str]] = declared or {}
-    calls = _extract_calls(trajectory, declared_map, mcp_call_servers, subagent_aliases)
+    mcp_names = _McpNames(declared_map.get(COMPONENT_MCP) or ())
+    calls = _extract_calls(trajectory, declared_map, mcp_names, mcp_call_servers, subagent_aliases)
     if calls is None:
         return None
     spec = plugin_case_spec(case)
@@ -2539,7 +2580,7 @@ def compute_plugin_signals(
         "order": _grade_order(calls, spec),
         "handoff": _grade_handoff(calls, spec, prompts=_prompt_texts(trajectory) if has_value else ()),
         "conflict": _grade_conflict(calls, spec),
-        "activation_coverage": _grade_activation_coverage(calls, declared_map),
+        "activation_coverage": _grade_activation_coverage(calls, declared_map, mcp_names),
     }
 
 
@@ -2707,6 +2748,7 @@ __all__ = [
     "PluginSignalsContext",
     "build_plugin_signals_context",
     "compute_plugin_signals",
+    "declared_mcp_server_matcher",
     "match_declared_mcp_server",
     "plugin_case_spec",
     "summarize_plugin_signals",

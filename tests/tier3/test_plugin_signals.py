@@ -15,6 +15,7 @@ from skillevaluator.tier3.eval_core.plugin_signals import (
     MAX_TOOL_PATTERNS,
     build_plugin_signals_context,
     compute_plugin_signals,
+    declared_mcp_server_matcher,
     match_declared_mcp_server,
     plugin_case_spec,
     summarize_plugin_signals,
@@ -246,6 +247,45 @@ class TestClassifierCodexStyle:
 
         assert signals["handoff"]["passed"] == 1
 
+    @pytest.mark.parametrize(
+        ("agent", "fn", "key"),
+        [
+            ("claude-code", "mcp__fs__write_file", "destination"),
+            ("hermes", "mcp_fs_write_file", "destination"),
+            ("hermes", "mcp_fs_save_file", "output"),
+            ("opencode", "fs_write_file", "destination"),
+            ("opencode", "fs_write_file", "file"),
+            ("opencode", "fs_edit_file", "target"),
+        ],
+    )
+    def test_mcp_write_tools_without_a_path_key_still_write_the_artifact(self, agent: str, fn: str, key: str) -> None:
+        traj = _traj(
+            _one("Skill", {"skill": "alpha"}),
+            _one(fn, {key: "out/report.json", "content": "{}"}, call_id="c2"),
+            _one("Skill", {"skill": "beta"}, call_id="c3"),
+            _one("Read", {"file_path": "out/report.json"}, call_id="c4"),
+        )
+        case = {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "artifact": "out/report.json"}]}
+
+        signals = _signals({**traj, "agent": {"name": agent}}, case, declared={**DECLARED, "mcp": ["fs"]})
+
+        assert (signals["handoff"]["passed"], signals["handoff"]["failures"]) == (1, [])
+
+    def test_an_mcp_editor_view_does_not_write_the_artifact(self) -> None:
+        traj = _traj(
+            _one("Skill", {"skill": "alpha"}),
+            _one("mcp__fs__str_replace_editor", {"command": "view", "target": "out/report.json"}, call_id="c2"),
+            _one("Skill", {"skill": "beta"}, call_id="c3"),
+            _one("Read", {"file_path": "out/report.json"}, call_id="c4"),
+        )
+        case = {"handoffs": [{"producer": "Skill:alpha", "consumer": "Skill:beta", "artifact": "out/report.json"}]}
+
+        signals = _signals(traj, case, declared={**DECLARED, "mcp": ["fs"]})
+
+        assert [failure["detail"] for failure in signals["handoff"]["failures"]] == [
+            "artifact was not written by the producer"
+        ]
+
     def test_declared_server_alternate_spellings_are_canonicalized(self) -> None:
         traj = _traj(
             _one("github.search_code", {"q": "x"}),
@@ -279,6 +319,23 @@ class TestMcpServerNames:
         self, observed: str, declared: list[str], expected: str | None
     ) -> None:
         assert match_declared_mcp_server(observed, declared) == expected
+        assert declared_mcp_server_matcher(declared)(observed) == expected
+
+    def test_declared_servers_are_indexed_once_per_trajectory(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        builds: list[object] = []
+        build = plugin_signals._McpNames.__init__
+
+        def counting_build(self: Any, declared: Any) -> None:
+            builds.append(self)
+            build(self, declared)
+
+        monkeypatch.setattr(plugin_signals._McpNames, "__init__", counting_build)
+        traj = _traj(_one("mcp__github__get_issue"), _one("jira__create_ticket", call_id="c2"))
+
+        signals = _signals(traj)
+
+        assert len(builds) == 1
+        assert signals["activation_coverage"]["exercised"] == ["mcp:github", "mcp:jira"]
 
     @pytest.mark.parametrize(
         ("agent", "fn", "servers", "tool"),
@@ -814,6 +871,8 @@ class TestHandoff:
             ),
             ("apply_patch", {"patchText": "*** Begin Patch\n*** Add File: out/report.json\n+{}\n*** End Patch"}),
             ("apply_patch", {"raw": "*** Begin Patch\n*** Add File: out/report.json\n+{}\n*** End Patch"}),
+            # Harbor's converters wrap a tool input that is not a JSON object as {"value": ...}.
+            ("apply_patch", {"value": "*** Begin Patch\n*** Add File: out/report.json\n+{}\n*** End Patch"}),
             ("applypatch", {"input": "*** Begin Patch\n*** Add File: out/report.json\n+{}\n*** End Patch"}),
             ("patch", {"mode": "patch", "patch": "*** Begin Patch\n*** Update File: out/report.json\n*** End Patch"}),
             ("patch", {"mode": "replace", "path": "out/report.json", "old_string": "a", "new_string": "b"}),
@@ -823,6 +882,7 @@ class TestHandoff:
             "move-to",
             "opencode-patch-text",
             "raw-input",
+            "value-input",
             "applypatch",
             "hermes-patch",
             "hermes-replace",
@@ -848,11 +908,25 @@ class TestHandoff:
             ("*** Update File: out/other.json\n@@\n-a\n+b\n*** Delete File: out/report.json", 0),
             ("*** Delete File: out/report.json\n*** Add File: out/report.json\n+{}", 1),
             ("*** Add File: out/report.json\n+{}\n*** Delete File: out/report.json", 1),
+            ("*** Update File: out/report.json\n*** Move to: archive/report.json\n@@\n-a\n+b", 0),
+            ("  *** Update File: out/report.json\n  *** Move to: archive/report.json", 0),
+            ("*** Update File: out/report.json\n*** Move to: archive/report.json\n*** Add File: out/report.json", 1),
         ],
-        ids=["add", "update", "move-to", "delete", "delete-beside-update", "delete-then-add", "add-then-delete"],
+        ids=[
+            "add",
+            "update",
+            "move-to",
+            "delete",
+            "delete-beside-update",
+            "delete-then-add",
+            "add-then-delete",
+            "moved-away",
+            "moved-away-indented",
+            "moved-away-then-added",
+        ],
     )
     @pytest.mark.parametrize("form", ["tool", "shell"])
-    def test_a_patch_that_only_deletes_the_artifact_does_not_write_it(
+    def test_a_patch_that_deletes_or_moves_the_artifact_away_does_not_write_it(
         self, headers: str, passed: int, form: str
     ) -> None:
         patch = f"*** Begin Patch\n{headers}\n*** End Patch"
@@ -1134,6 +1208,8 @@ def test_invalid_case_fields_are_reported_and_dropped(field: str, value: Any, fr
         (r"^\p{Lu}\w+$", True),  # a Unicode property: the regex engine runs it, ``re`` cannot compile it
         ("[[:alpha:]", False),  # ``re`` reads a set of characters; the regex engine an unclosed POSIX class
         ("(?a)a(?u)", False),  # the regex engine raises ValueError, not regex.error
+        ("(?V0)(?V1)x", False),  # ... KeyError
+        ("(?:abc){e<=99999999999999999999}", False),  # ... RuntimeError
     ],
 )
 def test_patterns_are_validated_by_the_engine_that_runs_them(pattern: str, valid: bool) -> None:
@@ -1148,6 +1224,30 @@ def test_patterns_are_validated_by_the_engine_that_runs_them(pattern: str, valid
     if valid:
         traj = _traj(_one("mcp__jira__create", {"title": "Track"}))
         assert _signals(traj, entry)["arguments"]["passed"] == 1
+
+
+@pytest.mark.parametrize("pattern", ["(?V0)(?V1)x", "(?:abc){e<=99999999999999999999}"])
+def test_a_pattern_the_engine_cannot_compile_is_dropped_without_breaking_collection(pattern: str) -> None:
+    case = {"id": "c1", "tool_arguments": [{"tool": "mcp:jira/create", "pattern": {"title": pattern}}]}
+    traj = _traj(_one("mcp__jira__create", {"title": "abcx"}))
+
+    assert plugin_case_spec(case) == {}
+    assert build_plugin_signals_context(entries=[case]).cases == {}
+    assert _signals(traj, case)["arguments"]["status"] == "not_applicable"
+
+
+@pytest.mark.parametrize("error", [KeyError("V0"), RuntimeError("invalid RE code"), IndexError("list index")])
+def test_a_pattern_search_that_raises_fails_the_check(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    def failing_search(*_args: Any, **_kwargs: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(plugin_signals.regex, "search", failing_search)
+    case = {"tool_arguments": [{"tool": "mcp:jira/create", "pattern": {"title": "^T"}}]}
+
+    block = _signals(_traj(_one("mcp__jira__create", {"title": "Track"})), case)["arguments"]
+
+    assert (block["checked"], block["passed"]) == (1, 0)
+    assert [failure["rule"] for failure in block["failures"]] == ["pattern"]
 
 
 def test_deeply_nested_schema_is_rejected() -> None:

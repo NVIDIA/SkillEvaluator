@@ -31,8 +31,8 @@ _FILES: dict[str, Any] = {
 }
 
 
-def _plugin(root: Path) -> Path:
-    for rel, content in _FILES.items():
+def _plugin(root: Path, files: dict[str, Any] = _FILES) -> Path:
+    for rel, content in files.items():
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content if isinstance(content, str) else json.dumps(content), encoding="utf-8")
@@ -167,3 +167,35 @@ def test_the_census_reads_the_recorded_agents_not_the_reason_text() -> None:
     row = {"type": "hook", "name": "h", "path": "h", "state": "staged", "reason": "planned"}
     assert reason({**row, "native_agents": ["claude-code"]}) == f"planned; {listed}"
     assert reason(row) == f"planned; staged natively for claude-code; {listed}"
+
+
+def test_rows_a_native_claude_code_arm_alone_stages_record_it(tmp_path: Path) -> None:
+    """A declared skill directory and a plugin-file MCP server load only through Claude Code's copied tree."""
+    files = {
+        **_FILES,
+        ".claude-plugin/plugin.json": {**_FILES[".claude-plugin/plugin.json"], "skills": ["./skills/", "./extra/"]},
+        "extra/beta/SKILL.md": "---\nname: beta\ndescription: Demo skill beta\n---\n# beta\nUse it.\n",
+        ".mcp.json": {"mcpServers": {"tools": {"command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/server.py"]}}},
+        "server.py": "print('server')\n",
+    }
+    plugin = _plugin(tmp_path / "demo", files)
+
+    def rows(plugin_load: str, **kwargs: Any) -> dict[str, dict[str, Any]]:
+        stage = tmp_path / f"stage-{plugin_load}"
+        package = prepare_plugin_eval_package(plugin, stage_root=stage, plugin_load=plugin_load, **kwargs)
+        return {row["name"]: row for row in package.provenance()["component_coverage"]["components"]}
+
+    native = rows("native", agents="claude-code", env_mode="docker")
+
+    assert "native claude-code arm only" in native["beta"]["reason"]
+    assert native["beta"]["native_agents"] == ["claude-code"]
+    assert "native claude-code arm" in native["tools"]["reason"]
+    assert native["tools"]["native_agents"] == ["claude-code"]
+    assert "native_agents" not in native["alpha"]  # a member skill every arm stages
+    wrapper = rows("wrapper")
+    assert "native_agents" not in wrapper["beta"] and "native_agents" not in wrapper["tools"]
+
+    census = {"claude-code": {"mode": "native", "listed": [{"type": "skill", "name": "beta", "evidence": "x"}]}}
+    plugin_load = {"by_agent": {"claude-code": {"mode": "native", "components": {"skill": "native"}}}}
+    promoted = apply_load_census({"components": [native["beta"]]}, census, plugin_load)
+    assert "staged natively for claude-code" not in promoted["components"][0]["reason"]

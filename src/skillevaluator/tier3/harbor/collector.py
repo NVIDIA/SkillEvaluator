@@ -796,22 +796,24 @@ class _JudgeSidecarFindings:
 
 
 def _judge_sidecar_findings(trial_dir: Path) -> _JudgeSidecarFindings:
-    """Scan and read a trial's judge sidecars once, keeping only what collection uses."""
+    """Scan and read a trial's judge sidecars once, keeping only what collection uses.
+
+    Each sidecar is projected as soon as it is read and then dropped, so
+    memory does not grow with the number of sidecars.
+    """
     sidecar_paths, scan_failure = _failed_judge_sidecar_paths(trial_dir)
-    sidecars = [
-        (step_name, *_read_failed_judge_sidecar(path, trial_dir=trial_dir, expected=expected))
-        for step_name, path, expected in sidecar_paths
-    ]
+    diagnostic = _JudgeFailureDiagnostic(scan_failure)
     declared_not_applicable: dict[str, frozenset[str]] = {}
-    if not scan_failure:
-        for step_name, sidecar, read_failure in sidecars:
-            if read_failure or sidecar is None:
-                continue
-            declared_not_applicable[step_name] = frozenset(
-                metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric_is_not_applicable(sidecar, metric)
-            )
+    for step_name, path, expected in sidecar_paths:
+        sidecar, read_failure = _read_failed_judge_sidecar(path, trial_dir=trial_dir, expected=expected)
+        diagnostic.add(step_name, sidecar, read_failure)
+        if scan_failure or read_failure or sidecar is None:
+            continue
+        declared_not_applicable[step_name] = frozenset(
+            metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric_is_not_applicable(sidecar, metric)
+        )
     return _JudgeSidecarFindings(
-        failure_diagnostic=_judge_failure_diagnostic(sidecars, scan_failure),
+        failure_diagnostic=diagnostic.record(),
         declared_not_applicable=declared_not_applicable,
     )
 
@@ -821,26 +823,28 @@ def _failed_judge_diagnostic(trial_dir: Path) -> dict[str, Any] | None:
     return _judge_sidecar_findings(trial_dir).failure_diagnostic
 
 
-def _judge_failure_diagnostic(
-    sidecars: list[tuple[str, dict[str, Any] | None, str]],
-    scan_failure: str,
-) -> dict[str, Any] | None:
-    """Project read sidecars ``(step, sidecar, read failure)`` into one unscoreable record."""
-    errors: dict[str, str] = {}
-    entry_id = ""
-    found_failure = bool(scan_failure)
-    if scan_failure:
-        errors["collector"] = scan_failure
-    for step_name, sidecar, read_failure in sidecars:
+class _JudgeFailureDiagnostic:
+    """Folds read sidecars ``(step, sidecar, read failure)``, one at a time, into one unscoreable record."""
+
+    def __init__(self, scan_failure: str) -> None:
+        self._errors: dict[str, str] = {"collector": scan_failure} if scan_failure else {}
+        self._entry_id = ""
+        self._found_failure = bool(scan_failure)
+        # Set once the errors reach one per metric; later sidecars add nothing.
+        self._full = False
+
+    def add(self, step_name: str, sidecar: dict[str, Any] | None, read_failure: str) -> None:
+        if self._full:
+            return
         if read_failure:
-            found_failure = True
-            errors.setdefault("collector", read_failure)
-            continue
+            self._found_failure = True
+            self._errors.setdefault("collector", read_failure)
+            return
         if not sidecar or str(sidecar.get("evaluation_status") or "").casefold() not in {"error", "failed"}:
-            continue
-        found_failure = True
-        if not entry_id:
-            entry_id = _safe_diagnostic_text(sidecar.get("entry_id"), max_len=256)
+            return
+        self._found_failure = True
+        if not self._entry_id:
+            self._entry_id = _safe_diagnostic_text(sidecar.get("entry_id"), max_len=256)
         safe_errors = _safe_evaluation_errors(sidecar.get("evaluation_errors"))
         if isinstance(safe_errors, dict):
             error_items = safe_errors.items()
@@ -853,23 +857,24 @@ def _judge_failure_diagnostic(
         safe_step = _safe_diagnostic_text(step_name, max_len=64)
         for metric, reason in error_items:
             key = f"{safe_step}.{metric}" if safe_step else str(metric)
-            errors.setdefault(key, reason)
-            if len(errors) >= len(DEFAULT_METRICS):
+            self._errors.setdefault(key, reason)
+            if len(self._errors) >= len(DEFAULT_METRICS):
                 break
-        if len(errors) >= len(DEFAULT_METRICS):
-            break
+        self._full = len(self._errors) >= len(DEFAULT_METRICS)
 
-    if not found_failure:
-        return None
-    diagnostic: dict[str, Any] = {
-        "metric_set": DEFAULT_METRIC_SET,
-        "evaluation_status": "failed",
-    }
-    if entry_id:
-        diagnostic["entry_id"] = entry_id
-    if errors:
-        diagnostic["evaluation_errors"] = errors
-    return redact_sensitive_data(diagnostic, max_str_len=REWARD_DIAGNOSTIC_STRING_MAX_CHARS)
+    def record(self) -> dict[str, Any] | None:
+        """The unscoreable record, or ``None`` when no sidecar failed."""
+        if not self._found_failure:
+            return None
+        diagnostic: dict[str, Any] = {
+            "metric_set": DEFAULT_METRIC_SET,
+            "evaluation_status": "failed",
+        }
+        if self._entry_id:
+            diagnostic["entry_id"] = self._entry_id
+        if self._errors:
+            diagnostic["evaluation_errors"] = self._errors
+        return redact_sensitive_data(diagnostic, max_str_len=REWARD_DIAGNOSTIC_STRING_MAX_CHARS)
 
 
 def _inspect_trial_directory(trial_dir: Path) -> tuple[str, str]:
@@ -1309,21 +1314,34 @@ def _save_unscored_trials(
             logger.debug("Failed to write Harbor failure artifact %s: %s", failure_file, e)
 
 
-def _reward_trial_context(reward_file: Path) -> tuple[Path, str, str | None]:
-    """Return ``(trial_root, trial_name, step_name)`` for a Harbor reward file.
+# Where Harbor's verifier writes rewards, relative to the job directory: single-step
+# tasks write ``<trial>/verifier/reward.json`` and native multi-step tasks write
+# ``<trial>/steps/<step>/verifier/reward.json``.
+_HARBOR_REWARD_FILE_PATTERNS = ("*/verifier/reward.json", "*/steps/*/verifier/reward.json")
 
-    Harbor single-step tasks write ``<trial>/verifier/reward.json``. Native
-    multi-step tasks may write ``<trial>/steps/<step>/verifier/reward.json``.
+
+def _harbor_reward_files(job_dir: Path) -> list[Path]:
+    """Return the reward files in Harbor's trial layouts, in sorted order.
+
+    The rest of a trial directory is agent-writable (Harbor mounts
+    ``/logs/agent`` from ``<trial>/agent``), so a ``reward.json`` anywhere else
+    is not a verifier result and is never scored.
+    """
+    return sorted(path for pattern in _HARBOR_REWARD_FILE_PATTERNS for path in job_dir.glob(pattern))
+
+
+def _reward_trial_context(job_dir: Path, reward_file: Path) -> tuple[Path, str, str | None]:
+    """Return ``(trial_root, trial_name, step_name)`` for a reward file from :func:`_harbor_reward_files`.
+
     Keep the real trial root for artifacts while making the persisted result
     name unique per step.
     """
-    verifier_dir = reward_file.parent
-    reward_parent = verifier_dir.parent
-    if reward_parent.parent.name == "steps":
-        step_name = reward_parent.name
-        trial_root = reward_parent.parent.parent
-        return trial_root, f"{trial_root.name}__{step_name}", step_name
-    return reward_parent, reward_parent.name, None
+    trial_name, *layout = reward_file.relative_to(job_dir).parts
+    trial_root = job_dir / trial_name
+    if layout[0] == "steps":
+        step_name = layout[1]
+        return trial_root, f"{trial_name}__{step_name}", step_name
+    return trial_root, trial_name, None
 
 
 def _reward_trajectory_path(trial_root: Path, step_name: str | None) -> Path:
@@ -1965,42 +1983,43 @@ def _extract_rewards(
         rewards.append(data)
         authoritative_trial_roots.add(trial_dir)
 
-    for reward_file in sorted(job_dir.rglob("reward.json")):
-        if reward_file.parent.name == "verifier":
-            try:
-                trial_dir, trial_name, step_name = _reward_trial_context(reward_file)
-                if artifacts.unscoreable(trial_dir):
-                    continue
-                if trial_dir in authoritative_trial_roots:
-                    continue
-                data = _read_json(reward_file)
-                if not isinstance(data, dict):
-                    logger.warning("Ignoring invalid or oversized Harbor reward: %s", reward_file)
-                    continue
-                _merge_reward_sidecars(data, reward_file.parent)
-                _merge_trial_evaluation_failures(data, trial_dir, artifacts)
-                data["_trial_name"] = trial_name
-                data["_trial_root_name"] = trial_dir.name
-                if arm_suffix:
-                    data["_arm_suffix"] = arm_suffix
-                if step_name:
-                    data["_step_name"] = step_name
-                result_file = trial_dir / "result.json"
-                parsed_result: dict[str, Any] | None = None
-                if result_file.exists():
-                    result = _read_json(result_file)
-                    if isinstance(result, dict):
-                        parsed_result = result
-                        _merge_constituent_default_reward_failure(data, result, trial_dir, artifacts)
-                        data["_started_at"] = result.get("started_at")
-                _populate_reward_entry_id(data, parsed_result, trial_name)
-                traj_file = _reward_trajectory_path(trial_dir, step_name)
-                if traj_file.exists():
-                    data["_has_trajectory"] = True
-                rewards.append(data)
-                scored_trial_roots.add(trial_dir)
-            except OSError as e:
-                logger.warning("Failed to read %s: %s", reward_file, e)
+    for reward_file in _harbor_reward_files(job_dir):
+        try:
+            trial_dir, trial_name, step_name = _reward_trial_context(job_dir, reward_file)
+            if artifacts.unscoreable(trial_dir):
+                continue
+            if trial_dir in authoritative_trial_roots:
+                continue
+            # Read without following a link anywhere below the job directory: a
+            # linked trial, steps, or verifier directory is not Harbor's layout.
+            data = _read_json(reward_file, root=job_dir)
+            if not isinstance(data, dict):
+                logger.warning("Ignoring invalid or oversized Harbor reward: %s", reward_file)
+                continue
+            _merge_reward_sidecars(data, reward_file.parent)
+            _merge_trial_evaluation_failures(data, trial_dir, artifacts)
+            data["_trial_name"] = trial_name
+            data["_trial_root_name"] = trial_dir.name
+            if arm_suffix:
+                data["_arm_suffix"] = arm_suffix
+            if step_name:
+                data["_step_name"] = step_name
+            result_file = trial_dir / "result.json"
+            parsed_result: dict[str, Any] | None = None
+            if result_file.exists():
+                result = _read_json(result_file)
+                if isinstance(result, dict):
+                    parsed_result = result
+                    _merge_constituent_default_reward_failure(data, result, trial_dir, artifacts)
+                    data["_started_at"] = result.get("started_at")
+            _populate_reward_entry_id(data, parsed_result, trial_name)
+            traj_file = _reward_trajectory_path(trial_dir, step_name)
+            if traj_file.exists():
+                data["_has_trajectory"] = True
+            rewards.append(data)
+            scored_trial_roots.add(trial_dir)
+        except OSError as e:
+            logger.warning("Failed to read %s: %s", reward_file, e)
 
     for result_file in sorted(job_dir.glob("*/result.json")):
         trial_dir = result_file.parent
@@ -3315,7 +3334,9 @@ def _codex_session_files(sessions: Path) -> list[Path]:
 
     The tree is agent-writable, so the walk never follows a link or reparse
     point and lists at most ``_CODEX_SESSION_WALK_ENTRIES`` entries. It visits
-    names in sorted order, a directory's files before its subdirectories.
+    names in sorted order, a directory's files before its subdirectories. A
+    directory with more entries than the budget has left ends the walk, so the
+    logs found never depend on the order the filesystem lists names in.
     """
     if not (_is_real_directory(sessions.parent) and _is_real_directory(sessions)):
         return []
@@ -3326,12 +3347,15 @@ def _codex_session_files(sessions: Path) -> list[Path]:
         directory = pending.pop()
         try:
             with os.scandir(directory) as iterator:
-                entries = sorted(islice(iterator, budget), key=lambda entry: entry.name)
+                # One entry past the budget shows that the directory does not fit in it.
+                entries = list(islice(iterator, budget + 1))
         except OSError:
             continue
+        if len(entries) > budget:
+            break
         budget -= len(entries)
         subdirectories: list[Path] = []
-        for entry in entries:
+        for entry in sorted(entries, key=lambda entry: entry.name):
             try:
                 metadata = entry.stat(follow_symlinks=False)
             except OSError:
@@ -4188,7 +4212,9 @@ def _collect_arm(
     )
     if plugin_signals_summary is not None and arm.hook_census_every_trial:
         plugin_signals_summary["hook_census"] = _arm_hook_census(job_dir, artifacts)
-    canary_summary = summarize_canary(rewards)
+    # The canary is checked without the judge, so a trial set aside as unscoreable
+    # (its judge failed) still counts: its leak is evidence, not a score.
+    canary_summary = summarize_canary(collected_rewards)
     collection.save_trials(arm, collected_rewards, job_dir)
     collection.write_summary(
         arm,

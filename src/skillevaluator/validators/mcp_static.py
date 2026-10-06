@@ -49,6 +49,7 @@ from skillevaluator.validators.url_policy import (
     url_ambiguities,
     url_credentials,
     whatwg_url,
+    without_userinfo,
 )
 
 CATEGORY = "MCP_DECLARATION"
@@ -150,12 +151,23 @@ def _client_reading(url: str) -> str:
         return "reject it as invalid"
     if not host:
         return "find no host in it"
+    if host != _whatwg_hostname(without_userinfo(url)):
+        # 'https://token\@host': the host they read is text that the URL holds as its userinfo.
+        return "read part of its user information as the host"
     return f"read it as {safe_url(url)!r}"
 
 
 def _safe_hostname(parsed: Any) -> str | None:
     try:
         return parsed.hostname
+    except ValueError:
+        return None
+
+
+def _whatwg_hostname(url: str) -> str | None:
+    """The host a WHATWG client reads from ``url``; ``None`` when it finds none or cannot parse the URL."""
+    try:
+        return urlparse(whatwg_url(url)).hostname
     except ValueError:
         return None
 

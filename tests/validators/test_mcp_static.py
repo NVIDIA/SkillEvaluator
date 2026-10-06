@@ -556,6 +556,17 @@ def test_command_findings_never_echo_an_inline_credential(config: dict) -> None:
     assert not any(_GITHUB_TOKEN in f.message or _OPENAI_KEY in f.message for f in findings)
 
 
+@pytest.mark.parametrize("userinfo", ["3f2a9c1be47d8a05f6e2b9c4d1a7e3f0b8c6d2a1", "deploy:31337"])
+def test_url_findings_never_show_userinfo_that_a_backslash_turns_into_the_host(userinfo: str) -> None:
+    """Regression: WHATWG clients read 'https://<userinfo>\\@host' as host <userinfo>, and the findings showed it."""
+    findings = validate_mcp_server_declaration("s", {"url": f"https://{userinfo}\\@api.example.com/mcp"}, "p.json")
+
+    assert {"mcp_url_inline_secret", "mcp_url_malformed_authority"} <= _checks(findings)
+    assert not any(userinfo in f.message or userinfo.rpartition(":")[2] in f.message for f in findings)
+    malformed = next(f for f in findings if f.check_name == "mcp_url_malformed_authority")
+    assert "read part of its user information as the host" in malformed.message
+
+
 def test_url_userinfo_written_as_references_is_allowed() -> None:
     # The client fills ${VAR} references from the user's environment; the plugin carries no secret.
     findings = validate_mcp_server_declaration("s", {"url": "https://${USER}:${TOKEN}@h.example/mcp"}, "p.json")

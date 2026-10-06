@@ -145,12 +145,11 @@ def url_credentials(url: str, *, userinfo_rule: UserinfoRule) -> UrlCredentials:
       name (``api_key=literal``) or a value shaped like a secret under any name
       (``q=sk-...``). A ``$VAR`` / ``${VAR}`` reference never counts.
     """
-    authority = _RAW_AUTHORITY_END_RE.split(url.partition("//")[2], maxsplit=1)[0]
-    userinfo, at, _host = authority.rpartition("@")
+    userinfo, _rest = _split_raw_userinfo(url)
     user, _colon, password = userinfo.partition(":")
     query = url.partition("?")[2].partition("#")[0]
     return UrlCredentials(
-        userinfo=bool(at) and _userinfo_carries_credential(user, password, rule=userinfo_rule),
+        userinfo=_userinfo_carries_credential(user, password, rule=userinfo_rule),
         query_keys=tuple(
             dict.fromkeys(
                 key
@@ -159,6 +158,29 @@ def url_credentials(url: str, *, userinfo_rule: UserinfoRule) -> UrlCredentials:
             )
         ),
     )
+
+
+def _split_raw_userinfo(url: str) -> tuple[str, str]:
+    """``(userinfo, the URL without it)``, read from the raw text as :func:`url_credentials` reads it.
+
+    The authority runs from ``//`` to the next ``/``, ``?``, or ``#`` (a
+    backslash does not end it), and the userinfo through its last ``@``.
+    """
+    prefix, slashes, rest = url.partition("//")
+    authority = _RAW_AUTHORITY_END_RE.split(rest, maxsplit=1)[0]
+    userinfo, at, _host = authority.rpartition("@")
+    if not at:
+        return "", url
+    return userinfo, f"{prefix}{slashes}{rest[len(userinfo) + 1 :]}"
+
+
+def without_userinfo(url: str) -> str:
+    """``url`` without the userinfo of its raw text, which :func:`url_credentials` checks for credentials.
+
+    A WHATWG client can read part of that userinfo as the host: it reads a
+    backslash as ``/``, so ``https://token\\@example.com/`` is host ``token``.
+    """
+    return _split_raw_userinfo(url)[1]
 
 
 def _userinfo_carries_credential(user: str, password: str, *, rule: UserinfoRule) -> bool:
@@ -326,16 +348,20 @@ def safe_url(url: str) -> str:
 
     An http(s), ws(s), or ftp URL is shown the way a WHATWG client (Node, the MCP
     SDKs) reads it, so the report names the host a client would actually contact.
-    A token in the path is redacted like any other report text (:func:`report_text`).
+    The userinfo of the raw text is removed first (:func:`without_userinfo`), so
+    text the URL holds as its userinfo is never shown, even where a backslash
+    makes a client read it as the host. A token in the path is redacted like any
+    other report text (:func:`report_text`).
     """
+    text = without_userinfo(url)
     try:
-        parsed = urlparse(whatwg_url(url))
+        parsed = urlparse(whatwg_url(text))
         host = parsed.hostname or ""
         port = f":{parsed.port}" if parsed.port else ""
     except ValueError:
-        return _unparsed_url(url)
+        return _unparsed_url(text)
     if not parsed.scheme or not host:
-        return _unparsed_url(url)
+        return _unparsed_url(text)
     display_host = f"[{host}]" if ":" in host else host
     return report_text(f"{parsed.scheme}://{display_host}{port}{parsed.path}")
 

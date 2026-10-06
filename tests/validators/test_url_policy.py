@@ -84,6 +84,23 @@ def test_safe_url_shows_where_a_client_connects_without_credentials(url: str, sh
     assert safe_url(url) == shown
 
 
+_BACKSLASH_USERINFO = "3f2a9c1be47d8a05f6e2b9c4d1a7e3f0b8c6d2a1"
+
+
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        (f"https://{_BACKSLASH_USERINFO}\\@api.example.com/mcp", "https://api.example.com/mcp"),
+        ("https://deploy:31337\\@evil.example/mcp", "https://evil.example/mcp"),
+        (f"https://{_BACKSLASH_USERINFO}\\@cdn.example.com/server.mcpb", "https://cdn.example.com/server.mcpb"),
+        ("https://user:pass@host\\@evil.example/x", "https://evil.example/x"),
+    ],
+)
+def test_safe_url_never_shows_userinfo_that_a_backslash_turns_into_the_host(url: str, shown: str) -> None:
+    """Regression: WHATWG reads '\\' as '/', so the userinfo before '\\@' was shown as the host."""
+    assert safe_url(url) == shown
+
+
 def test_safe_url_is_bounded() -> None:
     assert len(safe_url("https://h.example/" + "a" * 10_000)) <= MAX_REPORT_CHARS
 

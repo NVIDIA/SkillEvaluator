@@ -371,16 +371,11 @@ _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_]\w*=")
 def _shell_invocation(command: str, args: list[str]) -> tuple[str, list[str]] | None:
     """``(shell, its arguments)`` when an MCP command runs a shell interpreter, else ``None``.
 
-    'command' may name only the program, possibly as a path with spaces such as
-    "C:\\Program Files\\Git\\bin\\bash.exe", so every option is in 'args'; or it may hold a
-    whole command line ("bash -c node"), which is read argv-style as classify_mcp_pinning
-    does. An ``env`` wrapper is looked through: its options, ``NAME=value`` assignments,
+    The command is read like every other MCP command (:func:`_command_argv`). An
+    ``env`` wrapper is looked through: its options, ``NAME=value`` assignments,
     and ``-S`` string (``env -i PATH=/bin bash -c ...``, ``/usr/bin/env -S "sh -c ..."``).
     """
-    if _command_basename(command) in _SHELL_INTERPRETERS | {"env"}:
-        argv = [command, *args]
-    else:
-        argv = [*command.split(), *args]
+    argv = _command_argv(command, args)
     while argv and _command_basename(argv[0]) == "env":
         argv = _env_command(argv[1:])
     if argv and _command_basename(argv[0]) in _SHELL_INTERPRETERS:
@@ -906,6 +901,8 @@ _CONTAINER_RUNTIMES = frozenset({"docker", "podman", "nerdctl"})
 _RUNNER_COMMANDS = frozenset(
     {"npx", "bunx", "pnpx", "pnpm", "yarn", "npm", "uvx", "uv", "pipx", "deno", *_CONTAINER_RUNTIMES}
 )
+# The programs whose name tells _command_argv that a 'command' with spaces is one program path.
+_NAMED_PROGRAMS = frozenset({*_RUNNER_COMMANDS, *_SHELL_INTERPRETERS, "env"})
 
 
 @dataclass(frozen=True)
@@ -973,15 +970,29 @@ def _command_basename(command: str) -> str:
     return base
 
 
-def _argv(config: Any) -> list[str] | None:
-    """The argv a runnable MCP declaration runs, or ``None`` when it has no command.
+def _command_argv(command: str, args: list[str]) -> list[str]:
+    """The argv that an MCP server's ``command`` and ``args`` run.
 
-    A ``command`` whose whole string names a package runner is one executable,
-    possibly a path with spaces such as ``C:\\Program Files\\nodejs\\npx.cmd``
-    (:func:`validate_mcp_command` reads a shell the same way). Any other command with
-    spaces is a whole command line (``"npx -y pkg"``) and is split into words,
-    so it reads like the argv form.
+    ``command`` may name only the program, possibly as a path with spaces such as
+    ``C:\\Program Files\\nodejs\\npx.cmd``, so every option is in ``args``; or it
+    may hold a whole command line (``npx -y pkg``, ``bash -c node``), which is
+    split into words. Its first word decides. The string is one program only when
+    it starts like a path (its first word has a ``/`` or ``\\``) that names no
+    runner, shell, or ``env``, while the whole string does. So ``npx -y pkg
+    /srv/docker`` and ``bash -c x /usr/bin/env`` are command lines, whatever
+    their last path segment names.
     """
+    words = command.split()
+    path_with_spaces = (
+        ("/" in words[0] or "\\" in words[0])
+        and _command_basename(words[0]) not in _NAMED_PROGRAMS
+        and _command_basename(command) in _NAMED_PROGRAMS
+    )
+    return [command, *args] if path_with_spaces else [*words, *args]
+
+
+def _argv(config: Any) -> list[str] | None:
+    """The argv a runnable MCP declaration runs (:func:`_command_argv`), or ``None`` when it has no command."""
     if not isinstance(config, dict):
         return None
     command = config.get("command")
@@ -989,9 +1000,7 @@ def _argv(config: Any) -> list[str] | None:
         return None
     raw_args = config.get("args")
     args = [str(arg) for arg in raw_args] if isinstance(raw_args, list) else []
-    if _command_basename(command) in _RUNNER_COMMANDS:
-        return [command, *args]
-    return [*command.split(), *args]
+    return _command_argv(command, args)
 
 
 def _positionals(tokens: list[str], value_flags: frozenset[str]) -> Iterator[tuple[int, str]]:

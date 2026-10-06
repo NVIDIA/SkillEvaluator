@@ -114,6 +114,21 @@ def test_command_shell_inline_program_forms_are_blocked(config) -> None:
 
 
 @pytest.mark.parametrize(
+    "command",
+    [
+        "bash -c 'node server.js' /usr/bin/env",
+        "sh -c startserver /usr/bin/env",
+        "bash -c node-server /usr/bin/env",
+        "bash -c startserver --env-file /etc/env",
+        "bash -c startserver /bin/sh",
+    ],
+)
+def test_shell_command_line_that_ends_in_a_program_path_is_still_read_as_a_shell(command: str) -> None:
+    """Regression: a command line whose last path segment was 'env' or 'sh' was read as that one program."""
+    assert "mcp_command_dangerous_form" in _checks(validate_mcp_server_declaration("s", {"command": command}, "p.json"))
+
+
+@pytest.mark.parametrize(
     "config",
     [
         {"command": "bash", "args": ["script.sh"]},

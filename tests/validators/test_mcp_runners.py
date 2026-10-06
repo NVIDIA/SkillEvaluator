@@ -251,6 +251,35 @@ def test_pinning_reads_a_runner_path_with_spaces() -> None:
     assert mcp_container_image({"command": _DOCKER_WITH_SPACES, "args": ["run", "-i", "img:1.2.3"]}) == "img:1.2.3"
 
 
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (
+            {"command": "npx -y @modelcontextprotocol/server-filesystem /home/user/src/docker"},
+            ("npm", "npx", ("@modelcontextprotocol/server-filesystem",)),
+        ),
+        ({"command": "npx -y github:evil/npx", "args": ["left-pad@1.3.0"]}, ("npm", "npx", ("github:evil/npx",))),
+        ({"command": "docker run --rm -i ghcr.io/acme/docker"}, ("container", "docker run", ("ghcr.io/acme/docker",))),
+        (
+            {"command": "uvx --from git+https://github.com/evil/uvx", "args": ["pkg==1.0"]},
+            ("pypi", "uvx", ("git+https://github.com/evil/uvx",)),
+        ),
+    ],
+)
+def test_a_command_line_is_read_by_its_first_word(config: dict[str, Any], expected: tuple) -> None:
+    """Regression: a command line whose last path segment named a runner ('.../docker', 'github:evil/npx') was
+    read as one program of that name, so pinning, the image lookup, and the audit read the wrong program."""
+    invocation = parse_mcp_runner(config)
+    assert invocation is not None
+    assert (invocation.ecosystem, invocation.runner, invocation.specs) == expected
+    assert classify_mcp_pinning(config).status == "unpinned"
+
+
+def test_a_command_line_that_only_ends_in_a_runner_path_is_not_that_runner() -> None:
+    pin = classify_mcp_pinning({"command": "node ./server.js --data /srv/docker"})
+    assert (pin.status, pin.detail) == ("not_applicable", "local interpreter, script, or binary ('node')")
+
+
 # --------------------------------------------------------------------------- #
 # One exact-version matcher per ecosystem                                     #
 # --------------------------------------------------------------------------- #

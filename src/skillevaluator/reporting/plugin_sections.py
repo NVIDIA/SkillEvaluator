@@ -1184,6 +1184,8 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
     rows: list[dict[str, Any]] = []
     total = 0
     not_staged_rows: list[dict[str, Any]] = []
+    # The not-staged rows that the table (``rows``) leaves out.
+    not_staged_past_table: list[dict[str, Any]] = []
     unobserved_rows: list[dict[str, Any]] = []
     unobserved = 0
     computed_counts: dict[str, int] = {}
@@ -1207,11 +1209,14 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
         }
         if activation:
             row["observed"] = _observed_activation(row, observations)
-        if len(rows) < MAX_TABLE_ROWS:
+        in_table = len(rows) < MAX_TABLE_ROWS
+        if in_table:
             rows.append(row)
         if state not in EVALUATED_COVERAGE_STATES:
             if len(not_staged_rows) < MAX_TABLE_ROWS:
                 not_staged_rows.append(row)
+            if not in_table and len(not_staged_past_table) < MAX_TABLE_ROWS:
+                not_staged_past_table.append(row)
         elif activation and state != "exercised" and row["observed"] != "exercised":
             unobserved += 1
             if len(unobserved_rows) < MAX_TABLE_ROWS:
@@ -1238,6 +1243,8 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
         "counts": [row for row in counts if row["count"] or row["state"] in COVERAGE_STATES],
         "not_staged": not_staged,
         "not_staged_rows": not_staged_rows,
+        # For a format that prints the table but no list of the not-staged rows.
+        "not_staged_past_table": not_staged_past_table,
         "headline": f"{_plural(not_staged, 'component')} not staged",
         # The sentence every format prints after the headline.
         "detail": f"of {total} declared or packaged component(s); {staged} staged"

@@ -1469,8 +1469,9 @@ class TestBubblewrapLive:
 
         probe_dir = Path(tempfile.mkdtemp(prefix=".skilleval-host-read-probe-", dir=Path.home())).resolve()
         sentinel = probe_dir / "sentinel.txt"
-        secret = "BWRAP-HOST-HOME-SECRET"
-        sentinel.write_text(secret, encoding="utf-8")
+        # A plain marker, not a credential: the test only needs text it can look for.
+        marker = "BWRAP-HOST-HOME-MARKER"
+        sentinel.write_text(marker, encoding="utf-8")
         python_executable = Path(sys.executable).resolve()
         runtime_root = python_executable.parent.parent
         runtime_write_probe = runtime_root / f".skillevaluator-write-probe-{probe_dir.name}"
@@ -1500,8 +1501,8 @@ else:
         try:
             result = self._run([str(python_executable), "-B", "-c", code], run_root)
             assert result.returncode == 0, result.stderr
-            assert secret not in result.stdout
-            assert secret not in result.stderr
+            assert marker not in result.stdout
+            assert marker not in result.stderr
         finally:
             runtime_write_probe.unlink(missing_ok=True)
             shutil.rmtree(probe_dir, ignore_errors=True)

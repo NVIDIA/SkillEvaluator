@@ -862,26 +862,6 @@ class SecureRoot:
         finally:
             os.close(descriptor)
 
-    def read_prefix(
-        self,
-        relative_path: Path,
-        max_bytes: int,
-        *,
-        expected: os.stat_result | None = None,
-    ) -> bytes:
-        """Read the first ``max_bytes`` bytes of one regular single-link file without following redirects.
-
-        A larger file is not an error, so an oversize file can still show what
-        it starts with. The file is opened and re-verified like :meth:`read_bytes`.
-        """
-        descriptor, opened = self._open_file(relative_path, max_bytes, expected)
-        try:
-            prefix = read_bounded(descriptor, max_bytes, truncate=True)
-            _validate_opened_file(os.fstat(descriptor), relative_path, opened)
-            return prefix
-        finally:
-            os.close(descriptor)
-
     def read_text(
         self,
         relative_path: Path,

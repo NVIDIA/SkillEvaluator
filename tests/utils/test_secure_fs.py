@@ -705,51 +705,6 @@ def test_read_bounded_truncates_without_reading_past_the_limit(tmp_path: Path, m
     assert _read_descriptor(large, 0, truncate=True) == b""
 
 
-def test_secure_root_read_prefix_returns_the_start_of_an_oversize_file(tmp_path: Path) -> None:
-    root = tmp_path / "root"
-    root.mkdir()
-    (root / "manifest.json").write_text('{"name": "demo"}' + " " * 10_000)
-
-    with SecureRoot(root) as secure_root:
-        assert secure_root.read_prefix(Path("manifest.json"), 16) == b'{"name": "demo"}'
-        with pytest.raises(SecurePathError, match=r"exceeds the 16-byte limit"):
-            secure_root.read_bytes(Path("manifest.json"), 16)
-
-
-@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
-def test_secure_root_read_prefix_keeps_the_link_rules(tmp_path: Path, kind: str) -> None:
-    root = tmp_path / "root"
-    root.mkdir()
-    outside = tmp_path / "outside.json"
-    outside.write_text("SECRET")
-    if kind == "symlink":
-        (root / "manifest.json").symlink_to(outside)
-    else:
-        os.link(outside, root / "manifest.json")
-
-    with SecureRoot(root) as secure_root, pytest.raises(SecurePathError, match=r"symlink|hard-linked"):
-        secure_root.read_prefix(Path("manifest.json"), 4)
-
-
-def test_secure_root_read_prefix_detects_a_file_changed_while_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "root"
-    root.mkdir()
-    target = root / "manifest.json"
-    target.write_text("SAFE-CONTENT")
-    real_read = os.read
-
-    def mutating_read(descriptor: int, count: int) -> bytes:
-        target.write_text("CHANGED-CONTENT-THAT-IS-LONGER")
-        return real_read(descriptor, count)
-
-    monkeypatch.setattr(secure_fs.os, "read", mutating_read)
-
-    with SecureRoot(root) as secure_root, pytest.raises(SecurePathError, match=r"changed"):
-        secure_root.read_prefix(Path("manifest.json"), 4)
-
-
 def test_secure_root_reads_a_hard_linked_file_only_when_allowed(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()

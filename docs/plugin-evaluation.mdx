@@ -824,7 +824,8 @@ these forms, because the client that owns the namespace runs them. Bytes that
 are not UTF-8 are replaced, so binary bytes do not hide a script, and a hard
 link (such as pnpm's `node_modules` layout) is read like a regular file,
 because no script content leaves the analyzer. A script that is a symlink, a
-special file, larger than 1 MiB, past the read budget, or beyond the first 32
+special file, rewritten while it is read, larger than 1 MiB, past the read
+budget, or beyond the first 32
 scripts read (missing paths do not count), or a script that names more than 256
 other files, is not analyzed and is reported as `plugin_hook_script_unanalyzed`. So is a hook whose command or
 scripts run more than 2048 distinct files while the plugin downloads something, because the runs past that

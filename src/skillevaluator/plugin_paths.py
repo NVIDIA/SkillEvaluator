@@ -137,10 +137,13 @@ class PluginRootReader:
             return "file" if allow_hard_links or getattr(metadata, "st_nlink", 1) == 1 else "special"
         return "special"
 
-    def _read_bytes(self, rel: PurePosixPath, max_bytes: int, *, config: bool = False) -> bytes:
+    def _read_bytes(
+        self, rel: PurePosixPath, max_bytes: int, *, config: bool = False, allow_hardlinks: bool = False
+    ) -> bytes:
         """Bounded, anchored, no-follow read counted against a read budget; raises :class:`SecurePathError`.
 
         ``config`` charges the read to the separate config budget.
+        ``allow_hardlinks`` also reads a regular file with more than one link.
         """
         used = self.config_bytes_read if config else self.bytes_read
         budget = "config" if config else "inventory"
@@ -149,7 +152,9 @@ class PluginRootReader:
             raise SecurePathError("total_size_limit", f"Plugin {budget} read budget exhausted.")
         try:
             with SecureRoot(self.root) as secure_root:
-                raw, _metadata = secure_root.read_bytes(Path(*rel.parts), min(max_bytes, remaining))
+                raw, _metadata = secure_root.read_bytes(
+                    Path(*rel.parts), min(max_bytes, remaining), allow_hardlinks=allow_hardlinks
+                )
         except SecurePathError as exc:
             if exc.code == "file_size_limit" and remaining < max_bytes:
                 raise SecurePathError(
@@ -181,51 +186,11 @@ class PluginRootReader:
         A hook script is only scanned for evidence (no file content leaves the
         hook risk analyzer), so a hard-linked file, such as a ``node_modules``
         file pnpm links to its store, is read like any other regular file. Links
-        anywhere in the path, special files, a file over ``max_bytes``, and an
-        exhausted read budget raise :class:`SecurePathError`. Platforms without
-        descriptor-anchored ``openat`` keep :class:`SecureRoot`'s single-link rule.
+        anywhere in the path, special files, a file that changes while it is
+        read, a file over ``max_bytes``, and an exhausted read budget raise
+        :class:`SecurePathError`.
         """
-        if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
-            return self._read_bytes(rel, max_bytes)
-        remaining = CONTENT_DEDUP_MAX_TOTAL_BYTES - self.bytes_read
-        if remaining <= 0:
-            raise SecurePathError("total_size_limit", "Plugin inventory read budget exhausted.")
-        limit = min(max_bytes, remaining)
-        shown = rel.as_posix()
-        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-        with SecureRoot(self.root) as secure_root:
-            directory = secure_root.duplicate_posix_root_descriptor()
-            try:
-                for part in rel.parts[:-1]:
-                    child = os.open(part, flags | os.O_DIRECTORY, dir_fd=directory)
-                    os.close(directory)
-                    directory = child
-                descriptor = os.open(
-                    rel.parts[-1], flags | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0), dir_fd=directory
-                )
-            except OSError as exc:
-                raise SecurePathError("unsafe_path", f"Cannot open {shown} without following links: {exc}") from exc
-            finally:
-                os.close(directory)
-        try:
-            metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode):
-                raise SecurePathError("unsafe_path", f"Refusing a path that is not a regular file: {shown}")
-            chunks: list[bytes] = []
-            total = 0
-            while total <= limit:
-                chunk = os.read(descriptor, min(65_536, limit + 1 - total))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-        finally:
-            os.close(descriptor)
-        if total > limit:
-            code = "total_size_limit" if remaining < max_bytes else "file_size_limit"
-            raise SecurePathError(code, f"{shown} is larger than the {limit}-byte read limit", relative_path=shown)
-        self.bytes_read += total
-        return b"".join(chunks)
+        return self._read_bytes(rel, max_bytes, allow_hardlinks=True)
 
     def list_files(self, rel_dir: PurePosixPath, *, suffixes: tuple[str, ...] | None = None) -> list[PurePosixPath]:
         """Securely list regular files below a contained directory (raises on links)."""

@@ -796,22 +796,24 @@ class _JudgeSidecarFindings:
 
 
 def _judge_sidecar_findings(trial_dir: Path) -> _JudgeSidecarFindings:
-    """Scan and read a trial's judge sidecars once, keeping only what collection uses."""
+    """Scan and read a trial's judge sidecars once, keeping only what collection uses.
+
+    Each sidecar is projected as soon as it is read, so at most one parsed
+    sidecar (up to 5 MiB of JSON) is held at a time.
+    """
     sidecar_paths, scan_failure = _failed_judge_sidecar_paths(trial_dir)
-    sidecars = [
-        (step_name, *_read_failed_judge_sidecar(path, trial_dir=trial_dir, expected=expected))
-        for step_name, path, expected in sidecar_paths
-    ]
+    diagnostic = _JudgeFailureDiagnostic(scan_failure)
     declared_not_applicable: dict[str, frozenset[str]] = {}
-    if not scan_failure:
-        for step_name, sidecar, read_failure in sidecars:
-            if read_failure or sidecar is None:
-                continue
-            declared_not_applicable[step_name] = frozenset(
-                metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric_is_not_applicable(sidecar, metric)
-            )
+    for step_name, path, expected in sidecar_paths:
+        sidecar, read_failure = _read_failed_judge_sidecar(path, trial_dir=trial_dir, expected=expected)
+        diagnostic.add(step_name, sidecar, read_failure)
+        if scan_failure or read_failure or sidecar is None:
+            continue
+        declared_not_applicable[step_name] = frozenset(
+            metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric_is_not_applicable(sidecar, metric)
+        )
     return _JudgeSidecarFindings(
-        failure_diagnostic=_judge_failure_diagnostic(sidecars, scan_failure),
+        failure_diagnostic=diagnostic.record(),
         declared_not_applicable=declared_not_applicable,
     )
 
@@ -821,26 +823,28 @@ def _failed_judge_diagnostic(trial_dir: Path) -> dict[str, Any] | None:
     return _judge_sidecar_findings(trial_dir).failure_diagnostic
 
 
-def _judge_failure_diagnostic(
-    sidecars: list[tuple[str, dict[str, Any] | None, str]],
-    scan_failure: str,
-) -> dict[str, Any] | None:
-    """Project read sidecars ``(step, sidecar, read failure)`` into one unscoreable record."""
-    errors: dict[str, str] = {}
-    entry_id = ""
-    found_failure = bool(scan_failure)
-    if scan_failure:
-        errors["collector"] = scan_failure
-    for step_name, sidecar, read_failure in sidecars:
+class _JudgeFailureDiagnostic:
+    """Folds read sidecars ``(step, sidecar, read failure)``, one at a time, into one unscoreable record."""
+
+    def __init__(self, scan_failure: str) -> None:
+        self._errors: dict[str, str] = {"collector": scan_failure} if scan_failure else {}
+        self._entry_id = ""
+        self._found_failure = bool(scan_failure)
+        # Set once the errors reach one per metric; later sidecars add nothing.
+        self._full = False
+
+    def add(self, step_name: str, sidecar: dict[str, Any] | None, read_failure: str) -> None:
+        if self._full:
+            return
         if read_failure:
-            found_failure = True
-            errors.setdefault("collector", read_failure)
-            continue
+            self._found_failure = True
+            self._errors.setdefault("collector", read_failure)
+            return
         if not sidecar or str(sidecar.get("evaluation_status") or "").casefold() not in {"error", "failed"}:
-            continue
-        found_failure = True
-        if not entry_id:
-            entry_id = _safe_diagnostic_text(sidecar.get("entry_id"), max_len=256)
+            return
+        self._found_failure = True
+        if not self._entry_id:
+            self._entry_id = _safe_diagnostic_text(sidecar.get("entry_id"), max_len=256)
         safe_errors = _safe_evaluation_errors(sidecar.get("evaluation_errors"))
         if isinstance(safe_errors, dict):
             error_items = safe_errors.items()
@@ -853,23 +857,24 @@ def _judge_failure_diagnostic(
         safe_step = _safe_diagnostic_text(step_name, max_len=64)
         for metric, reason in error_items:
             key = f"{safe_step}.{metric}" if safe_step else str(metric)
-            errors.setdefault(key, reason)
-            if len(errors) >= len(DEFAULT_METRICS):
+            self._errors.setdefault(key, reason)
+            if len(self._errors) >= len(DEFAULT_METRICS):
                 break
-        if len(errors) >= len(DEFAULT_METRICS):
-            break
+        self._full = len(self._errors) >= len(DEFAULT_METRICS)
 
-    if not found_failure:
-        return None
-    diagnostic: dict[str, Any] = {
-        "metric_set": DEFAULT_METRIC_SET,
-        "evaluation_status": "failed",
-    }
-    if entry_id:
-        diagnostic["entry_id"] = entry_id
-    if errors:
-        diagnostic["evaluation_errors"] = errors
-    return redact_sensitive_data(diagnostic, max_str_len=REWARD_DIAGNOSTIC_STRING_MAX_CHARS)
+    def record(self) -> dict[str, Any] | None:
+        """The unscoreable record, or ``None`` when no sidecar failed."""
+        if not self._found_failure:
+            return None
+        diagnostic: dict[str, Any] = {
+            "metric_set": DEFAULT_METRIC_SET,
+            "evaluation_status": "failed",
+        }
+        if self._entry_id:
+            diagnostic["entry_id"] = self._entry_id
+        if self._errors:
+            diagnostic["evaluation_errors"] = self._errors
+        return redact_sensitive_data(diagnostic, max_str_len=REWARD_DIAGNOSTIC_STRING_MAX_CHARS)
 
 
 def _inspect_trial_directory(trial_dir: Path) -> tuple[str, str]:

@@ -10,7 +10,9 @@ import os
 import re
 import subprocess
 import sys
+import weakref
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1085,6 +1087,49 @@ def _create_step_entries(trial_dir: Path, names: list[str], *, directories: bool
             (path / "verifier").mkdir(parents=True)
         else:
             path.write_text("not a step directory", encoding="utf-8")
+
+
+def test_judge_sidecars_are_projected_one_at_a_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A trial may hold 64 sidecars of up to 5 MiB each, so collection keeps at most two parsed at once."""
+    trial_dir = tmp_path / "trial"
+    for index in range(8):
+        verifier = trial_dir / "steps" / f"step-{index}" / "verifier"
+        verifier.mkdir(parents=True)
+        sidecar = {
+            "entry_id": "case-001",
+            "evaluation_status": "failed",
+            "evaluation_errors": {f"metric_{index}": "judge timed out"},
+        }
+        (verifier / "skill_evaluator_reward.json").write_text(json.dumps(sidecar), encoding="utf-8")
+
+    class _Sidecar(dict):
+        """A parsed sidecar that a weak reference can track."""
+
+    parsed: list[weakref.ref[_Sidecar]] = []
+    peak = 0
+    read = collector_module._read_failed_judge_sidecar
+
+    def tracking_read(path: Path, **kwargs: Any) -> tuple[dict[str, Any] | None, str]:
+        nonlocal peak
+        sidecar, failure = read(path, **kwargs)
+        if sidecar is not None:
+            sidecar = _Sidecar(sidecar)
+            parsed.append(weakref.ref(sidecar))
+        peak = max(peak, sum(ref() is not None for ref in parsed))
+        return sidecar, failure
+
+    monkeypatch.setattr(collector_module, "_read_failed_judge_sidecar", tracking_read)
+
+    findings = collector_module._judge_sidecar_findings(trial_dir)
+
+    # The sidecar just read, and the previous one until its loop variable is rebound.
+    assert peak <= 2
+    assert findings.failure_diagnostic is not None
+    assert findings.failure_diagnostic["entry_id"] == "case-001"
+    assert list(findings.failure_diagnostic["evaluation_errors"]) == [
+        f"step-{index}.metric_{index}" for index in range(len(DEFAULT_METRICS))
+    ]
+    assert sorted(findings.declared_not_applicable) == [f"step-{index}" for index in range(8)]
 
 
 @pytest.mark.parametrize(

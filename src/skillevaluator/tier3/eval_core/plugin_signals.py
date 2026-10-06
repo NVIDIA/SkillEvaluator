@@ -509,6 +509,11 @@ def _check_regex(value: Any, where: str, errors: _FieldErrors) -> str | None:
     except (regex.error, ValueError, RecursionError, OverflowError) as exc:
         errors.add(where, f"is not a valid regular expression ({exc})")
         return None
+    except Exception as exc:
+        # Some malformed patterns raise other errors: KeyError for ``(?V0)(?V1)``,
+        # RuntimeError for a fuzzy count the engine cannot compile.
+        errors.add(where, f"is not a valid regular expression (the regex engine raised {type(exc).__name__})")
+        return None
     return value
 
 
@@ -2044,7 +2049,9 @@ def _regex_search(pattern: str, value: Any, budget: list[float]) -> bool | str:
         return regex.search(pattern, text, timeout=timeout) is not None
     except TimeoutError:
         return "pattern check timed out"
-    except (regex.error, RecursionError, OverflowError, ValueError):
+    except Exception:
+        # A pattern the engine cannot run fails the check: besides regex.error and
+        # ValueError it can raise KeyError, RuntimeError..., and grading never raises.
         return False
     finally:
         budget[0] -= time.monotonic() - started

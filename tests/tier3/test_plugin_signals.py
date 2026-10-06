@@ -1173,6 +1173,8 @@ def test_invalid_case_fields_are_reported_and_dropped(field: str, value: Any, fr
         (r"^\p{Lu}\w+$", True),  # a Unicode property: the regex engine runs it, ``re`` cannot compile it
         ("[[:alpha:]", False),  # ``re`` reads a set of characters; the regex engine an unclosed POSIX class
         ("(?a)a(?u)", False),  # the regex engine raises ValueError, not regex.error
+        ("(?V0)(?V1)x", False),  # ... KeyError
+        ("(?:abc){e<=99999999999999999999}", False),  # ... RuntimeError
     ],
 )
 def test_patterns_are_validated_by_the_engine_that_runs_them(pattern: str, valid: bool) -> None:
@@ -1187,6 +1189,30 @@ def test_patterns_are_validated_by_the_engine_that_runs_them(pattern: str, valid
     if valid:
         traj = _traj(_one("mcp__jira__create", {"title": "Track"}))
         assert _signals(traj, entry)["arguments"]["passed"] == 1
+
+
+@pytest.mark.parametrize("pattern", ["(?V0)(?V1)x", "(?:abc){e<=99999999999999999999}"])
+def test_a_pattern_the_engine_cannot_compile_is_dropped_without_breaking_collection(pattern: str) -> None:
+    case = {"id": "c1", "tool_arguments": [{"tool": "mcp:jira/create", "pattern": {"title": pattern}}]}
+    traj = _traj(_one("mcp__jira__create", {"title": "abcx"}))
+
+    assert plugin_case_spec(case) == {}
+    assert build_plugin_signals_context(entries=[case]).cases == {}
+    assert _signals(traj, case)["arguments"]["status"] == "not_applicable"
+
+
+@pytest.mark.parametrize("error", [KeyError("V0"), RuntimeError("invalid RE code"), IndexError("list index")])
+def test_a_pattern_search_that_raises_fails_the_check(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    def failing_search(*_args: Any, **_kwargs: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(plugin_signals.regex, "search", failing_search)
+    case = {"tool_arguments": [{"tool": "mcp:jira/create", "pattern": {"title": "^T"}}]}
+
+    block = _signals(_traj(_one("mcp__jira__create", {"title": "Track"})), case)["arguments"]
+
+    assert (block["checked"], block["passed"]) == (1, 0)
+    assert [failure["rule"] for failure in block["failures"]] == ["pattern"]
 
 
 def test_deeply_nested_schema_is_rejected() -> None:

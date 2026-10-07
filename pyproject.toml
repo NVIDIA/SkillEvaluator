@@ -7,7 +7,7 @@ requires = ["setuptools >= 77", "wheel"]
 
 [project]
 name = "skillevaluator"
-version = "0.4.0"
+version = "0.5.0"
 description = "Multi-tier framework for evaluating AI agent skills with quality gates, semantic overlap detection, synthetic evaluation dataset generation, and live agent evaluation."
 authors = [{ name = "NVIDIA Corporation" }]
 readme = "README.md"
@@ -51,7 +51,7 @@ dependencies = [
 llm = [
     "anthropic>=0.83.0",
     "boto3>=1.34.0",
-    "litellm>=1.83.10,<1.89.0.dev0",
+    "litellm>=1.92.0,<1.94.0.dev0",
     "openai>=2.21.0",
 ]
 # Tier 2 intra-skill deduplication and local-catalog inter-skill similarity.
@@ -61,13 +61,15 @@ tier2 = [
 # Tier 3 live agent evaluation through Harbor's native environments.
 tier3 = [
     "skillevaluator[llm]",
-    "harbor[gke]==0.13.2",
+    "harbor[gke]==0.24.0",
     # CVE-2026-59950, CVE-2026-52870, and CVE-2026-52869 fixed floor.
     "mcp>=1.28.1,<2",
     # CVE-2026-48522 through CVE-2026-48526 fixed floor.
     "pyjwt[crypto]>=2.13.0",
     # GHSA-hj66-6f7g-4r5v and GHSA-xpv3-w29h-x7cv fixed floor (via harbor[gke]).
     "oauthlib>=4.0.0",
+    # PYTHON_DOTENV_DISABLED, which keeps Harbor from loading .env files, needs 1.2.0.
+    "python-dotenv>=1.2.0",
 ]
 # Static security scanners (floors raised to the established release baseline).
 security = [

@@ -622,3 +622,46 @@ def test_parse_skill_includes_tools_dir_scripts(tmp_path):
     (tools / "run.py").write_text("print('hello')\n", encoding="utf-8")
     parsed = generate_dataset._parse_skill(skill)
     assert parsed["scripts"] == ["run.py"]
+
+
+_BLOCK_HARBOR_AND_RESOLVE_CASE = """
+import importlib.abc
+import json
+import sys
+from pathlib import Path
+
+
+class _BlockHarbor(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name == "harbor" or name.startswith("harbor."):
+            raise ImportError(name)
+        return None
+
+
+sys.meta_path.insert(0, _BlockHarbor())
+from skillevaluator.tier3 import generate_dataset
+
+case_id = generate_dataset._case_id_from_trial_dir(Path(sys.argv[1]))
+print(json.dumps({"case_id": case_id, "harbor_loaded": "harbor" in sys.modules}))
+"""
+
+
+def test_refine_resolves_result_case_ids_without_the_tier3_extra(tmp_path: Path) -> None:
+    import subprocess
+
+    trial = tmp_path / "case-007__abc1234"
+    trial.mkdir()
+    (trial / "result.json").write_text(
+        json.dumps({"task_id": {"path": str(tmp_path / "tasks" / "case-007")}}),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _BLOCK_HARBOR_AND_RESOLVE_CASE, str(trial)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {"case_id": "case-007", "harbor_loaded": False}

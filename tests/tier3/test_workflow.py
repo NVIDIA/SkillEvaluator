@@ -615,16 +615,14 @@ def test_gke_workflow_resolves_env_vars_and_enforces_precedence_before_preflight
     configured: list,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Resolve SKILLEVALUATOR_GKE_* env vars with CLI > env > config precedence before workflow preflight."""
+    """Resolve SKILLEVALUATOR_GKE_* env vars with CLI > env precedence before workflow preflight."""
     from skillevaluator.tier3.harbor import runner
 
     _dataset(skill)
     (skill / "evals" / "config.yml").write_text(
         "schema_version: 1\n"
         "harbor:\n"
-        "  environment_kwargs:\n"
-        "    workload_profile: 'standard'\n"
-        "    custom_setting: 'from-config'\n"
+        "  n_attempts: 1\n"
     )
     gke_env = {
         "SKILLEVALUATOR_GKE_CLUSTER": "env-cluster",
@@ -661,11 +659,9 @@ def test_gke_workflow_resolves_env_vars_and_enforces_precedence_before_preflight
         "namespace": "env-ns",
         "registry_location": "us-central1",
         "registry_name": "env-registry",
-        "workload_profile": "standard",
-        "custom_setting": "from-config",
     }
 
-    # 2. CLI > env > config precedence
+    # 2. CLI > env precedence
     result_override = CliRunner().invoke(
         _command(),
         [
@@ -676,8 +672,6 @@ def test_gke_workflow_resolves_env_vars_and_enforces_precedence_before_preflight
             "opencode",
             "--ek",
             "namespace=cli-ns",
-            "--ek",
-            "custom_setting=from-cli",
             "--progress",
             "off",
         ],
@@ -686,8 +680,6 @@ def test_gke_workflow_resolves_env_vars_and_enforces_precedence_before_preflight
     assert len(captured_prereq_kwargs) == 2
     assert captured_prereq_kwargs[1]["namespace"] == "cli-ns"
     assert captured_prereq_kwargs[1]["cluster_name"] == "env-cluster"
-    assert captured_prereq_kwargs[1]["custom_setting"] == "from-cli"
-    assert captured_prereq_kwargs[1]["workload_profile"] == "standard"
 
     # 3. Skill-authored GKE infrastructure kwargs are rejected in config.yml and stripped by _resolve_environment_kwargs
     stripped = runner._resolve_environment_kwargs(
@@ -711,5 +703,5 @@ def test_gke_workflow_resolves_env_vars_and_enforces_precedence_before_preflight
         [str(skill), "--env-mode", "gke", "--agents", "opencode", "--progress", "off"],
     )
     assert result_infra_in_config.exit_code != 0
-    assert "cluster_name cannot be configured in skill evals/config.yml" in result_infra_in_config.output
+    assert "unknown harbor key(s): environment_kwargs" in result_infra_in_config.output
     assert len(captured_prereq_kwargs) == 2

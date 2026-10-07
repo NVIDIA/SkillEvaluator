@@ -1,13 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
 import pytest
 
 from skillevaluator.tier3.dataset_utils import load_dataset_entries_with_format
 from skillevaluator.tier3.evals_config import (
-    _GKE_INFRASTRUCTURE_KWARGS,
     EvalsConfigError,
     load_evals_config,
+    parse_environment_kwarg_overrides,
+    validate_environment_kwargs,
 )
 from skillevaluator.tier3.evals_spec import validate_skillevaluators as validate_skill_evals
 
@@ -66,6 +69,55 @@ grading:
     assert config["grading"]["mode"] == "default_plus_custom"
 
 
+@pytest.mark.parametrize("value", [".nan", ".inf", "-.inf"])
+def test_load_evals_config_rejects_nonfinite_timeout_multiplier(tmp_path, value):
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        f"schema_version: 1\nharbor:\n  timeout_multiplier: {value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvalsConfigError, match=r"harbor\.timeout_multiplier.*finite"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_overflowing_timeout_multiplier(tmp_path):
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        f"schema_version: 1\nharbor:\n  timeout_multiplier: {10**1000}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvalsConfigError, match=r"harbor\.timeout_multiplier.*finite"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_finite_multiplier_that_overflows_default_timeouts(tmp_path):
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        "schema_version: 1\nharbor:\n  timeout_multiplier: 1.0e+308\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvalsConfigError, match=r"harbor\.timeout_multiplier.*finite Harbor timeouts"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_overflowing_pass_threshold(tmp_path):
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        f"schema_version: 1\nharbor:\n  pass_threshold: {10**1000}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvalsConfigError, match=r"harbor\.pass_threshold.*between"):
+        load_evals_config(skill)
+
+
 def test_load_evals_config_missing_is_empty(tmp_path):
     skill = tmp_path / "skill"
     (skill / "evals").mkdir(parents=True)
@@ -90,6 +142,149 @@ harbor:
 
     with pytest.raises(EvalsConfigError, match="unknown harbor key"):
         load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_environment_kwargs_because_they_are_operator_only(tmp_path):
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        "schema_version: 1\nharbor:\n  environment_kwargs:\n    region: us-west-2\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvalsConfigError, match=r"unknown harbor key.*environment_kwargs"):
+        load_evals_config(skill)
+
+
+@pytest.mark.parametrize(
+    ("entry", "secret"),
+    [
+        ("api_key=do-not-render-this", "do-not-render-this"),
+        ('headers={"Authorization":"do-not-render-this"}', "do-not-render-this"),
+        ('headers={"X-API-Key":"do-not-render-this"}', "do-not-render-this"),
+        ('metadata={"clientSecret":"do-not-render-this"}', "do-not-render-this"),
+        ('nested={"sudoPassword":"do-not-render-this"}', "do-not-render-this"),
+        ("endpoint=https://bearer-token@example.invalid/path", "bearer-token"),
+        ("endpoint=https://user%3Apassword@example.invalid/path", "user%3Apassword"),
+        ("endpoint=ssh://git@example.invalid/repo", "git@example.invalid"),
+        ("proxy=https://user:do-not-render-this@example.test", "do-not-render-this"),
+        ("missing-equals-do-not-render-this", "do-not-render-this"),
+    ],
+)
+def test_cli_environment_kwargs_reject_secrets_without_echoing_values(entry, secret):
+    with pytest.raises(ValueError) as caught:
+        parse_environment_kwarg_overrides((entry,))
+
+    assert secret not in str(caught.value)
+
+
+def test_cli_environment_kwargs_allow_non_secret_key_names() -> None:
+    assert parse_environment_kwarg_overrides(('key_name="evaluation-key"',)) == {"key_name": "evaluation-key"}
+
+
+def test_cli_environment_kwargs_allow_kubernetes_secret_object_reference() -> None:
+    assert parse_environment_kwarg_overrides(
+        ('image_pull_secret="registry-credentials"',),
+        env_mode="ack",
+    ) == {"image_pull_secret": "registry-credentials"}
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "reference"),
+    [
+        ("modal", "registry-credentials"),
+        ("daytona", "registry-credentials"),
+        ("ack", "username:password"),
+        ("ack", "UPPER_CASE"),
+        ("ack", "contains spaces"),
+    ],
+)
+def test_cli_environment_kwargs_reject_image_pull_secret_outside_ack_or_invalid_kubernetes_names(
+    env_mode: str,
+    reference: str,
+) -> None:
+    with pytest.raises(ValueError, match="Invalid --environment-kwarg"):
+        parse_environment_kwarg_overrides(
+            (f"image_pull_secret={json.dumps(reference)}",),
+            env_mode=env_mode,
+        )
+
+
+def test_environment_kwargs_reject_cycles_without_recursing() -> None:
+    cyclic: dict[str, object] = {}
+    cyclic["nested"] = cyclic
+
+    with pytest.raises(ValueError, match="cyclic"):
+        validate_environment_kwargs({"options": cyclic})
+
+
+def test_environment_kwargs_reject_excessive_direct_api_nesting_without_recursing() -> None:
+    nested: object = "leaf"
+    for _ in range(40):
+        nested = [nested]
+
+    with pytest.raises(ValueError, match="nest at most"):
+        validate_environment_kwargs({"options": nested})
+
+
+def test_cli_environment_kwargs_reject_extreme_json_nesting_without_traceback() -> None:
+    deeply_nested = "[" * 1200 + "0" + "]" * 1200
+
+    with pytest.raises(ValueError, match="nest"):
+        parse_environment_kwarg_overrides((f"options={deeply_nested}",))
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "entry", "expected"),
+    [
+        (
+            "daytona",
+            'secrets={"TARGET_API_KEY":"organization-secret-name"}',
+            {"secrets": {"TARGET_API_KEY": "organization-secret-name"}},
+        ),
+        (
+            "modal",
+            'secrets=["runtime-secret","telemetry-secret"]',
+            {"secrets": ["runtime-secret", "telemetry-secret"]},
+        ),
+        (
+            "modal",
+            'registry_secret="private-registry-login"',
+            {"registry_secret": "private-registry-login"},
+        ),
+        (
+            "skypilot",
+            'secrets=["cluster-secret"]',
+            {"secrets": ["cluster-secret"]},
+        ),
+        (
+            "cwsandbox",
+            'secrets=[{"store":"team-store","name":"runtime-key","field":"value","env_var":"API_KEY"}]',
+            {"secrets": [{"store": "team-store", "name": "runtime-key", "field": "value", "env_var": "API_KEY"}]},
+        ),
+        (
+            "wandb",
+            'secrets=[{"name":"runtime-key","env_var":"API_KEY"}]',
+            {"secrets": [{"name": "runtime-key", "env_var": "API_KEY"}]},
+        ),
+    ],
+)
+def test_cli_environment_kwargs_allow_provider_secret_references(env_mode, entry, expected) -> None:
+    assert parse_environment_kwarg_overrides((entry,), env_mode=env_mode) == expected
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "entry"),
+    [
+        ("e2b", 'secrets=["not-supported"]'),
+        ("daytona", 'secrets=["wrong-shape"]'),
+        ("modal", 'secrets={"wrong":"shape"}'),
+        ("cwsandbox", 'secrets=[{"value":"plaintext-not-a-reference"}]'),
+    ],
+)
+def test_cli_environment_kwargs_reject_secret_reference_fields_outside_exact_harbor_shapes(env_mode, entry) -> None:
+    with pytest.raises(ValueError, match="Invalid --environment-kwarg"):
+        parse_environment_kwarg_overrides((entry,), env_mode=env_mode)
 
 
 def test_load_evals_config_validates_resource_shapes(tmp_path):
@@ -125,130 +320,21 @@ harbor:
         load_evals_config(skill)
 
 
-def test_load_evals_config_valid_environment_kwargs(tmp_path):
-    skill = tmp_path / "gke-skill"
-    (skill / "evals").mkdir(parents=True)
-    (skill / "evals" / "config.yml").write_text(
-        """\
-schema_version: 1
-harbor:
-  environment_kwargs:
-    custom_setting: custom_val
-    workload_profile: memory-optimized
-""",
-        encoding="utf-8",
-    )
-
-    config, path = load_evals_config(skill)
-
-    assert path == skill / "evals" / "config.yml"
-    assert config["harbor"]["environment_kwargs"] == {
-        "custom_setting": "custom_val",
-        "workload_profile": "memory-optimized",
-    }
-
-
-def test_load_evals_config_invalid_environment_kwargs(tmp_path):
-    skill = tmp_path / "invalid-skill"
-    (skill / "evals").mkdir(parents=True)
-
-    # Not a mapping
-    (skill / "evals" / "config.yml").write_text(
-        """\
-schema_version: 1
-harbor:
-  environment_kwargs:
-    - custom_setting
-""",
-        encoding="utf-8",
-    )
-    with pytest.raises(EvalsConfigError, match=r"harbor\.environment_kwargs must be a mapping"):
-        load_evals_config(skill)
-
-    # Non-string value
-    (skill / "evals" / "config.yml").write_text(
-        """\
-schema_version: 1
-harbor:
-  environment_kwargs:
-    custom_setting: 12345
-""",
-        encoding="utf-8",
-    )
-    with pytest.raises(
-        EvalsConfigError,
-        match=r"harbor\.environment_kwargs\.custom_setting must be a non-empty string",
-    ):
-        load_evals_config(skill)
-
-
-def test_gke_infrastructure_kwargs_contains_expected_keys():
-    """Verify all 10 GKE infrastructure and security control kwargs are protected."""
-    expected = {
-        "allow_workload_identity",
-        "cluster_name",
-        "region",
-        "namespace",
-        "registry_location",
-        "registry_name",
-        "project_id",
-        "cloud_build_machine_type",
-        "cloud_build_disk_size_gb",
-        "memory_limit_multiplier",
-    }
-    assert expected == _GKE_INFRASTRUCTURE_KWARGS
-
-
-@pytest.mark.parametrize("blocked_key", sorted(_GKE_INFRASTRUCTURE_KWARGS))
-def test_load_evals_config_blocked_infrastructure_kwargs(tmp_path, blocked_key):
-    """Untrusted skills must not configure infrastructure keys in evals/config.yml."""
-    skill = tmp_path / "blocked-skill"
-    (skill / "evals").mkdir(parents=True)
-    (skill / "evals" / "config.yml").write_text(
-        f"""\
-schema_version: 1
-harbor:
-  environment_kwargs:
-    {blocked_key}: forbidden-val
-""",
-        encoding="utf-8",
-    )
-    with pytest.raises(
-        EvalsConfigError,
-        match=rf"harbor\.environment_kwargs\.{blocked_key} cannot be configured in skill evals/config\.yml",
-    ):
-        load_evals_config(skill)
-
-
 @pytest.mark.parametrize(
-    "forbidden_key",
+    ("entry", "secret"),
     [
-        "network_block_all",
-        "langsmith_endpoint",
-        "extra_docker_compose",
-        "arbitrary_backend_knob",
-        "cookie",
-        "oauth",
+        ("custom_setting=sk-ant-api03-1234567890abcdefghijklmnop", "sk-ant-api03-1234567890abcdefghijklmnop"),
+        ("custom_setting=ghp_1234567890abcdefghijklmnopqrstuvwxyz", "ghp_1234567890abcdefghijklmnopqrstuvwxyz"),
+        ("custom_setting=AIzaSyA1234567890abcdefghijklmnopqrstuvw", "AIzaSyA1234567890abcdefghijklmnopqrstuvw"),
+        ("custom_setting=-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----"),
+        ("service_account_key=my-secret-sa-key", "my-secret-sa-key"),
     ],
 )
-def test_load_evals_config_blocked_backend_security_controls(tmp_path, forbidden_key):
-    """Verify skills can only configure keys from the safe allowlist."""
-    skill = tmp_path / "forbidden-skill"
-    (skill / "evals").mkdir(parents=True)
-    (skill / "evals" / "config.yml").write_text(
-        f"""\
-schema_version: 1
-harbor:
-  environment_kwargs:
-    {forbidden_key}: some-value
-""",
-        encoding="utf-8",
-    )
-    with pytest.raises(
-        EvalsConfigError,
-        match=rf"harbor\.environment_kwargs\.{forbidden_key} cannot be configured in skill evals/config\.yml",
-    ):
-        load_evals_config(skill)
+def test_cli_environment_kwargs_reject_secret_value_patterns_without_echoing(entry, secret):
+    with pytest.raises(ValueError, match="Sensitive key or value detected") as caught:
+        parse_environment_kwarg_overrides((entry,))
+
+    assert secret not in str(caught.value)
 
 
 def test_validate_skill_evals_does_not_warn_expected_script_for_guide_only_skill(tmp_path):
@@ -386,3 +472,32 @@ def test_legacy_evals_json_is_accepted_with_deprecation_warning(tmp_path):
 
     assert not any(r.status == "error" for r in results)
     assert any("Deprecated eval dataset format" in r.message for r in results)
+
+
+@pytest.mark.parametrize(
+    "infra_key",
+    [
+        "allow_workload_identity",
+        "autopilot",
+        "cluster_name",
+        "region",
+        "namespace",
+        "registry_location",
+        "registry_name",
+        "project_id",
+        "cloud_build_machine_type",
+        "cloud_build_disk_size_gb",
+        "memory_limit_multiplier",
+    ],
+)
+def test_validate_environment_kwargs_gke_infrastructure_boundary(infra_key: str) -> None:
+    """Reject GKE infrastructure keys when allow_gke_infrastructure_kwargs=False while allowing them on host CLI."""
+    from skillevaluator.tier3.evals_config import validate_environment_kwargs
+
+    with pytest.raises(ValueError, match=r"GKE infrastructure setting .* is not allowed in skill config"):
+        validate_environment_kwargs({infra_key: "test-val"}, allow_gke_infrastructure_kwargs=False)
+
+    assert validate_environment_kwargs({infra_key: "test-val"}, allow_gke_infrastructure_kwargs=True) == {
+        infra_key: "test-val"
+    }
+

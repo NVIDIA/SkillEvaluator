@@ -1341,3 +1341,81 @@ def test_wait_for_container_exec_ready_aborts_immediately_on_gke_warden_missing_
         asyncio.run(env_obj._wait_for_container_exec_ready(max_attempts=60))
 
     assert sleep_calls == []
+
+
+def test_gke_environment_preflight_normalizes_multipath_kubeconfig(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Accept split KUBECONFIG in SkillEvaluatorGKEEnvironment.preflight() and raise SystemExit when missing."""
+    monkeypatch.setattr("skillevaluator.tier3.harbor.gke_environment.shutil.which", lambda cmd: f"/usr/bin/{cmd}")
+
+    valid_kc = tmp_path / "valid_kubeconfig"
+    valid_kc.write_text("apiVersion: v1\nclusters: []\n", encoding="utf-8")
+    missing_kc = tmp_path / "missing_kubeconfig"
+    monkeypatch.setenv("KUBECONFIG", f"{missing_kc}{os.pathsep}{valid_kc}")
+
+    # Split KUBECONFIG with one valid file succeeds where stock GKEEnvironment.preflight() would fail
+    SkillEvaluatorGKEEnvironment.preflight()
+
+    # All-missing KUBECONFIG raises SystemExit
+    monkeypatch.setenv("KUBECONFIG", str(missing_kc))
+    with pytest.raises(SystemExit, match="Kubernetes credentials"):
+        SkillEvaluatorGKEEnvironment.preflight()
+
+
+def test_gke_environment_exec_handles_harbor_024_stream_closed_and_pod_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+    make_gke_env: Callable[..., SkillEvaluatorGKEEnvironment],
+) -> None:
+    """Retry GKEExecStreamClosedError, redact persistent stream errors, and raise GKEPodNotFoundError on Warden missing pod."""
+    from harbor.environments.base import ExecResult
+    from harbor.environments.gke import GKEEnvironment, GKEExecStreamClosedError, GKEPodNotFoundError
+
+    async def _no_sleep(_sec: float) -> None:
+        return None
+
+    monkeypatch.setattr("skillevaluator.tier3.harbor.gke_environment.asyncio.sleep", _no_sleep)
+    secret_val = "sk-ant-api03-supersecretvalue123456"
+    env_obj = make_gke_env(namespace="default")
+    env_obj._persistent_env = {"ANTHROPIC_API_KEY": secret_val}
+
+    # 1. Transient GKEExecStreamClosedError succeeds on retry
+    attempts = 0
+
+    async def _flaky_exec(self_inner: object, **kwargs: object) -> ExecResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise GKEExecStreamClosedError(f"WebSocket closed with {secret_val}")
+        return ExecResult(stdout="ok", stderr=None, return_code=0)
+
+    monkeypatch.setattr(GKEEnvironment, "exec", _flaky_exec)
+    res = asyncio.run(env_obj.exec("echo hi"))
+    assert res.return_code == 0
+    assert attempts == 2
+
+    # 2. Persistent GKEExecStreamClosedError raises with redacted message
+    async def _always_closed_exec(self_inner: object, **kwargs: object) -> ExecResult:
+        raise GKEExecStreamClosedError(f"WebSocket closed: token={secret_val}")
+
+    monkeypatch.setattr(GKEEnvironment, "exec", _always_closed_exec)
+    with pytest.raises(GKEExecStreamClosedError) as exc_info:
+        asyncio.run(env_obj.exec("echo hi"))
+    assert secret_val not in str(exc_info.value)
+    assert "<redacted>" in str(exc_info.value)
+
+    # 3. Warden 400 missing-pod in stderr raises GKEPodNotFoundError with redacted message
+    async def _warden_missing_exec(self_inner: object, **kwargs: object) -> ExecResult:
+        return ExecResult(
+            stdout="",
+            stderr=f'Handshake status 400 Bad Request: {{"message":"Cannot connect to pod default/pod-1, not found."}} key={secret_val}',
+            return_code=1,
+        )
+
+    monkeypatch.setattr(GKEEnvironment, "exec", _warden_missing_exec)
+    with pytest.raises(GKEPodNotFoundError) as pod_exc_info:
+        asyncio.run(env_obj.exec("echo hi"))
+    assert secret_val not in str(pod_exc_info.value)
+    assert "<redacted>" in str(pod_exc_info.value)
+

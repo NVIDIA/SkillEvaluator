@@ -55,6 +55,7 @@ import yaml
 
 from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 _INTERACTIVE_RE = re.compile(
@@ -707,7 +708,7 @@ def _summarize_trajectory(trajectory: dict[str, Any], max_steps: int = 25) -> st
                 args_str = json.dumps(args, ensure_ascii=False)[:120]
                 lines.append(f"  {n}. [{fn}] {args_str}")
 
-        msg = (step.get("message") or "").strip()
+        msg = atif_content_text(step.get("message")).strip()
         if msg and len(msg) > 30 and n < max_steps:
             n += 1
             truncated = msg[:250] + "..." if len(msg) > 250 else msg
@@ -914,7 +915,7 @@ def _extract_agent_final_message(trajectory: dict[str, Any]) -> str:
     for step in reversed(trajectory.get("steps", [])):
         if step.get("source") != "agent":
             continue
-        msg = (step.get("message") or "").strip()
+        msg = atif_content_text(step.get("message")).strip()
         if msg and len(msg) > 20 and not step.get("tool_calls"):
             return msg
     return ""

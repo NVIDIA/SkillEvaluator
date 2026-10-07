@@ -3,8 +3,10 @@
 
 import asyncio
 import shlex
+from pathlib import Path
 
 import pytest
+import toml
 from harbor.agents.factory import AgentFactory
 from harbor.environments.base import ExecResult
 from harbor.models.agent.context import AgentContext
@@ -86,26 +88,44 @@ def test_selected_codex_launcher_preserves_provider_model_contract(
     if mode in {"e2b", "daytona"}:
         assert option_value("--env") == mode
         assert "--environment-import-path" not in command
+    # Harbor's unified --agent selector carries either a built-in name or an import path.
+    selected_agent = option_value("--agent")
+    assert selected_agent is not None
+    assert "-a" not in command
+    assert "--agent-import-path" not in command
     agent = AgentFactory.create_agent_from_config(
         AgentConfig(
-            name=option_value("-a"),
-            import_path=option_value("--agent-import-path"),
+            name=None if ":" in selected_agent else selected_agent,
+            import_path=selected_agent if ":" in selected_agent else None,
             model_name=option_value("--model"),
         ),
         logs_dir=tmp_path / "logs",
     )
 
     class RecordingEnvironment:
+        default_user = None
+
         def __init__(self):
             self.commands = []
+            self.uploads = {}
 
         async def exec(self, command, **kwargs):
             self.commands.append((command, kwargs.get("env") or {}))
             return ExecResult(return_code=0, stdout="", stderr="")
 
+        async def upload_file(self, source_path, target_path):
+            self.uploads[str(target_path)] = Path(source_path).read_text(encoding="utf-8")
+
     environment = RecordingEnvironment()
     instruction = "quote --model gpt-5.6-sol and /tmp/codex-secrets literally"
     asyncio.run(agent.run(instruction, environment=environment, context=AgentContext()))
+
+    # Harbor uploads the effective Codex config; gateway routing must survive it.
+    configs = [toml.loads(text) for path, text in environment.uploads.items() if path.endswith("config.toml")]
+    if base_url:
+        assert len(configs) == 1
+        assert configs[0]["model_provider"] == "openai_compatible"
+        assert configs[0]["model_providers"]["openai_compatible"]["base_url"] == base_url
 
     launchers = [(text, env) for text, env in environment.commands if "codex exec " in text]
     assert len(launchers) == 1

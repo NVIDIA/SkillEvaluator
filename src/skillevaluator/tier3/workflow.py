@@ -89,21 +89,31 @@ def _source_snapshot(skill_path: Path) -> Iterator[Path]:
         yield snapshot
 
 
-def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, str]:
+def _resolve_workflow_environment_kwargs(params: dict[str, Any]) -> dict[str, Any]:
+    """Parse CLI environment kwargs and resolve effective backend kwargs."""
+    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+    from skillevaluator.tier3.harbor.runner import _resolve_environment_kwargs
+
+    raw_cli_kwargs = params.get("environment_kwarg") or params.get("environment_kwargs") or ()
+    parsed_environment_kwargs = parse_environment_kwarg_overrides(raw_cli_kwargs, env_mode=params["env_mode"])
+    return _resolve_environment_kwargs(
+        params["env_mode"],
+        cli_kwargs=parsed_environment_kwargs,
+    )
+
+
+def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, Any]:
     """Reject known configuration errors before generating a paid dataset."""
     from skillevaluator.cli import _evaluated_source_from_options
     from skillevaluator.provider_config import resolve_llm_provider
-    from skillevaluator.tier3.commands import (
-        parse_agent_model_overrides,
-        parse_environment_kwargs,
-        resolve_agents,
-        validate_agents,
+    from skillevaluator.tier3.commands import parse_agent_model_overrides, resolve_agents, validate_agents
+    from skillevaluator.tier3.evals_config import (
+        _validate_config,
+        load_evals_config,
     )
-    from skillevaluator.tier3.evals_config import _validate_config, load_evals_config
     from skillevaluator.tier3.harbor.runner import (
         _model_for_agent,
         _resolve_agent_runtime_plan,
-        _resolve_environment_kwargs,
         _resolve_runtime_env,
         _workspace_skills,
     )
@@ -132,6 +142,7 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, st
         if params.get(cli_name) is not None:
             effective.setdefault(group, {})["mode"] = params[cli_name]
     _validate_config(effective, config_path or skill_path / "evals" / "config.yml")
+    resolved_environment_kwargs = _resolve_workflow_environment_kwargs(params)
     if harbor.get("stop_on_pass", False) and harbor.get("n_attempts", 1) == 1:
         raise ValueError("stop_on_pass requires n_attempts > 1")
 
@@ -166,13 +177,7 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, st
         )
         for agent in agents
     }
-    parsed_environment_kwargs = parse_environment_kwargs(params.get("environment_kwargs", ()))
-    resolved_environment_kwargs = _resolve_environment_kwargs(
-        params["env_mode"],
-        config_kwargs=harbor.get("environment_kwargs"),
-        cli_kwargs=parsed_environment_kwargs,
-    )
-    runtime_env, errors = _resolve_runtime_env(harbor.get("runtime_env"))
+    runtime_env, errors = _resolve_runtime_env(harbor.get("runtime_env"), env_mode=params["env_mode"])
     if errors:
         raise ValueError("; ".join(errors))
     _resolve_agent_runtime_plan(
@@ -195,24 +200,19 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, st
 def _preflight_environment(
     params: dict[str, Any],
     *,
-    environment_kwargs: dict[str, str] | None = None,
+    environment_kwargs: dict[str, Any] | None = None,
 ) -> None:
     """Check installed runtimes and backend configuration without an agent run."""
-    from skillevaluator.tier3.commands import parse_agents, parse_environment_kwargs
-    from skillevaluator.tier3.harbor.runner import _check_prerequisites, _resolve_environment_kwargs
+    from skillevaluator.tier3.commands import parse_agents
+    from skillevaluator.tier3.harbor.runner import _check_prerequisites
 
-    # These Harbor preflights perform remote authentication RPCs. Leave those
+    # These preflights contact a remote control plane or cluster. Leave those
     # probes in the execution engine instead of running them before generation.
-    if params["env_mode"] in {"cwsandbox", "wandb", "langsmith"}:
+    if params["env_mode"] in {"ack", "cwsandbox", "langsmith", "openshift", "wandb"}:
         return
-    if environment_kwargs is None:
-        parsed_environment_kwargs = parse_environment_kwargs(params.get("environment_kwargs", ()))
-        resolved_environment_kwargs = _resolve_environment_kwargs(
-            params["env_mode"],
-            cli_kwargs=parsed_environment_kwargs,
-        )
-    else:
-        resolved_environment_kwargs = environment_kwargs
+    resolved_environment_kwargs = (
+        _resolve_workflow_environment_kwargs(params) if environment_kwargs is None else environment_kwargs
+    )
     errors = _check_prerequisites(
         env_mode=params["env_mode"],
         agents=parse_agents(params["agents"]),

@@ -105,6 +105,7 @@ EVALS_SPEC: list[EntrySpec] = [
             "passthrough_env and setup_commands are accepted as compatibility aliases for runtime_env and pre_agent_setup.",
             "Supported skill_workspace keys: mode (isolated|group), include.",
             "Supported grading keys: mode (default|default_plus_custom|custom_only).",
+            "pre_agent_setup/setup_commands is allowed only with --skip-baseline; paired runs reject skill-owned setup code.",
             "CLI flags override config values.",
         ],
         example="""\
@@ -791,17 +792,9 @@ def _validate_mcp_toml(path: Path, results: list[CheckResult]) -> None:
         )
         return
 
-    allowed_runtime_env: dict[str, str] = {}
-    try:
-        from .evals_config import load_evals_config
+    from .evals_config import load_allowed_runtime_env
 
-        skill_root = path.parent.parent.parent
-        cfg, _ = load_evals_config(skill_root)
-        env_from_cfg = cfg.get("harbor", {}).get("runtime_env", {})
-        if isinstance(env_from_cfg, dict):
-            allowed_runtime_env = env_from_cfg
-    except Exception:
-        pass
+    allowed_runtime_env = load_allowed_runtime_env(path.parent.parent.parent)
 
     for i, s in enumerate(servers):
         if not isinstance(s, dict) or "name" not in s:

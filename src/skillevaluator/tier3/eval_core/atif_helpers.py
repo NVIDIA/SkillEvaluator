@@ -17,6 +17,7 @@ import re
 from typing import Any
 
 from skillevaluator.evidence import evidence_ref_identity
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     iter_normalized_tool_calls as iter_tool_calls,
 )
@@ -148,7 +149,7 @@ def build_conversation_summary(traj: dict[str, Any], question: str) -> str:
 
         obs = step.get("observation") or {}
         for r in obs.get("results") or []:
-            content = str(r.get("content", ""))
+            content = atif_content_text(r.get("content"))
             if content:
                 parts.append(f"Tool returned: {content[:400]}")
 
@@ -561,7 +562,7 @@ def _tool_observation_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
         for result_idx, result in enumerate((step.get("observation") or {}).get("results") or []):
             if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
                 return refs
-            content = str(result.get("content") or "")
+            content = atif_content_text(result.get("content"))
             if not content.strip():
                 continue
             call_id = str(result.get("source_call_id") or f"result-{result_idx}")
@@ -777,7 +778,7 @@ def _late_observation_excerpts(traj: dict[str, Any], limit: int) -> list[str]:
         if step.get("source") != "agent":
             continue
         for result in reversed((step.get("observation") or {}).get("results") or []):
-            content = str(result.get("content") or "").strip()
+            content = atif_content_text(result.get("content")).strip()
             if content:
                 out.append(_clip(content, limit))
     return out

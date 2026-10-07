@@ -110,7 +110,10 @@ def test_resolve_environment_kwargs_strict_missing():
 
 
 def test_build_harbor_run_command_gke_includes_all_ek_flags():
-    """Command construction includes --env gke and sorted --ek key=value flags."""
+    """Command construction includes --env SECURE_GKE_ENV_IMPORT_PATH and sorted JSON-encoded --ek flags."""
+    from skillevaluator.tier3.evals_config import encode_environment_kwarg
+    from skillevaluator.tier3.harbor.gke_environment import SECURE_GKE_ENV_IMPORT_PATH
+
     command = build_harbor_run_command(
         dataset_path="/tmp/dataset",
         agent="claude-code",
@@ -122,16 +125,16 @@ def test_build_harbor_run_command_gke_includes_all_ek_flags():
 
     assert "--env" in command
     env_idx = command.index("--env")
-    assert command[env_idx + 1] == "gke"
+    assert command[env_idx + 1] == SECURE_GKE_ENV_IMPORT_PATH
 
-    # Verify all 5 kwargs are emitted as --ek key=value
+    # Verify all 5 kwargs are emitted as JSON-encoded --ek key=value
     for key, val in COMPLETE_GKE_KWARGS.items():
         assert "--ek" in command
-        assert f"{key}={val}" in command
+        assert encode_environment_kwarg(key, val) in command
 
 
 def test_build_harbor_run_command_gke_supports_agent_import_path():
-    """Support custom agent import path in GKE mode without emitting agent name flag."""
+    """Support custom agent import path in GKE mode via Harbor 0.24.0 unified --agent flag."""
     custom_import = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorClaudeCode"
     command = build_harbor_run_command(
         dataset_path="/tmp/dataset",
@@ -143,11 +146,11 @@ def test_build_harbor_run_command_gke_supports_agent_import_path():
         environment_kwargs=COMPLETE_GKE_KWARGS,
     )
 
-    assert "--agent-import-path" in command
-    idx = command.index("--agent-import-path")
+    assert "--agent" in command
+    idx = command.index("--agent")
     assert command[idx + 1] == custom_import
     assert "-a" not in command
-    assert "--agent" not in command
+    assert "--agent-import-path" not in command
 
 
 def test_build_harbor_run_command_gke_defaults_claude_code_import_path():
@@ -161,11 +164,11 @@ def test_build_harbor_run_command_gke_defaults_claude_code_import_path():
         environment_kwargs=COMPLETE_GKE_KWARGS,
     )
 
-    assert "--agent-import-path" in command
-    idx = command.index("--agent-import-path")
+    assert "--agent" in command
+    idx = command.index("--agent")
     assert command[idx + 1] == "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorClaudeCode"
     assert "-a" not in command
-    assert "--agent" not in command
+    assert "--agent-import-path" not in command
 
 
 def test_check_prerequisites_gke_reports_missing_gcloud(monkeypatch: pytest.MonkeyPatch):
@@ -448,13 +451,16 @@ def test_gke_runtime_preflight_forwards_environment_kwargs(monkeypatch: pytest.M
         environment_kwargs=COMPLETE_GKE_KWARGS,
     )
 
+    from skillevaluator.tier3.evals_config import encode_environment_kwarg
+    from skillevaluator.tier3.harbor.gke_environment import SECURE_GKE_ENV_IMPORT_PATH
+
     assert result.ok is True
     command = captured["command"]
     assert isinstance(command, list)
     assert "--env" in command
-    assert command[command.index("--env") + 1] == "gke"
+    assert command[command.index("--env") + 1] == SECURE_GKE_ENV_IMPORT_PATH
     for key, val in COMPLETE_GKE_KWARGS.items():
-        assert f"{key}={val}" in command
+        assert encode_environment_kwarg(key, val) in command
 
 
 def test_gke_mode_rejects_vertex_ai_without_project_id(monkeypatch: pytest.MonkeyPatch):
@@ -510,7 +516,7 @@ def test_build_harbor_run_command_rejects_sensitive_kwargs(sensitive_key: str):
     """Reject environment kwargs containing credentials to protect the OS process table."""
     with pytest.raises(
         ValueError,
-        match=r"(?:Sensitive|disallowed) key or value detected in environment_kwargs",
+        match=r"Sensitive key or value detected",
     ):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
@@ -525,7 +531,7 @@ def test_build_harbor_run_command_rejects_unlisted_backend_kwargs():
     """Reject backend kwargs not in the safe constructor allowlist for the backend."""
     with pytest.raises(
         ValueError,
-        match=r"(?:Sensitive|disallowed) key or value detected in environment_kwargs",
+        match=r"does not accept environment kwarg\(s\): unrecognized_constructor_param",
     ):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
@@ -548,6 +554,8 @@ def test_build_harbor_run_command_rejects_unlisted_backend_kwargs():
 )
 def test_build_harbor_run_command_permits_benign_substrings_in_values(key: str, benign_value: str) -> None:
     """Permit valid non-sensitive infrastructure names containing words like turnkey, monkey, token."""
+    from skillevaluator.tier3.evals_config import encode_environment_kwarg
+
     cmd = build_harbor_run_command(
         dataset_path="/tmp/dataset",
         agent="claude-code",
@@ -555,13 +563,13 @@ def test_build_harbor_run_command_permits_benign_substrings_in_values(key: str, 
         env_mode="gke",
         environment_kwargs={**COMPLETE_GKE_KWARGS, key: benign_value},
     )
-    assert f"--ek={key}={benign_value}" in cmd or f"{key}={benign_value}" in " ".join(cmd)
+    assert encode_environment_kwarg(key, benign_value) in cmd
 
 
 def test_build_harbor_run_command_rejects_actual_secret_values() -> None:
     """Reject actual secret tokens passed in values of environment kwargs."""
     ya29_token = "ya29." + "a" * 25
-    with pytest.raises(ValueError, match=r"Sensitive key or value detected in environment_kwargs"):
+    with pytest.raises(ValueError, match=r"Sensitive key or value detected"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="claude-code",
@@ -594,17 +602,13 @@ def test_check_prerequisites_gke_supports_colon_separated_kubeconfig(
     assert any("Kubernetes credentials" in err or "kubeconfig" in err.lower() for err in errors)
 
 
-@pytest.mark.parametrize("benign_key", ["token-bucket", "token_bucket", "max_tokens", "prompt_tokens"])
+@pytest.mark.parametrize("benign_key", ["token_bucket", "max_tokens", "prompt_tokens"])
 def test_build_harbor_run_command_permits_benign_token_keys(benign_key: str) -> None:
-    """Permit rate-limiting and token count keys in environment kwargs."""
-    cmd = build_harbor_run_command(
-        dataset_path="/tmp/dataset",
-        agent="claude-code",
-        job_name="gke-job",
-        env_mode="gke",
-        environment_kwargs={**COMPLETE_GKE_KWARGS, benign_key: "100"},
-    )
-    assert f"--ek={benign_key}=100" in cmd or f"{benign_key}=100" in " ".join(cmd)
+    """Permit rate-limiting and token count keys in environment_kwargs secret validation."""
+    from skillevaluator.tier3.evals_config import validate_environment_kwargs
+
+    validated = validate_environment_kwargs({**COMPLETE_GKE_KWARGS, benign_key: "100"}, env_mode="gke")
+    assert validated[benign_key] == "100"
 
 
 def test_check_prerequisites_gke_expands_user_in_kubeconfig(
@@ -628,27 +632,27 @@ def test_check_prerequisites_gke_expands_user_in_kubeconfig(
 
 
 def test_parse_environment_kwargs_valid():
-    """Parse valid --ek key=value arguments with whitespace trimming."""
+    """Parse valid --ek key=value arguments with whitespace trimming and JSON coercion."""
     assert parse_environment_kwargs(()) == {}
     assert parse_environment_kwargs(("setting=value",)) == {"setting": "value"}
     assert parse_environment_kwargs(("  foo = bar  ", "baz=123", "multi=a=b=c")) == {
         "foo": "bar",
-        "baz": "123",
+        "baz": 123,
         "multi": "a=b=c",
     }
 
 
 def test_parse_environment_kwargs_missing_equals():
     """Reject arguments missing the equals separator."""
-    with pytest.raises(ValueError, match=r"--ek/--environment-kwarg must be in KEY=VALUE form"):
+    with pytest.raises(ValueError, match=r"Invalid --environment-kwarg entry 1: expected KEY=VALUE"):
         parse_environment_kwargs(("no_equals",))
 
 
 def test_parse_environment_kwargs_empty_key():
     """Reject arguments with an empty key."""
-    with pytest.raises(ValueError, match=r"--ek/--environment-kwarg key cannot be empty"):
+    with pytest.raises(ValueError, match=r"Invalid --environment-kwarg: keys must be valid Python keyword names"):
         parse_environment_kwargs(("=value",))
-    with pytest.raises(ValueError, match=r"--ek/--environment-kwarg key cannot be empty"):
+    with pytest.raises(ValueError, match=r"Invalid --environment-kwarg: keys must be valid Python keyword names"):
         parse_environment_kwargs(("  =value",))
 
 
@@ -665,7 +669,7 @@ def test_parse_environment_kwargs_empty_key():
 )
 def test_build_harbor_run_command_rejects_camel_case_sensitive_keys(sensitive_camel: str) -> None:
     """Reject camelCase credential keys in environment kwargs."""
-    with pytest.raises(ValueError, match=r"Sensitive key or value detected in environment_kwargs"):
+    with pytest.raises(ValueError, match=r"Sensitive key or value detected"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="claude-code",
@@ -686,15 +690,11 @@ def test_build_harbor_run_command_rejects_camel_case_sensitive_keys(sensitive_ca
     ],
 )
 def test_build_harbor_run_command_permits_camel_case_benign_token_keys(benign_camel: str) -> None:
-    """Permit camelCase rate-limiting and token count keys."""
-    cmd = build_harbor_run_command(
-        dataset_path="/tmp/dataset",
-        agent="claude-code",
-        job_name="gke-job",
-        env_mode="gke",
-        environment_kwargs={**COMPLETE_GKE_KWARGS, benign_camel: "100"},
-    )
-    assert f"--ek={benign_camel}=100" in cmd or f"{benign_camel}=100" in " ".join(cmd)
+    """Permit camelCase rate-limiting and token count keys in environment_kwargs secret validation."""
+    from skillevaluator.tier3.evals_config import validate_environment_kwargs
+
+    validated = validate_environment_kwargs({**COMPLETE_GKE_KWARGS, benign_camel: "100"}, env_mode="gke")
+    assert validated[benign_camel] == "100"
 
 
 @pytest.mark.parametrize(
@@ -708,13 +708,13 @@ def test_build_harbor_run_command_permits_camel_case_benign_token_keys(benign_ca
 )
 def test_build_harbor_run_command_rejects_aws_and_private_key_values(secret_val: str) -> None:
     """Reject AWS access keys and PEM private keys in environment kwarg values."""
-    with pytest.raises(ValueError, match=r"Sensitive key or value detected in environment_kwargs"):
+    with pytest.raises(ValueError, match=r"Sensitive key or value detected"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="claude-code",
             job_name="gke-job",
             env_mode="gke",
-            environment_kwargs={**COMPLETE_GKE_KWARGS, "custom_setting": secret_val},
+            environment_kwargs={**COMPLETE_GKE_KWARGS, "cluster_name": secret_val},
         )
 
 
@@ -739,7 +739,7 @@ def test_resolve_vertex_model_id_lowercases_unmapped_models() -> None:
 )
 def test_build_harbor_run_command_rejects_credential_keys(sensitive_key: str) -> None:
     """Reject credential keys in environment kwargs."""
-    with pytest.raises(ValueError, match=r"Sensitive key or value detected in environment_kwargs"):
+    with pytest.raises(ValueError, match=r"Sensitive key or value detected"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="claude-code",
@@ -765,13 +765,13 @@ def test_build_harbor_run_command_rejects_credential_keys(sensitive_key: str) ->
 )
 def test_build_harbor_run_command_rejects_token_values(sensitive_value: str) -> None:
     """Reject token and credential values in environment kwargs."""
-    with pytest.raises(ValueError, match=r"Sensitive key or value detected in environment_kwargs"):
+    with pytest.raises(ValueError, match=r"Sensitive key or value detected"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="claude-code",
             job_name="gke-job",
             env_mode="gke",
-            environment_kwargs={**COMPLETE_GKE_KWARGS, "custom_key": sensitive_value},
+            environment_kwargs={**COMPLETE_GKE_KWARGS, "cluster_name": sensitive_value},
         )
 
 
@@ -788,14 +788,19 @@ def test_build_harbor_run_command_rejects_token_values(sensitive_value: str) -> 
 )
 def test_build_harbor_run_command_permits_valid_rate_and_token_flags(flag_key: str, flag_val: str) -> None:
     """Permit valid rate limit, token budget, and cluster configuration flags."""
-    cmd = build_harbor_run_command(
-        dataset_path="/tmp/dataset",
-        agent="claude-code",
-        job_name="gke-job",
-        env_mode="gke",
-        environment_kwargs={**COMPLETE_GKE_KWARGS, flag_key: flag_val},
-    )
-    assert f"{flag_key}={flag_val}" in cmd
+    from skillevaluator.tier3.evals_config import encode_environment_kwarg, validate_environment_kwargs
+
+    validated = validate_environment_kwargs({**COMPLETE_GKE_KWARGS, flag_key: flag_val}, env_mode="gke")
+    assert validated[flag_key] == flag_val
+    if flag_key == "cluster_name":
+        cmd = build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="claude-code",
+            job_name="gke-job",
+            env_mode="gke",
+            environment_kwargs={**COMPLETE_GKE_KWARGS, flag_key: flag_val},
+        )
+        assert encode_environment_kwarg(flag_key, flag_val) in cmd
 
 
 @pytest.mark.parametrize(
@@ -815,7 +820,10 @@ def test_build_harbor_run_command_permits_valid_rate_and_token_flags(flag_key: s
 )
 def test_parse_environment_kwargs_rejects_credential_keys(sensitive_key: str) -> None:
     """Verify parse_environment_kwargs rejects sensitive credential keys with ValueError."""
-    with pytest.raises(ValueError, match=r"Sensitive key or value detected in environment_kwargs"):
+    with pytest.raises(
+        ValueError,
+        match=r"Invalid --environment-kwarg: (Sensitive key or value detected|keys must be valid Python keyword names)",
+    ):
         parse_environment_kwargs((f"{sensitive_key}=secret123",))
 
 
@@ -837,7 +845,7 @@ def test_parse_environment_kwargs_rejects_credential_keys(sensitive_key: str) ->
 def test_parse_environment_kwargs_permits_benign_token_keys(benign_token_key: str) -> None:
     """Verify parse_environment_kwargs permits benign token count, rate, and tokenizer keys."""
     parsed = parse_environment_kwargs((f"{benign_token_key}=1000",))
-    assert parsed == {benign_token_key: "1000"}
+    assert parsed == {benign_token_key: 1000}
 
 
 def test_resolve_single_kubeconfig_multi_path(tmp_path: Path) -> None:
@@ -1247,7 +1255,7 @@ def _write_mcp_skill_fixture(
 
 
 def test_build_harbor_run_command_gke_uses_secure_environment_import_path() -> None:
-    """Route GKE Harbor commands through SECURE_GKE_ENV_IMPORT_PATH instead of --env gke."""
+    """Route GKE Harbor commands through SECURE_GKE_ENV_IMPORT_PATH via Harbor 0.24.0 unified --env flag."""
     from skillevaluator.tier3.harbor.gke_environment import SECURE_GKE_ENV_IMPORT_PATH
 
     cmd = build_harbor_run_command(
@@ -1258,8 +1266,9 @@ def test_build_harbor_run_command_gke_uses_secure_environment_import_path() -> N
         model="gpt-5.5",
         environment_kwargs=COMPLETE_GKE_KWARGS,
     )
-    assert "--environment-import-path" in cmd
-    assert cmd[cmd.index("--environment-import-path") + 1] == SECURE_GKE_ENV_IMPORT_PATH
+    assert "--env" in cmd
+    assert cmd[cmd.index("--env") + 1] == SECURE_GKE_ENV_IMPORT_PATH
+    assert "--environment-import-path" not in cmd
 
 
 def test_check_prerequisites_gke_live_cluster_rejects_bound_service_account_without_opt_in(
@@ -1635,3 +1644,62 @@ def test_mcp_placeholder_stripping_rejects_operator_refs_literals_and_malformed_
 
     with pytest.raises(ValueError, match=expected_error_match):
         validate_mcp_server_declarations([bad_declaration])
+
+
+def test_resolve_runtime_env_allows_approved_mcp_secret_and_blocks_operator_or_unapproved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow SKILLEVALUATOR_ALLOWED_MCP_SECRETS in harbor.runtime_env while blocking unapproved or operator secrets."""
+    from skillevaluator.tier3.harbor.runner import _resolve_runtime_env
+
+    monkeypatch.setenv("DEVELOPERKNOWLEDGE_API_KEY", "dk-test-value")
+    monkeypatch.delenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", raising=False)
+
+    # Unapproved sensitive key is blocked
+    resolved, errors = _resolve_runtime_env(
+        {"DEVELOPERKNOWLEDGE_API_KEY": "${DEVELOPERKNOWLEDGE_API_KEY}"},
+        env_mode="gke",
+    )
+    assert resolved == {}
+    assert any("controls the host process and is not allowed" in err for err in errors)
+
+    # Operator-approved dedicated MCP secret is allowed when referenced via ${VAR}
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "developerknowledge.googleapis.com")
+    monkeypatch.setenv(
+        "SKILLEVALUATOR_ALLOWED_MCP_SECRETS",
+        "DEVELOPERKNOWLEDGE_API_KEY,ANTHROPIC_API_KEY",
+    )
+    resolved, errors = _resolve_runtime_env(
+        {"DEVELOPERKNOWLEDGE_API_KEY": "${DEVELOPERKNOWLEDGE_API_KEY}"},
+        env_mode="gke",
+    )
+    assert errors == []
+    assert resolved == {"DEVELOPERKNOWLEDGE_API_KEY": "dk-test-value"}
+    subprocess_env = _harbor_subprocess_environment(
+        env_mode="gke",
+        provider=_provider(),
+        configured_runtime_env=resolved,
+        provider_env={},
+        agent="claude-code",
+        agent_model="claude-sonnet-5",
+    )
+    assert subprocess_env.get("SKILLEVALUATOR_ALLOWED_MCP_HOSTS") == "developerknowledge.googleapis.com"
+    assert subprocess_env.get("SKILLEVALUATOR_ALLOWED_MCP_SECRETS") == "DEVELOPERKNOWLEDGE_API_KEY,ANTHROPIC_API_KEY"
+    assert subprocess_env.get("DEVELOPERKNOWLEDGE_API_KEY") == "dk-test-value"
+
+    # Literal secret for an approved MCP secret key is rejected
+    resolved, errors = _resolve_runtime_env(
+        {"DEVELOPERKNOWLEDGE_API_KEY": "literal-dk-key"},
+        env_mode="gke",
+    )
+    assert resolved == {}
+    assert any("must reference an environment variable rather than a literal secret" in err for err in errors)
+
+    # Operator-owned LLM secret remains blocked even when listed in SKILLEVALUATOR_ALLOWED_MCP_SECRETS
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    resolved, errors = _resolve_runtime_env(
+        {"ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"},
+        env_mode="gke",
+    )
+    assert resolved == {}
+    assert any("controls the host process and is not allowed" in err for err in errors)

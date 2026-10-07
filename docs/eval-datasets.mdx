@@ -200,8 +200,12 @@ skillevaluator create-eval-dataset ./my-skill --full --refine
 ```
 
 Collecting a fresh trajectory needs Docker, the `tier3` extra, and a configured
-provider. With `--no-llm`, refinement still works — it applies template-based
-updates from the trajectory instead of an LLM rewrite.
+provider. Refining from existing results does not need the `tier3` extra: case
+IDs are read from each trial's `reward.json` or Harbor `result.json`, and
+multimodal trajectory messages are read as text, with image and audio parts
+shown as `[image]` and `[audio]` markers. With `--no-llm`, refinement still
+works — it applies template-based updates from the trajectory instead of an LLM
+rewrite.
 
 ## Run policy: evals/config.yml
 

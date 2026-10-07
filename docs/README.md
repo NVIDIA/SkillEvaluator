@@ -12,12 +12,21 @@ contributors making non-trivial edits.
 ## Layout
 
 - `index.mdx` — landing page and three-tier overview
-- `installation.mdx` — extras, pip, Docker, requirements
-- `configuration.mdx` — credential map, providers, and embeddings
-- `tier1-validation.mdx` — checks, flags, reports, CI recipe
-- `tier2-deduplication.mdx` — dedup commands and thresholds
+- `quickstart.mdx` — install, one provider and key, and first runs
+- `installation.mdx` — extras, uv, pip, Docker, requirements
+- `configuration.mdx` — providers, embeddings, and Tier 3 credential roles
+- `tier1-validation.mdx` — checks, profiles, scanner setup, exit codes
+- `tier2-deduplication.mdx` — dedup commands, catalogs, thresholds, limits
 - `tier3-live-evaluation.mdx` — skill evaluation with live agents
-- `developer-guide.mdx` — contributor setup
+- `eval-datasets.mdx` — the `evals/` contract, dataset generation, run policy
+- `agents-and-sandboxes.mdx` — agents, environment backends, local mode, readiness
+- `custom-graders.mdx` — bring-your-own graders and native Harbor tasks
+- `reports.mdx` — report formats, scores, and the results-on-disk contract
+- `benchmark-rollout.mdx` — regenerating and promoting `BENCHMARK.md` cards
+- `ci-integration.mdx` — exit codes, GitHub Actions recipe, progressive adoption
+- `cli-reference.mdx` — every command and flag
+- `environment-variables.mdx` — variable-by-variable inventory
+- `developer-guide.mdx` — contributor setup, tests, and docs workflow
 
 Navigation order and slugs are defined in [`../fern/docs.yml`](../fern/docs.yml).
 

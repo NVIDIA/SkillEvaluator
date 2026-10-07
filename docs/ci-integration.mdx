@@ -12,16 +12,15 @@ Turn SkillEvaluator into a merge gate for your skill repository. The recommended
 | Exit code | Meaning | What to do |
 | --- | --- | --- |
 | `0` | Success — every gating check passed | Merge |
-| `1` | Validation failed — one or more gating checks failed | Fix the skill; read the report |
-| `2` | Configuration error — bad flags or an unreadable target | Fix the pipeline, not the skill |
-| `3` | Runtime error — an unexpected internal failure | Re-run; the skill was never judged. File an issue if it persists |
+| `1` | Validation failed — a gating check failed, the run could not complete, or an unexpected internal error occurred | Read the report or log; fix the skill, or re-run and file an issue if the run itself failed |
+| `2` | Usage error — an unknown flag, a value outside an option's type or choices, or a target path that does not exist | Fix the pipeline, not the skill |
 
 Tier 1 checks always gate the exit code. Tier 2 deduplication findings gate when dedup runs unless you pass `--no-block-on-dedup`; the recommended keyless gate below selects `--tiers 1` to exclude Tier 2 and Tier 3. Tier 3 live-evaluation results are advisory inside `validate` unless you pass `--block-on-agent-eval`. Reports record the effective choice for each tier. Without an explicit scope, `validate` runs all three tiers for skills, including Tier 3 autopilot.
 
 ## The recommended gate
 
 ```bash title="Keyless CI gate"
-skillevaluator validate ./skills --external --tiers 1 -r json,markdown -o reports --min-score 70
+skillevaluator validate ./skills --external --tiers 1 -r json,markdown,sarif -o reports --min-score 70
 ```
 
 Each flag earns its place:

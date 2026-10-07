@@ -214,7 +214,13 @@ completed run directly:
   (a `--skip-baseline` run has neither).
 - **`<agent>/{with-skill,without-skill}/`** — each arm's `summary.json`
   (scores, dimensions, pass@k, trial counts) and a `trials/` directory of
-  per-trial artifacts.
+  per-trial artifacts: the trial's `reward.json`, Harbor's `trajectory.json`
+  when available, and redacted, size-capped diagnostic copies such as
+  `trial.log`, `exception.txt`, and agent logs (`codex.txt`, `opencode.txt`).
+  With standard grading, `reward.json` records `trajectory_source` (the
+  trajectory or agent log that was graded) and, under each LLM judge's
+  `details`, an `omitted` record showing whether its evidence was truncated to
+  fit the [evidence budget](tier3-live-evaluation.mdx#evidence-budgets).
 
 <Note>
   Read commands (`view`, `compare`, `create-eval-dataset --refine`) honor the
@@ -304,6 +310,12 @@ its pass rate. When both arms contain the same identified cases,
 baseline-only passes, both-pass, and neither-pass — plus a two-sided exact
 McNemar diagnostic over the discordant pairs. Partial or unidentified pairing
 is labeled and does not receive that exact-test result.
+
+Each logical attempt counts once: a multi-step native task's step rewards
+combine into one attempt score for averages and pass@k. When one condition
+mixes standard-metric and custom-only rewards, its overall score and lift use
+that logical-attempt overall rather than the mean of the standard dimensions,
+which would cover only the standard rows.
 
 Case identifiers used as JSON keys must be printable, free of credential
 material, and no larger than 512 UTF-8 bytes. A reward with an unsafe identity

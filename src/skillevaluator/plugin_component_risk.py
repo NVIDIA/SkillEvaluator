@@ -37,6 +37,7 @@ import bisect
 import functools
 import posixpath
 import re
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -334,6 +335,48 @@ _SIMPLE_ASSIGNMENT_RE = re.compile(
     re.MULTILINE,
 )
 _VARIABLE_USE_RE = re.compile(r"\$(?:\{([A-Za-z_]\w{0,63})\}|([A-Za-z_]\w{0,63}))")
+# A parameter-default chain that may name the plugin root ('${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT}}',
+# '${CLAUDE_PLUGIN_ROOT:-}'): each '${NAME:-' (or '${NAME-') opens a level, and the innermost alternative is
+# empty or one plain variable.
+_DEFAULT_OPEN_RE = re.compile(r"\$\{([A-Za-z_]\w{0,63}):?-")
+_PLAIN_VARIABLE_RE = re.compile(r"\$\{([A-Za-z_]\w{0,63})\}|\$([A-Za-z_]\w{0,63})(?!\w)")
+_MAX_DEFAULT_DEPTH = 8
+# A hook command assignment that may set a variable to the plugin root: the whole command, one word, not
+# single-quoted (a single-quoted value is literal text).
+_ROOT_ALIAS_ASSIGNMENT_RE = re.compile(
+    r"[ \t]*(?:export[ \t]+)?(?P<name>[A-Za-z_]\w{0,63})=(?P<quote>\"?)"
+    r"(?P<value>[^\s;&|'\"<>()`\\]{1,256})(?P=quote)[ \t]*"
+)
+# What can set a variable without the text naming it, or run an assignment in another shell: a subshell,
+# group, or command substitution ('(', ')', '`', a '{' that does not open '${'), a heredoc, 'eval', and
+# 'source' / '.' of a file.
+_OPAQUE_VARIABLES_RE = re.compile(
+    rf"[()`]|(?<!\$)\{{|(?<!<)<<(?!<)|(?<![\w.-])eval(?![\w.-])|{_SOURCE_COMMAND}[ \t]", re.MULTILINE
+)
+# Shell text as quoting segments: a single- or double-quoted string, an escape, other text, or a lone quote
+# (unbalanced quoting).
+_QUOTING_SEGMENT_RE = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*"|\\.|[^'"\\]+|.""", re.DOTALL)
+_NAME_WORD_RE = re.compile(r"(?<!\w)[A-Za-z_]\w*")
+# Variables the shell sets by itself ('cd' sets PWD, 'read' sets REPLY), so one assignment does not fix them.
+_SHELL_SET_VARIABLES = frozenset(
+    {
+        "PWD",
+        "OLDPWD",
+        "REPLY",
+        "OPTARG",
+        "OPTIND",
+        "MAPFILE",
+        "DIRSTACK",
+        "RANDOM",
+        "SRANDOM",
+        "SECONDS",
+        "LINENO",
+        "HISTCMD",
+        "EPOCHSECONDS",
+        "EPOCHREALTIME",
+        "_",
+    }
+)
 _MAX_ASSIGNMENTS = 256
 _MAX_EXPANDED_CHARS = 1024
 # Leading directories of a run path matched against unpack directories; a deeper unpack directory is cut to
@@ -2441,6 +2484,33 @@ def _simple_assignments(text: str) -> dict[str, str]:
     return variables
 
 
+def _root_default_chain(value: str, names: frozenset[str]) -> tuple[str, int] | None:
+    """``(first variable, length)`` of the parameter-default chain that starts ``value`` when every alternative
+    in it is one of ``names`` (``${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT}}``, ``${CLAUDE_PLUGIN_ROOT:-}``), else ``None``.
+
+    The chain expands to the first variable that is set, so it names the plugin root only when each alternative
+    does: a literal or another variable (``${CLAUDE_PLUGIN_ROOT:-/tmp/x}``, ``${CLAUDE_PLUGIN_ROOT:-$HOME}``) can
+    make it any directory. An empty default only keeps an unset variable empty, like the plain placeholder.
+    """
+    first: str | None = None
+    position = depth = 0
+    while (opened := _DEFAULT_OPEN_RE.match(value, position)) is not None:
+        if opened.group(1) not in names or depth == _MAX_DEFAULT_DEPTH:
+            return None
+        first = first or opened.group(1)
+        depth += 1
+        position = opened.end()
+    if first is None:
+        return None
+    plain = _PLAIN_VARIABLE_RE.match(value, position)
+    if plain is not None:
+        if (plain.group(1) or plain.group(2)) not in names:
+            return None
+        position = plain.end()
+    end = position + depth
+    return (first, end) if value[position:end] == "}" * depth else None
+
+
 def _file_key(raw: str, variables: dict[str, str] | None = None) -> tuple[str, str] | None:
     """``(normalized path, base name)`` of a file argument; ``None`` for stdout, devices, and empty names.
 
@@ -2933,6 +3003,8 @@ class HookAnalyzer:
             (*allowed_private_hosts, *hook_allowlist_hosts(self.hook_allowed_urls))
         )
         self.root_refs = _plugin_root_refs(root_prefixes)
+        # The root placeholders' variable names, for parameter-default chains ('${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}').
+        self._root_names = frozenset(ref[2:-1] for ref in self.root_refs if ref.startswith("${") and ref.endswith("}"))
         self._root_ref_re = re.compile(
             "(?:"
             + "|".join(re.escape(ref) for ref in sorted(self.root_refs, key=len, reverse=True))
@@ -2984,29 +3056,103 @@ class HookAnalyzer:
             return None
         return rel if rel is not None else PurePosixPath()
 
-    def _first_level_paths(self, tokens: list[str]) -> list[PurePosixPath]:
-        """Script paths a command names: quoted command strings are split once more, and relative paths after
-        ``cd <root placeholder>`` resolve against that directory."""
+    def _plain_root(self, value: str) -> str:
+        """``value`` with a leading root default chain (``${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT}}/x``) written as
+        its first placeholder (``${CLAUDE_PLUGIN_ROOT}/x``); any other value unchanged."""
+        chain = _root_default_chain(value, self._root_names)
+        return value if chain is None else f"${{{chain[0]}}}{value[chain[1] :]}"
+
+    def _rooted(self, word: str, aliases: dict[str, str]) -> str:
+        """A command word (quotes removed) with the command's root variables expanded and a root default chain
+        made plain, so ``"$R/x.sh"`` after ``R="${CLAUDE_PLUGIN_ROOT:-}"`` reads ``${CLAUDE_PLUGIN_ROOT}/x.sh``."""
+        value = word.strip("\"'")
+        if aliases and "$" in value:
+            value = _expanded(value, aliases)
+        return self._plain_root(value)
+
+    def _root_aliases(self, text: str) -> dict[str, str]:
+        """Variables a hook command sets to the plugin root or a path under it, each with its plain placeholder.
+
+        Reading ``$R/x.sh`` as a plugin script clears ``script_unanalyzed``, so only an assignment that fixes
+        ``R`` for the rest of the command counts: one statement of its own (``R="${CLAUDE_PLUGIN_ROOT}";``, not an
+        env prefix, a pipeline stage, a background job, or after ``&&`` / ``||``), before every use, of a variable
+        the shell does not set itself, that the text names nowhere else but as ``$R`` / ``${R}`` outside single
+        quotes. A command with a subshell, group, command substitution, heredoc, ``eval``, or ``source`` resolves
+        no variable: those can set one without naming it.
+        """
+        if "=" not in text or "$" not in text or _OPAQUE_VARIABLES_RE.search(text):
+            return {}
+        single_quoted: set[str] = set()
+        for segment in _QUOTING_SEGMENT_RE.finditer(text):
+            part = segment.group(0)
+            if part in {"'", '"'}:
+                return {}  # unbalanced quoting
+            if part.startswith("'"):
+                single_quoted.update(use.group(1) or use.group(2) for use in _VARIABLE_USE_RE.finditer(part))
+        mentions = Counter(match.group(0) for match in _NAME_WORD_RE.finditer(text))
+        uses: Counter[str] = Counter()
+        first_use: dict[str, int] = {}
+        for use in _VARIABLE_USE_RE.finditer(text):
+            name = use.group(1) or use.group(2)
+            uses[name] += 1
+            first_use.setdefault(name, use.start())
+        # Per name: (value, end of the assignment) for its one standalone assignment, None for any other.
+        candidates: dict[str, tuple[str, int] | None] = {}
+        previous = 0
+        for command in _SHELL_COMMAND_RE.finditer(text):
+            gap, previous = text[previous : command.start()], command.end()
+            assignment = _ROOT_ALIAS_ASSIGNMENT_RE.fullmatch(command.group(0))
+            if assignment is None:
+                continue
+            name, follows = assignment.group("name"), text[command.end() : command.end() + 2]
+            standalone = set(gap) <= {";", "\n"} and not (follows.startswith("&") and follows != "&&")
+            candidates[name] = (
+                (assignment.group("value"), command.end()) if standalone and name not in candidates else None
+            )
+        aliases: dict[str, str] = {}
+        for name, candidate in candidates.items():
+            if (
+                candidate is None
+                or name in _SHELL_SET_VARIABLES
+                or name.startswith("BASH")
+                or name in self._root_names
+                or name in single_quoted
+                or mentions[name] != uses[name] + 1
+                or first_use.get(name, len(text)) < candidate[1]
+            ):
+                continue
+            value = self._plain_root(_expanded(candidate[0], aliases))
+            if _root_ref(value, self.root_refs) is not None:
+                aliases[name] = value
+        return aliases
+
+    def _first_level_paths(self, tokens: list[str], aliases: dict[str, str] | None = None) -> list[PurePosixPath]:
+        """Script paths a command names: quoted command strings are split once more, relative paths after
+        ``cd <root placeholder>`` resolve against that directory, and *aliases* (the command's root variables,
+        :meth:`_root_aliases`) and root default chains read as the plain placeholder."""
         words: list[str] = []
         for token in tokens:
             words.append(token)
             if any(char.isspace() for char in token.strip()):
                 words.extend(_split_words(token))  # 'bash -c "cd ${CLAUDE_PLUGIN_ROOT} && ./approve.sh"'
+        aliases = aliases or {}
         paths: list[PurePosixPath] = []
         cwd: PurePosixPath | None = None
         for index, word in enumerate(words):
             if word in {"cd", "pushd"} and index + 1 < len(words):
-                cwd = self._root_directory(words[index + 1])
+                cwd = self._root_directory(self._rooted(words[index + 1], aliases))
                 continue
-            paths.extend(self._script_paths(word, cwd))
+            paths.extend(self._script_paths(self._rooted(word, aliases), cwd))
         return list(dict.fromkeys(paths))
 
-    def _script_evidence(self, tokens: list[str]) -> tuple[list[_ShellFacts], list[str], bool]:
+    def _script_evidence(
+        self, tokens: list[str], aliases: dict[str, str] | None = None
+    ) -> tuple[list[_ShellFacts], list[str], bool]:
         """Facts of the plugin scripts a command runs (and of the scripts they name, one level), why any of
         them was not analyzed, and whether any script was found at all."""
         facts: list[_ShellFacts] = []
         unanalyzed: list[str] = []
-        first = self._first_level_paths(tokens)
+        first = self._first_level_paths(tokens, aliases)
         seen = set(first)
         second: list[PurePosixPath] = []
         found = False
@@ -3093,7 +3239,8 @@ class HookAnalyzer:
         return paths, None
 
     def _names_root(self, text: str) -> bool:
-        return any(ref in text for ref in self.root_refs)
+        """Whether ``text`` names a root placeholder, also in a parameter expansion (``${CLAUDE_PLUGIN_ROOT:-}``)."""
+        return any(ref.removesuffix("}") in text for ref in self.root_refs)
 
     # -- cross-handler download and run sites ------------------------------ #
     def _runs_download(self, facts: list[_ShellFacts]) -> bool:
@@ -3330,7 +3477,7 @@ class HookAnalyzer:
         text = _command_text(handler, site.dialect.command_keys)
         record.target = _bounded(text)
         tokens = _command_tokens(handler, site.dialect.command_keys)
-        scripts, unanalyzed, found_script = self._script_evidence(tokens)
+        scripts, unanalyzed, found_script = self._script_evidence(tokens, self._root_aliases(text))
         facts = [_shell_facts(text), *scripts]
         local = any(fact.remote_code for fact in facts) or self._runs_download(facts)
         other, others_truncated = self._cross_handler_download(record, facts)

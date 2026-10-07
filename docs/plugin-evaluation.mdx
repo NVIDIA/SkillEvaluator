@@ -1107,8 +1107,21 @@ A command hook that runs a script from the plugin root also has that whole
 script (up to 1 MiB) read as evidence, without following links. The root may be
 named by `${CLAUDE_PLUGIN_ROOT}` or by the manifest format's own placeholder
 (`${PLUGIN_ROOT}` for Codex and Agent Plugins, `${CURSOR_PLUGIN_ROOT}` for
-Cursor), braced or not. A Cursor hook's relative path, such as `./approve.sh`,
-is read against the plugin root and against the hooks file's directory, and
+Cursor), braced or not. A parameter-default chain names the root only when
+every alternative is one of these placeholders, such as
+`${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT}}` in a Codex plugin or
+`${CLAUDE_PLUGIN_ROOT:-}`. A literal or any other variable
+(`${CLAUDE_PLUGIN_ROOT:-/tmp/x}`, `${CLAUDE_PLUGIN_ROOT:-$HOME}`) could make it
+any directory. A variable the command sets to the root or a path under it
+(`R="${CLAUDE_PLUGIN_ROOT:-}"; exec "$R/scripts/run"`) names it too, when the
+assignment is a statement of its own (not an env prefix, a pipeline stage, or
+after `&&` / `||`) that comes before every use, the variable is not one the
+shell sets itself (`PWD`, `REPLY`), and the command names it nowhere else
+except as `$R` or `${R}` outside single quotes. A command with a subshell,
+group, command substitution, heredoc, `eval`, or `source`, which can set a
+variable without naming it, resolves no variable. A Cursor hook's relative
+path, such as `./approve.sh`, is read against the plugin root and against the
+hooks file's directory, and
 after `cd <root placeholder>` any hook's relative path is read against that
 directory. A quoted command string (`bash -c "…"`) is split once more. The
 plugin scripts a script names are followed one more level: by root placeholder,
@@ -1128,7 +1141,8 @@ scripts read (missing paths do not count), or a script that names more than 256
 other files, is not analyzed and is reported as `plugin_hook_script_unanalyzed`. So is a hook whose command or
 scripts run more than 2048 distinct files while the plugin downloads something, because the runs past that
 bound are not matched against the downloads. So is an approval hook that names the plugin
-root but runs no plugin script that could be read (`cd ${CLAUDE_PLUGIN_ROOT} &&
+root, also inside a parameter expansion such as `${CLAUDE_PLUGIN_ROOT:-/tmp/x}`,
+but runs no plugin script that could be read (`cd ${CLAUDE_PLUGIN_ROOT} &&
 npm run approve`).
 
 A matcher is classified without running it on a backtracking regex engine. No

@@ -23,7 +23,7 @@ SkillEvaluator selects the provider-native default: `opencode` for NVIDIA Build,
 | Agent | Notes |
 | --- | --- |
 | `claude-code` | Anthropic's Claude Code CLI. `claude` is an accepted alias. |
-| `codex` | OpenAI's Codex CLI. The OpenAI-provider default. |
+| `codex` | OpenAI's Codex CLI. The OpenAI-provider default. Runs with `reasoning_effort=high` so scores and cost stay comparable across Harbor releases. |
 | `opencode` | The OpenCode CLI. |
 
 The `claude` alias is canonicalized to `claude-code` everywhere an agent
@@ -209,9 +209,12 @@ use environment kwargs for resource overrides (`override_cpus`,
 mount injection (`mounts`, `mounts_json`), network policy (`network_policy`,
 `phase_network_policies`, `extra_allowed_hosts`), extra Compose definitions
 (`extra_docker_compose`), lifecycle controls (`delete`, `force_build`,
-`keep_containers`), or Kubernetes pod/security overrides. Use SkillEvaluator's
-first-class flags and config where available; advanced pod/security overrides
-are intentionally not exposed through this CLI surface. Equivalent
+`keep_containers`), Harbor's output streaming and environment upload controls
+(`stream`, `enable_environment_dir_upload`), the per-trial wiring Harbor
+supplies itself (such as `environment_dir`, `session_id`, and `trial_paths`),
+or Kubernetes pod/security overrides. Use SkillEvaluator's first-class flags
+and config where available; advanced pod/security overrides are intentionally
+not exposed through this CLI surface. Equivalent
 backend-specific aliases are also reserved when they directly bypass those
 guarantees, including provider volume/resource/network overrides, Kubernetes or
 cloud workload identities, disabled SSH host verification, and Singularity host
@@ -252,16 +255,15 @@ custom config path by itself; configure one of Harbor's supported credential
 forms before launching trials.
 
 Other eligible, backend-specific constructor options are forwarded after
-validation. Harbor acts only on options implemented by the selected backend;
-unknown kwargs are not a supported compatibility contract, so use the current
-Harbor constructor documentation for that environment. ACK scheduling options
-such as `node_selector` and
-`tolerations` are accepted, and `image_pull_secret` accepts only the name of an
-existing Kubernetes Secret object—not credential contents. Direct credential
-forwarding controls such as HF Sandbox's `forward_hf_token` are rejected. Use
-the same `--environment-kwarg` values and eligible non-Docker mode with
-`doctor` or `health-check` to preflight the configuration you intend to
-evaluate.
+validation. A key that the selected backend's Harbor 0.24.0 constructor does not
+accept is rejected before the run starts; for example, Harbor 0.24 removed
+Modal's `modal_sandbox_v2` option, so drop it from existing `--ek` flags. ACK
+scheduling options such as `node_selector` and `tolerations` are accepted, and
+`image_pull_secret` accepts only the name of an existing Kubernetes Secret
+object—not credential contents. Credential-bearing options such as LangSmith's
+`api_key` and Vercel's `credential_injection` are rejected. Use the same
+`--environment-kwarg` values and eligible non-Docker mode with `doctor` or
+`health-check` to preflight the configuration you intend to evaluate.
 
 A few Harbor options contain provider-managed secret **references**, not secret
 values. These narrow shapes are allowed; every other credential-shaped kwarg,

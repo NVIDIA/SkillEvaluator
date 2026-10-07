@@ -194,6 +194,12 @@ def _validate_skillspector_payload(
     return SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
 
 
+def _skillspector_fixture(name: str) -> dict:
+    """A captured SkillSpector --no-llm report from tests/fixtures (``skillspector-<name>-no-llm.json``)."""
+    path = Path(__file__).parents[1] / "fixtures" / f"skillspector-{name}-no-llm.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _set_universal_analyzer_work(payload: dict) -> None:
     """Keep synthetic complete reports aligned with producer work accounting."""
     component_count = len(payload["components"])
@@ -2611,6 +2617,153 @@ Call us at 555-123-4567 or +1-555-987-6543
                 "evidence-types": "compacted identity",
             }[mutation]
             assert any(expected in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        "fixture",
+        ["2.11.2-binary-asset", "2.12.0-binary-asset", "2.11.2-oms-signature", "2.12.0-oms-signature"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_documented_scope_exclusions_are_not_scan_gaps(
+        self, mock_tools, sample_skill_dir: Path, fixture: str
+    ) -> None:
+        # Captured with --no-llm. binary-asset: a plugin root whose only binary file is
+        # assets/logo.png; oms-signature: a skill with a recognized skill.oms.sig.
+        payload = _skillspector_fixture(fixture)
+        completeness = payload["analysis_completeness"]
+        # The SkillSpector miscount the validator reconciles.
+        assert completeness["status"] == "complete"
+        assert len(payload["components"]) == completeness["total_components"] + 1
+        if "binary-asset" in fixture:
+            assert {
+                status["analyzer_id"]
+                for status in completeness["analyzer_statuses"]
+                if status["status"] == "completed" and status["failed"] == 1
+            } == set(completeness["scope_exclusions"][0]["analyzers"])
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.passed, result.errors
+        assert not result.is_incomplete
+        assert not result.errors
+
+    @pytest.mark.parametrize(
+        ("fixture", "expected"),
+        [("2.12.0-binary-asset", "contradicts its work accounting"), ("2.12.0-oms-signature", "component inventory")],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_scope_exclusion_reconciliation_is_version_gated(
+        self, mock_tools, sample_skill_dir: Path, fixture: str, expected: str
+    ) -> None:
+        payload = _skillspector_fixture(fixture)
+        payload["metadata"]["skillspector_version"] = "2.11.1"
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        assert any(expected in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        ("mutation", "expected"),
+        [
+            ("unexplained-failed", "contradicts its work accounting"),
+            ("fatal-exclusion", "contradicts its work accounting"),
+            ("analyzer-not-listed", "contradicts its work accounting"),
+            ("analyzer-without-failed-work", "names analyzer work"),
+            ("extra-component", "component inventory"),
+            ("text-suffix", "contradicts its work accounting"),
+            ("unlisted-suffix", "contradicts its work accounting"),
+            ("executable-component", "contradicts its work accounting"),
+            ("referenced-asset", "contradicts its work accounting"),
+            ("line-range", "contradicts its work accounting"),
+            ("other-reason", "contradicts its work accounting"),
+            ("partial-outcome", "contradicts its work accounting"),
+            ("universal-work-missing", "universal analyzer evidence"),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_binary_asset_reconciliation_fails_closed(
+        self, mock_tools, sample_skill_dir: Path, mutation: str, expected: str
+    ) -> None:
+        payload = _skillspector_fixture("2.12.0-binary-asset")
+        completeness = payload["analysis_completeness"]
+        exclusion = completeness["scope_exclusions"][0]
+        statuses = {status["analyzer_id"]: status for status in completeness["analyzer_statuses"]}
+        logo = next(component for component in payload["components"] if component["path"] == "assets/logo.png")
+        if mutation == "unexplained-failed":
+            statuses["static_patterns_ssrf"].update(completed=3, failed=2)
+        elif mutation == "fatal-exclusion":
+            exclusion["fatal"] = True
+        elif mutation == "analyzer-not-listed":
+            exclusion["analyzers"].remove("static_patterns_ssrf")
+        elif mutation == "analyzer-without-failed-work":
+            exclusion["analyzers"].append("static_yara")
+        elif mutation == "extra-component":
+            payload["components"].append({**logo, "path": "assets/banner.png"})
+        elif mutation in {"text-suffix", "unlisted-suffix"}:
+            # A text file whose bytes are binary, or an unknown binary blob, stays a scan gap.
+            logo["path"] = exclusion["path"] = "commands/logo.md" if mutation == "text-suffix" else "assets/logo.bin"
+        elif mutation == "executable-component":
+            logo["executable"] = True
+        elif mutation == "referenced-asset":
+            completeness["references"].append(
+                {"source_path": "README.md", "target_path": "assets/logo.png", "status": "resolved"}
+            )
+        elif mutation == "line-range":
+            exclusion.update(start_line=1, end_line=6)
+        elif mutation == "other-reason":
+            exclusion["reason_code"] = "not_regular_file"
+        elif mutation == "partial-outcome":
+            exclusion["outcome"] = "partial"
+        elif mutation == "universal-work-missing":
+            # The analyzer skipped the asset but also lost a component it should have scanned.
+            statuses["static_patterns_ssrf"].update(planned_work=4, completed=3)
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        assert any(expected in error for error in result.errors), result.errors
+
+    @pytest.mark.parametrize(
+        "mutation", ["fatal-exclusion", "no-exclusion", "other-path", "not-a-signature", "extra-component"]
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_oms_signature_reconciliation_fails_closed(
+        self, mock_tools, sample_skill_dir: Path, mutation: str
+    ) -> None:
+        payload = _skillspector_fixture("2.12.0-oms-signature")
+        completeness = payload["analysis_completeness"]
+        signature = next(component for component in payload["components"] if component["type"] == "oms_signature")
+        if mutation == "fatal-exclusion":
+            completeness["scope_exclusions"][0]["fatal"] = True
+        elif mutation == "no-exclusion":
+            completeness["scope_exclusions"] = []
+        elif mutation == "other-path":
+            signature["path"] = completeness["scope_exclusions"][0]["path"] = "references/skill.oms.sig"
+        elif mutation == "not-a-signature":
+            signature["type"] = "other"
+        elif mutation == "extra-component":
+            payload["components"].append({**signature, "path": "references/notes.md", "type": "markdown"})
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        assert any("component inventory contradicts" in error for error in result.errors), result.errors
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_partial_verdict_with_scope_exclusion_stays_incomplete(
+        self, mock_tools, sample_skill_dir: Path
+    ) -> None:
+        """A reconciled exclusion does not override SkillSpector's own partial verdict."""
+        payload = _skillspector_fixture("2.11.2-oms-signature")
+        payload["analysis_completeness"].update(
+            status="partial", is_complete=False, limitations=["Signature metadata was not verified."]
+        )
+        payload["risk_assessment"]["recommendation"] = "CAUTION"
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        assert any("reports incomplete analysis (status 'partial')" in error for error in result.errors)
 
     @pytest.mark.parametrize("skillspector_version", ["2.9.6", "2.10.0"])
     @patch("skillevaluator.validators.security.Tools")

@@ -24,7 +24,8 @@ import tempfile
 import tokenize
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import NamedTuple
 
 import yaml
 from yaml.events import ScalarEvent
@@ -69,6 +70,37 @@ _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS = {(2, 9, 5), (2, 9, 6)}
 _SKILLSPECTOR_FINDING_IDENTITY_VERSION = (2, 11, 1)
 _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION = (2, 10, 0)
 _SKILLSPECTOR_DOCS_ONLY_APPLICABILITY_VERSION = (2, 11, 2)
+# SkillSpector 2.11.2 and 2.12.0 document artifacts they do not inspect as non-fatal ``out_of_scope``
+# scope exclusions, but miscount them: an analyzer's ``out_of_scope`` work lands in its ``failed``
+# count while its status ignores it (``completed`` with failed work), and ``components`` lists the
+# excluded artifacts that ``total_components`` leaves out. Reproduced with both releases (the
+# binary-asset and oms-signature fixtures); see :func:`_skillspector_scope_exclusion_accounting`.
+_SKILLSPECTOR_SCOPE_EXCLUSION_ACCOUNTING_VERSIONS = frozenset({(2, 11, 2), (2, 12, 0)})
+# Static image and font assets (a plugin logo, a screenshot) whose binary content the static
+# pattern analyzers skip. Other binary content, including a text or script suffix over binary
+# bytes, is never reconciled: it stays a scan gap.
+_SKILLSPECTOR_BINARY_ASSET_SUFFIXES = frozenset(
+    {
+        ".avif",
+        ".bmp",
+        ".eot",
+        ".gif",
+        ".icns",
+        ".ico",
+        ".jpeg",
+        ".jpg",
+        ".otf",
+        ".png",
+        ".tif",
+        ".tiff",
+        ".ttf",
+        ".webp",
+        ".woff",
+        ".woff2",
+    }
+)
+# The one path SkillSpector recognizes as an OMS signature (and excludes from content analysis).
+_SKILLSPECTOR_OMS_SIGNATURE_PATH = "skill.oms.sig"
 _SKILLSPECTOR_DOCS_ONLY_NOT_APPLICABLE_ANALYZERS = frozenset(
     {
         "behavioral_ast",
@@ -408,6 +440,94 @@ def _yaml_member_value_node(node: Node | None, key: str) -> Node | None:
         ):
             return value_node
     return None
+
+
+class _ScopeExclusionAccounting(NamedTuple):
+    """Documented out-of-scope artifacts of a SkillSpector report (:func:`_skillspector_scope_exclusion_accounting`)."""
+
+    out_of_scope_work: Counter[str]
+    """Analyzer id -> work items on excluded binary assets, which SkillSpector counts as ``failed``."""
+    binary_assets: int
+    """Excluded binary assets. Every universal analyzer plans one work item for each."""
+    excluded_components: int
+    """Entries of ``components`` that ``total_components`` leaves out."""
+
+
+_NO_SCOPE_EXCLUSIONS = _ScopeExclusionAccounting(Counter(), 0, 0)
+
+
+def _skillspector_scope_exclusion_accounting(
+    analysis_completeness: Mapping, components: object
+) -> _ScopeExclusionAccounting:
+    """The out-of-scope artifacts a SkillSpector 2.11.2/2.12.0 report documents and miscounts.
+
+    Only two explicitly documented, non-fatal, whole-file ``out_of_scope``
+    scope exclusions are reconciled, each matching exactly one non-executable
+    entry of ``components``:
+
+    * ``static``/``binary_content`` on a static image or font asset
+      (:data:`_SKILLSPECTOR_BINARY_ASSET_SUFFIXES`), naming the analyzers that
+      skipped it. Each named analyzer counted that work item as ``failed``.
+    * ``discovery``/``oms_signature`` on ``skill.oms.sig`` listed as an
+      ``oms_signature`` component. No analyzer plans work for it.
+
+    SkillSpector leaves such an artifact out of ``total_components`` unless a
+    resolved reference targets it (``relevant_components`` in its inspection
+    ledger); a referenced one is not reconciled. Every other exclusion is
+    ignored, so any work or component it would explain stays a contradiction
+    that makes the scan INCOMPLETE.
+    """
+    exclusions = analysis_completeness.get("scope_exclusions")
+    references = analysis_completeness.get("references", [])
+    if not (isinstance(exclusions, list) and isinstance(components, list) and isinstance(references, list)):
+        return _NO_SCOPE_EXCLUSIONS
+    components_by_path: dict[str, list[dict]] = {}
+    for component in components:
+        if isinstance(component, dict) and isinstance(component.get("path"), str):
+            components_by_path.setdefault(component["path"], []).append(component)
+    referenced = {
+        reference.get("target_path")
+        for reference in references
+        if isinstance(reference, dict) and reference.get("status") == "resolved"
+    }
+
+    binary_assets: dict[str, set[str]] = {}
+    signatures: set[str] = set()
+    for exclusion in exclusions:
+        if (
+            not isinstance(exclusion, dict)
+            or exclusion.get("outcome") != "out_of_scope"
+            or exclusion.get("fatal") is not False
+            or exclusion.get("start_line") is not None
+            or exclusion.get("end_line") is not None
+        ):
+            continue
+        path = exclusion.get("path")
+        matches = components_by_path.get(path, []) if isinstance(path, str) else []
+        if len(matches) != 1 or matches[0].get("executable") is not False or path in referenced:
+            continue
+        analyzers = exclusion.get("analyzers")
+        reason = (exclusion.get("phase"), exclusion.get("reason_code"))
+        if (
+            reason == ("static", "binary_content")
+            and PurePosixPath(path).suffix.lower() in _SKILLSPECTOR_BINARY_ASSET_SUFFIXES
+            and isinstance(analyzers, list)
+            and analyzers
+            and all(isinstance(analyzer, str) and analyzer for analyzer in analyzers)
+        ):
+            binary_assets.setdefault(path, set()).update(analyzers)
+        elif (
+            reason == ("discovery", "oms_signature")
+            and path == _SKILLSPECTOR_OMS_SIGNATURE_PATH
+            and matches[0].get("type") == "oms_signature"
+            and not analyzers
+        ):
+            signatures.add(path)
+    return _ScopeExclusionAccounting(
+        Counter(analyzer for analyzers in binary_assets.values() for analyzer in analyzers),
+        len(binary_assets),
+        len(binary_assets.keys() | signatures),
+    )
 
 
 def _skillspector_llm_stderr_failed(stderr: str) -> bool:
@@ -1029,6 +1149,7 @@ class SecurityValidator(ValidatorBase):
 
         findings_after_filtering: int | None = None
         universal_analyzer_evidence_valid = True
+        scope_accounting = _NO_SCOPE_EXCLUSIONS
         analysis_completeness = data.get("analysis_completeness")
         if uses_versioned_completeness and "analysis_completeness" not in data:
             result.add_error(
@@ -1190,6 +1311,12 @@ class SecurityValidator(ValidatorBase):
                         "non-empty list; security scan did not complete"
                     )
                     return False
+                scope_accounting = (
+                    _skillspector_scope_exclusion_accounting(analysis_completeness, data.get("components"))
+                    if skillspector_version in _SKILLSPECTOR_SCOPE_EXCLUSION_ACCOUNTING_VERSIONS
+                    else _NO_SCOPE_EXCLUSIONS
+                )
+                unexplained_out_of_scope_work = Counter(scope_accounting.out_of_scope_work)
                 expected_limitations: list[str] = []
                 observed_analyzer_ids: set[str] = set()
                 analyzer_evidence: dict[str, list[tuple[str, dict[str, int]]]] = {}
@@ -1256,6 +1383,12 @@ class SecurityValidator(ValidatorBase):
                             "unaccounted work despite successful execution; security scan did not complete"
                         )
                         return False
+                    # Failed work that a documented scope exclusion explains is out of scope, not failed
+                    # (SkillSpector 2.11.2/2.12.0 miscount it); every later check uses these counts.
+                    out_of_scope_work = min(unexplained_out_of_scope_work[analyzer_id], analyzer_counts["failed"])
+                    unexplained_out_of_scope_work[analyzer_id] -= out_of_scope_work
+                    analyzer_counts["failed"] -= out_of_scope_work
+                    analyzer_counts["out_of_scope"] = out_of_scope_work
                     if analyzer_counts["planned_work"]:
                         expected_analyzer_state = (
                             "failed"
@@ -1318,6 +1451,13 @@ class SecurityValidator(ValidatorBase):
                         )
                         return False
 
+                if any(count > 0 for count in unexplained_out_of_scope_work.values()):
+                    result.add_error(
+                        "skillspector JSON field 'analysis_completeness.scope_exclusions' names analyzer work "
+                        "that the analyzer statuses do not report; security scan did not complete"
+                    )
+                    return False
+
                 required_analyzer_ids = (
                     _SKILLSPECTOR_2_9_6_REQUIRED_ANALYZERS
                     if uses_statusless_completeness_schema
@@ -1373,12 +1513,17 @@ class SecurityValidator(ValidatorBase):
                     universal_analyzer_ids = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | (
                         {"artifact_integrity"} if uses_completeness_schema else set()
                     )
+                    # Every universal analyzer plans one work item per component, including each excluded
+                    # binary asset, and completes every item that is not documented as out of scope.
+                    universal_work = counts["total_components"] + scope_accounting.binary_assets
                     universal_analyzer_evidence_valid = all(
                         all(state == "completed" for state, _item in analyzer_evidence[analyzer_id])
                         and sum(item["planned_work"] for _state, item in analyzer_evidence[analyzer_id])
-                        == counts["total_components"]
-                        and sum(item["completed"] for _state, item in analyzer_evidence[analyzer_id])
-                        == counts["total_components"]
+                        == universal_work
+                        and sum(
+                            item["completed"] + item["out_of_scope"] for _state, item in analyzer_evidence[analyzer_id]
+                        )
+                        == universal_work
                         for analyzer_id in universal_analyzer_ids
                     )
                 actual_limitation_counts = Counter(limitations)
@@ -1730,7 +1875,11 @@ class SecurityValidator(ValidatorBase):
             )
             return False
         if uses_versioned_completeness and not result.is_incomplete:
-            if len(normalized_components) != analysis_completeness["total_components"]:
+            # SkillSpector lists documented out-of-scope artifacts in ``components`` but not in its total.
+            if (
+                len(normalized_components)
+                != analysis_completeness["total_components"] + scope_accounting.excluded_components
+            ):
                 result.add_error(
                     "skillspector JSON component inventory contradicts analysis completeness; "
                     "security scan did not complete"

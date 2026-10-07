@@ -296,6 +296,7 @@ def test_cli_reporter_consoles_print_emoji_codes_literally(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("COLUMNS", "250")
+    monkeypatch.delenv("TERM", raising=False)
     results = [
         _rubric_result(EMOJI_TEXT),
         _finding_result(EMOJI_TEXT),

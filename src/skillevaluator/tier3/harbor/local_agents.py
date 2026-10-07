@@ -8,13 +8,14 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import os
 import re
 import secrets
 import shlex
 import tempfile
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -50,6 +51,8 @@ _NVIDIA_BUILD_BRIDGE_API_KEY_ENV = "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_API_KEY"
 _NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN_ENV = "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN"
 _NVIDIA_BUILD_FILE_BACKED_SENTINEL_KEY = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_HOST_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
+
+logger = logging.getLogger(__name__)
 
 
 async def _await_task_uninterruptibly(
@@ -118,6 +121,18 @@ def _rewrite_launcher_segment(command: str, rewrite: Callable[[str], str]) -> st
 class SkillEvaluatorClaudeCode(ClaudeCode):
     """Wrap Claude Code to preserve rich MCP server declarations and Vertex AI routing."""
 
+    def _env_sources(self) -> tuple[Mapping[str, str], ...]:
+        """Environment sources in runtime precedence order, safe for partially initialized instances."""
+        sources: list[Mapping[str, str]] = []
+        resolved = getattr(self, "_resolved_env_vars", None)
+        if isinstance(resolved, Mapping):
+            sources.append(resolved)
+        extra = getattr(self, "_extra_env", None)
+        if isinstance(extra, Mapping):
+            sources.append(extra)
+        sources.append(os.environ)
+        return tuple(sources)
+
     def _uses_vertex_auth(self) -> bool:
         """Return whether Claude Code is configured to route through Vertex AI."""
         try:
@@ -128,8 +143,8 @@ class SkillEvaluatorClaudeCode(ClaudeCode):
                     default=False,
                 )
             )
-        except ValueError:
-            self.logger.debug("Ignoring invalid boolean environment value CLAUDE_CODE_USE_VERTEX")
+        except (ValueError, AttributeError):
+            logger.debug("Ignoring invalid boolean environment value CLAUDE_CODE_USE_VERTEX")
             return False
 
     @property
@@ -176,8 +191,7 @@ class SkillEvaluatorClaudeCode(ClaudeCode):
     ):
         if self._uses_vertex_auth():
             command = (
-                "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN; "
-                f"{command}"
+                f"unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN; {command}"
             )
             if env:
                 env = {

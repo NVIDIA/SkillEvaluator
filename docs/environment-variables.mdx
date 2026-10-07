@@ -6,7 +6,7 @@ layout: reference
 
 Every environment variable SkillEvaluator reads, grouped by feature area. Each group links to the guide that explains the workflow the variables belong to — this page is the inventory, not the tutorial.
 
-Boolean variables accept `1`, `true`, `yes`, or `on` (case-insensitive) as true, and `0`, `false`, `no`, or `off` as false.
+Boolean variables accept `1`, `true`, `yes`, or `on` (case-insensitive) as true, and `0`, `false`, `no`, or `off` as false. Any other value that is set, including an empty one, also counts as false.
 
 Two historical SkillEvaluator prefixes coexist. `SKILL_EVAL_*` covers provider
 and model configuration plus a small set of Tier 3 engine knobs;
@@ -29,10 +29,6 @@ These variables select and configure the provider used for LLM-backed checks and
 | `SKILL_EVAL_LLM_MODEL` | OpenAI: `gpt-5.6-sol`; Anthropic: `claude-opus-5`; NVIDIA Build: `nvidia/nemotron-3-super-120b-a12b`; OpenAI-compatible: `nvidia/nvidia/nemotron-3-super-120b-long-ctx`; Bedrock: `us.anthropic.claude-opus-5` | Chat model override. For gateways, use the exact catalog ID when it differs from the default. Setting it to an empty string is a configuration error. For a lower-cost OpenAI option, use `gpt-5.4-mini`. |
 | `SKILL_EVAL_LLM_BASE_URL` | provider default endpoint | Endpoint override; takes precedence over `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL`. Required for `openai-compatible`. Ignored by `nv_build`, whose endpoint is fixed to `https://integrate.api.nvidia.com/v1` — point a custom endpoint at the `openai-compatible` provider instead. |
 | `SKILL_EVAL_LLM_API_KEY` | — | API key for the `openai-compatible` provider (local servers still require it to be set). |
-| `SKILL_EVAL_LLM_MAX_RETRIES` | `3` | Extra attempts for transient LLM judge failures after the initial request. `0` disables retries; invalid or negative values use the default. |
-| `SKILL_EVAL_LLM_RETRY_BASE_DELAY` | `1` second | Base for exponential jitter between direct LLM judge attempts. Values must be finite and nonnegative. |
-| `SKILL_EVAL_LLM_RETRY_MAX_DELAY` | `30` seconds | Maximum sleep between direct LLM judge attempts. A `Retry-After` value above this limit fails fast; values must be finite and nonnegative. |
-| `SKILL_EVAL_LLM_JUDGE_BUDGET_SEC` | `180` seconds | Wall-time budget per required LLM judge in the Harbor verifier. Values must be finite and positive; invalid or nonpositive values use the default. |
 | `SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS` | unset | Comma-separated hosts whose model catalog may be read over plain HTTP. Catalog reads otherwise require HTTPS unless the host is loopback, because the request carries a bearer token. Use this only when the transport is already encrypted and authenticated below HTTP — a WireGuard or comparable tunnel peer, for example — where the tool cannot see that the link is protected. Each entry matches one whole host as written, with no resolution, no suffix matching, and no wildcards. A plain-HTTP request to an accepted host also bypasses any inherited HTTP proxy, so the bearer token is never offered to an intermediary. The transport rechecks authorization before dispatch and rejects hosts that are no longer allowed. HTTPS routing is unchanged. |
 | `NVIDIA_API_KEY` | — | Credential for the `nv_build` provider (NVIDIA Build). |
 | `OPENAI_API_KEY` | — | Credential for the `openai` provider. |
@@ -42,11 +38,47 @@ These variables select and configure the provider used for LLM-backed checks and
 | `AWS_REGION` | `us-west-2` | Region for the `bedrock` provider. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, ... | — | Standard AWS credential chain, used as-is by the `bedrock` provider. |
 
-The retry settings apply to the shared host LLM client and direct public-provider
-calls in the Harbor verifier. The canonical OpenAI RAGAS goal scorer uses its
-own adapter and scoring path. Harbor's managed verifier limits each required
-judge to `SKILL_EVAL_LLM_JUDGE_BUDGET_SEC` (180 seconds by default) so retries
-leave time to write a failed-run report.
+### LLM retries and judge time budget
+
+SkillEvaluator retries transient LLM failures itself. The retry settings apply
+on the host to every chat call made through the shared LLM client, including
+Tier 1 `--llm` checks, Tier 2 LLM analysis, eval dataset generation, and Tier 3
+report suggestions. They also apply in the Harbor verifier to the direct
+provider calls made by the `accuracy`, `goal_accuracy`, and `behavior_check`
+judges. Embedding requests and the canonical OpenAI RAGAS goal scorer use their
+own client and scoring path, so these settings do not apply to them.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SKILL_EVAL_LLM_MAX_RETRIES` | `3` | Number of retries after the initial request. `0` disables retries. Non-integer or negative values use the default. |
+| `SKILL_EVAL_LLM_RETRY_BASE_DELAY` | `1` second | Base for full-jitter exponential backoff. The wait before retry *n* is a random value from 0 up to `base × 2^(n-1)` seconds, capped at the maximum delay. Non-numeric, non-finite, or negative values use the default. |
+| `SKILL_EVAL_LLM_RETRY_MAX_DELAY` | `30` seconds | Longest single wait between attempts. A value below the base delay is raised to the base delay. Non-numeric, non-finite, or negative values use the default. |
+| `SKILL_EVAL_LLM_JUDGE_BUDGET_SEC` | `180` seconds | Wall-time budget for each required LLM judge in the Harbor verifier, covering all of its attempts and waits. Non-numeric, non-finite, zero, or negative values use the default. |
+
+Retries cover HTTP 429, 500, 502, 503, and 504 responses, connection errors,
+and timeouts. In the verifier, Bedrock throttling and service-unavailable
+errors are also retried. Other HTTP errors, such as 400, 401, 403, or 404, are
+not retried. When a retryable response carries a `Retry-After` header,
+either in seconds or as an HTTP date, the next attempt waits that long plus 0.1
+to 0.5 seconds of jitter instead of the computed backoff. An unparseable value
+waits the base delay. If `Retry-After` asks for longer than
+`SKILL_EVAL_LLM_RETRY_MAX_DELAY`, the call fails immediately with the provider's
+error.
+
+In the verifier, `SKILL_EVAL_LLM_JUDGE_BUDGET_SEC` also bounds retries. Each
+request's timeout is cut to the judge's remaining time, and a retry whose wait
+would pass the deadline ends the judge with a timeout. The RAGAS goal scorer
+runs under the same budget. A judge that runs out of time is an infrastructure
+failure, not a `0.0` score (see
+[Tier 3 judge failure semantics](#tier-3-judge-failure-semantics)). The three
+required judges run one after another inside the generated task's 600-second
+verifier timeout, so the default leaves time to write a failed-run report.
+
+Set these variables in the host environment that runs `skillevaluator`. When
+one is set, Tier 3 stages it into the generated Harbor task's `[verifier.env]`,
+so the verifier uses the same value. They are never added to the agent's
+environment, and `evals/config.yml` `runtime_env` cannot set `SKILL_EVAL_*`
+names.
 
 ### Anthropic endpoint roots
 
@@ -112,19 +144,69 @@ execution environments are covered in
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `SKILLEVALUATOR_RESULTS_DIR` | `<skill>/evals/results` | External root for run results. Precedence for writes: the `--results-dir` flag, then this variable, then the legacy in-skill location. Read commands (`view`, `compare`) honor the same order and also fall back to the legacy location so older runs stay visible. |
-| `SKILLEVALUATOR_LOCAL_SANDBOX` | `require` | Local-mode sandbox policy. `require` fails closed when no OS sandbox backend (Bubblewrap on Linux, Seatbelt on macOS) is usable; `prefer` degrades to advisory-only guardrails with a loud warning; `off` skips sandbox probing entirely — for skills you fully trust. No value enables native Windows: local mode fails closed there before anything runs — use WSL2 or `--env-mode docker`. |
+| `SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE` | macOS: `~/Library/Application Support/skillevaluator/output-provenance.key`; Linux: `$XDG_STATE_HOME/skillevaluator/output-provenance.key` (`~/.local/state` when `XDG_STATE_HOME` is unset); Windows: `%LOCALAPPDATA%\skillevaluator\output-provenance.key` | Local key that authenticates the markers SkillEvaluator writes into its generated output directories; a directory is replaced only when its marker verifies for that path. The key is created on first use. It must be outside every evaluated skill and generated output tree. On macOS and Linux, the file and its directory must be owned by the current user and not accessible to group or other users. |
+| `SKILLEVALUATOR_LOCAL_SANDBOX` | `require` | Local-mode sandbox policy. `require` fails closed when no OS sandbox backend (Bubblewrap on Linux, Seatbelt on macOS) is usable; `prefer` degrades to advisory-only guardrails with a loud warning; `off` skips sandbox probing entirely — for skills you fully trust. Any other value is rejected. No value enables native Windows: local mode fails closed there before anything runs — use WSL2 or `--env-mode docker`. |
 | `SKILLEVALUATOR_LOCAL_ALLOW_NET` | `true` | Network egress for local-mode trials. Set to `0` to airgap a skill that must not reach the network. Incompatible with the `nv_build` provider — NVIDIA Build local agents require network access, so airgapped runs are rejected up front. |
 | `SKILLEVALUATOR_LOCAL_STRICT_READS` | `false` | Tightens the sandbox's read-only view of the host system to a stricter path set. |
 | `SKILLEVALUATOR_LOCAL_INHERIT_AGENT_KEYS` | `false` | When true, local-mode trials inherit the host's agent credential variables into their ambient environment. Off by default so a hostile skill command cannot read credentials — agents and verifiers receive credentials per-exec instead. |
 | `SKILLEVALUATOR_RUNTIME_DIR` | `~/.local/share/skillevaluator/runtimes` | Where local mode looks for managed agent CLIs. Must be a dedicated subdirectory — not the home directory or one of its parents. |
 | `SKILL_EVAL_HARBOR_PREBUILD_TASK_ENVS` | unset | Set to exactly `1` to opt in to pre-building Harbor task environment images before trials start (other truthy spellings are not honored). Opt-in because concurrent trial cleanup can remove a shared prebuilt image that sibling trials still need. |
 | `SKILL_EVAL_JUDGE_MODEL` | falls back to `SKILL_EVAL_LLM_MODEL` | Operator-controlled model override for the Tier 3 dimension judge in standard grading. `LLM_JUDGE_MODEL` is honored as a higher-precedence spelling; when neither is set, the judge uses `SKILL_EVAL_LLM_MODEL`, then the built-in judge default. Both spellings change only the model used with the configured `SKILL_EVAL_LLM_PROVIDER`; they do not select a separate judge provider, so the model must be supported by that provider. Standard grading makes both spellings resolve to the selected override in Harbor's parent process, then forwards them through its verifier-only job layer, which takes precedence over task and step verifier declarations. Neither name is injected into the evaluated agent's initial environment; attempts to set or reference one from skill-authored `runtime_env` or native `[environment.env]` tables are rejected. Native custom-only graders keep ownership of their verifier configuration. Shared agent/verifier containers are a process boundary, not a confidentiality boundary; use a separate verifier environment when the model name itself must be hidden from untrusted agent processes. `run_config.json` records the configured judge provider, model, source, `override_applied`, and catalog-verification status separately from agent models; an allowed provider fallback may use a different model for an individual judge call. When `override_applied` is false for a native Harbor task, `effective_model_source` is `native_harbor_runtime` and catalog verification is explicitly inconclusive because an authored task or step verifier declaration may supersede the recorded fallback. |
+| `LLM_JUDGE_FALLBACK_MODELS` | unset | Comma-separated fallback models for the Tier 3 standard judges in the Harbor verifier. When the provider rejects the judge model as not found, invalid, or not accessible to the key, the verifier tries each fallback in order with the same provider. Fallback applies to the `openai`, `nv_build`, and `openai-compatible` providers. The value is forwarded only to standard verifier jobs, never to the agent environment or `custom_only` runs. |
 | `SKILLEVALUATOR_HARBOR_DIAGNOSTIC_ARTIFACT_MAX_BYTES` | `5242880` (5 MiB) | Size cap per diagnostic artifact copied from a Harbor trial into the results directory. Values are bounded to 0–67108864 bytes (64 MiB); `0` skips non-empty artifacts. Oversized artifacts are skipped and recorded in the artifact manifest. |
 | `SKILLEVALUATOR_GKE_CLUSTER`, `SKILLEVALUATOR_GKE_REGION`, `SKILLEVALUATOR_GKE_NAMESPACE`, `SKILLEVALUATOR_GKE_REGISTRY_LOCATION`, `SKILLEVALUATOR_GKE_REGISTRY_NAME` | — | Target cluster, region, namespace, and Artifact Registry coordinates for `--env-mode gke` when not supplied via `--ek`. |
 | `SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY` | `false` | Opt in (`1`, `true`, `yes`) to single-pod GKE Workload Identity (`CLAUDE_CODE_USE_VERTEX=1` or a GCP-bound Kubernetes ServiceAccount). Restricted to trusted skills because the pod ServiceAccount and GCE/GKE metadata server are shared with evaluated skill commands. |
 | `SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE` | `python:3.12-slim` | Trusted container image used by `skillevaluator-metadata-probe-init` and `skillevaluator-metadata-probe` in unprivileged `--env-mode gke` pods to verify that `169.254.169.254` and `169.254.169.252:988` are unreachable. Override when your GKE cluster restricts Docker Hub pulls and requires an internal Artifact Registry mirror. |
 | `SKILLEVALUATOR_GKE_AUTOPILOT` | auto-detected | Explicitly set `1`/`true` or `0`/`false` (or pass `--ek autopilot=<bool>`) to control GKE Autopilot ephemeral-storage adjustment (`10Gi` → `10176Mi` on non-accelerator `main` containers so adding the `64Mi` probe container stays within Autopilot's `10Gi` general-purpose pod ceiling) when node listing or `gcloud` inspection is unavailable. |
 | `SKILLEVALUATOR_VERTEX_ADC_JOB_TIMEOUT_SEC` | `3300` seconds | Maximum wall-clock timeout per Harbor subprocess invocation when using short-lived Google Application Default Credentials (ADC) with a Vertex AI OpenAPI endpoint, capped to the remaining token lifetime minus a 60-second safety margin. |
+
+### Harbor process environment
+
+SkillEvaluator starts every Harbor process in an empty, evaluator-owned working
+directory with `.env` loading and Harbor telemetry disabled:
+
+- Harbor does not read `.env` or `.env.local` files from your project or
+  current directory. Export variables in the shell or CI job that runs
+  `skillevaluator` instead.
+- An evaluation run passes Harbor only an allowlisted environment: basic
+  process, locale, and temporary-directory variables such as `PATH`, `HOME`,
+  `LANG`, and `TMPDIR`; proxy and CA-bundle variables; the selected backend's
+  own variables (see [Agents & Sandboxes](agents-and-sandboxes.mdx)); the
+  evaluator provider's settings and credential, plus the `AWS_*` chain for
+  `bedrock`; each selected agent's credentials; validated `runtime_env`
+  values; and the Tier 3 judge, retry, and evidence-budget variables on this
+  page. Other variables in your shell do not reach Harbor.
+- Relative paths in allowlisted path variables, such as `KUBECONFIG`,
+  `DOCKER_CONFIG`, `SSL_CERT_FILE`, or `AWS_SHARED_CREDENTIALS_FILE`, resolve
+  against the directory where you ran `skillevaluator`.
+- Setting `HARBOR_TELEMETRY` or `PYTHON_DOTENV_DISABLED` yourself has no
+  effect; SkillEvaluator always overrides both.
+- Tier 3 needs python-dotenv 1.2.0 or newer, which the `tier3` extra installs.
+  With an older version installed, the prerequisite check fails before Harbor
+  starts.
+
+### Judge evidence budgets
+
+Before the Harbor verifier calls the `accuracy`, `goal_accuracy`, and
+`behavior_check` judges, it condenses the agent's trajectory into a separate
+evidence excerpt for each judge. These budgets cap each excerpt in characters.
+When a run produces more evidence than fits, lower-priority material is
+dropped or truncated first so the judge still sees the agent's final response.
+Larger budgets give judges more context and cost more prompt tokens.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SKILL_EVAL_ACCURACY_BUDGET` | `8000` characters | Evidence budget for the `accuracy` judge: the agent's final response, files it wrote, and up to 6 recent tool results. |
+| `SKILL_EVAL_GOAL_ACCURACY_BUDGET` | `12000` characters | Evidence budget for the `goal_accuracy` judge, including the RAGAS goal scorer: the final response, end-state file changes, and up to 12 recent tool results. |
+| `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` | `8000` characters | Evidence budget for the `behavior_check` judge: file changes, the final response, the user request, and a compact tool history. The effective budget is never less than `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` plus 4000. |
+| `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` | `800` characters | Maximum length of the agent's final response within the `behavior_check` evidence. Values above 4000 can also raise the effective behavior-check budget. |
+
+Each value must be an integer. Values below `1` are treated as `1`, and
+non-integer values such as `8k` or `1.5` use the default. Set these variables in
+the host environment that runs `skillevaluator`. As with the
+[retry settings](#llm-retries-and-judge-time-budget), Tier 3 stages any that
+are set into the generated task's `[verifier.env]`, and never into the agent's
+environment.
 
 ### Tier 3 judge failure semantics
 
@@ -149,7 +231,7 @@ The `HARBOR_*` variables are read by your custom grader *inside* the task contai
 ## Set at runtime, not committed
 
 <Warning>
-Keep credentials out of skill repositories and CI configuration files. Export provider keys as masked secrets at runtime. Agent credentials for Tier 3 come only from the host environment — `evals/config.yml` `runtime_env` carries non-credential values, and any entry that names or references an operator-owned credential (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, their base-URL variables, `CLAUDE_CODE_USE_BEDROCK`, and the `AWS_*` credential variables) is rejected at run time, as are names that control the host process (`PATH`, `DOCKER_*`, proxy variables, `SKILLEVALUATOR_*`, and similar). See the blocked-names table in [Providers & Credentials](configuration.mdx#tier-3-credentials-two-roles). With NVIDIA Build, one exported `NVIDIA_API_KEY` covers both the evaluator and the agents in the `docker` and `local` env-modes.
+Keep credentials out of skill repositories and CI configuration files. Export provider keys as masked secrets at runtime. Agent credentials for Tier 3 come only from the host environment — `evals/config.yml` `runtime_env` carries non-credential values, and any entry that names or references an operator-owned credential (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, their base-URL variables, `CLAUDE_CODE_USE_BEDROCK`, and the `AWS_*` credential variables) is rejected at run time, as are names that control the host process (`PATH`, `DOCKER_*`, proxy variables, `SKILL_EVAL_*`, `SKILLEVALUATOR_*`, and similar). See the blocked-names table in [Providers & Credentials](configuration.mdx#tier-3-credentials-two-roles). With NVIDIA Build, one exported `NVIDIA_API_KEY` covers both the evaluator and the agents in the `docker` and `local` env-modes.
 </Warning>
 
 ## See also

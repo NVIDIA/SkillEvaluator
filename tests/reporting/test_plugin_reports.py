@@ -472,6 +472,47 @@ def test_html_tier3_integration_is_synthesized_when_requested_but_missing(tmp_pa
     assert "Integration was requested, but this run recorded no sum-of-parts comparison." in inconclusive
 
 
+_NOT_REQUESTED = (
+    "Integration was not requested (--lift-mode effectiveness); run with --lift-mode integration or both to measure it."
+)
+
+
+def test_an_effectiveness_only_run_states_that_integration_was_not_measured(tmp_path: Path) -> None:
+    result = _tier3_result(tmp_path)
+    payload = result.metadata["agent_eval"]
+    payload["lift_mode_requested"] = payload["lift_mode_effective"] = "effectiveness"
+    # The default lift mode builds no Integration block at all.
+    assert "integration" not in payload
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+    cli = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+
+    block = element_text(html, "tier3-integration") or ""
+    assert "Integration (Plugin Composition) — INCONCLUSIVE" in block
+    assert "Lift mode: requested effectiveness · effective effectiveness" in block
+    assert "fell back" not in block
+    inconclusive = element_text(html, "tier3-integration-inconclusive") or ""
+    assert "INCONCLUSIVE — Integration was not measured." in inconclusive
+    assert _NOT_REQUESTED in inconclusive
+    assert "### Integration (advisory)" in markdown
+    assert f"**INCONCLUSIVE:** {_NOT_REQUESTED}" in markdown
+    assert f"Integration: INCONCLUSIVE — {_NOT_REQUESTED} (advisory)" in cli
+    view = tier3_plugin_view(payload)
+    assert view is not None
+    assert view["integration"]["requested"] is False
+    assert f"Integration (the plugin versus its own parts) was not measured: {_NOT_REQUESTED}" in view["excluded"]
+
+
+def test_a_requested_integration_view_is_marked_requested(tmp_path: Path) -> None:
+    integration = {"verdict": "inconclusive", "measured": False, "reason": "No cross-component case completed."}
+    view = tier3_plugin_view(_tier3_result(tmp_path, integration=integration).metadata["agent_eval"])
+
+    assert view is not None
+    assert view["integration"]["requested"] is True
+    assert view["integration"]["reason"] == "No cross-component case completed."
+
+
 def test_html_tier3_measured_integration_shows_ci_and_point_verdict(tmp_path: Path) -> None:
     integration = {
         "verdict": "inconclusive",

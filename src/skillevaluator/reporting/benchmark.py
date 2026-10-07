@@ -815,7 +815,7 @@ class BenchmarkReporter(ReporterBase):
                 result = f"{entry['verdict_label']}, {_format_points(lift) if lift is not None else 'lift n/a'}"
                 # The view's Integration interval already falls back to the statistics block.
                 uncertainty = _ci_label(entry.get("ci"))
-            elif entry:
+            elif entry and entry.get("requested", True):
                 result = f"INCONCLUSIVE — {entry['reason']}"
                 uncertainty = "Not measured"
             elif modes:

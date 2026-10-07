@@ -98,6 +98,7 @@ _LIFT_KINDS = (("effectiveness", "Effectiveness lift"), ("integration", "Integra
 _SUM_OF_PARTS_LIFT_LABEL = "Integration lift (sum-of-parts baseline)"
 _PRECISION_CLASSES = {"adequate": "ok", "low": "warn", "insufficient": "fail"}
 _INTEGRATION_LIFT_MODES = frozenset({"integration", "both"})
+_LIFT_MODE_NAMES = _INTEGRATION_LIFT_MODES | {"effectiveness"}
 _INTEGRATION_VERDICTS = {
     "real_integration": ("Real integration", "ok"),
     "cosmetic_bundling": ("Cosmetic bundling", "warn"),
@@ -1731,13 +1732,20 @@ def integration_view(
     The run-level view is the best agent's block. When more than one agent
     carries its own block, ``per_agent`` lists one named view per agent, so a
     multi-agent run never shows one agent's Integration as the run's.
+
+    A run that recorded an effectiveness-only lift mode carries no Integration
+    block; it gets an explicit not-measured view (``requested`` False) that
+    says Integration was not requested, instead of no Integration section.
     """
     source = _mapping(payload)
     context = context or _tier3_context(source)
     integration = _mapping(source.get("integration"))
-    requested = (context.modes or {}).get("requested", "")
+    modes = context.modes or {}
+    requested = modes.get("requested", "")
     if not integration and requested not in _INTEGRATION_LIFT_MODES:
-        return None
+        if not modes or modes.get("effective") in _INTEGRATION_LIFT_MODES:
+            return None
+        return _not_requested_integration_view(context)
     primary = _integration_block_view(integration, context, statistics)
     agent_blocks = [(name, _mapping(agent.get("integration"))) for name, agent in _agents(source)]
     agent_blocks = [(name, block) for name, block in agent_blocks if block]
@@ -1749,6 +1757,26 @@ def integration_view(
             view["agent"] = name
             primary["per_agent"].append(view)
     return primary
+
+
+def _not_requested_integration_view(context: _Tier3Context) -> dict[str, Any]:
+    """Return the INCONCLUSIVE view of a run whose lift mode did not request Integration."""
+    modes = context.modes or {}
+    mode = next(
+        (value for value in (modes.get("requested"), modes.get("effective")) if value in _LIFT_MODE_NAMES),
+        "effectiveness",
+    )
+    view = _integration_block_view({}, context, None)
+    view.update(
+        reason=(
+            f"Integration was not requested (--lift-mode {mode}); "
+            "run with --lift-mode integration or both to measure it."
+        ),
+        requested=False,
+        agent="",
+        per_agent=[],
+    )
+    return view
 
 
 def _integration_block_view(
@@ -1792,6 +1820,8 @@ def _integration_block_view(
     ) or completeness_issues_view(integration, sum_of_parts_baseline=sum_of_parts_baseline)
     return {
         "measured": measured,
+        # False only for a run whose lift mode did not request Integration.
+        "requested": True,
         "verdict": verdict,
         "verdict_label": verdict_label,
         "verdict_class": verdict_class,

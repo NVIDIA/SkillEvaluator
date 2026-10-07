@@ -180,6 +180,23 @@ def test_integration_lift_mode_card_does_not_claim_an_effectiveness_result(tmp_p
     assert _gate(tmp_path, rendered) == []
 
 
+def test_effectiveness_only_card_keeps_integration_not_requested(tmp_path: Path) -> None:
+    tier3 = _tier3(partial=False)
+    tier3.metadata["agent_eval"]["lift_mode_requested"] = "effectiveness"
+    tier3.metadata["agent_eval"]["lift_mode_effective"] = "effectiveness"
+
+    rendered = _render([tier1_plugin_result(), tier3])
+
+    assert "| Integration (plugin vs. its own parts) | Not requested (lift mode: effectiveness) | Not measured |" in (
+        rendered
+    )
+    assert (
+        "- Integration (the plugin versus its own parts) was not measured: Integration was not requested "
+        "(--lift-mode effectiveness); run with --lift-mode integration or both to measure it."
+    ) in rendered
+    assert _gate(tmp_path, rendered) == []
+
+
 def test_partial_plugin_card_is_incomplete_and_lists_excluded_behavior(tmp_path: Path) -> None:
     integration = {"verdict": "inconclusive", "measured": False, "reason": "No cross-component case completed."}
     rendered = _render([tier1_plugin_result(), _tier3(partial=True, integration=integration)])

@@ -28,10 +28,14 @@ from pathlib import Path
 
 import yaml
 from yaml.events import ScalarEvent
+from yaml.nodes import MappingNode, Node, ScalarNode
 
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.constants import (
     HOME_PATH_SUBMITTER_ENV_VARS,
+    PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
+    PLUGIN_CODEX_MANIFEST_TYPE,
+    PLUGIN_MANIFEST_PRECEDENCE,
     SCAN_EXCLUDED_DIRS,
     SCAN_EXCLUDED_FILES,
     SCANNABLE_EXTENSIONS,
@@ -39,6 +43,8 @@ from skillevaluator.constants import (
 )
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.skill import SEMVER_RE
+from skillevaluator.plugin_formats import declares_agent_plugins_schema, manifest_syntax, parse_manifest_text
+from skillevaluator.plugin_manifest import canonical_manifest_relative
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
@@ -54,6 +60,10 @@ from skillevaluator.validators.plugin_tree import plugin_tree_exclusions
 logger = get_logger(__name__)
 
 _AUTHOR_IDENTITY_RE = re.compile(r"^\S[^<>\n]* <(?P<email>[^<>@\s]+@[^<>\s]+)>$")
+# Plugin manifest type by root-relative POSIX path (agent_plugin.yaml/.yml and the client plugin.json files).
+_PLUGIN_MANIFEST_TYPES_BY_PATH = dict(PLUGIN_MANIFEST_PRECEDENCE)
+_JSON_WHITESPACE = " \t\n\r"
+_JSON_DECODER = json.JSONDecoder()
 _SKILLSPECTOR_POLICY_EXIT_CODES = frozenset({0, 1})
 _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS = {(2, 9, 5), (2, 9, 6)}
 _SKILLSPECTOR_FINDING_IDENTITY_VERSION = (2, 11, 1)
@@ -346,6 +356,58 @@ def _comment_line_numbers(file_path: Path, lines: list[str]) -> frozenset[int]:
     if suffix in {".md", ".markdown"}:
         return _markdown_comment_line_numbers(lines)
     return _leading_hash_or_slash_comment_lines(lines)
+
+
+def _skip_json_whitespace(text: str, index: int) -> int:
+    while index < len(text) and text[index] in _JSON_WHITESPACE:
+        index += 1
+    return index
+
+
+def _json_member_value_index(text: str, index: int, key: str) -> int | None:
+    """Index where the value of the object at *index* for *key* starts, else ``None``.
+
+    The last member named *key* wins, as in :func:`json.loads`. *text* must
+    already be known to be valid JSON (values are skipped with the stdlib decoder).
+    """
+    index = _skip_json_whitespace(text, index)
+    if not text.startswith("{", index):
+        return None
+    index = _skip_json_whitespace(text, index + 1)
+    if text.startswith("}", index):
+        return None
+    found: int | None = None
+    try:
+        while text.startswith('"', index):
+            name, index = json.decoder.scanstring(text, index + 1)
+            index = _skip_json_whitespace(text, index)
+            if not text.startswith(":", index):
+                return None
+            index = _skip_json_whitespace(text, index + 1)
+            if name == key:
+                found = index
+            _value, index = _JSON_DECODER.raw_decode(text, index)
+            index = _skip_json_whitespace(text, index)
+            if not text.startswith(",", index):
+                return found if text.startswith("}", index) else None
+            index = _skip_json_whitespace(text, index + 1)
+    except (ValueError, RecursionError):
+        return None
+    return None
+
+
+def _yaml_member_value_node(node: Node | None, key: str) -> Node | None:
+    """The value node of *key* in a YAML mapping node, written after its key (an alias is not followed)."""
+    if not isinstance(node, MappingNode):
+        return None
+    for key_node, value_node in node.value:
+        if (
+            isinstance(key_node, ScalarNode)
+            and key_node.value == key
+            and value_node.start_mark.index >= key_node.end_mark.index
+        ):
+            return value_node
+    return None
 
 
 def _skillspector_llm_stderr_failed(stderr: str) -> bool:
@@ -2529,7 +2591,7 @@ class SecurityValidator(ValidatorBase):
             except ValueError:
                 relative_path = file_path.name
 
-            for finding_data in self._scan_file_for_pii(file_path, protected_usernames):
+            for finding_data in self._scan_file_for_pii(file_path, protected_usernames, scan_root=skill_path):
                 pii_found = True
                 value = finding_data.get("matched_value")
                 key: object = (
@@ -2839,12 +2901,20 @@ class SecurityValidator(ValidatorBase):
         """True when a line is a YAML frontmatter fence, including BOM-prefixed openers."""
         return line.strip().removeprefix("\ufeff").strip() == "---"
 
-    def _scan_file_for_pii(self, file_path: Path, protected_usernames: set[str] | None = None) -> list[dict]:
+    def _scan_file_for_pii(
+        self,
+        file_path: Path,
+        protected_usernames: set[str] | None = None,
+        *,
+        scan_root: Path | None = None,
+    ) -> list[dict]:
         """Scan a single file for PII patterns, yielding findings with full context.
 
         ``protected_usernames`` is the set of author/submitter identities used by
         the home-path check; when omitted it is resolved from the file's parent
-        directory so the method stays usable standalone.
+        directory so the method stays usable standalone. ``scan_root`` is the
+        scanned directory: a plugin manifest at its root may declare a public
+        author email (see :meth:`_plugin_manifest_author_emails`).
         """
         if protected_usernames is None:
             protected_usernames = self._protected_home_usernames(file_path.parent)
@@ -2856,7 +2926,10 @@ class SecurityValidator(ValidatorBase):
             return []
 
         lines = content.split("\n")
-        author_emails = self._frontmatter_author_emails(file_path, lines)
+        author_emails = {
+            **self._frontmatter_author_emails(file_path, lines),
+            **self._plugin_manifest_author_emails(file_path, content, scan_root),
+        }
         comment_lines = _comment_line_numbers(file_path, lines)
         global_exceptions = self.pii_patterns.get("exceptions", {}).get("allowed_paths", [])
         compiled = self._compile_pii_patterns(global_exceptions)
@@ -2899,6 +2972,76 @@ class SecurityValidator(ValidatorBase):
             for line_number, line in enumerate(lines[1:frontmatter_end], 2)
             if re.match(r"^\s*author\s*:", line, flags=re.IGNORECASE) and author_email.casefold() in line.casefold()
         }
+
+    @staticmethod
+    def _plugin_manifest_author_emails(file_path: Path, content: str, scan_root: Path | None) -> dict[int, str]:
+        """Map the author email line of a plugin manifest at *scan_root* to the manifest's declared author email.
+
+        A plugin manifest declares a public contributor email the way SKILL.md
+        frontmatter does (``agent_plugin.yaml`` requires ``author.email``). Only
+        a supported manifest path at the scan root counts (``agent_plugin.yaml``
+        /``.yml``, a ``.claude-plugin``/``.codex-plugin``/``.cursor-plugin``
+        ``plugin.json``, or a root ``plugin.json`` that opts into Agent Plugins),
+        and only the line holding the ``author`` email value: the object form
+        ``{"name": ..., "email": ...}`` everywhere, and the ``Name <email>``
+        string form in a Codex manifest (the only format that tolerates it).
+        A manifest that does not parse exempts nothing, and the same address
+        anywhere else in the manifest or in another file is still reported.
+        """
+        if scan_root is None:
+            return {}
+        try:
+            relative = canonical_manifest_relative(file_path.relative_to(scan_root))
+        except ValueError:
+            return {}
+        manifest_type = _PLUGIN_MANIFEST_TYPES_BY_PATH.get(relative.as_posix()) if relative is not None else None
+        if manifest_type is None:
+            return {}
+        try:
+            data = parse_manifest_text(manifest_type, content)
+        except (ValueError, RecursionError):
+            return {}
+        if not isinstance(data, dict) or (
+            manifest_type == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE and not declares_agent_plugins_schema(data)
+        ):
+            return {}
+
+        # The declared email, the manifest keys leading to the scalar that holds it, and that scalar's value.
+        author = data.get("author")
+        if isinstance(author, dict):
+            email = author.get("email")
+            value_path: tuple[str, ...] = ("author", "email")
+            value = email
+        elif isinstance(author, str) and manifest_type == PLUGIN_CODEX_MANIFEST_TYPE:
+            identity = _AUTHOR_IDENTITY_RE.fullmatch(author.strip())
+            email = identity.group("email") if identity is not None else None
+            value_path = ("author",)
+            value = author
+        else:
+            return {}
+        if not isinstance(email, str) or "@" not in email:
+            return {}
+
+        value_index: int | None = None
+        if manifest_syntax(manifest_type) == "json":
+            index: int | None = 0
+            for key in value_path:
+                index = _json_member_value_index(content, index, key) if index is not None else None
+            with contextlib.suppress(ValueError, RecursionError):
+                if index is not None and _JSON_DECODER.raw_decode(content, index)[0] == value:
+                    value_index = index
+        else:
+            try:
+                node: Node | None = yaml.compose(content, Loader=yaml.SafeLoader)
+            except (yaml.YAMLError, RecursionError, ValueError):
+                node = None
+            for key in value_path:
+                node = _yaml_member_value_node(node, key)
+            if isinstance(node, ScalarNode) and node.value == value:
+                value_index = node.start_mark.index
+        if value_index is None:
+            return {}
+        return {content.count("\n", 0, value_index) + 1: email}
 
     def _compile_pii_patterns(self, global_exceptions: list[str]) -> list[tuple[str, re.Pattern, list[str], dict]]:
         """Pre-compile all PII patterns with their merged exception lists."""

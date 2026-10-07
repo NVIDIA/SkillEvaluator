@@ -254,6 +254,53 @@ def _skillspector_documentation_only_report() -> dict:
     return payload
 
 
+_PLUGIN_AUTHOR_EMAIL = "jane@contoso-tools.invalid"
+_PLUGIN_SUPPORT_EMAIL = "support@contoso-help.invalid"
+
+
+def _write_plugin_manifest(root: Path, manifest: str, *, support: str = _PLUGIN_SUPPORT_EMAIL) -> Path:
+    """Write *manifest* (root-relative) declaring the author email, with *support* in its description.
+
+    The description is on line 3 of a YAML manifest and line 4 of a JSON one.
+    """
+    path = root / manifest
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if manifest.endswith((".yaml", ".yml")):
+        path.write_text(
+            "name: contoso-tools\n"
+            "version: 1.0.0\n"
+            f"description: Questions go to {support}\n"
+            "author:\n"
+            "  name: Jane Doe\n"
+            f"  email: {_PLUGIN_AUTHOR_EMAIL}\n"
+            "skills:\n"
+            "  refs:\n"
+            "    - skills/loader\n"
+        )
+        return root
+    data: dict = {
+        "name": "contoso-tools",
+        "version": "1.0.0",
+        "description": f"Questions go to {support}",
+        "author": {"name": "Jane Doe", "email": _PLUGIN_AUTHOR_EMAIL},
+    }
+    if manifest == "plugin.json":
+        data["$schema"] = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return root
+
+
+def _email_occurrences(result: ValidationResult) -> dict[str, list[tuple[str, int]]]:
+    """Reported email addresses with their (file, line) occurrences."""
+    return {
+        finding.metadata["matched_value"]: [
+            (occurrence["file"], occurrence["line"]) for occurrence in finding.metadata["occurrences"]
+        ]
+        for finding in result.findings
+        if finding.check_name == "emails"
+    }
+
+
 def _user_facing_reports(result: ValidationResult) -> list[str]:
     """Render every Tier 1 user-facing report surface for redaction checks."""
     return [
@@ -824,6 +871,126 @@ Run the documented workflow.
         email_findings = [finding for finding in pii_result.findings if finding.check_name == "emails"]
         assert len(email_findings) == 1
         assert email_findings[0].line_content == "Contact contributor@contributors.invalid for private support."
+
+    @pytest.mark.parametrize(
+        "manifest",
+        [
+            "agent_plugin.yaml",
+            "agent_plugin.yml",
+            ".claude-plugin/plugin.json",
+            "plugin.json",
+            ".codex-plugin/plugin.json",
+            ".cursor-plugin/plugin.json",
+        ],
+    )
+    def test_plugin_manifest_author_email_is_exempt_only_on_its_author_line(self, tmp_path: Path, manifest: str):
+        """A plugin manifest's declared author email is public metadata; other addresses stay PII."""
+        plugin = _write_plugin_manifest(tmp_path / "plugin", manifest)
+        (plugin / "README.md").write_text(f"# Contoso tools\n\nPrivate contact: {_PLUGIN_AUTHOR_EMAIL}\n")
+
+        occurrences = _email_occurrences(SecurityValidator(submitter_usernames=[]).validate_pii_only(plugin))
+
+        assert occurrences == {
+            _PLUGIN_AUTHOR_EMAIL: [("README.md", 3)],
+            _PLUGIN_SUPPORT_EMAIL: [(manifest, 3 if manifest.startswith("agent_plugin") else 4)],
+        }
+
+    def test_plugin_manifest_author_email_elsewhere_in_the_manifest_is_flagged(self, tmp_path: Path):
+        """Only the author email value is exempt: the same address in another manifest field is still PII."""
+        plugin = _write_plugin_manifest(tmp_path / "plugin", ".claude-plugin/plugin.json", support=_PLUGIN_AUTHOR_EMAIL)
+
+        occurrences = _email_occurrences(SecurityValidator(submitter_usernames=[]).validate_pii_only(plugin))
+
+        assert occurrences == {_PLUGIN_AUTHOR_EMAIL: [(".claude-plugin/plugin.json", 4)]}
+
+    def test_plugin_manifest_author_email_in_one_line_manifest_with_another_email(self, tmp_path: Path):
+        """On a shared line, the author email is exempt but another address on the same line is not."""
+        plugin = tmp_path / "plugin"
+        (plugin / ".claude-plugin").mkdir(parents=True)
+        (plugin / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps(
+                {
+                    "name": "contoso-tools",
+                    "author": {
+                        "name": "Jane Doe",
+                        "email": _PLUGIN_AUTHOR_EMAIL,
+                        "url": f"mailto:{_PLUGIN_SUPPORT_EMAIL}",
+                    },
+                }
+            )
+        )
+
+        occurrences = _email_occurrences(SecurityValidator(submitter_usernames=[]).validate_pii_only(plugin))
+
+        assert occurrences == {_PLUGIN_SUPPORT_EMAIL: [(".claude-plugin/plugin.json", 1)]}
+
+    @pytest.mark.parametrize(
+        ("manifest", "content"),
+        [
+            # Malformed manifests exempt nothing.
+            (
+                ".claude-plugin/plugin.json",
+                '{\n  "name": "contoso-tools",\n  "author": {\n    "email": "{email}",\n  },\n}\n',
+            ),
+            ("agent_plugin.yaml", "name: contoso-tools\nauthor:\n  email: {email}\n  - broken\n"),
+            # A root plugin.json is a manifest only when it opts into Agent Plugins.
+            ("plugin.json", '{\n  "name": "contoso-tools",\n  "author": {\n    "email": "{email}"\n  }\n}\n'),
+            # Not at the scanned root, so not this plugin's manifest.
+            (
+                "docs/.claude-plugin/plugin.json",
+                '{\n  "name": "contoso-tools",\n  "author": {\n    "email": "{email}"\n  }\n}\n',
+            ),
+            # Another key that holds the same address is not the author.
+            (".claude-plugin/plugin.json", '{\n  "author": {\n    "contact": "{email}"\n  }\n}\n'),
+            # Claude Code refuses a string author, so it declares nothing.
+            (".claude-plugin/plugin.json", '{\n  "name": "contoso-tools",\n  "author": "Jane Doe <{email}>"\n}\n'),
+        ],
+        ids=["malformed-json", "malformed-yaml", "root-without-schema", "nested", "other-key", "claude-string-author"],
+    )
+    def test_plugin_manifest_without_a_declared_author_email_is_flagged(
+        self, tmp_path: Path, manifest: str, content: str
+    ):
+        plugin = tmp_path / "plugin"
+        (plugin / manifest).parent.mkdir(parents=True, exist_ok=True)
+        (plugin / manifest).write_text(content.replace("{email}", _PLUGIN_AUTHOR_EMAIL))
+
+        occurrences = _email_occurrences(SecurityValidator(submitter_usernames=[]).validate_pii_only(plugin))
+
+        assert list(occurrences) == [_PLUGIN_AUTHOR_EMAIL]
+        assert [file for file, _line in occurrences[_PLUGIN_AUTHOR_EMAIL]] == [manifest]
+
+    def test_codex_manifest_string_author_email_is_exempt(self, tmp_path: Path):
+        """Codex tolerates an ``author`` string, so its ``Name <email>`` address is the declared author."""
+        plugin = tmp_path / "plugin"
+        (plugin / ".codex-plugin").mkdir(parents=True)
+        (plugin / ".codex-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "contoso-tools", "author": f"Jane Doe <{_PLUGIN_AUTHOR_EMAIL}>"}, indent=2)
+        )
+
+        assert _email_occurrences(SecurityValidator(submitter_usernames=[]).validate_pii_only(plugin)) == {}
+
+    def test_plugin_tree_scan_exempts_manifest_author_email(self, tmp_path: Path):
+        """The whole-plugin scan (plugin root plus bundled skills) exempts the root manifest's author email."""
+        from skillevaluator.validators.plugin_tree import plugin_tree_scope
+
+        plugin = _write_plugin_manifest(tmp_path / "plugin", "agent_plugin.yaml")
+        skill = plugin / "skills" / "loader"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: loader\ndescription: Loads data files.\n---\n\n# Loader\n\nMail {_PLUGIN_AUTHOR_EMAIL}.\n"
+        )
+
+        with plugin_tree_scope(plugin, [skill]):
+            result = SecurityValidator(submitter_usernames=[]).validate_pii_only(plugin)
+
+        assert sorted(
+            (finding.metadata["matched_value"], finding.file_path, finding.line_number)
+            for finding in result.findings
+            if finding.check_name == "emails"
+        ) == [
+            (_PLUGIN_AUTHOR_EMAIL, "[loader] skills/loader/SKILL.md", 8),
+            (_PLUGIN_SUPPORT_EMAIL, "agent_plugin.yaml", 3),
+        ]
 
     def test_unrelated_home_roots_not_flagged(self, tmp_path: Path):
         """Unrelated /home roots stay unflagged without an organization allowlist."""

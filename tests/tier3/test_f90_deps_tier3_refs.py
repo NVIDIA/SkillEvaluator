@@ -129,6 +129,29 @@ def test_standalone_plugin_repo_ref_to_its_own_skill_is_covered(tmp_path: Path) 
 
 
 @requires_git
+def test_gitlab_subgroup_refs_are_staged_like_git_refs(tmp_path: Path) -> None:
+    """Regression: ``source: gitlab`` refs were never staged, so a same-repository skill went unevaluated."""
+    gitlab_repo = "example-group/tools/agent-catalog"
+    repo = _clone(tmp_path / "repo", origin=f"https://gitlab.example.com/{gitlab_repo}.git")
+    _skill(repo / "skills" / "shared-skill")
+    _skill(repo / "skills" / "other-skill")
+    _skill(repo / "skills" / "git-skill")
+    refs = [
+        f"gitlab::{gitlab_repo}::skills::shared-skill",
+        {"source": "gitlab", "repo": gitlab_repo, "path": "skills/other-skill"},
+        f"git::{gitlab_repo}::skills::git-skill",
+    ]
+
+    package = prepare_plugin_eval_package(_plugin(repo / "plugins" / "demo", skills=refs), stage_root=tmp_path / "s")
+
+    assert sorted(path.name for path in package.include_skills) == ["git-skill", "other-skill", "shared-skill"]
+    assert package.unresolved_skill_refs == ()
+    provenance = package.provenance()
+    assert provenance["dependency_status_counts"]["referenced"] == 3
+    assert provenance["partial"] is False
+
+
+@requires_git
 def test_include_skills_still_supplies_an_external_ref(tmp_path: Path) -> None:
     repo = _clone(tmp_path / "repo")
     plugin = _plugin(repo / "plugins" / "demo", skills=["github::other-org/other-repo::skills::vendor-skill"])

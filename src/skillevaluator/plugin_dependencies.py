@@ -50,14 +50,17 @@ from urllib.parse import urlparse
 
 from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
 from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
+from skillevaluator.models.plugin import PLUGIN_REF_SOURCES
 from skillevaluator.plugin_states import DEPENDENCY_STATES
 from skillevaluator.utils.helpers import resolve_git_root
 from skillevaluator.utils.secure_fs import lstat_walk, stat_is_link_or_reparse
 from skillevaluator.utils.structured_data import require_bounded_string
 
-# Canonical dependency-ref sources. These mirror ``PluginSelector.source`` in
-# :mod:`skillevaluator.models.plugin`.
-REMOTE_REF_SOURCES = frozenset({"github", "git"})
+# Canonical dependency-ref sources: ``PluginSelector.source`` in
+# :mod:`skillevaluator.models.plugin`. The source never selects a host; identity
+# is the ``<owner>/<repo>`` (or GitLab ``<group>/<sub>/<repo>``) slug compared with
+# the ``origin`` remote, so every source resolves a same-repository ref alike.
+REMOTE_REF_SOURCES = frozenset(PLUGIN_REF_SOURCES)
 
 # Repo-root content dirs a canonical ref's <kind> segment may name, per resolution
 # kind. normalize_ref uses the ref's FIRST path segment as <kind>, so real
@@ -851,7 +854,7 @@ _CAUSE_ADVICE = {
         "Write the reference as <source>::<owner>/<repo>::<kind>::<name> (or a {source, repo, path} selector "
         "whose path is <kind>/<name>)."
     ),
-    CAUSE_SOURCE: "Use a supported reference source (github or git).",
+    CAUSE_SOURCE: "Use a supported reference source (github, gitlab, or git).",
     CAUSE_UNSAFE: "Name the component by its path below its content folder, without '..', '.' or backslashes.",
     CAUSE_CONTENT_ROOT: (
         "Point the reference at skills/ or team-skills/ (skills), or rules/ or team-rules/ (rules), or at a "

@@ -3,10 +3,14 @@
 
 """Tests for the bundle-reference plugin manifest model (skillevaluator.models.plugin)."""
 
+from typing import get_args
+
 import pytest
 from pydantic import ValidationError
 
-from skillevaluator.models.plugin import PluginManifest, PluginSelector
+from skillevaluator.models.plugin import PLUGIN_REF_SOURCES, PluginManifest, PluginSelector
+
+GITLAB_SUBGROUP_REPO = "example-group/tools/agent-catalog"
 
 
 def _valid_data(**overrides):
@@ -115,3 +119,44 @@ class TestPluginManifestInvalid:
                 author={"email": "dev@example.com"},
                 mcp=[{"name": "fs", "provider": ""}],
             )
+
+
+class TestPluginRefSources:
+    """``gitlab`` is accepted wherever ``github`` and ``git`` are, in both ref forms."""
+
+    def test_selector_and_canonical_forms_share_one_source_list(self):
+        assert get_args(PluginSelector.model_fields["source"].annotation) == PLUGIN_REF_SOURCES
+        assert set(PLUGIN_REF_SOURCES) == {"github", "gitlab", "git"}
+
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            f"gitlab::{GITLAB_SUBGROUP_REPO}::skills::ticket-triage",
+            "gitlab::example-group/agent-catalog::skills::ticket-triage",
+            {"source": "gitlab", "repo": GITLAB_SUBGROUP_REPO, "path": "skills/ticket-triage"},
+            {"source": "gitlab", "repo": "example-group/agent-catalog", "path": "team-skills/ops/ticket-triage"},
+        ],
+        ids=["canonical-subgroup", "canonical", "selector-subgroup", "selector"],
+    )
+    def test_gitlab_skill_and_rule_refs_are_accepted(self, ref):
+        manifest = PluginManifest(**_valid_data(skills={"refs": [ref]}, rules={"refs": [ref]}))
+
+        for section in (manifest.skills, manifest.rules):
+            [parsed] = section.refs
+            if isinstance(ref, dict):
+                assert isinstance(parsed, PluginSelector)
+                assert (parsed.source, parsed.repo) == ("gitlab", ref["repo"])
+            else:
+                assert parsed == ref
+
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            "bitbucket::example-group/agent-catalog::skills::ticket-triage",
+            {"source": "bitbucket", "repo": "example-group/agent-catalog", "path": "skills/ticket-triage"},
+        ],
+        ids=["canonical", "selector"],
+    )
+    def test_unknown_source_is_still_rejected(self, ref):
+        with pytest.raises(ValidationError, match="gitlab"):
+            PluginManifest(**_valid_data(skills={"refs": [ref]}))

@@ -33,10 +33,10 @@ SKILL_ADVICE = "--include-skills"
 requires_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is unavailable")
 
 
-def _clone(root: Path) -> Path:
+def _clone(root: Path, origin: str = ORIGIN) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", str(root)], check=True)
-    subprocess.run(["git", "-C", str(root), "remote", "add", "origin", ORIGIN], check=True)
+    subprocess.run(["git", "-C", str(root), "remote", "add", "origin", origin], check=True)
     return root
 
 
@@ -89,6 +89,31 @@ def test_same_repository_rule_ref_is_staged_as_at_tier1(tmp_path: Path) -> None:
     package = prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
 
     assert _tier1_rule_states(plugin, manifest) == [(ref, "referenced")]
+    assert package.staged_rules == ("style.md",)
+    assert package.unresolved_rule_refs == ()
+
+
+@requires_git
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "gitlab::example-group/tools/agent-catalog::rules::style.md",
+        {"source": "gitlab", "repo": "example-group/tools/agent-catalog", "path": "rules/style.md"},
+    ],
+    ids=["canonical", "selector"],
+)
+def test_gitlab_subgroup_rule_ref_is_staged_as_at_tier1(tmp_path: Path, ref) -> None:
+    """Regression: a ``source: gitlab`` rule ref was never classified or staged."""
+    repo = _clone(tmp_path / "repo", origin="https://gitlab.example.com/example-group/tools/agent-catalog.git")
+    (repo / "rules").mkdir()
+    (repo / "rules" / "style.md").write_text("# Style\nUse short lines.\n", encoding="utf-8")
+    plugin, manifest = _bundle_plugin(repo / "plugins" / "demo", rules=[ref])
+
+    package = prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
+
+    assert _tier1_rule_states(plugin, manifest) == [
+        ("gitlab::example-group/tools/agent-catalog::rules::style.md", "referenced")
+    ]
     assert package.staged_rules == ("style.md",)
     assert package.unresolved_rule_refs == ()
 

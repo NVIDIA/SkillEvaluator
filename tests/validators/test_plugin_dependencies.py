@@ -16,19 +16,26 @@ from click.testing import CliRunner
 from skillevaluator import plugin_dependencies
 from skillevaluator.cli import cli
 from skillevaluator.constants import CONTENT_TYPE_PLUGIN
+from skillevaluator.models.plugin import PLUGIN_REF_SOURCES
 from skillevaluator.models.result import Severity
 from skillevaluator.plugin_dependencies import (
+    CAUSE_SOURCE,
     DEPENDENCY_STATES,
+    REMOTE_REF_SOURCES,
     RepositoryIdentity,
+    classify_plugin_dependencies,
     classify_ref,
     local_repo_slug,
     resolve_repository_identity,
+    unverified_groups,
 )
 from skillevaluator.tier1.commands import run_validation
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 
 REPO = "example-org/example-repo"
 ORIGIN = "https://github.com/Example-Org/example-repo.git"
+GITLAB_REPO = "example-group/tools/agent-catalog"
+GITLAB_ORIGIN = "https://gitlab.example.com/Example-Group/tools/agent-catalog.git"
 
 requires_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is unavailable")
 
@@ -297,6 +304,11 @@ def test_repository_identity_runs_two_git_commands(tmp_path: Path, monkeypatch: 
         ("https://gitlab-ci-token:example-token@gitlab.example.com:8443/Example-Org/example-repo.git", REPO),
         ("https://user@gitlab.example.com:8443/Example-Org/example-repo.git", REPO),
         ("ssh://git@gitlab.example.com:2222/Example-Org/example-repo.git", REPO),
+        # GitLab subgroup repositories keep every group in the slug, in each remote form.
+        (GITLAB_ORIGIN, GITLAB_REPO),
+        ("git@gitlab.example.com:example-group/tools/agent-catalog.git", GITLAB_REPO),
+        ("ssh://git@gitlab.example.com:2222/example-group/tools/agent-catalog.git", GITLAB_REPO),
+        ("https://gitlab.example.com/example-group/tools/agent-catalog/-/tree/main", GITLAB_REPO),
     ],
 )
 def test_hosted_origins_establish_identity_and_local_paths_do_not(
@@ -324,6 +336,65 @@ def test_https_origin_with_credentials_and_a_port_keeps_the_missing_dependency_g
         "plugin_dependency_missing"
     ]
     assert not result.passed
+
+
+@requires_git
+@pytest.mark.parametrize("source", ["git", "github", "gitlab"])
+def test_every_source_resolves_a_gitlab_subgroup_repository_alike(tmp_path: Path, source: str) -> None:
+    """Regression: ``source: gitlab`` refs were rejected; identity is the origin slug, never the source's host."""
+    repo = _git_repo(tmp_path / "repo", origin=GITLAB_ORIGIN)
+    _skill(repo / "skills" / "shared")
+    (repo / "rules").mkdir()
+    (repo / "rules" / "style.md").write_text("Use short sentences.\n", encoding="utf-8")
+    plugin = _manifest(
+        repo / "plugins" / "p",
+        skills=[
+            f"{source}::{GITLAB_REPO}::skills::shared",
+            {"source": source, "repo": GITLAB_REPO, "path": "plugins/p/skills/bundled"},
+            f"{source}::{GITLAB_REPO}::skills::ghost",
+            f"{source}::example-group/other-catalog::skills::shared",
+        ],
+        rules=[{"source": source, "repo": GITLAB_REPO, "path": "rules/style.md"}],
+    )
+    _skill(plugin / "skills" / "bundled")
+
+    result = PluginSchemaValidator().validate(plugin)
+
+    assert not [f for f in result.findings if f.check_name.startswith("schema")]
+    assert {ref: (row["state"], row["path"]) for ref, row in _rows(result).items()} == {
+        f"{source}::{GITLAB_REPO}::skills::shared": ("referenced", "skills/shared"),
+        f"{source}::{GITLAB_REPO}::plugins::p/skills/bundled": ("provided", "skills/bundled"),
+        f"{source}::{GITLAB_REPO}::skills::ghost": ("missing", None),
+        f"{source}::example-group/other-catalog::skills::shared": ("external", None),
+        f"{source}::{GITLAB_REPO}::rules::style.md": ("referenced", "rules/style.md"),
+    }
+    [missing] = [f for f in result.findings if f.check_name == "plugin_dependency_missing"]
+    assert missing.metadata["ref"] == f"{source}::{GITLAB_REPO}::skills::ghost"
+    assert not result.passed
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        f"bitbucket::{GITLAB_REPO}::skills::shared",
+        {"source": "bitbucket", "repo": GITLAB_REPO, "path": "skills/shared"},
+    ],
+    ids=["canonical", "selector"],
+)
+def test_unknown_source_is_unresolved_and_the_advice_names_every_supported_source(tmp_path: Path, ref) -> None:
+    """The classifier (which Tier 3 runs on raw refs) still refuses a source outside the schema's list."""
+    _skill(tmp_path / "skills" / "shared")
+    identity = RepositoryIdentity(clone_root=tmp_path, local_slug=GITLAB_REPO)
+
+    resolution = classify_plugin_dependencies({"skills": {"refs": [ref]}}, tmp_path / "plugins" / "p", identity)
+
+    [row] = resolution.skills
+    assert (row.state, row.path, row.cause) == ("unresolved", None, CAUSE_SOURCE)
+    assert "unsupported reference source 'bitbucket'" in row.reason
+    [(cause, rows, suggestion)] = unverified_groups(resolution)
+    assert (cause, rows) == (CAUSE_SOURCE, [row])
+    assert suggestion == "Use a supported reference source (github, gitlab, or git)."
+    assert set(PLUGIN_REF_SOURCES) == REMOTE_REF_SOURCES
 
 
 @requires_git

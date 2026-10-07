@@ -45,6 +45,13 @@ class PluginAuthor(BaseModel):
         return v
 
 
+# Source-control systems a dependency ref may name. Only the repository slug is
+# compared with the local ``origin`` remote, so the host is never inferred from
+# the source: ``gitlab`` refs may name subgroup repositories (``group/sub/repo``).
+PluginRefSource = Literal["github", "gitlab", "git"]
+PLUGIN_REF_SOURCES: tuple[str, ...] = get_args(PluginRefSource)
+
+
 class PluginSelector(BaseModel):
     """A source-control selector pointing at a referenced resource.
 
@@ -54,14 +61,14 @@ class PluginSelector(BaseModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    source: Literal["github", "git"] = Field(..., description="Source control system (github or git)")
+    source: PluginRefSource = Field(..., description="Source control system (github, gitlab, or git)")
     repo: str = Field(..., min_length=1, description="Repository identifier (must contain '/')")
     path: str = Field(..., min_length=1, description="In-repo path to the referenced resource")
 
     @field_validator("repo")
     @classmethod
     def repo_must_be_full_logical_name(cls, v: str) -> str:
-        """Require ``repo`` to be a full repository name (e.g. 'owner/repository')."""
+        """Require ``repo`` to be a full repository name (e.g. 'owner/repository' or 'group/sub/repository')."""
         if "/" not in v:
             raise ValueError(
                 "repo must be a full repository name containing '/' (e.g. 'owner/repository'), not a shorthand name"
@@ -87,10 +94,10 @@ class PluginSelector(BaseModel):
 PluginRef = Union[str, PluginSelector]
 
 
-# Allowed source systems, derived from PluginSelector's own ``source`` Literal so
-# the canonical-ID string form and the selector-dict form share a single source
-# of truth and cannot drift apart.
-_ALLOWED_SELECTOR_SOURCES: tuple[str, ...] = get_args(PluginSelector.model_fields["source"].annotation)
+# Allowed source systems: the same Literal as PluginSelector's ``source``, so the
+# canonical-ID string form and the selector-dict form share a single source of
+# truth and cannot drift apart.
+_ALLOWED_SELECTOR_SOURCES: tuple[str, ...] = PLUGIN_REF_SOURCES
 
 
 def _validate_canonical_ref(entry: str) -> None:

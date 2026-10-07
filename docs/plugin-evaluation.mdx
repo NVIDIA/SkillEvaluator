@@ -692,17 +692,20 @@ repository. It never names a local path or a registry:
   `path: skills/release-notes`. The first `path` segment is the kind; the rest
   is the name.
 
-`source` must be `github` or `git`, `repo` must contain `/`, and a selector
-`path` must contain `/`. Refs are normalized before comparison: the source,
-repository, and kind are lowercased, and a trailing `.git` is removed.
+`source` must be `github`, `gitlab`, or `git`, `repo` must contain `/`, and a
+selector `path` must contain `/`. A `gitlab` repository may sit in a subgroup,
+for example `gitlab::example-group/tools/agent-catalog::skills::ticket-triage`.
+Refs are normalized before comparison: the source, repository, and kind are
+lowercased, and a trailing `.git` is removed.
 
 SkillEvaluator never fetches a reference. A reference is resolved only when it
-points into the **same repository** as the plugin: its `<owner>/<repo>` must
-match the `origin` remote of the repository root. A ref that resolves outside
-the plugin root must use a recognized content root: `skills` or `team-skills`
-for skills, and `rules` or `team-rules` for rules. Refs to other repositories
-are classified as `external` and are not resolved. Tier 3 can still cover a
-remote skill ref with a local skill of the same name; see
+points into the **same repository** as the plugin: its repository must match
+the path of the `origin` remote of the repository root. Only that path is
+compared, so the `source` does not have to name the remote's host. A ref that
+resolves outside the plugin root must use a recognized content root: `skills`
+or `team-skills` for skills, and `rules` or `team-rules` for rules. Refs to
+other repositories are classified as `external` and are not resolved. Tier 3
+can still cover a remote skill ref with a local skill of the same name; see
 [What gets staged](#what-gets-staged).
 
 The [component inventory](#component-inventory) shows each ref's state: a

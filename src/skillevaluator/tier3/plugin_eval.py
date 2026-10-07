@@ -10,7 +10,7 @@ normal Harbor-backed live evaluation path.
 Public offline scope
 --------------------
 A plugin is a *bundle-reference* artifact: ``skills.refs`` / ``rules.refs`` are
-canonical remote references (``source: github|git``) and ``mcp`` entries may be
+canonical remote references (``source: github|gitlab|git``) and ``mcp`` entries may be
 provider-scoped. SkillEvaluator does **not** fetch remote
 references -- that deferred "bundle-reference resolution" is a later phase.
 
@@ -1516,7 +1516,7 @@ class _IntraRepoResolver:
     skill or ``rules``/``team-rules`` for a rule) only when:
 
     * detection is active (there is an enclosing repo above the plugin), AND
-    * the ref names a public remote source (github/git), AND
+    * the ref names a public remote source (github/gitlab/git), AND
     * ``ref_kind`` is a recognized content root for the resolution kind, AND
     * the ref ``<repo>`` matches the local clone's git-origin slug, AND
     * every lexical component below the clone root is opened without following

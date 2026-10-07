@@ -514,7 +514,8 @@ skillevaluator tier3 evaluate-plugin ./my-plugin \
 Tier 3 builds a temporary skill-shaped wrapper and reuses the Harbor evaluation
 engine. It evaluates locally available components only:
 
-- bundled skills under `skills/` and same-repository `github` or `git` refs;
+- bundled skills under `skills/` and same-repository `github`, `gitlab`, or
+  `git` refs;
 - contained rule files; and
 - contained command or secure URL MCP servers, staged only in the plugin arm.
   Contained plugins may declare them in any `mcpServers` form (an inline map, a

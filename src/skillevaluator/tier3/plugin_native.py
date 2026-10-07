@@ -51,6 +51,7 @@ from skillevaluator.plugin_components import (
     COMPONENT_TYPES,
     PluginInventory,
     PluginRootReader,
+    coverage_row_names,
     normalize_declared_path,
     parse_markdown,
     summarize_coverage,
@@ -2789,7 +2790,8 @@ def native_load_unverified(summary: Mapping[str, Any]) -> str | None:
 
 
 def _coverage_names(row: Mapping[str, Any]) -> set[str]:
-    names = {str(row.get("name") or "")}
+    """The census names that can mean a coverage row: its name, staged member name, and path forms."""
+    names = set(coverage_row_names(row))
     path = row.get("path")
     if isinstance(path, str) and path:
         names.update({path, PurePosixPath(path).name, PurePosixPath(path).stem, path.removeprefix("rules/")})
@@ -2818,6 +2820,8 @@ def apply_load_census(
 
     Only component types ``plugin_load`` reports as ``native`` for that agent
     count; anything else in a census was not staged natively and is ignored.
+    A census entry matches a row by the row's name, the member name a resolved
+    skill or rule ref was staged under (its ``member``), or its path.
     Harness evidence (``loaded``) promotes a row to ``loaded``. A listing alone
     (``listed``) promotes a row to ``staged`` at most. When the harness
     reported that a staged component did not load (``not_loaded``), the row

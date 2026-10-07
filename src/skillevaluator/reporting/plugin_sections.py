@@ -37,7 +37,13 @@ from typing import Any, NamedTuple
 # The plugin state vocabularies are a module that imports nothing. Every reporter, and so
 # every CLI command, imports this module, so the Tier 3 signal, runtime-evidence, and
 # statistics helpers are imported only inside the Tier 3 views that use them.
-from skillevaluator.plugin_states import COVERAGE_STATES, DEPENDENCY_STATES, EVALUATED_COVERAGE_STATES, NOT_LOADED_STATE
+from skillevaluator.plugin_states import (
+    COVERAGE_MEMBER_KEY,
+    COVERAGE_STATES,
+    DEPENDENCY_STATES,
+    EVALUATED_COVERAGE_STATES,
+    NOT_LOADED_STATE,
+)
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 MAX_TABLE_ROWS = 200
@@ -1471,10 +1477,15 @@ def _activation_type_aliases() -> dict[str, tuple[str, str]]:
 
 
 def _activation_keys(row: Mapping[str, Any]) -> set[str]:
-    """Activation labels (``skill:x``, ``subagent:x`` ...) that name a coverage row's component."""
-    name = text(row.get("name"))
+    """Activation labels (``skill:x``, ``subagent:x`` ...) that name a coverage row's component.
+
+    A ref-declared row is activated under the member name it was staged as (``COVERAGE_MEMBER_KEY``).
+    """
+    names = {text(row.get("name"))}
+    if member := text(row.get(COVERAGE_MEMBER_KEY)):
+        names.add(member)
     kind = text(row.get("type"), limit=_KEYWORD_CHARS)
-    return {f"{alias}:{name}" for alias in _activation_type_aliases().get(kind, (kind,))}
+    return {f"{alias}:{name}" for alias in _activation_type_aliases().get(kind, (kind,)) for name in names}
 
 
 def _unstaged_activation_labels(value: object) -> set[str]:
@@ -1560,6 +1571,7 @@ def coverage_view(
         row = {
             "type": text(component.get("type"), limit=_KEYWORD_CHARS) or "unknown",
             "name": text(component.get("name")),
+            COVERAGE_MEMBER_KEY: text(component.get(COVERAGE_MEMBER_KEY)),
             "origin": text(component.get("origin"), limit=_LABEL_CHARS),
             "path": text(component.get("path")),
             "state": state,

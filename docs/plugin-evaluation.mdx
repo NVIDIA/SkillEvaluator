@@ -3364,6 +3364,19 @@ agents in `native_agents`:
 | `invalid` | The declaration is missing, escapes the root, is unsafe, or is malformed |
 | `exercised` | Runtime evidence from the with-plugin arm shows the component ran. Set after the run; see below |
 
+A skill or rule that a bundle manifest declares by reference (`skills.refs` or
+`rules.refs`) has a row named by its canonical ref, such as
+`gitlab::example-group/agent-catalog::skills::release-notes`, and no `path`.
+When the ref resolved to a local member, the row also has a `member` field: the
+name staging gave that member, which is the ref's last path segment
+(`release-notes`, or `style.md` for a rule file). That holds whether the ref
+named a skill inside the plugin, elsewhere in the same repository, or an
+external skill supplied with `--include-skills`. The load census and the
+activation labels (`skill:release-notes`) name the component by its member
+name, so they match the row through `member` as well as `name`. When two staged
+members share a name, the evidence cannot tell them apart, so no `member` is
+recorded for that ref.
+
 A component that only an additional manifest declares is `not_staged`, or
 `unsupported` for an unsupported type, and its reason names that manifest.
 `counts` totals the rows per state. `not_evaluated` counts every row whose state
@@ -3403,7 +3416,8 @@ never downgraded, and an `invalid` row never changes. The reason gains a
   also have been available to the agent: `staged` or `loaded`, or natively
   loaded according to `plugin_load`.
 - **Skills and MCP servers.** A staged or loaded member skill or runnable MCP
-  server was exercised.
+  server was exercised. A skill declared by reference counts when its `member`
+  name was exercised.
 
 Staging is not evaluation, so reports headline that count as
 **N components not staged**, never as "not evaluated". When the harness

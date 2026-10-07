@@ -57,6 +57,7 @@ import re
 import shutil
 import stat
 import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path, PurePosixPath
@@ -165,7 +166,7 @@ from skillevaluator.utils.structured_data import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from skillevaluator.plugin_formats import FormatProfile
     from skillevaluator.plugin_manifest import PluginManifestLocation
@@ -1162,6 +1163,7 @@ def _inventory_provenance(
                     component,
                     plugin_root=plugin_root,
                     member_skills=member_resolved,
+                    member_names=_unique_names(path.name for path in member_skills),
                     claude_skill_dirs=set(claude_skill_dirs),
                     claude_native_agents=claude_native_agents,
                     unresolved_refs=unresolved_skill_refs,
@@ -1173,6 +1175,7 @@ def _inventory_provenance(
                 _rule_row(
                     component,
                     staged_rule_names=set(staged_rule_names),
+                    unique_rule_names=_unique_names(staged_rule_names),
                     unresolved_refs=unresolved_rule_refs,
                     skipped=skipped,
                     arm_staging=arm_staging,
@@ -1203,17 +1206,44 @@ def _cross_client_row(component: Component) -> dict[str, Any]:
     return coverage_row(component, state, f"{source}; Tier 3 stages the selected manifest's components")
 
 
+def _unique_names(names: Iterable[str]) -> frozenset[str]:
+    """The names exactly one staged member has."""
+    counts = Counter(names)
+    return frozenset(name for name, count in counts.items() if count == 1)
+
+
+def _ref_member(component: Component, staged_names: frozenset[str]) -> str | None:
+    """The member name a resolved skill or rule ref was staged under, or ``None``.
+
+    Staging names the member after the ref's trailing name, whichever way the
+    ref resolved: the bundled skill directory, the same-repository snapshot, or
+    the same-named ``--include-skills`` directory for an external ref
+    (``gitlab::<group>/<repo>::skills::release-notes`` is staged as
+    ``release-notes``), and a rule after its file name. The load census and the
+    activation labels name it that way, so the row records it. A name no staged
+    member has is not recorded, and neither is one two staged members share:
+    evidence for that name cannot say which of them it was (the task
+    environment stages only the first skill directory with a given name).
+    """
+    member = _ref_name(component.name)
+    return member if member and member in staged_names else None
+
+
 def _skill_row(
     component: Component,
     *,
     plugin_root: Path,
     member_skills: set[Path],
+    member_names: frozenset[str],
     claude_skill_dirs: set[str],
     claude_native_agents: tuple[str, ...],
     unresolved_refs: tuple[str, ...],
     skipped: bool,
 ) -> dict[str, Any]:
-    """Coverage row of one skill: a staged member skill, a native Claude Code skill directory, or neither."""
+    """Coverage row of one skill: a staged member skill, a native Claude Code skill directory, or neither.
+
+    *member_names* are the directory names exactly one staged member skill has.
+    """
     if component.path == ".":
         return coverage_row(
             component,
@@ -1225,7 +1255,12 @@ def _skill_row(
             return coverage_row(component, "unavailable", "remote skill reference is not resolvable offline")
         if skipped:
             return coverage_row(component, "not_staged", _SKIPPED_PACKAGE_NOTE)
-        return coverage_row(component, "staged", "skill reference resolved to a local member skill")
+        return coverage_row(
+            component,
+            "staged",
+            "skill reference resolved to a local member skill",
+            member=_ref_member(component, member_names),
+        )
     if (plugin_root / component.path).resolve() in member_skills:
         return coverage_row(component, "staged", "bundled skill staged as a plugin member skill")
     if skipped:
@@ -1250,11 +1285,15 @@ def _rule_row(
     component: Component,
     *,
     staged_rule_names: set[str],
+    unique_rule_names: frozenset[str],
     unresolved_refs: tuple[str, ...],
     skipped: bool,
     arm_staging: _ArmStaging | None,
 ) -> dict[str, Any]:
-    """Coverage row of one rule: staged (natively or in the wrapper), unavailable, or not staged."""
+    """Coverage row of one rule: staged (natively or in the wrapper), unavailable, or not staged.
+
+    *unique_rule_names* are the names exactly one staged rule has.
+    """
     native_agents = arm_staging.native_for("rule") if arm_staging is not None else []
     if component.path is None:
         if component.name in unresolved_refs:
@@ -1262,7 +1301,8 @@ def _rule_row(
         if skipped:
             return coverage_row(component, "not_staged", _SKIPPED_PACKAGE_NOTE)
         reason = f"rule reference resolved and {_rule_reason(arm_staging, 'embedded in the wrapper')}"
-        return _natively_staged(coverage_row(component, "staged", reason), native_agents)
+        row = coverage_row(component, "staged", reason, member=_ref_member(component, unique_rule_names))
+        return _natively_staged(row, native_agents)
     if {component.name, PurePosixPath(component.path).name, component.path.removeprefix("rules/")} & staged_rule_names:
         return _natively_staged(coverage_row(component, "staged", _rule_reason(arm_staging)), native_agents)
     return coverage_row(

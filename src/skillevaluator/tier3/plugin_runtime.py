@@ -26,7 +26,9 @@ component ran, and upgrades ``mcp_proof`` from in-agent MCP calls:
   ``subagent:<name>`` or ``command:<name>`` and not every activation failed.
   Name matching is heuristic.
 * **skills and MCP servers**: a staged or loaded member skill or runnable MCP
-  server that ``activation_coverage`` exercised.
+  server that ``activation_coverage`` exercised. A skill declared by reference
+  is activated as the member it was staged as (``skill:release-notes`` for
+  ``gitlab::<group>/<repo>::skills::release-notes``), which its row records.
 
 Subagents, commands, skills, and MCP servers are promoted only when the
 component was actually available to the agent: its row is ``staged``,
@@ -45,7 +47,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from skillevaluator.plugin_components import summarize_coverage
+from skillevaluator.plugin_components import coverage_row_names, summarize_coverage
 from skillevaluator.plugin_states import EVALUATED_COVERAGE_STATES, NOT_LOADED_STATE
 from skillevaluator.tier3.mcp_proof import apply_in_agent_mcp_proof
 from skillevaluator.tier3.plugin_native import native_types_by_agent
@@ -131,6 +133,8 @@ def _exercise_evidence(
     state = str(row.get("state") or "")
     if not name or state == "invalid":
         return None
+    # A ref-declared row is activated under the member name it was staged as.
+    names = coverage_row_names(row)
     for agent, summary in summaries:
         agent_native_types = native_types.get(agent, set())
         if kind == "hook":
@@ -150,10 +154,10 @@ def _exercise_evidence(
         coverage = summary.get("activation_coverage")
         if not isinstance(coverage, Mapping):
             continue
-        label = f"{prefix}:{name}"
         exercised = coverage.get("exercised") or ()
         unavailable = coverage.get("unavailable") or ()
-        if label in exercised and label not in unavailable:
+        labels = [f"{prefix}:{candidate}" for candidate in names]
+        if any(label in exercised and label not in unavailable for label in labels):
             return f"activated in the {agent} with-plugin arm"
     return None
 

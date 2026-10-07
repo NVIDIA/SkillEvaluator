@@ -35,7 +35,7 @@ import os
 import re
 import stat
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, NamedTuple
@@ -111,7 +111,7 @@ from skillevaluator.plugin_paths import (
     _unscanned_path_finding,
     normalize_declared_path,
 )
-from skillevaluator.plugin_states import COVERAGE_STATES, EVALUATED_COVERAGE_STATES
+from skillevaluator.plugin_states import COVERAGE_MEMBER_KEY, COVERAGE_STATES, EVALUATED_COVERAGE_STATES
 from skillevaluator.utils.secure_fs import (
     MAX_SECURE_DIRECTORY_DEPTH,
     SecurePathError,
@@ -3407,8 +3407,11 @@ def refresh_component_finding_counts(results: Iterable[Any]) -> None:
 # --------------------------------------------------------------------------- #
 # Tier 3 coverage                                                             #
 # --------------------------------------------------------------------------- #
-def coverage_row(component: Component, state: CoverageState, reason: str) -> dict[str, Any]:
-    return {
+def coverage_row(
+    component: Component, state: CoverageState, reason: str, *, member: str | None = None
+) -> dict[str, Any]:
+    """One coverage row; *member* is the staged member name of a resolved skill or rule ref."""
+    row: dict[str, Any] = {
         "type": component.type,
         "name": component.name,
         "origin": component.origin,
@@ -3416,6 +3419,22 @@ def coverage_row(component: Component, state: CoverageState, reason: str) -> dic
         "state": state,
         "reason": reason,
     }
+    if member:
+        row[COVERAGE_MEMBER_KEY] = member
+    return row
+
+
+def coverage_row_names(row: Mapping[str, Any]) -> list[str]:
+    """The names runtime evidence can give a coverage row's component: its ``name``, then its staged member name.
+
+    A ref-declared row is named by its ref, but the load census and the
+    activation labels name the member it was staged as (``COVERAGE_MEMBER_KEY``).
+    """
+    names: list[str] = []
+    for value in (row.get("name"), row.get(COVERAGE_MEMBER_KEY)):
+        if isinstance(value, str) and value and value not in names:
+            names.append(value)
+    return names
 
 
 def summarize_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:

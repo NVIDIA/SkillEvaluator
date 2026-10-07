@@ -26,3 +26,8 @@ EVALUATED_COVERAGE_STATES: frozenset[str] = frozenset(COVERAGE_STATE_RANK)
 # did not load. It is not evaluated, but it was staged, so reports count it apart
 # from the components that were never staged.
 NOT_LOADED_STATE = "not_loaded"
+# A skill or rule declared by reference is a coverage row named by its ref
+# (``gitlab::<group>/<repo>::skills::release-notes``). When the ref resolved to a
+# local member, the row also records under this key the name staging gave that
+# member (``release-notes``), the name the load census and activation labels use.
+COVERAGE_MEMBER_KEY = "member"

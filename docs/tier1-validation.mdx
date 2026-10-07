@@ -172,6 +172,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     Validates `SKILL.md` frontmatter and repository placement:
 
     - YAML frontmatter must parse and satisfy the skill schema.
+    - Frontmatter keys, including keys nested under `metadata`, must be strings. An unquoted key that YAML reads as a number, boolean, null, or date (`123`, `yes`, `null`, `2026-01-01`) is a HIGH finding that names the key in YAML form, such as `Field 'metadata.true': Keys should be strings`; quote the key (`"yes":`) to keep it. Rules, workflows, and plugin manifests report non-string keys as schema errors too.
     - `name` and `description` are required. Names are 1–64 characters; descriptions are 1–1024 characters.
     - Names use kebab-case, start with a letter, and cannot have trailing or consecutive hyphens. The directory name must match the frontmatter `name`. The reserved words `anthropic` and `claude` must not appear in a skill name.
     - `alwaysApply` and `globs` are forbidden skill fields. Optional fields include `license`, `compatibility`, `metadata`, and `allowed-tools`.
@@ -336,8 +337,7 @@ Bundled Python scanners resolve next to the SkillEvaluator interpreter before `P
 | --- | --- |
 | `0` | Success — every gate passed |
 | `1` | Validation failed — a check failed or required scanner evidence is incomplete |
-| `2` | Configuration error — invalid flags, arguments, or target path |
-| `3` | Runtime error — an unexpected internal failure |
+| `2` | Usage error — an unknown flag, a value outside an option's type or choices, or a target path that does not exist |
 
 Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it runs unless `--no-block-on-dedup` is set. Tier 3 is advisory unless `--block-on-agent-eval` is set. The `quality` check passes when the composite score reaches `--min-score` (default `70`). Reports record the effective gate membership for every tier so saved evidence and process status agree.
 

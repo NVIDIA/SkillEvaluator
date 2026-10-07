@@ -27,8 +27,9 @@ No model override is needed. Defaults are pinned in the installed release,
 not automatically selected as the latest available model. Set
 `SKILL_EVAL_LLM_MODEL` only when you want a different evaluator model; the
 standard judge inherits it unless a judge override is set. Embeddings use their
-own model, and Tier 3 agent selection is separate. NVIDIA Build's Codex and
-Claude Code agents use a Super default even when the evaluator uses Nano.
+own model, and Tier 3 agent selection is separate. With NVIDIA Build, OpenCode
+follows `SKILL_EVAL_LLM_MODEL`, while Codex and Claude Code keep the Super
+default unless you override their models.
 
 Anthropic and Bedrock need a separate embedding provider for Tier 2; custom
 OpenAI-compatible endpoints require an explicit URL and key, with optional model overrides.
@@ -233,7 +234,7 @@ Live evaluation has two credential roles. They can share a key when the selected
 | Evaluator key | SkillEvaluator itself — dataset generation and verifier-side judging | The provider setup above (`SKILL_EVAL_LLM_PROVIDER` + its key) |
 | Agent credential | The live agent under test (Codex, Claude Code, ...) inside its task environment | Your host environment only — export the agent's native variables (for example `OPENAI_API_KEY` and `OPENAI_BASE_URL` for Codex) before the run |
 
-Both roles resolve from the operator's environment; a skill's `evals/config.yml` can never supply, rename, or redirect a credential. What each agent needs depends on the provider and `--env-mode`:
+Both roles resolve from the operator's environment; a skill's `evals/config.yml` can never supply, rename, or redirect a credential. Export them in the shell or CI job that runs SkillEvaluator: Harbor starts in an empty, evaluator-owned working directory with `.env` loading disabled, so a `.env` or `.env.local` file near your project is not read. What each agent needs depends on the provider and `--env-mode`:
 
 - **NVIDIA Build, one key** (`--env-mode docker` or `local`): a single `NVIDIA_API_KEY` powers the evaluator and all three supported agents — `opencode` calls NVIDIA Build directly, while `claude-code` and `codex` route through SkillEvaluator's compatibility bridge (in-container in Docker mode; an authenticated in-process host bridge in `local` mode). Agent models must be full NVIDIA Build catalog IDs in `publisher/model` form.
 - **NVIDIA Build on Harbor cloud modes** (`daytona`, `e2b`, ...): the bridge is not available. `claude-code` needs its own native `ANTHROPIC_API_KEY`, `codex` needs a full OpenAI Responses API credential (`OPENAI_API_KEY` plus `OPENAI_BASE_URL`), and each needs an explicit model via `--agent-model` or `harbor.agents.<agent>.model`.
@@ -302,8 +303,9 @@ KEY=VALUE` flags on `tier3 evaluate`, `doctor`, and `health-check`.
 Skill-owned `evals/config.yml` cannot set them. `docker` and `local` reject any
 environment kwargs. Harbor runtime-policy fields for resource overrides,
 mounts, networks, extra Compose definitions, SkillEvaluator's own lifecycle
-fields (`delete`, `force_build`, `keep_containers`), and Kubernetes pod security
-are reserved. Other backend-specific timeout and retention knobs remain
+fields (`delete`, `force_build`, `keep_containers`), Harbor's `stream` and
+`enable_environment_dir_upload` controls, and Kubernetes pod security are
+reserved. Other backend-specific timeout and retention knobs remain
 operator-owned. Never pass secrets there; credentials remain host environment
 variables.
 

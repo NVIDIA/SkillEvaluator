@@ -76,6 +76,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Brought the published documentation in line with 0.5.0. It now covers how
+  standard grading builds judge evidence and rebuilds trajectories from
+  OpenCode and Codex logs, structured judge output and retries, the evidence
+  budget and judge time-budget variables, and the Harbor process environment.
+  The CLI reference adds `validate --workers`, the full `--env-mode` list, and
+  the exit codes the CLI actually returns (`0`, `1`, `2`).
 - Tier 3 no longer treats flag values of credential-named variables (for example `XDG_SESSION_ID=1` or `FOO_AUTH_ENABLED=true`) as secrets, so progress counts are not redacted and the Docker sidecar no longer refuses values such as `127.0.0.1` or `python:3.13-slim`.
 
 ### Changed

@@ -94,7 +94,9 @@ using Harbor 0.24:
   with `.env` loading and Harbor telemetry disabled. Harbor ignores `.env.local`
   and `.env` files around your project, so it sees only SkillEvaluator's
   allowlisted environment. Relative host paths such as `KUBECONFIG` keep their
-  meaning.
+  meaning. Disabling `.env` loading needs python-dotenv 1.2.0 or newer, which
+  the `tier3` extra requires; with an older release, `doctor` and
+  `tier3 evaluate` fail the prerequisite check until you reinstall the extra.
 - Codex runs with `reasoning_effort=high`, the effort Harbor 0.22 used by
   default, so results stay comparable across Harbor upgrades.
 - Installed Codex adapters merge existing user and MCP configuration before the
@@ -126,18 +128,22 @@ using Harbor 0.24:
   single-step `step_results: null`, authoritative multi-step results, and
   multimodal tool output, which judges and reports see as text with
   `[image]`/`[audio]` markers.
-- Native tasks follow Harbor 0.24's separate-verifier precedence: a verifier
-  image, or a `Dockerfile` or `docker-compose.yaml` in the step or task `tests/`
-  directory, defines a dedicated verifier that must ship its own test script.
-  Otherwise the verifier is built from `environment/` and receives the uploaded
-  tests. SkillEvaluator validates that Compose model against the verifier's
-  environment allowlist, and rejects `docker-compose.yml` verifier definitions,
-  which Harbor ignores.
+- Native tasks follow Harbor 0.24's separate-verifier precedence. For a verify
+  pass that runs in a separate verifier container, a `docker_image` in the step
+  or task `[verifier.environment]`, or a `Dockerfile` or `docker-compose.yaml`
+  in the step or task `tests/` directory, defines a dedicated verifier that
+  must ship its own test script and never receives SkillEvaluator's grader.
+  Otherwise the separate verifier is built from `environment/` and receives the
+  uploaded tests. SkillEvaluator validates the verifier's Compose model against
+  its environment allowlist, and rejects `docker-compose.yml` verifier
+  definitions, which Harbor ignores. Standard grading modes reject separate
+  verifiers entirely; see [Custom Graders & Tasks](custom-graders.mdx).
 - Harbor 0.24 rejects a `reward.json` whose top-level values are not all
-  numbers. SkillEvaluator's verifier and wrapped custom graders already write
-  numeric rewards; a native task's own test script must do the same. When
-  Harbor records such a failure on a step, the failed job names that step's
-  exception instead of reporting only a trial count.
+  finite numbers. SkillEvaluator's verifier and wrapped custom graders already
+  write numeric rewards; a native task's own test script must do the same. When
+  Harbor's job statistics do not account for every trial, the failure names the
+  first trial or step exception Harbor recorded, such as
+  `VerifierOutputParseError`, instead of reporting only a trial count.
 - Harbor 0.24's `stream` and `enable_environment_dir_upload` environment
   options are reserved for the runtime policy and cannot be set with `--ek`.
 
@@ -345,7 +351,8 @@ so it can consume substantial tokens and exercise task actions; grading is the
 only part disabled. It is off by default. Harbor then starts the selected
 environment and runs the agent in both arms; with standard grading, each transcript is
 judged against the case's expected output and assertions using the configured
-evaluator provider. Finally, SkillEvaluator collects the artifacts and
+evaluator provider (see
+[How standard grading judges a trial](#how-standard-grading-judges-a-trial)). Finally, SkillEvaluator collects the artifacts and
 computes the dimension scores, pass rates, and Skill Lift. Harbor task and job
 directories are transient: they are deleted after collection whether the run
 succeeds or fails, unless you pass `--harbor-keep-jobs`.
@@ -597,7 +604,7 @@ dataset iteration, `--skip-baseline` removes the without-skill arm and usually
 cuts the live trial count roughly in half, but that run cannot produce Skill
 Lift. Re-enable the baseline for any result you intend to compare or publish.
 For multi-attempt runs, `--stop-on-pass` can avoid remaining attempts after a
-pass; it is not applicable with `--n-attempts 1`. By contrast,
+pass; it is rejected with `--n-attempts 1`. By contrast,
 `--n-concurrent` and `--max-agents` control parallelism and elapsed time; they
 do not reduce the total planned trials or model work.
 
@@ -652,7 +659,7 @@ The high-signal flags, with defaults:
 | `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](custom-graders.mdx) |
 | `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory |
 | `--harbor-keep-jobs` | off | Retain Harbor job directories for inspection |
-| `--timeout-multiplier` | `1.0` | Scale Harbor step timeouts |
+| `--timeout-multiplier` | `1.0` | Scale Harbor's agent, verifier, and environment-build timeouts; must be a finite number greater than 0 whose scaled timeouts stay finite |
 | `--copy-repo` | off | Copy the surrounding repository into the task environment |
 | `--include-skills` | none | Stage additional skill directories; requires `--skill-workspace-mode group` |
 
@@ -663,6 +670,109 @@ modes, is in the [CLI Reference](cli-reference.mdx).
 While iterating on a dataset, `--skip-baseline` roughly halves the runtime.
 Re-enable the baseline arm for any run whose Skill Lift you intend to trust.
 </Tip>
+
+## How standard grading judges a trial
+
+With `default` or `default_plus_custom` grading, SkillEvaluator's verifier
+grades each trial after the agent finishes. `security`, `skill_execution`, and
+`skill_efficiency` are deterministic trajectory checks. `accuracy`,
+`goal_accuracy`, and `behavior_check` are LLM judges that call the configured
+evaluator provider. `custom_only` runs none of them.
+
+### The graded trajectory
+
+The verifier grades Harbor's ATIF `trajectory.json`. When that file is missing
+or has no steps, it rebuilds a trajectory from the agent's own log in the
+trial's agent log directory, trying `claude-code.txt`, `cursor-cli.txt`,
+`cline.txt`, `opencode.txt`, and `codex.txt` in that order:
+
+- `opencode.txt` is OpenCode's JSON event stream. Text events become agent
+  messages, and completed tool events become tool calls whose output keeps the
+  tool's status, exit code, and error text.
+- `codex.txt` is the Codex JSON event log. Shell commands, file changes, MCP
+  tool calls, `web_search` actions (with the full search, open-page, or
+  find-in-page payload), and `collab_tool_call` items become tool calls. Failed
+  commands keep their `status=failed` and `exit_code=` evidence, so
+  error-recovery checks still see them.
+
+Each trial's reward records the artifact it graded in `trajectory_source`. If
+neither `trajectory.json` nor a supported log yields any steps, the reward
+records `No trajectory or reconstructible agent log`. Custom graders read
+`trajectory.json` directly and do not get this rebuild.
+
+### Evidence budgets
+
+Each LLM judge sees a bounded evidence bundle drawn from the trajectory rather
+than the full transcript. Sections are added in priority order until the
+judge's character budget runs out, so lower-priority sections are dropped or
+clipped first:
+
+| Judge | Evidence, highest priority first | Budget variable |
+| --- | --- | --- |
+| `accuracy` | Final response, produced files and writes, the six most recent tool results | `SKILL_EVAL_ACCURACY_BUDGET` |
+| `goal_accuracy` | Final response, end-state file changes, the twelve most recent tool results | `SKILL_EVAL_GOAL_ACCURACY_BUDGET` |
+| `behavior_check` | File changes, final response (capped by `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`), the user request, and a compact tool history | `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` |
+
+When the case's expected output or assertions contain a backtick-quoted
+snippet of four or more characters, or an output path under
+`/workspace/output`, `/output`, or `/logs/agent`, every bundle starts with a
+short deterministic fact list marking each one observed or not observed in the
+agent's tool calls.
+
+A judge can score only what its bundle contains. Evidence that was dropped or
+clipped cannot count, so on a long trajectory a behavior that appears only in
+truncated history can be judged as not observed. In the results tree, each
+judge's details in a trial's `reward.json` include an `omitted` record
+(`count`, `truncated`, and `reason`); when `truncated` is `true` on cases that
+matter, raise that judge's budget. Larger budgets send longer judge prompts and
+use more evaluator tokens. The behavior budget never falls below the
+final-response limit plus 4,000 characters, so raising the limit leaves room
+for the tool history. Set these variables in the host environment;
+SkillEvaluator forwards them to the verifier. Defaults and accepted values are
+in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
+
+### Judge requests and retries
+
+- **Structured output.** Each judge requests a fixed JSON schema. OpenAI and
+  OpenAI-compatible chat-completions endpoints, including NVIDIA Build, receive
+  a strict JSON Schema `response_format`; Anthropic `/v1/messages` receives
+  `output_config`. Bedrock judges use prompt-only JSON.
+- **Automatic downgrade.** If an endpoint rejects the schema option itself
+  with HTTP 400 or 422 (for example, `response_format` is unsupported), the
+  judge repeats that request without the schema and logs a warning. It then
+  skips the schema for that provider, endpoint, and model for the remaining
+  judge calls in that verifier run. Other 400 and 422 errors are not
+  downgraded.
+- **Reply validation.** Replies are checked against the expected fields either
+  way. An empty, unparseable, or invalid reply, including an empty reply from a
+  reasoning model that ran out of output tokens, gets one retry with a stricter
+  format reminder. `behavior_check` can also salvage complete per-behavior
+  results from a truncated reply and counts the missing behaviors as not
+  passed.
+- **RAGAS goal scorer.** With the `openai` provider on the canonical
+  `https://api.openai.com/v1` endpoint, `goal_accuracy` first tries the RAGAS
+  `AgentGoalAccuracyWithReference` scorer through its own client, without the
+  schema or retry handling above but within the same time budget. If RAGAS is
+  unavailable or fails, the prompt judge runs instead.
+- **Transient failures.** HTTP 429, 500, 502, 503, and 504 responses,
+  connection errors, timeouts, and Bedrock throttling or service-unavailable
+  errors are retried transparently with jittered exponential backoff. A
+  `Retry-After` header, in seconds or as an HTTP date, sets the wait; a value
+  above the maximum retry delay fails immediately instead of stalling.
+- **Time budget.** Each judge has its own wall-time budget (180 seconds by
+  default) inside the generated task's 600-second verifier timeout, which
+  leaves time to write failure artifacts. Requests are cut off at the
+  deadline, and a retry whose wait would reach it is not attempted. If you
+  raise the per-judge budget, scale the verifier timeout with
+  `--timeout-multiplier` so the three judges still fit.
+
+Retry counts, delays, and the per-judge budget come from the host environment
+and are forwarded to the verifier; see
+[LLM retries and judge time budget](environment-variables.mdx#llm-retries-and-judge-time-budget).
+Retries and downgrades do not change scoring formulas. A judge that still fails
+is an evaluation infrastructure failure, not a `0.0` score, and the affected
+condition publishes no scores; see
+[Tier 3 judge failure semantics](environment-variables.mdx#tier-3-judge-failure-semantics).
 
 ## Reading results
 

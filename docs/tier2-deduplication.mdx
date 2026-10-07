@@ -451,7 +451,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Unsupported extension | Skips the file |
     | Duplicate sections occur in one file | Reports the relevant headings and line ranges |
     | Skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the alias, then scans `AGENTS.md` once |
-    | Skill carries large generated snapshots (`evals`, `.evals`, `results`, `.results`, `versions`, `.versions`) | Excluded directories are pruned during traversal, so their contents never count toward the discovered-path limit — a well-used skill with large evals or results snapshots no longer trips it, as it could in earlier releases |
+    | Skill carries large generated snapshots (`evals`, `.evals`, `results`, `.results`, `versions`, `.versions`) | Excluded directories are pruned during traversal, so their contents never count toward the discovered-path limit |
     | A directory is a Windows junction or other reparse point | Rejected during the walk, like symbolic links |
     | Embedding or chat-LLM analysis is incomplete | Reports an error; does not claim a clean result |
   </Accordion>

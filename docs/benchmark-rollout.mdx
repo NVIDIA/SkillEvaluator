@@ -56,7 +56,8 @@ skillevaluator validate ./skills/example-skill \
   --output-dir ./benchmark-backfill/example-skill
 ```
 
-Tier 3 is publication-required by default. Omitting `--agent-eval` therefore
+Tier 3 runs by default for skills and is publication-required by default.
+Excluding it, with `--no-tier3` or a `--tiers` selection without `3`, therefore
 produces an `INCOMPLETE` card with Tier 3 marked `NOT RUN`, and never a
 publication recommendation. If a catalog intentionally makes Tier 3 optional,
 its orchestration must persist `benchmark_policy.tier3_required = false`; the
@@ -120,7 +121,7 @@ evaluated, or whose evaluator container is named by a mutable tag rather than
 pinned by digest. That includes a card whose Tier 3 row is skipped under an
 `optional by policy` contract. The flag stays opt-in because cards generated
 before the identity contract existed cannot satisfy it; without it the scan
-behaves exactly as it did before.
+skips these identity checks.
 
 Supply the identity when regenerating a card:
 

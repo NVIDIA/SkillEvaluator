@@ -332,3 +332,144 @@ skills:
 
         assert result.passed
         assert any(detail.check_name == "demo" for detail in result.success_details)
+
+
+def _bundle_manifest(dir_path: Path, *, skills=None, rules=None, **fields) -> Path:
+    body: dict = {"name": "ref-bundle", "author": {"email": "dev@example.com"}, **fields}
+    if skills is not None:
+        body["skills"] = {"refs": skills}
+    if rules is not None:
+        body["rules"] = {"refs": rules}
+    return _write_manifest(dir_path, json.dumps(body))
+
+
+def _schema_checks(result) -> list[str]:
+    return [f.check_name for f in result.findings if f.check_name.startswith("schema")]
+
+
+class TestBundleRefSchemaFindings:
+    """Regression: a bad selector also failed the ``str`` member of the ref union, giving two HIGH findings."""
+
+    @pytest.mark.parametrize("section", ["skills", "rules"])
+    def test_selector_with_unknown_source_is_one_finding(self, tmp_path: Path, section: str):
+        selector = {"source": "bitbucket", "repo": "example-org/example-repo", "path": f"{section}/demo"}
+        _bundle_manifest(tmp_path, **{section: [selector]})
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert not result.passed
+        [finding] = [f for f in result.findings if f.check_name.startswith("schema")]
+        assert finding.check_name == f"schema:{section}.refs.0.PluginSelector.source:literal_error"
+        assert finding.severity == Severity.HIGH
+        assert "'github', 'gitlab' or 'git'" in finding.message
+        assert "valid string" not in finding.message
+
+    @pytest.mark.parametrize(
+        ("selector", "check"),
+        [
+            ({"source": "github", "repo": "noslash", "path": "skills/demo"}, "PluginSelector.repo:value_error"),
+            (
+                {"source": "github", "repo": "a/b", "path": "skills/demo", "ref": "main"},
+                "PluginSelector.ref:extra_forbidden",
+            ),
+            ({"source": "github", "repo": "a/b", "path": "demo"}, "PluginSelector.path:value_error"),
+        ],
+        ids=["repo", "extra-key", "path"],
+    )
+    def test_every_selector_error_names_the_selector_field_only(self, tmp_path: Path, selector: dict, check: str):
+        _bundle_manifest(tmp_path, skills=[selector])
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert _schema_checks(result) == [f"schema:skills.refs.0.{check}"]
+
+    def test_malformed_canonical_string_is_one_finding_at_its_own_index(self, tmp_path: Path):
+        _bundle_manifest(tmp_path, skills=["github::example-org/example-repo::skills::ok", "bitbucket::a/b::skills::x"])
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert not result.passed
+        [finding] = [f for f in result.findings if f.check_name.startswith("schema")]
+        assert finding.check_name == "schema:skills.refs.1.str:value_error"
+        assert finding.severity == Severity.HIGH
+        assert "canonical ref must be" in finding.message
+        assert "'bitbucket::a/b::skills::x'" in finding.message
+
+    def test_each_bad_ref_gets_exactly_one_finding(self, tmp_path: Path):
+        """A malformed string no longer hides the selector after it; neither ref fans out into two findings."""
+        _bundle_manifest(
+            tmp_path,
+            skills=[
+                "github::noslash::skills::x",
+                {"source": "svn", "repo": "a/b", "path": "skills/y"},
+                "github::example-org/example-repo::skills::ok",
+            ],
+            rules=[{"source": "github", "repo": "a/b", "path": "rules/style.md"}, "git::noslash::rules::style.md"],
+        )
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert _schema_checks(result) == [
+            "schema:skills.refs.0.str:value_error",
+            "schema:skills.refs.1.PluginSelector.source:literal_error",
+            "schema:rules.refs.1.str:value_error",
+        ]
+
+    def test_non_string_non_mapping_ref_is_still_one_finding_for_the_list(self, tmp_path: Path):
+        _bundle_manifest(tmp_path, skills=[42, {"source": "svn", "repo": "a/b", "path": "skills/y"}])
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        [finding] = [f for f in result.findings if f.check_name.startswith("schema")]
+        assert finding.check_name == "schema:skills.refs:value_error"
+        assert "(got int)" in finding.message
+
+    @pytest.mark.parametrize("source", ["github", "gitlab", "git"])
+    def test_valid_refs_produce_no_schema_findings(self, tmp_path: Path, source: str):
+        _bundle_manifest(
+            tmp_path,
+            skills=[
+                f"{source}::example-org/example-repo::skills::one",
+                {"source": source, "repo": "example-group/tools/example-repo", "path": "skills/two"},
+            ],
+            rules=[{"source": source, "repo": "example-org/example-repo", "path": "rules/style.md"}],
+        )
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert _schema_checks(result) == []
+        assert result.passed
+        assert result.metadata["plugin"]["declared_dependencies"] == {"skills": 2, "rules": 1, "mcp": 0}
+
+    def test_other_fields_keep_one_finding_each(self, tmp_path: Path):
+        _bundle_manifest(
+            tmp_path,
+            tags="not-a-list",
+            metadata=5,
+            mcp=[{"name": "bad name", "provider": "stdio"}, "filesystem"],
+        )
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert _schema_checks(result) == [
+            "schema:tags:list_type",
+            "schema:metadata:dict_type",
+            "schema:mcp.0.name:value_error",
+            "schema:mcp.1:model_type",
+        ]
+
+    def test_bad_selectors_past_the_reporting_cap_are_counted_once_each(self, tmp_path: Path):
+        """105 bad selectors were 210 errors (each failed the str member too); now 105, and the cap still applies."""
+        selectors = [{"source": "bitbucket", "repo": "a/b", "path": f"skills/s{index:03}"} for index in range(105)]
+        _bundle_manifest(tmp_path, skills=selectors)
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        *reported, truncated = [f for f in result.findings if f.check_name.startswith("schema")]
+        assert [f.check_name for f in reported] == [
+            f"schema:skills.refs.{index}.PluginSelector.source:literal_error" for index in range(100)
+        ]
+        assert truncated.check_name == "schema_errors_truncated"
+        assert truncated.severity == Severity.HIGH
+        assert truncated.metadata == {"actual": 105, "reported": 100, "highest_unreported_severity": "high"}
+        assert not result.passed

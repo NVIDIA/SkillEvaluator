@@ -279,7 +279,11 @@ The manifest is validated in full against the bundle-reference schema:
 | Dependencies | At least one of `skills.refs`, `rules.refs`, or `mcp` must be non-empty |
 
 Unknown top-level fields are rejected, and each schema error is reported as a
-HIGH `schema:<field>:<error>` finding.
+HIGH `schema:<field>:<error>` finding. A bad ref is checked only against its
+own form and reported at its index: a selector object as
+`schema:skills.refs.<n>.PluginSelector.<key>:<error>`, for example
+`schema:skills.refs.0.PluginSelector.source:literal_error`, and a canonical
+string as `schema:skills.refs.<n>.str:value_error`.
 
 ### Contained manifest: `.claude-plugin/plugin.json`
 

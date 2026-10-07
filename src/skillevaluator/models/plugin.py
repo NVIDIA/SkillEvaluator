@@ -13,12 +13,15 @@ their content -- a plugin *references* existing skills, rules, and MCP servers
 from __future__ import annotations
 
 import re
-from typing import Any, Literal, Union, get_args
+from typing import Annotated, Any, Literal, Union, get_args
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
+    Discriminator,
     Field,
+    Tag,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -87,13 +90,6 @@ class PluginSelector(BaseModel):
         return v
 
 
-# A dependency ref is either a canonical ID string (``<source>::<repo>::...``)
-# or a selector dict. The before-validator on PluginDependencySection enforces
-# the canonical-ID source+repo invariants (mirroring PluginSelector); dict
-# entries are parsed into PluginSelector by the union.
-PluginRef = Union[str, PluginSelector]
-
-
 # Allowed source systems: the same Literal as PluginSelector's ``source``, so the
 # canonical-ID string form and the selector-dict form share a single source of
 # truth and cannot drift apart.
@@ -122,6 +118,34 @@ def _validate_canonical_ref(entry: str) -> None:
             f"canonical ref must be '<source>::<repo>::...' with source in "
             f"{{{allowed}}} and repo (2nd segment) containing '/'; got '{entry}'"
         )
+
+
+def _canonical_ref(entry: str) -> str:
+    """Before-validator for the string form: check the raw (unstripped) ref, then pass it on."""
+    _validate_canonical_ref(entry)
+    return entry
+
+
+def _ref_form(entry: Any) -> str:
+    """Union tag of a ref: ``str`` for a canonical ID, ``PluginSelector`` for anything else (a selector dict)."""
+    return "str" if isinstance(entry, str) else "PluginSelector"
+
+
+# A dependency ref is either a canonical ID string (``<source>::<repo>::...``)
+# or a selector dict parsed into PluginSelector. The union is discriminated by
+# the entry's Python type, so a bad ref is validated against its own form only.
+# A plain (smart) union also tried the other member, so every bad selector came
+# with a spurious "Input should be a valid string" error. The tags keep the
+# member names in error locations (``skills.refs.0.PluginSelector.source``), and
+# each malformed canonical ID is reported at its own index (``skills.refs.0.str``).
+# PluginDependencySection.validate_refs rejects any other entry type.
+PluginRef = Annotated[
+    Union[
+        Annotated[str, BeforeValidator(_canonical_ref), Tag("str")],
+        Annotated[PluginSelector, Tag("PluginSelector")],
+    ],
+    Discriminator(_ref_form),
+]
 
 
 class PluginDependencySection(BaseModel):
@@ -160,13 +184,11 @@ class PluginDependencySection(BaseModel):
     @field_validator("refs", mode="before")
     @classmethod
     def validate_refs(cls, v: Any) -> Any:
-        """Validate canonical-ID string refs; reject non-mapping/non-string entries."""
+        """Reject a non-list ``refs`` and non-mapping/non-string entries; ``PluginRef`` validates each entry."""
         if not isinstance(v, list):
             raise ValueError("refs must be a list of canonical IDs or selector objects")
         for entry in v:
-            if isinstance(entry, str):
-                _validate_canonical_ref(entry)
-            elif not isinstance(entry, dict):
+            if not isinstance(entry, (str, dict)):
                 raise ValueError(
                     f"each ref must be a canonical '::' ID string or a selector object (got {type(entry).__name__})"
                 )

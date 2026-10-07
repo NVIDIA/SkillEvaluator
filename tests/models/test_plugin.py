@@ -160,3 +160,36 @@ class TestPluginRefSources:
     def test_unknown_source_is_still_rejected(self, ref):
         with pytest.raises(ValidationError, match="gitlab"):
             PluginManifest(**_valid_data(skills={"refs": [ref]}))
+
+
+class TestPluginRefUnionErrors:
+    """Each ref is validated against the one form its type selects, so a bad ref is never reported twice."""
+
+    def _errors(self, refs):
+        with pytest.raises(ValidationError) as excinfo:
+            PluginManifest(**_valid_data(skills={"refs": refs}))
+        return [(error["loc"], error["type"]) for error in excinfo.value.errors()]
+
+    def test_bad_selector_reports_only_the_selector_error(self):
+        errors = self._errors([{"source": "bitbucket", "repo": "a/b", "path": "skills/x"}])
+
+        assert errors == [(("skills", "refs", 0, "PluginSelector", "source"), "literal_error")]
+
+    def test_bad_canonical_string_reports_only_the_string_error(self):
+        errors = self._errors(["github::a/b::skills::ok", "bitbucket::a/b::skills::x"])
+
+        assert errors == [(("skills", "refs", 1, "str"), "value_error")]
+
+    def test_whitespace_padded_source_is_still_rejected(self):
+        """The canonical check still sees the ref as written, before whitespace stripping."""
+        assert self._errors([" github::a/b::skills::x"]) == [(("skills", "refs", 0, "str"), "value_error")]
+
+    def test_valid_refs_parse_to_their_own_forms(self):
+        manifest = PluginManifest(
+            **_valid_data(
+                skills={"refs": ["github::a/b::skills::x ", {"source": "git", "repo": "a/b", "path": "skills/y"}]}
+            )
+        )
+
+        assert manifest.skills.refs[0] == "github::a/b::skills::x"
+        assert isinstance(manifest.skills.refs[1], PluginSelector)

@@ -320,6 +320,23 @@ harbor:
         load_evals_config(skill)
 
 
+@pytest.mark.parametrize(
+    ("entry", "secret"),
+    [
+        ("custom_setting=sk-ant-api03-1234567890abcdefghijklmnop", "sk-ant-api03-1234567890abcdefghijklmnop"),
+        ("custom_setting=ghp_1234567890abcdefghijklmnopqrstuvwxyz", "ghp_1234567890abcdefghijklmnopqrstuvwxyz"),
+        ("custom_setting=AIzaSyA1234567890abcdefghijklmnopqrstuvw", "AIzaSyA1234567890abcdefghijklmnopqrstuvw"),
+        ("custom_setting=-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----"),
+        ("service_account_key=my-secret-sa-key", "my-secret-sa-key"),
+    ],
+)
+def test_cli_environment_kwargs_reject_secret_value_patterns_without_echoing(entry, secret):
+    with pytest.raises(ValueError, match="Sensitive key or value detected") as caught:
+        parse_environment_kwarg_overrides((entry,))
+
+    assert secret not in str(caught.value)
+
+
 def test_validate_skill_evals_does_not_warn_expected_script_for_guide_only_skill(tmp_path):
     skill = tmp_path / "guide-skill"
     (skill / "evals").mkdir(parents=True)
@@ -455,3 +472,32 @@ def test_legacy_evals_json_is_accepted_with_deprecation_warning(tmp_path):
 
     assert not any(r.status == "error" for r in results)
     assert any("Deprecated eval dataset format" in r.message for r in results)
+
+
+@pytest.mark.parametrize(
+    "infra_key",
+    [
+        "allow_workload_identity",
+        "autopilot",
+        "cluster_name",
+        "region",
+        "namespace",
+        "registry_location",
+        "registry_name",
+        "project_id",
+        "cloud_build_machine_type",
+        "cloud_build_disk_size_gb",
+        "memory_limit_multiplier",
+    ],
+)
+def test_validate_environment_kwargs_gke_infrastructure_boundary(infra_key: str) -> None:
+    """Reject GKE infrastructure keys when allow_gke_infrastructure_kwargs=False while allowing them on host CLI."""
+    from skillevaluator.tier3.evals_config import validate_environment_kwargs
+
+    with pytest.raises(ValueError, match=r"GKE infrastructure setting .* is not allowed in skill config"):
+        validate_environment_kwargs({infra_key: "test-val"}, allow_gke_infrastructure_kwargs=False)
+
+    assert validate_environment_kwargs({infra_key: "test-val"}, allow_gke_infrastructure_kwargs=True) == {
+        infra_key: "test-val"
+    }
+

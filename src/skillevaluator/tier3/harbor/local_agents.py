@@ -8,13 +8,14 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import os
 import re
 import secrets
 import shlex
 import tempfile
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -24,7 +25,9 @@ from harbor.agents.installed.base import NonZeroAgentExitCodeError
 from harbor.agents.installed.claude_code import ClaudeCode
 from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.opencode import OpenCode
+from harbor.agents.model_connection import ResolvedModelConnection, without_inferred_endpoint
 from harbor.models.trial.paths import EnvironmentPaths
+from harbor.utils.env import parse_bool_env_value
 
 from skillevaluator.tier3.harbor.nvidia_build_bridge import (
     MAX_REQUESTS_PER_BRIDGE,
@@ -48,6 +51,8 @@ _NVIDIA_BUILD_BRIDGE_API_KEY_ENV = "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_API_KEY"
 _NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN_ENV = "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN"
 _NVIDIA_BUILD_FILE_BACKED_SENTINEL_KEY = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_HOST_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
+
+logger = logging.getLogger(__name__)
 
 
 async def _await_task_uninterruptibly(
@@ -113,7 +118,210 @@ def _rewrite_launcher_segment(command: str, rewrite: Callable[[str], str]) -> st
     return f"{rewrite(launcher)}{separator}{prompt}"
 
 
-class SkillEvaluatorLocalClaudeCode(ClaudeCode):
+class SkillEvaluatorClaudeCode(ClaudeCode):
+    """Wrap Claude Code to preserve rich MCP server declarations and Vertex AI routing."""
+
+    def _env_sources(self) -> tuple[Mapping[str, str], ...]:
+        """Environment sources in runtime precedence order, safe for partially initialized instances."""
+        sources: list[Mapping[str, str]] = []
+        resolved = getattr(self, "_resolved_env_vars", None)
+        if isinstance(resolved, Mapping):
+            sources.append(resolved)
+        extra = getattr(self, "_extra_env", None)
+        if isinstance(extra, Mapping):
+            sources.append(extra)
+        sources.append(os.environ)
+        return tuple(sources)
+
+    def _uses_vertex_auth(self) -> bool:
+        """Return whether Claude Code is configured to route through Vertex AI."""
+        try:
+            return bool(
+                parse_bool_env_value(
+                    self._get_env("CLAUDE_CODE_USE_VERTEX"),
+                    name="CLAUDE_CODE_USE_VERTEX",
+                    default=False,
+                )
+            )
+        except (ValueError, AttributeError):
+            logger.debug("Ignoring invalid boolean environment value CLAUDE_CODE_USE_VERTEX")
+            return False
+
+    @property
+    def model_connection(self) -> ResolvedModelConnection:
+        """Suppress Anthropic API endpoint inference when Vertex AI routing is active."""
+        access = super().model_connection
+        if self._uses_vertex_auth():
+            return without_inferred_endpoint(access)
+        return access
+
+    def _resolve_auth_env(self) -> dict[str, str]:
+        """Resolve Claude Code authentication environment including Vertex AI variables."""
+        if not self._uses_vertex_auth():
+            return super()._resolve_auth_env()
+
+        env: dict[str, str] = {"CLAUDE_CODE_USE_VERTEX": "1"}
+        for vertex_var in (
+            "CLOUD_ML_REGION",
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+            "GOOGLE_CLOUD_PROJECT",
+            "GCLOUD_PROJECT",
+            "CLOUDSDK_CORE_PROJECT",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "CLOUDSDK_CONFIG",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+        ):
+            val = (self._get_env(vertex_var) or "").strip()
+            if val:
+                env[vertex_var] = val
+        if (self._get_env("DISABLE_PROMPT_CACHING") or "").strip() == "1":
+            env["DISABLE_PROMPT_CACHING"] = "1"
+        return env
+
+    async def exec_as_agent(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+    ):
+        if self._uses_vertex_auth():
+            command = (
+                f"unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN; {command}"
+            )
+            if env:
+                env = {
+                    k: v
+                    for k, v in env.items()
+                    if k
+                    not in {
+                        "ANTHROPIC_API_KEY",
+                        "ANTHROPIC_AUTH_TOKEN",
+                        "ANTHROPIC_BASE_URL",
+                        "CLAUDE_CODE_OAUTH_TOKEN",
+                    }
+                }
+        return await super().exec_as_agent(
+            environment,
+            command=command,
+            env=env,
+            cwd=cwd,
+            timeout_sec=timeout_sec,
+        )
+
+    def _resolve_task_path(self) -> Path | None:
+        """Resolve the task directory path from trial config.json."""
+        trial_config_path = self.logs_dir.parent / "config.json"
+        if not trial_config_path.is_file():
+            trial_config_path = self.logs_dir.parent.parent / "config.json"
+            if not trial_config_path.is_file():
+                return None
+        try:
+            config_data = json.loads(trial_config_path.read_text(encoding="utf-8"))
+            task_path_str = config_data.get("task", {}).get("path")
+            if not task_path_str:
+                return None
+            task_path = Path(task_path_str)
+            if not task_path.is_absolute():
+                task_path = (trial_config_path.parent / task_path).resolve()
+            return task_path
+        except Exception:
+            return None
+
+    def _resolve_task_runtime_env(self) -> dict[str, str]:
+        """Extract allowed runtime environment from task.toml if available."""
+        task_path = self._resolve_task_path()
+        if not task_path:
+            return {}
+        task_toml_path = task_path / "task.toml"
+        if not task_toml_path.is_file():
+            return {}
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
+        try:
+            task_data = tomllib.loads(task_toml_path.read_text(encoding="utf-8"))
+            env_table = task_data.get("environment", {}).get("env", {})
+            if isinstance(env_table, dict):
+                return {str(k): str(v) for k, v in env_table.items()}
+        except Exception:
+            pass
+        return {}
+
+    def _build_register_mcp_servers_command(self) -> str | None:
+        """Build MCP registration command supporting streamable-http and headers from mcp_servers.json."""
+        mcp_servers = self._resolve_task_mcp_servers()
+        if not mcp_servers:
+            return super()._build_register_mcp_servers_command()
+
+        servers: dict[str, dict[str, Any]] = {}
+        for server in mcp_servers:
+            name = server.get("name")
+            if not name:
+                continue
+            transport = server.get("transport", "stdio")
+            if transport == "stdio":
+                stdio_entry: dict[str, Any] = {
+                    "type": "stdio",
+                    "command": server.get("command"),
+                    "args": server.get("args", []),
+                }
+                if "env" in server and isinstance(server["env"], dict):
+                    stdio_entry["env"] = server["env"]
+                servers[name] = stdio_entry
+            else:
+                http_type = "http" if transport in ("streamable-http", "http") else transport
+                entry: dict[str, Any] = {
+                    "type": http_type,
+                    "url": server.get("url"),
+                }
+                if "headers" in server and isinstance(server["headers"], dict):
+                    entry["headers"] = server["headers"]
+                servers[name] = entry
+
+        if not servers:
+            return super()._build_register_mcp_servers_command()
+
+        claude_json = json.dumps({"mcpServers": servers}, indent=2)
+        escaped = shlex.quote(claude_json)
+        return (
+            'CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME}" && '
+            'mkdir -p "$CLAUDE_DIR" && '
+            f"printf '%s\\n' {escaped} > \"$CLAUDE_DIR/.claude.json\""
+        )
+
+    def _resolve_task_mcp_servers(self) -> list[dict[str, Any]]:
+        """Resolve rich MCP declarations from task mcp_servers.json if available."""
+        task_path = self._resolve_task_path()
+        if not task_path:
+            return []
+        try:
+            mcp_json_path = task_path / "mcp_servers.json"
+            if not mcp_json_path.is_file():
+                return []
+            raw_servers = json.loads(mcp_json_path.read_text(encoding="utf-8"))
+            if isinstance(raw_servers, list):
+                from skillevaluator.tier3.harbor.adapter import validate_mcp_server_declarations
+
+                runtime_env = self._resolve_task_runtime_env()
+                return validate_mcp_server_declarations(
+                    raw_servers,
+                    allowed_runtime_env=runtime_env,
+                    source_label=str(mcp_json_path),
+                )
+            return []
+        except ValueError:
+            raise
+        except Exception:
+            return []
+
+
+class SkillEvaluatorLocalClaudeCode(SkillEvaluatorClaudeCode):
     """Claude Code wrapper that skips bootstrap install in local mode."""
 
     _REMOTE_CLAUDE_TMP = PurePosixPath(EnvironmentPaths.agent_dir / "claude-tmp")
@@ -714,7 +922,7 @@ class SkillEvaluatorNvidiaBuildCodex(_NvidiaBuildBridgeAgent, Codex):
         return _rewrite_launcher_segment(command, lambda text: _CODEX_MODEL_ARG_RE.sub(replace, text))
 
 
-class SkillEvaluatorNvidiaBuildClaudeCode(_NvidiaBuildBridgeAgent, ClaudeCode):
+class SkillEvaluatorNvidiaBuildClaudeCode(_NvidiaBuildBridgeAgent, SkillEvaluatorClaudeCode):
     """Stock Claude Code CLI routed through the in-trial NVIDIA Build bridge."""
 
     def _bridge_client_environment(self) -> dict[str, str]:
@@ -836,11 +1044,10 @@ class SkillEvaluatorLocalNvidiaBuildClaudeCode(
     """Managed local Claude Code CLI routed through an authenticated host bridge."""
 
 
-LOCAL_AGENT_IMPORT_PATHS = {
-    "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalClaudeCode",
-    "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalCodex",
-    "opencode": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalOpenCode",
-}
+from skillevaluator.tier3.harbor import (  # noqa: F401
+    CONTAINER_AGENT_IMPORT_PATHS,
+    LOCAL_AGENT_IMPORT_PATHS,
+)
 
 NVIDIA_BUILD_AGENT_IMPORT_PATHS = {
     "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildClaudeCode",

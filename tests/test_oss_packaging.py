@@ -147,7 +147,7 @@ def test_harbor_dependency_contract_keeps_base_install_isolated() -> None:
 
     assert base_names.isdisjoint({"harbor", "litellm"})
     assert len(harbor_requirements) == 1
-    assert not harbor_requirements[0].extras
+    assert harbor_requirements[0].extras == {"gke"}
     assert HARBOR_VERSION == "0.24.0"
     assert str(harbor_requirements[0].specifier) == f"=={HARBOR_VERSION}"
     assert len(litellm_requirements) == 1
@@ -440,6 +440,7 @@ def test_tier3_direct_dependencies_have_complete_license_notices() -> None:
     expected_notices = {
         "harbor": "Harbor (Apache-2.0)",
         "mcp": "MCP (MIT)",
+        "oauthlib": "OAuthLib (BSD-3-Clause)",
         "pyjwt": "PyJWT (MIT)",
         "python-dotenv": "python-dotenv (BSD-3-Clause)",
     }
@@ -481,6 +482,7 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
 
     assert "mcp>=1.28.1,<2" in tier3
     assert "pyjwt[crypto]>=2.13.0" in tier3
+    assert "oauthlib>=4.0.0" in tier3
     assert "telemetry" not in extras
     assert all(
         "protobuf" not in requirement.lower() for requirements in extras.values() for requirement in requirements
@@ -490,6 +492,7 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
     )
     assert all(version >= Version("1.28.1") for version in all_lock_versions["mcp"])
     assert all(version >= Version("2.13.0") for version in all_lock_versions["pyjwt"])
+    assert all(version >= Version("4.0.0") for version in all_lock_versions["oauthlib"])
     assert "protobuf" not in all_lock_versions
     assert not any(name.startswith("opentelemetry") for name in all_lock_versions)
 

@@ -222,6 +222,7 @@ REAL_SECRETS = [
     "token" + _fixture_secret("nvapi-", "Ab1Cd2Ef3", "Gh4Ij5Kl6", "Mn7Op8"),
     # Glued AWS access key ID (uppercase + digit, no lowercase, >=16 body).
     "data" + _fixture_secret("AKIA", "IOSFODNN7", "EXAMPLE"),
+    _fixture_secret("ya29.", "a0AXooCgs-", "abcdefghijklmnopqrstuvwxyz12345"),
 ]
 
 # Glued runs that look ID/hash-like must NOT be treated as secrets: lowercase

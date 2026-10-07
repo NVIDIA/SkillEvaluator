@@ -17,6 +17,8 @@ from skillevaluator.tier3.harbor.adapter import (
     _copy_custom_grader,
     _rebase_custom_dockerfile_content,
     _stage_repo_context,
+    _toml_value,
+    _write_task_toml,
     generate_harbor_tasks,
     stage_native_harbor_tasks,
 )
@@ -555,3 +557,52 @@ def test_custom_only_staging_does_not_inject_or_overwrite_evaluated_skill(
         assert "evaluated_skill" not in staged
     else:
         assert staged["evaluated_skill"] == authored_value
+
+
+def test_toml_value_serializes_dict_headers() -> None:
+    """Serialize string dictionaries as inline TOML tables."""
+    headers = {"X-Goog-Api-Key": "${DEVELOPERKNOWLEDGE_API_KEY}"}
+    serialized = _toml_value(headers)
+    assert '{"X-Goog-Api-Key" = "${DEVELOPERKNOWLEDGE_API_KEY}"}' in serialized or '{"X-Goog-Api-Key" = ' in serialized
+    assert "DEVELOPERKNOWLEDGE_API_KEY" in serialized
+
+
+def test_toml_value_rejects_non_string_dict_elements() -> None:
+    """Reject dictionaries with non-string keys or values."""
+    with pytest.raises(TypeError, match="strings, lists of strings, or dictionaries of strings"):
+        _toml_value({"count": 123})
+    with pytest.raises(TypeError, match="strings, lists of strings, or dictionaries of strings"):
+        _toml_value({123: "value"})
+
+
+def test_write_task_toml_writes_mcp_servers_json_and_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Write task.toml and mcp_servers.json preserving headers and transport when approved."""
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "developerknowledge.googleapis.com")
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "DEVELOPERKNOWLEDGE_API_KEY")
+    task_dir = tmp_path / "task-001"
+    task_dir.mkdir(parents=True)
+    mcp_servers = [
+        {
+            "name": "developer-knowledge",
+            "transport": "streamable-http",
+            "url": "https://developerknowledge.googleapis.com/mcp",
+            "headers": {"X-Goog-Api-Key": "${DEVELOPERKNOWLEDGE_API_KEY}"},
+        }
+    ]
+    entry = {"id": "case-001", "expected_skill": "test-skill"}
+
+    _write_task_toml(task_dir, entry, has_skill=True, mcp_servers=mcp_servers)
+
+    task_toml_content = (task_dir / "task.toml").read_text(encoding="utf-8")
+    assert "[[environment.mcp_servers]]" in task_toml_content
+    assert '"developer-knowledge"' in task_toml_content
+    assert '"headers" =' in task_toml_content or "headers =" in task_toml_content
+    assert "X-Goog-Api-Key" in task_toml_content
+
+    mcp_json_path = task_dir / "mcp_servers.json"
+    assert mcp_json_path.is_file()
+    loaded = json.loads(mcp_json_path.read_text(encoding="utf-8"))
+    assert loaded == mcp_servers

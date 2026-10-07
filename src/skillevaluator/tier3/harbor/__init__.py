@@ -31,6 +31,9 @@ LOCAL_AGENT_IMPORT_PATHS = {
     "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalCodex",
     "opencode": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalOpenCode",
 }
+CONTAINER_AGENT_IMPORT_PATHS = {
+    "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorClaudeCode",
+}
 
 HARBOR_AGENTS_SUPPORTED = frozenset(
     {
@@ -59,6 +62,7 @@ def canonical_agent_name(agent: str) -> str:
 
 __all__ = [
     "AGENT_ALIASES",
+    "CONTAINER_AGENT_IMPORT_PATHS",
     "DEFAULT_ENV_MODE",
     "DEFAULT_LLM_VERIFIER_TIMEOUT_SEC",
     "ENV_MODE_LOCAL",

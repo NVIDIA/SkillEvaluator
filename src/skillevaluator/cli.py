@@ -2307,6 +2307,20 @@ def dedup_scan(
         raise click.ClickException("dedup scan failed")
 
 
+def _parse_environment_kwargs_cli(
+    raw_kwargs: tuple[str, ...],
+    *,
+    env_mode: str | None = None,
+) -> dict[str, Any]:
+    """Parse and validate environment kwargs for CLI commands, raising Click BadParameter on errors."""
+    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+
+    try:
+        return parse_environment_kwarg_overrides(raw_kwargs, env_mode=env_mode)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint=["--ek"]) from exc
+
+
 def _workflow_report_options(func):
     func = _report_options(func)
     for param in func.__click_params__:
@@ -2545,6 +2559,8 @@ def evaluate(
     if autopilot:
         _ensure_autopilot_dataset(skill_path, progress=progress)
 
+    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
+
     options = EvaluationOptions(
         skill_path=skill_path,
         agents=agents,
@@ -2571,6 +2587,7 @@ def evaluate(
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
         evaluated_source=evaluated_source,
+        environment_kwargs=parsed_environment_kwargs,
     )
     try:
         if env_mode == "local":
@@ -2589,6 +2606,31 @@ def evaluate(
                     padding=(0, 1),
                 )
             )
+        elif env_mode == "gke":
+            from skillevaluator.tier3.commands import parse_agents
+            from skillevaluator.tier3.harbor.runner import (
+                is_gke_vertex_workload_identity_active,
+                is_gke_workload_identity_allowed,
+            )
+
+            if is_gke_vertex_workload_identity_active(
+                env_mode, parse_agents(agents)
+            ) and is_gke_workload_identity_allowed(options.environment_kwargs):
+                from rich.panel import Panel
+                from rich.text import Text
+
+                console.print(
+                    Panel(
+                        Text(
+                            "Intended for trusted skills and least-privilege service accounts. Harbor 0.24.0 single-pod "
+                            "GKE execution shares the pod service account and metadata server with evaluated skill commands.",
+                            style="yellow",
+                        ),
+                        title=Text("GKE Workload Identity · Trusted Skills Only", style="bold cyan"),
+                        border_style="yellow",
+                        padding=(0, 1),
+                    )
+                )
         progress_reporter = create_progress_reporter(progress, stream=click.get_text_stream("stderr"))
         engine_result = service.evaluate(options, progress_reporter=progress_reporter)
         failure = service.failure_reason(engine_result)
@@ -2784,6 +2826,7 @@ def doctor(
     """Check live-evaluation runtime readiness."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
+    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
     raise SystemExit(
         tier3_doctor(
             agents=agents,
@@ -2791,6 +2834,7 @@ def doctor(
             environment_kwarg=environment_kwarg,
             verify_models=verify_models,
             agent_model=agent_model,
+            environment_kwargs=parsed_environment_kwargs,
         )
     )
 
@@ -2813,6 +2857,7 @@ def health_check(agents: str | None, env_mode: str, environment_kwarg: tuple[str
     """Quick readiness check for the CLI and selected live-eval backend."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
+    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
     raise SystemExit(
         tier3_doctor(
             agents=agents,
@@ -2820,6 +2865,7 @@ def health_check(agents: str | None, env_mode: str, environment_kwarg: tuple[str
             environment_kwarg=environment_kwarg,
             verify_models=False,
             agent_model=(),
+            environment_kwargs=parsed_environment_kwargs,
         )
     )
 

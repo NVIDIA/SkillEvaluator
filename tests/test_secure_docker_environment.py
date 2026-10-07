@@ -598,3 +598,239 @@ def test_empty_stdin_handoff_fails_before_docker_preflight(monkeypatch) -> None:
         secure_docker_environment.SkillEvaluatorSecureDockerEnvironment.preflight()
 
     assert docker_preflight_called is False
+
+
+def test_secure_docker_exec_refreshes_adc_token_per_trial_and_verifier_exec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refresh host ADC token on every container exec() boundary so multi-trial Docker verifiers never use expired tokens."""
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    environment = object.__new__(secure_docker_environment.SkillEvaluatorSecureDockerEnvironment)
+    _initialize_harbor_context(environment)
+    environment._persistent_env = {}
+    environment.default_user = "1000"
+    environment.task_env_config = SimpleNamespace(workdir="/workspace")
+    environment._platform = SimpleNamespace(exec_shell_args=lambda command: ["bash", "-c", command])
+
+    handoff_payloads: list[str] = []
+    docker_commands: list[list[str]] = []
+
+    async def fake_run(
+        command: list[str],
+        check: bool = True,
+        timeout_sec: int | None = None,
+        stdin_data: bytes | None = None,
+        on_output: object | None = None,
+        **_kwargs,
+    ):
+        del check, timeout_sec, on_output
+        if stdin_data is not None:
+            handoff_payloads.append(stdin_data.decode("utf-8"))
+        docker_commands.append(command)
+        return SimpleNamespace(stdout="ok", stderr=None, return_code=0)
+
+    monkeypatch.setattr(environment, "_run_docker_compose_command", fake_run)
+
+    tokens = iter(["rotated-adc-token-trial-1", "rotated-adc-token-trial-2"])
+    monkeypatch.setattr(secure_docker_environment, "_get_google_access_token", lambda **_kw: next(tokens))
+
+    vertex_url = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+
+    # Trial 1 verifier exec (after initial launch token expired)
+    asyncio.run(
+        environment.exec(
+            "bash /tests/test.sh",
+            env={
+                "OPENAI_API_KEY": "expired-launch-token",
+                "OPENAI_BASE_URL": vertex_url,
+                "SKILL_EVAL_LLM_CREDENTIAL_SOURCE": "ADC",
+            },
+        )
+    )
+    # Trial 2 verifier exec (later in the same Harbor job after Trial 1 token also expired)
+    asyncio.run(
+        environment.exec(
+            "bash /tests/test.sh",
+            env={
+                "OPENAI_API_KEY": "expired-launch-token",
+                "OPENAI_BASE_URL": vertex_url,
+                "SKILL_EVAL_LLM_CREDENTIAL_SOURCE": "ADC",
+            },
+        )
+    )
+    # Explicit operator credential exec (must NOT be replaced by host ADC)
+    asyncio.run(
+        environment.exec(
+            "bash /tests/test.sh",
+            env={
+                "OPENAI_API_KEY": "explicit-operator-vertex-key",
+                "OPENAI_BASE_URL": vertex_url,
+            },
+        )
+    )
+
+    assert len(handoff_payloads) == 3
+    assert "rotated-adc-token-trial-1" in handoff_payloads[0]
+    assert "expired-launch-token" not in handoff_payloads[0]
+    assert "rotated-adc-token-trial-2" in handoff_payloads[1]
+    assert "expired-launch-token" not in handoff_payloads[1]
+    assert "explicit-operator-vertex-key" in handoff_payloads[2]
+
+    rendered_argv = "\n".join("\0".join(cmd) for cmd in docker_commands)
+    assert "rotated-adc-token-trial-1" not in rendered_argv
+    assert "rotated-adc-token-trial-2" not in rendered_argv
+
+
+def test_short_expiry_adc_docker_handoff_and_failed_refresh_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Preserve custom ADC sources for Docker host refresh, bound timeout below short token expiry, and fail closed on refresh failure."""
+    import json
+    import types
+    from datetime import UTC, datetime, timedelta
+
+    from skillevaluator.provider_config import resolve_llm_provider
+    from skillevaluator.tier3.harbor import runner, secure_docker_environment
+
+    adc_file = tmp_path / "external_account_adc.json"
+    adc_file.write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "audience": "//iam.googleapis.com/projects/123456/locations/global/workloadIdentityPools/p/providers/pr",
+                "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                "token_url": "https://sts.googleapis.com/v1/token",
+                "service_account_impersonation_url": (
+                    "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
+                    "eval@proj.iam.gserviceaccount.com:generateAccessToken"
+                ),
+                "service_account_impersonation": {"token_lifetime_seconds": 600},
+                "credential_source": {"file": str(tmp_path / "subject_token.txt")},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cloudsdk_dir = tmp_path / "gcloud_config"
+    cloudsdk_dir.mkdir()
+
+    minted_counter = 0
+
+    class _FakeCredentials:
+        def __init__(self, lifetime_seconds: int) -> None:
+            self._lifetime_seconds = lifetime_seconds
+            self.token: str | None = None
+            self.expiry: datetime | None = None
+
+        def refresh(self, _request: object) -> None:
+            nonlocal minted_counter
+            minted_counter += 1
+            self.token = f"short-lived-adc-token-{minted_counter}"
+            # Match google.auth's naive UTC datetime expiry convention
+            self.expiry = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=self._lifetime_seconds)
+
+    def fake_google_auth_default(scopes: object = None):
+        del scopes
+        cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+        if not cred_path or not Path(cred_path).is_file():
+            raise RuntimeError("ADC file could not be discovered from GOOGLE_APPLICATION_CREDENTIALS")
+        payload = json.loads(Path(cred_path).read_text(encoding="utf-8"))
+        lifetime = int(payload.get("service_account_impersonation", {}).get("token_lifetime_seconds", 3600))
+        return _FakeCredentials(lifetime), "demo-project"
+
+    google_mod = types.ModuleType("google")
+    auth_mod = types.ModuleType("google.auth")
+    transport_mod = types.ModuleType("google.auth.transport")
+    requests_mod = types.ModuleType("google.auth.transport.requests")
+    auth_mod.default = fake_google_auth_default  # type: ignore[attr-defined]
+    requests_mod.Request = object  # type: ignore[attr-defined]
+    google_mod.auth = auth_mod  # type: ignore[attr-defined]
+    auth_mod.transport = transport_mod  # type: ignore[attr-defined]
+    transport_mod.requests = requests_mod  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google", google_mod)
+    monkeypatch.setitem(sys.modules, "google.auth", auth_mod)
+    monkeypatch.setitem(sys.modules, "google.auth.transport", transport_mod)
+    monkeypatch.setitem(sys.modules, "google.auth.transport.requests", requests_mod)
+    monkeypatch.setattr("shutil.which", lambda _cmd: None)
+
+    vertex_url = "https://aiplatform.googleapis.com/v1beta1/projects/demo-project/locations/global/endpoints/openapi"
+    host_env = {
+        "PATH": "/usr/bin",
+        "HOME": str(tmp_path),
+        "SKILL_EVAL_LLM_PROVIDER": "openai",
+        "OPENAI_BASE_URL": vertex_url,
+        "SKILL_EVAL_LLM_MODEL": "google/gemini-3.8-flash",
+        "GOOGLE_APPLICATION_CREDENTIALS": str(adc_file),
+        "CLOUDSDK_CONFIG": str(cloudsdk_dir),
+    }
+    monkeypatch.setattr(os, "environ", dict(host_env))
+
+    provider = resolve_llm_provider()
+    assert provider.api_key == "short-lived-adc-token-1"
+    assert provider.credential_env == "ADC"
+    assert provider.credential_expiry is not None
+
+    plans = runner._resolve_agent_runtime_plan(
+        provider=provider,
+        agents=["opencode"],
+        models={"opencode": "openai/google/gemini-3.8-flash"},
+        configured_runtime_env={},
+        env_mode="docker",
+    )
+    docker_subprocess_env = dict(plans["opencode"].subprocess_env)
+    assert docker_subprocess_env.get("GOOGLE_APPLICATION_CREDENTIALS") == str(adc_file)
+    assert docker_subprocess_env.get("CLOUDSDK_CONFIG") == str(cloudsdk_dir)
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in plans["opencode"].staged_env
+    assert "CLOUDSDK_CONFIG" not in plans["opencode"].staged_env
+
+    # Verify _run_harbor enforces a deadline strictly below the 600s token lifetime (e.g. ~540s, not 3300s)
+    captured_timeout: float | None = None
+
+    def fake_harbor_run(command, *args, **kwargs):
+        del command, args
+        nonlocal captured_timeout
+        captured_timeout = kwargs.get("timeout_seconds")
+        return runner._BoundedHarborProcessResult(returncode=0, output_tail="", output_exceeded=False)
+
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", fake_harbor_run)
+    monkeypatch.setattr(runner, "_validate_harbor_job_result", lambda *_a, **_kw: (True, "ok"))
+
+    ok, _detail = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="opencode",
+        job_name="short-adc-job",
+        env_mode="docker",
+        model="google/gemini-3.8-flash",
+        jobs_dir=tmp_path / "jobs",
+        run_env=docker_subprocess_env,
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+    )
+    assert ok is True
+    assert captured_timeout is not None
+    assert 500.0 <= captured_timeout <= 545.0
+
+    # Simulate the trusted Harbor Docker host subprocess executing verifier handoff
+    monkeypatch.setattr(os, "environ", dict(docker_subprocess_env))
+    verifier_input = {
+        "OPENAI_API_KEY": docker_subprocess_env["OPENAI_API_KEY"],
+        "OPENAI_BASE_URL": vertex_url,
+        "SKILL_EVAL_LLM_CREDENTIAL_SOURCE": "ADC",
+    }
+    handed_off = secure_docker_environment._host_handoff_environment(verifier_input)
+    assert handed_off["OPENAI_API_KEY"] != docker_subprocess_env["OPENAI_API_KEY"]
+    assert handed_off["OPENAI_API_KEY"].startswith("short-lived-adc-token-")
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in handed_off
+    assert "CLOUDSDK_CONFIG" not in handed_off
+    assert "SKILL_EVAL_LLM_CREDENTIAL_EXPIRY" not in handed_off
+
+    # Missing-source / failed-refresh case: must fail closed instead of reusing the prior/expired token
+    adc_file.unlink()
+    with pytest.raises(RuntimeError, match="Failed to refresh Google ADC access token"):
+        secure_docker_environment._host_handoff_environment(verifier_input)

@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import tomllib
 import webbrowser
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,7 @@ from skillevaluator.tier3.harbor.runner import (
     _harbor_launch_environment,
     _model_for_agent,
     _resolve_agent_runtime_plan,
+    _resolve_environment_kwargs,
     run_harbor_eval,
 )
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
@@ -389,6 +391,17 @@ def parse_agent_model_overrides(raw_overrides: tuple[str, ...]) -> dict[str, lis
     return overrides
 
 
+def parse_environment_kwargs(
+    raw_kwargs: tuple[str, ...] | list[str],
+    *,
+    env_mode: str | None = None,
+) -> dict[str, Any]:
+    """Parse repeatable ``--ek key=value`` CLI pairs via ``parse_environment_kwarg_overrides``."""
+    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+
+    return parse_environment_kwarg_overrides(raw_kwargs, env_mode=env_mode)
+
+
 def validate_agents(agents: list[str]) -> list[str]:
     """Return unsupported agent names."""
     return [agent for agent in agents if agent not in HARBOR_AGENTS]
@@ -656,6 +669,7 @@ def evaluate(
     override_storage_mb: int | None,
     evaluated_source: dict[str, str] | None = None,
     progress_reporter: ProgressReporter | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run Harbor live-agent evaluation for a skill."""
     env_mode = _engine_env_mode(env_mode)
@@ -701,7 +715,8 @@ def evaluate(
         agent_models = parse_agent_model_overrides(agent_model)
         from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
 
-        environment_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
+        parsed_cli_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
+        merged_environment_kwargs = {**dict(environment_kwargs or {}), **parsed_cli_kwargs}
         unknown_model_agents = sorted(set(agent_models) - set(agent_list))
         if unknown_model_agents:
             raise ValueError(
@@ -731,7 +746,7 @@ def evaluate(
             agent_runtime_preflight=agent_runtime_preflight,
             env_mode=env_mode,
             env_mode_source="CLI",
-            environment_kwargs=environment_kwargs,
+            environment_kwargs=merged_environment_kwargs,
             timeout_multiplier=timeout_multiplier,
             evaluated_source=evaluated_source,
             override_cpus=override_cpus,
@@ -754,13 +769,29 @@ def doctor(
     environment_kwarg: tuple[str, ...] = (),
     verify_models: bool = False,
     agent_model: tuple[str, ...] = (),
+    environment_kwargs: Mapping[str, Any] | None = None,
 ) -> int:
     """Check whether live evaluation dependencies are available."""
+    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+
     env_mode = _engine_env_mode(env_mode)
     agent_list = parse_agents(agents) if agents is not None else []
     rows: list[tuple[str, str, str]] = []
     rows.append(("CLI package", "pass", f"skillevaluator {__version__}"))
 
+    kwarg_parse_error: str | None = None
+    try:
+        parsed_cli_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
+    except ValueError as exc:
+        parsed_cli_kwargs = {}
+        kwarg_parse_error = str(exc)
+
+    merged_cli_kwargs = {**dict(environment_kwargs or {}), **parsed_cli_kwargs}
+    resolved_env_kwargs = _resolve_environment_kwargs(
+        env_mode,
+        cli_kwargs=merged_cli_kwargs,
+        environ=os.environ,
+    )
     provider = None
     model_resolution: dict[str, tuple[str, str]] = {}
     runtime_plans: dict[str, Any] = {}
@@ -805,6 +836,7 @@ def doctor(
                     configured_runtime_env={},
                     env_mode=env_mode,
                     model_sources={agent: details[1] for agent, details in model_resolution.items()},
+                    environment_kwargs=resolved_env_kwargs,
                 )
             except ValueError as exc:
                 plan_error = str(exc)
@@ -832,20 +864,16 @@ def doctor(
     else:
         rows.append(("Harbor agents", "pass", ", ".join(agent_list)))
 
-    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
-
-    try:
-        environment_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
-    except ValueError as exc:
-        environment_kwargs = {}
-        prereq_errors = [str(exc)]
+    if kwarg_parse_error is not None:
+        prereq_errors = [kwarg_parse_error]
     else:
         prerequisite_subprocess_env = dict(next(iter(runtime_plans.values())).subprocess_env) if runtime_plans else None
         prereq_errors = _check_prerequisites(
             env_mode=env_mode,
             agents=agent_list,
-            environment_kwargs=environment_kwargs,
+            environment_kwargs=resolved_env_kwargs,
             subprocess_env=prerequisite_subprocess_env,
+            verify_live_cluster=verify_models,
         )
     if prereq_errors:
         for error in prereq_errors:
@@ -857,24 +885,31 @@ def doctor(
         if provider is None or not runtime_plans:
             rows.append(("provider model", "fail", "provider model resolution was unavailable"))
         else:
+            from skillevaluator.tier3.harbor.gke_environment import (
+                GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL,
+            )
             from skillevaluator.tier3.harbor.runtime_preflight import (
                 CredentialProbeDisposition,
                 credential_probe_disposition,
+                is_unverified_gke_vertex_auth_probe,
                 probe_model,
             )
 
             for agent in agent_list:
                 selected_provider = runtime_plans[agent].provider
                 probe = probe_model(selected_provider)
-                disposition = credential_probe_disposition(selected_provider, probe)
+                disposition = credential_probe_disposition(selected_provider, probe, env_mode=env_mode)
                 if disposition == CredentialProbeDisposition.FATAL:
                     status = "fail"
                     detail = probe.detail
                 elif disposition == CredentialProbeDisposition.DEGRADED:
                     status = "warn"
-                    detail = probe.detail
-                    if probe.ok:
-                        detail = f"{detail}; catalog access does not verify runtime credentials for this endpoint"
+                    if is_unverified_gke_vertex_auth_probe(selected_provider, probe, env_mode=env_mode):
+                        detail = GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL
+                    elif probe.ok:
+                        detail = f"{probe.detail}; catalog access does not verify runtime credentials for this endpoint"
+                    else:
+                        detail = probe.detail
                 else:
                     status = "pass"
                     detail = probe.detail
@@ -1200,6 +1235,7 @@ __all__ = [
     "init_custom_grader",
     "init_harbor_task",
     "parse_agents",
+    "parse_environment_kwargs",
     "validate_evals",
     "view_results",
 ]

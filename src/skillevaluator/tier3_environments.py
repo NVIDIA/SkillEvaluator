@@ -206,5 +206,8 @@ for _alias, _harbor_type in HARBOR_ENVIRONMENT_TYPE_ALIASES.items():
     HARBOR_ENVIRONMENT_KWARGS[_alias] = (
         HARBOR_ENVIRONMENT_KWARGS[_harbor_type] - HARBOR_ENVIRONMENT_ALIAS_KWARGS[_alias].keys()
     )
+# SkillEvaluatorGKEEnvironment wrapper kwargs accepted on ``--env-mode gke`` in
+# addition to stock Harbor's GKEEnvironment.__init__ parameters.
+SKILLEVALUATOR_GKE_EXTRA_ENVIRONMENT_KWARGS = frozenset({"allow_workload_identity", "autopilot"})
 ENV_MODE_LOCAL = "local"
 DEFAULT_ENV_MODE = "docker"

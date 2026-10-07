@@ -101,6 +101,24 @@ def test_save_catalog_cli_accepts_plugin_type(plugins: Path, tmp_path: Path) -> 
     assert json.loads(catalog.read_text(encoding="utf-8"))["schema_version"] == 2
 
 
+def test_save_catalog_cli_shows_the_plugins_left_out_of_the_catalog(plugins: Path, tmp_path: Path) -> None:
+    _plugin(plugins, "verbose", "Deploy " * 200, {"deploy-big": "Deploy big apps to a kubernetes cluster"})
+    undescribed = _plugin(plugins, "silent", "placeholder", {"conf-sync": "Sync confluence docs to markdown"})
+    (undescribed / "agent_plugin.yaml").write_text("name: silent\nauthor: {email: dev@example.com}\n", encoding="utf-8")
+    catalog = tmp_path / "catalog.json"
+
+    result = CliRunner().invoke(
+        cli,
+        ["tier2", "similarity-check", str(plugins), "--type", "plugin", "--save-catalog", str(catalog), "-r", "cli"],
+    )
+
+    assert result.exit_code == 0, result.output
+    flattened = " ".join(result.output.replace("│", " ").split())
+    assert "checks passed, 2 warnings" in flattened
+    assert "Plugin at 'verbose' was not added to the catalog:" in flattened
+    assert "Plugin 'silent' has no description; only its bundled skills were added to the catalog" in flattened
+
+
 def test_tier2_plugin_compares_with_local_catalog(plugins: Path, tmp_path: Path) -> None:
     catalog = tmp_path / "catalog.json"
     assert SimilarityValidator(content_type="plugin", save_catalog_path=catalog).validate(plugins).passed

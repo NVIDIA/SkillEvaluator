@@ -536,7 +536,12 @@ class CLIReporter(ReporterBase):
             for result in failed:
                 self.render_result(result, console)
 
-        non_blocking = [result for result in results if passes_required_gate(result) and result.findings]
+        # A passing result's warnings (for example plugins left out of a saved catalog) are shown only here.
+        non_blocking = [
+            result
+            for result in results
+            if passes_required_gate(result) and (result.findings or (result.passed and result.warnings))
+        ]
         if non_blocking:
             console.print(
                 Panel.fit(
@@ -650,7 +655,7 @@ class CLIReporter(ReporterBase):
             console.print("[green][PASS] Validation passed[/green]\n")
             self._print_summary_stats(result, console)
             self._print_success_details(result, console)
-            if result.findings:
+            if result.findings or result.warnings:
                 self._print_findings(result, console)
         else:
             console.print("[red][FAIL] Validation failed[/red]\n")
@@ -1087,6 +1092,8 @@ class CLIReporter(ReporterBase):
                     details = f"{s.checks_performed} checks passed"
                 else:
                     details = "OK"
+                if s.warnings > 0 and not result.metadata.get("skipped"):
+                    details += f", {s.warnings} warnings"
             else:
                 parts = []
                 if s.errors > 0:

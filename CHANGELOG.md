@@ -40,6 +40,12 @@ All notable changes to SkillEvaluator are documented in this file.
   judged by different models and counts it in `judge_mixed_cases`.
 - Removed the unused `CONTENT_DEDUP_LLM_*` constants and `LLM_VERIFY_MODEL`; an
   LLM client built from explicit credentials uses the provider default model.
+- Tier 3 pins the agent CLIs Harbor installs: Codex 0.161.0 and Claude Code
+  2.1.292, instead of the latest release. Claude Code runs Claude 5.5 and later
+  models with `reasoning_effort=medium`; Codex keeps `high`. Local mode keeps
+  your installed CLIs and fails a trial early when they are too old for the
+  model: Claude 5.5 needs Claude Code 2.1.280 or newer, and GPT-6 needs Codex
+  0.159.1 or newer.
 
 ### Fixed
 

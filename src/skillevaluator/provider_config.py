@@ -115,7 +115,8 @@ def is_openai_reasoning_model(model: str) -> bool:
     return _model_leaf(model).startswith(("gpt-5", "gpt-6"))
 
 
-def _is_gpt6_model(model: str) -> bool:
+def is_gpt6_model(model: str) -> bool:
+    """Return whether ``model`` is a GPT-6 model."""
     return _model_leaf(model).startswith("gpt-6")
 
 
@@ -148,7 +149,7 @@ def effective_reasoning_effort(provider: str, model: str, effort: str | None) ->
     if provider == "anthropic":
         supported = is_claude_5_5_or_later(model)
     else:
-        supported = provider != "bedrock" and _is_gpt6_model(model)
+        supported = provider != "bedrock" and is_gpt6_model(model)
     return effort if supported else None
 
 
@@ -158,7 +159,7 @@ def skillspector_reasoning_effort(model: str) -> str | None:
     Only GPT-6 models get one. Claude models behind OpenAI-compatible gateways
     can reject the parameter, so their effort stays at the model default.
     """
-    return SKILLSPECTOR_DEFAULT_REASONING_EFFORT if _is_gpt6_model(model) else None
+    return SKILLSPECTOR_DEFAULT_REASONING_EFFORT if is_gpt6_model(model) else None
 
 
 class ProviderConfigurationError(ValueError):

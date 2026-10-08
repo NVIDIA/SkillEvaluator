@@ -78,6 +78,10 @@ using Harbor 0.24:
   `tier3 evaluate` fail the prerequisite check until you reinstall the extra.
 - Codex runs with `reasoning_effort=high`, the effort Harbor 0.22 used by
   default, so results stay comparable across Harbor upgrades.
+- Harbor installs Codex 0.161.0 and Claude Code 2.1.292 rather than the latest
+  release, so a new CLI release does not change results. Claude Code runs
+  Claude 5.5 and later models with `reasoning_effort=medium`. Local mode uses
+  your installed CLIs and checks that they are new enough for the model.
 - Installed Codex adapters merge existing user and MCP configuration before the
   selected runtime provider and endpoint take precedence over conflicting route
   keys.

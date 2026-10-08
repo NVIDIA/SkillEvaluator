@@ -3461,8 +3461,11 @@ Staging is not evaluation, so reports headline that count as
 reported staged components as not loaded, the headline adds them
 (**0 components not staged, 7 not loaded**) and reports list them as "staged,
 not loaded". When the with-plugin trials recorded activation, reports also
-count and list the staged components that no plugin trial exercised. Coverage
-reads as complete (green) only when every component was staged, loaded, and
+count and list the staged components that no plugin trial exercised ("staged,
+not exercised"). A hooks file in that list whose handlers partly started says
+how many did (`hook hooks/hooks.json (1 of 2 hook handlers started)`), and a
+component whose every activation failed is marked `unavailable`. Coverage reads
+as complete (green) only when every component was staged, loaded, and
 exercised. It reads red when a component was not staged, and yellow otherwise,
 including when no activation was recorded.
 
@@ -3485,7 +3488,7 @@ The HTML report shows coverage in the Tier 3 overview as
 Dependency status counts appear next to it under
 **Plugin Dependency Completeness**. The Markdown report has the same content
 under `### Plugin Component Coverage`. The CLI summary prints the not-staged
-and staged-but-not-observed counts and lists. The SARIF run properties carry
+and staged-but-not-exercised counts and lists. The SARIF run properties carry
 `componentsNotStaged`, `componentsNotLoaded` and, when activation was recorded,
 `componentsStagedNotObserved`. The JSON report keeps the raw
 `plugin_provenance` block in the Tier 3 payload.

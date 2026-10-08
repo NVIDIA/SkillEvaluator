@@ -346,7 +346,7 @@
 <details class="t3-details" id="tier3-plugin-coverage" open>
     <summary>Plugin Component Coverage &mdash;
         <span class="t3-pill {{ _pill_class(cov.status_class) }}">{{ cov.headline }}</span>
-        {% if cov.staged_not_observed %}<span class="t3-pill warning">{{ cov.staged_not_observed }} staged, not observed</span>{% endif %}
+        {% if cov.staged_not_observed %}<span class="t3-pill warning">{{ cov.staged_not_observed }} staged, not exercised</span>{% endif %}
     </summary>
     <div class="t3-details-body">
     <p class="plugin-headline{{ ' bad' if cov.not_staged else '' }}" id="tier3-plugin-not-evaluated"><strong>{{ cov.headline }}</strong> {{ cov.detail }}.</p>

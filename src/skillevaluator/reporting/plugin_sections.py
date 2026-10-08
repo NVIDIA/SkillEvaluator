@@ -1615,7 +1615,7 @@ def coverage_view(
     if not_loaded:
         headline += f", {not_loaded} not loaded"
     observed_headline = (
-        f"{_plural(unobserved, 'staged component')} not observed in any plugin trial" if unobserved else ""
+        f"{_plural(unobserved, 'staged component')} not exercised in any plugin trial" if unobserved else ""
     )
     all_exercised = bool(activation) and staged > 0 and not_staged == 0 and not_loaded == 0 and unobserved == 0
     return {
@@ -2487,9 +2487,21 @@ def _signal_entry(
     }
 
 
-def _component_list(rows: list[dict[str, Any]], total: int) -> str:
-    """Name the first coverage rows and count the rest of *total*."""
-    names = [f"{row['type']} {row['name']}".strip() for row in rows[:_NAMES_IN_TEXT]]
+# Observed labels that carry no runtime evidence of a component.
+_NO_EVIDENCE_LABELS = frozenset({"", "not observed", "unverified"})
+
+
+def _component_list(rows: list[dict[str, Any]], total: int, *, evidence: bool = False) -> str:
+    """Name the first coverage rows and count the rest of *total*.
+
+    With *evidence*, a row the trials saw some of (a hooks file with some
+    handlers started, an unavailable component) also shows its observed label.
+    """
+    names = [
+        f"{row['type']} {row['name']}".strip()
+        + (f" ({row['observed']})" if evidence and row["observed"] not in _NO_EVIDENCE_LABELS else "")
+        for row in rows[:_NAMES_IN_TEXT]
+    ]
     omitted = max(0, total - len(names))
     return ", ".join(names) + (f" (+{omitted} more)" if names and omitted else "")
 
@@ -2506,8 +2518,8 @@ def excluded_behavior(view: Mapping[str, Any], provenance: object) -> list[str]:
         listed = _component_list(coverage["not_staged_rows"], coverage["not_staged"])
         statements.append(f"{coverage['headline']}: {listed}" if listed else str(coverage["headline"]))
     if coverage and coverage.get("staged_not_observed"):
-        listed = _component_list(coverage["staged_not_observed_rows"], coverage["staged_not_observed"])
-        statements.append(f"Staged but not observed in any plugin trial: {listed}")
+        listed = _component_list(coverage["staged_not_observed_rows"], coverage["staged_not_observed"], evidence=True)
+        statements.append(f"Staged but not exercised in any plugin trial: {listed}")
     for deferral in _DEFERRALS:
         names, omitted = _names(source.get(deferral.field), limit=_NAMES_IN_TEXT)
         if names:

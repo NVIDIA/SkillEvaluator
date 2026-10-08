@@ -6673,6 +6673,7 @@ def _attach_plugin_signals(
             wrapper_skills=context.wrapper_skills,
             mcp_call_servers=call_servers,
             subagent_aliases=context.aliases_for(arm),
+            lsp_servers=context.lsp_servers_for(arm, agent),
         )
         # Hook census lines written by templates/hook_census.sh (native hook staging).
         census = artifacts.hook_census(job_dir / root)

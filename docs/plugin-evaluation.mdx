@@ -81,7 +81,7 @@ they are not interchangeable:
 | Claim | Meaning | Where the report records it |
 | --- | --- | --- |
 | **Files staged** | The component's files were copied into the with-plugin arm | Tier 3 `component_coverage`, state `staged` |
-| **Component loaded** | The agent actually activated it during a trial: a `Skill` call, a read of the member's `SKILL.md`, or an MCP, subagent, or command call | Per-trial `plugin_signals.activations` and `activation_coverage.exercised` |
+| **Component loaded** | The agent actually activated it during a trial: a `Skill` call, a read of the member's `SKILL.md`, an MCP, subagent, or command call, or a Claude Code `LSP` call that a plugin LSP server answered | Per-trial `plugin_signals.activations` and `activation_coverage.exercised` |
 | **Behavior verified** | A grader scored an outcome that depends on it | Dimension scores and Skill Lift; the advisory signal graders (tool selection, arguments, order, handoffs, conflict probes) |
 
 Staging a component proves only that it was available. A staged member skill
@@ -2662,6 +2662,7 @@ Each tool call maps to zero or more component **activations**:
 | `mcp` | `mcp__<server>__<tool>`. For declared runnable servers, `<server>__<tool>`, `<server>.<tool>`, and `<server>/<tool>` are also recognized and normalized |
 | `subagent` | `Task` or `Agent` calls. The name comes from `subagent_type` (or `subagent`, `agent`, `agent_name`, `agent_type`), else from `type`, where Claude Code's `Agent` tool puts it |
 | `command` | `SlashCommand` calls |
+| `lsp` | Claude Code's `LSP` tool, in a native Claude Code with-plugin arm, which stages the plugin's LSP servers. The call counts for the one staged server whose `extensionToLanguage` maps the extension of its `filePath` (`/workspace/notes.lab` for `".lab": "lab"`). When two staged servers map that extension, it counts for neither. A result that says `No LSP server ...` is a failed call |
 | `rule_read` | Reserved and never emitted. Rules are embedded in the wrapper, so there is no separate rule file to read |
 
 Each activation records its `type`, `name`, `tool`, `server`, `step_index`, and
@@ -2730,7 +2731,7 @@ A sibling call's result never stands in for another call's outcome. Codex
 | --- | --- |
 | `activations` | Ordered component activations, at most 512 |
 | `routing` | Check 15, component routing: `expected`, `acceptable`, `decoys`, `skipped`, `called`, `precision`, `recall`, `f1`, `decoy_calls`, and `status`, over skill, subagent, and command refs |
-| `tool_selection` | Check 22, tool selection: the same keys, over MCP and plain tool refs |
+| `tool_selection` | Check 22, tool selection: the same keys, over MCP, LSP, and plain tool refs |
 | `arguments` | `checked`, `passed`, and `failures` (`tool`, `arg`, `rule`, `detail`), plus `status` |
 | `mcp_calls` | `total`, `succeeded`, `failed`, `unknown`, `success_rate`, and `by_server` with per-server counts, `success_rate`, `tools`, and the same counts per tool (`by_tool`) |
 | `order` | `edges`, `satisfied`, `unordered`, `violated` (each with `before`, `after`, and `reason`), `skipped`, and `status` |
@@ -2776,7 +2777,9 @@ The declared components for coverage are the member skills in every arm, plus
 the runnable plugin MCP servers, subagents, and commands in the with-plugin
 arm. Each agent's with-plugin arm also declares the MCP servers only it
 stages: a native Claude Code arm declares the servers that launch from the
-copied plugin files, and no other agent's arm does. Subagents and commands
+copied plugin files, and no other agent's arm does. Only a native Claude Code
+with-plugin arm declares the plugin's LSP servers (the ones it writes to
+`.lsp.json`); every other arm skips an `LSP:` ref instead of failing it. Subagents and commands
 come from the component inventory (`agents` and `commands`), and a
 `Task`/`Agent` or `SlashCommand` activation matches a declared name with or
 without this plugin's `plugin:` namespace prefix (a bare name of the
@@ -2823,11 +2826,11 @@ into per-trial checks. They are heuristic and advisory.
   `routing` (check 15) uses the refs that name skills, subagents, or commands
   (typed `Skill:`, `Agent:`, and `Command:` refs, and untyped refs that name a
   declared component). `tool_selection` (check 22) uses the other refs (`MCP:`
-  refs and untyped tool names). So MCP calls never dilute routing, and skill
+  and `LSP:` refs and untyped tool names). So MCP calls never dilute routing, and skill
   loads never dilute MCP tool selection.
   - `called` lists the distinct identities of that kind: every skill,
-    subagent, and command activation for routing; every MCP call, plus any
-    plain tool a ref names, for tool selection. Ordinary unlisted tools such as
+    subagent, and command activation for routing; every MCP call and plugin LSP
+    server activation, plus any plain tool a ref names, for tool selection. Ordinary unlisted tools such as
     `Read` or `Bash` therefore do not dilute precision. The generated wrapper
     skill is never a selection, and no ref (not even a glob such as
     `Skill:release-*`) matches it. The wrapper is the `<plugin>-plugin-eval`
@@ -3009,6 +3012,7 @@ case-insensitive and supports `fnmatch` globs such as `mcp__tracker__*`.
 | `Agent:<name>`, `Subagent:<name>`, `Task:<name>` | A subagent activation |
 | `Command:<name>`, `SlashCommand:<name>` | A command activation. A leading `/` in the name is ignored |
 | `MCP:<server>` or `MCP:<server>/<tool>` | An MCP activation for that server, or that server's tool |
+| `LSP:<server>` | A plugin LSP server activation: a Claude Code `LSP` call on a file that server serves. A bare `LSP` ref is the tool itself, whichever server answered |
 | Anything else | The canonical tool label (for example `mcp__tracker__search_issues` or `Skill:release-notes`), the raw tool name (such as `Bash`, `Read`, or `Write`), an MCP tool's bare name (`search_issues`), or a component name |
 
 Matching details:
@@ -3484,6 +3488,10 @@ never downgraded, and an `invalid` row never changes. The reason gains a
   was exercised: a runnable server, or in a native Claude Code arm a server
   that launches from plugin files. A skill declared by reference counts when
   its `member` name was exercised.
+- **LSP servers.** `activation_coverage` exercised the server: a Claude Code
+  `LSP` call that did not fail, on a file whose extension only that staged
+  server maps. Only a native Claude Code with-plugin arm stages LSP servers,
+  so only its trials can exercise one.
 
 Staging is not evaluation, so reports headline that count as
 **N components not staged**, never as "not evaluated". When the harness
@@ -3643,8 +3651,11 @@ the following:
   native Claude Code also stages LSP servers (a regenerated `.lsp.json`) and
   settings (a `settings.json` with only `agent` and `subagentStatusLine`); see
   the [support matrix](#per-harness-adapters). Claude Code's startup report
-  names neither LSP servers nor settings, so their rows are at most `staged`
-  (listed by the load census), never `loaded`. Monitors are never staged. Their
+  names neither LSP servers nor settings, so their rows are never `loaded`:
+  they stay `staged` (listed by the load census) unless an LSP server is
+  `exercised` by a trial's `LSP` call (see
+  [Plugin component signals](#plugin-component-signals)). Monitors are never
+  staged. Their
   absence does not make a run `INCOMPLETE`.
 - **The hook and privilege checks are static heuristics.** Auto-approval is
   detected from allow decisions in the hook command or the plugin script it

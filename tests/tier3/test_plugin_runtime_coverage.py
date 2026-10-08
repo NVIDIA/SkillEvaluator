@@ -368,3 +368,79 @@ def test_a_claude_code_agent_call_that_names_the_subagent_by_type_exercises_it()
     assert first["activation_coverage"]["exercised"] == ["subagent:lab-reviewer"]
     builtin = _summary(_call(1, "Agent", {"type": "Explore", "prompt": "Find the notes."}))
     assert builtin["activation_coverage"]["exercised"] == []
+
+
+_LSP_HOVER = {"operation": "hover", "filePath": "/workspace/notes.lab", "line": 1, "character": 6}
+
+
+def _lsp_signals(context: Any, arm: str, agent: str, *steps: dict[str, Any], refs=("LSP:lab-lsp",)) -> dict[str, Any]:
+    trajectory = {"agent": {"name": agent}, "steps": list(steps)}
+    signals = compute_plugin_signals(
+        trajectory,
+        {"expected_tools": list(refs)},
+        declared=context.declared_for(arm, agent),
+        lsp_servers=context.lsp_servers_for(arm, agent),
+    )
+    assert signals is not None
+    return signals
+
+
+def test_a_claude_code_lsp_call_exercises_the_plugin_lsp_server_for_that_file() -> None:
+    # Claude Code's LSP tool names a file, and the staged .lsp.json maps its extension to one plugin server.
+    context = build_plugin_signals_context(
+        plugin_name="component-lab", agent_lsp_servers={"claude-code": {"lab-lsp": [".lab"]}}
+    )
+    hover = _call(1, "LSP", _LSP_HOVER)
+
+    signals = _lsp_signals(context, "with_skill", "claude-code", hover)
+    assert signals["activation_coverage"]["exercised"] == ["lsp:lab-lsp"]
+    assert [(item["type"], item["name"], item["tool"]) for item in signals["activations"]] == [
+        ("lsp", "lab-lsp", "LSP")
+    ]
+    assert signals["tool_selection"]["recall"] == 1.0
+    # A bare "LSP" ref is still the tool itself.
+    assert _lsp_signals(context, "with_skill", "claude-code", hover, refs=["LSP"])["tool_selection"]["recall"] == 1.0
+    engine = {
+        "agents": {"claude-code": {"plugin_signals_summary": {"with_skill": summarize_plugin_signals([signals])}}}
+    }
+    provenance = _provenance([_row("lsp", "lab-lsp", "staged")])
+    assert apply_runtime_coverage(provenance, engine) == 1
+    assert _states(provenance) == {"lab-lsp": "exercised"}
+
+    # A failed call, a server that did not answer, and a file the server does not serve are not credited.
+    failed = _failed_call(1, "LSP", _LSP_HOVER)
+    unserved = _call(1, "LSP", _LSP_HOVER)
+    unserved["observation"]["results"][0]["content"] = "No LSP server available for file type: .lab"
+    for step in (failed, unserved):
+        coverage = _lsp_signals(context, "with_skill", "claude-code", step)["activation_coverage"]
+        assert coverage["exercised"] == [] and coverage["unavailable"] == ["lsp:lab-lsp"]
+    other = _call(1, "LSP", {**_LSP_HOVER, "filePath": "/workspace/notes.txt"})
+    assert _lsp_signals(context, "with_skill", "claude-code", other)["activation_coverage"]["unverified"] == [
+        "lsp:lab-lsp"
+    ]
+
+
+def test_an_lsp_call_is_credited_only_to_one_server_staged_in_that_arm() -> None:
+    context = build_plugin_signals_context(
+        agent_lsp_servers={"claude-code": {"lab-lsp": [".lab"], "alt-lsp": [".LAB", ".alt"]}}
+    )
+    hover = _call(1, "LSP", _LSP_HOVER)
+
+    # Two staged servers claim .lab, so the call cannot say which one answered.
+    ambiguous = _lsp_signals(context, "with_skill", "claude-code", hover)
+    assert ambiguous["activations"] == [] and ambiguous["activation_coverage"]["exercised"] == []
+    alt = _lsp_signals(context, "with_skill", "claude-code", _call(1, "LSP", {**_LSP_HOVER, "filePath": "a.alt"}))
+    assert alt["activation_coverage"]["exercised"] == ["lsp:alt-lsp"]
+
+    # Only the native Claude Code with-plugin arm stages the servers: elsewhere nothing is credited,
+    # even when a caller passes the servers, and an LSP:<server> ref is skipped rather than failed.
+    for arm, agent in (("without_skill", "claude-code"), ("sum_of_parts", "claude-code"), ("with_skill", "codex")):
+        declared = context.declared_for(arm, agent)
+        assert "lsp" not in declared and "lsp" in declared["unstaged"], (arm, agent)
+        signals = _lsp_signals(context, arm, agent, _call(1, "LSP", {**_LSP_HOVER, "filePath": "a.alt"}))
+        assert signals["activations"] == [], (arm, agent)
+        assert signals["tool_selection"]["skipped"] == ["LSP:lab-lsp"], (arm, agent)
+        forced = compute_plugin_signals(
+            {"agent": {"name": agent}, "steps": [hover]}, declared=declared, lsp_servers={"lab-lsp": [".lab"]}
+        )
+        assert forced is not None and forced["activations"] == [], (arm, agent)

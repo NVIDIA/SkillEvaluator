@@ -2739,8 +2739,10 @@ def _identify_call(
     if call.is_shell:
         call.side_idents = _side_channel_idents(fn_base, args, declared)
         if _writes_a_file(call):
+            # Codex runs its file tool as a shell ``apply_patch``, so that call is ``apply_patch`` too.
+            aliases = (*_SHELL_WRITE_ALIASES, "apply_patch") if _runs_apply_patch(call) else _SHELL_WRITE_ALIASES
             call.idents = [
-                replace(ident, aliases=(*ident.aliases, *_SHELL_WRITE_ALIASES)) if ident.kind is None else ident
+                replace(ident, aliases=(*ident.aliases, *aliases)) if ident.kind is None else ident
                 for ident in call.idents
             ]
     return call
@@ -2825,6 +2827,19 @@ def _writes_a_file(call: _Call) -> bool:
     Writes to devices such as ``/dev/null`` do not count.
     """
     return any(path and not path.startswith("/dev/") for path in call.shell_paths.writes)
+
+
+def _runs_apply_patch(call: _Call) -> bool:
+    """Whether a shell call runs ``apply_patch`` on a patch (``apply_patch <<'PATCH'``, as Codex does)."""
+    return any(
+        _APPLY_PATCH_HEADER_RE.search(text)
+        and any(
+            _APPLY_PATCH_COMMAND_RE.fullmatch(word.rsplit("/", 1)[-1])
+            for command, _ in _shell_chain(text)
+            for word in command
+        )
+        for text in _shell_texts(call.fn_base, call.args)
+    )
 
 
 _AGENT_ID_RE = re.compile(r'"agentId"\s*:\s*"([A-Za-z0-9_.:-]{1,128})"')

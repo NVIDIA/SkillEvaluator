@@ -3312,7 +3312,10 @@ native `mcp__plugin_<plugin>_<server>__<tool>`, OpenCode's `<server>_<tool>`,
 Hermes's `mcp_<server>_<tool>`, and Codex's bare tool name (its server comes
 from the Codex session log). An exact server name wins; a sanitized spelling
 counts only when it fits exactly one declared server, so `my.docs` and
-`my-docs` never credit each other.
+`my-docs` never credit each other. With NVIDIA Build, the Claude Code and
+Codex bridges send a tool name longer than Build's 64-character limit to the
+model as a shortened alias and restore the real name in the agent's tool
+calls, so the trajectory and these signals always see the real name.
 
 | Status | Meaning |
 | --- | --- |

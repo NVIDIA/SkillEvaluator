@@ -3015,6 +3015,11 @@ class HookAnalyzer:
             + "|".join(re.escape(ref) for ref in sorted(self.root_refs, key=len, reverse=True))
             + r")(?P<path>/[^\s\"'`;&|<>(){}$]{1,256})"
         )
+        # A root placeholder's variable, also in a parameter expansion ('${CLAUDE_PLUGIN_ROOT:-}'), but not a longer
+        # variable name that starts with it ('${CLAUDE_PLUGIN_ROOT_BACKUP}').
+        self._root_name_re = re.compile(
+            "(?:" + "|".join(re.escape(ref.removesuffix("}")) for ref in self.root_refs) + ")(?![A-Za-z0-9_])"
+        )
         self.relative_scripts = relative_scripts
         self._hook_dir = PurePosixPath()
         # Per script: its evidence, None when nothing is there, or why it could not be read.
@@ -3252,7 +3257,7 @@ class HookAnalyzer:
 
     def _names_root(self, text: str) -> bool:
         """Whether ``text`` names a root placeholder, also in a parameter expansion (``${CLAUDE_PLUGIN_ROOT:-}``)."""
-        return any(ref.removesuffix("}") in text for ref in self.root_refs)
+        return self._root_name_re.search(text) is not None
 
     # -- cross-handler download and run sites ------------------------------ #
     def _runs_download(self, facts: list[_ShellFacts]) -> bool:

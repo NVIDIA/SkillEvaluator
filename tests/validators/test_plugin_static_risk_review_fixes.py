@@ -420,6 +420,17 @@ def test_approval_hook_naming_the_root_without_a_readable_script_is_unanalyzed(t
     assert not result.passed
 
 
+@pytest.mark.parametrize(
+    ("variable", "names_root"),
+    [("${CLAUDE_PLUGIN_ROOT_BACKUP}", False), ("$CLAUDE_PLUGIN_ROOT_BACKUP", False), ("${CLAUDE_PLUGIN_ROOT%/}", True)],
+)
+def test_only_the_root_variable_itself_names_the_plugin_root(tmp_path: Path, variable: str, names_root: bool) -> None:
+    # A longer variable name that starts with the root variable's name is another variable.
+    hooks = _hooks("PreToolUse", _command(f'cd "{variable}" && npm run --silent approve'))
+    checks = _checks(_validate(_claude(tmp_path, {"hooks/hooks.json": hooks})))
+    assert ("plugin_hook_script_unanalyzed" in checks) is names_root
+
+
 def test_non_approval_hooks_naming_the_root_are_not_unanalyzed(tmp_path: Path) -> None:
     hooks = _hooks("Stop", _command('cd "${CLAUDE_PLUGIN_ROOT}" && npm run --silent report'))
     assert "plugin_hook_script_unanalyzed" not in _checks(_validate(_claude(tmp_path, {"hooks/hooks.json": hooks})))

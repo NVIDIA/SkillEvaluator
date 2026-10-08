@@ -827,6 +827,22 @@ def test_permissive_permission_mode_flags_are_medium(tmp_path: Path, args: list[
     assert _checks(result)["plugin_permission_mode_flag"] == Severity.MEDIUM
 
 
+@pytest.mark.parametrize(
+    ("agent", "flagged"),
+    [
+        # The flag takes a list of values: every word up to the next option is a tool, so Bash is granted.
+        ({"command": "claude", "args": ["--allowedTools", "Read", "Bash", "-p", "x"]}, True),
+        ({"command": "claude --allowedTools Read Bash -p x"}, True),
+        # After the next option, or after '--allowedTools=Read', a word is not a value of the flag.
+        ({"command": "claude", "args": ["--allowedTools", "Read", "-p", "Bash"]}, False),
+        ({"command": "claude --allowedTools=Read Bash -p x"}, False),
+    ],
+)
+def test_every_value_of_the_allowed_tools_flag_is_checked(tmp_path: Path, agent: dict, flagged: bool) -> None:
+    result = _validate(_claude(tmp_path, {".lsp.json": {"agent": agent}}))
+    assert ("plugin_permission_allow_flag" in _checks(result)) is flagged
+
+
 def test_one_walk_reports_bypass_and_permissive_mode_flags() -> None:
     config = {"command": "codex", "args": ["exec", "-a", "never"], "env": {"AGENT": "claude --permission-mode Auto"}}
 

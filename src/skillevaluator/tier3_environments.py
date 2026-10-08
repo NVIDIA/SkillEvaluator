@@ -208,3 +208,6 @@ for _alias, _harbor_type in HARBOR_ENVIRONMENT_TYPE_ALIASES.items():
     )
 ENV_MODE_LOCAL = "local"
 DEFAULT_ENV_MODE = "docker"
+
+#: ``--plugin-load`` choices for plugin Tier 3 runs; ``wrapper`` is the default.
+PLUGIN_LOAD_CHOICES: tuple[str, ...] = ("wrapper", "native", "auto")

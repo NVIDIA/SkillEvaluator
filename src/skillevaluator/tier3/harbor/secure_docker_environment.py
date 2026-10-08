@@ -56,7 +56,11 @@ from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_STDIN_SENTINEL,
     read_nvidia_build_key_from_stdin,
 )
-from skillevaluator.tier3.harbor.stream_redaction import CommandOutputByteBudget
+from skillevaluator.tier3.harbor.stream_redaction import (
+    CommandOutputByteBudget,
+    CommandOutputLimitError,
+    diagnosed_command_output_limit_error,
+)
 from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
 
 if TYPE_CHECKING:
@@ -242,9 +246,25 @@ def _eligible_secret_values(
     )
 
 
+_FLAG_LIKE_VALUE_RE = re.compile(r"(?i)^(?:[0-9]+|true|false|yes|no|on|off|enabled|disabled|none|null)$")
+
+
+def _is_flag_like_value(value: str) -> bool:
+    """Return whether a sensitive-named value is plainly a flag, not a secret."""
+    return bool(_FLAG_LIKE_VALUE_RE.match(value.strip()))
+
+
 def _sensitive_environment_values(environment: Mapping[str, str]) -> set[str]:
-    """Return exact values whose component-aware names mark them sensitive."""
-    return {value for name, value in environment.items() if value and _SENSITIVE_ENV_NAME_RE.search(name)}
+    """Return exact values whose component-aware names mark them sensitive.
+
+    Flag values such as ``XDG_SESSION_ID=1`` or ``*_AUTH_ENABLED=true`` are not
+    secrets; protecting them would block ordinary values like ``127.0.0.1``.
+    """
+    return {
+        value
+        for name, value in environment.items()
+        if value and _SENSITIVE_ENV_NAME_RE.search(name) and not _is_flag_like_value(value)
+    }
 
 
 def _credential_uri_environment_values(environment: Mapping[str, str]) -> set[str]:
@@ -1323,8 +1343,14 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         timeout_sec: int | None,
         stdin_data: bytes | None = None,
         on_output: OutputCallback,
+        secret_values: Iterable[str] = (),
     ) -> ExecResult:
-        """Stream output within one hard raw-byte budget."""
+        """Stream output within one hard raw-byte budget.
+
+        An overflow raises ``CommandOutputLimitError`` with a bounded summary
+        of the accepted output, redacted with *secret_values* and the known
+        credential shapes, so the failure is diagnosable from trial artifacts.
+        """
         stdout_stream = process.stdout
         if stdout_stream is None:
             raise RuntimeError("Streaming requires a captured stdout pipe")
@@ -1345,7 +1371,18 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
 
         async def read_stdout_and_wait() -> None:
             while raw_chunk := await stdout_stream.read(64 * 1024):
-                output_budget.consume(raw_chunk)
+                try:
+                    output_budget.consume(raw_chunk)
+                except CommandOutputLimitError as limit_error:
+                    # Summarizing up to the full budget is CPU-bound; keep it
+                    # off the event loop that other trials share.
+                    raise await asyncio.to_thread(
+                        diagnosed_command_output_limit_error,
+                        limit_error,
+                        output,
+                        rejected_chunk_bytes=len(raw_chunk),
+                        secret_values=secret_values,
+                    ) from None
                 output.extend(raw_chunk)
                 if text := decoder.decode(raw_chunk):
                     await on_output(text, "stdout")
@@ -2202,7 +2239,10 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             exact_protected_values.update(
                 value
                 for name, value in environment.items()
-                if name != NVIDIA_BUILD_KEY_STDIN_ENV and value and _SENSITIVE_ENV_NAME_RE.search(name)
+                if name != NVIDIA_BUILD_KEY_STDIN_ENV
+                and value
+                and _SENSITIVE_ENV_NAME_RE.search(name)
+                and not _is_flag_like_value(value)
             )
 
         include(os.environ)
@@ -2236,7 +2276,9 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             for name, value in environment.items():
                 if not value or (name == retained_name and value == retained_value):
                     continue
-                if len(value) >= _MIN_EXACT_SECRET_LENGTH or _SENSITIVE_ENV_NAME_RE.search(name):
+                if len(value) >= _MIN_EXACT_SECRET_LENGTH or (
+                    _SENSITIVE_ENV_NAME_RE.search(name) and not _is_flag_like_value(value)
+                ):
                     protected_values.add(value)
 
         include(getattr(self, "_compose_task_env", {}))
@@ -3168,6 +3210,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                 timeout_sec=None,
                 stdin_data=stdin_data,
                 on_output=discard_output,
+                secret_values=secret_values,
             )
 
         creation = asyncio.create_task(
@@ -3245,6 +3288,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                         timeout_sec=None,
                         stdin_data=stdin_data,
                         on_output=redacted_callback,
+                        secret_values=secret_values,
                     )
                     if not callback_error.done():
                         final_output = stream_redactor.finish()

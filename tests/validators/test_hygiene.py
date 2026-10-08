@@ -198,7 +198,7 @@ Check the [config file](./config/settings.yaml) for settings.
 
         result = HygieneValidator()._check_dead_links(skill_dir)
 
-        assert result.errors == [f"Dead link in SKILL.md: {target}"]
+        assert [finding.message for finding in result.findings] == [f"Dead link in SKILL.md: {target}"]
 
     def test_commonmark_non_navigation_contexts_are_ignored(self, tmp_path: Path):
         """Frontmatter, code, comments, and non-navigation HTML stay inert."""
@@ -242,7 +242,7 @@ Check the [config file](./config/settings.yaml) for settings.
 
         result = HygieneValidator()._check_dead_links(skill_dir)
 
-        assert result.errors == ["Dead link in SKILL.md: missing-dir/"]
+        assert [finding.message for finding in result.findings] == ["Dead link in SKILL.md: missing-dir/"]
 
     def test_non_local_and_root_absolute_targets_are_ignored(self, tmp_path: Path):
         """External, anchor-only, and root-absolute destinations are not host paths."""
@@ -271,7 +271,7 @@ Check the [config file](./config/settings.yaml) for settings.
 
         result = HygieneValidator()._check_dead_links(skill_dir)
 
-        assert result.errors == ["Dead link in SKILL.md: missing.md"]
+        assert [finding.message for finding in result.findings] == ["Dead link in SKILL.md: missing.md"]
 
     def test_valid_relative_links_pass(self, tmp_path: Path):
         """Test that valid relative links pass."""
@@ -451,7 +451,7 @@ pandas
 
         result = HygieneValidator()._check_requirements_file(requirements)
 
-        assert result.errors == ["requirements.txt:1 - Banned package: pycrypto"]
+        assert [finding.message for finding in result.findings] == ["requirements.txt:1 - Banned package: pycrypto"]
         assert result.warnings == []
 
     def test_detects_banned_packages(self, tmp_path: Path):

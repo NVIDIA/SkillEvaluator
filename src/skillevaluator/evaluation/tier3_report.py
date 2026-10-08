@@ -728,6 +728,17 @@ def refresh_plugin_run_report(
         return None
 
 
+def _without_canary_token(entry: dict[str, Any]) -> dict[str, Any]:
+    """*entry* with its planted canary token redacted: the token is a decoy secret, and the dataset goes into the
+    shareable report and to the insights judge."""
+    from skillevaluator.tier3.eval_core.checks import CANARY_ENTRY_KEY, CANARY_REDACTION
+
+    canary = entry.get(CANARY_ENTRY_KEY)
+    if not isinstance(canary, dict) or "token" not in canary:
+        return entry
+    return {**entry, CANARY_ENTRY_KEY: {**canary, "token": CANARY_REDACTION}}
+
+
 def build_agent_eval_payload(
     skill_name: str,
     agents: dict[str, dict[str, Any]],
@@ -940,7 +951,7 @@ def build_agent_eval_payload(
         "supported_metric_ids": list(AGENT_EVAL_EVALUATORS),
         "metric_labels": metric_labels,
         "attempt_policy": policy,
-        "dataset": public_dataset,
+        "dataset": [_without_canary_token(entry) for entry in public_dataset],
         "provenance": _build_provenance(
             agent_payloads,
             agents,

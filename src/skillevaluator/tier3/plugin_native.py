@@ -1525,7 +1525,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
         stays where the plugin copy puts it; any other member skill (outside the
         plugin root, or inside it but somewhere Claude Code does not read) is
         copied to ``skills/<name>``. A name that is already taken fails closed,
-        because Claude Code would load the other skill under that name.
+        because Claude Code would load the other skill under that name; so do
+        two skill directories of the plugin itself with one name.
         """
         root = source.plugin_root.resolve()
         reader = PluginRootReader(root)
@@ -1547,7 +1548,14 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     loaded.append(child.as_posix())
         loaded = list(dict.fromkeys(loaded))
         # Claude Code names a plugin skill by its directory name, in any skill dir.
-        loaded_names = {PurePosixPath(rel).name: rel for rel in loaded}
+        loaded_names: dict[str, str] = {}
+        for rel in loaded:
+            taken = loaded_names.setdefault(PurePosixPath(rel).name, rel)
+            if taken != rel:
+                raise ValueError(
+                    f"Refusing to stage plugin skill '{rel}' natively: the staged plugin already has {taken}, "
+                    "so Claude Code would load two skills under that name"
+                )
         staged: list[tuple[str, str, Path | None]] = []
         placed: set[str] = set()
         for skill in source.member_skills:

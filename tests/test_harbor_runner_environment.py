@@ -553,7 +553,27 @@ def test_judge_model_config_distinguishes_provider_default_from_explicit_model(
         "model": "test-model",
         "source": expected_source,
         "override_applied": False,
+        "reasoning_effort": None,
     }
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "judge_model", "effort"),
+    [
+        ("openai", "gpt-6.1-sol", "medium"),
+        ("anthropic", "claude-opus-5-5", "medium"),
+        ("openai", "gpt-5.6-sol", None),
+        ("bedrock", "us.anthropic.claude-opus-5-5", None),
+    ],
+)
+def test_judge_model_config_records_the_judge_reasoning_effort(
+    provider_name: str, judge_model: str, effort: str | None
+) -> None:
+    provider = _provider(provider_name)
+
+    config = runner._judge_model_config(provider, {"LLM_JUDGE_MODEL": judge_model}, "default")
+
+    assert config["reasoning_effort"] == effort
 
 
 def test_mixed_agents_receive_disjoint_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1236,6 +1256,7 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
         "model": "legacy-judge-model",
         "source": "LLM_JUDGE_MODEL",
         "override_applied": True,
+        "reasoning_effort": None,
         "catalog_verification": "degraded",
     }
 

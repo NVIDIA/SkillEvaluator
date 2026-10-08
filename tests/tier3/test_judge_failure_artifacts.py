@@ -432,8 +432,8 @@ def test_verifier_main_recovers_malformed_accuracy_and_goal_judges(
     assert rich["details"]["goal_accuracy"]["score"] == 1.0
     assert rich["details"]["goal_accuracy"]["model"] == "retry-model"
     assert numeric["accuracy"] == numeric["goal_accuracy"] == numeric["behavior_check"] == 1.0
-    assert [kwargs["max_tokens"] for _, kwargs in pair_calls] == [4096, 4096, 4096]
-    assert [kwargs["max_tokens"] for _, kwargs in goal_calls] == [4096, 4096]
+    assert [kwargs["max_tokens"] for _, kwargs in pair_calls] == [verifier.STRUCTURED_JUDGE_MAX_TOKENS] * 3
+    assert [kwargs["max_tokens"] for _, kwargs in goal_calls] == [verifier.STRUCTURED_JUDGE_MAX_TOKENS] * 2
     assert "previous reply could not be parsed or validated" in pair_calls[1][0]
     assert "previous reply could not be parsed or validated" in goal_calls[1][0]
 
@@ -606,7 +606,7 @@ def test_verifier_main_keeps_accuracy_fail_closed_after_retry_exhaustion(
     assert len(pair_calls) == 3
     accuracy_attempts = [call for call in pair_calls if "SKILL_IDENTIFIED" in call[0]]
     assert len(accuracy_attempts) == 2
-    assert [kwargs["max_tokens"] for _, kwargs in accuracy_attempts] == [4096, 4096]
+    assert [kwargs["max_tokens"] for _, kwargs in accuracy_attempts] == [verifier.STRUCTURED_JUDGE_MAX_TOKENS] * 2
     assert len(goal_calls) == 1
     assert "previous reply could not be parsed or validated" in pair_calls[1][0]
     assert "previous reply could not be parsed or validated" not in pair_calls[2][0]

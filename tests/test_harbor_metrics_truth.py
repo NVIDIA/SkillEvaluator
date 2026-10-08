@@ -19,6 +19,7 @@ from skillevaluator.tier3.harbor.collector import (
     _compute_lift,
     _condition_execution_summary,
     _count_derived_pass_rate_delta,
+    _logical_attempt_rewards,
     _mcnemar_exact_p_value,
     _mcnemar_exact_probability,
     _minimum_attainable_mcnemar_p_value,
@@ -256,6 +257,57 @@ def test_lift_omits_unpaired_metrics_and_incomplete_overall() -> None:
             "direction": "up",
         }
     }
+
+
+def _judged_reward(case_id: str, accuracy: float, judge_model: str) -> dict:
+    reward = {
+        "entry_id": case_id,
+        "_trial_name": f"{case_id}__attempt1",
+        "metric_set": DEFAULT_METRIC_SET,
+        **dict.fromkeys(DEFAULT_METRICS, 0.5),
+        "accuracy": accuracy,
+    }
+    reward["details"] = {"accuracy": {"score": accuracy, "judge_model_used": judge_model}}
+    return reward
+
+
+def test_lift_leaves_out_cases_whose_arms_used_different_judges() -> None:
+    with_rewards = [_judged_reward("case-1", 1.0, "claude-opus-4-8"), _judged_reward("case-2", 0.8, "judge")]
+    without_rewards = [_judged_reward("case-1", 0.0, "judge"), _judged_reward("case-2", 0.4, "judge")]
+    with_scores = dict.fromkeys(DEFAULT_METRICS, 0.5) | {"accuracy": 0.9}
+    without_scores = dict.fromkeys(DEFAULT_METRICS, 0.5) | {"accuracy": 0.2}
+
+    lift = _compute_lift(with_scores, without_scores, with_rewards, without_rewards, ["case-1", "case-2"])
+
+    assert lift["accuracy"] == {"with_skill": 0.8, "without_skill": 0.4, "delta": 0.4, "direction": "up"}
+    assert lift["judge_mixed_cases"] == {"accuracy": 1}
+    assert lift["overall"]["delta"] == round(0.4 / len(DEFAULT_METRICS), 4)
+    assert "judge_mixed_cases" not in _compute_lift(with_scores, without_scores, with_rewards[1:], without_rewards)
+
+
+def test_lift_leaves_out_multistep_cases_whose_steps_used_a_fallback_judge() -> None:
+    def steps(case_id: str, accuracy: float, step_judges: tuple[str, ...]) -> list[dict]:
+        rows = []
+        for index, judge_model in enumerate(step_judges, start=1):
+            row = _judged_reward(case_id, accuracy, judge_model)
+            row |= {"_trial_root_name": f"{case_id}__attempt1", "_step_name": f"step-{index}"}
+            rows.append(row)
+        return rows
+
+    with_rewards = _logical_attempt_rewards(
+        [*steps("case-1", 1.0, ("judge", "claude-opus-4-8")), *steps("case-2", 0.8, ("judge", "judge"))]
+    )
+    without_rewards = _logical_attempt_rewards(
+        [*steps("case-1", 0.0, ("judge", "judge")), *steps("case-2", 0.4, ("judge", "judge"))]
+    )
+    with_scores = dict.fromkeys(DEFAULT_METRICS, 0.5) | {"accuracy": 0.9}
+    without_scores = dict.fromkeys(DEFAULT_METRICS, 0.5) | {"accuracy": 0.2}
+
+    assert "details" not in with_rewards[0]
+    lift = _compute_lift(with_scores, without_scores, with_rewards, without_rewards, ["case-1", "case-2"])
+
+    assert lift["accuracy"] == {"with_skill": 0.8, "without_skill": 0.4, "delta": 0.4, "direction": "up"}
+    assert lift["judge_mixed_cases"] == {"accuracy": 1}
 
 
 def test_pass_summary_marks_incomplete_reward_unscored() -> None:

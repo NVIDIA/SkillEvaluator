@@ -58,6 +58,10 @@ from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGen
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
+# Output budget for generation and refinement; OpenAI reasoning models get the
+# larger reasoning ceiling from the shared client.
+_GENERATION_MAX_TOKENS = 16000
+
 _INTERACTIVE_RE = re.compile(
     r"interactive|opens?\s+a?\s*browser|waits?\s+for\s+(the\s+)?user|device.code\s+flow",
     re.IGNORECASE,
@@ -485,7 +489,7 @@ No other fields."""
         if announce_provider:
             print(f"  Using public provider: {provider.provider} / {provider.model}")
         text = await asyncio.to_thread(
-            LLMClient(max_tokens=2000, temperature=0.3).completions,
+            LLMClient(max_tokens=_GENERATION_MAX_TOKENS, temperature=0.3).completions,
             "You generate high-quality JSON evaluation datasets for AI agent skills.",
             prompt,
         )
@@ -885,7 +889,7 @@ Return ONLY the refined JSON array. No other text."""
 
         print(f"  Refining with public provider: {provider.provider} / {provider.model}")
         text = await asyncio.to_thread(
-            LLMClient(max_tokens=4000, temperature=0.2).completions,
+            LLMClient(max_tokens=_GENERATION_MAX_TOKENS, temperature=0.2).completions,
             "You refine JSON evaluation datasets using execution evidence.",
             prompt,
         )

@@ -78,6 +78,10 @@ using Harbor 0.24:
   `tier3 evaluate` fail the prerequisite check until you reinstall the extra.
 - Codex runs with `reasoning_effort=high`, the effort Harbor 0.22 used by
   default, so results stay comparable across Harbor upgrades.
+- Harbor installs Codex 0.161.0 and Claude Code 2.1.292 rather than the latest
+  release, so a new CLI release does not change results. Claude Code runs
+  Claude 5.5 and later models with `reasoning_effort=medium`. Local mode uses
+  your installed CLIs and checks that they are new enough for the model.
 - Installed Codex adapters merge existing user and MCP configuration before the
   selected runtime provider and endpoint take precedence over conflicting route
   keys.
@@ -606,7 +610,8 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   a strict JSON Schema `response_format`; Anthropic `/v1/messages` receives
   `output_config`. Bedrock judges use prompt-only JSON.
 - **Automatic downgrade.** If an endpoint rejects the schema option itself
-  with HTTP 400 or 422 (for example, `response_format` is unsupported), the
+  with HTTP 400 or 422 (for example, `response_format` is unsupported, or a
+  gateway turned the schema into a `tool_choice` the model rejects), the
   judge repeats that request without the schema and logs a warning. It then
   skips the schema for that provider, endpoint, and model for the remaining
   judge calls in that verifier run. Other 400 and 422 errors are not
@@ -617,8 +622,24 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   format reminder. `behavior_check` can also salvage complete per-behavior
   results from a truncated reply and counts the missing behaviors as not
   passed.
+- **Reasoning models.** GPT-5 and GPT-6 judges get no `temperature` and at
+  least 32,768 output tokens, because reasoning tokens count against the
+  limit; other judges get 16,384. GPT-6 judges and Claude 5.5 or later judges
+  on the Anthropic API are sent reasoning effort `medium`; other models keep
+  their default effort.
+- **Refusals.** A safety-classifier refusal is never scored as an answer. On
+  the native Claude API, Claude 5.5 or later judges use server-side fallback to
+  `claude-opus-4-8`, and on Bedrock a filtered Claude 5.5 reply is retried
+  once on Claude Opus 4.8 in the same geography. A refusal or an empty reply
+  then moves on to the next `LLM_JUDGE_FALLBACK_MODELS` entry, if any.
+  Each judge's details in the trial's `skill_evaluator_reward.json` record
+  `judge_model_used`, `judge_reasoning_effort`, and `judge_fallback_used`.
+  When the two conditions of a case were judged by different models, the case
+  is left out of that judge's skill lift and counted in `judge_mixed_cases`
+  in `lift.json`.
 - **RAGAS goal scorer.** With the `openai` provider on the canonical
-  `https://api.openai.com/v1` endpoint, `goal_accuracy` first tries the RAGAS
+  `https://api.openai.com/v1` endpoint and a judge model that is not a GPT-5 or
+  GPT-6 reasoning model, `goal_accuracy` first tries the RAGAS
   `AgentGoalAccuracyWithReference` scorer through its own client, without the
   schema or retry handling above but within the same time budget. If RAGAS is
   unavailable or fails, the prompt judge runs instead.

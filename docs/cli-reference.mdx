@@ -396,7 +396,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
 | `--model TEXT` | unset | Global agent model override. |
-| `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable), e.g. `--agent-model codex=gpt-5.6-sol`. Accepts the `claude` alias for `claude-code`. |
+| `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable), e.g. `--agent-model codex=gpt-6.1-sol`. Accepts the `claude` alias for `claude-code`. |
 | `--custom-dockerfile-mode [preserve\|rebase]` | unset | How a custom `evals/environment/Dockerfile` is applied: `rebase` (built-in default) swaps its `FROM` line onto the eval base image; `preserve` keeps your `FROM` and appends the eval dependencies. |
 | `--skill-workspace-mode [isolated\|group]` | unset | `isolated` (built-in default) stages only the target skill in the agent workspace; `group` also stages the skills from `--include-skills` / `skill_workspace.include`. |
 | `--include-skills PATH` | none | Additional skill(s) to mount into the eval environment (repeatable; paths must exist). Requires group workspace mode (`--skill-workspace-mode group` or `skill_workspace.mode: group` in `evals/config.yml`). |
@@ -415,7 +415,8 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | `--progress [auto\|rich\|plain\|off]` | `auto` | Progress display for the run: `rich` live view, `plain` line output, or `off`. |
 
 Without a `--model`/`--agent-model` override, agent execution uses
-`gpt-5.6-sol` for OpenAI, `claude-opus-5` for Anthropic, and
+`gpt-6.1-sol` for OpenAI (OpenCode: `openai/gpt-5.6-sol` unless
+`SKILL_EVAL_LLM_MODEL` is set), `claude-opus-5-5` for Anthropic, and
 `nvidia/nemotron-3-super-120b-a12b` for NVIDIA Build. OpenCode displays the
 last value as `nvidia/nvidia/nemotron-3-super-120b-a12b` because its adapter
 namespace precedes the NVIDIA catalog ID.

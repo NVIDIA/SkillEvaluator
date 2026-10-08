@@ -10,6 +10,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from skillevaluator.deduplication.intra_skill.llm_analyzer import (
+    SYSTEM_PROMPT,
+    VERDICT_JSON_SCHEMA,
     analyze_cluster,
     build_user_prompt,
     verdict_to_severity,
@@ -109,6 +111,21 @@ class TestAnalyzeCluster:
         }
         with pytest.raises(LLMClientError, match="unknown verdict"):
             analyze_cluster(mock_client, make_cluster())
+
+    def test_requests_the_verdict_schema_and_reads_rationale(self, make_cluster) -> None:
+        mock_client = MagicMock(spec=LLMClient)
+        mock_client.extract_json_from_response.return_value = {
+            "verdict": "DUPLICATE",
+            "confidence": 0.9,
+            "rationale": "Same steps in both files",
+            "suggestion": "Keep one copy",
+        }
+
+        result = analyze_cluster(mock_client, make_cluster())
+
+        assert result.reasoning == "Same steps in both files"
+        assert mock_client.extract_json_from_response.call_args.kwargs["response_schema"] == VERDICT_JSON_SCHEMA
+        assert '"rationale"' in SYSTEM_PROMPT
 
     def test_extracts_all_fields(self, make_cluster) -> None:
         mock_client = MagicMock(spec=LLMClient)

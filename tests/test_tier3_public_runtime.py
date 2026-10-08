@@ -2614,9 +2614,9 @@ def test_write_task_toml_forwards_retry_env(tmp_path: Path) -> None:
         ("daytona", "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayCodex"),
     ],
 )
-def test_codex_runs_pin_harbor_022_reasoning_effort(env_mode: str, agent_import_path: str | None) -> None:
-    from harbor.cli.utils import parse_kwargs
-
+def test_codex_runs_pin_harbor_022_reasoning_effort_and_cli_version(
+    env_mode: str, agent_import_path: str | None
+) -> None:
     command = build_harbor_run_command(
         dataset_path="/tmp/dataset",
         agent="codex",
@@ -2625,13 +2625,74 @@ def test_codex_runs_pin_harbor_022_reasoning_effort(env_mode: str, agent_import_
         agent_import_path=agent_import_path,
     )
 
-    agent_kwargs = [command[index + 1] for index, value in enumerate(command) if value == "--ak"]
-    assert parse_kwargs(agent_kwargs) == {"reasoning_effort": "high"}
+    # Local mode runs the installed CLI, so only Harbor-installed runs pin a version.
+    expected = (
+        {"reasoning_effort": "high"} if env_mode == "local" else {"reasoning_effort": "high", "version": "0.161.0"}
+    )
+    assert _harbor_agent_kwargs(command) == expected
 
 
-@pytest.mark.parametrize("agent", ["claude-code", "opencode"])
-def test_non_codex_runs_pass_no_agent_kwargs(agent: str) -> None:
-    command = build_harbor_run_command(dataset_path="/tmp/dataset", agent=agent, job_name="effort", env_mode="docker")
+def _harbor_agent_kwargs(command: list[str]) -> dict[str, object]:
+    from harbor.cli.utils import parse_kwargs
+
+    return parse_kwargs([command[index + 1] for index, value in enumerate(command) if value == "--ak"])
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        (None, {"version": "2.1.292"}),
+        ("claude-opus-5", {"version": "2.1.292"}),
+        ("us.anthropic.claude-opus-5", {"version": "2.1.292"}),
+        ("aws/anthropic/bedrock-claude-opus-5", {"version": "2.1.292"}),
+        ("claude-opus-5-5", {"reasoning_effort": "medium", "version": "2.1.292"}),
+        ("us.anthropic.claude-opus-5-5", {"reasoning_effort": "medium", "version": "2.1.292"}),
+        ("aws/anthropic/bedrock-claude-opus-5-5", {"reasoning_effort": "medium", "version": "2.1.292"}),
+        ("anthropic/claude-sonnet-5-5-20261001", {"reasoning_effort": "medium", "version": "2.1.292"}),
+    ],
+)
+def test_claude_code_runs_pin_cli_version_and_claude_5_5_effort(model: str | None, expected: dict[str, str]) -> None:
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset", agent="claude-code", job_name="effort", env_mode="docker", model=model
+    )
+
+    assert _harbor_agent_kwargs(command) == expected
+
+
+def test_local_claude_code_runs_keep_effort_without_a_cli_version() -> None:
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset", agent="claude-code", job_name="effort", env_mode="local", model="claude-opus-5-5"
+    )
+
+    assert _harbor_agent_kwargs(command) == {"reasoning_effort": "medium"}
+
+
+def test_documented_agent_cli_versions_match_the_pins() -> None:
+    from skillevaluator.tier3.harbor import local_agents, runner
+
+    docs = Path(__file__).resolve().parents[1] / "docs"
+    pages = {
+        page: " ".join((docs / page).read_text(encoding="utf-8").split())
+        for page in ("agents-and-sandboxes.mdx", "tier3-live-evaluation.mdx")
+    }
+    for page, text in pages.items():
+        assert f"Codex {runner._CODEX_VERSION}" in text, page
+        assert f"Claude Code {runner._CLAUDE_CODE_VERSION}" in text, page
+    for name, minimum in (
+        ("Claude Code", local_agents._CLAUDE_CODE_MIN_VERSION_FOR_CLAUDE_5_5),
+        ("Codex", local_agents._CODEX_MIN_VERSION_FOR_GPT_6),
+    ):
+        assert f"{name} {'.'.join(map(str, minimum))} or newer" in pages["agents-and-sandboxes.mdx"]
+
+
+def test_opencode_runs_pass_no_agent_kwargs() -> None:
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="opencode",
+        job_name="effort",
+        env_mode="docker",
+        model="anthropic/claude-opus-5-5",
+    )
 
     assert "--ak" not in command
 
@@ -2649,3 +2710,21 @@ def test_codex_agents_render_the_pinned_reasoning_effort(tmp_path: Path) -> None
     ):
         agent = agent_class(logs_dir=tmp_path, model_name="openai/gpt-5", reasoning_effort="high")
         assert "-c model_reasoning_effort=high" in agent.build_cli_flags(), agent_class.__name__
+
+
+def test_claude_code_agents_accept_the_pinned_version_and_effort(tmp_path: Path) -> None:
+    from harbor.agents.installed.claude_code import ClaudeCode
+
+    from skillevaluator.tier3.harbor import local_agents
+
+    for agent_class in (
+        ClaudeCode,
+        local_agents.SkillEvaluatorLocalClaudeCode,
+        local_agents.SkillEvaluatorNvidiaBuildClaudeCode,
+        local_agents.SkillEvaluatorLocalNvidiaBuildClaudeCode,
+    ):
+        agent = agent_class(
+            logs_dir=tmp_path, model_name="anthropic/claude-opus-5-5", reasoning_effort="medium", version="2.1.292"
+        )
+        assert "--effort medium" in agent.build_cli_flags(), agent_class.__name__
+        assert agent.version() == "2.1.292", agent_class.__name__

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-from skillevaluator.inference.types import LLMClientError
+from skillevaluator.inference.types import LLMClientError, LLMClientRefusedError, LLMClientTruncatedError
 
 # Provider error bodies are untrusted. Only these known protocol values are
 # useful to callers; arbitrary messages, URLs, IDs, and headers stay private.
@@ -79,6 +79,11 @@ def llm_failure_diagnostic(exc: Exception) -> str:
         else:
             remedy = "The LLM request failed. Check the selected provider and model configuration."
         return f"HTTP {status}{context}: {remedy}"
+
+    if isinstance(exc, LLMClientRefusedError):
+        return "The model declined the request (safety refusal). Retry with a different model or review the input."
+    if isinstance(exc, LLMClientTruncatedError):
+        return "LLM response stopped at the output-token limit before it was complete. Retry or use another model."
 
     # These names are shared by the supported SDKs; inspecting the hierarchy
     # also recognizes SDK subclasses without loading optional dependencies.

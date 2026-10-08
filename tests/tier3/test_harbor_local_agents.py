@@ -374,6 +374,84 @@ def test_local_claude_does_not_rewrite_instruction_permission_text(monkeypatch, 
     assert instruction not in run_command
 
 
+def _install_with_cli_output(monkeypatch: pytest.MonkeyPatch, agent: object, stdout: str) -> list[str]:
+    commands: list[str] = []
+
+    async def fake_parent_exec(self, environment, command, **kwargs):
+        commands.append(command)
+        return ExecResult(stdout=stdout, return_code=0)
+
+    monkeypatch.setattr("harbor.agents.installed.base.BaseInstalledAgent.exec_as_agent", fake_parent_exec)
+    asyncio.run(agent.install(object()))
+    return commands
+
+
+@pytest.mark.parametrize(
+    ("agent_class", "model", "stdout", "version"),
+    [
+        (SkillEvaluatorLocalClaudeCode, "claude-opus-5-5", "2.1.280 (Claude Code)\n", "2.1.280"),
+        (SkillEvaluatorLocalClaudeCode, "aws/anthropic/bedrock-claude-opus-5-5", "2.1.292 (Claude Code)\n", "2.1.292"),
+        (SkillEvaluatorLocalClaudeCode, "claude-opus-5", "2.1.118 (Claude Code)\n", "2.1.118"),
+        (SkillEvaluatorLocalCodex, "openai/gpt-6.1-sol", "codex-cli 0.159.1\n", "0.159.1"),
+        (SkillEvaluatorLocalCodex, "openai/openai/gpt-6.1-sol", "codex-cli 0.161.0\n", "0.161.0"),
+        (SkillEvaluatorLocalCodex, "openai/gpt-5.6-sol", "codex-cli 0.124.0\n", "0.124.0"),
+    ],
+)
+def test_local_install_records_a_cli_version_that_supports_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    agent_class: type,
+    model: str,
+    stdout: str,
+    version: str,
+) -> None:
+    agent = agent_class(logs_dir=tmp_path, model_name=model)
+
+    commands = _install_with_cli_output(monkeypatch, agent, stdout)
+
+    assert len(commands) == 1 and commands[0].endswith("--version")
+    assert agent.version() == version
+
+
+@pytest.mark.parametrize(
+    ("agent_class", "model", "stdout", "message"),
+    [
+        (
+            SkillEvaluatorLocalClaudeCode,
+            "claude-opus-5-5",
+            "2.1.279 (Claude Code)\n",
+            "claude-opus-5-5 needs claude 2.1.280 or newer, but the installed claude reports version '2.1.279'",
+        ),
+        (
+            SkillEvaluatorLocalClaudeCode,
+            "us.anthropic.claude-sonnet-5-5",
+            "claude dev build\n",
+            "needs claude 2.1.280 or newer, but the installed claude reports version 'claude dev build'",
+        ),
+        (
+            SkillEvaluatorLocalCodex,
+            "openai/openai/gpt-6.1-sol",
+            "codex-cli 0.159.0\n",
+            "openai/openai/gpt-6.1-sol needs codex 0.159.1 or newer, but the installed codex reports version '0.159.0'",
+        ),
+    ],
+)
+def test_local_install_rejects_a_cli_too_old_for_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    agent_class: type,
+    model: str,
+    stdout: str,
+    message: str,
+) -> None:
+    agent = agent_class(logs_dir=tmp_path, model_name=model)
+
+    with pytest.raises(RuntimeError, match=message) as excinfo:
+        _install_with_cli_output(monkeypatch, agent, stdout)
+
+    assert "--env-mode docker" in str(excinfo.value)
+
+
 def test_nvidia_build_codex_final_config_keeps_dynamic_bridge_over_user_and_runtime_values(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

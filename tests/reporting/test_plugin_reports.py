@@ -356,7 +356,7 @@ def test_markdown_names_every_staged_component_no_plugin_trial_exercised(tmp_pat
 
     markdown = MarkdownReporter(include_timestamp=False).render_all([result])
 
-    assert "Staged but not observed in any plugin trial:" in markdown
+    assert "Staged but not exercised in any plugin trial:" in markdown
     for name in names:
         assert f"- skill {name} (unverified)" in markdown
 
@@ -384,9 +384,9 @@ def test_staged_but_unexercised_components_are_not_reported_as_evaluated(tmp_pat
     coverage = view["coverage"]
     assert coverage["headline"] == "0 components not staged"
     assert coverage["staged_not_observed"] == 4
-    assert coverage["observed_headline"] == "4 staged components not observed in any plugin trial"
+    assert coverage["observed_headline"] == "4 staged components not exercised in any plugin trial"
     assert coverage["all_exercised"] is False
-    unobserved = "Staged but not observed in any plugin trial: skill loader, mcp search, mcp docs, hook pre-commit"
+    unobserved = "Staged but not exercised in any plugin trial: skill loader, mcp search, mcp docs, hook pre-commit"
     assert unobserved in view["excluded"]
 
     html = HTMLReporter(include_timestamp=False).render_all([result])
@@ -394,28 +394,28 @@ def test_staged_but_unexercised_components_are_not_reported_as_evaluated(tmp_pat
     assert "not evaluated" not in (element_text(html, "tier3-plugin-not-evaluated") or "")
     assert (
         "0 components not staged of 4 declared or packaged component(s); 4 staged; "
-        "4 staged components not observed in any plugin trial."
+        "4 staged components not exercised in any plugin trial."
     ) in section
     assert '<span class="t3-pill warn">0 components not staged</span>' in html
-    assert "4 staged, not observed" in section
+    assert "4 staged, not exercised" in section
     assert unobserved in (element_text(html, "tier3-plugin-excluded") or "")
     markdown = MarkdownReporter(include_timestamp=False).render_all([result])
     assert (
-        "**0 components not staged** of 4 declared or packaged component(s); 4 staged; 4 staged components not observed in any plugin "
+        "**0 components not staged** of 4 declared or packaged component(s); 4 staged; 4 staged components not exercised in any plugin "
         "trial."
     ) in markdown
     console = Console(file=StringIO(), width=200, color_system=None)
     print_plugin_tier3(view, console)
     assert (
         "Component coverage: 0 components not staged (of 4 declared or packaged component(s); 4 staged; "
-        "4 staged components not observed in any plugin trial)"
+        "4 staged components not exercised in any plugin trial)"
     ) in " ".join(console.file.getvalue().split())
     sarif = json.loads(SARIFReporter(include_timestamp=False).render_all([tier1_plugin_result(), result]))
     assert sarif["runs"][0]["properties"]["plugin"]["componentsStagedNotObserved"] == 4
     card = BenchmarkReporter(include_timestamp=False, content_type="plugin", skill_name="demo-plugin").render_all(
         [result]
     )
-    assert "- Component coverage: 0 components not staged; 4 staged components not observed" in card
+    assert "- Component coverage: 0 components not staged; 4 staged components not exercised" in card
     assert f"- {unobserved}" in card
     assert "No declared component or measurement was recorded as excluded" not in card
 

@@ -77,7 +77,7 @@ _CLI_LIST_ITEMS = 10
 
 
 def _print_remaining(console: Console, remaining: int) -> None:
-    """Count the rows a Tier 3 coverage list (not staged, not loaded, not observed) left out."""
+    """Count the rows a Tier 3 coverage list (not staged, not loaded, not exercised) left out."""
     if remaining > 0:
         console.print(f"    [dim]... and {remaining} more[/dim]")
 

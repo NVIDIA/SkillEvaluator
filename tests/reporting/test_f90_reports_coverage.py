@@ -13,7 +13,8 @@ census and runtime evidence in, and every reporter renders the result.
   a staged component the harness did not load must not read as covered.
 - ``e04-plugin-missing-some-trials``: the reason says in how many trials it loaded.
 - ``p01`` / ``n06``: a hook row is "exercised" only when every staged handler
-  started, and an exercised hook row is never "not observed".
+  started, and an exercised hook row is never "not observed". A partly started
+  one is listed as not exercised, with how many of its handlers started.
 - ``p03`` / ``p04`` / ``p02`` and the TG auditor's SK1 run: components that
   cannot be staged are not counted as "declared, unverified".
 - skeptic ``sk-2agent-both-smoke``: one agent's listing never hides another
@@ -312,6 +313,29 @@ def test_a_hooks_file_with_a_handler_that_never_started_is_not_exercised(tmp_pat
     assert row["state"] == "staged"
     assert "runtime evidence" not in row["reason"]
     assert "- hook hooks/hooks.json (staged, 1 of 2 hook handlers started)" in _all_reports(results)["cli"]
+
+
+def test_a_partly_started_hooks_file_is_not_exercised_and_keeps_its_handler_count(tmp_path: Path) -> None:
+    """One of two handlers started: the hooks file is listed as not exercised, with how many started."""
+    exits = {HOOK_IDS[0]: 0, HOOK_IDS[1]: 127}
+    _provenance, results = _run(
+        tmp_path, [{"hook_exits": exits}] * 3, activation=_activation(exercised=["skill:notes", "mcp:tools"])
+    )
+
+    view = tier3_plugin_view(results[1].metadata["agent_eval"])
+    assert view is not None
+    coverage = view["coverage"]
+    assert "hooks/hooks.json" in {row["name"] for row in coverage["staged_not_observed_rows"]}
+    assert coverage["observed_headline"] == "3 staged components not exercised in any plugin trial"
+    [statement] = [line for line in view["excluded"] if line.startswith("Staged but not exercised")]
+    assert "hook hooks/hooks.json (1 of 2 hook handlers started)" in statement
+    reports = _all_reports(results)
+    for report in ("cli", "markdown", "html", "benchmark"):
+        assert "not observed in any plugin trial" not in reports[report]
+    assert statement in (element_text(reports["html"], "tier3-plugin-excluded") or "")
+    assert "staged, not exercised" in (element_text(reports["html"], "tier3-plugin-coverage") or "")
+    listed = "Staged but not exercised in any plugin trial:\n\n- hook hooks/hooks.json (1 of 2 hook handlers started)"
+    assert listed in reports["markdown"]
 
 
 # ---------------------------------------------------------------------------

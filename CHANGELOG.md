@@ -132,7 +132,7 @@ All notable changes to SkillEvaluator are documented in this file.
   names, run dataset regex patterns under a deadline, scan every MCP result
   block for failure markers, and judge falsy but defined ground truth.
 - Plugin reports fail closed on an unreadable provenance sidecar, say how many
-  components were not staged or staged but not observed, and label a
+  components were not staged or staged but not exercised, and label a
   sum-of-parts lift as integration rather than effectiveness. `regex` is now a
   direct runtime dependency.
 - Kept Tier 3's interactive progress frame at a stable height, bounded visible

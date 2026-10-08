@@ -945,7 +945,7 @@ class BenchmarkReporter(ReporterBase):
                 )
             lines.append("")
         if coverage["staged_not_observed_rows"]:
-            lines.extend(["Staged but not observed in any plugin trial:", ""])
+            lines.extend(["Staged but not exercised in any plugin trial:", ""])
             lines.extend(
                 f"- {_publication_safe_inline(row['type'], private_labels)} "
                 f"{_publication_safe_inline(row['name'], private_labels)} "

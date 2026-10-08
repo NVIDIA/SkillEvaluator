@@ -10,6 +10,7 @@ import copy
 import json
 import logging
 import math
+import os
 import stat
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextvars import ContextVar
@@ -1667,10 +1668,13 @@ def _validate_catalog(
     when any skill failed. With ``workers`` above 1, skills validate in
     parallel child processes and the per-skill pipeline view is skipped.
     """
-    if ctx.params.get("previous_version"):
+    from skillevaluator.validators.version import PREVIOUS_VERSION_ENV
+
+    # The environment variable is the flag's default, so it gets the same guard.
+    if ctx.params.get("previous_version") or os.environ.get(PREVIOUS_VERSION_ENV):
         raise click.ClickException(
-            "--previous-version applies to one skill and cannot be reused for a catalog; "
-            "validate each skill separately with its own previous version"
+            f"--previous-version (or {PREVIOUS_VERSION_ENV}) applies to one skill and cannot be reused for a "
+            "catalog; validate each skill separately with its own previous version"
         )
     if workers > 1:
         _validate_catalog_parallel(ctx, skill_dirs=skill_dirs, output_dir=output_dir, workers=workers)

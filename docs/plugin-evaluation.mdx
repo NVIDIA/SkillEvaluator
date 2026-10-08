@@ -3492,7 +3492,9 @@ files:
 
 - `plugin_provenance.json` in the run directory. It holds everything the run
   did and did not evaluate:
-  - the evaluated member skills, staged rules, and runnable MCP servers;
+  - the evaluated member skills, staged rules, and runnable MCP servers
+    (including servers that launch from plugin files when a native Claude
+    Code arm starts them);
   - unresolved refs, provider-only servers, and `mcp_unsupported_config`;
   - the dataset and cross-component case counts, `integration_evidence_ready`,
     and `partial`;

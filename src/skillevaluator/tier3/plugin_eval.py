@@ -509,7 +509,8 @@ def prepare_plugin_eval_package(
         package_path=package_path,
         include_skills=member_skills,
         unresolved_mcp_servers=mcp.provider_names,
-        runnable_mcp_servers=mcp.runnable_names,
+        # A native Claude Code arm also starts the servers that launch from plugin files.
+        runnable_mcp_servers=mcp.runnable_names + (mcp.plugin_file_names if claude_native else ()),
         mcp_unsupported_config=tuple(mcp_unsupported_config),
         staged_rules=tuple(rule.name for rule in staged_rules),
         unresolved_skill_refs=unresolved_skill_refs,

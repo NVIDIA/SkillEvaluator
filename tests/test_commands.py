@@ -1069,6 +1069,24 @@ def test_validate_catalog_rejects_the_previous_version_env_var_for_every_skill(m
         assert not Path("skillevaluator-results").exists()
 
 
+def test_validate_refuses_a_folder_of_plugins_instead_of_passing_it() -> None:
+    # The folder types as unknown: only generic checks ran, so the invalid plugin passed with exit 0.
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        plugins = Path("plugins")
+        for name, manifest in (("good", '{"name": "good"}'), ("bad", '{"name": "Bad Name!!", "version": 5')):
+            (plugins / name / ".claude-plugin").mkdir(parents=True)
+            (plugins / name / ".claude-plugin" / "plugin.json").write_text(manifest, encoding="utf-8")
+
+        result = runner.invoke(
+            cli, ["validate", str(plugins.resolve()), "--tiers", "1", "--checks", "schema", "--no-llm", "-o", "out"]
+        )
+
+        assert result.exit_code == 2, result.output
+        assert "folder of 2 plugins (bad, good)" in result.output
+        assert not Path("out").exists()
+
+
 def test_validate_quiet_failing_run_renders_verdict_and_fails_cleanly(monkeypatch) -> None:
     # Regression: a failing DEFAULT (quiet) run must render the verdict panel
     # and exit via the machine-readable ClickException — not an AttributeError.

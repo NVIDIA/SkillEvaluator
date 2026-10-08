@@ -2015,10 +2015,12 @@ def _resolve_validate_target(
     auto-detected type is then detected again on the resolved root. A
     directory of skills without a regular root ``SKILL.md`` is a catalog, and
     its direct child skills are returned so each one is validated as its own
-    job.
+    job. A directory of unknown type whose direct children are plugins is
+    refused: no plugin check would run on it.
     """
     from skillevaluator.cli_core import detect_content_type, resolve_content_path
     from skillevaluator.constants import (
+        CONTENT_TYPE_PLUGIN,
         CONTENT_TYPE_SKILL,
         CONTENT_TYPE_UNKNOWN,
         PLUGIN_CONTAINED_MANIFEST_FILE,
@@ -2064,6 +2066,23 @@ def _resolve_validate_target(
             raise click.ClickException(f"Cannot discover validation target safely: {exc}") from exc
         if resolved_target not in discovered:
             catalog_skill_dirs = sorted(skill_dir for skill_dir in discovered if skill_dir.parent == resolved_target)
+    if not catalog_skill_dirs and resolved_type == CONTENT_TYPE_UNKNOWN and resolved_target.is_dir():
+        # Generic checks on a folder of plugins never check a plugin, so its report would pass any plugin.
+        try:
+            plugin_dirs = [
+                child
+                for child in sorted(resolved_target.iterdir())
+                if stat.S_ISDIR(child.lstat().st_mode) and detect_content_type(child) == CONTENT_TYPE_PLUGIN
+            ]
+        except OSError as exc:
+            raise click.ClickException(f"Cannot discover validation target safely: {exc}") from exc
+        if plugin_dirs:
+            names = ", ".join(strip_terminal_controls(child.name) for child in plugin_dirs[:10])
+            more = f" and {len(plugin_dirs) - 10} more" if len(plugin_dirs) > 10 else ""
+            raise click.UsageError(
+                f"Validation target is a folder of {len(plugin_dirs)} plugins ({names}{more}), not one plugin; "
+                "validate each plugin root on its own"
+            )
     return _ValidateTarget(resolved_type, resolved_target, catalog_skill_dirs)
 
 

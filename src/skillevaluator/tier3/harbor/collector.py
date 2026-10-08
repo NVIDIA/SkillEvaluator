@@ -5098,7 +5098,7 @@ def _pass_summary(
         grouped.setdefault(_entry_id(reward, expected_id_set), []).append(reward)
 
     cases: dict[str, Any] = {}
-    pairing_cases: dict[str, dict[str, bool]] = {}
+    pairing_cases: dict[str, dict[str, Any]] = {}
     passed_cases = 0
     attempts_used = 0
     extra_case_ids: list[str] = []
@@ -5114,6 +5114,7 @@ def _pass_summary(
     for entry_id in case_order:
         attempts = grouped.get(entry_id, [])
         attempt_rows: list[dict[str, Any]] = []
+        attempt_passes: list[dict[str, bool]] = []
         best_score: float | None = None
         first_pass_attempt: int | None = None
         for idx, reward in enumerate(sorted(attempts, key=_attempt_sort_key), start=1):
@@ -5122,6 +5123,7 @@ def _pass_summary(
                 continue
             score = round(overall, 4)
             passed = score >= pass_threshold
+            attempt_passes.append({"passed": passed})
             if passed and first_pass_attempt is None:
                 first_pass_attempt = idx
             best_score = score if best_score is None else max(best_score, score)
@@ -5150,7 +5152,12 @@ def _pass_summary(
         skipped = unscored if stop_on_pass and case_passed else 0
         missing = 0 if skipped else unscored
 
-        pairing_cases[entry_id] = {"passed": case_passed, "extra_case": not is_expected_case}
+        # Every attempt, also past the published caps: pass^k counts all k of them.
+        pairing_cases[entry_id] = {
+            "passed": case_passed,
+            "extra_case": not is_expected_case,
+            "attempts": attempt_passes,
+        }
         if entry_id in published_case_ids:
             cases[entry_id] = {
                 "passed": case_passed,

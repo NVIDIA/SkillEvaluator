@@ -194,6 +194,12 @@ def _validate_skillspector_payload(
     return SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
 
 
+def _skillspector_fixture(name: str) -> dict:
+    """A captured SkillSpector --no-llm report from tests/fixtures (``skillspector-<name>-no-llm.json``)."""
+    path = Path(__file__).parents[1] / "fixtures" / f"skillspector-{name}-no-llm.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _set_universal_analyzer_work(payload: dict) -> None:
     """Keep synthetic complete reports aligned with producer work accounting."""
     component_count = len(payload["components"])
@@ -252,6 +258,53 @@ def _skillspector_documentation_only_report() -> dict:
             )
     _set_universal_analyzer_work(payload)
     return payload
+
+
+_PLUGIN_AUTHOR_EMAIL = "jane@contoso-tools.invalid"
+_PLUGIN_SUPPORT_EMAIL = "support@contoso-help.invalid"
+
+
+def _write_plugin_manifest(root: Path, manifest: str, *, support: str = _PLUGIN_SUPPORT_EMAIL) -> Path:
+    """Write *manifest* (root-relative) declaring the author email, with *support* in its description.
+
+    The description is on line 3 of a YAML manifest and line 4 of a JSON one.
+    """
+    path = root / manifest
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if manifest.endswith((".yaml", ".yml")):
+        path.write_text(
+            "name: contoso-tools\n"
+            "version: 1.0.0\n"
+            f"description: Questions go to {support}\n"
+            "author:\n"
+            "  name: Jane Doe\n"
+            f"  email: {_PLUGIN_AUTHOR_EMAIL}\n"
+            "skills:\n"
+            "  refs:\n"
+            "    - skills/loader\n"
+        )
+        return root
+    data: dict = {
+        "name": "contoso-tools",
+        "version": "1.0.0",
+        "description": f"Questions go to {support}",
+        "author": {"name": "Jane Doe", "email": _PLUGIN_AUTHOR_EMAIL},
+    }
+    if manifest == "plugin.json":
+        data["$schema"] = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return root
+
+
+def _email_occurrences(result: ValidationResult) -> dict[str, list[tuple[str, int]]]:
+    """Reported email addresses with their (file, line) occurrences."""
+    return {
+        finding.metadata["matched_value"]: [
+            (occurrence["file"], occurrence["line"]) for occurrence in finding.metadata["occurrences"]
+        ]
+        for finding in result.findings
+        if finding.check_name == "emails"
+    }
 
 
 def _user_facing_reports(result: ValidationResult) -> list[str]:
@@ -824,6 +877,126 @@ Run the documented workflow.
         email_findings = [finding for finding in pii_result.findings if finding.check_name == "emails"]
         assert len(email_findings) == 1
         assert email_findings[0].line_content == "Contact contributor@contributors.invalid for private support."
+
+    @pytest.mark.parametrize(
+        "manifest",
+        [
+            "agent_plugin.yaml",
+            "agent_plugin.yml",
+            ".claude-plugin/plugin.json",
+            "plugin.json",
+            ".codex-plugin/plugin.json",
+            ".cursor-plugin/plugin.json",
+        ],
+    )
+    def test_plugin_manifest_author_email_is_exempt_only_on_its_author_line(self, tmp_path: Path, manifest: str):
+        """A plugin manifest's declared author email is public metadata; other addresses stay PII."""
+        plugin = _write_plugin_manifest(tmp_path / "plugin", manifest)
+        (plugin / "README.md").write_text(f"# Contoso tools\n\nPrivate contact: {_PLUGIN_AUTHOR_EMAIL}\n")
+
+        occurrences = _email_occurrences(SecurityValidator(submitter_usernames=[]).validate_pii_only(plugin))
+
+        assert occurrences == {
+            _PLUGIN_AUTHOR_EMAIL: [("README.md", 3)],
+            _PLUGIN_SUPPORT_EMAIL: [(manifest, 3 if manifest.startswith("agent_plugin") else 4)],
+        }
+
+    def test_plugin_manifest_author_email_elsewhere_in_the_manifest_is_flagged(self, tmp_path: Path):
+        """Only the author email value is exempt: the same address in another manifest field is still PII."""
+        plugin = _write_plugin_manifest(tmp_path / "plugin", ".claude-plugin/plugin.json", support=_PLUGIN_AUTHOR_EMAIL)
+
+        occurrences = _email_occurrences(SecurityValidator(submitter_usernames=[]).validate_pii_only(plugin))
+
+        assert occurrences == {_PLUGIN_AUTHOR_EMAIL: [(".claude-plugin/plugin.json", 4)]}
+
+    def test_plugin_manifest_author_email_in_one_line_manifest_with_another_email(self, tmp_path: Path):
+        """On a shared line, the author email is exempt but another address on the same line is not."""
+        plugin = tmp_path / "plugin"
+        (plugin / ".claude-plugin").mkdir(parents=True)
+        (plugin / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps(
+                {
+                    "name": "contoso-tools",
+                    "author": {
+                        "name": "Jane Doe",
+                        "email": _PLUGIN_AUTHOR_EMAIL,
+                        "url": f"mailto:{_PLUGIN_SUPPORT_EMAIL}",
+                    },
+                }
+            )
+        )
+
+        occurrences = _email_occurrences(SecurityValidator(submitter_usernames=[]).validate_pii_only(plugin))
+
+        assert occurrences == {_PLUGIN_SUPPORT_EMAIL: [(".claude-plugin/plugin.json", 1)]}
+
+    @pytest.mark.parametrize(
+        ("manifest", "content"),
+        [
+            # Malformed manifests exempt nothing.
+            (
+                ".claude-plugin/plugin.json",
+                '{\n  "name": "contoso-tools",\n  "author": {\n    "email": "{email}",\n  },\n}\n',
+            ),
+            ("agent_plugin.yaml", "name: contoso-tools\nauthor:\n  email: {email}\n  - broken\n"),
+            # A root plugin.json is a manifest only when it opts into Agent Plugins.
+            ("plugin.json", '{\n  "name": "contoso-tools",\n  "author": {\n    "email": "{email}"\n  }\n}\n'),
+            # Not at the scanned root, so not this plugin's manifest.
+            (
+                "docs/.claude-plugin/plugin.json",
+                '{\n  "name": "contoso-tools",\n  "author": {\n    "email": "{email}"\n  }\n}\n',
+            ),
+            # Another key that holds the same address is not the author.
+            (".claude-plugin/plugin.json", '{\n  "author": {\n    "contact": "{email}"\n  }\n}\n'),
+            # Claude Code refuses a string author, so it declares nothing.
+            (".claude-plugin/plugin.json", '{\n  "name": "contoso-tools",\n  "author": "Jane Doe <{email}>"\n}\n'),
+        ],
+        ids=["malformed-json", "malformed-yaml", "root-without-schema", "nested", "other-key", "claude-string-author"],
+    )
+    def test_plugin_manifest_without_a_declared_author_email_is_flagged(
+        self, tmp_path: Path, manifest: str, content: str
+    ):
+        plugin = tmp_path / "plugin"
+        (plugin / manifest).parent.mkdir(parents=True, exist_ok=True)
+        (plugin / manifest).write_text(content.replace("{email}", _PLUGIN_AUTHOR_EMAIL))
+
+        occurrences = _email_occurrences(SecurityValidator(submitter_usernames=[]).validate_pii_only(plugin))
+
+        assert list(occurrences) == [_PLUGIN_AUTHOR_EMAIL]
+        assert [file for file, _line in occurrences[_PLUGIN_AUTHOR_EMAIL]] == [manifest]
+
+    def test_codex_manifest_string_author_email_is_exempt(self, tmp_path: Path):
+        """Codex tolerates an ``author`` string, so its ``Name <email>`` address is the declared author."""
+        plugin = tmp_path / "plugin"
+        (plugin / ".codex-plugin").mkdir(parents=True)
+        (plugin / ".codex-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "contoso-tools", "author": f"Jane Doe <{_PLUGIN_AUTHOR_EMAIL}>"}, indent=2)
+        )
+
+        assert _email_occurrences(SecurityValidator(submitter_usernames=[]).validate_pii_only(plugin)) == {}
+
+    def test_plugin_tree_scan_exempts_manifest_author_email(self, tmp_path: Path):
+        """The whole-plugin scan (plugin root plus bundled skills) exempts the root manifest's author email."""
+        from skillevaluator.validators.plugin_tree import plugin_tree_scope
+
+        plugin = _write_plugin_manifest(tmp_path / "plugin", "agent_plugin.yaml")
+        skill = plugin / "skills" / "loader"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: loader\ndescription: Loads data files.\n---\n\n# Loader\n\nMail {_PLUGIN_AUTHOR_EMAIL}.\n"
+        )
+
+        with plugin_tree_scope(plugin, [skill]):
+            result = SecurityValidator(submitter_usernames=[]).validate_pii_only(plugin)
+
+        assert sorted(
+            (finding.metadata["matched_value"], finding.file_path, finding.line_number)
+            for finding in result.findings
+            if finding.check_name == "emails"
+        ) == [
+            (_PLUGIN_AUTHOR_EMAIL, "[loader] skills/loader/SKILL.md", 8),
+            (_PLUGIN_SUPPORT_EMAIL, "agent_plugin.yaml", 3),
+        ]
 
     def test_unrelated_home_roots_not_flagged(self, tmp_path: Path):
         """Unrelated /home roots stay unflagged without an organization allowlist."""
@@ -2444,6 +2617,153 @@ Call us at 555-123-4567 or +1-555-987-6543
                 "evidence-types": "compacted identity",
             }[mutation]
             assert any(expected in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        "fixture",
+        ["2.11.2-binary-asset", "2.12.0-binary-asset", "2.11.2-oms-signature", "2.12.0-oms-signature"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_documented_scope_exclusions_are_not_scan_gaps(
+        self, mock_tools, sample_skill_dir: Path, fixture: str
+    ) -> None:
+        # Captured with --no-llm. binary-asset: a plugin root whose only binary file is
+        # assets/logo.png; oms-signature: a skill with a recognized skill.oms.sig.
+        payload = _skillspector_fixture(fixture)
+        completeness = payload["analysis_completeness"]
+        # The SkillSpector miscount the validator reconciles.
+        assert completeness["status"] == "complete"
+        assert len(payload["components"]) == completeness["total_components"] + 1
+        if "binary-asset" in fixture:
+            assert {
+                status["analyzer_id"]
+                for status in completeness["analyzer_statuses"]
+                if status["status"] == "completed" and status["failed"] == 1
+            } == set(completeness["scope_exclusions"][0]["analyzers"])
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.passed, result.errors
+        assert not result.is_incomplete
+        assert not result.errors
+
+    @pytest.mark.parametrize(
+        ("fixture", "expected"),
+        [("2.12.0-binary-asset", "contradicts its work accounting"), ("2.12.0-oms-signature", "component inventory")],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_scope_exclusion_reconciliation_is_version_gated(
+        self, mock_tools, sample_skill_dir: Path, fixture: str, expected: str
+    ) -> None:
+        payload = _skillspector_fixture(fixture)
+        payload["metadata"]["skillspector_version"] = "2.11.1"
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        assert any(expected in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        ("mutation", "expected"),
+        [
+            ("unexplained-failed", "contradicts its work accounting"),
+            ("fatal-exclusion", "contradicts its work accounting"),
+            ("analyzer-not-listed", "contradicts its work accounting"),
+            ("analyzer-without-failed-work", "names analyzer work"),
+            ("extra-component", "component inventory"),
+            ("text-suffix", "contradicts its work accounting"),
+            ("unlisted-suffix", "contradicts its work accounting"),
+            ("executable-component", "contradicts its work accounting"),
+            ("referenced-asset", "contradicts its work accounting"),
+            ("line-range", "contradicts its work accounting"),
+            ("other-reason", "contradicts its work accounting"),
+            ("partial-outcome", "contradicts its work accounting"),
+            ("universal-work-missing", "universal analyzer evidence"),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_binary_asset_reconciliation_fails_closed(
+        self, mock_tools, sample_skill_dir: Path, mutation: str, expected: str
+    ) -> None:
+        payload = _skillspector_fixture("2.12.0-binary-asset")
+        completeness = payload["analysis_completeness"]
+        exclusion = completeness["scope_exclusions"][0]
+        statuses = {status["analyzer_id"]: status for status in completeness["analyzer_statuses"]}
+        logo = next(component for component in payload["components"] if component["path"] == "assets/logo.png")
+        if mutation == "unexplained-failed":
+            statuses["static_patterns_ssrf"].update(completed=3, failed=2)
+        elif mutation == "fatal-exclusion":
+            exclusion["fatal"] = True
+        elif mutation == "analyzer-not-listed":
+            exclusion["analyzers"].remove("static_patterns_ssrf")
+        elif mutation == "analyzer-without-failed-work":
+            exclusion["analyzers"].append("static_yara")
+        elif mutation == "extra-component":
+            payload["components"].append({**logo, "path": "assets/banner.png"})
+        elif mutation in {"text-suffix", "unlisted-suffix"}:
+            # A text file whose bytes are binary, or an unknown binary blob, stays a scan gap.
+            logo["path"] = exclusion["path"] = "commands/logo.md" if mutation == "text-suffix" else "assets/logo.bin"
+        elif mutation == "executable-component":
+            logo["executable"] = True
+        elif mutation == "referenced-asset":
+            completeness["references"].append(
+                {"source_path": "README.md", "target_path": "assets/logo.png", "status": "resolved"}
+            )
+        elif mutation == "line-range":
+            exclusion.update(start_line=1, end_line=6)
+        elif mutation == "other-reason":
+            exclusion["reason_code"] = "not_regular_file"
+        elif mutation == "partial-outcome":
+            exclusion["outcome"] = "partial"
+        elif mutation == "universal-work-missing":
+            # The analyzer skipped the asset but also lost a component it should have scanned.
+            statuses["static_patterns_ssrf"].update(planned_work=4, completed=3)
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        assert any(expected in error for error in result.errors), result.errors
+
+    @pytest.mark.parametrize(
+        "mutation", ["fatal-exclusion", "no-exclusion", "other-path", "not-a-signature", "extra-component"]
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_oms_signature_reconciliation_fails_closed(
+        self, mock_tools, sample_skill_dir: Path, mutation: str
+    ) -> None:
+        payload = _skillspector_fixture("2.12.0-oms-signature")
+        completeness = payload["analysis_completeness"]
+        signature = next(component for component in payload["components"] if component["type"] == "oms_signature")
+        if mutation == "fatal-exclusion":
+            completeness["scope_exclusions"][0]["fatal"] = True
+        elif mutation == "no-exclusion":
+            completeness["scope_exclusions"] = []
+        elif mutation == "other-path":
+            signature["path"] = completeness["scope_exclusions"][0]["path"] = "references/skill.oms.sig"
+        elif mutation == "not-a-signature":
+            signature["type"] = "other"
+        elif mutation == "extra-component":
+            payload["components"].append({**signature, "path": "references/notes.md", "type": "markdown"})
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        assert any("component inventory contradicts" in error for error in result.errors), result.errors
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_partial_verdict_with_scope_exclusion_stays_incomplete(
+        self, mock_tools, sample_skill_dir: Path
+    ) -> None:
+        """A reconciled exclusion does not override SkillSpector's own partial verdict."""
+        payload = _skillspector_fixture("2.11.2-oms-signature")
+        payload["analysis_completeness"].update(
+            status="partial", is_complete=False, limitations=["Signature metadata was not verified."]
+        )
+        payload["risk_assessment"]["recommendation"] = "CAUTION"
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        assert any("reports incomplete analysis (status 'partial')" in error for error in result.errors)
 
     @pytest.mark.parametrize("skillspector_version", ["2.9.6", "2.10.0"])
     @patch("skillevaluator.validators.security.Tools")
@@ -5472,3 +5792,30 @@ class TestSpdxAndIpFalsePositiveHardening:
             for finding in result.findings
             if finding.check_name == "ip_addresses"
         ] == ["8.8.8.8"]
+
+
+@pytest.mark.parametrize(
+    ("text", "labels"),
+    [
+        ("appVersion = 1.2.3.4", ["appVersion"]),
+        ("imageTag: 10.0.0.1", ["imageTag"]),
+        ("versionCode=1.0.0.1", ["versionCode"]),
+        ("build-version: 1.2.3.4", ["build-version"]),
+        ("conversion 1.2.3.4", []),
+        ("staging 1.2.3.4", []),
+    ],
+)
+def test_version_label_pattern_finds_whole_identifier_labels(text: str, labels: list[str]) -> None:
+    found = [match.group() for match in SecurityValidator._VERSION_LABEL_PATTERN.finditer(text)]
+
+    assert found == labels
+
+
+def test_version_label_pattern_stays_fast_on_long_identifier_runs() -> None:
+    import time
+
+    started = time.perf_counter()
+    for text in ("a" * 60 + "!", "version" + "A" * 60 + "!", "b" * 40 + "Version" + "Q" * 40 + "x!"):
+        list(SecurityValidator._VERSION_LABEL_PATTERN.finditer(text))
+    # The old camel-case groups backtracked exponentially (about 0.15 s on 22 lowercase letters, doubling per letter).
+    assert time.perf_counter() - started < 1.0

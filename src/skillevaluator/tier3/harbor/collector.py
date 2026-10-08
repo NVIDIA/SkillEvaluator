@@ -7049,27 +7049,31 @@ def _arm_observations(arm: _CollectedArm, *, expected_case_ids: list[str] | None
     The scored attempts of an arm that did not complete are kept too: a lift
     interval pairs the cases both arms scored and marks itself partial, so one
     failed trial does not remove it. Per-arm cost and token blocks stay gated
-    on a completed arm in :func:`build_agent_statistics`.
+    on a completed arm in :func:`build_agent_statistics`. Trials with no score
+    are observed separately, for the statistics that read only their usage.
     """
     execution_status = str(arm.execution.get("execution_status") or "unknown")
     expected_ids = [str(case_id) for case_id in (expected_case_ids or []) if str(case_id)]
     expected_set = set(expected_ids) or None
     trials: list[TrialObservation] = []
-    for reward in sorted(arm.logical_rewards, key=_attempt_sort_key):
-        case_id = _entry_id(reward, expected_set)
-        if expected_set is not None and case_id not in expected_set:
-            continue
-        usage = _trial_usage(arm.job_dir, reward) if arm.job_dir is not None else {}
-        trials.append(
-            TrialObservation(
-                case_id=case_id, reward=reward, usage=usage, logical_overall=_mixed_logical_overall(reward)
+    unscored: list[TrialObservation] = []
+    for observed, rewards in ((trials, arm.logical_rewards), (unscored, arm.unscored_rewards)):
+        for reward in sorted(rewards, key=_attempt_sort_key):
+            case_id = _entry_id(reward, expected_set)
+            if expected_set is not None and case_id not in expected_set:
+                continue
+            usage = _trial_usage(arm.job_dir, reward) if arm.job_dir is not None else {}
+            observed.append(
+                TrialObservation(
+                    case_id=case_id, reward=reward, usage=usage, logical_overall=_mixed_logical_overall(reward)
+                )
             )
-        )
     return ArmObservations(
         execution_status=execution_status,
         trials=tuple(trials),
         pass_summary=arm.pass_summary or {},
         job_failure=arm.job_failure,
+        unscored=tuple(unscored),
     )
 
 
@@ -7381,6 +7385,8 @@ class _CollectedArm:
     # Scoreable reward rows, and the logical Harbor attempts they collapse to.
     rewards: list[dict[str, Any]] = dataclass_field(default_factory=list)
     logical_rewards: list[dict[str, Any]] = dataclass_field(default_factory=list)
+    # One reward row per trial that has no scoreable row (a judge error, say).
+    unscored_rewards: list[dict[str, Any]] = dataclass_field(default_factory=list)
     metric_set: str = DEFAULT_METRIC_SET
     metrics: tuple[str, ...] = DISPLAY_METRICS
     scores: dict[str, float] = dataclass_field(default_factory=dict)
@@ -7454,6 +7460,13 @@ def _collect_arm(
     rewards, invalid_score_failures = _partition_scoreable_rewards(collected_rewards)
     trial_failures.extend(invalid_score_failures)
     logical_rewards = _logical_attempt_rewards(rewards)
+    # A trial with no scoreable row still ran, so its token counts stay usable.
+    scored_roots = {reward.get("_trial_root_name") for reward in rewards}
+    unscored_rewards: dict[str, dict[str, Any]] = {}
+    for reward in collected_rewards:
+        root = reward.get("_trial_root_name")
+        if isinstance(root, str) and root and root not in scored_roots:
+            unscored_rewards.setdefault(root, reward)
     scores, metric_set, metrics = average_metrics(logical_rewards)
     execution = collection.execution_summary(
         rewards,
@@ -7535,6 +7548,7 @@ def _collect_arm(
         trial_failures=trial_failures,
         rewards=rewards,
         logical_rewards=logical_rewards,
+        unscored_rewards=list(unscored_rewards.values()),
         metric_set=metric_set,
         metrics=metrics,
         scores=scores,

@@ -635,6 +635,38 @@ def test_collector_reports_context_cost_unavailable_without_step_metrics(tmp_pat
     assert agent["integration_completeness"]["complete"] is None
 
 
+def test_collector_keeps_a_judge_error_trial_in_the_context_cost(tmp_path: Path) -> None:
+    jobs = tmp_path / "jobs"
+    _write_job(jobs, "with", dict.fromkeys(CASES, 0.9), first_turn_prompt=1_500)
+    _write_job(jobs, "without", dict.fromkeys(CASES, 0.4))
+    # The judge failed on both with-arm attempts of case-6; the agent ran and its trajectory has its count.
+    for trial_name in ("case-6__attempt001", "case-6__attempt002"):
+        reward = {**_reward("case-6", 0.9), "evaluation_status": "error", "error": "judge call failed"}
+        reward_path = jobs / "demo-opencode-with" / trial_name / "verifier" / "reward.json"
+        reward_path.write_text(json.dumps(reward), encoding="utf-8")
+
+    result = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs,
+        n_attempts=2,
+        expected_cases=len(CASES),
+        expected_case_ids=CASES,
+        expected_trials=2 * len(CASES),
+    )
+    agent = result["agents"]["opencode"]
+
+    # A judge error does not change a token count: every case still pairs.
+    context = agent["context_cost_measured"]
+    assert context["n_pairs"] == 6
+    assert context["delta_tokens_mean"] == 500.0
+    assert context["excluded"] == {"hosted_search": 0, "missing_tokens": 0}
+    assert "one arm only" not in (context["reason"] or "")
+    # The scored statistics still leave the unscored case out.
+    assert agent["lift_uncertainty"]["effectiveness"]["n_cases"] == 5
+
+
 def test_trial_usage_falls_back_to_harbor_agent_result(tmp_path: Path) -> None:
     job_dir = tmp_path / "job"
     trial_dir = job_dir / "case-1__attempt001"

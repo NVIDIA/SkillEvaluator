@@ -11,7 +11,14 @@ from pathlib import Path
 import pytest
 
 from skillevaluator.provider_config import (
+    MAX_COMPLETION_TOKENS,
+    REASONING_MAX_COMPLETION_TOKENS,
     ProviderConfigurationError,
+    _supports_custom_temperature,
+    completion_token_limit,
+    effective_reasoning_effort,
+    is_claude_5_5_or_later,
+    is_openai_reasoning_model,
     resolve_embedding_provider,
     resolve_llm_provider,
     skillspector_reasoning_effort,
@@ -113,6 +120,54 @@ def test_skillspector_defaults_cover_every_provider_and_keep_supported_claude_mo
 )
 def test_skillspector_reasoning_effort_is_set_only_for_gpt_6_models(model: str, effort: str | None) -> None:
     assert skillspector_reasoning_effort(model) == effort
+
+
+@pytest.mark.parametrize(
+    ("model", "reasoning", "claude_5_5", "custom_temperature"),
+    [
+        ("gpt-5.6-sol", True, False, False),
+        ("openai/openai/gpt-5.6-sol", True, False, False),
+        ("gpt-6.1-sol", True, False, False),
+        ("openai/openai/gpt-6.1-sol", True, False, False),
+        ("gpt-4.1-mini", False, False, True),
+        ("claude-opus-5", False, False, False),
+        ("claude-opus-5-5", False, True, False),
+        ("claude-sonnet-5-5", False, True, False),
+        ("us.anthropic.claude-opus-5-5", False, True, False),
+        ("azure/anthropic/claude-opus-5-5", False, True, False),
+        # Gateway catalogs prefix vendor words; the old leaf check sent these a temperature.
+        ("aws/anthropic/bedrock-claude-opus-5", False, False, False),
+        ("aws/anthropic/bedrock-claude-opus-5-5", False, True, False),
+        ("claude-3-5-sonnet-20241022", False, False, True),
+        ("nvidia/nemotron-3-super-120b-a12b", False, False, True),
+    ],
+)
+def test_model_capability_helpers(model: str, reasoning: bool, claude_5_5: bool, custom_temperature: bool) -> None:
+    assert is_openai_reasoning_model(model) is reasoning
+    assert is_claude_5_5_or_later(model) is claude_5_5
+    assert _supports_custom_temperature(model) is custom_temperature
+    expected_limit = REASONING_MAX_COMPLETION_TOKENS if reasoning else MAX_COMPLETION_TOKENS
+    assert completion_token_limit(model, MAX_COMPLETION_TOKENS) == expected_limit
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "effort"),
+    [
+        ("openai", "gpt-6.1-sol", "high"),
+        ("openai-compatible", "openai/openai/gpt-6.1-sol", "high"),
+        ("anthropic", "claude-opus-5-5", "high"),
+        # Today's defaults keep their model-default effort.
+        ("openai", "gpt-5.6-sol", None),
+        ("anthropic", "claude-opus-5", None),
+        ("bedrock", "us.anthropic.claude-opus-5-5", None),
+        ("openai-compatible", "aws/anthropic/bedrock-claude-opus-5-5", None),
+        ("nv_build", "nvidia/nemotron-3-super-120b-a12b", None),
+    ],
+)
+def test_reasoning_effort_is_sent_only_where_the_route_accepts_it(
+    provider: str, model: str, effort: str | None
+) -> None:
+    assert effective_reasoning_effort(provider, model, "high") == effort
 
 
 @pytest.mark.parametrize(

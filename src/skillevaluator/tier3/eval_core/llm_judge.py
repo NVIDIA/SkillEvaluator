@@ -17,8 +17,15 @@ import urllib.request
 from typing import Any
 from urllib.parse import urlparse
 
-from skillevaluator.inference.types import EmptyLLMResponseError
-from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, _model_leaf, _supports_custom_temperature
+from skillevaluator.inference.types import EmptyLLMResponseError, LLMClientTruncatedError
+from skillevaluator.provider_config import (
+    CHAT_DEFAULT_OPENAI,
+    MAX_COMPLETION_TOKENS,
+    _supports_custom_temperature,
+    completion_token_limit,
+    effective_reasoning_effort,
+    is_openai_reasoning_model,
+)
 from skillevaluator.tier3.eval_core.atif_helpers import (
     _SECTION_COMPACT_TOOL_HISTORY,
     _SECTION_FINAL_RESPONSE,
@@ -33,6 +40,8 @@ logger = logging.getLogger(__name__)
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 NVIDIA_BUILD_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 DEFAULT_JUDGE_MODEL = CHAT_DEFAULT_OPENAI
+# Sent only to models that take an explicit effort (GPT-6, native Claude 5.5+).
+JUDGE_REASONING_EFFORT = "medium"
 
 _ERROR_REDACTION_MARKER = "[REDACTED]"
 _JUDGE_ERROR_REASON_LIMIT = 512
@@ -216,18 +225,19 @@ def _chat_completion_payload(
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
     token_key = (
         "max_completion_tokens"
-        if _model_leaf(model).startswith("gpt-5")
-        and _is_native_openai_chat_url(resolved_provider, resolved_request_url)
+        if is_openai_reasoning_model(model) and _is_native_openai_chat_url(resolved_provider, resolved_request_url)
         else "max_tokens"
     )
     payload: dict[str, Any] = {
         "model": model,
-        token_key: max_tokens,
+        token_key: completion_token_limit(model, max_tokens),
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
     }
     if temperature is not None and _supports_custom_temperature(model):
         payload["temperature"] = temperature
+    if effort := effective_reasoning_effort(resolved_provider, model, JUDGE_REASONING_EFFORT):
+        payload["reasoning_effort"] = effort
     if response_schema is not None:
         from skillevaluator.inference.client import _build_openai_response_format
 
@@ -240,7 +250,7 @@ def call_public_llm(
     *,
     model: str | None = None,
     api_key: str | None = None,
-    max_tokens: int = 1024,
+    max_tokens: int = 4096,
     temperature: float = 0.0,
     timeout: int = 60,
     allow_model_fallback: bool = True,
@@ -262,6 +272,7 @@ def call_public_llm(
             api_key=api_key,
             max_tokens=max_tokens,
             temperature=temperature,
+            reasoning_effort=JUDGE_REASONING_EFFORT,
         )
         return (
             client.completions(
@@ -274,6 +285,9 @@ def call_public_llm(
         )
     except EmptyLLMResponseError:
         return "", None
+    except LLMClientTruncatedError as exc:
+        # Like the verifier, hand back the partial reply so judges can salvage complete entries.
+        return exc.content, None
     except Exception as exc:
         detail = f"Public provider call failed: {exc}"
         return None, _redact_configured_credentials(detail, (api_key,))
@@ -609,7 +623,7 @@ def _salvage_behavior_results(text: str) -> list[dict[str, Any]]:
             return []
 
 
-STRUCTURED_JUDGE_MAX_TOKENS = 4096
+STRUCTURED_JUDGE_MAX_TOKENS = MAX_COMPLETION_TOKENS
 
 _JUDGE_RETRY_REMINDER = (
     "\n\nIMPORTANT: Your previous reply could not be parsed or validated. Respond with ONLY the "

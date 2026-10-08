@@ -17,9 +17,39 @@ All notable changes to SkillEvaluator are documented in this file.
   `skillspector_version` in the security result.
 - Install instructions and the missing-scanner hint now pin SkillSpector to
   `v2.12.0` instead of its default branch.
+- GPT-6 models get the GPT-5 request shape everywhere SkillEvaluator calls a
+  model: no `temperature`, and `max_completion_tokens` on the native OpenAI
+  endpoint. Gateway catalog IDs such as `aws/anthropic/bedrock-claude-opus-5`
+  are recognized as the Claude model they name.
+- Output-token limits are sized per model family. OpenAI reasoning models get
+  at least 32,768 tokens; other models get 16,384 for `--llm-verify`, rubric
+  evaluation, deduplication verdicts and judges, 8,192 for report suggestions
+  and 16,000 for dataset generation.
+- Reasoning effort is sent only to GPT-6 models and to Claude 5.5 or later on
+  the Anthropic API: `high` for `--llm-verify`, `medium` for rubric evaluation,
+  deduplication verdicts and judges. Today's default models keep their
+  default effort.
+- Rubric evaluation and deduplication verdicts request structured output. The
+  verifier and deduplication prompts ask for `rationale` instead of
+  `reasoning`; replies that still say `reasoning` are accepted.
+- The `goal_accuracy` RAGAS scorer is skipped for GPT-5 and GPT-6 judges, which
+  reject its sampling settings.
+- `run_config.json` records the judge reasoning effort, and each standard
+  judge's details record `judge_model_used`, `judge_reasoning_effort` and
+  `judge_fallback_used`. Skill lift leaves out a case whose two conditions were
+  judged by different models and counts it in `judge_mixed_cases`.
+- Removed the unused `CONTENT_DEDUP_LLM_*` constants and `LLM_VERIFY_MODEL`; an
+  LLM client built from explicit credentials uses the provider default model.
 
 ### Fixed
 
+- Safety-classifier refusals, content filters and output-token truncation are
+  detected instead of being read as empty or malformed output. `--llm-verify`
+  and rubric evaluation report the cause. Claude 5.5 or later requests to the
+  native Claude API use server-side fallback to Claude Opus 4.8. In the Harbor
+  verifier, Bedrock retries a filtered Claude 5.5 reply on Claude Opus 4.8, and
+  a refusal or empty judge reply moves on to the next
+  `LLM_JUDGE_FALLBACK_MODELS` entry.
 - Brought the published documentation in line with 0.5.0. It now covers how
   standard grading builds judge evidence and rebuilds trajectories from
   OpenCode and Codex logs, structured judge output and retries, the evidence

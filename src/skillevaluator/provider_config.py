@@ -74,31 +74,82 @@ _HEX_DIGIT_BYTES = frozenset(b"0123456789abcdefABCDEF")
 _UNRESERVED_BYTES = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 _NO_CUSTOM_TEMPERATURE_MODEL_IDS = frozenset({"claude-mythos-preview"})
 _ANTHROPIC_BEDROCK_PREFIX_RE = re.compile(r"^(?:(?:[a-z]{2}|global)\.)?anthropic\.")
+# Gateway catalogs can put vendor words before the model name, as in
+# ``aws/anthropic/bedrock-claude-opus-5-5``.
+_GATEWAY_LEAF_PREFIX_RE = re.compile(r"^(?:[a-z]+-)+?(?=(?:claude|gpt)-)")
 _VERSIONED_CLAUDE_MODEL_RE = re.compile(
     r"^claude-[a-z][a-z-]*-(?P<major>\d+)"
     r"(?:-(?P<minor>\d{1,2}))?"
     r"(?:-(?:\d{8}|latest))?"
     r"(?:-v\d+)?(?::\d+)?$"
 )
+# Output-token ceilings. OpenAI recommends reserving at least 25K tokens for
+# reasoning plus output on its reasoning models. Other models keep the role's
+# own limit, at most MAX_COMPLETION_TOKENS, which stays under the Anthropic
+# SDK's non-streaming max_tokens guard.
+MAX_COMPLETION_TOKENS = 16384
+REASONING_MAX_COMPLETION_TOKENS = 32768
+# Claude 5.5 safety classifiers can decline benign security content. The
+# native Claude API then retries the request on this model in the same call.
+ANTHROPIC_REFUSAL_FALLBACK_MODEL = "claude-opus-4-8"
+ANTHROPIC_SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
 def _model_leaf(model: str) -> str:
     """Return a normalized model ID for capability checks only."""
     leaf = str(model or "").strip().casefold().rsplit("/", 1)[-1]
+    leaf = _GATEWAY_LEAF_PREFIX_RE.sub("", leaf, count=1)
     return _ANTHROPIC_BEDROCK_PREFIX_RE.sub("", leaf, count=1)
+
+
+def _claude_version(model: str) -> tuple[int, int] | None:
+    """Return the ``(major, minor)`` version of a Claude model ID, or ``None``."""
+    match = _VERSIONED_CLAUDE_MODEL_RE.fullmatch(_model_leaf(model))
+    if match is None:
+        return None
+    return int(match.group("major")), int(match.group("minor") or 0)
+
+
+def is_openai_reasoning_model(model: str) -> bool:
+    """Return whether ``model`` is a GPT-5 or GPT-6 reasoning model."""
+    return _model_leaf(model).startswith(("gpt-5", "gpt-6"))
+
+
+def _is_gpt6_model(model: str) -> bool:
+    return _model_leaf(model).startswith("gpt-6")
+
+
+def is_claude_5_5_or_later(model: str) -> bool:
+    """Return whether ``model`` is a Claude 5.5 or later model."""
+    version = _claude_version(model)
+    return version is not None and version >= (5, 5)
 
 
 def _supports_custom_temperature(model: str) -> bool:
     """Return whether ``model`` accepts a non-default temperature value."""
-    leaf = _model_leaf(model)
-    if leaf.startswith("gpt-5") or leaf in _NO_CUSTOM_TEMPERATURE_MODEL_IDS:
+    if is_openai_reasoning_model(model) or _model_leaf(model) in _NO_CUSTOM_TEMPERATURE_MODEL_IDS:
         return False
+    version = _claude_version(model)
+    return version is None or version < (4, 7)
 
-    match = _VERSIONED_CLAUDE_MODEL_RE.fullmatch(leaf)
-    if match is None:
-        return True
-    version = (int(match.group("major")), int(match.group("minor") or 0))
-    return version < (4, 7)
+
+def completion_token_limit(model: str, max_tokens: int) -> int:
+    """Return ``max_tokens`` raised to the reasoning ceiling for OpenAI reasoning models."""
+    return max(max_tokens, REASONING_MAX_COMPLETION_TOKENS) if is_openai_reasoning_model(model) else max_tokens
+
+
+def effective_reasoning_effort(provider: str, model: str, effort: str | None) -> str | None:
+    """Return the reasoning effort SkillEvaluator sends for ``model`` on ``provider``.
+
+    Only GPT-6 models and native-Anthropic Claude 5.5 or later get one, so
+    older defaults keep their model-default effort. Bedrock and gateway Claude
+    routes can reject the field.
+    """
+    if provider == "anthropic":
+        supported = is_claude_5_5_or_later(model)
+    else:
+        supported = provider != "bedrock" and _is_gpt6_model(model)
+    return effort if supported else None
 
 
 def skillspector_reasoning_effort(model: str) -> str | None:
@@ -107,7 +158,7 @@ def skillspector_reasoning_effort(model: str) -> str | None:
     Only GPT-6 models get one. Claude models behind OpenAI-compatible gateways
     can reject the parameter, so their effort stays at the model default.
     """
-    return SKILLSPECTOR_DEFAULT_REASONING_EFFORT if _model_leaf(model).startswith("gpt-6") else None
+    return SKILLSPECTOR_DEFAULT_REASONING_EFFORT if _is_gpt6_model(model) else None
 
 
 class ProviderConfigurationError(ValueError):

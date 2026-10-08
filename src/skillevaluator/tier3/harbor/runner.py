@@ -44,10 +44,12 @@ from skillevaluator.provider_config import (
     ProviderConfig,
     ProviderConfigurationError,
     _normalize_anthropic_base_url,
+    effective_reasoning_effort,
     resolve_llm_provider,
 )
 from skillevaluator.source_identity import normalized_evaluated_source
 from skillevaluator.tier3.case_ids import validate_case_ids
+from skillevaluator.tier3.eval_core.llm_judge import JUDGE_REASONING_EFFORT
 from skillevaluator.tier3.evals_config import (
     MAX_HARBOR_TIMEOUT_MULTIPLIER,
     EvalsConfigError,
@@ -2025,21 +2027,20 @@ def _judge_model_config(
         return {"enabled": False}
     for name in ("LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"):
         if model := provider_env.get(name):
-            return {
-                "enabled": True,
-                "provider": provider.provider,
-                "model": model,
-                "source": name,
-                "override_applied": True,
-            }
+            source = name
+            override_applied = True
+            break
+    else:
+        model = provider.model
+        source = "SKILL_EVAL_LLM_MODEL" if os.environ.get("SKILL_EVAL_LLM_MODEL", "").strip() else "provider default"
+        override_applied = False
     return {
         "enabled": True,
         "provider": provider.provider,
-        "model": provider.model,
-        "source": (
-            "SKILL_EVAL_LLM_MODEL" if os.environ.get("SKILL_EVAL_LLM_MODEL", "").strip() else "provider default"
-        ),
-        "override_applied": False,
+        "model": model,
+        "source": source,
+        "override_applied": override_applied,
+        "reasoning_effort": effective_reasoning_effort(provider.provider, model, JUDGE_REASONING_EFFORT),
     }
 
 

@@ -4915,16 +4915,65 @@ def _pass_summary(
     }
 
 
+_LLM_JUDGE_METRICS = ("accuracy", "goal_accuracy", "behavior_check")
+
+
+def _judge_models_by_case(
+    rewards: list[dict[str, Any]], metric: str, expected_case_ids: set[str] | None
+) -> dict[str, set[str]]:
+    """Map each case to the judge models that scored ``metric`` in these rewards."""
+    models: dict[str, set[str]] = {}
+    for reward in rewards:
+        details = reward.get("details")
+        detail = details.get(metric) if isinstance(details, dict) else None
+        model = detail.get("judge_model_used") if isinstance(detail, dict) else None
+        if isinstance(model, str) and model:
+            models.setdefault(_entry_id(reward, expected_case_ids), set()).add(model)
+    return models
+
+
+def _metric_average_excluding(
+    rewards: list[dict[str, Any]], metric: str, excluded_cases: set[str], expected_case_ids: set[str] | None
+) -> float | None:
+    kept = [reward for reward in rewards if _entry_id(reward, expected_case_ids) not in excluded_cases]
+    return average_metrics(kept)[0].get(metric)
+
+
 def _compute_lift(
     with_scores: dict[str, float],
     without_scores: dict[str, float],
+    with_rewards: list[dict[str, Any]] | None = None,
+    without_rewards: list[dict[str, Any]] | None = None,
+    expected_case_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Compute skill lift (with-skill minus without-skill) per metric."""
+    """Compute skill lift (with-skill minus without-skill) per metric.
+
+    With the per-trial rewards, a case whose arms were judged by different
+    models (a judge fallback in one arm) is left out of that judge metric's
+    lift and counted in ``judge_mixed_cases``.
+    """
     lift: dict[str, Any] = {}
-    metrics = tuple(m for m in DISPLAY_METRICS if m in with_scores and m in without_scores)
-    for metric in metrics:
+    paired_scores: dict[str, tuple[float, float]] = {}
+    mixed_counts: dict[str, int] = {}
+    expected_set = set(expected_case_ids) if expected_case_ids else None
+    for metric in (m for m in DISPLAY_METRICS if m in with_scores and m in without_scores):
         w = with_scores[metric]
         wo = without_scores[metric]
+        if metric in _LLM_JUDGE_METRICS and with_rewards and without_rewards:
+            with_models = _judge_models_by_case(with_rewards, metric, expected_set)
+            without_models = _judge_models_by_case(without_rewards, metric, expected_set)
+            mixed = {
+                case_id
+                for case_id in with_models.keys() & without_models.keys()
+                if len(with_models[case_id] | without_models[case_id]) > 1
+            }
+            if mixed:
+                mixed_counts[metric] = len(mixed)
+                w = _metric_average_excluding(with_rewards, metric, mixed, expected_set)
+                wo = _metric_average_excluding(without_rewards, metric, mixed, expected_set)
+                if w is None or wo is None:
+                    continue
+        paired_scores[metric] = (w, wo)
         delta = round(w - wo, 4)
         lift[metric] = {
             "with_skill": w,
@@ -4932,14 +4981,17 @@ def _compute_lift(
             "delta": delta,
             "direction": "up" if delta > 0 else ("down" if delta < 0 else "flat"),
         }
+    metrics = tuple(paired_scores)
     if metrics in {DISPLAY_METRICS, LEGACY_METRICS}:
-        overall_with = sum(with_scores[m] for m in metrics) / len(metrics)
-        overall_without = sum(without_scores[m] for m in metrics) / len(metrics)
+        overall_with = sum(paired_scores[m][0] for m in metrics) / len(metrics)
+        overall_without = sum(paired_scores[m][1] for m in metrics) / len(metrics)
         lift["overall"] = {
             "with_skill": round(overall_with, 4),
             "without_skill": round(overall_without, 4),
             "delta": round(overall_with - overall_without, 4),
         }
+    if mixed_counts:
+        lift["judge_mixed_cases"] = mixed_counts
     return lift
 
 
@@ -6495,7 +6547,13 @@ def collect_harbor_results(
             and without_execution.get("execution_status") == "succeeded"
         )
         if paired_execution_succeeded and with_scores and without_scores:
-            lift = _compute_lift(with_scores, without_scores)
+            lift = _compute_lift(
+                with_scores,
+                without_scores,
+                with_logical_rewards,
+                without_logical_rewards,
+                expected_case_ids,
+            )
             _write_generated_root_json(agent_dir / "lift.json", output_dir, lift)
 
         custom_lift: dict[str, Any] = {}

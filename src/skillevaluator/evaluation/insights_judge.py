@@ -27,6 +27,7 @@ from skillevaluator.constants import (
     INSIGHTS_JUDGE_MAX_RECOMMENDATIONS,
     INSIGHTS_JUDGE_MAX_TOKENS,
     INSIGHTS_JUDGE_MODEL,
+    INSIGHTS_JUDGE_REASONING_EFFORT,
     INSIGHTS_JUDGE_TEMPERATURE,
 )
 from skillevaluator.inference.client import LLMClient
@@ -480,6 +481,7 @@ class InsightsJudge(LLMClient):
     default_model: str = INSIGHTS_JUDGE_MODEL
     default_max_tokens: int | None = INSIGHTS_JUDGE_MAX_TOKENS
     default_temperature: float | None = INSIGHTS_JUDGE_TEMPERATURE
+    default_reasoning_effort: str | None = INSIGHTS_JUDGE_REASONING_EFFORT
 
     def get_system_prompt(self) -> str:
         return _SYSTEM_PROMPT

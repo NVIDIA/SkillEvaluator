@@ -126,7 +126,7 @@ def test_accuracy_retries_invalid_response_once_and_recovers(
 
     assert result["score"] == 0.6
     assert result["criteria"] == _CRITERIA
-    assert [call["kwargs"]["max_tokens"] for call in calls] == [4096, 4096]
+    assert [call["kwargs"]["max_tokens"] for call in calls] == [judge_module.STRUCTURED_JUDGE_MAX_TOKENS] * 2
     assert "previous reply could not be parsed or validated" in calls[1]["prompt"]
 
 
@@ -234,7 +234,7 @@ def test_goal_retries_invalid_response_once_and_recovers(
 
     assert result["score"] == 1.0
     assert result["user_goal"] == "complete the task"
-    assert [call["kwargs"]["max_tokens"] for call in calls] == [4096, 4096]
+    assert [call["kwargs"]["max_tokens"] for call in calls] == [judge_module.STRUCTURED_JUDGE_MAX_TOKENS] * 2
     assert "previous reply could not be parsed or validated" in calls[1]["prompt"]
     if judge_module is eval_template:
         assert result["provider"] == "retry-provider"

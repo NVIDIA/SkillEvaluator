@@ -4147,6 +4147,43 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert not any("confirmed all findings" in message.lower() for message in result.messages)
         assert any("1 of 2 findings" in message and "not verified" in message for message in result.messages)
 
+    @pytest.mark.parametrize("explanation_key", ["rationale", "reasoning"])
+    def test_llm_verdict_explanation_reads_rationale_or_legacy_reasoning(
+        self, tmp_path: Path, explanation_key: str
+    ) -> None:
+        """The prompt asks for "rationale"; a reply using the older "reasoning" key still counts."""
+        result = ValidationResult()
+        result.add_structured_finding(
+            Finding(category="PII", severity=Severity.HIGH, check_name="email", message="Email", file_path="SKILL.md"),
+            is_error=True,
+        )
+
+        with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
+            verifier_cls.return_value.verify.return_value = {
+                0: {"verdict": "false_positive", "confidence": "high", explanation_key: "Documentation example."}
+            }
+            SecurityValidator(verify_llm=True)._verify_findings_with_llm(result, tmp_path)
+
+        assert result.findings[0].metadata["llm_reasoning"] == "Documentation example."
+        assert result.findings[0].severity == Severity.INFO
+        assert "incomplete_scans" not in result.metadata
+
+    def test_llm_verification_without_verdicts_reports_the_cause(self, tmp_path: Path) -> None:
+        result = ValidationResult()
+        result.add_structured_finding(
+            Finding(category="PII", severity=Severity.HIGH, check_name="email", message="Email", file_path="SKILL.md"),
+            is_error=True,
+        )
+        cause = "The model declined the request (safety refusal)."
+
+        with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
+            verifier_cls.return_value.verify.return_value = {}
+            verifier_cls.return_value.last_failure = cause
+            SecurityValidator(verify_llm=True)._verify_findings_with_llm(result, tmp_path)
+
+        assert result.metadata["incomplete_scans"] == ["llm-verification"]
+        assert f"LLM finding verification was skipped (no verdicts returned: {cause})" in result.messages
+
     def test_validate_security_only(self, sample_skill_dir: Path):
         """Test validate_security_only method runs only skillspector scan."""
         validator = SecurityValidator()

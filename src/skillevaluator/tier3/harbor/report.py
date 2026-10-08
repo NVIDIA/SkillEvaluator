@@ -701,7 +701,7 @@ Respond with ONLY a JSON array of objects {{"suggestion": "...", "dimension": "<
     try:
         from skillevaluator.tier3.eval_core.llm_judge import _extract_json, call_public_llm
 
-        content, error = call_public_llm(prompt, max_tokens=1536)
+        content, error = call_public_llm(prompt, max_tokens=8192)
         if error:
             logger.warning("LLM suggestion generation failed: %s", error)
             return [{"suggestion": s, "dimension": "", "evidence_refs": []} for s in _fallback_suggestions(findings)]

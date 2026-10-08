@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from tests.conftest import MockUrllibResponse, load_harbor_eval_template
 
-from skillevaluator.provider_config import CHAT_CHEAP_OPENAI, CHAT_DEFAULT_OPENAI
+from skillevaluator.provider_config import CHAT_CHEAP_OPENAI, CHAT_DEFAULT_OPENAI, REASONING_MAX_COMPLETION_TOKENS
 from skillevaluator.tier3.eval_core import llm_judge
 
 
@@ -39,7 +39,7 @@ def test_native_openai_gpt5_uses_max_completion_tokens_without_temperature(model
 
     assert payload == {
         "model": model,
-        "max_completion_tokens": 321,
+        "max_completion_tokens": REASONING_MAX_COMPLETION_TOKENS,
         "messages": [{"role": "user", "content": "Judge this response"}],
         "stream": False,
     }
@@ -93,6 +93,51 @@ def test_newer_claude_models_reject_custom_temperature(model: str) -> None:
     assert not llm_judge._supports_custom_temperature(model)
 
 
+@pytest.mark.parametrize("model", ["gpt-6.1-sol", "openai/openai/gpt-6.1-sol"])
+def test_gpt6_judge_payload_sends_judge_reasoning_effort(model: str) -> None:
+    payload = llm_judge._chat_completion_payload(
+        model=model,
+        prompt="Judge this response",
+        max_tokens=321,
+        temperature=0.0,
+        provider="openai",
+        request_url=llm_judge.OPENAI_CHAT_URL,
+    )
+
+    assert payload["reasoning_effort"] == llm_judge.JUDGE_REASONING_EFFORT
+    assert payload["max_completion_tokens"] == REASONING_MAX_COMPLETION_TOKENS
+    assert "temperature" not in payload
+
+
+def test_call_public_llm_returns_partial_text_from_a_truncated_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    monkeypatch.delenv("SKILL_EVAL_LLM_MODEL", raising=False)
+    mock_openai = MagicMock()
+    mock_openai.chat.completions.create.return_value.choices = [
+        MagicMock(finish_reason="length", message=MagicMock(content='{"results": [', refusal=None))
+    ]
+
+    with patch("openai.OpenAI", return_value=mock_openai):
+        assert llm_judge.call_public_llm("Judge this response") == ('{"results": [', None)
+
+
+def test_call_public_llm_reports_a_refusal_as_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    monkeypatch.delenv("SKILL_EVAL_LLM_MODEL", raising=False)
+    mock_openai = MagicMock()
+    mock_openai.chat.completions.create.return_value.choices = [
+        MagicMock(finish_reason="content_filter", message=MagicMock(content="", refusal=None))
+    ]
+
+    with patch("openai.OpenAI", return_value=mock_openai):
+        content, error = llm_judge.call_public_llm("Judge this response")
+
+    assert content is None
+    assert error is not None and "declined the request" in error
+
+
 def test_call_public_llm_uses_production_gpt5_payload_without_temperature(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -110,7 +155,7 @@ def test_call_public_llm_uses_production_gpt5_payload_without_temperature(
 
     assert (content, error) == ("Done", None)
     call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
-    assert call_kwargs["max_completion_tokens"] == 4096
+    assert call_kwargs["max_completion_tokens"] == REASONING_MAX_COMPLETION_TOKENS
     assert "temperature" not in call_kwargs
 
 
@@ -159,7 +204,7 @@ def test_shared_structured_judges_retry_empty_sdk_response(
     assert result["score"] == 1.0
     assert mock_openai.chat.completions.create.call_count == 2
     calls = mock_openai.chat.completions.create.call_args_list
-    assert [call.kwargs["max_tokens"] for call in calls] == [4096, 4096]
+    assert [call.kwargs["max_tokens"] for call in calls] == [llm_judge.STRUCTURED_JUDGE_MAX_TOKENS] * 2
     assert "previous reply could not be parsed or validated" in calls[1].kwargs["messages"][1]["content"]
 
 
@@ -194,7 +239,7 @@ def test_non_native_gpt5_requests_keep_max_tokens(provider: str, request_url: st
         request_url=request_url,
     )
 
-    assert payload["max_tokens"] == 321
+    assert payload["max_tokens"] == REASONING_MAX_COMPLETION_TOKENS
     assert "max_completion_tokens" not in payload
     assert "temperature" not in payload
 
@@ -229,7 +274,7 @@ def test_completion_token_payload_resolves_provider_and_url_when_omitted(
         temperature=0.0,
     )
 
-    assert payload["max_completion_tokens"] == 321
+    assert payload["max_completion_tokens"] == REASONING_MAX_COMPLETION_TOKENS
     assert "max_tokens" not in payload
     assert "temperature" not in payload
 
@@ -1122,6 +1167,7 @@ def test_harbor_eval_template_unrelated_400_does_not_disable_schema(
         "Unrecognized request argument supplied: response_format",
         "response_format is an unknown parameter",
         "output_config.format is an unexpected argument",
+        "tool_choice is not supported with this model",
     ],
 )
 def test_schema_rejection_grammar_accepts_direct_option_errors(message: str) -> None:

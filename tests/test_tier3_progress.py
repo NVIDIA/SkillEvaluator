@@ -1510,6 +1510,7 @@ def test_native_standard_grading_host_override_is_the_exact_judge_probe(
         "model": "host-judge-model",
         "source": override_name,
         "override_applied": True,
+        "reasoning_effort": None,
         "catalog_verification": "verified",
     }
 

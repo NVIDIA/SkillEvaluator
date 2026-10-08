@@ -16,6 +16,7 @@ from pathlib import Path
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_EMBEDDING_BATCH_SIZE,
+    CONTENT_DEDUP_LLM_REASONING_EFFORT,
     CONTENT_DEDUP_MAX_CHUNKS,
     CONTENT_DEDUP_MAX_LLM_CLUSTERS,
     CONTENT_DEDUP_SIMILARITY_THRESHOLD,
@@ -265,7 +266,7 @@ class IntraSkillValidator(ValidatorBase):
         # Step 5: LLM analysis for each cluster (concurrent)
         logger.info("Running LLM analysis on %d cluster(s) concurrently...", len(clusters))
         try:
-            llm = LLMClient(model=self._llm_model)
+            llm = LLMClient(model=self._llm_model, reasoning_effort=CONTENT_DEDUP_LLM_REASONING_EFFORT)
             config = llm._resolved_config()
             provider, model = safe_llm_labels(config.provider, config.model)
         except LLMClientError:

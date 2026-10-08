@@ -2797,7 +2797,8 @@ class SecurityValidator(ValidatorBase):
 
         if not verdicts:
             result.mark_scan_incomplete("llm-verification")
-            result.add_message("LLM finding verification was skipped (no verdicts returned)")
+            cause = f": {verifier.last_failure}" if verifier.last_failure else ""
+            result.add_message(f"LLM finding verification was skipped (no verdicts returned{cause})")
             return
 
         suppressed = 0
@@ -2809,7 +2810,8 @@ class SecurityValidator(ValidatorBase):
 
             verdict = verdict_data.get("verdict")
             confidence = verdict_data.get("confidence")
-            reasoning = verdict_data.get("reasoning")
+            # The prompt asks for "rationale"; replies that still say "reasoning" count too.
+            reasoning = verdict_data.get("rationale", verdict_data.get("reasoning"))
             if (
                 not isinstance(verdict, str)
                 or verdict not in _LLM_VERDICTS

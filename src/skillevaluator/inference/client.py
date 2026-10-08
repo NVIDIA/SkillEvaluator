@@ -27,16 +27,29 @@ from dataclasses import replace
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
-from skillevaluator.constants import LLM_VERIFY_MODEL, LLM_VERIFY_TEMPERATURE
+from skillevaluator.constants import LLM_VERIFY_TEMPERATURE
+from skillevaluator.inference.diagnostics import llm_failure_diagnostic
 from skillevaluator.inference.retry import RetryConfig, resolve_retry_config, retry_call_with_backoff
-from skillevaluator.inference.types import EmptyLLMResponseError, LLMClientError
+from skillevaluator.inference.types import (
+    EmptyLLMResponseError,
+    LLMClientError,
+    LLMClientRefusedError,
+    LLMClientTruncatedError,
+)
 from skillevaluator.logging_config import get_logger
 from skillevaluator.provider_config import (
+    ANTHROPIC_REFUSAL_FALLBACK_MODEL,
+    ANTHROPIC_SERVER_SIDE_FALLBACK_BETA,
+    CHAT_DEFAULT_MODELS,
+    MAX_COMPLETION_TOKENS,
     OPENAI_BASE_URL,
     ProviderConfig,
     ProviderConfigurationError,
-    _model_leaf,
     _supports_custom_temperature,
+    completion_token_limit,
+    effective_reasoning_effort,
+    is_claude_5_5_or_later,
+    is_openai_reasoning_model,
     resolve_llm_provider,
 )
 
@@ -94,10 +107,17 @@ def _sdk_targets_native_openai(client: Any) -> bool:
     return request_url.endswith(suffix) and _is_canonical_openai_base_url(request_url[: -len(suffix)])
 
 
+def _is_native_anthropic_endpoint(config: ProviderConfig) -> bool:
+    return config.provider == "anthropic" and (
+        not config.base_url or urlsplit(config.base_url).hostname == "api.anthropic.com"
+    )
+
+
 def _token_limit_kwargs(config: ProviderConfig, max_tokens: int | None) -> dict[str, int]:
     if max_tokens is None:
         return {}
-    if _is_native_openai_endpoint(config) and _model_leaf(config.model).startswith("gpt-5"):
+    max_tokens = completion_token_limit(config.model, max_tokens)
+    if _is_native_openai_endpoint(config) and is_openai_reasoning_model(config.model):
         return {"max_completion_tokens": max_tokens}
     return {"max_tokens": max_tokens}
 
@@ -160,7 +180,10 @@ _UNSUPPORTED_REASON_INDICATORS: tuple[str, ...] = (
     "disallowed",
 )
 
-_SCHEMA_OPTION_PATTERN = r"(?:response_format|response format|output_config|json_schema|structured[_ ]outputs?)"
+# Gateways can turn a schema into a forced tool call, so a tool_choice rejection is a schema rejection too.
+_SCHEMA_OPTION_PATTERN = (
+    r"(?:response_format|response format|output_config|json_schema|structured[_ ]outputs?|tool_choice)"
+)
 _SCHEMA_REJECTION_REASON = (
     r"(?:unsupported|not supported|not permitted|not allowed|disallowed|"
     r"unknown (?:parameter|field|argument)|unrecognized (?:request argument|parameter)|"
@@ -256,11 +279,30 @@ def _call_with_schema_fallback(
                 target_key.model,
             )
             fallback_kwargs = dict(call_kwargs)
-            fallback_kwargs.pop(schema_key, None)
+            schema_option = fallback_kwargs.pop(schema_key, None)
+            # Anthropic's output_config also carries the reasoning effort.
+            if isinstance(schema_option, dict) and "effort" in schema_option:
+                fallback_kwargs[schema_key] = {"effort": schema_option["effort"]}
             result = call_fn(**fallback_kwargs)
             _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
             return result
         raise
+
+
+# OpenAI-compatible finish_reason and Anthropic stop_reason values.
+_REFUSAL_STOP_REASONS = frozenset({"content_filter", "refusal"})
+_TRUNCATION_STOP_REASONS = frozenset({"length", "max_tokens"})
+
+
+def _checked_content(content: str, stop_reason: object, refusal: object = None) -> str:
+    """Return model text, raising typed errors for refusals, truncation and empty replies."""
+    if stop_reason in _REFUSAL_STOP_REASONS or (isinstance(refusal, str) and refusal):
+        raise LLMClientRefusedError(f"LLM provider declined the request (stop reason: {stop_reason})")
+    if stop_reason in _TRUNCATION_STOP_REASONS:
+        raise LLMClientTruncatedError("LLM response stopped at the output-token limit", content)
+    if not content:
+        raise EmptyLLMResponseError("LLM returned empty response content")
+    return content
 
 
 def _extract_choice_content(response: Any) -> str:
@@ -268,9 +310,11 @@ def _extract_choice_content(response: Any) -> str:
     first_choice = choices[0] if choices else None
     message = getattr(first_choice, "message", None) if first_choice is not None else None
     content = getattr(message, "content", None) if message is not None else ""
-    if not content:
-        return ""
-    return content.strip()
+    return _checked_content(
+        content.strip() if content else "",
+        getattr(first_choice, "finish_reason", None),
+        getattr(message, "refusal", None),
+    )
 
 
 class LLMClient:
@@ -286,12 +330,17 @@ class LLMClient:
        call :meth:`process`.
 
     Subclasses may override the ``default_*`` class attributes to change
-    model, token limit, or temperature without touching ``__init__``.
+    model, token limit, temperature, or reasoning effort without touching
+    ``__init__``, and set ``response_schema`` to request structured output
+    from :meth:`process`.
     """
 
-    default_model: str = LLM_VERIFY_MODEL
+    default_model: str | None = None
     default_max_tokens: int | None = None
     default_temperature: float | None = LLM_VERIFY_TEMPERATURE
+    default_reasoning_effort: str | None = None
+    response_schema: dict[str, Any] | None = None
+    schema_name: str = "judge_response"
 
     def __init__(
         self,
@@ -301,6 +350,7 @@ class LLMClient:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        reasoning_effort: str | None = None,
         max_retries: int | None = None,
         retry_base_delay: float | None = None,
         retry_max_delay: float | None = None,
@@ -311,6 +361,7 @@ class LLMClient:
         self._api_key = api_key
         self._max_tokens = max_tokens if max_tokens is not None else self.default_max_tokens
         self._temperature = temperature if temperature is not None else self.default_temperature
+        self._reasoning_effort = reasoning_effort if reasoning_effort is not None else self.default_reasoning_effort
         retry_cfg = resolve_retry_config()
         self._retry_config = RetryConfig(
             max_retries=max_retries if max_retries is not None else retry_cfg.max_retries,
@@ -320,6 +371,7 @@ class LLMClient:
         self._http_client = http_client
         self._client: Any = None
         self._provider_config: ProviderConfig | None = None
+        self.last_failure: str | None = None
 
     # -- public read-only properties for introspection --------------------
 
@@ -338,6 +390,12 @@ class LLMClient:
     @property
     def temperature(self) -> float | None:
         return self._temperature
+
+    @property
+    def reasoning_effort(self) -> str | None:
+        """Return the reasoning effort sent to the resolved model, or ``None`` for its default."""
+        config = self._resolved_config()
+        return effective_reasoning_effort(config.provider, config.model, self._reasoning_effort)
 
     @property
     def max_retries(self) -> int:
@@ -362,10 +420,11 @@ class LLMClient:
             return self._provider_config
 
         if self._api_key or self._base_url:
-            model = self._model or self.default_model
             base_url = _effective_openai_base_url(self._base_url)
+            provider = "openai" if _is_canonical_openai_base_url(base_url) else "openai-compatible"
+            model = self._model or self.default_model or CHAT_DEFAULT_MODELS[provider]
             self._provider_config = ProviderConfig(
-                provider="openai" if _is_canonical_openai_base_url(base_url) else "openai-compatible",
+                provider=provider,
                 model=model,
                 api_key=self._api_key,
                 base_url=base_url,
@@ -455,19 +514,30 @@ class LLMClient:
         config = self._resolved_config()
         client = self._get_client()
         target_key = SchemaTargetKey(config.provider, config.base_url or "", config.model)
+        reasoning_effort = self.reasoning_effort
 
         def _invoke_provider() -> str:
             use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
             if config.provider == "anthropic":
                 call_kwargs: dict[str, Any] = {
                     "model": config.model,
-                    "max_tokens": self._max_tokens or 4096,
+                    "max_tokens": self._max_tokens or MAX_COMPLETION_TOKENS,
                     "system": system_prompt,
                     "messages": [{"role": "user", "content": user_prompt}],
                     **_temperature_kwargs(config.model, self._temperature),
                 }
+                output_config: dict[str, Any] = {}
                 if use_schema and response_schema is not None:
-                    call_kwargs["output_config"] = _build_anthropic_output_config(response_schema)
+                    output_config.update(_build_anthropic_output_config(response_schema))
+                if reasoning_effort is not None:
+                    output_config["effort"] = reasoning_effort
+                if output_config:
+                    call_kwargs["output_config"] = output_config
+                if is_claude_5_5_or_later(config.model) and _is_native_anthropic_endpoint(config):
+                    # Server-side fallback (beta): a safety-classifier refusal is retried on
+                    # the fallback model within the same call. Older SDKs lack typed fields.
+                    call_kwargs["extra_headers"] = {"anthropic-beta": ANTHROPIC_SERVER_SIDE_FALLBACK_BETA}
+                    call_kwargs["extra_body"] = {"fallbacks": [{"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}]}
                 response = _call_with_schema_fallback(
                     client.messages.create,
                     call_kwargs,
@@ -478,9 +548,7 @@ class LLMClient:
                 content = "".join(
                     str(block.text) for block in response.content if getattr(block, "type", None) == "text"
                 )
-                if not content:
-                    raise EmptyLLMResponseError("LLM returned empty response content")
-                return content.strip()
+                return _checked_content(content.strip(), getattr(response, "stop_reason", None))
             if config.provider == "bedrock":
                 try:
                     from litellm import completion
@@ -498,10 +566,7 @@ class LLMClient:
                     **_temperature_kwargs(config.model, self._temperature),
                     **({"max_tokens": self._max_tokens} if self._max_tokens is not None else {}),
                 )
-                content = _extract_choice_content(response)
-                if not content:
-                    raise EmptyLLMResponseError("LLM returned empty response content")
-                return content
+                return _extract_choice_content(response)
             call_kwargs: dict[str, Any] = {
                 "model": config.model,
                 "stream": False,
@@ -511,6 +576,7 @@ class LLMClient:
                 ],
                 **_temperature_kwargs(config.model, self._temperature),
                 **_token_limit_kwargs(config, self._max_tokens),
+                **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
             }
             if use_schema and response_schema is not None:
                 call_kwargs["response_format"] = _build_openai_response_format(response_schema, schema_name)
@@ -522,16 +588,20 @@ class LLMClient:
                 target_key=target_key,
                 use_schema=use_schema,
             )
-            content = _extract_choice_content(response)
-            if not content:
-                raise EmptyLLMResponseError("LLM returned empty response content")
-            return content
+            return _extract_choice_content(response)
 
         return retry_call_with_backoff(_invoke_provider, config=self._retry_config)
 
-    def extract_json_from_response(self, system_prompt: str, user_prompt: str) -> dict:
+    def extract_json_from_response(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        response_schema: dict[str, Any] | None = None,
+        schema_name: str = "judge_response",
+    ) -> dict:
         """Send a completion and parse JSON from the response."""
-        raw = self.completions(system_prompt, user_prompt)
+        raw = self.completions(system_prompt, user_prompt, response_schema=response_schema, schema_name=schema_name)
 
         cleaned = raw.strip()
         if cleaned.startswith("```"):
@@ -567,20 +637,25 @@ class LLMClient:
         """Orchestrate a full LLM interaction: prompt -> call -> parse.
 
         On failure the fallback response is returned so callers always
-        receive a usable result.
+        receive a usable result, and ``last_failure`` records a bounded
+        diagnostic of the cause.
         """
+        self.last_failure = None
         try:
             system_prompt = self.get_system_prompt()
             user_prompt = self.create_user_prompt(**kwargs)
-            raw = self.completions(system_prompt, user_prompt)
+            raw = self.completions(
+                system_prompt,
+                user_prompt,
+                response_schema=self.response_schema,
+                schema_name=self.schema_name,
+            )
             return self.parse_response(raw, **kwargs)
-        except LLMClientError:
-            logger.warning("LLM not configured - using fallback response")
-            return self.get_fallback_response(**kwargs)
         except NotImplementedError:
             raise
         except Exception as exc:
-            logger.warning(f"LLM call failed ({exc}) - using fallback response")
+            self.last_failure = llm_failure_diagnostic(exc)
+            logger.warning("LLM call failed (%s) - using fallback response", self.last_failure)
             return self.get_fallback_response(**kwargs)
 
 

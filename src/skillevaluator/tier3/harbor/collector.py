@@ -4507,6 +4507,14 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
             logical_reward["_logical_overall"] = overall
         if any(row.get("_has_trajectory") for row in rows):
             logical_reward["_has_trajectory"] = True
+        # Keep every step's judge models so lift can spot a judge fallback in any step.
+        judge_models = {
+            metric: sorted(models)
+            for metric in _LLM_JUDGE_METRICS
+            if (models := set().union(*(_reward_judge_models(row, metric) for row in rows)))
+        }
+        if judge_models:
+            logical_reward["_judge_models"] = judge_models
         logical.append(logical_reward)
     return logical
 
@@ -4918,17 +4926,29 @@ def _pass_summary(
 _LLM_JUDGE_METRICS = ("accuracy", "goal_accuracy", "behavior_check")
 
 
+def _reward_judge_models(reward: dict[str, Any], metric: str) -> set[str]:
+    """Return the judge models that scored ``metric`` in one reward row.
+
+    A multi-step logical reward carries its steps' models in ``_judge_models``.
+    """
+    carried = reward.get("_judge_models")
+    if isinstance(carried, dict):
+        models = carried.get(metric)
+        return {model for model in models if isinstance(model, str) and model} if isinstance(models, list) else set()
+    details = reward.get("details")
+    detail = details.get(metric) if isinstance(details, dict) else None
+    model = detail.get("judge_model_used") if isinstance(detail, dict) else None
+    return {model} if isinstance(model, str) and model else set()
+
+
 def _judge_models_by_case(
     rewards: list[dict[str, Any]], metric: str, expected_case_ids: set[str] | None
 ) -> dict[str, set[str]]:
     """Map each case to the judge models that scored ``metric`` in these rewards."""
     models: dict[str, set[str]] = {}
     for reward in rewards:
-        details = reward.get("details")
-        detail = details.get(metric) if isinstance(details, dict) else None
-        model = detail.get("judge_model_used") if isinstance(detail, dict) else None
-        if isinstance(model, str) and model:
-            models.setdefault(_entry_id(reward, expected_case_ids), set()).add(model)
+        if reward_models := _reward_judge_models(reward, metric):
+            models.setdefault(_entry_id(reward, expected_case_ids), set()).update(reward_models)
     return models
 
 

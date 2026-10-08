@@ -127,6 +127,7 @@ from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_lo
 # PLUGIN_MCP_SERVERS_FILENAME stays distinct from the task-environment
 # ``mcp_servers.toml`` so the adapter can stage it for the with-plugin arm only.
 from skillevaluator.tier3.harbor.adapter import (
+    EVALS_DATASET_NAMES,
     MAX_PLUGIN_RUNTIME_NAMES,
     PLUGIN_MCP_SERVERS_FILENAME,
     PLUGIN_RUNTIME_COMPONENTS_FILENAME,
@@ -175,9 +176,9 @@ if TYPE_CHECKING:
 #: runner strips the suffix to recognize the wrapper skill by the plugin's name.
 PLUGIN_EVAL_PACKAGE_SUFFIX = "-plugin-eval"
 
-# Shared with Harbor's runtime find_evals_file() and the report loader so a
-# dataset accepted/staged here is resolvable downstream.
-_EVAL_DATASET_NAMES = tuple(f"evals{extension}" for extension in DATASET_EXTENSIONS)
+# Shared with Harbor's runtime find_evals_file(), in its order, so the dataset accepted, staged, and
+# previewed here is the one the run uses.
+_EVAL_DATASET_NAMES = EVALS_DATASET_NAMES
 
 # Install-time variables a harness expands when it loads an installed plugin
 # (Claude Code's CLAUDE_PLUGIN_ROOT/DATA, plus each manifest format's own root

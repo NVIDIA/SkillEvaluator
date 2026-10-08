@@ -84,6 +84,8 @@ _EVALUATOR_DATASET_FILENAMES = (
     "dataset.yaml",
     "dataset.yml",
 )
+#: The eval datasets :func:`find_evals_file` accepts, in the order it picks them.
+EVALS_DATASET_NAMES = ("evals.json", "evals.jsonl", "evals.yaml", "evals.yml", "dataset.json", "dataset.jsonl")
 _EVALUATOR_ONLY_TASK_INPUT_FILES = frozenset(
     {
         *(name.casefold() for name in _EVALUATOR_DATASET_FILENAMES),
@@ -1881,7 +1883,7 @@ def find_evals_file(skill_path: Path) -> Path | None:
     """Return the first supported SkillEvaluator eval dataset for a skill, if present."""
     evals_dir = skill_path / "evals"
     _validate_evals_source_directory(skill_path)
-    for name in ("evals.json", "evals.jsonl", "evals.yaml", "evals.yml", "dataset.json", "dataset.jsonl"):
+    for name in EVALS_DATASET_NAMES:
         candidate = evals_dir / name
         try:
             metadata = candidate.lstat()

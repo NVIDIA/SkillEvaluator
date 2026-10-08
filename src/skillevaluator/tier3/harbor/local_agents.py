@@ -16,6 +16,8 @@ import tempfile
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -38,6 +40,8 @@ from skillevaluator.tier3.harbor.sensitive_stdin import (
 
 if TYPE_CHECKING:
     from harbor.environments.base import BaseEnvironment
+    from harbor.models.trajectories.step import Step
+    from harbor.models.trajectories.trajectory import Trajectory
 
 _CODEX_MODEL_ARG_RE = re.compile(r"(?P<prefix>(?:^|\s)--model(?:=|\s+))(?P<model>[^\s]+)(?P<suffix>(?=\s|$))")
 
@@ -148,7 +152,287 @@ class SkillEvaluatorLocalClaudeCode(ClaudeCode):
         )
 
 
-class SkillEvaluatorGatewayCodex(Codex):
+@dataclass(frozen=True)
+class _CodexRollout:
+    """One Codex rollout file (one thread) and what its own ``session_meta`` says about it."""
+
+    path: Path
+    events: list[dict[str, Any]]
+    thread_id: str | None
+    parent_id: str | None
+    is_subagent: bool
+    nickname: str | None
+
+
+def _read_codex_rollout(path: Path) -> _CodexRollout:
+    events: list[dict[str, Any]] = []
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                with suppress(json.JSONDecodeError, RecursionError):
+                    event = json.loads(stripped)
+                    if isinstance(event, dict):
+                        events.append(event)
+    except (OSError, UnicodeDecodeError):
+        events = []
+    # The first session_meta is the thread's own; a forked child repeats its parent's further down.
+    meta = next((event for event in events if event.get("type") == "session_meta"), None)
+    payload = meta.get("payload") if meta else None
+    if not isinstance(payload, dict):
+        return _CodexRollout(path, events, None, None, False, None)
+    source = payload.get("source")
+    subagent = source.get("subagent") if isinstance(source, dict) else None
+    spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+    spawn = spawn if isinstance(spawn, dict) else {}
+    forked_from = payload.get("forked_from_id")
+    parent = spawn.get("parent_thread_id") or forked_from
+    nickname = payload.get("agent_nickname") or spawn.get("agent_nickname")
+    thread_id = payload.get("id")
+    return _CodexRollout(
+        path=path,
+        events=events,
+        thread_id=thread_id if isinstance(thread_id, str) and thread_id else None,
+        parent_id=parent if isinstance(parent, str) and parent else None,
+        is_subagent=subagent is not None or source == "subagent" or bool(forked_from),
+        nickname=nickname if isinstance(nickname, str) and nickname else None,
+    )
+
+
+def _codex_turn_start(event: dict[str, Any]) -> str | None:
+    payload = event.get("payload")
+    if event.get("type") != "event_msg" or not isinstance(payload, dict):
+        return None
+    if payload.get("type") not in {"task_started", "turn_started"}:
+        return None
+    turn_id = payload.get("turn_id")
+    return turn_id if isinstance(turn_id, str) and turn_id else None
+
+
+def _codex_turn_ids(events: list[dict[str, Any]]) -> set[str]:
+    turn_ids: set[str] = set()
+    for event in events:
+        payload = event.get("payload")
+        turn_id = _codex_turn_start(event)
+        if turn_id is None and event.get("type") == "turn_context" and isinstance(payload, dict):
+            turn_id = payload.get("turn_id") if isinstance(payload.get("turn_id"), str) else None
+        if turn_id:
+            turn_ids.add(turn_id)
+    return turn_ids
+
+
+def _codex_own_events(child: _CodexRollout, parent: _CodexRollout | None) -> list[dict[str, Any]]:
+    """Drop the history a ``fork_context`` child copied from its parent; keep the child's own turns.
+
+    Codex writes a forked child's rollout as its own ``session_meta``, then the parent's ``session_meta`` and
+    history, then the child's first turn. The copied part belongs to the parent's turns; the child's own part
+    starts at the first turn the parent never had.
+    """
+    events = child.events
+    metas = [index for index, event in enumerate(events) if event.get("type") == "session_meta"]
+    if len(metas) < 2:
+        return events
+    copied_start = metas[1]
+    inherited = _codex_turn_ids(parent.events) if parent is not None else set()
+    if not inherited:
+        first = next((turn for event in events[copied_start:] if (turn := _codex_turn_start(event))), None)
+        inherited = {first} if first else set()
+    for index in range(copied_start, len(events)):
+        turn_id = _codex_turn_start(events[index])
+        if turn_id and turn_id not in inherited:
+            return events[:copied_start] + events[index:]
+    return events[:copied_start]
+
+
+def _codex_step_time(step: Step) -> datetime | None:
+    if not step.timestamp:
+        return None
+    try:
+        when = datetime.fromisoformat(step.timestamp)
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
+
+
+def _sum_counts(base: int | None, extra: list[Any]) -> int | None:
+    values = [value for value in (base, *extra) if isinstance(value, int) and not isinstance(value, bool)]
+    return sum(values) if values else None
+
+
+class SkillEvaluatorCodex(Codex):
+    """Harbor's Codex, converting the main thread's rollout and folding subagent rollouts in as sidechain steps.
+
+    Each Codex thread writes its own rollout. When the agent calls ``spawn_agent``, the child thread's rollout
+    is the newest file, and Harbor converts only the newest one, so the trajectory became the subagent's: the
+    main agent's calls, its final answer and its first-turn tokens were lost. This picks the main thread (no
+    ``forked_from_id``, not a ``subagent`` source), then adds each descendant thread's agent steps marked
+    ``extra.is_sidechain`` and ``extra.agent_id``, as Harbor does for Claude Code subagents. The child's own
+    prompt is not added as a user step (it was written by the main agent, which the ``spawn_agent`` call
+    already shows), and no child step is placed after the main thread's final answer, which is what the judge
+    grades. A run with one rollout, or with no main thread, keeps Harbor's own conversion.
+    """
+
+    def convert_trajectory(self, logs_dir: Path) -> Trajectory | None:
+        sessions = logs_dir / "sessions"
+        paths = []
+        if sessions.is_dir() and not sessions.is_symlink():
+            paths = sorted(path for path in sessions.rglob("*.jsonl") if path.is_file() and not path.is_symlink())
+        if len(paths) < 2:
+            return super().convert_trajectory(logs_dir)
+        rollouts = [_read_codex_rollout(path) for path in paths]
+        roots = [rollout for rollout in rollouts if rollout.thread_id and not rollout.is_subagent]
+        if not roots:
+            return super().convert_trajectory(logs_dir)
+        # Like Harbor, convert the newest main thread (rollout names start with their creation time).
+        root = max(roots, key=lambda rollout: rollout.path)
+        trajectory = self._convert_codex_rollout_events(root.events, root.path.name)
+        if trajectory is None:
+            return None
+        children = self._codex_descendants(root, rollouts, single_root=len(roots) == 1)
+        if not children:
+            return trajectory
+        try:
+            return self._fold_codex_subagents(trajectory, children, rollouts)
+        except Exception:  # never lose the main thread over a malformed subagent rollout
+            self.logger.debug("Failed to fold Codex subagent rollouts into the trajectory", exc_info=True)
+            return trajectory
+
+    def _convert_codex_rollout_events(self, events: list[dict[str, Any]], name: str) -> Trajectory | None:
+        """Run Harbor's own conversion on one thread's events."""
+        if not events:
+            return None
+        with tempfile.TemporaryDirectory(prefix="skillevaluator-codex-rollout-") as directory:
+            (Path(directory) / name).write_text(
+                "".join(json.dumps(event) + "\n" for event in events),
+                encoding="utf-8",
+            )
+            return self._convert_events_to_trajectory(Path(directory))
+
+    @staticmethod
+    def _codex_descendants(
+        root: _CodexRollout, rollouts: list[_CodexRollout], *, single_root: bool
+    ) -> list[_CodexRollout]:
+        by_id = {rollout.thread_id: rollout for rollout in rollouts if rollout.thread_id}
+
+        def descends(rollout: _CodexRollout) -> bool:
+            seen: set[str] = set()
+            parent = rollout.parent_id
+            while parent and parent not in seen:
+                if parent == root.thread_id:
+                    return True
+                seen.add(parent)
+                ancestor = by_id.get(parent)
+                parent = ancestor.parent_id if ancestor is not None else None
+            return False
+
+        return [
+            rollout
+            for rollout in rollouts
+            if rollout.is_subagent
+            and rollout is not root
+            and (descends(rollout) or (rollout.parent_id is None and single_root))
+        ]
+
+    def _fold_codex_subagents(
+        self,
+        trajectory: Trajectory,
+        children: list[_CodexRollout],
+        rollouts: list[_CodexRollout],
+    ) -> Trajectory:
+        by_id = {rollout.thread_id: rollout for rollout in rollouts if rollout.thread_id}
+        main_steps = list(trajectory.steps)
+        main_times = [_codex_step_time(step) for step in main_steps]
+        final_index = next(
+            (
+                index
+                for index in range(len(main_steps) - 1, -1, -1)
+                if main_steps[index].source == "agent"
+                and isinstance(main_steps[index].message, str)
+                and main_steps[index].message.strip()
+            ),
+            len(main_steps),
+        )
+        # Child steps go before the first main step that started later, and never after the final answer.
+        slots: list[list[tuple[tuple[bool, float, int, int], Step]]] = [[] for _ in range(len(main_steps) + 1)]
+        child_steps: list[Step] = []
+        agent_ids: list[str] = []
+        for child_index, child in enumerate(children):
+            converted = self._convert_codex_rollout_events(
+                _codex_own_events(child, by_id.get(child.parent_id) if child.parent_id else None),
+                child.path.name,
+            )
+            if converted is None:
+                continue
+            slot = 0
+            for step_index, step in enumerate(converted.steps):
+                if step.source != "agent":
+                    continue
+                when = _codex_step_time(step)
+                later = next(
+                    (
+                        index
+                        for index, main_time in enumerate(main_times)
+                        if when is not None and main_time is not None and main_time > when
+                    ),
+                    len(main_steps),
+                )
+                slot = max(slot, min(later, final_index))
+                extra = dict(step.extra or {})
+                extra["is_sidechain"] = True
+                if child.thread_id:
+                    extra["agent_id"] = child.thread_id
+                if child.nickname:
+                    extra["agent_nickname"] = child.nickname
+                sidechain_step = step.model_copy(update={"extra": extra})
+                order = (when is None, when.timestamp() if when is not None else 0.0, child_index, step_index)
+                slots[slot].append((order, sidechain_step))
+                child_steps.append(sidechain_step)
+            if child.thread_id and child.thread_id not in agent_ids:
+                agent_ids.append(child.thread_id)
+        if not child_steps:
+            return trajectory
+
+        ordered: list[Step] = []
+        for index in range(len(main_steps) + 1):
+            # Concurrent children interleave by time; steps without a time keep their place at the end of a slot.
+            ordered.extend(step for _, step in sorted(slots[index], key=lambda item: item[0]))
+            if index < len(main_steps):
+                ordered.append(main_steps[index])
+        steps = [step.model_copy(update={"step_id": number}) for number, step in enumerate(ordered, start=1)]
+
+        final_metrics = trajectory.final_metrics
+        if final_metrics is not None:
+            # Codex counts tokens per thread, so the subagents' own requests are added to the main thread's.
+            child_metrics = [step.metrics for step in child_steps if step.metrics is not None]
+            costs = [metrics.cost_usd for metrics in child_metrics]
+            total_cost = final_metrics.total_cost_usd
+            if total_cost is not None:
+                total_cost = None if any(cost is None for cost in costs) else total_cost + sum(costs)
+            metrics_extra = dict(final_metrics.extra or {})
+            for key in ("reasoning_output_tokens", "total_tokens"):
+                if isinstance(metrics_extra.get(key), int):
+                    metrics_extra[key] = _sum_counts(
+                        metrics_extra[key], [(metrics.extra or {}).get(key) for metrics in child_metrics]
+                    )
+            update: dict[str, Any] = {
+                f"total_{name}": _sum_counts(
+                    getattr(final_metrics, f"total_{name}"), [getattr(metrics, name) for metrics in child_metrics]
+                )
+                for name in ("prompt_tokens", "completion_tokens", "cached_tokens")
+            }
+            update.update(total_cost_usd=total_cost, total_steps=len(steps), extra=metrics_extra or None)
+            final_metrics = final_metrics.model_copy(update=update)
+        agent = trajectory.agent.model_copy(
+            update={"extra": {**(trajectory.agent.extra or {}), "agent_ids": agent_ids}}
+        )
+        merged = trajectory.model_copy(update={"steps": steps, "final_metrics": final_metrics, "agent": agent})
+        # Re-check the ATIF rules (sequential step ids, call references) before Harbor writes it.
+        return type(trajectory).model_validate(merged.model_dump())
+
+
+class SkillEvaluatorGatewayCodex(SkillEvaluatorCodex):
     """Use an explicit Responses gateway without truncating its catalog model ID."""
 
     def _build_effective_config(self, openai_base_url: str | None = None) -> dict[str, Any]:
@@ -668,7 +952,7 @@ class _NvidiaBuildBridgeAgent:
                         raise
 
 
-class SkillEvaluatorNvidiaBuildCodex(_NvidiaBuildBridgeAgent, Codex):
+class SkillEvaluatorNvidiaBuildCodex(_NvidiaBuildBridgeAgent, SkillEvaluatorCodex):
     """Stock Codex CLI routed through the in-trial NVIDIA Build bridge."""
 
     _BRIDGE_CLIENT_ENV_UNSET = ("NVIDIA_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE")

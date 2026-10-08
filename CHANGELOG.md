@@ -69,7 +69,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Safety-classifier refusals, content filters and output-token truncation are
   detected instead of being read as empty or malformed output. `--llm-verify`
-  and rubric evaluation report the cause. Claude 5.5 or later requests to the
+  and rubric evaluation report the cause, and `--llm-verify` keeps the
+  complete verdicts of a truncated reply. Claude 5.5 or later requests to the
   native Claude API use server-side fallback to Claude Opus 4.8. In the Harbor
   verifier, Bedrock retries a filtered Claude 5.5 reply on Claude Opus 4.8, and
   a refusal or empty judge reply moves on to the next

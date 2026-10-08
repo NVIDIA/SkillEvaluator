@@ -332,7 +332,8 @@ class LLMClient:
     Subclasses may override the ``default_*`` class attributes to change
     model, token limit, temperature, or reasoning effort without touching
     ``__init__``, and set ``response_schema`` to request structured output
-    from :meth:`process`.
+    from :meth:`process`. A subclass whose :meth:`parse_response` keeps the
+    complete entries of a cut-off reply sets ``salvage_truncated_response``.
     """
 
     default_model: str | None = None
@@ -341,6 +342,7 @@ class LLMClient:
     default_reasoning_effort: str | None = None
     response_schema: dict[str, Any] | None = None
     schema_name: str = "judge_response"
+    salvage_truncated_response: bool = False
 
     def __init__(
         self,
@@ -638,7 +640,9 @@ class LLMClient:
 
         On failure the fallback response is returned so callers always
         receive a usable result, and ``last_failure`` records a bounded
-        diagnostic of the cause.
+        diagnostic of the cause. When ``salvage_truncated_response`` is set,
+        a reply cut off at the token limit is parsed for its complete entries
+        instead, and ``last_failure`` still records the truncation.
         """
         self.last_failure = None
         try:
@@ -655,6 +659,12 @@ class LLMClient:
             raise
         except Exception as exc:
             self.last_failure = llm_failure_diagnostic(exc)
+            if isinstance(exc, LLMClientTruncatedError) and exc.content and self.salvage_truncated_response:
+                logger.warning("LLM reply was truncated (%s) - keeping its complete entries", self.last_failure)
+                try:
+                    return self.parse_response(exc.content, **kwargs)
+                except Exception:
+                    pass
             logger.warning("LLM call failed (%s) - using fallback response", self.last_failure)
             return self.get_fallback_response(**kwargs)
 

@@ -911,3 +911,56 @@ class TestRefusalAndTruncation:
 
         assert verifier.last_failure is not None
         assert "declined the request" in verifier.last_failure
+
+    @pytest.mark.parametrize(
+        ("provider", "model", "make_response"),
+        [
+            ("openai", CHAT_DEFAULT_OPENAI, lambda text: _openai_choice_response(text, finish_reason="length")),
+            ("anthropic", CHAT_DEFAULT_ANTHROPIC, lambda text: _anthropic_response(text, stop_reason="max_tokens")),
+        ],
+    )
+    def test_verifier_keeps_complete_verdicts_from_a_truncated_reply(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: str, model: str, make_response
+    ) -> None:
+        _use_provider(monkeypatch, provider, model)
+        reply = (
+            '{"index": 0, "verdict": "false_positive", "confidence": "high", "rationale": "Test card."}\n'
+            '{"index": 1, "verdict": "true_positive", "confidence": "high", "rationale": "Real key."}\n'
+            '{"index": 2, "verdict": "false_pos'
+        )
+        sdk = MagicMock()
+        sdk.chat.completions.create.return_value = make_response(reply)
+        sdk.messages.create.return_value = make_response(reply)
+        verifier = FindingVerifier()
+
+        with patch("openai.OpenAI", return_value=sdk), patch("anthropic.Anthropic", return_value=sdk):
+            verdicts = verifier.process(findings=[], skill_path=tmp_path)
+
+        assert sorted(verdicts) == [0, 1]
+        assert verdicts[0]["verdict"] == "false_positive"
+        assert verifier.last_failure is not None
+        assert "output-token limit" in verifier.last_failure
+
+    def test_truncated_reply_uses_the_fallback_without_salvage(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class Client(LLMClient):
+            def get_system_prompt(self) -> str:
+                return "system"
+
+            def create_user_prompt(self, **_kwargs) -> str:
+                return "user"
+
+            def parse_response(self, response_text: str, **_kwargs) -> str:
+                return response_text
+
+            def get_fallback_response(self, **_kwargs) -> str:
+                return "fallback"
+
+        _use_provider(monkeypatch, "openai", CHAT_DEFAULT_OPENAI)
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value = _openai_choice_response("partial", finish_reason="length")
+
+        with patch("openai.OpenAI", return_value=mock_openai):
+            client = Client()
+            assert client.process() == "fallback"
+
+        assert client.last_failure is not None

@@ -2841,9 +2841,10 @@ class SecurityValidator(ValidatorBase):
             result.mark_scan_incomplete("llm-verification")
             noun = "finding" if unverified == 1 else "findings"
             verb = "was" if unverified == 1 else "were"
+            cause = f": {verifier.last_failure}" if verifier.last_failure else ""
             result.add_message(
                 f"LLM verification returned verdicts for {verified} of {len(result.findings)} findings; "
-                f"{unverified} {noun} {verb} not verified"
+                f"{unverified} {noun} {verb} not verified{cause}"
             )
         elif not suppressed:
             result.add_message("LLM verification reviewed all findings; no high-confidence false positives identified")

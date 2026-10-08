@@ -32,6 +32,8 @@ class FindingVerifier(LLMClient):
 
     default_max_tokens: int | None = LLM_VERIFY_MAX_TOKENS
     default_reasoning_effort: str | None = LLM_VERIFY_REASONING_EFFORT
+    # Verdicts are one JSON object per line, so a cut-off reply still holds complete ones.
+    salvage_truncated_response = True
 
     # -- Prompt definitions -----------------------------------------------
 

@@ -284,7 +284,7 @@ def call_public_llm(
     except EmptyLLMResponseError:
         return "", None
     except LLMClientTruncatedError as exc:
-        # Like the verifier, hand back the partial reply so judges can salvage complete entries.
+        # Hand back the partial reply so judges can salvage its complete entries.
         return exc.content, None
     except Exception as exc:
         detail = f"Public provider call failed: {exc}"

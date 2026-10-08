@@ -1123,6 +1123,7 @@ def test_summary_aggregates_rates_means_and_coverage_union() -> None:
         "pass_rate": 0.5,
         "status": "scored",
         "failed_probes": [{"probe": "p", "trials": 1}],
+        "skipped": 0,
     }
     assert summary["arguments"]["status"] == "not_applicable"
     assert summary["mcp_calls"]["by_server"]["jira"]["success_rate"] == 0.5

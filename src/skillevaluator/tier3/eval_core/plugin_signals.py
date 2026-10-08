@@ -4423,6 +4423,15 @@ def _summarize_selection(signals: Sequence[Mapping[str, Any]], key: str) -> dict
 _MAX_SUMMARY_EDGES = 20
 
 
+def _skipped(signals: Sequence[Mapping[str, Any]], key: str) -> int:
+    """How many items the trials skipped because this arm cannot carry their component type (scored or not)."""
+    return sum(
+        len(skipped)
+        for item in signals
+        if isinstance(block := item.get(key), Mapping) and isinstance(skipped := block.get("skipped"), list)
+    )
+
+
 def _summarize_order(signals: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Edge totals, trials with every edge in order, and the most common edges that did not hold, with why."""
     blocks = _scored(signals, "order")
@@ -4449,6 +4458,7 @@ def _summarize_order(signals: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             {"before": before, "after": after, "reason": reason, "trials": count}
             for (before, after, reason), count in top
         ],
+        "skipped": _skipped(signals, "order"),
         "status": STATUS_SCORED if blocks else STATUS_NOT_APPLICABLE,
     }
 
@@ -4465,6 +4475,7 @@ def _summarize_conflict(signals: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         {"probe": probe, "trials": count}
         for probe, count in sorted(counts.items(), key=lambda pair: -pair[1])[:_MAX_SUMMARY_EDGES]
     ]
+    summary["skipped"] = _skipped(signals, "conflict")
     return summary
 
 
@@ -4585,7 +4596,7 @@ def summarize_plugin_signals(signals: Sequence[Mapping[str, Any] | None]) -> dic
         "arguments": _summarize_checked(present, "arguments"),
         "mcp_calls": _summarize_mcp(present),
         "order": _summarize_order(present),
-        "handoff": _summarize_checked(present, "handoff"),
+        "handoff": {**_summarize_checked(present, "handoff"), "skipped": _skipped(present, "handoff")},
         "conflict": _summarize_conflict(present),
         "activation_coverage": _summarize_coverage(present),
     }

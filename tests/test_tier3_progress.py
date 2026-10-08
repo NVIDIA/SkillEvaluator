@@ -2081,7 +2081,7 @@ def test_default_task_staging_failure_cleans_transient_artifacts(
         {
             "labels": ["codex"],
             "provider": "openai-compatible",
-            "model": "openai/openai/gpt-5.6-sol",
+            "model": "openai/openai/gpt-6.1-sol",
             "status": "degraded",
             "detail": "model catalog access does not verify runtime credentials for this endpoint",
         },

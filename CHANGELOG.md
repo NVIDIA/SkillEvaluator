@@ -46,6 +46,13 @@ All notable changes to SkillEvaluator are documented in this file.
   your installed CLIs and fails a trial early when they are too old for the
   model: Claude 5.5 needs Claude Code 2.1.280 or newer, and GPT-6 needs Codex
   0.159.1 or newer.
+- OpenAI-compatible gateway agent defaults: Codex moves to
+  `openai/openai/gpt-6.1-sol` and Claude Code to
+  `aws/anthropic/bedrock-claude-opus-5-5`. OpenCode stays on
+  `nvidia/nvidia/nemotron-3-super-120b-long-ctx`, no longer tied to the gateway
+  chat default. Claude Code on the shared gateway key runs with
+  `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, so gateways that forward to
+  another provider do not reject its pre-release request fields.
 
 ### Fixed
 

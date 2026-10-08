@@ -2029,6 +2029,9 @@ def _gateway_anthropic_agent_credentials(provider: ProviderConfig) -> dict[str, 
     A standalone Anthropic key keeps its native endpoint, so a native key is
     never silently sent to the shared gateway. An explicit base URL without a
     separate key selects another API root on the operator's gateway.
+
+    On the gateway route Claude Code stops sending pre-release request fields,
+    which gateways that forward to another provider reject with HTTP 400.
     """
     credentials = _independent_anthropic_agent_credentials()
     if credentials.get("ANTHROPIC_API_KEY", "").strip():
@@ -2038,7 +2041,11 @@ def _gateway_anthropic_agent_credentials(provider: ProviderConfig) -> dict[str, 
         base_url = _normalize_anthropic_base_url(provider.base_url or "", variable="SKILL_EVAL_LLM_BASE_URL")
     if not base_url:
         raise ProviderConfigurationError("SKILL_EVAL_LLM_BASE_URL is required for the Claude gateway route.")
-    return {"ANTHROPIC_API_KEY": provider.api_key or "", "ANTHROPIC_BASE_URL": base_url}
+    return {
+        "ANTHROPIC_API_KEY": provider.api_key or "",
+        "ANTHROPIC_BASE_URL": base_url,
+        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+    }
 
 
 def _judge_model_config(

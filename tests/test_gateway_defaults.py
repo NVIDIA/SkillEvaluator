@@ -87,8 +87,8 @@ def test_gateway_rejects_blank_model_overrides(gateway, resolver, variable):
 @pytest.mark.parametrize(
     "agent,expected",
     [
-        ("codex", "openai/openai/gpt-5.6-sol"),
-        ("claude-code", "aws/anthropic/bedrock-claude-opus-5"),
+        ("codex", "openai/openai/gpt-6.1-sol"),
+        ("claude-code", "aws/anthropic/bedrock-claude-opus-5-5"),
         ("opencode", "openai/nvidia/nvidia/nemotron-3-super-120b-long-ctx"),
     ],
 )
@@ -131,7 +131,12 @@ def test_gateway_shared_credentials_are_scoped_per_agent(gateway):
     assert claude.provider.base_url == "https://gateway.example/team"
     assert claude.subprocess_env["ANTHROPIC_API_KEY"] == "gateway-key"
     assert claude.subprocess_env["ANTHROPIC_BASE_URL"] == "https://gateway.example/team"
-    assert set(claude.staged_env) == {"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"}
+    assert claude.subprocess_env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] == "1"
+    assert set(claude.staged_env) == {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+    }
     for agent in ("codex", "opencode"):
         assert plans[agent].provider.base_url == gateway["SKILL_EVAL_LLM_BASE_URL"]
         assert set(plans[agent].staged_env) == {"OPENAI_API_KEY", "OPENAI_BASE_URL"}
@@ -154,6 +159,9 @@ def test_explicit_claude_route_takes_precedence(gateway, monkeypatch, base, key,
     assert plans["claude-code"].provider.base_url == expected_base
     assert plans["claude-code"].provider.api_key == expected_key
     assert plans["codex"].provider.api_key == "gateway-key"
+    # Only the shared gateway key drops pre-release fields; a separate Claude route is the operator's.
+    disables_betas = "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS" in plans["claude-code"].staged_env
+    assert disables_betas is (expected_key == "gateway-key")
 
 
 def test_independent_native_claude_key_uses_native_model_default(gateway, monkeypatch):

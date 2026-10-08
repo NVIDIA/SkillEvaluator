@@ -140,15 +140,15 @@ Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedr
     | --- | --- | --- |
     | Evaluator and standard judge | `nvidia/nvidia/nemotron-3-super-120b-long-ctx` | `SKILL_EVAL_LLM_MODEL`; judge-only: `LLM_JUDGE_MODEL` then `SKILL_EVAL_JUDGE_MODEL` |
     | Tier 2 embeddings | `nvidia/nvidia/nemotron-3-embed-1b` | `SKILL_EVAL_EMBEDDING_MODEL` |
-    | Codex agent | `openai/openai/gpt-5.6-sol` | `--agent-model codex=MODEL` |
-    | Claude Code agent | `aws/anthropic/bedrock-claude-opus-5` | `--agent-model claude-code=MODEL` |
+    | Codex agent | `openai/openai/gpt-6.1-sol` | `--agent-model codex=MODEL` |
+    | Claude Code agent | `aws/anthropic/bedrock-claude-opus-5-5` | `--agent-model claude-code=MODEL` |
     | OpenCode agent | `nvidia/nvidia/nemotron-3-super-120b-long-ctx` | `--agent-model opencode=openai/MODEL` |
 
     Gateways can use different catalog IDs. Supply those exact IDs through the overrides; SkillEvaluator never substitutes a different model after a request fails. OpenCode's `openai/` prefix selects its adapter and is removed before sending the catalog ID. `SKILL_EVAL_LLM_MODEL` controls evaluation and judging; it does not replace these separate gateway agent defaults. Agent selection uses `--agent-model` / `--model`, then `harbor.agents.AGENT.model`, then the harness default, and records the model source in the run report.
 
     For Tier 3 in Docker, OpenCode requires Chat Completions, Codex requires Responses, and Claude Code requires Anthropic Messages, each with tool-call support. Selecting a shared URL does not add those APIs to a server. See the [Claude gateway requirements](https://code.claude.com/docs/en/llm-gateway).
 
-    Claude Code inherits the shared key and URL, stripping a terminal `/v1` from its API root while retaining any path prefix. An explicit `ANTHROPIC_BASE_URL` overrides that root. An explicit `ANTHROPIC_API_KEY` selects an independent Claude route: without `ANTHROPIC_BASE_URL`, it keeps the native Anthropic endpoint and defaults to `claude-opus-5`. CLI and skill-config model overrides still take precedence. Existing native-provider routes are unchanged.
+    Claude Code inherits the shared key and URL, stripping a terminal `/v1` from its API root while retaining any path prefix. An explicit `ANTHROPIC_BASE_URL` overrides that root. With the shared key, Claude Code runs with `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, so it does not send pre-release request fields that a gateway forwarding to another provider rejects. An explicit `ANTHROPIC_API_KEY` selects an independent Claude route: without `ANTHROPIC_BASE_URL`, it keeps the native Anthropic endpoint and defaults to `claude-opus-5`. CLI and skill-config model overrides still take precedence. Existing native-provider routes are unchanged.
   </Tab>
 </Tabs>
 

@@ -52,10 +52,11 @@ SKILLSPECTOR_DEFAULT_MODELS = {
 }
 SKILLSPECTOR_DEFAULT_REASONING_EFFORT = "medium"
 # Agent harnesses have separate model defaults with their required capabilities.
+# OpenCode keeps its own literal so a gateway chat-default change does not move it.
 GATEWAY_AGENT_DEFAULT_MODELS = {
-    "codex": "openai/openai/gpt-5.6-sol",
-    "claude-code": "aws/anthropic/bedrock-claude-opus-5",
-    "opencode": CHAT_DEFAULT_GATEWAY,
+    "codex": "openai/openai/gpt-6.1-sol",
+    "claude-code": "aws/anthropic/bedrock-claude-opus-5-5",
+    "opencode": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
 }
 EMBEDDING_DEFAULT_NVIDIA = "nvidia/nemotron-3-embed-1b"
 EMBEDDING_DEFAULT_GATEWAY = "nvidia/nvidia/nemotron-3-embed-1b"

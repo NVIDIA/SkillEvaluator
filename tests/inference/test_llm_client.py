@@ -767,6 +767,48 @@ class TestReasoningModelRequests:
         assert call_kwargs["max_completion_tokens"] == REASONING_MAX_COMPLETION_TOKENS
         assert "temperature" not in call_kwargs
 
+    @pytest.mark.parametrize("role", ["dedup", "dimension_judge", "insights_judge"])
+    def test_medium_effort_roles_send_medium_to_gpt6(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, role: str
+    ) -> None:
+        from skillevaluator.deduplication.intra_skill import intra_skill_validator
+        from skillevaluator.deduplication.intra_skill.semantic_clustering import ContentCluster
+        from skillevaluator.deduplication.utils.chunker import ContentChunk
+        from skillevaluator.evaluation.dimension_judge import DimensionJudge
+        from skillevaluator.evaluation.insights_judge import InsightsJudge
+
+        _use_provider(monkeypatch, "openai", CHAT_DEFAULT_OPENAI)
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value = _openai_choice_response(
+            '{"verdict": "DISTINCT", "confidence": 0.9, "rationale": "Different steps.", "suggestion": ""}'
+        )
+
+        with patch("openai.OpenAI", return_value=mock_openai):
+            if role == "dedup":
+                skill_dir = tmp_path / "skill"
+                skill_dir.mkdir()
+                (skill_dir / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
+                members = [
+                    ContentChunk("SKILL.md", "## A", 1, 2, "a" * 100, "markdown"),
+                    ContentChunk("SKILL.md", "## B", 3, 4, "b" * 100, "markdown"),
+                ]
+                with (
+                    patch.object(intra_skill_validator, "EmbeddingClient") as embedding_client,
+                    patch.object(
+                        intra_skill_validator,
+                        "build_clusters",
+                        return_value=[ContentCluster(members, 1.0, 1.0, False, {"markdown"})],
+                    ),
+                ):
+                    embedding_client.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+                    intra_skill_validator.IntraSkillValidator().validate(skill_dir)
+            else:
+                judge = DimensionJudge() if role == "dimension_judge" else InsightsJudge()
+                judge.completions("system", "user")
+
+        mock_openai.chat.completions.create.assert_called_once()
+        assert mock_openai.chat.completions.create.call_args.kwargs["reasoning_effort"] == "medium"
+
     def test_claude_5_5_rubric_gets_schema_effort_and_server_side_fallback(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

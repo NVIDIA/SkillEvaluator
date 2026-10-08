@@ -154,7 +154,7 @@ def test_model_capability_helpers(model: str, reasoning: bool, claude_5_5: bool,
         ("openai", "gpt-6.1-sol", "high"),
         ("openai-compatible", "openai/openai/gpt-6.1-sol", "high"),
         ("anthropic", "claude-opus-5-5", "high"),
-        # Today's defaults keep their model-default effort.
+        # Other models keep their default effort, and Bedrock and gateway Claude routes get none.
         ("openai", "gpt-5.6-sol", None),
         ("anthropic", "claude-opus-5", None),
         ("bedrock", "us.anthropic.claude-opus-5-5", None),

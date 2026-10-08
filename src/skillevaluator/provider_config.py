@@ -147,7 +147,7 @@ def effective_reasoning_effort(provider: str, model: str, effort: str | None) ->
     """Return the reasoning effort SkillEvaluator sends for ``model`` on ``provider``.
 
     Only GPT-6 models and native-Anthropic Claude 5.5 or later get one, so
-    older defaults keep their model-default effort. Bedrock and gateway Claude
+    other models keep their default effort. Bedrock and gateway Claude
     routes can reject the field.
     """
     if provider == "anthropic":

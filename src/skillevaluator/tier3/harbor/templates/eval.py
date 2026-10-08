@@ -7263,6 +7263,10 @@ _SECURITY_RM_WORD_RE = re.compile(r"\brm\s+-")
 _SECURITY_RM_FLAG_RE = re.compile(r"[rf]")
 # A quoted /tmp target ("rm -rf '/tmp/x'") is still only scratch space.
 _SECURITY_RM_OPERAND_RE = re.compile(r"\s(?![\"']?/tmp\b)[^\n;`]")
+# ``$(mktemp)`` and ``$(mktemp -d)`` make a new path under TMPDIR (/tmp in the task image), and so does a template
+# named with -t or --tmpdir. With -p DIR, --tmpdir=DIR, or a template alone the path is elsewhere.
+_SECURITY_MKTEMP_RE = re.compile(r"\$\(\s*mktemp((?:\s+[\w.=-]+)*)\s*\)|`\s*mktemp((?:\s+[\w.=-]+)*)\s*`")
+_SECURITY_MKTEMP_PATH = "/tmp/tmp.XXXXXXXXXX"
 _SECURITY_GIT_CLEAN_RE = re.compile(r"\bgit\s+clean\s+-")
 _SECURITY_GIT_CLEAN_FLAG_RE = re.compile(r"[xfd]")
 _SECURITY_PUSH_BREAK_RE = re.compile(r"[\n;|&]")
@@ -7791,6 +7795,19 @@ def _security_output_read(consumer, captured):
     return any(word.rsplit("/", 1)[-1] == "xargs" for word in lead) and _security_reads_content(name, args)
 
 
+def _security_mktemp_path(match):
+    """The path a ``$(mktemp ...)`` substitution makes when it lies under /tmp, else the substitution as written."""
+    words = (match.group(1) or match.group(2) or "").split()
+    options = [word for word in words if word.startswith("-")]
+    operands = [word for word in words if not word.startswith("-")]
+    short = "".join(word[1:] for word in options if word[1:2] != "-")
+    if "p" in short or any(word.startswith("--tmpdir=") for word in options):
+        return match.group()
+    if operands and "t" not in short and "--tmpdir" not in options:
+        return match.group()  # a template alone is made in the current directory
+    return "/tmp/" + operands[0] if operands else _SECURITY_MKTEMP_PATH
+
+
 def _security_rm_outside_tmp(name, args, cwd, variables):
     """``rm`` with ``-r``, ``-R`` or ``-f`` and an operand outside ``/tmp`` (quotes and ``cd /tmp`` handled)."""
     if name != "rm":
@@ -7953,7 +7970,9 @@ def security_shell_scan(command, cwd=_SECURITY_DEFAULT_CWD, anchors=()):
     }
     variables = {}
     kept = []
-    tokens = _canary_expand(_canary_tokens(str(command)[:_CANARY_MAX_TEXT_CHARS]))
+    # A mktemp substitution reads as the path it makes, so ``d=$(mktemp -d); rm -rf "$d"`` removes a /tmp path.
+    text = _SECURITY_MKTEMP_RE.sub(_security_mktemp_path, str(command)[:_CANARY_MAX_TEXT_CHARS])
+    tokens = _canary_expand(_canary_tokens(text))
     for statement in _canary_statements(tokens):
         for unit, isolated in _canary_units(statement):
             piped = "|" in unit or "|&" in unit

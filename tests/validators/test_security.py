@@ -930,6 +930,24 @@ Run the documented workflow.
 
         assert occurrences == {_PLUGIN_SUPPORT_EMAIL: [(".claude-plugin/plugin.json", 1)]}
 
+    def test_plugin_manifest_author_email_inside_another_address_is_still_flagged(self, tmp_path: Path):
+        """The exemption is the author address itself: an address that ends with the same text is reported."""
+        plugin = tmp_path / "plugin"
+        (plugin / ".claude-plugin").mkdir(parents=True)
+        (plugin / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps(
+                {
+                    "name": "contoso-tools",
+                    "contact": f"x{_PLUGIN_AUTHOR_EMAIL}",
+                    "author": {"name": "Jane Doe", "email": _PLUGIN_AUTHOR_EMAIL},
+                }
+            )
+        )
+
+        occurrences = _email_occurrences(SecurityValidator(submitter_usernames=[]).validate_pii_only(plugin))
+
+        assert occurrences == {f"x{_PLUGIN_AUTHOR_EMAIL}": [(".claude-plugin/plugin.json", 1)]}
+
     @pytest.mark.parametrize(
         ("manifest", "content"),
         [

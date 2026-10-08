@@ -502,7 +502,8 @@ def test_build_command_docker_mode_uses_secure_import_path() -> None:
     assert "--environment-import-path" not in cmd
     assert "-a" not in cmd
     assert cmd.count("--agent") == 1
-    assert cmd[cmd.index("--agent") + 1] == "codex"
+    # Plain Codex runs through SkillEvaluator's subclass so the main thread's rollout is converted (proof H4).
+    assert cmd[cmd.index("--agent") + 1] == "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorCodex"
     assert cmd.count("--env") == 1
     assert cmd[cmd.index("--env") + 1] == SECURE_DOCKER_ENV_IMPORT_PATH
 
@@ -2187,8 +2188,10 @@ def test_local_callback_streams_safe_partial_line_before_process_exit(tmp_path: 
     async def exercise() -> object:
         await environment.start()
         with environment.scoped_output_callback(on_output):
-            task = asyncio.create_task(environment.exec("printf safe-partial-output; sleep 1; printf done"))
-            await asyncio.wait_for(partial_output.wait(), timeout=0.5)
+            # The command keeps running well past the wait, so seeing the partial line proves it streamed
+            # before exit even when a loaded machine is slow to start the process.
+            task = asyncio.create_task(environment.exec("printf safe-partial-output; sleep 5; printf done"))
+            await asyncio.wait_for(partial_output.wait(), timeout=4)
             assert not task.done()
             return await task
 

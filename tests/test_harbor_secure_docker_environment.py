@@ -357,6 +357,205 @@ def test_compose_output_limit_fails_closed_and_contains_process(
     assert overflow_value.decode() not in str(caught.value)
 
 
+# Low-entropy synthetic values; the known-shape token is assembled at runtime
+# so no secret-shaped literal lands in the repository.
+_DIAGNOSTIC_SECRET = "diag-synthetic-value"
+_DIAGNOSTIC_KNOWN_TOKEN = "nv" + "api-" + "fake" * 4
+
+
+def _assert_no_secret_fragment(text: str, secret: str, *, width: int = 8) -> None:
+    for start in range(len(secret) - width + 1):
+        assert secret[start : start + width] not in text
+
+
+@pytest.mark.parametrize("with_callback", [False, True])
+def test_compose_output_limit_reports_redacted_overflow_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_callback: bool,
+) -> None:
+    environment = _initialized_docker_environment(tmp_path)
+    progress = b"\x1b[32mReading package lists... 50%\x1b[0m\r" * 20
+    fetched = b"Get:1 http://deb.example.invalid stable InRelease\n" * 30
+    # A BEL inside the secret must not let control stripping reassemble it
+    # after redaction.
+    split_secret = _DIAGNOSTIC_SECRET[:10] + "\x07" + _DIAGNOSTIC_SECRET[10:]
+    credentials = f"auth {split_secret} {_DIAGNOSTIC_KNOWN_TOKEN}\r\n".encode()
+    accepted = progress + fetched + credentials + b"done\n"
+    overflow = b"overflow-bytes-never-summarized"
+    process = _BufferedAndStreamedComposeProcess([accepted[:700], accepted[700:], overflow])
+
+    async def create_subprocess(*_args: object, **_kwargs: object) -> _BufferedAndStreamedComposeProcess:
+        return process
+
+    async def on_output(_text: str, _stream: str) -> None:
+        return None
+
+    async def contain(
+        _process: asyncio.subprocess.Process,
+        communication: asyncio.Task[object],
+        **_kwargs: object,
+    ) -> None:
+        with contextlib.suppress(BaseException):
+            await communication
+
+    monkeypatch.setattr(stream_redaction_module, "MAX_COMMAND_OUTPUT_BYTES", len(accepted), raising=False)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    monkeypatch.setattr(environment, "_contain_main_and_reap_compose", contain)
+
+    with pytest.raises(CommandOutputLimitError) as caught:
+        asyncio.run(
+            environment._run_docker_compose_command(
+                ["exec", "main", "sh", "-c", "apt-get update"],
+                check=False,
+                on_output=on_output if with_callback else None,
+                additional_secret_values=[_DIAGNOSTIC_SECRET],
+            )
+        )
+
+    message = str(caught.value)
+    assert message.startswith(
+        f"Command output exceeded the {len(accepted)}-byte safety limit; "
+        f"output diagnostics (redacted): accepted {len(accepted)} bytes before a {len(overflow)}-byte read; "
+    )
+    assert "32 newline-terminated lines" in message
+    assert "21 carriage returns (1 in CRLF)" in message
+    assert "41 terminal control sequences stripped" in message
+    assert "top lines: 30x 'Get:1 http://deb.example.invalid stable InRelease', 20x 'Reading package lists... 50%'" in (
+        message
+    )
+    assert "head: 'Reading package lists... 50%\\rReading package lists" in message
+    assert message.endswith("done\\n'")
+    assert "nvapi-<redacted>" in message
+    assert "<redacted>" in message.split("tail: ", 1)[1]
+    _assert_no_secret_fragment(message, _DIAGNOSTIC_SECRET)
+    _assert_no_secret_fragment(message, _DIAGNOSTIC_KNOWN_TOKEN.removeprefix("nvapi-"))
+    assert overflow.decode() not in message
+    assert not any(character in message for character in "\x1b\x07\r\n")
+
+
+def test_overflow_diagnostics_redact_across_excerpt_and_window_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Secrets straddle the head excerpt's end, the tail excerpt's start, and
+    # several tiny analysis windows; redaction runs before any excerpt cut.
+    monkeypatch.setattr(stream_redaction_module, "_OVERFLOW_ANALYSIS_WINDOW_BYTES", 7)
+    secret = _DIAGNOSTIC_SECRET
+    accepted = ("a" * 500 + secret + "m" * 3000 + secret + "z" * 496).encode()
+
+    message = stream_redaction_module.describe_command_output_overflow(
+        accepted,
+        rejected_chunk_bytes=64,
+        secret_values=[secret],
+    )
+
+    assert message.startswith(f"output diagnostics (redacted): accepted {len(accepted)} bytes before a 64-byte read; ")
+    assert "0 newline-terminated lines" in message
+    assert "top lines: 1x 'aaaa" in message
+    _assert_no_secret_fragment(message, secret)
+    assert message.count("<redacted>") >= 2
+
+
+def test_overflow_diagnostics_apply_generic_redaction_before_display_cuts() -> None:
+    # Credential URLs straddle the head excerpt's end and a top line's display
+    # width; the generic log patterns must see each whole URL before the cut.
+    head_password = "pw-" + "head" * 2
+    line_password = "pw-" + "line" * 2
+    head_url = f" https://head-user:{head_password}@proxy.invalid/\n"
+    repeated_line = "x" * 150 + f" https://line-user:{line_password}@proxy.invalid/\n"
+    accepted = ("y" * 500 + head_url + repeated_line * 3 + "z" * 6000).encode()
+
+    message = stream_redaction_module.describe_command_output_overflow(accepted, rejected_chunk_bytes=1)
+
+    assert "top lines: 3x 'xxxx" in message
+    for fragment in ("head-user", "line-user", head_password, line_password, "head-u", "line-u"):
+        assert fragment not in message
+
+
+def test_overflow_diagnostics_truncate_lines_and_render_short_output_once() -> None:
+    long_line = "L" * 300
+    accepted = (f"{long_line}\n" * 5 + "short\n").encode()
+
+    message = stream_redaction_module.describe_command_output_overflow(accepted, rejected_chunk_bytes=1)
+
+    assert f"top lines: 5x '{'L' * 160}…', 1x 'short'" in message
+    assert "head: " in message and "tail: " in message
+
+    short_message = stream_redaction_module.describe_command_output_overflow(b"one\ntwo\n", rejected_chunk_bytes=1)
+
+    assert short_message.endswith("output: 'one\\ntwo\\n'")
+    assert "2 newline-terminated lines" in short_message
+    assert "top lines: 1x 'one', 1x 'two'" in short_message
+
+
+def test_overflow_line_census_caps_distinct_lines_and_joins_split_crlf() -> None:
+    census = stream_redaction_module._OverflowLineCensus()
+    for feed in range(50):
+        census.feed("".join(f"distinct-{feed}-{line}\n" for line in range(100)) + "common\ncommon\n")
+    census.finish()
+
+    assert len(census.counts) <= stream_redaction_module._OVERFLOW_MAX_TRACKED_LINES
+    assert census.counts.most_common(1) == [("common", 100)]
+
+    split_census = stream_redaction_module._OverflowLineCensus()
+    split_census.feed("split\r")
+    split_census.feed("\nlast")
+    split_census.finish()
+
+    assert split_census.counts == {"split": 1, "last": 1}
+
+
+def test_overflow_diagnostic_failure_keeps_the_limit_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(*_args: object, **_kwargs: object) -> str:
+        raise ValueError("diagnostic bug")
+
+    monkeypatch.setattr(stream_redaction_module, "describe_command_output_overflow", fail)
+
+    error = stream_redaction_module.diagnosed_command_output_limit_error(
+        CommandOutputLimitError("Command output exceeded the 8-byte safety limit"),
+        b"12345678",
+        rejected_chunk_bytes=3,
+    )
+
+    assert isinstance(error, CommandOutputLimitError)
+    assert str(error) == "Command output exceeded the 8-byte safety limit; output diagnostics unavailable (ValueError)"
+
+
+def test_compose_output_within_limit_skips_overflow_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = _initialized_docker_environment(tmp_path)
+    chunks = [b"Hit:1 http://deb.example.invalid stable InRelease\n", b"Reading package lists... Done\n"]
+    process = _StreamedComposeProcess(chunks)
+    callbacks: list[str] = []
+
+    async def on_output(text: str, _stream: str) -> None:
+        callbacks.append(text)
+
+    def unexpected(*_args: object, **_kwargs: object) -> CommandOutputLimitError:
+        raise AssertionError("diagnostics must only run after an overflow")
+
+    monkeypatch.setattr(stream_redaction_module, "MAX_COMMAND_OUTPUT_BYTES", len(b"".join(chunks)), raising=False)
+    monkeypatch.setattr(
+        "skillevaluator.tier3.harbor.secure_docker_environment.diagnosed_command_output_limit_error",
+        unexpected,
+    )
+
+    result = asyncio.run(
+        environment._collect_streamed_output(
+            process,  # type: ignore[arg-type]
+            timeout_sec=5,
+            on_output=on_output,
+            secret_values=[_DIAGNOSTIC_SECRET],
+        )
+    )
+
+    assert result.return_code == 0
+    assert result.stdout == b"".join(chunks).decode()
+    assert "".join(callbacks) == result.stdout
+
+
 def test_compose_bounded_path_uses_devnull_without_stdin_or_callback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -8470,6 +8669,35 @@ def test_invalid_exec_environment_fails_without_serializing_value(
 
     assert message in str(caught.value)
     assert _SENTINEL not in str(caught.value)
+
+
+def test_sidecar_accepts_compose_value_when_sensitive_named_values_are_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``XDG_SESSION_ID=1`` and similar flags must not block values like ``python:3.13-slim``."""
+    environment = _initialized_secure_docker_environment(
+        tmp_path,
+        persistent_env={"FOO_AUTH_ENABLED": "1", "CLAUDE_CODE_CHILD_SESSION": "1"},
+    )
+    monkeypatch.setenv("XDG_SESSION_ID", "1")
+    monkeypatch.setenv("CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH", "1")
+    monkeypatch.setenv("HELPER_IMAGE", "python:3.13-slim")
+    (environment.environment_dir / "docker-compose.yaml").write_text(
+        "services:\n  helper:\n    image: ${HELPER_IMAGE:?required}\n",
+        encoding="utf-8",
+    )
+
+    class _Spawned(Exception):
+        pass
+
+    async def create_subprocess(*_args: object, **_kwargs: object) -> object:
+        raise _Spawned
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    with pytest.raises(_Spawned):
+        asyncio.run(environment.service_exec("true", service="helper"))
 
 
 def test_secure_docker_stays_on_the_docker_runtime(monkeypatch: pytest.MonkeyPatch) -> None:

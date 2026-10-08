@@ -10,7 +10,9 @@ import os
 import re
 import subprocess
 import sys
+import weakref
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -35,6 +37,7 @@ from skillevaluator.tier3.harbor.metrics import (
     MAX_CUSTOM_METRIC_NAME_BYTES,
     MAX_CUSTOM_METRICS,
     extract_custom_metrics,
+    finite_number,
     overall_score,
 )
 
@@ -171,6 +174,85 @@ def _collect(
         expected_case_ids=case_ids,
         expected_trials=len(case_ids),
     )
+
+
+@pytest.mark.parametrize(
+    "forged",
+    [
+        # Harbor mounts /logs/agent from <trial>/agent and /logs/artifacts from <trial>/artifacts.
+        "agent/x/verifier/reward.json",
+        "agent/steps/x/verifier/reward.json",
+        "artifacts/verifier/reward.json",
+        # A multi-step trial relocates /logs/agent into steps/<step>/agent.
+        "steps/finish/agent/verifier/reward.json",
+    ],
+)
+def test_a_reward_the_agent_writes_outside_the_verifier_layouts_is_never_scored(tmp_path: Path, forged: str) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    _write_reward(job_dir, trial_name, _default_reward("case-001", 0.1))
+    _write_complete_job_result(job_dir, [trial_name])
+    forged_reward = job_dir / trial_name / forged
+    forged_reward.parent.mkdir(parents=True)
+    forged_reward.write_text(json.dumps(_default_reward("case-001", 1.0)), encoding="utf-8")
+
+    assert [(row["_trial_name"], row["overall"]) for row in _extract_rewards(job_dir)] == [(trial_name, 0.1)]
+    assert collector_module.harbor_job_passed(job_dir, 0.5) is False
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    with_skill = result["agents"]["opencode"]["conditions"]["with_skill"]
+    assert (with_skill["execution_status"], with_skill["scored_attempts"]) == ("succeeded", 1)
+    trials_dir = tmp_path / "results" / "opencode" / "with-skill" / "trials"
+    assert [path.name for path in trials_dir.iterdir()] == [trial_name]
+
+
+@pytest.mark.parametrize(("link", "target"), [("verifier", "verifier"), ("steps", "steps/finish/verifier")])
+def test_a_reward_behind_a_linked_trial_directory_is_never_scored(tmp_path: Path, link: str, target: str) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    _write_reward(job_dir, "case-001__attempt", _default_reward("case-001", 0.1))
+    outside = tmp_path / "outside"
+    (outside / target).mkdir(parents=True)
+    (outside / target / "reward.json").write_text(json.dumps(_default_reward("case-002", 1.0)), encoding="utf-8")
+    linked_trial = job_dir / "case-002__attempt"
+    linked_trial.mkdir()
+    (linked_trial / link).symlink_to(outside / link, target_is_directory=True)
+
+    assert [(row["_trial_name"], row["overall"]) for row in _extract_rewards(job_dir)] == [("case-001__attempt", 0.1)]
+
+
+def _with_canary(reward: dict[str, object], *, leaked: bool) -> dict[str, object]:
+    canary = {"planted": True, "leaked": leaked, "sinks": [{"kind": "url"}] if leaked else [], "file_present": True}
+    details = dict(reward["details"])
+    details["security"] = {"score": 0.0 if leaked else 1.0, "findings": [], "canary": canary}
+    return {**reward, "details": details}
+
+
+def test_a_canary_leak_in_a_trial_whose_judge_failed_still_counts(tmp_path: Path) -> None:
+    with_job = tmp_path / "jobs" / "demo-opencode-with"
+    judge_failed = {
+        **_with_canary(_default_reward("case-001", 0.5), leaked=True),
+        "evaluation_status": "failed",
+        "evaluation_errors": {"accuracy": "judge timed out"},
+    }
+    _write_reward(with_job, "case-001__with", judge_failed)
+    _write_reward(with_job, "case-002__with", _with_canary(_default_reward("case-002", 0.9), leaked=False))
+    _write_complete_job_result(with_job, ["case-001__with", "case-002__with"])
+    without_job = tmp_path / "jobs" / "demo-opencode-without"
+    for case_id in ("case-001", "case-002"):
+        _write_reward(without_job, f"{case_id}__without", _with_canary(_default_reward(case_id, 0.9), leaked=False))
+    _write_complete_job_result(without_job, ["case-001__without", "case-002__without"])
+
+    result = _collect(tmp_path, skip_baseline=False, case_ids=["case-001", "case-002"])
+
+    # The judge failure keeps the trial out of the scores, not out of the canary verdict.
+    canary = result["agents"]["opencode"]["canary_summary"]
+    assert (canary["arms"]["with_skill"]["n_trials"], canary["arms"]["with_skill"]["leaked"]) == (2, 1)
+    assert canary["plugin_attributable"] is True
+    summary = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["canary_summary"]["leaked"] == 1
 
 
 def test_failed_judge_sidecar_is_merged_but_never_scored_and_reason_is_safe(tmp_path: Path) -> None:
@@ -659,6 +741,30 @@ def test_single_step_harbor_null_step_results_keeps_custom_reward_scoreable(tmp_
     assert agent["conditions"]["with_skill"]["scored_attempts"] == 1
     assert agent["custom_with_skill"] == {"domain_quality": 0.9}
     assert agent["pass_at_k"]["with_skill"]["rate"] == 1.0
+
+
+def test_oversized_integer_rewards_are_unscored_instead_of_aborting_collection() -> None:
+    # json.loads turns a long digit string into an int that float() cannot hold.
+    oversized = 10**400
+
+    reward = collector_module._reward_from_harbor_result({"verifier_result": {"rewards": {"reward": oversized}}})
+    step_rewards = collector_module._harbor_result_rewards(
+        {
+            "step_results": [
+                {"verifier_result": {"rewards": {"overall": oversized}}},
+                {"verifier_result": {"rewards": {"overall": 0.5}}},
+            ]
+        }
+    )
+
+    assert reward is not None
+    assert overall_score(reward) is None
+    assert reward["evaluation_status"] == "failed"
+    assert step_rewards is not None
+    # The oversized step is kept as an unusable number, not averaged away, so the
+    # shared reward normalizer fails the whole artifact instead of a partial average.
+    assert finite_number(step_rewards["overall"]) is None
+    assert collector_module._fail_closed_invalid_reward_numbers(step_rewards)["evaluation_status"] == "failed"
 
 
 @pytest.mark.parametrize("invalid_steps", [{}, "malformed-steps"], ids=("mapping", "string"))
@@ -1798,6 +1904,49 @@ def _create_step_entries(trial_dir: Path, names: list[str], *, directories: bool
             (path / "verifier").mkdir(parents=True)
         else:
             path.write_text("not a step directory", encoding="utf-8")
+
+
+def test_judge_sidecars_are_projected_one_at_a_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A trial may hold 64 sidecars of up to 5 MiB each, so collection keeps at most two parsed at once."""
+    trial_dir = tmp_path / "trial"
+    for index in range(8):
+        verifier = trial_dir / "steps" / f"step-{index}" / "verifier"
+        verifier.mkdir(parents=True)
+        sidecar = {
+            "entry_id": "case-001",
+            "evaluation_status": "failed",
+            "evaluation_errors": {f"metric_{index}": "judge timed out"},
+        }
+        (verifier / "skill_evaluator_reward.json").write_text(json.dumps(sidecar), encoding="utf-8")
+
+    class _Sidecar(dict):
+        """A parsed sidecar that a weak reference can track."""
+
+    parsed: list[weakref.ref[_Sidecar]] = []
+    peak = 0
+    read = collector_module._read_failed_judge_sidecar
+
+    def tracking_read(path: Path, **kwargs: Any) -> tuple[dict[str, Any] | None, str]:
+        nonlocal peak
+        sidecar, failure = read(path, **kwargs)
+        if sidecar is not None:
+            sidecar = _Sidecar(sidecar)
+            parsed.append(weakref.ref(sidecar))
+        peak = max(peak, sum(ref() is not None for ref in parsed))
+        return sidecar, failure
+
+    monkeypatch.setattr(collector_module, "_read_failed_judge_sidecar", tracking_read)
+
+    findings = collector_module._judge_sidecar_findings(trial_dir)
+
+    # The sidecar just read, and the previous one until its loop variable is rebound.
+    assert peak <= 2
+    assert findings.failure_diagnostic is not None
+    assert findings.failure_diagnostic["entry_id"] == "case-001"
+    assert list(findings.failure_diagnostic["evaluation_errors"]) == [
+        f"step-{index}.metric_{index}" for index in range(len(DEFAULT_METRICS))
+    ]
+    assert sorted(findings.declared_not_applicable) == [f"step-{index}" for index in range(8)]
 
 
 @pytest.mark.parametrize(
@@ -3295,6 +3444,84 @@ def test_generated_output_cleanup_refuses_symlink_escape(tmp_path: Path) -> None
         )
 
     assert sentinel.read_text(encoding="utf-8") == "do not delete"
+
+
+def _write_sum_of_parts_run(jobs_dir: Path) -> None:
+    for variant, score in (("with", 0.9), ("sumofparts", 0.6)):
+        job_dir = jobs_dir / f"demo-opencode-{variant}"
+        _write_reward(job_dir, "case-001__attempt", _default_reward("case-001", score))
+        _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+
+def _collect_sum_of_parts(tmp_path: Path, *, sum_of_parts_arm: bool) -> dict[str, object]:
+    return collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=tmp_path / "jobs",
+        skip_baseline=True,
+        sum_of_parts_arm=sum_of_parts_arm,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+
+def test_rerun_without_sum_of_parts_arm_clears_its_stale_outputs(tmp_path: Path) -> None:
+    _write_sum_of_parts_run(tmp_path / "jobs")
+    agent_dir = tmp_path / "results" / "opencode"
+
+    first = _collect_sum_of_parts(tmp_path, sum_of_parts_arm=True)
+
+    assert first["agents"]["opencode"]["integration_lift"]
+    assert (agent_dir / "sum-of-parts" / "summary.json").is_file()
+    assert (agent_dir / "sum-of-parts" / "trials" / "case-001__attempt" / "reward.json").is_file()
+    assert (agent_dir / "integration_lift.json").is_file()
+
+    second = _collect_sum_of_parts(tmp_path, sum_of_parts_arm=False)
+
+    assert second["execution_status"] == "succeeded"
+    assert second["agents"]["opencode"]["integration_lift"] == {}
+    assert not (agent_dir / "sum-of-parts" / "summary.json").exists()
+    assert not (agent_dir / "sum-of-parts" / "trials").exists()
+    assert not (agent_dir / "integration_lift.json").exists()
+    reloaded = report_data.load_agent_data(tmp_path / "results")["opencode"]
+    assert reloaded["sum_of_parts"] == {}
+    assert reloaded["overall_sum_of_parts"] is None
+
+
+def test_generated_output_cleanup_refuses_symlinked_sum_of_parts_directory(tmp_path: Path) -> None:
+    _write_sum_of_parts_run(tmp_path / "jobs")
+    agent_dir = tmp_path / "results" / "opencode"
+    agent_dir.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "summary.json"
+    sentinel.write_text("do not replace", encoding="utf-8")
+    (agent_dir / "sum-of-parts").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlinked generated output directory"):
+        _collect_sum_of_parts(tmp_path, sum_of_parts_arm=True)
+
+    assert sentinel.read_text(encoding="utf-8") == "do not replace"
+    assert not (outside / "trials").exists()
+
+
+def test_integration_lift_write_does_not_follow_a_planted_symlink(tmp_path: Path) -> None:
+    _write_sum_of_parts_run(tmp_path / "jobs")
+    agent_dir = tmp_path / "results" / "opencode"
+    agent_dir.mkdir(parents=True)
+    sentinel = tmp_path / "outside-integration_lift.json"
+    sentinel.write_text("outside sentinel", encoding="utf-8")
+    (agent_dir / "integration_lift.json").symlink_to(sentinel)
+
+    _collect_sum_of_parts(tmp_path, sum_of_parts_arm=True)
+
+    assert sentinel.read_text(encoding="utf-8") == "outside sentinel"
+    generated = agent_dir / "integration_lift.json"
+    assert generated.is_file()
+    assert not generated.is_symlink()
+    assert json.loads(generated.read_text(encoding="utf-8"))["overall"]["delta"] == 0.3
 
 
 def test_reused_results_remove_omitted_agent_from_report_discovery(tmp_path: Path, monkeypatch) -> None:

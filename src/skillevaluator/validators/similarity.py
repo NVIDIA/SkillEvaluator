@@ -4,21 +4,27 @@
 """Similarity validator for detecting duplicate content.
 
 Compares Skills, Rules, or Workflows via vector embedding cosine
-similarity using public OpenAI-compatible embedding APIs.
+similarity using public OpenAI-compatible embedding APIs. Plugins (one plugin
+root or a directory of plugins) can be saved to a version 2 local catalog for
+the plugin Tier 2 catalog checks.
 """
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 from skillevaluator.constants import (
+    CONTENT_TYPE_PLUGIN,
     CONTENT_TYPE_UNKNOWN,
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
     SIMILARITY_DEFAULT_THRESHOLD,
 )
-from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError
+from skillevaluator.embedding.client import (
+    EmbeddingClient,
+    SimilarityConfigError,
+    validate_similarity_threshold,
+)
 from skillevaluator.embedding.extractor import extract_from_skill
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
 from skillevaluator.embedding.registry import EmbeddingRegistry, SimilarityMatch
@@ -52,8 +58,7 @@ class SimilarityValidator(ValidatorBase):
     ) -> None:
         validate_max_entries(max_entries)
         validate_max_scalar_comparisons(max_scalar_comparisons)
-        if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
-            raise ValueError("Similarity threshold must be finite and within [0, 1]")
+        threshold = validate_similarity_threshold(threshold, context="Similarity")
         if catalog_path and cache_path and catalog_path != cache_path:
             raise ValueError("--catalog and deprecated --cache cannot be used together")
         if save_catalog_path and save_cache_path and save_catalog_path != save_cache_path:
@@ -102,11 +107,13 @@ class SimilarityValidator(ValidatorBase):
         if content_type == CONTENT_TYPE_UNKNOWN:
             result.add_error(
                 f"Cannot auto-detect content type for {safe_path_label(skill_path)}. "
-                "Use --type to specify skill, rules, or workflows."
+                "Use --type to specify skill, rules, workflows, or plugin."
             )
             return result
+        if content_type == CONTENT_TYPE_PLUGIN:
+            return self._save_plugin_catalog(skill_path, result)
         if (self._catalog_path or self._save_catalog_path) and content_type != "skill":
-            result.add_error("Local catalog workflows support skill content only")
+            result.add_error("Local catalog workflows support skill and plugin content only")
             return result
 
         client = EmbeddingClient(model=self._model)
@@ -119,9 +126,13 @@ class SimilarityValidator(ValidatorBase):
 
         try:
             if self._catalog_path:
-                if not self._catalog_path.exists():
+                try:
+                    self._catalog_path.lstat()
+                except FileNotFoundError:
                     result.add_error(f"Catalog does not exist: {self._catalog_display_name(self._catalog_path)}")
                     return result
+                except OSError as exc:
+                    raise SimilarityConfigError(f"Cannot inspect embedding catalog safely: {exc}") from exc
                 registry.load_catalog(self._catalog_path)
                 result.add_success(
                     "catalog_loaded",
@@ -200,6 +211,61 @@ class SimilarityValidator(ValidatorBase):
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _save_plugin_catalog(self, root: Path, result: ValidationResult) -> ValidationResult:
+        """Index one plugin or a directory of plugins and save a version 2 local catalog."""
+        if self._catalog_path:
+            result.add_error(
+                "Compare a plugin with a local catalog using `skillevaluator tier2 PLUGIN --catalog FILE`."
+            )
+            return result
+        if not self._save_catalog_path:
+            result.add_error(
+                "Plugin similarity builds local catalogs only: add --save-catalog FILE, then compare a plugin "
+                "with `skillevaluator tier2 PLUGIN --catalog FILE`."
+            )
+            return result
+        if self._full_body:
+            result.add_error("Plugin catalogs use description embeddings; --full-body is not supported for plugins")
+            return result
+
+        registry = EmbeddingRegistry(
+            EmbeddingClient(model=self._model),
+            max_entries=self._max_entries,
+            max_scalar_comparisons=self._max_scalar_comparisons,
+        )
+        safe_paths = (root, self._save_catalog_path)
+        try:
+            build = registry.build_plugin_catalog(root)
+            for path, reason in build.invalid_plugins:
+                result.add_warning(f"Plugin at '{path}' was not added to the catalog: {reason}")
+            if build.plugins == 0 and build.skills == 0:
+                result.add_error("Cannot save a catalog from an empty plugin collection")
+                return result
+            for name in build.skipped_plugins:
+                result.add_warning(
+                    f"Plugin '{name}' has no description; only its bundled skills were added to the catalog"
+                )
+            result.add_success(
+                "index_built",
+                f"Indexed {build.plugins} plugin and {build.skills} bundled skill entries",
+                content_type=CONTENT_TYPE_PLUGIN,
+                plugin_count=build.plugins,
+                skill_count=build.skills,
+            )
+            registry.save_catalog(self._save_catalog_path)
+        except SimilarityConfigError as exc:
+            result.mark_scan_incomplete("embedding-provider")
+            result.add_error(sanitize_path_text(f"Embedding provider error: {exc}", safe_paths))
+            return result
+        except (ValueError, OSError) as exc:
+            result.add_error(sanitize_path_text(str(exc), safe_paths))
+            return result
+        result.add_success(
+            "catalog_saved",
+            f"Saved local catalog to {self._catalog_display_name(self._save_catalog_path)}",
+        )
+        return result
 
     def _resolve_content_type(self, path: Path) -> str:
         """Determine content type from explicit flag or auto-detection."""

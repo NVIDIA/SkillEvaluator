@@ -386,6 +386,7 @@ _MISSING_TOOL_MARKERS = (
     "no such command",
     "not found. available",
     "unsupported call",
+    "unknown agent type",
 )
 # Check 15 routes work to components; check 22 selects tools (MCP and plain).
 _ROUTING_KINDS = frozenset({COMPONENT_SKILL, COMPONENT_SUBAGENT, COMPONENT_COMMAND})

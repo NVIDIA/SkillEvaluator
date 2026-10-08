@@ -216,6 +216,19 @@ class TestCLIReporter:
         # The finding's own warning string is listed once, as an issue, not again as a warning.
         assert output.count("same-name similarity match") == 1
 
+    def test_render_all_shows_a_skipped_check_as_skipped_not_passed(self) -> None:
+        from skillevaluator.deduplication.result_status import mark_advisory_skip
+
+        result = ValidationResult(validator_name="Inter-Skill Deduplication", validator_description="Catalog")
+        mark_advisory_skip(result, "No local catalog supplied; run with --catalog FILE to compare.")
+
+        output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+
+        assert "Inter-Skill Deduplication │ PASS │ Skipped (see warnings)" in output
+        assert "[Inter-Skill Deduplication] Catalog [SKIP] Validation skipped" in output
+        assert "[WARN] No local catalog supplied; run with --catalog FILE to compare." in output
+        assert "[PASS] Validation passed" not in output
+
     def test_render_all_counts_one_warning_in_the_singular(self) -> None:
         result = ValidationResult(validator_name="License Compliance", validator_description="License")
         result.add_success("skill_discovery", "Checking license compliance")

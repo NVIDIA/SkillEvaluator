@@ -652,6 +652,10 @@ class CLIReporter(ReporterBase):
         elif (tier3_incomplete := self._tier3_incomplete_reason(result)) is not None:
             console.print(f"[yellow][INCOMPLETE] {escape_markup(tier3_incomplete)}[/yellow]\n")
             self._print_summary_stats(result, console)
+        elif result.passed and result.metadata.get("skipped"):
+            # A skipped check did not run, so it did not pass; its warnings say why.
+            console.print("[yellow][SKIP] Validation skipped[/yellow]\n")
+            self._print_findings(result, console)
         elif result.passed:
             console.print("[green][PASS] Validation passed[/green]\n")
             self._print_summary_stats(result, console)

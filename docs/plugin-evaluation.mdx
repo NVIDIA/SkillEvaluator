@@ -3430,7 +3430,9 @@ external skill supplied with `--include-skills`. The load census and the
 activation labels (`skill:release-notes`) name the component by its member
 name, so they match the row through `member` as well as `name`. When two staged
 members share a name, the evidence cannot tell them apart, so no `member` is
-recorded for that ref.
+recorded for that ref. A bundled skill in a nested folder, such as
+`skills/release/notes-writer`, is named `release/notes-writer` but staged as
+`notes-writer`, so its row gets the same `member` field under the same rule.
 
 A component that only an additional manifest declares is `not_staged`, or
 `unsupported` for an unsupported type, and its reason names that manifest.

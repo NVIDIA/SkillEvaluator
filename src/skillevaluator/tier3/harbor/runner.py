@@ -604,13 +604,15 @@ def _plugin_signals_context(
     workspace_skills: list[Path],
     run_dir: Path,
     baseline_has_members: bool,
+    agent_mcp_servers: Mapping[str, Sequence[str]] | None = None,
 ) -> PluginSignalsContext:
     """Declared plugin components and staged case fields for report-only plugin signals.
 
     Member skills are the workspace skills staged beside the generated wrapper;
     runnable MCP servers come from the package's with-plugin-only MCP file,
     read through the adapter's bounded no-follow loader; case fields come from
-    the staged task entries.
+    the staged task entries. ``agent_mcp_servers`` holds the MCP servers only
+    one agent's with-plugin arm stages (see :func:`_native_plugin_file_mcp_servers`).
     """
     from skillevaluator.tier3.plugin_eval import PLUGIN_EVAL_PACKAGE_SUFFIX, PLUGIN_MCP_SERVERS_FILENAME
 
@@ -650,6 +652,7 @@ def _plugin_signals_context(
         subagents=runtime_components["subagents"],
         commands=runtime_components["commands"],
         subagent_aliases=subagent_aliases,
+        agent_mcp_servers=agent_mcp_servers,
     )
     from dataclasses import replace
 
@@ -661,6 +664,19 @@ def _plugin_signals_context(
         logger.warning("Plugin signals: could not read probed MCP input schemas: %s", exc)
         input_schemas = {}
     return replace(context, mcp_input_schemas=input_schemas) if input_schemas else context
+
+
+def _native_plugin_file_mcp_servers(stagings: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Per agent, the MCP servers that launch from plugin files and its native with-plugin arm stages.
+
+    Only an adapter that copies the plugin tree (Claude Code) starts them, and
+    the wrapper's runnable MCP file never lists them.
+    """
+    return {
+        agent: [str(server.get("name")) for server in staging.source.plugin_file_mcp_servers if server.get("name")]
+        for agent, staging in stagings.items()
+        if staging.adapter.copies_plugin_tree
+    }
 
 
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
@@ -4787,6 +4803,7 @@ def _run_harbor_eval_impl(
             workspace_skills=workspace_skills,
             run_dir=run_dir,
             baseline_has_members=bool(workspace_skills_baseline and not skip_baseline),
+            agent_mcp_servers=_native_plugin_file_mcp_servers(native_stagings),
         )
         if is_plugin_run
         else None

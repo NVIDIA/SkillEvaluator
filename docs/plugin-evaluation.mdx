@@ -2741,11 +2741,14 @@ Per arm, `plugin_signals_summary` aggregates the trials:
 
 The declared components for coverage are the member skills in every arm, plus
 the runnable plugin MCP servers, subagents, and commands in the with-plugin
-arm. Subagents and commands come from the component inventory (`agents` and
-`commands`), and a `Task`/`Agent` or `SlashCommand` activation matches a
-declared name with or without this plugin's `plugin:` namespace prefix. The
-plugin name comes from the generated `<plugin>-plugin-eval` package; another
-plugin's prefix never matches.
+arm. Each agent's with-plugin arm also declares the MCP servers only it
+stages: a native Claude Code arm declares the servers that launch from the
+copied plugin files, and no other agent's arm does. Subagents and commands
+come from the component inventory (`agents` and `commands`), and a
+`Task`/`Agent` or `SlashCommand` activation matches a declared name with or
+without this plugin's `plugin:` namespace prefix. The plugin name comes from
+the generated `<plugin>-plugin-eval` package; another plugin's prefix never
+matches.
 
 #### Hook execution census
 
@@ -3418,9 +3421,10 @@ never downgraded, and an `invalid` row never changes. The reason gains a
   every activation failed. Names are matched heuristically, so the row must
   also have been available to the agent: `staged` or `loaded`, or natively
   loaded according to `plugin_load`.
-- **Skills and MCP servers.** A staged or loaded member skill or runnable MCP
-  server was exercised. A skill declared by reference counts when its `member`
-  name was exercised.
+- **Skills and MCP servers.** A staged or loaded member skill or MCP server
+  was exercised: a runnable server, or in a native Claude Code arm a server
+  that launches from plugin files. A skill declared by reference counts when
+  its `member` name was exercised.
 
 Staging is not evaluation, so reports headline that count as
 **N components not staged**, never as "not evaluated". When the harness

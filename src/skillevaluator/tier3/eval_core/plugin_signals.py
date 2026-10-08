@@ -1155,7 +1155,9 @@ class PluginSignalsContext:
     evaluated components (the member skills staged in the with-plugin arm and
     the runnable MCP servers wired into it). ``wrapper_skills`` names the
     generated wrapper skill so it is not scored as a tool selection. ``cases``
-    maps case id to :func:`plugin_case_spec` output.
+    maps case id to :func:`plugin_case_spec` output. The context is shared by
+    every agent of a run, so what only one agent's with-plugin arm stages is
+    kept per agent (``agent_mcp_servers``).
     """
 
     member_skills: tuple[str, ...] = ()
@@ -1175,17 +1177,23 @@ class PluginSignalsContext:
     # The plugin's own name: the namespace Claude Code gives its skills, agents,
     # and commands (``<plugin>:<name>``).
     plugin_names: tuple[str, ...] = ()
+    # Agent -> the MCP servers its with-plugin arm stages beyond ``mcp_servers``: Claude Code's
+    # native plugin copy also starts the servers that launch from plugin files.
+    agent_mcp_servers: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def arm_enabled(self, arm: str) -> bool:
         if arm in {ARM_WITH, ARM_SUM_OF_PARTS}:
             return True
         return arm == ARM_WITHOUT and self.baseline_has_members
 
-    def declared_for(self, arm: str) -> dict[str, list[str]]:
-        """Declared components staged in ``arm`` (MCP is wired into the with-plugin arm only)."""
+    def declared_for(self, arm: str, agent: str = "") -> dict[str, list[str]]:
+        """Declared components staged in ``agent``'s ``arm`` (MCP is wired into the with-plugin arm only)."""
         declared: dict[str, list[str]] = {COMPONENT_SKILL: list(self.member_skills)}
         with_plugin = arm == ARM_WITH
-        declared[COMPONENT_MCP] = list(self.mcp_servers) if with_plugin else []
+        # Every agent's other arms stage the same members only, so a server any with-plugin arm runs is unstaged there.
+        agent_servers = [self.agent_mcp_servers.get(agent, ())] if with_plugin else self.agent_mcp_servers.values()
+        mcp_servers = list(dict.fromkeys((*self.mcp_servers, *(name for names in agent_servers for name in names))))
+        declared[COMPONENT_MCP] = mcp_servers if with_plugin else []
         if with_plugin and self.subagents:
             declared[COMPONENT_SUBAGENT] = list(self.subagents)
         if with_plugin and self.commands:
@@ -1197,7 +1205,7 @@ class PluginSignalsContext:
             unstaged = [
                 kind
                 for kind, names in (
-                    (COMPONENT_MCP, self.mcp_servers),
+                    (COMPONENT_MCP, mcp_servers),
                     (COMPONENT_SUBAGENT, self.subagents),
                     (COMPONENT_COMMAND, self.commands),
                 )
@@ -1226,11 +1234,14 @@ def build_plugin_signals_context(
     commands: Iterable[Any] = (),
     subagent_aliases: Mapping[str, Any] | None = None,
     plugin_name: str | None = None,
+    agent_mcp_servers: Mapping[str, Iterable[Any]] | None = None,
 ) -> PluginSignalsContext:
     """Build a bounded :class:`PluginSignalsContext` from dataset case entries.
 
     ``plugin_name`` defaults to the name in the generated wrapper package
     (``<plugin>-plugin-eval``) when ``wrapper_skills`` holds one.
+    ``agent_mcp_servers`` maps an agent to the MCP servers only its
+    with-plugin arm stages.
     """
     cases: dict[str, Mapping[str, Any]] = {}
     for count, entry in enumerate(entries):
@@ -1256,6 +1267,11 @@ def build_plugin_signals_context(
         commands=_clean_names(name.lstrip("/") for name in commands if isinstance(name, str)),
         subagent_aliases=_clean_aliases(subagent_aliases, declared_subagents),
         plugin_names=_clean_names([plugin_name] if plugin_name else _plugin_names_from_wrappers(wrappers)),
+        agent_mcp_servers={
+            agent: names
+            for agent, servers in (agent_mcp_servers or {}).items()
+            if isinstance(agent, str) and (names := _clean_names(servers))
+        },
     )
 
 

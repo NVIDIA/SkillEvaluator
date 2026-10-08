@@ -6541,13 +6541,14 @@ def _attach_plugin_signals(
     arm: str,
     expected_case_ids: list[str] | None,
     artifacts: _TrialArtifacts | None = None,
+    agent: str = "",
 ) -> dict[str, Any] | None:
     """Attach report-only ``plugin_signals`` to scored rewards and return the arm summary.
 
     Signals are computed once per logical trial from the whole-trial trajectory
-    and shared by that trial's reward rows. They never feed a score, pass/fail
-    result, or verdict. Returns ``None`` for non-plugin runs and arms that do
-    not stage plugin components.
+    and shared by that trial's reward rows, against what ``agent``'s ``arm``
+    staged. They never feed a score, pass/fail result, or verdict. Returns
+    ``None`` for non-plugin runs and arms that do not stage plugin components.
     """
     if context is None or job_dir is None or not context.arm_enabled(arm):
         return None
@@ -6571,7 +6572,7 @@ def _attach_plugin_signals(
         signals = compute_plugin_signals(
             _with_harness_statuses(trajectory, call_statuses),
             _case_spec_with_input_schemas(context, _entry_id(rows[0], case_ids), arm),
-            declared=context.declared_for(arm),
+            declared=context.declared_for(arm, agent),
             wrapper_skills=context.wrapper_skills,
             mcp_call_servers=call_servers,
             subagent_aliases=context.aliases_for(arm),
@@ -7409,6 +7410,7 @@ def _collect_arm(
         arm=arm.key,
         expected_case_ids=collection.expected_case_ids,
         artifacts=artifacts,
+        agent=collection.agent,
     )
     if plugin_signals_summary is not None and arm.hook_census_every_trial:
         plugin_signals_summary["hook_census"] = _arm_hook_census(job_dir, artifacts)

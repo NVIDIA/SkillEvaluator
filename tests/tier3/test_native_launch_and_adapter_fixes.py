@@ -296,6 +296,24 @@ def test_codex_native_mcp_toml_keeps_emoji_and_del_valid(tmp_path: Path) -> None
     assert parsed["mcp_servers"]["docs"] == {"url": "https://mcp.example.com/mcp"}
 
 
+def test_opencode_native_remote_mcp_disables_oauth(tmp_path: Path) -> None:
+    # Like Harbor and the wrapper arm: without oauth false, a 401 starts OpenCode's
+    # OAuth discovery and client registration, which a headless trial cannot finish.
+    source = _source(
+        tmp_path,
+        mcp_servers=(
+            {"name": "docs", "url": "https://mcp.example.com/mcp", "transport": "http"},
+            {"name": "legacy", "url": "https://mcp.example.com/sse", "transport": "sse"},
+            {"name": "local", "command": "npx", "args": ["-y", "@scope/local-mcp@1.0.0"], "transport": "stdio"},
+        ),
+    )
+    bundle = HARNESS_ADAPTERS["opencode"].build(source)
+    mcp = json.loads(bundle.generated["native/opencode/opencode.json"])["mcp"]
+    assert mcp["docs"] == {"type": "remote", "url": "https://mcp.example.com/mcp", "enabled": True, "oauth": False}
+    assert mcp["legacy"]["oauth"] is False
+    assert "oauth" not in mcp["local"]
+
+
 def test_wrapper_plugin_mcp_toml_round_trips_through_the_task_loader(tmp_path: Path) -> None:
     from skillevaluator.tier3.harbor.adapter import _load_mcp_servers
     from skillevaluator.tier3.plugin_eval import PLUGIN_MCP_SERVERS_FILENAME, _write_plugin_mcp_servers_toml

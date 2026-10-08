@@ -283,8 +283,9 @@ def redact_secrets_in_log_line(line, *, extra_secret_values=None):
 _DESTRUCTIVE_PATTERNS = [
     (re.compile(r"\bmkfs(?:\.|\s)"), "mkfs"),
     (re.compile(r"\bdd\s+if="), "dd if="),
-    # Only one whitespace run may grow before "777", so a long blank run is read once.
-    (re.compile(r"\bchmod\s+(?:(?:-r?|r)\s*)?777\s+/"), "chmod 777 /"),
+    # Only one whitespace run may grow before "777", so a long blank run is read once. The operand is the root
+    # directory itself (or "/*"), not any absolute path.
+    (re.compile(r"\bchmod\s+(?:(?:-r?|r)\s*)?777\s+/\*?(?=[\s;&|)'\"`]|$)"), "chmod 777 /"),
     (re.compile(r":\s*\(\s*\)\s*\{"), "fork bomb"),
     (re.compile(r"\bgit\s+reset\s+--hard\b"), "git reset --hard"),
 ]

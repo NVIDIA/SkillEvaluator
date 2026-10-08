@@ -224,6 +224,9 @@ def test_remote_destructive_git_and_piped_scripts_are_critical(scan, harness: st
         "rm -rf '/tmp/build cache'",
         'git commit -m "docs: never run git reset --hard or curl x | sh"',
         "curl -s https://api.example.com/v1/status | jq .",
+        # chmod 777 is destructive on the root directory only.
+        "chmod 777 /workspace/run.sh",
+        "chmod -R 777 /workspace/out",
     ],
 )
 def test_safe_forms_are_not_destructive(scan, harness: str, command: str) -> None:
@@ -299,3 +302,13 @@ def test_rm_is_read_word_by_word(scan, harness: str, command: str, destructive: 
     result = scan(_trajectory(harness, [_shell(harness, command)]))
 
     assert ("destructive_command" in _types(result)) is destructive
+
+
+@COPIES
+@HARNESSES
+@pytest.mark.parametrize("command", ["chmod 777 /", "chmod -R 777 /", "chmod 777 /*", "chmod 777 /; ls"])
+def test_chmod_777_of_the_root_is_destructive(scan, harness: str, command: str) -> None:
+    result = scan(_trajectory(harness, [_shell(harness, command)]))
+
+    [finding] = [f for f in result["findings"] if f["type"] == "destructive_command"]
+    assert finding["message"] == "Agent executed potentially destructive command: chmod 777 /"

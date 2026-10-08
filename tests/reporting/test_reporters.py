@@ -320,6 +320,21 @@ class TestCLIReporter:
 
         assert "[tool]" in plain_output
 
+    def test_render_counts_collection_metadata_in_success_details(self) -> None:
+        result = ValidationResult(validator_name="Code Integrity & Hygiene", validator_description="Hygiene")
+        result.add_success(
+            "writing-rules",
+            "All checks passed",
+            checks=[{"name": "dead_links_scan", "metadata": {"file_count": 1}}, {"name": "dead_links"}],
+            patterns=["test_*.py", "*_test.py"],
+            total_checks=2,
+        )
+
+        output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render(result)).split())
+
+        assert "[OK] writing-rules: All checks passed (checks=2 items, patterns=2 items, total_checks=2)" in output
+        assert "{'name'" not in output
+
     def test_render_all(self, mixed_results: list[ValidationResult]) -> None:
         """Test rendering multiple results."""
         reporter = CLIReporter()

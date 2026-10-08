@@ -958,7 +958,11 @@ class CLIReporter(ReporterBase):
         for detail in result.success_details:
             meta_str = ""
             if detail.metadata:
-                meta_parts = [f"{k}={v}" for k, v in detail.metadata.items()]
+                # A list or dict value is counted, not printed as a Python repr.
+                meta_parts = [
+                    f"{k}={len(v)} items" if isinstance(v, (list, tuple, set, dict)) else f"{k}={v}"
+                    for k, v in detail.metadata.items()
+                ]
                 if meta_parts:
                     meta_str = f" ({', '.join(meta_parts)})"
             console.print(

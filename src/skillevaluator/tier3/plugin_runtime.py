@@ -29,12 +29,15 @@ component ran, and upgrades ``mcp_proof`` from in-agent MCP calls:
   server that ``activation_coverage`` exercised. A skill declared by reference
   is activated as the member it was staged as (``skill:release-notes`` for
   ``gitlab::<group>/<repo>::skills::release-notes``), which its row records.
+* **LSP servers**: ``activation_coverage`` exercised ``lsp:<name>``, which
+  only a native Claude Code with-plugin arm that staged the server records
+  (a successful ``LSP`` tool call on a file extension only that server maps).
 
-Subagents, commands, skills, and MCP servers are promoted only when the
-component was actually available to the agent: its row is ``staged``,
-``loaded``, or ``not_loaded`` (staged, but some native agent did not load it,
-while another arm may have had it), or ``plugin_load`` reports the type as
-natively loaded for that agent.
+Subagents, commands, skills, MCP servers, and LSP servers are promoted only
+when the component was actually available to the agent: its row is
+``staged``, ``loaded``, or ``not_loaded`` (staged, but some native agent did
+not load it, while another arm may have had it), or ``plugin_load`` reports
+the type as natively loaded for that agent.
 
 Precedence is ``exercised`` > ``loaded`` > ``staged``; a row is never
 downgraded and an ``invalid`` row never changes. Everything here is
@@ -57,7 +60,7 @@ STATE_EXERCISED = "exercised"
 # census, or not_loaded (staged, but some native agent did not load it, while
 # another arm may have had it).
 _AVAILABLE_STATES = EVALUATED_COVERAGE_STATES | {NOT_LOADED_STATE}
-_ACTIVATION_PREFIX = {"skill": "skill", "mcp": "mcp", "agent": "subagent", "command": "command"}
+_ACTIVATION_PREFIX = {"skill": "skill", "mcp": "mcp", "agent": "subagent", "command": "command", "lsp": "lsp"}
 
 
 def _with_plugin_summaries(engine_result: Mapping[str, Any] | None) -> list[tuple[str, Mapping[str, Any]]]:

@@ -490,6 +490,82 @@ def test_collector_credits_a_plugin_file_mcp_server_only_in_the_claude_code_arm(
     assert (row["name"], row["state"]) == ("tracker", "exercised")
 
 
+def _lsp_plugin(tmp_path: Path, entry: dict[str, Any]) -> Path:
+    plugin = tmp_path / "component-lab"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "component-lab"}), encoding="utf-8")
+    server = {
+        "command": "python3",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/servers/lab_lsp.py"],
+        "extensionToLanguage": {".lab": "lab"},
+    }
+    (plugin / ".lsp.json").write_text(json.dumps({"lab-lsp": server}), encoding="utf-8")
+    (plugin / "servers").mkdir()
+    (plugin / "servers" / "lab_lsp.py").write_text("print('lab')\n", encoding="utf-8")
+    (plugin / "evals").mkdir()
+    (plugin / "evals" / "evals.json").write_text(json.dumps([entry]), encoding="utf-8")
+    return plugin
+
+
+def test_collector_credits_a_plugin_lsp_server_only_in_the_native_claude_code_arm(tmp_path: Path) -> None:
+    # Only native Claude Code stages the plugin's .lsp.json, and its LSP tool names the file it asks about.
+    from skillevaluator.tier3.harbor.native_staging import build_native_task_staging
+    from skillevaluator.tier3.plugin_native import adapter_for
+    from skillevaluator.tier3.plugin_runtime import apply_runtime_coverage
+
+    entry = {
+        "id": "case-1",
+        "prompt": "What is the first word of notes.lab?",
+        "expected_output": "Lab.",
+        "expected_tools": ["LSP:lab-lsp"],
+    }
+    package = prepare_plugin_eval_package(
+        _lsp_plugin(tmp_path, entry),
+        stage_root=tmp_path / "stage",
+        plugin_load="native",
+        agents=[AGENT, "codex"],
+        env_mode="docker",
+    )
+    stagings = {
+        agent: build_native_task_staging(agent, adapter_for(agent), package.native_source) for agent in (AGENT, "codex")
+    }
+    assert runner._native_lsp_servers(stagings) == {AGENT: {"lab-lsp": [".lab"]}}
+    run_dir = tmp_path / "run"
+    task_tests = run_dir / "_harbor-tasks" / AGENT / "with" / "case-1" / "tests"
+    task_tests.mkdir(parents=True)
+    _write_entry_json(task_tests.parent, entry, True, evaluated_skill=package.package_path.name)
+    context = runner._plugin_signals_context(
+        skill_path=package.package_path,
+        evaluator_skill_path=package.package_path,
+        workspace_skills=[],
+        run_dir=run_dir,
+        baseline_has_members=False,
+        agent_lsp_servers=runner._native_lsp_servers(stagings),
+    )
+    assert context.declared_for("with_skill", AGENT)["lsp"] == ["lab-lsp"]
+    assert "lsp" not in context.declared_for("with_skill", "codex")
+    hover = {"operation": "hover", "filePath": "/workspace/notes.lab", "line": 1, "character": 6}
+    call = _agent_step(2, "c1", "LSP", hover, "lab: a heading keyword")
+    trajectory = {"schema_version": "ATIF-v1.2", "steps": [{"step_id": 1, "source": "user", "message": "x"}, call]}
+
+    results = _collect(tmp_path, _jobs(tmp_path, trajectory=trajectory), "plugin", plugin_signals=context)
+
+    signals = _trial_reward(tmp_path, "plugin", "with-skill")["plugin_signals"]
+    assert signals["activation_coverage"]["exercised"] == ["lsp:lab-lsp"]
+    assert signals["tool_selection"]["recall"] == 1.0
+    # The member-skills arm never carries the server, so the ref is skipped there, not missed.
+    assert _trial_reward(tmp_path, "plugin", "sum-of-parts")["plugin_signals"]["tool_selection"]["skipped"] == [
+        "LSP:lab-lsp"
+    ]
+    provenance = package.provenance()
+    (row,) = [row for row in provenance["component_coverage"]["components"] if row["type"] == "lsp"]
+    assert (row["name"], row["state"]) == ("lab-lsp", "staged")
+    assert apply_runtime_coverage(provenance, results) == 1
+    (row,) = [row for row in provenance["component_coverage"]["components"] if row["type"] == "lsp"]
+    assert (row["name"], row["state"]) == ("lab-lsp", "exercised")
+
+
 def test_run_hands_the_collector_the_per_agent_plugin_signals_context(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

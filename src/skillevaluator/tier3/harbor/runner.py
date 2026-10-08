@@ -614,6 +614,7 @@ def _plugin_signals_context(
     baseline_has_members: bool,
     agent_mcp_servers: Mapping[str, Sequence[str]] | None = None,
     agent_unstaged: Mapping[str, Sequence[str]] | None = None,
+    agent_lsp_servers: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
 ) -> PluginSignalsContext:
     """Declared plugin components and staged case fields for report-only plugin signals.
 
@@ -622,8 +623,9 @@ def _plugin_signals_context(
     read through the adapter's bounded no-follow loader; case fields come from
     the staged task entries. ``agent_mcp_servers`` holds the MCP servers only
     one agent's with-plugin arm stages (see :func:`_native_plugin_file_mcp_servers`),
-    and ``agent_unstaged`` the component types it does not stage (see
-    :func:`_with_arm_unstaged`).
+    ``agent_unstaged`` the component types it does not stage (see
+    :func:`_with_arm_unstaged`), and ``agent_lsp_servers`` the LSP servers it
+    stages (see :func:`_native_lsp_servers`).
     """
     from skillevaluator.tier3.plugin_eval import PLUGIN_EVAL_PACKAGE_SUFFIX, PLUGIN_MCP_SERVERS_FILENAME
 
@@ -665,6 +667,7 @@ def _plugin_signals_context(
         subagent_aliases=subagent_aliases,
         agent_mcp_servers=agent_mcp_servers,
         agent_unstaged=agent_unstaged,
+        agent_lsp_servers=agent_lsp_servers,
     )
     from dataclasses import replace
 
@@ -689,6 +692,24 @@ def _native_plugin_file_mcp_servers(stagings: Mapping[str, Any]) -> dict[str, li
         for agent, staging in stagings.items()
         if staging.adapter.copies_plugin_tree
     }
+
+
+def _native_lsp_servers(stagings: Mapping[str, Any]) -> dict[str, dict[str, list[str]]]:
+    """Per agent, the LSP servers its native with-plugin arm stages, with the extensions each one maps.
+
+    Only an adapter that loads LSP servers natively (Claude Code) writes them to
+    the staged ``.lsp.json``; the extensions are its ``extensionToLanguage`` keys.
+    """
+    servers: dict[str, dict[str, list[str]]] = {}
+    for agent, staging in stagings.items():
+        if staging.bundle.components.get("lsp") != "native" or not staging.source.lsp_servers:
+            continue
+        servers[agent] = {
+            str(name): list(languages) if isinstance(languages := config.get("extensionToLanguage"), dict) else []
+            for name, config in staging.source.lsp_servers.items()
+            if isinstance(config, Mapping)
+        }
+    return servers
 
 
 def _with_arm_unstaged(agents: Sequence[str], decisions: Mapping[str, Any]) -> dict[str, list[str]]:
@@ -4924,6 +4945,7 @@ def _run_harbor_eval_impl(
             baseline_has_members=bool(workspace_skills_baseline and not skip_baseline),
             agent_mcp_servers=_native_plugin_file_mcp_servers(native_stagings),
             agent_unstaged=_with_arm_unstaged(agents, plugin_load_decisions),
+            agent_lsp_servers=_native_lsp_servers(native_stagings),
         )
         if is_plugin_run
         else None

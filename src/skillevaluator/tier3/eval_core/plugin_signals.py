@@ -36,6 +36,10 @@ Each normalized tool call is mapped to zero or more component activations:
 * ``command``  -- ``SlashCommand`` (name from the first token of ``command``),
   or the ``Skill`` tool naming a declared command (``<plugin>:<command>``),
   which is how Claude Code runs plugin commands.
+* ``lsp``      -- Claude Code's ``LSP`` tool, credited to the one plugin LSP
+  server staged in this arm whose ``extensionToLanguage`` covers the extension
+  of the call's ``filePath`` (``lsp_servers``). An extension that two staged
+  servers claim names neither.
 * ``rule_read`` is reserved by the output contract but never emitted: plugin
   rules are inlined into the generated wrapper skill, so there is no separate
   rule file for an agent to read.
@@ -63,8 +67,9 @@ list of alternative strings. Matching is case-insensitive and supports
 ``fnmatch`` globs:
 
 * ``Skill:<name>``, ``Agent:<name>`` (aliases ``Subagent:``/``Task:``),
-  ``Command:<name>`` (alias ``SlashCommand:``) and ``MCP:<server>`` (or
-  ``MCP:<server>/<tool>``) match a component activation of that type;
+  ``Command:<name>`` (alias ``SlashCommand:``), ``MCP:<server>`` (or
+  ``MCP:<server>/<tool>``) and ``LSP:<server>`` match a component activation
+  of that type (a bare ``LSP`` ref is the tool itself);
 * any other ref matches the canonical tool label (``mcp__server__tool``,
   ``Skill:<name>``...), the raw tool function name (``Bash``, ``Read``...) or
   its harness-neutral alias (``Bash`` is also Codex ``exec_command``; ``Write``
@@ -74,7 +79,7 @@ list of alternative strings. Matching is case-insensitive and supports
   package, or the plugin's own name when no member skill or command has it).
 
 Check 15 (``routing``) scores the refs about skills, subagents, and commands;
-check 22 (``tool_selection``) scores the refs about MCP and plain tools.
+check 22 (``tool_selection``) scores the refs about MCP, LSP, and plain tools.
 
 Handoff heuristics (conservative)
 ---------------------------------
@@ -145,6 +150,7 @@ COMPONENT_SKILL = "skill"
 COMPONENT_MCP = "mcp"
 COMPONENT_SUBAGENT = "subagent"
 COMPONENT_COMMAND = "command"
+COMPONENT_LSP = "lsp"
 COMPONENT_RULE_READ = "rule_read"
 
 STATUS_SCORED = "scored"
@@ -214,6 +220,12 @@ _MAX_SCHEMA_ERRORS_PER_CALL = 5
 _SKILL_TOOLS = frozenset({"skill"})
 _SUBAGENT_TOOLS = frozenset({"task", "agent"})
 _COMMAND_TOOLS = frozenset({"slashcommand", "slash_command"})
+# Claude Code's LSP tool: Claude Code sends it to the server whose ``extensionToLanguage`` maps the file's extension.
+_LSP_TOOLS = frozenset({"lsp"})
+_LSP_PATH_KEYS = ("filePath", "file_path")
+# An ``extensionToLanguage`` key: a dot and one suffix (``.lab``; a file's extension is never ``.d.ts``).
+_LSP_EXTENSION_RE = re.compile(r"\.[^./\\\s]{1,32}")
+_MAX_LSP_EXTENSIONS = 64
 _SHELL_TOOLS = frozenset(
     {
         "bash",
@@ -414,6 +426,7 @@ _REF_PREFIXES = {
     "command": COMPONENT_COMMAND,
     "slashcommand": COMPONENT_COMMAND,
     "mcp": COMPONENT_MCP,
+    "lsp": COMPONENT_LSP,
 }
 # Rules are inlined into the wrapper skill and hooks run outside the agent's tool calls.
 _UNSUPPORTED_REF_PREFIXES = frozenset({"rule", "rules", "hook", "hooks"})
@@ -425,11 +438,13 @@ _REF_PREFIX_SPELLING = {
     "command": "Command",
     "slashcommand": "SlashCommand",
     "mcp": "MCP",
+    "lsp": "LSP",
 }
 _IDENTITY_PREFIX = {
     COMPONENT_SKILL: "Skill",
     COMPONENT_SUBAGENT: "Agent",
     COMPONENT_COMMAND: "Command",
+    COMPONENT_LSP: "LSP",
 }
 # Skill/subagent/command names come from agent-written tool arguments. Only an
 # identifier-shaped name (or a declared member) is persisted; anything else, such
@@ -457,6 +472,7 @@ _UNAVAILABLE_MARKERS = (
     "connection refused",
     "mcp server not",
     "no mcp server",
+    "no lsp server",
 )
 _FAILURE_PHRASES = (
     *_UNAVAILABLE_MARKERS,
@@ -1198,6 +1214,9 @@ class PluginSignalsContext:
     # Agent -> the declared component types its with-plugin arm does not stage: plugin subagents
     # and commands unless that agent loads them natively.
     agent_unstaged: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # Agent -> the plugin LSP servers its with-plugin arm stages natively (Claude Code's ``.lsp.json``),
+    # each with the file extensions its ``extensionToLanguage`` maps.
+    agent_lsp_servers: Mapping[str, Mapping[str, tuple[str, ...]]] = field(default_factory=dict)
 
     def arm_enabled(self, arm: str) -> bool:
         if arm in {ARM_WITH, ARM_SUM_OF_PARTS}:
@@ -1216,6 +1235,11 @@ class PluginSignalsContext:
             declared[COMPONENT_SUBAGENT] = list(self.subagents)
         if with_plugin and self.commands:
             declared[COMPONENT_COMMAND] = list(self.commands)
+        lsp_servers = list(self.lsp_servers_for(arm, agent))
+        if lsp_servers:
+            declared[COMPONENT_LSP] = lsp_servers
+        # An LSP server only the native Claude Code arm stages is unstaged in every other arm.
+        lsp_elsewhere = not lsp_servers and any(self.agent_lsp_servers.values())
         if self.plugin_names:
             declared[DECLARED_PLUGIN] = list(self.plugin_names)
         # Refs to these can never match in this arm, so graders skip them instead of failing them.
@@ -1226,6 +1250,7 @@ class PluginSignalsContext:
                     (COMPONENT_MCP, mcp_servers),
                     (COMPONENT_SUBAGENT, self.subagents),
                     (COMPONENT_COMMAND, self.commands),
+                    (COMPONENT_LSP, lsp_elsewhere),
                 )
                 if names
             ]
@@ -1239,9 +1264,15 @@ class PluginSignalsContext:
         else:
             # Still declared, so a call the agent makes to one anyway is recorded.
             unstaged = [kind for kind in self.agent_unstaged.get(agent, ()) if declared.get(kind)]
+            if lsp_elsewhere:
+                unstaged.append(COMPONENT_LSP)
         if unstaged:
             declared[DECLARED_UNSTAGED] = unstaged
         return declared
+
+    def lsp_servers_for(self, arm: str, agent: str = "") -> Mapping[str, tuple[str, ...]]:
+        """The LSP servers ``agent``'s ``arm`` stages, with their file extensions (a native with-plugin arm only)."""
+        return self.agent_lsp_servers.get(agent, {}) if arm == ARM_WITH else {}
 
     def aliases_for(self, arm: str) -> Mapping[str, str]:
         """Subagent name aliases for ``arm`` (declared subagents count in the with-plugin arm only)."""
@@ -1264,14 +1295,16 @@ def build_plugin_signals_context(
     plugin_name: str | None = None,
     agent_mcp_servers: Mapping[str, Iterable[Any]] | None = None,
     agent_unstaged: Mapping[str, Iterable[Any]] | None = None,
+    agent_lsp_servers: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> PluginSignalsContext:
     """Build a bounded :class:`PluginSignalsContext` from dataset case entries.
 
     ``plugin_name`` defaults to the name in the generated wrapper package
     (``<plugin>-plugin-eval``) when ``wrapper_skills`` holds one.
     ``agent_mcp_servers`` maps an agent to the MCP servers only its
-    with-plugin arm stages, and ``agent_unstaged`` to the declared component
-    types its with-plugin arm does not stage.
+    with-plugin arm stages, ``agent_unstaged`` to the declared component
+    types its with-plugin arm does not stage, and ``agent_lsp_servers`` to the
+    LSP servers its with-plugin arm stages (``{server: extensions}``).
     """
     cases: dict[str, Mapping[str, Any]] = {}
     for count, entry in enumerate(entries):
@@ -1307,6 +1340,11 @@ def build_plugin_signals_context(
             for agent, values in (agent_unstaged or {}).items()
             if isinstance(agent, str) and (kinds := _clean_names(values))
         },
+        agent_lsp_servers={
+            agent: servers
+            for agent, value in (agent_lsp_servers or {}).items()
+            if isinstance(agent, str) and (servers := _clean_lsp_servers(value))
+        },
     )
 
 
@@ -1317,6 +1355,50 @@ def _plugin_names_from_wrappers(wrapper_skills: Iterable[str]) -> list[str]:
         for name in wrapper_skills
         if isinstance(name, str) and name.casefold().endswith(_WRAPPER_PACKAGE_SUFFIX) and len(name) > 12
     ]
+
+
+def _clean_lsp_servers(servers: Any) -> dict[str, tuple[str, ...]]:
+    """Bounded ``server -> file extensions`` (casefolded, each with its leading dot) of staged LSP servers."""
+    cleaned: dict[str, tuple[str, ...]] = {}
+    if not isinstance(servers, Mapping):
+        return cleaned
+    for raw_name, raw_extensions in servers.items():
+        if len(cleaned) >= MAX_DECLARED_COMPONENTS:
+            break
+        names = _clean_names([raw_name])
+        if not names or isinstance(raw_extensions, str | bytes) or not isinstance(raw_extensions, Iterable):
+            continue
+        extensions = [
+            extension.strip().casefold()
+            for extension in raw_extensions
+            if isinstance(extension, str) and _LSP_EXTENSION_RE.fullmatch(extension.strip())
+        ]
+        cleaned[names[0]] = tuple(dict.fromkeys(extensions))[:_MAX_LSP_EXTENSIONS]
+    return cleaned
+
+
+def _lsp_extension_index(lsp_servers: Any, declared: Mapping[str, Sequence[str]]) -> dict[str, str]:
+    """File extension -> the one LSP server declared in this arm that serves it.
+
+    An extension two declared servers claim is left out: the call cannot say which one answered.
+    """
+    staged = {name for name in declared.get(COMPONENT_LSP) or () if isinstance(name, str)}
+    owners: dict[str, set[str]] = {}
+    for server, extensions in _clean_lsp_servers(lsp_servers).items():
+        if server in staged:
+            for extension in extensions:
+                owners.setdefault(extension, set()).add(server)
+    return {extension: next(iter(servers)) for extension, servers in owners.items() if len(servers) == 1}
+
+
+def _lsp_ident(fn: str, args: Mapping[str, Any], lsp_extensions: Mapping[str, str]) -> _Ident | None:
+    """The plugin LSP server a Claude Code ``LSP`` call reached, from its file's extension, or ``None``."""
+    path = _normalize_path(_first_string(args, _LSP_PATH_KEYS))
+    suffix = posixpath.splitext(posixpath.basename(path))[1].casefold()
+    server = lsp_extensions.get(suffix) if suffix else None
+    if server is None:
+        return None
+    return _Ident(label=f"LSP:{server}", kind=COMPONENT_LSP, name=server, fn=fn, tool_label=fn)
 
 
 def _clean_aliases(aliases: Mapping[str, Any] | None, declared: Sequence[str]) -> dict[str, str]:
@@ -2596,10 +2678,12 @@ def _identities(
     wrapper_skills: Sequence[str] = (),
     manifest: Sequence[tuple[_ManifestRead, bool]] | None = None,
     agent: str = "",
+    lsp_extensions: Mapping[str, str] | None = None,
 ) -> list[_Ident]:
     """The identities of one call. ``manifest`` is the call's resolved ``SKILL.md`` reads, if known.
 
     ``agent`` names the harness, whose own agents a bare subagent name may reach.
+    ``lsp_extensions`` maps a file extension to the staged LSP server that serves it.
     """
     low = fn.casefold()
     idents: list[_Ident] = []
@@ -2628,6 +2712,8 @@ def _identities(
         words = _first_string(args, ("command", "name")).split()
         name = words[0].lstrip("/") if words else ""
         idents.append(_component_ident(COMPONENT_COMMAND, name, fn, fn, persist=_persistable_name(name, ()), **named))
+    elif low in _LSP_TOOLS and lsp_extensions and (lsp := _lsp_ident(fn, args, lsp_extensions)) is not None:
+        idents.append(lsp)
     if mcp is not None:
         idents.append(mcp)
     if not any(ident.kind in {COMPONENT_SKILL, COMPONENT_COMMAND} for ident in idents):
@@ -2708,6 +2794,7 @@ def _identify_call(
     root_cwd: str | None,
     subagent_aliases: Mapping[str, str] | None,
     wrapper_skills: Sequence[str],
+    lsp_extensions: Mapping[str, str] | None = None,
 ) -> _Call:
     """A normalized tool call with its identities and outcome (its subagent fields are filled in later)."""
     fn = str(tool_call.get("function_name") or "")[:_MAX_LABEL_CHARS]
@@ -2716,7 +2803,12 @@ def _identify_call(
     mcp = _mcp_ident(fn, mcp_names, agent=agent)
     fn_base = _base_tool_name(mcp.tool if mcp is not None and mcp.tool else fn)
     manifest = _manifest_reads(fn_base, args, declared.get(COMPONENT_SKILL) or (), is_mcp=mcp is not None)
-    named = {"subagent_aliases": subagent_aliases, "wrapper_skills": wrapper_skills, "agent": agent}
+    named = {
+        "subagent_aliases": subagent_aliases,
+        "wrapper_skills": wrapper_skills,
+        "agent": agent,
+        "lsp_extensions": lsp_extensions,
+    }
     unresolved = [(read, False) for read in manifest.reads]
     call = _Call(
         seq=seq,
@@ -2756,13 +2848,14 @@ def _extract_calls(
     mcp_call_servers: Mapping[str, str] | None = None,
     subagent_aliases: Mapping[str, str] | None = None,
     wrapper_skills: Sequence[str] = (),
+    lsp_extensions: Mapping[str, str] | None = None,
 ) -> list[_Call] | None:
     steps = trajectory.get("steps")
     if not isinstance(steps, list):
         return None
     agent = _trajectory_agent(trajectory)
     root_cwd = _trajectory_cwd(trajectory)
-    named = {"subagent_aliases": subagent_aliases, "wrapper_skills": wrapper_skills}
+    named = {"subagent_aliases": subagent_aliases, "wrapper_skills": wrapper_skills, "lsp_extensions": lsp_extensions}
     calls: list[_Call] = []
     # The parent's latest subagent call: a sidechain run that follows it is that subagent's work,
     # unless the parent's call result names the subagent's ``agentId`` (see ``_spawned_agent_id``).
@@ -4260,7 +4353,7 @@ def _grade_conflict(
 
 def _declared_keys(declared: Mapping[str, Sequence[str]] | None) -> list[tuple[str, str]]:
     keys: dict[tuple[str, str], None] = {}
-    for kind in (COMPONENT_SKILL, COMPONENT_MCP, COMPONENT_SUBAGENT, COMPONENT_COMMAND):
+    for kind in (COMPONENT_SKILL, COMPONENT_MCP, COMPONENT_SUBAGENT, COMPONENT_COMMAND, COMPONENT_LSP):
         for name in (declared or {}).get(kind) or ():
             if isinstance(name, str) and name:
                 keys[kind, name] = None
@@ -4359,6 +4452,7 @@ def compute_plugin_signals(
     wrapper_skills: Sequence[str] = (),
     mcp_call_servers: Mapping[str, str] | None = None,
     subagent_aliases: Mapping[str, str] | None = None,
+    lsp_servers: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any] | None:
     """Per-trial C3 ``plugin_signals`` for one ATIF trajectory, or ``None`` if unreadable.
 
@@ -4371,12 +4465,22 @@ def compute_plugin_signals(
     says it went to, for harnesses whose trajectory keeps only the bare tool
     name (Codex). ``subagent_aliases`` maps a staged subagent name (casefolded)
     to the declared name, for harnesses that rename a plugin agent (OpenCode).
+    ``lsp_servers`` maps each LSP server staged in this arm (also listed under
+    ``declared['lsp']``) to the file extensions its ``extensionToLanguage`` maps.
     """
     if not isinstance(trajectory, Mapping):
         return None
     declared_map = _with_plugin_names(declared or {}, wrapper_skills)
     mcp_names = _McpNames(declared_map.get(COMPONENT_MCP) or ())
-    calls = _extract_calls(trajectory, declared_map, mcp_names, mcp_call_servers, subagent_aliases, wrapper_skills)
+    calls = _extract_calls(
+        trajectory,
+        declared_map,
+        mcp_names,
+        mcp_call_servers,
+        subagent_aliases,
+        wrapper_skills,
+        lsp_extensions=_lsp_extension_index(lsp_servers, declared_map),
+    )
     if calls is None:
         return None
     spec = plugin_case_spec(case)
@@ -4630,6 +4734,7 @@ __all__ = [
     "ARM_WITHOUT_SKILL",
     "ARM_WITH_SKILL",
     "COMPONENT_COMMAND",
+    "COMPONENT_LSP",
     "COMPONENT_MCP",
     "COMPONENT_RULE_READ",
     "COMPONENT_SKILL",

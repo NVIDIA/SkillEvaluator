@@ -224,6 +224,11 @@ def test_remote_destructive_git_and_piped_scripts_are_critical(scan, harness: st
         "rm -rf '/tmp/build cache'",
         'git commit -m "docs: never run git reset --hard or curl x | sh"',
         "curl -s https://api.example.com/v1/status | jq .",
+        # mktemp makes its directory under /tmp, so removing it is cleaning up scratch space.
+        'rm -rf "$(mktemp -d)"',
+        "d=$(mktemp -d); cd $d && git init -q && cd - && rm -rf $d",
+        'tmp=$(mktemp -d)\npython3 -m venv "$tmp/venv"\nrm -rf "$tmp"',
+        'd=`mktemp -d -t build.XXXX`; rm -rf "$d"',
         # chmod 777 is destructive on the root directory only.
         "chmod 777 /workspace/run.sh",
         "chmod -R 777 /workspace/out",
@@ -296,6 +301,9 @@ def test_verifier_main_ignores_the_skill_body_and_names_the_critical(tmp_path: P
         ("rm -rf /tmp/a ./build", True),
         ("cd /tmp && rm -rf build", False),
         ("echo it's \"unterminated", False),
+        # mktemp puts a directory elsewhere with -p or a template that is not named with -t.
+        ('d=$(mktemp -d -p data); rm -rf "$d"', True),
+        ('d=$(mktemp -d build.XXXX); rm -rf "$d"', True),
     ],
 )
 def test_rm_is_read_word_by_word(scan, harness: str, command: str, destructive: bool) -> None:

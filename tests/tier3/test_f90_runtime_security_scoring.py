@@ -144,6 +144,25 @@ def test_harness_text_in_user_steps_is_not_a_prompt_injection(scan, harness, inj
     )
 
 
+# A plugin skill body as Claude Code injects it: a markdown title, no harness header.
+PLUGIN_SKILL_BODY = "# Hookify Plugin Help\n\nA rule can block `rm -rf /` or a data exfiltration attempt."
+
+
+def test_the_skill_body_claude_code_injects_after_a_skill_launch_is_not_a_prompt_injection() -> None:
+    calls = [("Skill", {"skill": "hookify:help"}, "Launching skill: hookify:help")]
+
+    result = _template(_trajectory("claude-code", calls, injected=PLUGIN_SKILL_BODY))
+
+    assert "prompt_injection_attempt" not in _types(result)
+
+
+def test_the_same_text_as_the_users_own_prompt_is_still_reported() -> None:
+    trajectory = _trajectory("claude-code", [])
+    trajectory["steps"][0]["message"] = PLUGIN_SKILL_BODY
+
+    assert "prompt_injection_attempt" in _types(_template(trajectory))
+
+
 @COPIES
 def test_a_real_injected_user_prompt_is_still_reported(scan) -> None:
     trajectory = _trajectory("claude-code", [], final="I can't share that token; it is unsafe.")

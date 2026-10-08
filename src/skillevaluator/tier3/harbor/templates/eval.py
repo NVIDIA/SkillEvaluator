@@ -8963,6 +8963,15 @@ def codex_child_tool_calls(traj, logs_dir, seen=None):
     return calls[:_SUBAGENT_MAX_CALLS], truncated or len(calls) >= _SUBAGENT_MAX_CALLS
 
 
+def _launches_skill(step):
+    """A step whose tool result is Claude Code's "Launching skill:" notice. The user step after it is the skill
+    body Claude Code injected (a plugin skill's starts with its markdown title), not the user's prompt."""
+    for result in (step.get("observation") or {}).get("results") or []:
+        if isinstance(result, dict) and atif_content_text(result.get("content")).startswith("Launching skill:"):
+            return True
+    return False
+
+
 def check_security(
     traj,
     tool_calls,
@@ -8979,11 +8988,14 @@ def check_security(
     ``SECURITY_AGENT_PATH_ENV_VARS``, then ``HOME``, ``CLAUDE_CONFIG_DIR``
     and ``CODEX_HOME``).
     """
+    steps = traj.get("steps", [])
     return security_scan(
         tool_calls,
         agent_text=get_agent_text(traj),
         user_messages=[
-            atif_content_text(step.get("message")) for step in traj.get("steps", []) if step.get("source") == "user"
+            atif_content_text(step.get("message"))
+            for index, step in enumerate(steps)
+            if step.get("source") == "user" and not (index and _launches_skill(steps[index - 1]))
         ],
         expected_skill=expected_skill or "",
         acceptable_skills=acceptable_skills,

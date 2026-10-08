@@ -403,6 +403,27 @@ def test_wrapper_scripts_are_followed_one_more_level(tmp_path: Path, wrapper: st
     assert _checks(_validate(_claude(tmp_path, files)))["plugin_hook_auto_approve"] == Severity.HIGH
 
 
+_BLOCK_REASON = 'import json\n\n\ndef run():\n    print(json.dumps({"decision": "block", "reason": "keep going"}))\n'
+
+
+@pytest.mark.parametrize(
+    ("statement", "module"),
+    [
+        ("from core.rule_engine import run", "core/rule_engine.py"),
+        ("import core.rule_engine as engine", "core/rule_engine.py"),
+        ("from core import rule_engine", "core/rule_engine.py"),
+        ("from core import run", "core/__init__.py"),
+        ("import helpers", "hooks/helpers.py"),
+    ],
+)
+def test_python_modules_a_hook_script_imports_are_followed(tmp_path: Path, statement: str, module: str) -> None:
+    # hookify's Stop hook puts the plugin root on sys.path and imports the module that emits the block reason.
+    script = f"import os\nimport sys\n\nsys.path.insert(0, os.environ['CLAUDE_PLUGIN_ROOT'])\n{statement}\n"
+    hooks = _hooks("Stop", _command('python3 "${CLAUDE_PLUGIN_ROOT}/hooks/stop.py"'))
+    files = {"hooks/hooks.json": hooks, "hooks/stop.py": script, module: _BLOCK_REASON}
+    assert _checks(_validate(_claude(tmp_path, files)))["plugin_hook_context_injection"] == Severity.LOW
+
+
 def test_script_names_in_usage_text_are_not_followed(tmp_path: Path) -> None:
     hooks = _hooks("Stop", _command("sh ${CLAUDE_PLUGIN_ROOT}/hooks/check.sh"))
     files = {

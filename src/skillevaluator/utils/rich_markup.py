@@ -7,12 +7,21 @@ from __future__ import annotations
 
 import re
 
+import regex
+
 # OSC strings (hyperlinks, window titles) go first so their payload goes with them.
 _OSC_ESCAPE_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 # CSI sequences, then every other ECMA-48 escape (such as "ESC c", a full terminal reset).
 _ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[ -/]*[0-~])")
 # C0 controls except tab, line feed and carriage return, then DEL and C1 controls.
 _TERMINAL_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+# Lone UTF-16 surrogates ("\ud83d" in YAML or JSON decodes to one) cannot be
+# encoded as UTF-8, so writing them to a console or a report file raises.
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+# Unicode format characters (category Cf): bidi overrides and isolates,
+# zero-width spaces and joiners, and similar. They change how text reads
+# without being visible, so terminal output shows them as escapes.
+_FORMAT_CHARACTER_RE = regex.compile(r"\p{Cf}")
 
 # Every "[" with the whole backslash run before it (the lookbehind and possessive
 # quantifier keep long runs linear). The optional group is set when the bracket
@@ -23,15 +32,36 @@ _OPEN_BRACKET = re.compile(r"(?<!\\)(\\*+)\[(?=([a-z#/@][^\[\]]*\])?)")
 _EMPTY_TAG = "[bold][/bold]"
 
 
-def strip_terminal_controls(text: str) -> str:
-    """Remove terminal escape sequences and control characters other than tab, LF and CR.
+def replace_unencodable(text: str) -> str:
+    """Replace lone surrogates with U+FFFD so the text can be encoded as UTF-8."""
+    return _SURROGATE_RE.sub("\ufffd", text)
 
-    Rich only strips BEL, BS, VT, FF and CR, so without this untrusted text can
-    move the cursor, erase lines, reset the terminal or emit OSC 8 hyperlinks.
+
+def _visible_escape(match: regex.Match[str]) -> str:
+    code = ord(match.group(0))
+    return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
+
+
+def show_format_characters(text: str) -> str:
+    """Replace Unicode format characters (bidi controls, zero-width) with visible ``\\uXXXX`` escapes."""
+    return _FORMAT_CHARACTER_RE.sub(_visible_escape, text)
+
+
+def strip_terminal_controls(text: str) -> str:
+    """Make untrusted text safe to write to a terminal.
+
+    Removes terminal escape sequences and control characters other than tab,
+    LF and CR: Rich only strips BEL, BS, VT, FF and CR, so without this
+    untrusted text can move the cursor, erase lines, reset the terminal or
+    emit OSC 8 hyperlinks. Unicode format characters (a right-to-left
+    override, a zero-width space) become visible ``\\uXXXX`` escapes, so they
+    cannot make a line read differently from what it says. Lone surrogates
+    become U+FFFD, so printing never raises ``UnicodeEncodeError``.
     """
     text = _OSC_ESCAPE_RE.sub("", text)
     text = _ANSI_ESCAPE_RE.sub("", text)
-    return _TERMINAL_CONTROL_RE.sub("", text)
+    text = _TERMINAL_CONTROL_RE.sub("", text)
+    return show_format_characters(replace_unencodable(text))
 
 
 def _escape_bracket(match: re.Match[str]) -> str:

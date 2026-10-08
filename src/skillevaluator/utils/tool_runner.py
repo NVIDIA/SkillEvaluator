@@ -179,6 +179,14 @@ class ExternalTool:
                 "or uv tool install semgrep"
             ),
             "skillspector": "Install with: uv tool install git+https://github.com/NVIDIA/SkillSpector.git",
+            "osv-scanner": (
+                "Install OSV-Scanner with: brew install osv-scanner (macOS) or "
+                "go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2"
+            ),
+            "npm": "Install Node.js (which provides the npm CLI) from https://nodejs.org",
+            "grype": "Install Grype with: brew install grype (macOS); see https://github.com/anchore/grype",
+            "trivy": "Install Trivy with: brew install trivy (macOS); see https://trivy.dev",
+            "claude": "Install Claude Code; see https://code.claude.com/docs",
             "skillevaluator": (
                 'Install with: uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
             ),
@@ -336,3 +344,10 @@ class Tools:
         prefer_interpreter_sibling=True,
         override_env="SKILLEVALUATOR_SKILLSPECTOR_PATH",
     )
+    # Optional scanners for the opt-in plugin dependency audit (npm and container images).
+    osv_scanner = ExternalTool("OSV-Scanner", "osv-scanner")
+    npm = ExternalTool("npm", "npm")
+    grype = ExternalTool("Grype", "grype")
+    trivy = ExternalTool("Trivy", "trivy")
+    # Claude Code CLI, for the opt-in `claude plugin validate` parity check.
+    claude = ExternalTool("Claude Code", "claude")

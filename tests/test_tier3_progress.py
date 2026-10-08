@@ -215,6 +215,97 @@ def test_rich_reporter_owns_live_table_and_updates_stage_rows(monkeypatch: pytes
     assert reporter.is_active is False
 
 
+def test_rich_progress_frame_height_stays_fixed_as_plan_and_events_grow() -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    reporter = progress.RichProgressReporter(stream=io.StringIO())
+    reporter._live_plan = progress.Tier3RunPlan(
+        skill_name="demo",
+        environment="docker",
+        agents=("codex",),
+        agent_models=(("codex", "example/model"),),
+    )
+
+    def _rendered_lines() -> list[str]:
+        stream = io.StringIO()
+        Console(file=stream, width=80, color_system=None).print(reporter._build_live_table())
+        return stream.getvalue().splitlines()
+
+    initial_lines = _rendered_lines()
+    reporter._live_plan = progress.Tier3RunPlan(
+        skill_name="demo",
+        environment="docker",
+        agents=("codex",),
+        agent_models=(("codex", "example/model"),),
+        provider="example-provider",
+        task_count=2,
+        case_count=1,
+        attempts=1,
+        baseline=True,
+        concurrency=4,
+        timeout_multiplier=2,
+        total_containers=2,
+    )
+    for index in range(10):
+        reporter.emit(
+            progress.ProgressEvent(
+                stage=f"stage-{index}",
+                state="complete",
+                detail=f"completed stage {index}",
+            )
+        )
+
+    assert len(_rendered_lines()) == len(initial_lines)
+
+
+def test_rich_progress_uses_manual_refresh_and_recent_event_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import rich.live
+    from rich.console import Console
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    reporter.start(_plan(progress))
+
+    for index in range(7):
+        reporter.emit(
+            progress.ProgressEvent(
+                stage=f"stage-{index}",
+                state="complete",
+                detail=f"completed stage {index}",
+            )
+        )
+    reporter.emit(progress.ProgressEvent(stage="stage-0", state="running", detail="active again"))
+
+    live = _FakeLive.instances[0]
+    rendered = io.StringIO()
+    Console(file=rendered, width=80, color_system=None).print(live.renderables[-1])
+    assert live.kwargs["auto_refresh"] is False
+    assert "active again" in rendered.getvalue()
+    reporter.close()
+
+
+def test_rich_progress_resets_state_when_live_initialization_fails() -> None:
+    progress = _progress_module()
+    reporter = progress.RichProgressReporter(stream=io.StringIO())
+
+    def _fail_live_initialization(*_args, **_kwargs):
+        raise RuntimeError("terminal initialization failed")
+
+    reporter._live_factory = _fail_live_initialization
+    with pytest.raises(RuntimeError, match="terminal initialization failed"):
+        reporter.start(_plan(progress))
+    reporter.close()
+
+    assert reporter._live_plan is None
+    assert reporter._live_events == {}
+    assert reporter._live_event_slots == 6
+
+
 def test_rich_reporter_immediately_starts_one_live_box_and_keeps_stage_updates_inside_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -491,6 +582,82 @@ def test_safe_reporter_disables_broken_presentation_without_raising() -> None:
     reporter.start(_plan(progress))
     reporter.close()
     assert broken.start_calls == 1
+
+
+def test_safe_reporter_becomes_inactive_after_post_start_failure() -> None:
+    progress = _progress_module()
+
+    class FailingReporter:
+        active = False
+
+        @property
+        def is_active(self) -> bool:
+            return self.active
+
+        def start(self, _plan) -> None:
+            self.active = True
+
+        def set_secret_values(self, _values) -> None:
+            pass
+
+        def emit(self, _event) -> None:
+            raise RuntimeError("redraw failed")
+
+        def heartbeat(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.active = False
+
+    reporter = progress.safe_progress_reporter(FailingReporter())
+    reporter.start(_plan(progress))
+    assert reporter.is_active
+
+    reporter.emit(progress.ProgressEvent(stage="configuration", state="ready"))
+
+    assert not reporter.is_active
+    reporter.close()
+
+
+def test_safe_reporter_disables_after_heartbeat_redraw_failure() -> None:
+    progress = _progress_module()
+    heartbeat_failed = threading.Event()
+    failed_on: list[threading.Thread] = []
+
+    class FailingLive:
+        def __init__(self, _table, **_kwargs) -> None:
+            self.update_calls = 0
+
+        def start(self, *, refresh: bool = False) -> None:
+            assert refresh
+
+        def update(self, _table, *, refresh: bool = False) -> None:
+            assert refresh
+            self.update_calls += 1
+            if self.update_calls == 2:
+                failed_on.append(threading.current_thread())
+                heartbeat_failed.set()
+                raise RuntimeError("heartbeat redraw failed")
+
+        def stop(self) -> None:
+            pass
+
+    rich_reporter = progress.RichProgressReporter(stream=io.StringIO(), refresh_interval=0.05)
+    rich_reporter._live_factory = FailingLive
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    heartbeat = rich_reporter._thread
+    assert heartbeat is not None
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+
+    assert heartbeat_failed.wait(timeout=10)
+    # The redraw sets the event before it raises, so the heartbeat thread may still be
+    # turning the reporter off. That thread ends right after, so wait for it to end.
+    heartbeat.join(timeout=10)
+    assert not heartbeat.is_alive()
+    assert failed_on == [heartbeat]
+    assert not reporter.is_active
+    reporter.close()
 
 
 def test_safe_reporter_tracks_lifecycle_when_delegate_has_no_active_state() -> None:
@@ -892,6 +1059,52 @@ def _configure_native_task_source(
         return [output / "case-1"]
 
     monkeypatch.setattr(runner, "stage_native_harbor_tasks", emit_native)
+
+
+class _StopAtPluginLoadProvenance(Exception):
+    """Raised by a stub to end a run once its plugin-load decisions are final."""
+
+
+@pytest.mark.parametrize("plugin_load", ["native", "auto"])
+def test_agent_route_without_a_native_wrapper_fails_native_and_falls_back_under_auto(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, plugin_load: str
+) -> None:
+    """A route with no native Harbor wrapper fails a ``native`` run and uses the generated wrapper under ``auto``."""
+    from skillevaluator.tier3 import plugin_native
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner, "_agent_import_path", lambda *_args: "custom.agents:RoutedCodex")
+    decisions: dict[str, Any] = {}
+
+    def record_decisions(_requested: str, final: dict[str, Any]) -> dict[str, Any]:
+        decisions.update(final)
+        raise _StopAtPluginLoadProvenance
+
+    monkeypatch.setattr(plugin_native, "plugin_load_provenance", record_decisions)
+    reporter = _RecordingReporter()
+    missing = "native plugin loading has no Harbor wrapper for codex over custom.agents:RoutedCodex"
+
+    def run() -> dict[str, Any]:
+        return runner.run_harbor_eval(
+            skill,
+            ["codex"],
+            eval_target_kind="plugin",
+            plugin_load=plugin_load,
+            native_plugin_source=SimpleNamespace(refusals=()),
+            output_dir=tmp_path / "results",
+            progress_reporter=reporter,
+        )
+
+    if plugin_load == "native":
+        assert run() == {"error": [f"--plugin-load native is not supported for codex: {missing}"]}
+        events = [(event.stage, event.state, event.detail) for event in reporter.events]
+        assert ("credential-validation", "failed", missing) in events
+        assert decisions == {}
+    else:
+        with pytest.raises(_StopAtPluginLoadProvenance):
+            run()
+        assert decisions["codex"].mode == "wrapper"
+        assert decisions["codex"].reason == f"auto: {missing}; using the generated wrapper"
 
 
 def test_ack_eval_preflight_uses_the_exact_prospective_bedrock_child_environment(
@@ -2090,7 +2303,7 @@ def test_default_task_staging_failure_cleans_transient_artifacts(
             "model": "gpt-5",
             "status": "degraded",
             "detail": "model catalog access does not verify runtime credentials for this endpoint",
-        }
+        },
     ]
     persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
     assert persisted["run_config"] == result["run_config"]

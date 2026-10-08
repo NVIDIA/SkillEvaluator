@@ -3027,11 +3027,13 @@ class HookAnalyzer:
 
     # -- scripts ----------------------------------------------------------- #
     def _script_paths(self, token: str, cwd: PurePosixPath | None = None) -> list[PurePosixPath]:
-        """Root-relative paths of the plugin script a command token may name (none when it escapes the root)."""
+        """Root-relative paths of the plugin script a command token may name (none when it escapes the root or
+        still names a variable)."""
         value = token.strip("\"'")
         if _root_ref(value, self.root_refs) is not None:
             rel, escapes = _plugin_root_path(value, self.root_refs)
-            return [rel] if rel is not None and not escapes else []
+            # A path that still names a variable ('scripts/$X.sh') is not the file with that literal name.
+            return [rel] if rel is not None and not escapes and "$" not in rel.as_posix() else []
         if not (self.relative_scripts or cwd is not None):
             return []
         if not _RELATIVE_SCRIPT_RE.match(value) or not {"/", "."} & set(value):
@@ -3047,12 +3049,13 @@ class HookAnalyzer:
         return paths
 
     def _root_directory(self, token: str) -> PurePosixPath | None:
-        """The root-relative directory a ``cd`` target names, or ``None`` when it is not under the plugin root."""
+        """The root-relative directory a ``cd`` target names, or ``None`` when it is not under the plugin root or
+        still names a variable."""
         value = token.strip("\"'")
         if _root_ref(value, self.root_refs) is None:
             return None
         rel, escapes = _plugin_root_path(value, self.root_refs)
-        if escapes:
+        if escapes or (rel is not None and "$" in rel.as_posix()):
             return None
         return rel if rel is not None else PurePosixPath()
 

@@ -20,6 +20,7 @@ from typing import Any
 import yaml
 
 from skillevaluator.tier3.harbor import canonical_agent_name
+from skillevaluator.tier3_environments import MAX_TRIAL_RETRIES
 
 CONFIG_FILENAMES = ("config.yml", "config.yaml")
 HARBOR_CUSTOM_DOCKERFILE_MODES = {"preserve", "rebase"}
@@ -44,6 +45,7 @@ _HARBOR_KEYS = {
     "n_concurrent",
     "max_agents",
     "timeout_multiplier",
+    "trial_retries",
     "agent_runtime_preflight",
     "plugin_canary",
     "agent_workdir",
@@ -183,6 +185,10 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
                 "harbor.timeout_multiplier",
                 maximum=MAX_HARBOR_TIMEOUT_MULTIPLIER,
             )
+        if "trial_retries" in harbor_raw:
+            harbor["trial_retries"] = _int_between(
+                harbor_raw["trial_retries"], 0, MAX_TRIAL_RETRIES, config_path, "harbor.trial_retries"
+            )
         if "agent_runtime_preflight" in harbor_raw:
             harbor["agent_runtime_preflight"] = _bool(
                 harbor_raw["agent_runtime_preflight"],
@@ -266,6 +272,14 @@ def _int_at_least(value: Any, minimum: int, config_path: Path, field: str) -> in
         raise EvalsConfigError(f"{config_path}: {field} must be an integer")
     if value < minimum:
         raise EvalsConfigError(f"{config_path}: {field} must be >= {minimum}")
+    return value
+
+
+def _int_between(value: Any, minimum: int, maximum: int, config_path: Path, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise EvalsConfigError(f"{config_path}: {field} must be an integer")
+    if not minimum <= value <= maximum:
+        raise EvalsConfigError(f"{config_path}: {field} must be between {minimum} and {maximum}")
     return value
 
 

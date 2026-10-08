@@ -120,7 +120,8 @@ _PROBE_MCP_ENV_HELP = (
 _TRIAL_RETRIES_HELP = (
     "Let Harbor retry a trial up to N times after an environment-start timeout, an agent-setup timeout, or a "
     "network failure during agent setup in SkillEvaluator's agent wrappers; never after an agent timeout or a "
-    "verifier or reward error. The run's run_config.json records the setting and the retries Harbor performed."
+    "verifier or reward error. Overrides harbor.trial_retries in evals/config.yml; without either, no trial is "
+    "retried. The run's run_config.json records the setting and the retries Harbor performed."
 )
 
 
@@ -704,7 +705,7 @@ def _run_agent_eval_or_skip(
     include_skills: tuple[Path, ...] = (),
     copy_repo: bool = False,
     timeout_multiplier: float | None = None,
-    trial_retries: int = 0,
+    trial_retries: int | None = None,
     harbor_keep_jobs: bool = False,
     agent_runtime_preflight: bool | None = None,
     block_on_agent_eval: bool = False,
@@ -1151,7 +1152,7 @@ def _run_plugin_agent_eval(
     include_skills: tuple[Path, ...] = (),
     copy_repo: bool = False,
     timeout_multiplier: float | None = None,
-    trial_retries: int = 0,
+    trial_retries: int | None = None,
     harbor_keep_jobs: bool = False,
     agent_runtime_preflight: bool | None = None,
     evaluated_source: dict[str, str] | None = None,
@@ -1539,7 +1540,7 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
         argv.append("--copy-repo")
     if params.get("timeout_multiplier") is not None:
         argv.extend(["--timeout-multiplier", str(params["timeout_multiplier"])])
-    if params.get("trial_retries"):
+    if params.get("trial_retries") is not None:
         argv.extend(["--trial-retries", str(params["trial_retries"])])
     if params.get("harbor_keep_jobs"):
         argv.append("--harbor-keep-jobs")
@@ -2465,8 +2466,7 @@ def _resolve_validate_target(
 @click.option(
     "--trial-retries",
     type=click.IntRange(0, MAX_TRIAL_RETRIES),
-    default=0,
-    show_default=True,
+    default=None,
     cls=GroupedOption,
     help_group=_TIER3_GROUP,
     help=_TRIAL_RETRIES_HELP,
@@ -2550,7 +2550,7 @@ def validate(
     include_skills: tuple[Path, ...],
     copy_repo: bool,
     timeout_multiplier: float | None,
-    trial_retries: int,
+    trial_retries: int | None,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
     workers: int,
@@ -3422,8 +3422,7 @@ def _tier2_workflow(
 @click.option(
     "--trial-retries",
     type=click.IntRange(0, MAX_TRIAL_RETRIES),
-    default=0,
-    show_default=True,
+    default=None,
     help=_TRIAL_RETRIES_HELP,
 )
 @click.option("--override-cpus", type=int, default=None)
@@ -3476,7 +3475,7 @@ def evaluate(
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
     timeout_multiplier: float | None,
-    trial_retries: int,
+    trial_retries: int | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
@@ -3662,8 +3661,7 @@ def evaluate(
 @click.option(
     "--trial-retries",
     type=click.IntRange(0, MAX_TRIAL_RETRIES),
-    default=0,
-    show_default=True,
+    default=None,
     help=_TRIAL_RETRIES_HELP,
 )
 @click.option("--override-cpus", type=int, default=None)
@@ -3702,7 +3700,7 @@ def evaluate_plugin(
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
     timeout_multiplier: float | None,
-    trial_retries: int,
+    trial_retries: int | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,

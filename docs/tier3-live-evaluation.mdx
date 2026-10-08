@@ -677,8 +677,10 @@ Re-enable the baseline arm for any run whose Skill Lift you intend to trust.
 
 A trial that fails while its environment starts or its agent installs leaves
 its arm `INCOMPLETE` even though nothing was wrong with the evaluation. With
-`--trial-retries N` (0 to 5, default 0), Harbor reruns such a trial up to N
-times from a fresh environment, under the same trial name:
+`--trial-retries N`, or `harbor.trial_retries: N` in `evals/config.yml` (0 to 5,
+default 0; the flag wins), Harbor reruns such a trial up to N times from a
+fresh environment, under the same trial name. The run plan printed at the
+start of the run then shows the retry budget:
 
 ```bash title="Retry setup failures"
 skillevaluator tier3 evaluate ./my-skill --agents codex --trial-retries 2

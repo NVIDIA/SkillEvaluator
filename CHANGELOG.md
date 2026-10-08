@@ -10,8 +10,9 @@ All notable changes to SkillEvaluator are documented in this file.
   times, after an environment-start timeout, an agent-setup timeout, or a
   network failure during agent setup in SkillEvaluator's agent wrappers, never
   after an agent timeout, a verifier or reward error, or a network failure
-  while the agent works on its task. `run_config.json` records the setting and
-  the retries performed.
+  while the agent works on its task. `harbor.trial_retries` in
+  `evals/config.yml` sets the same value, the run plan shows it, and
+  `run_config.json` records the setting and the retries performed.
 - Added public plugin evaluation across all tiers: static schema and MCP checks,
   advisory offline dependency/context deduplication, and Harbor-backed live
   evaluation with effectiveness and optional sum-of-parts Integration arms.

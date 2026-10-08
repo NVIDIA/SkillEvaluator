@@ -64,6 +64,8 @@ class Tier3RunPlan:
     concurrency: int | None = None
     max_agents: int | None = None
     timeout_multiplier: float | None = None
+    # Harbor retries per trial after an infrastructure error; shown only when enabled.
+    trial_retries: int | None = None
     matrix_trials: int | None = None
     preflight_trials: int | None = None
     total_containers: int | None = None
@@ -254,6 +256,7 @@ class PlainProgressReporter:
             ("concurrency", plan.concurrency),
             ("max-agents", plan.max_agents),
             ("timeout", None if plan.timeout_multiplier is None else f"{plan.timeout_multiplier:g}x"),
+            ("trial-retries", plan.trial_retries or None),
             ("matrix-trials", plan.matrix_trials),
             ("preflight-trials", plan.preflight_trials),
             ("containers", plan.total_containers),
@@ -420,6 +423,7 @@ class RichProgressReporter(PlainProgressReporter):
             ("Concurrency", plan.concurrency),
             ("Max agents", plan.max_agents),
             ("Timeout", None if plan.timeout_multiplier is None else f"{plan.timeout_multiplier:g}x"),
+            ("Trial retries", plan.trial_retries or None),
             ("Matrix trials", plan.matrix_trials),
             ("Preflight trials", plan.preflight_trials),
             ("Containers", plan.total_containers),

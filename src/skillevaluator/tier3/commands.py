@@ -663,7 +663,7 @@ def evaluate(
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
-    trial_retries: int = 0,
+    trial_retries: int | None = None,
     evaluated_source: dict[str, str] | None = None,
     progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
@@ -694,6 +694,7 @@ def evaluate(
                 concurrency=n_concurrent,
                 max_agents=max_agents,
                 timeout_multiplier=timeout_multiplier,
+                trial_retries=trial_retries,
             )
         )
         reporter.emit(ProgressEvent(stage="configuration", state="running"))

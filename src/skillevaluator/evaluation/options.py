@@ -53,8 +53,9 @@ class EvaluationOptions:
     harbor_keep_jobs: bool = False
     agent_runtime_preflight: bool | None = None
     timeout_multiplier: float | None = None
-    # Harbor retries per trial after an infrastructure error; 0 never retries.
-    trial_retries: int = 0
+    # Harbor retries per trial after an infrastructure error; 0 never retries and
+    # None defers to harbor.trial_retries in evals/config.yml, else 0.
+    trial_retries: int | None = None
     override_cpus: int | None = None
     override_memory_mb: int | None = None
     override_storage_mb: int | None = None

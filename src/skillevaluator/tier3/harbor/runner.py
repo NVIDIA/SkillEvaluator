@@ -3924,7 +3924,7 @@ def _run_harbor_eval_impl(
     env_mode_source: str = "CLI",
     environment_kwargs: Mapping[str, Any] | None = None,
     timeout_multiplier: float | None = None,
-    trial_retries: int = 0,
+    trial_retries: int | None = None,
     override_cpus: int | None = None,
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
@@ -3988,6 +3988,7 @@ def _run_harbor_eval_impl(
     timeout_multiplier = (
         timeout_multiplier if timeout_multiplier is not None else harbor_config.get("timeout_multiplier", 1.0)
     )
+    trial_retries = trial_retries if trial_retries is not None else harbor_config.get("trial_retries", 0)
     agent_runtime_preflight = (
         agent_runtime_preflight
         if agent_runtime_preflight is not None
@@ -4089,6 +4090,7 @@ def _run_harbor_eval_impl(
             concurrency=n_concurrent,
             max_agents=max_agents,
             timeout_multiplier=float(timeout_multiplier),
+            trial_retries=trial_retries,
         )
     )
 
@@ -4750,6 +4752,7 @@ def _run_harbor_eval_impl(
             concurrency=n_concurrent,
             max_agents=max_agents,
             timeout_multiplier=float(timeout_multiplier),
+            trial_retries=trial_retries,
             matrix_trials=matrix_trials,
             preflight_trials=preflight_trials,
             total_containers=matrix_trials + preflight_trials,
@@ -5107,6 +5110,7 @@ def run_harbor_eval(*args: Any, **kwargs: Any) -> dict[str, Any]:
                     concurrency=kwargs.get("n_concurrent"),
                     max_agents=kwargs.get("max_agents"),
                     timeout_multiplier=kwargs.get("timeout_multiplier"),
+                    trial_retries=kwargs.get("trial_retries"),
                 )
             )
             lifecycle.emit(ProgressEvent(stage="configuration", state="running"))

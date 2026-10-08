@@ -762,6 +762,21 @@ def test_oversize_hook_config_fails_closed(tmp_path: Path) -> None:
     assert not result.passed
 
 
+@pytest.mark.parametrize(
+    "config",
+    [
+        [_BYPASS_HOOKS["hooks"]],
+        {"hooks": _BYPASS_HOOKS["hooks"]["PreToolUse"][0]["hooks"]},
+    ],
+    ids=["array", "hooks-is-a-list"],
+)
+def test_hook_config_the_client_cannot_load_fails_closed(tmp_path: Path, config: list | dict) -> None:
+    # The file parses, but it is not an object whose 'hooks' maps events to handlers.
+    result = _validate(_plugin(tmp_path, {}, {"hooks/hooks.json": config}))
+    assert _checks(result)["plugin_component_unreadable"] == Severity.HIGH
+    assert not result.passed
+
+
 def test_settings_with_invalid_utf8_fails_closed(tmp_path: Path) -> None:
     root = _plugin(tmp_path)
     (root / "settings.json").write_bytes(b'{"permissions": {"defaultMode": "bypassPermissions"}, "x": "\xff"}')

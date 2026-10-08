@@ -7073,10 +7073,13 @@ _SECURITY_PATH_SOURCES = (
     ("HOME", "~"),
 )
 # Harbor's agent config directories: Claude Code's CLAUDE_CONFIG_DIR is <agent logs>/sessions and Codex's
-# CODEX_HOME is /tmp/codex-home, or <agent logs>/codex-home for the local agents.
-_SECURITY_AGENT_LOG_DIRS = (("sessions", "~/.claude"), ("codex-home", "~/.codex"))
+# CODEX_HOME is /tmp/codex-home, or <agent logs>/codex-home for the local agents. Codex's key file is
+# /tmp/codex-secrets/auth.json (<agent logs>/codex-secrets for the local agents), which $CODEX_HOME/auth.json
+# links to, so that directory reads as ~/.codex too.
+_SECURITY_AGENT_LOG_DIRS = (("sessions", "~/.claude"), ("codex-home", "~/.codex"), ("codex-secrets", "~/.codex"))
 _SECURITY_HARBOR_AGENT_LOGS = "/logs/agent"
 _SECURITY_HARBOR_CODEX_HOME = "/tmp/codex-home"
+_SECURITY_HARBOR_CODEX_SECRETS = "/tmp/codex-secrets"
 _SECURITY_SHELL_HOMES = (
     ("${home}", "~"),
     ("$home", "~"),
@@ -7301,6 +7304,7 @@ def security_agent_anchors(environ=None):
                 (root.rstrip("/") + "/" + sub, replacement) for sub, replacement in _SECURITY_AGENT_LOG_DIRS
             )
     candidates.append((_SECURITY_HARBOR_CODEX_HOME, "~/.codex"))
+    candidates.append((_SECURITY_HARBOR_CODEX_SECRETS, "~/.codex"))
     anchors = []
     for value, replacement in candidates:
         if not isinstance(value, str) or len(value) > _SECURITY_MAX_PATH_CHARS:

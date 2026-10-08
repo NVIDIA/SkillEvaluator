@@ -654,6 +654,21 @@ def test_member_skill_named_like_a_declared_skill_dir_entry_fails_closed(tmp_pat
         _prepare(plugin, tmp_path, include_skills=(outside,), agents="claude-code", env_mode="docker")
 
 
+def test_two_plugin_skill_dirs_with_one_name_fail_closed(tmp_path: Path) -> None:
+    """skills/foo and a declared vendor/foo are both <plugin>:foo, so one census entry cannot say which loaded."""
+    plugin = _claude(
+        tmp_path / "dup-plugin",
+        {"skills": ["./vendor/"]},
+        {"skills/foo/SKILL.md": SKILL.format(name="foo"), "vendor/foo/SKILL.md": SKILL.format(name="foo")},
+    )
+    package = _prepare(plugin, tmp_path)
+
+    with pytest.raises(ValueError, match="skills/foo"):
+        build_native_task_staging("claude-code", HARNESS_ADAPTERS["claude-code"], package.native_source)
+    with pytest.raises(ValueError, match="vendor/foo"):
+        _prepare(plugin, tmp_path, agents="claude-code", env_mode="docker")
+
+
 # --------------------------------------------------------------------------- #
 # Fidelity: userConfig, settings.json, LSP, MCP env/headers, bin/              #
 # --------------------------------------------------------------------------- #

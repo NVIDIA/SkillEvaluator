@@ -47,7 +47,7 @@ Only the dataset is required. Everything else is optional and additive:
 | `evals/evals.json` | The eval dataset. Without it, live evaluation cannot run. | Yes — required |
 | `evals/config.yml` | Run policy: attempts, thresholds, runtime env, agent models, grading mode. | Yes |
 | `evals/EVAL.md` | Developer guidance that steers dataset generation. | Yes |
-| `evals/files/` | Input fixtures, staged into `/workspace/input/` in the container. | Yes |
+| `evals/files/` | Input fixtures. Legacy cases receive the full directory; cases with a `files` field receive only their declared fixtures. | Yes |
 | `evals/environment/` | Custom container environment: Dockerfile, sidecars, MCP servers. | Yes |
 | `evals/harbor/` | Bring-your-own-task native Harbor tasks — see [Custom Graders & Tasks](custom-graders.mdx). | Yes |
 | `evals/grader.py` or `evals/grader.sh` | Bring-your-own-grader script — see [Custom Graders & Tasks](custom-graders.mdx). | Yes |
@@ -86,12 +86,20 @@ top-level object with `skill_name` and an `evals` array.
 | `prompt` | Yes | The user request the agent receives. |
 | `expected_output` | Yes | Outcome-oriented description of what a successful agent produced. |
 | `assertions` | No | Observable agent behaviors to verify, one per entry. |
+| `files` | No | Relative fixture path or list of paths under `evals/`. When present, only these fixtures are staged into `/workspace/input/`; an empty or `null` value stages none. Omit the field to stage all of `evals/files/` for legacy datasets. |
 | `expected_skill` | No | Skill the agent should route to; `null` for negative cases. |
 | `expected_script` | No | Script the agent should run; `null` if none applies. |
 | `acceptable_skills` | No | Closely related skills that earn partial routing credit (legacy alias: `acceptable_alternates`). |
 
 The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
 `evals.yml` — `tier3 evaluate` accepts all four.
+
+<Note>
+Declare `files` on new cases so each trial receives only the fixtures it needs.
+This prevents negative or unrelated cases from seeing other cases' inputs.
+Paths are resolved within `evals/`; absolute paths, URI schemes, and traversal
+outside the directory are rejected before the trial is staged.
+</Note>
 
 <AccordionGroup>
   <Accordion title="Legacy flat format">
@@ -108,6 +116,30 @@ The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
     | `acceptable_alternates` | `acceptable_skills` |
   </Accordion>
 </AccordionGroup>
+
+### Plugin datasets
+
+A plugin keeps its dataset in its own `evals/` directory, in this same format.
+`tier3 evaluate-plugin --evals-source` can point at another dataset. Without
+either, Tier 3 combines the member skills' datasets. `create-eval-dataset` and
+autopilot need a `SKILL.md`, so they do not generate plugin datasets. Plugin
+cases may add these optional fields:
+
+| Field | Purpose |
+| --- | --- |
+| `cross_component` | `true` marks a case that needs several member skills together |
+| `expected_skills` | The member skills the case should combine. A case with `cross_component: true` and at least two distinct names here is the evidence that Integration (`--lift-mode integration` or `both`) requires |
+| `expected_tools`, `acceptable_tools`, `decoy_tools` | Tool and component refs (such as `Skill:release-notes`, `MCP:tracker`, or `mcp__tracker__*`) for the report-only tool-selection signal |
+| `tool_arguments` | Argument rules for matching calls: `required`, a small JSON Schema subset, `equals`, `contains`, and `pattern` |
+| `expected_order` | `[before, after]` precedence edges between components or tools |
+| `handoffs` | A value or artifact that must pass from a producer to a consumer |
+| `conflict_probes` | A component that must be used, and one that must not be used |
+
+The component-signal fields are advisory and never change a score.
+`tier3 validate` type-checks and size-bounds them, and plugin evaluation stops
+before any agent runs when one is malformed. The exact schema, limits, and a
+worked example are in
+[Dataset fields for plugins](plugin-evaluation.mdx#dataset-fields-for-plugins).
 
 ## Generate a dataset
 
@@ -255,11 +287,13 @@ grading:
 | `harbor.max_agents` | integer ≥ 1 | Cap on agents evaluated in one run. |
 | `harbor.timeout_multiplier` | finite number > 0 | Scales task timeouts. Values that would overflow Harbor's mandatory lifecycle timeouts are rejected before execution. |
 | `harbor.agent_runtime_preflight` | boolean | Opt-in extra agent-only execution of the first staged task before the measured evaluation. Default: `false`; the CLI flag overrides this value. |
+| `harbor.plugin_canary` | boolean | Plant the canary decoy credential in every arm of a plugin run. Default: `true`. Set `false` to run a plugin evaluation without it. |
 | `harbor.agent_workdir` | string | Working directory for the agent inside the container. |
 | `harbor.resources` | `cpus`, `memory_mb`, `storage_mb` | Per-container resource requests. |
 | `harbor.runtime_env` | list or mapping | Non-credential task values passed into the container. Prefer a list of plain names — each expands to `${NAME}` from your shell; a mapping sets explicit templates. Entries that name or reference operator-owned credentials (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, base-URL variables, AWS credential variables) fail with a hard error. Alias: `passthrough_env`. |
 | `harbor.pre_agent_setup` | string or list | Shell commands run in the container before the agent starts. This skill-owned code is allowed only for with-skill-only runs (`--skip-baseline`); paired runs reject it so setup cannot distinguish or alter the baseline arm. Alias: `setup_commands`. Both spellings normalize to the same policy. |
 | `harbor.agents.<name>.model` | string | Per-agent model override; whitespace is trimmed. `claude` is accepted as an alias of `claude-code`, but configuring both spellings in one config is an error. |
+
 | `skill_workspace.mode` | `isolated`, `group` | Whether sibling skills are visible — see [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `skill_workspace.include` | list of paths | Extra skills staged into a `group` workspace. |
 | `grading.mode` | `default`, `default_plus_custom`, `custom_only` | Grading pipeline — see [Custom Graders & Tasks](custom-graders.mdx). Legacy spellings `aces_default` and `aces_plus_custom` are accepted and normalized to `default` and `default_plus_custom`. |

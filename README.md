@@ -150,8 +150,8 @@ skillevaluator validate ./my-skill
 `--full` remains supported but is unnecessary.
 Use `--tiers 1,2` or `--no-tier3` to skip live evaluation; `--tiers 1` runs
 only the static suite. `--no-autopilot` requires an existing evaluation source.
-Rules, workflows, and plugins retain their applicable validation stages without
-automatically enabling skill evaluation.
+Rules, workflows, and plugins skip automatic Tier 3; see
+[Plugin Evaluation](https://docs.nvidia.com/skills/skillevaluator/plugin-evaluation) for plugins.
 
 Generate and review broader coverage; templates omit negatives unless authored in `EVAL.md`:
 

@@ -31,7 +31,8 @@ skillevaluator tier2 ./my-skill --catalog ./skill-catalog.json
 Without `--catalog`, the output explicitly reports that inter-skill comparison
 did not run; it does not claim the skill is distinct from a catalog it never
 checked. Use `similarity-check ./skills --save-catalog ./skill-catalog.json` to
-build the catalog. Direct Tier 2 takes one skill directory; the expert
+build the catalog. Direct Tier 2 takes one skill directory or one plugin root
+(see [Plugin deduplication](#plugin-deduplication)); the expert
 `similarity-check` command also supports collection scans.
 
 Direct Tier 2 prints the terminal report and writes JSON and HTML reports to
@@ -199,8 +200,8 @@ changes the separate path, input-byte, catalog-file, vector, or result limits.
 
 Collection discovery allows up to 20,000 paths, independently of the
 4,096-path limit inside one skill. Each visited directory and file counts,
-including files that are not selected as manifests; excluded directories count
-once, but their contents are pruned. This accommodates all 5,000 supported
+including files that are not selected as manifests; excluded directories and
+their contents are pruned and do not count. This accommodates all 5,000 supported
 entries when each skill has a directory and `SKILL.md`. Collections with more
 supporting files or deeper layouts may reach the path ceiling before the
 selected-entry budget.
@@ -237,8 +238,14 @@ existing set — save the collection once and query candidates against it.
 
 Catalogs contain finite embedding vectors, relative skill paths, display names,
 descriptions, content fingerprints, and provider, model, mode, and
-endpoint-fingerprint metadata for compatibility checks. They never contain API
-keys.
+endpoint-fingerprint metadata for compatibility checks. A plugin catalog also
+holds plugin entries (see [Plugin deduplication](#plugin-deduplication)). They
+never contain API keys.
+
+Catalogs are versioned. Skill-only catalogs are written as schema version 1,
+exactly as before, so existing catalogs keep loading and older releases can read
+new skill-only catalogs. Catalogs that contain plugin entries are written as
+schema version 2, which adds a `plugins` list; both versions load.
 
 The provider, model, endpoint, vector length, and description-versus-full-body
 mode used for a query must be compatible with the catalog. A missing,
@@ -249,6 +256,112 @@ the settings you intend to use.
 Catalogs stay local unless you explicitly share them. Because they contain
 embeddings and other data derived from skill content, review them before
 sharing like any other generated project artifact.
+
+## Plugin deduplication
+
+Plugin Tier 2 is advisory: duplicate findings are capped at MEDIUM and never
+fail the run. It runs four checks:
+
+| Check | Compares | Needs |
+| --- | --- | --- |
+| A — duplicate references | `skills.refs` and `rules.refs` entries in `agent_plugin.yaml` | Nothing; always runs offline |
+| C-intra — context deduplication | Sections within each safely discovered skill under `skills/` | Embeddings and chat providers |
+| C-inter — bundled skills vs catalog | Each bundled skill's name and description with every catalog skill entry | A local catalog and an embeddings provider |
+| B — plugin vs catalog plugins | The plugin's name and description with every catalog plugin entry, plus member-skill overlap | A local catalog with plugin entries and an embeddings provider |
+
+`validate` runs Checks A and C-intra for a plugin and records C-inter and B as
+skipped, because it takes no catalog. Inside `validate`, Check A needs no
+provider, and C-intra is skipped with a reason when no embeddings provider is
+configured. Direct `tier2 PLUGIN` requires the embeddings and chat providers
+before it starts. [Plugin Evaluation](plugin-evaluation.mdx) covers plugin
+evaluation across all three tiers.
+
+```bash title="Run offline and contextual checks for a plugin"
+skillevaluator validate ./my-plugin --type plugin
+```
+
+To compare a plugin with other plugins and skills, save a local catalog and pass
+it to direct Tier 2:
+
+<Steps>
+  <Step title="Build a plugin catalog">
+    ```bash title="Save plugins and their bundled skills"
+    skillevaluator similarity-check ./plugins --type plugin --save-catalog ./plugin-catalog.json
+    ```
+
+    `--type plugin` accepts one plugin root or a directory of plugins. Each
+    plugin with a description becomes a plugin entry, and each bundled
+    `skills/**/SKILL.md` with a name and description becomes a skill entry. A
+    plugin without a description contributes only its bundled skills (a warning
+    names it), and a plugin whose manifest cannot supply a profile (for example,
+    one that is not a mapping) is left out entirely (a warning gives its
+    relative path and the reason). Unsafe links or files still fail the whole
+    build. A plugin root is detected automatically; a directory of plugins needs
+    `--type plugin`. Plugin catalogs use description embeddings, so
+    `--full-body` is rejected.
+  </Step>
+  <Step title="Compare one plugin">
+    ```bash title="Run plugin Tier 2 against the catalog"
+    skillevaluator tier2 ./plugins/my-plugin --catalog ./plugin-catalog.json
+    ```
+
+    A skill-only catalog from `similarity-check ./skills --save-catalog` also
+    works: C-inter runs, and B is recorded as skipped because the catalog has no
+    plugin entries.
+  </Step>
+</Steps>
+
+A plugin entry holds the plugin name, description, relative catalog path,
+manifest filename, a SHA-256 fingerprint of the manifest bytes (its source
+identity), the sorted, lowercased member skill names, and the description
+embedding. Member skills are the bundled skills under `skills/` plus the last
+path segment of each `skills.refs` entry.
+
+- **Self identity.** Only positive evidence excludes a catalog entry as the
+  plugin under test. A catalog plugin entry is this plugin only when its
+  manifest fingerprint matches (identical manifest bytes); catalog names are not
+  unique, so a same-name plugin with a different manifest is a distinct plugin.
+  In a catalog with plugin entries, a skill entry is one of this plugin's
+  bundled skills only at `<plugin>/skills/<skill>` under such a matching plugin
+  entry. A skill-only catalog has no plugin identity, so a skill entry is this
+  skill only when it has the same name and description at `<skill>` or
+  `skills/<skill>`. A verbatim or same-named copy anywhere else is compared and
+  reported. Each check records the excluded catalog paths
+  (`excluded_catalog_paths`) next to `self_matches_excluded`. A changed manifest
+  therefore makes this plugin's older catalog entry, and its bundled skills,
+  ordinary matches: rebuild the catalog to refresh it.
+- **C-inter** reports every catalog skill at or above `--similarity-threshold`
+  (default `0.75`), up to 10 per bundled skill, attributed to the bundled skill.
+  This skill's own catalog entries are excluded.
+- **B** reports catalog plugins whose description similarity reaches
+  `--similarity-threshold`, or which share at least half of the combined member
+  skill names (Jaccard overlap `0.5` or more), up to the top 10. This plugin's
+  own entries are excluded. Member-overlap-only matches are LOW. A same-name
+  catalog plugin is always a match (`name_collision: true`; a LOW
+  `NAME_COLLISION` when neither threshold is met) and is listed first.
+- **Optional LLM verdict.** `--llm` asks the configured chat LLM to classify
+  each Check B match as `WHOLE_DUPLICATE`, `PARTIAL_OVERLAP`, or `UNIQUE`. It is
+  off by default and requires `--catalog`. `UNIQUE` matches stay in the
+  results but raise no finding, except that a name collision stays a LOW
+  `NAME_COLLISION`. A failed or malformed LLM response leaves the similarity
+  finding in place without a verdict.
+
+Each result records its outcome under `plugin.catalog_skill_similarity` or
+`plugin.inter_plugin_similarity` in the JSON report, with `status`
+(`compared` or `skipped`), `catalog_entries`, `matches`, and `reason`. Missing
+catalogs, catalogs without the needed entries, rejected catalogs, and exceeded
+work limits are recorded as skipped with a reason, not as failures. Direct
+`tier2` rejects a malformed, linked, oversized, or incompatible catalog before
+any model call. Unsafe linked, hard-linked, or special plugin inputs are refused
+as blocking execution failures because the requested check cannot run safely.
+An unsafe or undecodable plugin manifest or bundled skill path fails both
+C-inter and B with a path-free reason, so neither check disappears from the
+report.
+
+The public implementation does not connect to a remote vector database or fetch
+remote component catalogs. Catalog reads use the same bounded, no-follow loader
+and limits as skill catalogs, and a plugin bundling more than 32 skills skips
+the embedding-backed checks before any provider call.
 
 ## Inside validate
 
@@ -289,19 +402,21 @@ you intend to skip Tier 2 entirely.
 
 Tier 2 treats skill content and catalog files as untrusted input. Before any
 provider call, it rejects linked roots, linked directories and manifests,
-hard-linked selected files, non-regular files, paths outside the verified scan
-root, and all file redirects except the exact contained
-`CLAUDE.md -> AGENTS.md` compatibility alias. That alias is validated but never
-followed; its exactly named, independently discovered, single-link regular
-sibling target is scanned once. Explicit limits bound
+hard-linked selected files, reparse points, non-regular files, and paths outside
+the verified scan root. The only redirect exception is the exact, contained
+`CLAUDE.md -> AGENTS.md` compatibility alias used by public agent-skill layouts;
+the alias is validated but never followed, and its independently discovered,
+single-link regular sibling target is scanned once. Native descriptor- or
+handle-anchored reads on POSIX and Windows verify that a selected file did not
+change between discovery and use. Explicit limits bound
 discovered paths, file counts, per-file and total input bytes, content chunks,
 candidate clusters, catalog size and entry count, vector length, returned
-matches, and pairwise scalar work. Catalog loading also rejects duplicate JSON
-keys, unexpected fields, invalid identities, non-finite vectors, and
-incompatible provider metadata. Increase the documented collection budgets only
-for a workload you intend to process. Splitting a collection into independent
-batches omits comparisons between batches and is not a complete deduplication
-scan.
+matches, pairwise scalar work, structured-data depth and scalar volume, and LLM
+prompt/response budgets. Manifest and catalog loading rejects duplicate keys,
+unexpected fields, invalid identities, non-finite values, and incompatible
+provider metadata. Increase the documented collection budgets only for a
+workload you intend to process. Splitting a collection into independent batches
+omits comparisons between batches and is not a complete deduplication scan.
 
 ### What leaves your machine
 
@@ -313,6 +428,10 @@ scan.
   embeddings provider. Only candidate clusters found by the embedding stage are
   sent to the configured chat LLM for classification.
 - `similarity-check` never calls a chat LLM.
+- Plugin C-inter and B send bundled skill names and descriptions, and the
+  plugin name and description, to the configured embeddings provider. Only
+  with `--llm` are the names, descriptions, catalog paths, and member skill
+  names of matched plugins sent to the configured chat LLM.
 - Catalog files are read and written locally; SkillEvaluator does not upload
   them to a catalog service.
 

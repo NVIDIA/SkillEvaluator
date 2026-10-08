@@ -677,9 +677,15 @@ def is_broad_allow_rule(rule: str) -> bool:
 PERMISSIVE_PERMISSION_MODES: frozenset[str] = frozenset({"acceptEdits", "auto"})
 
 
-# Claude Code's CLI pre-approval flag: '--allowedTools Bash', '--allowed-tools "Bash(python3:*) Edit"'.
+# One value of the flag: a quoted list ("Bash(python3:*) Edit") or one unquoted word.
+_ALLOWED_TOOLS_VALUE = r"\"[^\"\n]{0,1024}\"|'[^'\n]{0,1024}'|[^\s;&|]{1,1024}"
+_ALLOWED_TOOLS_VALUE_RE = re.compile(_ALLOWED_TOOLS_VALUE)
+# Claude Code's CLI pre-approval flag: '--allowedTools Bash', '--allowed-tools "Bash(python3:*) Edit"'. It takes a
+# list of values, so after a space every word up to the next option is one ('--allowedTools Read Bash -p x');
+# after '=' only the one value is.
 _ALLOWED_TOOLS_FLAG_RE = re.compile(
-    r"(?<![\w-])--allowed-?tools(?:=|\s+)(?P<value>\"[^\"\n]{0,1024}\"|'[^'\n]{0,1024}'|[^\s;&|]{1,1024})",
+    rf"(?<![\w-])--allowed-?tools(?:=(?P<value>{_ALLOWED_TOOLS_VALUE})"
+    rf"|\s+(?P<values>(?:{_ALLOWED_TOOLS_VALUE})(?:[ \t]+(?!-)(?:{_ALLOWED_TOOLS_VALUE}))*))",
     re.IGNORECASE,
 )
 _ALLOWED_TOOLS_FLAGS = frozenset({"--allowedtools", "--allowed-tools"})
@@ -697,12 +703,16 @@ def allowed_tools_flag_issues(value: Any) -> list[OverrideIssue]:
     hits: dict[tuple[str, str], None] = {}
     items: dict[str, dict[int, str]] = {}
 
-    def _broad(raw: str) -> str | None:
-        return next((rule for rule in parse_tool_list(raw.strip("\"'")) or [] if is_broad_allow_rule(rule)), None)
+    def _broad(values: Iterable[str]) -> str | None:
+        return next(
+            (rule for raw in values for rule in parse_tool_list(raw.strip("\"'")) or [] if is_broad_allow_rule(rule)),
+            None,
+        )
 
     for path, text in iter_config_strings(value):
         for match in _ALLOWED_TOOLS_FLAG_RE.finditer(text):
-            rule = _broad(match.group("value"))
+            spaced = match.group("values")
+            rule = _broad([match.group("value")] if spaced is None else _ALLOWED_TOOLS_VALUE_RE.findall(spaced))
             if rule is not None:
                 hits.setdefault((path, rule))
         item = _LIST_ITEM_PATH_RE.match(path)
@@ -711,7 +721,11 @@ def allowed_tools_flag_issues(value: Any) -> list[OverrideIssue]:
     for parent, tokens in items.items():
         for index, token in tokens.items():
             if token.strip().lower() in _ALLOWED_TOOLS_FLAGS:
-                rule = _broad(tokens.get(index + 1, ""))
+                # Every item up to the next option is a value: ['--allowedTools', 'Read', 'Bash', '-p', 'x'].
+                end = index + 1
+                while end in tokens and not tokens[end].lstrip().startswith("-"):
+                    end += 1
+                rule = _broad(tokens[position] for position in range(index + 1, end))
                 if rule is not None:
                     hits.setdefault((f"{parent}[{index}]", rule))
     return [

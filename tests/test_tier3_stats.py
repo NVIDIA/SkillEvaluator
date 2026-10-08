@@ -63,7 +63,7 @@ def test_bootstrap_is_deterministic_for_a_seed() -> None:
 
     assert first == second
     assert first["seed"] == LIFT_BOOTSTRAP_SEED
-    assert first["resamples"] == LIFT_BOOTSTRAP_RESAMPLES
+    assert first["resamples"] >= LIFT_BOOTSTRAP_RESAMPLES
     assert first["method"] == "paired_case_bootstrap"
     assert first["confidence"] == 0.95
     assert first["n_cases"] == 6
@@ -90,6 +90,24 @@ def test_bootstrap_known_datasets_give_expected_interval_shape() -> None:
     assert abs(symmetric["ci_low"] + symmetric["ci_high"]) <= 0.07
     assert symmetric["ci_includes_zero"] is True
     assert symmetric["precision"] == "low"
+
+
+def test_bootstrap_bounds_do_not_move_with_the_seed_at_small_n() -> None:
+    # At six cases the expanded tail is 0.24%: with 2,000 resamples each bound
+    # was about the 5th resampled mean, and the seed moved it by up to 0.04.
+    deltas = [0.555, 0.2383, 0.18, 0.1667, -0.0458, 0.4392]
+    treatment = dict(zip(CASES, deltas, strict=True))
+    control = dict.fromkeys(CASES, 0.0)
+
+    intervals = [stats.paired_case_bootstrap(treatment, control, seed=seed) for seed in range(10)]
+
+    lows = [interval["ci_low"] for interval in intervals]
+    highs = [interval["ci_high"] for interval in intervals]
+    assert max(lows) - min(lows) <= 0.01
+    assert max(highs) - min(highs) <= 0.01
+    # The exact bootstrap interval, over all 6**6 resamples, is [+0.0370, +0.4732].
+    assert intervals[0]["ci_low"] == pytest.approx(0.037, abs=0.005)
+    assert intervals[0]["ci_high"] == pytest.approx(0.4732, abs=0.005)
 
 
 def test_bootstrap_pairs_by_case_and_nests_attempts_within_cases() -> None:

@@ -595,6 +595,9 @@ TIER3_LIFT_FAIL_THRESHOLD = -0.10
 # whole cases are resampled with replacement. The seed is fixed so the same
 # run always reports the same interval.
 LIFT_BOOTSTRAP_RESAMPLES = 2000
+# The expanded interval's tail is thin at small n (0.24% at 6 cases), so more
+# resamples are drawn until each bound rests on at least this many of them.
+LIFT_BOOTSTRAP_TAIL_RESAMPLES = 200
 LIFT_BOOTSTRAP_SEED = 0
 LIFT_BOOTSTRAP_CONFIDENCE = 0.95
 # Fewer paired cases than this makes the interval ``insufficient``.

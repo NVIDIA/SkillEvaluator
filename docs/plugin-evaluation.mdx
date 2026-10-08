@@ -2288,7 +2288,7 @@ them changes a metric, dimension, score, pass@k, verdict, or gate.
 
 | Block | What it reports |
 | --- | --- |
-| `lift_uncertainty` | For `effectiveness` and `integration`: `estimate`, `ci_low`, `ci_high`, `confidence` (0.95), `method` (`paired_case_bootstrap`), `interval` (`expanded_percentile`), `resamples` (2,000), `seed` (0), `n_cases`, `expected_cases`, `precision`, `ci_includes_zero`, `partial`, `failed_arms`, the compared `treatment_arm` and `control_arm`, their `treatment_score` and `control_score`, and the `dimensions` both arms scored (`basis`) |
+| `lift_uncertainty` | For `effectiveness` and `integration`: `estimate`, `ci_low`, `ci_high`, `confidence` (0.95), `method` (`paired_case_bootstrap`), `interval` (`expanded_percentile`), `resamples` (at least 2,000, and with 5 or more paired cases enough that each bound rests on 200 resampled means), `seed` (0), `n_cases`, `expected_cases`, `precision`, `ci_includes_zero`, `partial`, `failed_arms`, the compared `treatment_arm` and `control_arm`, their `treatment_score` and `control_score`, and the `dimensions` both arms scored (`basis`) |
 | `reliability` | Per arm: `pass_at_k`, `pass_hat_k`, `k`, `n_cases`, and `not_applicable_metrics` (the metrics no trial of that arm scored) |
 | `cost` | Per arm: `tokens_per_success`, `usd_per_success`, `total_tokens`, `total_usd`, and `successes` |
 | `token_efficiency` | Per arm: the mean of `1 / (1 + tokens / 200000)` over trials |

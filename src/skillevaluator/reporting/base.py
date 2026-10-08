@@ -507,10 +507,17 @@ class ReporterBase(ABC):
         incomplete when required work did not finish (missing scanner evidence
         or a partial Tier 3 plugin run), and passed otherwise. Reporters share
         this helper so their plugin row cannot disagree with the overall verdict.
+        A real failure outranks missing evidence, as in BENCHMARK.md and the
+        terminal footer: an incomplete result that also failed on its own (a
+        blocking finding, a Tier 3 FAIL) makes the plugin failed.
         """
+        from skillevaluator.reporting.benchmark import _missing_evidence_only
+
         incomplete = False
         for result in results:
             if result.is_incomplete or is_partial_plugin_agent_eval(result):
+                if not passes_required_gate(result) and not _missing_evidence_only(result):
+                    return "failed"
                 incomplete = True
             elif not passes_required_gate(result):
                 return "failed"

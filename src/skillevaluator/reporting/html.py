@@ -1241,9 +1241,7 @@ class HTMLReporter(ReporterBase):
             for result in tier_results:
                 for finding in result.findings:
                     severity = (
-                        finding.severity.value
-                        if hasattr(finding.severity, "value")
-                        else str(finding.severity).lower()
+                        finding.severity.value if hasattr(finding.severity, "value") else str(finding.severity).lower()
                     )
                     if severity in totals:
                         totals[severity] += 1

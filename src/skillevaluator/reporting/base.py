@@ -358,9 +358,7 @@ def is_advisory_agent_eval_skip(result: ValidationResult) -> bool:
         return False
     payload = result.metadata.get("agent_eval", {}) if result.metadata else {}
     provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
-    return bool(
-        isinstance(provenance, dict) and provenance.get("advisory") and provenance.get("reason") == "skipped"
-    )
+    return bool(isinstance(provenance, dict) and provenance.get("advisory") and provenance.get("reason") == "skipped")
 
 
 def is_partial_plugin_agent_eval(result: ValidationResult) -> bool:

@@ -30,3 +30,10 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 regexes = ['''^cw-key-123456$''']
 paths = ['''^tests/test_harbor_environment_contract\.py$''']
+
+[[allowlists]]
+description = "Bedrock model ID that follows a credential name in SkillSpector bridge tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^us\.anthropic\.claude-opus-5$''']
+paths = ['''^tests/validators/test_security\.py$''']

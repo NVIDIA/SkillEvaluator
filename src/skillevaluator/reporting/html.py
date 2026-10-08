@@ -172,6 +172,15 @@ def _related_paths(finding: object) -> list[str]:
     return paths
 
 
+def _root_relative(path: str, roots: list[str]) -> str:
+    """Return *path* relative to the first of *roots* that contains it, else unchanged."""
+    for root in roots:
+        prefix = root.rstrip("/") + "/"
+        if path.startswith(prefix):
+            return path[len(prefix) :]
+    return path
+
+
 def _adaptive_unsigned_percent_decimals(percentage: float) -> int:
     """Return the existing bounded precision policy for one unsigned percentage."""
     if percentage in {0.0, 100.0}:
@@ -474,6 +483,9 @@ class HTMLReporter(ReporterBase):
             return self._reorganize_single_skill(results, single_skill)
 
         skills: dict[str, dict[str, Any]] = {}
+        # Scanned roots, to group a finding with an absolute path by its path below the root.
+        plugin = self._plugin_block_from_results(results) or {}
+        roots = [str(root) for root in (plugin.get("root"), self.target_path) if root]
 
         for result in results:
             validator_name = result.validator_name
@@ -517,10 +529,11 @@ class HTMLReporter(ReporterBase):
                 file_path = finding.file_path
                 skill_name, clean_path = split_display_prefix(file_path)
                 if skill_name is None:
-                    # Try to extract from path
-                    parts = file_path.split("/")
+                    # Try to extract from path; an absolute path outside every root is its own group.
+                    clean_path = _root_relative(clean_path, roots)
+                    parts = clean_path.split("/")
                     if len(parts) > 0:
-                        skill_name = parts[0]
+                        skill_name = parts[0] or clean_path
 
                 if skill_name:
                     if skill_name not in skills:

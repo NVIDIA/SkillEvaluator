@@ -491,6 +491,29 @@ class TestJSONReporter:
         assert data["rubric_eval"]["execution_status"] == "succeeded"
         assert data["results"][0]["rubric_eval"] == data["rubric_eval"]
 
+    def test_render_all_groups_a_finding_with_an_absolute_path_under_the_plugin_root(self) -> None:
+        result = ValidationResult(validator_name="Plugin Schema & Bundle References", validator_description="Plugin")
+        result.metadata["plugin"] = {"root": "/work/hookify", "name": "hookify"}
+        for file_path in ("/work/hookify/hooks/hooks.json", "commands/help.md", "/elsewhere/settings.json"):
+            result.add_finding(
+                Finding(
+                    category="SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="bundle_reference",
+                    message=f"Bad reference in {file_path}",
+                    file_path=file_path,
+                )
+            )
+
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+        # Every finding is counted: one below the plugin root by its path there, one outside it by its own path.
+        assert {skill["name"]: skill["issue_count"] for skill in data["skills"]} == {
+            "hooks": 1,
+            "commands": 1,
+            "/elsewhere/settings.json": 1,
+        }
+
     def test_compact_output(self, success_result: ValidationResult) -> None:
         """Test compact JSON output without indentation."""
         reporter = JSONReporter(indent=None, include_timestamp=False)

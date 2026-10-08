@@ -223,7 +223,7 @@ def test_generated_call_public_llm_redacts_generic_exception(
     assert error is not None
     assert credential not in error
     assert error == (
-        f"Public provider call failed for {verifier_module.DEFAULT_JUDGE_MODEL}: "
+        f"Public provider call failed for {verifier_module.DEFAULT_JUDGE_MODELS['nv_build']}: "
         "transport included [REDACTED] in diagnostics"
     )
 

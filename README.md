@@ -122,7 +122,7 @@ export OPENAI_API_KEY='sk-...'
 
 NVIDIA Build defaults to `nvidia/nemotron-3-super-120b-a12b` for evaluator chat,
 Tier 3 agent execution, and judging. Its embedding default is
-`nvidia/nemotron-3-embed-1b`; OpenAI defaults to `gpt-5.6-sol` and
+`nvidia/nemotron-3-embed-1b`; OpenAI defaults to `gpt-6.1-sol` and
 `text-embedding-3-small`. These are configured defaults, not automatically
 updated selections of the latest models. To select a different evaluator model:
 

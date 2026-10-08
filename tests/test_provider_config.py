@@ -46,11 +46,11 @@ def test_openai_provider_uses_standard_openai_credentials() -> None:
     }
 
 
-def test_openai_provider_uses_gpt_5_5_by_default() -> None:
+def test_openai_provider_uses_gpt_6_1_sol_by_default() -> None:
     config = resolve_llm_provider({"SKILL_EVAL_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "test-openai-key"})
 
-    assert config.model == "gpt-5.6-sol"
-    assert config.litellm_model == "openai/gpt-5.6-sol"
+    assert config.model == "gpt-6.1-sol"
+    assert config.litellm_model == "openai/gpt-6.1-sol"
 
 
 def test_anthropic_provider_uses_claude_opus_5_by_default() -> None:
@@ -77,15 +77,13 @@ def test_chat_default_models_are_the_single_source_of_truth() -> None:
         CHAT_DEFAULT_NVIDIA,
         CHAT_DEFAULT_OPENAI,
     )
-    from skillevaluator.tier3.eval_core.llm_judge import DEFAULT_JUDGE_MODEL
 
-    assert CHAT_DEFAULT_MODELS["openai"] == CHAT_DEFAULT_OPENAI == "gpt-5.6-sol"
+    assert CHAT_DEFAULT_MODELS["openai"] == CHAT_DEFAULT_OPENAI == "gpt-6.1-sol"
     assert CHAT_DEFAULT_MODELS["anthropic"] == CHAT_DEFAULT_ANTHROPIC == "claude-opus-5"
     assert CHAT_DEFAULT_MODELS["bedrock"] == CHAT_DEFAULT_BEDROCK == "us.anthropic.claude-opus-5"
     assert CHAT_DEFAULT_MODELS["nv_build"] == CHAT_DEFAULT_NVIDIA == "nvidia/nemotron-3-super-120b-a12b"
     assert CHAT_CHEAP_OPENAI == "gpt-5.4-mini"
     assert DIMENSION_JUDGE_MODEL == CHAT_DEFAULT_OPENAI
-    assert DEFAULT_JUDGE_MODEL == CHAT_DEFAULT_OPENAI
 
 
 def test_skillspector_defaults_cover_every_provider_and_keep_supported_claude_models() -> None:

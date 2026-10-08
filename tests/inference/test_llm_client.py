@@ -750,7 +750,7 @@ def _use_provider(monkeypatch: pytest.MonkeyPatch, provider: str, model: str) ->
 
 
 class TestReasoningModelRequests:
-    @pytest.mark.parametrize(("model", "effort"), [("gpt-6.1-sol", "high"), (CHAT_DEFAULT_OPENAI, None)])
+    @pytest.mark.parametrize(("model", "effort"), [(CHAT_DEFAULT_OPENAI, "high"), ("gpt-5.6-sol", None)])
     def test_finding_verifier_sends_high_effort_only_to_gpt6(
         self, monkeypatch: pytest.MonkeyPatch, model: str, effort: str | None
     ) -> None:

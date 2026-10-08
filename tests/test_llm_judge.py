@@ -18,14 +18,7 @@ from skillevaluator.provider_config import CHAT_CHEAP_OPENAI, CHAT_DEFAULT_OPENA
 from skillevaluator.tier3.eval_core import llm_judge
 
 
-@pytest.mark.parametrize(
-    "model",
-    [
-        CHAT_DEFAULT_OPENAI,
-        f"openai/{CHAT_DEFAULT_OPENAI}",
-        f"openai/openai/{CHAT_DEFAULT_OPENAI}",
-    ],
-)
+@pytest.mark.parametrize("model", ["gpt-5.6-sol", "openai/gpt-5.6-sol", "openai/openai/gpt-5.6-sol"])
 def test_native_openai_gpt5_uses_max_completion_tokens_without_temperature(model: str) -> None:
     """Verify native OpenAI gpt-5 requests use max_completion_tokens without temperature."""
     payload = llm_judge._chat_completion_payload(

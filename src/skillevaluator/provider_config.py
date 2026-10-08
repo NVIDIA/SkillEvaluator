@@ -21,9 +21,9 @@ _PROVIDER_SETUP_URL = "https://docs.nvidia.com/skills/skillevaluator/configurati
 
 # Pinned frontier chat defaults (not floating aliases like ``gpt-5`` / ``claude-opus-latest``).
 # Harbor ``templates/eval.py`` cannot import this module — keep its local
-# ``DEFAULT_JUDGE_MODEL`` in sync via the drift test in
+# ``DEFAULT_JUDGE_MODELS`` in sync via the drift test in
 # ``tests/tier3/test_judge_parse_robustness.py``.
-CHAT_DEFAULT_OPENAI = "gpt-5.6-sol"
+CHAT_DEFAULT_OPENAI = "gpt-6.1-sol"
 CHAT_DEFAULT_ANTHROPIC = "claude-opus-5"
 CHAT_DEFAULT_BEDROCK = "us.anthropic.claude-opus-5"
 CHAT_DEFAULT_NVIDIA = "nvidia/nemotron-3-super-120b-a12b"
@@ -58,6 +58,9 @@ GATEWAY_AGENT_DEFAULT_MODELS = {
     "claude-code": "aws/anthropic/bedrock-claude-opus-5-5",
     "opencode": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
 }
+# OpenCode drives OpenAI through a Chat Completions tool loop, and GPT-6.1 Sol
+# supports tool calls only on the Responses API.
+OPENCODE_OPENAI_DEFAULT_MODEL = "gpt-5.6-sol"
 EMBEDDING_DEFAULT_NVIDIA = "nvidia/nemotron-3-embed-1b"
 EMBEDDING_DEFAULT_GATEWAY = "nvidia/nvidia/nemotron-3-embed-1b"
 _EMBEDDING_DEFAULT_MODELS = {

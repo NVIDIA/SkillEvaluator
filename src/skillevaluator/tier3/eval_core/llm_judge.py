@@ -19,7 +19,6 @@ from urllib.parse import urlparse
 
 from skillevaluator.inference.types import EmptyLLMResponseError, LLMClientTruncatedError
 from skillevaluator.provider_config import (
-    CHAT_DEFAULT_OPENAI,
     MAX_COMPLETION_TOKENS,
     _supports_custom_temperature,
     completion_token_limit,
@@ -39,7 +38,6 @@ logger = logging.getLogger(__name__)
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 NVIDIA_BUILD_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-DEFAULT_JUDGE_MODEL = CHAT_DEFAULT_OPENAI
 # Sent only to models that take an explicit effort (GPT-6, native Claude 5.5+).
 JUDGE_REASONING_EFFORT = "medium"
 

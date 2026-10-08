@@ -89,7 +89,7 @@ Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedr
     export OPENAI_API_KEY='sk-...'
     ```
 
-    Default model: `gpt-5.6-sol` (OpenAI GPT-5.6 Sol frontier). For a lower-cost override set `SKILL_EVAL_LLM_MODEL=gpt-5.4-mini`. Endpoint `https://api.openai.com/v1`. Override the endpoint with `SKILL_EVAL_LLM_BASE_URL` (takes precedence) or `OPENAI_BASE_URL` — but a base URL that is a non-canonical alias of the native OpenAI endpoint is rejected; use `https://api.openai.com/v1` verbatim. On the canonical endpoint, `gpt-5*` models automatically send `max_completion_tokens` instead of `max_tokens`.
+    Default model: `gpt-6.1-sol` (OpenAI GPT-6.1 Sol frontier). For a lower-cost override set `SKILL_EVAL_LLM_MODEL=gpt-5.4-mini`. Endpoint `https://api.openai.com/v1`. Override the endpoint with `SKILL_EVAL_LLM_BASE_URL` (takes precedence) or `OPENAI_BASE_URL` — but a base URL that is a non-canonical alias of the native OpenAI endpoint is rejected; use `https://api.openai.com/v1` verbatim. On the canonical endpoint, GPT-5 and GPT-6 models automatically send `max_completion_tokens` instead of `max_tokens`. Tier 3's OpenCode agent uses `openai/gpt-5.6-sol` unless `SKILL_EVAL_LLM_MODEL` is set, because OpenCode calls tools through Chat Completions and GPT-6.1 Sol supports tool calls only on the Responses API.
   </Tab>
   <Tab title="Anthropic" language="anthropic">
     ```bash title="Anthropic setup"
@@ -258,7 +258,7 @@ schema_version: 1
 harbor:
   agents:
     codex:
-      model: gpt-5.6-sol
+      model: gpt-6.1-sol
 ```
 
 You can also supply that model at invocation time with `--agent-model codex=MODEL`. See [Tier 3: Live Evaluation](tier3-live-evaluation.mdx) for the full run workflow.

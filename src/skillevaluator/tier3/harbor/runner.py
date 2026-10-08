@@ -40,7 +40,9 @@ from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import (
     CHAT_DEFAULT_ANTHROPIC,
     CHAT_DEFAULT_NVIDIA,
+    CHAT_DEFAULT_OPENAI,
     GATEWAY_AGENT_DEFAULT_MODELS,
+    OPENCODE_OPENAI_DEFAULT_MODEL,
     ProviderConfig,
     ProviderConfigurationError,
     _normalize_anthropic_base_url,
@@ -2450,6 +2452,15 @@ def _model_for_agent(
                 credentials = _independent_anthropic_agent_credentials()
                 if credentials.get("ANTHROPIC_API_KEY", "").strip() and not credentials.get("ANTHROPIC_BASE_URL"):
                     selected, source = CHAT_DEFAULT_ANTHROPIC, "native Anthropic agent default"
+        elif (
+            agent == "opencode"
+            and provider.provider == "openai"
+            and provider.model == CHAT_DEFAULT_OPENAI
+            and not os.environ.get("SKILL_EVAL_LLM_MODEL", "").strip()
+        ):
+            # The OpenAI chat default needs the Responses API for tool calls;
+            # an explicit SKILL_EVAL_LLM_MODEL still reaches OpenCode.
+            selected, source = OPENCODE_OPENAI_DEFAULT_MODEL, "native OpenAI agent default"
         else:
             selected, source = provider.model, "public provider default"
     if (
@@ -2468,7 +2479,7 @@ def _model_for_agent(
             "openai": "openai",
             "openai-compatible": "openai",
         }.get(provider.provider)
-        if namespace and source in {"public provider default", "openai-compatible agent default"}:
+        if namespace and source not in {"CLI", "evals/config.yml"}:
             selected = f"{namespace}/{selected}"
     return selected, source
 

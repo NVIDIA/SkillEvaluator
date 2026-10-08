@@ -3910,11 +3910,11 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert "NVIDIA_API_KEY" not in child_env
 
     @pytest.mark.parametrize(
-        ("provider", "credential", "model"),
+        ("provider", "credential", "model", "effort"),
         (
-            ("openai", "OPENAI_API_KEY", "gpt-5.6-sol"),
-            ("anthropic", "ANTHROPIC_API_KEY", "claude-opus-5"),
-            ("bedrock", "AWS_BEARER_TOKEN_BEDROCK", "us.anthropic.claude-opus-5"),
+            ("openai", "OPENAI_API_KEY", "gpt-6.1-sol", "medium"),
+            ("anthropic", "ANTHROPIC_API_KEY", "claude-opus-5", None),
+            ("bedrock", "AWS_BEARER_TOKEN_BEDROCK", "us.anthropic.claude-opus-5", None),
         ),
     )
     def test_skillspector_child_environment_maps_supported_public_provider_defaults(
@@ -3923,18 +3923,21 @@ Call us at 555-123-4567 or +1-555-987-6543
         provider: str,
         credential: str,
         model: str,
+        effort: str | None,
     ) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", provider)
         monkeypatch.setenv(credential, "provider-test-key")
         monkeypatch.delenv("SKILL_EVAL_LLM_MODEL", raising=False)
         monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
         monkeypatch.delenv("SKILLSPECTOR_MODEL", raising=False)
+        monkeypatch.delenv("SKILLSPECTOR_REASONING_EFFORT", raising=False)
 
         child_env = _skillspector_child_env()
 
         assert child_env is not None
         assert child_env["SKILLSPECTOR_PROVIDER"] == provider
         assert child_env["SKILLSPECTOR_MODEL"] == model
+        assert child_env.get("SKILLSPECTOR_REASONING_EFFORT") == effort
 
     def test_skillspector_bedrock_environment_keeps_only_aws_chain(self, monkeypatch) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "bedrock")

@@ -471,12 +471,15 @@ def test_template_behavior_judge_max_tokens_matches_eval_core_constant():
     assert llm_judge.BEHAVIOR_JUDGE_MAX_TOKENS >= 4096
 
 
-def test_template_default_judge_model_matches_central_constant():
-    from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI
+def test_template_default_judge_models_match_provider_chat_defaults():
+    assert eval_template.DEFAULT_JUDGE_MODELS == provider_config.CHAT_DEFAULT_MODELS
 
-    assert eval_template.DEFAULT_JUDGE_MODEL == llm_judge.DEFAULT_JUDGE_MODEL
-    assert llm_judge.DEFAULT_JUDGE_MODEL == CHAT_DEFAULT_OPENAI
-    assert CHAT_DEFAULT_OPENAI == "gpt-5.6-sol"
+
+@pytest.mark.parametrize("provider", sorted(provider_config.CHAT_DEFAULT_MODELS))
+def test_template_last_resort_judge_follows_the_selected_provider(judge_env, provider):
+    judge_env.setenv("SKILL_EVAL_LLM_PROVIDER", provider)
+
+    assert eval_template._selected_judge_model() == provider_config.CHAT_DEFAULT_MODELS[provider]
 
 
 @pytest.mark.parametrize(

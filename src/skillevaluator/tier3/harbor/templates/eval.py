@@ -118,10 +118,16 @@ SKILL_EVALUATOR_REWARD_JSON = _env_path(
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 NVIDIA_BUILD_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-# Keep in sync with skillevaluator.provider_config and
-# skillevaluator.tier3.eval_core.llm_judge (sandbox template cannot import the
-# package — see drift tests).
-DEFAULT_JUDGE_MODEL = "gpt-5.6-sol"
+# Last-resort judge per provider when no model is configured. Keep in sync with
+# skillevaluator.provider_config.CHAT_DEFAULT_MODELS (sandbox template cannot
+# import the package — see drift tests).
+DEFAULT_JUDGE_MODELS = {
+    "openai": "gpt-6.1-sol",
+    "anthropic": "claude-opus-5",
+    "nv_build": "nvidia/nemotron-3-super-120b-a12b",
+    "bedrock": "us.anthropic.claude-opus-5",
+    "openai-compatible": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
+}
 JUDGE_REASONING_EFFORT = "medium"
 REASONING_MAX_COMPLETION_TOKENS = 32768
 ANTHROPIC_REFUSAL_FALLBACK_MODEL = "claude-opus-4-8"
@@ -2313,7 +2319,7 @@ def _selected_judge_model(model=None):
         or os.environ.get("LLM_JUDGE_MODEL")
         or os.environ.get("SKILL_EVAL_JUDGE_MODEL")
         or os.environ.get("SKILL_EVAL_LLM_MODEL")
-        or DEFAULT_JUDGE_MODEL
+        or DEFAULT_JUDGE_MODELS.get(_public_provider(), DEFAULT_JUDGE_MODELS["openai"])
     )
 
 

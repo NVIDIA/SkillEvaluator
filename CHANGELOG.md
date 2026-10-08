@@ -27,8 +27,7 @@ All notable changes to SkillEvaluator are documented in this file.
   and 16,000 for dataset generation.
 - Reasoning effort is sent only to GPT-6 models and to Claude 5.5 or later on
   the Anthropic API: `high` for `--llm-verify`, `medium` for rubric evaluation,
-  deduplication verdicts and judges. Today's default models keep their
-  default effort.
+  deduplication verdicts and judges.
 - Rubric evaluation and deduplication verdicts request structured output. The
   verifier and deduplication prompts ask for `rationale` instead of
   `reasoning`; replies that still say `reasoning` are accepted.
@@ -53,6 +52,11 @@ All notable changes to SkillEvaluator are documented in this file.
   chat default. Claude Code on the shared gateway key runs with
   `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, so gateways that forward to
   another provider do not reject its pre-release request fields.
+- The OpenAI default model moves from `gpt-5.6-sol` to `gpt-6.1-sol` for chat,
+  judging, Codex and SkillSpector, which runs it at `medium` reasoning effort,
+  so the effort values above apply to the OpenAI defaults. OpenCode keeps
+  `openai/gpt-5.6-sol` unless `SKILL_EVAL_LLM_MODEL` is set, because
+  GPT-6.1 Sol supports tool calls only on the Responses API.
 
 ### Fixed
 
@@ -63,6 +67,10 @@ All notable changes to SkillEvaluator are documented in this file.
   verifier, Bedrock retries a filtered Claude 5.5 reply on Claude Opus 4.8, and
   a refusal or empty judge reply moves on to the next
   `LLM_JUDGE_FALLBACK_MODELS` entry.
+- The Harbor verifier's last-resort judge model follows the selected provider.
+  With no judge or chat model configured, it used to request an OpenAI model
+  from Anthropic, Bedrock, NVIDIA Build and gateways. The unused host-side
+  `llm_judge.DEFAULT_JUDGE_MODEL` constant is removed.
 - Brought the published documentation in line with 0.5.0. It now covers how
   standard grading builds judge evidence and rebuilds trajectories from
   OpenCode and Codex logs, structured judge output and retries, the evidence

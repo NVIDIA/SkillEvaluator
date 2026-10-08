@@ -2371,7 +2371,7 @@
                 {%- if t3_band.verdict %}
                 Skill Lift band <strong>{{ t3_band.verdict | upper }}</strong>
                 {%- if t3_band.verdict == 'fail' and t3_band.regression_confirmed %} (confirmed regression: the whole interval is below zero)
-                {%- elif t3_band.verdict == 'fail' %} (not confirmed: the interval includes zero or was not computed)
+                {%- elif t3_band.verdict == 'fail' %} (not confirmed: the interval includes zero, rests on too few paired cases, or was not computed)
                 {%- endif %}.
                 {%- endif %}
                 {%- set t3_gate_tiers = gating if gating is defined and gating else {} %}

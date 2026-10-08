@@ -3239,9 +3239,10 @@ the dimension gate above. A lift in the FAIL band adds a warning. When its
 paired-case 95% interval also lies wholly below zero, it is a confirmed
 regression: the plugin made the tasks worse than running without it.
 `BENCHMARK.md` then says FAIL, and `--block-on-agent-eval` fails `validate`.
-A FAIL-band lift whose interval includes zero, or that has no interval, only
-warns. An Integration-only run has no no-plugin arm, so it has no Skill Lift
-band; Integration stays advisory. See [Reports & Results](reports.mdx).
+A FAIL-band lift whose interval includes zero, that has no interval, or whose
+interval has fewer than 5 paired cases (precision `insufficient`) only warns.
+An Integration-only run has no no-plugin arm, so it has no Skill Lift band;
+Integration stays advisory. See [Reports & Results](reports.mdx).
 
 ### What makes a plugin run INCOMPLETE
 

@@ -586,8 +586,8 @@ class BenchmarkReporter(ReporterBase):
                 (
                     "- A Skill Lift in the FAIL band whose paired-case interval lies wholly below zero is a "
                     "confirmed regression: it adds a warning and makes this card FAIL. A FAIL-band lift whose "
-                    "interval includes zero, or has no interval, only warns. Integration-only runs have no "
-                    "Skill Lift band."
+                    "interval includes zero, rests on too few paired cases, or has no interval, only warns. "
+                    "Integration-only runs have no Skill Lift band."
                 ),
                 (
                     "- Exit code: `validate --block-on-agent-eval` fails on a Tier 3 FAIL verdict, a confirmed "
@@ -1293,7 +1293,8 @@ def _lift_band_lines(ae: dict[str, Any] | None, subject: str) -> list[str]:
     else:
         text = (
             f"⚠️ **Negative Skill Lift:** {_lift_band_phrase(band)} is {band_text}, but the interval includes "
-            "zero or was not computed, so the regression is not confirmed and does not gate."
+            "zero, rests on too few paired cases, or was not computed, so the regression is not confirmed and "
+            "does not gate."
         )
     return [text, ""]
 

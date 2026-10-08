@@ -813,7 +813,9 @@ covers every dimension. Its independent band is **PASS** at +0.05 or above,
 **NEUTRAL** between -0.10 and +0.05, and **FAIL** at -0.10 or below. The band
 never changes the every-dimension verdict. A FAIL-band lift whose interval lies
 wholly below zero is a confirmed regression: the report warns, `BENCHMARK.md`
-says FAIL, and `--block-on-agent-eval` fails `validate`. A
+says FAIL, and `--block-on-agent-eval` fails `validate`. With fewer than 5
+paired cases the interval is too unstable to confirm a regression, so such a
+lift only warns. A
 report-only 95% interval from a paired, case-clustered bootstrap accompanies
 the lift; when that interval includes zero the report adds a warning, but the
 band is unchanged.

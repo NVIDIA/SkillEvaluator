@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Check 24 (execution success): real Claude Code and Codex failure shapes.
+"""Check 24 (execution success): real Claude Code, Codex, and OpenCode failure shapes.
 
 Fixtures copy the shapes of the saved proof examples (check-24 e01-e04, the
 check-22 codex.txt mapping case) with made-up values. Every MCP outcome is read
@@ -347,3 +347,144 @@ def test_harness_statuses_ignore_malformed_result_ids() -> None:
     results = marked["steps"][0]["observation"]["results"]
     assert results[0] == {"source_call_id": ["x"]}
     assert results[1]["extra"]["harness_status"] == "failed"
+
+
+def test_harness_errors_add_a_result_only_for_a_call_without_one() -> None:
+    from skillevaluator.tier3.harbor.collector import _with_harness_statuses
+
+    trajectory = {
+        "steps": [
+            {"tool_calls": [{"tool_call_id": ["x"]}, {"tool_call_id": "c1"}, {"tool_call_id": "c2"}]},
+            {"observation": {"results": [{"source_call_id": "c2", "content": "partial"}]}},
+        ]
+    }
+    marked = _with_harness_statuses(trajectory, {"c1": "error", "c2": "error"}, {"c1": "boom", "c2": "boom"})
+    assert marked is not None
+    assert marked["steps"][0]["observation"]["results"] == [
+        {"source_call_id": "c1", "content": "boom", "extra": {"harness_status": "error"}}
+    ]
+    assert marked["steps"][1]["observation"]["results"] == [
+        {"source_call_id": "c2", "content": "partial", "extra": {"harness_status": "error"}}
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# OpenCode: Harbor drops a failed call's result; opencode.txt keeps it        #
+# --------------------------------------------------------------------------- #
+UNKNOWN_AGENT = "Error: Unknown agent type: reviewer is not a valid agent type"
+
+
+def _opencode_turn(call_id: str, tool: str, args: dict[str, Any], state: dict[str, Any]) -> list[dict[str, Any]]:
+    part = {"type": "tool", "tool": tool, "callID": call_id, "state": {"input": args, **state}}
+    return [
+        {"type": "step_start", "timestamp": 1, "sessionID": "ses_1", "part": {}},
+        {"type": "tool_use", "timestamp": 2, "sessionID": "ses_1", "part": part},
+        {"type": "step_finish", "timestamp": 3, "sessionID": "ses_1", "part": {"tokens": {"input": 1, "output": 1}}},
+    ]
+
+
+def test_opencode_error_state_in_opencode_txt_marks_calls_failed(tmp_path: Path) -> None:
+    # A task call to an agent OpenCode does not know and an MCP call whose connection
+    # closed. Harbor's trajectory keeps no result for either, so neither may read as
+    # exercised; a completed call to another agent still is.
+    pytest.importorskip("harbor")
+    from harbor.agents.installed.opencode import OpenCode
+    from harbor.models.agent.context import AgentContext
+
+    events = [
+        *_opencode_turn("c1", "task", {"subagent_type": "reviewer"}, {"status": "error", "error": UNKNOWN_AGENT}),
+        *_opencode_turn("c2", "tracker_list_issues", {}, {"status": "error", "error": "MCP error -32000: closed"}),
+        *_opencode_turn("c3", "task", {"subagent_type": "helper"}, {"status": "completed", "output": "Done."}),
+    ]
+    jobs_dir = tmp_path / "jobs"
+    for variant in ("with", "without"):
+        trial_dir = jobs_dir / f"demo-opencode-{variant}" / f"{CASE_ID}__AbCd001"
+        (trial_dir / "verifier").mkdir(parents=True)
+        (trial_dir / "verifier" / "reward.json").write_text(json.dumps(REWARD), encoding="utf-8")
+        (trial_dir / "agent").mkdir()
+        (trial_dir / "agent" / "opencode.txt").write_text("".join(json.dumps(e) + "\n" for e in events), "utf-8")
+        OpenCode(logs_dir=trial_dir / "agent", model_name="openai/test-model").populate_context_post_run(AgentContext())
+        (trial_dir.parent / "result.json").write_text(
+            json.dumps(
+                {
+                    "n_total_trials": 1,
+                    "stats": {
+                        "n_trials": 1,
+                        "n_errors": 0,
+                        "evals": {
+                            "agent__model___harbor-tasks": {
+                                "n_trials": 1,
+                                "n_errors": 0,
+                                "reward_stats": {"reward": {"0.65": [trial_dir.name]}},
+                            }
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+    trajectory = json.loads((trial_dir / "agent" / "trajectory.json").read_text(encoding="utf-8"))
+    assert ["observation" in step for step in trajectory["steps"]] == [False, False, True]
+    case = {"id": CASE_ID, "prompt": "p", "expected_tools": ["Agent:reviewer"]}
+    context = build_plugin_signals_context(
+        mcp_servers=["tracker"], wrapper_skills=["demo"], entries=[case], subagents=["reviewer", "helper"]
+    )
+
+    collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "out",
+        jobs_dir=jobs_dir,
+        expected_cases=1,
+        expected_case_ids=[CASE_ID],
+        expected_trials=1,
+        plugin_signals=context,
+    )
+
+    reward_path = tmp_path / "out" / "opencode" / "with-skill" / "trials" / f"{CASE_ID}__AbCd001" / "reward.json"
+    signals = json.loads(reward_path.read_text(encoding="utf-8"))["plugin_signals"]
+    assert [(a["type"], a["name"], a["succeeded"]) for a in signals["activations"]] == [
+        ("subagent", "reviewer", False),
+        ("mcp", "tracker", False),
+        ("subagent", "helper", True),
+    ]
+    assert _counts(signals["mcp_calls"]) == (1, 0, 1, 0)
+    coverage = signals["activation_coverage"]
+    assert (coverage["exercised"], coverage["unavailable"]) == (
+        ["subagent:helper"],
+        ["mcp:tracker", "subagent:reviewer"],
+    )
+    # OpenCode said the agent does not exist, so the call is a wrong choice, not a hit.
+    assert signals["routing"]["recall"] == 0.0
+
+
+def test_opencode_error_state_fails_a_call_whose_result_the_trajectory_kept(tmp_path: Path) -> None:
+    # Harbor drops an errored part's result today, but a trajectory that keeps one (here
+    # partial output with no failure words) must still read the call as failed.
+    trial = f"{CASE_ID}__AbCd001"
+    step = _claude_call("c1", "tracker_list_issues", {}, {"content": "Listing open issues for example-org"})
+    events = _opencode_turn("c1", "tracker_list_issues", {}, {"status": "error", "error": "MCP error -32000: closed"})
+    jobs_dir = tmp_path / "jobs"
+    for variant in ("with", "without"):
+        spec = {"trajectory": _traj(step, agent="opencode"), "session": None, "codex_txt": None}
+        _write_job(jobs_dir, "opencode", variant, {trial: spec})
+        opencode_txt = jobs_dir / f"demo-opencode-{variant}" / trial / "agent" / "opencode.txt"
+        opencode_txt.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+    context = build_plugin_signals_context(
+        mcp_servers=["tracker"], wrapper_skills=["demo"], entries=[{"id": CASE_ID, "prompt": "p"}]
+    )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "out",
+        jobs_dir=jobs_dir,
+        expected_cases=1,
+        expected_case_ids=[CASE_ID],
+        expected_trials=1,
+        plugin_signals=context,
+    )
+
+    summary = results["agents"]["opencode"]["plugin_signals_summary"]["with_skill"]
+    assert _counts(summary["mcp_calls"]) == (1, 0, 1, 0)
+    assert summary["activation_coverage"]["unavailable"] == ["mcp:tracker"]

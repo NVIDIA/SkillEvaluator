@@ -6455,28 +6455,92 @@ def _codex_mcp_calls(trial_root: Path, trajectory: Mapping[str, Any] | None) -> 
     return servers, statuses
 
 
+_OPENCODE_LOG_MAX_BYTES = 16 * 1024 * 1024
+_OPENCODE_FAILED_CALLS = 4_000
+_OPENCODE_ERROR_CHARS = 2_048
+
+
+def _opencode_call_errors(trial_root: Path) -> dict[str, str]:
+    """OpenCode tool calls that failed, read from the raw ``opencode.txt``: ``call id -> error text``.
+
+    OpenCode's JSON stream ends each tool part with ``state.status``:
+    ``completed`` with an ``output``, or ``error`` with an ``error``. Harbor's
+    OpenCode trajectory keeps a call's result only when it has an output, so a
+    failed call (a ``task`` to an agent that does not exist, an MCP call whose
+    connection closed) is left with no result and no outcome. The part's
+    ``callID`` is the trajectory's tool call id. Empty for other harnesses.
+    """
+    from skillevaluator.tier3.eval_core.log_converters import _opencode_error_text
+
+    text = _read_bounded_text(trial_root / "agent" / "opencode.txt", max_bytes=_OPENCODE_LOG_MAX_BYTES)
+    errors: dict[str, str] = {}
+    for line in text.splitlines() if text and "tool_use" in text else ():
+        if "tool_use" not in line or "error" not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        part = event.get("part") if isinstance(event, Mapping) and event.get("type") == "tool_use" else None
+        state = part.get("state") if isinstance(part, Mapping) else None
+        if not isinstance(state, Mapping) or state.get("status") != "error":
+            continue
+        call_id = part.get("callID", part.get("id"))
+        if isinstance(call_id, str) and call_id and call_id not in errors:
+            errors[call_id] = _opencode_error_text(dict(state))[:_OPENCODE_ERROR_CHARS]
+            if len(errors) >= _OPENCODE_FAILED_CALLS:
+                break
+    return errors
+
+
 def _call_status(result: Any, statuses: Mapping[str, str]) -> str | None:
     call_id = result.get("source_call_id") if isinstance(result, Mapping) else None
     return statuses.get(call_id) if isinstance(call_id, str) else None
 
 
-def _with_harness_statuses(trajectory: dict[str, Any] | None, statuses: Mapping[str, str]) -> dict[str, Any] | None:
+def _step_results(step: Any) -> list[Any]:
+    observation = step.get("observation") if isinstance(step, Mapping) else None
+    results = observation.get("results") if isinstance(observation, Mapping) else None
+    return results if isinstance(results, list) else []
+
+
+def _with_harness_statuses(
+    trajectory: dict[str, Any] | None, statuses: Mapping[str, str], errors: Mapping[str, str] | None = None
+) -> dict[str, Any] | None:
     """A copy of ``trajectory`` whose results carry the harness's own per-call status.
 
     The status goes to ``extra.harness_status`` of every result whose
     ``source_call_id`` names the call, where plugin signals read it as the
-    call's structured outcome. The trajectory read from disk is not changed.
+    call's structured outcome. A call in ``errors`` (call id -> error text)
+    that no result names gets one in its step: the error text, with an
+    ``error`` status. The trajectory read from disk is not changed.
     """
     from skillevaluator.tier3.eval_core.plugin_signals import HARNESS_STATUS_KEY
 
     steps = trajectory.get("steps") if isinstance(trajectory, dict) else None
-    if not statuses or not isinstance(steps, list):
+    if not (statuses or errors) or not isinstance(steps, list):
         return trajectory
+    errors = errors or {}
+    # Only a call that no result names had its result dropped.
+    answered = {
+        result["source_call_id"]
+        for step in steps
+        for result in _step_results(step)
+        if errors and isinstance(result, Mapping) and isinstance(result.get("source_call_id"), str)
+    }
     updated: list[Any] = []
     for step in steps:
-        observation = step.get("observation") if isinstance(step, Mapping) else None
-        results = observation.get("results") if isinstance(observation, Mapping) else None
-        if not isinstance(results, list) or not any(_call_status(result, statuses) for result in results):
+        results = _step_results(step)
+        calls = step.get("tool_calls") if errors and isinstance(step, Mapping) else None
+        dropped = {
+            call_id: None
+            for call in (calls if isinstance(calls, list) else ())
+            if isinstance(call, Mapping)
+            and isinstance(call_id := call.get("tool_call_id"), str)
+            and call_id in errors
+            and call_id not in answered
+        }
+        if not dropped and not any(_call_status(result, statuses) for result in results):
             updated.append(step)
             continue
         marked = []
@@ -6487,6 +6551,13 @@ def _with_harness_statuses(trajectory: dict[str, Any] | None, statuses: Mapping[
                 continue
             extra = result.get("extra") if isinstance(result.get("extra"), Mapping) else {}
             marked.append({**result, "extra": {**extra, HARNESS_STATUS_KEY: status}})
+        # The harness dropped these results (OpenCode keeps none for a failed call).
+        marked.extend(
+            {"source_call_id": call_id, "content": errors[call_id], "extra": {HARNESS_STATUS_KEY: "error"}}
+            for call_id in dropped
+        )
+        answered.update(dropped)
+        observation = step.get("observation") if isinstance(step.get("observation"), Mapping) else {}
         updated.append({**step, "observation": {**observation, "results": marked}})
     return {**trajectory, "steps": updated}
 
@@ -6569,8 +6640,10 @@ def _attach_plugin_signals(
             mcp_found.append(found)
         trajectory = _plugin_signal_trajectory(job_dir / root)
         call_servers, call_statuses = _codex_mcp_calls(job_dir / root, trajectory)
+        call_errors = _opencode_call_errors(job_dir / root)
+        call_statuses.update(dict.fromkeys(call_errors, "error"))
         signals = compute_plugin_signals(
-            _with_harness_statuses(trajectory, call_statuses),
+            _with_harness_statuses(trajectory, call_statuses, call_errors),
             _case_spec_with_input_schemas(context, _entry_id(rows[0], case_ids), arm),
             declared=context.declared_for(arm, agent),
             wrapper_skills=context.wrapper_skills,

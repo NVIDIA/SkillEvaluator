@@ -2675,6 +2675,12 @@ The harness's own outcome wins over the result text:
   with a call by server, tool, and arguments: through the session log when it
   is readable, else through the trajectory's calls. A tool name is never
   paired by name and order alone.
+- **OpenCode.** Harbor's trajectory keeps a call's result only when the tool
+  returned output, so a failed call has none. The collector reads OpenCode's
+  own `opencode.txt` and pairs each tool part with its call by `callID`: a
+  part whose `state.status` is `"error"` fails the call, and its
+  `state.error` becomes the result text when the trajectory has no result.
+  A `"completed"` part leaves the result text to decide.
 
 Without a structured outcome, failure text is read only on a result's lead
 lines: the first and last line of each content block, after harness status

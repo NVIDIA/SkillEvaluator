@@ -171,6 +171,39 @@ def test_plugin_file_launch_is_not_staged_and_marks_run_incomplete(tmp_path: Pat
     assert row["state"] == "unsupported" and "does not stage" in row["reason"]
 
 
+@pytest.mark.parametrize(
+    ("agents", "unsupported"),
+    [(["claude-code"], []), (["claude-code", "codex"], ["plugin-database"])],
+    ids=["claude-only", "with-codex"],
+)
+def test_native_claude_counts_plugin_file_servers_as_runnable(
+    tmp_path: Path, agents: list[str], unsupported: list[str]
+) -> None:
+    # A native Claude Code arm starts a server that launches from plugin files, so
+    # the completeness section must count it as resolved, not drop it from both columns.
+    from skillevaluator.reporting.plugin_sections import completeness_view
+
+    root = _plugin(
+        tmp_path / "p",
+        {},
+        {
+            ".mcp.json": {"mcpServers": {"plugin-database": _PLUGIN_FILE_LAUNCHES[0]}},
+            "servers/db-server": "#!/bin/sh\necho hi\n",
+            "c.json": "{}",
+        },
+    )
+    package = prepare_plugin_eval_package(
+        root, stage_root=tmp_path / "stage", plugin_load="native", agents=agents, env_mode="docker"
+    )
+    assert not package.skipped
+    assert package.runnable_mcp_servers == ("plugin-database",)
+    provenance = package.provenance()
+    assert provenance["mcp_unsupported_config"] == unsupported
+    view = completeness_view(provenance)
+    assert view["counts"]["mcp_runnable"] == 1
+    assert view["partial"] is bool(unsupported)
+
+
 def test_bundle_manifest_plugin_file_launch_is_not_staged(tmp_path: Path) -> None:
     root = tmp_path / "b"
     (root / "skills" / "alpha" / "evals").mkdir(parents=True)

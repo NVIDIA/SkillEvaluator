@@ -723,14 +723,22 @@ def _tier2_finding_is_scan_failure(finding: object) -> bool:
 
 def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow], str]:
     """Return (ran, passed, rows, skip_reason) for the agent-eval result."""
-    if _is_skipped(result) or (not result.passed and not (result.metadata or {}).get("agent_eval", {}).get("summary")):
+    metadata = result.metadata or {}
+    payload = metadata.get("agent_eval") or {}
+    summary = payload.get("summary") or payload
+    # validate stamps a partial plugin run execution_status "skipped" to mark it INCOMPLETE, but a run
+    # that scored trials did run; one that failed its gate keeps the FAIL row validate gives it.
+    incomplete_run = (
+        _is_skipped(result)
+        and bool(summary.get("scored_attempts"))
+        and payload.get("execution_status") != "skipped"
+        and not metadata.get("tier3_gate_failures")
+    )
+    if (_is_skipped(result) and not incomplete_run) or (not result.passed and not payload.get("summary")):
         reason = str(
-            (result.metadata or {}).get("skip_reason")
-            or (result.warnings[0] if result.warnings else "prerequisite unavailable")
+            metadata.get("skip_reason") or (result.warnings[0] if result.warnings else "prerequisite unavailable")
         )
         return False, True, [], reason
-    payload = (result.metadata or {}).get("agent_eval") or {}
-    summary = payload.get("summary") or payload
     agents = summary.get("agents_run") or payload.get("agents_run") or []
     agent_segments: list[tuple[str, str]] = [(", ".join(agents) or "n/a", TEXT)]
     case_list = payload.get("cases") or []
@@ -751,7 +759,16 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
             rows.append(lift_row(float(lift), float(with_score), baseline))
     exec_status = payload.get("execution_status") or summary.get("execution_status")
     ok = bool(result.passed) and exec_status in (None, "succeeded")
-    if not ok:
+    if incomplete_run:
+        rows.append(
+            TierRow(
+                "incomplete",
+                [(str(metadata.get("skip_reason") or "INCOMPLETE: Tier 3 did not complete")[:110], RED)],
+                glyph="!",
+                glyph_style=f"bold {RED}",
+            )
+        )
+    elif not ok:
         errors = list(payload.get("execution_errors") or []) or list(result.errors)
         reason = str(errors[0]) if errors else "execution reported errors"
         rows.append(

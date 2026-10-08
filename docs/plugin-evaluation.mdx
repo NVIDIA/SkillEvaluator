@@ -2756,6 +2756,10 @@ Per arm, `plugin_signals_summary` aggregates the trials:
 - the order `satisfaction_rate` over edges, `trials_in_order` (trials with
   every edge in order), and `violated_edges`, the most common edges that did
   not hold, each with its `reason` and the number of trials;
+- for order, handoffs, and conflict probes, `skipped`: how many edges,
+  handoffs, or probes the trials skipped because the arm cannot carry their
+  component type. A check with nothing scored but something skipped is
+  reported as skipped, not as not configured;
 - `activation_coverage` as a union over trials, with a per-component
   `exercise_rate` (the share of trials that exercised it; a trial where every
   activation of it failed does not count);

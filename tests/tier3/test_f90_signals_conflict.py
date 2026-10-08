@@ -324,6 +324,34 @@ def test_probes_the_arm_cannot_satisfy_are_skipped() -> None:
     assert (block["checked"], block["status"]) == (0, "not_applicable")
 
 
+def test_reports_say_a_check_the_arm_skipped_was_skipped_not_unconfigured() -> None:
+    """The member-skills arm stages no MCP server, so every MCP probe, edge, and handoff is skipped there."""
+    trajectory = _trajectory("claude-code", _step("t1", "Skill", {"skill": "release-notes"}, "Launching skill"))
+    case = {
+        "id": "c",
+        "conflict_probes": [STAGE_NOT_PUBLISH],
+        "expected_order": [["Skill:release-notes", "MCP:reltools/stage_release"]],
+        "handoffs": [{"producer": "MCP:reltools/list_changes", "consumer": "Skill:release-notes", "value": "AT-4"}],
+    }
+    signals = []
+    for _ in range(2):
+        result = compute_plugin_signals(
+            trajectory, plugin_case_spec(case), declared=CONTEXT.declared_for(ARM_SUM_OF_PARTS)
+        )
+        assert result is not None
+        signals.append(result)
+    summary = summarize_plugin_signals(signals)
+    assert [summary[key]["skipped"] for key in ("order", "handoff", "conflict")] == [2, 2, 2]
+    view = signals_view({"agents": {"claude-code": {"plugin_signals_summary": {"sum_of_parts": summary}}}})
+    assert view is not None
+    skipped = "2 skipped (this arm cannot carry that component type)"
+    assert {check["name"]: check["label"] for check in view["entries"][0]["checks"]} == {
+        "Order": skipped,
+        "Handoff": skipped,
+        "Conflict": skipped,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Reports name the failed probes (L23 pooled rate)
 # ---------------------------------------------------------------------------

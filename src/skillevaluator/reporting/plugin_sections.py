@@ -122,6 +122,7 @@ STAGED_IS_NOT_VERIFIED = (
     "It does not show that the agent loaded the component, and it does not verify the component's behavior."
 )
 NOT_CONFIGURED = "not configured for this dataset"
+SKIPPED_IN_ARM = "skipped (this arm cannot carry that component type)"
 NOT_PRICED = "not priced"
 NOT_PRICED_NOTE = (
     "not priced: the run recorded tokens but no USD cost. Harbor prices trials from a public model price "
@@ -2263,6 +2264,9 @@ def _check_row(label: str, section: Mapping[str, Any], passed_key: str, total_ke
     total = section.get(total_key)
     rate = _rate(section, "pass_rate", "satisfaction_rate", numerator=passed_key, denominator=total_key)
     n_scored = fmt_count(section.get("n_scored"))
+    # The dataset configured the check, but the arm cannot carry the component type of anything it names.
+    skipped = count(section.get("skipped"))
+    unscored = f"{fmt_count(skipped)} {SKIPPED_IN_ARM}" if skipped else NOT_CONFIGURED
     return {
         "name": label,
         "applicable": applicable,
@@ -2270,9 +2274,7 @@ def _check_row(label: str, section: Mapping[str, Any], passed_key: str, total_ke
         "total": fmt_count(total),
         "rate": fmt_rate(rate),
         "n_scored": n_scored,
-        "label": (
-            NOT_CONFIGURED if not applicable else f"{fmt_count(passed)}/{fmt_count(total)} passed ({fmt_rate(rate)})"
-        ),
+        "label": unscored if not applicable else f"{fmt_count(passed)}/{fmt_count(total)} passed ({fmt_rate(rate)})",
         "detail": _scored_trials(n_scored) if applicable else "",
     }
 

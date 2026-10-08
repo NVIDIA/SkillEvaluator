@@ -7,12 +7,17 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import threading
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from skillevaluator.deduplication.intra_skill import intra_skill_validator
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
 from skillevaluator.deduplication.intra_skill.semantic_clustering import ContentCluster
+from skillevaluator.deduplication.utils import skill_collector
 from skillevaluator.deduplication.utils.chunker import ContentChunk
 from skillevaluator.embedding.client import SimilarityConfigError
 from skillevaluator.inference import LLMClientError, LLMVerdict
@@ -97,6 +102,39 @@ class TestIntraSkillValidatorValidate:
         assert finding.suggestion is not None
         assert "replace" in finding.suggestion.lower()
 
+    def test_hard_linked_file_is_marked_as_security_failure(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        outside = tmp_path / "outside.md"
+        outside.write_text("# Outside notes\n")
+        try:
+            os.link(outside, skill_dir / "notes.md")
+        except OSError as exc:
+            pytest.skip(f"hard links unavailable: {exc}")
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.passed is False
+        assert [finding.check_name for finding in result.findings] == ["unsafe_hardlink"]
+        assert result.findings[0].severity == Severity.CRITICAL
+        assert result.metadata["security_failure"] is True
+        assert result.metadata["execution_status"] == "failed"
+        assert result.metadata["optional"] is False
+
+    def test_collection_limit_is_not_a_security_failure(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_FILES", 1)
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("# Skill\n")
+        (skill_dir / "notes.md").write_text("# Notes\n")
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.passed is False
+        assert [finding.check_name for finding in result.findings] == ["file_count_limit"]
+        assert result.findings[0].severity == Severity.CRITICAL
+        assert "security_failure" not in result.metadata
+
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
     def test_chunk_limit_fails_before_embedding(self, mock_embed, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr(intra_skill_validator, "CONTENT_DEDUP_MAX_CHUNKS", 1)
@@ -133,13 +171,38 @@ class TestIntraSkillValidatorValidate:
         assert result.passed is False
         finding = result.findings[0]
         assert finding.check_name == "scalar_comparison_limit"
-        assert finding.file_path == skill_dir.name
+        # A finding about the whole skill points at its root, relative to the skill like every Tier 2 path.
+        assert finding.file_path == "."
         assert finding.metadata == {
             "pair_count": 1,
             "vector_dimension": 2,
             "scalar_work": 2,
             "limit": 1,
         }
+        mock_build_clusters.assert_not_called()
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_scalar_work_limit_stops_before_remaining_embedding_batches(
+        self, mock_embed, mock_build_clusters, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(intra_skill_validator, "CONTENT_DEDUP_EMBEDDING_BATCH_SIZE", 2)
+        monkeypatch.setattr(intra_skill_validator, "CONTENT_DEDUP_MAX_SCALAR_COMPARISONS", 1)
+        skill_dir = tmp_path / "batched-scalar-limit"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "\n".join(f"## Section {index}\n" + chr(97 + index) * 100 for index in range(5))
+        )
+        mock_embed.return_value.embed.side_effect = [
+            [[1.0, 0.0], [0.0, 1.0]],
+            [[1.0, 0.0], [0.0, 1.0]],
+            [[1.0, 0.0]],
+        ]
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.findings[0].check_name == "scalar_comparison_limit"
+        assert mock_embed.return_value.embed.call_count == 1
         mock_build_clusters.assert_not_called()
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
@@ -165,8 +228,61 @@ class TestIntraSkillValidatorValidate:
         assert result.passed is False
         assert result.findings[0].check_name == "llm_cluster_count_limit"
         assert result.findings[0].metadata == {"actual": 2, "limit": 1}
-        assert result.findings[0].file_path == skill_dir.name
+        assert result.findings[0].file_path == "."
         mock_llm.assert_not_called()
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_each_cluster_is_reviewed_with_its_own_prompt_and_reported_in_cluster_order(
+        self, mock_embed, mock_build_clusters, _mock_llm, mock_analyze, tmp_path: Path
+    ) -> None:
+        from skillevaluator.deduplication.intra_skill.llm_analyzer import build_user_prompt
+
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+        first = ContentCluster(
+            [
+                ContentChunk("SKILL.md", "## A", 1, 2, "a" * 100, "markdown"),
+                ContentChunk("guide.md", "## A again", 1, 2, "a" * 100, "markdown"),
+            ],
+            0.99,
+            0.99,
+            True,
+            {"markdown"},
+        )
+        second = ContentCluster(
+            [
+                ContentChunk("notes.md", "## B", 3, 4, "b" * 100, "markdown"),
+                ContentChunk("other.md", "## B again", 3, 4, "b" * 100, "markdown"),
+            ],
+            0.95,
+            0.95,
+            True,
+            {"markdown"},
+        )
+        mock_build_clusters.return_value = [first, second]
+        first_review_released = threading.Event()
+        prompts: dict[str, str] = {}
+
+        def analyze(_llm, cluster: ContentCluster, *, user_prompt: str) -> LLMVerdict:
+            prompts[cluster.members[0].source_file] = user_prompt
+            if cluster is first:
+                # The first cluster's review finishes last.
+                assert first_review_released.wait(timeout=5)
+            else:
+                first_review_released.set()
+            return LLMVerdict(verdict="DUPLICATE", confidence=0.9, reasoning="Same", suggestion="Merge")
+
+        mock_analyze.side_effect = analyze
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert prompts == {"SKILL.md": build_user_prompt(first), "notes.md": build_user_prompt(second)}
+        assert [finding.file_path for finding in result.findings] == ["SKILL.md", "notes.md"]
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
     def test_embedding_error_is_incomplete_without_skill_finding(self, mock_embed, tmp_path: Path) -> None:
@@ -395,7 +511,7 @@ class TestIntraSkillValidatorValidate:
         (skill / "SKILL.md").write_text("\n".join(f"## Section {letter}\n{letter.lower() * 200}" for letter in "ABCD"))
         mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
 
-        def analyze(_client, cluster):
+        def analyze(_client, cluster, **_kwargs):
             if any("Section A" in member.heading for member in cluster.members):
                 return LLMVerdict("DUPLICATE", 0.9, "Same content", "Remove one")
             raise RuntimeError("private provider response")
@@ -458,7 +574,7 @@ class TestIntraSkillValidatorValidate:
                 self.status_code = status
                 super().__init__("private provider response")
 
-        def analyze(_client, cluster):
+        def analyze(_client, cluster, **_kwargs):
             raise ServiceError(429 if any("Section A" in member.heading for member in cluster.members) else 400)
 
         mock_analyze.side_effect = analyze

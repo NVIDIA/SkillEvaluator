@@ -3,10 +3,14 @@
 
 """Tests for the bundle-reference plugin manifest model (skillevaluator.models.plugin)."""
 
+from typing import get_args
+
 import pytest
 from pydantic import ValidationError
 
-from skillevaluator.models.plugin import PluginManifest, PluginSelector
+from skillevaluator.models.plugin import PLUGIN_REF_SOURCES, PluginManifest, PluginSelector
+
+GITLAB_SUBGROUP_REPO = "example-group/tools/agent-catalog"
 
 
 def _valid_data(**overrides):
@@ -115,3 +119,77 @@ class TestPluginManifestInvalid:
                 author={"email": "dev@example.com"},
                 mcp=[{"name": "fs", "provider": ""}],
             )
+
+
+class TestPluginRefSources:
+    """``gitlab`` is accepted wherever ``github`` and ``git`` are, in both ref forms."""
+
+    def test_selector_and_canonical_forms_share_one_source_list(self):
+        assert get_args(PluginSelector.model_fields["source"].annotation) == PLUGIN_REF_SOURCES
+        assert set(PLUGIN_REF_SOURCES) == {"github", "gitlab", "git"}
+
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            f"gitlab::{GITLAB_SUBGROUP_REPO}::skills::ticket-triage",
+            "gitlab::example-group/agent-catalog::skills::ticket-triage",
+            {"source": "gitlab", "repo": GITLAB_SUBGROUP_REPO, "path": "skills/ticket-triage"},
+            {"source": "gitlab", "repo": "example-group/agent-catalog", "path": "team-skills/ops/ticket-triage"},
+        ],
+        ids=["canonical-subgroup", "canonical", "selector-subgroup", "selector"],
+    )
+    def test_gitlab_skill_and_rule_refs_are_accepted(self, ref):
+        manifest = PluginManifest(**_valid_data(skills={"refs": [ref]}, rules={"refs": [ref]}))
+
+        for section in (manifest.skills, manifest.rules):
+            [parsed] = section.refs
+            if isinstance(ref, dict):
+                assert isinstance(parsed, PluginSelector)
+                assert (parsed.source, parsed.repo) == ("gitlab", ref["repo"])
+            else:
+                assert parsed == ref
+
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            "bitbucket::example-group/agent-catalog::skills::ticket-triage",
+            {"source": "bitbucket", "repo": "example-group/agent-catalog", "path": "skills/ticket-triage"},
+        ],
+        ids=["canonical", "selector"],
+    )
+    def test_unknown_source_is_still_rejected(self, ref):
+        with pytest.raises(ValidationError, match="gitlab"):
+            PluginManifest(**_valid_data(skills={"refs": [ref]}))
+
+
+class TestPluginRefUnionErrors:
+    """Each ref is validated against the one form its type selects, so a bad ref is never reported twice."""
+
+    def _errors(self, refs):
+        with pytest.raises(ValidationError) as excinfo:
+            PluginManifest(**_valid_data(skills={"refs": refs}))
+        return [(error["loc"], error["type"]) for error in excinfo.value.errors()]
+
+    def test_bad_selector_reports_only_the_selector_error(self):
+        errors = self._errors([{"source": "bitbucket", "repo": "a/b", "path": "skills/x"}])
+
+        assert errors == [(("skills", "refs", 0, "PluginSelector", "source"), "literal_error")]
+
+    def test_bad_canonical_string_reports_only_the_string_error(self):
+        errors = self._errors(["github::a/b::skills::ok", "bitbucket::a/b::skills::x"])
+
+        assert errors == [(("skills", "refs", 1, "str"), "value_error")]
+
+    def test_whitespace_padded_source_is_still_rejected(self):
+        """The canonical check still sees the ref as written, before whitespace stripping."""
+        assert self._errors([" github::a/b::skills::x"]) == [(("skills", "refs", 0, "str"), "value_error")]
+
+    def test_valid_refs_parse_to_their_own_forms(self):
+        manifest = PluginManifest(
+            **_valid_data(
+                skills={"refs": ["github::a/b::skills::x ", {"source": "git", "repo": "a/b", "path": "skills/y"}]}
+            )
+        )
+
+        assert manifest.skills.refs[0] == "github::a/b::skills::x"
+        assert isinstance(manifest.skills.refs[1], PluginSelector)

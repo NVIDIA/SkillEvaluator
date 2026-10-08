@@ -143,8 +143,14 @@ Example usage here.
 
         naming_findings = [f for f in result.findings if f.check_name == "manifest_naming"]
         assert len(naming_findings) == 1, "Expected a HIGH finding for lowercase skill.md naming"
-        assert "SKILL.md" in naming_findings[0].message
-        assert "agentskills.io" in naming_findings[0].message
+        # Compare the whole message: it names the canonical file and the spec it comes from.
+        assert naming_findings[0].message == (
+            "Skill manifest uses non-canonical name 'skill.md' — "
+            "the agentskills.io spec requires 'SKILL.md' (uppercase). "
+            "On case-sensitive filesystems (Linux), this will not be "
+            "recognized by spec-compliant tooling"
+        )
+        assert naming_findings[0].suggestion == "Rename 'skill.md' to 'SKILL.md' to comply with the agentskills.io spec"
 
     def test_skill_md_uppercase_no_naming_warning(self, tmp_path: Path):
         """Test that SKILL.md (uppercase) does NOT produce a naming warning."""
@@ -441,6 +447,8 @@ Example.
         skill_md.write_text("""---
 name: xml-desc
 description: "A skill <script>alert('xss')</script> with injected tags"
+metadata:
+  author: Test User <test@nvidia.com>
 ---
 
 # XML Description Skill
@@ -458,7 +466,7 @@ Example.
         result = validator.validate(skill_dir)
 
         assert not result.passed
-        assert any("xml" in err.lower() or "description" in err.lower() for err in result.errors)
+        assert any("xml" in err.lower() for err in result.errors)
 
     def test_unclosed_xml_tag_in_description_rejected(self, tmp_path: Path):
         """Test validation fails when description contains an unclosed tag-like value."""
@@ -469,6 +477,8 @@ Example.
         skill_md.write_text("""---
 name: unclosed-xml-desc
 description: "A skill with an unclosed <script foo tag in the description"
+metadata:
+  author: Test User <test@nvidia.com>
 ---
 
 # Unclosed XML Description Skill
@@ -486,7 +496,7 @@ Example.
         result = validator.validate(skill_dir)
 
         assert not result.passed
-        assert any("xml" in err.lower() or "description" in err.lower() for err in result.errors)
+        assert any("xml" in err.lower() for err in result.errors)
 
     def test_closing_xml_tag_in_description_rejected(self, tmp_path: Path):
         """Opening and closing XML tags use the same schema and quality definition."""

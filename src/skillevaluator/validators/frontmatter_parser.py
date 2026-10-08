@@ -65,6 +65,10 @@ def parse_frontmatter(file_path: Path) -> tuple[ParsedFrontmatter | None, Valida
     except yaml.YAMLError as e:
         result.add_error(f"Invalid YAML in frontmatter: {e}")
         return None, result
+    except RecursionError:
+        # Deeply nested YAML exhausts the parser; every caller gets an error, never a crash.
+        result.add_error("Invalid YAML in frontmatter: it is nested too deeply to parse")
+        return None, result
 
     if not data or not isinstance(data, dict):
         result.add_error("Frontmatter must be a non-empty YAML dictionary")

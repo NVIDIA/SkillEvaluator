@@ -96,7 +96,7 @@ def test_scanner_source_does_not_match_its_constructed_deny_expressions() -> Non
     (
         "NVIDIA_API_KEY=nvapi-public-placeholder",
         "https://integrate.api.nvidia.com/v1",
-        "https://github.com/NVIDIA/SkillSpector.git",
+        "https://github.com/NVIDIA/SkillSpector.git@v2.12.0",
         'harbor_viewer = {"job_url": "https://viewer.example/jobs/1"}',
         "opentelemetry-api>=1.37.0",
         "OTEL_EXPORTER_OTLP_ENDPOINT=https://collector.example.test",

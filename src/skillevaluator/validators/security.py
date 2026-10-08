@@ -39,7 +39,12 @@ from skillevaluator.constants import (
 )
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.skill import SEMVER_RE
-from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
+from skillevaluator.provider_config import (
+    SKILLSPECTOR_DEFAULT_MODELS,
+    ProviderConfigurationError,
+    resolve_llm_provider,
+    skillspector_reasoning_effort,
+)
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
 from skillevaluator.validators.base import (
@@ -368,10 +373,23 @@ def _skillspector_process_env(environ: Mapping[str, str] | None = None) -> dict[
     return _copy_selected_environment(source, _SKILLSPECTOR_PROCESS_ENV_NAMES)
 
 
-def _skillspector_child_env() -> dict[str, str]:
+def _skillspector_operator_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """Return operator-set SkillSpector slot models, model registry and reasoning effort.
+
+    ``SKILLSPECTOR_TEMPERATURE`` stays out: current reasoning models reject a
+    custom temperature, which would fail every LLM request.
+    """
+    return _copy_selected_environment(
+        environ,
+        (name for name in environ if name.startswith("SKILLSPECTOR_MODEL_") or name == "SKILLSPECTOR_REASONING_EFFORT"),
+    )
+
+
+def _skillspector_provider_env() -> dict[str, str]:
     """Map public provider settings into an invocation-scoped SkillSpector environment."""
     source = os.environ
     child_env = _skillspector_process_env(source)
+    child_env.update(_skillspector_operator_env(source))
     skillspector_provider = source.get("SKILLSPECTOR_PROVIDER", "").strip().lower()
     skillspector_model = source.get("SKILLSPECTOR_MODEL", "").strip()
 
@@ -407,7 +425,10 @@ def _skillspector_child_env() -> dict[str, str]:
         return child_env
 
     child_env["SKILLSPECTOR_PROVIDER"] = mapped_provider
-    child_env["SKILLSPECTOR_MODEL"] = skillspector_model or provider.model
+    # An explicit SKILL_EVAL_LLM_MODEL reaches SkillSpector; the chat default does not.
+    child_env["SKILLSPECTOR_MODEL"] = skillspector_model or (
+        provider.model if "SKILL_EVAL_LLM_MODEL" in resolution_env else SKILLSPECTOR_DEFAULT_MODELS[provider.provider]
+    )
 
     if provider.provider in {"nv_build", "openai-compatible"}:
         if provider.api_key:
@@ -419,6 +440,32 @@ def _skillspector_child_env() -> dict[str, str]:
         if provider.provider == "bedrock":
             child_env.update(_copy_selected_environment(source, _SKILLSPECTOR_AWS_ENV_NAMES))
 
+    return child_env
+
+
+def _skillspector_default_reasoning_effort(child_env: Mapping[str, str]) -> str | None:
+    """Return SkillEvaluator's reasoning effort when every configured SkillSpector model takes it.
+
+    The effort is one global SkillSpector setting, so a slot override naming a
+    model without one (for example a Claude model) leaves it unset. Without
+    ``SKILLSPECTOR_MODEL`` SkillSpector picks its own model and effort.
+    """
+    if "SKILLSPECTOR_MODEL" not in child_env:
+        return None
+    efforts = {
+        skillspector_reasoning_effort(model)
+        for name, model in child_env.items()
+        if name.startswith("SKILLSPECTOR_MODEL") and name != "SKILLSPECTOR_MODEL_REGISTRY"
+    }
+    return efforts.pop() if len(efforts) == 1 else None
+
+
+def _skillspector_child_env() -> dict[str, str]:
+    """Return the SkillSpector environment plus SkillEvaluator's default reasoning effort."""
+    child_env = _skillspector_provider_env()
+    effort = _skillspector_default_reasoning_effort(child_env)
+    if effort is not None:
+        child_env.setdefault("SKILLSPECTOR_REASONING_EFFORT", effort)
     return child_env
 
 
@@ -765,6 +812,10 @@ class SecurityValidator(ValidatorBase):
 
         logger.info("Running %s on %s", stage_name, scan_root)
         child_env = _skillspector_child_env() if use_llm else _skillspector_process_env()
+        if use_llm:
+            # Requested LLM configuration; None leaves the choice to SkillSpector.
+            result.metadata["skillspector_model"] = child_env.get("SKILLSPECTOR_MODEL")
+            result.metadata["skillspector_reasoning_effort"] = child_env.get("SKILLSPECTOR_REASONING_EFFORT")
         tool_result = Tools.skillspector.run(args, timeout=300, env=child_env, replace_env=True)
 
         if tool_result.exit_code not in _SKILLSPECTOR_POLICY_EXIT_CODES:
@@ -2746,7 +2797,8 @@ class SecurityValidator(ValidatorBase):
 
         if not verdicts:
             result.mark_scan_incomplete("llm-verification")
-            result.add_message("LLM finding verification was skipped (no verdicts returned)")
+            cause = f": {verifier.last_failure}" if verifier.last_failure else ""
+            result.add_message(f"LLM finding verification was skipped (no verdicts returned{cause})")
             return
 
         suppressed = 0
@@ -2758,7 +2810,8 @@ class SecurityValidator(ValidatorBase):
 
             verdict = verdict_data.get("verdict")
             confidence = verdict_data.get("confidence")
-            reasoning = verdict_data.get("reasoning")
+            # The prompt asks for "rationale"; replies that still say "reasoning" count too.
+            reasoning = verdict_data.get("rationale", verdict_data.get("reasoning"))
             if (
                 not isinstance(verdict, str)
                 or verdict not in _LLM_VERDICTS
@@ -2788,9 +2841,10 @@ class SecurityValidator(ValidatorBase):
             result.mark_scan_incomplete("llm-verification")
             noun = "finding" if unverified == 1 else "findings"
             verb = "was" if unverified == 1 else "were"
+            cause = f": {verifier.last_failure}" if verifier.last_failure else ""
             result.add_message(
                 f"LLM verification returned verdicts for {verified} of {len(result.findings)} findings; "
-                f"{unverified} {noun} {verb} not verified"
+                f"{unverified} {noun} {verb} not verified{cause}"
             )
         elif not suppressed:
             result.add_message("LLM verification reviewed all findings; no high-confidence false positives identified")

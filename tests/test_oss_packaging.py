@@ -22,6 +22,7 @@ from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 from skillevaluator.cli import cli
+from skillevaluator.provider_config import CHAT_DEFAULT_ANTHROPIC, CHAT_DEFAULT_OPENAI
 from skillevaluator.tier3_environments import (
     HARBOR_ENVIRONMENT_ALIAS_KWARGS,
     HARBOR_ENVIRONMENT_EXTRAS,
@@ -792,9 +793,9 @@ def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     tier3 = (REPO_ROOT / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
     public_docs = f"{readme}\n{configuration}\n{tier3}"
 
-    assert "gpt-5.6-sol" in public_docs
+    assert f"`{CHAT_DEFAULT_OPENAI}`" in public_docs
     assert "gpt-5.4-mini" in public_docs
-    assert "claude-opus-5" in public_docs
+    assert f"`{CHAT_DEFAULT_ANTHROPIC}`" in public_docs
     assert "nvidia/nemotron-3-super-120b-a12b" in public_docs
     assert "nvidia/nvidia/nemotron-3-super-120b-a12b" in public_docs
     assert "Nemotron Super" in public_docs
@@ -887,7 +888,7 @@ def test_launch_docs_address_scanner_and_naming_ambiguities() -> None:
     normalized_quickstart = " ".join(quickstart.split())
 
     assert "brew install semgrep gitleaks" in quickstart
-    assert "uv tool install git+https://github.com/NVIDIA/SkillSpector.git" in quickstart
+    assert "uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0" in quickstart
     assert "Semgrep, SkillSpector, and Gitleaks" in quickstart
     assert "missing scanner evidence leaves the result `INCOMPLETE` and exits `1`" in normalized_quickstart
     assert "most often Gitleaks" not in ci
@@ -895,6 +896,23 @@ def test_launch_docs_address_scanner_and_naming_ambiguities() -> None:
     assert "`SKILL_EVAL_*` covers provider and model configuration" in " ".join(environment.split())
     assert "`SKILLEVALUATOR_*` covers product-level validation" in " ".join(environment.split())
     assert "are not interchangeable" in environment
+
+
+def test_skillspector_install_instructions_pin_one_release() -> None:
+    sources = [
+        REPO_ROOT / "README.md",
+        *(REPO_ROOT / "docs").rglob("*.mdx"),
+        *(REPO_ROOT / "src" / "skillevaluator").rglob("*.py"),
+    ]
+    install_specs = {
+        spec
+        for path in sources
+        for spec in re.findall(
+            r"git\+https://github\.com/NVIDIA/SkillSpector\.git[^\s`\"]*", path.read_text(encoding="utf-8")
+        )
+    }
+
+    assert install_specs == {"git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0"}
 
 
 def test_ci_sarif_merge_uses_uv_tool_python() -> None:

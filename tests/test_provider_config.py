@@ -10,7 +10,19 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.provider_config import ProviderConfigurationError, resolve_embedding_provider, resolve_llm_provider
+from skillevaluator.provider_config import (
+    MAX_COMPLETION_TOKENS,
+    REASONING_MAX_COMPLETION_TOKENS,
+    ProviderConfigurationError,
+    _supports_custom_temperature,
+    completion_token_limit,
+    effective_reasoning_effort,
+    is_claude_5_5_or_later,
+    is_openai_reasoning_model,
+    resolve_embedding_provider,
+    resolve_llm_provider,
+    skillspector_reasoning_effort,
+)
 
 PROVIDER_CONTRACT = Path(__file__).parent / "fixtures" / "public_provider_contract.json"
 
@@ -34,25 +46,25 @@ def test_openai_provider_uses_standard_openai_credentials() -> None:
     }
 
 
-def test_openai_provider_uses_gpt_5_5_by_default() -> None:
+def test_openai_provider_uses_gpt_6_1_sol_by_default() -> None:
     config = resolve_llm_provider({"SKILL_EVAL_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "test-openai-key"})
 
-    assert config.model == "gpt-5.6-sol"
-    assert config.litellm_model == "openai/gpt-5.6-sol"
+    assert config.model == "gpt-6.1-sol"
+    assert config.litellm_model == "openai/gpt-6.1-sol"
 
 
-def test_anthropic_provider_uses_claude_opus_5_by_default() -> None:
+def test_anthropic_provider_uses_claude_opus_5_5_by_default() -> None:
     config = resolve_llm_provider({"SKILL_EVAL_LLM_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "test-anthropic-key"})
 
-    assert config.model == "claude-opus-5"
-    assert config.litellm_model == "anthropic/claude-opus-5"
+    assert config.model == "claude-opus-5-5"
+    assert config.litellm_model == "anthropic/claude-opus-5-5"
 
 
-def test_bedrock_provider_uses_claude_opus_5_us_profile_by_default() -> None:
+def test_bedrock_provider_uses_claude_opus_5_5_us_profile_by_default() -> None:
     config = resolve_llm_provider({"SKILL_EVAL_LLM_PROVIDER": "bedrock"})
 
-    assert config.model == "us.anthropic.claude-opus-5"
-    assert config.litellm_model == "bedrock/us.anthropic.claude-opus-5"
+    assert config.model == "us.anthropic.claude-opus-5-5"
+    assert config.litellm_model == "bedrock/us.anthropic.claude-opus-5-5"
 
 
 def test_chat_default_models_are_the_single_source_of_truth() -> None:
@@ -65,15 +77,91 @@ def test_chat_default_models_are_the_single_source_of_truth() -> None:
         CHAT_DEFAULT_NVIDIA,
         CHAT_DEFAULT_OPENAI,
     )
-    from skillevaluator.tier3.eval_core.llm_judge import DEFAULT_JUDGE_MODEL
 
-    assert CHAT_DEFAULT_MODELS["openai"] == CHAT_DEFAULT_OPENAI == "gpt-5.6-sol"
-    assert CHAT_DEFAULT_MODELS["anthropic"] == CHAT_DEFAULT_ANTHROPIC == "claude-opus-5"
-    assert CHAT_DEFAULT_MODELS["bedrock"] == CHAT_DEFAULT_BEDROCK == "us.anthropic.claude-opus-5"
+    assert CHAT_DEFAULT_MODELS["openai"] == CHAT_DEFAULT_OPENAI == "gpt-6.1-sol"
+    assert CHAT_DEFAULT_MODELS["anthropic"] == CHAT_DEFAULT_ANTHROPIC == "claude-opus-5-5"
+    assert CHAT_DEFAULT_MODELS["bedrock"] == CHAT_DEFAULT_BEDROCK == "us.anthropic.claude-opus-5-5"
     assert CHAT_DEFAULT_MODELS["nv_build"] == CHAT_DEFAULT_NVIDIA == "nvidia/nemotron-3-super-120b-a12b"
     assert CHAT_CHEAP_OPENAI == "gpt-5.4-mini"
     assert DIMENSION_JUDGE_MODEL == CHAT_DEFAULT_OPENAI
-    assert DEFAULT_JUDGE_MODEL == CHAT_DEFAULT_OPENAI
+
+
+def test_skillspector_defaults_cover_every_provider_and_keep_supported_claude_models() -> None:
+    from skillevaluator.provider_config import CHAT_DEFAULT_MODELS, SKILLSPECTOR_DEFAULT_MODELS
+
+    assert SKILLSPECTOR_DEFAULT_MODELS.keys() == CHAT_DEFAULT_MODELS.keys()
+    # Literals, re-validated against the pinned SkillSpector release before they change.
+    assert SKILLSPECTOR_DEFAULT_MODELS == {
+        "openai": "gpt-6.1-sol",
+        "anthropic": "claude-opus-5",
+        "bedrock": "us.anthropic.claude-opus-5",
+        "nv_build": "nvidia/nemotron-3-super-120b-a12b",
+        "openai-compatible": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
+    }
+
+
+@pytest.mark.parametrize(
+    ("model", "effort"),
+    [
+        ("gpt-6.1-sol", "medium"),
+        ("openai/openai/gpt-6.1-sol", "medium"),
+        ("gpt-5.6-sol", None),
+        ("claude-opus-5-5", None),
+        ("us.anthropic.claude-opus-5-5", None),
+        ("aws/anthropic/bedrock-claude-opus-5-5", None),
+        ("nvidia/nemotron-3-super-120b-a12b", None),
+    ],
+)
+def test_skillspector_reasoning_effort_is_set_only_for_gpt_6_models(model: str, effort: str | None) -> None:
+    assert skillspector_reasoning_effort(model) == effort
+
+
+@pytest.mark.parametrize(
+    ("model", "reasoning", "claude_5_5", "custom_temperature"),
+    [
+        ("gpt-5.6-sol", True, False, False),
+        ("openai/openai/gpt-5.6-sol", True, False, False),
+        ("gpt-6.1-sol", True, False, False),
+        ("openai/openai/gpt-6.1-sol", True, False, False),
+        ("gpt-4.1-mini", False, False, True),
+        ("claude-opus-5", False, False, False),
+        ("claude-opus-5-5", False, True, False),
+        ("claude-sonnet-5-5", False, True, False),
+        ("us.anthropic.claude-opus-5-5", False, True, False),
+        ("azure/anthropic/claude-opus-5-5", False, True, False),
+        # Gateway catalogs prefix vendor words; the old leaf check sent these a temperature.
+        ("aws/anthropic/bedrock-claude-opus-5", False, False, False),
+        ("aws/anthropic/bedrock-claude-opus-5-5", False, True, False),
+        ("claude-3-5-sonnet-20241022", False, False, True),
+        ("nvidia/nemotron-3-super-120b-a12b", False, False, True),
+    ],
+)
+def test_model_capability_helpers(model: str, reasoning: bool, claude_5_5: bool, custom_temperature: bool) -> None:
+    assert is_openai_reasoning_model(model) is reasoning
+    assert is_claude_5_5_or_later(model) is claude_5_5
+    assert _supports_custom_temperature(model) is custom_temperature
+    expected_limit = REASONING_MAX_COMPLETION_TOKENS if reasoning else MAX_COMPLETION_TOKENS
+    assert completion_token_limit(model, MAX_COMPLETION_TOKENS) == expected_limit
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "effort"),
+    [
+        ("openai", "gpt-6.1-sol", "high"),
+        ("openai-compatible", "openai/openai/gpt-6.1-sol", "high"),
+        ("anthropic", "claude-opus-5-5", "high"),
+        # Other models keep their default effort, and Bedrock and gateway Claude routes get none.
+        ("openai", "gpt-5.6-sol", None),
+        ("anthropic", "claude-opus-5", None),
+        ("bedrock", "us.anthropic.claude-opus-5-5", None),
+        ("openai-compatible", "aws/anthropic/bedrock-claude-opus-5-5", None),
+        ("nv_build", "nvidia/nemotron-3-super-120b-a12b", None),
+    ],
+)
+def test_reasoning_effort_is_sent_only_where_the_route_accepts_it(
+    provider: str, model: str, effort: str | None
+) -> None:
+    assert effective_reasoning_effort(provider, model, "high") == effort
 
 
 @pytest.mark.parametrize(

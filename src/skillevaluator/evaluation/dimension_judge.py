@@ -21,6 +21,7 @@ from typing import Any
 from skillevaluator.constants import (
     DIMENSION_JUDGE_MAX_TOKENS,
     DIMENSION_JUDGE_MODEL,
+    DIMENSION_JUDGE_REASONING_EFFORT,
     DIMENSION_JUDGE_TEMPERATURE,
     DIMENSION_MAPPING,
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
@@ -141,6 +142,7 @@ class DimensionJudge(LLMClient):
     default_model: str = DIMENSION_JUDGE_MODEL
     default_max_tokens: int | None = DIMENSION_JUDGE_MAX_TOKENS
     default_temperature: float | None = DIMENSION_JUDGE_TEMPERATURE
+    default_reasoning_effort: str | None = DIMENSION_JUDGE_REASONING_EFFORT
 
     def get_system_prompt(self) -> str:
         return _SYSTEM_PROMPT

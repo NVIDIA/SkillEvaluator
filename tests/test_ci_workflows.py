@@ -181,7 +181,7 @@ def test_security_keeps_gitleaks_always_on_and_skips_only_nonessential_jobs() ->
     assert "vars.ENABLE_GITHUB_ADVANCED_SECURITY == 'true'" in codeql_if
 
 
-def test_gitleaks_synthetic_harbor_allowlists_are_exactly_scoped() -> None:
+def test_gitleaks_single_value_allowlists_are_exactly_scoped() -> None:
     config = tomllib.loads(GITLEAKS_CONFIG.read_text(encoding="utf-8"))
     allowlists = {entry["description"]: entry for entry in config["allowlists"]}
 
@@ -197,6 +197,10 @@ def test_gitleaks_synthetic_harbor_allowlists_are_exactly_scoped() -> None:
         "Synthetic cwsandbox API key used by Harbor environment contract tests": (
             "^cw-key-123456$",
             r"^tests/test_harbor_environment_contract\.py$",
+        ),
+        "Bedrock model ID that follows a credential name in SkillSpector bridge tests": (
+            r"^us\.anthropic\.claude-opus-5$",
+            r"^tests/validators/test_security\.py$",
         ),
     }
     for description, (regex, path) in expected.items():

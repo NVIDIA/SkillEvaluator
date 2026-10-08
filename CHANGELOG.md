@@ -4,8 +4,82 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- SkillSpector now has its own default model per provider instead of
+  following the chat default, so chat-default upgrades no longer reach
+  SkillSpector before it supports them. An explicit `SKILL_EVAL_LLM_MODEL`
+  still reaches it, and `SKILLSPECTOR_MODEL` still overrides both. The bridge
+  forwards your `SKILLSPECTOR_MODEL_<SLOT>`, `SKILLSPECTOR_MODEL_REGISTRY` and
+  `SKILLSPECTOR_REASONING_EFFORT` settings (never `SKILLSPECTOR_TEMPERATURE`),
+  defaults the reasoning effort to `medium` for GPT-6 models, and records the
+  requested `skillspector_model` and `skillspector_reasoning_effort` next to
+  `skillspector_version` in the security result.
+- Install instructions and the missing-scanner hint now pin SkillSpector to
+  `v2.12.0` instead of its default branch.
+- GPT-6 models get the GPT-5 request shape everywhere SkillEvaluator calls a
+  model: no `temperature`, and `max_completion_tokens` on the native OpenAI
+  endpoint. Gateway catalog IDs such as `aws/anthropic/bedrock-claude-opus-5`
+  are recognized as the Claude model they name.
+- Output-token limits are sized per model family. OpenAI reasoning models get
+  at least 32,768 tokens; other models get 16,384 for `--llm-verify`, rubric
+  evaluation, deduplication verdicts and judges, 8,192 for report suggestions
+  and 16,000 for dataset generation. On the Anthropic API, Claude Opus 4 and
+  4.1 stay at the 8,192 tokens the Anthropic SDK allows without streaming.
+- Reasoning effort is sent only to GPT-6 models and to Claude 5.5 or later on
+  the Anthropic API: `high` for `--llm-verify`, `medium` for rubric evaluation,
+  deduplication verdicts and judges.
+- Rubric evaluation and deduplication verdicts request structured output. The
+  verifier and deduplication prompts ask for `rationale` instead of
+  `reasoning`; replies that still say `reasoning` are accepted.
+- The `goal_accuracy` RAGAS scorer is skipped for GPT-5 and GPT-6 judges, which
+  reject its sampling settings.
+- `run_config.json` records the judge reasoning effort, and each standard
+  judge's details record `judge_model_used`, `judge_reasoning_effort` and
+  `judge_fallback_used`. Skill lift leaves out a case whose two conditions were
+  judged by different models and counts it in `judge_mixed_cases`.
+- Removed the unused `CONTENT_DEDUP_LLM_*` constants and `LLM_VERIFY_MODEL`; an
+  LLM client built from explicit credentials uses the provider default model.
+- Tier 3 pins the agent CLIs Harbor installs: Codex 0.161.0 and Claude Code
+  2.1.292, instead of the latest release. Claude Code runs Claude 5.5 and later
+  models with `reasoning_effort=medium`; Codex keeps `high`. Local mode keeps
+  your installed CLIs and fails a trial early when they are too old for the
+  model: Claude 5.5 needs Claude Code 2.1.280 or newer, and GPT-6 needs Codex
+  0.159.1 or newer.
+- OpenAI-compatible gateway agent defaults: Codex moves to
+  `openai/openai/gpt-6.1-sol` and Claude Code to
+  `aws/anthropic/bedrock-claude-opus-5-5`. OpenCode stays on
+  `nvidia/nvidia/nemotron-3-super-120b-long-ctx`, no longer tied to the gateway
+  chat default. Claude Code on the shared gateway key runs with
+  `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, so gateways that forward to
+  another provider do not reject its pre-release request fields.
+- The OpenAI default model moves from `gpt-5.6-sol` to `gpt-6.1-sol` for chat,
+  judging, Codex and SkillSpector, which runs it at `medium` reasoning effort,
+  so the effort values above apply to the OpenAI defaults. OpenCode keeps
+  `openai/gpt-5.6-sol` unless `SKILL_EVAL_LLM_MODEL` is set, because
+  GPT-6.1 Sol supports tool calls only on the Responses API.
+- The Anthropic and Bedrock default models move from Claude Opus 5 to Claude
+  Opus 5.5 (`claude-opus-5-5` and `us.anthropic.claude-opus-5-5`) for chat,
+  judging and Claude Code. On the Claude API they get the effort values above
+  and server-side refusal fallback, and Claude Code runs them at
+  `reasoning_effort=medium`.
+  SkillSpector stays on `claude-opus-5` and `us.anthropic.claude-opus-5`, which
+  SkillSpector v2.12.0 supports.
+
 ### Fixed
 
+- Safety-classifier refusals, content filters and output-token truncation are
+  detected instead of being read as empty or malformed output. `--llm-verify`
+  and rubric evaluation report the cause, and `--llm-verify` keeps the
+  complete verdicts of a truncated reply. Claude 5.5 or later requests to the
+  native Claude API use server-side fallback to Claude Opus 4.8. In the Harbor
+  verifier, Bedrock retries a filtered Claude 5.5 reply on Claude Opus 4.8, and
+  a refusal or empty judge reply moves on to the next
+  `LLM_JUDGE_FALLBACK_MODELS` entry.
+- The Harbor verifier's last-resort judge model follows the selected provider.
+  With no judge or chat model configured, it used to request an OpenAI model
+  from Anthropic, Bedrock, NVIDIA Build and gateways. The unused host-side
+  `llm_judge.DEFAULT_JUDGE_MODEL` constant is removed.
 - Brought the published documentation in line with 0.5.0. It now covers how
   standard grading builds judge evidence and rebuilds trajectories from
   OpenCode and Codex logs, structured judge output and retries, the evidence

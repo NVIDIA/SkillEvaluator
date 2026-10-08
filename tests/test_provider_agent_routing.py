@@ -7,7 +7,12 @@ from __future__ import annotations
 
 import pytest
 
-from skillevaluator.provider_config import ProviderConfig
+from skillevaluator.provider_config import (
+    CHAT_DEFAULT_OPENAI,
+    OPENCODE_OPENAI_DEFAULT_MODEL,
+    ProviderConfig,
+    resolve_llm_provider,
+)
 from skillevaluator.tier3.harbor.runner import _model_for_agent, _validate_agent_provider_credentials
 
 
@@ -57,6 +62,33 @@ def test_public_provider_defaults_are_normalized_for_each_agent(
 ) -> None:
     assert _model_for_agent(agent, cli_model=None, config_agents={}, provider=provider) == (
         expected,
+        "public provider default",
+    )
+
+
+@pytest.mark.parametrize(
+    ("configured_model", "expected"),
+    [
+        (None, (f"openai/{OPENCODE_OPENAI_DEFAULT_MODEL}", "native OpenAI agent default")),
+        (CHAT_DEFAULT_OPENAI, (f"openai/{CHAT_DEFAULT_OPENAI}", "public provider default")),
+    ],
+)
+def test_native_openai_opencode_keeps_its_default_unless_a_chat_model_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_model: str | None,
+    expected: tuple[str, str],
+) -> None:
+    environ = {"SKILL_EVAL_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "provider-key"}
+    if configured_model:
+        environ["SKILL_EVAL_LLM_MODEL"] = configured_model
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", configured_model)
+    else:
+        monkeypatch.delenv("SKILL_EVAL_LLM_MODEL", raising=False)
+    provider = resolve_llm_provider(environ)
+
+    assert _model_for_agent("opencode", cli_model=None, config_agents={}, provider=provider) == expected
+    assert _model_for_agent("codex", cli_model=None, config_agents={}, provider=provider) == (
+        CHAT_DEFAULT_OPENAI,
         "public provider default",
     )
 

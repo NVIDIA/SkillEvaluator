@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from skillevaluator.config import load_pii_patterns
+from skillevaluator.provider_config import CHAT_DEFAULT_MODELS
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
 from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators.base import Finding, Severity, ValidationResult
@@ -3909,10 +3910,11 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert "NVIDIA_API_KEY" not in child_env
 
     @pytest.mark.parametrize(
-        ("provider", "credential", "model"),
+        ("provider", "credential", "model", "effort"),
         (
-            ("openai", "OPENAI_API_KEY", "gpt-5.6-sol"),
-            ("anthropic", "ANTHROPIC_API_KEY", "claude-opus-5"),
+            ("openai", "OPENAI_API_KEY", "gpt-6.1-sol", "medium"),
+            ("anthropic", "ANTHROPIC_API_KEY", "claude-opus-5", None),
+            ("bedrock", "AWS_BEARER_TOKEN_BEDROCK", "us.anthropic.claude-opus-5", None),
         ),
     )
     def test_skillspector_child_environment_maps_supported_public_provider_defaults(
@@ -3921,17 +3923,21 @@ Call us at 555-123-4567 or +1-555-987-6543
         provider: str,
         credential: str,
         model: str,
+        effort: str | None,
     ) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", provider)
         monkeypatch.setenv(credential, "provider-test-key")
+        monkeypatch.delenv("SKILL_EVAL_LLM_MODEL", raising=False)
         monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
         monkeypatch.delenv("SKILLSPECTOR_MODEL", raising=False)
+        monkeypatch.delenv("SKILLSPECTOR_REASONING_EFFORT", raising=False)
 
         child_env = _skillspector_child_env()
 
         assert child_env is not None
         assert child_env["SKILLSPECTOR_PROVIDER"] == provider
         assert child_env["SKILLSPECTOR_MODEL"] == model
+        assert child_env.get("SKILLSPECTOR_REASONING_EFFORT") == effort
 
     def test_skillspector_bedrock_environment_keeps_only_aws_chain(self, monkeypatch) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "bedrock")
@@ -3991,6 +3997,150 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert os.environ["OPENAI_API_KEY"] == "ambient-openai-key"
         assert os.environ["OPENAI_BASE_URL"] == "https://ambient.example.test/v1"
 
+    @pytest.mark.parametrize(
+        ("provider", "credentials", "expected"),
+        (
+            ("openai", {"OPENAI_API_KEY": "provider-test-key"}, "gpt-6.1-sol"),
+            ("anthropic", {"ANTHROPIC_API_KEY": "provider-test-key"}, "claude-opus-5"),
+            ("bedrock", {"AWS_BEARER_TOKEN_BEDROCK": "provider-test-key"}, "us.anthropic.claude-opus-5"),
+            ("nv_build", {"NVIDIA_API_KEY": "provider-test-key"}, "nvidia/nemotron-3-super-120b-a12b"),
+            (
+                "openai-compatible",
+                {
+                    "SKILL_EVAL_LLM_API_KEY": "provider-test-key",
+                    "SKILL_EVAL_LLM_BASE_URL": "https://llm.example.test/v1",
+                },
+                "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
+            ),
+        ),
+    )
+    def test_skillspector_model_does_not_follow_a_changed_chat_default(
+        self, monkeypatch, provider: str, credentials: dict[str, str], expected: str
+    ) -> None:
+        monkeypatch.setitem(CHAT_DEFAULT_MODELS, provider, "changed-chat-default")
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", provider)
+        for name, value in credentials.items():
+            monkeypatch.setenv(name, value)
+        for name in ("SKILL_EVAL_LLM_MODEL", "SKILLSPECTOR_PROVIDER", "SKILLSPECTOR_MODEL"):
+            monkeypatch.delenv(name, raising=False)
+
+        assert _skillspector_child_env()["SKILLSPECTOR_MODEL"] == expected
+
+    @pytest.mark.parametrize(
+        ("skillspector_model", "expected"),
+        ((None, "claude-opus-5-5"), ("claude-opus-5", "claude-opus-5")),
+    )
+    def test_explicit_models_reach_skillspector_in_precedence_order(
+        self,
+        monkeypatch,
+        skillspector_model: str | None,
+        expected: str,
+    ) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "provider-test-key")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "claude-opus-5-5")
+        monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
+        if skillspector_model is None:
+            monkeypatch.delenv("SKILLSPECTOR_MODEL", raising=False)
+        else:
+            monkeypatch.setenv("SKILLSPECTOR_MODEL", skillspector_model)
+
+        assert _skillspector_child_env()["SKILLSPECTOR_MODEL"] == expected
+
+    @pytest.mark.parametrize("skillspector_provider", (None, "openai"))
+    def test_operator_skillspector_model_settings_are_forwarded_without_temperature(
+        self,
+        monkeypatch,
+        skillspector_provider: str | None,
+    ) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("OPENAI_API_KEY", "provider-test-key")
+        if skillspector_provider is None:
+            monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
+        else:
+            monkeypatch.setenv("SKILLSPECTOR_PROVIDER", skillspector_provider)
+        monkeypatch.setenv("SKILLSPECTOR_MODEL_META_ANALYZER", "gpt-5.6-sol")
+        monkeypatch.setenv("SKILLSPECTOR_MODEL_REGISTRY", "/etc/skillspector/model_registry.yaml")
+        monkeypatch.setenv("SKILLSPECTOR_REASONING_EFFORT", "high")
+        monkeypatch.setenv("SKILLSPECTOR_TEMPERATURE", "0")
+
+        child_env = _skillspector_child_env()
+
+        assert child_env["SKILLSPECTOR_MODEL_META_ANALYZER"] == "gpt-5.6-sol"
+        assert child_env["SKILLSPECTOR_MODEL_REGISTRY"] == "/etc/skillspector/model_registry.yaml"
+        assert child_env["SKILLSPECTOR_REASONING_EFFORT"] == "high"
+        assert "SKILLSPECTOR_TEMPERATURE" not in child_env
+
+    @pytest.mark.parametrize(
+        ("environment", "effort"),
+        (
+            ({}, None),
+            ({"SKILL_EVAL_LLM_MODEL": "openai/openai/gpt-6.1-sol"}, "medium"),
+            ({"SKILL_EVAL_LLM_MODEL": "aws/anthropic/bedrock-claude-opus-5-5"}, None),
+            ({"SKILLSPECTOR_MODEL": "gpt-6.1-sol"}, "medium"),
+            ({"SKILLSPECTOR_MODEL": "gpt-5.6-sol"}, None),
+            ({"SKILLSPECTOR_MODEL": "gpt-6.1-sol", "SKILLSPECTOR_REASONING_EFFORT": "high"}, "high"),
+            ({"SKILLSPECTOR_MODEL": "gpt-6.1-sol", "SKILLSPECTOR_MODEL_META_ANALYZER": "gpt-6.1-sol"}, "medium"),
+            ({"SKILLSPECTOR_MODEL": "gpt-6.1-sol", "SKILLSPECTOR_MODEL_META_ANALYZER": "claude-opus-5-5"}, None),
+            ({"SKILLSPECTOR_MODEL": "gpt-6.1-sol", "SKILLSPECTOR_MODEL_REGISTRY": "/registry.yaml"}, "medium"),
+            ({"SKILLSPECTOR_PROVIDER": "openai", "SKILLSPECTOR_MODEL": "gpt-6.1-sol"}, "medium"),
+            ({"SKILLSPECTOR_PROVIDER": "openai"}, None),
+        ),
+    )
+    def test_skillspector_reasoning_effort_defaults_to_medium_only_for_gpt_6_models(
+        self,
+        monkeypatch,
+        environment: dict[str, str],
+        effort: str | None,
+    ) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai-compatible")
+        monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", "compatible-test-key")
+        monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", "https://llm.example.test/v1")
+        for name in (
+            "SKILL_EVAL_LLM_MODEL",
+            "SKILLSPECTOR_PROVIDER",
+            "SKILLSPECTOR_MODEL",
+            "SKILLSPECTOR_MODEL_META_ANALYZER",
+            "SKILLSPECTOR_MODEL_REGISTRY",
+            "SKILLSPECTOR_REASONING_EFFORT",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in environment.items():
+            monkeypatch.setenv(name, value)
+
+        assert _skillspector_child_env().get("SKILLSPECTOR_REASONING_EFFORT") == effort
+
+    def test_llm_stage_records_requested_skillspector_model_and_effort(
+        self,
+        monkeypatch,
+        sample_skill_dir: Path,
+    ) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("OPENAI_API_KEY", "provider-test-key")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "gpt-6.1-sol")
+        for name in ("SKILLSPECTOR_PROVIDER", "SKILLSPECTOR_MODEL", "SKILLSPECTOR_REASONING_EFFORT"):
+            monkeypatch.delenv(name, raising=False)
+        reports = (_skillspector_json_report(), _skillspector_json_report(llm_requested=True, llm_available=True))
+
+        with (
+            patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector"),
+            patch.object(
+                Tools.skillspector,
+                "run",
+                side_effect=[
+                    ToolResult(success=True, stdout=json.dumps(report), stderr="", exit_code=0) for report in reports
+                ],
+            ) as mock_run,
+        ):
+            result = SecurityValidator(use_llm=True).validate_security_only(sample_skill_dir)
+
+        static_env, child_env = (call.kwargs["env"] for call in mock_run.call_args_list)
+        assert "SKILLSPECTOR_REASONING_EFFORT" not in static_env
+        assert child_env["SKILLSPECTOR_REASONING_EFFORT"] == "medium"
+        assert result.metadata["skillspector_model"] == "gpt-6.1-sol"
+        assert result.metadata["skillspector_reasoning_effort"] == "medium"
+        assert result.metadata["skillspector_version"] == "2.10.0"
+
     def test_partial_llm_verdicts_are_reported_as_partial(self, tmp_path: Path) -> None:
         """A verifier response covering only some findings must not claim full confirmation."""
         result = ValidationResult()
@@ -4018,6 +4168,43 @@ Call us at 555-123-4567 or +1-555-987-6543
 
         assert not any("confirmed all findings" in message.lower() for message in result.messages)
         assert any("1 of 2 findings" in message and "not verified" in message for message in result.messages)
+
+    @pytest.mark.parametrize("explanation_key", ["rationale", "reasoning"])
+    def test_llm_verdict_explanation_reads_rationale_or_legacy_reasoning(
+        self, tmp_path: Path, explanation_key: str
+    ) -> None:
+        """The prompt asks for "rationale"; a reply using the older "reasoning" key still counts."""
+        result = ValidationResult()
+        result.add_structured_finding(
+            Finding(category="PII", severity=Severity.HIGH, check_name="email", message="Email", file_path="SKILL.md"),
+            is_error=True,
+        )
+
+        with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
+            verifier_cls.return_value.verify.return_value = {
+                0: {"verdict": "false_positive", "confidence": "high", explanation_key: "Documentation example."}
+            }
+            SecurityValidator(verify_llm=True)._verify_findings_with_llm(result, tmp_path)
+
+        assert result.findings[0].metadata["llm_reasoning"] == "Documentation example."
+        assert result.findings[0].severity == Severity.INFO
+        assert "incomplete_scans" not in result.metadata
+
+    def test_llm_verification_without_verdicts_reports_the_cause(self, tmp_path: Path) -> None:
+        result = ValidationResult()
+        result.add_structured_finding(
+            Finding(category="PII", severity=Severity.HIGH, check_name="email", message="Email", file_path="SKILL.md"),
+            is_error=True,
+        )
+        cause = "The model declined the request (safety refusal)."
+
+        with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
+            verifier_cls.return_value.verify.return_value = {}
+            verifier_cls.return_value.last_failure = cause
+            SecurityValidator(verify_llm=True)._verify_findings_with_llm(result, tmp_path)
+
+        assert result.metadata["incomplete_scans"] == ["llm-verification"]
+        assert f"LLM finding verification was skipped (no verdicts returned: {cause})" in result.messages
 
     def test_validate_security_only(self, sample_skill_dir: Path):
         """Test validate_security_only method runs only skillspector scan."""

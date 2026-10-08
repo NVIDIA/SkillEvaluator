@@ -22,9 +22,13 @@ SkillEvaluator selects the provider-native default: `opencode` for NVIDIA Build,
 
 | Agent | Notes |
 | --- | --- |
-| `claude-code` | Anthropic's Claude Code CLI. `claude` is an accepted alias. |
-| `codex` | OpenAI's Codex CLI. The OpenAI-provider default. Runs with `reasoning_effort=high` so scores and cost stay comparable across Harbor releases. |
+| `claude-code` | Anthropic's Claude Code CLI. `claude` is an accepted alias. Harbor installs Claude Code 2.1.292. Claude 5.5 and later models run with `reasoning_effort=medium`; older models keep Claude Code's default effort. |
+| `codex` | OpenAI's Codex CLI. The OpenAI-provider default. Harbor installs Codex 0.161.0. Runs with `reasoning_effort=high` so scores and cost stay comparable across Harbor releases. |
 | `opencode` | The OpenCode CLI. |
+
+The pinned CLI releases apply wherever Harbor installs the agent: Docker and
+the remote environments. [Local mode](#local-mode) runs the CLI already on your
+machine instead.
 
 The `claude` alias is canonicalized to `claude-code` everywhere an agent
 name can appear — `-a/--agents`, `--agent-model`, and `harbor.agents` in
@@ -349,6 +353,11 @@ hard-unsupported and fails closed before agent-runtime discovery —
 `SKILLEVALUATOR_LOCAL_SANDBOX=prefer` or `off` is not a bypass; the error
 directs you to WSL2 or `--env-mode docker`. Only `claude-code`, `codex`,
 and `opencode` can run in local mode.
+
+Local mode does not install the pinned CLI releases. Each trial checks the
+installed version against the selected model instead and fails before the agent
+starts when it is too old: Claude 5.5 and later models need Claude Code 2.1.280
+or newer, and GPT-6 models need Codex 0.159.1 or newer.
 
 The sandbox policy is controlled by environment variables:
 

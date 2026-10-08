@@ -349,14 +349,24 @@ def test_network_exfiltration_check_scales_linearly():
     repeated_safe = "curl -sS https://example.com/skills/container-run-basics/SKILL.md ; " * 750
     assert 50_000 < len(repeated_safe) < 65_536
 
-    start_time = time.perf_counter()
-    result = check_security(
-        agent_text="Fetched items.",
-        tool_calls=[{"action": "Bash", "action_input": {"command": repeated_safe}}],
-    )
-    duration = time.perf_counter() - start_time
+    def best_time(command: str) -> tuple[float, dict]:
+        best, result = float("inf"), {}
+        for _ in range(3):
+            start_time = time.perf_counter()
+            result = check_security(
+                agent_text="Fetched items.",
+                tool_calls=[{"action": "Bash", "action_input": {"command": command}}],
+            )
+            best = min(best, time.perf_counter() - start_time)
+        return best, result
 
-    assert duration < 0.25, f"Check took {duration:.4f}s, expected linear scaling under 0.25s"
+    small, _ = best_time(repeated_safe[: len(repeated_safe) // 8])
+    duration, result = best_time(repeated_safe)
+
+    # 8x the input takes about 8x the time when the check is linear and 64x when it is
+    # quadratic. A ratio, not a fixed time, so a slow shared CI runner does not fail it.
+    assert duration < 24 * max(small, 1e-4), f"Check took {duration:.4f}s for 8x the input of {small:.4f}s"
+    assert duration < 2.0, f"Check took {duration:.4f}s on about 50KB of commands"
     assert result["passed"] is True
     assert not any(f["type"] == "network_exfiltration_risk" for f in result["findings"])
 

@@ -182,7 +182,7 @@ skillevaluator validate ./my-skill -a codex,claude-code \
     --env-mode docker --harbor-keep-jobs                  # Tier 3, retain Harbor jobs
 ```
 
-Pointing `validate` at a directory of skills (one with no root `SKILL.md`) runs the whole pipeline for each skill inside it, writes each skill's reports under `<output-dir>/<skill>/`, and finishes with a per-skill summary — catalog validation in one command. Skills run serially by default; `--workers N` validates up to N skills at once in parallel processes. `--previous-version` is rejected for a directory of skills. By default the terminal shows a compact pipeline view; `--verbose` switches to the full per-check detail stream.
+Pointing `validate` at a directory of skills (one with no root `SKILL.md`) runs the whole pipeline for each skill inside it, writes each skill's reports under `<output-dir>/<skill>/`, and finishes with a per-skill summary — catalog validation in one command. Skills run serially by default; `--workers N` validates up to N skills at once in parallel processes. `--previous-version` (or `SKILLEVALUATOR_PREVIOUS_VERSION`) is rejected for a directory of skills. By default the terminal shows a compact pipeline view; `--verbose` switches to the full per-check detail stream.
 
 `--help` groups the flags into four panels, mirrored by the subsections below.
 

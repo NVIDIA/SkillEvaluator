@@ -3215,6 +3215,8 @@ def _merge_additional(inventory: PluginInventory, extra: PluginInventory, declar
 
     ``declared_by`` names the additional manifest; ``None`` keeps the
     ``declared_by`` each component already carries (the cross-client pass).
+    A hook handler both inventories read keeps one record with the risk flags
+    of both, so every hook finding has its flag on the handler's row.
     """
     keys = {_merge_key(component) for component in inventory.components}
     for component in extra.components:
@@ -3234,11 +3236,16 @@ def _merge_additional(inventory: PluginInventory, extra: PluginInventory, declar
         if key not in seen:
             seen.add(key)
             inventory.findings.append(finding)
-    hook_keys = {(record.id, record.file) for record in inventory.hook_records}
+    hook_records = {(record.id, record.file): record for record in inventory.hook_records}
     for record in extra.hook_records:
-        if (record.id, record.file) not in hook_keys:
-            hook_keys.add((record.id, record.file))
+        kept = hook_records.get((record.id, record.file))
+        if kept is None:
+            hook_records[(record.id, record.file)] = record
             inventory.hook_records.append(record)
+            continue
+        # The same handler read with another client's hook rules: its findings were merged above.
+        for flag in record.risk_flags:
+            kept.add_flag(flag)
     privilege_keys = {(record.type, record.name, record.path) for record in inventory.privilege_records}
     for record in extra.privilege_records:
         if (record.type, record.name, record.path) not in privilege_keys:

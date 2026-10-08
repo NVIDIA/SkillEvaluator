@@ -241,6 +241,10 @@ declaration**:
   the selected manifest does not also declare carries `declared_by`, is never
   `evaluated` (an `evaluated` type becomes `static_only`), and is not counted in
   the context-cost estimate. Tier 3 records it as `not_staged` or `unsupported`.
+  A hook handler that both manifests load is checked with each client's rules
+  and keeps one `plugin.hook_risk` row, whose `risk_flags` hold the flags of
+  both (for example `context_injection` on a `SubagentStart` handler that only
+  Codex feeds to the model).
 
 ### Bundle-reference manifest: `agent_plugin.yaml`
 

@@ -119,3 +119,20 @@ def test_interrupt_is_still_unknown_to_claude_code(tmp_path: Path) -> None:
     flags = _flags(PluginSchemaValidator().validate(plugin))
 
     assert "unknown_event" in flags["hooks/hooks.json#Interrupt[0].hooks[0]"]
+
+
+def test_a_flag_only_the_codex_manifest_raises_stays_on_the_hook_row(tmp_path: Path) -> None:
+    """Claude Code and Codex manifests share hooks/hooks.json; only Codex feeds SubagentStart output to the model."""
+    hooks = {"SubagentStart": [_group(_command("echo 'subagent context'"))]}
+    plugin = _plugin(tmp_path / "plugin", ".claude-plugin", {"name": "both-clients", "version": "1.0.0"}, hooks)
+    (plugin / ".codex-plugin").mkdir()
+    (plugin / ".codex-plugin" / "plugin.json").write_text(json.dumps({**_CODEX_MANIFEST, "name": "both-clients"}))
+
+    result = PluginSchemaValidator().validate(plugin)
+    hook = "hooks/hooks.json#SubagentStart[0].hooks[0]"
+
+    assert "low:plugin_hook_context_injection" in _by_hook(result)[hook]
+    assert _flags(result)[hook] == ["context_injection"]
+    counts = result.metadata["plugin"]["hook_risk"]["counts"]
+    assert counts["by_flag"] == {"context_injection": 1}
+    assert counts["flagged"] == 1

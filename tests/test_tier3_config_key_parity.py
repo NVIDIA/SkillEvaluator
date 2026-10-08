@@ -389,3 +389,30 @@ def test_cli_grading_mode_accepts_legacy_aliases() -> None:
     assert GRADING_MODE_CHOICE.convert("aces_plus_custom", None, None) == "default_plus_custom"
     assert GRADING_MODE_CHOICE.convert("aces_default", None, None) == "default"
     assert GRADING_MODE_CHOICE.convert("custom_only", None, None) == "custom_only"
+
+
+def test_plugin_run_config_records_requested_and_effective_lift_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    result, _captured = _run_engine(
+        monkeypatch,
+        tmp_path,
+        USER_CONFIG,
+        eval_target_kind="plugin",
+        sum_of_parts_arm=True,
+        workspace_skills_baseline=False,
+        lift_mode_requested="both",
+        integration_skip_reason=None,
+    )
+
+    assert "error" not in result
+    # No member skills were staged, so the sum-of-parts arm could not run.
+    assert result["run_config"]["lift_mode"] == {
+        "requested": "both",
+        "effective": "effectiveness",
+        "integration_skip_reason": None,
+    }
+
+    skill_result, _ = _run_engine(monkeypatch, tmp_path / "skill", USER_CONFIG)
+    assert "lift_mode" not in skill_result["run_config"]

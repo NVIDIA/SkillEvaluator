@@ -37,9 +37,19 @@ class EvaluationOptions:
     custom_dockerfile_mode: str | None = None
     skill_workspace_mode: str | None = None
     include_skills: tuple[Path, ...] = ()
+    workspace_skills_baseline: bool = True
+    sum_of_parts_arm: bool = False
+    eval_target_kind: str = "skill"
+    lift_mode_requested: str | None = None
+    integration_skip_reason: str | None = None
+    # Plugin only: ``wrapper`` (default), ``native``, or ``auto``, plus the
+    # prepared plugin snapshot the native harness adapters stage.
+    plugin_load: str = "wrapper"
+    native_plugin_source: Any = None
     copy_repo: bool = False
     grading_mode: str | None = None
     results_dir: Path | None = None
+    resolved_results_root: Path | None = None
     harbor_keep_jobs: bool = False
     agent_runtime_preflight: bool | None = None
     timeout_multiplier: float | None = None

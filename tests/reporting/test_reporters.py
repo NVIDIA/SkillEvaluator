@@ -203,6 +203,29 @@ class TestCLIReporter:
         assert "[WARN] Plugin 'silent' has no description" in output
         assert "All validations passed" in output
 
+    def test_render_all_prints_a_plain_warning_next_to_the_findings_of_a_passed_result(self) -> None:
+        result = _similarity_result(severity=Severity.LOW)
+        result.add_warning("Bundled skill skills/nodesc was not compared: it has no description")
+
+        output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+
+        assert result.passed
+        assert "Similarity Check │ PASS │ OK, 2 warnings" in output
+        assert "Issues: 1. [SIMILARITY-LOW] same-name similarity match" in output
+        assert "Warnings: [WARN] Bundled skill skills/nodesc was not compared: it has no description" in output
+        # The finding's own warning string is listed once, as an issue, not again as a warning.
+        assert output.count("same-name similarity match") == 1
+
+    def test_render_all_counts_one_warning_in_the_singular(self) -> None:
+        result = ValidationResult(validator_name="License Compliance", validator_description="License")
+        result.add_success("skill_discovery", "Checking license compliance")
+        result.add_success("writing-rules", "All checks passed")
+        result.add_warning("No license information found - manual review required.")
+
+        output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+
+        assert "License Compliance │ PASS │ 2 checks passed, 1 warning │" in output
+
     def test_render_all_of_a_passed_result_without_warnings_is_unchanged(
         self, success_result: ValidationResult
     ) -> None:

@@ -987,6 +987,8 @@ class _ArmStaging:
     refused: frozenset[tuple[str, str]] = frozenset()
     #: False when the refusals are unknown (a wrapper run whose refusal pass could not read the plugin).
     refusals_known: bool = True
+    #: Names of the LSP servers native staging writes to ``.lsp.json`` (an entry that is not a server object is not).
+    lsp_servers: frozenset[str] = frozenset()
 
     def native_for(self, component_type: str) -> list[str]:
         return sorted(agent for agent, arm in self.native.items() if component_type in arm.types)
@@ -1014,7 +1016,8 @@ def _arm_staging(
             continue
         types = frozenset(native_component_types(adapter, source))
         native[agent] = _NativeArm(adapter.adapter_id, adapter.component_modes(), types)
-    return _ArmStaging(native=native, wrapper=tuple(sorted(wrapper)), refused=refused)
+    lsp_servers = frozenset(source.lsp_servers) if source is not None else frozenset()
+    return _ArmStaging(native=native, wrapper=tuple(sorted(wrapper)), refused=refused, lsp_servers=lsp_servers)
 
 
 def _rule_reason(staging: _ArmStaging | None, wrapper_reason: str = _WRAPPER_RULE_REASON) -> str:
@@ -1114,6 +1117,10 @@ def _other_type_row(component: Component, staging: _ArmStaging | None, agents: S
         else:
             others.append(f"{agent} (unsupported by the {agent} native adapter ({arm.adapter_id}))")
     native = staging.native_for(kind)
+    if kind == "lsp" and component.name not in staging.lsp_servers:
+        # A native arm stages only the LSP servers it found a config object for.
+        others.extend(f"{agent} (no valid LSP server config to stage)" for agent in native)
+        native = []
     if not native:
         return coverage_row(component, "unsupported", "not staged for " + "; ".join(others))
     reason = "staged natively for " + ", ".join(native)

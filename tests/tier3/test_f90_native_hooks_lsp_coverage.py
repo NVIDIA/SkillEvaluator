@@ -96,3 +96,61 @@ def test_wrapper_coverage_reason_names_a_native_refusal(
     assert reason.startswith("the generated wrapper does not stage lsp components")
     assert expected in reason
     assert absent not in reason
+
+
+def test_a_replaced_lsp_server_is_one_staged_row_with_the_config_claude_code_applies(tmp_path: Path) -> None:
+    """``.lsp.json`` and the manifest's ``lspServers`` share a name: only the declared server is staged and reported."""
+    plugin = _plugin(tmp_path / "plugin", ["--stdio"])
+    manifest = json.loads((plugin / ".claude-plugin" / "plugin.json").read_text())
+    (plugin / ".claude-plugin" / "plugin.json").write_text(json.dumps({**manifest, "lspServers": "./config/lsp.json"}))
+    declared = {"command": "tsgo", "args": ["--lsp", "--stdio"], "extensionToLanguage": {".ts": "typescript"}}
+    (plugin / "config").mkdir()
+    (plugin / "config" / "lsp.json").write_text(json.dumps({"typescript": declared}))
+
+    package = prepare_plugin_eval_package(
+        plugin, stage_root=tmp_path / "stage", plugin_load="native", agents="claude-code", env_mode="docker"
+    )
+    rows = [row for row in package.component_coverage["components"] if row["type"] == "lsp"]
+
+    assert [(row["name"], row["path"], row["state"]) for row in rows] == [("typescript", "config/lsp.json", "staged")]
+    assert package.native_source is not None
+    assert package.native_source.lsp_servers == {"typescript": declared}
+
+
+def test_an_lsp_entry_that_is_not_an_object_replaces_no_staged_server(tmp_path: Path) -> None:
+    """A declared entry that is not a server object leaves the ``.lsp.json`` server staged and reported."""
+    plugin = _plugin(tmp_path / "plugin", ["--stdio"])
+    manifest = json.loads((plugin / ".claude-plugin" / "plugin.json").read_text())
+    (plugin / ".claude-plugin" / "plugin.json").write_text(json.dumps({**manifest, "lspServers": "./config/lsp.json"}))
+    (plugin / "config").mkdir()
+    (plugin / "config" / "lsp.json").write_text(json.dumps({"typescript": "not-a-server"}))
+
+    package = prepare_plugin_eval_package(
+        plugin, stage_root=tmp_path / "stage", plugin_load="native", agents="claude-code", env_mode="docker"
+    )
+    rows = [row for row in package.component_coverage["components"] if row["type"] == "lsp"]
+
+    assert [(row["name"], row["path"], row["state"]) for row in rows] == [("typescript", ".lsp.json", "staged")]
+    assert package.native_source is not None
+    assert package.native_source.lsp_servers["typescript"]["command"] == "typescript-language-server"
+
+
+def test_an_lsp_entry_that_is_not_an_object_is_not_reported_staged(tmp_path: Path) -> None:
+    """Native staging skips an entry that is not a server object, so its row is not staged beside a valid one."""
+    plugin = _plugin(tmp_path / "plugin", ["--stdio"])
+    servers = json.loads((plugin / ".lsp.json").read_text())
+    (plugin / ".lsp.json").write_text(json.dumps({**servers, "python": "not-a-server"}))
+
+    package = prepare_plugin_eval_package(
+        plugin, stage_root=tmp_path / "stage", plugin_load="native", agents="claude-code", env_mode="docker"
+    )
+    rows = {row["name"]: row for row in package.component_coverage["components"] if row["type"] == "lsp"}
+
+    assert rows["typescript"]["state"] == "staged"
+    assert (rows["python"]["state"], rows["python"]["reason"]) == (
+        "unsupported",
+        "not staged for claude-code (no valid LSP server config to stage)",
+    )
+    assert "native_agents" not in rows["python"]
+    assert package.native_source is not None
+    assert set(package.native_source.lsp_servers) == {"typescript"}

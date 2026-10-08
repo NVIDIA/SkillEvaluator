@@ -989,6 +989,7 @@ findings count in `severity_counts` like the plugin root's.
 | `plugin_permission_mode_flag` | MEDIUM | A hook, LSP server, monitor, or settings file passes `--permission-mode auto` or `--permission-mode acceptEdits` (in any letter case) to an agent CLI |
 | `plugin_permission_allow_flag` | HIGH | A hook, LSP server, monitor, or settings file passes `--allowedTools` (or `--allowed-tools`) with a grant that runs any command or `*` (`--allowedTools Bash`) to an agent CLI |
 | `plugin_lsp_command_*`, `plugin_lsp_unpinned_package` | as for MCP | An `.lsp.json` server's `command` and `args` get the MCP stdio command checks, worded for an LSP server: a shell `-c` program (`plugin_lsp_command_dangerous_form`, CRITICAL), inline credentials, floating versions, and unpinned package runners. Claude Code starts an LSP server as argv without a shell, so an operator inside one argument is plain text and is not flagged; an argument that is only an operator or carries command substitution is LOW, not the MCP CRITICAL |
+| `plugin_lsp_duplicate_name` | MEDIUM | The same LSP server name is declared in more than one source. Claude Code applies `.lsp.json` first and then each `lspServers` entry in order, so a later declaration replaces an earlier one. An entry that is not a server object replaces nothing (Claude Code rejects it, or the whole file that holds it). The inventory lists the name once, at the declaration that runs (origin `declared+packaged` when it replaced a `.lsp.json` server), and Tier 3 stages and reports only that one. Every declaration, including a replaced one, is still statically checked |
 | `plugin_env_insecure_tls`, `plugin_env_inline_secret` | CRITICAL | An LSP server's `env` turns TLS verification off (`NODE_TLS_REJECT_UNAUTHORIZED=0`, ...) or carries a literal credential: the same rules as MCP `mcp_insecure_tls_env` and `mcp_inline_secret`. In a shipped settings file's `env` they are HIGH (Claude Code ignores plugin settings `env`, but it applies if the file is copied into a project). Values are never printed |
 | `plugin_permission_bypass_scan_truncated` | HIGH | A hook, LSP server, monitor, or settings config is too large to scan completely for bypass flags. A backstop: configs are read within the same node limit, so `plugin_component_unreadable` (or `mcp_config_file_too_large`) normally fires first |
 | `plugin_env_code_injection` | HIGH | Settings or LSP `env` preloads code (`LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, `BASH_ENV`, `NODE_OPTIONS` with `--require`, `-r`, `--import`, `--loader`, or `--experimental-loader`, `PERL5OPT` with `-M`, or `RUBYOPT` with `-r`). A module search path outside the plugin root (`PYTHONPATH`, `NODE_PATH`, `PERL5LIB`, `RUBYLIB`) is MEDIUM; paths under `${CLAUDE_PLUGIN_ROOT}` and a same-name passthrough are allowed |
@@ -2017,8 +2018,10 @@ The native copy never carries the plugin's `evals/` directory, a member
 skill's `evals/`, the `--evals-source` dataset, results or generated-output
 directories inside the plugin (such as a `--results-dir` there), `.env` files,
 or monitors. `.lsp.json` and `settings.json` are regenerated from what Claude
-Code applies. Components that only an additional manifest declares are not
-staged. A hook config, subagent, settings file, or LSP server that enables a
+Code applies. An LSP server entry that is not an object is left out of
+`.lsp.json`, and its coverage row is `unsupported` (no valid config to stage).
+Components that only an additional manifest declares are not staged. A hook
+config, subagent, settings file, or LSP server that enables a
 permission-bypass flag or `permissionMode: bypassPermissions` blocks every
 adapter that would stage that component, like the blocking MCP checks: `native`
 fails, and `auto` uses the wrapper for that agent with the reason recorded.

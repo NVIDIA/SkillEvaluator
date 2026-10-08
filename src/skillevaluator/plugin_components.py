@@ -2130,16 +2130,43 @@ class _Builder:
         default = PurePosixPath(self.profile.default_lsp_file) if self.profile.default_lsp_file else None
         if default is None and declared_value is None:
             return
+        # Claude Code applies the sources in order and a later server with the same name replaces an
+        # earlier one, so each name is one component at the declaration that runs: (origin, path, label).
+        # An entry that is not a server object configures nothing (Claude Code rejects it, or the whole
+        # file holding it), so it replaces no server; ``configured`` holds the names that have one.
+        applied: dict[str, tuple[Origin, str, str]] = {}
+        configured: set[str] = set()
         for name, origin, rel, config in self._json_sources("lsp", "lspServers", declared_value, default):
             servers = config.get("lspServers", config) if isinstance(config, dict) else None
             if not isinstance(servers, dict) or not servers:
                 self._add(Component("lsp", name, origin, rel, "unsupported"))
                 continue
             self._check_item_count(f"lspServers map in '{rel}'", len(servers), rel)
+            label = f"'{rel}'" if name == rel else f"'{rel}' ({name})"
             for server_name, server in list(servers.items())[:PLUGIN_COMPONENT_MAX_ITEMS]:
-                self._add(Component("lsp", str(server_name), origin, rel, "unsupported"))
                 where = f"lspServers['{server_name}']"
                 display = self.reader.display(rel)
+                server_origin = origin
+                previous = applied.get(str(server_name))
+                if isinstance(server, dict) and previous is not None and str(server_name) in configured:
+                    self.inventory.findings.append(
+                        _plugin_finding(
+                            Severity.MEDIUM,
+                            "plugin_lsp_duplicate_name",
+                            f"LSP server '{server_name}' is declared in both {previous[2]} and {label}; "
+                            "Claude Code keeps only the later declaration",
+                            display,
+                            "Declare each LSP server name once so reviewers see the configuration that actually runs.",
+                            metadata={"plugin_component": {"type": "lsp", "name": str(server_name)}},
+                        )
+                    )
+                    if previous[0] != origin:
+                        server_origin = "declared+packaged"
+                if isinstance(server, dict):
+                    applied[str(server_name)] = (server_origin, rel, label)
+                    configured.add(str(server_name))
+                elif previous is None:
+                    applied[str(server_name)] = (origin, rel, label)
                 component = ("lsp", str(server_name))
                 self.inventory.findings.extend(
                     _override_findings(
@@ -2157,6 +2184,8 @@ class _Builder:
                     )
                     self.inventory.findings.extend(_lsp_env_findings(str(server_name), server.get("env"), display))
                     self.inventory.findings.extend(_lsp_command_findings(str(server_name), server, display))
+        for server_name, (origin, rel, _label) in applied.items():
+            self._add(Component("lsp", server_name, origin, rel, "unsupported"))
 
     # -- monitors ---------------------------------------------------------- #
     def monitors(self) -> None:

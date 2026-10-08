@@ -166,6 +166,16 @@ LONG_CODEX_MCP_NAMESPACE_TOOL = {
 }
 LONG_CODEX_MCP_ALIAS = "mcp__component_lab_tracker__stage_workbook_from_shared__bc792ca1"
 
+# MCP tools may return image, audio, or resource content; Build tool messages are text only.
+ANTHROPIC_IMAGE_TOOL_RESULT = [
+    {"type": "text", "text": "ISSUE-123 chart"},
+    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aaaa"}},
+]
+RESPONSES_IMAGE_TOOL_OUTPUT = [
+    {"type": "input_text", "text": "ISSUE-123 chart"},
+    {"type": "input_image", "image_url": "data:image/png;base64,aaaa"},
+]
+
 
 class _FakeBuildHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
@@ -1571,6 +1581,50 @@ def test_responses_long_namespace_tool_reaches_build_as_an_alias_and_returns_its
     assert [tool["function"]["name"] for tool in build_request["tools"]] == [LONG_CODEX_MCP_ALIAS]
 
 
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        (
+            "/v1/messages",
+            {
+                "messages": [
+                    {"role": "user", "content": "Chart the issue."},
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "tool_use", "id": "call-1", "name": "mcp__tracker__chart", "input": {}}],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "call-1", "content": ANTHROPIC_IMAGE_TOOL_RESULT}
+                        ],
+                    },
+                ],
+            },
+        ),
+        (
+            "/v1/responses",
+            {
+                "input": [
+                    {"type": "function_call", "call_id": "call-1", "name": "chart", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "call-1", "output": RESPONSES_IMAGE_TOOL_OUTPUT},
+                ],
+            },
+        ),
+    ],
+)
+def test_image_tool_result_reaches_build_as_text_instead_of_a_400(
+    bridge_services: _BridgeServices, path: str, payload: dict[str, object]
+) -> None:
+    status, _headers, _body = _request(f"{bridge_services.url}{path}", {"model": "nvidia/model", **payload})
+
+    assert status == 200
+    build_request = bridge_services.build.requests[0][2]  # type: ignore[attr-defined]
+    assert build_request["messages"][-1]["role"] == "tool"
+    assert build_request["messages"][-1]["content"].startswith("ISSUE-123 chart[")
+    assert "aaaa" not in json.dumps(build_request)
+
+
 def test_messages_count_tokens_does_not_call_build(bridge_services: _BridgeServices) -> None:
     status, headers, body = _request(f"{bridge_services.url}/v1/messages/count_tokens", {"messages": []})
 
@@ -2370,6 +2424,81 @@ def test_anthropic_tool_result_becomes_chat_tool_message() -> None:
     translated = anthropic_to_chat_request(request)
 
     assert translated["messages"] == [{"role": "tool", "tool_call_id": "call-1", "content": "42"}]
+
+
+@pytest.mark.parametrize(
+    ("translator", "payload", "block_type"),
+    [
+        (
+            anthropic_to_chat_request,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "call-1", "content": ANTHROPIC_IMAGE_TOOL_RESULT}
+                        ],
+                    }
+                ]
+            },
+            "image",
+        ),
+        (
+            responses_to_chat_request,
+            {"input": [{"type": "function_call_output", "call_id": "call-1", "output": RESPONSES_IMAGE_TOOL_OUTPUT}]},
+            "input_image",
+        ),
+    ],
+)
+def test_non_text_tool_result_blocks_become_a_text_placeholder(
+    translator: object, payload: dict[str, object], block_type: str
+) -> None:
+    assert callable(translator)
+    translated = translator({"model": "nvidia/model", **payload})
+
+    assert translated["messages"] == [
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": (
+                f"ISSUE-123 chart[{block_type} block omitted: "
+                "the NVIDIA Build bridge forwards tool results as text only]"
+            ),
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("translator", "payload"),
+    [
+        (
+            anthropic_to_chat_request,
+            {"messages": [{"role": "user", "content": [ANTHROPIC_IMAGE_TOOL_RESULT[1]]}]},
+        ),
+        (anthropic_to_chat_request, {"system": ANTHROPIC_IMAGE_TOOL_RESULT, "messages": []}),
+        (
+            responses_to_chat_request,
+            {"input": [{"type": "message", "role": "user", "content": RESPONSES_IMAGE_TOOL_OUTPUT}]},
+        ),
+        (
+            anthropic_to_chat_request,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": [{"text": "untyped"}]}],
+                    }
+                ]
+            },
+        ),
+    ],
+)
+def test_non_text_message_blocks_and_untyped_tool_result_blocks_are_still_rejected(
+    translator: object, payload: dict[str, object]
+) -> None:
+    assert callable(translator)
+    with pytest.raises(BridgePayloadError, match="unsupported"):
+        translator({"model": "nvidia/model", **payload})
 
 
 def test_anthropic_system_message_role_used_by_claude_code_is_preserved() -> None:

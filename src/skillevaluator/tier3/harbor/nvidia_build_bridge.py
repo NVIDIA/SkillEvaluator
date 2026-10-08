@@ -52,6 +52,7 @@ IN_PROCESS_START_TIMEOUT_SECONDS = 5.0
 MAX_CHAT_TOOL_NAME_LENGTH = 64
 _BACKEND_DNS_RESOLVER_SLOT = BoundedSemaphore(1)
 DROPPED_RESPONSES_SERVER_TOOL_TYPES = {"web_search", "web_search_preview"}
+TEXT_CONTENT_BLOCK_TYPES = {"input_text", "output_text", "text"}
 DROPPED_CLAUDE_CODE_ORCHESTRATION_TOOLS = {
     "Agent",
     "Task",
@@ -1467,7 +1468,7 @@ def _content_text(content: Any) -> str:
         for block in content:
             if isinstance(block, str):
                 parts.append(block)
-            elif isinstance(block, dict) and block.get("type") in {"input_text", "output_text", "text"}:
+            elif isinstance(block, dict) and block.get("type") in TEXT_CONTENT_BLOCK_TYPES:
                 text = block.get("text")
                 if not isinstance(text, str):
                     raise BridgePayloadError("text content blocks must include a string text value")
@@ -1476,6 +1477,20 @@ def _content_text(content: Any) -> str:
                 raise BridgePayloadError("unsupported content block")
         return "".join(parts)
     raise BridgePayloadError("content must be a string or text block array")
+
+
+def _tool_result_text(content: Any) -> str:
+    """Flatten a tool result; a non-text block, such as an MCP image, becomes a placeholder."""
+    if not isinstance(content, list):
+        return _content_text(content)
+    parts: list[str] = []
+    for block in content:
+        block_type = block.get("type") if isinstance(block, dict) else None
+        if isinstance(block_type, str) and block_type not in TEXT_CONTENT_BLOCK_TYPES:
+            parts.append(f"[{block_type} block omitted: the NVIDIA Build bridge forwards tool results as text only]")
+        else:
+            parts.append(_content_text([block]))
+    return "".join(parts)
 
 
 def _responses_messages(
@@ -1492,7 +1507,9 @@ def _responses_messages(
             call_id = item.get("call_id")
             if not isinstance(call_id, str) or not call_id:
                 raise BridgePayloadError(f"{item_type} requires a call_id")
-            messages.append({"role": "tool", "tool_call_id": call_id, "content": _content_text(item.get("output", ""))})
+            messages.append(
+                {"role": "tool", "tool_call_id": call_id, "content": _tool_result_text(item.get("output", ""))}
+            )
         elif item_type == "function_call":
             _append_responses_tool_call(messages, _responses_function_call_to_chat(item, namespace_tools))
         elif item_type == "custom_tool_call":
@@ -1760,7 +1777,7 @@ def _anthropic_tool_result_to_chat(block: dict[str, Any]) -> dict[str, Any]:
     call_id = block.get("tool_use_id")
     if not isinstance(call_id, str) or not call_id:
         raise BridgePayloadError("tool_result requires a tool_use_id")
-    return {"role": "tool", "tool_call_id": call_id, "content": _content_text(block.get("content", ""))}
+    return {"role": "tool", "tool_call_id": call_id, "content": _tool_result_text(block.get("content", ""))}
 
 
 def _anthropic_tool_to_chat(tool: Any) -> dict[str, Any]:

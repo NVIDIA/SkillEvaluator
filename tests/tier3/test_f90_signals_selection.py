@@ -144,6 +144,16 @@ def test_codex_hosted_web_search_is_a_web_search_decoy() -> None:
     assert fetch["tool_selection"]["decoy_calls"] == 1
 
 
+def test_a_decoy_write_through_the_shell_is_not_a_precise_choice() -> None:
+    """An acceptable ``Bash`` does not make a shell call that is also a ``Write`` decoy a right choice."""
+    case = {"expected_tools": ["Skill:release-notes"], "acceptable_tools": ["Bash", "Read"], "decoy_tools": ["Write"]}
+    codex = _trajectory("codex", _step("c1", "exec_command", {"cmd": "cat > /workspace/x.md <<'EOF'\nx\nEOF"}))
+    claude = _trajectory("claude-code", _step("t1", "Write", {"file_path": "/workspace/x.md", "content": "x"}))
+    for trajectory in (codex, claude):
+        selection = _signals(trajectory, case)["tool_selection"]
+        assert (selection["precision"], selection["decoy_calls"]) == (0.0, 1), trajectory["agent"]
+
+
 @pytest.mark.parametrize(
     ("ref", "codex_call", "claude_call"),
     [

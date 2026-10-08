@@ -3282,11 +3282,16 @@ def _grade_selection(
 
     # label -> (identity, credited): a call to a tool that does not exist is a wrong choice, never a hit.
     called: dict[str, list[Any]] = {}
+    # Labels a decoy ref matched: a wrong choice even when an allowed ref matches them too, as a shell call
+    # that wrote a file matches both an acceptable ``Bash`` and a decoy ``Write``.
+    decoyed: set[str] = set()
     decoy_calls = 0
     for call in calls:
         idents = [ident for ident in call.idents if _in_family(ident)]
-        if decoy_refs and any(_ref_matches(ref, ident) for ref in decoy_refs for ident in idents):
+        matched = {ident.label for ident in idents if any(_ref_matches(ref, ident) for ref in decoy_refs)}
+        if matched:
             decoy_calls += 1
+            decoyed |= matched
         credited = not call.missing_tool
         for ident in idents:
             if ident.kind is None and not any(_ref_matches(ref, ident) for ref in all_refs):
@@ -3301,7 +3306,9 @@ def _grade_selection(
                 called[ident.label] = [ident, credited]
 
     precise = sum(
-        1 for ident, credited in called.values() if credited and any(_ref_matches(ref, ident) for ref in allowed)
+        1
+        for label, (ident, credited) in called.items()
+        if credited and label not in decoyed and any(_ref_matches(ref, ident) for ref in allowed)
     )
     # Precision is undefined when nothing in scope was called (a miss, not a wrong choice).
     precision = _ratio(precise, len(called)) if called else None

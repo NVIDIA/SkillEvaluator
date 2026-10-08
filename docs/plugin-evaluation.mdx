@@ -2839,7 +2839,10 @@ into per-trial checks. They are heuristic and advisory.
     as a match.
   - `precision` is the share of called identities that match `expected_tools`
     or `acceptable_tools`. It is `null` when nothing of that kind was called:
-    a miss is not a wrong choice.
+    a miss is not a wrong choice. An identity that a `decoy_tools` ref also
+    matched is a wrong choice: a shell call that wrote a file does not count
+    for an acceptable `Bash` when `Write` is a decoy, just as a `Write` call
+    would not.
   - `recall` is the share of `expected_tools` refs that were called. Refs to a
     component type the arm cannot carry are listed in `skipped` instead of
     being counted as misses: MCP in the member-skills arm, and plugin

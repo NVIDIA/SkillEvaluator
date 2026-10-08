@@ -20,6 +20,7 @@ from skillevaluator.evaluation.tier3_report import (
     build_agent_eval_payload,
 )
 from skillevaluator.tier3.harbor import stats
+from skillevaluator.tier3.harbor.collector import _pass_summary as collector_pass_summary
 from skillevaluator.tier3.harbor.collector import _trial_usage, collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS, LEGACY_METRIC_SET
 from skillevaluator.tier3.harbor.report_data import load_agent_data
@@ -210,6 +211,36 @@ def test_pass_hat_k_is_unobservable_when_stop_on_pass_truncates_attempts() -> No
     single = _pass_summary({"a": [True], "b": [False]}, k=1)
     assert stats.reliability_summary(single, stop_on_pass=True)["pass_hat_k"] == 0.5
     assert stats.reliability_summary({}, stop_on_pass=False) is None
+
+
+@pytest.mark.parametrize(("n_cases", "k"), [(3, 10), (100, 6), (300, 2)])
+def test_pass_hat_k_counts_every_case_past_the_published_detail_caps(n_cases: int, k: int) -> None:
+    # The published cases block keeps at most 8 attempts per case, 512 attempt
+    # rows and 256 cases; pass^k is still over every case and attempt.
+    case_ids = [f"case-{index:03d}" for index in range(n_cases)]
+    rewards = [
+        {
+            "entry_id": case_id,
+            "_trial_name": f"{case_id}__a{attempt}",
+            "_trial_root_name": f"{case_id}__a{attempt}",
+            "_attempt_ordinal": attempt,
+            "overall": 1.0,
+        }
+        for case_id in case_ids
+        for attempt in range(1, k + 1)
+    ]
+    summary = collector_pass_summary(
+        rewards,
+        n_attempts=k,
+        pass_threshold=0.5,
+        expected_cases=n_cases,
+        expected_case_ids=case_ids,
+        scorer=lambda reward: reward.get("overall"),
+    )
+
+    reliability = stats.reliability_summary(summary, stop_on_pass=False)
+
+    assert reliability == {"pass_at_k": 1.0, "pass_hat_k": 1.0, "k": k, "n_cases": n_cases}
 
 
 def test_cost_per_success_with_reported_usd() -> None:

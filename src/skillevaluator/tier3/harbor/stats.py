@@ -452,13 +452,15 @@ def reliability_summary(pass_summary: Mapping[str, Any], *, stop_on_pass: bool) 
 
     pass@k keeps its existing meaning. pass^k needs all k attempts to be
     observed, so it is ``None`` when ``stop_on_pass`` truncated the attempts.
-    Unscored attempts never count as passes.
+    Unscored attempts never count as passes. The published ``cases`` block is
+    capped for size, so the collector's ``_pairing_cases`` (every case and
+    attempt) is read when present.
     """
     if not pass_summary:
         return None
     k = int(pass_summary.get("k") or 0)
     n_cases = int(pass_summary.get("total_cases") or 0)
-    cases = pass_summary.get("cases")
+    cases = pass_summary.get("_pairing_cases", pass_summary.get("cases"))
     pass_hat_k: float | None = None
     if k > 0 and n_cases > 0 and isinstance(cases, Mapping) and not (stop_on_pass and k > 1):
         all_passed = 0

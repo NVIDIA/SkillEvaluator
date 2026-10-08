@@ -8,8 +8,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - `--trial-retries N` (default 0) lets Harbor rerun a Tier 3 trial, up to 5
   times, after an environment-start timeout, an agent-setup timeout, or a
-  network connection error, never after an agent timeout or a verifier or
-  reward error. `run_config.json` records the setting and the retries performed.
+  network failure during agent setup in SkillEvaluator's agent wrappers, never
+  after an agent timeout, a verifier or reward error, or a network failure
+  while the agent works on its task. `run_config.json` records the setting and
+  the retries performed.
 - Added public plugin evaluation across all tiers: static schema and MCP checks,
   advisory offline dependency/context deduplication, and Harbor-backed live
   evaluation with effectiveness and optional sum-of-parts Integration arms.

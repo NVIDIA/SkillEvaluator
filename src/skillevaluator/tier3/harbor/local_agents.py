@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from harbor.agents.installed.base import NonZeroAgentExitCodeError
+from harbor.agents.installed.base import NetworkConnectionError, NonZeroAgentExitCodeError
 from harbor.agents.installed.claude_code import ClaudeCode
 from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.opencode import OpenCode
@@ -117,7 +117,33 @@ def _rewrite_launcher_segment(command: str, rewrite: Callable[[str], str]) -> st
     return f"{rewrite(launcher)}{separator}{prompt}"
 
 
-class SkillEvaluatorLocalClaudeCode(ClaudeCode):
+class AgentSetupNetworkError(RuntimeError):
+    """A network failure while Harbor set up a SkillEvaluator agent, before it got its task.
+
+    Harbor raises ``NetworkConnectionError`` for any failed agent command whose
+    output shows a network failure, both while the agent installs and while it
+    works on the task, and retries a trial by exception name alone. This name
+    marks the setup-phase failure only, so ``--trial-retries`` can retry it
+    without ever rerunning an agent that already worked on its task. It is not
+    a ``NonZeroAgentExitCodeError``, so Harbor's exclusions never match it.
+    """
+
+
+class SetupNetworkErrorAgent:
+    """Raise a network failure in Harbor's agent setup as ``AgentSetupNetworkError``.
+
+    Harbor calls ``setup`` once per trial attempt, before the task starts; a
+    ``NetworkConnectionError`` from the agent's task commands keeps its name.
+    """
+
+    async def setup(self, environment: BaseEnvironment) -> None:
+        try:
+            await super().setup(environment)  # type: ignore[misc]
+        except NetworkConnectionError as exc:
+            raise AgentSetupNetworkError(f"Agent setup failed with a network error: {exc}") from exc
+
+
+class SkillEvaluatorLocalClaudeCode(SetupNetworkErrorAgent, ClaudeCode):
     """Claude Code wrapper that skips bootstrap install in local mode."""
 
     _REMOTE_CLAUDE_TMP = PurePosixPath(EnvironmentPaths.agent_dir / "claude-tmp")
@@ -261,7 +287,7 @@ def _sum_counts(base: int | None, extra: list[Any]) -> int | None:
     return sum(values) if values else None
 
 
-class SkillEvaluatorCodex(Codex):
+class SkillEvaluatorCodex(SetupNetworkErrorAgent, Codex):
     """Harbor's Codex, converting the main thread's rollout and folding subagent rollouts in as sidechain steps.
 
     Each Codex thread writes its own rollout. When the agent calls ``spawn_agent``, the child thread's rollout
@@ -501,7 +527,7 @@ class SkillEvaluatorLocalCodex(SkillEvaluatorGatewayCodex):
         return await super().exec_as_agent(environment, command=command, env=env, cwd=cwd, timeout_sec=timeout_sec)
 
 
-class SkillEvaluatorGatewayOpenCode(OpenCode):
+class SkillEvaluatorGatewayOpenCode(SetupNetworkErrorAgent, OpenCode):
     """Use Chat Completions for an explicitly OpenAI-compatible gateway."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -529,7 +555,7 @@ class SkillEvaluatorGatewayOpenCode(OpenCode):
         )
 
 
-class SkillEvaluatorLocalOpenCode(OpenCode):
+class SkillEvaluatorLocalOpenCode(SetupNetworkErrorAgent, OpenCode):
     """OpenCode wrapper that skips nvm/npm bootstrap in local mode."""
 
     _REMOTE_WORKSPACE = PurePosixPath("/workspace")
@@ -998,7 +1024,7 @@ class SkillEvaluatorNvidiaBuildCodex(_NvidiaBuildBridgeAgent, SkillEvaluatorCode
         return _rewrite_launcher_segment(command, lambda text: _CODEX_MODEL_ARG_RE.sub(replace, text))
 
 
-class SkillEvaluatorNvidiaBuildClaudeCode(_NvidiaBuildBridgeAgent, ClaudeCode):
+class SkillEvaluatorNvidiaBuildClaudeCode(_NvidiaBuildBridgeAgent, SetupNetworkErrorAgent, ClaudeCode):
     """Stock Claude Code CLI routed through the in-trial NVIDIA Build bridge."""
 
     def _bridge_client_environment(self) -> dict[str, str]:

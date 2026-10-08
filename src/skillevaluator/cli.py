@@ -119,8 +119,8 @@ _PROBE_MCP_ENV_HELP = (
 )
 _TRIAL_RETRIES_HELP = (
     "Let Harbor retry a trial up to N times after an environment-start timeout, an agent-setup timeout, or a "
-    "network connection error; never after an agent timeout or a verifier or reward error. The run's "
-    "run_config.json records the setting and the retries Harbor performed."
+    "network failure during agent setup in SkillEvaluator's agent wrappers; never after an agent timeout or a "
+    "verifier or reward error. The run's run_config.json records the setting and the retries Harbor performed."
 )
 
 

@@ -15,6 +15,7 @@ records around it.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import subprocess
 from datetime import UTC, datetime
@@ -35,6 +36,7 @@ from harbor.agents.installed.base import (
     NonZeroAgentExitCodeError,
     UnknownApiError,
 )
+from harbor.models.agent.context import AgentContext
 from harbor.models.job.config import RetryConfig
 from harbor.models.job.result import JobResult, JobStats
 from harbor.models.trial.result import ExceptionInfo, TrialResult
@@ -51,15 +53,25 @@ from skillevaluator.evaluation import EvaluationOptions, EvaluationService
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3 import commands as tier3_commands
-from skillevaluator.tier3.harbor import runner, runtime_preflight
+from skillevaluator.tier3.harbor import LOCAL_AGENT_IMPORT_PATHS, runner, runtime_preflight
 from skillevaluator.tier3.harbor.collector import (
+    _agent_runtime_failure_reason,
     collect_harbor_results,
     harbor_job_retries,
     validate_harbor_job_result,
 )
+from skillevaluator.tier3.harbor.local_agents import (
+    NVIDIA_BUILD_AGENT_IMPORT_PATHS,
+    NVIDIA_BUILD_LOCAL_AGENT_IMPORT_PATHS,
+    AgentSetupNetworkError,
+    SetupNetworkErrorAgent,
+    SkillEvaluatorCodex,
+    SkillEvaluatorLocalOpenCode,
+)
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
 from skillevaluator.tier3.harbor.runner import build_harbor_run_command
 from skillevaluator.tier3.harbor.runtime_preflight import validate_harbor_agent_only_job_result
+from skillevaluator.tier3.plugin_native import NATIVE_AGENT_IMPORT_PATHS
 from skillevaluator.tier3_environments import HARBOR_TRIAL_RETRY_EXCEPTIONS, MAX_TRIAL_RETRIES
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "skills" / "simple"
@@ -67,11 +79,13 @@ _NOW = datetime(2026, 10, 8, tzinfo=UTC)
 _RETRY_FLAGS = {"--max-retries", "-r", "--retry-include", "--retry-exclude"}
 
 # Harbor 0.24 exceptions for the agent's own task failures and the verifier's.
-# None of them may ever be retried.
+# None of them may ever be retried. NetworkConnectionError is one: Harbor raises
+# it from the agent's task commands as well as from its install commands.
 _TASK_PHASE_EXCEPTIONS = (
     AgentTimeoutError,
     VerifierTimeoutError,
     NonZeroAgentExitCodeError,
+    NetworkConnectionError,
     ApiError,
     ApiRateLimitError,
     UnknownApiError,
@@ -110,8 +124,9 @@ def test_trial_retries_pass_harbor_the_budget_and_only_the_infrastructure_except
     command = _command(trial_retries=2)
 
     retry_args = ["--max-retries", "2"]
-    for name in ("EnvironmentStartTimeoutError", "AgentSetupTimeoutError", "NetworkConnectionError"):
+    for name in ("EnvironmentStartTimeoutError", "AgentSetupTimeoutError", "AgentSetupNetworkError"):
         retry_args += ["--retry-include", name]
+    assert "NetworkConnectionError" not in command
     start = command.index("--max-retries")
     assert command[start : start + len(retry_args)] == retry_args
     # Nothing else changes, and Harbor's default exclusions stay in force because
@@ -129,7 +144,7 @@ def test_retry_include_names_are_the_names_harbor_records() -> None:
     raised = (
         EnvironmentStartTimeoutError("environment start timed out"),
         AgentSetupTimeoutError("agent setup timed out"),
-        NetworkConnectionError("Command failed (exit 100): apt-get update"),
+        AgentSetupNetworkError("Agent setup failed with a network error: Command failed (exit 6): curl"),
     )
 
     # Harbor's retry check compares ExceptionInfo.exception_type, which is type(exc).__name__.
@@ -150,6 +165,83 @@ def test_harbor_never_retries_a_task_or_verifier_failure_under_the_include_list(
     assert not set(HARBOR_TRIAL_RETRY_EXCEPTIONS) & RetryConfig().exclude_exceptions
     assert issubclass(NetworkConnectionError, NonZeroAgentExitCodeError)
     assert not queue._should_retry_exception(NonZeroAgentExitCodeError.__name__)
+    assert not issubclass(AgentSetupNetworkError, NonZeroAgentExitCodeError)
+
+
+class _NetworkFailingEnvironment:
+    """Agent environment whose every command, after Harbor's setup mkdir, fails with curl's DNS error."""
+
+    default_user = None
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    async def exec(self, command: str, **_kwargs: object) -> SimpleNamespace:
+        self.commands.append(command)
+        if command.startswith("[ -d /installed-agent ]"):
+            return SimpleNamespace(return_code=0, stdout="", stderr="")
+        return SimpleNamespace(return_code=6, stdout="", stderr="curl: (6) Could not resolve host: mirror.example.test")
+
+    async def upload_file(self, *_args: object, **_kwargs: object) -> None:
+        pass
+
+
+@pytest.mark.parametrize("agent_class", [SkillEvaluatorCodex, SkillEvaluatorLocalOpenCode])
+def test_a_wrapper_raises_a_setup_network_failure_under_the_retried_name(tmp_path: Path, agent_class: type) -> None:
+    agent = agent_class(logs_dir=tmp_path, model_name="openai/test-model")
+
+    with pytest.raises(AgentSetupNetworkError, match="Could not resolve host") as raised:
+        asyncio.run(agent.setup(_NetworkFailingEnvironment()))
+
+    assert type(raised.value.__cause__) is NetworkConnectionError
+    assert ExceptionInfo.from_exception(raised.value).exception_type in HARBOR_TRIAL_RETRY_EXCEPTIONS
+
+
+@pytest.mark.parametrize("agent_class", [SkillEvaluatorCodex, SkillEvaluatorLocalOpenCode])
+def test_a_wrapper_keeps_a_task_network_failure_unretried(tmp_path: Path, agent_class: type) -> None:
+    agent = agent_class(logs_dir=tmp_path, model_name="openai/test-model")
+    environment = _NetworkFailingEnvironment()
+
+    with pytest.raises(NetworkConnectionError) as raised:
+        asyncio.run(agent.run("Solve the task.", environment, AgentContext()))
+
+    assert environment.commands
+    assert type(raised.value) is NetworkConnectionError
+    assert ExceptionInfo.from_exception(raised.value).exception_type not in HARBOR_TRIAL_RETRY_EXCEPTIONS
+
+
+def _skillevaluator_agent_import_paths() -> set[str]:
+    """Every SkillEvaluator Harbor agent wrapper a Tier 3 run can launch."""
+    return {
+        *runner.HARBOR_AGENT_IMPORT_PATHS.values(),
+        *LOCAL_AGENT_IMPORT_PATHS.values(),
+        *NVIDIA_BUILD_AGENT_IMPORT_PATHS.values(),
+        *NVIDIA_BUILD_LOCAL_AGENT_IMPORT_PATHS.values(),
+        *NATIVE_AGENT_IMPORT_PATHS.values(),
+        *(base for _agent, base in NATIVE_AGENT_IMPORT_PATHS if base is not None),
+    }
+
+
+def test_every_skillevaluator_agent_wrapper_renames_a_setup_network_failure() -> None:
+    paths = _skillevaluator_agent_import_paths()
+    assert "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayOpenCode" in paths
+
+    for path in sorted(paths):
+        module_name, _, class_name = path.partition(":")
+        agent_class = getattr(importlib.import_module(module_name), class_name)
+        assert issubclass(agent_class, SetupNetworkErrorAgent), path
+        # Nothing between the wrapper and the mixin replaces the setup that renames the failure.
+        assert agent_class.setup is SetupNetworkErrorAgent.setup, path
+
+
+def test_a_setup_network_failure_left_after_the_retries_is_an_agent_runtime_failure(tmp_path: Path) -> None:
+    trial_dir = tmp_path / "case-001__Ab3dE5f"
+    trial_dir.mkdir()
+    failure = AgentSetupNetworkError("Agent setup failed with a network error: Command failed (exit 6): curl")
+    result = _trial_result(trial_dir, exception=failure)
+    (trial_dir / "result.json").write_text(result.model_dump_json(indent=4), encoding="utf-8")
+
+    assert _agent_runtime_failure_reason(trial_dir).startswith("AgentSetupNetworkError: Agent setup failed")
 
 
 def _trial_result(
@@ -280,7 +372,7 @@ def test_harbor_retries_a_setup_failure_in_the_same_directory_and_keeps_only_the
     result, attempts = _run_scripted_trial(
         monkeypatch,
         trial_dir,
-        [NetworkConnectionError("Command failed (exit 100): apt-get update && apt-get install -y nodejs npm")],
+        [AgentSetupNetworkError("Agent setup failed with a network error: Command failed (exit 6): curl")],
     )
 
     assert attempts == [1, 2]
@@ -293,7 +385,14 @@ def test_harbor_retries_a_setup_failure_in_the_same_directory_and_keeps_only_the
     assert persisted["exception_info"] is None
 
 
-@pytest.mark.parametrize("failure", [AgentTimeoutError("agent timed out"), VerifierTimeoutError("verifier timed out")])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        AgentTimeoutError("agent timed out"),
+        VerifierTimeoutError("verifier timed out"),
+        NetworkConnectionError("Command failed (exit 1): opencode run"),
+    ],
+)
 def test_harbor_keeps_a_task_phase_failure_without_retrying_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: BaseException
 ) -> None:

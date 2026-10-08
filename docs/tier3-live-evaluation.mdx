@@ -661,7 +661,7 @@ The high-signal flags, with defaults:
 | `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory |
 | `--harbor-keep-jobs` | off | Retain Harbor job directories for inspection |
 | `--timeout-multiplier` | `1.0` | Scale Harbor's agent, verifier, and environment-build timeouts; must be a finite number greater than 0 whose scaled timeouts stay finite |
-| `--trial-retries` | `0` | Let Harbor rerun a trial, up to 5 times, after an environment-start timeout, an agent-setup timeout, or a network connection error; see [Retry infrastructure failures](#retry-infrastructure-failures) |
+| `--trial-retries` | `0` | Let Harbor rerun a trial, up to 5 times, after an environment-start timeout, an agent-setup timeout, or a network failure during agent setup in SkillEvaluator's agent wrappers; see [Retry infrastructure failures](#retry-infrastructure-failures) |
 | `--copy-repo` | off | Copy the surrounding repository into the task environment |
 | `--include-skills` | none | Stage additional skill directories; requires `--skill-workspace-mode group` |
 
@@ -675,28 +675,38 @@ Re-enable the baseline arm for any run whose Skill Lift you intend to trust.
 
 ### Retry infrastructure failures
 
-A trial that fails while its environment starts or its agent installs, for
-example because an `apt-get` or `npm` mirror cannot be reached, leaves its arm
-`INCOMPLETE` even though nothing was wrong with the evaluation. With
+A trial that fails while its environment starts or its agent installs leaves
+its arm `INCOMPLETE` even though nothing was wrong with the evaluation. With
 `--trial-retries N` (0 to 5, default 0), Harbor reruns such a trial up to N
 times from a fresh environment, under the same trial name:
 
 ```bash title="Retry setup failures"
-skillevaluator tier3 evaluate ./my-skill --agents opencode --trial-retries 2
+skillevaluator tier3 evaluate ./my-skill --agents codex --trial-retries 2
 ```
 
-- Harbor retries only `EnvironmentStartTimeoutError`, `AgentSetupTimeoutError`,
-  and `NetworkConnectionError`, and never an agent timeout, a verifier or
+- Harbor retries exactly three exception names, all raised before the agent
+  receives its task: `EnvironmentStartTimeoutError` (the environment did not
+  start in time), `AgentSetupTimeoutError` (the agent did not install in time),
+  and `AgentSetupNetworkError`. It never retries an agent timeout, a verifier or
   reward error, or any other agent failure. With the default `0`, the Harbor
   command is unchanged.
-- Harbor matches exception names, not phases. It also raises
-  `NetworkConnectionError` when the agent's own task command fails with
-  network-error output: for Claude Code and Codex only from the CLI's own error
-  output, such as a lost model connection; for OpenCode and Hermes from any of
-  the command's output, tool output included. That trial also restarts from a
-  fresh environment, so its agent gets another attempt at the task. Keep the
-  default for tasks whose agent work makes network calls that are expected to
-  fail.
+- `AgentSetupNetworkError` is raised only by SkillEvaluator's own Harbor agent
+  wrappers, when an agent install command fails and Harbor classifies its output
+  as a network failure (`NetworkConnectionError`). Harbor does that only when the
+  last of its error patterns that matches is one of `Could not resolve host`,
+  `Connection refused`, `Connection timed out`, `Request timed out`,
+  `No route to host`, `SSL_connect`, `SSL_ERROR_SYSCALL`, or `curl: (N)`. Other
+  install failures, such as apt's `Temporary failure resolving` or an npm
+  `ENOTFOUND`, are not retried.
+- The wrappers run Codex in every environment, every agent in `--env local`,
+  OpenCode behind an OpenAI-compatible gateway in Docker, Claude Code and Codex
+  through NVIDIA Build, and the with-plugin arm of every agent under
+  `--plugin-load native`. A stock Harbor agent, such as Claude Code, OpenCode,
+  or Hermes on its default provider in Docker, gets only the two timeouts
+  retried.
+- `NetworkConnectionError` itself is never retried: Harbor also raises it when
+  the agent's own task command fails with network-error output, so a retry could
+  rerun an agent that already worked on its task.
 - A single-step native task that verifies in a separate environment cannot use
   retries, because Harbor gives that environment's start timeout the same name
   as the agent environment's. The run stops before any trial starts.

@@ -217,7 +217,7 @@ PLUGIN_LOAD_CHOICES: tuple[str, ...] = ("wrapper", "native", "auto")
 #: the run's wall time.
 MAX_TRIAL_RETRIES = 5
 
-#: Harbor exception names ``--trial-retries`` lets Harbor retry, each passed as
+#: Exception names ``--trial-retries`` lets Harbor retry, each passed as
 #: ``--retry-include``. Harbor 0.24 compares a trial's ``type(exc).__name__`` with
 #: these strings exactly, so a subclass or parent class never matches, and its
 #: default exclusions (agent and verifier timeouts, reward and verifier-output
@@ -225,13 +225,19 @@ MAX_TRIAL_RETRIES = 5
 #: The two timeouts are raised while the agent's environment starts or the agent
 #: installs, before it receives the task; ``EnvironmentStartTimeoutError`` also
 #: names a single-step task's separate verifier environment failing to start,
-#: which is why the runner refuses retries for such a task. ``NetworkConnectionError`` is Harbor's name for a failed agent command
-#: whose output shows a DNS, refused-connection, TLS, or curl failure, such as an
-#: apt or npm install that cannot reach its mirror. Harbor gives the same name to
-#: a failed task command: for Claude Code and Codex only from the CLI's own error
-#: output, such as a lost model connection; for other agents from any output.
+#: which is why the runner refuses retries for such a task.
+#: ``AgentSetupNetworkError`` is SkillEvaluator's own name, raised only by its
+#: Harbor agent wrappers, for a ``NetworkConnectionError`` from the agent's
+#: setup. Harbor raises that for a failed command whose output's last error
+#: pattern match is one of its network patterns ("Could not resolve host",
+#: "Connection refused", "Connection timed out", "Request timed out", "No route
+#: to host", "SSL_connect", "SSL_ERROR_SYSCALL", or "curl: (N)"); other install
+#: failures, such as apt's "Temporary failure resolving", are not retried.
+#: Harbor raises ``NetworkConnectionError`` from the agent's task commands too,
+#: so that name is never retried, and a stock Harbor agent gets only the two
+#: timeouts retried.
 HARBOR_TRIAL_RETRY_EXCEPTIONS: tuple[str, ...] = (
     "EnvironmentStartTimeoutError",
     "AgentSetupTimeoutError",
-    "NetworkConnectionError",
+    "AgentSetupNetworkError",
 )

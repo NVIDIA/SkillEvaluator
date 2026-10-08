@@ -924,6 +924,51 @@ def test_a_partial_plugin_run_recorded_only_under_the_summary_is_incomplete() ->
     assert tier3_plugin_view(result.metadata["agent_eval"])["partial"] is True
 
 
+def _gated_partial_plugin_run(*, verdict: str) -> ValidationResult:
+    """A partial plugin run under --block-on-agent-eval, stamped the way ``validate`` stamps it."""
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Tier 3")
+    result.metadata["agent_eval"] = {"verdict": verdict, "summary": {"plugin_provenance": provenance(partial=True)}}
+    result.metadata.update(execution_status="skipped", gating={"tier": 3, "blocking": True})
+    result.passed = False
+    if verdict == "fail":
+        result.metadata["tier3_gate_failures"] = ["Tier 3 verdict FAIL"]
+        result.add_error("Tier 3 verdict FAIL: the plugin arm scored below the gate")
+    return result
+
+
+def test_a_partial_plugin_run_that_failed_its_gate_makes_the_plugin_failed() -> None:
+    from skillevaluator.reporting.base import ReporterBase
+
+    failed = _gated_partial_plugin_run(verdict="fail")
+    missing_only = _gated_partial_plugin_run(verdict="pass")
+
+    assert ReporterBase._plugin_status([tier1_plugin_result(), failed]) == "failed"
+    # Missing evidence alone still makes the plugin INCOMPLETE, not failed.
+    assert ReporterBase._plugin_status([tier1_plugin_result(), missing_only]) == "incomplete"
+
+
+def test_a_scan_that_did_not_complete_and_found_a_blocking_issue_makes_the_plugin_failed() -> None:
+    from skillevaluator.models import Finding, Severity
+    from skillevaluator.reporting.base import ReporterBase
+
+    failed = ValidationResult(validator_name="Security Scan", validator_description="SkillSpector")
+    failed.add_finding(
+        Finding(
+            category="SECURITY",
+            severity=Severity.HIGH,
+            check_name="tool_misuse",
+            message="Tool Misuse: curl | sh",
+            file_path="commands/help.md",
+        )
+    )
+    failed.mark_scan_incomplete("skillspector")
+    missing_only = ValidationResult(validator_name="Security Scan", validator_description="SkillSpector")
+    missing_only.mark_scan_incomplete("skillspector")
+
+    assert ReporterBase._plugin_status([tier1_plugin_result(), failed]) == "failed"
+    assert ReporterBase._plugin_status([tier1_plugin_result(), missing_only]) == "incomplete"
+
+
 def test_similarity_views_carry_their_title_columns_and_summary() -> None:
     from skillevaluator.reporting.plugin_sections import similarity_view
 

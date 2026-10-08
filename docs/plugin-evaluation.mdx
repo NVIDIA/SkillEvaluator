@@ -2093,7 +2093,10 @@ copy of the file keeps its frontmatter with each command handler wrapped the
 same way (source `<file>#hooks`, for example
 `skills/notes/SKILL.md#hooks#PreToolUse[0].hooks[0]`). The generated wrapper
 stages member skills as written, so in wrapper mode a skill's frontmatter hooks
-run without the census; their coverage row says so. A permission-bypass flag in
+run without the census; their coverage row says so. Only Claude Code runs a
+skill's frontmatter hooks (the other harnesses' skill loaders ignore them), so
+in a run with no `claude-code` arm their row is `unsupported`, and in a mixed
+run the reason names the arms that ignore them. A permission-bypass flag in
 a member skill's frontmatter hooks blocks staging in every load mode.
 
 #### Load census and the `loaded` state

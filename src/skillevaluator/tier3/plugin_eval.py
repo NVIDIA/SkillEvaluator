@@ -1057,24 +1057,35 @@ def _refuse_member_skill_hooks(member_skills: tuple[Path, ...]) -> None:
         raise PluginLoadError(refusal)
 
 
-def _other_type_row(component: Component, staging: _ArmStaging | None) -> dict[str, Any]:
+def _other_type_row(component: Component, staging: _ArmStaging | None, agents: Sequence[str] = ()) -> dict[str, Any]:
     """Coverage row of a hook, subagent, command, or other type the generated wrapper does not stage.
 
     The reason follows the resolved plan: ``staged natively for <agents>`` when
     a native arm stages the type, why each other arm does not (the wrapper, or
     that agent's native adapter), and the wrapper note when no arm is native.
+    A skill's frontmatter hooks follow the run's *agents* instead: only Claude
+    Code runs them, so they are ``unsupported`` when no arm is claude-code.
     """
     from skillevaluator.plugin_components import is_skill_frontmatter_hook
 
     kind = component.type
     if is_skill_frontmatter_hook(component):
+        others = [agent for agent in agents if agent != "claude-code"]
+        ignored = f"{', '.join(others)} {'ignores' if len(others) == 1 else 'ignore'} them"
+        if others and len(others) == len(agents):
+            return coverage_row(
+                component,
+                "unsupported",
+                f"only Claude Code runs skill-frontmatter hooks, and no with-plugin arm is claude-code ({ignored})",
+            )
         native = staging.native_for(kind) if staging is not None else []
         wrapped = (
             f"census-wrapped in the native {', '.join(native)} arm"
-            + ("; staged without the hook census in the other arms" if staging is not None and staging.wrapper else "")
             if native
             else "staged without the hook census, so its runs are not counted"
         )
+        if others:
+            wrapped += f"; {ignored}"
         return coverage_row(
             component,
             "staged",
@@ -1185,7 +1196,7 @@ def _inventory_provenance(
         elif component.type == "mcp":
             rows.append(_mcp_coverage_row(component, contained, mcp))
         else:
-            rows.append(_other_type_row(component, arm_staging))
+            rows.append(_other_type_row(component, arm_staging, cost_agents))
     return {
         "component_coverage": summarize_coverage(rows),
         "context_cost": inventory.context_cost(

@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 from skillevaluator.inference.types import EmptyLLMResponseError
 from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, _model_leaf, _supports_custom_temperature
 from skillevaluator.tier3.eval_core.atif_helpers import (
+    _BEHAVIOR_SECTION_CHARS,
+    _MIN_BEHAVIOR_HISTORY_HEADROOM,
     _SECTION_COMPACT_TOOL_HISTORY,
     _SECTION_FINAL_RESPONSE,
     _SECTION_USER_REQUEST,
@@ -27,6 +29,7 @@ from skillevaluator.tier3.eval_core.atif_helpers import (
     _behavior_final_response_limit,
     _truncate_for_behavior,
 )
+from skillevaluator.tier3.eval_core.secret_redaction import _configured_secret_values
 
 logger = logging.getLogger(__name__)
 
@@ -37,20 +40,6 @@ DEFAULT_JUDGE_MODEL = CHAT_DEFAULT_OPENAI
 _ERROR_REDACTION_MARKER = "[REDACTED]"
 _JUDGE_ERROR_REASON_LIMIT = 512
 _JUDGE_TEXT_LIMIT = 512
-# Match verifier log redaction; shorter placeholders can corrupt ordinary diagnostic text.
-_MIN_EXACT_SECRET_LENGTH = 8
-_CREDENTIAL_ENV_VARS = (
-    "OPENAI_API_KEY",
-    "NVIDIA_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "SKILL_EVAL_LLM_API_KEY",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SECURITY_TOKEN",
-    "AWS_SESSION_TOKEN",
-    "AWS_BEARER_TOKEN_BEDROCK",
-    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
-)
 
 
 # ---------------------------------------------------------------------------
@@ -125,19 +114,6 @@ def _is_native_openai_chat_url(provider: str, request_url: str) -> bool:
     )
 
 
-def _configured_secret_values(extra_secret_values: tuple[str | None, ...] = ()) -> list[str]:
-    values = {
-        value
-        for name in _CREDENTIAL_ENV_VARS
-        if (value := os.environ.get(name, "")) and len(value) >= _MIN_EXACT_SECRET_LENGTH
-    }
-    for value in extra_secret_values:
-        text = str(value) if value else ""
-        if len(text) >= _MIN_EXACT_SECRET_LENGTH:
-            values.add(text)
-    return sorted(values, key=len, reverse=True)
-
-
 def _redact_configured_credentials(text: str, extra_secret_values: tuple[str | None, ...] = ()) -> str:
     redacted = str(text)
     for secret in _configured_secret_values(extra_secret_values):
@@ -151,6 +127,30 @@ def _judge_error(error_reason: str, **metadata: Any) -> dict[str, Any]:
     if len(safe_reason) > _JUDGE_ERROR_REASON_LIMIT:
         safe_reason = safe_reason[: _JUDGE_ERROR_REASON_LIMIT - 3] + "..."
     return {**metadata, "score": None, "status": "error", "reason": safe_reason}
+
+
+NOT_APPLICABLE_STATUS = "not_applicable"
+_NO_GROUND_TRUTH_REASON = "N/A: no ground_truth defined for this eval case"
+_NO_EXPECTED_BEHAVIOR_REASON = "N/A: no expected_behavior defined for this eval case"
+
+
+def _judge_not_applicable(reason: str, **metadata: Any) -> dict[str, Any]:
+    """Return a scoreless result for a judge that has nothing to judge against."""
+    return {**metadata, "score": None, "status": NOT_APPLICABLE_STATUS, "reason": reason}
+
+
+def _has_judge_reference(value: Any) -> bool:
+    """Return whether a ground_truth / expected_behavior value gives a judge something to check."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple)):
+        return any(_has_judge_reference(item) for item in value)
+    if isinstance(value, (bool, int, float)):
+        # 0, 0.0 and False are real reference answers, not a missing one.
+        return True
+    return bool(value)
 
 
 def _bounded_judge_text(value: Any) -> str:
@@ -515,7 +515,8 @@ def _salvage_behavior_results(text: str) -> list[dict[str, Any]]:
 
     Reasoning judges that hit the output-token cap emit ``{"results": [...`` and
     stop mid-entry (``finish_reason="length"``); every fully-formed ``{...}``
-    entry before the cut is still valid JSON and can be scored.
+    entry before the cut is still valid JSON. The verdict is scored only when
+    those entries cover every expected behavior.
     """
     text = text or ""
     if len(text) > _MAX_JSON_TEXT_CHARS or not _json_nesting_within_limit(text):
@@ -783,9 +784,13 @@ def judge_accuracy(
     agent_text: str,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Run the 5-criterion accuracy judge. Returns ``{"score": float, "reason": str, ...}``."""
-    if not ground_truth:
-        return {"score": 1.0, "reason": "No ground_truth -- skipped"}
+    """Run the 5-criterion accuracy judge. Returns ``{"score": float, "reason": str, ...}``.
+
+    Without a ground_truth there is nothing to judge against: the result is
+    ``{"score": None, "status": "not_applicable", ...}``, never a fabricated score.
+    """
+    if not _has_judge_reference(ground_truth):
+        return _judge_not_applicable(_NO_GROUND_TRUTH_REASON)
 
     prompt = ACCURACY_PROMPT.format(
         question=question,
@@ -873,9 +878,12 @@ def judge_goal_accuracy(
     tool_summary: str = "",
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Run the goal accuracy judge (two-step: infer goal, compare outcome)."""
-    if not ground_truth:
-        return {"score": 1.0, "reason": "No ground_truth -- skipped"}
+    """Run the goal accuracy judge (two-step: infer goal, compare outcome).
+
+    Without a ground_truth the result is ``not_applicable`` with a null score.
+    """
+    if not _has_judge_reference(ground_truth):
+        return _judge_not_applicable(_NO_GROUND_TRUTH_REASON)
 
     prompt = GOAL_ACCURACY_PROMPT.format(
         question=question,
@@ -986,7 +994,7 @@ def _compact_behavior_conversation(conversation_text: str, limit: int | None = N
         final_sec = conversation_text[final_idx:final_end]
         suffix = conversation_text[final_end:]
 
-        reserved_other = min(1600, max(0, limit - final_limit), limit // 2)
+        reserved_other = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, max(0, limit - final_limit), limit // 2)
         max_final = min(final_limit, max(1, limit - reserved_other))
         if len(final_sec) > max_final:
             final_body = final_sec[len(final_header) :]
@@ -1002,16 +1010,20 @@ def _compact_behavior_conversation(conversation_text: str, limit: int | None = N
             pre_comp = _slice_with_middle_marker(prefix, rem, marker)
             return f"{pre_comp}{final_sec}"[:limit]
         if len(prefix) <= rem // 2:
-            suf_comp = _slice_with_middle_marker(suffix, rem - len(prefix), marker, max_head=800, fallback_tail=True)
+            suf_comp = _slice_with_middle_marker(
+                suffix, rem - len(prefix), marker, max_head=_BEHAVIOR_SECTION_CHARS, fallback_tail=True
+            )
             return f"{prefix}{final_sec}{suf_comp}"[:limit]
         pre_budget = max(1, min(len(prefix), rem // 2))
         suf_budget = max(0, rem - pre_budget)
         pre_comp = _slice_with_middle_marker(prefix, pre_budget, marker)
-        suf_comp = _slice_with_middle_marker(suffix, suf_budget, marker, max_head=800, fallback_tail=True)
+        suf_comp = _slice_with_middle_marker(
+            suffix, suf_budget, marker, max_head=_BEHAVIOR_SECTION_CHARS, fallback_tail=True
+        )
         return f"{pre_comp}{final_sec}{suf_comp}"[:limit]
 
     available = limit - len(marker)
-    reserved_head = min(1600, available // 2)
+    reserved_head = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, available // 2)
     tail = max(1, available // 3, min(final_limit, max(1, available - max(1, reserved_head))))
     head = max(1, available - tail)
     return f"{conversation_text[:head]}{marker}{conversation_text[-tail:]}"
@@ -1035,9 +1047,12 @@ def judge_behavior_check(
     expected_behaviors: list[str],
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Run the behavior check LLM judge."""
-    if not expected_behaviors:
-        return {"score": 1.0, "reason": "No expected_behavior defined", "results": []}
+    """Run the behavior check LLM judge.
+
+    Without expected_behavior the result is ``not_applicable`` with a null score.
+    """
+    if not _has_judge_reference(expected_behaviors):
+        return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
 
     behaviors_text = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(expected_behaviors))
 
@@ -1070,7 +1085,8 @@ def judge_behavior_check(
             score = _behavior_payload_score(parsed, len(expected_behaviors))
 
     if score is None:
-        # Salvage complete entries from a truncated results array (newest first).
+        # Salvage a truncated results array (newest first) only when every
+        # behavior was judged before the cut.
         for text, extracted in reversed(attempts):
             if extracted is not None:
                 continue
@@ -1086,7 +1102,7 @@ def judge_behavior_check(
                 candidate_score = _behavior_payload_score(
                     candidate,
                     len(expected_behaviors),
-                    allow_partial=True,
+                    salvaged=True,
                 )
                 if candidate_score is not None:
                     parsed = candidate
@@ -1112,23 +1128,36 @@ def _behavior_payload_score(
     parsed: dict[str, Any] | list[Any] | None,
     expected_count: int,
     *,
-    allow_partial: bool = False,
+    salvaged: bool = False,
 ) -> float | None:
+    """Score a behavior verdict only when it is a complete, well-typed JSON object.
+
+    Every entry needs a boolean ``passed`` and the verdict judges exactly
+    ``expected_count`` behaviors. A verdict ``salvaged`` from a truncated reply
+    must also number its entries with the distinct steps ``1..expected_count``:
+    a behavior the cut left unjudged is a judge failure, never a failed
+    behavior. An optional ``score`` must be finite; the score is always
+    recomputed from the per-behavior results.
+    """
     if not isinstance(parsed, dict):
         return None
     results = parsed.get("results")
-    if not isinstance(results, list):
+    if not isinstance(results, list) or len(results) != expected_count:
         return None
     if any(not isinstance(result, dict) or not isinstance(result.get("passed"), bool) for result in results):
         return None
-    if allow_partial:
-        if not results or len(results) > expected_count:
-            return None
-    elif len(results) != expected_count:
+    if salvaged and not _covers_every_step(results, expected_count):
         return None
     if "score" in parsed and _finite_score(parsed["score"]) is None:
         return None
-    denominator = expected_count if allow_partial else len(results)
-    if denominator <= 0:
+    if expected_count <= 0:
         return None
-    return sum(1 for result in results if result["passed"]) / denominator
+    return sum(1 for result in results if result["passed"]) / expected_count
+
+
+def _covers_every_step(results: list[dict[str, Any]], expected_count: int) -> bool:
+    """Return whether *results* carry each step ``1..expected_count`` exactly once."""
+    steps = [result.get("step") for result in results]
+    if any(isinstance(step, bool) or not isinstance(step, int) for step in steps):
+        return False
+    return sorted(steps) == list(range(1, expected_count + 1))

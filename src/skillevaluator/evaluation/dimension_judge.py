@@ -333,19 +333,25 @@ def compute_dimensions_deterministic(evaluators: dict) -> list[dict]:
     return dimensions
 
 
+BASELINE_NOT_APPLICABLE_BULLET = "Not applicable without the skill or plugin, so there is no lift."
+
+
 def _human_reasoning_bullets(
     *,
     with_skill: float,
     baseline: float | None,
     lift: float | None,
     parts: list[str],
+    baseline_not_applicable: bool = False,
 ) -> list[str]:
     """Render 2-3 short, data-focused reasoning bullets for one dimension.
 
     Bullet 1 -- score + verdict relative to the configured PASS / NEUTRAL /
     FAIL thresholds.
     Bullet 2 -- lift versus baseline, or an explicit "no baseline" note when
-    baseline is absent.
+    baseline is absent. With ``baseline_not_applicable`` the baseline ran but
+    cannot score this dimension (no skill to discover or route to), so it says
+    that instead.
     Bullet 3 -- (optional) the strongest contributing signal among the
     weighted evaluators.
     """
@@ -372,6 +378,8 @@ def _human_reasoning_bullets(
             bullet_lift = f"{lift:+.2f} regression versus baseline {baseline:.2f}."
         else:
             bullet_lift = f"Roughly flat versus baseline {baseline:.2f} (lift {lift:+.2f})."
+    elif baseline_not_applicable:
+        bullet_lift = BASELINE_NOT_APPLICABLE_BULLET
     else:
         bullet_lift = "No baseline run available; lift cannot be computed."
 

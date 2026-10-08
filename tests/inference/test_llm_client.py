@@ -709,3 +709,26 @@ class TestExtractJsonFromResponse:
             client = LLMClient()
             with pytest.raises(LLMClientError, match="invalid JSON"):
                 client.extract_json_from_response("system", "user")
+
+
+@pytest.mark.parametrize("value", [True, float("nan"), float("inf"), -0.1, 1.5, 10**400, "0.5", None])
+def test_scores_and_confidences_must_be_finite_numbers_within_the_unit_interval(value: object) -> None:
+    from skillevaluator.inference import parse_bounded_llm_verdict, validate_tier2_llm_similarity_score
+
+    with pytest.raises(LLMClientError, match="Check similarity score must be a finite number within"):
+        validate_tier2_llm_similarity_score(value, context="Check")
+    with pytest.raises(LLMClientError, match="Check confidence must be a finite number within"):
+        parse_bounded_llm_verdict(
+            {"verdict": "duplicate", "confidence": value}, valid_verdicts={"duplicate"}, context="Check"
+        )
+
+
+@pytest.mark.parametrize("value", [0, 1, 0.5])
+def test_unit_interval_scores_and_confidences_are_accepted_as_floats(value: float) -> None:
+    from skillevaluator.inference import parse_bounded_llm_verdict, validate_tier2_llm_similarity_score
+
+    assert validate_tier2_llm_similarity_score(value, context="Check") == float(value)
+    verdict = parse_bounded_llm_verdict(
+        {"verdict": "duplicate", "confidence": value}, valid_verdicts={"duplicate"}, context="Check"
+    )
+    assert verdict.confidence == float(value)

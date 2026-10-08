@@ -1105,6 +1105,8 @@ def test_harbor_eval_template_unrelated_400_does_not_disable_schema(
     res1 = eval_template.judge_accuracy("q1", "gt1", "ans1")
     assert res1["status"] == "error"
     assert res1["score"] is None
+    # The schema check read the body; the judge error must still carry it.
+    assert error_message in res1["reason"]
     assert len(http_requests) == 1
     assert "response_format" in http_requests[0]
     assert len(eval_template._SCHEMA_UNSUPPORTED_TARGETS) == 0
@@ -1114,6 +1116,28 @@ def test_harbor_eval_template_unrelated_400_does_not_disable_schema(
     assert len(http_requests) == 2
     assert "response_format" in http_requests[1]
     assert len(eval_template._SCHEMA_UNSUPPORTED_TARGETS) == 0
+
+
+@pytest.mark.parametrize("code", [400, 422])
+@pytest.mark.parametrize("side", ["host", "verifier"])
+def test_schema_check_leaves_the_http_error_body_readable(side: str, code: int) -> None:
+    """Verify the structured-output check does not drain a 400/422 body that later readers need."""
+    from skillevaluator.inference import client as client_mod
+
+    if side == "host":
+        is_schema_unsupported = client_mod._is_schema_unsupported_error
+    else:
+        is_schema_unsupported = load_harbor_eval_template(
+            "harbor_template_schema_body"
+        )._is_schema_unsupported_http_error
+    body = json.dumps({"error": {"message": "invalid model: primary-model"}}).encode()
+    error = urllib.error.HTTPError(
+        "https://provider.invalid/v1/chat/completions", code, "Bad Request", email.message.Message(), io.BytesIO(body)
+    )
+
+    assert is_schema_unsupported(error) is False
+    assert error.read() == body
+    error.close()
 
 
 @pytest.mark.parametrize(

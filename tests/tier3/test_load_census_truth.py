@@ -210,9 +210,10 @@ def test_claude_failed_mcp_server_is_not_loaded_even_though_its_files_are_staged
     failed = rows[("mcp", "fail-mcp")]
     assert failed["state"] != "loaded"
     assert "status failed" in failed["reason"]
-    # The harness never reports hooks or output styles at startup: listed, not loaded.
+    # The harness never reports hooks, output styles, or LSP servers at startup: listed, not loaded.
     assert rows[("hook", "hooks/hooks.json")]["state"] == "staged"
     assert rows[("output_style", "terse")]["state"] == "staged"
+    assert rows[("lsp", "go")]["state"] == "staged"
     assert ("mcp", "fail-mcp") in {(row["type"], row["name"]) for row in summary["not_loaded"]}
 
 
@@ -235,6 +236,37 @@ def test_claude_init_without_the_plugin_marks_its_components_not_loaded_and_the_
     assert "did not load plugin release-helper" in reasons["ok-mcp"]
     assert provenance["partial"] is True
     assert "did not load the plugin" in provenance["native_load_unverified"]["claude-code"]
+
+
+def test_claude_init_without_the_plugin_marks_its_plugin_dir_configs_not_loaded(tmp_path: Path) -> None:
+    # LSP servers, settings, and bin/ are staged inside the plugin directory, so
+    # Claude Code cannot have applied them when it did not load the plugin.
+    plugin = _plugin(tmp_path)
+    _write(plugin / "settings.json", json.dumps({"agent": "helper"}))
+    _write(plugin / "bin" / "tool", "#!/bin/sh\nexit 0\n")
+    package = prepare_plugin_eval_package(
+        plugin, stage_root=tmp_path / "stage", plugin_load="native", agents=["claude-code"], env_mode="docker"
+    )
+    bundle, staging = _stage(tmp_path, "claude-code", package.native_source)
+    root = tmp_path / "container"
+    census = _run_setup(bundle, root, {"HOME": str(root / "home"), "CLAUDE_CONFIG_DIR": str(root / "cfg")})
+    job = tmp_path / "job"
+    _trial(job, "case-1__a", census, init=_init(plugin="someone-else"))
+
+    summary = _attach_load_census(
+        _scored(job), job, _plan("claude-code", staging, package.native_source), agent="claude-code"
+    )
+    rows = _rows(_provenance(package, "claude-code", summary))
+
+    reasons = {(row["type"], row["name"]): row["reason"] for row in summary["not_loaded"]}
+    for key in (("lsp", "go"), ("settings", "settings.json"), ("bin", "bin")):
+        assert "did not load plugin release-helper" in reasons[key], key
+    assert not {("lsp", "go"), ("settings", "settings.json"), ("bin", "bin")} & _found(summary)
+    # Rules are user rules outside the plugin, so they keep their listing.
+    assert ("rule", "style.md") in _found(summary)
+    for key in (("lsp", "go"), ("settings", "settings.json")):
+        assert rows[key]["state"] == "not_loaded", key
+        assert "did not load plugin release-helper" in rows[key]["reason"]
 
 
 def test_listing_alone_never_promotes_a_row_to_loaded(tmp_path: Path, package) -> None:

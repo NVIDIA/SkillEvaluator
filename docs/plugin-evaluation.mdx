@@ -2131,7 +2131,8 @@ collector reads the first `{"type": "system", "subtype": "init"}` event that
 Claude Code writes to `agent/claude-code.txt` at startup:
 
 - the plugin must be in `plugins[]`; if it is not, every plugin component is
-  `not_loaded`;
+  `not_loaded`, including the LSP servers, settings, and `bin/` staged in the
+  plugin directory;
 - a skill, subagent, or command must appear as `<plugin>:<name>` in `skills`,
   `agents`, or `slash_commands` (Claude Code names a skill by its directory
   and a file command by its file name);

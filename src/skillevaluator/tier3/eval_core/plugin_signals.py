@@ -138,6 +138,7 @@ from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     normalize_tool_call,
 )
 from skillevaluator.tier3.harbor.stats import ARM_SUM_OF_PARTS, ARM_WITH, ARM_WITHOUT
+from skillevaluator.tier3.plugin_native import OPENCODE_BUILTIN_AGENTS
 from skillevaluator.utils.redaction import redact_sensitive_text
 
 COMPONENT_SKILL = "skill"
@@ -392,6 +393,15 @@ _MISSING_TOOL_MARKERS = (
 _ROUTING_KINDS = frozenset({COMPONENT_SKILL, COMPONENT_SUBAGENT, COMPONENT_COMMAND})
 # Harnesses that cannot stage plugin subagents or commands, so refs to those can never match there.
 _NO_PLUGIN_AGENT_HARNESSES = frozenset({"codex"})
+# Each harness's own agents (casefolded). A bare one of these names reaches the built-in, never
+# the plugin's agent: Claude Code names a plugin agent ``<plugin>:<name>``, and OpenCode stages a
+# plugin agent named like its own as ``<plugin>-<name>``.
+_BUILTIN_AGENTS = {
+    "claude-code": frozenset(
+        {"claude", "explore", "general-purpose", "output-style-setup", "plan", "statusline-setup"}
+    ),
+    "opencode": OPENCODE_BUILTIN_AGENTS,
+}
 
 _REF_PREFIXES = {
     "skill": COMPONENT_SKILL,
@@ -1329,6 +1339,9 @@ class _Ident:
     ``position`` orders the reads of one chained shell command; ``failed``
     marks a read whose own error line says it failed. ``wrapper`` marks the
     generated wrapper skill, which is the harness's way in, not a component.
+    ``builtin`` marks a harness's own agent called by the bare name of a
+    declared plugin agent (Claude Code ``Explore`` for a plugin's ``explore``):
+    it is neither that component nor what a ref to it names.
     """
 
     label: str
@@ -1346,6 +1359,7 @@ class _Ident:
     failed: bool = False
     wrapper: bool = False
     aliases: tuple[str, ...] = ()
+    builtin: bool = False
 
     @property
     def persisted_name(self) -> str:
@@ -2553,6 +2567,14 @@ def _mcp_ident(fn: str, mcp_names: _McpNames, *, agent: str) -> _Ident | None:
     )
 
 
+def _builtin_agent(name: str, agent: str, declared: Mapping[str, Sequence[str]]) -> bool:
+    """Whether a bare subagent name reaches ``agent``'s own built-in agent, though a declared plugin agent has it."""
+    folded = name.casefold()
+    if ":" in folded or folded not in _BUILTIN_AGENTS.get(agent.casefold(), ()):
+        return False
+    return any(isinstance(item, str) and item.casefold() == folded for item in declared.get(COMPONENT_SUBAGENT) or ())
+
+
 def _identities(
     fn: str,
     fn_base: str,
@@ -2563,8 +2585,12 @@ def _identities(
     subagent_aliases: Mapping[str, str] | None = None,
     wrapper_skills: Sequence[str] = (),
     manifest: Sequence[tuple[_ManifestRead, bool]] | None = None,
+    agent: str = "",
 ) -> list[_Ident]:
-    """The identities of one call. ``manifest`` is the call's resolved ``SKILL.md`` reads, if known."""
+    """The identities of one call. ``manifest`` is the call's resolved ``SKILL.md`` reads, if known.
+
+    ``agent`` names the harness, whose own agents a bare subagent name may reach.
+    """
     low = fn.casefold()
     idents: list[_Ident] = []
     named = {"declared": declared, "wrapper_skills": wrapper_skills}
@@ -2580,8 +2606,13 @@ def _identities(
     elif low in _SUBAGENT_TOOLS:
         name = _first_string(args, ("subagent_type", "subagent", "agent", "agent_name", "agent_type"))
         # A harness that renamed a plugin agent when staging it calls it by the staged name.
-        name = (subagent_aliases or {}).get(name.casefold(), name)
-        idents.append(_component_ident(COMPONENT_SUBAGENT, name, fn, fn, persist=_persistable_name(name, ()), **named))
+        alias = (subagent_aliases or {}).get(name.casefold())
+        persist = _persistable_name(name, ())
+        if alias is None and _builtin_agent(name, agent, declared):
+            idents.append(_component_ident(COMPONENT_SUBAGENT, name, fn, fn, persist=persist, builtin=True))
+        else:
+            name = alias or name
+            idents.append(_component_ident(COMPONENT_SUBAGENT, name, fn, fn, persist=persist, **named))
     elif low in _COMMAND_TOOLS:
         words = _first_string(args, ("command", "name")).split()
         name = words[0].lstrip("/") if words else ""
@@ -2674,7 +2705,7 @@ def _identify_call(
     mcp = _mcp_ident(fn, mcp_names, agent=agent)
     fn_base = _base_tool_name(mcp.tool if mcp is not None and mcp.tool else fn)
     manifest = _manifest_reads(fn_base, args, declared.get(COMPONENT_SKILL) or (), is_mcp=mcp is not None)
-    named = {"subagent_aliases": subagent_aliases, "wrapper_skills": wrapper_skills}
+    named = {"subagent_aliases": subagent_aliases, "wrapper_skills": wrapper_skills, "agent": agent}
     unresolved = [(read, False) for read in manifest.reads]
     call = _Call(
         seq=seq,
@@ -3023,9 +3054,10 @@ def _ref_matches(ref: _Ref, ident: _Ident) -> bool:
     no ref matches it (not even a ``Skill:<plugin>*`` glob). An untyped ref
     matches a component by its label or name, never through the tool that
     carried it: the underlying tool (``Read``, ``Bash``...) is a separate
-    plain identity of the same call.
+    plain identity of the same call. A harness's own agent called by a
+    declared agent's bare name is not that agent, so no ref matches it either.
     """
-    if ident.wrapper:
+    if ident.wrapper or ident.builtin:
         return False
     if ref.kind is None:
         names = ident.untyped_names
@@ -4181,7 +4213,7 @@ def _ident_components(
     ident: _Ident, mcp_names: _McpNames, by_folded_name: Mapping[tuple[str, str], Sequence[str]]
 ) -> set[tuple[str, str]]:
     """The declared ``(type, name)`` components that ``ident`` activates (the wrapper skill activates none)."""
-    if ident.wrapper:
+    if ident.wrapper or ident.builtin:
         return set()
     if ident.kind == COMPONENT_MCP:
         # ``_McpNames.identity`` already maps a recognizable server to its declared name.

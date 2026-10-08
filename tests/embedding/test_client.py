@@ -314,6 +314,16 @@ class TestEmbedChunked:
 
         assert result == pytest.approx([0.5, 0.5])
 
+    def test_many_tiny_heading_chunks_fail_before_provider_call(self) -> None:
+        client = EmbeddingClient(api_key="unused")
+        client.embed = MagicMock(side_effect=AssertionError("provider must not be called"))
+        text = "\n".join(f"## Heading {index}\nx" for index in range(513))
+
+        with pytest.raises(SimilarityConfigError, match=r"chunk.*limit|too many"):
+            client.embed_chunked(text)
+
+        client.embed.assert_not_called()
+
     @pytest.mark.parametrize("overlap", [10, 11])
     def test_embed_chunked_rejects_non_progressing_windows_before_provider_call(
         self,
@@ -389,6 +399,7 @@ class TestSplitIntoChunks:
         ("chunk_size", "overlap", "message"),
         [
             (0, 0, "chunk size must be greater than zero"),
+            (-1, 0, "chunk size must be greater than zero"),
             (10, -1, "chunk overlap must not be negative"),
             (10, 10, "overlap must be smaller than the chunk size"),
             (10, 11, "overlap must be smaller than the chunk size"),
@@ -415,3 +426,10 @@ class TestAveragePool:
 
     def test_empty_returns_empty(self) -> None:
         assert _average_pool([]) == []
+
+    def test_large_stable_components_do_not_overflow_during_pooling(self) -> None:
+        vectors = [[8e153, 8e153] for _ in range(100)]
+
+        result = _average_pool(vectors)
+
+        assert result == pytest.approx([8e153, 8e153])

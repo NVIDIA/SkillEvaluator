@@ -75,6 +75,51 @@ def test_validate_panel_keeps_older_payloads_without_a_lift_basis() -> None:
     assert "with-skill 0.70" in text and "baseline 0.50" in text
 
 
+def _partial_plugin_run(payload: dict[str, Any]) -> Any:
+    """A Tier 3 result stamped INCOMPLETE the way ``validate`` stamps a partial plugin run."""
+    from skillevaluator.models import ValidationResult
+
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Run live agent evaluation")
+    result.metadata["agent_eval"] = payload
+    result.passed = False
+    result.metadata["execution_status"] = "skipped"
+    result.metadata["skip_reason"] = "INCOMPLETE: Tier 3 plugin evaluation did not complete"
+    return result
+
+
+def test_validate_panel_shows_a_partial_plugin_run_that_scored_trials_as_run() -> None:
+    # H-13: the INCOMPLETE stamp made the panel say "skipped" for a run that scored 22 of 24 attempts.
+    from skillevaluator.reporting.console_ui import summarize_tier3
+
+    summary = {"agents_run": ["codex"], "expected_attempts": 24, "scored_attempts": 22, "execution_status": "failed"}
+    result = _partial_plugin_run(
+        {"execution_status": "failed", "execution_errors": ["codex: 2 trials timed out"], "summary": summary}
+    )
+
+    ran, ok, rows, reason = summarize_tier3(result)
+
+    assert ran
+    assert not ok
+    assert reason == ""
+    assert _row_text(rows[0]) == "codex"
+    incomplete = next(row for row in rows if row.label == "incomplete")
+    assert _row_text(incomplete) == "INCOMPLETE: Tier 3 plugin evaluation did not complete"
+
+
+def test_validate_panel_still_skips_a_plugin_run_that_evaluated_nothing() -> None:
+    from skillevaluator.evaluation.tier3_report import advisory_skip_result
+    from skillevaluator.reporting.console_ui import summarize_tier3
+
+    skipped = advisory_skip_result("Tier 3 plugin evaluation is INCOMPLETE: nothing was evaluated.", skill_name="demo")
+    result = _partial_plugin_run(skipped.metadata["agent_eval"])
+
+    ran, _ok, rows, reason = summarize_tier3(result)
+
+    assert not ran
+    assert rows == []
+    assert reason == "INCOMPLETE: Tier 3 plugin evaluation did not complete"
+
+
 def test_dimension_reasoning_says_not_applicable_when_the_baseline_ran(tmp_path: Path) -> None:
     # Proof check-13 cc-evalplugin-B: "Efficiency is lowest at 0.70 ... No baseline run available;
     # lift cannot be computed." The baseline did run; Efficiency just does not apply to it.

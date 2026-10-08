@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from skillevaluator.models.result import Severity
 from skillevaluator.plugin_components import attribute_findings, plugin_inventory_for_root
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
@@ -136,3 +138,68 @@ def test_lsp_command_findings_speak_about_lsp_servers(tmp_path: Path) -> None:
     # A command substitution argument is still noted, as LOW, without echoing the argument.
     assert metachar[0].severity == Severity.LOW
     assert "$(id)" not in metachar[0].message and "x;id" not in metachar[0].message
+
+
+_PYRIGHT = {"command": "pyright-langserver", "args": ["--stdio"], "extensionToLanguage": {".py": "python"}}
+_BASEDPYRIGHT = {**_PYRIGHT, "command": "basedpyright-langserver"}
+
+
+@pytest.mark.parametrize(
+    ("manifest", "files", "path", "later"),
+    [
+        (
+            {"lspServers": "./config/lsp.json"},
+            {"config/lsp.json": {"pyright": _BASEDPYRIGHT}},
+            "config/lsp.json",
+            "'config/lsp.json'",
+        ),
+        (
+            {"lspServers": {"pyright": _BASEDPYRIGHT}},
+            {},
+            ".claude-plugin/plugin.json",
+            "'.claude-plugin/plugin.json' (inline)",
+        ),
+    ],
+)
+def test_a_declared_lsp_server_replaces_the_same_name_in_lsp_json(
+    tmp_path: Path, manifest: dict, files: dict[str, object], path: str, later: str
+) -> None:
+    """Claude Code applies manifest lspServers over .lsp.json, so the name is one row at the declaration that runs."""
+    plugin = _plugin(tmp_path / "plugin", {".lsp.json": {"pyright": _PYRIGHT}, **files}, manifest=manifest)
+
+    result = PluginSchemaValidator().validate(plugin)
+    rows = [row for row in result.metadata["plugin"]["component_inventory"]["components"] if row["type"] == "lsp"]
+    [duplicate] = [finding for finding in result.findings if finding.check_name == "plugin_lsp_duplicate_name"]
+
+    assert [(row["name"], row["origin"], row["path"]) for row in rows] == [("pyright", "declared+packaged", path)]
+    assert duplicate.severity == Severity.MEDIUM
+    assert duplicate.message == (
+        f"LSP server 'pyright' is declared in both '.lsp.json' and {later}; "
+        "Claude Code keeps only the later declaration"
+    )
+    assert duplicate.metadata["plugin_component"] == {"type": "lsp", "name": "pyright"}
+
+
+def test_an_lsp_json_the_manifest_names_is_not_a_duplicate(tmp_path: Path) -> None:
+    plugin = _plugin(tmp_path / "plugin", {".lsp.json": {"pyright": _PYRIGHT}}, manifest={"lspServers": "./.lsp.json"})
+
+    result = PluginSchemaValidator().validate(plugin)
+    rows = [row for row in result.metadata["plugin"]["component_inventory"]["components"] if row["type"] == "lsp"]
+
+    assert "plugin_lsp_duplicate_name" not in {finding.check_name for finding in result.findings}
+    assert [(row["name"], row["path"]) for row in rows] == [("pyright", ".lsp.json")]
+
+
+def test_an_lsp_entry_that_is_not_an_object_replaces_no_server(tmp_path: Path) -> None:
+    """An entry that is not a server object configures nothing, so the ``.lsp.json`` server stays the one that runs."""
+    plugin = _plugin(
+        tmp_path / "plugin",
+        {".lsp.json": {"pyright": _PYRIGHT}, "config/lsp.json": {"pyright": "not-a-server"}},
+        manifest={"lspServers": "./config/lsp.json"},
+    )
+
+    result = PluginSchemaValidator().validate(plugin)
+    rows = [row for row in result.metadata["plugin"]["component_inventory"]["components"] if row["type"] == "lsp"]
+
+    assert "plugin_lsp_duplicate_name" not in {finding.check_name for finding in result.findings}
+    assert [(row["name"], row["origin"], row["path"]) for row in rows] == [("pyright", "packaged", ".lsp.json")]

@@ -186,6 +186,23 @@ def test_a_later_shell_write_counts_for_write_after_a_plain_shell_call() -> None
         assert selection["precision"] == 1.0, trajectory["agent"]
 
 
+@pytest.mark.parametrize(
+    ("cmd", "recall"),
+    [
+        (
+            "apply_patch <<'PATCH'\n*** Begin Patch\n*** Update File: /workspace/a.py\n@@\n-x\n+y\n*** End Patch\nPATCH",
+            1.0,
+        ),
+        ("cd /workspace && apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: out/a.txt\n+x\n*** End Patch\nEOF", 1.0),
+        ("cat > out/a.txt <<'EOF'\nx\nEOF", 0.0),
+    ],
+)
+def test_apply_patch_matches_a_shell_apply_patch_but_no_other_shell_write(cmd: str, recall: float) -> None:
+    """Codex runs ``apply_patch`` as a shell here-document; ``apply_patch`` still means the file tools only."""
+    trajectory = _trajectory("codex", _step("c1", "exec_command", {"cmd": cmd, "workdir": "/workspace"}))
+    assert _signals(trajectory, {"expected_tools": ["apply_patch"]})["tool_selection"]["recall"] == recall
+
+
 # ---------------------------------------------------------------------------
 # What counts as a right choice
 # ---------------------------------------------------------------------------

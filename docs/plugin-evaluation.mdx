@@ -3030,7 +3030,9 @@ Matching details:
   interpreter code that opens a file for writing. Codex writes most files
   this way. Writes to devices such as `2>/dev/null` do not count. To mean
   only the dedicated file tools (`Write`, `Edit`, `MultiEdit`, and Codex
-  `apply_patch`), use `apply_patch`.
+  `apply_patch`), use `apply_patch`. Codex `apply_patch` counts both as its
+  own tool and as the shell command it usually runs as
+  (`apply_patch <<'PATCH'`).
 
 A ref is a non-empty string of at most 256 characters without control
 characters. A known prefix such as `Skill:` must be followed by a name. A

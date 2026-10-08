@@ -4119,14 +4119,33 @@ def _grade_handoff(
     *,
     prompts: Sequence[str] = (),
     root_cwd: str | None = None,
+    declared: Mapping[str, Sequence[str]] | None = None,
+    agent: str = "",
 ) -> dict[str, Any]:
-    """Verify each ``handoffs[i]`` carried producer output into consumer input (see module docs)."""
-    handoffs = spec.get("handoffs", [])
+    """Verify each ``handoffs[i]`` carried producer output into consumer input (see module docs).
+
+    A handoff whose producer or consumer names only component types this arm
+    cannot carry is listed in ``skipped`` and not checked.
+    """
+    unavailable = _unavailable_kinds(declared or {}, agent)
+    names_by_kind = _names_by_kind(declared or {}, unavailable)
     failures: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
+    checked = 0
     passed = 0
-    for handoff in handoffs:
+    for handoff in spec.get("handoffs", []):
         producer_refs = _refs(handoff["producer"])
         consumer_refs = _refs(handoff["consumer"])
+        if any(_side_unavailable(side, unavailable, names_by_kind) for side in (producer_refs, consumer_refs)):
+            skipped.append(
+                {
+                    "producer": _ref_label(handoff["producer"]),
+                    "consumer": _ref_label(handoff["consumer"]),
+                    "reason": "this arm cannot carry that component type",
+                }
+            )
+            continue
+        checked += 1
         producer_calls, consumer_calls = _handoff_calls(producer_refs, consumer_refs, calls)
         problems: list[str] = []
         if not any(_uses(producer_refs, call) for call in calls):
@@ -4157,10 +4176,11 @@ def _grade_handoff(
                 }
             )
     return {
-        "checked": len(handoffs),
+        "checked": checked,
         "passed": passed,
         "failures": failures,
-        "status": STATUS_SCORED if handoffs else STATUS_NOT_APPLICABLE,
+        "skipped": skipped,
+        "status": STATUS_SCORED if checked else STATUS_NOT_APPLICABLE,
     }
 
 
@@ -4352,6 +4372,8 @@ def compute_plugin_signals(
             spec,
             prompts=_prompt_texts(trajectory) if has_value else (),
             root_cwd=_trajectory_cwd(trajectory),
+            declared=declared_map,
+            agent=agent,
         ),
         "conflict": _grade_conflict(calls, spec, declared=declared_map, agent=agent),
         "activation_coverage": _grade_activation_coverage(calls, declared_map, mcp_names),

@@ -66,6 +66,27 @@ it in. The shared LLM client window (`litellm>=1.92.0,<1.94.0.dev0`) admits
 patched 1.92 and 1.93 releases validated with this integration while excluding
 prerelease and as-yet unvalidated 1.94 behavior.
 
+Harbor converts each trial's raw agent log into the trajectory that grading,
+plugin signals, and the measured context cost read. Since Harbor 0.20 that
+conversion keeps three things older releases dropped:
+
+- Codex per-step token counts, so the measured first-turn context cost works
+  for Codex runs.
+- Claude Code subagent transcripts (`<session>/subagents/*.jsonl`), so the
+  steps and MCP calls a subagent makes are graded.
+- Parallel Codex tool calls from one model request, which stay in one step, so
+  a handoff between them is not mistaken for a sequential one.
+
+Harbor converts only the newest Codex rollout. When a Codex agent calls
+`spawn_agent`, the newest rollout is the subagent's, so on its own Harbor would
+grade the subagent's last message and drop the main agent's calls and tokens.
+SkillEvaluator runs every Codex agent, plain `codex` included, through its own
+Harbor Codex wrapper. The wrapper converts the main thread's rollout and adds
+each subagent's own steps as sidechain steps (`extra.is_sidechain`,
+`extra.agent_id`), never after the main agent's final answer. The subagent's
+prompt is not added as a user step; the main agent's `spawn_agent` call already
+shows it.
+
 The integration preserves SkillEvaluator's runtime and artifact contracts while
 using Harbor 0.24:
 
@@ -123,6 +144,8 @@ using Harbor 0.24:
   Harbor's job statistics do not account for every trial, the failure names the
   first trial or step exception Harbor recorded, such as
   `VerifierOutputParseError`, instead of reporting only a trial count.
+- Harbor 0.24's `stream` and `enable_environment_dir_upload` environment
+  options are reserved for the runtime policy and cannot be set with `--ek`.
 
 ## Start with one command
 
@@ -440,8 +463,13 @@ cloud backend for untrusted code.
 
 Attached to `validate`, Tier 3 is advisory by default: its results appear in the
 combined reports without changing the exit code. Add `--block-on-agent-eval`
-to make its findings gate, including evidence that the selected YAML/JSON
-dataset or native Harbor source is missing or invalid. Autopilot is enabled
+to make it gate: a Tier 3 `FAIL` verdict, a confirmed Skill Lift regression (a
+lift of −0.10 or less whose whole interval is below zero), a skipped or
+`INCOMPLETE` run, and evidence that the selected YAML/JSON dataset or native
+Harbor source is missing or invalid then fail `validate`. A `NEUTRAL` verdict
+never does. The footer, the terminal summary and `BENCHMARK.md` call a gated run
+that never ran `FAIL`, and a partial plugin run `INCOMPLETE` unless its verdict
+is `FAIL` or it shows a confirmed regression. Autopilot is enabled
 by default for skills: it generates one starter case when no source exists and
 reuses valid existing sources unchanged. `--full` remains supported but is
 unnecessary. Use `--tiers 1,2` or `--no-tier3` to skip live evaluation;
@@ -460,6 +488,95 @@ alias for `--tier3`; explicit tier selection and disable flags control the
 scope. See the [CLI Reference](cli-reference.mdx) for the full group.
 </Note>
 
+## Plugin evaluation
+
+This section summarizes plugin Tier 3. [Plugin Evaluation](plugin-evaluation.mdx)
+is the full reference: what each arm stages, the Integration evidence gate and
+verdicts, report-only statistics and component signals, the plugin dataset
+fields, and current limitations.
+
+Run all three tiers for a plugin with the same validation entry point. Plugin
+Tier 3 runs only when requested with `--tier3`:
+
+```bash title="Validate a plugin through Tier 3"
+skillevaluator validate ./my-plugin --type plugin --tier3
+```
+
+For focused Tier 3 iteration, use the plugin-specific command and optionally
+provide a combined dataset or local member skills:
+
+```bash title="Evaluate plugin effectiveness and integration"
+skillevaluator tier3 evaluate-plugin ./my-plugin --lift-mode both
+skillevaluator tier3 evaluate-plugin ./my-plugin \
+  --evals-source ./evals/evals.json --include-skills ../skills/local-member
+```
+
+Tier 3 builds a temporary skill-shaped wrapper and reuses the Harbor evaluation
+engine. It evaluates locally available components only:
+
+- bundled skills under `skills/` and same-repository `github`, `gitlab`, or
+  `git` refs;
+- contained rule files; and
+- contained command or secure URL MCP servers, staged only in the plugin arm.
+  Contained plugins may declare them in any `mcpServers` form (an inline map, a
+  `./`-relative `.json` path, or an array of both) and in the root `.mcp.json`;
+  a later same-name declaration replaces an earlier one, as in Claude Code.
+
+Remote components are never fetched. Unresolved refs and provider-only MCP
+servers are recorded in plugin provenance. A partial run is reported as
+`INCOMPLETE`, never as a full pass. A plugin with nothing locally evaluable is
+`INCOMPLETE` too when it declares components that could not be resolved, and
+an advisory skip only when it declares nothing to evaluate.
+
+Plugin provenance also lists every declared and packaged component in
+`component_coverage` with a `staged`, `not_staged`, `unsupported`,
+`unavailable`, or `invalid` state. Hooks, agents, commands, LSP servers, output
+styles, monitors, and settings are inventoried but not staged. It also carries
+a static `context_cost` estimate and the MCP `mcp_pinning` summary. These fields
+are report-only and do not change the `INCOMPLETE` rule.
+
+Plugin baselines are controlled with `--lift-mode`:
+
+| Mode | Comparison |
+| --- | --- |
+| `effectiveness` | Coordinated plugin versus no plugin; default |
+| `integration` | Coordinated plugin versus its member skills staged individually |
+| `both` | Effectiveness plus a third, report-only sum-of-parts arm |
+
+Integration is only meaningful when the dataset contains composition evidence:
+at least one case with `cross_component: true` and two or more distinct member
+skills of the plugin in `expected_skills` (names that are not member skills do
+not count). Explicit `integration` is not run when that evidence is absent. `both` preserves the valid effectiveness run and records
+that Integration was skipped. Integration modes require the baseline and cannot
+be combined with `--skip-baseline`. Native Harbor-only sources remain valid for
+effectiveness but do not establish composition evidence by themselves.
+
+The Integration verdict classifies the plugin-minus-member-skills lift with
+±0.05 bands and records that band as `point_verdict`. The reported verdict uses
+the whole paired case bootstrap 95% interval: real when it clears +0.05,
+negative when it stays below -0.05, and cosmetic when it lies inside the band,
+so a tight interval around zero is cosmetic, not inconclusive. It reports
+`inconclusive`, with a `reason`, when the two arms do not cover the same cases
+with the configured attempts, when fewer than five cases pair up, or when the
+interval crosses a band edge. When Integration
+was requested but not measured, for example after a `both` fallback, the
+report carries an explicit `inconclusive` block with `measured: false` rather
+than omitting it.
+
+The Integration result is advisory and never changes the main Tier 3 score,
+verdict, or validation exit code. MCP declarations are statically checked before
+staging; inline credentials, shell command forms, insecure URLs, floating
+versions, disabled TLS verification, agent permission-bypass flags,
+library-preload environment variables, cloud metadata endpoints, and escaping,
+linked, missing, or oversized MCP config files are rejected.
+
+Each scored trial of a plugin run also records report-only component signals:
+which member skills, MCP servers, subagents, and commands the agent activated,
+and, when the dataset declares the optional plugin fields, tool selection,
+argument, order, handoff, and conflict checks. They never change a score or
+verdict. See [Plugin component signals](plugin-evaluation.mdx#plugin-component-signals)
+and the [plugin dataset fields](plugin-evaluation.mdx#dataset-fields-for-plugins).
+
 ## Plan for cost
 
 Tier 3 performs live model and agent calls, so it can incur provider charges
@@ -470,7 +587,8 @@ the trial volume is:
 eval cases × agents × attempts × arms
 ```
 
-A standard comparison has two arms (with-skill and without-skill). Each trial
+A standard comparison has two arms (with-skill and without-skill); a plugin run
+with `--lift-mode both` adds a third, member-skills arm. Each trial
 can make multiple agent-model requests, standard grading adds evaluator-model
 calls, dataset generation can add more, and the optional runtime preflight adds
 one extra agent execution per agent. Actual charges therefore depend on the selected
@@ -509,6 +627,21 @@ Local mode is experimental and provides weaker isolation than Docker or a
 managed sandbox. Use it only for trusted skills and workspaces; saving sandbox
 cost is not worth running untrusted code directly on the host.
 
+## Follow progress
+
+The default `--progress auto` uses a fixed-height Rich view on an interactive
+terminal and durable line-oriented output in redirected or CI logs. The run
+reports configuration, model resolution, environment and credential preflight,
+input staging, image preparation, agent execution, result collection, and
+report writing. Plain mode also emits heartbeats while a stage is still active;
+use `--progress rich`, `plain`, or `off` to choose explicitly.
+
+Progress details remove terminal control sequences and redact known credentials
+and key-like assignments. The Rich view keeps a bounded recent-stage history so
+the frame does not grow as agents complete. Progress rendering is best effort:
+if its initialization, refresh thread, or terminal redraw fails, the reporter
+disables itself without aborting the evaluation.
+
 ## Tune the run
 
 The high-signal flags, with defaults:
@@ -522,7 +655,7 @@ The high-signal flags, with defaults:
 | `--skip-baseline` | off | Skip the without-skill arm; faster, but no Skill Lift |
 | `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
 | `--agent-runtime-preflight` | off | Add one agent-only execution of the first staged task per agent before the full A/B matrix; `--no-agent-runtime-preflight` overrides a config value that enables it |
-| `--progress` | `auto` | Progress rendering: `auto`, `rich` (live TTY view with secret redaction), `plain`, or `off` |
+| `--progress` | `auto` | Progress rendering: `auto`, `rich` (fixed-height live TTY view with secret redaction), `plain`, or `off` |
 | `--autopilot` | off | When no evaluation source exists, generate exactly one eval case — with the configured provider, falling back to a deterministic keyless template — never overwriting an existing source |
 | `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](custom-graders.mdx) |
 | `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory |
@@ -672,20 +805,102 @@ agent passes only when every dimension passes. The top-level Tier 3 verdict is:
 | Fail | Every successful agent has a dimension below 0.40 |
 
 Skill Lift is the signed difference between the with-skill result and the
-without-skill baseline. Its independent band is **PASS** at +0.05 or above,
-**NEUTRAL** between -0.10 and +0.05, and **FAIL** at -0.10 or below. Lift is
-diagnostic evidence and does not override the every-dimension gate.
+without-skill baseline. The baseline has no skill to discover or route to, so
+it has no Discoverability or Efficiency score. Skill Lift therefore compares
+the two arms case by case on the dimensions both scored, so skill activation
+alone earns no lift; the full with-skill score that the verdict uses still
+covers every dimension. Its independent band is **PASS** at +0.05 or above,
+**NEUTRAL** between -0.10 and +0.05, and **FAIL** at -0.10 or below. The band
+never changes the every-dimension verdict. A FAIL-band lift whose interval lies
+wholly below zero is a confirmed regression: the report warns, `BENCHMARK.md`
+says FAIL, and `--block-on-agent-eval` fails `validate`. A
+report-only 95% interval from a paired, case-clustered bootstrap accompanies
+the lift; when that interval includes zero the report adds a warning, but the
+band is unchanged.
 
 With multiple attempts, pass@k shows whether at least one attempt per case met
 `--pass-threshold` — reliability context alongside Skill Lift, not a
-replacement for the dimensions. In `custom_only` mode, pass@k uses the custom
+replacement for the dimensions. pass^k, reported next to it, counts a case only
+when every one of its k attempts passed. In `custom_only` mode, pass@k uses the custom
 overall reward; the dimension rows stay visible but read **NO SCORE**, and
 custom metrics are never re-labeled as standard dimensions.
 
 Missing metrics are never coerced to `0.0`: an unscored run reports an
 `overall_score` of `None`, averages omit unscored metrics, and the affected
 cells render **NO SCORE**. `compare` likewise ignores stored summaries whose
-`execution_status` is not `succeeded`.
+`execution_status` is not `succeeded`, shows no lift (N/A) for a metric the
+baseline recorded as not applicable, and computes its Overall lift only on the
+metrics both arms scored.
+
+The LLM judges need something to judge against: `accuracy` and
+`goal_accuracy` use the case's `ground_truth` (`expected_output` in the
+agentskills format), and `behavior_check` uses its `expected_behavior`
+(`assertions`). When a case leaves that reference empty, the metric is **not
+applicable** for that trial rather than a free `1.0`. The verifier records a
+`null` score with `status: "not_applicable"` and a `reason` in
+`skill_evaluator_reward.json`. Harbor's `reward.json` stays numeric-only and
+omits the metric. Not-applicable metrics are left out of the trial's overall
+score, the per-arm metric averages, and Skill Lift. Summaries list them under
+`not_applicable_metrics` (every trial N/A) and `not_applicable_counts`, and the
+terminal and HTML report show **N/A**. A dimension loses a not-applicable
+source and reweights the rest, so Effectiveness uses `goal_accuracy` alone when
+no case defines `expected_behavior`. A dimension whose sources are all not
+applicable, such as Correctness when no case has a `ground_truth`, has no score.
+Because the gate needs every dimension, that agent's verdict is Neutral
+(inconclusive) rather than Pass or Fail. A missing metric without the
+verifier's not-applicable marker still leaves the trial unscored.
+
+The skill metrics follow the same rule in the no-skill baseline. That arm has
+no skill under test installed, so the verifier records `skill_execution` and
+`skill_efficiency` as not applicable there (unless it staged a skill the case
+could activate, such as an acceptable alternate). The baseline's summary lists
+them under `not_applicable_metrics`, reports show **N/A** for its
+Discoverability and Efficiency, and Skill Lift compares only the dimensions
+both arms scored. The pass@k lift does the same: it scores both arms' pass
+flags on the metrics both scored, while each arm's own pass@k is unchanged.
+
+The judges read evidence the verifier builds from the trajectory, not the raw
+trajectory. Every judge gets the agent's final answer and what it wrote: the
+body of each write, edit, `apply_patch`, or shell write. A shell write is an
+output redirection outside quotes, or a `tee` or `sed -i` operand, to a file
+rather than a device such as `/dev/null`; a code tool's `code` argument is
+read as a program, so its `>` comparisons are not writes. Write bodies share
+the room the evidence has left, at least 1,800 characters each. `accuracy` and
+`goal_accuracy` also get the newest tool results, and file changes always leave
+room for the newest two. `behavior_check` also gets a compact tool history;
+there each write is one short line, because FILE CHANGES already shows its
+body, so skill calls and test runs keep their room. Long text keeps its start
+and end around a marker such as `...[4213 chars truncated]...`, never a silent
+cut. When the evidence is over budget, earlier writes shrink or drop first,
+and the tool history drops its middle first. The history's copy of the final
+answer, which FINAL RESPONSE already shows, shrinks before any tool call drops.
+Secrets are redacted before the evidence reaches a judge: key-shaped text
+such as `sk-…`, `ghp_…`, `glpat-…`, `xoxb-…`, `hf_…`, `npm_…`, or an AWS key
+ID (`AKIA…`, `ASIA…`), the exact value of every
+provider credential in the verifier's environment, and the run's canary
+token. Placeholder keys and tokens such as `sk-your-key-here`,
+`nvapi-REPLACE_ME`, or `xoxb-your-bot-token` are left as written, so a config
+file the task asks for still matches the expected answer. Each judged
+metric's `omitted` field records whether evidence was dropped or shortened to
+fit the budget.
+
+The budgets are 8,000 characters for `accuracy` and `behavior_check` and 12,000
+for `goal_accuracy`. Set `SKILL_EVAL_ACCURACY_BUDGET`,
+`SKILL_EVAL_GOAL_ACCURACY_BUDGET`, or `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` to
+change them, and `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` (default 800) to
+change how much of the final answer `behavior_check` shows. The runner passes
+them to the verifier. `behavior_check` always keeps 4,000 characters past the
+final answer limit for the request, file changes, and tool history, and one
+write body can use up to the largest budget.
+
+A partially errored Harbor job remains an execution failure, but rewards from
+its completed trials are preserved when every aggregate error maps to a
+concrete failed trial and Harbor reports no failed status or non-zero aggregate
+exit code. Inspect `expected_attempts`, `scored_attempts`, `trial_failures`, and
+`execution_errors` before using those partial scores. When the error count is
+ambiguous, trials are still pending or cancelled, or the aggregate job itself
+failed, all rewards for that job are suppressed instead of presenting an
+uncertain score.
 
 The canonical Tier 3 payload embedded by both standalone `evaluate` and
 `validate --agent-eval` reports uses schema version 2.0. A completed

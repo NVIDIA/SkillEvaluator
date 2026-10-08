@@ -30,6 +30,8 @@ Each tier answers one question about your skill.
 
 Every tier is an independent entry point — run any command directly; nothing requires running the earlier tiers first.
 
+The same tiers also evaluate agent plugins that bundle skills, rules, and MCP servers: static manifest, dependency, and MCP checks; advisory deduplication; and live effectiveness and Integration evaluation. See [Plugin Evaluation](plugin-evaluation.mdx).
+
 | Tier | Representative commands | Requires |
 | --- | --- | --- |
 | [Tier 1](tier1-validation.mdx) | `tier1 PATH`, `quality-check`, `security-scan`, `pii-scan`, `lint-scripts`, `rubric-eval` | No API key for deterministic checks; the `security` extra plus external Semgrep, SkillSpector, and Gitleaks executables for full scanner coverage; a provider key for LLM checks |

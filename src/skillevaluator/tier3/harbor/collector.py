@@ -251,6 +251,8 @@ _AGENT_RUNTIME_EXCEPTION_TYPES = {
 }
 _UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES = {
     "AgentAuthenticationError",
+    # SkillEvaluator's agent wrappers rename a setup-phase NetworkConnectionError.
+    "AgentSetupNetworkError",
     "AgentTimeoutError",
     "ApiConnectionClosedError",
     "ApiInternalServerError",

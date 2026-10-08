@@ -39,6 +39,7 @@ from harbor.agents.installed.hermes import Hermes
 from harbor.agents.installed.opencode import OpenCode
 
 from skillevaluator.tier3.harbor.local_agents import (
+    SetupNetworkErrorAgent,
     SkillEvaluatorCodex,
     SkillEvaluatorGatewayCodex,
     SkillEvaluatorGatewayOpenCode,
@@ -60,7 +61,7 @@ class NativeLaunchError(RuntimeError):
     """Native plugin loading did not see exactly one Harbor launch command in an agent run."""
 
 
-class _NativePluginLoadMixin:
+class _NativePluginLoadMixin(SetupNetworkErrorAgent):
     """Run the native setup script right before the agent's launch command."""
 
     #: Harbor's launch, matched on the single launcher line only (see the module docstring).

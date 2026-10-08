@@ -264,7 +264,7 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | `--include-skills PATH` | none | Additional skill(s) to mount into the eval environment (repeatable; paths must exist). Requires group workspace mode, set via `skill_workspace.mode: group` in `evals/config.yml`. For a plugin, the paths are staged as extra member skills; plugin evaluation always uses a group workspace. |
 | `--copy-repo` | off | Copy the surrounding repo into the eval environment. |
 | `--timeout-multiplier FLOAT` | unset | Scale Harbor's agent, verifier, and environment-build timeouts (built-in default `1.0`). Must be a finite number greater than 0. |
-| `--trial-retries INTEGER` | `0` | Let Harbor rerun a trial, up to 5 times, after an environment-start timeout, an agent-setup timeout, or a network connection error; never after an agent timeout or a verifier or reward error. Recorded as `harbor.trial_retries` and `harbor.trial_retries_used` in `run_config.json`. See [Retry infrastructure failures](tier3-live-evaluation.mdx#retry-infrastructure-failures). |
+| `--trial-retries INTEGER` | `0` | Let Harbor rerun a trial, up to 5 times, after an environment-start timeout, an agent-setup timeout, or a network failure during agent setup in SkillEvaluator's agent wrappers; never after an agent timeout or a verifier or reward error. Recorded as `harbor.trial_retries` and `harbor.trial_retries_used` in `run_config.json`. See [Retry infrastructure failures](tier3-live-evaluation.mdx#retry-infrastructure-failures). |
 | `--harbor-keep-jobs` | off | Retain Harbor job dirs and artifacts after the run for inspection. |
 | `--agent-runtime-preflight / --no-agent-runtime-preflight` | disabled | Opt into an extra agent-only execution of the first staged task before the measured A/B matrix. The CLI value overrides `harbor.agent_runtime_preflight`; without either, no extra agent runs. |
 
@@ -425,7 +425,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | `--harbor-keep-jobs` | off | Retain Harbor job dirs and artifacts for inspection with [harbor-view](#harbor-view). |
 | `--agent-runtime-preflight / --no-agent-runtime-preflight` | disabled | Opt into an extra agent-only execution of the first staged task before the full A/B evaluation matrix. |
 | `--timeout-multiplier FLOAT` | unset | Scale Harbor's agent, verifier, and environment-build timeouts (built-in default `1.0`). Must be a finite number greater than 0. |
-| `--trial-retries INTEGER` | `0` | Let Harbor rerun a trial, up to 5 times, after an environment-start timeout, an agent-setup timeout, or a network connection error; never after an agent timeout or a verifier or reward error. Recorded as `harbor.trial_retries` and `harbor.trial_retries_used` in `run_config.json`. See [Retry infrastructure failures](tier3-live-evaluation.mdx#retry-infrastructure-failures). |
+| `--trial-retries INTEGER` | `0` | Let Harbor rerun a trial, up to 5 times, after an environment-start timeout, an agent-setup timeout, or a network failure during agent setup in SkillEvaluator's agent wrappers; never after an agent timeout or a verifier or reward error. Recorded as `harbor.trial_retries` and `harbor.trial_retries_used` in `run_config.json`. See [Retry infrastructure failures](tier3-live-evaluation.mdx#retry-infrastructure-failures). |
 | `--override-cpus INTEGER` | unset | Override eval-environment CPU allocation (passed through to Harbor). |
 | `--override-memory-mb INTEGER` | unset | Override eval-environment memory in MB (passed through to Harbor). |
 | `--override-storage-mb INTEGER` | unset | Override eval-environment storage in MB (passed through to Harbor). |
@@ -484,7 +484,7 @@ skillevaluator tier3 evaluate-plugin ./my-plugin --lift-mode both \
 | `--harbor-keep-jobs` | off | Retain Harbor job directories and artifacts for inspection. |
 | `--agent-runtime-preflight / --no-agent-runtime-preflight` | disabled | Add one agent-only execution of the first staged task per agent before the full evaluation matrix. |
 | `--timeout-multiplier FLOAT` | unset | Scale Harbor step timeouts. |
-| `--trial-retries INTEGER` | `0` | Let Harbor rerun a trial, up to 5 times, after an environment-start timeout, an agent-setup timeout, or a network connection error; never after an agent timeout or a verifier or reward error. Recorded as `harbor.trial_retries` and `harbor.trial_retries_used` in `run_config.json`. See [Retry infrastructure failures](tier3-live-evaluation.mdx#retry-infrastructure-failures). |
+| `--trial-retries INTEGER` | `0` | Let Harbor rerun a trial, up to 5 times, after an environment-start timeout, an agent-setup timeout, or a network failure during agent setup in SkillEvaluator's agent wrappers; never after an agent timeout or a verifier or reward error. Recorded as `harbor.trial_retries` and `harbor.trial_retries_used` in `run_config.json`. See [Retry infrastructure failures](tier3-live-evaluation.mdx#retry-infrastructure-failures). |
 | `--override-cpus INTEGER` | unset | Override eval-environment CPU allocation. |
 | `--override-memory-mb INTEGER` | unset | Override eval-environment memory in MB. |
 | `--override-storage-mb INTEGER` | unset | Override eval-environment storage in MB. |

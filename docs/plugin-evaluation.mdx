@@ -3277,8 +3277,9 @@ what the run did not evaluate.
 
 A trial that fails while its environment starts or its agent installs also
 leaves its arm incomplete. `--trial-retries N` lets Harbor rerun a trial after
-an environment-start timeout, an agent-setup timeout, or a network connection
-error, never after an agent timeout or a verifier or reward error; see
+an environment-start timeout, an agent-setup timeout, or a network failure
+during agent setup in SkillEvaluator's agent wrappers, never after an agent
+timeout or a verifier or reward error; see
 [Retry infrastructure failures](tier3-live-evaluation.mdx#retry-infrastructure-failures).
 
 When an agent's run did not complete, `BENCHMARK.md` prints no Tier 3 score or

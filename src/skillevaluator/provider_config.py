@@ -40,6 +40,17 @@ CHAT_DEFAULT_MODELS = {
     "bedrock": CHAT_DEFAULT_BEDROCK,
     "openai-compatible": CHAT_DEFAULT_GATEWAY,
 }
+# SkillSpector sends its own structured-output requests, so its defaults move
+# only to models the pinned SkillSpector release supports, not with the chat
+# defaults. An explicit ``SKILL_EVAL_LLM_MODEL`` still reaches SkillSpector.
+SKILLSPECTOR_DEFAULT_MODELS = {
+    "openai": CHAT_DEFAULT_OPENAI,
+    "anthropic": "claude-opus-5",
+    "bedrock": "us.anthropic.claude-opus-5",
+    "nv_build": CHAT_DEFAULT_NVIDIA,
+    "openai-compatible": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
+}
+SKILLSPECTOR_DEFAULT_REASONING_EFFORT = "medium"
 # Agent harnesses have separate model defaults with their required capabilities.
 GATEWAY_AGENT_DEFAULT_MODELS = {
     "codex": "openai/openai/gpt-5.6-sol",
@@ -88,6 +99,15 @@ def _supports_custom_temperature(model: str) -> bool:
         return True
     version = (int(match.group("major")), int(match.group("minor") or 0))
     return version < (4, 7)
+
+
+def skillspector_reasoning_effort(model: str) -> str | None:
+    """Return the SkillSpector reasoning effort SkillEvaluator sets for ``model``.
+
+    Only GPT-6 models get one. Claude models behind OpenAI-compatible gateways
+    can reject the parameter, so their effort stays at the model default.
+    """
+    return SKILLSPECTOR_DEFAULT_REASONING_EFFORT if _model_leaf(model).startswith("gpt-6") else None
 
 
 class ProviderConfigurationError(ValueError):

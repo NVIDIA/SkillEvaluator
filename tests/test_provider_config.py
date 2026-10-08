@@ -10,7 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.provider_config import ProviderConfigurationError, resolve_embedding_provider, resolve_llm_provider
+from skillevaluator.provider_config import (
+    ProviderConfigurationError,
+    resolve_embedding_provider,
+    resolve_llm_provider,
+    skillspector_reasoning_effort,
+)
 
 PROVIDER_CONTRACT = Path(__file__).parent / "fixtures" / "public_provider_contract.json"
 
@@ -74,6 +79,40 @@ def test_chat_default_models_are_the_single_source_of_truth() -> None:
     assert CHAT_CHEAP_OPENAI == "gpt-5.4-mini"
     assert DIMENSION_JUDGE_MODEL == CHAT_DEFAULT_OPENAI
     assert DEFAULT_JUDGE_MODEL == CHAT_DEFAULT_OPENAI
+
+
+def test_skillspector_defaults_cover_every_provider_and_keep_supported_claude_models() -> None:
+    from skillevaluator.provider_config import (
+        CHAT_DEFAULT_MODELS,
+        CHAT_DEFAULT_NVIDIA,
+        CHAT_DEFAULT_OPENAI,
+        SKILLSPECTOR_DEFAULT_MODELS,
+    )
+
+    assert SKILLSPECTOR_DEFAULT_MODELS.keys() == CHAT_DEFAULT_MODELS.keys()
+    assert SKILLSPECTOR_DEFAULT_MODELS == {
+        "openai": CHAT_DEFAULT_OPENAI,
+        "anthropic": "claude-opus-5",
+        "bedrock": "us.anthropic.claude-opus-5",
+        "nv_build": CHAT_DEFAULT_NVIDIA,
+        "openai-compatible": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
+    }
+
+
+@pytest.mark.parametrize(
+    ("model", "effort"),
+    [
+        ("gpt-6.1-sol", "medium"),
+        ("openai/openai/gpt-6.1-sol", "medium"),
+        ("gpt-5.6-sol", None),
+        ("claude-opus-5-5", None),
+        ("us.anthropic.claude-opus-5-5", None),
+        ("aws/anthropic/bedrock-claude-opus-5-5", None),
+        ("nvidia/nemotron-3-super-120b-a12b", None),
+    ],
+)
+def test_skillspector_reasoning_effort_is_set_only_for_gpt_6_models(model: str, effort: str | None) -> None:
+    assert skillspector_reasoning_effort(model) == effort
 
 
 @pytest.mark.parametrize(

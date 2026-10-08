@@ -4,6 +4,20 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- SkillSpector now has its own default model per provider instead of
+  following the chat default, so chat-default upgrades no longer reach
+  SkillSpector before it supports them. An explicit `SKILL_EVAL_LLM_MODEL`
+  still reaches it, and `SKILLSPECTOR_MODEL` still overrides both. The bridge
+  forwards your `SKILLSPECTOR_MODEL_<SLOT>`, `SKILLSPECTOR_MODEL_REGISTRY` and
+  `SKILLSPECTOR_REASONING_EFFORT` settings (never `SKILLSPECTOR_TEMPERATURE`),
+  defaults the reasoning effort to `medium` for GPT-6 models, and records the
+  requested `skillspector_model` and `skillspector_reasoning_effort` next to
+  `skillspector_version` in the security result.
+- Install instructions and the missing-scanner hint now pin SkillSpector to
+  `v2.12.0` instead of its default branch.
+
 ### Fixed
 
 - Brought the published documentation in line with 0.5.0. It now covers how

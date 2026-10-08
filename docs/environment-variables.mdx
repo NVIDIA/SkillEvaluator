@@ -98,12 +98,15 @@ If none is set, LLM-backed commands fail with a configuration error. If more tha
 
 ### SkillSpector bridge
 
-The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment. SkillEvaluator bridges your configured provider into that invocation with an isolated subprocess environment: only the selected provider's settings and a small set of basic process variables are forwarded, so ambient credentials for other providers never reach SkillSpector. The `nv_build` provider is bridged through SkillSpector's OpenAI-compatible path, pointing `OPENAI_BASE_URL` at the public NVIDIA Build endpoint.
+The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment. SkillEvaluator bridges your configured provider into that invocation with an isolated subprocess environment: only the selected provider's settings, the SkillSpector model settings below, and a small set of basic process variables are forwarded, so ambient credentials for other providers never reach SkillSpector. `SKILLSPECTOR_TEMPERATURE` is not forwarded, because current reasoning models reject a custom temperature. The `nv_build` provider is bridged through SkillSpector's OpenAI-compatible path, pointing `OPENAI_BASE_URL` at the public NVIDIA Build endpoint.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `SKILLSPECTOR_PROVIDER` | bridged from your provider | Overrides the provider SkillSpector uses. Must name a supported public provider (`openai`, `anthropic`, `bedrock`, or `nv_build`) — only that provider's credential variables are forwarded. Any other value fails closed: SkillSpector runs without a credential. |
-| `SKILLSPECTOR_MODEL` | bridged from your configured model | Model SkillSpector uses for its LLM analysis. |
+| `SKILLSPECTOR_MODEL` | `SKILL_EVAL_LLM_MODEL` when set, else the SkillSpector default for your provider | Model SkillSpector uses for its LLM analysis. SkillSpector defaults: OpenAI `gpt-5.6-sol`, Anthropic `claude-opus-5`, Bedrock `us.anthropic.claude-opus-5`, NVIDIA Build `nvidia/nemotron-3-super-120b-a12b`, OpenAI-compatible `nvidia/nvidia/nemotron-3-super-120b-long-ctx`. They track the models the pinned SkillSpector release supports, not the chat defaults. |
+| `SKILLSPECTOR_MODEL_<SLOT>` | unset | Per-analyzer model override, such as `SKILLSPECTOR_MODEL_META_ANALYZER`. Forwarded as set. |
+| `SKILLSPECTOR_MODEL_REGISTRY` | unset | Path to a complete custom SkillSpector model registry, for model IDs the bundled registry does not list. Forwarded as set. |
+| `SKILLSPECTOR_REASONING_EFFORT` | `medium` for GPT-6 models, else unset | Reasoning effort for every SkillSpector analyzer. Your value wins. SkillEvaluator sets it only when every SkillSpector model, including `SKILLSPECTOR_MODEL_<SLOT>` overrides, is a GPT-6 model, so never for Claude. |
 
 ## Embeddings
 

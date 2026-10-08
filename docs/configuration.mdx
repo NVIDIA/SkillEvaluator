@@ -313,7 +313,9 @@ variables.
 
 The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment (`SKILLSPECTOR_PROVIDER` plus per-provider credential variables). SkillEvaluator bridges your configured provider automatically for that invocation, so the one key above is all you need. For `nv_build`, the bridge uses SkillSpector's OpenAI-compatible provider path pointed at the public Build endpoint, so the same `NVIDIA_API_KEY` covers this too; it does not create a second NVIDIA credential name.
 
-The subprocess environment is isolated. Only the selected provider settings and basic process environment variables (`PATH`, `HOME`, TLS bundles, temp dirs) pass through — other ambient credentials in your shell are never forwarded.
+The subprocess environment is isolated. Only the selected provider settings and basic process environment variables (`PATH`, `HOME`, TLS bundles, temp dirs) pass through — other ambient credentials in your shell are never forwarded. Your SkillSpector model settings (`SKILLSPECTOR_MODEL_<SLOT>`, `SKILLSPECTOR_MODEL_REGISTRY`, `SKILLSPECTOR_REASONING_EFFORT`) pass through too; `SKILLSPECTOR_TEMPERATURE` does not.
+
+SkillSpector sends its own structured-output requests, so it has its own default model per provider instead of following the chat default. An explicit `SKILL_EVAL_LLM_MODEL` still reaches SkillSpector, and `SKILLSPECTOR_MODEL` overrides both. SkillSpector v2.12.0 does not return structured output for Claude 5.5 models: if `SKILL_EVAL_LLM_MODEL` names one, also set `SKILLSPECTOR_MODEL` to a supported model such as `claude-opus-5` (Bedrock: `us.anthropic.claude-opus-5`), or the `--llm` security stage is reported incomplete. See [SkillSpector bridge](environment-variables.mdx#skillspector-bridge) for the defaults.
 
 Setting `SKILLSPECTOR_PROVIDER` yourself overrides the bridge, but it must name a supported public provider (`openai`, `anthropic`, or `bedrock` — or `nv_build` to force the Build mapping); anything else fails closed and the subprocess receives no credential.
 

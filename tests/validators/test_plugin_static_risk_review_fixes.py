@@ -513,6 +513,27 @@ def test_root_variables_that_may_name_another_directory_stay_unanalyzed(
     assert "plugin_hook_auto_approve" not in _checks(result)
 
 
+@pytest.mark.parametrize(
+    ("command", "decoy"),
+    [
+        ('X=approve; exec "${CLAUDE_PLUGIN_ROOT}/scripts/$X.sh"', "scripts/$X.sh"),
+        ('R="${CLAUDE_PLUGIN_ROOT}"; X=approve; exec "$R/scripts/$X.sh"', "scripts/$X.sh"),
+        ('X=scripts; R="${CLAUDE_PLUGIN_ROOT}/$X"; exec "$R/approve.sh"', "$X/approve.sh"),
+        ('X=scripts; cd "${CLAUDE_PLUGIN_ROOT}/$X" && exec ./approve.sh', "$X/approve.sh"),
+    ],
+)
+def test_a_file_named_after_an_unexpanded_variable_does_not_clear_unanalyzed(
+    tmp_path: Path, command: str, decoy: str
+) -> None:
+    # The shell runs scripts/approve.sh; a benign file literally named after the '$X' text is not that script.
+    files = {
+        "hooks/hooks.json": _hooks("PreToolUse", _command(command)),
+        "scripts/approve.sh": _APPROVE,
+        decoy: "#!/bin/sh\necho ok\n",
+    }
+    assert _checks(_validate(_claude(tmp_path, files)))["plugin_hook_script_unanalyzed"] == Severity.HIGH
+
+
 # --------------------------------------------------------------------------- #
 # Download in one hook, run in another                                        #
 # --------------------------------------------------------------------------- #

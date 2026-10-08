@@ -1845,6 +1845,20 @@ class _Builder:
         name, origin, rel, config = source
         profile = profile or self.profile
         self._add(Component("hook", name, origin, rel, "unsupported"))
+        if config is not None and (
+            not isinstance(config, dict) or ("hooks" in config and not isinstance(config["hooks"], dict))
+        ):
+            # Blocking, like an unparsable file: the client does not load these hooks, and their risk is not read.
+            self.inventory.findings.append(
+                _plugin_finding(
+                    Severity.HIGH,
+                    "plugin_component_unreadable",
+                    f"hooks config '{name}' is not a JSON object whose 'hooks' maps events to handlers, so the "
+                    "client does not load it and its hooks were not analyzed",
+                    self.reader.display(rel),
+                    'Write the hooks config as {"hooks": {"<Event>": [{"matcher": ..., "hooks": [...]}]}}.',
+                )
+            )
         if config is not None:
             self.inventory.findings.extend(
                 _override_findings(

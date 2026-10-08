@@ -305,6 +305,24 @@ def test_codex_cannot_have_plugin_agents_or_commands_so_those_refs_are_skipped()
     assert routing["recall"] == 1.0
 
 
+def test_untyped_refs_to_components_the_member_skills_arm_does_not_stage_are_skipped_like_typed_ones() -> None:
+    """The sum-of-parts arm stages no subagents or commands, so ``release-check`` is still a command ref there."""
+    trajectory = _trajectory("claude-code", _step("t1", "Skill", {"skill": "release-notes"}, "Launching skill"))
+    results = []
+    for refs in (["Agent:release-reviewer", "Command:release-check"], ["release-reviewer", "release-check"]):
+        case = {
+            "expected_tools": ["Skill:release-notes", *refs],
+            "expected_order": [["Skill:release-notes", refs[1]]],
+            "conflict_probes": [{"id": "p1", "must_use": refs[0], "must_not_use": "WebSearch"}],
+        }
+        signals = _signals(trajectory, case, arm=ARM_SUM_OF_PARTS)
+        routing, tools = signals["routing"], signals["tool_selection"]
+        assert routing["skipped"] == refs
+        assert tools["expected"] == []
+        results.append((routing["recall"], tools["status"], signals["order"]["edges"], signals["conflict"]["skipped"]))
+    assert results == [(1.0, "not_applicable", 0, ["p1"])] * 2
+
+
 # ---------------------------------------------------------------------------
 # Dataset validation (L26)
 # ---------------------------------------------------------------------------

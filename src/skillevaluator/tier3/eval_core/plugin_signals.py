@@ -336,6 +336,9 @@ _READ_VERB_RE = re.compile(r"(?:^|_|-)(?:read|open|get|load|view|fetch|cat)(?:$|
 DECLARED_PLUGIN = "plugin"
 # ... and may list the component types the plugin declares but this arm does not stage.
 DECLARED_UNSTAGED = "unstaged"
+# ... and, as ``<type>:<name>``, the subagents and commands an arm leaves out of its declared names
+# entirely, so an untyped ref that names one is still read as a ref to that component.
+DECLARED_UNSTAGED_NAMES = "unstaged_names"
 _WRAPPER_PACKAGE_SUFFIX = "-plugin-eval"
 # A shell tool's error line that says one file operand could not be read.
 _READ_FAILURE_PHRASES = (
@@ -1226,6 +1229,13 @@ class PluginSignalsContext:
                 )
                 if names
             ]
+            hidden = [
+                f"{kind}:{name}"
+                for kind, names in ((COMPONENT_SUBAGENT, self.subagents), (COMPONENT_COMMAND, self.commands))
+                for name in names
+            ]
+            if hidden:
+                declared[DECLARED_UNSTAGED_NAMES] = hidden
         else:
             # Still declared, so a call the agent makes to one anyway is recorded.
             unstaged = [kind for kind in self.agent_unstaged.get(agent, ()) if declared.get(kind)]
@@ -3178,11 +3188,16 @@ def _component_names(
     declared: Mapping[str, Sequence[str]],
     kinds: Iterable[str] = (COMPONENT_SKILL, COMPONENT_SUBAGENT, COMPONENT_COMMAND),
 ) -> list[str]:
-    """Casefolded declared skill, subagent, and command names, bare and under the plugin namespace."""
+    """Casefolded declared skill, subagent, and command names, bare and under the plugin namespace.
+
+    The subagents and commands an arm does not declare (``DECLARED_UNSTAGED_NAMES``) count too, so an
+    untyped ref that names one is a ref to that component in every arm.
+    """
     namespaces = _plugin_namespaces(declared)
+    hidden = [entry.partition(":") for entry in declared.get(DECLARED_UNSTAGED_NAMES) or () if isinstance(entry, str)]
     names: list[str] = []
     for kind in kinds:
-        for name in declared.get(kind) or ():
+        for name in (*(declared.get(kind) or ()), *(name for hidden_kind, _, name in hidden if hidden_kind == kind)):
             if isinstance(name, str) and name:
                 names.append(name.casefold())
                 names.extend(f"{namespace}:{name.casefold()}" for namespace in namespaces)

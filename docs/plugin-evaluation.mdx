@@ -845,7 +845,8 @@ entries past the cap would go unchecked.
 `unsupported` means "inventoried, and statically checked where a check exists,
 but not evaluated." For example, hooks, LSP servers, monitors, and settings are
 scanned for permission-bypass flags and dangerous environment overrides, but
-they are never run. Hooks also get a per-handler
+Tier 1 never runs them (Tier 3 native loading stages some of them; see the
+[support matrix](#per-harness-adapters)). Hooks also get a per-handler
 [risk model](#hook-risk-model), and subagents and commands a
 [privilege review](#subagent-command-and-skill-privileges).
 
@@ -2140,9 +2141,10 @@ Claude Code writes to `agent/claude-code.txt` at startup:
   `connected`. A `failed` or `pending` server is `not_loaded`, with the status
   in the reason.
 
-The init event does not report hooks, output styles, or rules, so those stay
-`listed`. For Codex, OpenCode, and Hermes no harness check runs yet, so their
-components stay `listed`.
+The init event does not report hooks, output styles, LSP servers, settings,
+or `bin/`, so when the plugin is loaded those stay `listed`. Rules are user
+rules outside the plugin and stay `listed` either way. For Codex, OpenCode, and
+Hermes no harness check runs yet, so their components stay `listed`.
 
 The census file and the agent logs are written inside the sandbox, so the
 collector trusts only what SkillEvaluator staged: an entry for a component
@@ -3602,11 +3604,16 @@ the following:
   without prompts. Claude Code marketplace installs are not used either.
 - **Hooks, subagents, commands, LSP servers, output styles, and monitors are
   inventoried only in wrapper mode.** So are settings. Tier 1 checks them
-  statically where a check exists, and Tier 3 records them as `unsupported`.
-  Native loading stages hooks, subagents, commands, and output styles where the
-  harness supports them (see the [support matrix](#per-harness-adapters)); LSP
-  servers, monitors, and settings are never staged. Their absence does not make
-  a run `INCOMPLETE`.
+  statically where a check exists, and wrapper-mode Tier 3 records them as
+  `unsupported` (a member skill's frontmatter hooks are the exception; see
+  [hook census wrapping](#hook-census-wrapping)). Native loading stages hooks,
+  subagents, commands, and output styles where the harness supports them, and
+  native Claude Code also stages LSP servers (a regenerated `.lsp.json`) and
+  settings (a `settings.json` with only `agent` and `subagentStatusLine`); see
+  the [support matrix](#per-harness-adapters). Claude Code's startup report
+  names neither LSP servers nor settings, so their rows are at most `staged`
+  (listed by the load census), never `loaded`. Monitors are never staged. Their
+  absence does not make a run `INCOMPLETE`.
 - **The hook and privilege checks are static heuristics.** Auto-approval is
   detected from allow decisions in the hook command or the plugin script it
   runs; a decision built at run time, or one made by a compiled binary, is not

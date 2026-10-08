@@ -509,3 +509,17 @@ def test_docs_do_not_claim_codex_plugins_have_no_non_interactive_install() -> No
     docs = (Path(_SRC).parent / "docs" / "plugin-evaluation.mdx").read_text(encoding="utf-8")
     assert "no documented non-interactive local install path" not in docs
     assert "codex plugin marketplace add" in docs and "codex plugin add" in docs
+
+
+def test_docs_say_native_claude_code_stages_lsp_servers_and_settings() -> None:
+    # The adapter and the support matrix stage both for Claude Code; the limitations
+    # list once said they were never staged.
+    modes = HARNESS_ADAPTERS["claude-code"].component_modes()
+    assert modes["lsp"] == modes["settings"] == "native"
+    docs = " ".join((Path(_SRC).parent / "docs" / "plugin-evaluation.mdx").read_text(encoding="utf-8").split())
+    assert "LSP servers, monitors, and settings are never staged" not in docs
+    assert "native Claude Code also stages LSP servers" in docs and "Monitors are never staged" in docs
+    assert "The init event does not report hooks, output styles, LSP servers, settings," in docs
+    # Rules live outside the plugin, and wrapper mode stages a member skill's frontmatter hooks.
+    assert "Rules are user rules outside the plugin and stay `listed` either way." in docs
+    assert "(a member skill's frontmatter hooks are the exception;" in docs

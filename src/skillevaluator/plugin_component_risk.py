@@ -353,6 +353,11 @@ _ROOT_ALIAS_ASSIGNMENT_RE = re.compile(
 _OPAQUE_VARIABLES_RE = re.compile(
     rf"[()`]|(?<!\$)\{{|(?<!<)<<(?!<)|(?<![\w.-])eval(?![\w.-])|{_SOURCE_COMMAND}[ \t]", re.MULTILINE
 )
+# Shell words that open, continue, or close a compound command: an assignment inside 'if ...; then' or
+# 'while ...; do' may never run, so a command with one resolves no variable either.
+_COMPOUND_COMMAND_WORDS = frozenset(
+    {"if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "select", "case", "esac"}
+)
 # Shell text as quoting segments: a single- or double-quoted string, an escape, other text, or a lone quote
 # (unbalanced quoting).
 _QUOTING_SEGMENT_RE = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*"|\\.|[^'"\\]+|.""", re.DOTALL)
@@ -3081,7 +3086,8 @@ class HookAnalyzer:
         env prefix, a pipeline stage, a background job, or after ``&&`` / ``||``), before every use, of a variable
         the shell does not set itself, that the text names nowhere else but as ``$R`` / ``${R}`` outside single
         quotes. A command with a subshell, group, command substitution, heredoc, ``eval``, or ``source`` resolves
-        no variable: those can set one without naming it.
+        no variable: those can set one without naming it. Nor does one with a compound command (``if``, ``while``,
+        ``for``, ``case``): an assignment inside it may never run.
         """
         if "=" not in text or "$" not in text or _OPAQUE_VARIABLES_RE.search(text):
             return {}
@@ -3103,6 +3109,9 @@ class HookAnalyzer:
         candidates: dict[str, tuple[str, int] | None] = {}
         previous = 0
         for command in _SHELL_COMMAND_RE.finditer(text):
+            words = command.group(0).split(maxsplit=1)
+            if words and words[0] in _COMPOUND_COMMAND_WORDS:
+                return {}
             gap, previous = text[previous : command.start()], command.end()
             assignment = _ROOT_ALIAS_ASSIGNMENT_RE.fullmatch(command.group(0))
             if assignment is None:

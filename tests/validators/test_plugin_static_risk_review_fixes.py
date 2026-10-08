@@ -497,6 +497,8 @@ def test_scripts_named_through_a_root_variable_are_analyzed(tmp_path: Path) -> N
         'R="${CLAUDE_PLUGIN_ROOT}" "$R/scripts/run_python" "$R/scripts/record.py"',
         f'R="${{CLAUDE_PLUGIN_ROOT}}" | true; {_RUN_RECORD}',
         f'(R="${{CLAUDE_PLUGIN_ROOT}}"); {_RUN_RECORD}',
+        f'if false; then\nR="${{CLAUDE_PLUGIN_ROOT}}"\nfi\n{_RUN_RECORD}',
+        f'while false; do\nR="${{CLAUDE_PLUGIN_ROOT}}"\ndone\n{_RUN_RECORD}',
         f'R="${{CLAUDE_PLUGIN_ROOT}}"; eval "$X"; {_RUN_RECORD}',
         f'{_RUN_RECORD}; R="${{CLAUDE_PLUGIN_ROOT}}"',
         f"R='${{CLAUDE_PLUGIN_ROOT}}'; {_RUN_RECORD}",

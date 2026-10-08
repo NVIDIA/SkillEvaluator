@@ -27,6 +27,7 @@ from skillevaluator.constants import (
     LIFT_BOOTSTRAP_CONFIDENCE,
     LIFT_BOOTSTRAP_RESAMPLES,
     LIFT_BOOTSTRAP_SEED,
+    LIFT_BOOTSTRAP_TAIL_RESAMPLES,
     LIFT_CI_LOW_PRECISION_WIDTH,
     LIFT_CI_MIN_PAIRED_CASES,
     TOKEN_EFFICIENCY_HALF_LIFE,
@@ -345,7 +346,11 @@ def paired_case_bootstrap(
     replacement from a ``random.Random(seed)`` stream, so the interval is fully
     deterministic for a given input. The percentiles are widened for small n
     (:func:`expanded_tail`), because a plain percentile bootstrap over 5-10
-    cases is overconfident.
+    cases is overconfident. ``resamples`` is a minimum: with at least
+    ``LIFT_CI_MIN_PAIRED_CASES`` cases, enough are drawn that each bound rests on
+    ``LIFT_BOOTSTRAP_TAIL_RESAMPLES`` resampled means, so the bounds do not move
+    with the seed. With fewer cases the bounds are the extreme resampled means,
+    which the minimum already reaches.
     """
     if resamples < 1:
         raise ValueError("resamples must be positive")
@@ -374,9 +379,11 @@ def paired_case_bootstrap(
         result["estimate"] = round(deltas[0], 4)
         return result
 
+    tail = expanded_tail(n_cases, confidence)
+    if n_cases >= LIFT_CI_MIN_PAIRED_CASES:
+        resamples = max(resamples, math.ceil(LIFT_BOOTSTRAP_TAIL_RESAMPLES / tail))
     rng = random.Random(seed)
     means = sorted(math.fsum(rng.choices(deltas, k=n_cases)) / n_cases for _ in range(resamples))
-    tail = expanded_tail(n_cases, confidence)
     ci_low = _percentile(means, tail)
     ci_high = _percentile(means, 1.0 - tail)
     rounded_low = round(ci_low, 4)
@@ -386,6 +393,7 @@ def paired_case_bootstrap(
             "estimate": round(math.fsum(deltas) / n_cases, 4),
             "ci_low": rounded_low,
             "ci_high": rounded_high,
+            "resamples": resamples,
             "precision": lift_precision(n_cases, ci_low, ci_high),
             "ci_includes_zero": rounded_low <= 0.0 <= rounded_high,
         }

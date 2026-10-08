@@ -3231,11 +3231,11 @@ class SecurityValidator(ValidatorBase):
             if line_num in comment_lines:
                 continue
 
-            scan_line = line
+            matches = list(regex.finditer(line))
             if category == "emails" and (author_email := author_emails.get(line_num)):
-                scan_line = re.sub(re.escape(author_email), "author@example.com", line, count=1, flags=re.IGNORECASE)
-
-            matches = list(regex.finditer(scan_line))
+                # Exempt one address equal to the author email, not the first text that contains it ('xa@corp.com').
+                exempt = next((match for match in matches if match.group().casefold() == author_email.casefold()), None)
+                matches = [match for match in matches if match is not exempt]
             if not matches or any(exc in line for exc in exceptions):
                 continue
             if category == "ip_addresses":

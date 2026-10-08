@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from skillevaluator.plugin_components import summarize_coverage
-from skillevaluator.tier3.eval_core.plugin_signals import build_plugin_signals_context, compute_plugin_signals
+from skillevaluator.tier3.eval_core.plugin_signals import (
+    build_plugin_signals_context,
+    compute_plugin_signals,
+    summarize_plugin_signals,
+)
 from skillevaluator.tier3.harbor.adapter import PLUGIN_RUNTIME_COMPONENTS_FILENAME, load_plugin_runtime_components
 from skillevaluator.tier3.plugin_eval import PLUGIN_RUNTIME_COMPONENTS_FILENAME as PLUGIN_EVAL_FILENAME
 from skillevaluator.tier3.plugin_runtime import apply_runtime_coverage, apply_runtime_evidence
@@ -325,3 +329,42 @@ def test_a_bare_builtin_agent_name_never_counts_as_the_plugin_agent_of_that_name
         assert plugin_agent["routing"]["recall"] == 1.0, (agent, subagent)
     # A ref to a built-in the plugin does not declare still names it.
     assert _signals("claude-code", "Agent", "general-purpose", "Agent:general-purpose")["routing"]["recall"] == 1.0
+
+
+def _failed_call(step: int, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    call = _call(step, name, args)
+    call["observation"]["results"][0].update(content="Agent type not found", is_error=True)
+    return call
+
+
+def test_a_claude_code_agent_call_that_names_the_subagent_by_type_exercises_it() -> None:
+    # Claude Code 2.1.29x's Agent tool takes the subagent name as "type", not "subagent_type".
+    context = build_plugin_signals_context(subagents=["lab-reviewer", "explore"], plugin_name="component-lab")
+    args = {"type": "component-lab:lab-reviewer", "prompt": "Review the sentence for clarity."}
+
+    def _summary(*steps: dict[str, Any]) -> dict[str, Any]:
+        trajectory = {"agent": {"name": "claude-code"}, "steps": list(steps)}
+        signals = compute_plugin_signals(
+            trajectory, {"expected_tools": ["Agent:lab-reviewer"]}, declared=context.declared_for("with_skill")
+        )
+        assert signals is not None
+        return signals
+
+    signals = _summary(_call(1, "Agent", args))
+    assert signals["activation_coverage"]["exercised"] == ["subagent:lab-reviewer"]
+    assert signals["routing"]["recall"] == 1.0
+    engine = {
+        "agents": {"claude-code": {"plugin_signals_summary": {"with_skill": summarize_plugin_signals([signals])}}}
+    }
+    provenance = _provenance([_row("agent", "lab-reviewer", "loaded")])
+    assert apply_runtime_coverage(provenance, engine) == 1
+    assert _states(provenance) == {"lab-reviewer": "exercised"}
+
+    # A failed call is not credited, the existing keys still come first, and a
+    # bare built-in name still reaches Claude Code's own agent.
+    failed = _summary(_failed_call(1, "Agent", args))["activation_coverage"]
+    assert failed["exercised"] == [] and failed["unavailable"] == ["subagent:lab-reviewer"]
+    first = _summary(_call(1, "Task", {"subagent_type": "lab-reviewer", "type": "general-purpose"}))
+    assert first["activation_coverage"]["exercised"] == ["subagent:lab-reviewer"]
+    builtin = _summary(_call(1, "Agent", {"type": "Explore", "prompt": "Find the notes."}))
+    assert builtin["activation_coverage"]["exercised"] == []

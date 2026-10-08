@@ -2660,7 +2660,7 @@ Each tool call maps to zero or more component **activations**:
 | --- | --- |
 | `skill` | The `Skill` tool, or a read of a declared member's `SKILL.md`. The read can be a file-read tool, an MCP filesystem read, or a shell reader such as `cat`, `sed`, or `head` with the manifest as an operand. `rm`, `ls`, `grep`, `cp`, `sed -i`, or `<` input to a non-reader (`grep x < SKILL.md`) does not count. In a shell list, a read that never ran (after a failed `&&` part) does not count, and a read whose own error line names it (`cat: .../SKILL.md: No such file or directory`) is a failed activation |
 | `mcp` | `mcp__<server>__<tool>`. For declared runnable servers, `<server>__<tool>`, `<server>.<tool>`, and `<server>/<tool>` are also recognized and normalized |
-| `subagent` | `Task` or `Agent` calls |
+| `subagent` | `Task` or `Agent` calls. The name comes from `subagent_type` (or `subagent`, `agent`, `agent_name`, `agent_type`), else from `type`, where Claude Code's `Agent` tool puts it |
 | `command` | `SlashCommand` calls |
 | `rule_read` | Reserved and never emitted. Rules are embedded in the wrapper, so there is no separate rule file to read |
 

@@ -32,7 +32,7 @@ Each normalized tool call is mapped to zero or more component activations:
   Code's plugin servers (``mcp__plugin_<plugin>_<server>__<tool>``) and
   harness-sanitized names map back to the declared server; Codex bare tool
   names map through the server its log recorded (``mcp_call_servers``).
-* ``subagent`` -- ``Task``/``Agent`` (name from ``subagent_type``...).
+* ``subagent`` -- ``Task``/``Agent`` (name from ``subagent_type``..., else ``type``).
 * ``command``  -- ``SlashCommand`` (name from the first token of ``command``),
   or the ``Skill`` tool naming a declared command (``<plugin>:<command>``),
   which is how Claude Code runs plugin commands.
@@ -2614,7 +2614,8 @@ def _identities(
             persist = _persistable_name(name, declared.get(COMPONENT_SKILL) or ())
             idents.append(_component_ident(COMPONENT_SKILL, name, fn, fn, persist=persist, **named))
     elif low in _SUBAGENT_TOOLS:
-        name = _first_string(args, ("subagent_type", "subagent", "agent", "agent_name", "agent_type"))
+        # Claude Code 2.1.29x's Agent tool names the subagent in ``type`` (read for these tools only).
+        name = _first_string(args, ("subagent_type", "subagent", "agent", "agent_name", "agent_type", "type"))
         # A harness that renamed a plugin agent when staging it calls it by the staged name.
         alias = (subagent_aliases or {}).get(name.casefold())
         persist = _persistable_name(name, ())

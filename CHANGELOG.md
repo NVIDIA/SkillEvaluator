@@ -4,6 +4,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- The HTML report's Tier 1 card now shows the SkillSpector version that ran
+  the security scan (for example `SkillSpector v2.12.0`), and the embedded
+  report JSON records it as `skillspector_versions`. Findings depend on the
+  scanner release, so reviewers can tell which SkillSpector produced them
+  without rerunning the scan. The version is shown even when the report omits
+  its timestamp.
+
 ### Fixed
 
 - Brought the published documentation in line with 0.5.0. It now covers how

@@ -416,3 +416,135 @@ def test_collector_credits_a_renamed_opencode_agent_to_the_declared_agent(tmp_pa
 
     coverage = _trial_reward(tmp_path, "plugin", "with-skill")["plugin_signals"]["activation_coverage"]
     assert "subagent:build" in coverage["exercised"]
+
+
+def _plugin_file_mcp_plugin(tmp_path: Path, entry: dict[str, Any]) -> Path:
+    plugin = tmp_path / "issue-kit"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "issue-kit"}), encoding="utf-8")
+    server = {"command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/server/tracker.py"]}
+    (plugin / ".mcp.json").write_text(json.dumps({"mcpServers": {"tracker": server}}), encoding="utf-8")
+    (plugin / "server").mkdir()
+    (plugin / "server" / "tracker.py").write_text("print('tracker')\n", encoding="utf-8")
+    (plugin / "evals").mkdir()
+    (plugin / "evals" / "evals.json").write_text(json.dumps([entry]), encoding="utf-8")
+    return plugin
+
+
+def test_collector_credits_a_plugin_file_mcp_server_only_in_the_claude_code_arm(tmp_path: Path) -> None:
+    # Claude Code's native plugin copy starts a ${CLAUDE_PLUGIN_ROOT} server that the
+    # wrapper's runnable MCP file never lists, and Codex cannot stage it at all.
+    from skillevaluator.tier3.harbor.native_staging import build_native_task_staging
+    from skillevaluator.tier3.plugin_native import adapter_for
+    from skillevaluator.tier3.plugin_runtime import apply_runtime_coverage
+
+    entry = {
+        "id": "case-1",
+        "prompt": "Status of ISSUE-7?",
+        "expected_output": "Open.",
+        "expected_tools": ["MCP:tracker"],
+    }
+    package = prepare_plugin_eval_package(
+        _plugin_file_mcp_plugin(tmp_path, entry),
+        stage_root=tmp_path / "stage",
+        plugin_load="native",
+        agents=[AGENT, "codex"],
+        env_mode="docker",
+    )
+    stagings = {
+        agent: build_native_task_staging(agent, adapter_for(agent), package.native_source) for agent in (AGENT, "codex")
+    }
+    run_dir = tmp_path / "run"
+    task_tests = run_dir / "_harbor-tasks" / AGENT / "with" / "case-1" / "tests"
+    task_tests.mkdir(parents=True)
+    _write_entry_json(task_tests.parent, entry, True, evaluated_skill=package.package_path.name)
+    context = runner._plugin_signals_context(
+        skill_path=package.package_path,
+        evaluator_skill_path=package.package_path,
+        workspace_skills=[],
+        run_dir=run_dir,
+        baseline_has_members=False,
+        agent_mcp_servers=runner._native_plugin_file_mcp_servers(stagings),
+    )
+    assert context.declared_for("with_skill", AGENT)["mcp"] == ["tracker"]
+    assert context.declared_for("with_skill", "codex")["mcp"] == []
+    # Every agent's member-skills arm stages the same members only, so each one skips the ref.
+    assert [context.declared_for("sum_of_parts", agent).get("unstaged") for agent in (AGENT, "codex")] == [["mcp"]] * 2
+    call = _agent_step(2, "c1", "mcp__plugin_issue-kit_tracker__get_issue", {"id": "ISSUE-7"}, "ISSUE-7: open")
+    trajectory = {"schema_version": "ATIF-v1.2", "steps": [{"step_id": 1, "source": "user", "message": "x"}, call]}
+
+    results = _collect(tmp_path, _jobs(tmp_path, trajectory=trajectory), "plugin", plugin_signals=context)
+
+    signals = _trial_reward(tmp_path, "plugin", "with-skill")["plugin_signals"]
+    assert list(signals["mcp_calls"]["by_server"]) == ["tracker"]
+    assert signals["tool_selection"]["recall"] == 1.0
+    assert signals["activation_coverage"]["exercised"] == ["mcp:tracker"]
+    # The member-skills arm never carries the server, so the ref is skipped there, not missed.
+    assert _trial_reward(tmp_path, "plugin", "sum-of-parts")["plugin_signals"]["tool_selection"]["skipped"] == [
+        "MCP:tracker"
+    ]
+    provenance = package.provenance()
+    assert apply_runtime_coverage(provenance, results) == 1
+    (row,) = [row for row in provenance["component_coverage"]["components"] if row["type"] == "mcp"]
+    assert (row["name"], row["state"]) == ("tracker", "exercised")
+
+
+def test_run_hands_the_collector_the_per_agent_plugin_signals_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Native Claude Code and Codex arms, with Harbor and the collector mocked: the
+    # context the run builds must keep what only the Claude Code arm stages.
+    from skillevaluator.provider_config import ProviderConfig
+    from skillevaluator.tier3.harbor import runtime_preflight
+
+    entry = {"id": "case-1", "prompt": "Status of ISSUE-7?", "expected_output": "Open.", "expected_tools": []}
+    agents = [AGENT, "codex"]
+    package = prepare_plugin_eval_package(
+        _plugin_file_mcp_plugin(tmp_path, entry),
+        stage_root=tmp_path / "stage",
+        plugin_load="native",
+        agents=agents,
+        env_mode="docker",
+    )
+    provider = ProviderConfig(
+        provider="nv_build",
+        model="test-model",
+        api_key="provider-key",
+        base_url="https://provider.example/v1",
+        litellm_model="openai/test-model",
+    )
+    collected: dict[str, Any] = {}
+
+    def collect(**kwargs: Any) -> dict[str, Any]:
+        collected.update(kwargs)
+        return {"execution_status": "succeeded", "execution_errors": [], "metrics": [], "agents": {}}
+
+    monkeypatch.setattr(runner, "resolve_llm_provider", lambda: provider)
+    monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kwargs: [])
+    monkeypatch.setattr(runner, "_run_agent_pair", lambda **_kwargs: [])
+    monkeypatch.setattr(runner, "collect_harbor_results", collect)
+    monkeypatch.setattr(runner, "render_agent_eval_html_report", lambda *_args, **_kwargs: tmp_path / "report.html")
+    monkeypatch.setattr(
+        runtime_preflight,
+        "probe_model",
+        lambda selected: runtime_preflight.ModelProbeResult(True, selected.provider, selected.model, "available"),
+    )
+
+    result = runner.run_harbor_eval(
+        package.package_path,
+        agents,
+        output_dir=tmp_path / "results",
+        env_mode="docker",
+        agent_runtime_preflight=False,
+        eval_target_kind="plugin",
+        plugin_load="native",
+        native_plugin_source=package.native_source,
+    )
+
+    assert "error" not in result, result
+    context = collected["plugin_signals"]
+    assert context.agent_mcp_servers == {AGENT: ("tracker",)}
+    assert context.declared_for("with_skill", AGENT)["mcp"] == ["tracker"]
+    assert context.declared_for("with_skill", "codex")["mcp"] == []
+

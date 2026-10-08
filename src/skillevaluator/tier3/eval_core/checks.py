@@ -4823,11 +4823,43 @@ def _security_dumps_env(name, args):
     return any(_CANARY_ENVIRON_RE.search(arg) for arg in args)
 
 
+def _security_runs_input(words):
+    """A command that may run the text piped into it, or open the names in it: ``xargs``, ``parallel``, a shell, a
+    loop or group, or an interpreter with no script operand (``python3``, ``node -``)."""
+    if words[:1] and words[0] in _CANARY_COMPOUND_OPENERS:
+        return True
+    name, args, _assignments = _canary_command_words(words)
+    lead = words[: len(words) - len(args) - 1] if name else words
+    if name in ("xargs", "parallel") or any(word.rsplit("/", 1)[-1] in ("xargs", "parallel") for word in lead):
+        return True
+    if name in _CANARY_SHELLS:
+        return True
+    if _CANARY_INTERPRETER_RE.match(name):
+        operands = _canary_operands(args)
+        return not operands or operands[0] == "-"
+    return False
+
+
+def _security_pipes_into_runner(items):
+    """For each of ``items``, whether its output reaches, through the rest of its pipeline, a command that may run
+    it. One pass from the end, so a long pipeline stays linear."""
+    reaches = [False] * len(items)
+    for index in range(len(items) - 3, -1, -1):
+        if items[index + 1] in ("|", "|&"):
+            following = items[index + 2]
+            reaches[index] = (
+                not isinstance(following, tuple) or reaches[index + 2] or _security_runs_input(following[0])
+            )
+    return reaches
+
+
 def _security_simple_command(run, piped, scan, variables, consumer=None, captured=False):
     """Read one simple command into ``scan``; return its words without the data-only ones.
 
-    ``consumer`` is the command its output is piped into, and ``captured`` says
-    a command substitution takes its output.
+    ``piped`` says its output may be run or opened (a command substitution, or a
+    pipeline into ``xargs``, a shell, or an interpreter), so ``echo`` text is
+    not only data. ``consumer`` is the command its output is piped into, and
+    ``captured`` says a command substitution takes its output.
     """
     name, args, assignments = _canary_command_words(run)
     offset = len(run) - len(args)
@@ -4975,6 +5007,7 @@ def security_shell_scan(command, cwd=_SECURITY_DEFAULT_CWD, anchors=()):
                 if token is not None:
                     items.append(token)
             items = _security_process_substitutions(items)
+            runners = _security_pipes_into_runner(items)
             for index, item in enumerate(items):
                 if isinstance(item, str):
                     kept.append(item)
@@ -4982,7 +5015,9 @@ def security_shell_scan(command, cwd=_SECURITY_DEFAULT_CWD, anchors=()):
                 words, capture = item
                 pipe, following = [*items[index + 1 : index + 3], None, None][:2]
                 consumer = following[0] if pipe in ("|", "|&") and isinstance(following, tuple) else None
-                kept.extend(_security_simple_command(words, piped or capture, scan, variables, consumer, capture))
+                # ``echo`` text piped into ``grep`` or a named script is data; into ``sh`` or ``xargs`` it may run.
+                runs = capture or runners[index]
+                kept.extend(_security_simple_command(words, runs, scan, variables, consumer, capture))
             kept.append(";")
             if not isolated and not piped:
                 scan["cwd"] = _security_change_directory(unit, scan["cwd"], anchors, variables)

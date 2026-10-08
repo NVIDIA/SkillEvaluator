@@ -229,6 +229,10 @@ def test_remote_destructive_git_and_piped_scripts_are_critical(scan, harness: st
         "d=$(mktemp -d); cd $d && git init -q && cd - && rm -rf $d",
         'tmp=$(mktemp -d)\npython3 -m venv "$tmp/venv"\nrm -rf "$tmp"',
         'd=`mktemp -d -t build.XXXX`; rm -rf "$d"',
+        # Text piped into a command that only reads it (a search, a named script) is data.
+        "echo 'rm -rf build' | grep -E 'rm\\s+-rf'",
+        "printf 'rm -rf build\\n' | grep -P 'rm\\s+-rf' && echo matched",
+        """echo '{"tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' | python3 hooks/pretooluse.py""",
         # chmod 777 is destructive on the root directory only.
         "chmod 777 /workspace/run.sh",
         "chmod -R 777 /workspace/out",
@@ -301,6 +305,10 @@ def test_verifier_main_ignores_the_skill_body_and_names_the_critical(tmp_path: P
         ("rm -rf /tmp/a ./build", True),
         ("cd /tmp && rm -rf build", False),
         ("echo it's \"unterminated", False),
+        # Text piped on to a command that runs it is a command.
+        ("echo 'import os; os.system(\"rm -rf /srv/data\")' | python3", True),
+        ("echo 'rm -rf /srv/data' | tee run.log | sh", True),
+        ("echo 'rm -rf /srv/data' | xargs -I{} sh -c '{}'", True),
         # mktemp puts a directory elsewhere with -p or a template that is not named with -t.
         ('d=$(mktemp -d -p data); rm -rf "$d"', True),
         ('d=$(mktemp -d build.XXXX); rm -rf "$d"', True),

@@ -2404,7 +2404,7 @@ _EVIDENCE_STRENGTH = {"loaded": 3, LISTED_KEY: 2, "staged": 1}
 #: Component types Claude Code's ``system/init`` event can confirm, and the
 #: types that live inside the plugin (rules are user rules, outside it).
 _CLAUDE_INIT_TYPES = frozenset({"skill", "agent", "command", "mcp"})
-_CLAUDE_PLUGIN_TYPES = frozenset({"skill", "agent", "command", "mcp", "hook", "output_style"})
+_CLAUDE_PLUGIN_TYPES = frozenset({"skill", "agent", "command", "mcp", "hook", "output_style", "lsp", "settings", "bin"})
 CLAUDE_INIT_SOURCE = "claude-code system/init event"
 
 
@@ -2587,8 +2587,11 @@ def apply_claude_init_evidence(
     ``<plugin>:<name>``; a plugin MCP server only when init reports
     ``plugin:<plugin>:<server>`` with status ``connected`` (``failed`` and
     ``pending`` become ``not_loaded`` with that status). When init does not
-    list the plugin at all, every plugin component is ``not_loaded``. Hooks,
-    output styles, and rules are not in the init event and keep their listing.
+    list the plugin at all, every plugin component is ``not_loaded``, including
+    the LSP servers, settings, and ``bin/`` staged in the plugin directory.
+    Hooks, output styles, LSP servers, settings, and ``bin/`` are not in the
+    init event, so with the plugin loaded they keep their listing. Rules are
+    user rules outside the plugin and keep their listing either way.
     """
     result = {
         key: [dict(entry) for entry in value] if isinstance(value, list) else value for key, value in census.items()

@@ -66,6 +66,24 @@ def test_unconfirmed_negative_lift_warns_but_never_gates(monkeypatch: pytest.Mon
     assert exit_code == 0
 
 
+def test_too_few_paired_cases_never_confirm_a_regression(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Two paired cases: the interval is only the spread of the resampled means, below zero or not.
+    interval = json.loads(json.dumps(EDGE05_INTERVAL))
+    interval["effectiveness"].update({"ci_low": -0.3, "ci_high": -0.12, "n_cases": 2, "precision": "insufficient"})
+    tier3 = tier3_result(EDGE05_WITH, EDGE05_WITHOUT, lift_uncertainty=interval)
+
+    exit_code, report, benchmark, _footer = run_validate(monkeypatch, tmp_path, tier3, "--block-on-agent-eval")
+
+    payload = report["tier3"]
+    assert payload["lift_band"]["verdict"] == "fail"
+    assert payload["lift_band"]["regression_confirmed"] is False
+    assert payload["lift_band"]["precision"] == "insufficient"
+    warnings = [item for item in payload["conclusions"] if item.get("title") == "Negative Skill Lift"]
+    assert warnings and "fewer than 5 paired cases" in warnings[0]["message"]
+    assert "Skill Lift regression" not in benchmark
+    assert exit_code == 0
+
+
 def test_integration_only_lift_is_not_a_skill_lift_band(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     run_config = {
         "eval_target": {"kind": "plugin"},

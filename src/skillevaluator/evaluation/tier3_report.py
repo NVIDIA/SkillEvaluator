@@ -3209,7 +3209,10 @@ def _lift_band(
 
     A lift at or below the FAIL threshold whose paired-case interval lies wholly
     below zero is a confirmed regression: it adds a warning and fails
-    ``validate --block-on-agent-eval``. The dimension verdict is unchanged. An
+    ``validate --block-on-agent-eval``. An interval over fewer than
+    ``LIFT_CI_MIN_PAIRED_CASES`` paired cases (precision ``insufficient``) is
+    too unstable to confirm one, as for the Integration lift. The dimension
+    verdict is unchanged. An
     Integration-only plugin run has no no-plugin arm (its lift compares the
     plugin with its own parts, which stays advisory), so it gets no band.
     """
@@ -3223,6 +3226,7 @@ def _lift_band(
     ci_low = _finite_float(entry.get("ci_low"))
     ci_high = _finite_float(entry.get("ci_high"))
     has_interval = ci_low is not None and ci_high is not None
+    precision = entry.get("precision") if has_interval and isinstance(entry.get("precision"), str) else None
     verdict = _verdict_from_lift(lift)
     return {
         "verdict": verdict,
@@ -3230,9 +3234,12 @@ def _lift_band(
         "ci_low": ci_low if has_interval else None,
         "ci_high": ci_high if has_interval else None,
         "confidence": (_finite_float(entry.get("confidence")) or 0.95) if has_interval else None,
+        "precision": precision,
         "pass_threshold": TIER3_LIFT_PASS_THRESHOLD,
         "fail_threshold": TIER3_LIFT_FAIL_THRESHOLD,
-        "regression_confirmed": bool(verdict == VERDICT_FAIL and has_interval and ci_high < 0),
+        "regression_confirmed": bool(
+            verdict == VERDICT_FAIL and has_interval and ci_high < 0 and precision != "insufficient"
+        ),
     }
 
 
@@ -3261,11 +3268,12 @@ def _lift_band_conclusion(band: dict[str, Any] | None) -> dict[str, str] | None:
                 "unchanged; validate --block-on-agent-eval fails on this regression."
             ),
         }
-    reason = (
-        "its interval includes zero"
-        if band.get("ci_low") is not None and band.get("ci_high") is not None
-        else "no paired-case interval was computed"
-    )
+    if band.get("ci_low") is None or band.get("ci_high") is None:
+        reason = "no paired-case interval was computed"
+    elif band.get("precision") == "insufficient":
+        reason = f"its interval rests on fewer than {LIFT_CI_MIN_PAIRED_CASES} paired cases"
+    else:
+        reason = "its interval includes zero"
     return {
         "severity": "warn",
         "title": "Negative Skill Lift",

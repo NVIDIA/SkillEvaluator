@@ -663,6 +663,7 @@ def evaluate(
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
+    trial_retries: int = 0,
     evaluated_source: dict[str, str] | None = None,
     progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
@@ -752,6 +753,7 @@ def evaluate(
             env_mode_source="CLI",
             environment_kwargs=environment_kwargs,
             timeout_multiplier=timeout_multiplier,
+            trial_retries=trial_retries,
             evaluated_source=evaluated_source,
             override_cpus=override_cpus,
             override_memory_mb=override_memory_mb,

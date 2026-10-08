@@ -86,6 +86,7 @@ from skillevaluator.tier3.harbor.collector import (
     TRUNCATED_AGGREGATE_ATTEMPT_PREFIX,
     collect_harbor_results,
     harbor_job_passed,
+    harbor_job_retries,
     validate_harbor_job_result,
 )
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_definition
@@ -134,7 +135,9 @@ from skillevaluator.tier3_environments import (
     HARBOR_ENVIRONMENT_ALIAS_KWARGS,
     HARBOR_ENVIRONMENT_EXTRAS,
     HARBOR_ENVIRONMENT_KWARGS,
+    HARBOR_TRIAL_RETRY_EXCEPTIONS,
     HARBOR_VERSION,
+    MAX_TRIAL_RETRIES,
     harbor_environment_type,
 )
 from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_text
@@ -1347,6 +1350,13 @@ def _validated_timeout_multiplier(value: object) -> float:
     return normalized
 
 
+def _validated_trial_retries(value: object) -> int:
+    """Return one Harbor retry budget per trial accepted by every entry point."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_TRIAL_RETRIES:
+        raise ValueError(f"trial_retries must be an integer from 0 to {MAX_TRIAL_RETRIES}")
+    return value
+
+
 def _validated_pass_threshold(value: object) -> float:
     """Return one finite unit-interval attempt threshold."""
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -1395,6 +1405,7 @@ def build_harbor_run_command(
     model: str | None = None,
     jobs_dir: Path | None = None,
     timeout_multiplier: float = 1.0,
+    trial_retries: int = 0,
     disable_verification: bool = False,
     include_task_names: list[str] | None = None,
     override_cpus: int | None = None,
@@ -1408,6 +1419,7 @@ def build_harbor_run_command(
     if env_mode not in HARBOR_ENV_MODES:
         raise ValueError(f"env_mode must be one of: {', '.join(sorted(HARBOR_ENV_MODES))}")
     timeout_multiplier = _validated_timeout_multiplier(timeout_multiplier)
+    trial_retries = _validated_trial_retries(trial_retries)
     if (
         agent_import_path
         and env_mode not in {"docker", ENV_MODE_LOCAL}
@@ -1492,6 +1504,12 @@ def build_harbor_run_command(
         command.extend(["--model", model])
     if timeout_multiplier != 1.0:
         command.extend(["--timeout-multiplier", str(timeout_multiplier)])
+    if trial_retries:
+        # Harbor retries every exception it does not exclude unless an include
+        # list is given, so the list is what limits retries to infrastructure.
+        command.extend(["--max-retries", str(trial_retries)])
+        for exception_name in HARBOR_TRIAL_RETRY_EXCEPTIONS:
+            command.extend(["--retry-include", exception_name])
     if override_cpus is not None:
         command.extend(["--override-cpus", str(override_cpus)])
     if override_memory_mb is not None:
@@ -2577,6 +2595,34 @@ def _workspace_skills(skill_path: Path, values: list[str | Path]) -> list[Path]:
     return resolved
 
 
+def _separate_verifier_task(task_roots: list[Path]) -> Path | None:
+    """Return a staged single-step task whose verifier runs in its own environment.
+
+    Harbor 0.24 raises ``EnvironmentStartTimeoutError`` both when the agent's
+    environment fails to start and when such a task's verifier environment does,
+    after the agent has run, and retries a trial by that name alone. A multi-step
+    task records a step's verifier failure on the step, which Harbor never retries.
+    """
+    from harbor.models.task.config import TaskConfig
+    from harbor.models.task.verifier_mode import VerifierEnvironmentMode, resolve_task_verifier_mode
+
+    for root in task_roots:
+        for task_file in sorted(root.glob("*/task.toml")):
+            try:
+                task_config = TaskConfig.model_validate_toml(task_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                # Harbor rejects the same file when it loads the task.
+                continue
+            if not task_config.steps and resolve_task_verifier_mode(task_config) == VerifierEnvironmentMode.SEPARATE:
+                return task_file
+    return None
+
+
+def _record_trial_retries_used(run_config: dict[str, Any], jobs_dir: Path, job_names: list[str]) -> None:
+    """Record in the run configuration how many trial retries Harbor performed."""
+    run_config["harbor"]["trial_retries_used"] = sum(harbor_job_retries(jobs_dir / name) for name in job_names)
+
+
 def _task_timeout_plan(task_roots: list[Path], timeout_multiplier: float) -> float | None:
     """Return the largest staged agent timeout after applying Harbor scaling."""
     timeouts: list[float] = []
@@ -3037,6 +3083,7 @@ def _run_harbor(
     expected_trials: int | None = None,
     expected_total_trials: int | None = None,
     include_task_names: list[str] | None = None,
+    trial_retries: int = 0,
 ) -> tuple[bool, str]:
     # Preserve the historical exact-value protection for every selected child
     # value, and additionally protect detached credential URI/proxy userinfo
@@ -3053,6 +3100,7 @@ def _run_harbor(
         model=model,
         jobs_dir=jobs_dir,
         timeout_multiplier=timeout_multiplier,
+        trial_retries=trial_retries,
         include_task_names=include_task_names,
         override_cpus=override_cpus,
         override_memory_mb=override_memory_mb,
@@ -3544,6 +3592,7 @@ def _run_stop_on_pass_variant(
     agent_import_path: str | None = None,
     verifier_env: Mapping[str, str] | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
+    trial_retries: int = 0,
 ) -> list[str]:
     """Run each case one attempt at a time, stopping its attempts on first pass."""
     errors: list[str] = []
@@ -3570,6 +3619,7 @@ def _run_stop_on_pass_variant(
                 environment_kwargs=environment_kwargs,
                 expected_trials=1,
                 include_task_names=[task_name],
+                trial_retries=trial_retries,
             )
             job_dir = jobs_dir / job_name
             attempt_job_dirs.append(job_dir)
@@ -3612,6 +3662,7 @@ def _run_agent_pair(
     verifier_env: Mapping[str, str] | None = None,
     with_agent_import_path: str | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
+    trial_retries: int = 0,
 ) -> list[str]:
     """Launch the with-skill arm and its baselines for one agent.
 
@@ -3649,6 +3700,7 @@ def _run_agent_pair(
                     agent_import_path=variant_import_path,
                     verifier_env=verifier_env,
                     environment_kwargs=environment_kwargs,
+                    trial_retries=trial_retries,
                 )
             except Exception as exc:
                 if variant not in _REPORT_ONLY_VARIANTS:
@@ -3688,6 +3740,7 @@ def _run_agent_pair(
                 verifier_env=verifier_env,
                 environment_kwargs=environment_kwargs,
                 expected_trials=expected_trials,
+                trial_retries=trial_retries,
             ): variant
             for (variant, dataset, variant_import_path), condition_concurrency in zip(
                 jobs, job_concurrency, strict=True
@@ -3871,6 +3924,7 @@ def _run_harbor_eval_impl(
     env_mode_source: str = "CLI",
     environment_kwargs: Mapping[str, Any] | None = None,
     timeout_multiplier: float | None = None,
+    trial_retries: int = 0,
     override_cpus: int | None = None,
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
@@ -3973,6 +4027,11 @@ def _run_harbor_eval_impl(
         timeout_multiplier = _validated_timeout_multiplier(timeout_multiplier)
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid timeout multiplier"))
+        return {"error": [str(exc)]}
+    try:
+        trial_retries = _validated_trial_retries(trial_retries)
+    except ValueError as exc:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid trial retries"))
         return {"error": [str(exc)]}
     try:
         pass_threshold = _validated_pass_threshold(pass_threshold)
@@ -4314,6 +4373,9 @@ def _run_harbor_eval_impl(
             "stop_on_pass": bool(stop_on_pass),
             "n_concurrent": n_concurrent,
             "timeout_multiplier": timeout_multiplier,
+            "trial_retries": trial_retries,
+            # Retries Harbor performed, counted from its job results once the jobs ran.
+            "trial_retries_used": 0,
             "base_image_mode": base_image_mode,
             "jobs_retained": keep_harbor_jobs,
         },
@@ -4662,6 +4724,18 @@ def _run_harbor_eval_impl(
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid staged timeout"))
         return _persist_pre_execution_failure([str(exc)])
+    if trial_retries and (
+        separate_verifier_task := _separate_verifier_task(
+            [path for paths in agent_task_dirs.values() for path in paths if path is not None]
+        )
+    ):
+        detail = (
+            "trial_retries is not supported for a single-step task that verifies in a separate environment: "
+            "Harbor names that environment's start timeout EnvironmentStartTimeoutError, as it does the agent "
+            f"environment's, so a retry could rerun an agent that already finished: {separate_verifier_task}"
+        )
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="trial retries unsupported"))
+        return _persist_pre_execution_failure([detail])
     reporter.start(
         Tier3RunPlan(
             skill_name=skill_path.name,
@@ -4695,8 +4769,10 @@ def _run_harbor_eval_impl(
                 detail="image preparation delegated to Harbor during task execution",
             )
         )
+    # The Harbor jobs this run launches, read back for the retries Harbor performed.
+    harbor_job_names: list[str] = []
     if agent_runtime_preflight:
-        from skillevaluator.tier3.harbor.runtime_preflight import run_agent_runtime_preflight
+        from skillevaluator.tier3.harbor.runtime_preflight import preflight_job_name, run_agent_runtime_preflight
 
         reporter.emit(ProgressEvent(stage="agent-runtime-preflight", state="running"))
         preflight_errors: list[str] = []
@@ -4714,9 +4790,12 @@ def _run_harbor_eval_impl(
                 override_storage_mb=override_storage_mb,
                 agent_import_path=with_agent_import_paths.get(agent) or agent_import_paths.get(agent),
                 environment_kwargs=effective_environment_kwargs,
+                trial_retries=trial_retries,
             )
+            harbor_job_names.append(preflight_job_name(agent))
             if not preflight.ok:
                 preflight_errors.append(f"{agent} runtime preflight failed: {preflight.detail}")
+        _record_trial_retries_used(run_config, jobs_dir, harbor_job_names)
         if preflight_errors:
             detail = "; ".join(preflight_errors)
             reporter.emit(ProgressEvent(stage="agent-runtime-preflight", state="failed", detail=detail))
@@ -4767,6 +4846,7 @@ def _run_harbor_eval_impl(
             task_names=task_selectors,
             verifier_env=job_judge_verifier_env,
             environment_kwargs=effective_environment_kwargs,
+            trial_retries=trial_retries,
         )
 
     active_agents: set[str] = set()
@@ -4821,6 +4901,15 @@ def _run_harbor_eval_impl(
             reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="failed", detail="agent execution interrupted"))
         _emit_run_finished("failed", "agent execution failed")
         raise unexpected_worker_error
+
+    # A stop-on-pass arm's merged job sums the retries of its per-attempt jobs.
+    harbor_job_names.extend(
+        f"{skill_path.name}-{agent}-{variant}"
+        for agent in agents
+        for variant, dataset in zip(("with", "without", _SUM_OF_PARTS_VARIANT), agent_task_dirs[agent], strict=True)
+        if dataset is not None
+    )
+    _record_trial_retries_used(run_config, jobs_dir, harbor_job_names)
 
     reporter.emit(ProgressEvent(stage="collection", state="running"))
     plugin_signals = (

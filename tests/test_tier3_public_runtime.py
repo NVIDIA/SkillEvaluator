@@ -2451,6 +2451,7 @@ def test_native_harbor_metadata_entry_id_seam_across_runner_collector_and_datase
         verifier_env: object = None,
         include_task_names: list[str] | None = None,
         environment_kwargs: object = None,
+        trial_retries: int = 0,
     ) -> tuple[bool, str]:
         from datetime import UTC, datetime
         from uuid import uuid4

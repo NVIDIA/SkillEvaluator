@@ -88,12 +88,17 @@ class TrialObservation:
 
 @dataclass(frozen=True)
 class ArmObservations:
-    """All logical attempts of one evaluation arm, in attempt order per case."""
+    """All logical attempts of one evaluation arm, in attempt order per case.
+
+    ``unscored`` holds the attempts with no score (a judge error, say). They
+    feed only statistics that read usage, such as the measured context cost.
+    """
 
     execution_status: str
     trials: Sequence[TrialObservation] = ()
     pass_summary: Mapping[str, Any] = field(default_factory=dict)
     job_failure: str = ""
+    unscored: Sequence[TrialObservation] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -631,9 +636,10 @@ def context_cost_measured(
     The first LLM turn carries the always-on context (system prompt, skill and
     rule preambles, tool schemas) before task work starts, so the paired delta
     measures what the plugin adds to every request. Every trial with a count
-    is used, also in an arm that failed elsewhere (a judge error does not
-    change a token count). Trials without a count, and trials whose first call
-    ran a hosted web search, are left out and the result says ``partial``.
+    is used, also one with no score or in an arm that failed elsewhere (a
+    judge error does not change a token count). Trials without a count, and
+    trials whose first call ran a hosted web search, are left out and the
+    result says ``partial``.
     Fewer than :data:`CONTEXT_COST_MIN_PAIRED_CASES` pairs give ``insufficient``.
     """
     result: dict[str, Any] = {
@@ -649,8 +655,8 @@ def context_cost_measured(
     if with_arm is None or without_arm is None or without_arm.execution_status == "skipped":
         result["reason"] = "No baseline (without) arm was run."
         return result
-    with_turns = _case_first_turn_tokens(with_arm.trials)
-    without_turns = _case_first_turn_tokens(without_arm.trials)
+    with_turns = _case_first_turn_tokens((*with_arm.trials, *with_arm.unscored))
+    without_turns = _case_first_turn_tokens((*without_arm.trials, *without_arm.unscored))
     result["excluded"] = {
         "hosted_search": with_turns.hosted_search + without_turns.hosted_search,
         "missing_tokens": with_turns.missing + with_turns.no_usage + without_turns.missing + without_turns.no_usage,

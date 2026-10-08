@@ -53,7 +53,9 @@ LOG_JWT_RE = re.compile(
 LOG_GITHUB_TOKEN_RE = re.compile(r"\b(?P<prefix>gh[pousr]_)[A-Za-z0-9]{36,255}\b")
 LOG_GITHUB_PAT_RE = re.compile(r"\b(?P<prefix>github_pat_)[A-Za-z0-9_]{22,255}\b")
 LOG_GITLAB_PAT_RE = re.compile(r"\b(?P<prefix>glpat-)[A-Za-z0-9_-]{20,255}")
-LOG_SLACK_TOKEN_RE = re.compile(r"\b(?P<prefix>xox[abeprs]-)[A-Za-z0-9-]{10,255}")
+# A Slack body also takes "_": stopping there left a token glued on after a "-" ("xoxb-1-ghp_<body>") with its
+# prefix read into the Slack body and its own body in clear.
+LOG_SLACK_TOKEN_RE = re.compile(r"\b(?P<prefix>xox[abeprs]-)[A-Za-z0-9_-]{10,255}")
 LOG_HUGGING_FACE_TOKEN_RE = re.compile(r"\b(?P<prefix>hf_)[A-Za-z0-9]{30,255}")
 LOG_NPM_TOKEN_RE = re.compile(r"\b(?P<prefix>npm_)[A-Za-z0-9]{36}\b")
 LOG_PREFIXED_TOKEN_PATTERNS = (

@@ -89,8 +89,9 @@ _VERSIONED_CLAUDE_MODEL_RE = re.compile(
 )
 # Output-token ceilings. OpenAI recommends reserving at least 25K tokens for
 # reasoning plus output on its reasoning models. Other models keep the role's
-# own limit, at most MAX_COMPLETION_TOKENS, which stays under the Anthropic
-# SDK's non-streaming max_tokens guard.
+# own limit, at most MAX_COMPLETION_TOKENS. The Anthropic SDK also caps
+# non-streaming requests per model (8,192 for Claude Opus 4 and 4.1), and the
+# shared client clamps to that cap.
 MAX_COMPLETION_TOKENS = 16384
 REASONING_MAX_COMPLETION_TOKENS = 32768
 # Claude 5.5 safety classifiers can decline benign security content. The

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -828,6 +829,38 @@ class TestReasoningModelRequests:
         first, second = (call.kwargs for call in mock_anthropic.messages.create.call_args_list)
         assert first["output_config"]["format"]["schema"] == {"type": "object"}
         assert second["output_config"] == {"effort": "medium"}
+
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
+    @pytest.mark.parametrize("model", ["claude-opus-4-1-20250805", "claude-opus-4-0"])
+    def test_anthropic_max_tokens_stay_under_the_sdk_non_streaming_limit(
+        self, monkeypatch: pytest.MonkeyPatch, model: str
+    ) -> None:
+        """The real SDK refuses Opus 4/4.1 non-streaming requests above 8,192 tokens before sending."""
+        import httpx
+
+        requests: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model,
+                    "content": [{"type": "text", "text": "Done"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        _use_provider(monkeypatch, "anthropic", model)
+        verifier = FindingVerifier(http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+        assert verifier.completions("system", "user") == "Done"
+        assert requests[0]["max_tokens"] == 8192
 
     @pytest.mark.parametrize(
         ("base_url", "provider_default"),

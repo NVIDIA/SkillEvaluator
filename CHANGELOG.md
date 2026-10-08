@@ -24,7 +24,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Output-token limits are sized per model family. OpenAI reasoning models get
   at least 32,768 tokens; other models get 16,384 for `--llm-verify`, rubric
   evaluation, deduplication verdicts and judges, 8,192 for report suggestions
-  and 16,000 for dataset generation.
+  and 16,000 for dataset generation. On the Anthropic API, Claude Opus 4 and
+  4.1 stay at the 8,192 tokens the Anthropic SDK allows without streaming.
 - Reasoning effort is sent only to GPT-6 models and to Claude 5.5 or later on
   the Anthropic API: `high` for `--llm-verify`, `medium` for rubric evaluation,
   deduplication verdicts and judges.

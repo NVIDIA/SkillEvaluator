@@ -23,6 +23,7 @@ import json
 import os
 import re
 import urllib.error
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit
@@ -120,6 +121,20 @@ def _token_limit_kwargs(config: ProviderConfig, max_tokens: int | None) -> dict[
     if _is_native_openai_endpoint(config) and is_openai_reasoning_model(config.model):
         return {"max_completion_tokens": max_tokens}
     return {"max_tokens": max_tokens}
+
+
+def _anthropic_max_tokens(model: str, max_tokens: int) -> int:
+    """Clamp ``max_tokens`` to the Anthropic SDK's per-model non-streaming limit.
+
+    The SDK refuses a non-streaming request above that limit (8,192 for
+    Claude Opus 4 and 4.1) before sending it.
+    """
+    try:
+        from anthropic._constants import MODEL_NONSTREAMING_TOKENS
+    except ImportError:
+        return max_tokens
+    limit = MODEL_NONSTREAMING_TOKENS.get(model)
+    return min(max_tokens, limit) if isinstance(limit, int) else max_tokens
 
 
 def _temperature_kwargs(model: str, temperature: float | None) -> dict[str, float]:
@@ -261,15 +276,19 @@ def _is_schema_unsupported_error(exc: Exception) -> bool:
 
 def _call_with_schema_fallback(
     call_fn: Any,
-    call_kwargs: dict[str, Any],
+    build_kwargs: Callable[[bool], dict[str, Any]],
     *,
-    schema_key: str,
     target_key: SchemaTargetKey,
     use_schema: bool,
 ) -> Any:
-    """Invoke call_fn and downgrade to prompt-only on confirmed HTTP 400/422 schema errors."""
+    """Invoke call_fn and downgrade to prompt-only on confirmed HTTP 400/422 schema errors.
+
+    ``build_kwargs(include_schema)`` returns the provider request with or
+    without its structured-output option, so each provider keeps its other
+    request fields on the downgrade.
+    """
     try:
-        return call_fn(**call_kwargs)
+        return call_fn(**build_kwargs(use_schema))
     except Exception as exc:
         if use_schema and _is_schema_unsupported_error(exc):
             logger.warning(
@@ -278,12 +297,7 @@ def _call_with_schema_fallback(
                 target_key.provider,
                 target_key.model,
             )
-            fallback_kwargs = dict(call_kwargs)
-            schema_option = fallback_kwargs.pop(schema_key, None)
-            # Anthropic's output_config also carries the reasoning effort.
-            if isinstance(schema_option, dict) and "effort" in schema_option:
-                fallback_kwargs[schema_key] = {"effort": schema_option["effort"]}
-            result = call_fn(**fallback_kwargs)
+            result = call_fn(**build_kwargs(False))
             _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
             return result
         raise
@@ -521,29 +535,32 @@ class LLMClient:
         def _invoke_provider() -> str:
             use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
             if config.provider == "anthropic":
-                call_kwargs: dict[str, Any] = {
-                    "model": config.model,
-                    "max_tokens": self._max_tokens or MAX_COMPLETION_TOKENS,
-                    "system": system_prompt,
-                    "messages": [{"role": "user", "content": user_prompt}],
-                    **_temperature_kwargs(config.model, self._temperature),
-                }
-                output_config: dict[str, Any] = {}
-                if use_schema and response_schema is not None:
-                    output_config.update(_build_anthropic_output_config(response_schema))
-                if reasoning_effort is not None:
-                    output_config["effort"] = reasoning_effort
-                if output_config:
-                    call_kwargs["output_config"] = output_config
-                if is_claude_5_5_or_later(config.model) and _is_native_anthropic_endpoint(config):
-                    # Server-side fallback (beta): a safety-classifier refusal is retried on
-                    # the fallback model within the same call. Older SDKs lack typed fields.
-                    call_kwargs["extra_headers"] = {"anthropic-beta": ANTHROPIC_SERVER_SIDE_FALLBACK_BETA}
-                    call_kwargs["extra_body"] = {"fallbacks": [{"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}]}
+
+                def _anthropic_kwargs(include_schema: bool) -> dict[str, Any]:
+                    call_kwargs: dict[str, Any] = {
+                        "model": config.model,
+                        "max_tokens": _anthropic_max_tokens(config.model, self._max_tokens or MAX_COMPLETION_TOKENS),
+                        "system": system_prompt,
+                        "messages": [{"role": "user", "content": user_prompt}],
+                        **_temperature_kwargs(config.model, self._temperature),
+                    }
+                    output_config: dict[str, Any] = {}
+                    if include_schema and response_schema is not None:
+                        output_config.update(_build_anthropic_output_config(response_schema))
+                    if reasoning_effort is not None:
+                        output_config["effort"] = reasoning_effort
+                    if output_config:
+                        call_kwargs["output_config"] = output_config
+                    if is_claude_5_5_or_later(config.model) and _is_native_anthropic_endpoint(config):
+                        # Server-side fallback (beta): a safety-classifier refusal is retried on
+                        # the fallback model within the same call. Older SDKs lack typed fields.
+                        call_kwargs["extra_headers"] = {"anthropic-beta": ANTHROPIC_SERVER_SIDE_FALLBACK_BETA}
+                        call_kwargs["extra_body"] = {"fallbacks": [{"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}]}
+                    return call_kwargs
+
                 response = _call_with_schema_fallback(
                     client.messages.create,
-                    call_kwargs,
-                    schema_key="output_config",
+                    _anthropic_kwargs,
                     target_key=target_key,
                     use_schema=use_schema,
                 )
@@ -569,24 +586,26 @@ class LLMClient:
                     **({"max_tokens": self._max_tokens} if self._max_tokens is not None else {}),
                 )
                 return _extract_choice_content(response)
-            call_kwargs: dict[str, Any] = {
-                "model": config.model,
-                "stream": False,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                **_temperature_kwargs(config.model, self._temperature),
-                **_token_limit_kwargs(config, self._max_tokens),
-                **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
-            }
-            if use_schema and response_schema is not None:
-                call_kwargs["response_format"] = _build_openai_response_format(response_schema, schema_name)
+
+            def _openai_kwargs(include_schema: bool) -> dict[str, Any]:
+                call_kwargs: dict[str, Any] = {
+                    "model": config.model,
+                    "stream": False,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    **_temperature_kwargs(config.model, self._temperature),
+                    **_token_limit_kwargs(config, self._max_tokens),
+                    **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
+                }
+                if include_schema and response_schema is not None:
+                    call_kwargs["response_format"] = _build_openai_response_format(response_schema, schema_name)
+                return call_kwargs
 
             response = _call_with_schema_fallback(
                 client.chat.completions.create,
-                call_kwargs,
-                schema_key="response_format",
+                _openai_kwargs,
                 target_key=target_key,
                 use_schema=use_schema,
             )

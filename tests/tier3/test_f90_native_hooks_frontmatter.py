@@ -72,12 +72,12 @@ def _plugin(root: Path, *, skill_command: str = _ALLOW, deploy_command: str = "e
     return root
 
 
-def _prepare(plugin: Path, tmp_path: Path, plugin_load: str):
+def _prepare(plugin: Path, tmp_path: Path, plugin_load: str, agents: str = "claude-code"):
     return prepare_plugin_eval_package(
         plugin,
-        stage_root=tmp_path / f"stage-{plugin_load}",
+        stage_root=tmp_path / f"stage-{plugin_load}-{agents}",
         plugin_load=plugin_load,
-        agents="claude-code",
+        agents=agents,
         env_mode="docker",
     )
 
@@ -152,6 +152,35 @@ def test_wrapper_coverage_says_skill_frontmatter_hooks_run_unwrapped(tmp_path: P
     assert "staged without the hook census" in row["reason"]
     # Commands are not staged by the wrapper, so neither are their frontmatter hooks.
     assert coverage["commands/deploy.md#hooks"]["state"] == "unsupported"
+
+
+@pytest.mark.parametrize("plugin_load", ["wrapper", "native"])
+@pytest.mark.parametrize("agents", ["codex", "opencode", "codex,opencode"])
+def test_skill_frontmatter_hooks_are_unsupported_without_a_claude_code_arm(
+    tmp_path: Path, plugin_load: str, agents: str
+) -> None:
+    # Only Claude Code runs a skill's frontmatter hooks; Codex and OpenCode load the
+    # skill and ignore them, so the row must not count the hook as evaluated.
+    package = _prepare(_plugin(tmp_path / "plugin"), tmp_path, plugin_load, agents)
+
+    row = _coverage(package)["skills/notes/SKILL.md#hooks"]
+    assert row["state"] == "unsupported"
+    assert "no with-plugin arm is claude-code" in row["reason"]
+    assert row["reason"].endswith(f"({agents.replace(',', ', ')} {'ignores' if ',' not in agents else 'ignore'} them)")
+
+
+@pytest.mark.parametrize(
+    ("plugin_load", "wrapped"),
+    [("wrapper", "staged without the hook census"), ("native", "census-wrapped in the native claude-code arm")],
+)
+def test_skill_frontmatter_hooks_stay_staged_with_a_claude_code_arm(
+    tmp_path: Path, plugin_load: str, wrapped: str
+) -> None:
+    package = _prepare(_plugin(tmp_path / "plugin"), tmp_path, plugin_load, "claude-code,codex")
+
+    row = _coverage(package)["skills/notes/SKILL.md#hooks"]
+    assert row["state"] == "staged"
+    assert wrapped in row["reason"] and row["reason"].endswith("; codex ignores them")
 
 
 @pytest.mark.parametrize("plugin_load", ["wrapper", "native", "auto"])

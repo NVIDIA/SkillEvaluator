@@ -199,3 +199,31 @@ def test_rows_a_native_claude_code_arm_alone_stages_record_it(tmp_path: Path) ->
     plugin_load = {"by_agent": {"claude-code": {"mode": "native", "components": {"skill": "native"}}}}
     promoted = apply_load_census({"components": [native["beta"]]}, census, plugin_load)
     assert "staged natively for claude-code" not in promoted["components"][0]["reason"]
+
+
+@pytest.mark.parametrize("agent", ["claude-code", "opencode"])
+def test_an_inline_command_without_text_content_is_not_reported_staged(tmp_path: Path, agent: str) -> None:
+    """Native staging has nothing to write for ``"content": null``, so the row must not count as evaluated."""
+    commands = {
+        "broken": {"description": "Broken.", "content": None},
+        "ok": {"description": "Ok.", "content": "Do it."},
+    }
+    files = {**_FILES, ".claude-plugin/plugin.json": {**_FILES[".claude-plugin/plugin.json"], "commands": commands}}
+    package = prepare_plugin_eval_package(
+        _plugin(tmp_path / "demo", files),
+        stage_root=tmp_path / "stage",
+        plugin_load="native",
+        agents=agent,
+        env_mode="docker",
+    )
+    coverage = package.provenance()["component_coverage"]
+    rows = {row["name"]: row for row in coverage["components"] if row["type"] == "command"}
+
+    assert package.native_source is not None
+    assert [(text.type, text.name) for text in package.native_source.texts if text.type == "command"] == [
+        ("command", "ok")
+    ]
+    assert (rows["ok"]["state"], rows["ok"]["reason"]) == ("staged", f"staged natively for {agent}")
+    assert rows["broken"]["state"] == "invalid"
+    assert "native_agents" not in rows["broken"]
+    assert coverage["counts"]["invalid"] == 1

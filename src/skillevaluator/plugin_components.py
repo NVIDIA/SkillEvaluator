@@ -1967,19 +1967,23 @@ class _Builder:
             self._privileges(component, parsed.frontmatter, self.reader.display(rel))
 
     def _command_map(self, commands: dict[str, Any]) -> None:
-        """The object form of ``commands``: each entry has a ``source`` file or folder, or inline ``content``."""
+        """The object form of ``commands``: each entry has a ``source`` file or folder, or inline ``content`` text."""
         self._check_item_count("'commands' map", len(commands))
         for index, (command_name, entry) in enumerate(commands.items()):
             if index >= PLUGIN_COMPONENT_MAX_ITEMS:
                 break
-            if not isinstance(entry, dict) or ("source" in entry) == ("content" in entry):
+            if (
+                not isinstance(entry, dict)
+                or ("source" in entry) == ("content" in entry)
+                or not isinstance(entry.get("content", ""), str)
+            ):
                 self.inventory.findings.append(
                     _plugin_finding(
                         Severity.HIGH,
                         "plugin_component_path_invalid",
-                        f"commands[{command_name!r}] must set exactly one of 'source' or 'content'",
+                        f"commands[{command_name!r}] must set exactly one of 'source' or 'content' (text)",
                         self.manifest_display,
-                        "Give each command map entry either a 'source' file path or inline 'content'.",
+                        "Give each command map entry either a 'source' file path or inline 'content' text.",
                     )
                 )
                 self._add(Component("command", str(command_name), "declared", None, "unsupported", problem="invalid"))

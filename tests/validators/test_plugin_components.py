@@ -406,6 +406,21 @@ def test_declared_path_of_the_wrong_kind_is_an_invalid_component(
     assert broken == [(component_type, name, path)]
 
 
+def test_inline_command_content_that_is_not_text_is_an_invalid_component(tmp_path: Path) -> None:
+    """An inline command is its ``content`` text, so ``"content": null`` declares no command."""
+    manifest = {"commands": {"broken": {"description": "Broken.", "content": None}, "ok": {"content": "Do it."}}}
+    root = _plugin(tmp_path, manifest)
+    inventory = build_plugin_inventory(root, manifest, contained=True, manifest_rel=".claude-plugin/plugin.json")
+
+    [finding] = [finding for finding in inventory.findings if finding.check_name == "plugin_component_path_invalid"]
+    assert finding.severity == Severity.HIGH
+    assert finding.message == "commands['broken'] must set exactly one of 'source' or 'content' (text)"
+    assert [(row.name, row.problem) for row in inventory.components if row.type == "command"] == [
+        ("broken", "invalid"),
+        ("ok", None),
+    ]
+
+
 @_SKIP_SYMLINKS
 def test_symlinked_component_path_is_unsafe(tmp_path: Path) -> None:
     outside = tmp_path / "agent.md"

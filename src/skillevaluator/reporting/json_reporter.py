@@ -18,7 +18,13 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
+from skillevaluator.reporting.base import (
+    PLUGIN_CATALOG_SIMILARITY_KEYS,
+    ReporterBase,
+    is_advisory_agent_eval_skip,
+    passes_required_gate,
+)
+from skillevaluator.reporting.plugin_sections import json_safe, plugin_attributable_leaks
 from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
@@ -95,7 +101,11 @@ class JSONReporter(ReporterBase):
             "total_errors": total_errors,
             "total_warnings": total_warnings,
             "severity_counts": {
-                "critical": sum(r.summary.critical_count for r in results),
+                # A plugin-attributable canary leak is critical, as in SARIF and BENCHMARK.md.
+                "critical": sum(
+                    r.summary.critical_count + len(plugin_attributable_leaks(r.metadata.get("agent_eval")))
+                    for r in results
+                ),
                 "high": sum(r.summary.high_count for r in results),
                 "medium": sum(r.summary.medium_count for r in results),
                 "low": sum(r.summary.low_count for r in results),
@@ -164,6 +174,12 @@ class JSONReporter(ReporterBase):
             )
             if applicability is not None:
                 data["tier3_applicability"] = applicability
+
+        # Surface the Tier 1 plugin model without requiring consumers to
+        # inspect individual validator results.
+        plugin = self._plugin_block_from_results(results)
+        if plugin is not None:
+            data["plugin"] = json_safe(plugin)
 
         if self.include_timestamp:
             data["generated_at"] = datetime.now(tz=UTC).isoformat()
@@ -245,6 +261,17 @@ class JSONReporter(ReporterBase):
         llm_analysis = result.metadata.get("llm_analysis")
         if isinstance(llm_analysis, dict):
             data["llm_analysis"] = llm_analysis
+
+        # Plugin Tier 2 local-catalog comparisons (Check C-inter and Check B).
+        plugin_meta = result.metadata.get("plugin")
+        if isinstance(plugin_meta, dict):
+            catalog_similarity = {
+                key: plugin_meta[key]
+                for key in PLUGIN_CATALOG_SIMILARITY_KEYS
+                if isinstance(plugin_meta.get(key), dict)
+            }
+            if catalog_similarity:
+                data["plugin"] = catalog_similarity
 
         return data
 

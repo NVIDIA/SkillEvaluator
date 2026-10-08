@@ -187,6 +187,31 @@ class TestCLIReporter:
         assert "Required validations passed" in output
         assert "live evaluation skipped" in output
 
+    def test_render_all_shows_the_warnings_of_a_passed_result(self) -> None:
+        result = ValidationResult(validator_name="Similarity Check", validator_description="Similarity")
+        result.add_success("index_built", "Indexed 1 plugin and 2 bundled skill entries")
+        result.add_success("catalog_saved", "Saved local catalog to catalog.json")
+        result.add_warning("Plugin at 'verbose' was not added to the catalog: [description] too long")
+        result.add_warning("Plugin 'silent' has no description; only its bundled skills were added to the catalog")
+
+        output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+
+        assert result.passed
+        assert "Similarity Check │ PASS │ 2 checks passed, 2 warnings" in output
+        assert "Non-blocking Findings" in output
+        assert "[WARN] Plugin at 'verbose' was not added to the catalog: [description] too long" in output
+        assert "[WARN] Plugin 'silent' has no description" in output
+        assert "All validations passed" in output
+
+    def test_render_all_of_a_passed_result_without_warnings_is_unchanged(
+        self, success_result: ValidationResult
+    ) -> None:
+        output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([success_result])).split())
+
+        assert "SCHEMA │ PASS │ 3 checks passed │" in output
+        assert "warnings" not in output.lower()
+        assert "Non-blocking Findings" not in output
+
     def test_render_failure_escapes_markup_in_finding_fields(self) -> None:
         """Dynamic finding text should not be parsed as Rich markup."""
         result = ValidationResult(
@@ -1371,8 +1396,8 @@ class TestMarkdownReporter:
 
         output = MarkdownReporter(include_timestamp=False).render_all([result])
 
-        assert "`/steps/0/tool_calls/0/normalized/0`" in output
-        assert "`/steps/0/tool_calls/0/normalized/1`" in output
+        assert "<code>/steps/0/tool_calls/0/normalized/0</code>" in output
+        assert "<code>/steps/0/tool_calls/0/normalized/1</code>" in output
 
     def test_details_section(self, failure_result: ValidationResult) -> None:
         """Test expandable details section."""

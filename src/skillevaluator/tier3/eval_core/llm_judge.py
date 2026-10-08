@@ -15,15 +15,12 @@ import re
 import urllib.error
 import urllib.request
 from typing import Any
-from urllib.parse import urlparse
 
 from skillevaluator.inference.types import EmptyLLMResponseError, LLMClientTruncatedError
 from skillevaluator.provider_config import (
     MAX_COMPLETION_TOKENS,
-    _supports_custom_temperature,
-    completion_token_limit,
+    ProviderConfig,
     effective_reasoning_effort,
-    is_openai_reasoning_model,
 )
 from skillevaluator.tier3.eval_core.atif_helpers import (
     _SECTION_COMPACT_TOOL_HISTORY,
@@ -99,37 +96,6 @@ def _resolve_url(provider: str) -> str:
         return os.environ.get("SKILL_EVAL_LLM_BASE_URL") or NVIDIA_BUILD_CHAT_URL
     base_url = os.environ.get("SKILL_EVAL_LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
     return base_url.rstrip("/") + "/chat/completions" if base_url else OPENAI_CHAT_URL
-
-
-def _is_native_openai_chat_url(provider: str, request_url: str) -> bool:
-    if str(provider or "").strip().casefold() != "openai":
-        return False
-
-    raw_url = str(request_url or "")
-    if raw_url != raw_url.strip() or any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw_url):
-        return False
-    try:
-        parsed = urlparse(raw_url)
-        port = parsed.port
-    except ValueError:
-        return False
-
-    return (
-        parsed.scheme.casefold() == "https"
-        and parsed.hostname is not None
-        and parsed.hostname.casefold() == "api.openai.com"
-        and parsed.netloc.casefold() in {"api.openai.com", "api.openai.com:443"}
-        and port in {None, 443}
-        and parsed.path in {"/v1/chat/completions", "/v1/chat/completions/"}
-        and parsed.username is None
-        and parsed.password is None
-        and not parsed.params
-        and not parsed.query
-        and not parsed.fragment
-        and ";" not in raw_url
-        and "?" not in raw_url
-        and "#" not in raw_url
-    )
 
 
 def _configured_secret_values(extra_secret_values: tuple[str | None, ...] = ()) -> list[str]:
@@ -219,26 +185,36 @@ def _chat_completion_payload(
     response_schema: dict[str, Any] | None = None,
     schema_name: str = "judge_response",
 ) -> dict[str, Any]:
+    """Return the OpenAI-compatible judge request body ``LLMClient`` would send.
+
+    Built from the shared client's request helpers, so the drift test holds the
+    Harbor template's in-container copy to what the client sends.
+    """
+    from skillevaluator.inference.client import (
+        _build_openai_response_format,
+        _temperature_kwargs,
+        _token_limit_kwargs,
+    )
+
     resolved_provider = _provider() if provider is None else provider
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
-    token_key = (
-        "max_completion_tokens"
-        if is_openai_reasoning_model(model) and _is_native_openai_chat_url(resolved_provider, resolved_request_url)
-        else "max_tokens"
+    config = ProviderConfig(
+        provider=resolved_provider,
+        model=model,
+        api_key=None,
+        base_url=resolved_request_url.rstrip("/").removesuffix("/chat/completions"),
+        litellm_model=f"openai/{model}",
     )
     payload: dict[str, Any] = {
         "model": model,
-        token_key: completion_token_limit(model, max_tokens),
+        **_token_limit_kwargs(config, max_tokens),
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
+        **_temperature_kwargs(model, temperature),
     }
-    if temperature is not None and _supports_custom_temperature(model):
-        payload["temperature"] = temperature
     if effort := effective_reasoning_effort(resolved_provider, model, JUDGE_REASONING_EFFORT):
         payload["reasoning_effort"] = effort
     if response_schema is not None:
-        from skillevaluator.inference.client import _build_openai_response_format
-
         payload["response_format"] = _build_openai_response_format(response_schema, schema_name)
     return payload
 

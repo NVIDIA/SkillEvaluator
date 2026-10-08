@@ -14,7 +14,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from tests.conftest import MockUrllibResponse, load_harbor_eval_template
 
-from skillevaluator.provider_config import CHAT_CHEAP_OPENAI, CHAT_DEFAULT_OPENAI, REASONING_MAX_COMPLETION_TOKENS
+from skillevaluator.provider_config import (
+    CHAT_CHEAP_OPENAI,
+    CHAT_DEFAULT_OPENAI,
+    REASONING_MAX_COMPLETION_TOKENS,
+    _supports_custom_temperature,
+)
 from skillevaluator.tier3.eval_core import llm_judge
 
 
@@ -51,15 +56,15 @@ def test_native_openai_gpt5_uses_max_completion_tokens_without_temperature(model
 )
 def test_gpt5_family_rejects_custom_temperature(model: str) -> None:
     """Verify gpt-5 models do not support custom temperature."""
-    assert not llm_judge._supports_custom_temperature(model)
+    assert not _supports_custom_temperature(model)
 
 
 def test_older_models_accept_custom_temperature() -> None:
     """Verify legacy model families support custom temperature."""
-    assert llm_judge._supports_custom_temperature("gpt-4.1-mini")
-    assert llm_judge._supports_custom_temperature("claude-opus-4-6")
-    assert llm_judge._supports_custom_temperature("claude-opus-4-20250514")
-    assert llm_judge._supports_custom_temperature("claude-3-5-sonnet-20241022")
+    assert _supports_custom_temperature("gpt-4.1-mini")
+    assert _supports_custom_temperature("claude-opus-4-6")
+    assert _supports_custom_temperature("claude-opus-4-20250514")
+    assert _supports_custom_temperature("claude-3-5-sonnet-20241022")
 
 
 @pytest.mark.parametrize(
@@ -83,7 +88,7 @@ def test_older_models_accept_custom_temperature() -> None:
 )
 def test_newer_claude_models_reject_custom_temperature(model: str) -> None:
     """Verify newer Claude models do not accept custom temperature."""
-    assert not llm_judge._supports_custom_temperature(model)
+    assert not _supports_custom_temperature(model)
 
 
 @pytest.mark.parametrize("model", ["gpt-6.1-sol", "openai/openai/gpt-6.1-sol"])
@@ -272,6 +277,19 @@ def test_completion_token_payload_resolves_provider_and_url_when_omitted(
     assert "temperature" not in payload
 
 
+def _judge_token_key(provider: str, request_url: str) -> str:
+    payload = llm_judge._chat_completion_payload(
+        model=CHAT_DEFAULT_OPENAI,
+        prompt="Judge this response",
+        max_tokens=321,
+        temperature=0.0,
+        provider=provider,
+        request_url=request_url,
+    )
+    (token_key,) = {"max_tokens", "max_completion_tokens"} & payload.keys()
+    return token_key
+
+
 @pytest.mark.parametrize(
     "request_url",
     [
@@ -282,7 +300,7 @@ def test_completion_token_payload_resolves_provider_and_url_when_omitted(
     ],
 )
 def test_native_openai_completion_token_url_accepts_only_canonical_variants(request_url: str) -> None:
-    assert llm_judge._is_native_openai_chat_url("OPENAI", request_url)
+    assert _judge_token_key("OPENAI", request_url) == "max_completion_tokens"
 
 
 @pytest.mark.parametrize(
@@ -311,7 +329,7 @@ def test_native_openai_completion_token_url_accepts_only_canonical_variants(requ
     ],
 )
 def test_deceptive_openai_urls_keep_max_tokens(provider: str, request_url: str) -> None:
-    assert not llm_judge._is_native_openai_chat_url(provider, request_url)
+    assert _judge_token_key(provider, request_url) == "max_tokens"
 
 
 @pytest.mark.parametrize(

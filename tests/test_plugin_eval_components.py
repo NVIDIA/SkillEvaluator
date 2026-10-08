@@ -61,6 +61,18 @@ def test_path_ref_is_staged(tmp_path: Path, wrapped: bool) -> None:
     assert staged["remote"] == {"name": "remote", "url": "https://mcp.example.com/mcp", "transport": "http"}
 
 
+def test_url_server_without_transport_is_staged_as_http(tmp_path: Path) -> None:
+    # Harbor reads a URL server with no transport as SSE, which a streamable-HTTP
+    # server rejects; native Claude Code and --probe-mcp default it to http.
+    servers = {
+        "remote": {"url": "https://mcp.example.com/mcp"},
+        "legacy": {"url": "https://mcp.example.com/sse", "type": "sse"},
+    }
+    staged = _staged_servers(_prepare(_plugin(tmp_path / "p", {"mcpServers": servers}), tmp_path))
+    assert staged["remote"]["transport"] == "http"
+    assert staged["legacy"]["transport"] == "sse"
+
+
 def test_array_form_is_staged(tmp_path: Path) -> None:
     root = _plugin(
         tmp_path / "p",

@@ -1848,8 +1848,10 @@ stages the with-plugin arm the way each harness loads plugins instead; see
   MCP file, so they never reach a baseline arm. Each declaration first passes
   the blocking Tier 1 MCP checks. A raw inline credential is never written to
   the staged file. That file, `evals/environment/plugin_mcp_servers.toml`, is
-  generated, so an evals source that already contains it fails staging. MCP
-  servers in the dataset's own
+  generated, so an evals source that already contains it fails staging. A
+  `url` server that declares no `transport` or `type` is staged as `http`
+  (streamable HTTP), the transport native Claude Code and `--probe-mcp` also
+  use. MCP servers in the dataset's own
   `evals/environment/mcp_servers.toml` are task environment and are shared by
   every arm. A server launched from plugin files (a `command`, `args`, or `cwd`
   that uses `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}`, the manifest

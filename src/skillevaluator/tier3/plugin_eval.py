@@ -2320,15 +2320,20 @@ _CLAUDE_NATIVE_APPLIES = frozenset({"plugin_files", "env", "headers"})
 
 
 def _runnable_server(entry: dict[str, Any]) -> dict[str, Any]:
-    """The launch fields of a validated MCP entry that reach the staged server list (``stdio`` by default)."""
+    """The launch fields of a validated MCP entry that reach the staged server list.
+
+    A ``command`` server defaults to ``stdio`` and a ``url`` server to ``http``
+    (streamable HTTP), as native Claude Code and ``--probe-mcp`` assume; Harbor
+    would otherwise read a URL server with no transport as ``sse``.
+    """
     server: dict[str, Any] = {"name": entry["name"]}
     for key in ("url", "command", "transport"):
         if entry.get(key):
             server[key] = entry[key]
     if entry.get("args"):
         server["args"] = list(entry["args"])
-    if "command" in server and "transport" not in server:
-        server["transport"] = "stdio"
+    if "transport" not in server:
+        server["transport"] = "stdio" if "command" in server else "http"
     return server
 
 

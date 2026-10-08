@@ -24,8 +24,8 @@ _PROVIDER_SETUP_URL = "https://docs.nvidia.com/skills/skillevaluator/configurati
 # ``DEFAULT_JUDGE_MODELS`` in sync via the drift test in
 # ``tests/tier3/test_judge_parse_robustness.py``.
 CHAT_DEFAULT_OPENAI = "gpt-6.1-sol"
-CHAT_DEFAULT_ANTHROPIC = "claude-opus-5"
-CHAT_DEFAULT_BEDROCK = "us.anthropic.claude-opus-5"
+CHAT_DEFAULT_ANTHROPIC = "claude-opus-5-5"
+CHAT_DEFAULT_BEDROCK = "us.anthropic.claude-opus-5-5"
 CHAT_DEFAULT_NVIDIA = "nvidia/nemotron-3-super-120b-a12b"
 # Gateway catalog IDs are independent of native-provider model names. Operators
 # can override these defaults without changing the configured endpoint or key.

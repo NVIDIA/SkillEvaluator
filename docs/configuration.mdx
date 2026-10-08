@@ -97,7 +97,7 @@ Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedr
     export ANTHROPIC_API_KEY='sk-ant-...'
     ```
 
-    Default model: `claude-opus-5`, using the Anthropic SDK's default endpoint. Override it with `SKILL_EVAL_LLM_BASE_URL` (highest precedence) or `ANTHROPIC_BASE_URL`; when neither is set, SkillEvaluator uses the Anthropic default.
+    Default model: `claude-opus-5-5`, using the Anthropic SDK's default endpoint. Override it with `SKILL_EVAL_LLM_BASE_URL` (highest precedence) or `ANTHROPIC_BASE_URL`; when neither is set, SkillEvaluator uses the Anthropic default.
 
     For Anthropic, either base-URL variable must be an absolute HTTP(S) API root. Supply an unversioned root such as `https://gateway.example.com` or a legacy URL whose final segment is `/v1`, such as `https://gateway.example.com/team/v1`. SkillEvaluator normalizes the latter to its API root so the Anthropic SDK, the Tier 3 verifier, and a matching Claude Code agent each form request paths with exactly one `/v1/messages` suffix. An independently credentialed Claude Code route applies the same normalization and validation to `ANTHROPIC_BASE_URL` when the evaluator uses another provider. Routing through path prefixes, ports, IP addresses, internationalized domain names, and ordinary safe percent escapes is preserved.
 
@@ -125,7 +125,7 @@ Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedr
     # (environment variables, shared profile, or an assumed role).
     ```
 
-    Default model: `us.anthropic.claude-opus-5` on the AWS Bedrock Runtime (US geo inference profile for Claude Opus 5).
+    Default model: `us.anthropic.claude-opus-5-5` on the AWS Bedrock Runtime (US geo inference profile for Claude Opus 5.5).
   </Tab>
   <Tab title="OpenAI-compatible" language="openai-compatible">
     ```bash title="OpenAI-compatible setup"
@@ -148,7 +148,7 @@ Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedr
 
     For Tier 3 in Docker, OpenCode requires Chat Completions, Codex requires Responses, and Claude Code requires Anthropic Messages, each with tool-call support. Selecting a shared URL does not add those APIs to a server. See the [Claude gateway requirements](https://code.claude.com/docs/en/llm-gateway).
 
-    Claude Code inherits the shared key and URL, stripping a terminal `/v1` from its API root while retaining any path prefix. An explicit `ANTHROPIC_BASE_URL` overrides that root. With the shared key, Claude Code runs with `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, so it does not send pre-release request fields that a gateway forwarding to another provider rejects. An explicit `ANTHROPIC_API_KEY` selects an independent Claude route: without `ANTHROPIC_BASE_URL`, it keeps the native Anthropic endpoint and defaults to `claude-opus-5`. CLI and skill-config model overrides still take precedence. Existing native-provider routes are unchanged.
+    Claude Code inherits the shared key and URL, stripping a terminal `/v1` from its API root while retaining any path prefix. An explicit `ANTHROPIC_BASE_URL` overrides that root. With the shared key, Claude Code runs with `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, so it does not send pre-release request fields that a gateway forwarding to another provider rejects. An explicit `ANTHROPIC_API_KEY` selects an independent Claude route: without `ANTHROPIC_BASE_URL`, it keeps the native Anthropic endpoint and defaults to `claude-opus-5-5`. CLI and skill-config model overrides still take precedence. Existing native-provider routes are unchanged.
   </Tab>
 </Tabs>
 
@@ -315,7 +315,7 @@ The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/Skil
 
 The subprocess environment is isolated. Only the selected provider settings and basic process environment variables (`PATH`, `HOME`, TLS bundles, temp dirs) pass through — other ambient credentials in your shell are never forwarded. Your SkillSpector model settings (`SKILLSPECTOR_MODEL_<SLOT>`, `SKILLSPECTOR_MODEL_REGISTRY`, `SKILLSPECTOR_REASONING_EFFORT`) pass through too; `SKILLSPECTOR_TEMPERATURE` does not.
 
-SkillSpector sends its own structured-output requests, so it has its own default model per provider instead of following the chat default. An explicit `SKILL_EVAL_LLM_MODEL` still reaches SkillSpector, and `SKILLSPECTOR_MODEL` overrides both. SkillSpector v2.12.0 does not return structured output for Claude 5.5 models: if `SKILL_EVAL_LLM_MODEL` names one, also set `SKILLSPECTOR_MODEL` to a supported model such as `claude-opus-5` (Bedrock: `us.anthropic.claude-opus-5`), or the `--llm` security stage is reported incomplete. See [SkillSpector bridge](environment-variables.mdx#skillspector-bridge) for the defaults.
+SkillSpector sends its own structured-output requests, so it has its own default model per provider instead of following the chat default. On Anthropic and Bedrock it stays on Claude Opus 5 while the chat default is Claude Opus 5.5. An explicit `SKILL_EVAL_LLM_MODEL` still reaches SkillSpector, and `SKILLSPECTOR_MODEL` overrides both. SkillSpector v2.12.0 does not return structured output for Claude 5.5 models: if `SKILL_EVAL_LLM_MODEL` names one, also set `SKILLSPECTOR_MODEL` to a supported model such as `claude-opus-5` (Bedrock: `us.anthropic.claude-opus-5`), or the `--llm` security stage is reported incomplete. See [SkillSpector bridge](environment-variables.mdx#skillspector-bridge) for the defaults.
 
 Setting `SKILLSPECTOR_PROVIDER` yourself overrides the bridge, but it must name a supported public provider (`openai`, `anthropic`, or `bedrock` — or `nv_build` to force the Build mapping); anything else fails closed and the subprocess receives no credential.
 

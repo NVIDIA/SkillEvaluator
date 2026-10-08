@@ -168,7 +168,7 @@ def test_independent_native_claude_key_uses_native_model_default(gateway, monkey
     monkeypatch.setenv("ANTHROPIC_API_KEY", "native-key")
     provider = resolve_llm_provider(gateway)
     assert _model_for_agent("claude-code", cli_model=None, config_agents={}, provider=provider) == (
-        "claude-opus-5",
+        "claude-opus-5-5",
         "native Anthropic agent default",
     )
     assert _model_for_agent("claude-code", cli_model="exact/override", config_agents={}, provider=provider) == (

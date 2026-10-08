@@ -787,7 +787,7 @@ class TestReasoningModelRequests:
         assert call_kwargs["extra_body"] == {"fallbacks": [{"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}]}
 
     def test_claude_opus_5_keeps_model_default_effort_and_no_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _use_provider(monkeypatch, "anthropic", CHAT_DEFAULT_ANTHROPIC)
+        _use_provider(monkeypatch, "anthropic", "claude-opus-5")
         mock_anthropic = MagicMock()
         mock_anthropic.messages.create.return_value = _anthropic_response("Done")
 

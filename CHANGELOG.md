@@ -57,6 +57,13 @@ All notable changes to SkillEvaluator are documented in this file.
   so the effort values above apply to the OpenAI defaults. OpenCode keeps
   `openai/gpt-5.6-sol` unless `SKILL_EVAL_LLM_MODEL` is set, because
   GPT-6.1 Sol supports tool calls only on the Responses API.
+- The Anthropic and Bedrock default models move from Claude Opus 5 to Claude
+  Opus 5.5 (`claude-opus-5-5` and `us.anthropic.claude-opus-5-5`) for chat,
+  judging and Claude Code. On the Claude API they get the effort values above
+  and server-side refusal fallback, and Claude Code runs them at
+  `reasoning_effort=medium`.
+  SkillSpector stays on `claude-opus-5` and `us.anthropic.claude-opus-5`, which
+  SkillSpector v2.12.0 supports.
 
 ### Fixed
 

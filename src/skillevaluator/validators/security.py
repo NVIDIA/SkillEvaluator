@@ -144,13 +144,9 @@ _SKILLSPECTOR_COMMON_REQUIRED_ANALYZERS = frozenset(
         "static_yara",
     }
 )
-_SKILLSPECTOR_2_9_6_REQUIRED_ANALYZERS = (
-    _SKILLSPECTOR_COMMON_REQUIRED_ANALYZERS | _SKILLSPECTOR_SEMANTIC_ANALYZERS
-)
+_SKILLSPECTOR_2_9_6_REQUIRED_ANALYZERS = _SKILLSPECTOR_COMMON_REQUIRED_ANALYZERS | _SKILLSPECTOR_SEMANTIC_ANALYZERS
 # SkillSpector 2.10+ can omit semantic analyzers when no provider is available.
-_SKILLSPECTOR_2_10_REQUIRED_ANALYZERS = _SKILLSPECTOR_COMMON_REQUIRED_ANALYZERS | {
-    "artifact_integrity"
-}
+_SKILLSPECTOR_2_10_REQUIRED_ANALYZERS = _SKILLSPECTOR_COMMON_REQUIRED_ANALYZERS | {"artifact_integrity"}
 _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS = frozenset(
     analyzer_id
     for analyzer_id in _SKILLSPECTOR_COMMON_REQUIRED_ANALYZERS
@@ -608,8 +604,7 @@ def _skillspector_child_env() -> dict[str, str]:
 def _tree_contains_artifact_dirs(root: Path) -> bool:
     """Return True when the SkillSpector scan tree needs staging."""
     return any(
-        any(d in _SKILLSPECTOR_SCAN_EXCLUDED_DIRS for d in dirnames)
-        for _dirpath, dirnames, _filenames in os.walk(root)
+        any(d in _SKILLSPECTOR_SCAN_EXCLUDED_DIRS for d in dirnames) for _dirpath, dirnames, _filenames in os.walk(root)
     )
 
 
@@ -1112,19 +1107,14 @@ class SecurityValidator(ValidatorBase):
                 skillspector_version = (major, minor, patch)
         elif report_metadata is None:
             version_error = (
-                "skillspector JSON report is missing "
-                "'metadata.skillspector_version'; security scan did not complete"
+                "skillspector JSON report is missing 'metadata.skillspector_version'; security scan did not complete"
             )
         uses_completeness_schema = (
-            skillspector_version is not None
-            and skillspector_version >= _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION
+            skillspector_version is not None and skillspector_version >= _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION
         )
-        uses_statusless_completeness_schema = (
-            skillspector_version in _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS
-        )
+        uses_statusless_completeness_schema = skillspector_version in _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS
         uses_finding_identity = (
-            skillspector_version is not None
-            and skillspector_version >= _SKILLSPECTOR_FINDING_IDENTITY_VERSION
+            skillspector_version is not None and skillspector_version >= _SKILLSPECTOR_FINDING_IDENTITY_VERSION
         )
         uses_versioned_completeness = uses_completeness_schema or uses_statusless_completeness_schema
         completeness_contract = "2.10+" if uses_completeness_schema else "2.9.5/2.9.6"
@@ -1139,8 +1129,7 @@ class SecurityValidator(ValidatorBase):
             return False
         if "execution_successful" in data and not isinstance(execution_successful, bool):
             result.add_error(
-                "skillspector JSON field 'execution_successful' must be a boolean; "
-                "security scan did not complete"
+                "skillspector JSON field 'execution_successful' must be a boolean; security scan did not complete"
             )
             return False
         if execution_successful is False:
@@ -1161,8 +1150,7 @@ class SecurityValidator(ValidatorBase):
         if "analysis_completeness" in data:
             if not isinstance(analysis_completeness, dict):
                 result.add_error(
-                    "skillspector JSON field 'analysis_completeness' must be an object; "
-                    "security scan did not complete"
+                    "skillspector JSON field 'analysis_completeness' must be an object; security scan did not complete"
                 )
                 return False
             if skillspector_version is not None and not uses_versioned_completeness:
@@ -1187,10 +1175,7 @@ class SecurityValidator(ValidatorBase):
                     "security scan did not complete"
                 )
                 return False
-            if (
-                execution_successful is not None
-                and execution_successful is not completeness_execution_successful
-            ):
+            if execution_successful is not None and execution_successful is not completeness_execution_successful:
                 result.add_error(
                     "skillspector JSON execution_successful fields contradict each other; "
                     "security scan did not complete"
@@ -1332,11 +1317,7 @@ class SecurityValidator(ValidatorBase):
                         return False
                     analyzer_id = analyzer_status.get("analyzer_id")
                     analyzer_state = analyzer_status.get("status")
-                    if (
-                        not isinstance(analyzer_id, str)
-                        or not analyzer_id
-                        or not isinstance(analyzer_state, str)
-                    ):
+                    if not isinstance(analyzer_id, str) or not analyzer_id or not isinstance(analyzer_state, str):
                         result.add_error(
                             "skillspector JSON field 'analysis_completeness.analyzer_statuses' has "
                             "invalid analyzer evidence; security scan did not complete"
@@ -1366,12 +1347,8 @@ class SecurityValidator(ValidatorBase):
                             )
                             return False
                         analyzer_counts[field] = value
-                    analyzer_evidence.setdefault(analyzer_id, []).append(
-                        (analyzer_state, analyzer_counts)
-                    )
-                    if analyzer_counts["planned_work"] != sum(
-                        analyzer_counts[field] for field in outcome_fields
-                    ):
+                    analyzer_evidence.setdefault(analyzer_id, []).append((analyzer_state, analyzer_counts))
+                    if analyzer_counts["planned_work"] != sum(analyzer_counts[field] for field in outcome_fields):
                         result.add_error(
                             "skillspector JSON field 'analysis_completeness.analyzer_statuses' has "
                             "inconsistent work accounting; security scan did not complete"
@@ -1440,10 +1417,9 @@ class SecurityValidator(ValidatorBase):
                         )
                     elif analyzer_state == "not_applicable":
                         not_applicable_analyzer_ids.add(analyzer_id)
-                        not_applicable_evidence_valid &= (
-                            analyzer_status.get("reason_code") == "no_applicable_files"
-                            and not any(analyzer_counts.values())
-                        )
+                        not_applicable_evidence_valid &= analyzer_status.get(
+                            "reason_code"
+                        ) == "no_applicable_files" and not any(analyzer_counts.values())
                     elif analyzer_state not in {"completed", "not_applicable"}:
                         result.add_error(
                             "skillspector JSON field 'analysis_completeness.analyzer_statuses' reports "
@@ -1465,11 +1441,7 @@ class SecurityValidator(ValidatorBase):
                 )
                 if skillspector_version >= (2, 11, 0):
                     required_analyzer_ids |= {"bundled_execution_surface"}
-                if (
-                    uses_completeness_schema
-                    and use_llm
-                    and report_metadata.get("llm_available") is True
-                ):
+                if uses_completeness_schema and use_llm and report_metadata.get("llm_available") is True:
                     required_analyzer_ids |= _SKILLSPECTOR_SEMANTIC_ANALYZERS
                 if not required_analyzer_ids.issubset(observed_analyzer_ids):
                     result.add_error(
@@ -1500,16 +1472,13 @@ class SecurityValidator(ValidatorBase):
                     and not ledger_exceptions
                     and not limitations
                     and report_metadata.get("has_executable_scripts") is False
-                    and not_applicable_analyzer_ids
-                    == _SKILLSPECTOR_DOCS_ONLY_NOT_APPLICABLE_ANALYZERS
+                    and not_applicable_analyzer_ids == _SKILLSPECTOR_DOCS_ONLY_NOT_APPLICABLE_ANALYZERS
                     and not_applicable_evidence_valid
                     and docs_only_analyzer_states_valid
                 )
-                if (
-                    is_complete
-                    or uses_statusless_completeness_schema
-                    or complete_by_applicability
-                ) and counts["total_components"]:
+                if (is_complete or uses_statusless_completeness_schema or complete_by_applicability) and counts[
+                    "total_components"
+                ]:
                     universal_analyzer_ids = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | (
                         {"artifact_integrity"} if uses_completeness_schema else set()
                     )
@@ -1528,12 +1497,8 @@ class SecurityValidator(ValidatorBase):
                     )
                 actual_limitation_counts = Counter(limitations)
                 expected_limitation_counts = Counter(expected_limitations)
-                if (
-                    uses_statusless_completeness_schema
-                    and actual_limitation_counts != expected_limitation_counts
-                ) or (
-                    uses_completeness_schema
-                    and bool(expected_limitation_counts - actual_limitation_counts)
+                if (uses_statusless_completeness_schema and actual_limitation_counts != expected_limitation_counts) or (
+                    uses_completeness_schema and bool(expected_limitation_counts - actual_limitation_counts)
                 ):
                     result.add_error(
                         "skillspector JSON field 'analysis_completeness.limitations' contradicts "
@@ -1543,14 +1508,9 @@ class SecurityValidator(ValidatorBase):
 
                 if uses_completeness_schema and is_complete is not (completeness_status == "complete"):
                     has_report_stage_truncation = any(
-                        limitation.startswith("Transitive traversal truncated: ")
-                        for limitation in limitations
+                        limitation.startswith("Transitive traversal truncated: ") for limitation in limitations
                     )
-                    if not (
-                        not is_complete
-                        and completeness_status == "complete"
-                        and has_report_stage_truncation
-                    ):
+                    if not (not is_complete and completeness_status == "complete" and has_report_stage_truncation):
                         result.add_error(
                             "skillspector JSON field 'analysis_completeness' has contradictory status markers; "
                             "security scan did not complete"
@@ -1741,10 +1701,18 @@ class SecurityValidator(ValidatorBase):
                         _skillspector_scoring_source_scope(issue),
                         issue["id"],
                         issue.get("match_fingerprint"),
-                        *(issue.get(field) for field in (
-                            "finding", "category", "pattern", "explanation",
-                            "remediation", "intent", "tags",
-                        )),
+                        *(
+                            issue.get(field)
+                            for field in (
+                                "finding",
+                                "category",
+                                "pattern",
+                                "explanation",
+                                "remediation",
+                                "intent",
+                                "tags",
+                            )
+                        ),
                         # JSON classification evidence distinguishes true from 1.
                         json.dumps(issue.get("evidence"), sort_keys=True),
                     )
@@ -1835,9 +1803,7 @@ class SecurityValidator(ValidatorBase):
         for index, component in enumerate(normalized_components):
             for field in ("path", "source_identity", "source_url", "source_digest"):
                 value = component.get(field)
-                if uses_versioned_completeness and field == "path" and (
-                    not isinstance(value, str) or not value
-                ):
+                if uses_versioned_completeness and field == "path" and (not isinstance(value, str) or not value):
                     result.add_error(
                         f"skillspector JSON field 'components[{index}].path' must be a non-empty string; "
                         "security scan did not complete"
@@ -2128,8 +2094,7 @@ class SecurityValidator(ValidatorBase):
     ) -> int | float:
         """Return a conservative score floor from the public report fields."""
         file_executable = {
-            (_skillspector_scoring_source_scope(component), component["path"]):
-            component.get("executable") is True
+            (_skillspector_scoring_source_scope(component), component["path"]): component.get("executable") is True
             for component in components
             if isinstance(component.get("path"), str)
         }
@@ -2195,9 +2160,7 @@ class SecurityValidator(ValidatorBase):
                 by_rule.setdefault(issue["id"], []).append(
                     base_contribution(
                         issue,
-                        trust_location=(
-                            unknown_finding_count == 0 and identity not in ambiguous_identities
-                        ),
+                        trust_location=(unknown_finding_count == 0 and identity not in ambiguous_identities),
                     )
                 )
 
@@ -2218,8 +2181,7 @@ class SecurityValidator(ValidatorBase):
                 ]
                 total += costs[0]
                 reductions.extend(
-                    costs[index] - costs[index + 1]
-                    for index in range(len(_SKILLSPECTOR_DIMINISHING_WEIGHTS))
+                    costs[index] - costs[index + 1] for index in range(len(_SKILLSPECTOR_DIMINISHING_WEIGHTS))
                 )
             total -= sum(sorted(reductions, reverse=True)[:unknown_finding_count])
             score_floor = max(
@@ -2241,12 +2203,10 @@ class SecurityValidator(ValidatorBase):
         )
         if uses_report_identities:
             all_visible_issues = [*issues, *(removed_issues or [])]
-            all_deduplicated, all_ambiguous_identities = (
-                SecurityValidator._deduplicate_skillspector_issues_for_scoring(
-                    all_visible_issues,
-                    uses_report_identities=True,
-                    uses_finding_identity=uses_finding_identity,
-                )
+            all_deduplicated, all_ambiguous_identities = SecurityValidator._deduplicate_skillspector_issues_for_scoring(
+                all_visible_issues,
+                uses_report_identities=True,
+                uses_finding_identity=uses_finding_identity,
             )
             unknown_finding_count = max(
                 0,
@@ -2266,9 +2226,7 @@ class SecurityValidator(ValidatorBase):
                 _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]]
                 * issue["confidence"]
                 * _SKILLSPECTOR_EXECUTABLE_MULTIPLIER,
-                _SKILLSPECTOR_RISK_SCORE_FLOORS_BY_RULE_ID.get(issue["id"], 0)
-                if issue["confidence"] > 0
-                else 0,
+                _SKILLSPECTOR_RISK_SCORE_FLOORS_BY_RULE_ID.get(issue["id"], 0) if issue["confidence"] > 0 else 0,
             )
             for issue in removed_issues
         )
@@ -2295,9 +2253,7 @@ class SecurityValidator(ValidatorBase):
                 uses_finding_identity=uses_finding_identity,
             )
             if uses_report_identities:
-                modern_identity_counts[
-                    (_skillspector_scoring_source_scope(issue), issue["id"], identity)
-                ] += 1
+                modern_identity_counts[(_skillspector_scoring_source_scope(issue), issue["id"], identity)] += 1
             key = (
                 _skillspector_scoring_source_scope(issue),
                 issue["id"],
@@ -2323,11 +2279,7 @@ class SecurityValidator(ValidatorBase):
             existing = cross_file_best.get(key)
             if existing is None or issue["confidence"] > existing["confidence"]:
                 cross_file_best[key] = issue
-        ambiguous_identities = {
-            identity
-            for identity, count in modern_identity_counts.items()
-            if count > 1
-        }
+        ambiguous_identities = {identity for identity, count in modern_identity_counts.items() if count > 1}
         return list(cross_file_best.values()), ambiguous_identities
 
     @staticmethod
@@ -2378,9 +2330,7 @@ class SecurityValidator(ValidatorBase):
                 return False
         finding_id = issue.get("finding_id")
         if require_finding_id and (not isinstance(finding_id, str) or not finding_id.strip()):
-            result.add_error(
-                f"{prefix}.finding_id' must be a non-empty string; security scan did not complete"
-            )
+            result.add_error(f"{prefix}.finding_id' must be a non-empty string; security scan did not complete")
             return False
         if not any(
             isinstance(issue.get(field), str) and issue[field].strip()
@@ -2406,9 +2356,7 @@ class SecurityValidator(ValidatorBase):
         location = issue.get("location")
         if location is None:
             if require_location_file:
-                result.add_error(
-                    f"{prefix}.location.file' must be a non-empty string; security scan did not complete"
-                )
+                result.add_error(f"{prefix}.location.file' must be a non-empty string; security scan did not complete")
                 return False
             return True
         if not isinstance(location, dict):
@@ -2416,9 +2364,7 @@ class SecurityValidator(ValidatorBase):
             return False
         file_path = location.get("file")
         if require_location_file and (not isinstance(file_path, str) or not file_path):
-            result.add_error(
-                f"{prefix}.location.file' must be a non-empty string; security scan did not complete"
-            )
+            result.add_error(f"{prefix}.location.file' must be a non-empty string; security scan did not complete")
             return False
         if file_path is not None and not isinstance(file_path, str):
             result.add_error(f"{prefix}.location.file' must be a string or null; security scan did not complete")
@@ -2477,19 +2423,15 @@ class SecurityValidator(ValidatorBase):
         uses_report_identities = (
             isinstance(raw_version, str)
             and SEMVER_RE.fullmatch(raw_version) is not None
-            and tuple(int(part) for part in raw_version.split("."))
-            >= _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION
+            and tuple(int(part) for part in raw_version.split(".")) >= _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION
         )
         uses_finding_identity = (
             uses_report_identities
-            and tuple(int(part) for part in raw_version.split("."))
-            >= _SKILLSPECTOR_FINDING_IDENTITY_VERSION
+            and tuple(int(part) for part in raw_version.split(".")) >= _SKILLSPECTOR_FINDING_IDENTITY_VERSION
         )
         analysis_completeness = data.get("analysis_completeness")
         findings_after_filtering = (
-            analysis_completeness.get("findings_after_filtering")
-            if isinstance(analysis_completeness, dict)
-            else None
+            analysis_completeness.get("findings_after_filtering") if isinstance(analysis_completeness, dict) else None
         )
         suppressed = data.get("suppressed")
         serialized_findings = len(issues) + (len(suppressed) if isinstance(suppressed, list) else 0)

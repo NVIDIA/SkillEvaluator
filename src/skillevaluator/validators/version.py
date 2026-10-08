@@ -106,10 +106,7 @@ class VersionValidator(ValidatorBase):
                     category="VERSION",
                     severity=Severity.HIGH,
                     check_name="version_missing",
-                    message=(
-                        "metadata.version is missing even though a previous version "
-                        f"('{previous}') was supplied"
-                    ),
+                    message=(f"metadata.version is missing even though a previous version ('{previous}') was supplied"),
                     file_path=str(manifest),
                     suggestion="Keep metadata.version and bump major, minor, or patch",
                 )

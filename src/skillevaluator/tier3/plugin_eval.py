@@ -1261,7 +1261,8 @@ def _skill_row(
 ) -> dict[str, Any]:
     """Coverage row of one skill: a staged member skill, a native Claude Code skill directory, or neither.
 
-    *member_names* are the directory names exactly one staged member skill has.
+    *member_names* are the directory names exactly one staged member skill has; a
+    resolved ref or a nested bundled skill records its staged name only when it is one.
     """
     if component.path == ".":
         return coverage_row(
@@ -1281,7 +1282,14 @@ def _skill_row(
             member=_ref_member(component, member_names),
         )
     if (plugin_root / component.path).resolve() in member_skills:
-        return coverage_row(component, "staged", "bundled skill staged as a plugin member skill")
+        # A nested skill (``skills/release/notes-writer``) is staged, loaded, and activated by its directory name.
+        member = PurePosixPath(component.path).name
+        return coverage_row(
+            component,
+            "staged",
+            "bundled skill staged as a plugin member skill",
+            member=member if member != component.name and member in member_names else None,
+        )
     if skipped:
         return coverage_row(component, "not_staged", _SKIPPED_PACKAGE_NOTE)
     if component.path in claude_skill_dirs:

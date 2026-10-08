@@ -275,6 +275,36 @@ def test_activation_promotion_of_packaged_rows_and_hooks_is_unchanged() -> None:
     }
 
 
+def test_activation_exercises_a_nested_bundled_skill_by_its_directory_name(tmp_path: Path) -> None:
+    """``skills/release/notes-writer`` is a row named ``release/notes-writer``, staged as ``notes-writer``."""
+    plugin = tmp_path / "acme"
+    (plugin / ".claude-plugin").mkdir(parents=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "acme", "version": "1.0.0"}))
+    _skill(plugin / "skills" / "flat-skill")
+    _skill(plugin / "skills" / "release" / "notes-writer")
+    (plugin / "evals").mkdir()
+    (plugin / "evals" / "evals.json").write_text(json.dumps(EVALS), encoding="utf-8")
+    package = prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
+    provenance = package.provenance()
+
+    assert sorted(path.name for path in package.include_skills) == ["flat-skill", "notes-writer"]
+    rows = _rows(provenance["component_coverage"])
+    assert {name: row.get("member") for name, row in rows.items()} == {
+        "flat-skill": None,
+        "release/notes-writer": "notes-writer",
+    }
+    labels = ("skill:flat-skill", "skill:notes-writer")
+    view = coverage_view(
+        provenance["component_coverage"], {"activation": {"declared": list(labels), "exercised": list(labels)}}
+    )
+    assert view is not None
+    assert {row["name"]: row["observed"] for row in view["rows"]} == dict.fromkeys(rows, "exercised")
+    assert apply_runtime_coverage(provenance, _engine(exercised=labels)) == 2
+    assert {name: row["state"] for name, row in _rows(provenance["component_coverage"]).items()} == dict.fromkeys(
+        rows, "exercised"
+    )
+
+
 @requires_git
 def test_reports_count_an_exercised_ref_declared_skill_as_observed(tmp_path: Path) -> None:
     """The live false negative: a skill that loaded and ran was listed as staged but not observed."""

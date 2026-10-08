@@ -309,6 +309,21 @@ skills:
         assert result.metadata["plugin"]["in_plugin_skills"] == 1
         assert any("[broken-skill]" in finding.file_path for finding in result.findings)
 
+    def test_bundled_skill_name_mismatch_suggests_keeping_the_folder_name(self, tmp_path: Path):
+        # Claude Code loads a plugin skill by its folder name, so the fix is the frontmatter name.
+        manifest = tmp_path / ".claude-plugin" / "plugin.json"
+        manifest.parent.mkdir()
+        manifest.write_text('{"name": "hookify"}', encoding="utf-8")
+        skill = tmp_path / "skills" / "writing-rules" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("---\nname: writing-hookify-rules\ndescription: Writes hookify rules.\n---\n# Rules\n")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        [finding] = [finding for finding in result.findings if finding.check_name == "name_consistency"]
+        assert finding.suggestion.startswith("Update the frontmatter name to 'writing-rules'.")
+        assert "rename directory" not in finding.suggestion
+
     def test_contained_plugin_with_valid_bundled_skill_passes(self, tmp_path: Path):
         manifest = tmp_path / ".claude-plugin" / "plugin.json"
         manifest.parent.mkdir()

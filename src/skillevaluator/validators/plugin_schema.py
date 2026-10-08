@@ -1630,6 +1630,14 @@ class PluginSchemaValidator(ValidatorBase):
                 )
             )
             return
+        for finding in skill_result.findings:
+            if finding.check_name == "name_consistency":
+                # Claude Code loads a plugin skill by its folder name ('<plugin>:<folder>'), which the plugin's own
+                # commands and docs use, so renaming the folder is not the safe fix.
+                finding.suggestion = (
+                    f"Update the frontmatter name to '{skill_dir.name}'. A plugin skill is loaded by its folder "
+                    "name, so renaming the folder changes the name the plugin's commands and users load it by."
+                )
         if advisory is not None:
             skill_result = _advisory_result(skill_result, advisory)
         result.merge_with_prefix(skill_result, skill_name)

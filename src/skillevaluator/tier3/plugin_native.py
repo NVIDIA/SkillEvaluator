@@ -2088,7 +2088,9 @@ class OpenCodeAdapter(HarnessAdapter):
                         "enabled": True,
                     }
                 else:
-                    mcp[server["name"]] = {"type": "remote", "url": server["url"], "enabled": True}
+                    # Match Harbor and the wrapper arm: headless trials cannot complete
+                    # OAuth, so a 401 must not start OpenCode's OAuth discovery.
+                    mcp[server["name"]] = {"type": "remote", "url": server["url"], "enabled": True, "oauth": False}
             config["mcp"] = mcp
             checks.extend(
                 CensusCheck(

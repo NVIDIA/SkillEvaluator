@@ -211,3 +211,27 @@ DEFAULT_ENV_MODE = "docker"
 
 #: ``--plugin-load`` choices for plugin Tier 3 runs; ``wrapper`` is the default.
 PLUGIN_LOAD_CHOICES: tuple[str, ...] = ("wrapper", "native", "auto")
+
+#: Upper bound for ``--trial-retries``. Each retry repeats a trial's environment
+#: start and agent setup, so a small cap keeps a broken backend from multiplying
+#: the run's wall time.
+MAX_TRIAL_RETRIES = 5
+
+#: Harbor exception names ``--trial-retries`` lets Harbor retry, each passed as
+#: ``--retry-include``. Harbor 0.24 compares a trial's ``type(exc).__name__`` with
+#: these strings exactly, so a subclass or parent class never matches, and its
+#: default exclusions (agent and verifier timeouts, reward and verifier-output
+#: errors, usage limits, refusals, authentication, unknown models) still win.
+#: The two timeouts are raised while the agent's environment starts or the agent
+#: installs, before it receives the task; ``EnvironmentStartTimeoutError`` also
+#: names a single-step task's separate verifier environment failing to start,
+#: which is why the runner refuses retries for such a task. ``NetworkConnectionError`` is Harbor's name for a failed agent command
+#: whose output shows a DNS, refused-connection, TLS, or curl failure, such as an
+#: apt or npm install that cannot reach its mirror. Harbor gives the same name to
+#: a failed task command: for Claude Code and Codex only from the CLI's own error
+#: output, such as a lost model connection; for other agents from any output.
+HARBOR_TRIAL_RETRY_EXCEPTIONS: tuple[str, ...] = (
+    "EnvironmentStartTimeoutError",
+    "AgentSetupTimeoutError",
+    "NetworkConnectionError",
+)

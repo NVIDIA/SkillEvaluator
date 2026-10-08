@@ -60,7 +60,7 @@ from skillevaluator.tier1.commands import (
     run_security_scan,
     run_validation,
 )
-from skillevaluator.tier3_environments import HARBOR_ENVIRONMENTS, PLUGIN_LOAD_CHOICES
+from skillevaluator.tier3_environments import HARBOR_ENVIRONMENTS, MAX_TRIAL_RETRIES, PLUGIN_LOAD_CHOICES
 from skillevaluator.tier_group import TierGroup
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 from skillevaluator.utils.tier2_paths import (
@@ -116,6 +116,11 @@ _PROBE_MCP_ENV_HELP = (
     "${VAR} headers (repeatable). NAME sends it to every URL server whose headers use it; NAME=HOST only to "
     "servers whose URL host is HOST; NAME@SERVER only to that server. The plugin chooses the URL, so headers "
     "that reference any other variable are not sent."
+)
+_TRIAL_RETRIES_HELP = (
+    "Let Harbor retry a trial up to N times after an environment-start timeout, an agent-setup timeout, or a "
+    "network connection error; never after an agent timeout or a verifier or reward error. The run's "
+    "run_config.json records the setting and the retries Harbor performed."
 )
 
 
@@ -699,6 +704,7 @@ def _run_agent_eval_or_skip(
     include_skills: tuple[Path, ...] = (),
     copy_repo: bool = False,
     timeout_multiplier: float | None = None,
+    trial_retries: int = 0,
     harbor_keep_jobs: bool = False,
     agent_runtime_preflight: bool | None = None,
     block_on_agent_eval: bool = False,
@@ -740,6 +746,7 @@ def _run_agent_eval_or_skip(
             include_skills=include_skills,
             copy_repo=copy_repo,
             timeout_multiplier=timeout_multiplier,
+            trial_retries=trial_retries,
             harbor_keep_jobs=harbor_keep_jobs,
             agent_runtime_preflight=agent_runtime_preflight,
             evaluated_source=evaluated_source,
@@ -792,6 +799,7 @@ def _run_agent_eval_or_skip(
         include_skills=include_skills,
         copy_repo=copy_repo,
         timeout_multiplier=timeout_multiplier,
+        trial_retries=trial_retries,
         harbor_keep_jobs=harbor_keep_jobs,
         agent_runtime_preflight=agent_runtime_preflight,
         evaluated_source=evaluated_source,
@@ -1143,6 +1151,7 @@ def _run_plugin_agent_eval(
     include_skills: tuple[Path, ...] = (),
     copy_repo: bool = False,
     timeout_multiplier: float | None = None,
+    trial_retries: int = 0,
     harbor_keep_jobs: bool = False,
     agent_runtime_preflight: bool | None = None,
     evaluated_source: dict[str, str] | None = None,
@@ -1223,6 +1232,7 @@ def _run_plugin_agent_eval(
                 grading_mode=grading_mode,
                 copy_repo=copy_repo,
                 timeout_multiplier=timeout_multiplier,
+                trial_retries=trial_retries,
                 harbor_keep_jobs=harbor_keep_jobs,
                 agent_runtime_preflight=agent_runtime_preflight,
                 evaluated_source=evaluated_source,
@@ -1529,6 +1539,8 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
         argv.append("--copy-repo")
     if params.get("timeout_multiplier") is not None:
         argv.extend(["--timeout-multiplier", str(params["timeout_multiplier"])])
+    if params.get("trial_retries"):
+        argv.extend(["--trial-retries", str(params["trial_retries"])])
     if params.get("harbor_keep_jobs"):
         argv.append("--harbor-keep-jobs")
     agent_runtime_preflight = params.get("agent_runtime_preflight")
@@ -2451,6 +2463,15 @@ def _resolve_validate_target(
     help="Scale Harbor step timeouts.",
 )
 @click.option(
+    "--trial-retries",
+    type=click.IntRange(0, MAX_TRIAL_RETRIES),
+    default=0,
+    show_default=True,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help=_TRIAL_RETRIES_HELP,
+)
+@click.option(
     "--harbor-keep-jobs",
     is_flag=True,
     cls=GroupedOption,
@@ -2529,6 +2550,7 @@ def validate(
     include_skills: tuple[Path, ...],
     copy_repo: bool,
     timeout_multiplier: float | None,
+    trial_retries: int,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
     workers: int,
@@ -2807,6 +2829,7 @@ def validate(
             include_skills=include_skills,
             copy_repo=copy_repo,
             timeout_multiplier=timeout_multiplier,
+            trial_retries=trial_retries,
             harbor_keep_jobs=harbor_keep_jobs,
             agent_runtime_preflight=agent_runtime_preflight,
             block_on_agent_eval=block_on_agent_eval_effective,
@@ -3396,6 +3419,13 @@ def _tier2_workflow(
     help="Run an extra agent-only execution of the first staged task before the full matrix [default: disabled].",
 )
 @click.option("--timeout-multiplier", type=float, default=None)
+@click.option(
+    "--trial-retries",
+    type=click.IntRange(0, MAX_TRIAL_RETRIES),
+    default=0,
+    show_default=True,
+    help=_TRIAL_RETRIES_HELP,
+)
 @click.option("--override-cpus", type=int, default=None)
 @click.option("--override-memory-mb", type=int, default=None)
 @click.option("--override-storage-mb", type=int, default=None)
@@ -3446,6 +3476,7 @@ def evaluate(
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
     timeout_multiplier: float | None,
+    trial_retries: int,
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
@@ -3491,6 +3522,7 @@ def evaluate(
         harbor_keep_jobs=harbor_keep_jobs,
         agent_runtime_preflight=agent_runtime_preflight,
         timeout_multiplier=timeout_multiplier,
+        trial_retries=trial_retries,
         override_cpus=override_cpus,
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
@@ -3627,6 +3659,13 @@ def evaluate(
 @click.option("--harbor-keep-jobs", is_flag=True)
 @click.option("--agent-runtime-preflight/--no-agent-runtime-preflight", default=None)
 @click.option("--timeout-multiplier", type=float, default=None)
+@click.option(
+    "--trial-retries",
+    type=click.IntRange(0, MAX_TRIAL_RETRIES),
+    default=0,
+    show_default=True,
+    help=_TRIAL_RETRIES_HELP,
+)
 @click.option("--override-cpus", type=int, default=None)
 @click.option("--override-memory-mb", type=int, default=None)
 @click.option("--override-storage-mb", type=int, default=None)
@@ -3663,6 +3702,7 @@ def evaluate_plugin(
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
     timeout_multiplier: float | None,
+    trial_retries: int,
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
@@ -3763,6 +3803,7 @@ def evaluate_plugin(
                 harbor_keep_jobs=harbor_keep_jobs,
                 agent_runtime_preflight=agent_runtime_preflight,
                 timeout_multiplier=timeout_multiplier,
+                trial_retries=trial_retries,
                 override_cpus=override_cpus,
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,

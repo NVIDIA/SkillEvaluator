@@ -661,6 +661,7 @@ The high-signal flags, with defaults:
 | `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory |
 | `--harbor-keep-jobs` | off | Retain Harbor job directories for inspection |
 | `--timeout-multiplier` | `1.0` | Scale Harbor's agent, verifier, and environment-build timeouts; must be a finite number greater than 0 whose scaled timeouts stay finite |
+| `--trial-retries` | `0` | Let Harbor rerun a trial, up to 5 times, after an environment-start timeout, an agent-setup timeout, or a network connection error; see [Retry infrastructure failures](#retry-infrastructure-failures) |
 | `--copy-repo` | off | Copy the surrounding repository into the task environment |
 | `--include-skills` | none | Stage additional skill directories; requires `--skill-workspace-mode group` |
 
@@ -671,6 +672,43 @@ modes, is in the [CLI Reference](cli-reference.mdx).
 While iterating on a dataset, `--skip-baseline` roughly halves the runtime.
 Re-enable the baseline arm for any run whose Skill Lift you intend to trust.
 </Tip>
+
+### Retry infrastructure failures
+
+A trial that fails while its environment starts or its agent installs, for
+example because an `apt-get` or `npm` mirror cannot be reached, leaves its arm
+`INCOMPLETE` even though nothing was wrong with the evaluation. With
+`--trial-retries N` (0 to 5, default 0), Harbor reruns such a trial up to N
+times from a fresh environment, under the same trial name:
+
+```bash title="Retry setup failures"
+skillevaluator tier3 evaluate ./my-skill --agents opencode --trial-retries 2
+```
+
+- Harbor retries only `EnvironmentStartTimeoutError`, `AgentSetupTimeoutError`,
+  and `NetworkConnectionError`, and never an agent timeout, a verifier or
+  reward error, or any other agent failure. With the default `0`, the Harbor
+  command is unchanged.
+- Harbor matches exception names, not phases. It also raises
+  `NetworkConnectionError` when the agent's own task command fails with
+  network-error output: for Claude Code and Codex only from the CLI's own error
+  output, such as a lost model connection; for OpenCode and Hermes from any of
+  the command's output, tool output included. That trial also restarts from a
+  fresh environment, so its agent gets another attempt at the task. Keep the
+  default for tasks whose agent work makes network calls that are expected to
+  fail.
+- A single-step native task that verifies in a separate environment cannot use
+  retries, because Harbor gives that environment's start timeout the same name
+  as the agent environment's. The run stops before any trial starts.
+- Harbor deletes a failed attempt's trial directory before the retry and counts
+  the attempt only as a retry, so it adds no trial, error, evidence, or score to
+  the results. Each retry repeats the environment start and agent setup. The
+  agent runtime preflight retries the same way, and its time limit grows to
+  cover every attempt.
+- `run_config.json`, and `run_config` in `result.json`, record the setting as
+  `harbor.trial_retries` and the retries Harbor performed across the run's jobs
+  as `harbor.trial_retries_used`. Retained Harbor jobs (`--harbor-keep-jobs`)
+  name each retried exception in their `job.log`.
 
 ## How standard grading judges a trial
 

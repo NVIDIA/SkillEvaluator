@@ -3275,6 +3275,12 @@ a Tier 3 `FAIL` verdict or a confirmed Skill Lift regression fails it the same
 way it fails a complete run, advisory without the flag. The reports still say
 what the run did not evaluate.
 
+A trial that fails while its environment starts or its agent installs also
+leaves its arm incomplete. `--trial-retries N` lets Harbor rerun a trial after
+an environment-start timeout, an agent-setup timeout, or a network connection
+error, never after an agent timeout or a verifier or reward error; see
+[Retry infrastructure failures](tier3-live-evaluation.mdx#retry-infrastructure-failures).
+
 When an agent's run did not complete, `BENCHMARK.md` prints no Tier 3 score or
 uplift for it under "Results at a Glance". It says how many attempts of each
 arm scored. The HTML and JSON reports keep the per-trial evidence.
@@ -3769,6 +3775,7 @@ skillevaluator tier3 evaluate-plugin ./my-plugin --agents claude-code --plugin-l
 skillevaluator validate ./my-plugin --tier3 --agents claude-code,hermes --plugin-load auto
 skillevaluator validate ./my-plugin --tier3 --block-on-agent-eval     # make Tier 3 gate
 skillevaluator tier3 evaluate-plugin ./my-plugin --probe-mcp           # prove URL MCP servers (advisory)
+skillevaluator tier3 evaluate-plugin ./my-plugin --trial-retries 2     # rerun trials whose setup failed
 ```
 
 | Command | Plugin-specific flags |

@@ -769,6 +769,21 @@ def validate_harbor_job_result(
     return True, ""
 
 
+def harbor_job_retries(job_dir: Path) -> int:
+    """Return how many trial retries Harbor recorded for one job, or 0 if none.
+
+    Harbor 0.24 retries a trial under its original trial name: it deletes the
+    failed attempt's directory before the next attempt, drops that attempt from
+    the job statistics, and counts it only in ``stats.n_retries``. Every other
+    counter, the evaluation statistics, and the trial directories therefore
+    describe each logical trial once, by its last attempt.
+    """
+    result = _read_json(job_dir / "result.json")
+    stats = result.get("stats") if isinstance(result, dict) else None
+    retries = stats.get("n_retries") if isinstance(stats, dict) else None
+    return retries if isinstance(retries, int) and not isinstance(retries, bool) and retries > 0 else 0
+
+
 def _read_json_text(text: str) -> Any:
     try:
         return json.loads(text)

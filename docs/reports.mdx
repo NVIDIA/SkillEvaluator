@@ -235,6 +235,8 @@ completed run directly:
   artifact references.
 - **`run_config.json`** / **`attempt_policy.json`** — exactly how the run was
   configured: environment, attempts, concurrency, grading mode, pass threshold.
+  `harbor.trial_retries` is the `--trial-retries` setting and
+  `harbor.trial_retries_used` the trial retries Harbor performed.
 - **`report.html`** — the human-readable report, generated automatically at
   the end of every run.
 - **`comparison.json`** — the cross-agent comparison table; written only when

@@ -551,6 +551,15 @@
           "type": "float"
         },
         {
+          "default": "0",
+          "name": "trial_retries",
+          "opts": [
+            "--trial-retries"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
           "name": "override_cpus",
           "opts": [
             "--override-cpus"
@@ -887,6 +896,15 @@
           ],
           "param_type": "option",
           "type": "float"
+        },
+        {
+          "default": "0",
+          "name": "trial_retries",
+          "opts": [
+            "--trial-retries"
+          ],
+          "param_type": "option",
+          "type": "integer range"
         },
         {
           "name": "override_cpus",
@@ -2733,6 +2751,15 @@
               "type": "float"
             },
             {
+              "default": "0",
+              "name": "trial_retries",
+              "opts": [
+                "--trial-retries"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
               "name": "override_cpus",
               "opts": [
                 "--override-cpus"
@@ -3069,6 +3096,15 @@
               ],
               "param_type": "option",
               "type": "float"
+            },
+            {
+              "default": "0",
+              "name": "trial_retries",
+              "opts": [
+                "--trial-retries"
+              ],
+              "param_type": "option",
+              "type": "integer range"
             },
             {
               "name": "override_cpus",
@@ -3548,6 +3584,15 @@
             ],
             "param_type": "option",
             "type": "float"
+          },
+          {
+            "default": "0",
+            "name": "trial_retries",
+            "opts": [
+              "--trial-retries"
+            ],
+            "param_type": "option",
+            "type": "integer range"
           },
           {
             "name": "override_cpus",
@@ -4073,6 +4118,15 @@
           ],
           "param_type": "option",
           "type": "float"
+        },
+        {
+          "default": "0",
+          "name": "trial_retries",
+          "opts": [
+            "--trial-retries"
+          ],
+          "param_type": "option",
+          "type": "integer range"
         },
         {
           "default": "False",

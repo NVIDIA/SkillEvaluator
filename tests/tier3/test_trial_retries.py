@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import io
 import json
 import subprocess
 from datetime import UTC, datetime
@@ -25,6 +26,7 @@ from uuid import uuid4
 
 import pytest
 from click.testing import CliRunner
+from rich.console import Console
 
 pytest.importorskip("harbor")
 
@@ -53,7 +55,8 @@ from skillevaluator.evaluation import EvaluationOptions, EvaluationService
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3 import commands as tier3_commands
-from skillevaluator.tier3.harbor import LOCAL_AGENT_IMPORT_PATHS, runner, runtime_preflight
+from skillevaluator.tier3.evals_config import EvalsConfigError, _validate_config
+from skillevaluator.tier3.harbor import LOCAL_AGENT_IMPORT_PATHS, progress, runner, runtime_preflight
 from skillevaluator.tier3.harbor.collector import (
     _agent_runtime_failure_reason,
     collect_harbor_results,
@@ -539,7 +542,9 @@ def test_run_harbor_launches_harbor_with_the_retry_flags(monkeypatch: pytest.Mon
     assert retry_command[retry_command.index("--max-retries") + 1] == "3"
 
 
-def test_tier3_evaluate_forwards_trial_retries_and_defaults_to_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tier3_evaluate_forwards_trial_retries_and_leaves_the_default_to_the_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: list[EvaluationOptions] = []
 
     def evaluate(_self: object, options: EvaluationOptions, **_kwargs: object) -> dict[str, object]:
@@ -553,7 +558,7 @@ def test_tier3_evaluate_forwards_trial_retries_and_defaults_to_zero(monkeypatch:
         outcome = CliRunner().invoke(cli_module.cli, argv)
         assert outcome.exit_code == 0, outcome.output
 
-    assert [options.trial_retries for options in captured] == [0, 2]
+    assert [options.trial_retries for options in captured] == [None, 2]
     rejected = CliRunner().invoke(cli_module.cli, [*base, "--trial-retries", str(MAX_TRIAL_RETRIES + 1)])
     assert rejected.exit_code == 2
     assert "--trial-retries" in rejected.output
@@ -584,13 +589,15 @@ def test_validate_forwards_trial_retries_and_catalog_children_add_the_flag_only_
     assert outcome.exit_code == 0, outcome.output
     assert captured["trial_retries"] == 1
 
-    def child_argv(trial_retries: int) -> list[str]:
+    def child_argv(trial_retries: int | None) -> list[str]:
         context = SimpleNamespace(params={"env_mode": "docker", "trial_retries": trial_retries})
         return cli_module._catalog_child_argv_from_ctx(context, FIXTURE, tmp_path / "out")
 
-    assert "--trial-retries" not in child_argv(0)
-    retried = child_argv(2)
-    assert retried[retried.index("--trial-retries") + 1] == "2"
+    assert "--trial-retries" not in child_argv(None)
+    # An explicit 0 still overrides harbor.trial_retries in the child skill's config.
+    for value in (0, 2):
+        argv = child_argv(value)
+        assert argv[argv.index("--trial-retries") + 1] == str(value)
 
 
 def test_validate_helper_and_plugin_evaluation_carry_trial_retries_into_the_service(
@@ -662,13 +669,13 @@ def test_engine_entry_point_forwards_trial_retries(monkeypatch: pytest.MonkeyPat
     assert captured["trial_retries"] == 2
 
 
-def _native_skill(tmp_path: Path, *, verifier: str = "") -> Path:
+def _native_skill(tmp_path: Path, *, verifier: str = "", harbor: str = "") -> Path:
     skill_dir = tmp_path / "target-skill"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("---\nname: target-skill\ndescription: demo\n---\n# Body\n", encoding="utf-8")
     (skill_dir / "evals").mkdir()
     (skill_dir / "evals" / "config.yaml").write_text(
-        "schema_version: 1\nharbor:\n  task_source: native_harbor\ngrading:\n  mode: custom_only\n",
+        f"schema_version: 1\nharbor:\n  task_source: native_harbor\n{harbor}grading:\n  mode: custom_only\n",
         encoding="utf-8",
     )
     for folder in ("case-001", "case-002"):
@@ -793,3 +800,95 @@ def test_run_with_trial_retries_stops_before_harbor_for_a_separate_verifier_task
     [error] = results["execution_errors"]
     assert "trial_retries is not supported for a single-step task that verifies in a separate environment" in error
     assert launches == []
+
+
+@pytest.mark.parametrize("value", [0, 1, MAX_TRIAL_RETRIES])
+def test_evals_config_accepts_harbor_trial_retries(tmp_path: Path, value: int) -> None:
+    config = _validate_config({"schema_version": 1, "harbor": {"trial_retries": value}}, tmp_path / "config.yml")
+
+    assert config["harbor"]["trial_retries"] == value
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (-1, f"must be between 0 and {MAX_TRIAL_RETRIES}"),
+        (MAX_TRIAL_RETRIES + 1, f"must be between 0 and {MAX_TRIAL_RETRIES}"),
+        (True, "must be an integer"),
+        (1.5, "must be an integer"),
+        ("2", "must be an integer"),
+    ],
+)
+def test_evals_config_rejects_an_invalid_harbor_trial_retries(tmp_path: Path, value: object, message: str) -> None:
+    with pytest.raises(EvalsConfigError, match=f"harbor.trial_retries {message}"):
+        _validate_config({"schema_version": 1, "harbor": {"trial_retries": value}}, tmp_path / "config.yml")
+
+
+@pytest.mark.parametrize(("cli_value", "expected"), [(None, 3), (0, 0), (1, 1)])
+def test_run_takes_trial_retries_from_the_config_unless_the_cli_sets_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cli_value: int | None, expected: int
+) -> None:
+    skill_dir = _native_skill(tmp_path, harbor="  trial_retries: 3\n")
+    _offline_engine(monkeypatch)
+    launches: list[object] = []
+    plans: list[progress.Tier3RunPlan] = []
+
+    class Reporter(progress.NullProgressReporter):
+        def start(self, plan: progress.Tier3RunPlan) -> None:
+            plans.append(plan)
+
+    def fake_run_harbor(**kwargs: object) -> tuple[bool, str]:
+        launches.append(kwargs.get("trial_retries"))
+        return False, "stop after the first launch"
+
+    monkeypatch.setattr(runner, "_run_harbor", fake_run_harbor)
+
+    results = runner.run_harbor_eval(
+        skill_path=skill_dir,
+        agents=["opencode"],
+        output_dir=tmp_path / "eval-out",
+        env_mode="docker",
+        agent_runtime_preflight=False,
+        skip_baseline=True,
+        trial_retries=cli_value,
+        progress_reporter=Reporter(),
+    )
+
+    assert launches == [expected]
+    assert results["run_config"]["harbor"]["trial_retries"] == expected
+    # The resolved plans carry the effective value; the early plan before config loads carries the CLI value.
+    assert [plan.trial_retries for plan in plans] == [cli_value, expected, expected]
+
+
+def _banner_plan(trial_retries: int | None) -> progress.Tier3RunPlan:
+    return progress.Tier3RunPlan(
+        skill_name="demo",
+        environment="docker",
+        agents=("codex",),
+        attempts=1,
+        timeout_multiplier=1.0,
+        trial_retries=trial_retries,
+    )
+
+
+def test_the_run_plan_shows_the_trial_retries_only_when_enabled() -> None:
+    def plain(trial_retries: int | None) -> str:
+        output = io.StringIO()
+        reporter = progress.PlainProgressReporter(stream=output, refresh_interval=60)
+        reporter.start(_banner_plan(trial_retries))
+        reporter.close()
+        return output.getvalue()
+
+    def rich(trial_retries: int | None) -> str:
+        reporter = progress.RichProgressReporter(stream=io.StringIO())
+        reporter._live_plan = _banner_plan(trial_retries)
+        output = io.StringIO()
+        Console(file=output, force_terminal=False, width=200).print(reporter._build_live_table())
+        return output.getvalue()
+
+    assert "timeout=1x" in plain(2)
+    assert "trial-retries=2" in plain(2)
+    assert "Trial retries 2" in rich(2)
+    for value in (None, 0):
+        assert "trial-retries" not in plain(value)
+        assert "Trial retries" not in rich(value)

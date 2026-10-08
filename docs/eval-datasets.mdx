@@ -286,6 +286,7 @@ grading:
 | `harbor.n_concurrent` | integer ≥ 1 | Concurrent trials. |
 | `harbor.max_agents` | integer ≥ 1 | Cap on agents evaluated in one run. |
 | `harbor.timeout_multiplier` | finite number > 0 | Scales task timeouts. Values that would overflow Harbor's mandatory lifecycle timeouts are rejected before execution. |
+| `harbor.trial_retries` | integer 0–5 | Times Harbor may rerun a trial after an environment-start timeout, an agent-setup timeout, or a network failure during agent setup in SkillEvaluator's agent wrappers; see [Retry infrastructure failures](tier3-live-evaluation.mdx#retry-infrastructure-failures). Default: `0`; `--trial-retries` overrides this value. |
 | `harbor.agent_runtime_preflight` | boolean | Opt-in extra agent-only execution of the first staged task before the measured evaluation. Default: `false`; the CLI flag overrides this value. |
 | `harbor.plugin_canary` | boolean | Plant the canary decoy credential in every arm of a plugin run. Default: `true`. Set `false` to run a plugin evaluation without it. |
 | `harbor.agent_workdir` | string | Working directory for the agent inside the container. |

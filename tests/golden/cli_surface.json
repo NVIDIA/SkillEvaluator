@@ -551,7 +551,6 @@
           "type": "float"
         },
         {
-          "default": "0",
           "name": "trial_retries",
           "opts": [
             "--trial-retries"
@@ -898,7 +897,6 @@
           "type": "float"
         },
         {
-          "default": "0",
           "name": "trial_retries",
           "opts": [
             "--trial-retries"
@@ -2751,7 +2749,6 @@
               "type": "float"
             },
             {
-              "default": "0",
               "name": "trial_retries",
               "opts": [
                 "--trial-retries"
@@ -3098,7 +3095,6 @@
               "type": "float"
             },
             {
-              "default": "0",
               "name": "trial_retries",
               "opts": [
                 "--trial-retries"
@@ -3586,7 +3582,6 @@
             "type": "float"
           },
           {
-            "default": "0",
             "name": "trial_retries",
             "opts": [
               "--trial-retries"
@@ -4120,7 +4115,6 @@
           "type": "float"
         },
         {
-          "default": "0",
           "name": "trial_retries",
           "opts": [
             "--trial-retries"

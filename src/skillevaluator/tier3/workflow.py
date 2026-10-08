@@ -118,6 +118,7 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> None:
         "n_concurrent",
         "max_agents",
         "timeout_multiplier",
+        "trial_retries",
         "agent_runtime_preflight",
         "custom_dockerfile_mode",
     ):

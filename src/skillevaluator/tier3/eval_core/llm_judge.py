@@ -809,14 +809,12 @@ def judge_accuracy(
     criteria = parsed.get("criteria")
     criteria_valid = _valid_accuracy_criteria(criteria)
 
-    score = _finite_score(parsed.get("score"))
-    if not skill_identification_applicable:
-        assert criteria_valid
-        score = sum(value is True for key, value in criteria.items() if key != "SKILL_IDENTIFIED") / 4.0
-    elif score is None:
-        assert criteria_valid
+    if criteria_valid:
         yes_count = sum(1 for v in criteria.values() if v is True)
         score = yes_count / 5.0
+    else:
+        score = _finite_score(parsed.get("score"))
+        assert score is not None
 
     result = {
         "score": round(score, 4),

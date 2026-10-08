@@ -2654,7 +2654,15 @@ Each activation records its `type`, `name`, `tool`, `server`, `step_index`, and
 call names this plugin's component, with or without the plugin's namespace
 (`release-kit:release-notes` and `release-notes` are one component). A name
 under another plugin's namespace (`acme-tools:release-notes`) is kept as
-written and never matches this plugin's component. `succeeded` is tri-state:
+written and never matches this plugin's component. Neither does a bare
+subagent name that is one of the harness's own agents: Claude Code names a
+plugin agent `<plugin>:<name>`, so its `Explore` or `Plan` is never the
+plugin's `explore` or `plan`, and OpenCode stages a plugin agent named like
+one of its own (`build`, `plan`, `general`, `explore`, ...) as
+`<plugin>-<name>`, so a bare `general` there is its built-in. When the
+plugin declares an agent of that name, such a call is kept as written, never
+counts as the plugin's agent, and matches no ref; otherwise a ref still names
+the built-in (`Agent:general-purpose`). `succeeded` is tri-state:
 
 - `true`: a result correlated with this call came back without an error flag or
   a failure marker, or the harness itself reported the call completed.
@@ -2752,7 +2760,8 @@ stages: a native Claude Code arm declares the servers that launch from the
 copied plugin files, and no other agent's arm does. Subagents and commands
 come from the component inventory (`agents` and `commands`), and a
 `Task`/`Agent` or `SlashCommand` activation matches a declared name with or
-without this plugin's `plugin:` namespace prefix. The plugin name comes from
+without this plugin's `plugin:` namespace prefix (a bare name of the
+harness's own agent excepted, see above). The plugin name comes from
 the generated `<plugin>-plugin-eval` package; another plugin's prefix never
 matches.
 

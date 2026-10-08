@@ -285,3 +285,43 @@ def test_an_opencode_agent_staged_under_a_new_name_still_counts_as_the_declared_
     assert context.aliases_for("sum_of_parts") == {}
     stray = build_plugin_signals_context(subagents=["reviewer"], subagent_aliases={"x-build": "build"})
     assert stray.subagent_aliases == {}
+
+
+def test_a_bare_builtin_agent_name_never_counts_as_the_plugin_agent_of_that_name() -> None:
+    # OpenCode stages the plugin's "build" as "demo-kit-build" and Claude Code names its
+    # "plan" "demo-kit:plan", so a bare "build" or "Plan" reaches the harness's own agent.
+    context = build_plugin_signals_context(
+        subagents=["build", "plan"], subagent_aliases={"demo-kit-build": "build"}, plugin_name="demo-kit"
+    )
+
+    def _signals(agent: str, tool: str, subagent: str, ref: str) -> dict[str, Any]:
+        trajectory = {"agent": {"name": agent}, "steps": [_call(1, tool, {"subagent_type": subagent, "prompt": "go"})]}
+        signals = compute_plugin_signals(
+            trajectory,
+            {"expected_tools": [ref]},
+            declared=context.declared_for("with_skill"),
+            subagent_aliases=context.aliases_for("with_skill"),
+        )
+        assert signals is not None
+        return signals
+
+    for agent, tool, subagent, ref in (
+        ("opencode", "task", "build", "Agent:build"),
+        ("opencode", "task", "plan", "Agent:plan"),
+        ("claude-code", "Task", "Plan", "Agent:plan"),
+    ):
+        builtin = _signals(agent, tool, subagent, ref)
+        assert builtin["activation_coverage"]["exercised"] == [], (agent, subagent)
+        assert builtin["routing"]["recall"] == 0.0, (agent, subagent)
+        assert builtin["activations"][0]["name"] == subagent
+    for agent, tool, subagent, ref, declared in (
+        ("opencode", "task", "demo-kit-build", "Agent:build", "subagent:build"),
+        ("claude-code", "Task", "demo-kit:plan", "Agent:plan", "subagent:plan"),
+        # Claude Code has no built-in "build", so the bare name is still the plugin's agent.
+        ("claude-code", "Task", "build", "Agent:build", "subagent:build"),
+    ):
+        plugin_agent = _signals(agent, tool, subagent, ref)
+        assert plugin_agent["activation_coverage"]["exercised"] == [declared], (agent, subagent)
+        assert plugin_agent["routing"]["recall"] == 1.0, (agent, subagent)
+    # A ref to a built-in the plugin does not declare still names it.
+    assert _signals("claude-code", "Agent", "general-purpose", "Agent:general-purpose")["routing"]["recall"] == 1.0

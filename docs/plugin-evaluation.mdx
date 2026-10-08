@@ -2734,7 +2734,7 @@ A sibling call's result never stands in for another call's outcome. Codex
 | `arguments` | `checked`, `passed`, and `failures` (`tool`, `arg`, `rule`, `detail`), plus `status` |
 | `mcp_calls` | `total`, `succeeded`, `failed`, `unknown`, `success_rate`, and `by_server` with per-server counts, `success_rate`, `tools`, and the same counts per tool (`by_tool`) |
 | `order` | `edges`, `satisfied`, `unordered`, `violated` (each with `before`, `after`, and `reason`), `skipped`, and `status` |
-| `handoff` | `checked`, `passed`, `failures`, and `status` |
+| `handoff` | `checked`, `passed`, `failures`, `skipped`, and `status` |
 | `conflict` | `checked`, `passed`, `failures`, `skipped`, and `status` |
 | `activation_coverage` | `declared`, `exercised`, `unverified`, and `unavailable` |
 | `hook_census` | `status` (`recorded`, `absent`, or `unreadable`), `hooks` (`hook_id`, `event`, `runs`, `failures`, `blocked`, `not_started`, `total_duration_ms`), `total_runs`, `total_failures`, `total_blocked`, `total_not_started`, `invalid_lines`, and `truncated` |
@@ -2845,7 +2845,8 @@ into per-trial checks. They are heuristic and advisory.
     An untyped ref is skipped the same way when every declared skill,
     subagent, or command it names is of such a type, so `reviewer`, naming
     only a declared subagent, is skipped in a with-plugin arm that skips
-    `Agent:reviewer`. The same holds for order edges and conflict probes.
+    `Agent:reviewer`. The same holds for order edges, handoffs, and conflict
+    probes.
   - `f1` combines the two; it is 0 when nothing expected was called.
   - `decoy_calls` counts calls that match `decoy_tools`.
 - **Arguments.** Each `tool_arguments` rule is checked against every call that
@@ -2946,6 +2947,8 @@ into per-trial checks. They are heuristic and advisory.
     subagent call that only names the path is not a read; the subagent's own
     reads are.
   - When a handoff sets both, both must hold.
+  - A handoff whose producer or consumer names only component types the arm
+    cannot carry is listed in `skipped` and not checked.
 - **Conflict probes.** A probe passes when `must_use` was used and
   `must_not_use` was not tried, anywhere in the trial (the probe checks
   presence, not which component ran first).

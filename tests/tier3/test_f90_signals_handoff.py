@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from skillevaluator.tier3.eval_core.plugin_signals import (
+    ARM_SUM_OF_PARTS,
     ARM_WITH_SKILL,
     build_plugin_signals_context,
     compute_plugin_signals,
@@ -74,11 +75,11 @@ def _codex_read(call_id: str, *members: str) -> dict[str, Any]:
     return _exec(call_id, cmd, "".join(f"---\nname: {member}\n---\n" for member in members))
 
 
-def _handoff(trajectory: dict[str, Any], *handoffs: dict[str, Any]) -> dict[str, Any]:
+def _handoff(trajectory: dict[str, Any], *handoffs: dict[str, Any], arm: str = ARM_WITH_SKILL) -> dict[str, Any]:
     signals = compute_plugin_signals(
         trajectory,
         plugin_case_spec({"id": "c", "handoffs": list(handoffs)}),
-        declared=CONTEXT.declared_for(ARM_WITH_SKILL),
+        declared=CONTEXT.declared_for(arm),
         wrapper_skills=CONTEXT.wrapper_skills,
     )
     assert signals is not None
@@ -447,6 +448,30 @@ def test_a_read_in_the_same_step_or_a_failed_read_does_not_count() -> None:
         _bash("t5", "cat out/x.json", "cat: out/x.json: No such file or directory"),
     )
     assert not _passes(failed_read, artifact="out/x.json")
+
+
+# ---------------------------------------------------------------------------
+# Components the arm cannot carry
+# ---------------------------------------------------------------------------
+
+
+def test_handoffs_whose_producer_or_consumer_the_arm_cannot_carry_are_skipped() -> None:
+    """Codex loads no plugin subagents, and the member-skills arm stages no MCP servers."""
+    skip = "this arm cannot carry that component type"
+    typed = {"producer": "Agent:release-reviewer", "consumer": RN, "value": "AT-4821"}
+    untyped = {"producer": RN, "consumer": "release-reviewer", "value": "AT-4821"}
+    block = _handoff(_codex(_codex_read("c1", "release-notes")), typed, untyped)
+    assert block["skipped"] == [
+        {"producer": "Agent:release-reviewer", "consumer": RN, "reason": skip},
+        {"producer": RN, "consumer": "release-reviewer", "reason": skip},
+    ]
+    assert (block["checked"], block["failures"], block["status"]) == (0, [], "not_applicable")
+
+    mcp = {"producer": "MCP:reltools/list_changes", "consumer": RN, "value": "AT-4821"}
+    members = {"producer": CC, "consumer": RN, "value": "AT-4821"}
+    block = _handoff(_claude(_launch("t1", "release-notes")), mcp, members, arm=ARM_SUM_OF_PARTS)
+    assert [item["producer"] for item in block["skipped"]] == ["MCP:reltools/list_changes"]
+    assert (block["checked"], block["passed"], block["status"]) == (1, 0, "scored")
 
 
 # ---------------------------------------------------------------------------

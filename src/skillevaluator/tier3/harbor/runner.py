@@ -48,7 +48,12 @@ from skillevaluator.provider_config import (
 )
 from skillevaluator.source_identity import normalized_evaluated_source
 from skillevaluator.tier3.case_ids import validate_case_ids
-from skillevaluator.tier3.eval_core.plugin_signals import PluginSignalsContext, build_plugin_signals_context
+from skillevaluator.tier3.eval_core.plugin_signals import (
+    COMPONENT_COMMAND,
+    COMPONENT_SUBAGENT,
+    PluginSignalsContext,
+    build_plugin_signals_context,
+)
 from skillevaluator.tier3.evals_config import (
     MAX_HARBOR_TIMEOUT_MULTIPLIER,
     EvalsConfigError,
@@ -605,6 +610,7 @@ def _plugin_signals_context(
     run_dir: Path,
     baseline_has_members: bool,
     agent_mcp_servers: Mapping[str, Sequence[str]] | None = None,
+    agent_unstaged: Mapping[str, Sequence[str]] | None = None,
 ) -> PluginSignalsContext:
     """Declared plugin components and staged case fields for report-only plugin signals.
 
@@ -612,7 +618,9 @@ def _plugin_signals_context(
     runnable MCP servers come from the package's with-plugin-only MCP file,
     read through the adapter's bounded no-follow loader; case fields come from
     the staged task entries. ``agent_mcp_servers`` holds the MCP servers only
-    one agent's with-plugin arm stages (see :func:`_native_plugin_file_mcp_servers`).
+    one agent's with-plugin arm stages (see :func:`_native_plugin_file_mcp_servers`),
+    and ``agent_unstaged`` the component types it does not stage (see
+    :func:`_with_arm_unstaged`).
     """
     from skillevaluator.tier3.plugin_eval import PLUGIN_EVAL_PACKAGE_SUFFIX, PLUGIN_MCP_SERVERS_FILENAME
 
@@ -653,6 +661,7 @@ def _plugin_signals_context(
         commands=runtime_components["commands"],
         subagent_aliases=subagent_aliases,
         agent_mcp_servers=agent_mcp_servers,
+        agent_unstaged=agent_unstaged,
     )
     from dataclasses import replace
 
@@ -677,6 +686,24 @@ def _native_plugin_file_mcp_servers(stagings: Mapping[str, Any]) -> dict[str, li
         for agent, staging in stagings.items()
         if staging.adapter.copies_plugin_tree
     }
+
+
+def _with_arm_unstaged(agents: Sequence[str], decisions: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Per agent, the plugin subagent and command types its with-plugin arm does not stage.
+
+    Only a native adapter that loads them stages them. The generated wrapper
+    never does, and an agent without a decision runs the wrapper.
+    """
+    unstaged: dict[str, list[str]] = {}
+    for agent in agents:
+        decision = decisions.get(agent)
+        components = decision.components if decision is not None else {}
+        unstaged[agent] = [
+            kind
+            for kind, component in ((COMPONENT_SUBAGENT, "agent"), (COMPONENT_COMMAND, "command"))
+            if components.get(component) != "native"
+        ]
+    return unstaged
 
 
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
@@ -4804,6 +4831,7 @@ def _run_harbor_eval_impl(
             run_dir=run_dir,
             baseline_has_members=bool(workspace_skills_baseline and not skip_baseline),
             agent_mcp_servers=_native_plugin_file_mcp_servers(native_stagings),
+            agent_unstaged=_with_arm_unstaged(agents, plugin_load_decisions),
         )
         if is_plugin_run
         else None

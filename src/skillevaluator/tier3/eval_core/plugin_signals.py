@@ -1156,8 +1156,9 @@ class PluginSignalsContext:
     the runnable MCP servers wired into it). ``wrapper_skills`` names the
     generated wrapper skill so it is not scored as a tool selection. ``cases``
     maps case id to :func:`plugin_case_spec` output. The context is shared by
-    every agent of a run, so what only one agent's with-plugin arm stages is
-    kept per agent (``agent_mcp_servers``).
+    every agent of a run, so what only one agent's with-plugin arm stages, or
+    does not stage, is kept per agent (``agent_mcp_servers``,
+    ``agent_unstaged``).
     """
 
     member_skills: tuple[str, ...] = ()
@@ -1180,6 +1181,9 @@ class PluginSignalsContext:
     # Agent -> the MCP servers its with-plugin arm stages beyond ``mcp_servers``: Claude Code's
     # native plugin copy also starts the servers that launch from plugin files.
     agent_mcp_servers: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # Agent -> the declared component types its with-plugin arm does not stage: plugin subagents
+    # and commands unless that agent loads them natively.
+    agent_unstaged: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def arm_enabled(self, arm: str) -> bool:
         if arm in {ARM_WITH, ARM_SUM_OF_PARTS}:
@@ -1200,8 +1204,8 @@ class PluginSignalsContext:
             declared[COMPONENT_COMMAND] = list(self.commands)
         if self.plugin_names:
             declared[DECLARED_PLUGIN] = list(self.plugin_names)
+        # Refs to these can never match in this arm, so graders skip them instead of failing them.
         if not with_plugin:
-            # Refs to these can never match in this arm, so graders skip them instead of failing them.
             unstaged = [
                 kind
                 for kind, names in (
@@ -1211,8 +1215,11 @@ class PluginSignalsContext:
                 )
                 if names
             ]
-            if unstaged:
-                declared[DECLARED_UNSTAGED] = unstaged
+        else:
+            # Still declared, so a call the agent makes to one anyway is recorded.
+            unstaged = [kind for kind in self.agent_unstaged.get(agent, ()) if declared.get(kind)]
+        if unstaged:
+            declared[DECLARED_UNSTAGED] = unstaged
         return declared
 
     def aliases_for(self, arm: str) -> Mapping[str, str]:
@@ -1235,13 +1242,15 @@ def build_plugin_signals_context(
     subagent_aliases: Mapping[str, Any] | None = None,
     plugin_name: str | None = None,
     agent_mcp_servers: Mapping[str, Iterable[Any]] | None = None,
+    agent_unstaged: Mapping[str, Iterable[Any]] | None = None,
 ) -> PluginSignalsContext:
     """Build a bounded :class:`PluginSignalsContext` from dataset case entries.
 
     ``plugin_name`` defaults to the name in the generated wrapper package
     (``<plugin>-plugin-eval``) when ``wrapper_skills`` holds one.
     ``agent_mcp_servers`` maps an agent to the MCP servers only its
-    with-plugin arm stages.
+    with-plugin arm stages, and ``agent_unstaged`` to the declared component
+    types its with-plugin arm does not stage.
     """
     cases: dict[str, Mapping[str, Any]] = {}
     for count, entry in enumerate(entries):
@@ -1271,6 +1280,11 @@ def build_plugin_signals_context(
             agent: names
             for agent, servers in (agent_mcp_servers or {}).items()
             if isinstance(agent, str) and (names := _clean_names(servers))
+        },
+        agent_unstaged={
+            agent: kinds
+            for agent, values in (agent_unstaged or {}).items()
+            if isinstance(agent, str) and (kinds := _clean_names(values))
         },
     )
 
@@ -3127,16 +3141,41 @@ def _unavailable_kinds(declared: Mapping[str, Sequence[str]], agent: str = "") -
     return frozenset(kinds)
 
 
-def _component_names(declared: Mapping[str, Sequence[str]]) -> list[str]:
+def _component_names(
+    declared: Mapping[str, Sequence[str]],
+    kinds: Iterable[str] = (COMPONENT_SKILL, COMPONENT_SUBAGENT, COMPONENT_COMMAND),
+) -> list[str]:
     """Casefolded declared skill, subagent, and command names, bare and under the plugin namespace."""
     namespaces = _plugin_namespaces(declared)
     names: list[str] = []
-    for kind in (COMPONENT_SKILL, COMPONENT_SUBAGENT, COMPONENT_COMMAND):
+    for kind in kinds:
         for name in declared.get(kind) or ():
             if isinstance(name, str) and name:
                 names.append(name.casefold())
                 names.extend(f"{namespace}:{name.casefold()}" for namespace in namespaces)
     return names
+
+
+def _names_by_kind(declared: Mapping[str, Sequence[str]], unavailable: frozenset[str]) -> dict[str, list[str]]:
+    """Declared skill, subagent, and command names per type (see :func:`_ref_unavailable`).
+
+    Empty when the arm carries every type, since then no ref is skipped.
+    """
+    return {kind: _component_names(declared, [kind]) for kind in _ROUTING_KINDS} if unavailable else {}
+
+
+def _ref_unavailable(ref: _Ref, unavailable: frozenset[str], names_by_kind: Mapping[str, Sequence[str]]) -> bool:
+    """Whether ``ref`` names only component types this arm cannot carry.
+
+    A typed ref names its own type. An untyped ref names the type of each
+    declared skill, subagent, or command it matches (``names_by_kind``), so a
+    bare ``reviewer`` that matches only a declared subagent is a subagent ref;
+    one that matches none names a tool.
+    """
+    if ref.kind is not None:
+        return ref.kind in unavailable
+    kinds = {kind for kind, names in names_by_kind.items() if any(ref.glob.match(name) for name in names)}
+    return bool(kinds) and kinds <= unavailable
 
 
 def _routing_ref(ref: _Ref, component_names: Sequence[str]) -> bool:
@@ -3158,6 +3197,7 @@ def _grade_selection(
     routing: bool,
     component_names: Sequence[str],
     unavailable: frozenset[str],
+    declared: Mapping[str, Sequence[str]],
 ) -> dict[str, Any]:
     def _family(values: Sequence[str]) -> list[str]:
         return [value for value in values if _routing_ref(_parse_ref(value), component_names) == routing]
@@ -3167,8 +3207,10 @@ def _grade_selection(
     decoys = _family(spec.get("decoy_tools", []))
     expected_refs, acceptable_refs, decoy_refs = _refs(expected), _refs(acceptable), _refs(decoys)
     # Expected refs to a component type this arm cannot carry are reported, not counted against recall.
-    applicable = [ref for ref in expected_refs if ref.kind not in unavailable]
-    skipped = [value for value, ref in zip(expected, expected_refs, strict=True) if ref.kind in unavailable]
+    names_by_kind = _names_by_kind(declared, unavailable)
+    missing = [_ref_unavailable(ref, unavailable, names_by_kind) for ref in expected_refs]
+    applicable = [ref for ref, absent in zip(expected_refs, missing, strict=True) if not absent]
+    skipped = [value for value, absent in zip(expected, missing, strict=True) if absent]
     allowed = [*expected_refs, *acceptable_refs]
     all_refs = [*allowed, *decoy_refs]
 
@@ -3249,6 +3291,7 @@ def _grade_routing(
         routing=True,
         component_names=_component_names(declared_map),
         unavailable=_unavailable_kinds(declared_map, agent),
+        declared=declared_map,
     )
 
 
@@ -3276,6 +3319,7 @@ def _grade_tool_selection(
         routing=False,
         component_names=_component_names(declared_map),
         unavailable=_unavailable_kinds(declared_map, agent),
+        declared=declared_map,
     )
 
 
@@ -3722,9 +3766,11 @@ def _first_use(refs: Sequence[_Ref], calls: Sequence[_Call]) -> _Call | None:
     return next((call for call in calls if _uses(refs, call)), None)
 
 
-def _side_unavailable(refs: Sequence[_Ref], unavailable: frozenset[str]) -> bool:
-    """Every alternative names a component type this arm cannot carry."""
-    return bool(refs) and all(ref.kind is not None and ref.kind in unavailable for ref in refs)
+def _side_unavailable(
+    refs: Sequence[_Ref], unavailable: frozenset[str], names_by_kind: Mapping[str, Sequence[str]]
+) -> bool:
+    """Every alternative names a component type this arm cannot carry (see :func:`_ref_unavailable`)."""
+    return bool(refs) and all(_ref_unavailable(ref, unavailable, names_by_kind) for ref in refs)
 
 
 def _edge_reason(before: Sequence[_Ref], after: Sequence[_Ref], calls: Sequence[_Call]) -> str:
@@ -3772,6 +3818,7 @@ def _grade_order(
     counted in ``edges``.
     """
     unavailable = _unavailable_kinds(declared or {}, agent)
+    names_by_kind = _names_by_kind(declared or {}, unavailable)
     satisfied = 0
     unordered = 0
     counted = 0
@@ -3780,7 +3827,7 @@ def _grade_order(
     for before, after in spec.get("expected_order", []):
         before_refs, after_refs = _refs(before), _refs(after)
         labels = {"before": _ref_label(before), "after": _ref_label(after)}
-        if _side_unavailable(before_refs, unavailable) or _side_unavailable(after_refs, unavailable):
+        if any(_side_unavailable(side, unavailable, names_by_kind) for side in (before_refs, after_refs)):
             skipped.append({**labels, "reason": "this arm cannot carry that component type"})
             continue
         counted += 1
@@ -4086,13 +4133,14 @@ def _grade_conflict(
     is about presence over the whole trial, not which one ran first.
     """
     unavailable = _unavailable_kinds(declared or {}, agent)
+    names_by_kind = _names_by_kind(declared or {}, unavailable)
     failures: list[dict[str, str]] = []
     skipped: list[str] = []
     checked = 0
     passed = 0
     for probe in spec.get("conflict_probes", []):
         must_use, must_not_use = _refs(probe["must_use"]), _refs(probe["must_not_use"])
-        if _side_unavailable(must_use, unavailable):
+        if _side_unavailable(must_use, unavailable, names_by_kind):
             skipped.append(_safe_text(probe["id"]))
             continue
         checked += 1

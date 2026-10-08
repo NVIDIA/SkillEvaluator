@@ -2807,9 +2807,15 @@ into per-trial checks. They are heuristic and advisory.
     or `acceptable_tools`. It is `null` when nothing of that kind was called:
     a miss is not a wrong choice.
   - `recall` is the share of `expected_tools` refs that were called. Refs to a
-    component type the arm cannot carry (MCP in the member-skills arm, plugin
-    subagents and commands on Codex) are listed in `skipped` instead of being
-    counted as misses.
+    component type the arm cannot carry are listed in `skipped` instead of
+    being counted as misses: MCP in the member-skills arm, and plugin
+    subagents and commands in a with-plugin arm whose agent does not load them
+    natively (`--plugin-load wrapper`, the wrapper fallback of `auto`, Codex,
+    and Hermes; see the support matrix in [Native loading](#native-loading)).
+    An untyped ref is skipped the same way when every declared skill,
+    subagent, or command it names is of such a type, so `reviewer`, naming
+    only a declared subagent, is skipped in a with-plugin arm that skips
+    `Agent:reviewer`. The same holds for order edges and conflict probes.
   - `f1` combines the two; it is 0 when nothing expected was called.
   - `decoy_calls` counts calls that match `decoy_tools`.
 - **Arguments.** Each `tool_arguments` rule is checked against every call that
@@ -2851,9 +2857,10 @@ into per-trial checks. They are heuristic and advisory.
   - `reversed`: `after` was used first.
 
   An edge with a side that names only a component type the arm cannot carry
-  (plugin subagents and commands on Codex, MCP in the member-skills arm) is
-  listed in `skipped` and not counted. Reports show the edge counts, the
-  trials fully in order, and the edges not in order with their reasons.
+  (plugin subagents and commands where the agent does not load them natively,
+  MCP in the member-skills arm) is listed in `skipped` and not counted.
+  Reports show the edge counts, the trials fully in order, and the edges not
+  in order with their reasons.
 - **Handoffs.** Both the producer and the consumer must be activated by a
   call that did not fail. A call is attributed to a ref when it matches the
   ref directly, or when it runs in the ref's window:

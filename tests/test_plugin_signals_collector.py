@@ -547,4 +547,45 @@ def test_run_hands_the_collector_the_per_agent_plugin_signals_context(
     assert context.agent_mcp_servers == {AGENT: ("tracker",)}
     assert context.declared_for("with_skill", AGENT)["mcp"] == ["tracker"]
     assert context.declared_for("with_skill", "codex")["mcp"] == []
+    # Codex loads no plugin subagents or commands; native Claude Code loads both.
+    assert context.agent_unstaged == {"codex": ("subagent", "command")}
 
+
+def test_with_arm_skips_subagent_and_command_refs_its_agent_does_not_load(tmp_path: Path) -> None:
+    # The default wrapper stages no plugin subagents or commands on any harness, and
+    # Hermes has no native path for them; native Claude Code and OpenCode load them.
+    from skillevaluator.tier3.plugin_native import resolve_plugin_load
+
+    agents = [AGENT, "opencode", "hermes"]
+    wrapper = runner._with_arm_unstaged(agents, resolve_plugin_load("wrapper", agents, env_mode="docker"))
+    native = runner._with_arm_unstaged(agents, resolve_plugin_load("native", agents, env_mode="docker"))
+    assert wrapper == {agent: ["subagent", "command"] for agent in agents}
+    assert native == {AGENT: [], "opencode": [], "hermes": ["subagent", "command"]}
+    # A bare name that matches only a declared subagent or command is a ref to that type too.
+    case = {
+        **CASE,
+        "expected_tools": ["Skill:alpha", "Agent:reviewer", "Command:release", "reviewer"],
+        "expected_order": [["Skill:alpha", "Agent:reviewer"], ["Skill:alpha", "release"]],
+        "conflict_probes": [
+            {"id": "p1", "must_use": "Agent:reviewer", "must_not_use": "Skill:beta"},
+            {"id": "p2", "must_use": "release", "must_not_use": "Skill:beta"},
+        ],
+    }
+    components = {"subagents": ["reviewer"], "commands": ["release"], "entries": [case]}
+    jobs_dir = _jobs(tmp_path)
+
+    _collect(tmp_path, jobs_dir, "wrapper", plugin_signals=_context(**components, agent_unstaged=wrapper))
+    _collect(tmp_path, jobs_dir, "native", plugin_signals=_context(**components, agent_unstaged=native))
+
+    skipped = _trial_reward(tmp_path, "wrapper", "with-skill")["plugin_signals"]
+    assert skipped["routing"]["skipped"] == ["Agent:reviewer", "Command:release", "reviewer"]
+    assert skipped["routing"]["recall"] == 1.0
+    assert [edge["after"] for edge in skipped["order"]["skipped"]] == ["Agent:reviewer", "release"]
+    assert skipped["conflict"]["skipped"] == ["p1", "p2"]
+    # The agent can still reach for one anyway, so it stays declared.
+    assert "subagent:reviewer" in skipped["activation_coverage"]["declared"]
+    scored = _trial_reward(tmp_path, "native", "with-skill")["plugin_signals"]
+    assert scored["routing"]["skipped"] == []
+    assert scored["routing"]["recall"] == 0.25
+    assert [edge["reason"] for edge in scored["order"]["violated"]] == ["after_never_called"] * 2
+    assert scored["conflict"]["checked"] == 2

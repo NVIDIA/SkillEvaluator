@@ -485,6 +485,14 @@ _CURL_SHORT_OPTS_WITH_ARG = {
     "z",
 }
 _INERT_PRINT_COMMANDS = {"echo", "printf"}
+# Commands that run a later word as a command, past the wrappers _unwrap_shell_command steps over: a client
+# named after them runs (``ssh host curl -d ...``), while ``grep curl notes.md`` or ``which curl`` only names it.
+_NETWORK_COMMAND_RUNNERS = frozenset(
+    {"busybox", "chroot", "chrt", "docker", "faketime", "firejail", "flock", "hatch", "ionice", "kubectl"}
+    | {"ltrace", "npx", "nsenter", "numactl", "parallel", "pdm", "pipenv", "podman", "poetry", "proxychains"}
+    | {"proxychains4", "runuser", "rye", "script", "setpriv", "sg", "ssh", "strace", "su", "systemd-run"}
+    | {"taskset", "torsocks", "tsocks", "unbuffer", "unshare", "uv", "uvx", "valgrind", "watch", "xvfb-run"}
+)
 ACCEPTABLE_ALTERNATE_SCORE = 0.75
 
 
@@ -4545,13 +4553,18 @@ def _is_network_exfiltration_command(cmd_text, _depth=0):
         if executable not in _NETWORK_EXECUTABLES:
             if executable in _INERT_PRINT_COMMANDS:
                 continue
+            # A command word that is an option was left by a wrapper option this check does not know, so the
+            # client may still be the command it runs.
+            runs_command = not executable or executable in _NETWORK_COMMAND_RUNNERS
             for sub_idx in range(cmd_idx + 1, len(command)):
                 tok = command[sub_idx].strip("\"'")
+                if executable == "find" and tok in _SECURITY_FIND_EXEC_ACTIONS:
+                    runs_command = True
                 if not tok or "://" in tok or tok.startswith("-"):
                     continue
                 sub_exe = _shell_executable(tok).removesuffix(".exe")
                 # A word too long to expand may be a client's name, as a wrapper runs it.
-                if sub_exe in _NETWORK_EXECUTABLES or _UNSETTLED_VALUE in tok:
+                if (runs_command and sub_exe in _NETWORK_EXECUTABLES) or _UNSETTLED_VALUE in tok:
                     return True
             continue
 

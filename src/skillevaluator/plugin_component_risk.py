@@ -37,6 +37,7 @@ import bisect
 import functools
 import posixpath
 import re
+import sys
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
@@ -2919,8 +2920,37 @@ _COMMAND_POSITION_RE = re.compile(
 )
 _MAX_COMMAND_PREFIX = 256
 _SHELL_OR_PYTHON_SHEBANG_RE = re.compile(r"#![^\n]{0,128}\b(?:(?:ba|z|da|k)?sh|python[0-9.]{0,8})\b")
+_PYTHON_SHEBANG_RE = re.compile(r"#![^\n]{0,128}\bpython[0-9.]{0,8}\b")
+# A Python import statement at the start of a line: 'import core.rules as r', 'from core.rule_engine import X'.
+_PYTHON_IMPORT_RE = re.compile(
+    r"^[ \t]*(?:from[ \t]+(?P<package>[A-Za-z_][\w.]{0,255})[ \t]+import[ \t]+(?P<names>[\w \t,()]{1,512})"
+    r"|import[ \t]+(?P<modules>[\w \t,.]{1,512}))",
+    re.MULTILINE,
+)
 _NAMING_SUFFIXES = frozenset({"", ".sh", ".bash", ".zsh", ".py"})
 _SENSITIVE_TOOL_LABELS = {"mcp__server__tool": "MCP tools (mcp__*)", "apply_patch": "apply_patch (Codex file edits)"}
+
+
+def _python_import_paths(text: str) -> list[str]:
+    """Files of the modules a Python script imports, other than the standard library's.
+
+    ``from core.rule_engine import RuleEngine`` names ``core/rule_engine.py`` or
+    its package's ``core/rule_engine/__init__.py``, and ``core/rule_engine/RuleEngine.py``
+    in case the name is a submodule; ``import a.b as c`` names ``a/b.py`` or ``a/b/__init__.py``.
+    """
+    paths: dict[str, None] = {}
+    for match in _PYTHON_IMPORT_RE.finditer(text):
+        package = match.group("package")
+        listed = match.group("modules") if package is None else match.group("names").strip("() \t")
+        names = [part.split()[0] for part in listed.split(",") if part.split()]
+        for module in names if package is None else [package]:
+            if module.split(".")[0] in sys.stdlib_module_names:
+                continue
+            path = module.replace(".", "/")
+            paths.update(dict.fromkeys((f"{path}.py", f"{path}/__init__.py")))
+            if package is not None:
+                paths.update(dict.fromkeys(f"{path}/{name}.py" for name in names))
+    return list(paths)
 
 
 class _RunReferences:
@@ -3237,8 +3267,9 @@ class HookAnalyzer:
 
     def _script_references(self, text: str, rel: PurePosixPath) -> tuple[tuple[PurePosixPath, ...], str | None]:
         """Plugin scripts a script runs: named by root placeholder, relative to its own directory, or (in shell
-        and Python scripts) by a script file name, against its directory and the plugin root. A name in a
-        comment, or one a command only prints or tests (``echo``, ``[ -f … ]``), is not followed."""
+        and Python scripts) by a script file name, against its directory and the plugin root; a Python script's
+        imported modules count too. A name in a comment, or one a command only prints or tests (``echo``,
+        ``[ -f … ]``), is not followed."""
         base = rel.parent
         found: dict[PurePosixPath, None] = {}
         runs = _RunReferences(text)
@@ -3250,6 +3281,8 @@ class HookAnalyzer:
         ]
         if rel.suffix.lower() in _NAMING_SUFFIXES or _SHELL_OR_PYTHON_SHEBANG_RE.match(text[:256]):
             relative.extend(match.group("path") for match in _SCRIPT_NAME_RE.finditer(text) if runs.runs(match.start()))
+        if rel.suffix.lower() == ".py" or _PYTHON_SHEBANG_RE.match(text[:256]):
+            relative.extend(_python_import_paths(text))
         for raw in dict.fromkeys(candidates):
             path, escapes = _contained_path(raw)
             if path is not None and not escapes:

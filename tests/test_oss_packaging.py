@@ -430,6 +430,17 @@ def test_idna_is_a_bounded_direct_dependency_with_a_license_notice() -> None:
     assert "IDNA (BSD-3-Clause)" in notices
 
 
+def test_regex_is_a_locked_direct_dependency_with_a_license_notice() -> None:
+    # Plugin signal pattern checks need the regex engine's per-match timeout.
+    dependencies = [Requirement(raw) for raw in _project()["project"]["dependencies"]]
+    (package,) = [package for package in _lock()["package"] if package["name"] == "skillevaluator"]
+    notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+
+    assert any(canonicalize_name(requirement.name) == "regex" for requirement in dependencies)
+    assert {"name": "regex"} in package["dependencies"]
+    assert "regex (Apache-2.0 AND CNRI-Python)" in notices
+
+
 def test_tier3_direct_dependencies_have_complete_license_notices() -> None:
     tier3 = [Requirement(raw) for raw in _project()["project"]["optional-dependencies"]["tier3"]]
     direct_packages = {

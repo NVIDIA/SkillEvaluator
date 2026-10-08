@@ -87,19 +87,15 @@ def test_chat_default_models_are_the_single_source_of_truth() -> None:
 
 
 def test_skillspector_defaults_cover_every_provider_and_keep_supported_claude_models() -> None:
-    from skillevaluator.provider_config import (
-        CHAT_DEFAULT_MODELS,
-        CHAT_DEFAULT_NVIDIA,
-        CHAT_DEFAULT_OPENAI,
-        SKILLSPECTOR_DEFAULT_MODELS,
-    )
+    from skillevaluator.provider_config import CHAT_DEFAULT_MODELS, SKILLSPECTOR_DEFAULT_MODELS
 
     assert SKILLSPECTOR_DEFAULT_MODELS.keys() == CHAT_DEFAULT_MODELS.keys()
+    # Literals, re-validated against the pinned SkillSpector release before they change.
     assert SKILLSPECTOR_DEFAULT_MODELS == {
-        "openai": CHAT_DEFAULT_OPENAI,
+        "openai": "gpt-6.1-sol",
         "anthropic": "claude-opus-5",
         "bedrock": "us.anthropic.claude-opus-5",
-        "nv_build": CHAT_DEFAULT_NVIDIA,
+        "nv_build": "nvidia/nemotron-3-super-120b-a12b",
         "openai-compatible": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
     }
 

@@ -42,12 +42,13 @@ CHAT_DEFAULT_MODELS = {
 }
 # SkillSpector sends its own structured-output requests, so its defaults move
 # only to models the pinned SkillSpector release supports, not with the chat
-# defaults. An explicit ``SKILL_EVAL_LLM_MODEL`` still reaches SkillSpector.
+# defaults. Every entry is a literal so a chat-default bump cannot move it.
+# An explicit ``SKILL_EVAL_LLM_MODEL`` still reaches SkillSpector.
 SKILLSPECTOR_DEFAULT_MODELS = {
-    "openai": CHAT_DEFAULT_OPENAI,
+    "openai": "gpt-6.1-sol",
     "anthropic": "claude-opus-5",
     "bedrock": "us.anthropic.claude-opus-5",
-    "nv_build": CHAT_DEFAULT_NVIDIA,
+    "nv_build": "nvidia/nemotron-3-super-120b-a12b",
     "openai-compatible": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
 }
 SKILLSPECTOR_DEFAULT_REASONING_EFFORT = "medium"
@@ -147,9 +148,10 @@ def completion_token_limit(model: str, max_tokens: int) -> int:
 def effective_reasoning_effort(provider: str, model: str, effort: str | None) -> str | None:
     """Return the reasoning effort SkillEvaluator sends for ``model`` on ``provider``.
 
-    Only GPT-6 models and native-Anthropic Claude 5.5 or later get one, so
-    other models keep their default effort. Bedrock and gateway Claude
-    routes can reject the field.
+    GPT-6 models get one on every provider except Bedrock, and Claude 5.5 or
+    later gets one on every ``anthropic`` endpoint, including a custom
+    ``ANTHROPIC_BASE_URL``. Bedrock and OpenAI-compatible Claude routes can
+    reject the field, so they and all other models keep their default effort.
     """
     if provider == "anthropic":
         supported = is_claude_5_5_or_later(model)

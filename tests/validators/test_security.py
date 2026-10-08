@@ -3997,15 +3997,34 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert os.environ["OPENAI_API_KEY"] == "ambient-openai-key"
         assert os.environ["OPENAI_BASE_URL"] == "https://ambient.example.test/v1"
 
-    def test_skillspector_model_does_not_follow_a_changed_chat_default(self, monkeypatch) -> None:
-        monkeypatch.setitem(CHAT_DEFAULT_MODELS, "anthropic", "claude-opus-5-5")
-        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "provider-test-key")
-        monkeypatch.delenv("SKILL_EVAL_LLM_MODEL", raising=False)
-        monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
-        monkeypatch.delenv("SKILLSPECTOR_MODEL", raising=False)
+    @pytest.mark.parametrize(
+        ("provider", "credentials", "expected"),
+        (
+            ("openai", {"OPENAI_API_KEY": "provider-test-key"}, "gpt-6.1-sol"),
+            ("anthropic", {"ANTHROPIC_API_KEY": "provider-test-key"}, "claude-opus-5"),
+            ("bedrock", {"AWS_BEARER_TOKEN_BEDROCK": "provider-test-key"}, "us.anthropic.claude-opus-5"),
+            ("nv_build", {"NVIDIA_API_KEY": "provider-test-key"}, "nvidia/nemotron-3-super-120b-a12b"),
+            (
+                "openai-compatible",
+                {
+                    "SKILL_EVAL_LLM_API_KEY": "provider-test-key",
+                    "SKILL_EVAL_LLM_BASE_URL": "https://llm.example.test/v1",
+                },
+                "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
+            ),
+        ),
+    )
+    def test_skillspector_model_does_not_follow_a_changed_chat_default(
+        self, monkeypatch, provider: str, credentials: dict[str, str], expected: str
+    ) -> None:
+        monkeypatch.setitem(CHAT_DEFAULT_MODELS, provider, "changed-chat-default")
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", provider)
+        for name, value in credentials.items():
+            monkeypatch.setenv(name, value)
+        for name in ("SKILL_EVAL_LLM_MODEL", "SKILLSPECTOR_PROVIDER", "SKILLSPECTOR_MODEL"):
+            monkeypatch.delenv(name, raising=False)
 
-        assert _skillspector_child_env()["SKILLSPECTOR_MODEL"] == "claude-opus-5"
+        assert _skillspector_child_env()["SKILLSPECTOR_MODEL"] == expected
 
     @pytest.mark.parametrize(
         ("skillspector_model", "expected"),

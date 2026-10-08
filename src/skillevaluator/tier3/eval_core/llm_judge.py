@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 NVIDIA_BUILD_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-# Sent only to models that take an explicit effort (GPT-6, native Claude 5.5+).
+# Sent only where effective_reasoning_effort allows it (GPT-6, Claude 5.5+ on the anthropic provider).
 JUDGE_REASONING_EFFORT = "medium"
 
 _ERROR_REDACTION_MARKER = "[REDACTED]"

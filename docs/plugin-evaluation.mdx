@@ -3605,6 +3605,12 @@ the following:
 - **MCP `env` and `headers` are not applied** by the evaluation runtime. A
   server that declares them is flagged in Tier 1 and makes the Tier 3 run
   `INCOMPLETE`.
+- **NVIDIA Build sees MCP tool results as text.** With NVIDIA Build, the
+  Claude Code and Codex bridges replace an image, audio, or resource block in
+  a tool result with a placeholder that names the block type, because Build
+  tool messages carry text only. The trial goes on, but the model never sees
+  that content. A bridged request is still limited to 1 MB, which a large
+  base64 image in the history can exceed.
 - **Hermes runs in containers only.** `hermes` is supported for Docker and
   cloud environments with the Anthropic provider (native endpoint), using a
   provider-qualified model such as `anthropic/MODEL`. It is refused with the

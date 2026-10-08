@@ -809,11 +809,12 @@ def judge_accuracy(
     criteria = parsed.get("criteria")
     criteria_valid = _valid_accuracy_criteria(criteria)
 
-    score = _finite_score(parsed.get("score"))
-    if score is None:
-        assert criteria_valid
+    if criteria_valid:
         yes_count = sum(1 for v in criteria.values() if v is True)
         score = yes_count / 5.0
+    else:
+        score = _finite_score(parsed.get("score"))
+        assert score is not None
 
     return {
         "score": round(score, 4),

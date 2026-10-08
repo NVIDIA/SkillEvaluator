@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Derive accuracy scores from complete five-criterion verdicts in both judge
+  runtimes, so an inconsistent model-supplied total cannot distort Skill Lift.
+  Correct the Harbor prompt example to score five passing criteria as 1.0.
+
 - Brought the published documentation in line with 0.5.0. It now covers how
   standard grading builds judge evidence and rebuilds trajectories from
   OpenCode and Codex logs, structured judge output and retries, the evidence

@@ -8132,7 +8132,7 @@ Compute score = count(true) / 5.
 Be lenient on exact wording but strict on factual correctness.
 
 Respond with ONLY a JSON object:
-{{"criteria": {{"SKILL_IDENTIFIED": true, "ACTION_CORRECT": true, "FACTUALLY_ACCURATE": true, "TASK_ADDRESSED": true, "ACTIONABLE": true}}, "score": 0.8, "reason": "brief summary"}}
+{{"criteria": {{"SKILL_IDENTIFIED": true, "ACTION_CORRECT": true, "FACTUALLY_ACCURATE": true, "TASK_ADDRESSED": true, "ACTIONABLE": true}}, "score": 1.0, "reason": "brief summary"}}
 
 USER QUESTION:
 {question}
@@ -8158,10 +8158,11 @@ SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may 
     criteria = parsed.get("criteria")
     criteria_valid = _valid_accuracy_criteria(criteria)
 
-    score = _finite_score(parsed.get("score"))
-    if score is None:
-        assert criteria_valid
+    if criteria_valid:
         score = sum(1 for v in criteria.values() if v is True) / 5.0
+    else:
+        score = _finite_score(parsed.get("score"))
+        assert score is not None
     return {
         "score": round(score, 4),
         "reason": _bounded_judge_text(parsed.get("reason", "")),

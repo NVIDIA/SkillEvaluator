@@ -36,6 +36,7 @@ from skillevaluator.constants import (
 from skillevaluator.reporting.base import (
     ReporterBase,
     additional_errors,
+    additional_warnings,
     passes_required_gate,
     plugin_catalog_similarity_summary,
 )
@@ -970,19 +971,18 @@ class CLIReporter(ReporterBase):
             console.print(f"[dim]{label}:[/dim]")
             for error in errors:
                 console.print(f"  [red]•[/red] {escape_markup(str(error))}")
-        if not result.findings:
-            # Preserve legacy warnings when there are no structured findings.
-            if result.warnings:
-                console.print("[dim]Warnings:[/dim]")
-                for warning in result.warnings:
-                    console.print(f"  [yellow][WARN][/yellow] {escape_markup(str(warning))}")
-            return
-
-        if errors:
-            console.print()
-        console.print("[dim]Issues:[/dim]")
-        for i, finding in enumerate(result.findings, 1):
-            self._print_finding(i, finding, console)
+        if result.findings:
+            if errors:
+                console.print()
+            console.print("[dim]Issues:[/dim]")
+            for i, finding in enumerate(result.findings, 1):
+                self._print_finding(i, finding, console)
+        # Plain warnings (no finding behind them) are listed too; a finding's own warning is an issue above.
+        warnings = additional_warnings(result)
+        if warnings:
+            console.print("[dim]Warnings:[/dim]")
+            for warning in warnings:
+                console.print(f"  [yellow][WARN][/yellow] {escape_markup(str(warning))}")
 
     def _print_finding(self, index: int, finding: Finding, console: Console) -> None:
         """Print a single finding with structured details.
@@ -1093,7 +1093,7 @@ class CLIReporter(ReporterBase):
                 else:
                     details = "OK"
                 if s.warnings > 0 and not result.metadata.get("skipped"):
-                    details += f", {s.warnings} warnings"
+                    details += f", {s.warnings} warning{'s' if s.warnings != 1 else ''}"
             else:
                 parts = []
                 if s.errors > 0:

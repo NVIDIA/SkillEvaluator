@@ -390,6 +390,16 @@ def additional_errors(result: ValidationResult) -> list[str]:
     return [error for error in result.errors if error not in represented]
 
 
+def additional_warnings(result: ValidationResult) -> list[str]:
+    """Return warnings not already displayed through a structured finding.
+
+    A non-blocking finding also adds its legacy string to ``warnings``; keep the
+    plain warnings (such as a skipped comparison) without repeating those.
+    """
+    represented = {form for finding in result.findings for form in finding.legacy_string_forms()}
+    return [warning for warning in result.warnings if warning not in represented]
+
+
 PLUGIN_CATALOG_SIMILARITY_KEYS = (PLUGIN_CATALOG_SKILL_SIMILARITY_KEY, PLUGIN_CATALOG_PLUGIN_SIMILARITY_KEY)
 
 

@@ -1368,6 +1368,7 @@
                     <div class="tier-card-stats">
                         <span><strong>{{ tier1_summary.passed_count }}</strong>/{{ tier1_summary.total }} validators passed</span>
                         {% if tier1_summary.issue_count %}<span><strong>{{ tier1_summary.issue_count }}</strong> issue(s)</span>{% endif %}
+                        {% if skillspector_versions %}<span title="SkillSpector version that ran the Tier 1 security scan">SkillSpector <strong>v{{ skillspector_versions | join(', v') }}</strong></span>{% endif %}
                     </div>
                     {% if tier1_summary.critical or tier1_summary.high or tier1_summary.medium or tier1_summary.low %}
                     <div class="tier-card-sev">

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import json
 import os
@@ -195,12 +196,14 @@ class NvidiaBuildBridgeHandler(BaseHTTPRequestHandler):
                     namespace_tools,
                 )
             elif route == MESSAGES_PATH:
-                chat_request = _anthropic_to_chat_request(
+                chat_request, tool_names = _anthropic_to_chat_request(
                     payload, max_output_tokens=self.bridge_config.max_output_tokens
                 )
                 _enforce_allowed_model(self.bridge_config, chat_request)
                 events = _translate_backend(
-                    _request_build(self.bridge_config, chat_request), chat_completion_to_anthropic_events
+                    _request_build(self.bridge_config, chat_request),
+                    chat_completion_to_anthropic_events,
+                    tool_names,
                 )
         except BridgePayloadError as error:
             error_type = {
@@ -1128,12 +1131,13 @@ def _responses_to_chat_request(
 
 def anthropic_to_chat_request(payload: Any) -> dict[str, Any]:
     """Translate an Anthropic Messages request to a Build Chat Completions request."""
-    return _anthropic_to_chat_request(payload)
+    translated, _tool_names = _anthropic_to_chat_request(payload)
+    return translated
 
 
 def _anthropic_to_chat_request(
     payload: Any, *, max_output_tokens: int = MAX_OUTPUT_TOKENS_PER_REQUEST
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, str]]:
     request = _require_object(payload)
     messages: list[dict[str, Any]] = []
     if "system" in request:
@@ -1146,21 +1150,25 @@ def _anthropic_to_chat_request(
 
     translated: dict[str, Any] = {"model": _require_model(request), "messages": messages}
     tools = request.get("tools")
-    translated_tools: list[dict[str, Any]] | None = None
+    tool_names: dict[str, str] = {}
     if tools is not None:
-        translated_tools = []
+        translated_tools: list[dict[str, Any]] = []
         for tool in _require_list(tools, "tools"):
             chat_tool = _anthropic_tool_to_chat(tool)
             tool_name = chat_tool["function"]["name"]
             if tool_name in DROPPED_CLAUDE_CODE_ORCHESTRATION_TOOLS or not _is_chat_tool_name(tool_name):
                 continue
+            chat_name = _chat_tool_alias(tool_name)
+            if tool_names.setdefault(chat_name, tool_name) != tool_name:
+                raise BridgePayloadError("Anthropic tool name collision after shortening")
+            chat_tool["function"]["name"] = chat_name
             translated_tools.append(chat_tool)
         if translated_tools:
             translated["tools"] = translated_tools
     _copy_request_options(request, translated, {"temperature", "top_p"})
     if "tool_choice" in request:
         tool_choice = request["tool_choice"]
-        declared_tool_names = {tool["function"]["name"] for tool in translated_tools or []}
+        declared_tool_names = set(tool_names.values())
         if (
             isinstance(tool_choice, dict)
             and tool_choice.get("type") == "tool"
@@ -1183,7 +1191,7 @@ def _anthropic_to_chat_request(
             translated["parallel_tool_calls"] = False
     if "max_tokens" in request:
         translated["max_tokens"] = _require_output_token_limit(request["max_tokens"], "max_tokens", max_output_tokens)
-    return translated
+    return translated, tool_names
 
 
 def chat_completion_to_responses_events(
@@ -1300,7 +1308,9 @@ def chat_completion_to_responses_events(
         yield {**event, "sequence_number": sequence_number}
 
 
-def chat_completion_to_anthropic_events(payload: Any) -> Iterator[dict[str, Any]]:
+def chat_completion_to_anthropic_events(
+    payload: Any, tool_names: dict[str, str] | None = None
+) -> Iterator[dict[str, Any]]:
     """Yield terminal Anthropic Messages stream events for one Chat Completion."""
     response_id, model, content, tool_calls = _chat_completion_parts(payload)
     normalized_tool_calls = _anthropic_tool_calls(tool_calls)
@@ -1326,10 +1336,11 @@ def chat_completion_to_anthropic_events(payload: Any) -> Iterator[dict[str, Any]
 
     for tool_call, _tool_input in normalized_tool_calls:
         function = tool_call["function"]
+        name = (tool_names or {}).get(function["name"], function["name"])
         yield {
             "type": "content_block_start",
             "index": index,
-            "content_block": {"type": "tool_use", "id": tool_call["id"], "name": function["name"], "input": {}},
+            "content_block": {"type": "tool_use", "id": tool_call["id"], "name": name, "input": {}},
         }
         yield {
             "type": "content_block_delta",
@@ -1423,7 +1434,7 @@ def _anthropic_tool_choice_to_chat(choice: Any) -> Any:
     if choice_type == "none":
         return "none"
     if choice_type == "tool" and isinstance(choice.get("name"), str):
-        return {"type": "function", "function": {"name": choice["name"]}}
+        return {"type": "function", "function": {"name": _chat_tool_alias(choice["name"])}}
     raise BridgePayloadError("unsupported Anthropic tool_choice")
 
 
@@ -1649,9 +1660,7 @@ def _responses_namespace_tool_to_chat(
         if nested_kind not in {"function", "custom"}:
             _responses_tool_to_chat(nested_tool)
             raise BridgePayloadError("namespace tools must contain function or custom tools")
-        chat_name = f"{namespace}__{nested_name}"
-        if len(chat_name) > MAX_CHAT_TOOL_NAME_LENGTH:
-            raise BridgePayloadError("flattened namespace tool names must be at most 64 characters")
+        chat_name = _chat_tool_alias(f"{namespace}__{nested_name}")
         if chat_name in namespace_tools or chat_name in top_level_names:
             raise BridgePayloadError("Responses tool name collision after namespace flattening")
         chat_tool = _responses_tool_to_chat(nested_tool)
@@ -1667,7 +1676,16 @@ def _validate_namespace_name(name: str, field_name: str) -> None:
 
 
 def _is_chat_tool_name(name: Any) -> bool:
-    return isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) is not None
+    """Return whether Build accepts ``name`` once ``_chat_tool_alias`` fits it into 64 characters."""
+    return isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_-]+", name) is not None
+
+
+def _chat_tool_alias(name: str) -> str:
+    """Fit a tool name into Build's 64 characters: a prefix plus a digest, stable across replayed turns."""
+    if len(name) <= MAX_CHAT_TOOL_NAME_LENGTH:
+        return name
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+    return f"{name[: MAX_CHAT_TOOL_NAME_LENGTH - len(digest) - 1]}_{digest}"
 
 
 def _namespace_chat_tool_name(
@@ -1731,7 +1749,10 @@ def _anthropic_tool_use_to_chat(block: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": call_id,
         "type": "function",
-        "function": {"name": name, "arguments": json.dumps(tool_input, separators=(",", ":"), sort_keys=True)},
+        "function": {
+            "name": _chat_tool_alias(name),
+            "arguments": json.dumps(tool_input, separators=(",", ":"), sort_keys=True),
+        },
     }
 
 

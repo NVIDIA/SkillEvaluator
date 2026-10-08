@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from skillevaluator.tier3.harbor.adapter import find_evals_file
 from skillevaluator.tier3.harbor.native_staging import build_native_task_staging, stage_native_bundle
 from skillevaluator.tier3.plugin_eval import prepare_plugin_eval_package
 from skillevaluator.tier3.plugin_native import (
@@ -1003,6 +1004,24 @@ def test_prepare_follows_a_task_source_pinned_in_the_evals_config(tmp_path: Path
     assert package.provenance()["partial"] is True
     with pytest.raises(PluginLoadError, match="native Harbor"):
         _prepare(with_skill, tmp_path, "native", agents="claude-code", env_mode="docker")
+
+
+@pytest.mark.parametrize("plugin_load", ["native", "auto"])
+def test_prepare_plans_with_the_dataset_the_runner_picks_before_harbor_tasks(tmp_path: Path, plugin_load: str) -> None:
+    """The runner takes evals/dataset.json before evals/harbor/, so native loading is not refused for it."""
+    plugin = _write(
+        tmp_path / "ds-plugin",
+        {
+            ".claude-plugin/plugin.json": {"name": "ds-plugin", "description": "Demo plugin"},
+            "skills/alpha/SKILL.md": SKILL.format(name="alpha"),
+            "evals/dataset.json": EVALS["evals/evals.json"],
+            "evals/harbor/t1/task.toml": "version = '1.0'\n",
+        },
+    )
+    package = _prepare(plugin, tmp_path, plugin_load, agents="claude-code", env_mode="docker")
+
+    assert find_evals_file(package.package_path) == package.package_path / "evals" / "dataset.json"
+    assert package.native_source is not None
 
 
 @pytest.mark.parametrize(

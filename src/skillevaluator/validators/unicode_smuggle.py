@@ -20,6 +20,7 @@ import base64
 import binascii
 import mimetypes
 import re
+import unicodedata
 from pathlib import Path
 
 from skillevaluator.config import load_unicode_smuggle_patterns
@@ -33,6 +34,10 @@ logger = get_logger(__name__)
 # A base64 run long enough to carry a sentence; the first runs of a file are decoded.
 _BASE64_RUN_RE = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/]{32,8192}={0,2}(?![A-Za-z0-9+/=_-])")
 _MAX_BASE64_RUNS = 256
+# U+FE0E / U+FE0F right after a symbol choose its text or emoji presentation ('⚠️' is U+26A0 U+FE0F); a keycap
+# puts U+FE0F between '0'-'9', '#', or '*' and U+20E3.
+_PRESENTATION_SELECTORS = frozenset("\ufe0e\ufe0f")
+_KEYCAP_BASES = frozenset("0123456789#*")
 # Decoded text that tells an agent to act: override its instructions, fetch or upload data, or reach secrets.
 _HIDDEN_INSTRUCTION_RE = re.compile(
     r"\b(?:ignore|disregard|forget)\b.{0,24}\b(?:previous|prior|above|earlier|all|your)\b.{0,24}"
@@ -297,6 +302,18 @@ class UnicodeSmuggleValidator(ValidatorBase):
         return None
 
     @staticmethod
+    def _is_presentation_selector(line: str, col: int) -> bool:
+        """Whether ``line[col]`` is U+FE0E / U+FE0F choosing how the symbol before it is drawn (an emoji
+        presentation sequence such as U+26A0 U+FE0F, or a keycap such as '1' U+FE0F U+20E3)."""
+        if col == 0 or line[col] not in _PRESENTATION_SELECTORS:
+            return False
+        base = line[col - 1]
+        if base in _KEYCAP_BASES:
+            return line[col + 1 : col + 2] == "\u20e3"
+        # Emoji bases are symbols and punctuation outside ASCII, plus U+2139 INFORMATION SOURCE (a letter).
+        return base == "\u2139" or (not base.isascii() and unicodedata.category(base)[0] in "SP")
+
+    @staticmethod
     def _group_consecutive(chars: list[dict]) -> list[list[dict]]:
         """Group consecutive invisible characters by column position."""
         if not chars:
@@ -340,6 +357,10 @@ class UnicodeSmuggleValidator(ValidatorBase):
                 suggestion="BOM at file start is harmless. Remove if not needed.",
                 metadata={"unicode_category": "zero_width", "char_count": 1},
             )
+
+        # One presentation selector after its emoji base is standard text, not an invisible character
+        if run_length == 1 and self._is_presentation_selector(line, group[0]["col"]):
+            return None
 
         # Unicode Tags that decode to ASCII -> CRITICAL
         if "unicode_tags" in categories_in_group:

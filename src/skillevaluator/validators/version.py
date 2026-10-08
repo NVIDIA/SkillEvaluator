@@ -171,9 +171,16 @@ class VersionValidator(ValidatorBase):
         if not current:
             if not self._validate_previous_version(current, manifest, result):
                 return result
+            message = "No semantic version label present; resource will use commit-hash history"
+            if parsed.yaml_data.get("version") is not None:
+                # The legacy top-level 'version' is not read (see _extract_version); say so instead of "none".
+                message = (
+                    "No metadata.version label present (the top-level 'version' field is not read as the semantic "
+                    "version label); resource will use commit-hash history"
+                )
             result.add_success(
                 check_name="version_optional",
-                message="No semantic version label present; resource will use commit-hash history",
+                message=message,
                 previous_version=self.previous_version,
             )
             return result

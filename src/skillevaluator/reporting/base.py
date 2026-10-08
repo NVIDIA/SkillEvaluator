@@ -21,10 +21,18 @@ import tempfile
 from abc import ABC, abstractmethod
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import click
 
+from skillevaluator.constants import PLUGIN_CATALOG_PLUGIN_SIMILARITY_KEY, PLUGIN_CATALOG_SKILL_SIMILARITY_KEY
+from skillevaluator.reporting.plugin_sections import (
+    completeness_view,
+    plugin_block,
+    plugin_provenance,
+    split_display_prefix,
+    tier1_plugin_view,
+)
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
 
 if TYPE_CHECKING:
@@ -355,6 +363,13 @@ def is_advisory_agent_eval_skip(result: ValidationResult) -> bool:
     )
 
 
+def is_partial_plugin_agent_eval(result: ValidationResult) -> bool:
+    """Return whether a Tier 3 result records a partial (INCOMPLETE) plugin run."""
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    completeness = completeness_view(plugin_provenance(metadata.get("agent_eval")))
+    return bool(completeness and completeness["partial"])
+
+
 def passes_required_gate(result: ValidationResult) -> bool:
     """Return whether *result* permits the required validation gate to pass."""
     gating = result.metadata.get("gating") if isinstance(result.metadata, dict) else None
@@ -369,17 +384,30 @@ def additional_errors(result: ValidationResult) -> list[str]:
     Findings also populate the legacy error list. Keep independent errors,
     including execution diagnostics, without repeating those mirrored entries.
     """
-    represented = {finding.to_legacy_string() for finding in result.findings}
-    for finding in result.findings:
-        # merge_with_prefix puts skill labels before legacy messages but inside
-        # structured finding paths. Recognize both forms, including nested merges.
-        location = finding.location
-        prefix = ""
-        while location.startswith("[") and "] " in location:
-            label, _, location = location.partition("] ")
-            prefix += label + "] "
-            represented.add(f"{prefix}{finding.tag} {finding.message} in {location}")
+    # merge_with_prefix puts skill labels before legacy messages but inside
+    # structured finding paths. Recognize both forms, including nested merges.
+    represented = {form for finding in result.findings for form in finding.legacy_string_forms()}
     return [error for error in result.errors if error not in represented]
+
+
+PLUGIN_CATALOG_SIMILARITY_KEYS = (PLUGIN_CATALOG_SKILL_SIMILARITY_KEY, PLUGIN_CATALOG_PLUGIN_SIMILARITY_KEY)
+
+
+def plugin_catalog_similarity_summary(result: ValidationResult) -> str | None:
+    """One-line text for a plugin Tier 2 local-catalog check, or ``None``."""
+    plugin = result.metadata.get("plugin") if isinstance(result.metadata, dict) else None
+    if not isinstance(plugin, dict):
+        return None
+    for key in PLUGIN_CATALOG_SIMILARITY_KEYS:
+        block = plugin.get(key)
+        if not isinstance(block, dict):
+            continue
+        if block.get("status") == "skipped":
+            return f"Skipped: {block.get('reason') or 'prerequisite unavailable'}"
+        matches = block.get("matches")
+        match_count = len(matches) if isinstance(matches, list) else 0
+        return f"Compared with {block.get('catalog_entries', 0)} catalog entries; {match_count} advisory match(es)"
+    return None
 
 
 class ReporterBase(ABC):
@@ -460,3 +488,84 @@ class ReporterBase(ABC):
             "sarif": ".sarif.json",
         }
         return extensions.get(self.name, ".txt")
+
+    @classmethod
+    def _plugin_status(cls, results: list[ValidationResult]) -> str:
+        """Return the canonical plugin status with fail-closed precedence.
+
+        A plugin is failed when any completed check fails the required gate,
+        incomplete when required work did not finish (missing scanner evidence
+        or a partial Tier 3 plugin run), and passed otherwise. Reporters share
+        this helper so their plugin row cannot disagree with the overall verdict.
+        """
+        incomplete = False
+        for result in results:
+            if result.is_incomplete or is_partial_plugin_agent_eval(result):
+                incomplete = True
+            elif not passes_required_gate(result):
+                return "failed"
+        return "incomplete" if incomplete else "passed"
+
+    @staticmethod
+    def _plugin_block(result: ValidationResult) -> dict[str, Any] | None:
+        """Return normalized Tier 1 plugin metadata for one result, if present."""
+        return plugin_block(result.metadata)
+
+    @classmethod
+    def _plugin_block_from_results(cls, results: list[ValidationResult]) -> dict[str, Any] | None:
+        """Return the plugin metadata merged across *results*.
+
+        Tier 1 (manifest, dependencies, components) and Tier 2 (advisory
+        catalog similarity) record their plugin keys on separate results, so
+        the ``plugin`` dicts are merged. The first non-empty value for a key
+        wins, which keeps the manifest identity from the Tier 1 result.
+        """
+        merged: dict[str, Any] = {}
+        found = False
+        for result in results:
+            block = cls._plugin_block(result)
+            if block is None:
+                metadata = result.metadata if isinstance(result.metadata, dict) else {}
+                block = dict(metadata["plugin"]) if isinstance(metadata.get("plugin"), dict) else None
+            if block is None:
+                continue
+            found = True
+            for key, value in block.items():
+                if merged.get(key) in (None, "", {}, []):
+                    merged[key] = value
+        return merged if found else None
+
+    @classmethod
+    def _tier1_plugin_view(cls, results: list[ValidationResult]) -> dict[str, Any] | None:
+        """Return the Tier 1 plugin section's display model for *results*, or ``None`` without plugin data."""
+        block = cls._plugin_block_from_results(results)
+        if block is None:
+            return None
+        return tier1_plugin_view(
+            block,
+            status=cls._plugin_status(results),
+            bundled_skills=cls._plugin_child_names(results, block),
+        )
+
+    @classmethod
+    def _plugin_child_names(cls, results: list[ValidationResult], block: dict[str, Any]) -> list[str]:
+        """Return the canonical root-relative bundled-skill identifiers of the merged plugin *block*."""
+        bundled = block.get("bundled_skills")
+        if isinstance(bundled, list):
+            return list(dict.fromkeys(name for name in bundled if isinstance(name, str) and name))
+
+        # Results produced before the explicit ``bundled_skills`` field existed
+        # name bundled skills only through success details and prefixed findings.
+        plugin_result = next((result for result in results if cls._plugin_block(result) is not None), None)
+        if plugin_result is None:
+            return []
+        names = [
+            detail.check_name
+            for detail in plugin_result.success_details
+            if detail.check_name != "plugin_manifest" and not detail.check_name.startswith("[")
+        ]
+        for finding in plugin_result.findings:
+            skill, _path = split_display_prefix(finding.file_path or "")
+            if skill is not None:
+                names.append(skill)
+        return list(dict.fromkeys(names))

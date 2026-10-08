@@ -79,8 +79,10 @@ Example: `47% → 92% (+45 points)` means the skill-assisted run scored 92%, 45 
 | Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency` (100%) |
 
 - Dimension bands: PASS at 50% or above; NEUTRAL from 40% to below 50%; FAIL below 40%.
-- Overall Tier 3 lift: PASS at +5 points or more; FAIL at -10 points or less; values between those bands are NEUTRAL.
-- Overall verdict: PASS only when every configured dimension passes for at least one supported agent. Lift is reported as diagnostic evidence and does not override this gate.
+- Skill Lift band (with versus without, best agent): PASS at +5 points or more; FAIL at -10 points or less; values between those bands are NEUTRAL.
+- Overall verdict: PASS only when every configured dimension passes for at least one supported agent. The Skill Lift band never changes the Tier 3 dimension verdict.
+- A Skill Lift in the FAIL band whose paired-case interval lies wholly below zero is a confirmed regression: it adds a warning and makes this card FAIL. A FAIL-band lift whose interval includes zero, or has no interval, only warns. Integration-only runs have no Skill Lift band.
+- Exit code: `validate --block-on-agent-eval` fails on a Tier 3 FAIL verdict, a confirmed regression, or a skipped or INCOMPLETE Tier 3 run; a NEUTRAL verdict never fails it. Without the flag, Tier 3 is advisory and never changes the exit code.
 - The 50% attempt pass threshold is a separate per-task gate; it is not the dimension pass threshold.
 - Effectiveness is the equal-weight mean of goal completion (`goal_accuracy`) and expected workflow adherence (`behavior_check`).
 - Token efficiency is a separate report-only signal. It does not change a dimension score or the overall verdict.

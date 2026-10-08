@@ -5124,6 +5124,30 @@ class TestFalsePositivePrevention:
         email_errors = [e for e in result.errors if "email" in e.lower()]
         assert len(email_errors) == 0, f"URL credentials should not be flagged: {email_errors}"
 
+    @pytest.mark.parametrize(
+        ("text", "reported"),
+        [
+            # A URL elsewhere on the line does not excuse a separate address.
+            ("Docs: https://docs.contoso.dev/start - questions to bob@realcorp.com\n", ["bob@realcorp.com"]),
+            (
+                json.dumps({"name": "demo", "homepage": "https://contoso.dev/x", "contact": "bob@realcorp.com"}),
+                ["bob@realcorp.com"],
+            ),
+            # The userinfo of a URL is not an email address.
+            ("git clone https://deploy:token@git.realcorp.com/team/repo.git\n", []),
+        ],
+    )
+    def test_email_url_exception_covers_only_the_address_in_the_url(
+        self, tmp_path: Path, text: str, reported: list[str]
+    ):
+        skill_dir = tmp_path / "email-url-line"
+        skill_dir.mkdir()
+        (skill_dir / "notes.md").write_text(text)
+
+        result = SecurityValidator(submitter_usernames=[]).validate_pii_only(skill_dir)
+
+        assert list(_email_occurrences(result)) == reported
+
     def test_email_subdomain_of_example_not_flagged(self, tmp_path: Path):
         """Subdomains of example.com should not be flagged."""
         skill_dir = tmp_path / "email-subdomain"

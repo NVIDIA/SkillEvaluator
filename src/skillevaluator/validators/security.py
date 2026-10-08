@@ -2980,6 +2980,11 @@ class SecurityValidator(ValidatorBase):
         return bool(SecurityValidator._GPS_ZERO_PATTERN.search(line))
 
     @classmethod
+    def _is_url_userinfo(cls, match: re.Match, line: str) -> bool:
+        """Return whether an email-shaped match is a URL's userinfo and host (``https://user:token@host``)."""
+        return cls._URL_AUTHORITY_PREFIX_PATTERN.search(line, max(0, match.start() - 512), match.start()) is not None
+
+    @classmethod
     def _is_version_literal(cls, match: re.Match, line: str) -> bool:
         """Return whether an IPv4-shaped match is clearly a release version."""
         prefix = line[: match.start()]
@@ -3236,6 +3241,9 @@ class SecurityValidator(ValidatorBase):
                 # Exempt one address equal to the author email, not the first text that contains it ('xa@corp.com').
                 exempt = next((match for match in matches if match.group().casefold() == author_email.casefold()), None)
                 matches = [match for match in matches if match is not exempt]
+            if category == "emails":
+                # Only the address in a URL is excused, not every address on a line that also has a URL.
+                matches = [match for match in matches if not self._is_url_userinfo(match, line)]
             if not matches or any(exc in line for exc in exceptions):
                 continue
             if category == "ip_addresses":

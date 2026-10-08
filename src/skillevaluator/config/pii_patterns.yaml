@@ -71,8 +71,8 @@ emails:
       - "license"
       - "(c)"
       - "Authors"
-      # URL credential syntax (userinfo@host is not an email)
-      - "://"
+      # URL credential syntax (userinfo@host) is not an email: security.py skips an
+      # address inside a URL itself, so a URL elsewhere on the line exempts nothing.
       # OData/Redfish JSON property names (e.g. Members@odata.count, @odata.type)
       - "@odata."
 

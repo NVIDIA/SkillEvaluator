@@ -101,6 +101,20 @@ def test_artifacts_redact_the_whole_url_userinfo(prefix: str, body: str) -> None
     assert body not in redacted
 
 
+# Tokens whose prefix holds a "_", glued after a Slack token's "-". A Slack body that stopped at that "_" ended
+# on the other token's prefix, which the one-pass scan then never read, and left the other token's body in clear.
+_GLUED_AFTER_SLACK = ["github-personal", "github-fine-grained", "hugging-face", "npm"]
+
+
+@REDACTORS
+@pytest.mark.parametrize(("prefix", "body"), [_TOKENS[name] for name in _GLUED_AFTER_SLACK], ids=_GLUED_AFTER_SLACK)
+def test_a_token_glued_after_a_slack_token_is_redacted_too(redact, prefix: str, body: str) -> None:
+    redacted = redact(f"sent with xoxb-{_fixture_secret('1234567890', '-')}{prefix}{body} today")
+
+    assert body not in redacted
+    assert redacted.startswith("sent with xoxb-")
+
+
 # Text shaped like the start of a token that is not one, for every redactor: a bare or
 # short prefix, a type letter Slack does not issue ("xoxo" is also a word), a Hugging
 # Face prefix glued to a word, and hyphenated words.

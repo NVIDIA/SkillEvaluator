@@ -59,11 +59,10 @@ In practice: a default `validate` run (no `-r`) shows the compact pipeline view 
 | Code | Meaning |
 | --- | --- |
 | `0` | Success |
-| `1` | Validation failed, or the run could not complete |
-| `2` | Configuration error — bad flags or an unreadable target |
-| `3` | Runtime error — an unexpected internal failure |
+| `1` | Validation failed, the run could not complete, or an unexpected internal error occurred |
+| `2` | Usage error — an unknown flag, a value outside an option's type or choices, or a target path that does not exist |
 
-**Version.** `skillevaluator --version` prints the installed version.
+**Global options.** `skillevaluator --version` prints the installed version. `-v, --verbose`, given before the command (`skillevaluator -v validate ./my-skill`), enables debug logging; for `validate` it also replaces the compact pipeline view with the full detail stream. Every command accepts `-h` as a short form of `--help`.
 
 ## Direct tier workflows
 
@@ -102,7 +101,7 @@ autopilot. It is separate from these tier-only workflows.
 | `--llm / --no-llm` | Enabled when a provider is configured | Enable or skip rubric, LLM security, and finding verification; explicit `--llm` requires valid provider configuration |
 | `--min-score INTEGER` | `70` | Minimum passing quality and rubric score, from 0 to 100 |
 | `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `external` | Validation policy profile |
-| `--previous-version TEXT` | unset | Previous version for version checks |
+| `--previous-version TEXT` | `SKILLEVALUATOR_PREVIOUS_VERSION`, else unset | Previous version for version checks |
 
 Also accepts `-r/--report` and `-o/--output-dir` described above.
 
@@ -122,7 +121,7 @@ Both thresholds accept values from 0 to 1. Also accepts `-r/--report` and
 ## Expert tier subcommands
 
 The commands below remain available for focused operations.
-`skillevaluator tier1 validate PATH` now runs the same isolated Tier 1 workflow
+`skillevaluator tier1 validate PATH` runs the same isolated Tier 1 workflow
 as `tier1 PATH`. Use top-level `skillevaluator validate PATH` for the combined
 pipeline.
 
@@ -172,7 +171,7 @@ skillevaluator validate ./my-skill -a codex,claude-code \
     --env-mode docker --harbor-keep-jobs                  # Tier 3, retain Harbor jobs
 ```
 
-Pointing `validate` at a directory of skills (one with no root `SKILL.md`) runs the whole pipeline serially for each skill inside it and finishes with a per-skill summary — catalog validation in one command. By default the terminal shows a compact pipeline view; `--verbose` switches to the full per-check detail stream.
+Pointing `validate` at a directory of skills (one with no root `SKILL.md`) runs the whole pipeline for each skill inside it, writes each skill's reports under `<output-dir>/<skill>/`, and finishes with a per-skill summary — catalog validation in one command. Skills run serially by default; `--workers N` validates up to N skills at once in parallel processes. `--previous-version` is rejected for a directory of skills. By default the terminal shows a compact pipeline view; `--verbose` switches to the full per-check detail stream.
 
 `--help` groups the flags into four panels, mirrored by the subsections below.
 
@@ -189,6 +188,9 @@ Applies to the whole run: target typing, policy profile, reports, tier selection
 | `--profile TEXT` | `$SKILLEVALUATOR_PROFILE`, then `external` | Validation profile: `external` or a custom name. |
 | `--external` | — | Shortcut for `--profile external` (validate for public publication). |
 | `--policy FILE` | none | Custom policy YAML overlaid on top of `--profile`. |
+| `--workers INTEGER RANGE` | `1` | Concurrent skill jobs when validating a folder of skills (`x>=1`). Values above 1 run skills in parallel processes and disable the per-skill pipeline view. |
+
+The [evaluated source provenance](#evaluated-source-provenance) flags also appear in this panel.
 
 Auto-detection recognizes: a `SKILL.md` for skills, `.mdc` files for rules, `workflow-rules.mdc` for workflows, and — for plugins — a bundle-reference `agent_plugin.yaml`/`.yml` manifest or a contained `.claude-plugin/plugin.json` manifest. Plugins are validated against their public contract; quality, lint, and version checks are skill-only and skipped for plugins.
 
@@ -201,6 +203,7 @@ Static checks; LLM-free by default. Tier 1 gates the exit code and always runs.
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--checks, --tier1-checks TEXT` | all applicable | Comma-separated subset of Tier 1 checks. Default choices: `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, `lint`; opt-in (not run by default): `dependency`. `quality`/`lint`/`version` are skill-only and skipped for rules and workflows. |
+| `--previous-version VERSION` | `SKILLEVALUATOR_PREVIOUS_VERSION`, else unset | Previous released version; the skill's version must be a strictly greater SemVer. Single-skill targets only. |
 | `--fail-fast` | off | Stop on the first failing check instead of collecting all issues. |
 | `-c, --continue-on-failure` | off | Run the full pipeline without stopping early; record all issues in the reports. Overrides `--fail-fast`, and for folder validation keeps scanning every skill past a CRITICAL finding. |
 | `--llm, --tier1-llm / --no-llm, --no-tier1-llm` | `no-llm` | Enable LLM-backed security analysis (requires a configured public provider — see [Providers & Credentials](configuration.mdx)). |
@@ -242,7 +245,7 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | `--results-dir DIRECTORY` | unset | Directory for Harbor live-eval results. |
 | `--include-skills PATH` | none | Additional skill(s) to mount into the eval environment (repeatable; paths must exist). Requires group workspace mode, set via `skill_workspace.mode: group` in `evals/config.yml`. |
 | `--copy-repo` | off | Copy the surrounding repo into the eval environment. |
-| `--timeout-multiplier FLOAT` | unset | Scale Harbor step timeouts. |
+| `--timeout-multiplier FLOAT` | unset | Scale Harbor's agent, verifier, and environment-build timeouts (built-in default `1.0`). Must be a finite number greater than 0. |
 | `--harbor-keep-jobs` | off | Retain Harbor job dirs and artifacts after the run for inspection. |
 | `--agent-runtime-preflight / --no-agent-runtime-preflight` | disabled | Opt into an extra agent-only execution of the first staged task before the measured A/B matrix. The CLI value overrides `harbor.agent_runtime_preflight`; without either, no extra agent runs. |
 
@@ -341,7 +344,7 @@ Plus the standard report options.
 
 ## dedup-scan
 
-Alias of [context-optimization-check](#context-optimization-check) — same behavior, same flags (`--threshold` default `0.8`, `--model`, `--llm-model`, plus the standard report options).
+Alias of [context-optimization-check](#context-optimization-check) — same behavior, same flags (`--threshold` default `0.8`, `--model`, `--llm-model`, plus the standard report options). Only the report basename differs: `skillevaluator-dedup` instead of `skillevaluator-context`.
 
 ```bash title="Same check, alias name"
 skillevaluator dedup-scan ./my-skill
@@ -383,8 +386,8 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
-| `--env-mode` | `docker` | Where trials run. SkillEvaluator exposes 26 environment modes: 25 Harbor-native backends, including Docker, plus SkillEvaluator `local` mode. See the complete extras and prerequisites matrix in [Agents & Sandboxes](agents-and-sandboxes.mdx). |
-| `--environment-kwarg`, `--ek` | none | Operator-only `KEY=VALUE` constructor option for Harbor-native non-Docker backends (repeatable). Values accept JSON-compatible types; skill-owned `evals/config.yml` cannot set them. Never pass secrets. Docker and local reject all kwargs, and Harbor runtime-policy fields for overrides, mounts, networks, extra Compose, lifecycle, and pod security are reserved. |
+| `--env-mode` | `docker` | Where trials run. SkillEvaluator exposes 26 environment modes: 25 Harbor-native modes — `docker`, `daytona`, `e2b`, `modal`, `runloop`, `langsmith`, `ec2`, `gke`, `ack`, `openshift`, `novita`, `apple-container`, `singularity`, `islo`, `tensorlake`, `cwsandbox`, `wandb`, `use-computer`, `blaxel`, `beam`, `skypilot`, `hyperbrowser`, `vercel`, `runta`, `mosaic` — plus SkillEvaluator `local` mode. `wandb` runs Harbor's `cwsandbox` backend with W&B authentication, so it needs the `harbor[cwsandbox]==0.24.0` extra; Harbor 0.24 has no `wandb` extra. Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `kata`, `prime`, and `smol` backends are not selectable. See the complete extras and prerequisites matrix in [Agents & Sandboxes](agents-and-sandboxes.mdx#where-trials-run). |
+| `--environment-kwarg`, `--ek` | none | Operator-only `KEY=VALUE` constructor option for Harbor-native non-Docker backends (repeatable). Values accept JSON-compatible types; skill-owned `evals/config.yml` cannot set them. Never pass secrets. Docker and local reject all kwargs. Harbor runtime-policy fields for overrides, mounts, networks, extra Compose, lifecycle, and pod security are reserved, as are `stream`, `enable_environment_dir_upload`, and `auth` for `cwsandbox`/`wandb`. Names the selected backend does not accept in Harbor 0.24.0 are rejected. See [Native backend constructor options](agents-and-sandboxes.mdx#native-backend-constructor-options). |
 | `--autopilot` | off | Create one eval case when no dataset/task source exists, then evaluate. The case is LLM-generated with the configured provider, with a deterministic keyless template fallback; an existing source is never overwritten. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
 | `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
@@ -402,7 +405,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | `--results-dir DIRECTORY` | unset | Directory for live-eval results (precedence rules in [Reports & Results](reports.mdx)). |
 | `--harbor-keep-jobs` | off | Retain Harbor job dirs and artifacts for inspection with [harbor-view](#harbor-view). |
 | `--agent-runtime-preflight / --no-agent-runtime-preflight` | disabled | Opt into an extra agent-only execution of the first staged task before the full A/B evaluation matrix. |
-| `--timeout-multiplier FLOAT` | unset | Scale Harbor step timeouts. |
+| `--timeout-multiplier FLOAT` | unset | Scale Harbor's agent, verifier, and environment-build timeouts (built-in default `1.0`). Must be a finite number greater than 0. |
 | `--override-cpus INTEGER` | unset | Override eval-environment CPU allocation (passed through to Harbor). |
 | `--override-memory-mb INTEGER` | unset | Override eval-environment memory in MB (passed through to Harbor). |
 | `--override-storage-mb INTEGER` | unset | Override eval-environment storage in MB (passed through to Harbor). |
@@ -428,7 +431,7 @@ skillevaluator create-eval-dataset ./my-skill --full
 ```
 
 <Warning>
-`--force` overwrites an existing `evals/evals.json`, including any hand-edited cases. Use `--dry-run` first if you are unsure.
+`--force` overwrites an existing `evals/evals.json`, including any hand-edited cases, and `--refine` implies `--force`. Use `--dry-run` first if you are unsure.
 </Warning>
 
 | Flag | Default | Effect |
@@ -438,7 +441,7 @@ skillevaluator create-eval-dataset ./my-skill --full
 | `--dry-run` | off | Preview without writing. |
 | `--force` | off | Overwrite existing `evals/evals.json`. |
 | `--prompt PATH` | none | Developer eval-guidance file for generation (default: auto-detects `evals/EVAL.md`). |
-| `--refine` | off | Refine cases using existing or collected trajectories. |
+| `--refine` | off | Refine cases using existing or collected trajectories. Reading trajectories from existing results does not require the `tier3` extra; when none exist, collecting one runs `claude-code` through Harbor and needs the `tier3` extra, Docker, and a configured provider (see [Eval Datasets](eval-datasets.mdx)). |
 | `--from-results PATH` | none | With `--refine`: results path containing agent trajectories (default: latest results). |
 | `--results-dir DIRECTORY` | unset | With `--refine`: external results root to search for trajectories. |
 

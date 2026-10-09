@@ -4,6 +4,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Brought the published documentation in line with 0.5.0. It now covers how
+  standard grading builds judge evidence and rebuilds trajectories from
+  OpenCode and Codex logs, structured judge output and retries, the evidence
+  budget and judge time-budget variables, and the Harbor process environment.
+  The CLI reference adds `validate --workers`, the full `--env-mode` list, and
+  the exit codes the CLI actually returns (`0`, `1`, `2`).
+
+## 0.5.0 - 2026-10-06
+
 ### Added
 
 - Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for

@@ -259,7 +259,9 @@ class EmbeddingRegistry:
             batch = texts[start : start + batch_size]
             vectors = [self._client.embed_chunked(batch[0])] if self._full_body else self._client.embed(batch)
             if len(vectors) != len(batch):
-                raise ValueError(f"Embedding provider returned {len(vectors)} vectors for {len(batch)} entries in batch")
+                raise ValueError(
+                    f"Embedding provider returned {len(vectors)} vectors for {len(batch)} entries in batch"
+                )
             for vector in vectors:
                 vector_dimension = _validate_vector(vector, vector_dimension)
                 validated_vectors.append(vector)
@@ -659,13 +661,16 @@ def _validate_catalog_identity(entry_id: object, path: object, content_type: obj
 
 def _validate_text_fields(entry_id: str, name: object, description: object) -> None:
     _validate_catalog_string(name, f"Catalog entry '{entry_id}' name")
-    _validate_catalog_string(description, f"Catalog entry '{entry_id}' description")
+    _validate_catalog_string(description, f"Catalog entry '{entry_id}' description", allow_text_whitespace=True)
 
 
-def _validate_catalog_string(value: object, label: str) -> str:
+def _validate_catalog_string(value: object, label: str, *, allow_text_whitespace: bool = False) -> str:
     if not isinstance(value, str) or not value or len(value) > MAX_CATALOG_TEXT_LENGTH:
         raise ValueError(f"{label} must be a non-empty bounded string")
-    if any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value):
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Cs"} and not (allow_text_whitespace and character in "\t\n\r")
+        for character in value
+    ):
         raise ValueError(f"{label} contains unsafe control or surrogate characters")
     return value
 

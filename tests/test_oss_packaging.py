@@ -179,10 +179,10 @@ def test_harbor_dependency_contract_keeps_base_install_isolated() -> None:
 
 def test_harbor_environment_extra_mapping_matches_installed_metadata() -> None:
     provided_extras = set(metadata("harbor").get_all("Provides-Extra") or ())
-    system_or_base_backends = {"docker", "openshift", "apple-container", "singularity"}
+    system_or_base_backends = {"docker", "kata", "openshift", "apple-container", "singularity"}
 
-    assert len(HARBOR_ENVIRONMENTS) == 24
-    assert len(HARBOR_NATIVE_ENV_MODES) == 23
+    assert len(HARBOR_ENVIRONMENTS) == 25
+    assert len(HARBOR_NATIVE_ENV_MODES) == 24
     assert frozenset(HARBOR_ENVIRONMENTS) - {"local"} == HARBOR_NATIVE_ENV_MODES
     assert set(HARBOR_ENVIRONMENT_EXTRAS) == HARBOR_NATIVE_ENV_MODES
     assert {mode for mode, extra in HARBOR_ENVIRONMENT_EXTRAS.items() if extra is None} == system_or_base_backends
@@ -316,8 +316,8 @@ def test_public_docs_match_harbor_environment_and_kwarg_contract() -> None:
     public_docs = f"{agents}\n{cli_reference}\n{configuration}\n{tier3}\n{eval_config}"
     normalized_docs = " ".join(public_docs.split())
 
-    assert "24 environment modes" in public_docs
-    assert "23 Harbor-native backends" in public_docs
+    assert "25 environment modes" in public_docs
+    assert "24 Harbor-native backends" in public_docs
     assert "All 16 values" not in public_docs
     assert "same 16 values" not in public_docs
     assert "14 additional Harbor-native backends" not in public_docs
@@ -808,7 +808,7 @@ def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     assert "skillevaluator tier3 evaluate ./my-skill --agents claude-code --env-mode docker\n" in tier3
     assert "Explicit model overrides are preserved exactly" in public_docs
     assert "OpenCode renders it as" in public_docs
-    assert "Docker or local compatibility bridge" in public_docs
+    assert "in-container (Docker and Kata) or local compatibility bridge" in public_docs
     assert "experimental Claude Code" in public_docs
 
 

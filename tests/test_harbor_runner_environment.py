@@ -1842,6 +1842,9 @@ def test_harbor_backend_environment_allowlist_covers_every_native_022_mode() -> 
         "vercel": {"VERCEL_OIDC_TOKEN", "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID", "VERCEL_TOKEN"},
     }
 
+    # Kata runs on the host's Docker engine, so it selects exactly Docker's variables.
+    expected["kata"] = expected["docker"]
+
     assert set(expected) == HARBOR_NATIVE_ENV_MODES
     assert {mode: set(names) for mode, names in runner._HARBOR_ENV_MODE_VARS.items()} == expected
 

@@ -13,6 +13,7 @@ import pytest
 
 from skillevaluator.tier3.harbor import runner
 from skillevaluator.tier3.harbor.runner import build_harbor_run_command
+from skillevaluator.tier3.harbor.secure_docker_environment import NVIDIA_BUILD_STDIN_SENTINEL
 
 
 def _environment_kwargs(command: list[str]) -> list[str]:
@@ -83,6 +84,169 @@ def test_backend_kwargs_track_the_pinned_harbor_release() -> None:
         environment_kwargs={"dind_image": "docker:dind"},
     )
     assert f"dind_image={json.dumps('docker:dind')}" in _environment_kwargs(tensorlake)
+
+
+def test_kata_runs_the_hardened_kata_backend() -> None:
+    from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_KATA_ENV_IMPORT_PATH
+
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="codex",
+        job_name="kata",
+        env_mode="kata",
+        environment_kwargs={"kata_runtime": "kata-clh"},
+    )
+
+    assert command[command.index("--env") + 1] == SECURE_KATA_ENV_IMPORT_PATH
+    assert command[command.index("--agent") + 1] == "codex"
+    assert command[command.index("--ak") + 1] == f"reasoning_effort={json.dumps('high')}"
+    assert _environment_kwargs(command) == [f"kata_runtime={json.dumps('kata-clh')}"]
+
+
+@pytest.mark.parametrize(
+    ("environment_kwargs", "message"),
+    [
+        ({"keep_containers": True}, "reserved for Harbor runtime policy"),
+        ({"privileged": True}, "does not accept environment kwarg"),
+        ({"kata_runtime": "runc"}, "kata_runtime"),
+        ({"kata_runtime": "kata --privileged"}, "kata_runtime"),
+        ({"kata_runtime": 7}, "kata_runtime"),
+        ({"kata_dns": "1.1.1.1\noptions ndots:15"}, "kata_dns"),
+        ({"kata_dns": ["dns.example"]}, "kata_dns"),
+        ({"kata_dns": [" 1.1.1.1"]}, "kata_dns"),
+        ({"kata_dns": {"server": "1.1.1.1"}}, "kata_dns"),
+        ({"kata_dns": "fe80::1%eth0\nsearch attacker.example"}, "kata_dns"),
+        ({"kata_dns": ["fe80::1%eth0\noptions ndots:15"]}, "kata_dns"),
+        ({"kata_dns": ["fe80::1%eth0"]}, "kata_dns"),
+        ({"kata_dns": ""}, "at least one IP address"),
+        ({"kata_dns": ","}, "at least one IP address"),
+        ({"kata_dns": []}, "at least one IP address"),
+        ({"kata_dns": None}, "kata_dns"),
+    ],
+)
+def test_kata_kwargs_keep_the_microvm_boundary(environment_kwargs: dict[str, object], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="opencode",
+            job_name="kata",
+            env_mode="kata",
+            environment_kwargs=environment_kwargs,
+        )
+
+
+@pytest.mark.parametrize("dns", ["1.1.1.1, 2606:4700:4700::1111", ["9.9.9.9"], ["10.0.0.2", "::1"]])
+def test_kata_accepts_literal_dns_servers(dns: object) -> None:
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="opencode",
+        job_name="kata",
+        env_mode="kata",
+        environment_kwargs={"kata_dns": dns},
+    )
+
+    assert _environment_kwargs(command) == [f"kata_dns={json.dumps(dns, separators=(',', ':'))}"]
+
+
+def test_docker_still_rejects_environment_kwargs() -> None:
+    with pytest.raises(ValueError, match="not supported for SkillEvaluator Docker mode"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="opencode",
+            job_name="docker",
+            env_mode="docker",
+            environment_kwargs={"kata_runtime": "kata"},
+        )
+
+
+@pytest.mark.parametrize(("registered", "ready"), [(["kata", "kata-clh"], True), (["kata-qemu"], False)])
+def test_kata_prerequisites_require_the_selected_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    registered: list[str],
+    ready: bool,
+) -> None:
+    from harbor.environments.factory import EnvironmentFactory
+    from harbor.environments.kata import KataEnvironment
+    from harbor.models.environment_type import EnvironmentType
+
+    preflights: list[object] = []
+    monkeypatch.setattr(
+        EnvironmentFactory, "run_preflight", lambda environment_type, **_kwargs: preflights.append(environment_type)
+    )
+    monkeypatch.setattr(KataEnvironment, "_registered_kata_runtimes", classmethod(lambda _cls: registered))
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: runner.subprocess.CompletedProcess(
+            [], 0, stdout="Docker Compose version v2", stderr=""
+        ),
+    )
+
+    errors = runner._check_prerequisites(
+        env_mode="kata", agents=["opencode"], environment_kwargs={"kata_runtime": "kata-clh"}
+    )
+
+    assert preflights == [EnvironmentType.KATA]
+    if ready:
+        assert errors == []
+    else:
+        assert errors == ["Harbor environment 'kata' requires Docker to register the Kata runtime 'kata-clh'."]
+
+
+def test_kata_default_runtime_must_be_registered(monkeypatch: pytest.MonkeyPatch) -> None:
+    from harbor.environments.factory import EnvironmentFactory
+    from harbor.environments.kata import KataEnvironment
+
+    monkeypatch.setattr(EnvironmentFactory, "run_preflight", lambda _environment_type, **_kwargs: None)
+    monkeypatch.setattr(KataEnvironment, "_registered_kata_runtimes", classmethod(lambda _cls: ["kata-clh"]))
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: runner.subprocess.CompletedProcess(
+            [], 0, stdout="Docker Compose version v2", stderr=""
+        ),
+    )
+
+    assert runner._check_prerequisites(env_mode="kata", agents=["opencode"]) == [
+        "Harbor environment 'kata' requires Docker to register the Kata runtime 'kata'."
+    ]
+
+
+def test_kata_rejects_compose_sidecars_before_harbor_starts(tmp_path: Path) -> None:
+    def task(name: str, compose: str | None) -> Path:
+        environment = tmp_path / name / "environment"
+        environment.mkdir(parents=True)
+        if compose is not None:
+            (environment / "docker-compose.yaml").write_text(compose, encoding="utf-8")
+        return tmp_path / name
+
+    dockerfile_only = task("dockerfile-only", None)
+    main_only = task("main-only", "services:\n  main:\n    environment:\n      MODE: test\n")
+    sidecar = task("with-db", "services:\n  main: {}\n  db:\n    image: postgres:16\n")
+
+    assert runner._staged_task_environment_error("kata", [dockerfile_only, main_only]) is None
+    error = runner._staged_task_environment_error("kata", [dockerfile_only, sidecar])
+    assert error is not None
+    assert "task 'with-db'" in error
+    assert "(db)" in error
+    assert runner._staged_task_environment_error("docker", [sidecar]) is None
+
+
+def test_kata_runs_are_described_as_microvm_attempts() -> None:
+    from skillevaluator.reporting.benchmark import _environment_note
+
+    assert _environment_note("kata") == "Each task attempt ran in its own Kata Containers microVM."
+    assert _environment_note("docker") == "Each task attempt ran in its own isolated Docker container."
+
+
+def test_kata_uses_the_docker_nvidia_build_handoff_and_host_environment() -> None:
+    assert runner._HARBOR_ENV_MODE_VARS["kata"] == runner._HARBOR_ENV_MODE_VARS["docker"]
+    handoff = runner._nvidia_build_key_handoff(
+        {"NVIDIA_API_KEY": "nvapi-kata-handoff", "SKILL_EVAL_LLM_PROVIDER": "nv_build"},
+        env_mode="kata",
+    )
+    assert handoff.subprocess_env["NVIDIA_API_KEY"] == NVIDIA_BUILD_STDIN_SENTINEL
+    assert handoff.stdin_text == "nvapi-kata-handoff"
 
 
 def test_cwsandbox_prerequisites_require_sdk_and_api_key(monkeypatch: pytest.MonkeyPatch) -> None:

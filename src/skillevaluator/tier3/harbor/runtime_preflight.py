@@ -79,6 +79,7 @@ from skillevaluator.tier3.harbor.runner import (
     _nvidia_build_key_handoff,
     build_harbor_run_command,
 )
+from skillevaluator.tier3_environments import HARBOR_DOCKER_ENGINE_ENV_MODES
 
 if TYPE_CHECKING:
     from skillevaluator.provider_config import ProviderConfig
@@ -1084,7 +1085,7 @@ def validate_harbor_agent_only_job_result(
                     f"Harbor agent-only trial {trial_result_path.parent.name} step {step_name!r} has no agent result"
                 )
 
-    if env_mode == "docker" and not any(
+    if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES and not any(
         _has_visible_artifact(agent_dir, root=job_dir) for agent_dir in agent_artifact_dirs
     ):
         return False, (

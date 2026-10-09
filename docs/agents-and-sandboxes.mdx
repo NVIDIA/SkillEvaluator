@@ -58,7 +58,7 @@ See the two credential roles in [Providers & Credentials](configuration.mdx).
 ## One NVIDIA Build key for everything
 
 When the evaluator provider is NVIDIA Build (`nv_build`) and trials run in
-`--env-mode docker` or `local`, a single `NVIDIA_API_KEY` powers the
+`--env-mode docker`, `kata`, or `local`, a single `NVIDIA_API_KEY` powers the
 evaluator and all three agents:
 
 - **OpenCode** calls NVIDIA Build directly through its `nvidia` provider
@@ -110,7 +110,7 @@ SKILLEVALUATOR_LOCAL_ALLOW_NET or set it to 1`.
 
 ### Other backends still need native credentials
 
-The bridges exist only in `docker` and `local` mode. On any other Harbor
+The bridges exist only in `docker`, `kata`, and `local` mode. On any other Harbor
 backend, each agent calls its native provider:
 
 | Agent | Requirement with `nv_build` on other backends |
@@ -127,7 +127,7 @@ Anthropic evaluator with `opencode` also does not support local mode.
 
 ## Where trials run
 
-SkillEvaluator exposes 24 environment modes: 23 Harbor-native backends,
+SkillEvaluator exposes 25 environment modes: 24 Harbor-native backends,
 including Docker, plus SkillEvaluator's own `local` host-execution mode.
 Docker is the default. The `tier3` extra installs base `harbor==0.24.0`; install
 the environment extra shown below when a managed backend needs one.
@@ -135,6 +135,7 @@ the environment extra shown below when a managed backend needs one.
 | Mode | Type | Harbor extra or system prerequisite |
 | --- | --- | --- |
 | `docker` | Harbor-native | No additional Python extra. Requires Docker Engine and Docker Compose v2 — see [Docker mode](#docker-mode). |
+| `kata` | Harbor-native | No additional Python extra. Requires a Linux host with `/dev/kvm` and a Kata Containers runtime registered with Docker — see [Kata mode](#kata-mode). |
 | `daytona` | Harbor-native | `harbor[daytona]==0.24.0` |
 | `e2b` | Harbor-native | `harbor[e2b]==0.24.0` |
 | `modal` | Harbor-native | `harbor[modal]==0.24.0` |
@@ -160,7 +161,7 @@ the environment extra shown below when a managed backend needs one.
 | `local` | SkillEvaluator | Your machine, under an OS sandbox policy — see [Local mode](#local-mode). |
 
 <Tip>
-SkillEvaluator documents setup for `docker` and `local`. For any other
+SkillEvaluator documents setup for `docker`, `kata`, and `local`. For any other
 backend, install the mapped Harbor extra or system CLI shown above, set the
 credentials that backend requires, and confirm readiness with
 `skillevaluator doctor --env-mode <mode>` before a full run.
@@ -173,17 +174,20 @@ authentication (`auth=wandb`), using `WANDB_API_KEY` or the netrc file that
 is rejected for both `cwsandbox` and `wandb`.
 
 Harbor 0.24 also defines `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`,
-`kata`, `runta`, `prime`, `mosaic`, and `smol`, but those backends are not
-exposed until SkillEvaluator can project the complete task bundle — skill,
-verifier, dependencies, and inputs — through a trusted image or
-backend-native provisioning path, with credentials and constructor options
-reviewed per backend. Selecting one of those names is rejected before a run
-starts.
+`runta`, `prime`, `mosaic`, and `smol`, but those backends are not exposed
+until SkillEvaluator can project the complete task bundle — skill, verifier,
+dependencies, and inputs — through a trusted image or backend-native
+provisioning path, with credentials and constructor options reviewed per
+backend. Selecting one of those names is rejected before a run starts. Podman
+also needs a runtime-aware hardened Compose runner: Harbor runs Podman without
+Compose's `up --wait` readiness gate and, for some frontends, without
+`compose cp`, which SkillEvaluator's Docker isolation relies on.
 
 ### Native backend constructor options
 
 Environment kwargs are operator-only and apply only to Harbor-native
-non-Docker backends. `docker` and `local` reject any environment kwargs. For an
+non-Docker backends. `docker` and `local` reject any environment kwargs, and
+`kata` accepts only its two runtime options (see [Kata mode](#kata-mode)). For an
 eligible backend that needs non-secret constructor options in addition to host
 credentials, pass each option with the repeatable
 `--environment-kwarg KEY=VALUE` / `--ek KEY=VALUE` flag:
@@ -325,6 +329,35 @@ loading so the same definition cannot start with one interpolation value and
 later run with another. Put non-secret interpolation values in
 `harbor.runtime_env` in `evals/config.yml`; keep operator credentials in the
 host environment as described above.
+
+## Kata mode
+
+`--env-mode kata` uses the same hardened Docker Compose backend as Docker mode,
+including its credential handoff and container containment, but Harbor adds a
+final Compose overlay that runs every task service under a Kata Containers
+runtime, so agent execution and verification happen inside KVM microVMs instead
+of on the host kernel. It needs a Linux host with `/dev/kvm`, Docker Compose v2,
+and a Kata runtime handler registered with Docker (for example with Kata's
+`kata-manager.sh`). `skillevaluator doctor --env-mode kata` checks all three,
+including that Docker registers the selected handler.
+
+Two environment kwargs are accepted:
+
+| Kwarg | Default | Rule |
+| --- | --- | --- |
+| `kata_runtime` | `kata` | A registered Docker runtime handler whose name contains `kata`, such as `kata-clh` or `kata-qemu`. Other handlers, such as `runc`, are rejected. |
+| `kata_dns` | `1.1.1.1,8.8.8.8` | At least one IP address, written to each microVM's `resolv.conf`, as a list or comma-separated string. The default replaces the resolvers Docker's embedded DNS would forward to, so set your network's resolvers when public DNS is blocked or when a gateway, judge, or package endpoint uses an internal hostname. |
+
+Harbor's Kata backend has limits that SkillEvaluator keeps:
+
+- Image builds are not VM-isolated. Dockerfile `RUN` steps execute on the
+  host's BuildKit builder; the microVM boundary covers the agent and verifier.
+- Non-public network policies are rejected before start, because Kata VMs
+  cannot join the egress-control sidecar's network namespace. Generated tasks
+  use public networking.
+- Compose service-name DNS does not work inside the microVM, so tasks whose
+  Compose model declares services other than `main`, such as a database
+  sidecar, are rejected before the run starts.
 
 ## Local mode
 

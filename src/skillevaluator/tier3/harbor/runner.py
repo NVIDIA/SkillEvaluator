@@ -8,6 +8,7 @@ from __future__ import annotations
 import codecs
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import logging
 import math
@@ -23,7 +24,7 @@ import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
@@ -98,7 +99,10 @@ from skillevaluator.tier3.harbor.report_data import (
     load_staged_harbor_dataset,
 )
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
-from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_DOCKER_ENV_IMPORT_PATH
+from skillevaluator.tier3.harbor.secure_docker_environment import (
+    SECURE_DOCKER_ENV_IMPORT_PATH,
+    SECURE_KATA_ENV_IMPORT_PATH,
+)
 from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_KEY_STDIN_ENV as _NVIDIA_BUILD_KEY_STDIN_ENV,
 )
@@ -121,6 +125,7 @@ from skillevaluator.tier3.results_location import publish_latest_results
 from skillevaluator.tier3_environments import (
     DEFAULT_ENV_MODE,
     ENV_MODE_LOCAL,
+    HARBOR_DOCKER_ENGINE_ENV_MODES,
     HARBOR_ENV_MODES,
     HARBOR_ENVIRONMENT_ALIAS_KWARGS,
     HARBOR_ENVIRONMENT_EXTRAS,
@@ -756,6 +761,7 @@ _DOCKER_HOST_ENV_VARS = frozenset(
 )
 _HARBOR_ENV_MODE_VARS = {
     "docker": _DOCKER_HOST_ENV_VARS,
+    "kata": _DOCKER_HOST_ENV_VARS,
     "daytona": frozenset(
         {
             "DAYTONA_API_KEY",
@@ -1050,7 +1056,7 @@ def _nvidia_build_key_handoff(
     subprocess_env.pop(_NVIDIA_BUILD_KEY_STDIN_ENV, None)
     api_key = subprocess_env.get("NVIDIA_API_KEY", "")
     if (
-        env_mode == "docker"
+        env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES
         and subprocess_env.get("SKILL_EVAL_LLM_PROVIDER") == "nv_build"
         and api_key
         and api_key not in {_NVIDIA_BUILD_FILE_SENTINEL, _NVIDIA_BUILD_STDIN_SENTINEL}
@@ -1132,6 +1138,10 @@ _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS: dict[str, frozenset[str]] = {
 }
 
 
+_KATA_RUNTIME_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_KATA_DNS_SERVER_RE = re.compile(r"[0-9A-Fa-f:.]{2,45}")
+
+
 def _environment_kwarg_policy_error(env_mode: str, environment_kwargs: Mapping[str, Any]) -> str | None:
     if not environment_kwargs:
         return None
@@ -1146,6 +1156,64 @@ def _environment_kwarg_policy_error(env_mode: str, environment_kwargs: Mapping[s
         return f"Harbor {HARBOR_VERSION} environment '{env_mode}' does not accept environment kwarg(s): " + ", ".join(
             unknown
         )
+    if env_mode == "kata":
+        return _kata_environment_kwarg_error(environment_kwargs)
+    return None
+
+
+def _kata_environment_kwarg_error(environment_kwargs: Mapping[str, Any]) -> str | None:
+    """Keep Kata's runtime overlay pointed at a Kata handler and literal DNS servers."""
+    runtime = environment_kwargs.get("kata_runtime", "kata")
+    # Harbor treats Docker runtimes whose names contain "kata" as Kata handlers;
+    # any other handler, such as runc, would silently drop the microVM boundary.
+    if not isinstance(runtime, str) or "kata" not in runtime or not _KATA_RUNTIME_NAME_RE.fullmatch(runtime):
+        return "Harbor environment 'kata' requires kata_runtime to name a registered Kata runtime handler"
+    # Harbor writes each server into the microVM's resolv.conf. Parse them the
+    # way Harbor does (comma strings are split and trimmed) and allow only IP
+    # literals: an IPv6 zone ID (%...) could otherwise carry resolver directives.
+    if "kata_dns" not in environment_kwargs:
+        return None
+    dns = environment_kwargs["kata_dns"]
+    if isinstance(dns, str):
+        servers = [server.strip() for server in dns.split(",") if server.strip()]
+    elif isinstance(dns, list) and all(isinstance(server, str) for server in dns):
+        servers = dns
+    else:
+        return "Harbor environment 'kata' requires kata_dns to be a list of IP addresses"
+    # Without a server Harbor keeps Docker's embedded resolver, which a Kata VM cannot reach.
+    if not servers:
+        return "Harbor environment 'kata' requires kata_dns to list at least one IP address"
+    for server in servers:
+        if not _KATA_DNS_SERVER_RE.fullmatch(server):
+            return "Harbor environment 'kata' requires kata_dns to be a list of IP addresses"
+        try:
+            ipaddress.ip_address(server)
+        except ValueError:
+            return "Harbor environment 'kata' requires kata_dns to be a list of IP addresses"
+    return None
+
+
+def _staged_task_environment_error(env_mode: str, task_dirs: Iterable[Path]) -> str | None:
+    """Reject staged task environments the selected backend cannot run."""
+    if env_mode != "kata":
+        return None
+    import yaml
+
+    for task_dir in task_dirs:
+        compose_path = task_dir / "environment" / "docker-compose.yaml"
+        if not compose_path.is_file():
+            continue
+        try:
+            compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            return f"Could not read the Docker Compose model of task '{task_dir.name}'"
+        services = compose.get("services") if isinstance(compose, dict) else None
+        if sidecars := sorted(str(name) for name in services or {} if name != "main"):
+            # Kata replaces each service's resolv.conf, so Compose service-name DNS stops working.
+            return (
+                f"Harbor environment 'kata' cannot run task '{task_dir.name}' with Compose sidecar services "
+                f"({', '.join(sidecars)}): services in Kata microVMs cannot resolve each other by name"
+            )
     return None
 
 
@@ -1203,10 +1271,10 @@ def build_harbor_run_command(
     timeout_multiplier = _validated_timeout_multiplier(timeout_multiplier)
     if (
         agent_import_path
-        and env_mode not in {"docker", ENV_MODE_LOCAL}
+        and env_mode not in HARBOR_DOCKER_ENGINE_ENV_MODES | {ENV_MODE_LOCAL}
         and agent_import_path not in _NATIVE_BACKEND_AGENT_IMPORT_PATHS
     ):
-        raise ValueError("agent_import_path is supported only with --env docker or local")
+        raise ValueError("agent_import_path is supported only with --env docker, kata, or local")
     validated_environment_kwargs = validate_environment_kwargs(
         dict(environment_kwargs or {}),
         env_mode=env_mode,
@@ -1262,12 +1330,12 @@ def build_harbor_run_command(
                 f"inherit_agent_keys={str(local_sandbox.coerce_flag(None, env_var=local_sandbox.INHERIT_AGENT_KEYS_ENV)).lower()}",
             ]
         )
-    elif env_mode == "docker":
+    elif env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES:
         if agent_import_path:
             command.extend(["--agent", agent_import_path])
         else:
             command.extend(["--agent", agent])
-        command.extend(["--env", SECURE_DOCKER_ENV_IMPORT_PATH])
+        command.extend(["--env", SECURE_KATA_ENV_IMPORT_PATH if env_mode == "kata" else SECURE_DOCKER_ENV_IMPORT_PATH])
     else:
         command.extend(["--agent", agent_import_path or agent, "--env", harbor_environment_type(env_mode)])
     for name, value in sorted(_HARBOR_AGENT_KWARGS.get(agent, {}).items()):
@@ -1456,7 +1524,7 @@ def _validate_agent_provider_credentials(
                 "NVIDIA Build local agents require network access; unset SKILLEVALUATOR_LOCAL_ALLOW_NET or set it to 1."
             ]
 
-    if env_mode in {"docker", ENV_MODE_LOCAL}:
+    if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES | {ENV_MODE_LOCAL}:
         for agent in agents:
             model = models.get(agent, "")
             raw_model = model.removeprefix("nvidia/") if agent == "opencode" else model
@@ -1808,7 +1876,8 @@ def _check_prerequisites(
         except ValueError as exc:
             return [f"Invalid local runtime configuration: {exc}"]
 
-    if env_mode == "docker":
+    if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES:
+        mode_label = "Kata" if env_mode == "kata" else "Docker"
         try:
             compose = subprocess.run(
                 ["docker", "compose", "version"],
@@ -1822,7 +1891,7 @@ def _check_prerequisites(
                 exc,
                 secret_values=secret_values_from_environment(os.environ),
             )
-            return [f"Docker Compose v2 is required for Tier 3 Docker mode: {detail}"]
+            return [f"Docker Compose v2 is required for Tier 3 {mode_label} mode: {detail}"]
         if compose.returncode != 0:
             detail = (compose.stderr or compose.stdout).strip()
             safe_detail = redact_progress_detail(
@@ -1830,7 +1899,7 @@ def _check_prerequisites(
                 secret_values=secret_values_from_environment(os.environ),
             )
             suffix = f": {safe_detail}" if safe_detail else ""
-            return [f"Docker Compose v2 is required for Tier 3 Docker mode{suffix}"]
+            return [f"Docker Compose v2 is required for Tier 3 {mode_label} mode{suffix}"]
 
     try:
         from harbor.environments.factory import EnvironmentFactory
@@ -1839,6 +1908,13 @@ def _check_prerequisites(
         if cwsandbox_errors := _cwsandbox_prerequisite_errors(env_mode):
             return cwsandbox_errors
         EnvironmentFactory.run_preflight(EnvironmentType(harbor_environment_type(env_mode)))
+        if env_mode == "kata":
+            from harbor.environments.kata import DEFAULT_KATA_RUNTIME, KataEnvironment
+
+            # Harbor's preflight only requires some Kata handler; require the selected one.
+            kata_runtime = (environment_kwargs or {}).get("kata_runtime", DEFAULT_KATA_RUNTIME)
+            if kata_runtime not in KataEnvironment._registered_kata_runtimes():
+                return [f"Harbor environment 'kata' requires Docker to register the Kata runtime {kata_runtime!r}."]
         if env_mode == "ack":
             ack_subprocess_env = (
                 dict(subprocess_env)
@@ -2100,7 +2176,7 @@ def _agent_credentials(
             if env_mode == ENV_MODE_LOCAL:
                 return _local_agent_credentials(provider)
             return {"NVIDIA_API_KEY": provider.api_key or ""}
-        if env_mode in {"docker", ENV_MODE_LOCAL} and agent in {"claude-code", "codex"}:
+        if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES | {ENV_MODE_LOCAL} and agent in {"claude-code", "codex"}:
             # The Docker bridge wrapper reads the evaluator credential from
             # the Harbor parent handoff; the vendor CLI receives only a local
             # sentinel and must not inherit NVIDIA_API_KEY in task env.
@@ -2179,11 +2255,7 @@ def _agent_provider_config(
     if (
         evaluator_provider.provider == "nv_build"
         and agent == "claude-code"
-        and env_mode
-        not in {
-            "docker",
-            ENV_MODE_LOCAL,
-        }
+        and env_mode not in HARBOR_DOCKER_ENGINE_ENV_MODES | {ENV_MODE_LOCAL}
     ):
         resolved_model = model.removeprefix("anthropic/")
         return ProviderConfig(
@@ -2196,11 +2268,7 @@ def _agent_provider_config(
     if (
         evaluator_provider.provider == "nv_build"
         and agent == "codex"
-        and env_mode
-        not in {
-            "docker",
-            ENV_MODE_LOCAL,
-        }
+        and env_mode not in HARBOR_DOCKER_ENGINE_ENV_MODES | {ENV_MODE_LOCAL}
     ):
         resolved_model = model.removeprefix("openai/")
         return ProviderConfig(
@@ -2445,7 +2513,7 @@ def _agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> s
     """Select only the provider-specific wrappers required for this environment."""
     if provider.provider == "openai-compatible" and agent == "codex" and env_mode != ENV_MODE_LOCAL:
         return _GATEWAY_CODEX_IMPORT_PATH
-    if provider.provider == "openai-compatible" and agent == "opencode" and env_mode == "docker":
+    if provider.provider == "openai-compatible" and agent == "opencode" and env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES:
         return "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayOpenCode"
     return _nvidia_build_agent_import_path(provider, agent, env_mode)
 
@@ -2459,7 +2527,7 @@ def _nvidia_build_agent_import_path(provider: ProviderConfig, agent: str, env_mo
         NVIDIA_BUILD_LOCAL_AGENT_IMPORT_PATHS,
     )
 
-    if env_mode == "docker":
+    if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES:
         return NVIDIA_BUILD_AGENT_IMPORT_PATHS.get(agent)
     if env_mode == ENV_MODE_LOCAL:
         return NVIDIA_BUILD_LOCAL_AGENT_IMPORT_PATHS.get(agent)
@@ -4098,7 +4166,7 @@ def _run_harbor_eval_impl(
 
     emitter = stage_native_harbor_tasks if task_source == "native_harbor" else generate_harbor_tasks
     resource_config = harbor_config.get("resources", {})
-    use_base_image = env_mode == "docker" and base_image_mode != "disabled"
+    use_base_image = env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES and base_image_mode != "disabled"
     base_image = ""
     if use_base_image:
         reporter.emit(
@@ -4167,6 +4235,8 @@ def _run_harbor_eval_impl(
                 evaluator_skill_path=evaluator_skill_path,
                 arm_suffix=with_arm_suffix,
             )
+            if staged_environment_error := _staged_task_environment_error(env_mode, task_paths):
+                raise ValueError(staged_environment_error)
             task_selectors = validate_case_ids(task.name for task in task_paths)
             logical_case_ids = validate_case_ids(_native_entry_id(task) for task in task_paths)
             case_id_by_task_selector = dict(zip(task_selectors, logical_case_ids, strict=True))

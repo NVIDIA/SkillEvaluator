@@ -38,6 +38,11 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 log converters now rebuild ATIF trajectories from OpenCode JSON streams
   (`opencode.txt`) and structured Codex tee logs (`codex.txt`) when
   `trajectory.json` is missing or empty.
+- `--env-mode kata` runs Tier 3 trials through the hardened Docker backend with
+  every task service in a Kata Containers microVM. It requires a Linux host with
+  `/dev/kvm` and a Kata runtime registered with Docker, and accepts only the
+  `kata_runtime` and `kata_dns` environment kwargs. Image builds still run on
+  the host, and tasks with Compose sidecars are rejected.
 
 ### Changed
 
@@ -55,9 +60,9 @@ All notable changes to SkillEvaluator are documented in this file.
   Native tasks' own test scripts must write numeric `reward.json` values, which
   Harbor 0.24 enforces; a failed job now names the trial or step exception that
   Harbor recorded.
-- Exposed 23 Harbor 0.24 backends alongside local mode. `cua-cloud`,
-  `opensandbox`, `hf-sandbox`, `podman`, `kata`, `runta`, `prime`, `mosaic`,
-  and `smol` remain disabled until generated tasks can be projected through a
+- Exposed 24 Harbor 0.24 backends alongside local mode. `cua-cloud`,
+  `opensandbox`, `hf-sandbox`, `podman`, `runta`, `prime`, `mosaic`, and
+  `smol` remain disabled until generated tasks can be projected through a
   trusted image or backend-native provisioning path. Non-secret backend
   constructor options can be supplied with repeatable, operator-only
   `--environment-kwarg` / `--ek` flags; skill-owned configuration,

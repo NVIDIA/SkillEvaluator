@@ -44,6 +44,7 @@ from harbor.environments.base import (
 )
 from harbor.environments.docker.docker import DockerEnvironment, _sanitize_docker_compose_project_name
 from harbor.environments.docker.runtime import DOCKER_RUNTIME, ContainerRuntime
+from harbor.environments.kata import KataEnvironment
 
 from skillevaluator.tier3.harbor.progress import secret_values_from_environment
 from skillevaluator.tier3.harbor.secure_copy import (
@@ -64,6 +65,9 @@ if TYPE_CHECKING:
 
 SECURE_DOCKER_ENV_IMPORT_PATH = (
     "skillevaluator.tier3.harbor.secure_docker_environment:SkillEvaluatorSecureDockerEnvironment"
+)
+SECURE_KATA_ENV_IMPORT_PATH = (
+    "skillevaluator.tier3.harbor.secure_docker_environment:SkillEvaluatorSecureKataEnvironment"
 )
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -3527,3 +3531,15 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
             timeout_sec=timeout_sec,
             user=user,
         )
+
+
+class SkillEvaluatorSecureKataEnvironment(SkillEvaluatorSecureDockerEnvironment, KataEnvironment):
+    """Hardened Docker orchestration with every task service in a Kata microVM.
+
+    Harbor's Kata backend changes only the Compose model: a final overlay sets
+    ``runtime:`` on every task service and binds a literal ``resolv.conf``.
+    The hardened Docker runner already passes every ``_docker_compose_paths``
+    entry to Compose and keeps its argv, credential handoff, and containment
+    guarantees, so this class only combines the two. Harbor's Kata preflight
+    and its rejection of non-public network policies stay in force.
+    """

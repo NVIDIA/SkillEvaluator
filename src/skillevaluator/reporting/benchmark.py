@@ -877,6 +877,8 @@ def _environment_note(environment: str | None) -> str | None:
         return "Each task attempt ran in its own isolated sandbox."
     if "k8s" in lowered or "sandbox" in lowered:
         return "Each task attempt ran in its own isolated sandbox pod."
+    if lowered == "kata":
+        return "Each task attempt ran in its own Kata Containers microVM."
     if "docker" in lowered:
         return "Each task attempt ran in its own isolated Docker container."
     if "local" in lowered:

@@ -7,7 +7,7 @@ description: "Run a real agent with and without your skill in a sandboxed enviro
 Tier 3 answers the question the other tiers can't: **does your skill actually
 make an agent better at the task?** It is the one tier that needs real
 infrastructure — model access for the evaluator and selected agent, and
-Docker or another sandbox. NVIDIA Build in Docker or local mode uses one key
+Docker or another sandbox. NVIDIA Build in Docker, Kata, or local mode uses one key
 for both roles; OpenAI with Codex can also share its key. This guide takes you from a skill directory to a
 finished with-skill vs. without-skill comparison.
 
@@ -81,7 +81,7 @@ using Harbor 0.24:
 - Installed Codex adapters merge existing user and MCP configuration before the
   selected runtime provider and endpoint take precedence over conflicting route
   keys.
-- Docker and local execution stream stdout and stderr through secret redaction
+- Docker, Kata, and local execution stream stdout and stderr through secret redaction
   before Harbor callbacks receive them. Each command has a 16 MiB combined raw
   stdout/stderr limit; exceeding it terminates the command process tree and
   fails the trial instead of returning partial output.
@@ -363,9 +363,9 @@ Compose, proxy, or tracing controls. Configure the selected backend in the
 host environment instead.
 
 One deliberate exception collapses the two roles: with the `nv_build` provider
-in `--env-mode docker` or `local`, a single `NVIDIA_API_KEY` powers the
+in `--env-mode docker`, `kata`, or `local`, a single `NVIDIA_API_KEY` powers the
 evaluator and all three agents. Direct OpenCode talks to NVIDIA Build directly;
-Codex and experimental Claude Code use a Docker or local compatibility bridge.
+Codex and experimental Claude Code use an in-container (Docker and Kata) or local compatibility bridge.
 Explicit model overrides are preserved exactly. Without an override, all three
 agents default to Nemotron Super (`nvidia/nemotron-3-super-120b-a12b`); direct
 OpenCode renders it as `nvidia/nvidia/nemotron-3-super-120b-a12b` because its
@@ -390,7 +390,7 @@ explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
 ## Where agents run
 
-`--env-mode` selects one of 24 environment modes: 23 Harbor-native backends,
+`--env-mode` selects one of 25 environment modes: 24 Harbor-native backends,
 including the default Docker backend, plus SkillEvaluator's **local mode**,
 which runs the agent CLI directly on the host under an OS-sandbox policy.
 Managed backends such as `daytona`, `e2b`, and `modal` require their mapped
@@ -398,12 +398,13 @@ Harbor 0.24 extra; OpenShift, Apple Container, and Singularity instead use
 system CLIs and have no Harbor Python extra. These are selectable integration
 modes, not evidence that every managed backend was exercised end to end for
 this release. Harbor 0.24 transport verification covers Docker and local;
-validate any managed backend's extra, credentials, infrastructure, and
+Kata mode reuses the Docker transport but has not been exercised on a KVM host.
+Validate any managed backend's extra, credentials, infrastructure, and
 constructor settings with `doctor` and its Harbor preflight before relying on
 it.
 
-Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `kata`, `runta`,
-`prime`, `mosaic`, and `smol` backends are not selectable because they cannot
+Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `runta`, `prime`,
+`mosaic`, and `smol` backends are not selectable because they cannot
 yet receive SkillEvaluator's complete generated task bundle through a trusted
 image or backend-native provisioning path.
 
@@ -411,7 +412,7 @@ Environment kwargs are only for Harbor-native non-Docker backends. Pass
 non-secret constructor settings with the repeatable, operator-only
 `--environment-kwarg KEY=VALUE` / `--ek KEY=VALUE` option. Skill-owned
 `evals/config.yml` cannot set them. `docker` and `local` reject any environment
-kwargs. Fields owned by Harbor runtime policy are also reserved: resource
+kwargs, and `kata` accepts only `kata_runtime` and `kata_dns`. Fields owned by Harbor runtime policy are also reserved: resource
 overrides, mounts, network policy, extra Compose definitions, SkillEvaluator's
 own lifecycle fields (`delete`, `force_build`, `keep_containers`), and
 Kubernetes pod security are not exposed through this surface. Other
@@ -713,7 +714,7 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
     Export the agent's credential in the host environment where you run
     `skillevaluator` — agent credentials are read only from the host, never
     from `evals/config.yml`. It is a separate role from the evaluator key,
-    except with `nv_build` in Docker or local mode, where one
+    except with `nv_build` in Docker, Kata, or local mode, where one
     `NVIDIA_API_KEY` covers both.
   </Accordion>
   <Accordion title="evaluate cannot start the environment">

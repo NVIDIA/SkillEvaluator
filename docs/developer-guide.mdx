@@ -136,16 +136,19 @@ Every commit needs a Developer Certificate of Origin sign-off — commit with `g
 | [CHANGELOG.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/CHANGELOG.md) | User-visible changes per release |
 | [CITATION.cff](https://github.com/NVIDIA/SkillEvaluator/blob/main/CITATION.cff) | How to cite SkillEvaluator |
 
-If you use SkillEvaluator in academic or technical work, please cite it:
+If you use SkillEvaluator in academic or technical work, cite the methodology
+paper listed under `preferred-citation` in `CITATION.cff`, and record the
+SkillEvaluator version you used for reproducibility:
 
-```yaml title="CITATION.cff"
+```yaml title="CITATION.cff (excerpt)"
 cff-version: 1.2.0
-message: "If you use SkillEvaluator in academic or technical work, please cite this software."
 title: "SkillEvaluator"
 type: software
-version: "0.4.0"
-authors:
-  - name: "NVIDIA Corporation"
-license: Apache-2.0
-repository-code: "https://github.com/NVIDIA/SkillEvaluator"
+version: "0.5.0"
+preferred-citation:
+  type: article
+  title: "Evaluating Skills, Not Just Agents: Agentic Continuous Evaluation of Skills"
+  year: 2026
+  doi: "10.48550/arXiv.2608.20614"
+  url: "https://arxiv.org/abs/2608.20614"
 ```

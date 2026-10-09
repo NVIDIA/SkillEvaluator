@@ -72,6 +72,76 @@ def _write_catalog(path: Path, data: dict | None = None) -> Path:
 
 
 class TestCatalogPersistence:
+    @pytest.mark.parametrize("full_body", [False, True])
+    @pytest.mark.parametrize(
+        ("style", "description"),
+        [
+            (">", "Summarize reports and extract findings.\n"),
+            ("|", "Summarize reports\nand extract findings.\n"),
+            (">-", "Summarize reports and extract findings."),
+        ],
+    )
+    def test_yaml_multiline_description_roundtrip(
+        self, tmp_path: Path, full_body: bool, style: str, description: str
+    ) -> None:
+        skill_dir = tmp_path / "skills" / "summarize-reports"
+        skill_dir.mkdir(parents=True)
+        manifest = (
+            f"---\nname: summarize-reports\ndescription: {style}\n"
+            "  Summarize reports\n  and extract findings.\nlicense: MIT\n---\n\n# Reports\n"
+        )
+        (skill_dir / "SKILL.md").write_text(manifest, encoding="utf-8", newline="")
+        client = _client([[1.0, 0.0]])
+        registry = EmbeddingRegistry(client, full_body=full_body)
+        assert registry.build_from_directory(tmp_path / "skills", "skill") == 1
+        original = registry._entries["skill:summarize-reports"]
+        assert original.description == description
+        if full_body:
+            client.embed_chunked.assert_called_once_with(manifest)
+        else:
+            client.embed.assert_called_once_with([f"summarize-reports: {description}"])
+
+        catalog_path = tmp_path / "catalog.json"
+        registry.save_catalog(catalog_path)
+        restored = EmbeddingRegistry(client, full_body=full_body)
+        restored.load_catalog(catalog_path)
+
+        assert restored._entries["skill:summarize-reports"] == original
+        matches = restored.query("Summarize reports", threshold=0.9)
+        assert len(matches) == 1
+        assert matches[0].entry_b == "summarize-reports"
+        assert matches[0].score == pytest.approx(1.0)
+
+    @pytest.mark.parametrize("whitespace", ["\n", "\r", "\t"])
+    def test_description_whitespace_survives_load_and_save(self, tmp_path: Path, whitespace: str) -> None:
+        data = _catalog_data()
+        description = f"First{whitespace}catalog skill"
+        data["entries"][0]["description"] = description
+        registry = EmbeddingRegistry(_client())
+        registry.load_catalog(_write_catalog(tmp_path / "input.json", data))
+        output = tmp_path / "output.json"
+        registry.save_catalog(output)
+        assert json.loads(output.read_text(encoding="utf-8"))["entries"][0]["description"] == description
+
+    @pytest.mark.parametrize(
+        ("field", "character"),
+        [("name", char) for char in "\n\r\t"] + [("description", char) for char in "\x00\x0b\x0c\x1b\x85\u202e\ud800"],
+    )
+    def test_catalog_still_rejects_unsafe_text_on_load_and_save(
+        self, tmp_path: Path, field: str, character: str
+    ) -> None:
+        data = _catalog_data()
+        data["entries"][0][field] = f"First{character}skill"
+        with pytest.raises(ValueError, match="unsafe control or surrogate"):
+            EmbeddingRegistry(_client()).load_catalog(_write_catalog(tmp_path / "unsafe.json", data))
+
+        registry = EmbeddingRegistry(_client())
+        registry.load_catalog(_write_catalog(tmp_path / "safe.json"))
+        setattr(registry._entries["skill:team-a"], field, data["entries"][0][field])
+        with pytest.raises(ValueError, match="unsafe control or surrogate"):
+            registry.save_catalog(tmp_path / "output.json")
+        assert not (tmp_path / "output.json").exists()
+
     def test_save_catalog_is_versioned_relative_and_preserves_duplicate_names(self, tmp_path: Path) -> None:
         for directory, description in (("team-a", "First"), ("team-b", "Second")):
             skill_dir = tmp_path / "skills" / directory

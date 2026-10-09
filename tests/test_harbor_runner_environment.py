@@ -1840,6 +1840,18 @@ def test_harbor_backend_environment_allowlist_covers_every_native_022_mode() -> 
             "SSH_AUTH_SOCK",
         },
         "vercel": {"VERCEL_OIDC_TOKEN", "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID", "VERCEL_TOKEN"},
+        "runta": {"RUNTA_CONFIG", "RUNTA_ENDPOINT", "RUNTA_TOKEN"},
+        "mosaic": {
+            "MAR_API_TOKEN",
+            "MAR_CONFIG",
+            "MAR_ENDPOINT",
+            "MOSAIC_API_TOKEN",
+            "MOSAIC_API_URL",
+            "MOSAIC_CONFIG",
+            "MOSAIC_REGISTRY_PASSWORD",
+            "MOSAIC_REGISTRY_USERNAME",
+            "MOSAIC_RETRIES",
+        },
     }
 
     assert set(expected) == HARBOR_NATIVE_ENV_MODES
@@ -2048,6 +2060,12 @@ def test_skip_baseline_keeps_normalized_skill_owned_setup_enabled(
         ("hyperbrowser", "DOCKER_HOST"),
         ("wandb", "NETRC"),
         ("vercel", "VERCEL_OIDC_TOKEN"),
+        ("runta", "RUNTA_TOKEN"),
+        ("runta", "RUNTA_ENDPOINT"),
+        ("mosaic", "MOSAIC_API_TOKEN"),
+        ("mosaic", "MOSAIC_API_URL"),
+        ("mosaic", "MOSAIC_CONFIG"),
+        ("mosaic", "MAR_API_TOKEN"),
     ],
 )
 def test_new_harbor_022_backend_environment_is_selected_without_cross_backend_leakage(

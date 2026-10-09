@@ -37,6 +37,8 @@ HARBOR_ENVIRONMENTS = (
     "skypilot",
     "hyperbrowser",
     "vercel",
+    "runta",
+    "mosaic",
     # Not a Harbor-native backend: SkillEvaluator's host execution mode, run
     # under an OS sandbox (bubblewrap on Linux, Seatbelt on macOS). Dispatched
     # by passing its custom import path through Harbor's unified --env flag.
@@ -85,14 +87,16 @@ HARBOR_ENVIRONMENT_EXTRAS: dict[str, str | None] = {
     "skypilot": "skypilot",
     "hyperbrowser": "hyperbrowser",
     "vercel": "vercel",
+    "runta": "runta",
+    "mosaic": "mosaic",
 }
 
 # Constructor kwargs consumed by the pinned Harbor release. Keep this static so
 # importing the base SkillEvaluator CLI never imports Harbor or optional provider
 # SDKs. The packaging parity test AST-reads the pinned Harbor sources and catches
 # additions, removals, and provider kwargs that are consumed through **kwargs.
-# Registry-only entries (cua-cloud, opensandbox, hf-sandbox, podman, kata, runta,
-# prime, mosaic, smol) keep that parity exact; those modes are not exposed.
+# Registry-only entries (cua-cloud, opensandbox, hf-sandbox, podman, kata, prime,
+# smol) keep that parity exact; those modes are not exposed.
 _HARBOR_BASE_ENVIRONMENT_KWARGS = frozenset(
     {
         "cpu_enforcement_policy",

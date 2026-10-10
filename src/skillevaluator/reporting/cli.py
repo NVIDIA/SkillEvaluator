@@ -52,10 +52,20 @@ from skillevaluator.reporting.plugin_sections import (
     static_risk_view,
     tier3_plugin_view,
 )
+from skillevaluator.reporting.run_status import RunStatus, Status, resolve_run_status
 from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
+
+_ROW_LABELS = {
+    Status.PASSED: "[green]PASS[/green]",
+    Status.NEUTRAL: "[green]PASS[/green]",
+    Status.FAILED: "[red]FAIL[/red]",
+    Status.INCOMPLETE: "[bold yellow]INCOMPLETE[/bold yellow]",
+    Status.SKIPPED: "[yellow]SKIP[/yellow]",
+    Status.NOT_RUN: "[yellow]SKIP[/yellow]",
+}
 
 
 def _related_paths(finding: Finding) -> list[str]:
@@ -516,8 +526,9 @@ class CLIReporter(ReporterBase):
 
     def _render_all_results(self, results: list[ValidationResult], console: Console) -> None:
         """Render all results with summary table and failure details."""
+        status = resolve_run_status(results)
         # Print summary table
-        self._print_summary_table(results, console)
+        self._print_summary_table(results, console, status)
         console.print()
         plugin_block = self._plugin_block_from_results(results)
         static_risk = static_risk_view(plugin_block) if plugin_block is not None else None
@@ -535,7 +546,7 @@ class CLIReporter(ReporterBase):
                 )
             )
             for result in failed:
-                self.render_result(result, console)
+                self.render_result(result, console, status)
 
         # A passing result's warnings (for example plugins left out of a saved catalog) are shown only here.
         non_blocking = [
@@ -552,7 +563,7 @@ class CLIReporter(ReporterBase):
                 )
             )
             for result in non_blocking:
-                self.render_result(result, console)
+                self.render_result(result, console, status)
 
         # A passing AGENT_EVAL is advisory, so it has no details above. A plugin
         # run still prints its compact Tier 3 block: the verdict can be FAIL
@@ -570,49 +581,36 @@ class CLIReporter(ReporterBase):
             self._print_agent_eval_verdict(agent_eval, console)
             print_plugin_tier3(plugin_view, console)
 
-        # Print overall status
-        advisory_skips = [result for result in results if self._is_advisory_agent_eval_skip(result)]
-        required_passed = all(passes_required_gate(result) for result in results)
-        advisory_tier3 = [label for result in results if (label := self._advisory_tier3_gate_label(result))]
-        advisory_tier3 += [
-            "Tier 3 INCOMPLETE"
-            for result in results
-            if passes_required_gate(result) and self._tier3_incomplete_reason(result) is not None
-        ]
-        blocking = [result for result in results if not passes_required_gate(result)]
-        # A real failure outranks missing evidence (the footer and BENCHMARK.md use the same rule): a result
-        # that failed on a blocking finding of its own, a Tier 3 FAIL, or a gated Tier 3 run that never ran.
-        real_failures = [result for result in blocking if not self._missing_evidence_only(result)]
-        missing = list(dict.fromkeys(tool for result in results for tool in result.incomplete_scans))
-        only_tier3_incomplete = bool(blocking) and all(self._tier3_incomplete_reason(result) for result in blocking)
-        if real_failures and (missing or any(self._tier3_incomplete_reason(result) for result in blocking)):
-            also = escape_markup(", ".join(missing) if missing else "Tier 3")
+        # Print overall status: the run status headline, as the footer and every report give it.
+        if status.headline is Status.FAILED and status.missing:
+            # A real failure outranks missing evidence; the line still says what did not complete.
             console.print(
                 f"\n[bold red][FAIL] Validation failed[/bold red] [yellow](evidence is also incomplete: "
-                f"{also} did not complete)[/yellow]\n"
+                f"{escape_markup(', '.join(status.missing))} did not complete)[/yellow]\n"
             )
-        elif not real_failures and (missing or only_tier3_incomplete):
+        elif status.headline is Status.FAILED:
+            console.print("\n[bold red][FAIL] Validation failed[/bold red]\n")
+        elif status.headline is Status.INCOMPLETE:
             console.print("\n[bold yellow][INCOMPLETE] Validation evidence is incomplete[/bold yellow]\n")
-        elif required_passed and advisory_tier3:
-            # Tier 3 failed its gate but was advisory: the exit code is 0, yet "all passed" would be false.
+        elif status.advisory:
+            # A tier outside the exit gate did not pass: the exit code is 0, yet "all passed" would be false.
+            label = status.advisory[0]
+            hint = "; --block-on-agent-eval makes it gate" if label.startswith("Tier 3") else ""
             console.print(
                 "\n[bold green][PASS] Required validations passed[/bold green] "
-                f"[yellow]({escape_markup(advisory_tier3[0])} is advisory; "
-                "--block-on-agent-eval makes it gate)[/yellow]\n"
+                f"[yellow]({escape_markup(label)} is advisory{hint})[/yellow]\n"
             )
-        elif required_passed:
-            if advisory_skips:
-                console.print(
-                    "\n[bold green][PASS] Required validations passed[/bold green] "
-                    f"[yellow]({len(advisory_skips)} live evaluation skipped)[/yellow]\n"
-                )
-            else:
-                console.print("\n[bold green][PASS] All validations passed[/bold green]\n")
+        elif advisory_skips := [result for result in results if self._is_advisory_agent_eval_skip(result)]:
+            console.print(
+                "\n[bold green][PASS] Required validations passed[/bold green] "
+                f"[yellow]({len(advisory_skips)} live evaluation skipped)[/yellow]\n"
+            )
         else:
-            console.print("\n[bold red][FAIL] Validation failed[/bold red]\n")
+            console.print("\n[bold green][PASS] All validations passed[/bold green]\n")
 
-    def render_result(self, result: ValidationResult, console: Console) -> None:
-        """Render a single validation result."""
+    def render_result(self, result: ValidationResult, console: Console, status: RunStatus | None = None) -> None:
+        """Render a single validation result under the row status the run status gives it."""
+        row = (status or resolve_run_status([result])).of(result)
         # Header
         console.print(f"\n[bold]{escape_markup(f'[{result.validator_name}]')}[/bold]")
         if result.validator_description:
@@ -645,14 +643,18 @@ class CLIReporter(ReporterBase):
             console.print("[yellow][SKIP] Live evaluation did not run[/yellow]\n")
             self._print_summary_stats(result, console)
         elif result.is_incomplete:
-            tools = ", ".join(result.incomplete_scans)
-            console.print(f"[yellow][INCOMPLETE] {escape_markup(tools)} did not complete[/yellow]\n")
+            tools = escape_markup(", ".join(result.incomplete_scans))
+            if row is Status.FAILED:
+                # A blocking finding of its own outranks the scan that did not complete.
+                console.print(f"[red][FAIL] Validation failed[/red] [yellow]({tools} did not complete)[/yellow]\n")
+            else:
+                console.print(f"[yellow][INCOMPLETE] {tools} did not complete[/yellow]\n")
             self._print_summary_stats(result, console)
             self._print_findings(result, console)
-        elif (tier3_incomplete := self._tier3_incomplete_reason(result)) is not None:
-            console.print(f"[yellow][INCOMPLETE] {escape_markup(tier3_incomplete)}[/yellow]\n")
+        elif row is Status.INCOMPLETE:
+            console.print(f"[yellow][INCOMPLETE] {escape_markup(self._tier3_incomplete_text(result))}[/yellow]\n")
             self._print_summary_stats(result, console)
-        elif result.passed and result.metadata.get("skipped"):
+        elif row is Status.SKIPPED:
             # A skipped check did not run, so it did not pass; its warnings say why.
             console.print("[yellow][SKIP] Validation skipped[/yellow]\n")
             self._print_findings(result, console)
@@ -1022,8 +1024,11 @@ class CLIReporter(ReporterBase):
             console.print(f"     [dim]{label}:[/dim]     {escape_markup(finding.suggestion)}")
         console.print()
 
-    def _print_summary_table(self, results: list[ValidationResult], console: Console) -> None:
-        """Print summary table for all validators."""
+    def _print_summary_table(
+        self, results: list[ValidationResult], console: Console, status: RunStatus | None = None
+    ) -> None:
+        """Print summary table for all validators, one row status per validator from the run status."""
+        status = status or resolve_run_status(results)
         table = Table(
             title="SkillEvaluator Validation Results",
             show_header=True,
@@ -1037,28 +1042,19 @@ class CLIReporter(ReporterBase):
 
         for result in results:
             advisory_skip = self._is_advisory_agent_eval_skip(result)
-            status = (
-                "[yellow]SKIP[/yellow]"
-                if advisory_skip
-                else "[bold yellow]INCOMPLETE[/bold yellow]"
-                if result.is_incomplete
-                else "[green]PASS[/green]"
-                if result.passed
-                else "[red]FAIL[/red]"
-            )
+            row = status.of(result)
+            label = _ROW_LABELS[row]
             s = result.summary
             static_test_evidence = self._static_test_evidence_message(result)
             tier3_gate = self._tier3_gate_failure_text(result)
-            tier3_incomplete = self._tier3_incomplete_reason(result)
 
-            if tier3_incomplete is not None:
+            if row is Status.INCOMPLETE and result.validator_name == "AGENT_EVAL":
                 # A partial or skipped Tier 3 run is missing evidence, not a failed check.
-                status = "[bold yellow]INCOMPLETE[/bold yellow]"
-                details = escape_markup(tier3_incomplete)
+                details = escape_markup(self._tier3_incomplete_text(result))
             elif tier3_gate is not None:
                 # A Tier 3 FAIL: name the reason, and say when it did not gate the exit code.
                 if self._advisory_tier3_gate_label(result):
-                    status = "[red]FAIL[/red] (advisory)"
+                    label = "[red]FAIL[/red] (advisory)"
                 details = escape_markup(tier3_gate)
                 if skip_reason := (result.metadata or {}).get("skip_reason"):
                     # A partial run that failed: the evaluated parts failed, and the rest was not evaluated.
@@ -1067,7 +1063,6 @@ class CLIReporter(ReporterBase):
                 # --block-on-agent-eval made Tier 3 gate, and it never ran: the gate failed.
                 agent_eval = result.metadata.get("agent_eval", {})
                 provenance = agent_eval.get("provenance", {}) if isinstance(agent_eval, dict) else {}
-                status = "[red]FAIL[/red]"
                 details = escape_markup(
                     f"{provenance.get('message') or 'Live evaluation did not run'} (--block-on-agent-eval gates Tier 3)"
                 )
@@ -1085,9 +1080,6 @@ class CLIReporter(ReporterBase):
                     counts.append(f"{s.warnings} warnings")
                 if counts:
                     details += f" ({', '.join(counts)})"
-                if not self._missing_evidence_only(result):
-                    # It also failed on a blocking finding of its own: FAIL outranks missing evidence.
-                    status = "[red]FAIL[/red]"
             elif result.passed:
                 catalog_summary = plugin_catalog_similarity_summary(result)
                 if catalog_summary:
@@ -1110,7 +1102,7 @@ class CLIReporter(ReporterBase):
                     parts.append(f"{s.warnings} warnings")
                 details = ", ".join(parts) if parts else "Failed"
 
-            table.add_row(escape_markup(str(result.validator_name)), status, details)
+            table.add_row(escape_markup(str(result.validator_name)), label, details)
 
         console.print(table)
 
@@ -1126,43 +1118,9 @@ class CLIReporter(ReporterBase):
         return str(labels[0])
 
     @staticmethod
-    def _tier3_incomplete_reason(result: ValidationResult) -> str | None:
-        """Return why a Tier 3 run is INCOMPLETE (partial or skipped), or ``None``.
-
-        An advisory skip has its own SKIP row, and a partial run that failed its
-        gate (a FAIL verdict or a confirmed Skill Lift regression) is a failure,
-        as on the BENCHMARK card and in the footer.
-        """
-        metadata = result.metadata or {}
-        payload = metadata.get("agent_eval")
-        if result.validator_name != "AGENT_EVAL" or result.passed or not isinstance(payload, dict):
-            return None
-        if CLIReporter._is_advisory_agent_eval_skip(result) or str(payload.get("verdict") or "").lower() == "fail":
-            return None
-        if metadata.get("tier3_gate_failures"):
-            return None
-        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
-        skipped = "skipped" in (
-            metadata.get("execution_status"),
-            payload.get("execution_status"),
-            summary.get("execution_status"),
-        )
-        if not skipped:
-            return None
-        return str(metadata.get("skip_reason") or "INCOMPLETE: Tier 3 did not complete")
-
-    @staticmethod
-    def _missing_evidence_only(result: ValidationResult) -> bool:
-        """Whether a blocking result is only missing evidence (INCOMPLETE), not failed.
-
-        A scan that did not complete counts as a failure when the same result also
-        recorded a blocking finding of its own.
-        """
-        from skillevaluator.reporting.benchmark import has_blocking_finding
-
-        if result.is_incomplete:
-            return not has_blocking_finding(result)
-        return CLIReporter._tier3_incomplete_reason(result) is not None
+    def _tier3_incomplete_text(result: ValidationResult) -> str:
+        """Say why an INCOMPLETE Tier 3 run (partial, or stamped skipped by ``validate``) is INCOMPLETE."""
+        return str((result.metadata or {}).get("skip_reason") or "INCOMPLETE: Tier 3 did not complete")
 
     @staticmethod
     def _gated_tier3_not_run(result: ValidationResult) -> bool:

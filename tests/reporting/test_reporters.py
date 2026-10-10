@@ -224,7 +224,7 @@ class TestCLIReporter:
 
         output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
 
-        assert "Inter-Skill Deduplication │ PASS │ Skipped (see warnings)" in output
+        assert "Inter-Skill Deduplication │ SKIP │ Skipped (see warnings)" in output
         assert "[Inter-Skill Deduplication] Catalog [SKIP] Validation skipped" in output
         assert "[WARN] No local catalog supplied; run with --catalog FILE to compare." in output
         assert "[PASS] Validation passed" not in output

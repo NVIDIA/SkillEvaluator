@@ -32,6 +32,7 @@ from skillevaluator.reporting.plugin_sections import (
     split_display_prefix,
     tier3_plugin_view,
 )
+from skillevaluator.reporting.run_status import resolve_run_status
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -686,8 +687,15 @@ class SARIFReporter(ReporterBase):
         }
         if self.include_timestamp or _collect_incomplete_scans(results) or _tier3_notifications(results):
             run["invocations"] = [_build_invocation(results)]
+        # ``executionSuccessful`` says whether the tools ran; the run's verdict is the headline every report gives.
+        status = resolve_run_status(results)
+        run["properties"] = {
+            "overallStatus": status.headline.value,
+            "tierStatus": {str(number): tier.status.value for number, tier in status.tiers.items() if tier.results},
+            "statusReasons": list(status.reasons),
+        }
         if plugin is not None:
-            run["properties"] = {"plugin": _plugin_run_properties(plugin, results)}
+            run["properties"]["plugin"] = _plugin_run_properties(plugin, results)
 
         document: dict[str, Any] = {
             "$schema": _SARIF_SCHEMA,

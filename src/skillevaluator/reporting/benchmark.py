@@ -29,6 +29,14 @@ from skillevaluator.reporting.plugin_sections import (
     tier3_plugin_view,
     unsupported_type_split,
 )
+from skillevaluator.reporting.run_status import (
+    RunStatus,
+    Status,
+    TierStatus,
+    _publication_skipped,
+    _tier3_not_run,
+    resolve_run_status,
+)
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 from skillevaluator.utils.rich_markup import strip_terminal_controls
@@ -51,10 +59,6 @@ _SIGNAL_DESCRIPTIONS = {
     "token_efficiency": "token usage with and without the skill (reported separately; not scored as a dimension)",
 }
 
-_TIER2_VALIDATORS = {
-    "context deduplication",
-    "intra-skill deduplication",
-}
 
 _RETIRED_PRODUCT_NAME = re.compile(r"\b[a-z]*[\s_-]*skills[\s_-]*eval\b", flags=re.IGNORECASE)
 _RETIRED_SANDBOX_REFERENCE = re.compile(
@@ -118,9 +122,10 @@ class BenchmarkReporter(ReporterBase):
         skill_name = _publication_safe_skill_name(self.skill_name or _skill_name(results, ae))
         private_labels = _private_environment_labels(ae)
         policy = _benchmark_policy(results, ae)
-        status = _overall_status(results, ae, policy)
+        run_status = resolve_run_status(results)
+        status = run_status.publication.verdict
 
-        advisory = status == "FAIL" and _advisory_tier3_failure(results, ae)
+        advisory = run_status.publication_advisory
         lines: list[str] = [
             f"# Skill Benchmark: {skill_name}",
             "",
@@ -130,7 +135,7 @@ class BenchmarkReporter(ReporterBase):
         if status == "PASS":
             self._render_publication_recommendation(lines, results)
         elif status == "FAIL":
-            lines.extend(_fail_lines(results, ae, "skill", advisory=advisory))
+            lines.extend(_fail_lines(run_status, ae, "skill", advisory=advisory))
         elif status == "INCOMPLETE":
             lines.extend(
                 [
@@ -163,7 +168,7 @@ class BenchmarkReporter(ReporterBase):
         )
         self._render_report_purpose(lines)
         self._render_results_at_a_glance(lines, ae, private_labels)
-        self._render_tier_status(lines, results, ae, policy, private_labels)
+        self._render_tier_status(lines, run_status, ae, policy, private_labels)
         self._render_findings(lines, results, private_labels)
         self._render_methodology(lines, ae, private_labels)
         self._render_freshness(lines)
@@ -427,16 +432,16 @@ class BenchmarkReporter(ReporterBase):
     def _render_tier_status(
         self,
         lines: list[str],
-        results: list[ValidationResult],
+        run_status: RunStatus,
         ae: dict[str, Any] | None,
         benchmark_policy: dict[str, bool],
         private_labels: tuple[str, ...],
         tier3_override: tuple[str, str] | None = None,
     ) -> None:
         tier_groups = [
-            ("Tier 1", "Static validation", _tier1_results(results)),
-            ("Tier 2", "Semantic deduplication", _tier2_results(results)),
-            ("Tier 3", "Live agent evaluation", _tier3_results(results)),
+            ("Tier 1", "Static validation", run_status.tiers[1]),
+            ("Tier 2", "Semantic deduplication", run_status.tiers[2]),
+            ("Tier 3", "Live agent evaluation", run_status.tiers[3]),
         ]
 
         lines.extend(
@@ -447,15 +452,16 @@ class BenchmarkReporter(ReporterBase):
                 "|---|---|---|---|",
             ]
         )
-        for tier, purpose, tier_results in tier_groups:
-            status, evidence = _tier_status(tier, tier_results, ae, benchmark_policy)
-            if tier == "Tier 3" and tier3_override is not None and tier_results:
+        for tier, purpose, tier_status in tier_groups:
+            status, evidence = _tier_status(tier_status, ae, benchmark_policy)
+            if tier == "Tier 3" and tier3_override is not None and tier_status.results:
                 status, evidence = tier3_override
             lines.append(f"| {tier} | {purpose} | **{status}** | {_md_cell(evidence, private_labels)} |")
         lines.append("")
 
-        for tier, _purpose, tier_results in tier_groups:
-            if tier_results and all(_result_skipped(result) for result in tier_results):
+        for tier, _purpose, tier_status in tier_groups:
+            tier_results = list(tier_status.results)
+            if tier_results and all(_publication_skipped(result) for result in tier_results):
                 lines.append(f"{tier} validation was skipped and executed 0 checks.")
                 for reason in _skip_reasons(tier_results):
                     lines.append(f"- {_publication_safe_inline(reason, private_labels)}")
@@ -663,9 +669,10 @@ class BenchmarkReporter(ReporterBase):
         private_labels = _private_environment_labels(ae)
         policy = _benchmark_policy(results, ae)
         partial = bool(view and view["partial"])
-        status = _plugin_overall_status(results, ae, policy, partial=partial)
+        run_status = resolve_run_status(results)
+        status = run_status.publication.verdict
 
-        advisory = status == "FAIL" and _advisory_tier3_failure(results, ae)
+        advisory = run_status.publication_advisory
         lines: list[str] = [f"# Plugin Benchmark: {name}", "", _verdict_callout(status, advisory=advisory), ""]
         if status == "PASS":
             lines.extend(["## Publication Recommendation", ""])
@@ -683,7 +690,7 @@ class BenchmarkReporter(ReporterBase):
                 )
             lines.append("")
         elif status == "FAIL":
-            lines.extend(_fail_lines(results, ae, "plugin", advisory=advisory))
+            lines.extend(_fail_lines(run_status, ae, "plugin", advisory=advisory))
         elif status == "INCOMPLETE":
             lines.extend(
                 [
@@ -737,11 +744,11 @@ class BenchmarkReporter(ReporterBase):
         if view and partial:
             reason = f"Partial plugin run: {view['incomplete_reason']}"
             tier3_override = ("INCOMPLETE", reason)
-            if _tier3_fail_reasons(ae):
+            if run_status.tiers[3].publication is Status.FAILED:
                 # The evaluated parts already failed: FAIL outranks the partial run, as on the card.
-                _status, evidence = _tier_status("Tier 3", _tier3_results(results), ae, policy)
+                _status, evidence = _tier_status(run_status.tiers[3], ae, policy)
                 tier3_override = ("FAIL", f"{evidence}; {reason[0].lower()}{reason[1:]}")
-        self._render_tier_status(lines, results, ae, policy, private_labels, tier3_override)
+        self._render_tier_status(lines, run_status, ae, policy, private_labels, tier3_override)
         self._render_findings(lines, results, private_labels)
         self._render_methodology(lines, ae, private_labels)
         self._render_freshness(lines, subject="plugin")
@@ -1157,87 +1164,6 @@ def _advisory_agent_eval_skip_message(results: list[ValidationResult]) -> str | 
     return None
 
 
-def _result_skipped(result: ValidationResult) -> bool:
-    """Return whether a result records a skipped validator run."""
-    return bool(result.metadata.get("skipped")) or is_advisory_agent_eval_skip(result)
-
-
-def _overall_status(
-    results: list[ValidationResult],
-    ae: dict[str, Any] | None,
-    benchmark_policy: dict[str, bool],
-) -> str:
-    # A real failure outranks missing evidence (the footer and the terminal summary use the same rule):
-    # a result that failed the gate on a blocking finding of its own is FAIL even if a scan also did not
-    # complete, and the FAIL text says what did not complete.
-    real_failure = any(not passes_required_gate(result) and not _missing_evidence_only(result) for result in results)
-    if any(result.is_incomplete for result in results) and not real_failure:
-        return "INCOMPLETE"
-
-    blocking_skips = [
-        result
-        for result in results
-        if _result_skipped(result) and not result.metadata.get("optional") and not is_advisory_agent_eval_skip(result)
-    ]
-    if blocking_skips and not real_failure:
-        return "INCOMPLETE"
-
-    has_failures = not all(passes_required_gate(result) for result in results)
-    if has_failures and not real_failure and not _tier3_fail_reasons(ae):
-        # Only missing evidence blocks the gate (a partial Tier 3 run): INCOMPLETE, as in the footer.
-        return "INCOMPLETE"
-    summary = _mapping((ae or {}).get("summary"))
-    verdict = str((ae or {}).get("verdict") or summary.get("verdict") or "").lower()
-    dimension_verdict = _tier3_dimension_verdict(ae)
-    if has_failures or _tier3_fail_reasons(ae):
-        return "FAIL"
-
-    tier3_results = _tier3_results(results)
-    has_present_tier3_result = bool(tier3_results) and not all(_result_skipped(result) for result in tier3_results)
-    if (benchmark_policy["tier3_required"] or has_present_tier3_result) and not _tier3_evidence_complete(ae):
-        return "INCOMPLETE"
-    execution_status = str((ae or {}).get("execution_status") or summary.get("execution_status") or "").lower()
-    if verdict == "neutral" and execution_status in {"succeeded", ""}:
-        return "NEUTRAL"
-    if verdict == "pass" and dimension_verdict == "neutral":
-        return "NEUTRAL"
-    return "PASS"
-
-
-def _plugin_overall_status(
-    results: list[ValidationResult],
-    ae: dict[str, Any] | None,
-    benchmark_policy: dict[str, bool],
-    *,
-    partial: bool,
-) -> str:
-    """Return the card verdict; a partial plugin run is INCOMPLETE unless something failed.
-
-    A Tier 3 FAIL verdict or a confirmed Skill Lift regression fails a partial run
-    as it fails a complete one: the legend, the footer and ``--block-on-agent-eval``
-    apply the same rule.
-    """
-    if not partial:
-        return _overall_status(results, ae, benchmark_policy)
-    non_tier3 = [result for result in results if not _is_tier3(result)]
-    if any(not passes_required_gate(result) and not _missing_evidence_only(result) for result in non_tier3):
-        return "FAIL"
-    if _tier3_fail_reasons(ae):
-        return "FAIL"
-    return "INCOMPLETE"
-
-
-def _tier3_gating(results: list[ValidationResult]) -> bool | None:
-    """Return whether Tier 3 was in the exit gate, or ``None`` when no gate was recorded."""
-    values = [
-        gating["blocking"]
-        for result in _tier3_results(results)
-        if isinstance(gating := (result.metadata or {}).get("gating"), dict)
-        and isinstance(gating.get("blocking"), bool)
-    ]
-    return any(values) if values else None
-
-
 def _tier3_fail_reasons(ae: dict[str, Any] | None) -> list[str]:
     """Say why a complete Tier 3 run fails its gate, in report words.
 
@@ -1299,17 +1225,8 @@ def _lift_band_lines(ae: dict[str, Any] | None, subject: str) -> list[str]:
     return [text, ""]
 
 
-def _advisory_tier3_failure(results: list[ValidationResult], ae: dict[str, Any] | None) -> bool:
-    """Whether FAIL comes only from Tier 3 while Tier 3 was outside the exit gate (exit code 0)."""
-    if not _tier3_fail_reasons(ae):
-        return False
-    if not all(passes_required_gate(result) for result in results):
-        return False
-    return _tier3_gating(results) is False
-
-
 def _fail_lines(
-    results: list[ValidationResult],
+    run_status: RunStatus,
     ae: dict[str, Any] | None,
     subject: str,
     *,
@@ -1327,12 +1244,12 @@ def _fail_lines(
             ),
             "",
         ]
-    gated = " `--block-on-agent-eval` made Tier 3 gate this run." if reasons and _tier3_gating(results) else ""
-    others_pass = all(passes_required_gate(result) for result in results if not _is_tier3(result))
+    gated = " `--block-on-agent-eval` made Tier 3 gate this run." if reasons and run_status.tiers[3].blocking else ""
+    others_pass = all(passes_required_gate(result) for tier in (1, 2) for result in run_status.tiers[tier].results)
     # A gated Tier 3 run that never ran fails the gate, the same as in the footer and the terminal summary.
     not_run = [
         str(_mapping(_mapping(result.metadata.get("agent_eval")).get("provenance")).get("message") or "").strip()
-        for result in results
+        for result in run_status.tiers[3].results
         if _tier3_not_run(result) and not passes_required_gate(result)
     ]
     if reasons and others_pass:
@@ -1353,10 +1270,10 @@ def _fail_lines(
         )
         if reasons:
             text += f" Tier 3 live evaluation failed: {'; '.join(reasons)}.{gated}"
-    missing = list(dict.fromkeys(tool for result in results for tool in result.incomplete_scans))
-    if missing:
+    if run_status.missing:
         # FAIL outranks missing evidence, but the card still says what did not complete.
-        text += f" Evidence is also incomplete: {_publication_safe_inline(', '.join(missing))} did not complete."
+        missing = ", ".join(run_status.missing)
+        text += f" Evidence is also incomplete: {_publication_safe_inline(missing)} did not complete."
     return [text, ""]
 
 
@@ -1864,31 +1781,37 @@ def _format_points(delta: float) -> str:
 
 
 def _tier_status(
-    tier: str,
-    results: list[ValidationResult],
+    tier: TierStatus,
     ae: dict[str, Any] | None,
     benchmark_policy: dict[str, bool],
 ) -> tuple[str, str]:
-    if not results:
+    """Word a Tier Status row; the status itself is the run status's ``publication`` for the tier."""
+    results = list(tier.results)
+    verdict = tier.publication
+    if verdict is Status.NOT_RUN:
         return "NOT RUN", "No result was recorded"
     incomplete = [result for result in results if result.is_incomplete]
     if incomplete:
         tools = list(dict.fromkeys(tool for result in incomplete for tool in result.incomplete_scans))
         missing = f"missing trustworthy evidence from {', '.join(tools)}"
-        if any(not passes_required_gate(result) and not _missing_evidence_only(result) for result in results):
+        if verdict is Status.FAILED:
             # A real failure outranks missing evidence, as on the card and in the footer.
             blocking = sum(1 for result in results for finding in result.findings if _finding_blocks(finding, result))
             return "FAILED", f"{blocking} blocking finding(s); {missing}"
         return "INCOMPLETE", missing[0].upper() + missing[1:]
-    if all(_result_skipped(result) for result in results):
-        optional = all(result.metadata.get("optional") or is_advisory_agent_eval_skip(result) for result in results)
-        return ("SKIPPED (ADVISORY)" if optional else "INCOMPLETE"), "; ".join(_skip_reasons(results))
+    if all(_publication_skipped(result) for result in results):
+        return ("SKIPPED (ADVISORY)" if verdict is Status.SKIPPED else "INCOMPLETE"), "; ".join(_skip_reasons(results))
 
     findings = [finding for result in results for finding in result.findings]
-    if tier == "Tier 3" and ae and _tier3_fail_reasons(ae):
+    if tier.tier == 3 and ae and verdict is Status.FAILED and _tier3_fail_reasons(ae):
         # The verdict (or a confirmed Skill Lift regression) decides the Tier 3 row; say whether it gated.
-        gating = _tier3_gating(results)
-        gate = "; advisory (not in the exit gate)" if gating is False else "; gates the exit code" if gating else ""
+        gate = (
+            "; advisory (not in the exit gate)"
+            if tier.blocking is False
+            else "; gates the exit code"
+            if tier.blocking
+            else ""
+        )
         regression = "; Skill Lift regression" if _lift_band(ae).get("regression_confirmed") is True else ""
         agents_tasks = f"{len(_agents(ae))} agent(s); {_dataset_summary(ae)['total_tasks']} task(s)"
         return "FAIL", f"{agents_tasks}{regression}{gate}"
@@ -1896,30 +1819,25 @@ def _tier_status(
     if not_run:
         # --block-on-agent-eval made Tier 3 gate, and it never ran: a failed gate, not missing evidence.
         return "FAILED", "Did not run: " + "; ".join(_skip_reasons(not_run)) + "; gates the exit code"
-    if any(not result.passed and not _result_skipped(result) for result in results):
+    if verdict is Status.FAILED:
         return "FAILED", f"{len(results)} validator(s); {len(findings)} finding(s)"
 
-    if tier == "Tier 3" and ae:
+    if tier.tier == 3 and ae:
         summary = _mapping(ae.get("summary"))
         execution = str(ae.get("execution_status") or summary.get("execution_status") or "").lower()
-        verdict = str(ae.get("verdict") or summary.get("verdict") or "").lower()
-        dimension_verdict = _tier3_dimension_verdict(ae)
-        if execution and execution != "succeeded":
+        if verdict is Status.INCOMPLETE and execution and execution != "succeeded":
             return "INCOMPLETE", f"Execution status: {execution}"
-        if not _tier3_evidence_complete(ae):
+        if verdict is Status.INCOMPLETE:
             evidence = (
                 "Required Tier 3 evidence is missing"
                 if benchmark_policy["tier3_required"]
                 else "Present Tier 3 result lacks complete evidence"
             )
             return "INCOMPLETE", evidence
-        effective_verdict = verdict
-        if verdict == "pass" and dimension_verdict == "neutral":
-            effective_verdict = "neutral"
-        if effective_verdict in {"pass", "neutral"}:
-            return effective_verdict.upper(), (
-                f"{len(_agents(ae))} agent(s); {_dataset_summary(ae)['total_tasks']} task(s)"
-            )
+        if verdict in {Status.PASSED, Status.NEUTRAL}:
+            return verdict.verdict, f"{len(_agents(ae))} agent(s); {_dataset_summary(ae)['total_tasks']} task(s)"
+    if verdict is Status.INCOMPLETE:
+        return "INCOMPLETE", "Required evidence is missing"
 
     status = "PASSED WITH OBSERVATIONS" if findings else "PASSED"
     return status, f"{len(results)} validator(s); {len(findings)} finding(s)"
@@ -1968,29 +1886,6 @@ def _weighted_signals(config: dict[str, Any]) -> str:
     return " + ".join(parts) or "Not configured"
 
 
-def _tier1_results(results: list[ValidationResult]) -> list[ValidationResult]:
-    return [result for result in results if not _is_tier2(result) and not _is_tier3(result)]
-
-
-def _tier2_results(results: list[ValidationResult]) -> list[ValidationResult]:
-    return [result for result in results if _is_tier2(result)]
-
-
-def _tier3_results(results: list[ValidationResult]) -> list[ValidationResult]:
-    return [result for result in results if _is_tier3(result)]
-
-
-def _is_tier2(result: ValidationResult) -> bool:
-    name = result.validator_name.lower()
-    if name in _TIER2_VALIDATORS or "dedup" in name:
-        return True
-    return any(finding.category == "CONTENT_DEDUP" for finding in result.findings)
-
-
-def _is_tier3(result: ValidationResult) -> bool:
-    return bool(result.metadata.get("agent_eval")) or result.validator_name == "AGENT_EVAL"
-
-
 def _finding_blocks(finding: Finding, result: ValidationResult) -> bool:
     """Whether *finding* blocks: its result fails the required gate and records it as an error.
 
@@ -2006,41 +1901,6 @@ def _finding_blocks(finding: Finding, result: ValidationResult) -> bool:
 def _finding_is_error(finding: Finding, result: ValidationResult) -> bool:
     """CRITICAL and HIGH, or a MEDIUM or LOW that *result* records as an error."""
     return finding.severity.value in {"critical", "high"} or finding.to_legacy_string() in result.errors
-
-
-def has_blocking_finding(result: ValidationResult) -> bool:
-    """Whether *result* records a blocking finding of its own, not only missing evidence.
-
-    A scanner that did not complete adds warnings or plain errors, never a
-    finding, so this tells a real failure from an INCOMPLETE scan when one
-    result has both. The footer, the terminal summary and this card all use it:
-    a real failure outranks missing evidence.
-    """
-    return any(_finding_is_error(finding, result) for finding in result.findings)
-
-
-def _missing_evidence_only(result: ValidationResult) -> bool:
-    """Whether a result that fails the gate is only missing evidence (INCOMPLETE), not failed."""
-    if result.is_incomplete:
-        return not has_blocking_finding(result)
-    return _is_tier3(result) and _tier3_result_incomplete(result)
-
-
-def _tier3_result_incomplete(result: ValidationResult) -> bool:
-    """A partial Tier 3 plugin run that did not fail its gate (no FAIL verdict, no confirmed regression)."""
-    metadata = result.metadata if isinstance(result.metadata, dict) else {}
-    if metadata.get("execution_status") != "skipped" or metadata.get("tier3_gate_failures"):
-        return False
-    payload = _mapping(metadata.get("agent_eval"))
-    return str(payload.get("verdict") or "").lower() != "fail" and not _tier3_not_run(result)
-
-
-def _tier3_not_run(result: ValidationResult) -> bool:
-    """Whether *result* is a Tier 3 run that never ran (an advisory skip), gated or not."""
-    if not _is_tier3(result):
-        return False
-    provenance = _mapping(_mapping((result.metadata or {}).get("agent_eval")).get("provenance"))
-    return bool(provenance.get("advisory") and provenance.get("reason") == "skipped")
 
 
 def _top_findings(findings: list[Finding], *, limit: int) -> list[Finding]:

@@ -27,8 +27,8 @@ from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.plugin_formats import DEFAULT_SKILLS_DIR
 from skillevaluator.plugin_paths import PLUGIN_CATEGORY
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
-from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
+from skillevaluator.reporting.run_status import is_tier2_validator_name
 from skillevaluator.utils.rich_markup import escape_markup
 from skillevaluator.validators.base import continue_on_failure_scope
 from skillevaluator.validators.code_risk import CodeRiskValidator

@@ -264,6 +264,7 @@
         .status-badge.pass { background: #dcfce7; color: #166534; }
         .status-badge.fail { background: #fee2e2; color: #991b1b; }
         .status-badge.warn { background: #fef3c7; color: #92400e; }
+        .status-badge.skipped { background: var(--bg-tertiary); color: var(--text-secondary); }
         [data-theme="dark"] .status-badge.pass { background: #14532d; color: #86efac; }
         [data-theme="dark"] .status-badge.fail { background: #450a0a; color: #fca5a5; }
         [data-theme="dark"] .status-badge.warn { background: #451a03; color: #fcd34d; }
@@ -376,6 +377,7 @@
         .collapsible-header .status-indicator.pass { background: var(--success-color); }
         .collapsible-header .status-indicator.fail { background: var(--danger-color); }
         .collapsible-header .status-indicator.warn { background: var(--warning-color); }
+        .collapsible-header .status-indicator.skipped { background: var(--text-secondary); }
         .validator-collapsible.active .status-indicator.pass { background: #86efac; }
         .validator-collapsible.active .status-indicator.fail { background: #fca5a5; }
         .validator-collapsible.active .status-indicator.warn { background: #fcd34d; }
@@ -1280,15 +1282,15 @@
     {% set tier3_skip_message = tier3_provenance_data.get('message') or 'Live evaluation did not run.' %}
     {%- from "plugin_sections.html.j2" import tier1_plugin_section, tier3_incomplete_callout, tier3_coverage_section, tier3_completeness_section, integration_section, lift_modes_line, statistics_section, signals_section, hook_census_section, canary_section, mcp_proof_section, tier3_plugin_load_section %}
     {%- set tier3_plugin_incomplete = has_tier3 and tier3_plugin and tier3_plugin.partial and not tier3_is_skipped %}
-    {#- A partial run whose evaluated parts already fail (FAIL verdict or confirmed regression) is FAIL, as in BENCHMARK.md. #}
-    {%- set tier3_partial_failed = tier3_plugin_incomplete and (((tier3.verdict or '') | lower) == 'fail' or ((tier3.get('lift_band') or {}).get('regression_confirmed') is sameas true)) %}
+    {#- The Tier 3 verdict and tone come from the run status (reporting/run_status.py), computed once for the tier card
+        and the dashboard: a partial plugin run reads INCOMPLETE in the warn tone even when its raw verdict is pass,
+        and FAIL when its evaluated parts already failed (FAIL verdict or confirmed regression), as in BENCHMARK.md. #}
+    {%- set tier3_card = tier_cards.tier3 %}
+    {%- set tier3_partial_failed = tier3_plugin_incomplete and tier3_card.status == 'failed' %}
     {#- --block-on-agent-eval made Tier 3 gate, and it never ran: a failed gate, as in BENCHMARK.md and the footer. #}
-    {%- set tier3_gated_skip = tier3_is_skipped and 'tier3' in ((gating if gating is defined and gating else {}).blocking_tiers or []) %}
-    {#- Displayed Tier 3 verdict and tone (skipped, warn, pass or fail), computed once for the tier card and the
-        dashboard: a partial plugin run reads INCOMPLETE in the warn tone even when its raw verdict is pass. #}
-    {%- set tier3_verdict = ((tier3.verdict or 'unknown') | lower) if has_tier3 else 'unknown' %}
-    {%- set tier3_display_verdict = 'FAIL' if tier3_gated_skip else ('SKIPPED' if tier3_is_skipped else ('FAIL' if tier3_partial_failed else ('INCOMPLETE' if tier3_plugin_incomplete else tier3_verdict | upper))) %}
-    {%- set tier3_tone = 'fail' if tier3_gated_skip else 'skipped' if tier3_is_skipped else ('fail' if tier3_partial_failed else ('warn' if tier3_plugin_incomplete else ('pass' if tier3_verdict == 'pass' else ('fail' if tier3_verdict == 'fail' else 'warn')))) %}
+    {%- set tier3_gated_skip = tier3_is_skipped and tier3_card.status == 'failed' %}
+    {%- set tier3_display_verdict = tier3_card.verdict %}
+    {%- set tier3_tone = tier3_card.tone %}
     <div class="main-header">
         <div class="header-content">
             <div class="logo-section">
@@ -1309,7 +1311,7 @@
                 {% if target_path %}<p class="header-meta-item"><strong>Target:</strong> {% if target_path.startswith('https://') %}<a href="{{ target_path }}" target="_blank" class="header-target-link" title="{{ target_path }}">{{ target_display or target_path }}</a>{% else %}{{ target_path }}{% endif %}</p>{% endif %}
                 {% if profile %}<p class="header-meta-item"><strong>Profile:</strong> <span class="header-profile-badge profile-{{ profile }}">{{ profile }}</span></p>{% endif %}
                 {% if timestamp %}<p class="header-meta-item">Generated: {{ timestamp }}{% if version %} &middot; SkillEvaluator v{{ version }}{% endif %}</p>{% endif %}
-                <span class="header-status-badge {{ 'warn' if has_incomplete else ('pass' if all_passed else 'fail') }}">{{ 'Incomplete' if has_incomplete else ('All Passed' if all_passed else 'Issues Found') }}</span>
+                <span class="header-status-badge {{ 'warn' if has_incomplete else ('pass' if all_passed else 'fail') }}"{% if status_reasons %} title="{{ status_reasons | join('; ') }}"{% endif %}>{{ 'Incomplete' if has_incomplete else ('All Passed' if all_passed else 'Issues Found') }}</span>
             </div>
         </div>
     </div>
@@ -1407,7 +1409,7 @@
             {% set initial_tab = tabs[0].id if tabs else 'tier1' %}
             <div class="tier-cards">
                 {% if has_tier1 %}
-                {% set t1_class = 'warn' if tier1_summary.incomplete_count else ('pass' if (tier1_summary.total > 0 and tier1_summary.all_passed) else ('fail' if tier1_summary.total > 0 else 'skipped')) %}
+                {% set t1_class = tier_cards.tier1.tone %}
                 <div class="tier-card {{ t1_class }}{% if initial_tab == 'tier1' %} active{% endif %}"
                      role="button"
                      tabindex="0"
@@ -1418,7 +1420,7 @@
                      title="Open Tier 1: Security and Static Validation">
                     <div class="tier-card-head">
                         <span class="tier-card-label">Tier 1</span>
-                        <span class="tier-card-verdict">{{ 'PASS' if t1_class == 'pass' else ('FAIL' if t1_class == 'fail' else 'N/A') }}</span>
+                        <span class="tier-card-verdict">{{ tier_cards.tier1.verdict }}</span>
                     </div>
                     <h3 class="tier-card-title">Security &amp; Static Validation</h3>
                     <div class="tier-card-stats">
@@ -1436,7 +1438,7 @@
                 </div>
                 {% endif %}
                 {% if has_tier2 %}
-                {% set t2_class = 'pass' if (tier2_summary.total > 0 and tier2_summary.all_passed) else ('fail' if tier2_summary.total > 0 else 'skipped') %}
+                {% set t2_class = tier_cards.tier2.tone %}
                 <div class="tier-card {{ t2_class }}{% if initial_tab == 'tier2' %} active{% endif %}"
                      role="button"
                      tabindex="0"
@@ -1447,7 +1449,7 @@
                      title="Open Tier 2: Deduplication">
                     <div class="tier-card-head">
                         <span class="tier-card-label">Tier 2</span>
-                        <span class="tier-card-verdict">{{ 'PASS' if t2_class == 'pass' else ('FAIL' if t2_class == 'fail' else 'N/A') }}</span>
+                        <span class="tier-card-verdict">{{ tier_cards.tier2.verdict }}</span>
                     </div>
                     <h3 class="tier-card-title">Deduplication</h3>
                     <div class="tier-card-stats">
@@ -1869,9 +1871,10 @@
                     <thead><tr><th>Validator</th><th>Status</th><th>Files Scanned</th><th>Checks Performed</th><th>Errors</th><th>Warnings</th></tr></thead>
                     <tbody>
                         {% for result in results %}
-                        <tr onclick="scrollToValidator({{ loop.index }})" data-status="{{ result.status }}">
+                        {% set badge = row_badge(result) %}
+                        <tr onclick="scrollToValidator({{ loop.index }})" data-status="{{ row_status(result) }}">
                             <td class="name-col">{{ result.validator_name }}</td>
-                            <td><span class="status-badge {{ 'warn' if result.is_incomplete else ('pass' if result.passed else 'fail') }}">{{ 'Incomplete' if result.is_incomplete else ('Pass' if result.passed else 'Fail') }}</span></td>
+                            <td><span class="status-badge {{ badge[0] }}">{{ badge[1] }}</span></td>
                             <td>{{ result.summary.files_scanned }}</td>
                             <td>{{ result.summary.checks_performed }}</td>
                             <td class="{{ 'error-text' if result.summary.errors > 0 else '' }}">{{ result.summary.errors }}</td>
@@ -1884,15 +1887,16 @@
         </div>
         <div class="section-header">Detailed Results</div>
         {% for result in results %}
-        <div class="validator-card" id="validator-{{ loop.index }}" data-status="{{ result.status }}">
+        {% set badge = row_badge(result) %}
+        <div class="validator-card" id="validator-{{ loop.index }}" data-status="{{ row_status(result) }}">
             <button class="validator-collapsible {{ 'active' if not result.passed else '' }}" onclick="toggleValidator(this)">
                 <div class="collapsible-header">
-                    <span class="status-indicator {{ 'warn' if result.is_incomplete else ('pass' if result.passed else 'fail') }}"></span>
+                    <span class="status-indicator {{ badge[0] }}"></span>
                     <span>{{ result.validator_name }}</span>
                     {% if result.validator_description %}<span style="opacity:0.6;font-weight:400;font-size:0.8rem;margin-left:0.25rem">— {{ result.validator_description }}</span>{% endif %}
                 </div>
                 <div style="display:flex;align-items:center;gap:0.75rem">
-                    <span class="status-badge {{ 'warn' if result.is_incomplete else ('pass' if result.passed else 'fail') }}">{{ 'Incomplete' if result.is_incomplete else ('Pass' if result.passed else 'Fail') }}</span>
+                    <span class="status-badge {{ badge[0] }}">{{ badge[1] }}</span>
                     <span class="expand-text">{{ '▲ Collapse' if not result.passed else '▼ Expand' }}</span>
                 </div>
             </button>

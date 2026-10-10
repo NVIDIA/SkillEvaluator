@@ -1824,8 +1824,13 @@ def _finish_pipeline_view(
     target_path: Path,
     agent_eval: bool,
 ) -> None:
-    """Render the quiet-mode verdict panel and report footer."""
-    from skillevaluator.reporting.console_ui import Verdict, _is_skipped, first_fix
+    """Render the quiet-mode verdict panel and report footer.
+
+    The verdict is the run status every report gives (``reporting.run_status``): a real failure outranks missing
+    evidence, and an advisory Tier 3 that did not pass is named without changing the exit code.
+    """
+    from skillevaluator.reporting.console_ui import Verdict, first_fix
+    from skillevaluator.reporting.run_status import resolve_run_status
 
     ext = {"html": ".html", "json": ".json", "markdown": ".md", "sarif": ".sarif.json"}
     links: list[tuple[str, str]] = [
@@ -1835,12 +1840,12 @@ def _finish_pipeline_view(
     ]
     payload = ((tier3_result.metadata or {}).get("agent_eval") or {}) if tier3_result is not None else {}
     summary = payload.get("summary") or payload
+    considered = list(tier_gate_results)
+    if tier3_result is not None and all(result is not tier3_result for result in considered):
+        considered.append(tier3_result)
+    status = resolve_run_status(considered)
     # A Tier 3 FAIL (complete or partial run) or an INCOMPLETE partial run that stayed advisory.
-    tier3_gate = _tier3_gate_label(tier3_result) or (
-        "Tier 3 INCOMPLETE"
-        if tier3_result is not None and not tier3_result.passed and _gate_result_incomplete(tier3_result)
-        else None
-    )
+    tier3_gate = next((label for label in status.advisory if label.startswith("Tier 3")), None)
 
     if not gate_failed:
         ran = sum(1 for block in view.blocks if block.status not in ("pending", "skip"))
@@ -1858,16 +1863,10 @@ def _finish_pipeline_view(
         view.finish(Verdict(passed=True, headline=headline), links)
         return
 
-    blocked = [result for result in tier_gate_results if not result.passed]
-    incomplete = [result for result in blocked if _gate_result_incomplete(result)]
-    # A skipped Tier 3 run that gates is a failure (it did not run); other skipped results never block.
-    failed = [
-        result
-        for result in blocked
-        if not _gate_result_incomplete(result) and (result.validator_name == "AGENT_EVAL" or not _is_skipped(result))
-    ]
+    failed = list(status.failed)
+    incomplete = list(status.incomplete)
     # Missing evidence also counts when the same result failed on a blocking finding of its own.
-    missing = [result for result in blocked if result in incomplete or result.is_incomplete]
+    missing = [result for result in failed if result.is_incomplete] + incomplete
     rerun = _rerun_hint(target_path, agent_eval)
     if failed:
         # A real failure outranks missing evidence; the headline still counts what did not complete.
@@ -1890,30 +1889,6 @@ def _tier3_gate_label(result: ValidationResult | None) -> str | None:
     if not isinstance(labels, list) or not labels:
         return None
     return " · ".join(str(label) for label in labels)
-
-
-def _gate_result_incomplete(result: ValidationResult) -> bool:
-    """Whether a blocking result is only missing evidence (INCOMPLETE) rather than failed.
-
-    The rule is the one the terminal summary and BENCHMARK.md use. A scanner that
-    did not complete is INCOMPLETE, unless the same result also recorded a
-    blocking finding of its own: a real failure outranks missing evidence. A
-    partial Tier 3 plugin run is INCOMPLETE unless it failed its gate (a FAIL
-    verdict or a confirmed Skill Lift regression). A Tier 3 run that did not run
-    at all fails the gate when ``--block-on-agent-eval`` makes Tier 3 gate.
-    """
-    from skillevaluator.reporting.benchmark import has_blocking_finding
-    from skillevaluator.reporting.console_ui import _is_skipped
-
-    if result.validator_name != "AGENT_EVAL":
-        return result.is_incomplete and not has_blocking_finding(result)
-    metadata = result.metadata or {}
-    payload = metadata.get("agent_eval") if isinstance(metadata.get("agent_eval"), dict) else {}
-    if _tier3_gate_label(result) or str(payload.get("verdict") or "").lower() == "fail":
-        return False
-    if _tier3_not_run_message(result) is not None:
-        return False
-    return _is_skipped(result)
 
 
 def _tier3_not_run_message(result: ValidationResult) -> str | None:

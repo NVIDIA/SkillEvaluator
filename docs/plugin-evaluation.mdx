@@ -3028,9 +3028,11 @@ Matching details:
   separate `Read` call for a `Read` ref.
 - Plain tool names mean the same tool on every harness: `Bash` also matches
   Codex `exec_command`; `Write`, `Edit`, and `MultiEdit` also match Codex
-  `apply_patch`; `WebSearch` and `WebFetch` also match Codex's hosted
-  `web_search_call`; `TodoWrite` also matches `update_plan`. The reverse also
-  holds (`exec_command` matches Claude Code `Bash`).
+  `apply_patch`; `WebSearch` also matches a search through Codex's hosted
+  `web_search_call`, and `WebFetch` a page it opened (`open_page` or
+  `find_in_page`), while a call that records no action matches both;
+  `TodoWrite` also matches `update_plan`. The reverse also holds
+  (`exec_command` matches Claude Code `Bash`).
 - `Write`, `Edit`, and `MultiEdit` mean "wrote a file", so they also match a
   `Bash` or `exec_command` call that writes one: a redirect such as
   `cat > notes.md <<'EOF'`, `tee`, `cp`/`mv`/`install`, `touch`, `sed -i`, or

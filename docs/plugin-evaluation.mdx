@@ -1918,10 +1918,25 @@ spend money on a run.
 | `integration` | With plugin vs member skills only | The single baseline is the member-skills arm, so its interval is filed under `lift_uncertainty.integration`, the Integration block describes plugin minus members, and no plugin-vs-no-plugin lift is reported |
 | `both` | Effectiveness, plus a third, report-only member-skills arm | Plugin lift from the no-plugin baseline; Integration from the member-skills arm (`integration_lift.json` keeps per-metric deltas) |
 
-The Integration lift measures the wrapper, the rules, the plugin MCP servers,
-and the coordination between members together, because the member-skills arm
-has none of them. Integration modes need a baseline, so they cannot be combined
-with `--skip-baseline`.
+Reports call the with-plugin minus member-skills lift the **Bundle lift** (its
+previous name was Integration lift). Bundle lift = full plugin minus its skills
+alone. It includes the plugin's rules, MCP servers and wrapper, not only how the
+parts coordinate, because the member-skills arm has none of them. The JSON keys
+keep their names (`integration`, `integration_lift`,
+`lift_uncertainty.integration`, `point_verdict`). Integration modes need a
+baseline, so they cannot be combined with `--skip-baseline`.
+
+**Split by case type.** The Integration block also reports the Bundle lift on
+two groups of the same paired cases, in `by_case_type`: the cases marked
+`cross_component: true`, which need several member skills together, and all
+other cases. A lift that shows up mostly on the other cases is more likely the
+plugin's extra rules and tools than coordination. Each group has `n`, `lift`,
+`ci_low`, `ci_high`, and `reason`, from the same paired case bootstrap; a group
+with fewer than 5 pairs gets only the point estimate and a reason. The
+case-weighted mean of the two groups equals the Bundle lift. Reports show one
+line, for example "On cross-component cases: +0.31 (n=6). On other cases:
++0.04 (n=4)." The split is report-only and never changes a verdict, band, or
+exit code.
 
 **One lift, one basis.** The arm without the plugin has no skill to discover or
 route to, so the verifier records `skill_execution` and `skill_efficiency` as
@@ -1949,6 +1964,30 @@ row reads "Not measured", because this mode never runs the plugin against a
 baseline without it. Runs saved before this rule, which filed the interval under
 `effectiveness`, are refiled under `integration` when the report is built.
 
+### Known limitations and planned work
+
+- The Bundle lift (full plugin minus its skills alone) includes the plugin's
+  rules, MCP servers and wrapper, not only how the parts coordinate. A
+  loose-parts arm is planned: the same skills, rules and MCP servers staged
+  separately, with no wrapper. Full plugin minus loose parts could then be
+  called the Integration lift, and Bundle lift = extras + integration.
+- In native mode the with-plugin arm can also load hooks, subagents and
+  commands (which ones depends on the harness), and the member-skills arm never
+  does, so they land in the Bundle lift too; they are not compared as loose
+  parts. Loading as a plugin also renames things
+  (`plugin:skill`), so part of the gap is packaging.
+- Small runs (a handful of cases, 1-2 attempts) often end `inconclusive`: the
+  ±0.05 bands are narrower than the interval. Use at least 10 cases and 3
+  attempts before reading either lift.
+- A three-step split (skills, extras, integration) adds up exactly only on one
+  common set of scores. Today each lift uses the dimensions its own two arms
+  scored, and the no-plugin arm has the skill-specific scores as N/A, so the
+  Plugin lift is not the sum of the other lifts.
+- The `by_case_type` split is a hint, not proof: a lift on cross-component cases
+  still includes the plugin's extras.
+- Each lift is measured with one agent model on one harness. It is not
+  comparable across harnesses.
+
 ### Native loading
 
 `--plugin-load` chooses how the **with-plugin arm** loads the plugin. It is
@@ -1967,7 +2006,7 @@ skillevaluator validate ./my-plugin --tier3 --agents opencode --plugin-load auto
 
 Only the with-plugin arm changes. The **member-skills** arm and the
 **without-plugin** arm are staged exactly as in wrapper mode, so Skill Lift and
-the Integration lift still compare the same baselines. What changes is the
+the Bundle lift still compare the same baselines. What changes is the
 with-plugin side: the lift then measures the plugin as the harness loads it.
 
 Native loading needs a task container. The `local` environment runs the agent
@@ -2242,12 +2281,12 @@ reason.
 ### Integration verdict and INCONCLUSIVE rules
 
 The Integration block is advisory and report-only. It never changes the main
-Tier 3 score, verdict, or exit code. The Integration lift is plugin minus
+Tier 3 score, verdict, or exit code. The Bundle lift is plugin minus
 member skills, classified by fixed bands and recorded as `point_verdict`:
 
-| Integration lift | `point_verdict` | Read it as |
+| Bundle lift | `point_verdict` | Read it as |
 | --- | --- | --- |
-| ≥ +0.05 | `real_integration` | The coordinated plugin measurably outperforms its members alone |
+| ≥ +0.05 | `real_integration` | The full plugin measurably outperforms its members alone |
 | between −0.05 and +0.05 | `cosmetic_bundling` | The plugin performs about the same as its members alone |
 | ≤ −0.05 | `negative_integration` | The plugin underperforms its members; inspect coordination overhead |
 
@@ -2277,7 +2316,7 @@ the best agent's (and names it), and every report prints one named Integration
 result per agent.
 
 The block also records `components`, `with_plugin`, `sum_of_parts`,
-`integration_lift`, `complete`, `completeness`, `lift_uncertainty`, an
+`integration_lift`, `complete`, `completeness`, `lift_uncertainty`, `by_case_type`, an
 `interpretation`, `agent`, and both lift modes.
 
 ### Report-only statistics
@@ -2288,7 +2327,7 @@ them changes a metric, dimension, score, pass@k, verdict, or gate.
 
 | Block | What it reports |
 | --- | --- |
-| `lift_uncertainty` | For `effectiveness` and `integration`: `estimate`, `ci_low`, `ci_high`, `confidence` (0.95), `method` (`paired_case_bootstrap`), `interval` (`expanded_percentile`), `resamples` (at least 2,000, and with 5 or more paired cases enough that each bound rests on 200 resampled means), `seed` (0), `n_cases`, `expected_cases`, `precision`, `ci_includes_zero`, `partial`, `failed_arms`, the compared `treatment_arm` and `control_arm`, their `treatment_score` and `control_score`, and the `dimensions` both arms scored (`basis`) |
+| `lift_uncertainty` | For `effectiveness` and `integration`: `estimate`, `ci_low`, `ci_high`, `confidence` (0.95), `method` (`paired_case_bootstrap`), `interval` (`expanded_percentile`), `resamples` (at least 2,000, and with 5 or more paired cases enough that each bound rests on 200 resampled means), `seed` (0), `n_cases`, `expected_cases`, `precision`, `ci_includes_zero`, `partial`, `failed_arms`, the compared `treatment_arm` and `control_arm`, their `treatment_score` and `control_score`, and the `dimensions` both arms scored (`basis`). For a plugin run, `integration` also carries `by_case_type` |
 | `reliability` | Per arm: `pass_at_k`, `pass_hat_k`, `k`, `n_cases`, and `not_applicable_metrics` (the metrics no trial of that arm scored) |
 | `cost` | Per arm: `tokens_per_success`, `usd_per_success`, `total_tokens`, `total_usd`, and `successes` |
 | `token_efficiency` | Per arm: the mean of `1 / (1 + tokens / 200000)` over trials |
@@ -3568,7 +3607,7 @@ In the `validate` JSON report, the Tier 3 payload (the `tier3` key) carries:
   `context_cost_measured`.
 
 The HTML report renders the Integration block as an advisory, report-only
-"Integration (Plugin Composition)" section.
+"Integration (Bundle Lift)" section, with the Bundle lift definition and the by-case-type line.
 
 Plugin sections by report format:
 
@@ -3576,7 +3615,7 @@ Plugin sections by report format:
 | --- | --- | --- |
 | JSON | Top-level `plugin` object, merged across validator results: `manifest_type`, `manifest_declarations`, `dependency_resolution`, `dependency_status_counts`, `component_inventory`, `mcp`, `context_cost`, `catalog_skill_similarity`, `inter_plugin_similarity`, and, when present, `privileges`, `hook_risk`, `cve_summary`, `validator_parity`, and `endpoint_resolution` | `tier3.plugin_provenance`, `tier3.integration`, the statistics blocks, and `plugin_signals_summary` per agent. `severity_counts.critical` also counts each plugin-attributable canary leak |
 | Markdown | `## Plugin` with `### Plugin manifests` (when there is more than one), `### Dependency resolution`, `### Component inventory`, `### MCP pinning`, `### Context cost`, `### Subagent, command, and skill privileges`, `### Hook risk`, `### Dependency CVE audit`, `### Claude plugin validate parity`, `### Endpoint DNS and redirect checks`, and the Tier 2 catalog similarity subsections | `### Plugin Component Coverage` plus a compact Integration and statistics summary, `### Canary Exfiltration`, `### Plugin Hook Census (advisory)`, and `### MCP Proof (advisory)` |
-| HTML | A plugin card in the Tier 1 tab: overview, plugin manifests (when there is more than one), dependency resolution, component inventory, unsupported types, MCP pinning, context cost, subagent and command privileges, hook risk, dependency CVE audit, validator parity, endpoint checks, and catalog similarity | The Tier 3 overview adds these sections: INCOMPLETE callout, **Plugin Component Coverage**, **Plugin Dependency Completeness**, **Integration (Plugin Composition)** with lift modes or an explicit **INCONCLUSIVE — Integration was not measured** block, **Plugin Statistics**, **Plugin Signals** (advisory), **Canary Exfiltration**, **Plugin Hook Census**, and **MCP Proof** |
+| HTML | A plugin card in the Tier 1 tab: overview, plugin manifests (when there is more than one), dependency resolution, component inventory, unsupported types, MCP pinning, context cost, subagent and command privileges, hook risk, dependency CVE audit, validator parity, endpoint checks, and catalog similarity | The Tier 3 overview adds these sections: INCOMPLETE callout, **Plugin Component Coverage**, **Plugin Dependency Completeness**, **Integration (Bundle Lift)** with lift modes or an explicit **INCONCLUSIVE — Integration was not measured** block, **Plugin Statistics**, **Plugin Signals** (advisory), **Canary Exfiltration**, **Plugin Hook Census**, and **MCP Proof** |
 | SARIF | `runs[0].properties.plugin` holds the plugin summary. Each result that belongs to an inventoried component gets `properties.pluginComponent`: the component the finding names (`metadata.mcp_server`, `metadata.plugin_component`, or the declared ref) wins, then the path. A relative or absolute target path gives the same result. A path that only points at a manifest or at a file several components share attributes to no component | A plugin-attributable canary leak is an `AGENT_EVAL/canary_exfiltration` error result. A failed Tier 3 run sets `executionSuccessful: false` with an error notification; a skipped or INCOMPLETE run adds a warning notification |
 | CLI | Plugin summary lines, including privilege, hook, CVE audit, parity, and endpoint summaries | Coverage, Integration with its interval, statistics, signal summaries, canary results, the hook census, and the MCP proof |
 

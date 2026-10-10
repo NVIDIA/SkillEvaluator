@@ -93,6 +93,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Reports call the plugin-minus-member-skills lift the Bundle lift (it was the
+  Integration lift) and say that it includes the plugin's rules, MCP servers and
+  wrapper, not only how the parts coordinate. JSON keys are unchanged. The
+  Integration block also reports the same lift on `cross_component` cases and on
+  all other cases (`by_case_type`), report-only.
 - Tier 3 `accuracy`, `goal_accuracy`, and `behavior_check` are now not
   applicable (N/A) instead of a fabricated 1.0 when an eval case has no
   `ground_truth` or `expected_behavior`; N/A metrics are left out of overall

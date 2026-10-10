@@ -551,8 +551,13 @@ that Integration was skipped. Integration modes require the baseline and cannot
 be combined with `--skip-baseline`. Native Harbor-only sources remain valid for
 effectiveness but do not establish composition evidence by themselves.
 
-The Integration verdict classifies the plugin-minus-member-skills lift with
-±0.05 bands and records that band as `point_verdict`. The reported verdict uses
+Reports call the plugin-minus-member-skills lift the Bundle lift. Bundle lift =
+full plugin minus its skills alone. It includes the plugin's rules, MCP servers
+and wrapper, not only how the parts coordinate. The Integration block also
+splits it into `cross_component` cases and all other cases (`by_case_type`,
+report-only).
+
+The Integration verdict classifies the Bundle lift with ±0.05 bands and records that band as `point_verdict`. The reported verdict uses
 the whole paired case bootstrap 95% interval: real when it clears +0.05,
 negative when it stays below -0.05, and cosmetic when it lies inside the band,
 so a tight interval around zero is cosmetic, not inconclusive. It reports

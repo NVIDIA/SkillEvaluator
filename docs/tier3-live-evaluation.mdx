@@ -539,8 +539,8 @@ Plugin baselines are controlled with `--lift-mode`:
 
 | Mode | Comparison |
 | --- | --- |
-| `effectiveness` | Coordinated plugin versus no plugin; default |
-| `integration` | Coordinated plugin versus its member skills staged individually |
+| `effectiveness` | Full plugin versus no plugin; default |
+| `integration` | Full plugin versus its member skills staged individually (the Bundle lift) |
 | `both` | Effectiveness plus a third, report-only sum-of-parts arm |
 
 Integration is only meaningful when the dataset contains composition evidence:
@@ -553,8 +553,11 @@ effectiveness but do not establish composition evidence by themselves.
 
 Reports call the plugin-minus-member-skills lift the Bundle lift. Bundle lift =
 full plugin minus its skills alone. It includes the plugin's rules, MCP servers
-and wrapper, not only how the parts coordinate. The Integration block also
-splits it into `cross_component` cases and all other cases (`by_case_type`,
+and wrapper, not only how the parts coordinate. Reports label its verdicts
+Real bundle lift, Cosmetic bundling and Negative bundle lift; the JSON values
+(`real_integration`, `cosmetic_bundling`, `negative_integration`) are
+unchanged. The Integration block also splits it into the cross-component cases
+(the composition evidence above) and all other cases (`by_case_type`,
 report-only).
 
 The Integration verdict classifies the Bundle lift with ±0.05 bands and records that band as `point_verdict`. The reported verdict uses

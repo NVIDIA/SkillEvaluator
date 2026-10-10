@@ -862,9 +862,10 @@ def build_agent_statistics(
     interval compares the plugin with its parts, so it is filed under
     ``integration`` and no effectiveness interval exists.
 
-    With ``cross_component_case_ids`` (a plugin run), the integration interval
-    also carries ``by_case_type``: the same lift on cross-component cases and
-    on all other cases (:func:`lift_by_case_type`).
+    With ``cross_component_case_ids`` (a plugin run whose staged cases were
+    read), the integration interval also carries ``by_case_type``: the same
+    lift on cross-component cases and on all other cases
+    (:func:`lift_by_case_type`). ``None`` records no split.
     """
     with_arm = arms.get(ARM_WITH)
     without_arm = arms.get(ARM_WITHOUT)

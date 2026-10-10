@@ -59,10 +59,10 @@ def test_failed_no_plugin_trial_keeps_integration_and_a_partial_effectiveness_in
     effectiveness_row = next(line for line in card.splitlines() if "Plugin lift (plugin vs. no plugin)" in line)
     assert "Partial run, not final: +45 points" in effectiveness_row
     assert "partial: 6 of 6 cases; did not complete: Baseline (no plugin)" in effectiveness_row
-    assert "Bundle lift (plugin vs. its skills alone) | Real integration, +20 points" in card
+    assert "Bundle lift (plugin vs. its skills alone) | Real bundle lift, +20 points" in card
 
     report = markdown(built)
-    assert "**Real integration:** plugin 0.85 vs sum-of-parts 0.65 (bundle lift +0.20" in report
+    assert "**Real bundle lift:** plugin 0.85 vs sum-of-parts 0.65 (bundle lift +0.20" in report
     assert "produced no comparable score" not in report
 
 

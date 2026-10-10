@@ -68,9 +68,13 @@ INTEGRATION_VERDICT_INCONCLUSIVE = "inconclusive"
 _INTEGRATION_REAL_THRESHOLD = 0.05
 _INTEGRATION_NEGATIVE_THRESHOLD = -0.05
 _INTEGRATION_INTERPRETATION = {
-    INTEGRATION_VERDICT_REAL: "The coordinated plugin measurably outperforms its member components alone.",
-    INTEGRATION_VERDICT_COSMETIC: "The plugin performs about the same as its member components alone.",
-    INTEGRATION_VERDICT_NEGATIVE: "The plugin underperforms its member components alone; inspect coordination overhead.",
+    # The Bundle lift includes the plugin's rules, MCP servers and wrapper, so no sentence credits coordination alone.
+    INTEGRATION_VERDICT_REAL: "The full plugin measurably outperforms its member skills alone.",
+    INTEGRATION_VERDICT_COSMETIC: "The plugin performs about the same as its member skills alone.",
+    INTEGRATION_VERDICT_NEGATIVE: (
+        "The plugin underperforms its member skills alone; inspect what it adds (rules, MCP servers, wrapper) "
+        "and how its parts coordinate."
+    ),
     INTEGRATION_VERDICT_INCONCLUSIVE: "The sum-of-parts comparison did not produce complete, conclusive evidence.",
 }
 _LIFT_MODES = ("effectiveness", "integration", "both")

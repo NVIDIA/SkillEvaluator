@@ -1165,6 +1165,24 @@ def plugin_case_spec(entry: Any) -> dict[str, Any]:
     return spec
 
 
+def is_cross_component_case(entry: Any, member_skills: Iterable[str]) -> bool:
+    """Whether a case can show the plugin's parts working together.
+
+    A cross-component case is marked ``cross_component: true`` and names two or
+    more of the plugin's member skills in ``expected_skills`` (compared without
+    case or surrounding spaces). The dataset's cross-component count, the
+    Integration readiness gate and the Bundle lift split by case type all use
+    this one rule, so a report never shows two different counts.
+    """
+    if not isinstance(entry, Mapping) or entry.get("cross_component") is not True:
+        return False
+    expected = entry.get("expected_skills")
+    if not isinstance(expected, list):
+        return False
+    members = {str(name).strip().casefold() for name in member_skills}
+    return len({str(name).strip().casefold() for name in expected} & members) >= 2
+
+
 # =============================================================================
 # Collector context
 # =============================================================================
@@ -1225,8 +1243,9 @@ class PluginSignalsContext:
     # Agent -> the plugin LSP servers its with-plugin arm stages natively (Claude Code's ``.lsp.json``),
     # each with the file extensions its ``extensionToLanguage`` maps.
     agent_lsp_servers: Mapping[str, Mapping[str, tuple[str, ...]]] = field(default_factory=dict)
-    # Ids of the cases marked ``cross_component: true``; the bundle lift is also reported on them alone.
-    cross_component_cases: frozenset[str] = frozenset()
+    # Ids of the cross-component cases (:func:`is_cross_component_case`); the Bundle lift is also
+    # reported on them alone. ``None`` when no staged case was read, so no split is recorded.
+    cross_component_cases: frozenset[str] | None = None
 
     def arm_enabled(self, arm: str) -> bool:
         if arm in {ARM_WITH, ARM_SUM_OF_PARTS}:
@@ -1316,8 +1335,10 @@ def build_plugin_signals_context(
     types its with-plugin arm does not stage, and ``agent_lsp_servers`` to the
     LSP servers its with-plugin arm stages (``{server: extensions}``).
     """
+    members = _clean_names(member_skills)
     cases: dict[str, Mapping[str, Any]] = {}
     cross_component: set[str] = set()
+    read_case = False
     for count, entry in enumerate(entries):
         if count >= MAX_CONTEXT_CASES:
             break
@@ -1326,7 +1347,8 @@ def build_plugin_signals_context(
         case_id = entry.get("id")
         if not isinstance(case_id, str) or not case_id.strip() or case_id in cases:
             continue
-        if entry.get("cross_component") is True:
+        read_case = True
+        if is_cross_component_case(entry, members):
             cross_component.add(case_id)
         spec = plugin_case_spec(entry)
         if spec:
@@ -1334,7 +1356,7 @@ def build_plugin_signals_context(
     declared_subagents = _clean_names(subagents)
     wrappers = _clean_names(wrapper_skills)
     return PluginSignalsContext(
-        member_skills=_clean_names(member_skills),
+        member_skills=members,
         mcp_servers=_clean_names(mcp_servers),
         wrapper_skills=wrappers,
         cases=cases,
@@ -1358,7 +1380,8 @@ def build_plugin_signals_context(
             for agent, value in (agent_lsp_servers or {}).items()
             if isinstance(agent, str) and (servers := _clean_lsp_servers(value))
         },
-        cross_component_cases=frozenset(cross_component),
+        # No staged case read: the split is not recorded, which is not the same as zero cases.
+        cross_component_cases=frozenset(cross_component) if read_case else None,
     )
 
 
@@ -4764,6 +4787,7 @@ __all__ = [
     "build_plugin_signals_context",
     "compute_plugin_signals",
     "declared_mcp_server_matcher",
+    "is_cross_component_case",
     "match_declared_mcp_server",
     "plugin_case_spec",
     "summarize_plugin_signals",

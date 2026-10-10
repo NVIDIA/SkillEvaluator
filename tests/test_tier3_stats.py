@@ -1160,15 +1160,19 @@ def test_integration_block_carries_the_split_without_changing_the_verdict() -> N
 def test_plugin_signals_context_records_the_cross_component_case_ids() -> None:
     from skillevaluator.tier3.eval_core.plugin_signals import build_plugin_signals_context
 
+    both = ["loader", "summarizer"]
     context = build_plugin_signals_context(
+        member_skills=both,
         entries=[
-            {"id": "a", "cross_component": True},
-            {"id": "b", "cross_component": "true"},
-            {"id": "c"},
-            {"cross_component": True},
-        ]
+            {"id": "a", "cross_component": True, "expected_skills": both},
+            {"id": "b", "cross_component": "true", "expected_skills": both},
+            {"id": "c", "expected_skills": both},
+            {"id": "d", "cross_component": True, "expected_skills": ["loader"]},
+            {"cross_component": True, "expected_skills": both},
+        ],
     )
 
+    # The same rule as the dataset's cross-component count: the flag and two or more member skills.
     assert context.cross_component_cases == frozenset({"a"})
 
 
@@ -1181,7 +1185,10 @@ def test_collector_reports_the_split_for_a_plugin_run(tmp_path: Path) -> None:
     _write_job(jobs, "sumofparts", dict.fromkeys(CASES, 0.7))
     context = build_plugin_signals_context(
         member_skills=["loader", "summarizer"],
-        entries=[{"id": case, "cross_component": index < 2} for index, case in enumerate(CASES)],
+        entries=[
+            {"id": case, "cross_component": index < 2, "expected_skills": ["loader", "summarizer"]}
+            for index, case in enumerate(CASES)
+        ],
     )
 
     agent = _collect_three_arms(tmp_path, plugin_signals=context)["agents"]["opencode"]

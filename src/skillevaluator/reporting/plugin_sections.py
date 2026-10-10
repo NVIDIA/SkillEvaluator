@@ -106,10 +106,11 @@ _CASE_TYPE_LABELS = (("cross_component", "cross-component"), ("other", "other"))
 _PRECISION_CLASSES = {"adequate": "ok", "low": "warn", "insufficient": "fail"}
 _INTEGRATION_LIFT_MODES = frozenset({"integration", "both"})
 _LIFT_MODE_NAMES = _INTEGRATION_LIFT_MODES | {"effectiveness"}
+# Human labels of the Bundle lift verdicts; the JSON values keep their ``*_integration`` names.
 _INTEGRATION_VERDICTS = {
-    "real_integration": ("Real integration", "ok"),
+    "real_integration": ("Real bundle lift", "ok"),
     "cosmetic_bundling": ("Cosmetic bundling", "warn"),
-    "negative_integration": ("Negative integration", "fail"),
+    "negative_integration": ("Negative bundle lift", "fail"),
     "inconclusive": ("Inconclusive", "warn"),
 }
 _SIGNAL_SECTIONS = (

@@ -539,7 +539,7 @@ def test_html_tier3_measured_integration_shows_ci_and_point_verdict(tmp_path: Pa
     html = HTMLReporter(include_timestamp=False).render_all([result])
 
     block = element_text(html, "tier3-integration") or ""
-    assert "Inconclusive point estimate: Real integration 0.80 0.65 +0.15" in block
+    assert "Inconclusive point estimate: Real bundle lift 0.80 0.65 +0.15" in block
     assert "[-0.05, +0.30] precision: insufficient CI includes zero" in block
     assert "loader summarizer" in block
     assert element_text(html, "tier3-integration-inconclusive") is None
@@ -587,7 +587,7 @@ def test_every_report_format_names_the_bundle_lift_and_shows_the_case_type_split
     assert _SPLIT_LINE in markdown
 
     cli = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
-    assert "Integration: REAL INTEGRATION (bundle lift +0.18)" in cli
+    assert "Integration: REAL BUNDLE LIFT (bundle lift +0.18)" in cli
     assert _BUNDLE_LIFT_SENTENCE in cli
     assert _SPLIT_LINE in cli
 

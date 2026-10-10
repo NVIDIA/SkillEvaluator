@@ -815,8 +815,10 @@ class BenchmarkReporter(ReporterBase):
                 label += f" — {entry['agent']}"
             if entry and entry["measured"]:
                 if entry.get("by_case_type"):
-                    scope = f"{entry['agent']}: " if entry.get("agent") and len(entries) > 1 else ""
-                    splits.extend([_md_cell(f"{scope}{entry['by_case_type']}", private_labels), ""])
+                    # Below the table, the line names its lift (and agent) itself.
+                    scope = f" — {entry['agent']}" if entry.get("agent") and len(entries) > 1 else ""
+                    split = f"{BUNDLE_LIFT_LABEL} by case type{scope}: {entry['by_case_type']}"
+                    splits.extend([_md_cell(split, private_labels), ""])
                 lift = entry.get("lift_value")
                 result = f"{entry['verdict_label']}, {_format_points(lift) if lift is not None else 'lift n/a'}"
                 # The view's Integration interval already falls back to the statistics block.

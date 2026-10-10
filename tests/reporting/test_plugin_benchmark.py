@@ -125,7 +125,7 @@ def test_complete_plugin_card(tmp_path: Path) -> None:
         "| \\[-2, +55\\] points (95% CI); precision low; CI includes zero |"
     ) in rendered
     assert (
-        "| Bundle lift (plugin vs. its skills alone) | Real integration, +18 points "
+        "| Bundle lift (plugin vs. its skills alone) | Real bundle lift, +18 points "
         "| \\[+6, +31\\] points (95% CI); precision adequate |"
     ) in rendered
     assert "## Component Coverage" in rendered

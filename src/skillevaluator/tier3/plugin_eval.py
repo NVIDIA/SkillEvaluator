@@ -120,7 +120,7 @@ from skillevaluator.plugin_formats import (
 )
 from skillevaluator.plugin_mcp import mcp_pinning_summary
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries, normalize_dataset_entries
-from skillevaluator.tier3.eval_core.plugin_signals import validate_plugin_case_fields
+from skillevaluator.tier3.eval_core.plugin_signals import is_cross_component_case, validate_plugin_case_fields
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
 
 # The generated with-plugin files the Harbor adapter reads (and their name cap).
@@ -766,14 +766,8 @@ def _cross_component_case_count(dataset_cases: list[dict[str, Any]], member_skil
     arm. Native Harbor sources can be valid for effectiveness without carrying
     this structured composition metadata.
     """
-    member_names = {skill.name.strip().casefold() for skill in member_skills}
-    return sum(
-        1
-        for case in dataset_cases
-        if case.get("cross_component") is True
-        and isinstance(case.get("expected_skills"), list)
-        and len({str(name).strip().casefold() for name in case["expected_skills"]} & member_names) >= 2
-    )
+    member_names = [skill.name for skill in member_skills]
+    return sum(1 for case in dataset_cases if is_cross_component_case(case, member_names))
 
 
 def _planned_agents(agents: str | Sequence[str] | None) -> list[str] | None:

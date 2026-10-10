@@ -1927,16 +1927,19 @@ keep their names (`integration`, `integration_lift`,
 baseline, so they cannot be combined with `--skip-baseline`.
 
 **Split by case type.** The Integration block also reports the Bundle lift on
-two groups of the same paired cases, in `by_case_type`: the cases marked
-`cross_component: true`, which need several member skills together, and all
-other cases. A lift that shows up mostly on the other cases is more likely the
-plugin's extra rules and tools than coordination. Each group has `n`, `lift`,
-`ci_low`, `ci_high`, and `reason`, from the same paired case bootstrap; a group
-with fewer than 5 pairs gets only the point estimate and a reason. The
-case-weighted mean of the two groups equals the Bundle lift. Reports show one
-line, for example "On cross-component cases: +0.31 (n=6). On other cases:
-+0.04 (n=4)." The split is report-only and never changes a verdict, band, or
-exit code.
+two groups of the same paired cases, in `by_case_type`: the cross-component
+cases, marked `cross_component: true` with two or more member skills in
+`expected_skills` (the same rule as the dataset's cross-component count), and
+all other cases. A lift that shows up mostly on the other cases is more likely
+the plugin's extra rules and tools than coordination. Each group has `n`,
+`lift`, `ci_low`, `ci_high`, and `reason`, from the same paired case bootstrap;
+a group with fewer than 5 pairs gets only the point estimate and a reason. The
+case-weighted mean of the two groups equals the Bundle lift, up to rounding to
+four decimals. Reports show one line, for example "On cross-component cases:
++0.31 (n=6). On other cases: +0.04 (n=4)."; `BENCHMARK.md` starts it with
+"Bundle lift by case type:". A run that could not read its staged cases records
+no split rather than zero cross-component cases. The split is report-only and
+never changes a verdict, band, or exit code.
 
 **One lift, one basis.** The arm without the plugin has no skill to discover or
 route to, so the verifier records `skill_execution` and `skill_efficiency` as
@@ -2284,11 +2287,13 @@ The Integration block is advisory and report-only. It never changes the main
 Tier 3 score, verdict, or exit code. The Bundle lift is plugin minus
 member skills, classified by fixed bands and recorded as `point_verdict`:
 
-| Bundle lift | `point_verdict` | Read it as |
-| --- | --- | --- |
-| ≥ +0.05 | `real_integration` | The full plugin measurably outperforms its members alone |
-| between −0.05 and +0.05 | `cosmetic_bundling` | The plugin performs about the same as its members alone |
-| ≤ −0.05 | `negative_integration` | The plugin underperforms its members; inspect coordination overhead |
+| Bundle lift | `point_verdict` | Report label | Read it as |
+| --- | --- | --- | --- |
+| ≥ +0.05 | `real_integration` | Real bundle lift | The full plugin measurably outperforms its member skills alone |
+| between −0.05 and +0.05 | `cosmetic_bundling` | Cosmetic bundling | The plugin performs about the same as its member skills alone |
+| ≤ −0.05 | `negative_integration` | Negative bundle lift | The plugin underperforms its member skills alone; inspect what it adds (rules, MCP servers, wrapper) and how its parts coordinate |
+
+The JSON values keep their names; only the labels in the reports changed.
 
 The reported `verdict` uses the whole paired case bootstrap 95% interval, not
 just the point: `real_integration` when the interval clears +0.05,

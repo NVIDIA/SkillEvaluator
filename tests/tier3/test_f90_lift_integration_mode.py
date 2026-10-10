@@ -76,7 +76,7 @@ def test_legacy_members_lift_is_never_reported_as_skill_lift(tmp_path: Path) -> 
     card = benchmark(built)
     assert "| Overall | 64% → 85% (+21 points) |" in card
     assert "| Plugin lift (plugin vs. no plugin) | Not measured" in card
-    assert "Real integration, +21 points" in card
+    assert "Real bundle lift, +21 points" in card
 
 
 def test_older_legacy_runs_are_refiled_under_integration(tmp_path: Path) -> None:

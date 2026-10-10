@@ -74,6 +74,7 @@ from skillevaluator.plugin_component_risk import (
     analyze_agent,
     analyze_command,
     analyze_skill,
+    component_finding,
     hook_dialect,
     hook_risk_summary,
     is_broad_allow_rule,
@@ -118,6 +119,8 @@ from skillevaluator.utils.secure_fs import (
     stat_is_link_or_reparse,
 )
 from skillevaluator.utils.structured_data import (
+    MAX_STRUCTURED_COLLECTION_ITEMS,
+    MAX_STRUCTURED_SCALAR_CHARS,
     StructuredDataError,
     StructuredDataLimitError,
     load_bounded_json,
@@ -957,6 +960,8 @@ class _Markdown:
     description: str | None
     body: str
     frontmatter: dict[str, Any]
+    # Why frontmatter over a parser limit was not read; its fields are unknown, not absent.
+    frontmatter_error: str | None = None
 
 
 # Claude Code's lenient frontmatter retry: a ``key: value`` line whose plain
@@ -1001,15 +1006,18 @@ def _quote_lenient_values(raw: str) -> str:
 
 
 def _load_frontmatter(raw: str) -> Any:
-    """Bounded YAML frontmatter, with Claude Code's lenient retry when strict YAML rejects it."""
+    """Bounded YAML frontmatter, with Claude Code's lenient retry when strict YAML rejects it.
+
+    A key written twice keeps its last value, as in Claude Code.
+    """
     if not raw.strip():
         return {}
     try:
-        return load_bounded_yaml(raw)
+        return load_bounded_yaml(raw, last_key_wins=True)
     except StructuredDataLimitError:
         raise
     except (StructuredDataError, ValueError):
-        return load_bounded_yaml(_quote_lenient_values(raw))
+        return load_bounded_yaml(_quote_lenient_values(raw), last_key_wins=True)
 
 
 def parse_markdown(text: str) -> _Markdown:
@@ -1018,7 +1026,10 @@ def parse_markdown(text: str) -> _Markdown:
     Frontmatter that strict YAML rejects is read again the way Claude Code
     reads it (:func:`_quote_lenient_values`), so a value such as ``Deploy:
     runs the script`` does not hide the fields after it. Frontmatter that
-    still fails to parse gives no fields, as in Claude Code.
+    still fails to parse gives no fields, as in Claude Code. Frontmatter over a
+    parser limit (a 65,536-character value, 1,024 list or mapping items) gives
+    no fields and a ``frontmatter_error``: Claude Code still reads it, so its
+    grants are unknown and the caller must fail closed.
     """
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
@@ -1029,6 +1040,8 @@ def parse_markdown(text: str) -> _Markdown:
             body = "\n".join(lines[index + 1 :]).strip()
             try:
                 data = _load_frontmatter(raw)
+            except StructuredDataLimitError as exc:
+                return _Markdown(None, None, body, {}, frontmatter_error=str(exc))
             except (StructuredDataError, ValueError, RecursionError):
                 return _Markdown(None, None, body, {})
             if not isinstance(data, dict):
@@ -1700,7 +1713,11 @@ class _Builder:
         parsed = parse_markdown(text)
         # Claude Code pre-approves a skill's allowed-tools and registers its frontmatter hooks while it is active.
         self._privileges(
-            component, parsed.frontmatter, self.reader.display(manifest_rel), source_file=manifest_rel.as_posix()
+            component,
+            parsed.frontmatter,
+            self.reader.display(manifest_rel),
+            source_file=manifest_rel.as_posix(),
+            frontmatter_error=parsed.frontmatter_error,
         )
         component.cost = CostRow(
             "skill",
@@ -1964,7 +1981,9 @@ class _Builder:
         component = self._add(Component(component_type, name, origin, rel.as_posix(), _TYPE_SUPPORT[component_type]))
         if parsed is not None:
             component.cost = _markdown_cost(component_type, component.name, parsed)
-            self._privileges(component, parsed.frontmatter, self.reader.display(rel))
+            self._privileges(
+                component, parsed.frontmatter, self.reader.display(rel), frontmatter_error=parsed.frontmatter_error
+            )
 
     def _command_map(self, commands: dict[str, Any]) -> None:
         """The object form of ``commands``: each entry has a ``source`` file or folder, or inline ``content`` text."""
@@ -2037,7 +2056,13 @@ class _Builder:
             "always-on: description; on-demand: command body",
             traits=model_hidden_traits(parsed.frontmatter),
         )
-        self._privileges(component, parsed.frontmatter, self.reader.display(rel), entry=entry)
+        self._privileges(
+            component,
+            parsed.frontmatter,
+            self.reader.display(rel),
+            frontmatter_error=parsed.frontmatter_error,
+            entry=entry,
+        )
 
     def _command_map_folder(self, command_name: str, declared: DeclaredPath, entry: dict[str, Any]) -> None:
         """A ``commands`` map entry whose source is a folder: one command per Markdown file directly in it.
@@ -2082,10 +2107,26 @@ class _Builder:
         display: str,
         *,
         source_file: str | None = None,
+        frontmatter_error: str | None = None,
         **kwargs: Any,
     ) -> None:
         if (component.type, component.name, component.path) in self._privilege_keys:
             return
+        if frontmatter_error is not None and component.type in {"agent", "command", "skill"}:
+            # Fail closed: Claude Code still reads this frontmatter, so a grant in it applies unseen.
+            self.inventory.findings.append(
+                component_finding(
+                    Severity.HIGH,
+                    "plugin_component_unreadable",
+                    f"{component.type} '{component.name}' frontmatter is over the parser limits "
+                    f"({frontmatter_error}), so its tool grants and permission settings could not be checked; "
+                    "Claude Code still reads them",
+                    display,
+                    f"Keep each frontmatter value under {MAX_STRUCTURED_SCALAR_CHARS} characters and each list "
+                    f"or mapping under {MAX_STRUCTURED_COLLECTION_ITEMS} items.",
+                    component=(component.type, component.name),
+                )
+            )
         if component.type == "agent":
             plugin_name = self.manifest.get("name") if self.manifest is not None else None
             record, findings = analyze_agent(

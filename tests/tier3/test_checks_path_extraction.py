@@ -372,8 +372,7 @@ def test_check_tool_efficiency_counts_claude_code_read_as_productive():
     ]
     result = check_tool_efficiency(tool_calls, "api-caller", "call_api.py")
     assert result["score"] == 1.0  # both calls productive
-    assert result["details"]["productive"] == 2
-    assert result["details"]["wasted"] == 0
+    assert result["reason"] == "2/2 productive calls (100%)"
 
 
 def test_check_tool_efficiency_counts_codex_exec_command_cmd_as_productive():
@@ -388,8 +387,7 @@ def test_check_tool_efficiency_counts_codex_exec_command_cmd_as_productive():
     result = check_tool_efficiency(tool_calls, "sandbox-smoke")
 
     assert result["score"] == 1.0
-    assert result["details"]["productive"] == 1
-    assert result["details"]["wasted"] == 0
+    assert result["reason"] == "1/1 productive calls (100%)"
 
 
 def test_check_tool_efficiency_handles_non_dict_action_input():

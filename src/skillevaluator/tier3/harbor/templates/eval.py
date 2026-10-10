@@ -12359,6 +12359,10 @@ def check_error_recovery(tool_calls, expected_script=None):
             "agent_faults": 0,
         }
 
+    # Same list as eval_core/checks.py. No "timeout": passing output can hold it
+    # ("timeout: 300.0s" from pytest-timeout). No "connectionrefused": Python's
+    # ConnectionRefusedError already matches "error". A failure that prints neither
+    # word nor an exit code (curl's "Connection refused") is not seen as one.
     error_kw = [
         "error",
         "traceback",

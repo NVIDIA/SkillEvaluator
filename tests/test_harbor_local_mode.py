@@ -34,6 +34,7 @@ from harbor.models.trial.paths import TrialPaths
 
 from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3.harbor import (
+    DOCKER_AGENT_IMPORT_PATHS,
     ENV_MODE_LOCAL,
     HARBOR_ENV_MODES,
     HARBOR_NATIVE_ENV_MODES,
@@ -496,13 +497,14 @@ def test_build_command_wires_strict_read_policy(monkeypatch: pytest.MonkeyPatch)
     assert "strict_reads=true" in " ".join(cmd)
 
 
-def test_build_command_docker_mode_uses_secure_import_path() -> None:
-    cmd = build_harbor_run_command(dataset_path="/tmp/ds", agent="codex", job_name="j", env_mode="docker")
+@pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
+def test_build_command_docker_mode_uses_secure_import_path(agent: str) -> None:
+    cmd = build_harbor_run_command(dataset_path="/tmp/ds", agent=agent, job_name="j", env_mode="docker")
     assert "--agent-import-path" not in cmd
     assert "--environment-import-path" not in cmd
     assert "-a" not in cmd
     assert cmd.count("--agent") == 1
-    assert cmd[cmd.index("--agent") + 1] == "codex"
+    assert cmd[cmd.index("--agent") + 1] == DOCKER_AGENT_IMPORT_PATHS.get(agent, agent)
     assert cmd.count("--env") == 1
     assert cmd[cmd.index("--env") + 1] == SECURE_DOCKER_ENV_IMPORT_PATH
 

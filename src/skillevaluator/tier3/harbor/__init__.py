@@ -32,6 +32,13 @@ LOCAL_AGENT_IMPORT_PATHS = {
     "opencode": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalOpenCode",
 }
 
+# Docker wrappers retain Harbor's installers while avoiding redundant Node/npm
+# packages on the branches that bootstrap their own runtime.
+DOCKER_AGENT_IMPORT_PATHS = {
+    "codex": "skillevaluator.tier3.harbor.installed_agents:SkillEvaluatorCodex",
+    "claude-code": "skillevaluator.tier3.harbor.installed_agents:SkillEvaluatorClaudeCode",
+}
+
 HARBOR_AGENTS_SUPPORTED = frozenset(
     {
         "claude-code",
@@ -61,6 +68,7 @@ __all__ = [
     "AGENT_ALIASES",
     "DEFAULT_ENV_MODE",
     "DEFAULT_LLM_VERIFIER_TIMEOUT_SEC",
+    "DOCKER_AGENT_IMPORT_PATHS",
     "ENV_MODE_LOCAL",
     "HARBOR_AGENTS",
     "HARBOR_AGENTS_EXPERIMENTAL",

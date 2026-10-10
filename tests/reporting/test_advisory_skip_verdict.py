@@ -51,7 +51,7 @@ def test_advisory_skip_is_non_blocking_in_markdown() -> None:
     assert "**Status:** ✅ PASSED" in output
     assert "| Validator Results | 1 |" in output
     assert "| Validators Run |" not in output
-    assert "| ⏭️ Advisory skips | 1 |" in output
+    assert "| ⏭️ Skipped | 1 |" in output
     assert "### ⏭️ SKIPPED AGENT_EVAL" in output
     assert "❌ FAILED" not in output
 

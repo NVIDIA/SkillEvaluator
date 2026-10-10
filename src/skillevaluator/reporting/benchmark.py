@@ -33,6 +33,7 @@ from skillevaluator.reporting.run_status import (
     RunStatus,
     Status,
     TierStatus,
+    _finding_is_error,
     _publication_skipped,
     _tier3_not_run,
     resolve_run_status,
@@ -1244,7 +1245,10 @@ def _fail_lines(
             ),
             "",
         ]
-    gated = " `--block-on-agent-eval` made Tier 3 gate this run." if reasons and run_status.tiers[3].blocking else ""
+    # Say Tier 3 gated the run only when it failed the exit gate, not merely because the flag was set.
+    failed_gate = {id(result) for result in run_status.failed}
+    tier3_failed_gate = any(id(result) in failed_gate for result in run_status.tiers[3].results)
+    gated = " `--block-on-agent-eval` made Tier 3 gate this run." if reasons and tier3_failed_gate else ""
     others_pass = all(passes_required_gate(result) for tier in (1, 2) for result in run_status.tiers[tier].results)
     # A gated Tier 3 run that never ran fails the gate, the same as in the footer and the terminal summary.
     not_run = [
@@ -1896,11 +1900,6 @@ def _finding_blocks(finding: Finding, result: ValidationResult) -> bool:
     if passes_required_gate(result):
         return False
     return _finding_is_error(finding, result)
-
-
-def _finding_is_error(finding: Finding, result: ValidationResult) -> bool:
-    """CRITICAL and HIGH, or a MEDIUM or LOW that *result* records as an error."""
-    return finding.severity.value in {"critical", "high"} or finding.to_legacy_string() in result.errors
 
 
 def _top_findings(findings: list[Finding], *, limit: int) -> list[Finding]:

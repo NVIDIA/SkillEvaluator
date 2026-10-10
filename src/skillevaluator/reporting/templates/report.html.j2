@@ -4067,12 +4067,18 @@
             ['all', 'pass', 'fail'].forEach(s => document.getElementById('filter-' + s).classList.remove('active'));
             document.getElementById('filter-' + status).classList.add('active');
             let visibleCount = 0;
+            // data-status is the row status: passed, failed, incomplete or skipped. "Failed Only" keeps every
+            // validator that did not pass and was not skipped.
+            const matches = el => {
+                const value = el.getAttribute('data-status');
+                return status === 'all' || (status === 'pass' ? value === 'passed' : (value === 'failed' || value === 'incomplete'));
+            };
             cards.forEach(c => {
-                const show = (status === 'all' || c.getAttribute('data-status') === status);
+                const show = matches(c);
                 c.style.display = show ? '' : 'none';
                 if (show) visibleCount++;
             });
-            rows.forEach(r => r.style.display = (status === 'all' || r.getAttribute('data-status') === status) ? '' : 'none');
+            rows.forEach(r => r.style.display = matches(r) ? '' : 'none');
             // Show/hide empty state message
             let emptyMsg = document.getElementById('validator-empty-msg');
             if (!emptyMsg) {

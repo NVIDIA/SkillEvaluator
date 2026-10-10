@@ -43,7 +43,7 @@ from skillevaluator.reporting.base import (
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-    from skillevaluator.models import ValidationResult
+    from skillevaluator.models import Finding, ValidationResult
 
 __all__ = ["RunStatus", "Status", "TierStatus", "is_tier2_validator_name", "resolve_run_status"]
 
@@ -218,11 +218,16 @@ def _tier3_outcome(result: ValidationResult) -> Status:
 
 
 def _has_blocking_finding(result: ValidationResult) -> bool:
-    """A CRITICAL or HIGH finding, or a MEDIUM or LOW one the check records as an error."""
-    return any(
-        finding.severity.value in {"critical", "high"} or finding.to_legacy_string() in result.errors
-        for finding in result.findings
-    )
+    """Whether the result records a blocking finding of its own, not only missing evidence."""
+    return any(_finding_is_error(finding, result) for finding in result.findings)
+
+
+def _finding_is_error(finding: Finding, result: ValidationResult) -> bool:
+    """CRITICAL and HIGH, or a MEDIUM or LOW that *result* records as an error (``fail_on_medium``)."""
+    if finding.severity.value in {"critical", "high"}:
+        return True
+    # merge_with_prefix lists a bundled skill's error as "[skill] [TAG] msg in path"; recognize every form.
+    return any(form in result.errors for form in finding.legacy_string_forms())
 
 
 def _skipped(result: ValidationResult) -> bool:
@@ -345,8 +350,10 @@ def _publication_tier_status(
 
 
 def _publication_skipped(result: ValidationResult) -> bool:
-    """A check BENCHMARK.md counts as skipped: one that recorded a skip, or a Tier 3 run outside the gate that never ran."""
-    return bool(_mapping(result.metadata).get("skipped")) or is_advisory_agent_eval_skip(result)
+    """A check BENCHMARK.md counts as skipped: one that recorded a skip and did not fail, or a Tier 3 run outside the
+    gate that never ran. A check that recorded a skip but failed is a failure, as on every other surface."""
+    skipped = bool(_mapping(result.metadata).get("skipped")) and result.passed
+    return skipped or is_advisory_agent_eval_skip(result)
 
 
 def _advisory_labels(
@@ -404,7 +411,7 @@ class _Tier3Evidence:
         payload = _agent_eval_payload(list(results))
         source = _mapping(payload)
         summary = _mapping(source.get("summary"))
-        verdict = str(source.get("verdict") or summary.get("verdict") or "").lower()
+        verdict = _verdict(source)
         if verdict == "pass" and _tier3_dimension_verdict(payload) == "neutral":
             verdict = "neutral"
         return cls(

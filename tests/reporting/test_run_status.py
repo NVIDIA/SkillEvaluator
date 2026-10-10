@@ -539,3 +539,83 @@ def test_status_invariants(t1: str, t2: str, b2: bool, t3: str, b3: bool) -> Non
         status.plugin,
         tiers(status),
     )
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups: edge cases of the rule, and the reporters that render it
+# ---------------------------------------------------------------------------
+
+
+def test_a_skipped_check_that_failed_is_failed_on_the_card_too() -> None:
+    parity = check("Claude Plugin Validate", skipped=True)
+    parity.add_error("claude plugin validate crashed")
+
+    status = resolve_run_status([check("Plugin Schema"), parity])
+
+    assert status.of(parity) is Status.FAILED
+    assert status.tiers[1].status is Status.FAILED
+    assert status.tiers[1].publication is Status.FAILED
+    assert status.headline is Status.FAILED
+
+
+def test_a_bundled_skills_blocking_medium_finding_outranks_missing_evidence() -> None:
+    skill = ValidationResult(validator_name="Secrets Detection")
+    skill.add_finding(
+        Finding("SECRET", Severity.MEDIUM, "generic-secret", "Possible secret", "SKILL.md"), fail_on_medium=True
+    )
+    merged = ValidationResult(validator_name="Secrets Detection")
+    merged.merge_with_prefix(skill, "my-skill")
+    merged.mark_scan_incomplete("gitleaks")
+    merged.metadata["gating"] = {"tier": 1, "blocking": True}
+    assert merged.errors and merged.errors[0].startswith("[my-skill] ")
+
+    status = resolve_run_status([merged])
+
+    assert status.of(merged) is Status.FAILED
+    assert status.headline is Status.FAILED
+    assert status.missing == ("gitleaks",)
+
+
+def test_a_card_fail_the_gate_never_saw_does_not_claim_tier3_gated_the_run() -> None:
+    from skillevaluator.reporting import BenchmarkReporter
+
+    # The payload's verdict says pass, but its dimension scores say FAIL: the card is stricter than the gate,
+    # which validate decides from the result (it passed, so the run exited 0).
+    agent_eval = gated(complete_plugin_run(verdict="pass", score=0.3), blocking=True)
+    results = [check("Plugin Schema"), agent_eval]
+
+    status = resolve_run_status(results)
+    card = BenchmarkReporter(include_timestamp=False, content_type="plugin", skill_name="demo-plugin").render_all(
+        results
+    )
+
+    assert status.headline is Status.PASSED
+    assert status.publication is Status.FAILED
+    assert "Overall verdict: FAIL" in card
+    assert "made Tier 3 gate this run" not in card
+
+
+def test_markdown_counts_a_skipped_check_as_skipped_and_keeps_its_findings() -> None:
+    from skillevaluator.reporting import MarkdownReporter
+
+    skipped = check("Inter-Skill Deduplication", tier=2, blocking=False, skipped=True, optional=True, low=1)
+
+    output = MarkdownReporter(include_timestamp=False).render_all([check("Plugin Schema"), skipped])
+
+    assert "| ✅ Passed | 1 |" in output
+    assert "| ⏭️ Skipped | 1 |" in output
+    assert "### ⏭️ SKIPPED Inter-Skill Deduplication" in output
+    assert "Inter-Skill Deduplication LOW 0" in output
+
+
+def test_html_filters_match_the_row_statuses() -> None:
+    import re
+
+    from skillevaluator.reporting import HTMLReporter
+
+    html = HTMLReporter(include_timestamp=False).render_all([check("Plugin Schema", high=1), check("Security Scan")])
+
+    statuses = re.findall(r'class="validator-card" id="validator-\d+" data-status="([a-z]+)"', html)
+    assert statuses == ["failed", "passed"]
+    # "Passed Only" and "Failed Only" compare against those same values.
+    assert "status === 'pass' ? value === 'passed' : (value === 'failed' || value === 'incomplete')" in html

@@ -3228,11 +3228,11 @@ Markdown and HTML status, the SARIF `overallStatus` run property, and
 `BENCHMARK.md`. They say `FAIL` when a check found a blocking problem, even if a
 scanner in the same run, or in the same check, did not complete, and they still
 name what did not complete (the JSON `incomplete_scans` lists the scanners).
-They say `INCOMPLETE` only when nothing failed. A skipped check is shown as
-skipped, never as passed. A tier outside the exit gate never changes the
-headline; the reports name it as advisory instead. `BENCHMARK.md` is a
-publication card, so it can be stricter than the headline (Tier 3 evidence is
-publication-required by default), never more lenient.
+They say `INCOMPLETE` only when nothing failed. A skipped check's row, and a
+tier where nothing ran, say `SKIPPED`, never `PASS`. A tier outside the exit
+gate never changes the headline; the reports name it as advisory instead.
+`BENCHMARK.md` is a publication card, so it can be stricter than the headline
+(Tier 3 evidence is publication-required by default), never more lenient.
 
 A Tier 3 run that never ran (for example, Docker is missing) is a failed gate
 when `--block-on-agent-eval` makes Tier 3 gate: every report says `FAIL` and

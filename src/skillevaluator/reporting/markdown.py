@@ -651,8 +651,8 @@ class MarkdownReporter(ReporterBase):
         lines.append(f"| ❌ Failed | {rows.count(Status.FAILED)} |")
         lines.append(f"| ⚠️ Incomplete | {rows.count(Status.INCOMPLETE)} |")
         if rows.count(Status.SKIPPED):
-            # A skipped check did not run, so it is neither passed nor failed; a skip never fails the gate.
-            lines.append(f"| ⏭️ Advisory skips | {rows.count(Status.SKIPPED)} |")
+            # A skipped check did not run, so it is neither passed nor failed.
+            lines.append(f"| ⏭️ Skipped | {rows.count(Status.SKIPPED)} |")
 
         total_errors = sum(r.summary.errors for r in results)
         total_warnings = sum(r.summary.warnings for r in results)
@@ -904,6 +904,9 @@ class MarkdownReporter(ReporterBase):
         elif row is Status.SKIPPED:
             reason = result.metadata.get("skip_reason") or next(iter(result.warnings or result.messages), "")
             lines.append(f"- Skipped: {_markdown_table_cell(reason or 'the check did not run')}")
+            if result.findings:
+                lines.extend(["", f"**Non-blocking findings: {len(result.findings)}**", ""])
+                self._render_findings(result.findings, lines)
         elif result.passed:
             self._render_success(result, lines)
             if result.findings:

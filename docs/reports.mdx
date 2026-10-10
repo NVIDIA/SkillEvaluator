@@ -57,6 +57,10 @@ SARIF notes:
   link) is shown as text and never rendered.
 - For plugins, `properties.pluginComponent` names the component the finding
   belongs to. See [Plugin evaluation](plugin-evaluation.mdx#where-results-are-recorded).
+- `runs[0].properties` carries the run's headline as `overallStatus` (`passed`,
+  `failed`, or `incomplete`, the same as every other report), each tier's
+  status as `tierStatus`, and the reasons as `statusReasons`.
+  `executionSuccessful` only says whether the scanners themselves ran.
 
 ## File naming
 

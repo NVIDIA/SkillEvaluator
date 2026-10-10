@@ -617,6 +617,30 @@ def test_url_query_credential_env_reference_allowed() -> None:
     assert "mcp_url_inline_secret" not in _checks(findings)
 
 
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"command": "npx", "args": ["-y", "@scope/server@1.2.3", "--token", "${user_config.token}"]},
+        {"command": "npx", "args": ["-y", "@scope/server@1.2.3", "--api-key=${user_config.token}"]},
+        {"command": "npx", "args": ["-y", "@scope/server@1.2.3", "--token", "${user_config.a.b}"]},
+        {"command": "npx", "env": {"API_TOKEN": "${user_config.token}"}},
+        {"command": "npx", "env": {"API_TOKEN": "${user_config.token}${SUFFIX}"}},
+        {"url": "https://mcp.example.com/mcp", "headers": {"X-Api-Key": "${user_config.token}"}},
+        {"url": "https://mcp.example.com/mcp", "headers": {"Authorization": "Bearer ${user_config.token}"}},
+        {"url": "https://mcp.example.com/mcp?token=${user_config.token}"},
+        {"url": "https://mcp.example.com/mcp?api_key=${user_config.token}"},
+    ],
+)
+def test_claude_user_config_reference_is_not_an_inline_credential(config) -> None:
+    """Regression: Claude Code fills '${user_config.KEY}' from the plugin's userConfig; it was read as a literal secret."""
+    assert _checks(validate_mcp_server_declaration("s", config, "p.json")) <= {"mcp_field_ignored"}
+
+
+def test_literal_text_next_to_a_user_config_reference_is_still_judged() -> None:
+    config = {"command": "npx", "env": {"API_TOKEN": "rawFAKEvalue0123${user_config.suffix}"}}
+    assert "mcp_inline_secret" in _checks(validate_mcp_server_declaration("s", config, "p.json"))
+
+
 _GITHUB_TOKEN = "ghp_" + "0123456789abcdefghij0123456789abcdef"
 _OPENAI_KEY = "sk-" + "abcdefghijklmnop1234"
 

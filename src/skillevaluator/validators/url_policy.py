@@ -37,9 +37,11 @@ from skillevaluator.utils.redaction import redact_sensitive_text
 # --------------------------------------------------------------------------- #
 # Environment references. Claude Code expands '${NAME}' and '${NAME:-default}' in an MCP server's command,
 # args, env, url, and headers (the default when NAME is unset); hooks and many configs also use '$NAME';
-# Cursor documents '${env:NAME}'. A reference with no default (or an empty one) carries no value of its own.
+# Cursor documents '${env:NAME}'. Claude Code also fills '${user_config.KEY}' with the value the user gives for the
+# plugin's userConfig option KEY. A reference with no default (or an empty one) carries no value of its own.
 _ENV_EXPANSION_RE = re.compile(
     r"\$\{(?P<cursor>env:)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}"
+    r"|\$\{user_config\.(?P<user_config>[A-Za-z0-9_.-]+)\}"
     r"|\$(?P<bare>[A-Za-z_][A-Za-z0-9_]*)"
 )
 # What is left of an Authorization-style value once its references are removed: 'Bearer ${TOKEN}'.

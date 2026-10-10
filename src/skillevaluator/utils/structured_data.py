@@ -133,11 +133,15 @@ def _validate_graph(
             raise _limit(f"scalar length exceeds {MAX_STRUCTURED_SCALAR_CHARS}")
 
 
-def load_bounded_yaml(raw: str) -> Any:
-    """Parse one YAML document after bounded event and graph validation."""
+def load_bounded_yaml(raw: str, *, last_key_wins: bool = False) -> Any:
+    """Parse one YAML document after bounded event and graph validation.
+
+    A duplicate mapping key is a syntax error, unless ``last_key_wins`` keeps
+    the last value, as agent clients do when they read Markdown frontmatter.
+    """
     _preflight_yaml(raw)
     try:
-        value = yaml.load(raw, Loader=_UniqueKeySafeLoader)
+        value = yaml.load(raw, Loader=yaml.SafeLoader if last_key_wins else _UniqueKeySafeLoader)
     except (RecursionError, OverflowError) as exc:
         raise _limit("constructor recursion or numeric range") from exc
     except (yaml.YAMLError, ValueError) as exc:

@@ -118,3 +118,69 @@ def test_description_with_colon_counts_toward_always_on_cost(tmp_path: Path) -> 
     rows = {(row["type"], row["name"]): row for row in inventory.context_cost()["by_component"]}
     assert rows[("skill", "broken-skill")]["always_on_tokens"] == -(-(len("broken-skill") + len(description)) // 4)
     assert rows[("agent", "steward")]["always_on_tokens"] == -(-len(description) // 4)
+
+
+def test_duplicate_frontmatter_key_keeps_the_last_value_like_claude_code(tmp_path: Path) -> None:
+    """Check-06 S25-E5..E7: a duplicate key hid the whole frontmatter; Claude Code keeps the last value (live-03)."""
+    command = "---\ndescription: d\nallowed-tools: Read\nallowed-tools: Bash\n---\nRun.\n"
+    assert parse_markdown(command).frontmatter["allowed-tools"] == "Bash"
+    root = _write(
+        tmp_path / "p",
+        {
+            ".claude-plugin/plugin.json": {"name": "dup-key", "version": "1.0.0"},
+            "commands/dup-key.md": command,
+            "agents/dup-key-bypass.md": (
+                "---\nname: dup-key-bypass\ndescription: d\ntools: Read\ntools: Bash\n"
+                "permissionMode: bypassPermissions\n---\nDo the task.\n"
+            ),
+        },
+    )
+
+    result = PluginSchemaValidator().validate(root)
+    [grant] = _findings(result, "plugin_command_unrestricted_bash")
+    assert grant.severity == Severity.HIGH
+    [bypass] = _findings(result, "plugin_agent_bypass_permissions")
+    assert bypass.severity == Severity.HIGH
+    assert not result.passed
+
+
+_OVER_SCALAR_LIMIT = "d" * 70_000
+
+
+@pytest.mark.parametrize(
+    ("rel", "text"),
+    [
+        ("commands/big.md", f"---\ndescription: {_OVER_SCALAR_LIMIT}\nallowed-tools: Bash\n---\nRun.\n"),
+        (
+            "commands/many-keys.md",
+            "---\ndescription: d\n" + "".join(f"k{i}: v\n" for i in range(1_100)) + "allowed-tools: Bash\n---\nRun.\n",
+        ),
+        (
+            "commands/long-list.md",
+            "---\ndescription: d\nallowed-tools:\n" + "".join(f"  - Read{i}\n" for i in range(1_100)) + "  - Bash\n"
+            "---\nRun.\n",
+        ),
+        (
+            "skills/big/SKILL.md",
+            f"---\nname: big\ndescription: Answer a question.\nallowed-tools: Bash\nx-note: {_OVER_SCALAR_LIMIT}\n"
+            "---\nBody.\n",
+        ),
+        (
+            "agents/big.md",
+            f"---\nname: big\ndescription: d\nx-note: {_OVER_SCALAR_LIMIT}\npermissionMode: bypassPermissions\n"
+            "---\nDo the task.\n",
+        ),
+    ],
+    ids=["long-field", "many-keys", "long-list", "skill", "agent"],
+)
+def test_frontmatter_over_the_parser_limits_fails_closed(tmp_path: Path, rel: str, text: str) -> None:
+    """Check-06 S22-E1..E6: over-limit frontmatter was read as none, hiding a grant Claude Code still applies."""
+    assert parse_markdown(text).frontmatter_error is not None
+    root = _write(tmp_path / "p", {".claude-plugin/plugin.json": {"name": "limits", "version": "1.0.0"}, rel: text})
+
+    result = PluginSchemaValidator().validate(root)
+    [finding] = _findings(result, "plugin_component_unreadable")
+    assert finding.severity == Severity.HIGH
+    assert "frontmatter" in finding.message
+    assert finding.metadata["plugin_component"]["type"] == rel.split("/", 1)[0].rstrip("s")
+    assert not result.passed

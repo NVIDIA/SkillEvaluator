@@ -42,6 +42,12 @@ def test_bounded_yaml_rejects_duplicate_mapping_keys() -> None:
         load_bounded_yaml("name: first\nname: second\n")
 
 
+def test_bounded_yaml_can_keep_the_last_duplicate_key_like_frontmatter_readers() -> None:
+    assert load_bounded_yaml("name: first\nname: second\n", last_key_wins=True) == {"name": "second"}
+    with pytest.raises(StructuredDataLimitError, match=r"scalar"):
+        load_bounded_yaml("name: " + "x" * 70_000, last_key_wins=True)
+
+
 def test_bounded_json_rejects_deep_nesting_and_non_json_syntax() -> None:
     raw = '{"value":' + ("[" * 1_500) + "0" + ("]" * 1_500) + "}"
     with pytest.raises(StructuredDataLimitError, match=r"depth|complex|limit"):

@@ -12,6 +12,8 @@ quotes the line that assigns the token, and that code snippet was copied as is.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from skillevaluator.validators.security import SecurityValidator
@@ -80,4 +82,4 @@ def test_skillspector_snippet_never_carries_a_credential_without_a_token_shape(s
     finding, _is_error = SecurityValidator._convert_skillspector_issue(issue)
 
     assert secret not in (finding.line_content or "")
-    assert "<redacted>" in finding.line_content or "mcp.example.com" in finding.line_content
+    assert re.search(r"<redacted>|mcp\.example\.com", finding.line_content)

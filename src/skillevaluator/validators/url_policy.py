@@ -692,28 +692,50 @@ _ECHOED_CREDENTIAL_ASSIGNMENT_RE = re.compile(
     r"(?i)(\b(?>[A-Z0-9_]*?(?:TOKEN|SECRET|PASSW(?:OR)?D|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY))[A-Z0-9_]*+=)"
     r"(?!\$)[^\s'\"|;&]+"
 )
+# The same names with a quoted value, the way shell, Python, YAML, and JSON lines write one: 'KEY="..."',
+# "API_KEY = '...'", "os.environ['API_KEY']='...'", 'api_token: "..."', '"password": "..."'. The value runs to the
+# matching quote on the same line.
+_ECHOED_QUOTED_CREDENTIAL_RE = re.compile(
+    r"(?i)(\b(?>[A-Z0-9_]*?(?:TOKEN|SECRET|PASSW(?:OR)?D|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY))[A-Z0-9_]*+"
+    r"(?:['\"]\]?)?[ \t]*+[=:][ \t]*+(['\"]))(?!\$)[^'\"\r\n]*+(?=\2)"
+)
+# A WHATWG client reads 'https:user:pw@host' (a special scheme with no slashes) as user information too. The user
+# information stops at the next such scheme, so each scheme is read once ('https:' repeated stays linear).
+_SLASHLESS_USERINFO_RE = re.compile(
+    r"(?i)(?<![a-z0-9+.\-])((?:https?|wss?|ftp):)(?![/\\])"
+    r"(?:(?!(?:https?|wss?|ftp):)[^\s/\\?#@{}'\"<>])*+@"
+)
+# 'user:password@host/path' with no scheme, starting a word (a container image with registry credentials). The
+# '/' after the host keeps 'npm:pkg@1.2.3' and 'mcp:1.2.3@sha256:...' readable; '@scope/pkg' has no user name.
+# Each part stops where the next could start ('=' for a user name, ':' for a password), so the text is read in
+# linear time.
+_SCHEMELESS_USERINFO_RE = re.compile(r"""(?<![^\s'"=])([^\s/@:'"=]++:)[^\s/@:'"]++@(?=[^\s/@'"]++/)""")
 
 
 def redact_secrets(text: str) -> str:
     """``text`` (a command token, spec, or line, or a quoted code snippet) with its credentials removed.
 
-    URL userinfo and queries are dropped (a fragment such as a git ref stays),
-    and known secret shapes (``ghp_...``, ``sk-...``, a JWT), ``Bearer
-    <token>``, the value after a credential-named flag, and a credential-named
-    assignment become ``<redacted>``. The rest stays as written, line breaks
-    included, and the text is not bounded; it is read in linear time, so a long
-    line costs little. Bound it (:func:`report_text`) where a report field
-    shows it.
+    URL userinfo (also in ``https:user:pw@host``) and queries are dropped (a
+    fragment such as a git ref stays), the password of a scheme-less
+    ``user:pw@host/path`` is redacted, and known secret shapes (``ghp_...``,
+    ``sk-...``, a JWT), ``Bearer <token>``, the value after a credential-named
+    flag, and a credential-named assignment, quoted or not, become
+    ``<redacted>``. The rest stays as written, line breaks included, and the
+    text is not bounded; it is read in linear time, so a long line costs
+    little. Bound it (:func:`report_text`) where a report field shows it.
     """
     for _pass in range(_MAX_USERINFO_PASSES):
         stripped = _EMBEDDED_USERINFO_RE.sub(r"\1", text)
         if stripped == text:
             break
         text = stripped
+    text = _SLASHLESS_USERINFO_RE.sub(r"\1", text)
+    text = _SCHEMELESS_USERINFO_RE.sub(r"\1<redacted>@", text)
     text = _without_url_queries(text)
     text = _SECRET_VALUE_RE.sub("<redacted>", text)
     text = _ECHOED_AUTH_VALUE_RE.sub(r"\1\2<redacted>", text)
     text = _ECHOED_CREDENTIAL_FLAG_RE.sub(r"\1<redacted>", text)
+    text = _ECHOED_QUOTED_CREDENTIAL_RE.sub(r"\1<redacted>", text)
     return _ECHOED_CREDENTIAL_ASSIGNMENT_RE.sub(r"\1<redacted>", text)
 
 

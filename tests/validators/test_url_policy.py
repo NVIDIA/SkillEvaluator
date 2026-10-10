@@ -334,6 +334,11 @@ _LONG_RUNS = [
     (("a:", "/", 100_000, "u:pw@h?token=hunter2"), ("a:", "/", 100_000, "h")),
     (("", "--auth", 16_000, "=hunter2"), ("", "--auth", 16_000, "=<redacted>")),
     (("", "TOKEN", 20_000, "=hunter2"), ("", "TOKEN", 20_000, "=<redacted>")),
+    # 'https:user:pw@host', a scheme-less 'user:pw@host/path', and a quoted credential assignment.
+    (("", "https:", 16_000, "u:pw@h/"), ("", "https:", 16_000, "h/")),
+    (("", "=", 100_000, "u:pw@h/x"), ("", "=", 100_000, "u:<redacted>@h/x")),
+    (("", "=a:", 33_000, ""), ("", "=a:", 33_000, "")),
+    (("", "token']=", 12_000, "'hunter2'"), ("", "token']=", 12_000, "'<redacted>'")),
 ]
 
 

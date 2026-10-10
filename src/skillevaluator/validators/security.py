@@ -2702,7 +2702,13 @@ class SecurityValidator(ValidatorBase):
             first = group["first"]
             # A credential is never copied into a report: the message, metadata, and source line show a
             # redacted form, so every report format (JSON, Markdown, HTML, SARIF, CLI, BENCHMARK) stays clean.
-            value = self._shown_pii_value(first["category"], first.get("matched_value"))
+            # A value that its line's redaction removes (the value of 'api_token: "..."') is a credential too,
+            # whatever pattern matched it (a random token can look like a Bitcoin address).
+            line_content = first.get("line_content")
+            shown_line = self._redact_pii_line(line_content, secret_patterns) if line_content else line_content
+            raw_value = first.get("matched_value")
+            credential = bool(raw_value and shown_line and raw_value in line_content and raw_value not in shown_line)
+            value = self._shown_pii_value(first["category"], raw_value, credential=credential)
             occurrences = group["occurrences"]
             severity = first["severity"].upper()
 
@@ -2712,12 +2718,11 @@ class SecurityValidator(ValidatorBase):
                 metadata["matched_value"] = value
                 metadata["occurrence_count"] = len(occurrences)
                 metadata["occurrences"] = [{"file": f, "line": line} for f, line in occurrences]
-                if first["category"] in self._SECRET_PII_CATEGORIES:
+                if credential or first["category"] in self._SECRET_PII_CATEGORIES:
                     metadata["value_redacted"] = True
             if len(occurrences) > 1:
                 message += f" — {len(occurrences)} occurrences ({self._format_occurrences(occurrences)})"
 
-            line_content = first.get("line_content")
             finding = Finding(
                 category="PII",
                 severity=severity,
@@ -2725,7 +2730,7 @@ class SecurityValidator(ValidatorBase):
                 message=message,
                 file_path=group["first_file"],
                 line_number=first["line"],
-                line_content=self._redact_pii_line(line_content, secret_patterns) if line_content else line_content,
+                line_content=shown_line,
                 suggestion=first.get("suggestion"),
                 metadata=metadata,
             )
@@ -2741,9 +2746,12 @@ class SecurityValidator(ValidatorBase):
         return result
 
     @classmethod
-    def _shown_pii_value(cls, category: str, value: str | None) -> str | None:
-        """The matched value for reports: a credential category shows only a public prefix and its length."""
-        if not value or category not in cls._SECRET_PII_CATEGORIES:
+    def _shown_pii_value(cls, category: str, value: str | None, *, credential: bool = False) -> str | None:
+        """The matched value for reports: a credential shows only a public prefix and its length.
+
+        A value counts as a credential by its category, or when ``credential`` says its line holds it as one.
+        """
+        if not value or not (credential or category in cls._SECRET_PII_CATEGORIES):
             return value
         prefix = next((known for known in cls._PUBLIC_SECRET_PREFIXES if value.lower().startswith(known.lower())), "")
         return f"{prefix}…[redacted, {len(value)} characters]"

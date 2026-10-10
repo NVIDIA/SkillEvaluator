@@ -206,6 +206,7 @@ class Verdict:
     headline: str
     fix: list[tuple[str, str]] | None = None
     rerun: str | None = None
+    incomplete: bool = False  # exit 1 because required evidence is missing, not because a check failed
 
 
 class ValidateView:
@@ -445,7 +446,8 @@ class ValidateView:
                 ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 0", MUTED)
             )
             return Panel(body, box=box.ROUNDED, border_style=GREEN, width=self.width, padding=(0, 2))
-        line1 = _pill("✗ FAIL", RED, ink="#1C0605") + Text.assemble(
+        label = "! INCOMPLETE" if verdict.incomplete else "✗ FAIL"
+        line1 = _pill(label, RED, ink="#1C0605") + Text.assemble(
             ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 1", MUTED)
         )
         parts: list = [line1]
@@ -525,6 +527,7 @@ def _is_skipped(result: ValidationResult) -> bool:
 
 
 _VALIDATOR_CHECK_KEYS = (
+    ("claude plugin validate", "claude-validate"),
     ("schema", "schema"),
     ("security scan", "security"),
     ("pii", "pii"),
@@ -720,14 +723,22 @@ def _tier2_finding_is_scan_failure(finding: object) -> bool:
 
 def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow], str]:
     """Return (ran, passed, rows, skip_reason) for the agent-eval result."""
-    if _is_skipped(result) or (not result.passed and not (result.metadata or {}).get("agent_eval", {}).get("summary")):
+    metadata = result.metadata or {}
+    payload = metadata.get("agent_eval") or {}
+    summary = payload.get("summary") or payload
+    # validate stamps a partial plugin run execution_status "skipped" to mark it INCOMPLETE, but a run
+    # that scored trials did run; one that failed its gate keeps the FAIL row validate gives it.
+    incomplete_run = (
+        _is_skipped(result)
+        and bool(summary.get("scored_attempts"))
+        and payload.get("execution_status") != "skipped"
+        and not metadata.get("tier3_gate_failures")
+    )
+    if (_is_skipped(result) and not incomplete_run) or (not result.passed and not payload.get("summary")):
         reason = str(
-            (result.metadata or {}).get("skip_reason")
-            or (result.warnings[0] if result.warnings else "prerequisite unavailable")
+            metadata.get("skip_reason") or (result.warnings[0] if result.warnings else "prerequisite unavailable")
         )
         return False, True, [], reason
-    payload = (result.metadata or {}).get("agent_eval") or {}
-    summary = payload.get("summary") or payload
     agents = summary.get("agents_run") or payload.get("agents_run") or []
     agent_segments: list[tuple[str, str]] = [(", ".join(agents) or "n/a", TEXT)]
     case_list = payload.get("cases") or []
@@ -739,11 +750,25 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
     lift = summary.get("overall_lift")
     with_score = summary.get("overall_score")
     if isinstance(lift, (int, float)) and isinstance(with_score, (int, float)):
-        baseline = max(0.0, min(1.0, float(with_score) - float(lift)))
-        rows.append(lift_row(float(lift), float(with_score), baseline))
+        basis = _lift_basis_scores(payload, summary)
+        if basis is not None:
+            rows.append(lift_row(float(lift), *basis))
+        else:
+            # Older payloads have no lift basis; their lift is the full score minus the baseline.
+            baseline = max(0.0, min(1.0, float(with_score) - float(lift)))
+            rows.append(lift_row(float(lift), float(with_score), baseline))
     exec_status = payload.get("execution_status") or summary.get("execution_status")
     ok = bool(result.passed) and exec_status in (None, "succeeded")
-    if not ok:
+    if incomplete_run:
+        rows.append(
+            TierRow(
+                "incomplete",
+                [(str(metadata.get("skip_reason") or "INCOMPLETE: Tier 3 did not complete")[:110], RED)],
+                glyph="!",
+                glyph_style=f"bold {RED}",
+            )
+        )
+    elif not ok:
         errors = list(payload.get("execution_errors") or []) or list(result.errors)
         reason = str(errors[0]) if errors else "execution reported errors"
         rows.append(
@@ -755,6 +780,26 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
             )
         )
     return True, ok, rows, ""
+
+
+def _lift_basis_scores(payload: dict, summary: dict) -> tuple[float, float] | None:
+    """The best agent's two arm scores on the lift's own basis, or ``None`` for older payloads.
+
+    The lift compares the dimensions both arms scored, case by case. The full
+    with-skill score also has Discoverability and Efficiency, which the arm
+    without the skill does not, so full score minus lift is not a baseline.
+    """
+    agents = payload.get("agents")
+    best = summary.get("best_agent") or payload.get("best_agent")
+    agent = agents.get(best) if isinstance(agents, dict) and isinstance(best, str) else None
+    bases = agent.get("lift_basis") if isinstance(agent, dict) else None
+    basis = bases.get("effectiveness") if isinstance(bases, dict) else None
+    if not isinstance(basis, dict):
+        return None
+    scores = [basis.get("with_skill"), basis.get("baseline")]
+    if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in scores):
+        return None
+    return float(scores[0]), float(scores[1])
 
 
 def _first_error(result: ValidationResult) -> str:

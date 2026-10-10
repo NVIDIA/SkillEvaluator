@@ -109,13 +109,6 @@ def test_engine_kwargs_excludes_skill_path() -> None:
     assert kwargs["env_mode"] == "docker"
 
 
-def test_evaluation_options_preserves_legacy_positional_skip_baseline() -> None:
-    options = EvaluationOptions(Path("/tmp/x"), "codex", "docker", True)
-
-    assert options.skip_baseline is True
-    assert options.environment_kwarg == ()
-
-
 def test_evaluation_options_leave_agent_selection_to_the_provider() -> None:
     assert EvaluationOptions(skill_path=Path("/tmp/x")).agents is None
 
@@ -132,6 +125,13 @@ def test_cli_evaluate_rejects_an_empty_explicit_agent_list(monkeypatch: pytest.M
 
     assert result.exit_code != 0
     assert "Select at least one agent" in result.output
+
+
+def test_evaluation_options_preserves_legacy_positional_skip_baseline() -> None:
+    options = EvaluationOptions(Path("/tmp/x"), "codex", "docker", True)
+
+    assert options.skip_baseline is True
+    assert options.environment_kwarg == ()
 
 
 def test_service_defaults_to_null_progress_reporter(monkeypatch: pytest.MonkeyPatch) -> None:

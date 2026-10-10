@@ -232,6 +232,8 @@ description: Vulnerable skill
         with (
             mock_tool_available("pip_audit", "/usr/bin/pip-audit"),
             patch.object(Tools.pip_audit, "run", return_value=mock_result),
+            # No network: the advisory severity lookup fails, so the severity is unknown.
+            patch("skillevaluator.validators.dependency_ecosystems.fetch_osv_record", side_effect=OSError("offline")),
         ):
             result = validator.validate(skill_dir)
 
@@ -247,7 +249,7 @@ description: Test
 ---
 # Test
 """)
-        (skill_dir / "requirements.txt").write_text("requests>=2.28.0\n")
+        (skill_dir / "requirements.txt").write_text("requests==2.28.0\n")
 
         validator = DependencySecurityValidator()
 

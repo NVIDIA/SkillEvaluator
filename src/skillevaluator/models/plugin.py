@@ -12,12 +12,16 @@ their content -- a plugin *references* existing skills, rules, and MCP servers
 
 from __future__ import annotations
 
-from typing import Any, Literal, Union, get_args
+import re
+from typing import Annotated, Any, Literal, Union, get_args
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
+    Discriminator,
     Field,
+    Tag,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -44,6 +48,13 @@ class PluginAuthor(BaseModel):
         return v
 
 
+# Source-control systems a dependency ref may name. Only the repository slug is
+# compared with the local ``origin`` remote, so the host is never inferred from
+# the source: ``gitlab`` refs may name subgroup repositories (``group/sub/repo``).
+PluginRefSource = Literal["github", "gitlab", "git"]
+PLUGIN_REF_SOURCES: tuple[str, ...] = get_args(PluginRefSource)
+
+
 class PluginSelector(BaseModel):
     """A source-control selector pointing at a referenced resource.
 
@@ -53,14 +64,14 @@ class PluginSelector(BaseModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    source: Literal["github", "git"] = Field(..., description="Source control system (github or git)")
+    source: PluginRefSource = Field(..., description="Source control system (github, gitlab, or git)")
     repo: str = Field(..., min_length=1, description="Repository identifier (must contain '/')")
     path: str = Field(..., min_length=1, description="In-repo path to the referenced resource")
 
     @field_validator("repo")
     @classmethod
     def repo_must_be_full_logical_name(cls, v: str) -> str:
-        """Require ``repo`` to be a full repository name (e.g. 'owner/repository')."""
+        """Require ``repo`` to be a full repository name (e.g. 'owner/repository' or 'group/sub/repository')."""
         if "/" not in v:
             raise ValueError(
                 "repo must be a full repository name containing '/' (e.g. 'owner/repository'), not a shorthand name"
@@ -79,17 +90,10 @@ class PluginSelector(BaseModel):
         return v
 
 
-# A dependency ref is either a canonical ID string (``<source>::<repo>::...``)
-# or a selector dict. The before-validator on PluginDependencySection enforces
-# the canonical-ID source+repo invariants (mirroring PluginSelector); dict
-# entries are parsed into PluginSelector by the union.
-PluginRef = Union[str, PluginSelector]
-
-
-# Allowed source systems, derived from PluginSelector's own ``source`` Literal so
-# the canonical-ID string form and the selector-dict form share a single source
-# of truth and cannot drift apart.
-_ALLOWED_SELECTOR_SOURCES: tuple[str, ...] = get_args(PluginSelector.model_fields["source"].annotation)
+# Allowed source systems: the same Literal as PluginSelector's ``source``, so the
+# canonical-ID string form and the selector-dict form share a single source of
+# truth and cannot drift apart.
+_ALLOWED_SELECTOR_SOURCES: tuple[str, ...] = PLUGIN_REF_SOURCES
 
 
 def _validate_canonical_ref(entry: str) -> None:
@@ -114,6 +118,34 @@ def _validate_canonical_ref(entry: str) -> None:
             f"canonical ref must be '<source>::<repo>::...' with source in "
             f"{{{allowed}}} and repo (2nd segment) containing '/'; got '{entry}'"
         )
+
+
+def _canonical_ref(entry: str) -> str:
+    """Before-validator for the string form: check the raw (unstripped) ref, then pass it on."""
+    _validate_canonical_ref(entry)
+    return entry
+
+
+def _ref_form(entry: Any) -> str:
+    """Union tag of a ref: ``str`` for a canonical ID, ``PluginSelector`` for anything else (a selector dict)."""
+    return "str" if isinstance(entry, str) else "PluginSelector"
+
+
+# A dependency ref is either a canonical ID string (``<source>::<repo>::...``)
+# or a selector dict parsed into PluginSelector. The union is discriminated by
+# the entry's Python type, so a bad ref is validated against its own form only.
+# A plain (smart) union also tried the other member, so every bad selector came
+# with a spurious "Input should be a valid string" error. The tags keep the
+# member names in error locations (``skills.refs.0.PluginSelector.source``), and
+# each malformed canonical ID is reported at its own index (``skills.refs.0.str``).
+# PluginDependencySection.validate_refs rejects any other entry type.
+PluginRef = Annotated[
+    Union[
+        Annotated[str, BeforeValidator(_canonical_ref), Tag("str")],
+        Annotated[PluginSelector, Tag("PluginSelector")],
+    ],
+    Discriminator(_ref_form),
+]
 
 
 class PluginDependencySection(BaseModel):
@@ -152,17 +184,19 @@ class PluginDependencySection(BaseModel):
     @field_validator("refs", mode="before")
     @classmethod
     def validate_refs(cls, v: Any) -> Any:
-        """Validate canonical-ID string refs; reject non-mapping/non-string entries."""
+        """Reject a non-list ``refs`` and non-mapping/non-string entries; ``PluginRef`` validates each entry."""
         if not isinstance(v, list):
             raise ValueError("refs must be a list of canonical IDs or selector objects")
         for entry in v:
-            if isinstance(entry, str):
-                _validate_canonical_ref(entry)
-            elif not isinstance(entry, dict):
+            if not isinstance(entry, (str, dict)):
                 raise ValueError(
                     f"each ref must be a canonical '::' ID string or a selector object (got {type(entry).__name__})"
                 )
         return v
+
+
+MCP_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+_MCP_NAME_RE = re.compile(MCP_NAME_PATTERN)
 
 
 class PluginMcpEntry(BaseModel):
@@ -176,6 +210,15 @@ class PluginMcpEntry(BaseModel):
 
     name: str = Field(..., min_length=1, description="MCP server name")
     provider: str = Field(..., min_length=1, description="MCP provider or transport identifier")
+
+    @field_validator("name")
+    @classmethod
+    def name_must_have_valid_charset(cls, value: str) -> str:
+        if not _MCP_NAME_RE.fullmatch(value):
+            raise ValueError(
+                "MCP name must start with an alphanumeric and contain only letters, digits, '.', '_', or '-'"
+            )
+        return value
 
 
 class PluginManifest(BaseModel):

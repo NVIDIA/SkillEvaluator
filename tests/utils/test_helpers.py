@@ -7,12 +7,18 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from skillevaluator.utils import find_skills_in_directory, get_skill_name_from_path
 from skillevaluator.utils.helpers import (
     _ssh_to_https,
+    find_bundled_plugin_skill_manifests,
+    git_origin_https_url,
+    preferred_skill_manifests,
     resolve_git_remote_url,
     resolve_git_root,
 )
+from skillevaluator.utils.secure_fs import SecureFile
 
 
 class TestFindSkillsInDirectory:
@@ -78,6 +84,42 @@ class TestFindSkillsInDirectory:
         result = find_skills_in_directory(tmp_path)
         assert len(result) == 0
 
+    def test_linked_final_root_is_rejected_without_following_target_type(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_root = tmp_path / "real"
+        real_root.mkdir()
+        linked_root = tmp_path / "linked"
+        linked_root.symlink_to(real_root, target_is_directory=True)
+        real_is_dir = Path.is_dir
+
+        def guarded_is_dir(path: Path) -> bool:
+            if path == linked_root:
+                raise AssertionError("linked root target type must not be queried")
+            return real_is_dir(path)
+
+        monkeypatch.setattr(Path, "is_dir", guarded_is_dir)
+
+        with pytest.raises(ValueError, match=r"root|symlink|reparse|unsafe"):
+            find_skills_in_directory(linked_root)
+
+    def test_root_inspection_error_is_not_treated_as_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "catalog"
+        root.mkdir()
+        real_lstat = Path.lstat
+
+        def denied_lstat(path: Path):
+            if path == root:
+                raise PermissionError("denied")
+            return real_lstat(path)
+
+        monkeypatch.setattr(Path, "lstat", denied_lstat)
+
+        with pytest.raises(ValueError, match=r"inspect|access|denied"):
+            find_skills_in_directory(root)
+
 
 class TestGetSkillNameFromPath:
     """Tests for get_skill_name_from_path function."""
@@ -102,6 +144,52 @@ class TestGetSkillNameFromPath:
         ]
         for path, expected in cases:
             assert get_skill_name_from_path(path) == expected, path
+
+
+class TestPreferredSkillManifests:
+    """One manifest per skill folder, chosen without reading anything."""
+
+    def test_prefers_skill_md_per_folder_in_path_order(self, tmp_path: Path) -> None:
+        metadata = tmp_path.stat()
+
+        def manifest(relative: str) -> SecureFile:
+            return SecureFile(tmp_path, tmp_path / relative, Path(relative), metadata)
+
+        files = [
+            manifest("a-b/skill.md"),
+            manifest("a/b/skill.md"),
+            manifest("a/b/SKILL.md"),
+            manifest("skill.md"),
+            manifest("SKILL.md"),
+            manifest("c/skill.md"),
+        ]
+
+        assert [file.rel_path for file in preferred_skill_manifests(files)] == [
+            "SKILL.md",
+            "a/b/SKILL.md",
+            "a-b/skill.md",
+            "c/skill.md",
+        ]
+        assert preferred_skill_manifests([]) == []
+
+
+class TestFindBundledPluginSkillManifests:
+    """Bundled skill manifests found below one plugin skills folder."""
+
+    def test_every_identity_records_the_same_normalized_skills_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: a skill in skills/evals/ recorded the root as typed (relative), unlike its siblings."""
+        for folder in ("a", "evals", "versions/v2"):
+            (tmp_path / "plugin" / "skills" / folder).mkdir(parents=True)
+            (tmp_path / "plugin" / "skills" / folder / "SKILL.md").write_text("---\nname: x\n---\n")
+        monkeypatch.chdir(tmp_path)
+
+        manifests = find_bundled_plugin_skill_manifests(Path("plugin"))
+
+        assert [manifest.rel_path for manifest in manifests] == ["a/SKILL.md", "evals/SKILL.md", "versions/v2/SKILL.md"]
+        assert {manifest.root for manifest in manifests} == {Path.cwd() / "plugin" / "skills"}
+        assert all(manifest.path == manifest.root / manifest.relative_path for manifest in manifests)
 
 
 class TestSshToHttps:
@@ -149,6 +237,28 @@ class TestSshToHttps:
         for remote_url, expected in cases:
             assert _ssh_to_https(remote_url) == expected, remote_url
 
+    @pytest.mark.parametrize(
+        ("remote_url", "expected"),
+        [
+            # Regression: credentials and a port were read as an SCP-style
+            # "user@host:path" remote, so the port became a path segment.
+            (
+                "https://gitlab-ci-token:example-token@gitlab.example.com:8443/group/repo.git",
+                "https://gitlab.example.com:8443/group/repo",
+            ),
+            ("https://user@gitlab.example.com:8443/group/repo.git", "https://gitlab.example.com:8443/group/repo"),
+            ("https://gitlab.example.com:8443/group/repo.git", "https://gitlab.example.com:8443/group/repo"),
+            ("https://user@[2001:db8::1]:8443/group/repo.git", "https://[2001:db8::1]:8443/group/repo"),
+            # The SSH port is not the web port, and the scheme matches in any case.
+            ("ssh://git@gitlab.example.com:2222/group/repo.git", "https://gitlab.example.com/group/repo"),
+            ("SSH://git@gitlab.example.com:2222/group/repo.git", "https://gitlab.example.com/group/repo"),
+            ("http://user@gitlab.example.com:8080/group/repo.git", None),
+            ("https://gitlab.example.com:notaport/group/repo.git", None),
+        ],
+    )
+    def test_url_with_credentials_and_port(self, remote_url: str, expected: str | None) -> None:
+        assert _ssh_to_https(remote_url) == expected
+
 
 class TestMakeTimestampedBasename:
     """Tests for ``make_timestamped_basename`` filename construction."""
@@ -195,6 +305,41 @@ class TestResolveGitRoot:
 
     def test_returns_none_outside_git_repository(self, tmp_path: Path) -> None:
         assert resolve_git_root(tmp_path) is None
+
+
+class TestGitOriginHttpsUrl:
+    """Tests for the origin lookup behind report browse links."""
+
+    @pytest.mark.parametrize(
+        ("origin", "expected"),
+        [
+            ("git@github.com:example/project.git", "https://github.com/example/project"),
+            ("https://token@github.com/example/project.git", "https://github.com/example/project"),
+            ("http://github.com/example/project.git", None),
+            # Not misread as the SCP-style remote "user@github.com:8080/...".
+            ("http://user@github.com:8080/example/project.git", None),
+            ("git://git@github.com:9418/example/project.git", None),
+            ("file:///srv/git/example/project.git", None),
+            (
+                "https://gitlab-ci-token:example-token@gitlab.example.com:8443/example/project.git",
+                "https://gitlab.example.com:8443/example/project",
+            ),
+            (
+                "https://user@gitlab.example.com:8443/example/project.git",
+                "https://gitlab.example.com:8443/example/project",
+            ),
+        ],
+    )
+    def test_accepts_only_ssh_and_https_origins(self, tmp_path: Path, origin: str, expected: str | None) -> None:
+        repo_root = tmp_path / "repo"
+        _init_git_repo(repo_root, origin)
+
+        assert git_origin_https_url(repo_root) == expected
+
+    def test_returns_none_without_an_origin(self, tmp_path: Path) -> None:
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+        assert git_origin_https_url(tmp_path) is None
 
 
 class TestResolveGitRemoteUrl:

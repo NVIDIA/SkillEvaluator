@@ -37,6 +37,8 @@ class SimilarityConfigError(Exception):
 
 
 MAX_EMBEDDING_VECTOR_DIMENSION = 65_536
+MAX_EMBEDDING_INPUT_CHUNKS = 512
+MAX_EMBEDDING_CHUNKED_CHARS = 2 * 1024 * 1024
 
 
 def validate_embedding_vector(
@@ -44,15 +46,26 @@ def validate_embedding_vector(
     expected_dimension: int | None = None,
     *,
     context: str = "Embedding provider",
+    allow_zero: bool = False,
 ) -> int:
     """Validate a provider vector before it reaches similarity arithmetic."""
     values, _norm = _validated_vector_values(
         vector,
         expected_dimension,
         context=context,
-        allow_zero=False,
+        allow_zero=allow_zero,
     )
     return len(values)
+
+
+def validate_similarity_threshold(value: object, *, context: str = "Similarity") -> float:
+    """Require a finite numeric similarity threshold within the report range."""
+    if type(value) not in (int, float):
+        raise ValueError(f"{context} threshold must be finite and within [0, 1]")
+    numeric = float(value)
+    if not math.isfinite(numeric) or not 0.0 <= numeric <= 1.0:
+        raise ValueError(f"{context} threshold must be finite and within [0, 1]")
+    return numeric
 
 
 def normalize_embedding_vector(
@@ -346,6 +359,12 @@ def _split_into_chunks(
         else:
             chunks.extend(_fixed_size_chunks(section, max_chars, overlap_chars))
 
+        if len(chunks) > MAX_EMBEDDING_INPUT_CHUNKS:
+            raise SimilarityConfigError(f"Embedding chunk count exceeds the {MAX_EMBEDDING_INPUT_CHUNKS}-chunk limit")
+
+    if sum(len(chunk) for chunk in chunks) > MAX_EMBEDDING_CHUNKED_CHARS:
+        raise SimilarityConfigError(f"Embedding chunk input exceeds the {MAX_EMBEDDING_CHUNKED_CHARS}-character limit")
+
     return chunks or [text]
 
 
@@ -373,13 +392,25 @@ def _split_by_headings(text: str) -> list[str]:
 
 def _fixed_size_chunks(text: str, max_chars: int, overlap_chars: int) -> list[str]:
     """Fall back to fixed-size overlapping windows."""
+    if max_chars <= 0 or overlap_chars < 0 or overlap_chars >= max_chars:
+        raise SimilarityConfigError("Fixed-size chunk window must be positive with overlap smaller than size")
     chunks: list[str] = []
+    total_chars = 0
     start = 0
     while start < len(text):
         end = start + max_chars
         chunk = text[start:end].strip()
         if chunk:
             chunks.append(chunk)
+            total_chars += len(chunk)
+            if len(chunks) > MAX_EMBEDDING_INPUT_CHUNKS:
+                raise SimilarityConfigError(
+                    f"Embedding chunk count exceeds the {MAX_EMBEDDING_INPUT_CHUNKS}-chunk limit"
+                )
+            if total_chars > MAX_EMBEDDING_CHUNKED_CHARS:
+                raise SimilarityConfigError(
+                    f"Embedding chunk input exceeds the {MAX_EMBEDDING_CHUNKED_CHARS}-character limit"
+                )
         start += max_chars - overlap_chars
     return chunks
 
@@ -397,7 +428,7 @@ def _average_pool(vectors: list[list[float]]) -> list[float]:
         )
     assert dimension is not None
     count = len(vectors)
-    pooled = [math.fsum(vector[index] for vector in vectors) / count for index in range(dimension)]
+    pooled = [math.fsum(vector[index] / count for vector in vectors) for index in range(dimension)]
     validate_embedding_vector(pooled, dimension, context="Pooled embedding")
     return pooled
 

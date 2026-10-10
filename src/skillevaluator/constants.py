@@ -141,6 +141,54 @@ PLUGIN_MANIFEST_TYPE = "agent_bundle_yaml"
 PLUGIN_MODE = "bundle_reference"
 PLUGIN_CONTAINED_MANIFEST_TYPE = "claude_plugin_json"
 PLUGIN_CONTAINED_MODE = "contained"
+# Plugin names are not skill names: Claude Code sets no length limit and the
+# Codex runtime loads long names (its packaging tools stop at 64 characters), so
+# NAME_MAX_LENGTH does not apply to them. Reports keep at most this many characters.
+PLUGIN_NAME_MAX_REPORT_CHARS = 256
+
+# Additional native plugin manifest formats. Each is a contained plugin: its
+# components ship inside the plugin root, like ``.claude-plugin/plugin.json``.
+PLUGIN_CODEX_MANIFEST_DIR = ".codex-plugin"
+PLUGIN_CURSOR_MANIFEST_DIR = ".cursor-plugin"
+# Agent Plugins v1 (agent-plugins.org) roots a plugin with ``plugin.json`` at
+# the plugin root itself, not inside a vendor directory.
+PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE = PLUGIN_CONTAINED_MANIFEST_FILE
+PLUGIN_CODEX_MANIFEST_TYPE = "codex_plugin_json"
+PLUGIN_CURSOR_MANIFEST_TYPE = "cursor_plugin_json"
+PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE = "agent_plugins_v1"
+# Root-relative manifest paths in discovery precedence order, with the manifest
+# type each one selects. When a root holds more than one, the first one wins
+# and the others are recorded as additional manifest declarations.
+PLUGIN_MANIFEST_PRECEDENCE: tuple[tuple[str, str], ...] = (
+    ("agent_plugin.yaml", PLUGIN_MANIFEST_TYPE),
+    ("agent_plugin.yml", PLUGIN_MANIFEST_TYPE),
+    (f"{PLUGIN_CONTAINED_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CONTAINED_MANIFEST_TYPE),
+    (PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE, PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE),
+    (f"{PLUGIN_CODEX_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CODEX_MANIFEST_TYPE),
+    (f"{PLUGIN_CURSOR_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CURSOR_MANIFEST_TYPE),
+)
+PLUGIN_MANIFEST_RELATIVE_PATHS: tuple[str, ...] = tuple(path for path, _type in PLUGIN_MANIFEST_PRECEDENCE)
+# Vendor directories whose ``plugin.json`` roots a contained plugin at the
+# directory's parent.
+PLUGIN_NATIVE_MANIFEST_DIRS: tuple[str, ...] = (
+    PLUGIN_CONTAINED_MANIFEST_DIR,
+    PLUGIN_CODEX_MANIFEST_DIR,
+    PLUGIN_CURSOR_MANIFEST_DIR,
+)
+# Manifest types whose components are contained in the plugin root.
+PLUGIN_CONTAINED_MANIFEST_TYPES = frozenset(
+    {
+        PLUGIN_CONTAINED_MANIFEST_TYPE,
+        PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
+        PLUGIN_CODEX_MANIFEST_TYPE,
+        PLUGIN_CURSOR_MANIFEST_TYPE,
+    }
+)
+# Static plugin component inventory bounds (Tier 1 and Tier 3 coverage).
+PLUGIN_COMPONENT_MAX_ITEMS = 256
+# Byte cap for plugin JSON config files (.mcp.json, referenced MCP configs,
+# hooks/LSP/monitor configs, shipped settings). Larger files are findings.
+PLUGIN_CONFIG_MAX_BYTES = 256 * 1024
 
 # Note: allowed MCP providers, selector sources, and top-level fields are
 # enforced directly by the Pydantic model in ``skillevaluator.models.plugin``
@@ -158,21 +206,28 @@ BANNED_PACKAGES = [
 # File extensions to scan
 SCANNABLE_EXTENSIONS = {".py", ".sh", ".yaml", ".yml", ".json", ".md", ".txt"}
 
+# Evaluation output and version-snapshot folder names (a skill's own artifacts).
+SCAN_ARTIFACT_DIRS = frozenset({"evals", ".evals", "results", ".results", "versions", ".versions"})
+
 # Directories to skip at any depth during Tier 1 file-tree walks (scan artifact roots, version snapshots, build caches).
+# Plugin skill discovery skips the artifact names only inside a skill: a folder
+# with one of those names directly under a plugin's skills/ is searched, and a
+# SKILL.md deeper inside one is reported (utils.helpers).
 SCAN_EXCLUDED_DIRS = frozenset(
     {
-        "evals",
-        ".evals",
-        "results",
-        ".results",
-        "versions",
-        ".versions",
+        *SCAN_ARTIFACT_DIRS,
         "__pycache__",
         ".git",
         ".venv",
         "node_modules",
     }
 )
+
+# Whole-plugin Tier 1 scans first walk the entire plugin tree without following
+# links. The walk prunes the directories scanners never enter, but keeps the
+# bytecode cache directory because SkillSpector inspects shipped bytecode.
+PLUGIN_TREE_PRUNED_DIRS = SCAN_EXCLUDED_DIRS - {"__pycache__"}
+PLUGIN_TREE_MAX_DISCOVERED_PATHS = 20_000
 
 # Generated publishing/signing artifacts that may live in a skill root after
 # NVSkills CI runs. They are derived from the author-owned skill content, so
@@ -240,6 +295,32 @@ SIMILARITY_DEFAULT_MODEL = EMBEDDING_DEFAULT_NVIDIA
 SIMILARITY_CHUNK_SIZE = 512  # tokens per chunk for full-body mode
 SIMILARITY_CHUNK_OVERLAP = 64  # token overlap between chunks
 
+# Shared Tier 2 LLM resource limits. Validators render and validate complete
+# prompts before making external calls, then bound parsed response scalars.
+TIER2_LLM_MAX_CALLS = 100
+TIER2_LLM_MAX_PROMPT_CHARS = 64_000
+TIER2_LLM_MAX_TOTAL_PROMPT_CHARS = 1_000_000
+TIER2_LLM_MAX_INPUT_SCALAR_CHARS = 16_384
+TIER2_LLM_MAX_REFERENCE_ITEMS = 256
+TIER2_LLM_MAX_RESPONSE_SCALAR_CHARS = 8_192
+
+# Aggregate guardrails for the automatically run plugin context checks. The
+# call allowance is distributed across safely discovered bundled skills.
+MAX_PLUGIN_DEDUP_SKILLS = 32
+MAX_PLUGIN_DEDUP_LLM_CALLS = TIER2_LLM_MAX_CALLS
+
+# Advisory local-catalog plugin checks (Check B: plugin vs catalog plugins;
+# Check C-inter: bundled skills vs catalog skills). Plugin catalog entries store
+# bounded, casefolded member skill names for Jaccard overlap scoring.
+PLUGIN_CATALOG_MAX_MEMBERS = TIER2_LLM_MAX_REFERENCE_ITEMS
+PLUGIN_CATALOG_MAX_MEMBER_CHARS = 256
+# Public result-metadata keys under ``metadata["plugin"]`` for the two checks.
+PLUGIN_CATALOG_SKILL_SIMILARITY_KEY = "catalog_skill_similarity"
+PLUGIN_CATALOG_PLUGIN_SIMILARITY_KEY = "inter_plugin_similarity"
+INTER_PLUGIN_MEMBER_OVERLAP_THRESHOLD = 0.5
+INTER_PLUGIN_TOP_K = 10
+INTER_SKILL_CATALOG_TOP_K = 10
+
 
 # =============================================================================
 # CONTEXT DEDUPLICATION CONSTANTS (Phase 1)
@@ -266,7 +347,11 @@ CONTENT_DEDUP_MAX_DISCOVERED_PATHS = 4096
 CONTENT_DEDUP_MAX_FILE_BYTES = 1 * 1024 * 1024
 CONTENT_DEDUP_MAX_TOTAL_BYTES = 8 * 1024 * 1024
 CONTENT_DEDUP_MAX_CHUNKS = 512
+CONTENT_DEDUP_MAX_SCALAR_COMPARISONS = 25_000_000
 CONTENT_DEDUP_MAX_LLM_CLUSTERS = 50
+CONTENT_DEDUP_MAX_CLUSTER_MEMBERS = 64
+CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS = TIER2_LLM_MAX_PROMPT_CHARS
+CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS = TIER2_LLM_MAX_TOTAL_PROMPT_CHARS
 
 # Collection-wide similarity budgets are independent of a single skill's file limit.
 SIMILARITY_DEFAULT_MAX_ENTRIES = 1_024
@@ -504,6 +589,21 @@ AGENT_EVAL_VERDICT_FAIL = "fail"
 # the HTML reporter to color the Tier 3 lift verdict bands.
 TIER3_LIFT_PASS_THRESHOLD = 0.05
 TIER3_LIFT_FAIL_THRESHOLD = -0.10
+
+# Report-only lift uncertainty: a paired, case-clustered percentile bootstrap.
+# Attempts are averaged within each case first, cases are paired by id, and
+# whole cases are resampled with replacement. The seed is fixed so the same
+# run always reports the same interval.
+LIFT_BOOTSTRAP_RESAMPLES = 2000
+# The expanded interval's tail is thin at small n (0.24% at 6 cases), so more
+# resamples are drawn until each bound rests on at least this many of them.
+LIFT_BOOTSTRAP_TAIL_RESAMPLES = 200
+LIFT_BOOTSTRAP_SEED = 0
+LIFT_BOOTSTRAP_CONFIDENCE = 0.95
+# Fewer paired cases than this makes the interval ``insufficient``.
+LIFT_CI_MIN_PAIRED_CASES = 5
+# A wider interval than this (in score units) is reported as ``low`` precision.
+LIFT_CI_LOW_PRECISION_WIDTH = 0.20
 
 AGENT_EVAL_DATASET_REQUIRED_FIELDS = [
     "id",

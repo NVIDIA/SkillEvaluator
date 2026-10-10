@@ -1047,6 +1047,46 @@ def test_validate_catalog_rejects_one_previous_version_for_every_skill() -> None
         assert not Path("skillevaluator-results").exists()
 
 
+def test_validate_catalog_rejects_the_previous_version_env_var_for_every_skill(monkeypatch) -> None:
+    # SKILLEVALUATOR_PREVIOUS_VERSION is the default for --previous-version, so it gets the same guard.
+    monkeypatch.setenv("SKILLEVALUATOR_PREVIOUS_VERSION", "1.2.0")
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        for name in ("simple", "simple2"):
+            shutil.copytree(FIXTURE, catalog / name)
+        second = catalog / "simple2" / "SKILL.md"
+        second.write_text(second.read_text(encoding="utf-8").replace("name: simple", "name: simple2"), encoding="utf-8")
+
+        result = runner.invoke(
+            cli,
+            ["validate", "--no-tier3", str(catalog.resolve()), "--no-llm", "--no-dedup", "--checks", "version"],
+        )
+
+        assert result.exit_code != 0
+        assert "SKILLEVALUATOR_PREVIOUS_VERSION" in result.output
+        assert "cannot be reused for a catalog" in result.output
+        assert not Path("skillevaluator-results").exists()
+
+
+def test_validate_refuses_a_folder_of_plugins_instead_of_passing_it() -> None:
+    # The folder types as unknown: only generic checks ran, so the invalid plugin passed with exit 0.
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        plugins = Path("plugins")
+        for name, manifest in (("good", '{"name": "good"}'), ("bad", '{"name": "Bad Name!!", "version": 5')):
+            (plugins / name / ".claude-plugin").mkdir(parents=True)
+            (plugins / name / ".claude-plugin" / "plugin.json").write_text(manifest, encoding="utf-8")
+
+        result = runner.invoke(
+            cli, ["validate", str(plugins.resolve()), "--tiers", "1", "--checks", "schema", "--no-llm", "-o", "out"]
+        )
+
+        assert result.exit_code == 2, result.output
+        assert "folder of 2 plugins (bad, good)" in result.output
+        assert not Path("out").exists()
+
+
 def test_validate_quiet_failing_run_renders_verdict_and_fails_cleanly(monkeypatch) -> None:
     # Regression: a failing DEFAULT (quiet) run must render the verdict panel
     # and exit via the machine-readable ClickException — not an AttributeError.

@@ -517,3 +517,31 @@ def test_catalog_query_match_limit_fails_closed(tmp_path: Path, monkeypatch) -> 
 
     with pytest.raises(ValueError, match="match limit"):
         registry.query_entry(target, 0.75)
+
+
+def test_catalog_file_checks_require_one_regular_unlinked_file(tmp_path: Path) -> None:
+    regular = tmp_path / "catalog.json"
+    regular.write_text("{}", encoding="utf-8")
+    other = tmp_path / "other.json"
+    other.write_text("{}", encoding="utf-8")
+
+    registry_module._require_regular_single_link(regular.lstat(), "unexpected")
+    registry_module._require_regular_single_link(regular.lstat(), "unexpected", same_as=regular.lstat())
+    with pytest.raises(ValueError, match=r"^replaced$"):
+        registry_module._require_regular_single_link(other.lstat(), "replaced", same_as=regular.lstat())
+    with pytest.raises(ValueError, match=r"^not regular$"):
+        registry_module._require_regular_single_link(tmp_path.lstat(), "not regular")
+    os.link(regular, tmp_path / "second-name.json")
+    with pytest.raises(ValueError, match=r"^hard-linked$"):
+        registry_module._require_regular_single_link(regular.lstat(), "hard-linked")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privileges on Windows")
+def test_catalog_file_checks_refuse_a_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "catalog.json"
+    target.write_text("{}", encoding="utf-8")
+    link = tmp_path / "link.json"
+    link.symlink_to(target)
+
+    with pytest.raises(ValueError, match=r"^link$"):
+        registry_module._require_regular_single_link(link.lstat(), "link")

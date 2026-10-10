@@ -72,6 +72,27 @@ jobs:
       - name: Lint
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         run: uv run ruff check .
+      # The Harbor verifier runs these files with the task image's python3, which
+      # can be older than the Python SkillEvaluator itself needs. Compiling catches
+      # syntax; the smoke script also runs code that needs newer runtime features.
+      - name: Compile Harbor verifier files on Python 3.9 and 3.11
+        if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            src/skillevaluator/tier3/harbor/templates/*.py
+            src/skillevaluator/tier3/eval_core/log_converters.py
+            src/skillevaluator/tier3/eval_core/codex_tool_call_normalizer.py
+            src/skillevaluator/evidence.py
+          )
+          for version in 3.9 3.11; do
+            uv run --no-project --python "$version" -- python -I -c \
+              "import sys; [compile(open(p, encoding='utf-8').read(), p, 'exec') for p in sys.argv[1:]]" \
+              "${files[@]}"
+            uv run --no-project --python "$version" --with "idna>=3.10,<4" -- python -I \
+              scripts/ci/smoke_harbor_verifier.py
+          done
       - name: Run tests with coverage
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         run: >-
@@ -319,6 +340,7 @@ jobs:
           tests/test_results_location_legacy_compatibility.py
           tests/test_tier3_compare.py
           tests/test_tier3_progress.py
+          tests/utils/test_secure_fs_platform.py
           tests/utils/test_secure_fs_selected_reads.py
           tests/test_oss_packaging.py
 

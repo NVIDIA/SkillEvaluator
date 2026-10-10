@@ -11,6 +11,18 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 from urllib.parse import unquote
 
+from skillevaluator.tier3.eval_core.secret_redaction import (
+    LOG_AWS_ACCESS_KEY_RE,
+    LOG_GITHUB_PAT_RE,
+    LOG_GITHUB_TOKEN_RE,
+    LOG_GITLAB_PAT_RE,
+    LOG_HUGGING_FACE_TOKEN_RE,
+    LOG_NPM_TOKEN_RE,
+    LOG_PREFIXED_TOKEN_RE,
+    LOG_SLACK_TOKEN_RE,
+    keep_token_prefix,
+)
+
 _SECRET_KEY_PARTS = {
     "auth",
     "authorization",
@@ -135,16 +147,41 @@ _JWT_RE = re.compile(
     rf"(?<!{_JWT_CHAR})(?P<lead>(?>(?:\b|{_JWT_CHAR}*?-)(?=eyJ)))"
     rf"eyJ{_JWT_CHAR}{{10,}}+\.eyJ{_JWT_CHAR}{{10,}}+\.{_JWT_CHAR}{{10,}}\b"
 )
+# Tokens whose prefix names their service (GitHub, GitLab, Slack, Hugging Face, npm), whose
+# redaction keeps the ``prefix`` group, and AWS access key IDs. The patterns are the log
+# redactor's (tier3/eval_core/secret_redaction.py), which defines them so that it loads
+# without this package's __init__.
+GITHUB_TOKEN_RE = LOG_GITHUB_TOKEN_RE
+GITHUB_PAT_RE = LOG_GITHUB_PAT_RE
+GITLAB_PAT_RE = LOG_GITLAB_PAT_RE
+SLACK_TOKEN_RE = LOG_SLACK_TOKEN_RE
+HUGGING_FACE_TOKEN_RE = LOG_HUGGING_FACE_TOKEN_RE
+NPM_TOKEN_RE = LOG_NPM_TOKEN_RE
+PREFIXED_TOKEN_PATTERNS = (
+    GITHUB_TOKEN_RE,
+    GITHUB_PAT_RE,
+    GITLAB_PAT_RE,
+    SLACK_TOKEN_RE,
+    HUGGING_FACE_TOKEN_RE,
+    NPM_TOKEN_RE,
+)
+# All of them in one pass; ``keep_token_prefix`` writes the matched prefix back.
+PREFIXED_TOKEN_RE = LOG_PREFIXED_TOKEN_RE
+AWS_ACCESS_KEY_RE = LOG_AWS_ACCESS_KEY_RE
 _REDACTIONS = (
     (_JWT_RE, r"\g<lead>jwt-<redacted>"),
-    (re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}"), "aws-access-key-<redacted>"),
+    (AWS_ACCESS_KEY_RE, "aws-access-key-<redacted>"),
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer <redacted>"),
     (re.compile(r"(?<![A-Za-z0-9])sk-[a-zA-Z0-9_-]{8,}"), "sk-<redacted>"),
     (re.compile(r"nvapi-[a-zA-Z0-9_-]{8,}"), "nvapi-<redacted>"),
     (re.compile(r"crsr_[a-f0-9]{16,}"), "crsr_<redacted>"),
     (re.compile(r"sha256~[A-Za-z0-9._~-]+"), "sha256~<redacted>"),
-    # GitHub's p/o/u/r families retain the 36-character opaque body. The s
-    # family also has a variable-length ``ghs_APPID_JWT`` stateless format.
+    # A service token that stands on its own keeps its prefix (``ghp_<redacted>``).
+    (PREFIXED_TOKEN_RE, keep_token_prefix),
+    # Tokens glued into a longer name ("quality_ghp_..."), in another case, or in a shape the
+    # prefixed patterns leave out are redacted whole. GitHub's p/o/u/r families retain the
+    # 36-character opaque body. The s family also has a variable-length ``ghs_APPID_JWT``
+    # stateless format.
     (
         re.compile(r"(?i)gh[pour]_[A-Za-z0-9]{36}"),
         "github-token-<redacted>",
@@ -193,6 +230,21 @@ def _redact_auth_header(match: re.Match[str]) -> str:
     return f"{match.group('key')}: {match.group('scheme')} <redacted>"
 
 
+def _redact_unterminated_private_key(text: str) -> str:
+    """Redact from the first private-key header with no later ``-----END `` to the end of the text."""
+    # Same result as substituting ``HEADER(?![\s\S]*-----END )[\s\S]*\Z``, whose
+    # lookahead rescanned the rest of the text from every header. A header qualifies
+    # when the last "-----END " in the text starts before the header ends.
+    last_end = text.rfind("-----END ")
+    match = _PRIVATE_KEY_HEADER_RE.search(text)
+    while match is not None:
+        if match.end() > last_end:
+            return f"{text[: match.start()]}private-key-<redacted>"
+        # Headers can overlap ("...PRIVATE KEY-----BEGIN ..."), so resume inside this one.
+        match = _PRIVATE_KEY_HEADER_RE.search(text, match.start() + 1)
+    return text
+
+
 def credential_uri_secret_values(value: str, *, allow_schemeless: bool = False) -> set[str]:
     """Return raw and decoded credential components from one URI authority."""
     raw = str(value or "")
@@ -225,21 +277,6 @@ def credential_uri_secret_values(value: str, *, allow_schemeless: bool = False) 
         if separator and password:
             protected.add(password)
     return {item for item in protected if item}
-
-
-def _redact_unterminated_private_key(text: str) -> str:
-    """Redact from the first private-key header with no later ``-----END `` to the end of the text."""
-    # Same result as substituting ``HEADER(?![\s\S]*-----END )[\s\S]*\Z``, whose
-    # lookahead rescanned the rest of the text from every header. A header qualifies
-    # when the last "-----END " in the text starts before the header ends.
-    last_end = text.rfind("-----END ")
-    match = _PRIVATE_KEY_HEADER_RE.search(text)
-    while match is not None:
-        if match.end() > last_end:
-            return f"{text[: match.start()]}private-key-<redacted>"
-        # Headers can overlap ("...PRIVATE KEY-----BEGIN ..."), so resume inside this one.
-        match = _PRIVATE_KEY_HEADER_RE.search(text, match.start() + 1)
-    return text
 
 
 def redact_sensitive_text(value: str, *, max_len: int | None = None) -> str:

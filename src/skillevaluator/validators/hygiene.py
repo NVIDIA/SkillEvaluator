@@ -12,6 +12,7 @@ from pathlib import Path
 
 from skillevaluator.constants import BANNED_PACKAGES
 from skillevaluator.logging_config import get_logger
+from skillevaluator.models.result import Finding, Severity
 from skillevaluator.validators.base import ValidationResult, ValidatorBase, iter_scannable_files
 from skillevaluator.validators.markdown import markdown_link_targets, normalized_local_path
 
@@ -24,6 +25,26 @@ def _link_display(value: str) -> str:
     """Keep untrusted link diagnostics bounded and on one physical line."""
     escaped = ascii(value[:160])[1:-1]
     return escaped[:160] + ("..." if len(value) > 160 or len(escaped) > 160 else "")
+
+
+def _relative_path(path: Path, root: Path) -> str:
+    """``path`` relative to the scanned directory (POSIX), so a plugin scan can attribute it to a component."""
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _hygiene_finding(check_name: str, message: str, file_path: str, suggestion: str) -> Finding:
+    """A blocking hygiene failure as a structured finding (SARIF result, component attribution)."""
+    return Finding(
+        category="HYGIENE",
+        severity=Severity.HIGH,
+        check_name=check_name,
+        message=message,
+        file_path=file_path,
+        suggestion=suggestion,
+    )
 
 
 class HygieneValidator(ValidatorBase):
@@ -93,9 +114,14 @@ class HygieneValidator(ValidatorBase):
                     if link_href in seen_invalid:
                         continue
                     seen_invalid.add(link_href)
-                    result.add_error(
-                        f"Invalid local link in {_link_display(md_file.name)}: {_link_display(link_href)} "
-                        "(absolute or drive-relative path)"
+                    result.add_finding(
+                        _hygiene_finding(
+                            "invalid_local_link",
+                            f"Invalid local link in {_link_display(md_file.name)}: {_link_display(link_href)} "
+                            "(absolute or drive-relative path)",
+                            _relative_path(md_file, skill_path),
+                            "Link to a file inside the skill or plugin with a relative path.",
+                        )
                     )
                     continue
                 if local_path is None or local_path in seen_targets:
@@ -108,7 +134,14 @@ class HygieneValidator(ValidatorBase):
                 except (OSError, ValueError):
                     exists = False
                 if not exists:
-                    result.add_error(f"Dead link in {_link_display(md_file.name)}: {_link_display(link_href)}")
+                    result.add_finding(
+                        _hygiene_finding(
+                            "dead_link",
+                            f"Dead link in {_link_display(md_file.name)}: {_link_display(link_href)}",
+                            _relative_path(md_file, skill_path),
+                            "Ship the linked file, fix the link, or remove it.",
+                        )
+                    )
 
         if not result.errors:
             result.add_success(
@@ -188,7 +221,14 @@ class HygieneValidator(ValidatorBase):
             is_direct_reference = bool(direct_reference_separator and direct_reference_target.strip())
 
             if pkg_name in banned_lower:
-                result.add_error(f"{req_file.name}:{line_num} - Banned package: {pkg_name}")
+                finding = _hygiene_finding(
+                    "banned_package",
+                    f"{req_file.name}:{line_num} - Banned package: {pkg_name}",
+                    req_file.name,
+                    f"Replace '{pkg_name}' with a maintained alternative.",
+                )
+                finding.line_number = line_num
+                result.add_finding(finding)
             elif not is_direct_reference and not re.search(r"[=<>!]", requirement_part):
                 result.add_warning(f"{req_file.name}:{line_num} - Unpinned: {line}")
 

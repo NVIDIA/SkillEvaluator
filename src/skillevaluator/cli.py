@@ -5,15 +5,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import logging
 import math
+import os
+import stat
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import click
 
@@ -38,6 +41,7 @@ from skillevaluator.reporting.console_ui import (
     summarize_tier3,
 )
 from skillevaluator.reporting.naming import report_basename
+from skillevaluator.reporting.plugin_sections import split_display_prefix
 
 # Tier 1 (static validation) is the base install surface and is safe to import
 # eagerly. Tier 2 (embeddings/LLM) and Tier 3 (Harbor and its environments)
@@ -45,6 +49,7 @@ from skillevaluator.reporting.naming import report_basename
 # imported lazily inside the command callbacks. This keeps `import skillevaluator.cli`
 # and the CLI surface available on a base install without those extras.
 from skillevaluator.tier1.commands import (
+    ReportsNotWrittenError,
     console,
     emit_reports,
     enabled_check_lineup,
@@ -55,7 +60,7 @@ from skillevaluator.tier1.commands import (
     run_security_scan,
     run_validation,
 )
-from skillevaluator.tier3_environments import HARBOR_ENVIRONMENTS
+from skillevaluator.tier3_environments import HARBOR_ENVIRONMENTS, MAX_TRIAL_RETRIES, PLUGIN_LOAD_CHOICES
 from skillevaluator.tier_group import TierGroup
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 from skillevaluator.utils.tier2_paths import (
@@ -63,6 +68,10 @@ from skillevaluator.utils.tier2_paths import (
     paths_refer_to_same_location,
     sanitize_tier2_results,
 )
+
+if TYPE_CHECKING:
+    from skillevaluator.evaluation import EvaluationOptions
+    from skillevaluator.tier3.plugin_eval import PluginEvalPackage
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
@@ -102,6 +111,31 @@ def _validate_similarity_threshold(_ctx: click.Context, _param: click.Parameter,
     return value
 
 
+_PROBE_MCP_ENV_HELP = (
+    "Plugin only, with --probe-mcp: a host environment variable the probe may expand into a server's declared "
+    "${VAR} headers (repeatable). NAME sends it to every URL server whose headers use it; NAME=HOST only to "
+    "servers whose URL host is HOST; NAME@SERVER only to that server. The plugin chooses the URL, so headers "
+    "that reference any other variable are not sent."
+)
+_TRIAL_RETRIES_HELP = (
+    "Let Harbor retry a trial up to N times after an environment-start timeout, an agent-setup timeout, or a "
+    "network failure during agent setup in SkillEvaluator's agent wrappers; never after an agent timeout or a "
+    "verifier or reward error. Overrides harbor.trial_retries in evals/config.yml; without either, no trial is "
+    "retried. The run's run_config.json records the setting and the retries Harbor performed."
+)
+
+
+def _validate_probe_mcp_env(_ctx: click.Context, _param: click.Parameter, value: tuple[str, ...]) -> tuple[str, ...]:
+    from skillevaluator.tier3.mcp_proof import parse_env_grant
+
+    for item in value:
+        try:
+            parse_env_grant(item)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc)) from exc
+    return tuple(dict.fromkeys(value))
+
+
 # Heading + intro for the grouped Tier 3 options in ``validate --help``.
 _RUN_GROUP = "Run & Reports"
 _RUN_GROUP_DESC = "Applies to the whole run: target typing, policy profile, reports, tier selection."
@@ -120,7 +154,8 @@ Content types (--type):
   rules      .mdc files in team-rules/
   workflows  workflow-rules.mdc in a workflow directory
   plugin     Bundle-reference manifest (agent_plugin.yaml/.yml) or
-             contained plugin (.claude-plugin/plugin.json)
+             contained plugin (.claude-plugin/, .codex-plugin/, or
+             .cursor-plugin/plugin.json, or an Agent Plugins root plugin.json)
 
 Report formats (-r/--report):
   cli        Rich terminal output (default)
@@ -363,6 +398,53 @@ def _effective_report_formats(report_formats: tuple[str, ...], *, quiet: bool) -
     return report_formats
 
 
+def _content_relative_finding_paths(results: list[ValidationResult], validated: Path, content_root: Path) -> None:
+    """Make finding paths built from a relative target relative to the content root.
+
+    Validators get the target as typed. For ``validate sample``, some join it
+    into their paths ("sample/SKILL.md", relative to the working directory)
+    while others report paths relative to the content root ("SKILL.md"), so the
+    reports mixed both and SARIF, which reads a relative path against the
+    content root, pointed "sample/SKILL.md" nowhere. Each path that starts with
+    the typed target is rewritten as ``validate .`` would report it, unless it
+    names an existing entry under the content root (a skill "examples" with its
+    own "examples/" folder). A bundled skill's ``"[skill] "`` label is kept.
+    The ``errors`` / ``warnings`` string that mirrors a moved finding moves
+    with it, so reports still match it to the finding and do not list it again.
+    """
+    prefix = validated.parts
+    if validated.is_absolute() or not prefix:
+        return  # absolute paths are already unambiguous; "." has no prefix
+    for result in results:
+        moved: list[tuple[list[str], list[str]]] = []
+        for finding in result.findings:
+            skill, path = split_display_prefix(finding.file_path or "")
+            label = "" if skill is None else f"[{skill}] "
+            parts = Path(path).parts
+            if parts[: len(prefix)] != prefix:
+                continue
+            # A path relative to the content root never starts with "..", so only a
+            # target without ".." can be ambiguous.
+            if ".." not in prefix and (content_root / path).exists(follow_symlinks=False):
+                continue
+            # Always "/": str(Path(...)) gives "\\" on Windows, and validators there
+            # build backslash paths, so reports and SARIF would otherwise differ by OS.
+            old_forms = finding.legacy_string_forms()
+            finding.file_path = label + ("/".join(parts[len(prefix) :]) or ".")
+            moved.append((old_forms, finding.legacy_string_forms()))
+        for old_forms, new_forms in moved:
+            _move_legacy_string(result, old_forms, new_forms)
+
+
+def _move_legacy_string(result: ValidationResult, old_forms: list[str], new_forms: list[str]) -> None:
+    """Rewrite one ``errors`` / ``warnings`` entry that mirrors a moved finding to its new path."""
+    for messages in (result.errors, result.warnings):
+        for old, new in zip(old_forms, new_forms, strict=False):
+            if old in messages:
+                messages[messages.index(old)] = new
+                return
+
+
 def _record_validate_json_report(report_name: str | None) -> None:
     _validate_json_report_var.set(report_name)
 
@@ -390,6 +472,34 @@ def _report_formats_explicit() -> bool:
     return False
 
 
+_TIER2_EXTRA_SKIP = "Skipped: install the Tier 2 extra (make install EXTRAS=tier2), or pass --no-dedup."
+
+
+def _embedding_backend_problem() -> str | None:
+    """Why Tier 2 cannot embed here, or ``None`` when it can.
+
+    Embedding needs the ``tier2`` extra (``openai``) and a configured public
+    embedding provider. ``find_spec`` does not import the module (so nothing
+    leaks into a base install) and may raise if a meta-path blocker is active;
+    any failure there counts as the extra missing.
+    """
+    import importlib.util
+
+    from skillevaluator.provider_config import ProviderConfigurationError, resolve_embedding_provider
+
+    try:
+        has_openai = importlib.util.find_spec("openai") is not None
+    except (ImportError, ValueError):
+        has_openai = False
+    if not has_openai:
+        return _TIER2_EXTRA_SKIP
+    try:
+        resolve_embedding_provider()
+    except ProviderConfigurationError as exc:
+        return f"Tier 2 skipped: embedding setup is required.\n\n{exc}\n\nTo skip Tier 2, pass --no-dedup."
+    return None
+
+
 def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
     """Run Tier 2 dedup when possible, else return a non-failing skipped result.
 
@@ -397,7 +507,6 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
     configured public embedding provider. When either is missing it degrades
     gracefully to a warning so a lightweight ``validate`` keeps working.
     """
-    import importlib.util
 
     def _skip(message: str) -> list[ValidationResult]:
         result = ValidationResult(
@@ -408,27 +517,24 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
         result.metadata["skipped"] = True
         return [result]
 
-    def _available(module: str) -> bool:
-        # find_spec does not import the module (so nothing leaks into a base
-        # install) and may raise if a meta-path blocker is active; treat any
-        # failure as "unavailable" so dedup degrades to a warning.
-        try:
-            return importlib.util.find_spec(module) is not None
-        except (ImportError, ValueError):
-            return False
-
-    if not _available("openai"):
-        return _skip("Skipped: install the Tier 2 extra (make install EXTRAS=tier2), or pass --no-dedup.")
     try:
-        from skillevaluator.provider_config import ProviderConfigurationError, resolve_embedding_provider
         from skillevaluator.tier2.commands import run_dedup_scan
     except ImportError:
-        return _skip("Skipped: install the Tier 2 extra (make install EXTRAS=tier2), or pass --no-dedup.")
-    try:
-        resolve_embedding_provider()
-    except ProviderConfigurationError as exc:
-        return _skip(f"Tier 2 skipped: embedding setup is required.\n\n{exc}\n\nTo skip Tier 2, pass --no-dedup.")
+        return _skip(_TIER2_EXTRA_SKIP)
+    if problem := _embedding_backend_problem():
+        return _skip(problem)
     return run_dedup_scan(target_path)
+
+
+def _run_plugin_dedup_or_skip(plugin_root: Path) -> list[ValidationResult]:
+    """Run the public plugin Tier 2 contract without remote catalog services.
+
+    The embedding-based context checks run only when an embedding backend is
+    available; the rest of the contract runs either way.
+    """
+    from skillevaluator.tier2.commands import run_plugin_dedup_scan
+
+    return run_plugin_dedup_scan(plugin_root, run_context=_embedding_backend_problem() is None)
 
 
 def _partial_agent_eval_result(
@@ -438,6 +544,8 @@ def _partial_agent_eval_result(
     failure: str,
     results_dir: Path | None,
     env_mode: str,
+    dataset_source: Path | None = None,
+    plugin_provenance: dict[str, Any] | None = None,
 ) -> ValidationResult | None:
     """Normalize an engine run that produced usable results alongside errors.
 
@@ -467,6 +575,8 @@ def _partial_agent_eval_result(
             results_dir=results_dir,
             env_mode=env_mode,
             engine_result=engine_result,
+            **({"dataset_source": dataset_source} if dataset_source is not None else {}),
+            **({"plugin_provenance": plugin_provenance} if plugin_provenance is not None else {}),
         )
     except Exception:
         return None
@@ -595,12 +705,21 @@ def _run_agent_eval_or_skip(
     include_skills: tuple[Path, ...] = (),
     copy_repo: bool = False,
     timeout_multiplier: float | None = None,
+    trial_retries: int | None = None,
     harbor_keep_jobs: bool = False,
     agent_runtime_preflight: bool | None = None,
     block_on_agent_eval: bool = False,
     validate_source: bool = True,
     evaluated_source: dict[str, str] | None = None,
     progress_reporter=None,
+    kind: str = "skill",
+    lift_mode: str = "effectiveness",
+    repo_root: Path | None = None,
+    probe_mcp: bool = False,
+    probe_mcp_env: tuple[str, ...] = (),
+    allowed_private_hosts: tuple[str, ...] = (),
+    plugin_load: str = "wrapper",
+    policy: Any = None,
 ) -> ValidationResult:
     """Run Tier 3 live agent evaluation and fold the result into the combined report.
 
@@ -609,6 +728,39 @@ def _run_agent_eval_or_skip(
     describing why Tier 3 could not run. Tier 3 remains advisory by default,
     and callers can opt into blocking behavior.
     """
+    if kind == "plugin":
+        return _run_plugin_agent_eval(
+            target_path,
+            agents=agents,
+            env_mode=env_mode,
+            environment_kwarg=environment_kwarg,
+            skip_baseline=skip_baseline,
+            n_concurrent=n_concurrent,
+            max_agents=max_agents,
+            n_attempts=n_attempts,
+            pass_threshold=pass_threshold,
+            stop_on_pass=stop_on_pass,
+            model=model,
+            agent_model=agent_model,
+            grading_mode=grading_mode,
+            results_dir=results_dir,
+            include_skills=include_skills,
+            copy_repo=copy_repo,
+            timeout_multiplier=timeout_multiplier,
+            trial_retries=trial_retries,
+            harbor_keep_jobs=harbor_keep_jobs,
+            agent_runtime_preflight=agent_runtime_preflight,
+            evaluated_source=evaluated_source,
+            progress_reporter=progress_reporter,
+            lift_mode=lift_mode,
+            repo_root=repo_root,
+            probe_mcp=probe_mcp,
+            probe_mcp_env=probe_mcp_env,
+            allowed_private_hosts=allowed_private_hosts,
+            plugin_load=plugin_load,
+            policy=policy,
+        )
+
     if validate_source:
         from skillevaluator.evaluation.tier3_report import dataset_required_result
         from skillevaluator.tier3.evals_spec import validate_tier3_source
@@ -648,6 +800,7 @@ def _run_agent_eval_or_skip(
         include_skills=include_skills,
         copy_repo=copy_repo,
         timeout_multiplier=timeout_multiplier,
+        trial_retries=trial_retries,
         harbor_keep_jobs=harbor_keep_jobs,
         agent_runtime_preflight=agent_runtime_preflight,
         evaluated_source=evaluated_source,
@@ -699,6 +852,427 @@ def _run_agent_eval_or_skip(
             "Tier 3 live evaluation produced no parseable results.",
             skill_name=target_path.name,
         )
+    return result
+
+
+def _plugin_lift_mode_for_evidence(
+    prepared: PluginEvalPackage,
+    requested_lift_mode: str,
+) -> tuple[str, str | None]:
+    """Resolve a plugin lift mode without discarding a valid effectiveness run."""
+    if requested_lift_mode not in {"integration", "both"}:
+        return requested_lift_mode, None
+    evidence_error = prepared.integration_evidence_error()
+    if evidence_error and requested_lift_mode == "both":
+        return "effectiveness", evidence_error
+    return requested_lift_mode, evidence_error
+
+
+def _plugin_integration_error(lift_mode: str, skip_baseline: bool, reason: str | None) -> str | None:
+    """Why a requested plugin Integration comparison cannot run, or ``None``.
+
+    Integration compares against the without-plugin baseline, so it needs that
+    arm. ``--lift-mode integration`` also needs composition evidence (*reason*
+    says what is missing); ``both`` falls back to effectiveness instead. The
+    refusal says the comparison was not run, never a verdict on one.
+    """
+    if lift_mode not in {"integration", "both"}:
+        return None
+    if skip_baseline:
+        return "Integration requires a baseline; remove --skip-baseline."
+    if reason and lift_mode == "integration":
+        return f"Integration was not run: {reason}. Fix that, or use --lift-mode effectiveness."
+    return None
+
+
+def _plugin_lift_metadata(
+    requested_lift_mode: str,
+    effective_lift_mode: str,
+    integration_skip_reason: str | None,
+) -> dict[str, str]:
+    """Record the requested and effective plugin lift modes for reports and provenance.
+
+    Always emitted, not only on a fallback: a report must know that
+    ``--lift-mode integration|both`` was asked for to explain an Integration
+    comparison that was not measured instead of silently omitting it.
+    """
+    metadata = {
+        "requested_lift_mode": requested_lift_mode,
+        "effective_lift_mode": effective_lift_mode,
+    }
+    if integration_skip_reason is not None:
+        metadata["integration_skip_reason"] = integration_skip_reason
+    return metadata
+
+
+# The earlier name, kept for existing imports.
+_plugin_lift_fallback_metadata = _plugin_lift_metadata
+
+
+def _plugin_evaluation_options(
+    prepared: PluginEvalPackage,
+    *,
+    plugin_dir: Path,
+    lift_mode: str,
+    effective_lift_mode: str,
+    integration_skip_reason: str | None,
+    plugin_load: str,
+    results_dir: Path | None,
+    **run_options: Any,
+) -> EvaluationOptions:
+    """The ``EvaluationOptions`` for a prepared plugin package.
+
+    The plugin-specific fields are set here: the staged package with its member
+    skills in one group workspace, the baseline arms the effective lift mode
+    needs, the load mode and native snapshot, and the results root of the plugin
+    itself rather than of its temporary package. *run_options* are the generic
+    Tier 3 options (agents, attempts, models, ...), passed through unchanged.
+    """
+    from skillevaluator.evaluation import EvaluationOptions
+    from skillevaluator.tier3.results_location import resolve_results_root
+
+    return EvaluationOptions(
+        skill_path=prepared.package_path,
+        skill_workspace_mode="group",
+        include_skills=prepared.include_skills,
+        workspace_skills_baseline=effective_lift_mode == "integration",
+        sum_of_parts_arm=effective_lift_mode == "both",
+        eval_target_kind="plugin",
+        lift_mode_requested=lift_mode,
+        integration_skip_reason=integration_skip_reason,
+        plugin_load=plugin_load,
+        native_plugin_source=prepared.native_source,
+        results_dir=results_dir,
+        resolved_results_root=resolve_results_root(plugin_dir, results_dir),
+        **run_options,
+    )
+
+
+def _engine_run_dir(engine_result: Any) -> Path | None:
+    """The run directory the engine reported, or ``None``."""
+    run_dir = engine_result.get("run_dir") if isinstance(engine_result, dict) else None
+    return Path(str(run_dir)) if run_dir else None
+
+
+def _plugin_mcp_proof(
+    prepared: PluginEvalPackage,
+    *,
+    probe_mcp: bool,
+    allowed_private_hosts: tuple[str, ...] = (),
+    probe_mcp_env: tuple[str, ...] = (),
+) -> dict[str, Any] | None:
+    """Pre-run MCP proof for author-supplied URL MCP servers, or ``None`` when there are none.
+
+    Without ``--probe-mcp`` every URL server is recorded as ``declared``; with it,
+    each gets one bounded host probe (``initialize`` + ``tools/list``) under the
+    endpoint policy. Only the host variables named with ``--probe-mcp-env`` (for every
+    server, one host, or one server) are expanded into declared headers, and the
+    variables that may be sent are printed per host before the probe runs. The
+    tool input schemas the probe lists are recorded in the prepared package, so
+    the run checks every call's arguments against the server's own schema.
+    Advisory only: it never changes the INCOMPLETE rule.
+    """
+    targets = prepared.mcp_probe_targets
+    if not targets:
+        return None
+    from skillevaluator.tier3.mcp_proof import (
+        declared_mcp_proof,
+        planned_env_sends,
+        probe_mcp_servers,
+        write_mcp_input_schemas,
+    )
+
+    if not probe_mcp:
+        return declared_mcp_proof(targets)
+    # Say which opted-in host variables may leave the machine, and to which host, before any probe runs.
+    for server, host, names in planned_env_sends(targets, probe_mcp_env):
+        console.print(
+            f"MCP probe may send {escape_markup(', '.join(names))} to {escape_markup(host or 'an unknown host')} "
+            f"(server {escape_markup(server)}, --probe-mcp-env)"
+        )
+    proof = probe_mcp_servers(targets, allowed_private_hosts=allowed_private_hosts, expand_env=probe_mcp_env)
+    write_mcp_input_schemas(getattr(prepared, "package_path", None), proof)
+    return proof
+
+
+def _incomplete_plugin_provenance(
+    prepared: PluginEvalPackage,
+    engine_result: Any,
+    mcp_proof: dict[str, Any] | None,
+    failure: str,
+    metadata: dict[str, str],
+) -> dict[str, Any] | None:
+    """Plugin provenance for a run that did not complete, written to the run dir before any error.
+
+    The with-plugin arm's load census, hook census, canary, and coverage are
+    still evidence even when another arm (or some trials) failed, so they are
+    kept and the run is marked INCOMPLETE instead of being dropped.
+    """
+    from skillevaluator.tier3.plugin_eval import write_plugin_provenance
+
+    try:
+        provenance = _plugin_provenance_with_runtime_evidence(prepared, engine_result, mcp_proof)
+    except Exception:
+        return None
+    provenance.update(metadata)
+    provenance["execution_incomplete"] = f"Tier 3 plugin evaluation did not complete: {failure}"[:2000]
+    provenance["partial"] = True
+    run_dir = _engine_run_dir(engine_result)
+    if run_dir is not None and run_dir.is_dir():
+        # Best effort: the in-memory provenance still reaches the result and reports.
+        with contextlib.suppress(Exception):
+            write_plugin_provenance(run_dir, provenance)
+    return provenance
+
+
+def _completed_plugin_provenance(
+    prepared: PluginEvalPackage,
+    engine_result: Any,
+    mcp_proof: dict[str, Any] | None,
+    metadata: dict[str, str],
+) -> dict[str, Any]:
+    """Plugin provenance for a completed run, also written to the run dir as its sidecar.
+
+    The runner rendered ``report.html`` before the sidecar existed, so the
+    caller refreshes the report once the result is known.
+    """
+    from skillevaluator.tier3.plugin_eval import write_plugin_provenance
+
+    provenance = _plugin_provenance_with_runtime_evidence(prepared, engine_result, mcp_proof)
+    provenance.update(metadata)
+    run_dir = _engine_run_dir(engine_result)
+    if run_dir is not None:
+        write_plugin_provenance(run_dir, provenance)
+    return provenance
+
+
+def _plugin_provenance_with_runtime_evidence(
+    prepared: PluginEvalPackage, engine_result: Any, mcp_proof: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Plugin provenance plus runtime coverage (``exercised``) and the MCP proof."""
+    from skillevaluator.tier3.plugin_native import finalize_native_provenance
+    from skillevaluator.tier3.plugin_runtime import apply_runtime_evidence
+
+    provenance = prepared.provenance()
+    if mcp_proof is not None:
+        provenance["mcp_proof"] = mcp_proof
+    # Native load census first: runtime evidence reads provenance["plugin_load"].
+    finalize_native_provenance(provenance, engine_result)
+    return apply_runtime_evidence(provenance, engine_result if isinstance(engine_result, dict) else None)
+
+
+def _incomplete_plugin_agent_eval_result(
+    plugin_dir: Path,
+    *,
+    prepared: PluginEvalPackage,
+    engine_result: Any,
+    failure: str,
+    mcp_proof: dict[str, Any] | None,
+    metadata: dict[str, str],
+    results_dir: Path | None,
+    env_mode: str,
+) -> ValidationResult:
+    """An INCOMPLETE ``AGENT_EVAL`` result for a plugin run that did not complete.
+
+    Writes ``plugin_provenance.json`` first, then builds the result from this
+    run's own output so the with-plugin canary, load census, hook census, and
+    coverage stay in every report. Falls back to an advisory skip only when the
+    run left no usable results.
+    """
+    from skillevaluator.evaluation.tier3_report import (
+        advisory_skip_result,
+        incomplete_reason,
+        refresh_plugin_run_report,
+    )
+
+    message = f"Tier 3 plugin evaluation did not complete: {failure}"
+    provenance = _incomplete_plugin_provenance(prepared, engine_result, mcp_proof, failure, metadata)
+    result = _partial_agent_eval_result(
+        plugin_dir,
+        engine_result=engine_result,
+        failure=message,
+        results_dir=results_dir,
+        env_mode=env_mode,
+        dataset_source=prepared.package_path,
+        plugin_provenance=provenance,
+    )
+    if result is None:
+        return advisory_skip_result(message, skill_name=plugin_dir.name)
+    result.passed = False
+    result.metadata["execution_status"] = "skipped"
+    result.metadata["skip_reason"] = incomplete_reason(provenance or {"execution_incomplete": message})
+    result.metadata.update(metadata)
+    run_dir = _engine_run_dir(engine_result)
+    if run_dir is not None:
+        # The runner rendered report.html before the sidecar existed.
+        refresh_plugin_run_report(plugin_dir, run_dir, result=result)
+    return result
+
+
+def _incomplete_plugin_skip_result(plugin_dir: Path, prepared: Any) -> ValidationResult:
+    """An INCOMPLETE ``AGENT_EVAL`` result for a plugin with nothing locally evaluable.
+
+    A plugin whose only refs are external, missing, or unresolved, or whose
+    only component is a provider-only MCP server, evaluated nothing. That is
+    not an advisory skip: the result fails, says INCOMPLETE, and carries the
+    plugin provenance, so every report lists what could not be evaluated.
+    """
+    from skillevaluator.evaluation.tier3_report import advisory_skip_result, incomplete_reason
+
+    provenance = prepared.provenance()
+    reason = incomplete_reason(provenance)
+    message = f"Tier 3 plugin evaluation is INCOMPLETE: nothing was evaluated. {prepared.skip_reason or ''}".strip()
+    result = advisory_skip_result(message, skill_name=plugin_dir.name)
+    payload = result.metadata.get("agent_eval")
+    if isinstance(payload, dict):
+        payload["plugin_provenance"] = provenance
+        payload["provenance"] = {"source": "plugin", "reason": "incomplete", "advisory": False, "message": message}
+    result.passed = False
+    result.metadata["execution_status"] = "skipped"
+    result.metadata["skip_reason"] = f"{reason} (nothing was evaluated)"
+    return result
+
+
+def _run_plugin_agent_eval(
+    plugin_target: Path,
+    *,
+    agents: str | None,
+    env_mode: str,
+    environment_kwarg: tuple[str, ...] = (),
+    skip_baseline: bool,
+    n_concurrent: int | None,
+    max_agents: int | None,
+    n_attempts: int | None = None,
+    pass_threshold: float | None = None,
+    stop_on_pass: bool | None = None,
+    model: str | None = None,
+    agent_model: tuple[str, ...] = (),
+    grading_mode: str | None = None,
+    results_dir: Path | None = None,
+    include_skills: tuple[Path, ...] = (),
+    copy_repo: bool = False,
+    timeout_multiplier: float | None = None,
+    trial_retries: int | None = None,
+    harbor_keep_jobs: bool = False,
+    agent_runtime_preflight: bool | None = None,
+    evaluated_source: dict[str, str] | None = None,
+    progress_reporter=None,
+    lift_mode: str = "effectiveness",
+    repo_root: Path | None = None,
+    probe_mcp: bool = False,
+    probe_mcp_env: tuple[str, ...] = (),
+    allowed_private_hosts: tuple[str, ...] = (),
+    plugin_load: str = "wrapper",
+    policy: Any = None,
+) -> ValidationResult:
+    """Stage and evaluate a public plugin without fetching remote components."""
+    import tempfile
+
+    from skillevaluator.cli_core import resolve_plugin_path
+    from skillevaluator.evaluation import EvaluationService
+    from skillevaluator.evaluation.tier3_report import (
+        advisory_skip_result,
+        agent_eval_result_from_run,
+        refresh_plugin_run_report,
+    )
+    from skillevaluator.tier3.plugin_eval import prepare_plugin_eval_package
+
+    plugin_dir = resolve_plugin_path(plugin_target)
+
+    def _skipped(message: str) -> ValidationResult:
+        return advisory_skip_result(message, skill_name=plugin_dir.name)
+
+    lift_metadata: dict[str, str] = {}
+    try:
+        with tempfile.TemporaryDirectory(prefix="skillevaluator-plugin-eval-") as temp_dir:
+            prepared = prepare_plugin_eval_package(
+                plugin_dir,
+                stage_root=Path(temp_dir),
+                include_skills=include_skills,
+                repo_root=repo_root,
+                plugin_load=plugin_load,
+                agents=agents,
+                env_mode=env_mode,
+                policy=policy,
+            )
+            if prepared.skipped or prepared.package_path is None:
+                if getattr(prepared, "incomplete_skip", False):
+                    return _incomplete_plugin_skip_result(plugin_dir, prepared)
+                return _skipped(
+                    f"Tier 3 plugin evaluation skipped: {prepared.skip_reason or 'nothing locally evaluable'}"
+                )
+            effective_lift_mode, integration_skip_reason = _plugin_lift_mode_for_evidence(prepared, lift_mode)
+            if integration_error := _plugin_integration_error(lift_mode, skip_baseline, integration_skip_reason):
+                return _skipped(f"Tier 3 plugin {integration_error}")
+            lift_metadata = _plugin_lift_metadata(lift_mode, effective_lift_mode, integration_skip_reason)
+            mcp_proof = _plugin_mcp_proof(
+                prepared,
+                probe_mcp=probe_mcp,
+                allowed_private_hosts=allowed_private_hosts,
+                probe_mcp_env=probe_mcp_env,
+            )
+            options = _plugin_evaluation_options(
+                prepared,
+                plugin_dir=plugin_dir,
+                lift_mode=lift_mode,
+                effective_lift_mode=effective_lift_mode,
+                integration_skip_reason=integration_skip_reason,
+                plugin_load=plugin_load,
+                results_dir=results_dir,
+                agents=agents,
+                env_mode=env_mode,
+                environment_kwarg=environment_kwarg,
+                skip_baseline=skip_baseline,
+                n_concurrent=n_concurrent,
+                max_agents=max_agents,
+                n_attempts=n_attempts,
+                pass_threshold=pass_threshold,
+                stop_on_pass=stop_on_pass,
+                model=model,
+                agent_model=agent_model,
+                grading_mode=grading_mode,
+                copy_repo=copy_repo,
+                timeout_multiplier=timeout_multiplier,
+                trial_retries=trial_retries,
+                harbor_keep_jobs=harbor_keep_jobs,
+                agent_runtime_preflight=agent_runtime_preflight,
+                evaluated_source=evaluated_source,
+            )
+            service = EvaluationService()
+            if progress_reporter is not None:
+                engine_result = service.evaluate(options, progress_reporter=progress_reporter)
+            else:
+                engine_result = service.evaluate(options)
+            if failure := service.failure_reason(engine_result):
+                return _incomplete_plugin_agent_eval_result(
+                    plugin_dir,
+                    prepared=prepared,
+                    engine_result=engine_result,
+                    failure=failure,
+                    mcp_proof=mcp_proof,
+                    metadata=lift_metadata,
+                    results_dir=results_dir,
+                    env_mode=env_mode,
+                )
+            provenance = _completed_plugin_provenance(prepared, engine_result, mcp_proof, lift_metadata)
+            result = agent_eval_result_from_run(
+                plugin_dir,
+                results_dir=results_dir,
+                dataset_source=prepared.package_path,
+                env_mode=env_mode,
+                engine_result=engine_result if isinstance(engine_result, dict) else None,
+                plugin_provenance=provenance,
+            )
+            run_dir = _engine_run_dir(engine_result)
+            if result is not None and run_dir is not None:
+                # The runner rendered report.html before the sidecar existed.
+                refresh_plugin_run_report(plugin_dir, run_dir, result=result)
+    except Exception as exc:
+        return _skipped(f"Tier 3 plugin evaluation skipped: {exc}")
+
+    if result is None:
+        return _skipped("Tier 3 plugin evaluation produced no parseable results.")
+    result.metadata.update(lift_metadata)
     return result
 
 
@@ -902,6 +1476,10 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
         argv.extend(["--policy", str(params["policy_path"])])
     if params.get("profile"):
         argv.extend(["--profile", str(params["profile"])])
+    if params.get("repo_root"):
+        argv.extend(["--repo-root", str(params["repo_root"])])
+    if params.get("resolve_endpoints"):
+        argv.append("--resolve-endpoints")
     if params.get("agent_eval") is True:
         argv.append("--tier3")
     elif params.get("agent_eval") is False:
@@ -923,6 +1501,16 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
         argv.extend(["--env-mode", str(env_mode)])
     for environment_kwarg in params.get("environment_kwarg") or ():
         argv.extend(["--environment-kwarg", str(environment_kwarg)])
+    lift_mode = params.get("lift_mode", "effectiveness")
+    if lift_mode != "effectiveness":
+        argv.extend(["--lift-mode", str(lift_mode)])
+    if params.get("probe_mcp"):
+        argv.append("--probe-mcp")
+    for name in params.get("probe_mcp_env") or ():
+        argv.extend(["--probe-mcp-env", str(name)])
+    plugin_load = params.get("plugin_load", "wrapper")
+    if plugin_load != "wrapper":
+        argv.extend(["--plugin-load", str(plugin_load)])
     if params.get("skip_baseline"):
         argv.append("--skip-baseline")
     if params.get("n_concurrent") is not None:
@@ -952,6 +1540,8 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
         argv.append("--copy-repo")
     if params.get("timeout_multiplier") is not None:
         argv.extend(["--timeout-multiplier", str(params["timeout_multiplier"])])
+    if params.get("trial_retries") is not None:
+        argv.extend(["--trial-retries", str(params["trial_retries"])])
     if params.get("harbor_keep_jobs"):
         argv.append("--harbor-keep-jobs")
     agent_runtime_preflight = params.get("agent_runtime_preflight")
@@ -1080,7 +1670,7 @@ def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) ->
 def _validate_catalog(
     ctx: click.Context,
     *,
-    resolved_target: Path,
+    skill_dirs: list[Path],
     output_dir: Path,
     workers: int = 1,
 ) -> None:
@@ -1091,13 +1681,14 @@ def _validate_catalog(
     when any skill failed. With ``workers`` above 1, skills validate in
     parallel child processes and the per-skill pipeline view is skipped.
     """
-    if ctx.params.get("previous_version"):
-        raise click.ClickException(
-            "--previous-version applies to one skill and cannot be reused for a catalog; "
-            "validate each skill separately with its own previous version"
-        )
+    from skillevaluator.validators.version import PREVIOUS_VERSION_ENV
 
-    skill_dirs = sorted(marker.parent for marker in resolved_target.glob("*/SKILL.md"))
+    # The environment variable is the flag's default, so it gets the same guard.
+    if ctx.params.get("previous_version") or os.environ.get(PREVIOUS_VERSION_ENV):
+        raise click.ClickException(
+            f"--previous-version (or {PREVIOUS_VERSION_ENV}) applies to one skill and cannot be reused for a "
+            "catalog; validate each skill separately with its own previous version"
+        )
     if workers > 1:
         _validate_catalog_parallel(ctx, skill_dirs=skill_dirs, output_dir=output_dir, workers=workers)
         return
@@ -1244,11 +1835,20 @@ def _finish_pipeline_view(
     ]
     payload = ((tier3_result.metadata or {}).get("agent_eval") or {}) if tier3_result is not None else {}
     summary = payload.get("summary") or payload
+    # A Tier 3 FAIL (complete or partial run) or an INCOMPLETE partial run that stayed advisory.
+    tier3_gate = _tier3_gate_label(tier3_result) or (
+        "Tier 3 INCOMPLETE"
+        if tier3_result is not None and not tier3_result.passed and _gate_result_incomplete(tier3_result)
+        else None
+    )
 
     if not gate_failed:
         ran = sum(1 for block in view.blocks if block.status not in ("pending", "skip"))
         advisory_failed = any(block.status == "fail" and block.number in {2, 3} for block in view.blocks)
-        if advisory_failed:
+        if tier3_gate:
+            # Tier 3 failed its gate or is INCOMPLETE, but it is advisory here: never call that "all tiers passed".
+            headline = f"gating tiers passed · {tier3_gate} is advisory (--block-on-agent-eval gates it)"
+        elif advisory_failed:
             headline = "gating tiers passed · advisory tier reported findings (see report)"
         else:
             headline = f"all {ran} tier{'s' if ran != 1 else ''} passed"
@@ -1258,20 +1858,91 @@ def _finish_pipeline_view(
         view.finish(Verdict(passed=True, headline=headline), links)
         return
 
-    failed = [result for result in tier_gate_results if not result.passed and not _is_skipped(result)]
-    if failed:
-        first = failed[0].validator_name or "validation"
-        extra = f" (+{len(failed) - 1} more)" if len(failed) > 1 else ""
-        tier_no = (failed[0].metadata.get("gating") or {}).get("tier")
-        tier_label = f" in Tier {tier_no}" if tier_no is not None else ""
-        headline = f"{first}{extra} failed{tier_label}"
-    else:
-        headline = "validation failed"
+    blocked = [result for result in tier_gate_results if not result.passed]
+    incomplete = [result for result in blocked if _gate_result_incomplete(result)]
+    # A skipped Tier 3 run that gates is a failure (it did not run); other skipped results never block.
+    failed = [
+        result
+        for result in blocked
+        if not _gate_result_incomplete(result) and (result.validator_name == "AGENT_EVAL" or not _is_skipped(result))
+    ]
+    # Missing evidence also counts when the same result failed on a blocking finding of its own.
+    missing = [result for result in blocked if result in incomplete or result.is_incomplete]
     rerun = _rerun_hint(target_path, agent_eval)
-    view.finish(
-        Verdict(passed=False, headline=headline, fix=first_fix(tier_gate_results), rerun=rerun),
-        links,
-    )
+    if failed:
+        # A real failure outranks missing evidence; the headline still counts what did not complete.
+        headline = _gate_headline(failed, "failed")
+        if missing:
+            headline += f" · {len(missing)} did not complete"
+        verdict = Verdict(passed=False, headline=headline, fix=first_fix(tier_gate_results), rerun=rerun)
+    elif incomplete:
+        verdict = Verdict(
+            passed=False, incomplete=True, headline=_gate_headline(incomplete, "did not complete"), rerun=rerun
+        )
+    else:
+        verdict = Verdict(passed=False, headline="validation failed", fix=first_fix(tier_gate_results), rerun=rerun)
+    view.finish(verdict, links)
+
+
+def _tier3_gate_label(result: ValidationResult | None) -> str | None:
+    """Return why a Tier 3 run, complete or partial, failed its gate (``Tier 3 verdict FAIL``), or ``None``."""
+    labels = (result.metadata or {}).get("tier3_gate_failures") if result is not None else None
+    if not isinstance(labels, list) or not labels:
+        return None
+    return " · ".join(str(label) for label in labels)
+
+
+def _gate_result_incomplete(result: ValidationResult) -> bool:
+    """Whether a blocking result is only missing evidence (INCOMPLETE) rather than failed.
+
+    The rule is the one the terminal summary and BENCHMARK.md use. A scanner that
+    did not complete is INCOMPLETE, unless the same result also recorded a
+    blocking finding of its own: a real failure outranks missing evidence. A
+    partial Tier 3 plugin run is INCOMPLETE unless it failed its gate (a FAIL
+    verdict or a confirmed Skill Lift regression). A Tier 3 run that did not run
+    at all fails the gate when ``--block-on-agent-eval`` makes Tier 3 gate.
+    """
+    from skillevaluator.reporting.benchmark import has_blocking_finding
+    from skillevaluator.reporting.console_ui import _is_skipped
+
+    if result.validator_name != "AGENT_EVAL":
+        return result.is_incomplete and not has_blocking_finding(result)
+    metadata = result.metadata or {}
+    payload = metadata.get("agent_eval") if isinstance(metadata.get("agent_eval"), dict) else {}
+    if _tier3_gate_label(result) or str(payload.get("verdict") or "").lower() == "fail":
+        return False
+    if _tier3_not_run_message(result) is not None:
+        return False
+    return _is_skipped(result)
+
+
+def _tier3_not_run_message(result: ValidationResult) -> str | None:
+    """Return why Tier 3 did not run at all (an advisory skip result), or ``None``."""
+    payload = (result.metadata or {}).get("agent_eval")
+    provenance = payload.get("provenance") if isinstance(payload, dict) else None
+    if not isinstance(provenance, dict) or not (provenance.get("advisory") and provenance.get("reason") == "skipped"):
+        return None
+    return str(provenance.get("message") or "Tier 3 live evaluation did not run").strip()
+
+
+def _gate_headline(results: list[ValidationResult], outcome: str) -> str:
+    """Name the first blocking result, its tier, and how many more share the outcome."""
+    first = results[0]
+    extra = f" (+{len(results) - 1} more)" if len(results) > 1 else ""
+    tier_no = ((first.metadata or {}).get("gating") or {}).get("tier")
+    tier_label = f" in Tier {tier_no}" if tier_no is not None else ""
+    if first.validator_name == "AGENT_EVAL":
+        if label := _tier3_gate_label(first):
+            return f"{label}{extra}"
+        if outcome == "did not complete":
+            reason = str((first.metadata or {}).get("skip_reason") or "").strip()
+            reason = reason.removeprefix("INCOMPLETE:").strip()
+            return f"Tier 3{extra}: {reason}" if reason else f"Tier 3{extra} did not complete"
+        if (message := _tier3_not_run_message(first)) is not None:
+            # A gated Tier 3 run that never ran: say why (the message already names Tier 3).
+            return f"{message}{extra}" if message.startswith("Tier 3") else f"Tier 3 did not run{extra}: {message}"
+        return f"Tier 3 live evaluation{extra} {outcome}"
+    return f"{first.validator_name or 'validation'}{extra} {outcome}{tier_label}"
 
 
 def _print_tier_banner(title: str) -> None:
@@ -1294,6 +1965,138 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     if profile:
         profile_color = "cyan"
         console.print(f"Profile: [{profile_color}]{escape_markup(str(profile))}[/{profile_color}]")
+
+
+def _declared_target_is_link(target_path: Path) -> bool:
+    """Whether the validation target is a symlink or reparse point; a hard-linked or special one is refused."""
+    from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
+
+    try:
+        metadata = target_path.lstat()
+    except OSError as exc:
+        raise click.ClickException(f"Cannot inspect validation target safely: {exc}") from exc
+    is_link = stat_is_link_or_reparse(metadata)
+    if stat.S_ISREG(metadata.st_mode) and getattr(metadata, "st_nlink", 1) != 1:
+        raise click.UsageError(f"Validation target is a hard-linked file: {target_path.name or '.'}")
+    if not is_link and not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
+        raise click.UsageError(f"Validation target is not a regular file or directory: {target_path.name or '.'}")
+    return is_link
+
+
+def _has_regular_skill_manifest(directory: Path) -> bool:
+    """Whether *directory* holds a regular, single-link skill manifest, checked without following links."""
+    from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
+    from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
+
+    for manifest_name in SKILL_MANIFEST_VARIANTS:
+        try:
+            metadata = (directory / manifest_name).lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise click.ClickException(f"Cannot inspect validation target safely: {exc}") from exc
+        if (
+            not stat_is_link_or_reparse(metadata)
+            and stat.S_ISREG(metadata.st_mode)
+            and getattr(metadata, "st_nlink", 1) == 1
+        ):
+            return True
+    return False
+
+
+class _ValidateTarget(NamedTuple):
+    """The content ``validate`` runs on."""
+
+    content_type: str
+    root: Path
+    #: The direct child skills of a catalog (a directory of skills without a root manifest); otherwise empty.
+    catalog_skill_dirs: list[Path]
+
+
+def _resolve_validate_target(
+    target_path: Path,
+    *,
+    content_type: str,
+    detected_type: str,
+    declared_is_link: bool,
+    tier1_only: bool,
+) -> _ValidateTarget:
+    """Resolve the content type and root ``validate`` runs on, and the skills of a catalog.
+
+    A linked target root is followed only for a Tier 1-only run of a
+    directory, never when the target names a selected manifest; an
+    auto-detected type is then detected again on the resolved root. A
+    directory of skills without a regular root ``SKILL.md`` is a catalog, and
+    its direct child skills are returned so each one is validated as its own
+    job. A directory of unknown type whose direct children are plugins is
+    refused: no plugin check would run on it.
+    """
+    from skillevaluator.cli_core import detect_content_type, resolve_content_path
+    from skillevaluator.constants import (
+        CONTENT_TYPE_PLUGIN,
+        CONTENT_TYPE_SKILL,
+        CONTENT_TYPE_UNKNOWN,
+        PLUGIN_CONTAINED_MANIFEST_FILE,
+        PLUGIN_MANIFEST_FILES,
+        RULES_FILE_EXTENSION,
+        SKILL_MANIFEST_VARIANTS,
+    )
+
+    resolved_type = detected_type
+    resolved_target = resolve_content_path(target_path, resolved_type)
+    if declared_is_link:
+        names_selected_manifest = (
+            target_path.name in SKILL_MANIFEST_VARIANTS
+            or target_path.name in PLUGIN_MANIFEST_FILES
+            # Any plugin.json: vendor-directory manifests and the Agent Plugins root manifest.
+            or target_path.name == PLUGIN_CONTAINED_MANIFEST_FILE
+            or target_path.suffix == RULES_FILE_EXTENSION
+        )
+        if names_selected_manifest or not tier1_only or not target_path.is_dir():
+            raise click.UsageError(
+                f"Validation target root is a symlink or reparse point (including a junction): "
+                f"{target_path.name or '.'}"
+            )
+        try:
+            resolved_target = target_path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise click.ClickException(f"Cannot resolve linked Tier 1 validation root safely: {exc}") from exc
+        if content_type == "auto":
+            resolved_type = detect_content_type(resolved_target)
+            resolved_target = resolve_content_path(resolved_target, resolved_type)
+
+    catalog_skill_dirs: list[Path] = []
+    if (
+        resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
+        and resolved_target.is_dir()
+        and not _has_regular_skill_manifest(resolved_target)
+    ):
+        from skillevaluator.utils.helpers import find_skills_in_directory
+
+        try:
+            discovered = find_skills_in_directory(resolved_target)
+        except ValueError as exc:
+            raise click.ClickException(f"Cannot discover validation target safely: {exc}") from exc
+        if resolved_target not in discovered:
+            catalog_skill_dirs = sorted(skill_dir for skill_dir in discovered if skill_dir.parent == resolved_target)
+    if not catalog_skill_dirs and resolved_type == CONTENT_TYPE_UNKNOWN and resolved_target.is_dir():
+        # Generic checks on a folder of plugins never check a plugin, so its report would pass any plugin.
+        try:
+            plugin_dirs = [
+                child
+                for child in sorted(resolved_target.iterdir())
+                if stat.S_ISDIR(child.lstat().st_mode) and detect_content_type(child) == CONTENT_TYPE_PLUGIN
+            ]
+        except OSError as exc:
+            raise click.ClickException(f"Cannot discover validation target safely: {exc}") from exc
+        if plugin_dirs:
+            names = ", ".join(strip_terminal_controls(child.name) for child in plugin_dirs[:10])
+            more = f" and {len(plugin_dirs) - 10} more" if len(plugin_dirs) > 10 else ""
+            raise click.UsageError(
+                f"Validation target is a folder of {len(plugin_dirs)} plugins ({names}{more}), not one plugin; "
+                "validate each plugin root on its own"
+            )
+    return _ValidateTarget(resolved_type, resolved_target, catalog_skill_dirs)
 
 
 @cli.command(epilog=_VALIDATE_EPILOG)
@@ -1339,7 +2142,8 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help_group=_TIER1_GROUP,
     help="Comma-separated subset of Tier 1 checks to run (default: all applicable). "
     "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint; "
-    "opt-in (not run by default): dependency. "
+    "opt-in (not run by default): dependency, and claude-validate (plugins: parity with "
+    "'claude plugin validate' when the claude CLI is installed). "
     "quality/lint/version are skill-only and skipped for rules/workflows.",
 )
 @click.option(
@@ -1429,6 +2233,27 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     "Values above 1 run skills in parallel processes and disable the per-skill pipeline view.",
 )
 @click.option(
+    "--repo-root",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Plugin only: repository root (git top-level) used to resolve same-repository skill/rule "
+    "references in Tier 1 and Tier 3. Default: the git top-level containing the plugin. The "
+    "missing-dependency gate also requires that root to have a git 'origin' remote; otherwise "
+    "references stay unresolved (advisory).",
+)
+@click.option(
+    "--resolve-endpoints",
+    is_flag=True,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Plugin only, opt-in network check: resolve MCP and HTTP hook URL hosts and send one "
+    "credential-free HEAD (no redirects followed) to flag names or redirects that reach private, "
+    "link-local, or cloud-metadata addresses. Also enabled by 'endpoints.resolve: true' in the policy. "
+    "Default: off (Tier 1 stays network-free).",
+)
+@click.option(
     "--dedup/--no-dedup",
     "--tier2/--no-tier2",
     "dedup",
@@ -1460,7 +2285,9 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     default=None,
     cls=GroupedOption,
     help_group=_TIER3_GROUP,
-    help="Make Tier 3 findings gate the exit code. Default: advisory.",
+    help="Make Tier 3 gate the exit code: a FAIL verdict, a confirmed Skill Lift regression (FAIL band, whole "
+    "interval below zero), or a run that is skipped or INCOMPLETE then fails validate. A NEUTRAL verdict never "
+    "does. Default: advisory (reported, exit code unchanged).",
 )
 @click.option(
     "--autopilot/--no-autopilot",
@@ -1489,6 +2316,45 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     cls=GroupedOption,
     help_group=_TIER3_GROUP,
     help="Harbor environment backend.",
+)
+@click.option(
+    "--lift-mode",
+    type=click.Choice(["effectiveness", "integration", "both"]),
+    default="effectiveness",
+    show_default=True,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Plugin only: compare against no plugin, sum-of-parts, or both baselines.",
+)
+@click.option(
+    "--probe-mcp",
+    is_flag=True,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Plugin only: before Tier 3, probe author-supplied URL MCP servers from the host "
+    "(initialize + tools/list, bounded) under the endpoint policy. Sends only literal declared headers "
+    "unless --probe-mcp-env names a variable. Advisory.",
+)
+@click.option(
+    "--probe-mcp-env",
+    "probe_mcp_env",
+    multiple=True,
+    metavar="NAME[=HOST|@SERVER]",
+    callback=_validate_probe_mcp_env,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help=_PROBE_MCP_ENV_HELP,
+)
+@click.option(
+    "--plugin-load",
+    type=click.Choice(PLUGIN_LOAD_CHOICES),
+    default="wrapper",
+    show_default=True,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Plugin only: how the with-plugin arm loads the plugin. 'wrapper' stages a generated wrapper skill; "
+    "'native' stages it the way each harness loads plugins (fails for unsupported agents or local mode); "
+    "'auto' uses native where supported and the wrapper otherwise.",
 )
 @click.option(
     "--environment-kwarg",
@@ -1598,6 +2464,14 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Scale Harbor step timeouts.",
 )
 @click.option(
+    "--trial-retries",
+    type=click.IntRange(0, MAX_TRIAL_RETRIES),
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help=_TRIAL_RETRIES_HELP,
+)
+@click.option(
     "--harbor-keep-jobs",
     is_flag=True,
     cls=GroupedOption,
@@ -1649,6 +2523,8 @@ def validate(
     profile: str | None,
     external: bool,
     policy_path: Path | None,
+    repo_root: Path | None,
+    resolve_endpoints: bool,
     dedup: bool,
     block_on_dedup: bool | None,
     agent_eval: bool | None,
@@ -1656,6 +2532,10 @@ def validate(
     autopilot: bool | None,
     agents: str | None,
     env_mode: str,
+    lift_mode: str,
+    probe_mcp: bool,
+    probe_mcp_env: tuple[str, ...],
+    plugin_load: str,
     environment_kwarg: tuple[str, ...],
     skip_baseline: bool,
     n_concurrent: int | None,
@@ -1670,6 +2550,7 @@ def validate(
     include_skills: tuple[Path, ...],
     copy_repo: bool,
     timeout_multiplier: float | None,
+    trial_retries: int | None,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
     workers: int,
@@ -1685,20 +2566,22 @@ def validate(
     blocking Tier 2 deduplication, and advisory Tier 3 live evaluation.
     For skills, reuse the existing dataset or generate one when missing.
     Use --tiers 1,2 to omit live evaluation, or --block-on-agent-eval to make
-    Tier 3 gate the exit code. Reports follow --report and --output-dir.
+    Tier 3 gate the exit code: a Tier 3 FAIL verdict, a confirmed Skill Lift
+    regression, or a skipped or INCOMPLETE Tier 3 run then fails validate; NEUTRAL
+    does not. Without the flag, Tier 3 is reported (BENCHMARK.md says it was
+    advisory) but never changes the exit code.
+    Reports follow --report and --output-dir.
 
     Rules, workflows, and plugins retain Tier 1/2 by default; their Tier 3
     evaluation requires an explicit --tier3, --autopilot, or --full request.
 
-    A plugin (a bundle-reference ``agent_plugin.yaml``/``.yml`` manifest or a
-    contained ``.claude-plugin/plugin.json`` manifest) is auto-detected and
-    validated against its public contract. Quality/lint/version checks are
-    skill-only and skipped for plugins.
+    A plugin (a bundle-reference ``agent_plugin.yaml``/``.yml`` manifest, or a
+    contained ``.claude-plugin/``, ``.codex-plugin/``, or ``.cursor-plugin/``
+    ``plugin.json`` or Agent Plugins root ``plugin.json``) is auto-detected and
+    validated against its public contract; quality/lint/version checks run on
+    each skill bundled under the plugin's ``skills/`` directory.
     """
     _record_validate_json_report(None)
-    if dedup:
-        _reject_linked_tier2_root(target_path)
-    target_path = target_path.resolve()
     evaluated_source = _evaluated_source_from_options(
         evaluated_source_repository,
         evaluated_source_revision,
@@ -1717,6 +2600,8 @@ def validate(
     from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url, resolve_git_root
     from skillevaluator.validators.policy import apply_policy, resolve_policy
 
+    declared_is_link = _declared_target_is_link(target_path)
+
     if external and profile and profile != "external":
         raise click.ClickException(f"--external conflicts with --profile {profile}; pass one or the other.")
     profile_name = "external" if external else profile
@@ -1728,10 +2613,10 @@ def validate(
     block_on_dedup_effective = True if block_on_dedup is None else block_on_dedup
     block_on_agent_eval_effective = False if block_on_agent_eval is None else block_on_agent_eval
 
-    resolved_type = content_type if content_type != "auto" else detect_content_type(target_path)
+    detected_type = content_type if content_type != "auto" else detect_content_type(target_path)
     # Only skills own an evals/ task source. Plugins, rules, and workflows can
     # still run Tier 3, but must bypass the skill-directory source preflight.
-    preflight_tier3_source = resolved_type == CONTENT_TYPE_SKILL
+    preflight_tier3_source = detected_type == CONTENT_TYPE_SKILL
 
     # Skill validation is the complete workflow. Keep the old flags as aliases,
     # while explicit disable flags and the authoritative --tiers selector still
@@ -1752,21 +2637,23 @@ def validate(
         # turns Tier 3 off even when --full/--autopilot/--tier3 turned it on.
         agent_eval = "3" in selected
     autopilot = autopilot and agent_eval
-    tier3_path = target_path.parent if preflight_tier3_source and target_path.is_file() else target_path
 
-    from skillevaluator.constants import CONTENT_TYPE_UNKNOWN
-
+    run_tier2 = dedup and detected_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_PLUGIN)
+    run_tier3 = agent_eval and detected_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_PLUGIN)
+    resolved_type, resolved_target, catalog_skill_dirs = _resolve_validate_target(
+        target_path,
+        content_type=content_type,
+        detected_type=detected_type,
+        declared_is_link=declared_is_link,
+        # Auto-detection through the link could still turn Tier 2 or 3 on, so it counts as requesting them.
+        tier1_only=not (run_tier2 or run_tier3 or (content_type == "auto" and (dedup or agent_eval))),
+    )
     # A directory of skills (no root SKILL.md) is a catalog: run the pipeline
     # once per skill, each as its own job with its own reports.
-    if (
-        resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
-        and target_path.is_dir()
-        and not (target_path / "SKILL.md").exists()
-        and any(target_path.glob("*/SKILL.md"))
-    ):
+    if catalog_skill_dirs:
         _validate_catalog(
             click.get_current_context(),
-            resolved_target=target_path,
+            skill_dirs=catalog_skill_dirs,
             output_dir=output_dir,
             workers=workers,
         )
@@ -1775,17 +2662,18 @@ def validate(
     # Quiet (default) drives the compact pipeline view; --verbose keeps the
     # historical full-detail stream, as does DEBUG logging via the group -v.
     quiet = not verbose and not logging.getLogger().isEnabledFor(logging.DEBUG)
-    run_tier3 = agent_eval
     planned_tiers = [(1, "Static & Security", "static & security")]
     tier2_index = tier3_index = None
-    if dedup:
+    if run_tier2:
         tier2_index = len(planned_tiers)
         planned_tiers.append((2, "Deduplication", "deduplication"))
     if run_tier3:
         tier3_index = len(planned_tiers)
         planned_tiers.append((3, "Live Agent Eval", "live agent eval"))
+    # The lexical target may be "." or a manifest file; name reports after the resolved content root.
+    target_name = resolved_target.resolve().name
     view = ValidateView(
-        skill=f"{resolved_type}: {target_path.name}",
+        skill=f"{resolved_type}: {target_name}",
         tiers=planned_tiers,
         command="validate",
         enabled=quiet,
@@ -1810,7 +2698,7 @@ def validate(
         checks_done.append(name)
 
     results = run_validation(
-        target_path,
+        resolved_target,
         checks=checks,
         use_llm=llm,
         llm_verify=llm_verify,
@@ -1821,7 +2709,13 @@ def validate(
         fail_fast=fail_fast,
         continue_on_failure=continue_on_failure,
         on_check=_on_check if quiet else None,
+        repo_root=repo_root,
+        resolve_endpoints=resolve_endpoints,
     )
+    if resolved_type == CONTENT_TYPE_PLUGIN and resolved_target != target_path:
+        from skillevaluator.validators.plugin_schema import PluginSchemaValidator
+
+        PluginSchemaValidator.note_requested_manifest(results, target_path)
     # The raw pass/fail signal drives --fail-fast identically in both modes;
     # the DISPLAYED tier summary must reflect policy-finalized severities or
     # the tier blocks can contradict the verdict panel (apply_policy is
@@ -1834,12 +2728,16 @@ def validate(
     tier1_gate_results = list(results)
     tier2_gate_results: list[ValidationResult] = []
 
-    if dedup and not (fail_fast and not continue_on_failure and tier1_raw_failed):
+    if run_tier2 and not (fail_fast and not continue_on_failure and tier1_raw_failed):
         if not quiet:
             _print_tier_banner(_TIER_BANNERS["tier2"])
         view.tier_start(tier2_index)
         view.tier_progress(tier2_index, [stage_hint_row("stages", "chunk · embed · cluster · llm-judge")])
-        tier2_results = _run_dedup_or_skip(target_path)
+        tier2_results = (
+            _run_plugin_dedup_or_skip(resolved_target)
+            if resolved_type == CONTENT_TYPE_PLUGIN
+            else _run_dedup_or_skip(resolved_target)
+        )
         results.extend(tier2_results)
         tier2_gate_results.extend(tier2_results)
         if quiet:
@@ -1849,7 +2747,7 @@ def validate(
             view.tier_done(tier2_index, failed=not tier2_ok, rows=tier2_rows)
         else:
             view.tier_skip(tier2_index, tier2_skip)
-    elif dedup:
+    elif run_tier2:
         view.tier_skip(tier2_index, "skipped after Tier 1 failure (fail-fast)")
 
     # Preserve the pre-Tier 3 results for progressive output. Final gate
@@ -1862,7 +2760,7 @@ def validate(
     # Severities are finalized first so this interim view matches the combined
     # report rendered at the end (apply_policy is idempotent, so emit_reports
     # re-applying it is a no-op).
-    if not quiet and agent_eval and "cli" in report_formats:
+    if not quiet and run_tier3 and "cli" in report_formats:
         apply_policy(tier_gate_results, policy)
         CLIReporter(console=console).print_summary(tier_gate_results)
 
@@ -1871,7 +2769,7 @@ def validate(
     # runs regardless of Tier 1/Tier 2 outcome. It degrades to a non-blocking
     # advisory note when it cannot run.
     tier3_result: ValidationResult | None = None
-    if agent_eval:
+    if run_tier3:
         if not quiet:
             _print_tier_banner(_TIER_BANNERS["tier3"])
         view.tier_start(tier3_index)
@@ -1895,7 +2793,7 @@ def validate(
                 tier3_index, [*tier3_config_rows, stage_hint_row("status", "preparing evaluation dataset…")]
             )
             try:
-                dataset_note = _ensure_autopilot_dataset(tier3_path, quiet=quiet)
+                dataset_note = _ensure_autopilot_dataset(resolved_target, quiet=quiet)
             except (Exception, SystemExit) as exc:
                 autopilot_error = f"autopilot dataset generation failed: {getattr(exc, 'message', exc)}"
                 if not quiet:
@@ -1914,7 +2812,7 @@ def validate(
 
         reporter = ViewProgressReporter(_on_engine_tail) if quiet else None
         tier3_result = _run_agent_eval_or_skip(
-            tier3_path,
+            resolved_target,
             agents=agents,
             env_mode=env_mode,
             environment_kwarg=environment_kwarg,
@@ -1931,12 +2829,21 @@ def validate(
             include_skills=include_skills,
             copy_repo=copy_repo,
             timeout_multiplier=timeout_multiplier,
+            trial_retries=trial_retries,
             harbor_keep_jobs=harbor_keep_jobs,
             agent_runtime_preflight=agent_runtime_preflight,
             block_on_agent_eval=block_on_agent_eval_effective,
             validate_source=preflight_tier3_source,
             evaluated_source=evaluated_source,
             progress_reporter=reporter,
+            kind=resolved_type,
+            lift_mode=lift_mode,
+            repo_root=repo_root,
+            probe_mcp=probe_mcp,
+            probe_mcp_env=probe_mcp_env,
+            allowed_private_hosts=tuple(policy.mcp_allowed_private_hosts),
+            plugin_load=plugin_load,
+            policy=policy,
         )
         results.append(tier3_result)
         tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(tier3_result)
@@ -1945,7 +2852,15 @@ def validate(
             # Reports read the skip reason from metadata, so the generation
             # failure must land there too, not only in the view's skip row.
             tier3_result.metadata["skip_reason"] = tier3_skip
-        if tier3_ran:
+        if not tier3_ran and (tier3_gate_label := _tier3_gate_label(tier3_result)):
+            # A partial run that failed its gate (FAIL verdict or confirmed regression) is FAIL, not skipped,
+            # as in the footer and the reports; the note says what was not evaluated.
+            view.tier_done(
+                tier3_index,
+                failed=True,
+                rows=[*tier3_config_rows[3:], detail_row("verdict", tier3_gate_label, tier3_skip)],
+            )
+        elif tier3_ran:
             view.tier_done(tier3_index, failed=not tier3_ok, rows=[*tier3_config_rows[3:], *tier3_rows])
         else:
             view.tier_skip(tier3_index, tier3_skip)
@@ -1962,7 +2877,7 @@ def validate(
         if preflight_tier3_source:
             from skillevaluator.tier3.evals_spec import validate_tier3_source
 
-            source_kind, _source_checks = validate_tier3_source(tier3_path)
+            source_kind, _source_checks = validate_tier3_source(resolved_target)
         tier3_result.metadata.setdefault(
             "tier3_applicability",
             {
@@ -1988,10 +2903,13 @@ def validate(
         CONTENT_TYPE_WORKFLOWS: "Workflow",
         CONTENT_TYPE_PLUGIN: "Plugin",
     }.get(resolved_type, "Skill")
-    target_display = resolve_git_remote_url(target_path) or str(target_path)
-    sarif_repository_root = resolve_git_root(target_path)
+    # Reports and the footer name the validated content root, not the lexical "." or manifest-file argument.
+    report_root = resolved_target.resolve()
+    _content_relative_finding_paths(results, resolved_target, report_root)
+    target_display = resolve_git_remote_url(report_root) or str(report_root)
+    sarif_repository_root = resolve_git_root(report_root)
     if sarif_repository_root is None:
-        sarif_repository_root = target_path if target_path.is_dir() else target_path.parent
+        sarif_repository_root = report_root if report_root.is_dir() else report_root.parent
 
     # Quiet mode defaults the reports to html+json (the terminal shows only
     # the summary; the files carry the findings) and points at them from the
@@ -1999,24 +2917,32 @@ def validate(
     # "cli", which renders the full Rich report below the pipeline view.
     effective_formats = _effective_report_formats(report_formats, quiet=quiet)
     report_basename_value = make_timestamped_basename(f"{REPORT_PREFIX}-output")
-    emit_reports(
-        results,
-        report_formats=effective_formats,
-        output_dir=output_dir,
-        basename=report_basename_value,
-        policy=policy,
-        target_path=target_display,
-        content_label=content_label,
-        announce_paths=not quiet,
-        sarif_scan_root=target_path,
-        sarif_repository_root=sarif_repository_root,
-    )
+    reports_error: ReportsNotWrittenError | None = None
+    try:
+        emit_reports(
+            results,
+            report_formats=effective_formats,
+            output_dir=output_dir,
+            basename=report_basename_value,
+            policy=policy,
+            target_path=target_display,
+            content_label=content_label,
+            announce_paths=not quiet,
+            sarif_scan_root=report_root,
+            sarif_repository_root=sarif_repository_root,
+        )
+    except ReportsNotWrittenError as exc:
+        # A requested report is missing, so the command must fail; it does so
+        # after BENCHMARK.md and the footer, which no longer links that file.
+        reports_error = exc
+        effective_formats = tuple(fmt for fmt in effective_formats if fmt not in exc.formats)
     _record_validate_json_report(f"{report_basename_value}.json" if "json" in effective_formats else None)
 
-    # BENCHMARK.md is generated compulsorily for skills (matches SkillEvaluator), even on
-    # failure, so the publication card always reflects the latest evaluation --
-    # now including Tier 3 results when --agent-eval ran.
-    if resolved_type == CONTENT_TYPE_SKILL:
+    # BENCHMARK.md is generated compulsorily for skills and plugins (matches SkillEvaluator),
+    # even on failure, so the publication card always reflects the latest evaluation --
+    # now including Tier 3 results when --agent-eval ran. Plugin cards add component
+    # coverage, Integration, and the behavior the run did not evaluate.
+    if resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_PLUGIN):
         from skillevaluator.reporting import BenchmarkReporter
         from skillevaluator.reporting.naming import BENCHMARK_FILENAME
         from skillevaluator.source_identity import EvaluatedSourceConflict
@@ -2027,7 +2953,10 @@ def validate(
         # stays as the last line of defence: the renderer re-validates the
         # carriers it is handed, and a producer can record one after the fact.
         try:
-            BenchmarkReporter(skill_name=target_path.name).save(results, output_dir / BENCHMARK_FILENAME)
+            BenchmarkReporter(
+                skill_name=target_name,
+                content_type="plugin" if resolved_type == CONTENT_TYPE_PLUGIN else "skill",
+            ).save(results, output_dir / BENCHMARK_FILENAME)
         except EvaluatedSourceConflict as exc:
             # Publication fails closed on a contradictory identity, so report which
             # values disagreed rather than letting the card write a guess.
@@ -2052,9 +2981,13 @@ def validate(
             output_dir=output_dir,
             basename=report_basename_value,
             report_formats=effective_formats,
-            target_path=target_path,
+            target_path=report_root,
             agent_eval=agent_eval,
         )
+    if reports_error is not None:
+        if gate_failed:
+            raise click.ClickException(f"validation failed, and {reports_error.message}")
+        raise reports_error
     if gate_failed:
         raise click.ClickException("validation failed")
 
@@ -2147,7 +3080,13 @@ def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir:
 
 @cli.command("similarity-check")
 @click.argument("content_path", type=click.Path(exists=True, path_type=Path))
-@click.option("--type", "content_type", default="auto", type=click.Choice(["skill", "rules", "workflows", "auto"]))
+@click.option(
+    "--type",
+    "content_type",
+    default="auto",
+    type=click.Choice(["skill", "rules", "workflows", "plugin", "auto"]),
+    help="Content type; plugin builds a local catalog of plugins and their bundled skills (with --save-catalog).",
+)
 @click.option("--threshold", type=float, default=0.75, show_default=True, callback=_validate_similarity_threshold)
 @click.option("--full-body", is_flag=True, help="Embed full file bodies instead of descriptions.")
 @click.option("--model", default=None, help="Embedding model override.")
@@ -2175,7 +3114,7 @@ def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir:
     "--save-catalog",
     type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Build and save a versioned local catalog from this collection.",
+    help="Build and save a versioned local catalog from this collection (skills, or plugins with bundled skills).",
 )
 @click.option("--cache", type=click.Path(path_type=Path), default=None, hidden=True)
 @click.option("--save-cache", type=click.Path(path_type=Path), default=None, hidden=True)
@@ -2369,7 +3308,7 @@ def _tier1_workflow(
     "--catalog",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Saved JSON catalog for inter-skill comparison.",
+    help="Saved JSON catalog for inter-skill comparison; for plugins, also inter-plugin comparison.",
 )
 @click.option(
     "--threshold",
@@ -2385,9 +3324,15 @@ def _tier1_workflow(
     default=0.75,
     show_default=True,
     callback=_validate_similarity_threshold,
-    help="Inter-skill similarity threshold.",
+    help="Inter-skill and inter-plugin catalog similarity threshold.",
 )
 @click.option("--full-body", is_flag=True, help="Compare full SKILL.md content against a full-body catalog.")
+@click.option(
+    "--llm/--no-llm",
+    default=False,
+    show_default=True,
+    help="Plugin only: add an advisory LLM verdict to inter-plugin catalog matches (requires --catalog).",
+)
 @_workflow_report_options
 def _tier2_workflow(
     skill_path: Path,
@@ -2395,10 +3340,11 @@ def _tier2_workflow(
     threshold: float,
     similarity_threshold: float,
     full_body: bool,
+    llm: bool,
     report_formats: tuple[str, ...],
     output_dir: Path,
 ) -> None:
-    """Run intra-skill deduplication and optional inter-skill catalog comparison."""
+    """Run intra-skill deduplication and optional local catalog comparison for a skill or plugin."""
     from skillevaluator.tier_workflows import run_tier2_workflow
 
     _reject_linked_tier2_root(skill_path)
@@ -2410,6 +3356,7 @@ def _tier2_workflow(
         threshold=threshold,
         similarity_threshold=similarity_threshold,
         full_body=full_body,
+        llm=llm,
     )
     sanitize_tier2_results(results, skill_path, catalog)
     if not emit_reports(
@@ -2472,6 +3419,12 @@ def _tier2_workflow(
     help="Run an extra agent-only execution of the first staged task before the full matrix [default: disabled].",
 )
 @click.option("--timeout-multiplier", type=float, default=None)
+@click.option(
+    "--trial-retries",
+    type=click.IntRange(0, MAX_TRIAL_RETRIES),
+    default=None,
+    help=_TRIAL_RETRIES_HELP,
+)
 @click.option("--override-cpus", type=int, default=None)
 @click.option("--override-memory-mb", type=int, default=None)
 @click.option("--override-storage-mb", type=int, default=None)
@@ -2522,6 +3475,7 @@ def evaluate(
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
     timeout_multiplier: float | None,
+    trial_retries: int | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
@@ -2567,6 +3521,7 @@ def evaluate(
         harbor_keep_jobs=harbor_keep_jobs,
         agent_runtime_preflight=agent_runtime_preflight,
         timeout_multiplier=timeout_multiplier,
+        trial_retries=trial_retries,
         override_cpus=override_cpus,
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
@@ -2609,6 +3564,288 @@ def evaluate(
         if failure:
             raise click.exceptions.Exit(1)
     except (click.ClickException, click.exceptions.Exit):
+        raise
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("evaluate-plugin", hidden=True)
+@click.argument("plugin_path", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--evals-source",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Workflow evals directory, dataset file, or skill/plugin directory containing evals/.",
+)
+@click.option(
+    "-a",
+    "--agents",
+    default=None,
+    help=(
+        "Comma-separated Harbor agents (claude aliases claude-code). Default follows the provider: "
+        "NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
+    ),
+)
+@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
+@click.option("--skip-baseline", is_flag=True, help="Skip without-plugin baseline.")
+@click.option(
+    "--lift-mode",
+    type=click.Choice(["effectiveness", "integration", "both"]),
+    default="effectiveness",
+    show_default=True,
+    help=(
+        "Compare against no plugin, sum-of-parts, or both baselines. Integration "
+        "requires a cross-component dataset case; 'both' falls back to effectiveness "
+        "when composition evidence is unavailable."
+    ),
+)
+@click.option(
+    "--plugin-load",
+    type=click.Choice(PLUGIN_LOAD_CHOICES),
+    default="wrapper",
+    show_default=True,
+    help=(
+        "How the with-plugin arm loads the plugin: 'wrapper' (generated wrapper skill), 'native' "
+        "(the harness's own plugin layout; fails for unsupported agents or local mode), or 'auto' "
+        "(native where supported, the wrapper otherwise). Baseline arms are unchanged."
+    ),
+)
+@click.option("--n-attempts", type=int, default=None)
+@click.option("--pass-threshold", type=float, default=None)
+@click.option("--stop-on-pass/--no-stop-on-pass", default=None)
+@click.option("--n-concurrent", type=int, default=None)
+@click.option("--max-agents", type=int, default=None)
+@click.option("--model", default=None, help="Global agent model override.")
+@click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")
+@click.option("--custom-dockerfile-mode", type=click.Choice(["preserve", "rebase"]), default=None)
+@click.option("--include-skills", multiple=True, type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--repo-root",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+    help="Clone-root override for deterministic same-repository reference resolution.",
+)
+@click.option("--copy-repo", is_flag=True)
+@click.option(
+    "--probe-mcp",
+    is_flag=True,
+    help=(
+        "Before the run, probe each author-supplied URL MCP server from the host (initialize + tools/list, "
+        "bounded) under the endpoint policy. Sends only literal declared headers unless --probe-mcp-env names "
+        "a variable. Advisory; recorded as mcp_proof in plugin provenance."
+    ),
+)
+@click.option(
+    "--probe-mcp-env",
+    "probe_mcp_env",
+    multiple=True,
+    metavar="NAME[=HOST|@SERVER]",
+    callback=_validate_probe_mcp_env,
+    help=_PROBE_MCP_ENV_HELP,
+)
+@click.option(
+    "--policy",
+    "policy_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Custom policy YAML overlaid on the default profile, as in validate: its severity_overrides apply to the "
+        "MCP checks that gate staging, and mcp.allowed_private_hosts reaches --probe-mcp."
+    ),
+)
+@click.option("--grading-mode", type=GRADING_MODE_CHOICE, default=None)
+@click.option("--results-dir", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=None)
+@click.option("--harbor-keep-jobs", is_flag=True)
+@click.option("--agent-runtime-preflight/--no-agent-runtime-preflight", default=None)
+@click.option("--timeout-multiplier", type=float, default=None)
+@click.option(
+    "--trial-retries",
+    type=click.IntRange(0, MAX_TRIAL_RETRIES),
+    default=None,
+    help=_TRIAL_RETRIES_HELP,
+)
+@click.option("--override-cpus", type=int, default=None)
+@click.option("--override-memory-mb", type=int, default=None)
+@click.option("--override-storage-mb", type=int, default=None)
+@click.option(
+    "--progress",
+    type=click.Choice(["auto", "rich", "plain", "off"]),
+    default="auto",
+    show_default=True,
+)
+def evaluate_plugin(
+    plugin_path: Path,
+    evals_source: Path | None,
+    agents: str | None,
+    env_mode: str,
+    skip_baseline: bool,
+    lift_mode: str,
+    plugin_load: str,
+    n_attempts: int | None,
+    pass_threshold: float | None,
+    stop_on_pass: bool | None,
+    n_concurrent: int | None,
+    max_agents: int | None,
+    model: str | None,
+    agent_model: tuple[str, ...],
+    custom_dockerfile_mode: str | None,
+    include_skills: tuple[Path, ...],
+    repo_root: Path | None,
+    copy_repo: bool,
+    probe_mcp: bool,
+    probe_mcp_env: tuple[str, ...],
+    policy_path: Path | None,
+    grading_mode: str | None,
+    results_dir: Path | None,
+    harbor_keep_jobs: bool,
+    agent_runtime_preflight: bool | None,
+    timeout_multiplier: float | None,
+    trial_retries: int | None,
+    override_cpus: int | None,
+    override_memory_mb: int | None,
+    override_storage_mb: int | None,
+    progress: str,
+) -> None:
+    """Run Tier 3 live evaluation for a public agent plugin."""
+    import tempfile
+
+    from skillevaluator.cli_core import resolve_plugin_path
+    from skillevaluator.evaluation import EvaluationService
+    from skillevaluator.evaluation.tier3_report import incomplete_reason, refresh_plugin_run_report
+    from skillevaluator.tier3.harbor.progress import create_progress_reporter
+    from skillevaluator.tier3.plugin_eval import prepare_plugin_eval_package
+    from skillevaluator.validators.policy import resolve_policy
+
+    plugin_dir = resolve_plugin_path(plugin_path)
+    service = EvaluationService()
+    try:
+        policy = resolve_policy(policy_path=policy_path)
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    try:
+        with tempfile.TemporaryDirectory(prefix="skillevaluator-plugin-eval-") as temp_dir:
+            prepared = prepare_plugin_eval_package(
+                plugin_dir,
+                stage_root=Path(temp_dir),
+                evals_source=evals_source,
+                include_skills=include_skills,
+                repo_root=repo_root,
+                plugin_load=plugin_load,
+                agents=agents,
+                env_mode=env_mode,
+                policy=policy,
+            )
+            for label, values in (
+                ("Unresolved remote skill refs", prepared.unresolved_skill_refs),
+                ("Unresolved remote rule refs", prepared.unresolved_rule_refs),
+                ("Provider-only MCP servers", prepared.unresolved_mcp_servers),
+            ):
+                if values:
+                    console.print(
+                        f"[yellow]{label} (deferred, not evaluated):[/yellow] {escape_markup(', '.join(values))}"
+                    )
+            if prepared.skipped or prepared.package_path is None:
+                if prepared.incomplete_skip:
+                    # Declared components exist but none could be evaluated: INCOMPLETE, never exit 0.
+                    raise click.ClickException(
+                        f"{incomplete_reason(prepared.provenance())} (nothing was evaluated). {prepared.skip_reason}"
+                    )
+                console.print(
+                    f"[yellow]Skipping plugin evaluation:[/yellow] {escape_markup(str(prepared.skip_reason))}"
+                )
+                return
+            effective_lift_mode, integration_skip_reason = _plugin_lift_mode_for_evidence(prepared, lift_mode)
+            if integration_error := _plugin_integration_error(lift_mode, skip_baseline, integration_skip_reason):
+                raise click.ClickException(f"Plugin {integration_error}")
+            if integration_skip_reason:
+                # --lift-mode both without composition evidence.
+                console.print(
+                    f"[yellow]Integration skipped:[/yellow] {escape_markup(integration_skip_reason)}. "
+                    "Running effectiveness only."
+                )
+            allowed_private_hosts = tuple(policy.mcp_allowed_private_hosts) if probe_mcp else ()
+            mcp_proof = _plugin_mcp_proof(
+                prepared,
+                probe_mcp=probe_mcp,
+                allowed_private_hosts=allowed_private_hosts,
+                probe_mcp_env=probe_mcp_env,
+            )
+            if probe_mcp and mcp_proof:
+                for server, entry in mcp_proof.items():
+                    console.print(
+                        f"MCP proof [bold]{escape_markup(server)}[/bold]: {escape_markup(entry['status'])} "
+                        f"[dim]({escape_markup(entry['detail'])})[/dim]"
+                    )
+
+            options = _plugin_evaluation_options(
+                prepared,
+                plugin_dir=plugin_dir,
+                lift_mode=lift_mode,
+                effective_lift_mode=effective_lift_mode,
+                integration_skip_reason=integration_skip_reason,
+                plugin_load=plugin_load,
+                results_dir=results_dir,
+                agents=agents,
+                env_mode=env_mode,
+                skip_baseline=skip_baseline,
+                n_attempts=n_attempts,
+                pass_threshold=pass_threshold,
+                stop_on_pass=stop_on_pass,
+                n_concurrent=n_concurrent,
+                max_agents=max_agents,
+                model=model,
+                agent_model=agent_model,
+                custom_dockerfile_mode=custom_dockerfile_mode,
+                copy_repo=copy_repo,
+                grading_mode=grading_mode,
+                harbor_keep_jobs=harbor_keep_jobs,
+                agent_runtime_preflight=agent_runtime_preflight,
+                timeout_multiplier=timeout_multiplier,
+                trial_retries=trial_retries,
+                override_cpus=override_cpus,
+                override_memory_mb=override_memory_mb,
+                override_storage_mb=override_storage_mb,
+            )
+            reporter = create_progress_reporter(progress, stream=click.get_text_stream("stderr"))
+            engine_result = service.evaluate(options, progress_reporter=reporter)
+            lift_metadata = _plugin_lift_metadata(lift_mode, effective_lift_mode, integration_skip_reason)
+            failure = service.failure_reason(engine_result)
+            # Build the plugin provenance (and write its sidecar) before the summary, so the summary shows the
+            # same coverage, completeness, and load blocks as the reports (the engine result alone has none).
+            provenance: dict[str, Any] | None = None
+            provenance_error: Exception | None = None
+            if failure:
+                # Keep the with-plugin evidence of a run that did not complete.
+                provenance = _incomplete_plugin_provenance(prepared, engine_result, mcp_proof, failure, lift_metadata)
+            else:
+                try:
+                    provenance = _completed_plugin_provenance(prepared, engine_result, mcp_proof, lift_metadata)
+                except Exception as exc:  # still show the run summary first
+                    provenance_error = exc
+            if isinstance(engine_result, dict):
+                from skillevaluator.tier3.result_display import render_evaluation_result
+
+                shown = engine_result if provenance is None else {**engine_result, "plugin_provenance": provenance}
+                render_evaluation_result(shown, console=console)
+            if provenance_error is not None:
+                raise provenance_error
+            run_dir = _engine_run_dir(engine_result)
+            if run_dir is not None and provenance is not None:
+                # The runner rendered report.html before the sidecar existed.
+                refresh_plugin_run_report(
+                    plugin_dir,
+                    run_dir,
+                    env_mode=env_mode,
+                    engine_result=engine_result,
+                    plugin_provenance=provenance,
+                )
+            if failure:
+                # The INCOMPLETE reason every report gives: why the run did not complete, then what it deferred.
+                fallback = {"execution_incomplete": f"Tier 3 plugin evaluation did not complete: {failure}"}
+                raise click.ClickException(incomplete_reason(provenance or fallback))
+            if provenance and provenance.get("partial"):
+                raise click.ClickException(incomplete_reason(provenance))
+    except click.ClickException:
         raise
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
@@ -2859,14 +4096,18 @@ tier2.add_command(context_optimization_check, "context-optimization-check")
 tier2.add_command(dedup_scan, "dedup-scan")
 tier2.workflow = _tier2_workflow
 
-# The namespace registration stays visible; only the top-level duplicate is
-# hidden (same underlying command, shared params and behavior).
+# Register an independent command object for the namespaced spelling so future
+# Click metadata changes on one help surface cannot leak into the other.
 _tier3_evaluate_visible = copy.copy(evaluate)
-# The shallow copy shares the mutable params list; give the visible twin its
+# The shallow copy shares the mutable params list; give the namespaced twin its
 # own list so in-place registration on one can never leak into the other.
 _tier3_evaluate_visible.params = list(evaluate.params)
 _tier3_evaluate_visible.hidden = False
 tier3.add_command(_tier3_evaluate_visible, "evaluate")
+_tier3_evaluate_plugin_visible = copy.copy(evaluate_plugin)
+_tier3_evaluate_plugin_visible.params = list(evaluate_plugin.params)
+_tier3_evaluate_plugin_visible.hidden = False
+tier3.add_command(_tier3_evaluate_plugin_visible, "evaluate-plugin")
 tier3.add_command(create_dataset, "create-eval-dataset")
 tier3.add_command(init_custom_grader, "init-custom-grader")
 tier3.add_command(init_harbor_task, "init-harbor-task")

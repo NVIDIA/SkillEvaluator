@@ -5,15 +5,37 @@
 
 from __future__ import annotations
 
+import codecs
 import re
 import unicodedata
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Iterable
+from operator import itemgetter
 
 _REDACTION_LABEL = "<redacted>"
 _REDACTION_SENTINEL_CANDIDATES = ("␟", "␞", "␝", "␜", "")
 _MAX_REDACTION_SCAN_CHUNK = 64 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 16 * 1024 * 1024
+
+_OVERFLOW_ANALYSIS_WINDOW_BYTES = 1024 * 1024
+_OVERFLOW_EXCERPT_CHARS = 512
+_OVERFLOW_LINE_CHARS = 160
+_OVERFLOW_TOP_LINES = 3
+_OVERFLOW_MAX_TRACKED_LINES = 1024
+_OVERFLOW_WINDOW_LINE_CANDIDATES = 64
+# Excerpts and lines keep this much extra context so the generic, regex-based
+# credential patterns see a whole match before the display cut.
+_OVERFLOW_GENERIC_CONTEXT_CHARS = 4096
+_OVERFLOW_LINE_CONTEXT_CHARS = 1024
+_overflow_line_key = itemgetter(slice(None, _OVERFLOW_LINE_CONTEXT_CHARS))
+_LINE_SEPARATOR_RE = re.compile(r"\r\n|\r|\n")
+# ANSI CSI/OSC/two-character escapes, then any other C0/C1 control except the
+# tab and line separators that the overflow analysis itself interprets.
+_TERMINAL_CONTROL_RE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])"
+    r"|\x9b[0-?]*[ -/]*[@-~]"
+    r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]"
+)
 
 
 class CommandOutputLimitError(RuntimeError):
@@ -34,6 +56,158 @@ class CommandOutputByteBudget:
         if next_total > self.limit_bytes:
             raise CommandOutputLimitError(f"Command output exceeded the {self.limit_bytes}-byte safety limit")
         self.consumed_bytes = next_total
+
+
+class _OverflowLineCensus:
+    """Count CR/LF-delimited lines of redacted text with bounded memory.
+
+    Each feed is counted with C-level ``Counter`` work; only lines already
+    tracked and that feed's most frequent candidates are merged, and the
+    census is pruned back to a fixed number of distinct (truncated) lines.
+    """
+
+    def __init__(self) -> None:
+        self.counts: Counter[str] = Counter()
+        self._pending = ""
+
+    def feed(self, text: str) -> None:
+        combined = self._pending + text
+        held_separator = ""
+        if combined.endswith("\r"):
+            # A CRLF may straddle two feeds; keep the CR for the next one.
+            combined, held_separator = combined[:-1], "\r"
+        lines = _LINE_SEPARATOR_RE.split(combined)
+        self._pending = _overflow_line_key(lines.pop()) + held_separator
+        if lines:
+            self._merge(Counter(map(_overflow_line_key, lines)))
+
+    def finish(self) -> None:
+        if self._pending:
+            self._merge(Counter((self._pending.removesuffix("\r"),)))
+        self._pending = ""
+
+    def _merge(self, window_counts: Counter[str]) -> None:
+        for line in self.counts.keys() & window_counts.keys():
+            self.counts[line] += window_counts[line]
+        for line, count in window_counts.most_common(_OVERFLOW_WINDOW_LINE_CANDIDATES):
+            if line not in self.counts:
+                self.counts[line] = count
+        if len(self.counts) > _OVERFLOW_MAX_TRACKED_LINES:
+            self.counts = Counter(dict(self.counts.most_common(_OVERFLOW_MAX_TRACKED_LINES)))
+
+
+def _overflow_display(text: str, limit: int) -> str:
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return repr(text)
+
+
+def describe_command_output_overflow(
+    accepted_output: bytes | bytearray,
+    *,
+    rejected_chunk_bytes: int,
+    secret_values: Iterable[str] = (),
+) -> str:
+    """Summarize output accepted before a budget overflow on one bounded line.
+
+    Byte, newline and carriage-return counts describe the raw output.  Every
+    excerpt comes from one contiguous pass that first strips terminal control
+    sequences and then applies the streaming exact-value and known-shape
+    redaction used for live command output, so an excerpt boundary cannot
+    split such a secret and control-character removal cannot reassemble one.
+    The generic credential patterns applied to logs run on a bounded context
+    around each excerpt and line before it is cut, and once more on the
+    rendered summary.  Memory stays bounded by the analysis window, the
+    excerpt contexts and a capped census of distinct lines.
+    """
+    from skillevaluator.utils.redaction import redact_sensitive_text
+
+    secrets = tuple(dict.fromkeys(value for value in secret_values if value))
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    redactor = StreamingLogRedactor(secrets)
+    census = _OverflowLineCensus()
+    excerpt_context = _OVERFLOW_EXCERPT_CHARS + _OVERFLOW_GENERIC_CONTEXT_CHARS
+    head = ""
+    tail = ""
+    redacted_chars = 0
+    control_sequences = 0
+    replacement_characters = 0
+
+    def sanitize(text: str) -> str:
+        nonlocal control_sequences, replacement_characters
+        replacement_characters += text.count("\ufffd")
+        sanitized, removed = _TERMINAL_CONTROL_RE.subn("", text)
+        control_sequences += removed
+        return sanitized.replace("\t", " ")
+
+    def analyze(redacted: str) -> None:
+        nonlocal head, tail, redacted_chars
+        if not redacted:
+            return
+        if len(head) < excerpt_context:
+            head += redacted[: excerpt_context - len(head)]
+        tail = (tail + redacted[-excerpt_context:])[-excerpt_context:]
+        redacted_chars += len(redacted)
+        census.feed(redacted)
+
+    with memoryview(accepted_output) as data:
+        for start in range(0, len(data), _OVERFLOW_ANALYSIS_WINDOW_BYTES):
+            with data[start : start + _OVERFLOW_ANALYSIS_WINDOW_BYTES] as window:
+                analyze(redactor.feed(sanitize(decoder.decode(window))))
+    analyze(redactor.feed(sanitize(decoder.decode(b"", final=True))))
+    analyze(redactor.finish())
+    census.finish()
+
+    newline_count = accepted_output.count(b"\n")
+    carriage_return_count = accepted_output.count(b"\r")
+    crlf_count = accepted_output.count(b"\r\n")
+    top_lines = ", ".join(
+        f"{count}x {_overflow_display(redact_sensitive_text(line), _OVERFLOW_LINE_CHARS)}"
+        for line, count in census.counts.most_common(_OVERFLOW_TOP_LINES)
+    )
+    parts = [
+        f"accepted {len(accepted_output)} bytes before a {rejected_chunk_bytes}-byte read",
+        f"{newline_count} newline-terminated lines",
+        f"{carriage_return_count} carriage returns ({crlf_count} in CRLF)",
+        f"{control_sequences} terminal control sequences stripped",
+        f"{replacement_characters} UTF-8 decode replacements",
+        f"top lines: {top_lines or 'none'}",
+    ]
+    head = redact_sensitive_text(head)
+    # Short output fits entirely in the head context.
+    whole_output = redacted_chars <= excerpt_context
+    tail = head if whole_output else redact_sensitive_text(tail)
+    if whole_output and len(head) <= 2 * _OVERFLOW_EXCERPT_CHARS:
+        parts.append(f"output: {_overflow_display(head, 2 * _OVERFLOW_EXCERPT_CHARS)}")
+    else:
+        parts.append(f"head: {_overflow_display(head, _OVERFLOW_EXCERPT_CHARS)}")
+        parts.append(f"tail: {_overflow_display(tail[-_OVERFLOW_EXCERPT_CHARS:], _OVERFLOW_EXCERPT_CHARS)}")
+    summary = "output diagnostics (redacted): " + "; ".join(parts)
+    final_redactor = StreamingLogRedactor(secrets)
+    return redact_sensitive_text(final_redactor.feed(summary) + final_redactor.finish())
+
+
+def diagnosed_command_output_limit_error(
+    error: CommandOutputLimitError,
+    accepted_output: bytes | bytearray,
+    *,
+    rejected_chunk_bytes: int,
+    secret_values: Iterable[str] = (),
+) -> CommandOutputLimitError:
+    """Return *error* extended with redacted overflow diagnostics.
+
+    The message still starts with the original limit message.  A diagnostic
+    failure only degrades the summary; it never masks the limit failure.
+    """
+    try:
+        diagnostics = describe_command_output_overflow(
+            accepted_output,
+            rejected_chunk_bytes=rejected_chunk_bytes,
+            secret_values=secret_values,
+        )
+    except Exception as diagnostic_error:
+        diagnostics = f"output diagnostics unavailable ({type(diagnostic_error).__name__})"
+    return CommandOutputLimitError(f"{error}; {diagnostics}")
 
 
 def collision_safe_redaction_marker(secret_values: Iterable[str]) -> str:

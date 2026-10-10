@@ -157,7 +157,7 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 
 def _numeric(value: Any) -> float | None:
-    if not isinstance(value, int | float) or isinstance(value, bool):
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
     try:
         score = float(value)

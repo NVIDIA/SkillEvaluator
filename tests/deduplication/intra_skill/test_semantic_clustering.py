@@ -5,12 +5,17 @@
 
 from __future__ import annotations
 
+import random
+from itertools import combinations
+
 import pytest
 
+from skillevaluator.deduplication.intra_skill import semantic_clustering
 from skillevaluator.deduplication.intra_skill.semantic_clustering import (
     UnionFind,
     build_clusters,
 )
+from skillevaluator.embedding.client import EmbeddingClient
 
 
 class TestUnionFind:
@@ -53,6 +58,24 @@ class TestUnionFind:
 
 
 class TestBuildClusters:
+    @pytest.mark.parametrize("threshold", [float("nan"), float("inf"), -0.1, 1.1, True])
+    def test_rejects_invalid_threshold(self, make_chunk, threshold: object) -> None:
+        chunks = [make_chunk(embedding=[1.0, 0.0]), make_chunk(embedding=[1.0, 0.0])]
+        with pytest.raises(ValueError, match=r"threshold|finite|\[0, 1\]"):
+            build_clusters(chunks, threshold=threshold)  # type: ignore[arg-type]
+
+    def test_rejects_scalar_work_before_cosine_loop(self, make_chunk, monkeypatch) -> None:
+        chunks = [make_chunk(embedding=[1.0, 0.0]), make_chunk(embedding=[1.0, 0.0])]
+        monkeypatch.setattr(
+            semantic_clustering,
+            "unit_vector_similarity",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("cosine must not run")),
+        )
+        monkeypatch.setattr(semantic_clustering, "CONTENT_DEDUP_MAX_SCALAR_COMPARISONS", 1)
+
+        with pytest.raises(ValueError, match=r"scalar.*limit|scalar.*exceeds"):
+            build_clusters(chunks)
+
     def test_fewer_than_2_chunks_returns_empty(self, make_chunk) -> None:
         assert build_clusters([make_chunk(embedding=[1.0, 0.0])]) == []
         assert build_clusters([]) == []
@@ -115,3 +138,30 @@ class TestBuildClusters:
         b = make_chunk(source_format="python", source_file="b.py", embedding=[1.0, 0.0])
         clusters = build_clusters([a, b], threshold=0.80)
         assert clusters[0].source_formats == {"markdown", "python"}
+
+    def test_scores_match_cosine_similarity_and_each_vector_is_normalized_once(self, make_chunk, monkeypatch) -> None:
+        rng = random.Random(28)
+        vectors = [[rng.uniform(-1.0, 1.0) for _ in range(16)] for _ in range(12)]
+        vectors[3] = list(vectors[0])
+        vectors[5] = [value * 3.0 for value in vectors[1]]
+        vectors[7] = [0.0] * 16
+        chunks = [make_chunk(source_file=f"file-{index}.md", embedding=vector) for index, vector in enumerate(vectors)]
+        normalized: list[int] = []
+        real_normalize = semantic_clustering.normalize_embedding_vector
+
+        def counting_normalize(vector, *args, **kwargs):
+            normalized.append(len(vector))
+            return real_normalize(vector, *args, **kwargs)
+
+        monkeypatch.setattr(semantic_clustering, "normalize_embedding_vector", counting_normalize)
+
+        clusters = build_clusters(chunks, threshold=0.2)
+
+        assert normalized == [16] * len(chunks)
+        assert clusters
+        index_of = {id(chunk): index for index, chunk in enumerate(chunks)}
+        for cluster in clusters:
+            indices = sorted(index_of[id(member)] for member in cluster.members)
+            expected = [EmbeddingClient.cosine_similarity(vectors[i], vectors[j]) for i, j in combinations(indices, 2)]
+            assert cluster.max_similarity == max(expected)
+            assert cluster.avg_similarity == sum(expected) / len(expected)

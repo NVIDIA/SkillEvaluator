@@ -73,6 +73,14 @@ Both bridges support multi-turn tool-call continuation, so agents complete
 real tool loops against Build models. The Claude Code bridge drops
 orchestration and server tools Build cannot execute — `WebFetch`,
 `WebSearch`, `Task`, and similar — before forwarding a request.
+Build accepts tool names of at most 64 characters, so a longer one, such as
+a plugin MCP tool named `mcp__plugin_<plugin>_<server>__<tool>`, reaches the
+model as a stable alias: its first 55 characters and a short hash of the full
+name. The bridges translate the model's calls back, so the agent and its
+trajectory see the real tool name. Build tool messages carry text only, so a
+non-text block in a tool result, such as an image that an MCP tool or a file
+read returns, reaches the model as a short placeholder that names the block
+type.
 
 ### Models on the one-key path
 

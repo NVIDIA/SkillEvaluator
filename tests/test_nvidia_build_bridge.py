@@ -147,6 +147,35 @@ CHAT_NAMESPACE_TOOL_RESPONSE = {
     ],
 }
 
+# Claude Code names a plugin's MCP tools mcp__plugin_<plugin>_<server>__<tool>,
+# and Codex nests them in an mcp__<server> namespace; both overflow Build's 64.
+LONG_CLAUDE_CODE_MCP_TOOL = "mcp__plugin_example-release-tools_tracker__stage_workbook_from_shared_drive_folder"
+LONG_CLAUDE_CODE_MCP_ALIAS = "mcp__plugin_example-release-tools_tracker__stage_workbo_c0b791ac"
+LONG_CODEX_MCP_NAMESPACE_TOOL = {
+    "type": "namespace",
+    "name": "mcp__component_lab_tracker",
+    "description": "Tracker MCP server.",
+    "tools": [
+        {
+            "type": "function",
+            "name": "stage_workbook_from_shared_drive_folder",
+            "description": "Stage a workbook.",
+            "parameters": {"type": "object"},
+        }
+    ],
+}
+LONG_CODEX_MCP_ALIAS = "mcp__component_lab_tracker__stage_workbook_from_shared__bc792ca1"
+
+# MCP tools may return image, audio, or resource content; Build tool messages are text only.
+ANTHROPIC_IMAGE_TOOL_RESULT = [
+    {"type": "text", "text": "ISSUE-123 chart"},
+    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aaaa"}},
+]
+RESPONSES_IMAGE_TOOL_OUTPUT = [
+    {"type": "input_text", "text": "ISSUE-123 chart"},
+    {"type": "input_image", "image_url": "data:image/png;base64,aaaa"},
+]
+
 
 class _FakeBuildHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
@@ -189,6 +218,17 @@ class _FakeBuildHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(response).encode("utf-8"))
+            return
+
+        if request.get("model") == "return-first-tool-call":
+            completion = json.loads(json.dumps(CHAT_TOOL_RESPONSE))
+            completion["choices"][0]["message"]["tool_calls"][0]["function"]["name"] = request["tools"][0]["function"][
+                "name"
+            ]
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(completion).encode("utf-8"))
             return
 
         if request.get("model") == "return-namespace-tool-call":
@@ -1480,6 +1520,111 @@ def test_messages_bridge_returns_anthropic_sse_and_message_stop(bridge_services:
     assert bridge_services.build.requests[0][0] == "/v1/chat/completions"  # type: ignore[attr-defined]
 
 
+def test_messages_long_mcp_tool_reaches_build_as_an_alias_and_returns_its_real_name(
+    bridge_services: _BridgeServices,
+) -> None:
+    request_base = {
+        "model": "return-first-tool-call",
+        "tools": [{"name": LONG_CLAUDE_CODE_MCP_TOOL, "description": "Stage.", "input_schema": {"type": "object"}}],
+    }
+    user_message = {"role": "user", "content": "Stage the workbook."}
+
+    first_status, _first_headers, first_body = _request(
+        f"{bridge_services.url}/v1/messages", {**request_base, "messages": [user_message]}
+    )
+
+    assert first_status == 200
+    tool_use = next(
+        event["content_block"]
+        for event in _sse_events(first_body)
+        if event["type"] == "content_block_start" and event["content_block"]["type"] == "tool_use"
+    )
+    assert tool_use["name"] == LONG_CLAUDE_CODE_MCP_TOOL
+    first_build_request = bridge_services.build.requests[0][2]  # type: ignore[attr-defined]
+    assert [tool["function"]["name"] for tool in first_build_request["tools"]] == [LONG_CLAUDE_CODE_MCP_ALIAS]
+
+    second_status, _second_headers, _second_body = _request(
+        f"{bridge_services.url}/v1/messages",
+        {
+            **request_base,
+            "messages": [
+                user_message,
+                {"role": "assistant", "content": [{**tool_use, "input": {"city": "Paris"}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use["id"], "content": "ok"}]},
+            ],
+        },
+    )
+
+    assert second_status == 200
+    second_build_request = bridge_services.build.requests[1][2]  # type: ignore[attr-defined]
+    assert second_build_request["messages"][1]["tool_calls"][0]["function"]["name"] == LONG_CLAUDE_CODE_MCP_ALIAS
+
+
+def test_responses_long_namespace_tool_reaches_build_as_an_alias_and_returns_its_real_name(
+    bridge_services: _BridgeServices,
+) -> None:
+    status, _headers, body = _request(
+        f"{bridge_services.url}/v1/responses",
+        {
+            "model": "return-first-tool-call",
+            "input": "Stage the workbook.",
+            "tools": [LONG_CODEX_MCP_NAMESPACE_TOOL],
+            "store": False,
+        },
+    )
+
+    assert status == 200
+    done = next(event for event in _sse_events(body) if event["type"] == "response.output_item.done")
+    assert done["item"]["name"] == "stage_workbook_from_shared_drive_folder"
+    assert done["item"]["namespace"] == "mcp__component_lab_tracker"
+    build_request = bridge_services.build.requests[0][2]  # type: ignore[attr-defined]
+    assert [tool["function"]["name"] for tool in build_request["tools"]] == [LONG_CODEX_MCP_ALIAS]
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        (
+            "/v1/messages",
+            {
+                "messages": [
+                    {"role": "user", "content": "Chart the issue."},
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "tool_use", "id": "call-1", "name": "mcp__tracker__chart", "input": {}}],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "call-1", "content": ANTHROPIC_IMAGE_TOOL_RESULT}
+                        ],
+                    },
+                ],
+            },
+        ),
+        (
+            "/v1/responses",
+            {
+                "input": [
+                    {"type": "function_call", "call_id": "call-1", "name": "chart", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "call-1", "output": RESPONSES_IMAGE_TOOL_OUTPUT},
+                ],
+            },
+        ),
+    ],
+)
+def test_image_tool_result_reaches_build_as_text_instead_of_a_400(
+    bridge_services: _BridgeServices, path: str, payload: dict[str, object]
+) -> None:
+    status, _headers, _body = _request(f"{bridge_services.url}{path}", {"model": "nvidia/model", **payload})
+
+    assert status == 200
+    build_request = bridge_services.build.requests[0][2]  # type: ignore[attr-defined]
+    assert build_request["messages"][-1]["role"] == "tool"
+    assert build_request["messages"][-1]["content"].startswith("ISSUE-123 chart[")
+    assert "aaaa" not in json.dumps(build_request)
+
+
 def test_messages_count_tokens_does_not_call_build(bridge_services: _BridgeServices) -> None:
     status, headers, body = _request(f"{bridge_services.url}/v1/messages/count_tokens", {"messages": []})
 
@@ -1970,17 +2115,6 @@ def test_responses_namespaced_tool_choice_becomes_forced_flat_chat_function(
             [
                 {
                     "type": "namespace",
-                    "name": "n" * 40,
-                    "description": "too long after flattening",
-                    "tools": [{"type": "function", "name": "t" * 30, "parameters": {}}],
-                }
-            ],
-            "64",
-        ),
-        (
-            [
-                {
-                    "type": "namespace",
                     "name": "ns",
                     "description": "duplicate",
                     "tools": [
@@ -2025,6 +2159,35 @@ def test_responses_namespace_tools_reject_malformed_or_colliding_names(
 ) -> None:
     with pytest.raises(BridgePayloadError, match=error):
         responses_to_chat_request({"model": "nvidia/model", "tools": tools})
+
+
+def test_responses_long_namespace_tool_names_use_one_stable_alias_everywhere() -> None:
+    translated = responses_to_chat_request(
+        {
+            "model": "nvidia/model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call-stage-1",
+                    "name": "stage_workbook_from_shared_drive_folder",
+                    "namespace": "mcp__component_lab_tracker",
+                    "arguments": "{}",
+                },
+                {"type": "function_call_output", "call_id": "call-stage-1", "output": "staged"},
+            ],
+            "tools": [LONG_CODEX_MCP_NAMESPACE_TOOL],
+            "tool_choice": {
+                "type": "function",
+                "name": "stage_workbook_from_shared_drive_folder",
+                "namespace": "mcp__component_lab_tracker",
+            },
+        }
+    )
+
+    assert len(LONG_CODEX_MCP_ALIAS) == bridge.MAX_CHAT_TOOL_NAME_LENGTH
+    assert [tool["function"]["name"] for tool in translated["tools"]] == [LONG_CODEX_MCP_ALIAS]
+    assert translated["messages"][0]["tool_calls"][0]["function"]["name"] == LONG_CODEX_MCP_ALIAS
+    assert translated["tool_choice"] == {"type": "function", "function": {"name": LONG_CODEX_MCP_ALIAS}}
 
 
 def test_responses_custom_tool_choice_becomes_forced_chat_function() -> None:
@@ -2263,6 +2426,81 @@ def test_anthropic_tool_result_becomes_chat_tool_message() -> None:
     assert translated["messages"] == [{"role": "tool", "tool_call_id": "call-1", "content": "42"}]
 
 
+@pytest.mark.parametrize(
+    ("translator", "payload", "block_type"),
+    [
+        (
+            anthropic_to_chat_request,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "call-1", "content": ANTHROPIC_IMAGE_TOOL_RESULT}
+                        ],
+                    }
+                ]
+            },
+            "image",
+        ),
+        (
+            responses_to_chat_request,
+            {"input": [{"type": "function_call_output", "call_id": "call-1", "output": RESPONSES_IMAGE_TOOL_OUTPUT}]},
+            "input_image",
+        ),
+    ],
+)
+def test_non_text_tool_result_blocks_become_a_text_placeholder(
+    translator: object, payload: dict[str, object], block_type: str
+) -> None:
+    assert callable(translator)
+    translated = translator({"model": "nvidia/model", **payload})
+
+    assert translated["messages"] == [
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": (
+                f"ISSUE-123 chart[{block_type} block omitted: "
+                "the NVIDIA Build bridge forwards tool results as text only]"
+            ),
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("translator", "payload"),
+    [
+        (
+            anthropic_to_chat_request,
+            {"messages": [{"role": "user", "content": [ANTHROPIC_IMAGE_TOOL_RESULT[1]]}]},
+        ),
+        (anthropic_to_chat_request, {"system": ANTHROPIC_IMAGE_TOOL_RESULT, "messages": []}),
+        (
+            responses_to_chat_request,
+            {"input": [{"type": "message", "role": "user", "content": RESPONSES_IMAGE_TOOL_OUTPUT}]},
+        ),
+        (
+            anthropic_to_chat_request,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": [{"text": "untyped"}]}],
+                    }
+                ]
+            },
+        ),
+    ],
+)
+def test_non_text_message_blocks_and_untyped_tool_result_blocks_are_still_rejected(
+    translator: object, payload: dict[str, object]
+) -> None:
+    assert callable(translator)
+    with pytest.raises(BridgePayloadError, match="unsupported"):
+        translator({"model": "nvidia/model", **payload})
+
+
 def test_anthropic_system_message_role_used_by_claude_code_is_preserved() -> None:
     request = {
         "model": "nvidia/nemotron-3-super-120b-a12b",
@@ -2289,13 +2527,52 @@ def test_claude_code_orchestration_tools_are_omitted_but_executable_and_custom_t
             {"name": "WebSearch", "description": "Server-side search", "input_schema": {"type": "object"}},
             {"name": "TaskCreate", "description": "Create task", "input_schema": {"type": "object"}},
             {"name": "mcp_custom", "description": "Custom MCP tool", "input_schema": {"type": "object"}},
-            {"name": f"mcp_{'x' * 70}", "description": "Too long for Build", "input_schema": {"type": "object"}},
+            {"name": "mcp.dotted", "description": "Not a Build function name", "input_schema": {"type": "object"}},
         ],
     }
 
     translated = anthropic_to_chat_request(request)
 
     assert [tool["function"]["name"] for tool in translated["tools"]] == ["Bash", "mcp_custom"]
+
+
+def test_anthropic_long_mcp_tool_names_use_one_stable_alias_everywhere() -> None:
+    translated = anthropic_to_chat_request(
+        {
+            "model": "nvidia/nemotron-3-super-120b-a12b",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "call-1", "name": LONG_CLAUDE_CODE_MCP_TOOL, "input": {}}],
+                },
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "staged"}]},
+            ],
+            "tools": [
+                {"name": "Bash", "description": "Run shell", "input_schema": {"type": "object"}},
+                {"name": LONG_CLAUDE_CODE_MCP_TOOL, "description": "Stage", "input_schema": {"type": "object"}},
+            ],
+            "tool_choice": {"type": "tool", "name": LONG_CLAUDE_CODE_MCP_TOOL},
+        }
+    )
+
+    assert len(LONG_CLAUDE_CODE_MCP_ALIAS) == bridge.MAX_CHAT_TOOL_NAME_LENGTH
+    assert [tool["function"]["name"] for tool in translated["tools"]] == ["Bash", LONG_CLAUDE_CODE_MCP_ALIAS]
+    assert translated["messages"][0]["tool_calls"][0]["function"]["name"] == LONG_CLAUDE_CODE_MCP_ALIAS
+    assert translated["tool_choice"] == {"type": "function", "function": {"name": LONG_CLAUDE_CODE_MCP_ALIAS}}
+
+
+def test_anthropic_tool_alias_that_collides_with_a_declared_name_is_rejected() -> None:
+    with pytest.raises(BridgePayloadError, match="collision"):
+        anthropic_to_chat_request(
+            {
+                "model": "nvidia/nemotron-3-super-120b-a12b",
+                "messages": [{"role": "user", "content": "Stage."}],
+                "tools": [
+                    {"name": LONG_CLAUDE_CODE_MCP_ALIAS, "input_schema": {"type": "object"}},
+                    {"name": LONG_CLAUDE_CODE_MCP_TOOL, "input_schema": {"type": "object"}},
+                ],
+            }
+        )
 
 
 def test_anthropic_required_tool_choice_rejects_an_all_filtered_tool_set() -> None:

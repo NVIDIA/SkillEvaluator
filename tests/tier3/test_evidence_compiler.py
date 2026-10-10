@@ -268,17 +268,28 @@ def test_small_accuracy_and_goal_budgets_retain_final_response_excerpt(monkeypat
 @pytest.mark.parametrize("budget", [10, 20, 26, 40])
 def test_assemble_micro_budgets_and_missing_final_response_fallback(monkeypatch, budget: int) -> None:
     template_module = _load_harbor_template_module()
-    sections = [
-        ("FINAL RESPONSE", "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu."),
-        ("KEY OBSERVATIONS", "Secondary observation that should be dropped."),
-    ]
-    shared_text, shared_drop, shared_trunc = atif_helpers._assemble(sections, budget)
-    template_text, template_drop, template_trunc = template_module._assemble(sections, budget)
+    args = (
+        "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu.",
+        [],
+        "PRODUCED FILES / WRITES",
+        ["Secondary observation that should be dropped."],
+        "KEY OBSERVATIONS",
+        budget,
+    )
+    shared = atif_helpers._assemble_bundle(*args)
+    templated = template_module._assemble_bundle(*args)
 
-    assert shared_text == template_text
-    assert shared_drop == template_drop == 2
-    assert shared_trunc is True and template_trunc is True
-    assert 0 < len(shared_text) <= budget
+    assert shared == templated
+    text, omitted, truncated = shared
+    # The final response is cut to what fits, and the observation is dropped.
+    assert omitted == 2
+    assert truncated is True
+    assert len(text) <= budget
+    assert "Secondary observation" not in text
+    if budget >= len("FINAL RESPONSE\nAlpha"):
+        assert text.startswith("FINAL RESPONSE\nAlpha")
+    else:
+        assert text == ""  # not even the section title fits
 
     # Sad/edge path: agent produced no final text message, only a large file write + tool observation
     monkeypatch.setenv("SKILL_EVAL_ACCURACY_BUDGET", "90")

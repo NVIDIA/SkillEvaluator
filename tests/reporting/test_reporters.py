@@ -187,6 +187,67 @@ class TestCLIReporter:
         assert "Required validations passed" in output
         assert "live evaluation skipped" in output
 
+    def test_render_all_shows_the_warnings_of_a_passed_result(self) -> None:
+        result = ValidationResult(validator_name="Similarity Check", validator_description="Similarity")
+        result.add_success("index_built", "Indexed 1 plugin and 2 bundled skill entries")
+        result.add_success("catalog_saved", "Saved local catalog to catalog.json")
+        result.add_warning("Plugin at 'verbose' was not added to the catalog: [description] too long")
+        result.add_warning("Plugin 'silent' has no description; only its bundled skills were added to the catalog")
+
+        output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+
+        assert result.passed
+        assert "Similarity Check │ PASS │ 2 checks passed, 2 warnings" in output
+        assert "Non-blocking Findings" in output
+        assert "[WARN] Plugin at 'verbose' was not added to the catalog: [description] too long" in output
+        assert "[WARN] Plugin 'silent' has no description" in output
+        assert "All validations passed" in output
+
+    def test_render_all_prints_a_plain_warning_next_to_the_findings_of_a_passed_result(self) -> None:
+        result = _similarity_result(severity=Severity.LOW)
+        result.add_warning("Bundled skill skills/nodesc was not compared: it has no description")
+
+        output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+
+        assert result.passed
+        assert "Similarity Check │ PASS │ OK, 2 warnings" in output
+        assert "Issues: 1. [SIMILARITY-LOW] same-name similarity match" in output
+        assert "Warnings: [WARN] Bundled skill skills/nodesc was not compared: it has no description" in output
+        # The finding's own warning string is listed once, as an issue, not again as a warning.
+        assert output.count("same-name similarity match") == 1
+
+    def test_render_all_shows_a_skipped_check_as_skipped_not_passed(self) -> None:
+        from skillevaluator.deduplication.result_status import mark_advisory_skip
+
+        result = ValidationResult(validator_name="Inter-Skill Deduplication", validator_description="Catalog")
+        mark_advisory_skip(result, "No local catalog supplied; run with --catalog FILE to compare.")
+
+        output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+
+        assert "Inter-Skill Deduplication │ PASS │ Skipped (see warnings)" in output
+        assert "[Inter-Skill Deduplication] Catalog [SKIP] Validation skipped" in output
+        assert "[WARN] No local catalog supplied; run with --catalog FILE to compare." in output
+        assert "[PASS] Validation passed" not in output
+
+    def test_render_all_counts_one_warning_in_the_singular(self) -> None:
+        result = ValidationResult(validator_name="License Compliance", validator_description="License")
+        result.add_success("skill_discovery", "Checking license compliance")
+        result.add_success("writing-rules", "All checks passed")
+        result.add_warning("No license information found - manual review required.")
+
+        output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+
+        assert "License Compliance │ PASS │ 2 checks passed, 1 warning │" in output
+
+    def test_render_all_of_a_passed_result_without_warnings_is_unchanged(
+        self, success_result: ValidationResult
+    ) -> None:
+        output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([success_result])).split())
+
+        assert "SCHEMA │ PASS │ 3 checks passed │" in output
+        assert "warnings" not in output.lower()
+        assert "Non-blocking Findings" not in output
+
     def test_render_failure_escapes_markup_in_finding_fields(self) -> None:
         """Dynamic finding text should not be parsed as Rich markup."""
         result = ValidationResult(
@@ -258,6 +319,21 @@ class TestCLIReporter:
         plain_output = re.sub(r"\x1b\[[0-9;]*m", "", output)
 
         assert "[tool]" in plain_output
+
+    def test_render_counts_collection_metadata_in_success_details(self) -> None:
+        result = ValidationResult(validator_name="Code Integrity & Hygiene", validator_description="Hygiene")
+        result.add_success(
+            "writing-rules",
+            "All checks passed",
+            checks=[{"name": "dead_links_scan", "metadata": {"file_count": 1}}, {"name": "dead_links"}],
+            patterns=["test_*.py", "*_test.py"],
+            total_checks=2,
+        )
+
+        output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render(result)).split())
+
+        assert "[OK] writing-rules: All checks passed (checks=2 items, patterns=2 items, total_checks=2)" in output
+        assert "{'name'" not in output
 
     def test_render_all(self, mixed_results: list[ValidationResult]) -> None:
         """Test rendering multiple results."""
@@ -414,6 +490,29 @@ class TestJSONReporter:
 
         assert data["rubric_eval"]["execution_status"] == "succeeded"
         assert data["results"][0]["rubric_eval"] == data["rubric_eval"]
+
+    def test_render_all_groups_a_finding_with_an_absolute_path_under_the_plugin_root(self) -> None:
+        result = ValidationResult(validator_name="Plugin Schema & Bundle References", validator_description="Plugin")
+        result.metadata["plugin"] = {"root": "/work/hookify", "name": "hookify"}
+        for file_path in ("/work/hookify/hooks/hooks.json", "commands/help.md", "/elsewhere/settings.json"):
+            result.add_finding(
+                Finding(
+                    category="SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="bundle_reference",
+                    message=f"Bad reference in {file_path}",
+                    file_path=file_path,
+                )
+            )
+
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+        # Every finding is counted: one below the plugin root by its path there, one outside it by its own path.
+        assert {skill["name"]: skill["issue_count"] for skill in data["skills"]} == {
+            "hooks": 1,
+            "commands": 1,
+            "/elsewhere/settings.json": 1,
+        }
 
     def test_compact_output(self, success_result: ValidationResult) -> None:
         """Test compact JSON output without indentation."""
@@ -1371,8 +1470,8 @@ class TestMarkdownReporter:
 
         output = MarkdownReporter(include_timestamp=False).render_all([result])
 
-        assert "`/steps/0/tool_calls/0/normalized/0`" in output
-        assert "`/steps/0/tool_calls/0/normalized/1`" in output
+        assert "<code>/steps/0/tool_calls/0/normalized/0</code>" in output
+        assert "<code>/steps/0/tool_calls/0/normalized/1</code>" in output
 
     def test_details_section(self, failure_result: ValidationResult) -> None:
         """Test expandable details section."""

@@ -331,9 +331,11 @@ class _DiscoveryAdmission:
         max_paths: int,
         max_depth: int | None,
         allow_context_alias: bool,
+        refuse_selected_dirs: bool = True,
     ) -> None:
         self.root = root
         self.selected = selected
+        self.refuse_selected_dirs = refuse_selected_dirs
         self.excluded = frozenset(excluded_dirs)
         self.max_paths = max_paths
         self.max_depth = max_depth
@@ -367,7 +369,7 @@ class _DiscoveryAdmission:
             )
         if relative.name in self.excluded:
             return False
-        if self.selected(relative):
+        if self.refuse_selected_dirs and self.selected(relative):
             _raise_unsafe_file(relative)
         self._consume_path(relative)
         directory_depth = len(relative.parts)
@@ -461,6 +463,7 @@ def discover_secure_files(
     max_paths: int,
     max_depth: int | None = None,
     allow_context_alias: bool = True,
+    refuse_selected_dirs: bool = True,
 ) -> list[SecureFile]:
     """Discover selected files below ``root`` without following redirects.
 
@@ -470,6 +473,12 @@ def discover_secure_files(
     reads except for the exact contained ``CLAUDE.md -> AGENTS.md``
     compatibility alias, whose regular target must be independently
     discovered; only that target is returned and read.
+
+    A directory that ``selected`` matches is refused: a caller that selects a
+    file by name (``SKILL.md``) expects no folder there. Pass
+    ``refuse_selected_dirs=False`` when ``selected`` filters every file below
+    ``root``, so an ordinary subfolder (``rules/team/``, ``agents/team.md/``)
+    is walked instead.
     """
     if max_paths < 1:
         raise ValueError("max_paths must be positive")
@@ -483,6 +492,7 @@ def discover_secure_files(
         max_paths=max_paths,
         max_depth=max_depth,
         allow_context_alias=allow_context_alias,
+        refuse_selected_dirs=refuse_selected_dirs,
     )
     if os.name == "posix":
         _walk_posix(root, root_metadata, admission)

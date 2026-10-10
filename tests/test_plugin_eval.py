@@ -547,6 +547,24 @@ def test_contained_rule_replacement_after_discovery_is_rejected(
         prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
 
 
+def test_contained_rules_subfolder_is_staged_not_refused(tmp_path: Path) -> None:
+    """Regression: a rules/ subfolder was 'a selected path that is not a regular file', so staging refused."""
+    plugin = tmp_path / "plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "p", "rules": "./rules"}), encoding="utf-8")
+    (plugin / "rules" / "team").mkdir(parents=True)
+    (plugin / "rules" / "tone.md").write_text("Be brief.\n", encoding="utf-8")
+    (plugin / "rules" / "team" / "style.md").write_text("Use plain words.\n", encoding="utf-8")
+    evals = plugin / "evals"
+    evals.mkdir()
+    (evals / "evals.json").write_text("[]", encoding="utf-8")
+
+    package = prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
+
+    assert package.staged_rules == ("team/style.md", "tone.md")
+
+
 def test_oversized_contained_rule_is_rejected(tmp_path: Path) -> None:
     plugin = tmp_path / "plugin"
     manifest = plugin / ".claude-plugin" / "plugin.json"

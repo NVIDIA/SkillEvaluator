@@ -441,6 +441,34 @@ def test_symlink_inside_default_component_dir_is_unsafe(tmp_path: Path) -> None:
     assert _checks(result)["plugin_component_path_unsafe"] == Severity.HIGH
 
 
+def test_a_subfolder_of_a_component_folder_is_listed_not_unsafe(tmp_path: Path) -> None:
+    """Regression: a rules/ subfolder and an agents/ folder named 'team.md' were HIGH 'unsafe entries'."""
+    agent = "---\nname: {}\ndescription: x\ntools: Read\n---\nbody\n"
+    root = _plugin(
+        tmp_path / "p",
+        {},
+        {
+            "rules/tone.md": "Be brief.\n",
+            "rules/team/style.md": "Use plain words.\n",
+            "agents/top.md": agent.format("top"),
+            "agents/team.md/inner.md": agent.format("inner"),
+        },
+    )
+    result = _validate(root)
+    assert "plugin_component_path_unsafe" not in _checks(result)
+    assert sorted(row["name"] for row in _components(result, "rule")) == ["team/style.md", "tone.md"]
+    assert sorted(row["name"] for row in _components(result, "agent")) == ["inner", "top"]
+
+
+@_SKIP_SYMLINKS
+def test_symlink_in_a_rules_subfolder_is_still_unsafe(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.md"
+    outside.write_text("x", encoding="utf-8")
+    root = _plugin(tmp_path / "p", {}, {"rules/team/style.md": "Use plain words.\n"})
+    (root / "rules" / "team" / "evil.md").symlink_to(outside)
+    assert _checks(_validate(root))["plugin_component_path_unsafe"] == Severity.HIGH
+
+
 def test_normalize_declared_path() -> None:
     claude = CLAUDE_PROFILE.manifest_path_prefixes
     assert normalize_declared_path("./a/b/", claude).rel.as_posix() == "a/b"

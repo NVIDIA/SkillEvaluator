@@ -1263,10 +1263,9 @@ def build_harbor_run_command(
             ]
         )
     elif env_mode == "docker":
-        if agent_import_path:
-            command.extend(["--agent", agent_import_path])
-        else:
-            command.extend(["--agent", agent])
+        from skillevaluator.tier3.harbor import DOCKER_AGENT_IMPORT_PATHS
+
+        command.extend(["--agent", agent_import_path or DOCKER_AGENT_IMPORT_PATHS.get(agent, agent)])
         command.extend(["--env", SECURE_DOCKER_ENV_IMPORT_PATH])
     else:
         command.extend(["--agent", agent_import_path or agent, "--env", harbor_environment_type(env_mode)])

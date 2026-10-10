@@ -15,9 +15,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Preserved multiline skill descriptions when saving and loading Tier 2
-  embedding catalogs. Descriptions can contain line breaks and tabs, while
-  catalog identifiers and other control characters remain strictly validated.
+- Fixed Docker Codex and Claude Code setup wasting its timeout installing
+  distribution Node/npm before Harbor's own installers. Native, gateway Codex,
+  and NVIDIA Build agents now provision Node/npm only on the installer branches
+  that need them, while preserving installed-agent and version-pin checks.
 - Brought the published documentation in line with 0.5.0. It now covers how
   standard grading builds judge evidence and rebuilds trajectories from
   OpenCode and Codex logs, structured judge output and retries, the evidence

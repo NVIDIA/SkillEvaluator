@@ -260,7 +260,11 @@ def test_unprefixed_refs_mean_the_same_tool_on_both_harnesses() -> None:
         {
             "source": "agent",
             "tool_calls": [
-                {"tool_call_id": "", "function_name": "web_search_call", "arguments": {"action_type": "search"}}
+                {
+                    "tool_call_id": "",
+                    "function_name": "web_search_call",
+                    "arguments": {"action_type": "open_page", "url": "https://example.com/alarms"},
+                }
             ],
         },
         _exec("c4", "ls /workspace"),

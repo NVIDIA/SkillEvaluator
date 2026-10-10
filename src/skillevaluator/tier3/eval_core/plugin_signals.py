@@ -367,7 +367,7 @@ _READ_FAILURE_PHRASES = (
 # Harness-neutral names for plain tools, so one unprefixed ref means the same
 # thing on every harness: Codex writes files with ``apply_patch``, runs shell
 # commands with ``exec_command``, has one hosted web tool (``web_search_call``,
-# both search and page open), and plans with ``update_plan``.
+# both search and page open; see ``_WEB_ACTION_ALIASES``), and plans with ``update_plan``.
 _TOOL_ALIASES: dict[str, tuple[str, ...]] = {
     "bash": ("exec_command", "shell", "local_shell"),
     "exec_command": ("bash", "shell"),
@@ -385,6 +385,14 @@ _TOOL_ALIASES: dict[str, tuple[str, ...]] = {
     "webfetch": ("web_search_call", "web_fetch"),
     "update_plan": ("todowrite",),
     "todowrite": ("update_plan",),
+}
+# Codex's hosted web call records its action: a ``search`` is a web search, and
+# opening a page or finding text in it is a fetch. Only a call that records no
+# known action answers to both names.
+_WEB_ACTION_ALIASES: dict[str, tuple[str, ...]] = {
+    "search": ("websearch", "web_search"),
+    "open_page": ("webfetch", "web_fetch"),
+    "find_in_page": ("webfetch", "web_fetch"),
 }
 # A shell call that writes a file also answers to the file-writing tool names. Codex
 # writes most files through ``exec_command`` (``cat > f <<'EOF'``, ``python3 - <<'PY'``),
@@ -2741,6 +2749,10 @@ def _identities(
         # The tool itself is a plain identity too, so ``Bash`` or ``Read`` refs see a call that also
         # loaded a skill, without that skill answering to the tool's name.
         aliases = _TOOL_ALIASES.get(fn_base, ())
+        action = args.get("action_type") if fn_base == "web_search_call" else None
+        if isinstance(action, str):
+            # A fetch is not a ``WebSearch`` decoy, nor a search a ``WebFetch`` one.
+            aliases = _WEB_ACTION_ALIASES.get(action.casefold(), aliases)
         idents.append(_Ident(label=fn, kind=None, name=fn, fn=fn, tool_label=fn, aliases=aliases))
     return idents
 

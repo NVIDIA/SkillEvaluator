@@ -140,8 +140,34 @@ def test_codex_hosted_web_search_is_a_web_search_decoy() -> None:
         selection = _signals(trajectory, case, context=DOCS, servers=servers)["tool_selection"]
         assert selection["decoy_calls"] == 1, trajectory["agent"]
         assert selection["precision"] == 0.5, trajectory["agent"]
-    fetch = _signals(codex, {"decoy_tools": ["WebFetch"]}, context=DOCS, servers={"c3": "deepwiki"})
-    assert fetch["tool_selection"]["decoy_calls"] == 1
+        # A search is not a ``WebFetch`` decoy on either harness.
+        fetch = _signals(trajectory, {"decoy_tools": ["WebFetch"]}, context=DOCS, servers=servers)
+        assert fetch["tool_selection"]["decoy_calls"] == 0, trajectory["agent"]
+
+
+def test_a_codex_web_call_answers_to_the_web_tool_its_action_names() -> None:
+    """A Codex page open is a right ``WebFetch``, not a ``WebSearch`` decoy, as Claude Code's ``WebFetch`` is."""
+    url = "https://flask.palletsprojects.com/en/stable/appcontext/"
+    fetches = (
+        _trajectory("codex", _step("", "web_search_call", {"action_type": "open_page", "url": url}, None)),
+        _trajectory("codex", _step("", "web_search_call", {"action_type": "find_in_page", "url": url}, None)),
+        _trajectory("claude-code", _step("t1", "WebFetch", {"url": url, "prompt": "app context"})),
+    )
+    searches = (
+        _trajectory("codex", _step("", "web_search_call", {"action_type": "search", "query": "flask"}, None)),
+        _trajectory("claude-code", _step("t1", "WebSearch", {"query": "flask"})),
+    )
+    for trajectories, right, wrong in ((fetches, "WebFetch", "WebSearch"), (searches, "WebSearch", "WebFetch")):
+        for trajectory in trajectories:
+            chosen = _signals(trajectory, {"expected_tools": [right], "decoy_tools": [wrong]}, context=DOCS)
+            assert _brief(chosen["tool_selection"]) == (1.0, 1.0, 0), (trajectory["agent"], right)
+            # The same call is still the decoy when the case names it so.
+            decoyed = _signals(trajectory, {"expected_tools": [wrong], "decoy_tools": [right]}, context=DOCS)
+            assert _brief(decoyed["tool_selection"]) == (0.0, 0.0, 1), (trajectory["agent"], right)
+    # A call that records no action could be either, so it still answers to both.
+    unknown = _trajectory("codex", _step("", "web_search_call", {"action_type": ""}, None))
+    for decoy in ("WebSearch", "WebFetch"):
+        assert _signals(unknown, {"decoy_tools": [decoy]}, context=DOCS)["tool_selection"]["decoy_calls"] == 1, decoy
 
 
 def test_a_decoy_write_through_the_shell_is_not_a_precise_choice() -> None:

@@ -23,7 +23,13 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.constants import RUBRIC_CRITERIA, RUBRIC_MAX_TOKENS, RUBRIC_MIN_SCORE, RUBRIC_REASONING_EFFORT
+from skillevaluator.constants import (
+    RUBRIC_CRITERIA,
+    RUBRIC_MAX_TOKENS,
+    RUBRIC_MIN_SCORE,
+    RUBRIC_REASONING_MAX_TOKENS,
+    RUBRIC_REASONING_MODEL_MARKERS,
+)
 from skillevaluator.inference.client import LLMClient
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity, ValidationResult
@@ -220,6 +226,27 @@ class RubricJudge(LLMClient):
     default_reasoning_effort: str | None = RUBRIC_REASONING_EFFORT
     response_schema: dict[str, Any] | None = RUBRIC_JSON_SCHEMA
     schema_name: str = "rubric_evaluation"
+
+    @staticmethod
+    def _resolved_model_name() -> str:
+        """Best-effort model name from the environment, ignoring config errors."""
+        try:
+            from skillevaluator.provider_config import resolve_llm_provider
+
+            return resolve_llm_provider().model
+        except Exception:
+            return ""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # A reasoning model burns the whole completion budget on hidden
+        # reasoning before emitting visible JSON, so the default cap truncates
+        # the answer mid-object. Raise it for those families unless the caller
+        # passed an explicit max_tokens.
+        if kwargs.get("max_tokens") is None:
+            model = (kwargs.get("model") or self._resolved_model_name() or "").lower()
+            if any(marker in model for marker in RUBRIC_REASONING_MODEL_MARKERS):
+                kwargs["max_tokens"] = RUBRIC_REASONING_MAX_TOKENS
+        super().__init__(*args, **kwargs)
 
     _SYSTEM_PROMPT = (
         "You are evaluating an AI Agent Skill documentation file (SKILL.md).\n"

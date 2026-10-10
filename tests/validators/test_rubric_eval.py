@@ -10,7 +10,11 @@ from unittest.mock import patch
 
 import pytest
 
-from skillevaluator.constants import RUBRIC_CRITERIA
+from skillevaluator.constants import (
+    RUBRIC_CRITERIA,
+    RUBRIC_MAX_TOKENS,
+    RUBRIC_REASONING_MAX_TOKENS,
+)
 from skillevaluator.reporting import HTMLReporter
 from skillevaluator.validators.rubric_eval import (
     RubricEvalValidator,
@@ -109,6 +113,27 @@ class TestRubricJudge:
         judge = RubricJudge()
         result = judge.parse_response('{"score": 80, "overall_pass": true, "checks": []}')
         assert result["score"] == 80
+
+    def test_reasoning_model_gets_a_larger_token_budget(self):
+        """Reasoning models spend the completion budget before emitting content.
+
+        Measured on deepseek/deepseek-v4.1-flash with a 4096-token cap:
+        ``reasoning_tokens=4000, text_tokens=0`` and ``finish_reason=length``,
+        so the rubric JSON was truncated mid-object and never parsed.
+        """
+        judge = RubricJudge(model="deepseek/deepseek-v4.1-flash")
+        assert judge._max_tokens == RUBRIC_REASONING_MAX_TOKENS
+        assert judge._max_tokens > RUBRIC_MAX_TOKENS
+
+    def test_standard_model_keeps_default_token_budget(self):
+        """Non-reasoning models must not pay the larger budget's latency."""
+        judge = RubricJudge(model="gpt-4o")
+        assert judge._max_tokens == RUBRIC_MAX_TOKENS
+
+    def test_explicit_token_override_is_preserved(self):
+        """An explicit max_tokens always wins over the reasoning-model default."""
+        judge = RubricJudge(model="deepseek/deepseek-v4.1-flash", max_tokens=1234)
+        assert judge._max_tokens == 1234
 
 
 class TestCollectSupplementaryContent:

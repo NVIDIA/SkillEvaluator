@@ -304,6 +304,40 @@ class TestExternalTool:
         assert result.stderr == "still working"
         assert "timed out" in (result.error_message or "")
 
+    def test_run_decodes_non_utf8_output_tolerantly(self):
+        """A child emitting non-UTF-8 bytes must not lose its captured streams.
+
+        ``text=True`` decodes strictly, so a Windows child printing a traceback
+        with a non-ASCII path raises UnicodeDecodeError inside subprocess's
+        reader thread and leaves ``proc.stdout``/``proc.stderr`` unset (None).
+        Callers such as the SkillSpector wrapper then crash on ``stderr.casefold()``
+        instead of reading the scanner's diagnostics.
+        """
+        undecodable = b"WARNING path \xa1 not utf-8\n"
+        mock_proc = CompletedProcess(args=["scanner"], returncode=0, stdout=b'{"ok": true}', stderr=undecodable)
+        with (
+            patch("shutil.which", return_value="/usr/bin/scanner"),
+            patch("skillevaluator.utils.tool_runner.subprocess.run", return_value=mock_proc),
+        ):
+            result = ExternalTool("Scanner", "scanner").run([], log_command=False)
+
+        assert result.success is True
+        assert result.exit_code == 0
+        assert result.stderr is not None, "stderr must never be None on a successful run"
+        assert "WARNING path" in result.stderr
+        assert result.stdout == '{"ok": true}'
+
+    def test_run_captures_bytes_without_text_mode(self):
+        """subprocess.run is invoked without text=True so decoding is our own."""
+        mock_proc = CompletedProcess(args=["scanner"], returncode=0, stdout=b"out", stderr=b"err")
+        with (
+            patch("shutil.which", return_value="/usr/bin/scanner"),
+            patch("skillevaluator.utils.tool_runner.subprocess.run", return_value=mock_proc) as mock_run,
+        ):
+            ExternalTool("Scanner", "scanner").run([], log_command=False)
+
+        assert mock_run.call_args.kwargs.get("text") is not True
+
     def test_run_merges_extra_env_over_ambient(self):
         """env additions are merged onto os.environ, not substituted for it."""
         mock_proc = CompletedProcess(args=["true"], returncode=0, stdout="", stderr="")

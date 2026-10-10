@@ -7736,6 +7736,7 @@ def collect_harbor_results(
                 and plugin_signals.member_skills
                 and not skip_baseline
             ),
+            cross_component_case_ids=plugin_signals.cross_component_cases if plugin_signals is not None else None,
         )
         # Keep the legacy per-arm execution snapshots next to the per-case
         # completeness verdict so earlier consumers still find them.

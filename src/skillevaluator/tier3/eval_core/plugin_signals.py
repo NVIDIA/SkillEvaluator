@@ -1225,6 +1225,8 @@ class PluginSignalsContext:
     # Agent -> the plugin LSP servers its with-plugin arm stages natively (Claude Code's ``.lsp.json``),
     # each with the file extensions its ``extensionToLanguage`` maps.
     agent_lsp_servers: Mapping[str, Mapping[str, tuple[str, ...]]] = field(default_factory=dict)
+    # Ids of the cases marked ``cross_component: true``; the bundle lift is also reported on them alone.
+    cross_component_cases: frozenset[str] = frozenset()
 
     def arm_enabled(self, arm: str) -> bool:
         if arm in {ARM_WITH, ARM_SUM_OF_PARTS}:
@@ -1315,6 +1317,7 @@ def build_plugin_signals_context(
     LSP servers its with-plugin arm stages (``{server: extensions}``).
     """
     cases: dict[str, Mapping[str, Any]] = {}
+    cross_component: set[str] = set()
     for count, entry in enumerate(entries):
         if count >= MAX_CONTEXT_CASES:
             break
@@ -1323,6 +1326,8 @@ def build_plugin_signals_context(
         case_id = entry.get("id")
         if not isinstance(case_id, str) or not case_id.strip() or case_id in cases:
             continue
+        if entry.get("cross_component") is True:
+            cross_component.add(case_id)
         spec = plugin_case_spec(entry)
         if spec:
             cases[case_id] = spec
@@ -1353,6 +1358,7 @@ def build_plugin_signals_context(
             for agent, value in (agent_lsp_servers or {}).items()
             if isinstance(agent, str) and (servers := _clean_lsp_servers(value))
         },
+        cross_component_cases=frozenset(cross_component),
     )
 
 

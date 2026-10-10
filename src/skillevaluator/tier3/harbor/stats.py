@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 import random
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -455,6 +455,56 @@ def paired_lift(
     return result
 
 
+CASE_TYPE_CROSS_COMPONENT = "cross_component"
+CASE_TYPE_OTHER = "other"
+
+
+def lift_by_case_type(
+    treatment: ArmObservations | None,
+    control: ArmObservations | None,
+    cross_component_case_ids: Collection[str],
+) -> dict[str, Any] | None:
+    """Split a paired lift into ``cross_component`` cases and all ``other`` cases.
+
+    Report-only. Each side reuses the paired per-case scores and the paired
+    case bootstrap of :func:`paired_lift`, so the case-weighted mean of the two
+    sides equals the whole lift. A side with fewer than
+    ``LIFT_CI_MIN_PAIRED_CASES`` pairs gets a point estimate and a reason, no interval.
+    """
+    if treatment is None or control is None:
+        return None
+    treatment_scores, control_scores, _ = shared_case_scores(treatment.trials, control.trials)
+    if not treatment_scores:
+        return None
+    cross = {str(case_id) for case_id in cross_component_case_ids}
+    split: dict[str, Any] = {}
+    for case_type, label in ((CASE_TYPE_CROSS_COMPONENT, "cross-component"), (CASE_TYPE_OTHER, "other")):
+        is_cross = case_type == CASE_TYPE_CROSS_COMPONENT
+        ids = [case_id for case_id in treatment_scores if (case_id in cross) is is_cross]
+        result = paired_case_bootstrap(
+            {case_id: treatment_scores[case_id] for case_id in ids},
+            {case_id: control_scores[case_id] for case_id in ids},
+        )
+        n_cases = int(result["n_cases"])
+        reason = None
+        if not n_cases:
+            reason = f"No {label} case was scored in both arms."
+        elif n_cases < LIFT_CI_MIN_PAIRED_CASES:
+            reason = (
+                f"Only {n_cases} paired {label} case(s); "
+                f"at least {LIFT_CI_MIN_PAIRED_CASES} are needed for an interval."
+            )
+        interval = reason is None
+        split[case_type] = {
+            "n": n_cases,
+            "lift": result["estimate"],
+            "ci_low": result["ci_low"] if interval else None,
+            "ci_high": result["ci_high"] if interval else None,
+            "reason": reason,
+        }
+    return split
+
+
 # ---------------------------------------------------------------------------
 # Reliability (pass^k)
 # ---------------------------------------------------------------------------
@@ -796,6 +846,7 @@ def build_agent_statistics(
     pass_threshold: float,
     sum_of_parts_requested: bool,
     baseline_is_sum_of_parts: bool = False,
+    cross_component_case_ids: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble every C4 statistics block for one agent.
 
@@ -810,6 +861,10 @@ def build_agent_statistics(
     integration`` run, whose only baseline stages the member skills: its
     interval compares the plugin with its parts, so it is filed under
     ``integration`` and no effectiveness interval exists.
+
+    With ``cross_component_case_ids`` (a plugin run), the integration interval
+    also carries ``by_case_type``: the same lift on cross-component cases and
+    on all other cases (:func:`lift_by_case_type`).
     """
     with_arm = arms.get(ARM_WITH)
     without_arm = arms.get(ARM_WITHOUT)
@@ -817,14 +872,9 @@ def build_agent_statistics(
 
     effectiveness = None
     if baseline_is_sum_of_parts:
-        integration = paired_lift(
-            with_arm,
-            without_arm,
-            treatment_arm=ARM_WITH,
-            control_arm=ARM_WITHOUT,
-            expected_case_ids=expected_case_ids,
-        )
+        members_arm, members_name = without_arm, ARM_WITHOUT
     else:
+        members_arm, members_name = sop_arm, ARM_SUM_OF_PARTS
         effectiveness = paired_lift(
             with_arm,
             without_arm,
@@ -832,13 +882,15 @@ def build_agent_statistics(
             control_arm=ARM_WITHOUT,
             expected_case_ids=expected_case_ids,
         )
-        integration = paired_lift(
-            with_arm,
-            sop_arm,
-            treatment_arm=ARM_WITH,
-            control_arm=ARM_SUM_OF_PARTS,
-            expected_case_ids=expected_case_ids,
-        )
+    integration = paired_lift(
+        with_arm,
+        members_arm,
+        treatment_arm=ARM_WITH,
+        control_arm=members_name,
+        expected_case_ids=expected_case_ids,
+    )
+    if integration is not None and cross_component_case_ids is not None:
+        integration["by_case_type"] = lift_by_case_type(with_arm, members_arm, cross_component_case_ids)
 
     reliability: dict[str, Any] = {}
     cost: dict[str, Any] = {}

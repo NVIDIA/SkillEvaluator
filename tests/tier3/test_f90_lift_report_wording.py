@@ -64,8 +64,8 @@ def test_multi_agent_markdown_names_the_agent_of_every_lift_interval(tmp_path: P
     section = report.split("### Integration (advisory)", 1)[1].split("\n### ", 1)[0]
     bullets = [line for line in section.splitlines() if line.startswith("- ")]
 
-    assert "- claude-code — Integration lift: +0.03" in "\n".join(bullets)
-    assert "- codex — Integration lift: +0.20" in "\n".join(bullets)
+    assert "- claude-code — Bundle lift: +0.03" in "\n".join(bullets)
+    assert "- codex — Bundle lift: +0.20" in "\n".join(bullets)
     assert "- claude-code — Effectiveness lift:" in "\n".join(bullets)
     assert "- codex — Effectiveness lift:" in "\n".join(bullets)
     assert all(bullet.startswith(("- claude-code — ", "- codex — ")) for bullet in bullets)

@@ -23,6 +23,8 @@ from skillevaluator.constants import (
 )
 from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
 from skillevaluator.reporting.plugin_sections import (
+    BUNDLE_LIFT_DEFINITION,
+    BUNDLE_LIFT_LABEL,
     NOT_LOADED_STATE,
     STAGING_CAVEAT,
     number,
@@ -760,7 +762,7 @@ class BenchmarkReporter(ReporterBase):
                 "- is discovered and activated when needed;",
                 "- helps the agent complete the user's goal and expected workflow;",
                 "- avoids wasted skill and tool usage; and",
-                "- adds value as a coordinated plugin beyond its individual components (Integration, when measured).",
+                "- adds value beyond its skills alone (Bundle lift, when measured).",
                 "",
                 (
                     f"A plugin evaluation demonstrates only what it staged and exercised. {STAGING_CAVEAT} The "
@@ -806,11 +808,15 @@ class BenchmarkReporter(ReporterBase):
         modes = (view or {}).get("lift_modes")
         # One named row per agent in a multi-agent run; one unnamed row otherwise.
         entries = (integration or {}).get("per_agent") or [integration]
+        splits: list[str] = []
         for entry in entries:
-            label = "Integration (plugin vs. its own parts)"
+            label = f"{BUNDLE_LIFT_LABEL} (plugin vs. its skills alone)"
             if entry and entry.get("agent") and len(entries) > 1:
                 label += f" — {entry['agent']}"
             if entry and entry["measured"]:
+                if entry.get("by_case_type"):
+                    scope = f"{entry['agent']}: " if entry.get("agent") and len(entries) > 1 else ""
+                    splits.extend([_md_cell(f"{scope}{entry['by_case_type']}", private_labels), ""])
                 lift = entry.get("lift_value")
                 result = f"{entry['verdict_label']}, {_format_points(lift) if lift is not None else 'lift n/a'}"
                 # The view's Integration interval already falls back to the statistics block.
@@ -833,11 +839,11 @@ class BenchmarkReporter(ReporterBase):
                 "",
                 (
                     "Plugin lift compares the plugin with the same tasks run without it, on the dimensions both runs "
-                    "can score; it is not the Effectiveness dimension (goal and workflow) above. Integration compares "
-                    "the coordinated plugin with its member components staged individually; it is advisory and never "
-                    "changes the verdict."
+                    "can score; it is not the Effectiveness dimension (goal and workflow) above. "
+                    f"{BUNDLE_LIFT_DEFINITION} It is advisory and never changes the verdict."
                 ),
                 "",
+                *splits,
             ]
         )
         if sum_of_parts_baseline:

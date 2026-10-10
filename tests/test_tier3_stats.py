@@ -986,7 +986,7 @@ def test_cli_plugin_summary_prints_integration_interval_and_reason() -> None:
     )
 
     output = buffer.getvalue()
-    assert "Integration: INCONCLUSIVE (lift +0.15)" in output
+    assert "Integration: INCONCLUSIVE (bundle lift +0.15)" in output
     assert "95% CI [-0.05, +0.35], precision low" in output
     assert "includes zero" in output
 
@@ -1023,3 +1023,172 @@ def test_agent_statistics_of_an_effectiveness_only_run_have_nothing_incomplete()
     )
     assert tuple(result) == stats.STATISTICS_BLOCKS
     assert result["integration_completeness"]["complete"] is None
+
+
+# ---------------------------------------------------------------------------
+# Bundle lift split by case type (report-only)
+# ---------------------------------------------------------------------------
+
+CROSS_CASES = [f"cross-{index}" for index in range(1, 7)]
+OTHER_CASES = [f"other-{index}" for index in range(1, 6)]
+
+
+def _split_arms(
+    cross_lift: float, other_lift: float, *, cross: list[str] = CROSS_CASES, other: list[str] = OTHER_CASES
+) -> tuple[ArmObservations, ArmObservations]:
+    """A plugin arm and a member-skills arm whose per-case lift differs by case type."""
+    plugin = [_trial(case, 0.5 + cross_lift + 0.01 * index) for index, case in enumerate(cross)]
+    plugin += [_trial(case, 0.5 + other_lift + 0.01 * index) for index, case in enumerate(other)]
+    members = [_trial(case, 0.5) for case in (*cross, *other)]
+    return _arm(plugin), _arm(members)
+
+
+def test_bundle_lift_splits_cross_component_and_other_cases() -> None:
+    plugin, members = _split_arms(0.3, 0.05)
+    whole = stats.paired_lift(plugin, members, treatment_arm="with_skill", control_arm="sum_of_parts")
+
+    split = stats.lift_by_case_type(plugin, members, frozenset(CROSS_CASES))
+
+    assert split is not None and whole is not None
+    cross, other = split["cross_component"], split["other"]
+    assert (cross["n"], other["n"]) == (6, 5)
+    assert cross["lift"] == pytest.approx(0.325)
+    assert other["lift"] == pytest.approx(0.07)
+    assert cross["reason"] is None and other["reason"] is None
+    # The same paired case bootstrap as the whole lift, on that group's cases.
+    treatment, control, _ = stats.shared_case_scores(plugin.trials, members.trials)
+    expected = stats.paired_case_bootstrap(
+        {case: treatment[case] for case in CROSS_CASES}, {case: control[case] for case in CROSS_CASES}
+    )
+    assert (cross["ci_low"], cross["ci_high"]) == (expected["ci_low"], expected["ci_high"])
+    assert other["ci_low"] is not None and other["ci_low"] <= other["lift"] <= other["ci_high"]
+    # The case-weighted mean of the two groups is the whole Bundle lift.
+    assert (6 * cross["lift"] + 5 * other["lift"]) / 11 == pytest.approx(whole["estimate"], abs=1e-4)
+
+
+def test_bundle_lift_group_with_fewer_than_five_pairs_gets_a_point_estimate_only() -> None:
+    few = CROSS_CASES[:3]
+    plugin, members = _split_arms(0.3, 0.05, cross=few)
+
+    split = stats.lift_by_case_type(plugin, members, frozenset(few))
+
+    assert split is not None
+    assert split["cross_component"] == {
+        "n": 3,
+        "lift": pytest.approx(0.31),
+        "ci_low": None,
+        "ci_high": None,
+        "reason": "Only 3 paired cross-component case(s); at least 5 are needed for an interval.",
+    }
+    assert split["other"]["n"] == 5 and split["other"]["ci_low"] is not None
+
+
+def test_bundle_lift_without_cross_component_cases_files_every_case_as_other() -> None:
+    plugin, members = _split_arms(0.3, 0.05)
+    whole = stats.paired_lift(plugin, members, treatment_arm="with_skill", control_arm="sum_of_parts")
+
+    split = stats.lift_by_case_type(plugin, members, frozenset())
+
+    assert split is not None and whole is not None
+    assert split["cross_component"] == {
+        "n": 0,
+        "lift": None,
+        "ci_low": None,
+        "ci_high": None,
+        "reason": "No cross-component case was scored in both arms.",
+    }
+    other = split["other"]
+    assert other["n"] == 11
+    assert (other["lift"], other["ci_low"], other["ci_high"]) == (whole["estimate"], whole["ci_low"], whole["ci_high"])
+    assert stats.lift_by_case_type(plugin, None, frozenset()) is None
+
+
+def test_agent_statistics_add_the_split_to_the_integration_interval_of_plugin_runs_only() -> None:
+    plugin, members = _split_arms(0.3, 0.05)
+    no_plugin = _arm([_trial(case, 0.2) for case in (*CROSS_CASES, *OTHER_CASES)])
+    arms = {"with_skill": plugin, "without_skill": no_plugin, "sum_of_parts": members}
+    common: dict[str, Any] = {
+        "expected_case_ids": [*CROSS_CASES, *OTHER_CASES],
+        "n_attempts": 1,
+        "stop_on_pass": False,
+        "pass_threshold": 0.5,
+    }
+
+    plain = stats.build_agent_statistics(arms, sum_of_parts_requested=True, **common)
+    split = stats.build_agent_statistics(
+        arms, sum_of_parts_requested=True, cross_component_case_ids=frozenset(CROSS_CASES), **common
+    )
+
+    integration = split["lift_uncertainty"]["integration"]
+    assert integration["by_case_type"] == stats.lift_by_case_type(plugin, members, CROSS_CASES)
+    assert "by_case_type" not in plain["lift_uncertainty"]["integration"]
+    assert "by_case_type" not in split["lift_uncertainty"]["effectiveness"]
+    # Nothing else changes.
+    assert {key: value for key, value in integration.items() if key != "by_case_type"} == plain["lift_uncertainty"][
+        "integration"
+    ]
+    assert split["lift_uncertainty"]["effectiveness"] == plain["lift_uncertainty"]["effectiveness"]
+
+    # Legacy two-arm --lift-mode integration: the only baseline is the member-skills arm.
+    legacy = stats.build_agent_statistics(
+        {"with_skill": plugin, "without_skill": members},
+        sum_of_parts_requested=False,
+        baseline_is_sum_of_parts=True,
+        cross_component_case_ids=frozenset(CROSS_CASES),
+        **common,
+    )
+    assert legacy["lift_uncertainty"]["integration"]["by_case_type"]["cross_component"]["n"] == 6
+
+
+def test_integration_block_carries_the_split_without_changing_the_verdict() -> None:
+    split = {
+        "cross_component": {"n": 6, "lift": 0.3, "ci_low": 0.1, "ci_high": 0.5, "reason": None},
+        "other": {"n": 4, "lift": 0.0, "ci_low": None, "ci_high": None, "reason": "Only 4 paired other case(s)."},
+    }
+    interval = _uncertainty(0.06, 0.4, precision="low")
+
+    base = _build_integration_report(_best(interval), PLUGIN_CONFIG)
+    with_split = _build_integration_report(_best({**interval, "by_case_type": split}), PLUGIN_CONFIG)
+
+    assert base is not None and with_split is not None
+    assert base["by_case_type"] is None
+    assert with_split["by_case_type"] == split
+    for key in ("verdict", "point_verdict", "integration_lift", "reason", "measured", "complete"):
+        assert with_split[key] == base[key]
+
+
+def test_plugin_signals_context_records_the_cross_component_case_ids() -> None:
+    from skillevaluator.tier3.eval_core.plugin_signals import build_plugin_signals_context
+
+    context = build_plugin_signals_context(
+        entries=[
+            {"id": "a", "cross_component": True},
+            {"id": "b", "cross_component": "true"},
+            {"id": "c"},
+            {"cross_component": True},
+        ]
+    )
+
+    assert context.cross_component_cases == frozenset({"a"})
+
+
+def test_collector_reports_the_split_for_a_plugin_run(tmp_path: Path) -> None:
+    from skillevaluator.tier3.eval_core.plugin_signals import build_plugin_signals_context
+
+    jobs = tmp_path / "jobs"
+    _write_job(jobs, "with", dict.fromkeys(CASES, 0.9))
+    _write_job(jobs, "without", dict.fromkeys(CASES, 0.4))
+    _write_job(jobs, "sumofparts", dict.fromkeys(CASES, 0.7))
+    context = build_plugin_signals_context(
+        member_skills=["loader", "summarizer"],
+        entries=[{"id": case, "cross_component": index < 2} for index, case in enumerate(CASES)],
+    )
+
+    agent = _collect_three_arms(tmp_path, plugin_signals=context)["agents"]["opencode"]
+
+    split = agent["lift_uncertainty"]["integration"]["by_case_type"]
+    assert (split["cross_component"]["n"], split["other"]["n"]) == (2, 4)
+    assert split["cross_component"]["lift"] == split["other"]["lift"] == 0.2
+    assert split["cross_component"]["ci_low"] is None and split["other"]["ci_low"] is None
+    persisted = json.loads((tmp_path / "results" / "opencode" / "statistics.json").read_text(encoding="utf-8"))
+    assert persisted["lift_uncertainty"]["integration"]["by_case_type"] == split

@@ -3185,7 +3185,7 @@ def _integration_interval_verdict(uncertainty: dict[str, Any]) -> tuple[str, str
     high = _finite_float(uncertainty.get("ci_high"))
     ci_text = _ci_text(uncertainty) or "interval"
     if low is None or high is None:
-        return INTEGRATION_VERDICT_INCONCLUSIVE, "The Integration lift has no interval to classify it."
+        return INTEGRATION_VERDICT_INCONCLUSIVE, "The Bundle lift has no interval to classify it."
     if low >= _INTEGRATION_REAL_THRESHOLD:
         return INTEGRATION_VERDICT_REAL, None
     if high <= _INTEGRATION_NEGATIVE_THRESHOLD:
@@ -3200,13 +3200,13 @@ def _integration_interval_verdict(uncertainty: dict[str, Any]) -> tuple[str, str
     if low <= 0.0 <= high:
         return (
             INTEGRATION_VERDICT_INCONCLUSIVE,
-            f"The paired case bootstrap {ci_text} for the Integration lift includes zero and reaches past {band}, "
+            f"The paired case bootstrap {ci_text} for the Bundle lift includes zero and reaches past {band}, "
             "so it cannot tell a real or negative effect from no effect.",
         )
     effect = "a real" if high >= _INTEGRATION_REAL_THRESHOLD else "a negative"
     return (
         INTEGRATION_VERDICT_INCONCLUSIVE,
-        f"The paired case bootstrap {ci_text} for the Integration lift crosses the {band} band edge, "
+        f"The paired case bootstrap {ci_text} for the Bundle lift crosses the {band} band edge, "
         f"so it cannot tell {effect} effect from cosmetic bundling.",
     )
 
@@ -3469,7 +3469,7 @@ def _integration_no_score_reason(
     arms = " and the ".join(_arm_name(condition, names) for condition in unscored)
     errors = [str(error) for error in conditions[unscored[0]].get("execution_errors") or [] if str(error).strip()]
     cause = f" ({errors[0][:200]})" if errors else ""
-    return f"The {arms} produced no usable scored trial{cause}, so no case could be paired for the Integration lift."
+    return f"The {arms} produced no usable scored trial{cause}, so no case could be paired for the Bundle lift."
 
 
 def _integration_block(
@@ -3505,6 +3505,8 @@ def _integration_block(
         "complete": complete,
         "completeness": completeness if isinstance(completeness, dict) else None,
         "lift_uncertainty": uncertainty,
+        # Report-only: the same lift on cross_component cases and on all other cases.
+        "by_case_type": uncertainty.get("by_case_type") if isinstance(uncertainty, dict) else None,
         "interpretation": _INTEGRATION_INTERPRETATION[verdict],
         # Set whenever the verdict is inconclusive.
         "reason": reason,
@@ -3618,7 +3620,7 @@ def _build_integration_report(
     elif uncertainty is not None and uncertainty.get("precision") == "insufficient":
         reason = (
             f"Only {_as_nonnegative_int(uncertainty.get('n_cases'))} paired case(s); at least "
-            f"{LIFT_CI_MIN_PAIRED_CASES} are needed for a usable interval on the Integration lift."
+            f"{LIFT_CI_MIN_PAIRED_CASES} are needed for a usable interval on the Bundle lift."
         )
     elif uncertainty is not None:
         verdict, reason = _integration_interval_verdict(uncertainty)

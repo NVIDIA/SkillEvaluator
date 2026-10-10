@@ -125,7 +125,7 @@ def test_complete_plugin_card(tmp_path: Path) -> None:
         "| \\[-2, +55\\] points (95% CI); precision low; CI includes zero |"
     ) in rendered
     assert (
-        "| Integration (plugin vs. its own parts) | Real integration, +18 points "
+        "| Bundle lift (plugin vs. its skills alone) | Real integration, +18 points "
         "| \\[+6, +31\\] points (95% CI); precision adequate |"
     ) in rendered
     assert "## Component Coverage" in rendered
@@ -139,6 +139,29 @@ def test_complete_plugin_card(tmp_path: Path) -> None:
     assert "| Tier 3 | Live agent evaluation | **PASS** |" in rendered
     assert "Regenerate this benchmark when the plugin or any of its components" in rendered
     assert _gate(tmp_path, rendered) == []
+
+
+def test_plugin_card_defines_the_bundle_lift_and_shows_the_case_type_split(tmp_path: Path) -> None:
+    integration = {
+        **_MEASURED_INTEGRATION,
+        "by_case_type": {
+            "cross_component": {"n": 6, "lift": 0.3, "ci_low": 0.1, "ci_high": 0.5, "reason": None},
+            "other": {"n": 3, "lift": 0.02, "ci_low": None, "ci_high": None, "reason": "Only 3 paired other case(s)."},
+        },
+    }
+    rendered = _render([tier1_plugin_result(), _tier3(partial=False, integration=integration)])
+
+    assert (
+        "Bundle lift = full plugin minus its skills alone. It includes the plugin's rules, MCP servers and wrapper, "
+        "not only how the parts coordinate. It is advisory and never changes the verdict."
+    ) in rendered
+    assert "On cross-component cases: +0.30 (n=6). On other cases: +0.02 (n=3)." in rendered
+    assert "Integration lift" not in rendered
+    assert _gate(tmp_path, rendered) == []
+
+    # A run that recorded no split shows no split line.
+    plain = _render([tier1_plugin_result(), _tier3(partial=False, integration=_MEASURED_INTEGRATION)])
+    assert "On cross-component cases" not in plain
 
 
 def test_integration_lift_mode_card_does_not_claim_an_effectiveness_result(tmp_path: Path) -> None:
@@ -167,7 +190,7 @@ def test_integration_lift_mode_card_does_not_claim_an_effectiveness_result(tmp_p
         "sum-of-parts | Not measured |"
     ) in rendered
     assert (
-        "| Integration (plugin vs. its own parts) | Inconclusive, +30 points "
+        "| Bundle lift (plugin vs. its skills alone) | Inconclusive, +30 points "
         "| \\[-2, +55\\] points (95% CI); precision low; CI includes zero |"
     ) in rendered
     assert "so the plugin was never compared with a run without it" in rendered
@@ -187,11 +210,12 @@ def test_effectiveness_only_card_keeps_integration_not_requested(tmp_path: Path)
 
     rendered = _render([tier1_plugin_result(), tier3])
 
-    assert "| Integration (plugin vs. its own parts) | Not requested (lift mode: effectiveness) | Not measured |" in (
-        rendered
+    assert (
+        "| Bundle lift (plugin vs. its skills alone) | Not requested (lift mode: effectiveness) | Not measured |"
+        in (rendered)
     )
     assert (
-        "- Integration (the plugin versus its own parts) was not measured: Integration was not requested "
+        "- Bundle lift (the plugin versus its skills alone) was not measured: Integration was not requested "
         "(--lift-mode effectiveness); run with --lift-mode integration or both to measure it."
     ) in rendered
     assert _gate(tmp_path, rendered) == []
@@ -205,7 +229,9 @@ def test_partial_plugin_card_is_incomplete_and_lists_excluded_behavior(tmp_path:
     assert "Tier 3 evaluated only part of this plugin" in rendered
     assert "## Publication Recommendation" not in rendered
     assert "- Plugin run: INCOMPLETE (partial)" in rendered
-    assert "| Integration (plugin vs. its own parts) | INCONCLUSIVE — No cross-component case completed. |" in rendered
+    assert (
+        "| Bundle lift (plugin vs. its skills alone) | INCONCLUSIVE — No cross-component case completed. |" in rendered
+    )
     assert "**2 components not staged** of 4 declared or packaged component(s); 2 staged." in rendered
     assert "| docs | mcp | Unavailable | provider-only MCP server |" in rendered
     # The coverage table and the excluded list already name each component that was not staged.
@@ -214,8 +240,9 @@ def test_partial_plugin_card_is_incomplete_and_lists_excluded_behavior(tmp_path:
     assert "- Status: **INCOMPLETE** — 1 unresolved skill ref, 1 provider-only MCP server" in rendered
     assert "- Provider-only MCP servers were not exercised: docs" in rendered
     assert "- Unresolved skill refs were not evaluated: github::org/repo::skills::remote" in rendered
-    assert "- Integration (the plugin versus its own parts) was not measured: No cross-component case completed." in (
-        rendered
+    assert (
+        "- Bundle lift (the plugin versus its skills alone) was not measured: No cross-component case completed."
+        in (rendered)
     )
     assert "| Tier 3 | Live agent evaluation | **INCOMPLETE** | Partial plugin run:" in rendered
     assert _gate(tmp_path, rendered) == []

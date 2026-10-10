@@ -233,6 +233,8 @@ def _print_integration(integration: dict | None, console: Console) -> None:
     per_agent = integration.get("per_agent")
     for entry in per_agent or [integration]:
         _print_integration_entry(entry, console, scope=entry.get("agent") if per_agent else "")
+    if integration.get("definition"):
+        console.print(f"    [dim]{escape_markup(integration['definition'])}[/dim]", soft_wrap=True)
 
 
 def _print_integration_entry(entry: dict, console: Console, *, scope: str) -> None:
@@ -248,11 +250,13 @@ def _print_integration_entry(entry: dict, console: Console, *, scope: str) -> No
     point = f" [dim](point estimate: {esc(entry['point_verdict_label'])})[/dim]" if entry["point_verdict_label"] else ""
     console.print(
         f"  [bold]Integration{named}:[/bold] {esc(entry['verdict_label']).upper()} "
-        f"(lift {entry['integration_lift']}){point} [dim](advisory)[/dim]"
+        f"(bundle lift {entry['integration_lift']}){point} [dim](advisory)[/dim]"
     )
     ci = entry["ci"]
     if ci:
         console.print(f"    [dim]{esc(ci['confidence'])} {esc(ci['interval'])}, precision {esc(ci['precision'])}[/dim]")
+    if entry.get("by_case_type"):
+        console.print(f"    [dim]{esc(entry['by_case_type'])}[/dim]", soft_wrap=True)
     if entry["reason"]:
         console.print(f"    [dim]{esc(entry['reason'])}[/dim]", soft_wrap=True)
     if entry["components"]:

@@ -470,18 +470,18 @@
 {#- One named block per agent in a multi-agent run; the summary shows the run-level (best) agent's verdict. -#}
 {% set entries = i.per_agent if i.per_agent else [i] %}
 <details class="t3-details" id="tier3-integration" open>
-    <summary>Integration (Plugin Composition) &mdash;
+    <summary>Integration (Bundle Lift) &mdash;
         <span class="t3-pill {{ _pill_class(i.verdict_class) }}">{{ i.status_text }}</span>{% if i.per_agent and i.agent %} <span class="plugin-subtle">({{ i.agent }})</span>{% endif %}
         <span class="t3-pill warning">Advisory &middot; Report-only</span>
     </summary>
     <div class="t3-details-body">
-    <p class="t3-section-hint">Compositional-lift ablation: the coordinated plugin versus its member components staged individually. This signal never affects the overall score or verdict.</p>
+    <p class="t3-section-hint">{{ i.definition }} This signal never affects the overall score or verdict.</p>
     {% if modes %}{{ lift_modes_line(modes) }}{% endif %}
     {% for e in entries %}
     {% if i.per_agent %}<div class="plugin-subsection"><h4>{{ e.agent }}</h4>{% endif %}
     {% if e.measured %}
     <div class="table-scroll"><table class="summary-table">
-        <thead><tr><th>Verdict</th><th>Plugin</th><th>Sum-of-parts</th><th>Integration Lift</th>{% if e.ci %}<th>{{ e.ci.confidence }}</th>{% endif %}<th>Components</th></tr></thead>
+        <thead><tr><th>Verdict</th><th>Plugin</th><th>Sum-of-parts</th><th>Bundle Lift</th>{% if e.ci %}<th>{{ e.ci.confidence }}</th>{% endif %}<th>Components</th></tr></thead>
         <tbody><tr>
             <td><span class="t3-pill {{ _pill_class(e.verdict_class) }}">{{ e.verdict_label }}</span>{% if e.point_verdict_label %}<div class="plugin-subtle">point estimate: {{ e.point_verdict_label }}</div>{% endif %}</td>
             <td>{{ e.with_plugin }}</td>
@@ -491,6 +491,7 @@
             <td>{{ _names_inline(e.components) }}{% if e.components_omitted %} (+{{ e.components_omitted }} more){% endif %}</td>
         </tr></tbody>
     </table></div>
+    {% if e.by_case_type %}<p class="t3-section-hint">{{ e.by_case_type }}</p>{% endif %}
     {% else %}
     <div class="plugin-callout warn"{% if loop.first %} id="tier3-integration-inconclusive"{% endif %}>
         <strong>INCONCLUSIVE &mdash; Integration was not measured.</strong>

@@ -435,6 +435,9 @@ def _integration(integration: dict | None, modes: dict | None, lines: list[str])
         lines.append("")
     if not integration:
         return
+    if integration.get("definition"):
+        lines.append(f"*{cell(integration['definition'])}*")
+        lines.append("")
     # One named Integration line per agent in a multi-agent run.
     per_agent = integration.get("per_agent")
     for entry in per_agent or [integration]:
@@ -447,8 +450,10 @@ def _integration(integration: dict | None, modes: dict | None, lines: list[str])
             point = f"; point estimate: {cell(entry['point_verdict_label'])}" if entry["point_verdict_label"] else ""
             lines.append(
                 f"**{scope}{cell(entry['verdict_label'])}:** plugin {entry['with_plugin']} vs "
-                f"sum-of-parts {entry['sum_of_parts']} (lift {entry['integration_lift']}{interval}{point})"
+                f"sum-of-parts {entry['sum_of_parts']} (bundle lift {entry['integration_lift']}{interval}{point})"
             )
+            if entry.get("by_case_type"):
+                lines.append(cell(entry["by_case_type"]))
             if entry["reason"]:
                 lines.append(f"*{cell(entry['reason'])}*")
         else:

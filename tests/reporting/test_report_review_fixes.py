@@ -1264,7 +1264,7 @@ def test_engine_result_display_reports_the_measured_integration_lift() -> None:
     output = " ".join(render_result(_both_mode_engine_result()).split())
 
     assert "recorded no sum-of-parts comparison" not in output
-    assert "Integration: REAL INTEGRATION (lift +0.20)" in output
+    assert "Integration: REAL INTEGRATION (bundle lift +0.20)" in output
 
 
 def test_engine_result_display_names_each_agents_integration_block() -> None:
@@ -1280,8 +1280,8 @@ def test_engine_result_display_names_each_agents_integration_block() -> None:
     output = " ".join(render_result(result).split())
 
     assert "recorded no sum-of-parts comparison" not in output
-    assert "Integration (codex): REAL INTEGRATION (lift +0.20)" in output
-    assert "Integration (claude-code): NEGATIVE INTEGRATION (lift -0.10)" in output
+    assert "Integration (codex): REAL INTEGRATION (bundle lift +0.20)" in output
+    assert "Integration (claude-code): NEGATIVE INTEGRATION (bundle lift -0.10)" in output
 
 
 def test_markdown_integration_line_prints_the_lift_once(tmp_path: Path) -> None:
@@ -1308,7 +1308,7 @@ def test_markdown_integration_line_prints_the_lift_once(tmp_path: Path) -> None:
     line = next(line for line in markdown.splitlines() if "vs sum-of-parts" in line)
     assert "+0.12 +0.12" not in line
     assert line.count("+0.12") == 1
-    assert "(lift +0.12, 95% CI [+0.06, +0.17]; point estimate: Real integration)" in line
+    assert "(bundle lift +0.12, 95% CI [+0.06, +0.17]; point estimate: Real integration)" in line
 
 
 # ---------------------------------------------------------------------------

@@ -50,16 +50,16 @@ def test_every_report_names_the_agent_of_each_integration_result(tmp_path: Path)
     built = _two_agent_run(tmp_path)
 
     report = markdown(built)
-    assert re.search(r"\*\*claude-code — [^*]+:\*\* plugin 0\.69 vs sum-of-parts 0\.65 \(lift \+0\.04", report)
-    assert "**codex — Real integration:** plugin 0.85 vs sum-of-parts 0.65 (lift +0.20" in report
+    assert re.search(r"\*\*claude-code — [^*]+:\*\* plugin 0\.69 vs sum-of-parts 0\.65 \(bundle lift \+0\.04", report)
+    assert "**codex — Real integration:** plugin 0.85 vs sum-of-parts 0.65 (bundle lift +0.20" in report
 
     output = cli(built)
-    assert re.search(r"Integration \(claude-code\):\s+\S+.*\(lift \+0\.04\)", output)
-    assert re.search(r"Integration \(codex\):\s+REAL INTEGRATION \(lift \+0\.20\)", output)
+    assert re.search(r"Integration \(claude-code\):\s+\S+.*\(bundle lift \+0\.04\)", output)
+    assert re.search(r"Integration \(codex\):\s+REAL INTEGRATION \(bundle lift \+0\.20\)", output)
 
     card = benchmark(built)
-    assert "| Integration (plugin vs. its own parts) — claude-code |" in card
-    assert "| Integration (plugin vs. its own parts) — codex | Real integration, +20 points |" in card
+    assert "| Bundle lift (plugin vs. its skills alone) — claude-code |" in card
+    assert "| Bundle lift (plugin vs. its skills alone) — codex | Real integration, +20 points |" in card
 
     page = html(built)
     section = page[page.index('id="tier3-integration"') :]

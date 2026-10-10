@@ -178,8 +178,9 @@ def test_markdown_tier3_plugin_blocks_state_what_was_not_evaluated(tmp_path: Pat
     assert "- 2 components not staged: mcp docs, hook pre-commit" in excluded
     assert "- Unresolved skill refs were not evaluated: github::org/repo::skills::remote" in excluded
     assert "- Provider-only MCP servers were not exercised: docs" in excluded
-    assert "- Integration (the plugin versus its own parts) was not measured: No cross-component case completed." in (
-        excluded
+    assert (
+        "- Bundle lift (the plugin versus its skills alone) was not measured: No cross-component case completed."
+        in (excluded)
     )
     assert "**Lift mode:** requested <code>both</code>, effective <code>effectiveness</code>" in markdown
     assert "**INCONCLUSIVE:** No cross-component case completed." in markdown
@@ -489,7 +490,7 @@ def test_an_effectiveness_only_run_states_that_integration_was_not_measured(tmp_
     cli = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
 
     block = element_text(html, "tier3-integration") or ""
-    assert "Integration (Plugin Composition) — INCONCLUSIVE" in block
+    assert "Integration (Bundle Lift) — INCONCLUSIVE" in block
     assert "Lift mode: requested effectiveness · effective effectiveness" in block
     assert "fell back" not in block
     inconclusive = element_text(html, "tier3-integration-inconclusive") or ""
@@ -501,7 +502,7 @@ def test_an_effectiveness_only_run_states_that_integration_was_not_measured(tmp_
     view = tier3_plugin_view(payload)
     assert view is not None
     assert view["integration"]["requested"] is False
-    assert f"Integration (the plugin versus its own parts) was not measured: {_NOT_REQUESTED}" in view["excluded"]
+    assert f"Bundle lift (the plugin versus its skills alone) was not measured: {_NOT_REQUESTED}" in view["excluded"]
 
 
 def test_a_requested_integration_view_is_marked_requested(tmp_path: Path) -> None:
@@ -544,6 +545,84 @@ def test_html_tier3_measured_integration_shows_ci_and_point_verdict(tmp_path: Pa
     assert element_text(html, "tier3-integration-inconclusive") is None
 
 
+_BUNDLE_LIFT_SENTENCE = (
+    "Bundle lift = full plugin minus its skills alone. It includes the plugin's rules, MCP servers and wrapper, "
+    "not only how the parts coordinate."
+)
+_SPLIT_LINE = "On cross-component cases: +0.30 (n=6). On other cases: +0.02 (n=3)."
+
+
+def _measured_integration_with_split() -> dict:
+    return {
+        "verdict": "real_integration",
+        "point_verdict": "real_integration",
+        "measured": True,
+        "with_plugin": 0.8,
+        "sum_of_parts": 0.62,
+        "integration_lift": 0.18,
+        "components": ["loader", "summarizer"],
+        "lift_uncertainty": {"estimate": 0.18, "ci_low": 0.06, "ci_high": 0.31, "confidence": 0.95},
+        "by_case_type": {
+            "cross_component": {"n": 6, "lift": 0.3, "ci_low": 0.1, "ci_high": 0.5, "reason": None},
+            "other": {"n": 3, "lift": 0.02, "ci_low": None, "ci_high": None, "reason": "Only 3 paired other case(s)."},
+        },
+        "lift_mode_requested": "both",
+        "lift_mode_effective": "both",
+    }
+
+
+def test_every_report_format_names_the_bundle_lift_and_shows_the_case_type_split(tmp_path: Path) -> None:
+    result = _tier3_result(tmp_path, integration=_measured_integration_with_split())
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    block = element_text(html, "tier3-integration") or ""
+    assert "Integration (Bundle Lift)" in block
+    assert "Bundle Lift" in block and "Integration Lift" not in block
+    assert _BUNDLE_LIFT_SENTENCE in block
+    assert _SPLIT_LINE in block
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+    assert f"*{_BUNDLE_LIFT_SENTENCE}*" in markdown
+    assert "(bundle lift +0.18, 95% CI [+0.06, +0.31])" in markdown
+    assert _SPLIT_LINE in markdown
+
+    cli = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+    assert "Integration: REAL INTEGRATION (bundle lift +0.18)" in cli
+    assert _BUNDLE_LIFT_SENTENCE in cli
+    assert _SPLIT_LINE in cli
+
+    for rendered in (block, markdown, cli):
+        assert "Integration lift" not in rendered
+
+
+def test_case_type_split_is_left_out_when_the_run_recorded_none(tmp_path: Path) -> None:
+    integration = _measured_integration_with_split()
+    del integration["by_case_type"]
+    result = _tier3_result(tmp_path, integration=integration)
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+    cli = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+
+    for rendered in (markdown, cli):
+        assert _BUNDLE_LIFT_SENTENCE in rendered
+        assert "On cross-component cases" not in rendered
+
+
+def test_case_type_split_without_cross_component_pairs_reads_n_a(tmp_path: Path) -> None:
+    integration = _measured_integration_with_split()
+    integration["by_case_type"]["cross_component"] = {
+        "n": 0,
+        "lift": None,
+        "ci_low": None,
+        "ci_high": None,
+        "reason": "No cross-component case was scored in both arms.",
+    }
+    view = tier3_plugin_view(_tier3_result(tmp_path, integration=integration).metadata["agent_eval"])
+
+    assert view is not None
+    assert view["integration"]["by_case_type"] == "On cross-component cases: n/a (n=0). On other cases: +0.02 (n=3)."
+
+
 def test_html_tier3_statistics_render_ci_reliability_cost_and_context(tmp_path: Path) -> None:
     html = HTMLReporter(include_timestamp=False).render_all([_tier3_result(tmp_path)])
 
@@ -578,22 +657,20 @@ def test_integration_lift_mode_labels_the_baseline_as_sum_of_parts(tmp_path: Pat
 
     view = tier3_plugin_view(result.metadata["agent_eval"])
     assert view is not None and view["sum_of_parts_baseline"] is True
-    assert [row["label"] for row in view["statistics"]["primary"]["lift_ci"]] == [
-        "Integration lift (sum-of-parts baseline)"
-    ]
+    assert [row["label"] for row in view["statistics"]["primary"]["lift_ci"]] == ["Bundle lift (sum-of-parts baseline)"]
     assert [arm["label"] for arm in view["statistics"]["primary"]["arms"]] == ["Plugin", "Sum-of-parts baseline"]
     assert view["statistics"]["primary"]["completeness"]["failed_arms"] == ["Sum of parts"]
 
     markdown = MarkdownReporter(include_timestamp=False).render_all([result])
-    assert "Integration lift (sum-of-parts baseline): +0.30 [-0.02, +0.55] (95% CI)" in markdown
+    assert "Bundle lift (sum-of-parts baseline): +0.30 [-0.02, +0.55] (95% CI)" in markdown
     html = HTMLReporter(include_timestamp=False).render_all([result])
     statistics = element_text(html, "tier3-plugin-statistics") or ""
-    assert "Integration lift (sum-of-parts baseline) +0.30 [-0.02, +0.55]" in statistics
+    assert "Bundle lift (sum-of-parts baseline) +0.30 [-0.02, +0.55]" in statistics
     assert "Sum-of-parts baseline 50% 25% 3 4" in statistics
     console = Console(file=StringIO(), width=200, color_system=None)
     print_plugin_tier3(view, console)
     plain = " ".join(console.file.getvalue().split())
-    assert "Integration lift (sum-of-parts baseline)" in plain
+    assert "Bundle lift (sum-of-parts baseline)" in plain
     assert "Sum-of-parts baseline" in plain
     for rendered in (markdown, statistics, plain):
         assert "Effectiveness lift" not in rendered

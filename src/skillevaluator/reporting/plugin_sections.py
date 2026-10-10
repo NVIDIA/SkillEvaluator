@@ -94,8 +94,15 @@ PLUGIN_ARMS = frozenset({"with_skill", "with_plugin"})
 SUM_OF_PARTS_BASELINE_LABEL = "Sum-of-parts baseline"
 _BASELINE_ARMS = frozenset({"without_skill", "baseline"})
 _ARM_ORDER = ("with_skill", "with_plugin", "without_skill", "baseline", "sum_of_parts")
-_LIFT_KINDS = (("effectiveness", "Effectiveness lift"), ("integration", "Integration lift"))
-_SUM_OF_PARTS_LIFT_LABEL = "Integration lift (sum-of-parts baseline)"
+# The JSON keys stay ``integration``/``integration_lift``; readers see "Bundle lift" (formerly "Integration lift").
+BUNDLE_LIFT_LABEL = "Bundle lift"
+BUNDLE_LIFT_DEFINITION = (
+    "Bundle lift = full plugin minus its skills alone. It includes the plugin's rules, MCP servers and wrapper, "
+    "not only how the parts coordinate."
+)
+_LIFT_KINDS = (("effectiveness", "Effectiveness lift"), ("integration", BUNDLE_LIFT_LABEL))
+_SUM_OF_PARTS_LIFT_LABEL = f"{BUNDLE_LIFT_LABEL} (sum-of-parts baseline)"
+_CASE_TYPE_LABELS = (("cross_component", "cross-component"), ("other", "other"))
 _PRECISION_CLASSES = {"adequate": "ok", "low": "warn", "insufficient": "fail"}
 _INTEGRATION_LIFT_MODES = frozenset({"integration", "both"})
 _LIFT_MODE_NAMES = _INTEGRATION_LIFT_MODES | {"effectiveness"}
@@ -1809,7 +1816,7 @@ def _integration_block_view(
         uncertainty = _mapping(uncertainty.get("integration"))
     sum_of_parts_baseline = context.sum_of_parts_baseline
     if uncertainty:
-        ci = _ci_row("integration", "Integration lift", uncertainty, sum_of_parts_baseline=sum_of_parts_baseline)
+        ci = _ci_row("integration", BUNDLE_LIFT_LABEL, uncertainty, sum_of_parts_baseline=sum_of_parts_baseline)
     point_verdict = text(integration.get("point_verdict"), limit=_LABEL_CHARS).lower()
     point_label = (
         _INTEGRATION_VERDICTS.get(point_verdict, (_humanize(point_verdict), "warn"))[0]
@@ -1839,7 +1846,21 @@ def _integration_block_view(
         "interpretation": text(integration.get("interpretation")),
         "ci": ci,
         "completeness": completeness,
+        "definition": BUNDLE_LIFT_DEFINITION,
+        "by_case_type": _by_case_type_line(integration.get("by_case_type") or uncertainty.get("by_case_type")),
     }
+
+
+def _by_case_type_line(split: object) -> str:
+    """One line with the bundle lift on cross-component cases and on all other cases; empty when not recorded."""
+    sides = _mapping(split)
+    if not sides:
+        return ""
+    parts = []
+    for key, label in _CASE_TYPE_LABELS:
+        side = _mapping(sides.get(key))
+        parts.append(f"On {label} cases: {fmt_signed(side.get('lift'))} (n={fmt_count(side.get('n') or 0)}).")
+    return " ".join(parts)
 
 
 def _statistic_sources(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -2530,7 +2551,7 @@ def excluded_behavior(view: Mapping[str, Any], provenance: object) -> list[str]:
     integration = _mapping(view.get("integration"))
     if integration and not integration.get("measured"):
         statements.append(
-            f"Integration (the plugin versus its own parts) was not measured: {integration.get('reason')}"
+            f"{BUNDLE_LIFT_LABEL} (the plugin versus its skills alone) was not measured: {integration.get('reason')}"
         )
     return statements
 

@@ -12,6 +12,8 @@ quotes the line that assigns the token, and that code snippet was copied as is.
 
 from __future__ import annotations
 
+import pytest
+
 from skillevaluator.validators.security import SecurityValidator
 
 TOKEN = "ghp_" + "A1b2" * 9
@@ -42,3 +44,40 @@ def test_skillspector_snippet_and_texts_never_carry_the_secret() -> None:
     assert "curl -s -H" in finding.line_content
     assert "<redacted>" in finding.line_content
     assert finding.file_path == "hooks/scripts/notify.sh" and finding.line_number == 4
+
+
+_AWS_SECRET = "FAKEawsSecret" + "Key0123456789abcdefghijklmn+/"
+_URL_PASSWORD = "C9F-FAKE-PW" + "-9"
+
+
+@pytest.mark.parametrize(
+    ("snippet", "secret"),
+    [
+        # check-10 s03-p2: a quoted value under a credential name, which has no known token shape
+        (
+            f'#!/bin/sh\nexport AWS_SECRET_ACCESS_KEY="{_AWS_SECRET}"\naws s3 cp ./build.log s3://example-logs/',
+            _AWS_SECRET,
+        ),
+        (f"API_KEY = '{_AWS_SECRET}'", _AWS_SECRET),
+        (f"os.environ['API_KEY']='{_AWS_SECRET}'", _AWS_SECRET),
+        (f'service:\n  api_token: "{_AWS_SECRET}"', _AWS_SECRET),
+        # check-09 s05-edge-2: a WHATWG client reads 'https:user:pw@host' as user information
+        (f'"url": "https:bob:{_URL_PASSWORD}@mcp.example.com/mcp"', _URL_PASSWORD),
+    ],
+    ids=["shell-export", "python-assignment", "python-subscript", "yaml", "https-without-slashes"],
+)
+def test_skillspector_snippet_never_carries_a_credential_without_a_token_shape(snippet: str, secret: str) -> None:
+    issue = {
+        "id": "E5",
+        "pattern": "Cloud Storage Exfiltration",
+        "category": "Data Exfiltration",
+        "finding": "aws s3 cp",
+        "severity": "MEDIUM",
+        "code_snippet": snippet,
+        "location": {"file": "hooks/scripts/upload.sh", "start_line": 3},
+    }
+
+    finding, _is_error = SecurityValidator._convert_skillspector_issue(issue)
+
+    assert secret not in (finding.line_content or "")
+    assert "<redacted>" in finding.line_content or "mcp.example.com" in finding.line_content

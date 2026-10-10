@@ -30,7 +30,23 @@ _QUERY_TOKEN = "AUDITFAKETOKEN" + "123456"
 _GIT_PASSWORD = "FAKEGITPASS" + "123456"
 _CMD_TOKEN = "FAKECMDTOKEN" + "123456"
 _PATH_DEFAULT_TOKEN = "LEAKPROBE" + "7782"
-_SECRETS = (_GHP_ARG, _GHP_SCRIPT, _URL_PASSWORD, _QUERY_TOKEN, _GIT_PASSWORD, _CMD_TOKEN, _PATH_DEFAULT_TOKEN)
+# Values with no known token shape: in program text, in a container image spec, and one the PII scan reads as a
+# Bitcoin address (check-04 pos-38/edge-42, check-10 s03-e3).
+_PROGRAM_TOKEN = "FAKEpyTok3n" + "0123456789abcdef"
+_IMAGE_PASSWORD = "FAKEimgPW" + "0123456789"
+_ADDRESS_SHAPED_TOKEN = "1" + "FAKEbtcShapedTokenAbcdefgh"
+_SECRETS = (
+    _GHP_ARG,
+    _GHP_SCRIPT,
+    _URL_PASSWORD,
+    _QUERY_TOKEN,
+    _GIT_PASSWORD,
+    _CMD_TOKEN,
+    _PATH_DEFAULT_TOKEN,
+    _PROGRAM_TOKEN,
+    _IMAGE_PASSWORD,
+    _ADDRESS_SHAPED_TOKEN,
+)
 
 _CODEX_MANIFEST = {
     "name": "leaky",
@@ -71,6 +87,13 @@ def _servers() -> dict[str, dict]:
         "git-spec": {"command": "npx", "args": ["-y", f"git+https://bot:{_GIT_PASSWORD}@github.com/example/mcp.git"]},
         # a whole command line with a credential flag and a shell operator
         "cmd-line": {"command": f"npx -y @scope/server@1.2.3 --token {_CMD_TOKEN} | tee log"},
+        # check-04 pos-38: a credential assigned inside an inline program
+        "py-env": {"command": "python3", "args": ["-c", f"import os; os.environ['API_KEY']='{_PROGRAM_TOKEN}'"]},
+        # check-04 edge-42: user:password@ in a container image spec
+        "docker-cred": {
+            "command": "docker",
+            "args": ["run", "-i", f"bob:{_IMAGE_PASSWORD}@registry.example.com/i:latest"],
+        },
     }
 
 
@@ -97,6 +120,8 @@ def _plugin(root: Path, fmt: str) -> Path:
             "hooks/hooks.json": hooks,
             # check-10 p03: a token in a shipped script, found by the PII scan
             "scripts/post-status.sh": f'#!/bin/sh\nTOKEN="{_GHP_SCRIPT}"\necho "status posted" >&2\n',
+            # check-10 s03-e3: a credential the PII scan reports as a Bitcoin address
+            "scripts/config.yaml": f'service:\n  api_token: "{_ADDRESS_SHAPED_TOKEN}"\n',
         },
     )
 

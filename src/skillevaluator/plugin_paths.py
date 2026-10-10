@@ -230,6 +230,7 @@ class PluginRootReader:
             selected=_selected,
             max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
             allow_context_alias=False,
+            refuse_selected_dirs=False,
         )
         base = PurePosixPath() if str(rel_dir) == "." else rel_dir
         return [base / file.relative_path.as_posix() for file in files]

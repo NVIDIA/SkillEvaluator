@@ -1921,6 +1921,7 @@ def _discover_contained_rule_files(plugin_root: Path) -> list[_StagedRule]:
             excluded_dirs=SCAN_EXCLUDED_DIRS,
             max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
             allow_context_alias=False,
+            refuse_selected_dirs=False,
         )
         _check_rule_bounds(count=len(files), total_bytes=sum(file.metadata.st_size for file in files))
         with SecureRoot(rules_root) as secure_root:

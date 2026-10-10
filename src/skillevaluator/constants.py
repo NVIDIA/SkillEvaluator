@@ -392,6 +392,21 @@ QUALITY_RESOURCE_DIRS = ("assets", "templates", "design-system", "resources")
 RUBRIC_MAX_TOKENS = 4096
 RUBRIC_MIN_SCORE = 60
 
+# Reasoning models spend the completion budget on hidden reasoning before any
+# visible content, so a 4096-token cap truncates the JSON mid-object (measured:
+# reasoning_tokens=4000, text_tokens=0). Raise the cap for known reasoning
+# families; SKILL_EVAL_LLM_MAX_TOKENS still overrides it explicitly.
+RUBRIC_REASONING_MODEL_MARKERS = (
+    "deepseek-r",
+    "deepseek-v4",
+    "o1",
+    "o3",
+    "o4",
+    "gpt-5",
+    "reasoning",
+)
+RUBRIC_REASONING_MAX_TOKENS = 32768
+
 RUBRIC_CRITERIA = [
     {
         "id": "description_clarity",

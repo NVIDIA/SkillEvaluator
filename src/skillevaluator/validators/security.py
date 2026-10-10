@@ -355,7 +355,7 @@ def _skillspector_llm_stderr_failed(stderr: str) -> bool:
     explicitly requested LLM stage, those warnings mean the evidence is
     incomplete regardless of the process exit code or JSON metadata.
     """
-    normalized = stderr.casefold()
+    normalized = (stderr or "").casefold()
     return any(marker in normalized for marker in _SKILLSPECTOR_LLM_FAILURE_MARKERS)
 
 

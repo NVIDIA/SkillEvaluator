@@ -5957,3 +5957,53 @@ def test_local_nvidia_opencode_config_disables_oauth_for_remote_mcp(monkeypatch:
     config = json.loads(payload)
     assert config["mcp"]["remote-tools"] == {"type": "remote", "url": "https://tools.example/mcp", "oauth": False}
     assert config["mcp"]["local-tools"] == {"type": "local", "command": ["tool-server", "--stdio"]}
+
+
+@pytest.mark.parametrize("script_name", ["harbor", "harbor.exe", "harbor.cmd"])
+def test_harbor_bin_resolves_windows_console_script_suffixes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script_name: str,
+) -> None:
+    """The Harbor console script carries a suffix on Windows.
+
+    Probing only the suffix-less ``harbor`` name misses the interpreter-sibling
+    install entirely and falls through to ``shutil.which``, so
+    ``doctor --env-mode docker`` reports "harbor CLI not found" on a machine
+    where Harbor 0.24.0 is installed and runnable.
+    """
+    from skillevaluator.tier3.harbor import runner
+
+    fake_interpreter = tmp_path / "python.exe"
+    fake_interpreter.write_text("", encoding="utf-8")
+    (tmp_path / script_name).write_text("", encoding="utf-8")
+    monkeypatch.setattr(runner.os, "sys", SimpleNamespace(executable=str(fake_interpreter)))
+    monkeypatch.delenv("PATH", raising=False)
+
+    assert runner._harbor_bin() == str(tmp_path / script_name)
+
+
+def test_harbor_bin_falls_back_to_path_lookup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no sibling script, PATH lookup still applies."""
+    from skillevaluator.tier3.harbor import runner
+
+    fake_interpreter = tmp_path / "python.exe"
+    fake_interpreter.write_text("", encoding="utf-8")
+    monkeypatch.setattr(runner.os, "sys", SimpleNamespace(executable=str(fake_interpreter)))
+    monkeypatch.setattr(runner.shutil, "which", lambda _name: "/opt/harbor/bin/harbor")
+
+    assert runner._harbor_bin() == "/opt/harbor/bin/harbor"
+
+
+def test_harbor_bin_returns_bare_name_when_missing_everywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing Harbor still yields the command name for the caller to report."""
+    from skillevaluator.tier3.harbor import runner
+
+    fake_interpreter = tmp_path / "python.exe"
+    fake_interpreter.write_text("", encoding="utf-8")
+    monkeypatch.setattr(runner.os, "sys", SimpleNamespace(executable=str(fake_interpreter)))
+    monkeypatch.setattr(runner.shutil, "which", lambda _name: None)
+
+    assert runner._harbor_bin() == "harbor"

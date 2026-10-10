@@ -926,8 +926,14 @@ class AgentRuntimePlan:
 
 def _harbor_bin() -> str:
     """Return the Harbor executable installed with the active interpreter."""
-    candidate = Path(os.sys.executable).parent / "harbor"
-    return str(candidate) if candidate.exists() else (shutil.which("harbor") or "harbor")
+    bin_dir = Path(os.sys.executable).parent
+    # Windows installs the console script as harbor.exe; the suffix-less probe
+    # below only matches POSIX layouts.
+    for name in ("harbor", "harbor.exe", "harbor.cmd"):
+        candidate = bin_dir / name
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which("harbor") or "harbor"
 
 
 # Harbor loads ``.env.local`` from its working directory, and Harbor and LiteLLM

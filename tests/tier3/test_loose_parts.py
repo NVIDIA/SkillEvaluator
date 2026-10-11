@@ -950,3 +950,8 @@ def test_info_pieces_use_the_hashes_of_the_report_they_sit_next_to(loose) -> Non
     info = loose.info(content=report)
     pieces = {piece["id"]: piece["sha256"] for piece in info["pieces"]}
     assert pieces["skill:version-bump"] == "f" * 64
+
+
+def test_setup_sets_the_config_dir_default_once(loose) -> None:
+    setup = loose.bundle.generated["native/setup.sh"]
+    assert setup.count(': "${CLAUDE_CONFIG_DIR:=$HOME/.claude}"') == 1

@@ -692,7 +692,9 @@ class _Builder:
     def _rules(self) -> list[str]:
         """Stage the rules with the plugin arm's own writer, so path and bytes are the same in both arms."""
         not_loaded: list[tuple[str, str, str]] = []
-        self.setup.extend(self.adapter._stage_rules(self.bundle, self.source, self.checks, not_loaded))
+        lines = self.adapter._stage_rules(self.bundle, self.source, self.checks, not_loaded)
+        # The rule writer starts with the same CLAUDE_CONFIG_DIR default line this setup already has.
+        self.setup.extend(line for line in lines if line not in self.setup)
         self.not_loaded.extend(not_loaded)
         staged: list[str] = []
         for name, content in self.source.rules:

@@ -37,6 +37,7 @@ from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
+    from skillevaluator.reporting.run_status import RunStatus
 
 
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -497,30 +498,6 @@ class ReporterBase(ABC):
         }
         return extensions.get(self.name, ".txt")
 
-    @classmethod
-    def _plugin_status(cls, results: list[ValidationResult]) -> str:
-        """Return the canonical plugin status with fail-closed precedence.
-
-        A plugin is failed when any completed check fails the required gate,
-        incomplete when required work did not finish (missing scanner evidence
-        or a partial Tier 3 plugin run), and passed otherwise. Reporters share
-        this helper so their plugin row cannot disagree with the overall verdict.
-        A real failure outranks missing evidence, as in BENCHMARK.md and the
-        terminal footer: an incomplete result that also failed on its own (a
-        blocking finding, a Tier 3 FAIL) makes the plugin failed.
-        """
-        from skillevaluator.reporting.benchmark import _missing_evidence_only
-
-        incomplete = False
-        for result in results:
-            if result.is_incomplete or is_partial_plugin_agent_eval(result):
-                if not passes_required_gate(result) and not _missing_evidence_only(result):
-                    return "failed"
-                incomplete = True
-            elif not passes_required_gate(result):
-                return "failed"
-        return "incomplete" if incomplete else "passed"
-
     @staticmethod
     def _plugin_block(result: ValidationResult) -> dict[str, Any] | None:
         """Return normalized Tier 1 plugin metadata for one result, if present."""
@@ -551,14 +528,17 @@ class ReporterBase(ABC):
         return merged if found else None
 
     @classmethod
-    def _tier1_plugin_view(cls, results: list[ValidationResult]) -> dict[str, Any] | None:
-        """Return the Tier 1 plugin section's display model for *results*, or ``None`` without plugin data."""
+    def _tier1_plugin_view(cls, results: list[ValidationResult], status: RunStatus) -> dict[str, Any] | None:
+        """Return the Tier 1 plugin section's display model for *results*, or ``None`` without plugin data.
+
+        The plugin row shows ``status.plugin``: the run's headline, fail-closed on missing evidence.
+        """
         block = cls._plugin_block_from_results(results)
         if block is None:
             return None
         return tier1_plugin_view(
             block,
-            status=cls._plugin_status(results),
+            status=status.plugin.value,
             bundled_skills=cls._plugin_child_names(results, block),
         )
 

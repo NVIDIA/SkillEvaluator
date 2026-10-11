@@ -234,10 +234,13 @@ def test_sarif_run_and_results_carry_plugin_context(tmp_path: Path) -> None:
     }
 
 
-def test_sarif_without_plugin_has_no_run_properties() -> None:
+def test_sarif_without_plugin_has_no_plugin_run_properties() -> None:
     document = json.loads(SARIFReporter(include_timestamp=False).render_all(_skill_results()))
 
-    assert "properties" not in document["runs"][0]
+    properties = document["runs"][0]["properties"]
+    assert "plugin" not in properties
+    # Every run carries the headline every report gives.
+    assert properties["overallStatus"] == "passed"
 
 
 @pytest.mark.parametrize(
@@ -991,13 +994,14 @@ def test_html_and_cli_say_how_many_integration_components_were_left_out(tmp_path
 
 
 def test_a_partial_plugin_run_recorded_only_under_the_summary_is_incomplete() -> None:
-    from skillevaluator.reporting.base import ReporterBase, is_partial_plugin_agent_eval
+    from skillevaluator.reporting.base import is_partial_plugin_agent_eval
+    from skillevaluator.reporting.run_status import resolve_run_status
 
     result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Tier 3")
     result.metadata["agent_eval"] = {"summary": {"plugin_provenance": provenance(partial=True)}}
 
     assert is_partial_plugin_agent_eval(result) is True
-    assert ReporterBase._plugin_status([tier1_plugin_result(), result]) == "incomplete"
+    assert resolve_run_status([tier1_plugin_result(), result]).plugin == "incomplete"
     assert tier3_plugin_view(result.metadata["agent_eval"])["partial"] is True
 
 
@@ -1014,19 +1018,19 @@ def _gated_partial_plugin_run(*, verdict: str) -> ValidationResult:
 
 
 def test_a_partial_plugin_run_that_failed_its_gate_makes_the_plugin_failed() -> None:
-    from skillevaluator.reporting.base import ReporterBase
+    from skillevaluator.reporting.run_status import resolve_run_status
 
     failed = _gated_partial_plugin_run(verdict="fail")
     missing_only = _gated_partial_plugin_run(verdict="pass")
 
-    assert ReporterBase._plugin_status([tier1_plugin_result(), failed]) == "failed"
+    assert resolve_run_status([tier1_plugin_result(), failed]).plugin == "failed"
     # Missing evidence alone still makes the plugin INCOMPLETE, not failed.
-    assert ReporterBase._plugin_status([tier1_plugin_result(), missing_only]) == "incomplete"
+    assert resolve_run_status([tier1_plugin_result(), missing_only]).plugin == "incomplete"
 
 
 def test_a_scan_that_did_not_complete_and_found_a_blocking_issue_makes_the_plugin_failed() -> None:
     from skillevaluator.models import Finding, Severity
-    from skillevaluator.reporting.base import ReporterBase
+    from skillevaluator.reporting.run_status import resolve_run_status
 
     failed = ValidationResult(validator_name="Security Scan", validator_description="SkillSpector")
     failed.add_finding(
@@ -1042,8 +1046,8 @@ def test_a_scan_that_did_not_complete_and_found_a_blocking_issue_makes_the_plugi
     missing_only = ValidationResult(validator_name="Security Scan", validator_description="SkillSpector")
     missing_only.mark_scan_incomplete("skillspector")
 
-    assert ReporterBase._plugin_status([tier1_plugin_result(), failed]) == "failed"
-    assert ReporterBase._plugin_status([tier1_plugin_result(), missing_only]) == "incomplete"
+    assert resolve_run_status([tier1_plugin_result(), failed]).plugin == "failed"
+    assert resolve_run_status([tier1_plugin_result(), missing_only]).plugin == "incomplete"
 
 
 def test_similarity_views_carry_their_title_columns_and_summary() -> None:

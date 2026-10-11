@@ -24,7 +24,6 @@ from skillevaluator.reporting.base import (
     ReporterBase,
     additional_errors,
     is_advisory_agent_eval_skip,
-    passes_required_gate,
 )
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
@@ -32,6 +31,7 @@ from skillevaluator.reporting.harbor_viewer import (
     safe_url,
 )
 from skillevaluator.reporting.plugin_sections import format_score, tier3_plugin_view
+from skillevaluator.reporting.run_status import RunStatus, Status, resolve_run_status
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 if TYPE_CHECKING:
@@ -98,6 +98,7 @@ def _table_header(*headers: str) -> list[str]:
 # Plugin sections, one function per subsection (the HTML template's macros)
 # ---------------------------------------------------------------------------
 
+_HEADLINE_MARKERS = {Status.PASSED: "✅ PASSED", Status.FAILED: "❌ FAILED", Status.INCOMPLETE: "⚠️ INCOMPLETE"}
 _PLUGIN_STATUS_MARKERS = {"failed": "❌ FAILED", "incomplete": "⚠️ INCOMPLETE", "passed": "✅ PASSED"}
 
 
@@ -660,7 +661,7 @@ class MarkdownReporter(ReporterBase):
     def render(self, result: ValidationResult) -> str:
         """Render single result to Markdown."""
         lines = []
-        self._render_result(result, lines)
+        self._render_result(result, lines, resolve_run_status([result]))
         return _markdown_output("\n".join(lines))
 
     def render_all(self, results: list[ValidationResult]) -> str:
@@ -671,12 +672,11 @@ class MarkdownReporter(ReporterBase):
         lines.append("# SkillEvaluator Validation Report")
         lines.append("")
 
-        # Overall status
-        all_passed = all(passes_required_gate(r) for r in results)
-        has_incomplete = any(r.is_incomplete for r in results)
-        advisory_skip_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
-        status = "⚠️ INCOMPLETE" if has_incomplete else "✅ PASSED" if all_passed else "❌ FAILED"
-        lines.append(f"**Status:** {status}")
+        # Overall status: the headline every report gives, and why.
+        status = resolve_run_status(results)
+        lines.append(f"**Status:** {_HEADLINE_MARKERS[status.headline]}")
+        if status.reasons:
+            lines.append(f"**Reasons:** {'; '.join(_markdown_table_cell(reason) for reason in status.reasons)}")
 
         policy = next(
             (result.metadata.get("policy") for result in results if isinstance(result.metadata.get("policy"), dict)),
@@ -697,14 +697,14 @@ class MarkdownReporter(ReporterBase):
         lines.append("")
         lines.append("| Metric | Value |")
         lines.append("|--------|-------|")
+        rows = [status.of(r) for r in results]
         lines.append(f"| Validator Results | {len(results)} |")
-        lines.append(f"| ✅ Passed | {sum(1 for r in results if r.status == 'passed')} |")
-        lines.append(
-            f"| ❌ Failed | {sum(1 for r in results if r.status == 'failed' and not is_advisory_agent_eval_skip(r))} |"
-        )
-        lines.append(f"| ⚠️ Incomplete | {sum(1 for r in results if r.is_incomplete)} |")
-        if advisory_skip_count:
-            lines.append(f"| ⏭️ Advisory skips | {advisory_skip_count} |")
+        lines.append(f"| ✅ Passed | {rows.count(Status.PASSED)} |")
+        lines.append(f"| ❌ Failed | {rows.count(Status.FAILED)} |")
+        lines.append(f"| ⚠️ Incomplete | {rows.count(Status.INCOMPLETE)} |")
+        if rows.count(Status.SKIPPED):
+            # A skipped check did not run, so it is neither passed nor failed.
+            lines.append(f"| ⏭️ Skipped | {rows.count(Status.SKIPPED)} |")
 
         total_errors = sum(r.summary.errors for r in results)
         total_warnings = sum(r.summary.warnings for r in results)
@@ -726,7 +726,7 @@ class MarkdownReporter(ReporterBase):
         lines.append(f"| Total Issues | {issue_str} |")
         lines.append("")
 
-        plugin_view = self._tier1_plugin_view(results)
+        plugin_view = self._tier1_plugin_view(results, status)
         if plugin_view is not None:
             self._render_plugin_section(plugin_view, lines)
 
@@ -756,7 +756,8 @@ class MarkdownReporter(ReporterBase):
         tier3_results = [r for r in results if r.metadata.get("agent_eval")]
         if tier3_results:
             ae = tier3_results[0].metadata["agent_eval"]
-            verdict = ae.get("verdict", "unknown").upper()
+            # The Tier 3 status, not the raw verdict: a partial run is INCOMPLETE and a skipped one SKIPPED.
+            verdict = status.tiers[3].status.verdict
             composite = ae.get("composite_lift")
             runtime = ae.get("runtime_seconds", 0.0)
 
@@ -852,7 +853,7 @@ class MarkdownReporter(ReporterBase):
         lines.append("")
 
         for result in results:
-            self._render_result(result, lines)
+            self._render_result(result, lines, status)
 
         # Footer
         lines.append("---")
@@ -912,22 +913,21 @@ class MarkdownReporter(ReporterBase):
         _hook_census(view.get("hook_census"), lines)
         _mcp_proof(view.get("mcp_proof"), lines)
 
-    def _render_result(self, result: ValidationResult, lines: list[str]) -> None:
-        """Render a single validation result."""
+    def _render_result(self, result: ValidationResult, lines: list[str], status: RunStatus) -> None:
+        """Render a single validation result under the row status the run status gives it."""
         qs = result.metadata.get("quality_scores")
 
-        advisory_skip = is_advisory_agent_eval_skip(result)
-        if result.is_incomplete:
-            status_emoji = "⚠️ INCOMPLETE"
-            lines.append(f"### {status_emoji} {result.validator_name}")
-        elif advisory_skip:
+        row = status.of(result)
+        if row is Status.INCOMPLETE:
+            lines.append(f"### ⚠️ INCOMPLETE {result.validator_name}")
+        elif row is Status.SKIPPED:
             lines.append(f"### ⏭️ SKIPPED {result.validator_name}")
         elif qs and qs.get("grade"):
             grade = qs["grade"]
-            status_emoji = "✅" if result.passed else "❌"
+            status_emoji = "✅" if row is Status.PASSED else "❌"
             lines.append(f"### {status_emoji} {grade} {result.validator_name}")
         else:
-            status_emoji = "✅" if result.passed else "❌"
+            status_emoji = "✅" if row is Status.PASSED else "❌"
             lines.append(f"### {status_emoji} {result.validator_name}")
 
         if result.validator_description:
@@ -949,11 +949,17 @@ class MarkdownReporter(ReporterBase):
 
         if result.is_incomplete:
             self._render_incomplete(result, lines)
-        elif advisory_skip:
+        elif is_advisory_agent_eval_skip(result):
             payload = result.metadata.get("agent_eval", {}) if result.metadata else {}
             provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
             message = provenance.get("message") if isinstance(provenance, dict) else None
             lines.append(f"- {_markdown_table_cell(message) if message else 'Live evaluation did not run.'}")
+        elif row is Status.SKIPPED:
+            reason = result.metadata.get("skip_reason") or next(iter(result.warnings or result.messages), "")
+            lines.append(f"- Skipped: {_markdown_table_cell(reason or 'the check did not run')}")
+            if result.findings:
+                lines.extend(["", f"**Non-blocking findings: {len(result.findings)}**", ""])
+                self._render_findings(result.findings, lines)
         elif result.passed:
             self._render_success(result, lines)
             if result.findings:

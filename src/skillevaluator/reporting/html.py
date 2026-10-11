@@ -43,13 +43,30 @@ from skillevaluator.reporting.base import (
 )
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
 from skillevaluator.reporting.plugin_sections import split_display_prefix, tier3_plugin_view
+from skillevaluator.reporting.run_status import RunStatus, Status, resolve_run_status
 from skillevaluator.utils.rich_markup import replace_unencodable
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
 
 
-_TIER2_VALIDATOR_MARKERS = ("similarity", "dedup", "context optimization")
+# How each status reads on a tier card and on a validator row: (CSS tone, label).
+_TIER_CARD = {
+    Status.PASSED: ("pass", "PASS"),
+    Status.NEUTRAL: ("warn", "NEUTRAL"),
+    Status.FAILED: ("fail", "FAIL"),
+    Status.INCOMPLETE: ("warn", "INCOMPLETE"),
+    Status.SKIPPED: ("skipped", "SKIPPED"),
+    Status.NOT_RUN: ("skipped", "N/A"),
+}
+_ROW_BADGE = {
+    Status.PASSED: ("pass", "Pass"),
+    Status.NEUTRAL: ("pass", "Pass"),
+    Status.FAILED: ("fail", "Fail"),
+    Status.INCOMPLETE: ("warn", "Incomplete"),
+    Status.SKIPPED: ("skipped", "Skipped"),
+    Status.NOT_RUN: ("skipped", "Not run"),
+}
 
 # Tier 3 already enforces a 2 MiB canonical payload limit. HTML needs a
 # separate bound because script-safe escaping (``<`` -> ``\u003c``), pretty
@@ -148,12 +165,6 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
         if value > 0
     }
     return preview, notice
-
-
-def is_tier2_validator_name(validator_name: str | None) -> bool:
-    """Return whether a validator name belongs to Tier 2 reporting."""
-    normalized_name = " ".join((validator_name or "").casefold().replace("_", " ").replace("-", " ").split())
-    return any(marker in normalized_name for marker in _TIER2_VALIDATOR_MARKERS)
 
 
 def _related_paths(finding: object) -> list[str]:
@@ -933,44 +944,13 @@ class HTMLReporter(ReporterBase):
         except (ValueError, OSError):
             return path
 
-    # Validator names produced by ``commands.validate`` for each tier.  Used
-    # to bucket combined run results back into per-tier summaries for the
-    # hero card so the chip for "Tier 1" reflects only Tier 1 validators
-    # instead of leaking Tier 2 / Tier 3 stats from the global totals.
-    _TIER3_VALIDATOR_NAMES: ClassVar[frozenset[str]] = frozenset({"AGENT_EVAL"})
-
-    @classmethod
-    def _split_results_by_tier(
-        cls, results: list[ValidationResult]
-    ) -> tuple[list[ValidationResult], list[ValidationResult], list[ValidationResult]]:
-        """Bucket a flat results list into ``(tier1, tier2, tier3)`` slices.
-
-        ``commands.validate`` concatenates results in tier order before handing
-        them to the reporter, so we restore tier identity here by validator
-        name rather than relying on list slicing (which would silently break
-        if a tier ever produced zero results).
-        """
-        tier1: list[ValidationResult] = []
-        tier2: list[ValidationResult] = []
-        tier3: list[ValidationResult] = []
-        for r in results:
-            name = getattr(r, "validator_name", None) or ""
-            if name in cls._TIER3_VALIDATOR_NAMES:
-                tier3.append(r)
-            elif is_tier2_validator_name(name):
-                tier2.append(r)
-            else:
-                tier1.append(r)
-        return tier1, tier2, tier3
-
     @staticmethod
     def _compute_tier_summary(results: list[ValidationResult]) -> dict[str, Any]:
         """Compact stats for a single tier — what the hero chip displays.
 
-        Returns ``passed`` (boolean), executed/pass/skip counts,
-        ``issue_count`` (sum of findings), and per-severity totals.
-        ``total == 0`` lets the template hide the chip entirely without an
-        extra "did this tier run?" predicate.
+        Returns executed/pass/skip counts, ``issue_count`` (sum of findings),
+        and per-severity totals. The tier's status is the run status's
+        (``tier_cards``), not derived from these counts.
         """
         total = len(results)
         passed_count = sum(1 for r in results if r.passed)
@@ -996,22 +976,20 @@ class HTMLReporter(ReporterBase):
             "advisory_skipped_count": advisory_skipped_count,
             "failed_count": failed_count,
             "issue_count": issue_count,
-            "all_passed": total > 0 and failed_count == 0,
-            "incomplete_count": sum(1 for r in results if r.is_incomplete),
             "critical": critical,
             "high": high,
             "medium": medium,
             "low": low,
         }
 
-    def _results_to_dict(self, results: list[ValidationResult]) -> list[dict[str, Any]]:
+    def _results_to_dict(self, results: list[ValidationResult], status: RunStatus) -> list[dict[str, Any]]:
         output = []
         for result in results:
             result_dict = {
                 "validator_name": result.validator_name,
                 "validator_description": result.validator_description,
                 "passed": result.passed,
-                "status": "skipped" if is_advisory_agent_eval_skip(result) else result.status,
+                "status": status.of(result).value,
                 "incomplete_scans": result.incomplete_scans,
                 "summary": {
                     "files_scanned": result.summary.files_scanned,
@@ -1104,9 +1082,12 @@ class HTMLReporter(ReporterBase):
         return self.render_all([result])
 
     def render_all(self, results: list[ValidationResult]) -> str:
-        all_passed = all(passes_required_gate(r) for r in results)
-        has_incomplete = any(r.is_incomplete for r in results)
-        overall_status = "incomplete" if has_incomplete else "passed" if all_passed else "failed"
+        # Every status this report shows comes from the run status: the headline badges, the tier
+        # cards, and each validator row.
+        status = resolve_run_status(results)
+        all_passed = status.headline is Status.PASSED
+        has_incomplete = status.headline is Status.INCOMPLETE
+        overall_status = status.headline.value
         total_errors = sum(r.summary.errors for r in results)
         total_warnings = sum(r.summary.warnings for r in results)
         passed_count = sum(1 for r in results if r.passed)
@@ -1163,7 +1144,7 @@ class HTMLReporter(ReporterBase):
         # Per-tier summaries so the hero card chips can show "Tier 1: 6/7
         # passed (0 critical)" etc. without leaking Tier 2 / Tier 3 stats
         # from the global aggregate counters.
-        tier1_results, tier2_results, tier3_results = self._split_results_by_tier(results)
+        tier1_results, tier2_results, tier3_results = (list(status.tiers[number].results) for number in (1, 2, 3))
         tier1_summary = self._compute_tier_summary(tier1_results)
         tier2_summary = self._compute_tier_summary(tier2_results)
         tier3_summary = self._compute_tier_summary(tier3_results)
@@ -1173,7 +1154,7 @@ class HTMLReporter(ReporterBase):
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
         # Plugin sections are built from the complete canonical data (not the
         # bounded HTML preview) into their own bounded display models.
-        plugin_view = self._tier1_plugin_view(results)
+        plugin_view = self._tier1_plugin_view(results, status)
         tier3_plugin = tier3_plugin_view(tier3_data)
 
         # Keep the Tier 1 dashboard scoped to Tier 1. Tier 2 and Tier 3 have
@@ -1313,6 +1294,7 @@ class HTMLReporter(ReporterBase):
             "summary": {
                 "all_passed": all_passed,
                 "status": overall_status,
+                "status_reasons": list(status.reasons),
                 "incomplete_scans": list(dict.fromkeys(tool for result in results for tool in result.incomplete_scans)),
                 "total_validators": total_validators,
                 "passed_count": passed_count,
@@ -1324,7 +1306,7 @@ class HTMLReporter(ReporterBase):
                 "passed_skills": passed_skills,
                 "failed_skills": failed_skills,
             },
-            "results": self._results_to_dict(results),
+            "results": self._results_to_dict(results, status),
             "skills": skills_by_name,
             "top_issues": top_issues,
             "contributors": contributors,
@@ -1373,6 +1355,17 @@ class HTMLReporter(ReporterBase):
             all_passed=all_passed,
             has_incomplete=has_incomplete,
             overall_status=overall_status,
+            status_reasons=status.reasons,
+            tier_cards={
+                f"tier{number}": {
+                    "status": tier.status.value,
+                    "tone": _TIER_CARD[tier.status][0],
+                    "verdict": _TIER_CARD[tier.status][1],
+                }
+                for number, tier in status.tiers.items()
+            },
+            row_badge=lambda result: _ROW_BADGE[status.of(result)],
+            row_status=lambda result: status.of(result).value,
             total_validators=total_validators,
             passed_count=passed_count,
             failed_count=failed_count,

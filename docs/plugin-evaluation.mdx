@@ -3542,12 +3542,17 @@ only with `--block-on-agent-eval`. With the flag, a Tier 3 `FAIL` verdict fails
 a plugin run that did not complete, was skipped, or was `INCOMPLETE`. A
 `NEUTRAL` verdict never fails it.
 
-A real failure outranks missing evidence. The terminal footer, the terminal
-summary and `BENCHMARK.md` say `FAIL` when a check found a blocking problem,
-even if a scanner in the same run, or in the same check, did not complete. They
-still name what did not complete. They say `INCOMPLETE` only when nothing
-failed. The JSON `overall_status` reports `incomplete` whenever a required
-scanner produced no evidence, and lists the blocking findings next to it.
+A real failure outranks missing evidence. Every report gives a run the same
+headline: the terminal footer and summary, the JSON `overall_status`, the
+Markdown and HTML status, the SARIF `overallStatus` run property, and
+`BENCHMARK.md`. They say `FAIL` when a check found a blocking problem, even if a
+scanner in the same run, or in the same check, did not complete, and they still
+name what did not complete (the JSON `incomplete_scans` lists the scanners).
+They say `INCOMPLETE` only when nothing failed. A skipped check's row, and a
+tier where nothing ran, say `SKIPPED`, never `PASS`. A tier outside the exit
+gate never changes the headline; the reports name it as advisory instead.
+`BENCHMARK.md` is a publication card, so it can be stricter than the headline
+(Tier 3 evidence is publication-required by default), never more lenient.
 
 A Tier 3 run that never ran (for example, Docker is missing) is a failed gate
 when `--block-on-agent-eval` makes Tier 3 gate: every report says `FAIL` and

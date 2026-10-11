@@ -2373,7 +2373,8 @@ do not add (percentiles are not additive), and rounding to four decimals can
 leave up to 0.0002. The ladder total is labeled "Plugin lift on the common
 basis" and can differ from the headline Plugin lift, which compares two arms on
 the dimensions both scored. `by_case_type` repeats the steps on the
-cross-component cases and on the other cases.
+cross-component cases and on the other cases; as in the Bundle lift's split, a
+group with fewer than 5 cases gets point estimates without an interval.
 
 **The glue verdict.** Only the Integration lift gets a verdict, read on
 cross-component cases only (cases marked `cross_component: true` that name two
@@ -2385,8 +2386,8 @@ rules are the Bundle lift's: `real_integration` when the 95% interval clears
 +0.05, `negative_integration` when it stays below −0.05, `cosmetic_bundling`
 when it lies inside the band, and `inconclusive` when
 
-- fewer than 5 cross-component cases pair up, or the interval crosses a band
-  edge;
+- fewer than 5 cross-component cases pair up (the glue then shows a point
+  estimate without an interval), or the interval crosses a band edge;
 - the loose-parts arm did not cover the same cases with the configured attempts
   as the full plugin (`integration_completeness.loose_parts`), or a
   cross-component case was dropped from any arm;

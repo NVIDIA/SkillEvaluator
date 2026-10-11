@@ -266,6 +266,14 @@ def test_fewer_than_five_cross_component_pairs_give_no_usable_glue_interval() ->
     assert glue["n"] == 4 < LIFT_CI_MIN_PAIRED_CASES
     assert glue["lift"] == pytest.approx(0.1)
     assert glue["precision"] == "insufficient"
+    # No interval below 5 pairs, as for the Bundle lift's case-type split.
+    assert (glue["ci_low"], glue["ci_high"]) == (None, None)
+    group = block["by_case_type"]["cross_component"]
+    assert group["n_cases"] == 4
+    assert all((step["ci_low"], step["ci_high"]) == (None, None) for step in group["steps"].values())
+    assert group["steps"]["skill"]["estimate"] == pytest.approx(0.2)
+    # The whole ladder (9 cases) keeps its intervals.
+    assert block["steps"]["skill"]["ci_low"] is not None
     assert glue["reason"] == "Only 4 paired cross-component case(s); at least 5 are needed for an interval."
 
 

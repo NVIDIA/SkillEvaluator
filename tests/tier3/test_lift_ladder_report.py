@@ -356,9 +356,9 @@ def test_a_cross_component_case_lost_in_any_arm_makes_the_glue_verdict_inconclus
     ]
     assert block["glue"]["verdict"] == "inconclusive"
     assert "x-1" in block["glue"]["reason"]
-    # The glue interval says it is partial, as every other lift interval does.
+    # The glue row says how many of the cross-component cases it kept (4 of 5: too few for an interval).
     row = next(line for line in benchmark(built).splitlines() if line.startswith("| Integration lift (glue"))
-    assert "partial: 4 of 5 cases" in row
+    assert "No interval: 4 of 5 paired case(s), too few" in row
 
 
 def test_capability_not_identical_shows_the_number_but_no_verdict(tmp_path: Path) -> None:
@@ -735,3 +735,14 @@ def test_old_bundle_labels_stay_out_of_the_bundle_section(tmp_path: Path) -> Non
     assert "Real integration lift" not in bundle
     assert "Real integration lift" in _html_section(page).text
     assert re.search(r"Integration \(Bundle Lift\)", bundle)
+
+
+def test_a_partial_glue_interval_says_so(tmp_path: Path) -> None:
+    """Six cross-component cases, one lost in the loose arm: five pairs keep an interval marked partial."""
+    cross = [*CROSS, "o-1"]
+    built = _build(tmp_path, {"claude-code": _ladder([0.2], cross=cross, drop_loose=("x-1",))})
+
+    glue = built["lift_ladder"]["glue"]
+    assert (glue["n"], glue["partial"], glue["verdict"]) == (5, True, "inconclusive")
+    row = next(line for line in benchmark(built).splitlines() if line.startswith("| Integration lift (glue"))
+    assert "partial: 5 of 6 cases" in row

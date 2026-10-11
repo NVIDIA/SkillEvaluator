@@ -664,14 +664,26 @@ def _ladder_step(
     )
 
 
+def _step_fields(result: Mapping[str, Any], *, split: bool) -> dict[str, Any]:
+    """A step's reported fields. A case-type group below the pair minimum keeps its estimate but no interval."""
+    step = {field: result[field] for field in _STEP_FIELDS}
+    if split and int(result["n_cases"]) < LIFT_CI_MIN_PAIRED_CASES:
+        step["ci_low"] = step["ci_high"] = None
+    return step
+
+
 def _ladder_rungs(
-    scores: Mapping[str, Mapping[str, float]], case_ids: Sequence[str]
+    scores: Mapping[str, Mapping[str, float]], case_ids: Sequence[str], *, split: bool = False
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, Any]]:
-    """The four steps and the common-basis Bundle lift over one case set, plus the first step's full result."""
+    """The four steps and the common-basis Bundle lift over one case set, plus the first step's full result.
+
+    *split* marks a case-type group: as in :func:`lift_by_case_type`, fewer
+    than ``LIFT_CI_MIN_PAIRED_CASES`` pairs give a point estimate only.
+    """
     results = {name: _ladder_step(scores, arms, case_ids) for name, arms in LADDER_STEPS.items()}
     bundle = _ladder_step(scores, LADDER_BUNDLE, case_ids)
-    steps = {name: {field: result[field] for field in _STEP_FIELDS} for name, result in results.items()}
-    return steps, {field: bundle[field] for field in _STEP_FIELDS}, results["skill"]
+    steps = {name: _step_fields(result, split=split) for name, result in results.items()}
+    return steps, _step_fields(bundle, split=split), results["skill"]
 
 
 def _ladder_glue(
@@ -708,6 +720,8 @@ def _ladder_glue(
         full[case_id], loose[case_id] = case_scores[ARM_WITH], case_scores[ARM_LOOSE_PARTS]
     result = paired_case_bootstrap(full, loose)
     n_cases = int(result["n_cases"])
+    # The glue is read on one case type, so it follows the case-type split: no interval below the pair minimum.
+    interval = n_cases >= LIFT_CI_MIN_PAIRED_CASES
     if reason is None and not n_cases:
         reason = "No cross-component case was scored in every arm."
     elif reason is None and n_cases < LIFT_CI_MIN_PAIRED_CASES:
@@ -722,8 +736,8 @@ def _ladder_glue(
         "basis_dimensions": [dimension for dimension in _DIMENSION_ORDER if dimension in used],
         "n": n_cases,
         "lift": result["estimate"],
-        "ci_low": result["ci_low"],
-        "ci_high": result["ci_high"],
+        "ci_low": result["ci_low"] if interval else None,
+        "ci_high": result["ci_high"] if interval else None,
         "precision": result["precision"],
         "confidence": result["confidence"],
         "partial": bool(excluded or glue_failed),
@@ -773,7 +787,7 @@ def lift_ladder(
         for case_type in (CASE_TYPE_CROSS_COMPONENT, CASE_TYPE_OTHER):
             is_cross = case_type == CASE_TYPE_CROSS_COMPONENT
             ids = [case_id for case_id in basis.case_ids if (case_id in cross) is is_cross]
-            group_steps, group_bundle, _ = _ladder_rungs(basis.scores, ids)
+            group_steps, group_bundle, _ = _ladder_rungs(basis.scores, ids, split=True)
             by_case_type[case_type] = {"n_cases": len(ids), "steps": group_steps, "bundle": group_bundle}
     expected_ids = {str(case_id) for case_id in expected_case_ids or [] if str(case_id)}
     expected_cases = len(expected_ids) if expected_ids else len(basis.case_ids) + len(basis.excluded_cases)

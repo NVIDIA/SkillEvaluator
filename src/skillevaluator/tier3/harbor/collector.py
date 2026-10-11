@@ -5866,8 +5866,17 @@ def _is_standard_skill_execution_reward(reward: dict[str, Any]) -> bool:
     )
 
 
-def _trajectory_skill_invoked(trajectory: Any, skill_name: str, *, depth: int = 0) -> bool | None:
-    """Derive target invocation from executed root and referenced subagent paths."""
+def _trajectory_skill_invoked(
+    trajectory: Any, skill_name: str, *, depth: int = 0, native_prefix: str = ""
+) -> bool | None:
+    """Derive target invocation from executed root and referenced subagent paths.
+
+    ``native_prefix`` is the plugin namespace a harness gives a natively loaded
+    plugin's skills (Claude Code ``<plugin>:<skill>``): with it, ``Skill(<plugin>:X)``
+    and ``Skill(X)`` both invoke ``X``, so the full native plugin arm and the
+    loose-parts arm (bare names) credit the same skill. Another plugin's
+    namespace never counts. Empty (the default) keeps the exact-name match.
+    """
     if not isinstance(trajectory, dict):
         return None
     if depth > _MAX_TRAJECTORY_REFERENCE_DEPTH:
@@ -5904,7 +5913,9 @@ def _trajectory_skill_invoked(trajectory: Any, skill_name: str, *, depth: int = 
                 agent_trajectory = {**trajectory, "steps": agent_steps}
                 tool_calls = extract_tool_calls_as_dicts(agent_trajectory)
                 skill_tool_names = get_skill_tool_calls(agent_trajectory)
-                negative_check = check_negative_case(tool_calls, skill_name, skill_tool_names=skill_tool_names)
+                negative_check = check_negative_case(
+                    tool_calls, skill_name, skill_tool_names=skill_tool_names, native_prefix=native_prefix
+                )
             except (AttributeError, TypeError, ValueError):
                 results.append(None)
             else:
@@ -5958,7 +5969,9 @@ def _trajectory_skill_invoked(trajectory: Any, skill_name: str, *, depth: int = 
                     seen_ids.add(trajectory_id)
                     referenced_ids.append(trajectory_id)
     results.extend(
-        _trajectory_skill_invoked(embedded_by_id[trajectory_id], skill_name, depth=depth + 1)
+        _trajectory_skill_invoked(
+            embedded_by_id[trajectory_id], skill_name, depth=depth + 1, native_prefix=native_prefix
+        )
         for trajectory_id in referenced_ids
     )
     if True in results:
@@ -6587,12 +6600,12 @@ def _with_harness_statuses(
 
 
 def _case_spec_with_input_schemas(context: PluginSignalsContext, case_id: str, arm: str) -> Mapping[str, Any]:
-    """The case's plugin fields, plus the probed servers' tool input schemas in the with-plugin arm."""
-    from skillevaluator.tier3.eval_core.plugin_signals import ARM_WITH_SKILL, MCP_INPUT_SCHEMAS_KEY
+    """The case's plugin fields, plus the probed servers' tool input schemas in the arms that stage the servers."""
+    from skillevaluator.tier3.eval_core.plugin_signals import MCP_INPUT_SCHEMAS_KEY, PLUGIN_PART_ARMS
 
     spec = context.case_spec(case_id)
     schemas = getattr(context, "mcp_input_schemas", None)
-    if arm != ARM_WITH_SKILL or not isinstance(schemas, Mapping) or not schemas:
+    if arm not in PLUGIN_PART_ARMS or not isinstance(schemas, Mapping) or not schemas:
         return spec
     return {**spec, MCP_INPUT_SCHEMAS_KEY: schemas}
 

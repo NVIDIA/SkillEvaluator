@@ -142,8 +142,7 @@ from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     MAPPED_OUTER_EXEC_OBSERVATION,
     normalize_tool_call,
 )
-from skillevaluator.tier3.harbor.stats import ARM_SUM_OF_PARTS, ARM_WITH, ARM_WITHOUT
-from skillevaluator.tier3.loose_parts import LOOSE_PARTS_ARM
+from skillevaluator.tier3.harbor.stats import ARM_LOOSE_PARTS, ARM_SUM_OF_PARTS, ARM_WITH, ARM_WITHOUT
 from skillevaluator.tier3.plugin_native import OPENCODE_BUILTIN_AGENTS
 from skillevaluator.utils.redaction import redact_sensitive_text
 
@@ -161,7 +160,7 @@ STATUS_NOT_APPLICABLE = "not_applicable"
 ARM_WITH_SKILL = ARM_WITH
 ARM_WITHOUT_SKILL = ARM_WITHOUT
 #: The arms that stage the plugin's MCP servers, subagents, and commands: the full plugin and its loose parts.
-PLUGIN_PART_ARMS = frozenset({ARM_WITH, LOOSE_PARTS_ARM})
+PLUGIN_PART_ARMS = frozenset({ARM_WITH, ARM_LOOSE_PARTS})
 
 # -- dataset field bounds ----------------------------------------------------
 MAX_TOOL_PATTERNS = 64
@@ -1251,7 +1250,7 @@ class PluginSignalsContext:
     cross_component_cases: frozenset[str] | None = None
 
     def arm_enabled(self, arm: str) -> bool:
-        if arm in {ARM_WITH, ARM_SUM_OF_PARTS, LOOSE_PARTS_ARM}:
+        if arm in {ARM_WITH, ARM_SUM_OF_PARTS, ARM_LOOSE_PARTS}:
             return True
         return arm == ARM_WITHOUT and self.baseline_has_members
 

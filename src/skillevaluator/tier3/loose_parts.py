@@ -65,7 +65,7 @@ from typing import Any, ClassVar
 
 from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES
 from skillevaluator.plugin_paths import PluginRootReader
-from skillevaluator.tier3.harbor.stats import ARM_SUM_OF_PARTS, ARM_WITH, ARM_WITHOUT
+from skillevaluator.tier3.harbor.stats import ARM_LOOSE_PARTS, ARM_SUM_OF_PARTS, ARM_WITH, ARM_WITHOUT
 from skillevaluator.tier3.plugin_native import (
     BUNDLE_DIRNAME,
     CONTAINER_ROOT,
@@ -92,8 +92,8 @@ from skillevaluator.tier3.plugin_native import (
     wrap_hook_sources,
 )
 
-#: The arm key in results, lift JSON, and plugin signals, and its report label.
-LOOSE_PARTS_ARM = "loose_parts"
+#: The arm key in results, lift JSON, and plugin signals (the statistics' own key), and its report label.
+LOOSE_PARTS_ARM = ARM_LOOSE_PARTS
 LOOSE_PARTS_LABEL = "Loose parts"
 #: The one harness v1 measures.
 LOOSE_AGENT = "claude-code"

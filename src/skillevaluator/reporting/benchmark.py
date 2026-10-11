@@ -836,6 +836,7 @@ class BenchmarkReporter(ReporterBase):
                 f"| {_md_cell(label, private_labels)} | {_md_cell(result, private_labels)} "
                 f"| {_md_cell(uncertainty, private_labels)} |"
             )
+        ladder_notes = _render_ladder_rows(lines, (view or {}).get("lift_ladder"), private_labels)
         lines.extend(
             [
                 "",
@@ -846,6 +847,7 @@ class BenchmarkReporter(ReporterBase):
                 ),
                 "",
                 *splits,
+                *ladder_notes,
             ]
         )
         if sum_of_parts_baseline:
@@ -1861,6 +1863,42 @@ def _missing_baseline_text(agent: dict[str, Any], ae: dict[str, Any] | None) -> 
     if statuses & {"failed", "unknown", "skipped"}:
         return f"{ran}, but the run is INCOMPLETE; uplift not computed"
     return f"{ran}, but no comparable baseline score was recorded; uplift not computed"
+
+
+_LADDER_GLUE_ROW = "Integration lift (glue: full plugin vs. loose parts)"
+
+
+def _render_ladder_rows(lines: list[str], ladder: dict[str, Any] | None, private_labels: tuple[str, ...]) -> list[str]:
+    """Add one lift-ladder row per agent to the lift table; return the notes printed below it.
+
+    The view (plugin_sections.lift_ladder_view) words everything; this only
+    places it. In wrapper mode the row is the Wrapper effect, with no verdict.
+    """
+    if not ladder:
+        return []
+    notes: list[str] = []
+    for entry in ladder["entries"]:
+        scope = f" — {entry['agent']}" if ladder["named"] and entry["agent"] else ""
+        label = (entry["integration_label"] if entry["wrapper"] else _LADDER_GLUE_ROW) + scope
+        if entry["measured"]:
+            glue = entry["glue"]
+            lift = glue["lift_value"]
+            result = f"{glue['verdict_label']}, {_format_points(lift) if lift is not None else 'lift n/a'}"
+            uncertainty = _ci_label(glue["ci"]) if lift is not None else "Not measured"
+            parts = " ".join(part for part in (entry["loose_parts_line"], entry["hooks_caveat"]) if part)
+            for note in (f"Lift ladder{scope}: {entry['line']}", glue["reason"], parts, entry["capability_line"]):
+                if note:
+                    notes.extend([_md_cell(note, private_labels), ""])
+        else:
+            result = f"Not measured — {entry['reason']}"
+            uncertainty = "Not measured"
+        lines.append(
+            f"| {_md_cell(label, private_labels)} | {_md_cell(result, private_labels)} "
+            f"| {_md_cell(uncertainty, private_labels)} |"
+        )
+    if ladder["basis_note"]:
+        notes.extend([_md_cell(ladder["basis_note"], private_labels), ""])
+    return notes
 
 
 def _format_points(delta: float) -> str:

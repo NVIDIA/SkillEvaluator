@@ -1278,7 +1278,7 @@
     {% set tier3_execution_status = (tier3.get('execution_status') or tier3_summary_data.get('execution_status')) if has_tier3 else none %}
     {% set tier3_is_skipped = tier3_execution_status == 'skipped' or (tier3_provenance_data.get('advisory') and tier3_provenance_data.get('reason') == 'skipped') %}
     {% set tier3_skip_message = tier3_provenance_data.get('message') or 'Live evaluation did not run.' %}
-    {%- from "plugin_sections.html.j2" import tier1_plugin_section, tier3_incomplete_callout, tier3_coverage_section, tier3_completeness_section, integration_section, lift_modes_line, statistics_section, signals_section, hook_census_section, canary_section, mcp_proof_section, tier3_plugin_load_section %}
+    {%- from "plugin_sections.html.j2" import tier1_plugin_section, tier3_incomplete_callout, tier3_coverage_section, tier3_completeness_section, integration_section, lift_ladder_section, lift_modes_line, statistics_section, signals_section, hook_census_section, canary_section, mcp_proof_section, tier3_plugin_load_section %}
     {%- set tier3_plugin_incomplete = has_tier3 and tier3_plugin and tier3_plugin.partial and not tier3_is_skipped %}
     {#- A partial run whose evaluated parts already fail (FAIL verdict or confirmed regression) is FAIL, as in BENCHMARK.md. #}
     {%- set tier3_partial_failed = tier3_plugin_incomplete and (((tier3.verdict or '') | lower) == 'fail' or ((tier3.get('lift_band') or {}).get('regression_confirmed') is sameas true)) %}
@@ -2617,6 +2617,7 @@
             {% endif %}
             {%- if tier3_plugin %}
             {%- if tier3_plugin.integration %}{{ integration_section(tier3_plugin.integration, tier3_plugin.lift_modes) }}{% elif tier3_plugin.lift_modes %}{{ lift_modes_line(tier3_plugin.lift_modes) }}{% endif %}
+            {%- if tier3_plugin.lift_ladder %}{{ lift_ladder_section(tier3_plugin.lift_ladder) }}{% endif %}
             {%- if tier3_plugin.statistics %}{{ statistics_section(tier3_plugin.statistics) }}{% endif %}
             {%- if tier3_plugin.signals %}{{ signals_section(tier3_plugin.signals) }}{% endif %}
             {%- if tier3_plugin.canary %}{{ canary_section(tier3_plugin.canary) }}{% endif %}

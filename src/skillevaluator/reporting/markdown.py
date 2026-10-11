@@ -461,6 +461,54 @@ def _integration(integration: dict | None, modes: dict | None, lines: list[str])
         lines.append("")
 
 
+def _lift_ladder(ladder: dict | None, lines: list[str]) -> None:
+    """Render the lift ladder view (plugin_sections.lift_ladder_view) as it is: line, step table, glue, parts."""
+    if not ladder:
+        return
+    cell = _markdown_table_cell
+    lines.append("### Lift ladder (advisory)")
+    lines.append("")
+    lines.append(f"*{cell(ladder['definition'])}*")
+    lines.append("")
+    if ladder["basis_note"]:
+        lines.append(f"*{cell(ladder['basis_note'])}*")
+        lines.append("")
+    for entry in ladder["entries"]:
+        scope = f"{cell(entry['agent'])} — " if ladder["named"] and entry["agent"] else ""
+        if not entry["measured"]:
+            lines.append(f"**{scope}NOT MEASURED:** {cell(entry['reason'])}")
+            lines.append("")
+            continue
+        lines.append(f"**{scope}{cell(entry['line'])}**")
+        lines.append("")
+        lines.extend(
+            _table_header(
+                "Step", "Arms", "Estimate", entry["confidence"], "Cases", "Precision", "Cross-component", "Other"
+            )
+        )
+        for row in entry["rows"]:
+            cells = (row[key] for key in ("label", "arms", "estimate", "interval", "n_cases", "precision"))
+            split = (row["cross_component"] or "-", row["other"] or "-")
+            lines.append("| " + " | ".join(cell(value) for value in (*cells, *split)) + " |")
+        lines.append("")
+        glue = entry["glue"]
+        point = f" (point estimate: {cell(glue['point_label'])})" if glue["point_label"] else ""
+        lines.append(f"**{cell(glue['verdict_title'])}:** {cell(glue['verdict_label'])}{point}")
+        parts = " ".join(part for part in (entry["loose_parts_line"], entry["hooks_caveat"]) if part)
+        for note in (
+            glue["reason"],
+            glue["basis"],
+            entry["excluded"],
+            parts,
+            entry["capability_line"],
+            entry["signals_line"],
+        ):
+            if note:
+                lines.append("")
+                lines.append(f"*{cell(note)}*")
+        lines.append("")
+
+
 def _lift_intervals(statistics: dict | None, lines: list[str]) -> None:
     if not statistics:
         return
@@ -853,6 +901,7 @@ class MarkdownReporter(ReporterBase):
         _not_evaluated(view["excluded"], lines)
         _plugin_loading(view.get("plugin_load"), lines)
         _integration(view["integration"], view["lift_modes"], lines)
+        _lift_ladder(view.get("lift_ladder"), lines)
         _lift_intervals(view["statistics"], lines)
         _mcp_calls(view.get("signals"), lines)
         MarkdownReporter._render_tier3_runtime_evidence(view, lines)

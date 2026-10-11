@@ -160,6 +160,7 @@ def print_plugin_tier3(view: dict, console: Console) -> None:
     _print_plugin_loading(view.get("plugin_load"), console)
     _print_lift_modes(view.get("lift_modes"), console)
     _print_integration(view.get("integration"), console)
+    _print_lift_ladder(view.get("lift_ladder"), console)
     statistics = view.get("statistics")
     if statistics:
         for scope in statistics["scopes"]:
@@ -264,6 +265,42 @@ def _print_integration_entry(entry: dict, console: Console, *, scope: str) -> No
         console.print(f"    [dim]components: {esc(', '.join(entry['components']))}{more}[/dim]")
     if entry["interpretation"]:
         console.print(f"    [dim]{esc(entry['interpretation'])}[/dim]", soft_wrap=True)
+
+
+def _print_lift_ladder(ladder: dict | None, console: Console) -> None:
+    """Print the lift ladder view (plugin_sections.lift_ladder_view) as it is."""
+    if not ladder:
+        return
+    esc = escape_markup
+    for entry in ladder["entries"]:
+        named = f" ({esc(entry['agent'])})" if ladder["named"] and entry["agent"] else ""
+        if not entry["measured"]:
+            console.print(
+                f"  [bold]Lift ladder{named}:[/bold] [yellow]NOT MEASURED[/yellow] — {esc(entry['reason'])} "
+                "[dim](advisory)[/dim]",
+                soft_wrap=True,
+            )
+            continue
+        console.print(f"  [bold]Lift ladder{named}:[/bold] {esc(entry['line'])} [dim](advisory)[/dim]", soft_wrap=True)
+        for row in entry["rows"]:
+            split = (
+                f"; cross-component {row['cross_component']}, other {row['other']}" if row["cross_component"] else ""
+            )
+            arms = "" if row["arms"] in row["label"] else f" ({row['arms']})"
+            console.print(
+                f"    [dim]{esc(row['label'])}{esc(arms)}: {esc(row['estimate'])} {esc(row['interval'])}, "
+                f"n={esc(row['n_cases'])}, precision {esc(row['precision'])}{esc(split)}[/dim]",
+                soft_wrap=True,
+            )
+        glue = entry["glue"]
+        point = f" (point estimate: {glue['point_label']})" if glue["point_label"] else ""
+        console.print(f"    [dim]{esc(glue['verdict_title'])}: {esc(glue['verdict_label'])}{esc(point)}[/dim]")
+        parts = " ".join(part for part in (entry["loose_parts_line"], entry["hooks_caveat"]) if part)
+        for note in (glue["reason"], entry["excluded"], parts, entry["capability_line"], entry["signals_line"]):
+            if note:
+                console.print(f"    [dim]{esc(note)}[/dim]", soft_wrap=True)
+    if ladder["basis_note"]:
+        console.print(f"    [dim]{esc(ladder['basis_note'])}[/dim]", soft_wrap=True)
 
 
 def _print_signals(signals: dict | None, console: Console) -> None:

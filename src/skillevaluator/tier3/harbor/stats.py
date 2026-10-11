@@ -596,21 +596,31 @@ def _shared_case_score(
 
 
 def _failure_records_by_arm(records: Sequence[Any]) -> dict[str, str]:
-    """The staging's failure records (``{arm, attempt, piece, reason}``) as one bounded reason per arm."""
-    by_arm: dict[str, list[str]] = {}
+    """The staging's failure records (``{arm, attempt, piece, reason}``) as one bounded reason per arm.
+
+    One piece that failed in several attempts is listed once with all of them
+    (its first reason), so a second failing piece is not hidden behind repeats.
+    """
+    by_arm: dict[str, dict[str, tuple[list[int], str]]] = {}
     for record in records:
         if not isinstance(record, Mapping):
             continue
         piece = str(record.get("piece") or "a staged part")[:_LOAD_FAILURE_PIECE_CHARS]
-        attempt = record.get("attempt")
-        where = f"{piece} (attempt {attempt})" if type(attempt) is int else piece
         reason = str(record.get("reason") or "not loaded")[:_LOAD_FAILURE_REASON_CHARS]
-        by_arm.setdefault(str(record.get("arm") or "unknown"), []).append(f"{where}: {reason}")
-    return {
-        arm: "; ".join(items[:_LOAD_FAILURES_PER_ARM])
-        + (f" (+{len(items) - _LOAD_FAILURES_PER_ARM} more)" if len(items) > _LOAD_FAILURES_PER_ARM else "")
-        for arm, items in by_arm.items()
-    }
+        attempts, _ = by_arm.setdefault(str(record.get("arm") or "unknown"), {}).setdefault(piece, ([], reason))
+        attempt = record.get("attempt")
+        if type(attempt) is int and attempt not in attempts:
+            attempts.append(attempt)
+    folded: dict[str, str] = {}
+    for arm, pieces in by_arm.items():
+        items = []
+        for piece, (attempts, reason) in pieces.items():
+            label = "attempt" if len(attempts) == 1 else "attempts"
+            where = f"{piece} ({label} {', '.join(map(str, sorted(attempts)))})" if attempts else piece
+            items.append(f"{where}: {reason}")
+        more = len(items) - _LOAD_FAILURES_PER_ARM
+        folded[arm] = "; ".join(items[:_LOAD_FAILURES_PER_ARM]) + (f" (+{more} more)" if more > 0 else "")
+    return folded
 
 
 def _clean_load_failures(load_failures_by_case: LoadFailures | None) -> dict[str, dict[str, str]]:

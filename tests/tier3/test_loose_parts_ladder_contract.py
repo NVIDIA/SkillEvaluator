@@ -274,3 +274,40 @@ def test_an_agent_the_staging_refused_shows_the_staging_reason(loose, info) -> N
     # The refused agent inherits nothing from the measured agent's hashes.
     assert block["loose_parts"]["content_hashes"] is None
     assert block["loose_parts"]["equal_across_arms"] is None
+
+
+def test_a_refused_agent_inherits_no_staged_parts_from_the_measured_agent(info) -> None:
+    record = {**info, "agents": {"codex": {"not_measured_reason": "not supported: codex is not measured"}}}
+
+    block = _report(None, record, agent_name="codex")
+
+    assert (block["measured"], block["reason"]) == (False, "not supported: codex is not measured")
+    loose_parts = block["loose_parts"]
+    for key in ("rules", "mcp_servers", "subagents", "commands", "hooks", "dropped_as_glue"):
+        assert loose_parts[key] == [], key
+    assert (loose_parts["content_hashes"], loose_parts["equal_across_arms"]) == (None, None)
+
+
+def test_the_report_never_calls_equal_what_the_staging_called_unequal(info) -> None:
+    """The staging's hashing is the source of truth; the report's recomputation may only add mismatches."""
+    record = {**info, "equal_across_arms": False, "mismatches": ["rule:release-policy.md"]}
+    ladder = stats.lift_ladder(_arms(), CROSS, expected_case_ids=CASES)
+
+    block = _report(ladder, record)
+
+    assert block["loose_parts"]["equal_across_arms"] is False
+    assert [item["piece"] for item in block["loose_parts"]["mismatches"]] == ["rule:release-policy.md"]
+    assert block["glue"]["verdict"] == "inconclusive"
+    assert "capability not identical across arms" in block["glue"]["reason"]
+
+
+def test_one_piece_failing_in_every_attempt_is_listed_once() -> None:
+    rows = [
+        *({"arm": LOOSE, "attempt": attempt, "piece": "agent:a", "reason": "not reported"} for attempt in (1, 2, 3)),
+        {"arm": LOOSE, "attempt": 2, "piece": "mcp:x", "reason": "failed"},
+    ]
+
+    ladder = stats.lift_ladder(_arms(), CROSS, expected_case_ids=CASES, load_failures_by_case={"x-1": rows})
+
+    reason = ladder["excluded_cases"][0]["load_failures"][LOOSE]
+    assert reason == "agent:a (attempts 1, 2, 3): not reported; mcp:x (attempt 2): failed"

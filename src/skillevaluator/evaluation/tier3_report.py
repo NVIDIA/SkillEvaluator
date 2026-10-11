@@ -3782,6 +3782,9 @@ def _loose_parts_record(plugin_provenance: dict[str, Any] | None, agent_name: st
     record = provenance.get("loose_parts") if isinstance(provenance.get("loose_parts"), dict) else {}
     agents = record.get("agents") if isinstance(record.get("agents"), dict) else {}
     own = agents.get(agent_name) if isinstance(agents.get(agent_name), dict) else {}
+    if own.get("not_measured_reason") or own.get("error"):
+        # A refused agent staged nothing: the run-level pieces, hashes and glue belong to the measured agent.
+        return dict(own)
     return {**{key: value for key, value in record.items() if key != "agents"}, **own}
 
 
@@ -3818,6 +3821,13 @@ def _loose_parts_block(record: dict[str, Any]) -> dict[str, Any] | None:
         return None
     glue_ids = _piece_ids(record.get("dropped_as_glue"))
     equal, mismatches = _capability_parity(record.get("content_hashes"), glue_ids)
+    if record.get("equal_across_arms") is False:
+        # The staging's hashing is the source of truth: the recomputation here may add mismatches, never clear one.
+        known = {item["piece"] for item in mismatches}
+        for piece in _string_list(record.get("mismatches")):
+            if piece not in known and len(mismatches) < _LADDER_MAX_ITEMS:
+                mismatches.append({"piece": piece, "issue": "differs", "arms": ["with_skill", _LADDER_ARM_LOOSE]})
+        equal = False
     hashes = _content_hashes(record.get("content_hashes"))
     loader = str(record.get("loader") or "").strip()[:32]
     return {

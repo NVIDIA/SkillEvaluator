@@ -1885,8 +1885,12 @@ def _render_ladder_rows(lines: list[str], ladder: dict[str, Any] | None, private
             lift = glue["lift_value"]
             result = f"{glue['verdict_label']}, {_format_points(lift) if lift is not None else 'lift n/a'}"
             uncertainty = _ci_label(glue["ci"]) if lift is not None else "Not measured"
-            parts = " ".join(part for part in (entry["loose_parts_line"], entry["hooks_caveat"]) if part)
-            for note in (f"Lift ladder{scope}: {entry['line']}", glue["reason"], parts, entry["capability_line"]):
+            for note in (
+                f"Lift ladder{scope}: {entry['line']}",
+                glue["reason"],
+                entry["loose_parts_line"],
+                entry["capability_line"],
+            ):
                 if note:
                     notes.extend([_md_cell(note, private_labels), ""])
         else:

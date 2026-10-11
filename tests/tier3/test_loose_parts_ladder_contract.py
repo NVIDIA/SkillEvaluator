@@ -24,12 +24,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _loose_parts_fixtures import make_plugin, native_source
 
+from skillevaluator.evaluation.tier3_report import _build_ladder_report
+from skillevaluator.reporting.plugin_sections import lift_ladder_view
 from skillevaluator.tier3.harbor import stats
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
 from skillevaluator.tier3.harbor.stats import ArmObservations, TrialObservation
 from skillevaluator.tier3.loose_parts import (
     LOOSE_PARTS_ARM,
     build_loose_parts,
+    compare_content_hashes,
     load_failures_by_case,
     loose_parts_load_evidence,
 )
@@ -38,6 +41,9 @@ NONE, SKILLS, LOOSE, FULL = "without_skill", "sum_of_parts", "loose_parts", "wit
 CROSS = [f"x-{index}" for index in range(1, 7)]
 OTHER = ["o-1", "o-2", "o-3"]
 CASES = [*CROSS, *OTHER]
+COMPLETE = {"complete": True, "missing_cases": [], "failed_arms": [], "attempt_shortfall": []}
+RUN_CONFIG = {"eval_target": {"kind": "plugin"}, "lift_mode": {"requested": "ladder", "effective": "ladder"}}
+NATIVE = {"requested": "native", "by_agent": {"claude-code": {"mode": "native"}}}
 
 
 @pytest.fixture(scope="module")
@@ -46,6 +52,11 @@ def loose(tmp_path_factory: pytest.TempPathFactory):
     parts = build_loose_parts(native_source(make_plugin(root / "plugins"), root / "stage").native_source)
     assert parts.error is None
     return parts
+
+
+@pytest.fixture(scope="module")
+def info(loose) -> dict[str, Any]:
+    return loose.info()
 
 
 def _init(**overrides: Any) -> dict[str, Any]:
@@ -95,6 +106,16 @@ def _failures(loose) -> dict[str, list[dict[str, Any]]]:
             FULL: {"x-2": [full_missing]},
         }
     )
+
+
+def _report(
+    ladder: dict[str, Any] | None, loose_parts: dict[str, Any], agent_name: str = "claude-code"
+) -> dict[str, Any]:
+    agent = {"lift_ladder": ladder, "integration_completeness": {**COMPLETE, "loose_parts": COMPLETE}}
+    provenance = {"plugin_load": NATIVE, "loose_parts": loose_parts}
+    block = _build_ladder_report(agent, RUN_CONFIG, provenance, agent_name=agent_name)
+    assert block is not None
+    return block
 
 
 # ---------------------------------------------------------------------------
@@ -174,3 +195,82 @@ def test_many_failed_pieces_are_bounded_per_arm(loose) -> None:
     reason = ladder["excluded_cases"][0]["load_failures"][LOOSE]
     assert len(reason) <= 1000
     assert "(+" in reason and "more)" in reason
+
+
+# ---------------------------------------------------------------------------
+# The info block: staging -> report block and display model
+# ---------------------------------------------------------------------------
+
+
+def test_the_report_reads_the_staging_info_block(info) -> None:
+    ladder = stats.lift_ladder(_arms(), CROSS, expected_case_ids=CASES)
+
+    block = _report(ladder, info)
+
+    loose_parts = block["loose_parts"]
+    assert info["equal_across_arms"] is True
+    assert (loose_parts["equal_across_arms"], loose_parts["mismatches"]) == (True, [])
+    glue_ids = [piece["id"] for piece in info["dropped_as_glue"]]
+    assert glue_ids and "manifest:.claude-plugin/plugin.json" in glue_ids
+    assert loose_parts["dropped_as_glue"] == glue_ids
+    assert (loose_parts["rules"], loose_parts["mcp_servers"]) == (info["rules"], info["mcp_servers"])
+    assert loose_parts["subagents"] == ["release-reviewer"]
+    assert loose_parts["commands"] == ["release-check"]
+    assert loose_parts["hooks"] == ["hooks/hooks.json"]
+    assert loose_parts["content_hashes"] == info["content_hashes"]
+    # Same capability, complete, 6 cross-component pairs at +0.10 everywhere: a real integration lift.
+    assert block["glue"]["verdict"] == "real_integration", block["glue"]["reason"]
+
+
+def test_report_parity_agrees_with_the_staging_on_a_changed_piece(loose, info) -> None:
+    hashes = {arm: dict(pieces) for arm, pieces in info["content_hashes"].items()}
+    hashes[LOOSE]["rule:release-policy.md"] = "0" * 64
+    hashes[LOOSE].pop("command:release-check")
+    staged = compare_content_hashes(hashes)
+    changed = loose.info(content=staged)
+    ladder = stats.lift_ladder(_arms(), CROSS, expected_case_ids=CASES)
+
+    block = _report(ladder, changed)
+
+    assert staged["equal_across_arms"] is False
+    assert block["loose_parts"]["equal_across_arms"] is False
+    assert {item["piece"] for item in block["loose_parts"]["mismatches"]} == set(staged["mismatches"])
+    assert block["glue"]["verdict"] == "inconclusive"
+    assert "capability not identical across arms" in block["glue"]["reason"]
+
+
+def test_the_rendered_ladder_names_glue_by_id_and_every_staged_kind(info) -> None:
+    ladder = stats.lift_ladder(_arms(), CROSS, expected_case_ids=CASES)
+    block = _report(ladder, info)
+
+    view = lift_ladder_view({"lift_ladder": block})
+
+    assert view is not None
+    entry = view["entries"][0]
+    line = entry["loose_parts_line"]
+    assert "{" not in line, line
+    assert "rules: release-files.md, release-policy.md" in line
+    assert "MCP servers: reltools" in line
+    assert "subagents: release-reviewer" in line
+    assert "commands: release-check" in line
+    assert "hooks: hooks/hooks.json" in line
+    assert "Plugin-only, counted as glue: " in line and "manifest:.claude-plugin/plugin.json" in line
+    # v1 stages hooks as loose parts, so nothing may say they are glue.
+    assert "hooks as glue" not in " ".join(str(value) for value in entry.values())
+    for words in ("subagents", "commands", "hooks"):
+        assert words in view["definition"], view["definition"]
+    assert "Capability identical across arms: yes" in entry["capability_line"]
+
+
+def test_an_agent_the_staging_refused_shows_the_staging_reason(loose, info) -> None:
+    refused = build_loose_parts(loose.source, "codex")
+    assert refused.error is not None and refused.error.startswith("not supported:")
+    record = {**info, "agents": {"codex": refused.info(content=refused.content_report())}}
+
+    block = _report(None, record, agent_name="codex")
+
+    assert block["measured"] is False
+    assert block["reason"] == refused.error[:300]
+    # The refused agent inherits nothing from the measured agent's hashes.
+    assert block["loose_parts"]["content_hashes"] is None
+    assert block["loose_parts"]["equal_across_arms"] is None

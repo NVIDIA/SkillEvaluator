@@ -494,12 +494,11 @@ def _lift_ladder(ladder: dict | None, lines: list[str]) -> None:
         glue = entry["glue"]
         point = f" (point estimate: {cell(glue['point_label'])})" if glue["point_label"] else ""
         lines.append(f"**{cell(glue['verdict_title'])}:** {cell(glue['verdict_label'])}{point}")
-        parts = " ".join(part for part in (entry["loose_parts_line"], entry["hooks_caveat"]) if part)
         for note in (
             glue["reason"],
             glue["basis"],
             entry["excluded"],
-            parts,
+            entry["loose_parts_line"],
             entry["capability_line"],
             entry["signals_line"],
         ):

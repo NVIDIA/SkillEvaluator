@@ -295,8 +295,13 @@ def _print_lift_ladder(ladder: dict | None, console: Console) -> None:
         glue = entry["glue"]
         point = f" (point estimate: {glue['point_label']})" if glue["point_label"] else ""
         console.print(f"    [dim]{esc(glue['verdict_title'])}: {esc(glue['verdict_label'])}{esc(point)}[/dim]")
-        parts = " ".join(part for part in (entry["loose_parts_line"], entry["hooks_caveat"]) if part)
-        for note in (glue["reason"], entry["excluded"], parts, entry["capability_line"], entry["signals_line"]):
+        for note in (
+            glue["reason"],
+            entry["excluded"],
+            entry["loose_parts_line"],
+            entry["capability_line"],
+            entry["signals_line"],
+        ):
             if note:
                 console.print(f"    [dim]{esc(note)}[/dim]", soft_wrap=True)
     if ladder["basis_note"]:

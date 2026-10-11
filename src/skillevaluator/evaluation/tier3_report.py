@@ -3670,6 +3670,8 @@ _LADDER_ARM_LOOSE = "loose_parts"
 _LADDER_SIGNAL_SECTIONS = ("routing", "tool_selection", "order", "handoff", "conflict")
 _LADDER_MAX_ITEMS = 64
 _LADDER_MAX_HASHED_PIECES = 128
+# Report key -> piece kind of the staged loose parts listed next to the rules and MCP servers.
+_LADDER_STAGED_KINDS = (("subagents", "agent"), ("commands", "command"), ("hooks", "hook"))
 _LADDER_REASON_CAPABILITY = "capability not identical across arms"
 _LADDER_REASON_WRAPPER = (
     "The full-plugin arm loaded the plugin through SkillEvaluator's generated wrapper, so full minus loose parts "
@@ -3783,21 +3785,47 @@ def _loose_parts_record(plugin_provenance: dict[str, Any] | None, agent_name: st
     return {**{key: value for key, value in record.items() if key != "agents"}, **own}
 
 
+def _piece_ids(value: object) -> list[str]:
+    """Piece ids from a list of ids or of the loose-parts staging's ``{"id", "reason"}`` records."""
+    if not isinstance(value, list | tuple):
+        return []
+    ids = (item.get("id") if isinstance(item, dict) else item for item in value)
+    return [str(piece) for piece in ids if piece is not None and str(piece).strip()]
+
+
+def _staged_piece_names(pieces: object, kind: str) -> list[str]:
+    """The names of the staged loose parts of one *kind*, from the staging's ``pieces`` (``id`` is ``<kind>:<name>``)."""
+    if not isinstance(pieces, list | tuple):
+        return []
+    return _string_list(
+        [
+            piece["id"].split(":", 1)[1]
+            for piece in pieces
+            if isinstance(piece, dict) and piece.get("kind") == kind and ":" in str(piece.get("id") or "")
+        ]
+    )
+
+
 def _loose_parts_block(record: dict[str, Any]) -> dict[str, Any] | None:
+    """The report's view of the run's ``loose_parts`` record (the staging's info block, or the same fields).
+
+    ``dropped_as_glue`` is reduced to piece ids, and ``subagents``,
+    ``commands`` and ``hooks`` list the staged loose parts of those kinds
+    (from ``pieces``), next to ``rules`` and ``mcp_servers``. Capability
+    parity is recomputed from ``content_hashes``.
+    """
     if not record:
         return None
-    raw_dropped = record.get("dropped_as_glue")
-    equal, mismatches = _capability_parity(
-        record.get("content_hashes"), raw_dropped if isinstance(raw_dropped, list | tuple) else None
-    )
-    dropped = _string_list(raw_dropped)
+    glue_ids = _piece_ids(record.get("dropped_as_glue"))
+    equal, mismatches = _capability_parity(record.get("content_hashes"), glue_ids)
     hashes = _content_hashes(record.get("content_hashes"))
     loader = str(record.get("loader") or "").strip()[:32]
     return {
         "loader": loader or None,
         "rules": _string_list(record.get("rules")),
         "mcp_servers": _string_list(record.get("mcp_servers")),
-        "dropped_as_glue": dropped,
+        **{key: _staged_piece_names(record.get("pieces"), kind) for key, kind in _LADDER_STAGED_KINDS},
+        "dropped_as_glue": _string_list(glue_ids),
         "content_hashes": hashes,
         "equal_across_arms": equal,
         "mismatches": mismatches,
@@ -3951,7 +3979,8 @@ def _build_ladder_report(
     }
     if raw is None or not isinstance(raw.get("steps"), dict):
         reason = (
-            str(record.get("not_measured_reason") or "").strip()[:300]
+            # The staging's own refusal (``error``, e.g. "not supported: ...") when the runner wrote no other reason.
+            str(record.get("not_measured_reason") or record.get("error") or "").strip()[:300]
             or _ladder_skip_reason(run_config, plugin_provenance)
             or _LADDER_REASON_NOT_RECORDED
         )

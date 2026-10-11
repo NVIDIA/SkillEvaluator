@@ -1880,8 +1880,8 @@ def _by_case_type_line(split: object) -> str:
 
 LADDER_TITLE = "Lift ladder"
 _LADDER_PIECES = (
-    "The lift ladder adds a loose-parts arm: the plugin's skills, rules and MCP servers staged as plain pieces, "
-    "with no plugin packaging."
+    "The lift ladder adds a loose-parts arm: the plugin's skills, rules, MCP servers, subagents, commands and hooks "
+    "staged as plain pieces, with no plugin packaging."
 )
 LADDER_DEFINITION = (
     f"{_LADDER_PIECES} Skill lift (skills only minus no plugin) + Capability lift (loose parts minus skills only) "
@@ -1897,7 +1897,6 @@ LADDER_BASIS_NOTE = (
     "the ladder scores every arm only on the dimensions all four arms scored, over the cases all four scored, "
     "while the headline compares two arms on the dimensions both scored."
 )
-LADDER_HOOKS_CAVEAT = "v1 counts hooks as glue, policy hooks included."
 _LADDER_ROWS = (
     ("skill", "Skill lift", "skills only minus no plugin"),
     ("capability", "Capability lift", "loose parts minus skills only"),
@@ -1981,7 +1980,6 @@ def _ladder_entry(block: Mapping[str, Any], agent: str) -> dict[str, Any]:
     measured = block.get("measured") is not False and bool(steps)
     integration_label = LADDER_WRAPPER_LABEL if wrapper else LADDER_INTEGRATION_LABEL
     loose = _mapping(block.get("loose_parts"))
-    dropped, _ = _names(loose.get("dropped_as_glue"))
     entry: dict[str, Any] = {
         "agent": agent,
         "measured": measured,
@@ -1989,7 +1987,6 @@ def _ladder_entry(block: Mapping[str, Any], agent: str) -> dict[str, Any]:
         "integration_label": integration_label,
         "reason": text(block.get("reason")),
         "loose_parts_line": _loose_parts_line(loose),
-        "hooks_caveat": LADDER_HOOKS_CAVEAT if any(name.startswith("hook:") for name in dropped) else "",
         "capability_line": _capability_line(loose, integration_label),
     }
     if not measured:
@@ -2173,10 +2170,13 @@ def _loose_parts_line(loose: Mapping[str, Any]) -> str:
     def _listed(names: list[str], omitted: int) -> str:
         return (", ".join(names) or "none") + (f" (+{omitted} more)" if omitted else "")
 
-    return (
-        f"{head}: rules: {_listed(rules, rules_omitted)}; MCP servers: {_listed(servers, servers_omitted)}. "
-        f"Plugin-only, counted as glue: {_listed(dropped, dropped_omitted)}."
-    )
+    staged = [f"rules: {_listed(rules, rules_omitted)}", f"MCP servers: {_listed(servers, servers_omitted)}"]
+    # Subagents, commands and hooks load standalone on Claude Code too; listed when the staging recorded them.
+    for key in ("subagents", "commands", "hooks"):
+        names, omitted = _names(loose.get(key), limit=_NAMES_IN_TEXT)
+        if names:
+            staged.append(f"{key}: {_listed(names, omitted)}")
+    return f"{head}: {'; '.join(staged)}. Plugin-only, counted as glue: {_listed(dropped, dropped_omitted)}."
 
 
 def _capability_line(loose: Mapping[str, Any], integration_label: str) -> str:

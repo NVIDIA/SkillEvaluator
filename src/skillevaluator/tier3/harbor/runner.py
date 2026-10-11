@@ -3753,6 +3753,20 @@ def _run_agent_pair(
     # The advertised concurrency is one per-agent trial budget. Split it
     # across concurrently running conditions instead of multiplying it by two.
     worker_count = min(len(jobs), n_concurrent)
+    if loose_parts is not None and worker_count < len(jobs):
+        # Never raised behind the user's back (that would change resource use): say what runs all arms at once.
+        logger.warning(
+            "%s: --lift-mode ladder runs %d arms, but --n-concurrent is %d (or harbor.n_concurrent in "
+            "evals/config.yml), so only %d run at once and the rest wait for a free slot. Pass --n-concurrent %d "
+            "(or a multiple of %d) to run all %d arms at once.",
+            agent,
+            len(jobs),
+            n_concurrent,
+            worker_count,
+            len(jobs),
+            len(jobs),
+            len(jobs),
+        )
     if worker_count == len(jobs):
         concurrency_per_job, extra_slots = divmod(n_concurrent, len(jobs))
         job_concurrency = [concurrency_per_job + (1 if index < extra_slots else 0) for index in range(len(jobs))]

@@ -471,7 +471,7 @@ skillevaluator tier3 evaluate-plugin ./my-plugin --lift-mode both \
 | `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
 | `--pass-threshold FLOAT` | unset | Score threshold (0.0–1.0) for a case to count as passed. |
 | `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
-| `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
+| `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent, split across the arms. With `--lift-mode ladder` use 4 or more so all four arms run at once; below that the runner warns and the remaining arms wait. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
 | `--model TEXT` | unset | Global agent model override. |
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable). |

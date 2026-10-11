@@ -2294,7 +2294,13 @@ tasks in `_harbor-tasks/<agent>/looseparts/`, results in
 `<agent>/loose-parts/`). It is report-only, like the skills-only arm: its
 failure never fails the run. It gets the same cases, attempts, timeouts,
 retries, resources and verifier settings as the other three arms, and the
-per-agent concurrency is split over four jobs. Its tasks are staged like the
+per-agent concurrency is split over four jobs. Run the ladder with
+`--n-concurrent 4` or more (a multiple of 4 splits the trial slots evenly):
+below 4, only that many arms run at once, the rest wait for a free slot, and
+the runner logs a warning that names `--n-concurrent 4`. It never raises the
+value for you, since that changes how many containers run. The default is 4
+unless `harbor.n_concurrent` in `evals/config.yml` sets it lower. With
+`--stop-on-pass` the arms run one after another anyway. Its tasks are staged like the
 skills-only arm's (no target skill, `has_skill: false`, the same task names),
 plus the loose bundle. `run_config.json` records
 `skill_workspace.loose_parts_arm` and, per agent, `loose_parts.agents.<agent>`

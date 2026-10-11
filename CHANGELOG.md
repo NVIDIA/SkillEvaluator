@@ -31,6 +31,7 @@ All notable changes to SkillEvaluator are documented in this file.
   effectiveness; with nothing loose to stage, in wrapper mode, or with no native
   Claude Code agent it falls back to `both`; the reason is recorded in
   `ladder_skip_reason`. With `--skip-baseline` it is refused.
+- With `--lift-mode ladder`, a `--n-concurrent` (or `harbor.n_concurrent`) below the four arms logs a warning per agent that names `--n-concurrent 4`: only that many arms run at once and the rest wait. The value is never raised for you, since that changes how many containers run; `--stop-on-pass`, which runs the arms one after another, and runs without the ladder do not warn.
 - Loose-parts staging for native Claude Code (`skillevaluator.tier3.loose_parts`):
   skills, rules, MCP servers, subagents, commands and hooks staged as plain
   user-level pieces, per-piece content hashes across the full, loose and

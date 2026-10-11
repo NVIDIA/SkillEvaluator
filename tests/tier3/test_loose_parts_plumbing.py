@@ -464,6 +464,77 @@ def test_the_agent_pair_launches_four_jobs_with_the_same_settings(
     assert sum(job["n_concurrent"] for job in launched.values()) == 4
 
 
+def _launch_pair(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, n_concurrent: int, loose: bool = True, **settings: Any
+) -> dict[str, int]:
+    """Launch one agent's arms with a fake Harbor; return each job's trial slots."""
+    slots: dict[str, int] = {}
+
+    def fake_run(**kwargs: Any) -> tuple[bool, str]:
+        slots[str(kwargs["job_name"]).rsplit("-", 1)[-1]] = kwargs["n_concurrent"]
+        return True, ""
+
+    monkeypatch.setattr(runner, "_run_harbor", fake_run)
+    monkeypatch.setattr(
+        runner, "_run_stop_on_pass_variant", lambda **kwargs: slots.setdefault(kwargs["variant"], 1) and []
+    )
+    runner._run_agent_pair(
+        **{**_PAIR_SETTINGS, "n_concurrent": n_concurrent, **settings},
+        with_skill=tmp_path / "with",
+        baseline=tmp_path / "without",
+        sum_of_parts=tmp_path / "sumofparts",
+        loose_parts=tmp_path / "looseparts" if loose else None,
+        loose_agent_import_path="loose:Agent" if loose else None,
+        jobs_dir=tmp_path / "jobs",
+    )
+    return slots
+
+
+def _concurrency_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [record.getMessage() for record in caplog.records if "--n-concurrent" in record.getMessage()]
+
+
+def test_ladder_below_four_slots_warns_with_the_value_that_runs_every_arm_at_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("WARNING", logger="skillevaluator.tier3.harbor.runner")
+
+    slots = _launch_pair(monkeypatch, tmp_path, n_concurrent=3)
+
+    # Concurrency is not raised behind the user's back: 3 workers, one trial slot each, the fourth arm waits.
+    assert sorted(slots) == ["looseparts", "sumofparts", "with", "without"]
+    assert set(slots.values()) == {1}
+    (warning,) = _concurrency_warnings(caplog)
+    assert "4 arms" in warning and "--n-concurrent is 3" in warning
+    assert "--n-concurrent 4" in warning
+    assert "harbor.n_concurrent" in warning
+
+
+@pytest.mark.parametrize(
+    ("n_concurrent", "loose", "settings"),
+    [
+        (4, True, {}),  # every arm runs at once
+        (8, True, {}),
+        (1, False, {}),  # no ladder: three arms below the slots is the user's choice, as before
+        (1, True, {"stop_on_pass": True}),  # stop-on-pass runs the arms one after another anyway
+    ],
+    ids=["ladder-4", "ladder-8", "both-1", "ladder-stop-on-pass"],
+)
+def test_no_concurrency_warning_when_every_arm_runs_at_once_or_the_ladder_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    n_concurrent: int,
+    loose: bool,
+    settings: dict[str, Any],
+) -> None:
+    caplog.set_level("WARNING", logger="skillevaluator.tier3.harbor.runner")
+
+    _launch_pair(monkeypatch, tmp_path, n_concurrent=n_concurrent, loose=loose, **settings)
+
+    assert _concurrency_warnings(caplog) == []
+
+
 def test_stop_on_pass_runs_the_loose_job_last_with_the_same_settings(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -125,11 +125,11 @@ def _plugin_tree_ignore(source: NativePluginSource, excluded_roots: Sequence[Pat
     return _ignore
 
 
-def _write_generated(bundle_root: Path, rel: str, text: str) -> None:
+def _bundle_target(bundle_root: Path, rel: str, *, what: str) -> Path:
+    """``bundle_root/rel`` with its parent directories created, never through a link or outside the bundle."""
     rel_path = PurePosixPath(rel)
     if rel_path.is_absolute() or ".." in rel_path.parts or not rel_path.parts:
-        raise UnsafeStagingError(f"Generated native bundle path escapes the bundle: {rel}")
-    target = bundle_root.joinpath(*rel_path.parts)
+        raise UnsafeStagingError(f"{what} path escapes the bundle: {rel}")
     current = bundle_root
     for part in rel_path.parts[:-1]:
         current = current / part
@@ -139,12 +139,35 @@ def _write_generated(bundle_root: Path, rel: str, text: str) -> None:
                 raise UnsafeStagingError(f"Refusing to write the native bundle through a non-directory: {rel}")
         else:
             current.mkdir()
+    return bundle_root.joinpath(*rel_path.parts)
+
+
+def _write_generated(bundle_root: Path, rel: str, text: str) -> None:
+    target = _bundle_target(bundle_root, rel, what="Generated native bundle")
     if os.path.lexists(target):
         metadata = target.lstat()
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise UnsafeStagingError(f"Refusing to overwrite a linked or special file in the native bundle: {rel}")
         target.unlink()
     target.write_text(text, encoding="utf-8")
+
+
+def _stage_bundle_files(bundle_root: Path, staging: NativeTaskStaging) -> None:
+    """Copy the bundle's single plugin files (bytes and mode kept), each contained in the plugin root.
+
+    The copy never follows a link and never writes over an existing path, so a
+    file swapped for a link after planning, or two pieces with one destination,
+    fail staging instead of staging something else.
+    """
+    plugin_root = staging.source.plugin_root
+    for source_file, dest_rel in staging.bundle.files:
+        destination = _bundle_target(bundle_root, dest_rel, what="Native bundle file")
+        if os.path.lexists(destination):
+            raise UnsafeStagingError(f"Native bundle file destination already exists: {dest_rel}")
+        try:
+            copy_file_secure(source_file, destination, allowed_root=plugin_root)
+        except (UnsafeStagingError, OSError) as exc:
+            raise ValueError(f"Refusing to stage plugin file '{dest_rel}' natively: {exc}") from exc
 
 
 def stage_native_bundle(
@@ -190,6 +213,7 @@ def stage_native_bundle(
             ignore=_runtime_skill_copy_ignore(source_dir, excluded_roots),
         )
         _sanitize_staged_runtime_skills(destination)
+    _stage_bundle_files(bundle_root, staging)
     for rel, text in sorted(bundle.generated.items()):
         _write_generated(bundle_root, rel, text)
     return [f"COPY {BUNDLE_DIRNAME}/ {CONTAINER_ROOT}/"]

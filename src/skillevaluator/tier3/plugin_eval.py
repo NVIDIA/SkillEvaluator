@@ -167,7 +167,7 @@ from skillevaluator.utils.structured_data import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from skillevaluator.plugin_formats import FormatProfile
     from skillevaluator.plugin_manifest import PluginManifestLocation
@@ -227,6 +227,9 @@ class PluginEvalPackage:
     # snapshot the harness adapters stage for the with-plugin arm. ``None`` in
     # the default wrapper mode.
     native_source: NativePluginSource | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
+    # The agents whose with-plugin arm loads the plugin natively in this run's load plan; ``None`` when the
+    # plan was not resolved here (no agents or environment given).
+    native_agents: tuple[str, ...] | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
     # Report-only static inventory outputs (C2). ``None`` for packages built
     # without an inventory (e.g. constructed directly in tests).
     component_coverage: dict[str, Any] | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
@@ -273,6 +276,8 @@ class PluginEvalPackage:
             ),
             # Offline classification of declared skill/rule refs (same classifier as Tier 1).
             "dependency_status_counts": status_counts,
+            # Whether the loose-parts arm can run (native Claude Code; see loose_parts_error for why not).
+            "loose_parts_ready": self.loose_parts_error() is None,
         }
         # Report-only: unsupported component types are listed here, never gated.
         if self.component_coverage is not None:
@@ -292,6 +297,30 @@ class PluginEvalPackage:
         server, must not pass Tier 3 with exit 0.
         """
         return self.skipped and bool(self.provenance()["partial"])
+
+    def loose_parts_error(self, agent: str = "claude-code") -> str | None:
+        """Why the loose-parts arm cannot run for ``agent``, or ``None`` when it can.
+
+        ``not supported: use native ...`` without a native plugin snapshot
+        (wrapper mode) or when the run's plan loads ``agent``'s plugin arm with
+        the wrapper, ``not supported: ...`` for a harness v1 does not measure,
+        and "loose parts equal the skills alone ..." for a plugin with no rule,
+        runnable MCP server, subagent, command, or hook to stage beyond skills.
+        The plugin-level answer is computed once per package.
+        """
+        from skillevaluator.tier3.loose_parts import NOT_SUPPORTED_WRAPPER, not_supported_reason
+
+        if agent != "claude-code":
+            return not_supported_reason(agent)
+        if self.native_agents is not None and agent not in self.native_agents:
+            return f"{NOT_SUPPORTED_WRAPPER} ({agent}'s plugin arm does not load the plugin natively in this run)"
+        return self._loose_parts_plugin_error
+
+    @functools.cached_property
+    def _loose_parts_plugin_error(self) -> str | None:
+        from skillevaluator.tier3.loose_parts import loose_parts_error
+
+        return loose_parts_error(self.native_source)
 
     def integration_evidence_error(self) -> str | None:
         """Explain why an Integration arm would not test composition."""
@@ -507,6 +536,7 @@ def prepare_plugin_eval_package(
     return PluginEvalPackage(
         plugin_name=plugin.name,
         native_source=native_source,
+        native_agents=_native_agents(native_plan),
         package_path=package_path,
         include_skills=member_skills,
         unresolved_mcp_servers=mcp.provider_names,
@@ -646,6 +676,11 @@ def _resolve_plugin_rules(
     if plugin.contained and not isinstance(rules_section, list):
         return tuple(_discover_contained_rule_files(plugin.plugin_root)), ()
     return _resolve_rules(rules_section, plugin.plugin_dir, plugin.plugin_root, resolver)
+
+
+def _native_agents(plan: Mapping[str, AgentLoadDecision] | None) -> tuple[str, ...] | None:
+    """The agents a resolved load plan loads natively (``None`` when no plan was resolved)."""
+    return None if plan is None else tuple(agent for agent, decision in plan.items() if decision.native)
 
 
 def _native_snapshot(

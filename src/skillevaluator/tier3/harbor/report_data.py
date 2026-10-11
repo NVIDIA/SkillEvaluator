@@ -816,7 +816,9 @@ def load_agent_data(
             statistics = _load_bounded_json(statistics_file, agent_diagnostics, artifact="statistics")
             if isinstance(statistics, dict):
                 for block in STATISTICS_BLOCKS:
-                    if isinstance(statistics.get(block), dict):
+                    # A block the collector did not compute (``lift_ladder`` without a loose-parts arm) is
+                    # persisted as null and loads back as None; the report ignores both.
+                    if isinstance(statistics.get(block), dict) or (block in statistics and statistics[block] is None):
                         agent_info[block] = statistics[block]
 
         for arm in _REPORT_ARMS:

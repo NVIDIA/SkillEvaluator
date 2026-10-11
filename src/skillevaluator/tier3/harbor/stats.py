@@ -9,7 +9,7 @@ all file I/O and hands this module plain observations, so the functions here
 are pure and deterministic.
 
 The blocks produced here (``lift_uncertainty``, ``reliability``, ``cost``,
-``token_efficiency``, ``context_cost_measured`` and
+``token_efficiency``, ``context_cost_measured``, ``lift_ladder`` and
 ``integration_completeness``) follow the shared C4 statistics contract.
 """
 
@@ -50,15 +50,19 @@ PRECISION_INSUFFICIENT = "insufficient"
 ARM_WITH = "with_skill"
 ARM_WITHOUT = "without_skill"
 ARM_SUM_OF_PARTS = "sum_of_parts"
+# The plugin's skills, rules and MCP servers staged as plain pieces, without the plugin packaging.
+ARM_LOOSE_PARTS = "loose_parts"
 
 # The statistics blocks of one agent, in the order build_agent_statistics()
 # returns them. Each is persisted in statistics.json and in the agent's results.
+# ``lift_ladder`` is ``None`` unless the agent ran a loose-parts arm.
 STATISTICS_BLOCKS = (
     "lift_uncertainty",
     "reliability",
     "cost",
     "token_efficiency",
     "context_cost_measured",
+    "lift_ladder",
     "integration_completeness",
 )
 
@@ -336,6 +340,19 @@ def expanded_tail(n_cases: int, confidence: float) -> float:
     return _normal_cdf(-math.sqrt(n_cases / (n_cases - 1)) * t_value)
 
 
+def _resample_means(deltas: Sequence[float], *, resamples: int, seed: int) -> list[float]:
+    """The mean of each case resample, in draw order, from a ``random.Random(seed)`` stream.
+
+    ``rng.choices`` picks every index from the seed and ``len(deltas)`` alone,
+    never from the values, so two delta lists of the same length are resampled
+    at the same case indices. That is why the lift ladder's steps add up in
+    every resample, not only on their means.
+    """
+    n_cases = len(deltas)
+    rng = random.Random(seed)
+    return [math.fsum(rng.choices(deltas, k=n_cases)) / n_cases for _ in range(resamples)]
+
+
 def paired_case_bootstrap(
     treatment: Mapping[str, float],
     control: Mapping[str, float],
@@ -387,8 +404,7 @@ def paired_case_bootstrap(
     tail = expanded_tail(n_cases, confidence)
     if n_cases >= LIFT_CI_MIN_PAIRED_CASES:
         resamples = max(resamples, math.ceil(LIFT_BOOTSTRAP_TAIL_RESAMPLES / tail))
-    rng = random.Random(seed)
-    means = sorted(math.fsum(rng.choices(deltas, k=n_cases)) / n_cases for _ in range(resamples))
+    means = sorted(_resample_means(deltas, resamples=resamples, seed=seed))
     ci_low = _percentile(means, tail)
     ci_high = _percentile(means, 1.0 - tail)
     rounded_low = round(ci_low, 4)
@@ -503,6 +519,296 @@ def lift_by_case_type(
             "reason": reason,
         }
     return split
+
+
+# ---------------------------------------------------------------------------
+# Lift ladder: four arms on one common basis
+# ---------------------------------------------------------------------------
+
+LADDER_SCHEMA_VERSION = "1.0"
+LADDER_BASIS = "common_dimensions_all_arms"
+GLUE_BASIS = "common_dimensions_skill_arms"
+# Every arm can score these, the no-plugin arm included (it has no skill to discover or use).
+COMMON_BASIS_DIMENSIONS = ("security", "correctness", "effectiveness")
+# The three arms that stage skills can all score every dimension, routing and wasted work included.
+GLUE_BASIS_DIMENSIONS = tuple(DIMENSION_MAPPING)
+# The ladder's arms, cheapest first: role -> arm key.
+LADDER_ARMS = {"none": ARM_WITHOUT, "skills": ARM_SUM_OF_PARTS, "loose": ARM_LOOSE_PARTS, "full": ARM_WITH}
+# step -> (treatment arm, control arm). skill + capability + integration = plugin, per case.
+LADDER_STEPS = {
+    "skill": (ARM_SUM_OF_PARTS, ARM_WITHOUT),
+    "capability": (ARM_LOOSE_PARTS, ARM_SUM_OF_PARTS),
+    "integration": (ARM_WITH, ARM_LOOSE_PARTS),
+    "plugin": (ARM_WITH, ARM_WITHOUT),
+}
+# Not a rung: capability + integration, the Bundle lift on the ladder's common basis.
+LADDER_BUNDLE = (ARM_WITH, ARM_SUM_OF_PARTS)
+_GLUE_ARMS = (ARM_SUM_OF_PARTS, ARM_LOOSE_PARTS, ARM_WITH)
+
+EXCLUDED_LOAD_FAILED = "load_failed"
+EXCLUDED_NOT_SCORED = "not_scored"
+EXCLUDED_NO_COMMON_DIMENSION = "no_common_dimension"
+
+
+@dataclass(frozen=True)
+class CommonCaseScores:
+    """Every arm scored on one basis: the same cases, and per case the same dimensions.
+
+    ``scores[arm][case_id]`` is the arm's mean over the dimensions every arm
+    scored for that case. Every arm holds exactly ``case_ids``. ``dimensions``
+    lists the dimensions used for at least one case, in report order.
+    ``excluded_cases`` holds one entry per dropped case: ``case``, ``reason``
+    (``load_failed``, ``not_scored`` or ``no_common_dimension``, in that
+    precedence), ``missing_arms`` (arms with no score for it) and
+    ``load_failures`` (``{arm: reason}``).
+    """
+
+    scores: Mapping[str, Mapping[str, float]]
+    case_ids: tuple[str, ...]
+    dimensions: tuple[str, ...]
+    excluded_cases: tuple[Mapping[str, Any], ...] = ()
+
+
+def _shared_case_score(
+    case_dimensions: Mapping[str, Mapping[str, Mapping[str, float]]],
+    case_id: str,
+    dimensions: Collection[str],
+) -> tuple[list[str], dict[str, float]]:
+    """The *dimensions* every arm scored for one case, and each arm's mean over them."""
+    shared = set(dimensions)
+    for by_case in case_dimensions.values():
+        shared &= set(by_case.get(case_id, {}))
+    ordered = [dimension for dimension in _DIMENSION_ORDER if dimension in shared]
+    if not ordered or not case_dimensions:
+        return [], {}
+    return ordered, {
+        arm: math.fsum(by_case[case_id][dimension] for dimension in ordered) / len(ordered)
+        for arm, by_case in case_dimensions.items()
+    }
+
+
+def _clean_load_failures(load_failures_by_case: Mapping[str, Mapping[str, str]] | None) -> dict[str, dict[str, str]]:
+    failures: dict[str, dict[str, str]] = {}
+    for case_id, by_arm in (load_failures_by_case or {}).items():
+        if isinstance(by_arm, Mapping) and by_arm:
+            failures[str(case_id)] = {str(arm): str(reason) for arm, reason in by_arm.items()}
+    return failures
+
+
+def common_case_scores(
+    arms: Mapping[str, ArmObservations],
+    *,
+    dimensions: Collection[str] = COMMON_BASIS_DIMENSIONS,
+    expected_case_ids: Sequence[str] | None = None,
+    load_failures_by_case: Mapping[str, Mapping[str, str]] | None = None,
+) -> CommonCaseScores:
+    """Score every arm per case on the *dimensions* that every arm scored for that case.
+
+    Listwise: a case is kept only when every arm scored it, no arm failed its
+    load verification for it (``load_failures_by_case``: ``{case: {arm:
+    reason}}``, any arm counts), and the arms share at least one of
+    *dimensions* for it. Otherwise it is dropped from every arm and listed in
+    ``excluded_cases``. Correctness is N/A in every arm for a case without
+    ``ground_truth``, so it drops out of that case for all arms alike. An
+    expected case no arm scored is listed with every arm missing.
+    """
+    names = list(arms)
+    case_dimensions = {name: case_dimension_means(arms[name].trials) for name in names}
+    failures = _clean_load_failures(load_failures_by_case)
+    universe = sorted(
+        {
+            *(case_id for by_case in case_dimensions.values() for case_id in by_case),
+            *(str(case_id) for case_id in expected_case_ids or [] if str(case_id)),
+        }
+    )
+    scores: dict[str, dict[str, float]] = {name: {} for name in names}
+    kept: list[str] = []
+    used: set[str] = set()
+    excluded: list[Mapping[str, Any]] = []
+    for case_id in universe:
+        missing = [name for name in names if not case_dimensions[name].get(case_id)]
+        failed = failures.get(case_id, {})
+        shared, case_scores = ([], {}) if missing else _shared_case_score(case_dimensions, case_id, dimensions)
+        if failed or missing or not shared:
+            if failed:
+                reason = EXCLUDED_LOAD_FAILED
+            elif missing:
+                reason = EXCLUDED_NOT_SCORED
+            else:
+                reason = EXCLUDED_NO_COMMON_DIMENSION
+            excluded.append({"case": case_id, "reason": reason, "missing_arms": missing, "load_failures": dict(failed)})
+            continue
+        kept.append(case_id)
+        used.update(shared)
+        for name, value in case_scores.items():
+            scores[name][case_id] = value
+    return CommonCaseScores(
+        scores=scores,
+        case_ids=tuple(kept),
+        dimensions=tuple(dimension for dimension in _DIMENSION_ORDER if dimension in used),
+        excluded_cases=tuple(excluded),
+    )
+
+
+_STEP_FIELDS = ("estimate", "ci_low", "ci_high", "n_cases", "precision")
+
+
+def _ladder_step(
+    scores: Mapping[str, Mapping[str, float]], arms: tuple[str, str], case_ids: Sequence[str]
+) -> dict[str, Any]:
+    """One step's paired bootstrap over *case_ids* (default seed and resamples, like every lift)."""
+    treatment, control = arms
+    return paired_case_bootstrap(
+        {case_id: scores[treatment][case_id] for case_id in case_ids},
+        {case_id: scores[control][case_id] for case_id in case_ids},
+    )
+
+
+def _step_fields(result: Mapping[str, Any], *, split: bool) -> dict[str, Any]:
+    """A step's reported fields. A case-type group below the pair minimum keeps its estimate but no interval."""
+    step = {field: result[field] for field in _STEP_FIELDS}
+    if split and int(result["n_cases"]) < LIFT_CI_MIN_PAIRED_CASES:
+        step["ci_low"] = step["ci_high"] = None
+    return step
+
+
+def _ladder_rungs(
+    scores: Mapping[str, Mapping[str, float]], case_ids: Sequence[str], *, split: bool = False
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    """The four steps and the common-basis Bundle lift over one case set, plus the first step's full result.
+
+    *split* marks a case-type group: as in :func:`lift_by_case_type`, fewer
+    than ``LIFT_CI_MIN_PAIRED_CASES`` pairs give a point estimate only.
+    """
+    results = {name: _ladder_step(scores, arms, case_ids) for name, arms in LADDER_STEPS.items()}
+    bundle = _ladder_step(scores, LADDER_BUNDLE, case_ids)
+    steps = {name: _step_fields(result, split=split) for name, result in results.items()}
+    return steps, _step_fields(bundle, split=split), results["skill"]
+
+
+def _ladder_glue(
+    arms: Mapping[str, ArmObservations],
+    basis: CommonCaseScores,
+    cross: set[str] | None,
+    failed_arms: Sequence[str],
+) -> dict[str, Any]:
+    """Full plugin minus loose parts on the cross-component common cases, on all five dimensions.
+
+    The cases are the ladder's own (so a case dropped anywhere is dropped
+    here too); per case the dimensions are the ones the three skill arms all
+    scored, which keeps routing (discoverability) and wasted work
+    (efficiency), where glue mostly shows.
+    """
+    glue_failed = [arm for arm in failed_arms if arm in _GLUE_ARMS]
+    if cross is None:
+        case_ids: list[str] = []
+        excluded: list[str] = []
+        reason: str | None = "The run recorded no case types, so no case is known to be cross-component."
+    else:
+        case_ids = [case_id for case_id in basis.case_ids if case_id in cross]
+        excluded = [str(entry["case"]) for entry in basis.excluded_cases if entry["case"] in cross]
+        reason = None
+    case_dimensions = {arm: case_dimension_means(arms[arm].trials) for arm in _GLUE_ARMS}
+    full: dict[str, float] = {}
+    loose: dict[str, float] = {}
+    used: set[str] = set()
+    for case_id in case_ids:
+        shared, case_scores = _shared_case_score(case_dimensions, case_id, GLUE_BASIS_DIMENSIONS)
+        if not shared:  # cannot happen for a ladder case: every arm shares a common-basis dimension
+            continue
+        used.update(shared)
+        full[case_id], loose[case_id] = case_scores[ARM_WITH], case_scores[ARM_LOOSE_PARTS]
+    result = paired_case_bootstrap(full, loose)
+    n_cases = int(result["n_cases"])
+    # The glue is read on one case type, so it follows the case-type split: no interval below the pair minimum.
+    interval = n_cases >= LIFT_CI_MIN_PAIRED_CASES
+    if reason is None and not n_cases:
+        reason = "No cross-component case was scored in every arm."
+    elif reason is None and n_cases < LIFT_CI_MIN_PAIRED_CASES:
+        reason = (
+            f"Only {n_cases} paired cross-component case(s); "
+            f"at least {LIFT_CI_MIN_PAIRED_CASES} are needed for an interval."
+        )
+    return {
+        "case_type": CASE_TYPE_CROSS_COMPONENT,
+        "basis": GLUE_BASIS,
+        "arms": list(_GLUE_ARMS),
+        "basis_dimensions": [dimension for dimension in _DIMENSION_ORDER if dimension in used],
+        "n": n_cases,
+        "lift": result["estimate"],
+        "ci_low": result["ci_low"] if interval else None,
+        "ci_high": result["ci_high"] if interval else None,
+        "precision": result["precision"],
+        "confidence": result["confidence"],
+        "partial": bool(excluded or glue_failed),
+        "failed_arms": glue_failed,
+        "excluded_cases": excluded,
+        "reason": reason,
+    }
+
+
+def lift_ladder(
+    arms: Mapping[str, ArmObservations],
+    cross_component_case_ids: Collection[str] | None,
+    *,
+    expected_case_ids: Sequence[str] | None = None,
+    load_failures_by_case: Mapping[str, Mapping[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Split the plugin lift into four steps that add up, on one common basis.
+
+    Report-only. ``arms`` is keyed like :data:`LADDER_ARMS`; an arm that is
+    absent leaves every case unscored and is listed in ``failed_arms``. All
+    four arms are scored by :func:`common_case_scores`, so a case is kept only
+    when every arm scored it and passed load verification. Each step
+    (:data:`LADDER_STEPS`) and the common-basis Bundle lift go through
+    :func:`paired_case_bootstrap` over the same cases with the same seed, so
+    ``skill + capability + integration = plugin`` per case, on the means, and
+    in every resample (the intervals themselves are percentiles and do not
+    add). ``by_case_type`` repeats the steps on the cross-component cases and
+    on the others; ``None`` when the case types were not recorded. ``glue``
+    is the Integration lift on cross-component cases on the five-dimension
+    basis of the three skill arms; the report reads its verdict there.
+    """
+    observed = {arm: arms.get(arm) for arm in LADDER_ARMS.values()}
+    failed_arms = [
+        arm
+        for arm, observations in observed.items()
+        if observations is None or not observations.succeeded or observations.job_failure
+    ]
+    ladder_arms = {arm: observations or ArmObservations("missing") for arm, observations in observed.items()}
+    basis = common_case_scores(
+        ladder_arms, expected_case_ids=expected_case_ids, load_failures_by_case=load_failures_by_case
+    )
+    steps, bundle, first = _ladder_rungs(basis.scores, basis.case_ids)
+    cross = None if cross_component_case_ids is None else {str(case_id) for case_id in cross_component_case_ids}
+    by_case_type: dict[str, Any] | None = None
+    if cross is not None:
+        by_case_type = {}
+        for case_type in (CASE_TYPE_CROSS_COMPONENT, CASE_TYPE_OTHER):
+            is_cross = case_type == CASE_TYPE_CROSS_COMPONENT
+            ids = [case_id for case_id in basis.case_ids if (case_id in cross) is is_cross]
+            group_steps, group_bundle, _ = _ladder_rungs(basis.scores, ids, split=True)
+            by_case_type[case_type] = {"n_cases": len(ids), "steps": group_steps, "bundle": group_bundle}
+    expected_ids = {str(case_id) for case_id in expected_case_ids or [] if str(case_id)}
+    expected_cases = len(expected_ids) if expected_ids else len(basis.case_ids) + len(basis.excluded_cases)
+    return {
+        "schema_version": LADDER_SCHEMA_VERSION,
+        "advisory": True,
+        "report_only": True,
+        "arms": dict(LADDER_ARMS),
+        "basis": LADDER_BASIS,
+        "dimensions": list(basis.dimensions),
+        "n_cases": len(basis.case_ids),
+        "expected_cases": expected_cases,
+        "partial": bool(basis.excluded_cases or failed_arms or len(basis.case_ids) < expected_cases),
+        "failed_arms": failed_arms,
+        "excluded_cases": [dict(entry) for entry in basis.excluded_cases],
+        "bootstrap": {field: first[field] for field in ("method", "interval", "confidence", "seed", "resamples")},
+        "steps": steps,
+        "bundle": bundle,
+        "by_case_type": by_case_type,
+        "glue": _ladder_glue(ladder_arms, basis, cross, failed_arms),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -784,6 +1090,7 @@ def integration_completeness(
     stop_on_pass: bool,
     pass_threshold: float,
     requested: bool = True,
+    loose_parts_arm: ArmObservations | None = None,
 ) -> dict[str, Any]:
     """Check that the Integration arms cover the same cases with enough attempts.
 
@@ -795,30 +1102,61 @@ def integration_completeness(
     ``requested`` (effectiveness-only lift, ``--skip-baseline``): there is
     nothing to compare, so nothing is incomplete. A requested arm without
     observations is listed in ``failed_arms``.
+
+    With a ``loose_parts_arm`` the result also holds ``loose_parts``: the same
+    check of the loose-parts arm against the full plugin, which the
+    Integration lift (glue) verdict reads. The full-versus-skills keys are
+    unchanged by it.
     """
-    if not requested:
-        return {"complete": None, "missing_cases": [], "failed_arms": [], "attempt_shortfall": []}
-    if with_arm is None or sum_of_parts_arm is None:
+    pair = partial(
+        _pair_completeness,
+        with_arm,
+        expected_case_ids=expected_case_ids,
+        n_attempts=n_attempts,
+        stop_on_pass=stop_on_pass,
+        pass_threshold=pass_threshold,
+    )
+    if requested:
+        result = pair(ARM_SUM_OF_PARTS, sum_of_parts_arm)
+    else:
+        result = {"complete": None, "missing_cases": [], "failed_arms": [], "attempt_shortfall": []}
+    if loose_parts_arm is not None:
+        result["loose_parts"] = pair(ARM_LOOSE_PARTS, loose_parts_arm)
+    return result
+
+
+def _pair_completeness(
+    with_arm: ArmObservations | None,
+    control_name: str,
+    control_arm: ArmObservations | None,
+    *,
+    expected_case_ids: Sequence[str] | None,
+    n_attempts: int,
+    stop_on_pass: bool,
+    pass_threshold: float,
+) -> dict[str, Any]:
+    """The plugin arm against one control arm: missing cases, failed arms and attempt shortfall."""
+    if with_arm is None or control_arm is None:
         missing_arms = [
-            arm for arm, observed in ((ARM_WITH, with_arm), (ARM_SUM_OF_PARTS, sum_of_parts_arm)) if observed is None
+            arm for arm, observed in ((ARM_WITH, with_arm), (control_name, control_arm)) if observed is None
         ]
         return {"complete": False, "missing_cases": [], "failed_arms": missing_arms, "attempt_shortfall": []}
 
     failed_arms: list[str] = []
     if not with_arm.succeeded:
         failed_arms.append(ARM_WITH)
-    if not sum_of_parts_arm.succeeded or sum_of_parts_arm.job_failure:
-        failed_arms.append(ARM_SUM_OF_PARTS)
+    if not control_arm.succeeded or control_arm.job_failure:
+        failed_arms.append(control_name)
 
     with_flags = _scored_pass_flags(with_arm.trials, pass_threshold)
-    sop_flags = _scored_pass_flags(sum_of_parts_arm.trials, pass_threshold)
+    control_flags = _scored_pass_flags(control_arm.trials, pass_threshold)
     expected = list(dict.fromkeys(str(case_id) for case_id in (expected_case_ids or []) if str(case_id)))
-    compared = expected or sorted(set(with_flags) | set(sop_flags))
+    compared = expected or sorted(set(with_flags) | set(control_flags))
 
-    missing_cases = [case_id for case_id in compared if not with_flags.get(case_id) or not sop_flags.get(case_id)]
+    missing_cases = [case_id for case_id in compared if not with_flags.get(case_id) or not control_flags.get(case_id)]
     attempt_shortfall: list[dict[str, Any]] = []
     for case_id in compared:
-        for arm, flags_by_case in ((ARM_WITH, with_flags), (ARM_SUM_OF_PARTS, sop_flags)):
+        for arm, flags_by_case in ((ARM_WITH, with_flags), (control_name, control_flags)):
             flags = flags_by_case.get(case_id, [])
             required = _required_attempts(flags, n_attempts=n_attempts, stop_on_pass=stop_on_pass)
             if len(flags) < required:
@@ -847,11 +1185,15 @@ def build_agent_statistics(
     sum_of_parts_requested: bool,
     baseline_is_sum_of_parts: bool = False,
     cross_component_case_ids: Collection[str] | None = None,
+    load_failures_by_case: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Assemble every C4 statistics block for one agent.
 
-    ``arms`` is keyed by ``with_skill``, ``without_skill`` and ``sum_of_parts``;
-    absent keys mean the arm was not run. A lift interval uses every case
+    ``arms`` is keyed by ``with_skill``, ``without_skill``, ``sum_of_parts``
+    and ``loose_parts``; absent keys mean the arm was not run. Only an agent
+    with ``loose_parts`` observations gets a ``lift_ladder`` block
+    (:func:`lift_ladder`, which drops the cases in ``load_failures_by_case``);
+    otherwise the block is ``None`` and every other block is unchanged. A lift interval uses every case
     scored in both of its arms: one failed trial (a judge error or a timeout)
     marks it ``partial`` with ``n_cases`` of ``expected_cases`` pairs instead of
     removing it. Per-arm reliability, cost and token blocks cover only arms
@@ -870,6 +1212,22 @@ def build_agent_statistics(
     with_arm = arms.get(ARM_WITH)
     without_arm = arms.get(ARM_WITHOUT)
     sop_arm = arms.get(ARM_SUM_OF_PARTS) if sum_of_parts_requested else None
+    loose_arm = arms.get(ARM_LOOSE_PARTS)
+    ladder = None
+    # A legacy two-arm run's only baseline holds the member skills, so it has no no-plugin rung to stand on.
+    if loose_arm is not None and not baseline_is_sum_of_parts:
+        ladder_arms = {
+            ARM_WITHOUT: without_arm,
+            ARM_SUM_OF_PARTS: sop_arm,
+            ARM_LOOSE_PARTS: loose_arm,
+            ARM_WITH: with_arm,
+        }
+        ladder = lift_ladder(
+            {arm: observed for arm, observed in ladder_arms.items() if observed is not None},
+            cross_component_case_ids,
+            expected_case_ids=expected_case_ids,
+            load_failures_by_case=load_failures_by_case,
+        )
 
     effectiveness = None
     if baseline_is_sum_of_parts:
@@ -915,6 +1273,7 @@ def build_agent_statistics(
         "cost": cost,
         "token_efficiency": token_efficiency,
         "context_cost_measured": context_cost_measured(with_arm, without_arm),
+        "lift_ladder": ladder,
         "integration_completeness": integration_completeness(
             with_arm,
             sop_arm,
@@ -923,5 +1282,6 @@ def build_agent_statistics(
             stop_on_pass=stop_on_pass,
             pass_threshold=pass_threshold,
             requested=sum_of_parts_requested,
+            loose_parts_arm=loose_arm,
         ),
     }

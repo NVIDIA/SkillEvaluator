@@ -34,6 +34,8 @@ from functools import cache, cached_property
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
 
+from skillevaluator.constants import LADDER_INTEGRATION_LABEL, LADDER_WRAPPER_LABEL
+
 # The plugin state vocabularies are a module that imports nothing. Every reporter, and so
 # every CLI command, imports this module, so the Tier 3 signal, runtime-evidence, and
 # statistics helpers are imported only inside the Tier 3 views that use them.
@@ -85,6 +87,7 @@ ARM_LABELS = {
     "without_skill": "Baseline (no plugin)",
     "baseline": "Baseline (no plugin)",
     "sum_of_parts": "Sum of parts",
+    "loose_parts": "Loose parts",
 }
 # The arms that ran with the plugin (newer payloads name it with_plugin).
 PLUGIN_ARMS = frozenset({"with_skill", "with_plugin"})
@@ -93,7 +96,7 @@ PLUGIN_ARMS = frozenset({"with_skill", "with_plugin"})
 # describe the sum of parts, not a run without the plugin.
 SUM_OF_PARTS_BASELINE_LABEL = "Sum-of-parts baseline"
 _BASELINE_ARMS = frozenset({"without_skill", "baseline"})
-_ARM_ORDER = ("with_skill", "with_plugin", "without_skill", "baseline", "sum_of_parts")
+_ARM_ORDER = ("with_skill", "with_plugin", "without_skill", "baseline", "sum_of_parts", "loose_parts")
 # The JSON keys stay ``integration``/``integration_lift``; readers see "Bundle lift" (formerly "Integration lift").
 BUNDLE_LIFT_LABEL = "Bundle lift"
 BUNDLE_LIFT_DEFINITION = (
@@ -104,7 +107,8 @@ _LIFT_KINDS = (("effectiveness", "Effectiveness lift"), ("integration", BUNDLE_L
 _SUM_OF_PARTS_LIFT_LABEL = f"{BUNDLE_LIFT_LABEL} (sum-of-parts baseline)"
 _CASE_TYPE_LABELS = (("cross_component", "cross-component"), ("other", "other"))
 _PRECISION_CLASSES = {"adequate": "ok", "low": "warn", "insufficient": "fail"}
-_INTEGRATION_LIFT_MODES = frozenset({"integration", "both"})
+# ``ladder`` runs the skills-only arm too, so it also measures the Bundle lift.
+_INTEGRATION_LIFT_MODES = frozenset({"integration", "both", "ladder"})
 _LIFT_MODE_NAMES = _INTEGRATION_LIFT_MODES | {"effectiveness"}
 # Human labels of the Bundle lift verdicts; the JSON values keep their ``*_integration`` names.
 _INTEGRATION_VERDICTS = {
@@ -1253,6 +1257,7 @@ def tier3_plugin_view(payload: object) -> dict[str, Any] | None:
         "lift_modes": context.modes,
         "sum_of_parts_baseline": context.sum_of_parts_baseline,
         "integration": integration,
+        "lift_ladder": lift_ladder_view(source, context=context),
         "statistics": statistics,
         "signals": signals,
         "hook_census": hook_census_view(source, context=context),
@@ -1268,6 +1273,7 @@ def tier3_plugin_view(payload: object) -> dict[str, Any] | None:
         "mcp_pinning",
         "lift_modes",
         "integration",
+        "lift_ladder",
         "statistics",
         "signals",
         "hook_census",
@@ -1864,6 +1870,366 @@ def _by_case_type_line(split: object) -> str:
     return " ".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Lift ladder (loose-parts arm)
+#
+# One display model for every format, the way the run status is decided in
+# one place: each reporter prints these strings and rows as they are and never
+# words a ladder number on its own.
+# ---------------------------------------------------------------------------
+
+LADDER_TITLE = "Lift ladder"
+_LADDER_PIECES = (
+    "The lift ladder adds a loose-parts arm: the plugin's skills, rules and MCP servers staged as plain pieces, "
+    "with no plugin packaging."
+)
+LADDER_DEFINITION = (
+    f"{_LADDER_PIECES} Skill lift (skills only minus no plugin) + Capability lift (loose parts minus skills only) "
+    "+ Integration lift (glue: full plugin minus loose parts) = Plugin lift on the common basis, per case."
+)
+LADDER_WRAPPER_DEFINITION = (
+    f"{_LADDER_PIECES} Skill lift (skills only minus no plugin) + Capability lift (loose parts minus skills only) "
+    f"+ {LADDER_WRAPPER_LABEL} = Plugin lift on the common basis, per case. In wrapper mode the full arm loads "
+    "the plugin through SkillEvaluator's generated wrapper, so that step measures the wrapper and gets no verdict."
+)
+LADDER_BASIS_NOTE = (
+    "The ladder total is labeled 'Plugin lift on the common basis' and can differ from the headline Plugin lift: "
+    "the ladder scores every arm only on the dimensions all four arms scored, over the cases all four scored, "
+    "while the headline compares two arms on the dimensions both scored."
+)
+LADDER_HOOKS_CAVEAT = "v1 counts hooks as glue, policy hooks included."
+_LADDER_ROWS = (
+    ("skill", "Skill lift", "skills only minus no plugin"),
+    ("capability", "Capability lift", "loose parts minus skills only"),
+    ("integration", "Integration lift (glue)", "full plugin minus loose parts"),
+    ("plugin", "Plugin lift on the common basis", "full plugin minus no plugin"),
+    ("bundle", "Bundle lift on the common basis", "full plugin minus skills only"),
+)
+# The glue step reuses the Bundle lift's verdict values; its labels name the glue.
+_GLUE_VERDICTS = {
+    "real_integration": ("Real integration lift", "ok"),
+    "cosmetic_bundling": ("Cosmetic glue", "warn"),
+    "negative_integration": ("Negative integration lift", "fail"),
+    "inconclusive": ("Inconclusive", "warn"),
+}
+_LADDER_NO_VERDICT = ("No verdict (wrapper mode)", "neutral")
+_PARITY_ISSUES = {
+    "differs": "differs",
+    "missing": "missing",
+    "glue_in_loose_parts": "is plugin-only glue but was staged as a loose part",
+    "not_a_skill": "is not a skill",
+}
+_LADDER_SIGNALS = (
+    ("routing", "Routing (P/R/F1)"),
+    ("tool_selection", "Tool selection (P/R/F1)"),
+    ("order", "Order"),
+    ("handoff", "Handoff"),
+    ("conflict", "Conflict"),
+)
+
+
+def lift_ladder_view(payload: object, *, context: _Tier3Context | None = None) -> dict[str, Any] | None:
+    """Return the lift ladder display model, or ``None`` when the run neither ran nor requested it.
+
+    One entry per agent with a ``lift_ladder`` block when more than one has
+    one (``named``), else one entry for the run. Each entry carries the
+    one-line equation (``line``), the step ``rows``, the glue verdict, the
+    excluded cases, the loose-parts census with its capability check, and the
+    signals next to the glue. An agent whose loose arm did not run is an
+    entry with ``measured`` False and its ``reason``.
+    """
+    source = _mapping(payload)
+    context = context or _tier3_context(source)
+    blocks = [(name, block) for name, agent in _agents(source) if (block := _mapping(agent.get("lift_ladder")))]
+    run_block = _mapping(source.get("lift_ladder"))
+    modes = context.modes or {}
+    if len(blocks) > 1:
+        entries = [_ladder_entry(block, name) for name, block in blocks]
+    elif run_block or blocks:
+        block = run_block or blocks[0][1]
+        entries = [
+            _ladder_entry(block, text(block.get("agent"), limit=_LABEL_CHARS) or (blocks[0][0] if blocks else ""))
+        ]
+    elif "ladder" in (modes.get("requested"), modes.get("effective")):
+        reason = text(context.provenance.get("ladder_skip_reason")) or (
+            "The lift ladder was requested, but this run recorded no loose-parts arm."
+        )
+        entries = [_ladder_entry({"measured": False, "reason": reason}, "")]
+    else:
+        return None
+    run_agent = text(run_block.get("agent"), limit=_LABEL_CHARS)
+    primary = next((entry for entry in entries if entry["agent"] == run_agent), entries[0])
+    native = any(entry["measured"] and not entry["wrapper"] for entry in entries)
+    wrapper = any(entry["measured"] and entry["wrapper"] for entry in entries)
+    return {
+        "title": LADDER_TITLE,
+        "definition": LADDER_WRAPPER_DEFINITION if wrapper and not native else LADDER_DEFINITION,
+        # Only a measured ladder has a total to compare with the headline Plugin lift.
+        "basis_note": LADDER_BASIS_NOTE if native or wrapper else "",
+        "entries": entries,
+        "named": len(entries) > 1,
+        "agent": primary["agent"],
+        "status_text": primary["status_text"],
+        "status_class": primary["status_class"],
+    }
+
+
+def _ladder_entry(block: Mapping[str, Any], agent: str) -> dict[str, Any]:
+    # Only a natively loaded full arm measures the plugin's glue; wrapper mode or an unrecorded mode does not.
+    wrapper = text(block.get("full_arm_load"), limit=_KEYWORD_CHARS) != "native"
+    steps = _mapping(block.get("steps"))
+    measured = block.get("measured") is not False and bool(steps)
+    integration_label = LADDER_WRAPPER_LABEL if wrapper else LADDER_INTEGRATION_LABEL
+    loose = _mapping(block.get("loose_parts"))
+    dropped, _ = _names(loose.get("dropped_as_glue"))
+    entry: dict[str, Any] = {
+        "agent": agent,
+        "measured": measured,
+        "wrapper": wrapper,
+        "integration_label": integration_label,
+        "reason": text(block.get("reason")),
+        "loose_parts_line": _loose_parts_line(loose),
+        "hooks_caveat": LADDER_HOOKS_CAVEAT if any(name.startswith("hook:") for name in dropped) else "",
+        "capability_line": _capability_line(loose, integration_label),
+    }
+    if not measured:
+        reason = entry["reason"] or "No loose-parts arm was recorded for this agent."
+        entry.update(
+            reason=reason,
+            line=f"Not measured: {reason}",
+            rows=[],
+            glue=None,
+            excluded="",
+            signals=[],
+            signals_line="",
+            completeness=None,
+            confidence="CI",
+            status_text="NOT MEASURED",
+            status_class="warn",
+        )
+        return entry
+    confidence = number(_mapping(block.get("bootstrap")).get("confidence"))
+    glue = _glue_view(_mapping(block.get("glue")), integration_label, wrapper=wrapper)
+    signals = _ladder_signal_rows(_mapping(_mapping(block.get("glue")).get("signals")))
+    entry.update(
+        line=_ladder_line(block, glue, wrapper=wrapper),
+        rows=_ladder_rows(block, wrapper=wrapper),
+        glue=glue,
+        excluded=_excluded_cases_line(block.get("excluded_cases")),
+        signals=signals,
+        signals_line=(
+            "Signals next to the glue (Loose parts → Plugin): "
+            + "; ".join(f"{row['name']} {row['loose']} → {row['full']}" for row in signals)
+            + "."
+            if signals
+            else ""
+        ),
+        completeness=completeness_issues_view(block.get("completeness")),
+        confidence=f"{confidence * 100:.0f}% CI" if confidence is not None else "CI",
+        status_text=glue["verdict_label"],
+        status_class=glue["verdict_class"],
+    )
+    return entry
+
+
+def _ladder_rows(block: Mapping[str, Any], *, wrapper: bool) -> list[dict[str, Any]]:
+    steps = _mapping(block.get("steps"))
+    split = _mapping(block.get("by_case_type"))
+    rows = []
+    for key, label, arms in _LADDER_ROWS:
+        if key == "integration" and wrapper:
+            label, arms = LADDER_WRAPPER_LABEL, "full wrapper arm minus loose parts"
+        step = _mapping(block.get("bundle")) if key == "bundle" else _mapping(steps.get(key))
+        low, high = number(step.get("ci_low")), number(step.get("ci_high"))
+        precision = text(step.get("precision"), limit=_KEYWORD_CHARS).lower()
+        groups = {}
+        for case_type, _ in _CASE_TYPE_LABELS:
+            group = _mapping(split.get(case_type))
+            group_step = (
+                _mapping(group.get("bundle")) if key == "bundle" else _mapping(_mapping(group.get("steps")).get(key))
+            )
+            groups[case_type] = fmt_signed(group_step.get("estimate")) if group else ""
+        rows.append(
+            {
+                "key": key,
+                "label": label,
+                "arms": arms,
+                "estimate": fmt_signed(step.get("estimate")),
+                "interval": f"[{fmt_signed(low)}, {fmt_signed(high)}]"
+                if low is not None and high is not None
+                else "n/a",
+                "n_cases": fmt_count(step.get("n_cases")),
+                "precision": precision or "unknown",
+                "precision_class": _PRECISION_CLASSES.get(precision, "neutral"),
+                "cross_component": groups["cross_component"],
+                "other": groups["other"],
+            }
+        )
+    return rows
+
+
+def _glue_view(glue: Mapping[str, Any], integration_label: str, *, wrapper: bool) -> dict[str, Any]:
+    """The glue step on cross-component cases: its numbers, verdict and reason."""
+    verdict = text(glue.get("verdict"), limit=_LABEL_CHARS).lower()
+    if wrapper:
+        label, verdict_class = _LADDER_NO_VERDICT
+    else:
+        label, verdict_class = _GLUE_VERDICTS.get(verdict or "inconclusive", (_humanize(verdict), "warn"))
+    point = text(glue.get("point_verdict"), limit=_LABEL_CHARS).lower()
+    point_label = (
+        _GLUE_VERDICTS.get(point, (_humanize(point), "warn"))[0] if point and point != verdict and not wrapper else ""
+    )
+    lift, low, high = number(glue.get("lift")), number(glue.get("ci_low")), number(glue.get("ci_high"))
+    n = fmt_count(glue.get("n"))
+    if lift is None:
+        summary = "not measured"
+    elif low is not None and high is not None:
+        summary = f"{fmt_signed(lift)} [{fmt_signed(low)}, {fmt_signed(high)}] (n={n})"
+    else:
+        summary = f"{fmt_signed(lift)} (n={n}, no interval)"
+    ci_source = {
+        "estimate": lift,
+        "ci_low": low,
+        "ci_high": high,
+        "confidence": glue.get("confidence"),
+        "n_cases": glue.get("n"),
+        "precision": glue.get("precision"),
+        "partial": glue.get("partial") is True,
+        "expected_cases": (count(glue.get("n")) or 0) + len(_sequence(glue.get("excluded_cases"))),
+        "failed_arms": glue.get("failed_arms"),
+    }
+    dimensions, _ = _names(glue.get("basis_dimensions"))
+    return {
+        "title": f"{integration_label} on cross-component cases",
+        "verdict_title": f"{integration_label} verdict (cross-component cases)",
+        "verdict_label": label,
+        "verdict_class": verdict_class,
+        "point_label": point_label,
+        "words": "no verdict (wrapper mode)" if wrapper else label.lower(),
+        "summary": summary,
+        "lift_value": lift,
+        "ci": _ci_row("glue", integration_label, ci_source),
+        "reason": text(glue.get("reason")),
+        "basis": f"Glue basis: the three skill arms on {', '.join(dimensions)}." if dimensions else "",
+    }
+
+
+def _ladder_line(block: Mapping[str, Any], glue: Mapping[str, Any], *, wrapper: bool) -> str:
+    """``Bundle lift +0.18 = capability +0.11 + integration (glue) +0.07 (common basis, 16 cases). Glue ...``."""
+    steps = _mapping(block.get("steps"))
+    cases = count(block.get("n_cases")) or 0
+    step_name = "wrapper effect" if wrapper else "integration (glue)"
+    bundle = fmt_signed(_mapping(block.get("bundle")).get("estimate"))
+    capability = fmt_signed(_mapping(steps.get("capability")).get("estimate"))
+    integration = fmt_signed(_mapping(steps.get("integration")).get("estimate"))
+    # Each term is rounded on its own, so the shown terms can miss the shown total by 0.01; say so when they do.
+    shown = [float(value) for value in (bundle, capability, integration) if value != "n/a"]
+    rounded = len(shown) == 3 and round(shown[1] + shown[2], 2) != shown[0]
+    basis = f"common basis, {_plural(cases, 'case')}" + ("; terms rounded" if rounded else "")
+    return (
+        f"Bundle lift {bundle} = capability {capability} + {step_name} {integration} ({basis}). "
+        f"{glue['title']}: {glue['summary']}, {glue['words']}."
+    )
+
+
+def _excluded_cases_line(value: object) -> str:
+    excluded = [entry for entry in _sequence(value) if isinstance(entry, Mapping)]
+    parts = []
+    for entry in excluded[:_NAMES_IN_TEXT]:
+        code = text(entry.get("reason"), limit=_KEYWORD_CHARS)
+        missing = [
+            arm_label(arm) for item in _sequence(entry.get("missing_arms")) if (arm := text(item, limit=_LABEL_CHARS))
+        ]
+        failures = [
+            f"{arm_label(text(arm, limit=_LABEL_CHARS))}: {text(reason)}"
+            for arm, reason in list(_mapping(entry.get("load_failures")).items())[:4]
+        ]
+        if code == "load_failed":
+            detail = (
+                "load failed: " + "; ".join(failures) + (f"; not scored by {', '.join(missing)}" if missing else "")
+            )
+        elif code == "not_scored":
+            detail = "not scored by " + (", ".join(missing) or "any arm")
+        elif code == "no_common_dimension":
+            detail = "no dimension every arm scored"
+        else:
+            detail = code or "excluded"
+        parts.append(f"{text(entry.get('case'))} ({detail})")
+    if not parts:
+        return ""
+    more = f" (+{len(excluded) - len(parts)} more)" if len(excluded) > len(parts) else ""
+    return f"Excluded from every arm: {', '.join(parts)}{more}."
+
+
+def _loose_parts_line(loose: Mapping[str, Any]) -> str:
+    if not loose:
+        return ""
+    loader = text(loose.get("loader"), limit=_KEYWORD_CHARS)
+    head = f"Loose parts ({loader} loader)" if loader else "Loose parts"
+    rules, rules_omitted = _names(loose.get("rules"), limit=_NAMES_IN_TEXT)
+    servers, servers_omitted = _names(loose.get("mcp_servers"), limit=_NAMES_IN_TEXT)
+    dropped, dropped_omitted = _names(loose.get("dropped_as_glue"), limit=_NAMES_IN_TEXT)
+
+    def _listed(names: list[str], omitted: int) -> str:
+        return (", ".join(names) or "none") + (f" (+{omitted} more)" if omitted else "")
+
+    return (
+        f"{head}: rules: {_listed(rules, rules_omitted)}; MCP servers: {_listed(servers, servers_omitted)}. "
+        f"Plugin-only, counted as glue: {_listed(dropped, dropped_omitted)}."
+    )
+
+
+def _capability_line(loose: Mapping[str, Any], integration_label: str) -> str:
+    """Say whether the loose-parts arm staged the plugin's own pieces byte for byte (by content hash)."""
+    if not loose:
+        return ""
+    equal = loose.get("equal_across_arms")
+    if equal is True:
+        pieces = {text(piece) for arm in _mapping(loose.get("content_hashes")).values() for piece in _mapping(arm)}
+        return f"Capability identical across arms: yes ({_plural(len(pieces), 'hashed piece')})."
+    if equal is False:
+        mismatches = [item for item in _sequence(loose.get("mismatches")) if isinstance(item, Mapping)]
+        shown = []
+        for item in mismatches[:5]:
+            issue = text(item.get("issue"), limit=_KEYWORD_CHARS)
+            arms = ", ".join(arm_label(text(arm, limit=_LABEL_CHARS)) for arm in _sequence(item.get("arms")))
+            shown.append(f"{text(item.get('piece'))} {_PARITY_ISSUES.get(issue, issue)} ({arms})")
+        more = f" (+{len(mismatches) - len(shown)} more)" if len(mismatches) > len(shown) else ""
+        return (
+            f"Capability identical across arms: no — {'; '.join(shown)}{more}. "
+            f"The {integration_label} is shown, but its verdict is inconclusive."
+        )
+    return "Capability identical across arms: not recorded (no content hashes)."
+
+
+def _ladder_signal_rows(signals: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Loose parts against the full plugin for each recorded signal, worded as the Plugin Signals section words it."""
+    rows = []
+    for key, name in _LADDER_SIGNALS:
+        per_arm = _mapping(signals.get(key))
+        if not per_arm:
+            continue
+        loose = _signal_text(key, _mapping(per_arm.get("loose_parts")))
+        full = _signal_text(key, _mapping(per_arm.get("with_skill")))
+        rows.append({"name": name, "loose": loose or "n/a", "full": full or "n/a"})
+    return rows
+
+
+def _signal_text(key: str, section: Mapping[str, Any]) -> str:
+    if not section:
+        return ""
+    if key in {"routing", "tool_selection"}:
+        selection = _selection_view(section)
+        return selection["result"] if selection else ""
+    if key == "order":
+        row = _order_row(section)
+    elif key == "conflict":
+        row = _conflict_row(section)
+    else:
+        row = _check_row("Handoff", section, "passed", "checked")
+    return row["label"] if row else ""
+
+
 def _statistic_sources(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     provenance = _mapping(payload.get("provenance"))
     return [
@@ -1885,7 +2251,8 @@ def _statistics_block(source: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]
     return {
         key: value
         for key in STATISTICS_BLOCKS
-        if (value := _mapping(source.get(key)))
+        if key != "lift_ladder"
+        and (value := _mapping(source.get(key)))
         and (key != "integration_completeness" or _has_completeness_issue_keys(value))
     }
 
@@ -1905,6 +2272,8 @@ def statistics_view(payload: object, *, context: _Tier3Context | None = None) ->
     sum_of_parts_baseline = context.sum_of_parts_baseline
     run_statistics: dict[str, Mapping[str, Any]] = {}
     for key in STATISTICS_BLOCKS:
+        if key == "lift_ladder":  # the lift ladder has its own view
+            continue
         for candidate in _statistic_sources(source):
             value = _mapping(candidate.get(key))
             if value and (key != "integration_completeness" or _has_completeness_issue_keys(value)):
@@ -2554,6 +2923,10 @@ def excluded_behavior(view: Mapping[str, Any], provenance: object) -> list[str]:
         statements.append(
             f"{BUNDLE_LIFT_LABEL} (the plugin versus its skills alone) was not measured: {integration.get('reason')}"
         )
+    for entry in _sequence(_mapping(view.get("lift_ladder")).get("entries")):
+        if isinstance(entry, Mapping) and not entry.get("measured"):
+            scope = f" for {entry['agent']}" if entry.get("agent") else ""
+            statements.append(f"The lift ladder (loose-parts arm) was not measured{scope}: {entry.get('reason')}")
     return statements
 
 

@@ -508,6 +508,54 @@
 </details>
 {% endmacro %}
 
+{#- ===================== Tier 3: lift ladder (loose-parts arm) ===================== -#}
+{% macro lift_ladder_section(l) %}
+{#- Renders plugin_sections.lift_ladder_view as it is; one named block per agent in a multi-agent run. -#}
+<details class="t3-details" id="tier3-lift-ladder" open>
+    <summary>Lift Ladder (Loose Parts) &mdash;
+        <span class="t3-pill {{ _pill_class(l.status_class) }}">{{ l.status_text }}</span>{% if l.named and l.agent %} <span class="plugin-subtle">({{ l.agent }})</span>{% endif %}
+        <span class="t3-pill warning">Advisory &middot; Report-only</span>
+    </summary>
+    <div class="t3-details-body">
+    <p class="t3-section-hint">{{ l.definition }} This section never affects the overall score or verdict.</p>
+    {% if l.basis_note %}<p class="t3-section-hint">{{ l.basis_note }}</p>{% endif %}
+    {% for e in l.entries %}
+    {% if l.named %}<div class="plugin-subsection"><h4>{{ e.agent }}</h4>{% endif %}
+    {% if e.measured %}
+    <p class="t3-ladder-line"><strong>{{ e.line }}</strong></p>
+    <div class="table-scroll"><table class="summary-table">
+        <thead><tr><th>Step</th><th>Arms</th><th>Estimate</th><th>{{ e.confidence }}</th><th>Cases</th><th>Precision</th><th>Cross-component</th><th>Other</th></tr></thead>
+        <tbody>
+        {% for r in e.rows %}<tr><td>{{ r.label }}</td><td>{{ r.arms }}</td><td>{{ r.estimate }}</td><td>{{ r.interval }}</td><td>{{ r.n_cases }}</td><td><span class="t3-pill {{ _pill_class(r.precision_class) }}">{{ r.precision }}</span></td><td>{{ r.cross_component or '-' }}</td><td>{{ r.other or '-' }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    <p class="t3-section-hint"><strong>{{ e.glue.verdict_title }}:</strong> <span class="t3-pill {{ _pill_class(e.glue.verdict_class) }}">{{ e.glue.verdict_label }}</span>{% if e.glue.point_label %} <span class="plugin-subtle">(point estimate: {{ e.glue.point_label }})</span>{% endif %}</p>
+    {% if e.glue.reason %}<p class="t3-section-hint">{{ e.glue.reason }}</p>{% endif %}
+    {% if e.glue.basis %}<p class="t3-section-hint">{{ e.glue.basis }}</p>{% endif %}
+    {% if e.excluded %}<p class="t3-section-hint">{{ e.excluded }}</p>{% endif %}
+    {% if e.loose_parts_line %}<p class="t3-section-hint">{{ e.loose_parts_line }}{% if e.hooks_caveat %} {{ e.hooks_caveat }}{% endif %}</p>{% endif %}
+    {% if e.capability_line %}<p class="t3-section-hint">{{ e.capability_line }}</p>{% endif %}
+    {% if e.signals %}
+    <div class="table-scroll"><table class="summary-table">
+        <thead><tr><th>Signal next to the glue</th><th>Loose parts</th><th>Plugin</th></tr></thead>
+        <tbody>{% for s in e.signals %}<tr><td>{{ s.name }}</td><td>{{ s.loose }}</td><td>{{ s.full }}</td></tr>{% endfor %}</tbody>
+    </table></div>
+    {% endif %}
+    {% if e.completeness and e.completeness.issues %}{{ _completeness_issues(e.completeness) }}{% endif %}
+    {% else %}
+    <div class="plugin-callout warn">
+        <strong>NOT MEASURED &mdash; the lift ladder has no loose-parts arm{% if e.agent %} for {{ e.agent }}{% endif %}.</strong>
+        <p style="margin:0.35rem 0 0;">{{ e.reason }}</p>
+    </div>
+    {% if e.loose_parts_line %}<p class="t3-section-hint">{{ e.loose_parts_line }}</p>{% endif %}
+    {% endif %}
+    {% if l.named %}</div>{% endif %}
+    {% endfor %}
+    </div>
+</details>
+{% endmacro %}
+
 {% macro lift_modes_line(modes) %}
 <p class="t3-section-hint" id="tier3-lift-modes"><strong>Lift mode:</strong> requested <code>{{ modes.requested }}</code> &middot; effective <code>{{ modes.effective }}</code>{% if modes.fallback %} <span class="t3-pill warning">fell back</span>{% endif %}</p>
 {% endmacro %}

@@ -35,6 +35,8 @@ from skillevaluator.constants import (
     DIMENSION_MAPPING,
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
+    LADDER_INTEGRATION_LABEL,
+    LADDER_WRAPPER_LABEL,
     LIFT_CI_MIN_PAIRED_CASES,
     TIER3_LIFT_FAIL_THRESHOLD,
     TIER3_LIFT_PASS_THRESHOLD,
@@ -77,8 +79,10 @@ _INTEGRATION_INTERPRETATION = {
     ),
     INTEGRATION_VERDICT_INCONCLUSIVE: "The sum-of-parts comparison did not produce complete, conclusive evidence.",
 }
-_LIFT_MODES = ("effectiveness", "integration", "both")
-_INTEGRATION_LIFT_MODES = ("integration", "both")
+_LIFT_MODES = ("effectiveness", "integration", "both", "ladder")
+# ``ladder`` runs the skills-only arm too, so it measures the Bundle lift as well.
+_INTEGRATION_LIFT_MODES = ("integration", "both", "ladder")
+_LADDER_LIFT_MODE = "ladder"
 _INTEGRATION_REASON_NO_WORKSPACE = "The run recorded no plugin workspace, so no member-skills arm could be compared."
 _INTEGRATION_REASON_NO_COMPONENTS = "The run staged no member components, so no member-skills arm could be compared."
 _INTEGRATION_REASON_NO_ARM = "The member-skills (sum-of-parts) arm was not run, so Integration was not measured."
@@ -981,6 +985,8 @@ def build_agent_eval_payload(
         payload["lift_mode_effective"] = lift_modes["effective"]
     _attach_integration_reports(payload, agent_payloads, best_agent, run_config, plugin_provenance)
     _attach_plugin_report_fields(payload, agents)
+    # After the plugin fields: the ladder shows each agent's per-arm signals next to its glue.
+    _attach_ladder_reports(payload, agent_payloads, best_agent, run_config, plugin_provenance)
 
     _layer_llm_insights(
         payload,
@@ -3177,19 +3183,23 @@ def _verdict_from_lift(lift: float | None) -> str:
     return VERDICT_NEUTRAL
 
 
-def _integration_interval_verdict(uncertainty: dict[str, Any]) -> tuple[str, str | None]:
+def _integration_interval_verdict(
+    uncertainty: dict[str, Any], *, subject: str = "Bundle lift"
+) -> tuple[str, str | None]:
     """Classify the Integration lift by where its whole interval lies relative to the +/-0.05 band.
 
     "real" needs the interval to clear +0.05 and "negative" to stay below
     -0.05. "cosmetic" is an equivalence claim: the whole interval lies inside
     the band, so a tight tie around zero is cosmetic, not inconclusive.
     Otherwise the interval cannot tell the bands apart and the reason says why.
+    *subject* names the lift in that reason (the lift ladder's glue step
+    passes "Integration lift").
     """
     low = _finite_float(uncertainty.get("ci_low"))
     high = _finite_float(uncertainty.get("ci_high"))
     ci_text = _ci_text(uncertainty) or "interval"
     if low is None or high is None:
-        return INTEGRATION_VERDICT_INCONCLUSIVE, "The Bundle lift has no interval to classify it."
+        return INTEGRATION_VERDICT_INCONCLUSIVE, f"The {subject} has no interval to classify it."
     if low >= _INTEGRATION_REAL_THRESHOLD:
         return INTEGRATION_VERDICT_REAL, None
     if high <= _INTEGRATION_NEGATIVE_THRESHOLD:
@@ -3204,13 +3214,13 @@ def _integration_interval_verdict(uncertainty: dict[str, Any]) -> tuple[str, str
     if low <= 0.0 <= high:
         return (
             INTEGRATION_VERDICT_INCONCLUSIVE,
-            f"The paired case bootstrap {ci_text} for the Bundle lift includes zero and reaches past {band}, "
+            f"The paired case bootstrap {ci_text} for the {subject} includes zero and reaches past {band}, "
             "so it cannot tell a real or negative effect from no effect.",
         )
     effect = "a real" if high >= _INTEGRATION_REAL_THRESHOLD else "a negative"
     return (
         INTEGRATION_VERDICT_INCONCLUSIVE,
-        f"The paired case bootstrap {ci_text} for the Bundle lift crosses the {band} band edge, "
+        f"The paired case bootstrap {ci_text} for the {subject} crosses the {band} band edge, "
         f"so it cannot tell {effect} effect from cosmetic bundling.",
     )
 
@@ -3342,7 +3352,9 @@ def _plugin_lift_modes(
     effective = _lift_mode_value(recorded.get("effective")) or _lift_mode_value(provenance.get("effective_lift_mode"))
     if effective is None and _is_plugin_target(config):
         workspace = config.get("skill_workspace") if isinstance(config.get("skill_workspace"), dict) else {}
-        if workspace.get("sum_of_parts_arm"):
+        if workspace.get("loose_parts_arm"):
+            effective = _LADDER_LIFT_MODE
+        elif workspace.get("sum_of_parts_arm"):
             effective = "both"
         elif workspace.get("baseline_includes_workspace_skills"):
             effective = "integration"
@@ -3396,6 +3408,7 @@ _ARM_NAMES = {
     "with_plugin": "with-plugin arm",
     "without_skill": "no-plugin arm",
     "sum_of_parts": "member-skills (sum-of-parts) arm",
+    "loose_parts": "loose-parts arm",
 }
 
 
@@ -3421,13 +3434,14 @@ def _integration_completeness_reason(
     uncertainty: dict[str, Any] | None = None,
     *,
     names: dict[str, str] | None = None,
+    base: str = "The plugin and member-skills arms did not cover the same expected cases with the configured attempts",
 ) -> str:
     """Explain why the per-case Integration completeness check failed.
 
     Names the arm that really failed, the missing cases and the attempt
-    shortfall, and how many paired cases the lift still used.
+    shortfall, and how many paired cases the lift still used. *base* is the
+    opening sentence, without its full stop.
     """
-    base = "The plugin and member-skills arms did not cover the same expected cases with the configured attempts"
     details: list[str] = []
     completeness = completeness if isinstance(completeness, dict) else {}
     failed_arms = [str(arm) for arm in completeness.get("failed_arms") or []]
@@ -3578,6 +3592,9 @@ def _build_integration_report(
         basis = bases.get("integration") if isinstance(bases.get("integration"), dict) else None
         sum_of_parts = _finite_float(best.get("sum_of_parts"))
         completeness = best.get("integration_completeness")
+        if isinstance(completeness, dict) and "loose_parts" in completeness:
+            # The loose-versus-full check belongs to the lift ladder; the Bundle lift block stays as it was.
+            completeness = {key: value for key, value in completeness.items() if key != "loose_parts"}
         complete = bool(isinstance(completeness, dict) and completeness.get("complete"))
         uncertainty = _lift_uncertainty_entry(best, "integration")
     elif workspace.get("baseline_includes_workspace_skills"):
@@ -3643,6 +3660,359 @@ def _build_integration_report(
         uncertainty=uncertainty,
         lift_modes=lift_modes,
     )
+
+
+# ---------------------------------------------------------------------------
+# Lift ladder (loose-parts arm): report block and the glue verdict
+# ---------------------------------------------------------------------------
+
+_LADDER_ARM_LOOSE = "loose_parts"
+_LADDER_SIGNAL_SECTIONS = ("routing", "tool_selection", "order", "handoff", "conflict")
+_LADDER_MAX_ITEMS = 64
+_LADDER_MAX_HASHED_PIECES = 128
+_LADDER_REASON_CAPABILITY = "capability not identical across arms"
+_LADDER_REASON_WRAPPER = (
+    "The full-plugin arm loaded the plugin through SkillEvaluator's generated wrapper, so full minus loose parts "
+    "measures that wrapper, not the plugin's own glue. It is reported as the Wrapper effect and gets no "
+    "Integration verdict."
+)
+_LADDER_REASON_LOAD_UNKNOWN = (
+    "The run did not record that the full-plugin arm loaded the plugin natively, so full minus loose parts "
+    "is reported as the Wrapper effect and gets no Integration verdict."
+)
+# CR5: no ladder statistics also covers a legacy integration-mode baseline, which has no no-plugin rung.
+_LADDER_REASON_NOT_RECORDED = "No lift ladder statistics were recorded for this agent."
+_LADDER_REASON_UNVERIFIED = (
+    "capability not verified across arms: no content hashes of the full-plugin and loose-parts arms were "
+    "recorded, so full minus loose parts may not be only glue."
+)
+_LADDER_COMPLETENESS_BASE = (
+    "The plugin and loose-parts arms did not cover the same expected cases with the configured attempts"
+)
+
+
+def _ladder_skip_reason(run_config: dict[str, Any] | None, plugin_provenance: dict[str, Any] | None) -> str | None:
+    """Why a requested ladder fell back (``ladder_skip_reason`` in the provenance or the runner's lift-mode record)."""
+    provenance = plugin_provenance if isinstance(plugin_provenance, dict) else {}
+    config = run_config if isinstance(run_config, dict) else {}
+    recorded = config.get("lift_mode") if isinstance(config.get("lift_mode"), dict) else {}
+    reason = str(provenance.get("ladder_skip_reason") or recorded.get("ladder_skip_reason") or "").strip()
+    return reason or None
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [str(item)[:300] for item in value[:_LADDER_MAX_ITEMS] if str(item).strip()]
+
+
+def _content_hashes(value: object) -> dict[str, dict[str, str]] | None:
+    """``{arm: {piece_id: sha256}}`` as strings, bounded; ``None`` when not recorded."""
+    if not isinstance(value, dict) or not value:
+        return None
+    hashes: dict[str, dict[str, str]] = {}
+    for arm, pieces in islice(value.items(), 8):
+        if isinstance(pieces, dict):
+            hashes[str(arm)] = {
+                str(piece)[:300]: str(digest)[:128]
+                for piece, digest in islice(pieces.items(), _LADDER_MAX_HASHED_PIECES)
+            }
+    return hashes or None
+
+
+def _capability_parity(
+    content_hashes: dict[str, Any] | None, dropped_as_glue: list[str] | tuple[str, ...] | None
+) -> tuple[bool | None, list[dict[str, Any]]]:
+    """Whether the loose-parts arm stages exactly the plugin's capability, by content hash.
+
+    ``content_hashes`` is ``{arm: {piece_id: sha256}}`` with piece ids such as
+    ``skill:<name>``, ``rule:<file>``, ``mcp:<server>``, ``hook:<path>``,
+    ``agent:<name>`` and ``command:<name>`` (bare names in every arm). The
+    rule: every full-plugin piece that is not listed in ``dropped_as_glue``
+    is in the loose-parts arm with the same hash, the loose-parts arm stages
+    nothing else and no glue, and the skills-only arm stages exactly the
+    full plugin's skills, with the same hashes. Returns ``(None, [])`` when
+    the full-plugin or loose-parts hashes were not recorded.
+    """
+    # Compared in full: only the copy the payload stores is bounded, so a large plugin gets no false mismatch.
+    hashes = {
+        str(arm): {str(piece): str(digest) for piece, digest in pieces.items()}
+        for arm, pieces in (content_hashes.items() if isinstance(content_hashes, dict) else ())
+        if isinstance(pieces, dict)
+    }
+    full, loose = hashes.get("with_skill", hashes.get("with_plugin")), hashes.get(_LADDER_ARM_LOOSE)
+    if full is None or loose is None:
+        return None, []
+    glue = {str(piece) for piece in dropped_as_glue or [] if str(piece).strip()}
+    mismatches: list[dict[str, Any]] = []
+
+    def _add(piece: str, issue: str, *arms: str) -> None:
+        if len(mismatches) < _LADDER_MAX_ITEMS:
+            mismatches.append({"piece": piece[:300], "issue": issue, "arms": list(arms)})
+
+    for piece in sorted(set(full) | set(loose)):
+        if piece in glue:
+            if piece in loose:
+                _add(piece, "glue_in_loose_parts", _LADDER_ARM_LOOSE)
+        elif piece not in loose:
+            _add(piece, "missing", _LADDER_ARM_LOOSE)
+        elif piece not in full:
+            _add(piece, "missing", "with_skill")
+        elif full[piece] != loose[piece]:
+            _add(piece, "differs", "with_skill", _LADDER_ARM_LOOSE)
+    skills = hashes.get("sum_of_parts")
+    if skills is not None:
+        for piece in sorted(set(skills) | {piece for piece in full if piece.startswith("skill:")}):
+            if not piece.startswith("skill:"):
+                _add(piece, "not_a_skill", "sum_of_parts")
+            elif piece not in skills:
+                _add(piece, "missing", "sum_of_parts")
+            elif piece not in full:
+                _add(piece, "missing", "with_skill")
+            elif skills[piece] != full[piece]:
+                _add(piece, "differs", "sum_of_parts", "with_skill")
+    return not mismatches, mismatches
+
+
+def _loose_parts_record(plugin_provenance: dict[str, Any] | None, agent_name: str) -> dict[str, Any]:
+    """The run's ``plugin_provenance["loose_parts"]``, with ``agents[agent_name]`` overriding its keys."""
+    provenance = plugin_provenance if isinstance(plugin_provenance, dict) else {}
+    record = provenance.get("loose_parts") if isinstance(provenance.get("loose_parts"), dict) else {}
+    agents = record.get("agents") if isinstance(record.get("agents"), dict) else {}
+    own = agents.get(agent_name) if isinstance(agents.get(agent_name), dict) else {}
+    return {**{key: value for key, value in record.items() if key != "agents"}, **own}
+
+
+def _loose_parts_block(record: dict[str, Any]) -> dict[str, Any] | None:
+    if not record:
+        return None
+    raw_dropped = record.get("dropped_as_glue")
+    equal, mismatches = _capability_parity(
+        record.get("content_hashes"), raw_dropped if isinstance(raw_dropped, list | tuple) else None
+    )
+    dropped = _string_list(raw_dropped)
+    hashes = _content_hashes(record.get("content_hashes"))
+    loader = str(record.get("loader") or "").strip()[:32]
+    return {
+        "loader": loader or None,
+        "rules": _string_list(record.get("rules")),
+        "mcp_servers": _string_list(record.get("mcp_servers")),
+        "dropped_as_glue": dropped,
+        "content_hashes": hashes,
+        "equal_across_arms": equal,
+        "mismatches": mismatches,
+    }
+
+
+def _full_arm_load(agent_name: str, run_config: dict[str, Any] | None, plugin_provenance: dict[str, Any] | None) -> str:
+    """How the full-plugin arm loaded the plugin for this agent: ``native``, ``wrapper`` or ``unknown``.
+
+    Read from ``plugin_load.by_agent[agent].mode`` (provenance first, then the
+    run config), else ``plugin_load.requested``. Only ``native`` earns the
+    Integration lift label and a verdict.
+    """
+    for source in (plugin_provenance, run_config):
+        plan = source.get("plugin_load") if isinstance(source, dict) else None
+        if not isinstance(plan, dict):
+            continue
+        by_agent = plan.get("by_agent") if isinstance(plan.get("by_agent"), dict) else {}
+        entry = by_agent.get(agent_name) if isinstance(by_agent.get(agent_name), dict) else {}
+        mode = entry.get("mode") or plan.get("requested")
+        if mode in ("native", "wrapper"):
+            return str(mode)
+    return "unknown"
+
+
+def _ladder_signals(agent: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Per signal, the loose-parts and full-plugin arms' summaries, shown next to the glue."""
+    summaries = agent.get("plugin_signals_summary") if isinstance(agent.get("plugin_signals_summary"), dict) else {}
+    arms = {
+        _LADDER_ARM_LOOSE: summaries.get(_LADDER_ARM_LOOSE),
+        "with_skill": summaries.get("with_skill") or summaries.get("with_plugin"),
+    }
+    signals: dict[str, dict[str, Any]] = {}
+    for section in _LADDER_SIGNAL_SECTIONS:
+        per_arm = {
+            arm: _bounded_report_copy(summary[section])
+            for arm, summary in arms.items()
+            if isinstance(summary, dict) and isinstance(summary.get(section), dict)
+        }
+        if per_arm:
+            signals[section] = per_arm
+    return signals
+
+
+def _ladder_glue_incomplete_reason(completeness: object, glue: dict[str, Any]) -> str:
+    parts: list[str] = []
+    if not isinstance(completeness, dict):
+        parts.append("No completeness check of the loose-parts arm against the full plugin was recorded.")
+    elif completeness.get("complete") is not True:
+        parts.append(_integration_completeness_reason(completeness, names=_ARM_NAMES, base=_LADDER_COMPLETENESS_BASE))
+    excluded = [str(case) for case in glue.get("excluded_cases") or []]
+    if excluded:
+        suffix = f" (+{len(excluded) - 5} more)" if len(excluded) > 5 else ""
+        parts.append(
+            "Cross-component case(s) dropped from every arm (not scored, or not loaded, in some arm): "
+            + ", ".join(excluded[:5])
+            + suffix
+            + "."
+        )
+    failed = [str(arm) for arm in glue.get("failed_arms") or []]
+    if failed:
+        parts.append("Did not complete: " + ", ".join(_arm_name(arm) for arm in failed[:4]) + ".")
+    return " ".join(parts) or "The Integration lift comparison is incomplete."
+
+
+def _ladder_glue_verdict(
+    glue: dict[str, Any],
+    *,
+    full_arm_load: str,
+    capability_equal: bool | None,
+    completeness: object,
+) -> dict[str, Any]:
+    """The glue step's verdict: the Bundle lift's +/-0.05 bands and inconclusive rules, on cross-component cases.
+
+    In order: a full arm not loaded natively (wrapper mode, or no load mode
+    recorded) gets no verdict; no lift, capability that is not identical (or
+    not verified) across arms, an incomplete loose-versus-full comparison (or a
+    cross-component case lost in any arm), and fewer than
+    ``LIFT_CI_MIN_PAIRED_CASES`` pairs are ``inconclusive``; otherwise the
+    whole interval decides, as for the Bundle lift.
+    """
+    lift = _finite_float(glue.get("lift"))
+    complete = (
+        isinstance(completeness, dict) and completeness.get("complete") is True and glue.get("partial") is not True
+    )
+    if full_arm_load != "native":
+        reason = _LADDER_REASON_WRAPPER if full_arm_load == "wrapper" else _LADDER_REASON_LOAD_UNKNOWN
+        return {"point_verdict": None, "verdict": None, "reason": reason, "complete": complete}
+    point_verdict = _integration_verdict(lift, complete=True) if lift is not None else None
+    verdict = point_verdict or INTEGRATION_VERDICT_INCONCLUSIVE
+    reason: str | None = None
+    if lift is None:
+        reason = str(glue.get("reason") or "No cross-component case was scored in every arm.")
+    elif capability_equal is None:
+        reason = _LADDER_REASON_UNVERIFIED
+    elif capability_equal is False:
+        reason = (
+            f"{_LADDER_REASON_CAPABILITY}: the loose-parts arm did not stage the plugin's own pieces byte for byte, "
+            "so full minus loose parts is not only glue."
+        )
+    elif not complete:
+        reason = _ladder_glue_incomplete_reason(completeness, glue)
+    elif glue.get("precision") == "insufficient":
+        reason = (
+            f"Only {_as_nonnegative_int(glue.get('n'))} paired cross-component case(s); at least "
+            f"{LIFT_CI_MIN_PAIRED_CASES} are needed for a usable interval on the {LADDER_INTEGRATION_LABEL}."
+        )
+    else:
+        verdict, reason = _integration_interval_verdict(glue, subject=LADDER_INTEGRATION_LABEL)
+    if reason is not None:
+        verdict = INTEGRATION_VERDICT_INCONCLUSIVE
+    return {"point_verdict": point_verdict, "verdict": verdict, "reason": reason, "complete": complete}
+
+
+def _build_ladder_report(
+    agent: dict[str, Any],
+    run_config: dict[str, Any] | None,
+    plugin_provenance: dict[str, Any] | None = None,
+    *,
+    agent_name: str = "",
+) -> dict[str, Any] | None:
+    """Build one agent's report-only lift ladder block, or ``None`` when the ladder was neither run nor requested.
+
+    The statistics (``agent["lift_ladder"]``, from :func:`stats.lift_ladder`)
+    are carried as computed. Added here: the glue verdict
+    (:func:`_ladder_glue_verdict`), the label of the full-minus-loose step
+    (``Wrapper effect`` unless the full arm loaded the plugin natively), the
+    loose-parts census with its content-hash parity (from
+    ``plugin_provenance["loose_parts"]``), the per-arm signals next to the
+    glue, and the lift modes. An agent whose loose arm did not run gets
+    ``measured: False`` and a reason. Nothing here changes a score, verdict,
+    band or exit code.
+    """
+    lift_modes = _plugin_lift_modes(run_config, plugin_provenance)
+    requested = _LADDER_LIFT_MODE in (lift_modes["requested"], lift_modes["effective"])
+    raw = agent.get("lift_ladder") if isinstance(agent.get("lift_ladder"), dict) else None
+    if raw is None and not requested:
+        return None
+    record = _loose_parts_record(plugin_provenance, agent_name)
+    full_arm_load = _full_arm_load(agent_name, run_config, plugin_provenance)
+    wrapper = full_arm_load != "native"
+    block: dict[str, Any] = {
+        "schema_version": "1.0",
+        "advisory": True,
+        "report_only": True,
+        "lift_mode_requested": lift_modes["requested"],
+        "lift_mode_effective": lift_modes["effective"],
+        "full_arm_load": full_arm_load,
+        "integration_label": LADDER_WRAPPER_LABEL if wrapper else LADDER_INTEGRATION_LABEL,
+        "loose_parts": _loose_parts_block(record),
+    }
+    if raw is None or not isinstance(raw.get("steps"), dict):
+        reason = (
+            str(record.get("not_measured_reason") or "").strip()[:300]
+            or _ladder_skip_reason(run_config, plugin_provenance)
+            or _LADDER_REASON_NOT_RECORDED
+        )
+        block.update(
+            measured=False,
+            reason=reason,
+            glue={"lift": None, "point_verdict": None, "verdict": None, "reason": reason},
+        )
+        return block
+    completeness_block = agent.get("integration_completeness")
+    completeness = completeness_block.get("loose_parts") if isinstance(completeness_block, dict) else None
+    glue = dict(raw.get("glue")) if isinstance(raw.get("glue"), dict) else {}
+    loose_parts = block["loose_parts"] or {}
+    glue.update(
+        _ladder_glue_verdict(
+            glue,
+            full_arm_load=full_arm_load,
+            capability_equal=loose_parts.get("equal_across_arms"),
+            completeness=completeness,
+        )
+    )
+    glue["signals"] = _ladder_signals(agent)
+    block.update(
+        {
+            **{key: value for key, value in raw.items() if key not in block and key != "glue"},
+            "measured": True,
+            "reason": None,
+            "glue": glue,
+            "completeness": completeness if isinstance(completeness, dict) else None,
+        }
+    )
+    return block
+
+
+def _attach_ladder_reports(
+    payload: dict[str, Any],
+    agents: dict[str, dict[str, Any]],
+    best_agent: str,
+    run_config: dict[str, Any] | None,
+    plugin_provenance: dict[str, Any] | None,
+) -> None:
+    """Give every agent its own named ``lift_ladder`` block, and the run the best agent's (else the first's).
+
+    Replaces the raw statistics copy the agent payload carries. A run with
+    no ladder statistics that did not request ``--lift-mode ladder`` gets no
+    block at all, so older results render as before.
+    """
+    per_agent: dict[str, dict[str, Any]] = {}
+    for name, agent in agents.items():
+        block = _build_ladder_report(agent, run_config, plugin_provenance, agent_name=name)
+        if block is None:
+            agent.pop("lift_ladder", None)
+            continue
+        block = {"agent": name, **block}
+        agent["lift_ladder"] = block
+        per_agent[name] = block
+    if not per_agent:
+        payload.pop("lift_ladder", None)
+        return
+    primary = best_agent if best_agent in per_agent else sorted(per_agent)[0]
+    payload["lift_ladder"] = dict(per_agent[primary])
 
 
 def _agent_quality_verdict(agent: dict[str, Any]) -> str:

@@ -203,3 +203,129 @@ def test_a_plugin_without_plugin_root_text_records_none(tmp_path: Path) -> None:
     parts = build_loose_parts(native_source(make_plugin(tmp_path / "plugins"), tmp_path / "stage").native_source)
 
     assert parts.info(content=parts.content_report())["plugin_root_in_text"] == {}
+
+
+def test_a_subagent_capability_difference_gets_no_integration_verdict_in_the_report(tmp_path: Path) -> None:
+    from test_lift_ladder_report import _build, _ladder
+
+    plugin = make_plugin(tmp_path / "plugins")
+    write(plugin / "agents" / "release-reviewer.md", AGENT_TEXT.replace("tools: Read, Grep\n", "mcpServers:\n  - x\n"))
+    parts = build_loose_parts(native_source(plugin, tmp_path / "stage").native_source)
+    record = parts.info(content=parts.content_report())
+
+    built = _build(tmp_path / "run", {"claude-code": _ladder([0.2])}, loose_parts=record)
+
+    glue = built["lift_ladder"]["glue"]
+    assert built["lift_ladder"]["loose_parts"]["equal_across_arms"] is False
+    assert glue["lift"] == pytest.approx(0.2)
+    assert glue["verdict"] == "inconclusive"
+    assert glue["reason"].startswith("capability not identical across arms")
+
+
+# --------------------------------------------------------------------------- #
+# Claude Code's real system/init names (2.1.284, recorded with no model call)  #
+# --------------------------------------------------------------------------- #
+# The fields the load evidence reads, from three real runs over the emitted release-kit tasks:
+# --plugin-dir (full), user agents/commands/settings plus --mcp-config (loose), and skills only.
+_RK_TOOLS = ["compute_version", "list_changes", "publish_release", "stage_release"]
+REAL_INIT = {
+    "with_skill": {
+        "skills": ["release-kit:changelog-collect", "release-kit:release-notes", "release-kit:version-bump"],
+        "agents": ["claude", "release-kit:release-reviewer", "Explore", "general-purpose", "Plan"],
+        "slash_commands": [
+            "release-kit:release-check",
+            "release-kit:changelog-collect",
+            "release-kit:release-notes",
+            "release-kit:version-bump",
+        ],
+        "mcp_servers": [{"name": "plugin:release-kit:reltools", "status": "connected", "source": "plugin"}],
+        "tools": ["Bash", "Skill", *(f"mcp__plugin_release-kit_reltools__{tool}" for tool in _RK_TOOLS)],
+        "plugins": [{"name": "release-kit", "source": "release-kit@inline", "version": "1.0.0"}],
+    },
+    "loose_parts": {
+        "skills": ["changelog-collect", "release-notes", "version-bump"],
+        "agents": ["claude", "release-reviewer", "Explore", "general-purpose", "Plan"],
+        "slash_commands": ["changelog-collect", "release-notes", "version-bump", "release-check"],
+        "mcp_servers": [{"name": "reltools", "status": "connected", "source": "dynamic"}],
+        "tools": ["Bash", "Skill", *(f"mcp__reltools__{tool}" for tool in _RK_TOOLS)],
+        "plugins": [{"name": "agents-md", "path": "builtin", "source": "agents-md@builtin"}],
+    },
+    "sum_of_parts": {
+        "skills": ["changelog-collect", "release-notes", "version-bump"],
+        "agents": ["claude", "Explore", "general-purpose", "Plan"],
+        "slash_commands": ["changelog-collect", "release-notes", "version-bump"],
+        "mcp_servers": [],
+        "tools": ["Bash", "Skill"],
+        "plugins": [{"name": "agents-md", "path": "builtin", "source": "agents-md@builtin"}],
+    },
+}
+
+
+def _release_kit(root: Path) -> Path:
+    """The release-kit layout the pilot runs (skills, rule, MCP server, subagent, command, hooks)."""
+    plugin = make_plugin(root, name="release-kit")
+    (plugin / "rules" / "release-files.md").unlink()
+    (plugin / "rules" / "semver-help.mdc").unlink()
+    write(plugin / "skills" / "release-notes" / "SKILL.md", "---\nname: release-notes\ndescription: Notes.\n---\nx\n")
+    write(plugin / ".mcp.json", json.dumps({"mcpServers": {"reltools": {"command": "/tmp/reltools/reltools"}}}))
+    return plugin
+
+
+def test_real_claude_code_init_events_load_every_piece_in_every_arm(tmp_path: Path) -> None:
+    from skillevaluator.tier3.loose_parts import load_failures_by_case, loose_parts_load_evidence
+
+    parts = build_loose_parts(native_source(_release_kit(tmp_path / "plugins"), tmp_path / "stage").native_source)
+    evidence = {
+        arm: {
+            "case-1": [loose_parts_load_evidence([{"type": "system", "subtype": "init", **init}], None, parts, arm=arm)]
+        }
+        for arm, init in REAL_INIT.items()
+    }
+
+    assert load_failures_by_case(evidence) == {}
+    for arm, cases in evidence.items():
+        loaded = {piece for piece, row in cases["case-1"][0].items() if row["loaded"] is True}
+        expected = {"skill:changelog-collect", "skill:release-notes", "skill:version-bump"}
+        if arm != "sum_of_parts":
+            expected |= {"agent:release-reviewer", "command:release-check", "mcp:reltools"}
+        assert loaded == expected, (arm, cases["case-1"][0])
+
+
+def test_a_full_arm_init_that_does_not_list_the_plugin_drops_the_case(tmp_path: Path) -> None:
+    from skillevaluator.tier3.loose_parts import load_failures_by_case, loose_parts_load_evidence
+
+    parts = build_loose_parts(native_source(_release_kit(tmp_path / "plugins"), tmp_path / "stage").native_source)
+    # The loose arm's init (bare names, no plugin) read as if it were the full arm: nothing counts as loaded.
+    init = {"type": "system", "subtype": "init", **REAL_INIT["loose_parts"]}
+    evidence = {"with_skill": {"case-1": [loose_parts_load_evidence([init], None, parts, arm="with_skill")]}}
+
+    failures = load_failures_by_case(evidence)
+    assert {row["piece"] for row in failures["case-1"]} >= {"skill:changelog-collect", "mcp:reltools"}
+
+
+# --------------------------------------------------------------------------- #
+# MCP server env values stay out of the run record                            #
+# --------------------------------------------------------------------------- #
+def test_mcp_env_values_never_reach_the_loose_parts_record(tmp_path: Path) -> None:
+    plugin = make_plugin(tmp_path / "plugins")
+    write(
+        plugin / ".mcp.json",
+        json.dumps(
+            {
+                "mcpServers": {
+                    "reltools": {
+                        "command": "node",
+                        "args": ["${CLAUDE_PLUGIN_ROOT}/servers/reltools.js"],
+                        "env": {"RELTOOLS_MODE": "very-distinctive-mode-value", "RELTOOLS_TOKEN": "${RELTOOLS_TOKEN}"},
+                    }
+                }
+            }
+        ),
+    )
+    parts = build_loose_parts(native_source(plugin, tmp_path / "stage").native_source)
+
+    record = json.dumps(parts.info(content=parts.content_report()))
+
+    assert "mcp:reltools" in record
+    for value in ("very-distinctive-mode-value", "RELTOOLS_MODE", "RELTOOLS_TOKEN"):
+        assert value not in record

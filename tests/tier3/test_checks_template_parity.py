@@ -706,6 +706,9 @@ SKILL_TOOL_NAMES = [
     ["plugin:demo"],
     ["other-plugin:demo"],
     ["plugin:deploy"],
+    # The loose-parts arm: Claude Code runs a staged user command by its bare name, with no plugin prefix.
+    ["deploy"],
+    ["Deploy ", "demo"],
     ["demo-extra"],
     ["other", "demo"],
     ["plugin:demo:sub"],

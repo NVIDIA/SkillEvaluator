@@ -761,14 +761,24 @@ def _write_four_arm_run(
     *,
     arms: tuple[str, ...] = (FULL, NONE, SKILLS, LOOSE),
     init: dict[tuple[str, str], dict[str, Any] | None] | None = None,
+    scores: dict[tuple[str, str], dict[str, float | None]] | None = None,
 ) -> Path:
-    """Harbor jobs for every arm (no plugin 0.4, skills 0.6, loose 0.7, full 0.8) with Claude Code init logs."""
+    """Harbor jobs for every arm (no plugin 0.4, skills 0.6, loose 0.7, full 0.8) with Claude Code init logs.
+
+    ``scores`` replaces the metric scores of one ``(arm, case)`` trial.
+    """
     jobs = tmp_path / "jobs"
     overrides = init or {}
+    replaced = scores or {}
     for arm in arms:
         variant = _VARIANTS[arm]
         value = _ARM_SCORES[arm]
-        write_job(jobs, AGENT, variant, {case: [metrics(value, skill=arm != NONE)] for case in CASES})
+        write_job(
+            jobs,
+            AGENT,
+            variant,
+            {case: [replaced.get((arm, case), metrics(value, skill=arm != NONE))] for case in CASES},
+        )
         for case in CASES:
             event = overrides.get((arm, case), _init_event(arm))
             log = jobs / f"{SKILL}-{AGENT}-{variant}" / f"{case}__attempt001" / "agent" / "claude-code.txt"
@@ -889,6 +899,61 @@ def test_a_part_that_did_not_load_drops_the_case_from_every_arm(tmp_path: Path) 
     assert {steps[name]["n_cases"] for name in steps} == {len(CASES) - 3}
     failures = collected["loose_parts"]["load_evidence"]["load_failures_by_case"]
     assert sorted(failures) == ["o-1", "x-1", "x-2"]
+
+
+def test_loose_parts_lift_compares_both_arms_on_the_same_cases(tmp_path: Path) -> None:
+    # The pilot's shape: on a case with no expected skill the loose arm records the skill metrics as N/A,
+    # while the full plugin scores them. The old file averaged the full arm over every case (0.7333)
+    # and the loose arm over the rest (0.7): different trial sets.
+    plan = _loose_plan(tmp_path)
+    jobs = _write_four_arm_run(
+        tmp_path,
+        scores={
+            (FULL, "o-3"): metrics(0.8, skill_execution=0.2, skill_efficiency=0.2),
+            (LOOSE, "o-3"): metrics(0.7, skill=False),
+        },
+    )
+
+    collected = _collect(tmp_path, jobs, loose_parts=plan)
+
+    lift = json.loads((tmp_path / "results" / AGENT / "loose_parts_lift.json").read_text(encoding="utf-8"))
+    assert collected["agents"][AGENT]["loose_parts_lift"] == lift
+    assert lift["skill_execution"] == {"with_skill": 0.8, "without_skill": 0.7, "delta": 0.1, "direction": "up"}
+    assert lift["skill_efficiency"]["delta"] == 0.1
+    basis = lift["basis"]
+    assert basis["arms"] == [FULL, LOOSE]
+    assert basis["metrics"]["skill_execution"] == {"cases": len(CASES) - 1, "trials": {FULL: 8, LOOSE: 8}}
+    assert basis["metrics"]["security"] == {"cases": len(CASES), "trials": {FULL: 9, LOOSE: 9}}
+    assert basis["excluded_cases"] == [
+        {"case": "o-3", "reason": "not_applicable", "arms": [LOOSE], "metrics": ["skill_execution", "skill_efficiency"]}
+    ]
+
+
+def test_loose_parts_lift_leaves_out_the_cases_the_ladder_drops_for_load(tmp_path: Path) -> None:
+    plan = _loose_plan(tmp_path)
+    jobs = _write_four_arm_run(
+        tmp_path,
+        init={(LOOSE, "x-1"): _init_event(LOOSE, mcp_servers=[{"name": "reltools", "status": "failed"}])},
+        scores={(LOOSE, "x-1"): metrics(0.1)},
+    )
+
+    collected = _collect(tmp_path, jobs, loose_parts=plan)
+
+    lift = collected["agents"][AGENT]["loose_parts_lift"]
+    assert [entry["case"] for entry in collected["agents"][AGENT]["lift_ladder"]["excluded_cases"]] == ["x-1"]
+    # x-1's loose trial ran without its MCP server, so its 0.1 never reaches the comparison.
+    assert lift["security"]["without_skill"] == 0.7
+    assert lift["basis"]["metrics"]["security"]["cases"] == len(CASES) - 1
+    (entry,) = lift["basis"]["excluded_cases"]
+    assert entry["case"] == "x-1" and entry["reason"] == "load_failed" and entry["arms"] == [LOOSE]
+    assert entry["metrics"] == [
+        "security",
+        "skill_execution",
+        "skill_efficiency",
+        "accuracy",
+        "goal_accuracy",
+        "behavior_check",
+    ]
 
 
 def test_a_slow_mcp_server_is_proven_by_a_successful_call(tmp_path: Path) -> None:

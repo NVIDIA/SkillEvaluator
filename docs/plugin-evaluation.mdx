@@ -1962,6 +1962,22 @@ scored for each case (`basis: shared_metrics`), and `excluded_metrics` lists the
 metrics only one arm had. When the arms' own pass@k rates use different
 metrics, the Reliability table says so.
 
+The per-metric lift files (`lift.json`, `integration_lift.json` and
+`loose_parts_lift.json`) pair the same way. For each metric, both arms are
+averaged over the trials of the cases both arms scored that metric on, so the
+two sides never cover different cases: a case where the skills-only or
+loose-parts arm records the skill metrics as N/A (no expected skill, so no skill
+to run) is left out of those two metrics for both arms. When nothing is left
+out, the values are the arm averages. Each file's `basis` block gives, per
+metric, the number of cases and each arm's trials (`metrics`), the metrics not
+compared at all (`excluded_metrics`, for example the skill metrics of a
+no-plugin baseline), and every case left out with its reason and arms
+(`excluded_cases`: `not_applicable`, `no_value`, `not_scored`, `load_failed` or
+`unidentified_case`). A long list keeps its first 64 entries;
+`excluded_case_entries` gives the full number and `excluded_cases_truncated`
+says when entries were left off. `loose_parts_lift.json` also leaves out the
+cases the lift ladder drops because a part did not load.
+
 When the effective mode is `integration`, the reports never present that lift
 as plugin effectiveness or Skill Lift. They label the baseline arm
 "Sum-of-parts baseline" or "member skills", and the `BENCHMARK.md` Plugin lift
@@ -2287,7 +2303,7 @@ with `measured` and, for an agent that does not run the arm,
 `loose_parts` block (the staging's info below, the content hashes of the
 emitted tasks, the load evidence and the per-agent reasons), and each measured
 agent gets `loose_parts_lift.json` (full plugin minus loose parts per
-dimension) and `loose_parts_load_evidence.json` (every scored trial's
+metric, on the cases both arms scored; see the `basis` block above) and `loose_parts_load_evidence.json` (every scored trial's
 evidence). The loose arm runs wherever the native full-plugin arm runs: it uses
 the same native bundle route, and its Harbor wrapper over the stock Claude Code
 agent is allowed on the same Harbor backends as the native wrapper.

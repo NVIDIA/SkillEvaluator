@@ -20,7 +20,7 @@ import shutil
 import stat
 import sys
 import unicodedata
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from fractions import Fraction
@@ -42,6 +42,7 @@ from skillevaluator.tier3.eval_core.runtime_evidence import (
     summarize_canary,
     summarize_hook_census,
 )
+from skillevaluator.tier3.harbor.lift_basis import pair_metric_scores
 from skillevaluator.tier3.harbor.loose_parts_arm import (
     LOAD_EVIDENCE_FILENAME,
     LOOSE_PARTS_VARIANT,
@@ -5389,6 +5390,41 @@ def _compute_lift(
     return lift
 
 
+def _paired_lift(
+    treatment: _CollectedArm,
+    control: _CollectedArm,
+    *,
+    arms: tuple[str, str],
+    expected_case_ids: list[str] | None,
+    dropped_cases: Mapping[str, Sequence[str]] | None = None,
+) -> dict[str, Any]:
+    """Per-metric lift of *treatment* over *control*, both scored on the same cases.
+
+    Each metric keeps only the cases both arms scored it on (and none in
+    *dropped_cases*), so the two sides average the same trial set; the file's
+    ``basis`` block records the counts and every case or metric left out.
+    """
+    expected = set(expected_case_ids or []) or None
+    active = set(treatment.metrics) | set(control.metrics)
+    paired = pair_metric_scores(
+        [(_entry_id(reward, expected), reward) for reward in treatment.logical_rewards],
+        [(_entry_id(reward, expected), reward) for reward in control.logical_rewards],
+        arms=arms,
+        metrics=[metric for metric in DISPLAY_METRICS if metric in active],
+        expected_case_ids=expected_case_ids or (),
+        dropped_cases=dropped_cases,
+    )
+    lift = _compute_lift(
+        paired.treatment,
+        paired.control,
+        with_not_applicable=[*treatment.not_applicable, *paired.not_comparable],
+        without_not_applicable=[*control.not_applicable, *paired.not_comparable],
+    )
+    if lift:
+        lift["basis"] = paired.basis
+    return lift
+
+
 def _lift_overall_basket_complete(
     metrics: tuple[str, ...],
     with_scores: dict[str, float],
@@ -7802,11 +7838,8 @@ def collect_harbor_results(
 
         integration_lift: dict[str, Any] = {}
         if with_skill.scores and sum_of_parts.scores:
-            integration_lift = _compute_lift(
-                with_skill.scores,
-                sum_of_parts.scores,
-                with_not_applicable=with_skill.not_applicable,
-                without_not_applicable=sum_of_parts.not_applicable,
+            integration_lift = _paired_lift(
+                with_skill, sum_of_parts, arms=(ARM_WITH, ARM_SUM_OF_PARTS), expected_case_ids=expected_case_ids
             )
             (agent_dir / "integration_lift.json").write_text(json.dumps(integration_lift, indent=2), encoding="utf-8")
         arm_observations = {ARM_WITH: _arm_observations(with_skill, expected_case_ids=expected_case_ids)}
@@ -7848,11 +7881,8 @@ def collect_harbor_results(
         lift: dict[str, Any] = {}
         paired_execution_succeeded = with_skill.succeeded and without_skill.succeeded
         if paired_execution_succeeded and with_skill.scores and without_skill.scores:
-            lift = _compute_lift(
-                with_skill.scores,
-                without_skill.scores,
-                with_not_applicable=with_skill.not_applicable,
-                without_not_applicable=without_skill.not_applicable,
+            lift = _paired_lift(
+                with_skill, without_skill, arms=(ARM_WITH, ARM_WITHOUT), expected_case_ids=expected_case_ids
             )
             _write_generated_root_json(agent_dir / "lift.json", output_dir, lift)
 
@@ -7909,12 +7939,17 @@ def collect_harbor_results(
         loose_lift: dict[str, Any] = {}
         loose = arms.get(ARM_LOOSE_PARTS)
         if loose is not None and with_skill.scores and loose.scores:
-            # Full plugin minus loose parts per dimension (arm averages); the ladder holds the paired interval.
-            loose_lift = _compute_lift(
-                with_skill.scores,
-                loose.scores,
-                with_not_applicable=with_skill.not_applicable,
-                without_not_applicable=loose.not_applicable,
+            # Full plugin minus loose parts per metric on the same cases, without the cases the ladder drops
+            # for load evidence; the ladder holds the paired interval.
+            loose_lift = _paired_lift(
+                with_skill,
+                loose,
+                arms=(ARM_WITH, ARM_LOOSE_PARTS),
+                expected_case_ids=expected_case_ids,
+                dropped_cases={
+                    case: [str(failure.get("arm")) for failure in failures]
+                    for case, failures in (loose_load.failures if loose_load is not None else {}).items()
+                },
             )
             _write_generated_root_json(agent_dir / "loose_parts_lift.json", output_dir, loose_lift)
 

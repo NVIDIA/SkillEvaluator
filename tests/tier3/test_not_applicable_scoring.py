@@ -377,8 +377,11 @@ def test_collector_handles_every_judged_metric_not_applicable(
     assert result["execution_status"] == "succeeded"
     assert agent["with_skill"] == {"security": 1.0, "skill_execution": 1.0, "skill_efficiency": 1.0}
     assert agent["not_applicable_metrics"]["with_skill"] == list(JUDGED)
-    assert set(agent["lift"]) == {"security", "skill_execution", "skill_efficiency", "overall"}
+    assert set(agent["lift"]) == {"security", "skill_execution", "skill_efficiency", "overall", "basis"}
     assert agent["lift"]["overall"] == {"with_skill": 1.0, "without_skill": 0.5, "delta": 0.5}
+    # The judged metrics are N/A on every with-skill trial, so the file names them as not compared.
+    assert [entry["metric"] for entry in agent["lift"]["basis"]["excluded_metrics"]] == list(JUDGED)
+    assert {entry["reason"] for entry in agent["lift"]["basis"]["excluded_metrics"]} == {"not_applicable"}
     assert set(agent["dimensions_with_skill"]) == {"security", "discoverability", "efficiency"}
     assert agent["pass_at_k"]["with_skill"]["passed_cases"] == 1
 

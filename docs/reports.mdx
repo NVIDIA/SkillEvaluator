@@ -247,7 +247,9 @@ completed run directly:
   you ran more than one agent.
 - **`<agent>/lift.json`** and **`<agent>/pass_at_k_lift.json`** — per-metric
   deltas between the two arms; written only when both arms produced scores
-  (a `--skip-baseline` run has neither).
+  (a `--skip-baseline` run has neither). `lift.json` compares both arms on the
+  same cases per metric, and its `basis` block lists the counts and every case
+  or metric left out ([details](plugin-evaluation.mdx#arms-and-lift-modes)).
 - **`<agent>/statistics.json`** — report-only statistics: 95% bootstrap
   intervals for the lift, pass^k, tokens and reported USD cost per passed
   case, token efficiency, the measured first-turn context delta, and per-case

@@ -6134,9 +6134,11 @@ def _generate_harbor_tasks_into(
         # The adapter writes the plugin's servers into the harness config itself.
         # A same-named task-environment server would produce a duplicate entry.
         task_names = {str(server.get("name")) for server in mcp_servers}
-        collisions = sorted(
-            str(server.get("name")) for server in native_plugin.source.mcp_servers if server.get("name") in task_names
-        )
+        plugin_servers = list(native_plugin.source.mcp_servers)
+        if native_plugin.adapter.copies_plugin_tree and not native_plugin.adapter.namespaces_plugin_names:
+            # The loose-parts arm starts plugin-file servers under their bare names too.
+            plugin_servers.extend(native_plugin.source.plugin_file_mcp_servers)
+        collisions = sorted({str(server.get("name")) for server in plugin_servers if server.get("name") in task_names})
         if collisions:
             raise ValueError(
                 "Plugin MCP server name(s) collide with task-environment MCP servers under native loading: "

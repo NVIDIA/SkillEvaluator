@@ -1138,6 +1138,9 @@ class NativeBundle:
     Claude Code: its ``system/init`` event and the plugin name it reports).
     ``skill_aliases`` are the extra names the harness may report for the staged
     skills (Claude Code's ``<plugin>:<skill>``), which routing grades accept.
+    ``files`` lists ``(source file, bundle-relative dest)`` single-file copies
+    from inside the plugin root (bytes and mode kept; the loose-parts arm's
+    subagents, commands, and referenced scripts).
     """
 
     agent: str
@@ -1150,6 +1153,7 @@ class NativeBundle:
     hook_ids: dict[str, list[str]] = field(default_factory=dict)
     harness: dict[str, str] = field(default_factory=dict)
     skill_aliases: list[str] = field(default_factory=list)
+    files: list[tuple[Path, str]] = field(default_factory=list)
 
     def census_plan(self) -> dict[str, Any]:
         """What the collector needs to read and check this arm's load census."""

@@ -1973,12 +1973,16 @@ baseline without it. Runs saved before this rule, which filed the interval under
 
 - The Bundle lift (full plugin minus its skills alone) includes the plugin's
   rules, MCP servers and wrapper, not only how the parts coordinate.
-  `--lift-mode ladder` adds a loose-parts arm and splits it: Bundle lift =
-  Capability lift + Integration lift, on one common basis (see
-  [Lift ladder](#lift-ladder-loose-parts-arm)). Version 1 stages skills, rules
-  and MCP servers only, and only for native Claude Code; hooks, subagents,
-  commands, output styles, LSP servers and settings cannot load as loose parts
-  there, so they count as glue.
+  `--lift-mode ladder` adds a
+  [loose-parts arm](#loose-parts-arm-native-claude-code) and splits it: Bundle
+  lift = Capability lift + Integration lift, on one common basis (see
+  [Lift ladder](#lift-ladder-loose-parts-arm)). Version 1 builds the loose-parts
+  arm only for native Claude Code, where the skills, rules, MCP servers,
+  subagents, commands and hooks all load as plain pieces; only what cannot load
+  standalone (output styles, LSP servers, plugin settings, `bin/`, the manifest
+  and `userConfig`) counts as glue. The staging, hashes, load evidence,
+  statistics and reports are built; the runner does not run the arm yet
+  (`--lift-mode ladder` is not wired).
 - In native mode the with-plugin arm can also load hooks, subagents and
   commands (which ones depends on the harness), and the member-skills arm never
   does, so they land in the Bundle lift too. Loading as a plugin also renames
@@ -2255,6 +2259,93 @@ Plugin provenance records the plan and the census:
 Reports show a **Plugin Loading** section (HTML, Markdown, and CLI) with each
 agent's mode, adapter, component modes, and census counts: confirmed by
 harness, listed (files found, not confirmed), staged only, and not loaded.
+
+#### Loose-parts arm (native Claude Code)
+
+The loose-parts arm (arm key `loose_parts`, label "Loose parts") holds the same
+skills, rules, MCP servers, subagents, commands and hooks as the native Claude
+Code plugin arm, but as plain pieces that Claude Code loads without any plugin.
+Full plugin minus loose parts then measures only the plugin's glue. The staging,
+content hashes, and load evidence are built (`skillevaluator.tier3.loose_parts`);
+the `--lift-mode ladder` option that runs the arm and the `lift_ladder` report
+are not wired yet.
+
+It runs only with `--plugin-load native` on Claude Code, where the plugin arm is
+the real `--plugin-dir` load. In wrapper mode the plugin arm is SkillEvaluator's
+own generated wrapper `SKILL.md`, so plugin minus loose parts would measure that
+wrapper: the arm is refused with "not supported: use native", as it is when the
+run's plan loads Claude Code with the wrapper. Plugin provenance records
+`loose_parts_ready`. A plugin with
+nothing to stage beyond its skills (no rule, runnable MCP server, subagent,
+command or hook) is refused with "loose parts equal the skills alone", because
+the arm would repeat the skills-only arm.
+
+**Where each piece goes.** Everything reaches the container through the native
+bundle and `/skilleval/native/setup.sh`, like the plugin arm. The launch runs
+setup first, adds no `--plugin-dir`, and passes the MCP config with
+`--mcp-config`:
+
+| Piece | Plugin arm (`--plugin-dir`) | Loose-parts arm |
+| --- | --- | --- |
+| Skills | in the plugin copy, named `<plugin>:<skill>` | the task skills projection, exactly as the skills-only arm (bare names) |
+| Rules | user rules `$CLAUDE_CONFIG_DIR/rules/skilleval-<plugin>/` | the same files at the same path, written by the same code |
+| Subagents, commands | plugin `agents/`, `commands/` | byte-identical copies in `$CLAUDE_CONFIG_DIR/agents/` and `commands/` |
+| Hooks | census-wrapped `hooks/hooks.json` | the same census-wrapped hooks in `$CLAUDE_CONFIG_DIR/settings.json` (never over an existing file) |
+| MCP servers | plugin `.mcp.json`, named `plugin:<plugin>:<server>` | the same entries (command, args, env) in `/skilleval/native/claude-code/loose/mcp.json` |
+| Files named through `${CLAUDE_PLUGIN_ROOT}` (by a hook, an MCP server, a command, a subagent, or a skill's `SKILL.md`) | the plugin copy | byte- and mode-identical copies under `/skilleval/native/claude-code/loose/root/`, same relative path |
+
+`${CLAUDE_PLUGIN_ROOT}` in a hook command or MCP field is replaced with
+`/skilleval/native/claude-code/loose/root`, and `${CLAUDE_PLUGIN_DATA}` with
+`/tmp/skilleval-loose-data` (created empty by setup). Nothing else in the command
+changes, and the hook ids are the plugin arm's, so the hook census joins the
+same Tier 1 rows. The launch exports `CLAUDE_PLUGIN_ROOT` and
+`CLAUDE_PLUGIN_DATA` with those values, so the bare `$CLAUDE_PLUGIN_ROOT` form,
+which is left as written, and a script or command body that reads the variable
+find the loose copies. Command, subagent and skill files stay byte-identical. A
+reference that points outside the plugin root, or to a path the plugin copy
+leaves out, is staged in neither arm and listed in `not_staged`. A link is
+refused. A plugin-file MCP server named like a task-environment server is
+refused in the loose arm, where both would have the same bare name.
+
+**What is dropped as glue.** Only what Claude Code cannot load standalone, each
+listed per run in `loose_parts.dropped_as_glue` with its reason: output styles,
+`.lsp.json` servers, the plugin `settings.json` keys (`agent`,
+`subagentStatusLine`), `bin/` on the `PATH`, the manifest with its
+`<plugin>:` namespacing and plugin listing, and `userConfig`. A policy hook
+(for example one that blocks `git push`) is a loose part, so it is not glue.
+
+**How hashes prove equality.** `loose_parts.content_hashes` has one sha256 per
+piece for the full plugin arm (`with_skill`), the loose-parts arm
+(`loose_parts`) and the skills-only arm (`sum_of_parts`). Each arm is staged
+into a private directory by the runner's own staging code and the staged bytes
+are hashed: a file is the sha256 of its bytes; a skill or directory is the
+sha256 of its file list (path, file sha256, executable bit); an MCP server or a
+hook source is the sha256 of its JSON with the loose root written back as
+`${CLAUDE_PLUGIN_ROOT}`. A file the plugin arm rewrites only to census-wrap its
+frontmatter hooks is hashed from its source and named in `normalized`.
+`equal_across_arms` is true when every piece matches; `mismatches` lists every
+piece that differs or that one arm lacks. Piece ids use bare names
+(`skill:changelog-collect`, `mcp:reltools`), so namespacing never counts as a
+difference.
+
+**How load is verified.** Only Claude Code's own `system/init` event marks a
+piece loaded (`loose_parts.load_evidence`, per piece `loaded`, `source`,
+`evidence`): skills, subagents and commands by bare name in the loose arm
+(`<plugin>:<name>` in the plugin arm, which must also list the plugin), an MCP
+server with status `connected`. A slow-starting server is often reported
+`pending` at startup although it works; then a successful call of one of its
+tools in the trial's trajectory marks it loaded, with `source: mcp-call`. Rules
+and hooks are not in the init event, so they are `loaded: null` and never count
+as failures. A piece with `loaded: false` in any attempt of any arm is a load
+failure for that case (`load_failures_by_case`), and the case is dropped from
+every arm so the arms stay paired.
+
+**v1 limits.** Claude Code only: Codex, OpenCode and Hermes are not measured.
+A copied script that loads files next to it that no hook or server names is not
+staged with them (name the directory, or the plugin root, to copy more). The
+loose arm stages member skills as the skills-only arm does, so a skill's
+frontmatter hooks run there without the hook census. Part of full minus loose
+is still packaging: the plugin listing and the `<plugin>:` names.
 
 ### The Integration evidence gate
 

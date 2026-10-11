@@ -143,6 +143,7 @@ from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     normalize_tool_call,
 )
 from skillevaluator.tier3.harbor.stats import ARM_SUM_OF_PARTS, ARM_WITH, ARM_WITHOUT
+from skillevaluator.tier3.loose_parts import LOOSE_PARTS_ARM
 from skillevaluator.tier3.plugin_native import OPENCODE_BUILTIN_AGENTS
 from skillevaluator.utils.redaction import redact_sensitive_text
 
@@ -159,6 +160,8 @@ STATUS_NOT_APPLICABLE = "not_applicable"
 # The arm names are harbor.stats'; these aliases keep the names the collector and tests import.
 ARM_WITH_SKILL = ARM_WITH
 ARM_WITHOUT_SKILL = ARM_WITHOUT
+#: The arms that stage the plugin's MCP servers, subagents, and commands: the full plugin and its loose parts.
+PLUGIN_PART_ARMS = frozenset({ARM_WITH, LOOSE_PARTS_ARM})
 
 # -- dataset field bounds ----------------------------------------------------
 MAX_TOOL_PATTERNS = 64
@@ -1223,7 +1226,7 @@ class PluginSignalsContext:
     cases: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     baseline_has_members: bool = False
     # Declared plugin subagents and commands. They count toward activation
-    # coverage in the with-plugin arm only, the one arm that carries the plugin.
+    # coverage in the arms that stage them: the with-plugin and loose-parts arms.
     subagents: tuple[str, ...] = ()
     commands: tuple[str, ...] = ()
     # Staged subagent name (casefolded) -> declared name, for harnesses that
@@ -1248,14 +1251,21 @@ class PluginSignalsContext:
     cross_component_cases: frozenset[str] | None = None
 
     def arm_enabled(self, arm: str) -> bool:
-        if arm in {ARM_WITH, ARM_SUM_OF_PARTS}:
+        if arm in {ARM_WITH, ARM_SUM_OF_PARTS, LOOSE_PARTS_ARM}:
             return True
         return arm == ARM_WITHOUT and self.baseline_has_members
 
     def declared_for(self, arm: str, agent: str = "") -> dict[str, list[str]]:
-        """Declared components staged in ``agent``'s ``arm`` (MCP is wired into the with-plugin arm only)."""
+        """Declared components staged in ``agent``'s ``arm``.
+
+        MCP servers, subagents, and commands are staged in the with-plugin arm
+        and in the loose-parts arm (as plain user-level pieces with bare names;
+        the plugin name stays declared, so a namespaced spelling still maps to
+        the same component). LSP servers are plugin-only glue: unstaged in the
+        loose-parts arm.
+        """
         declared: dict[str, list[str]] = {COMPONENT_SKILL: list(self.member_skills)}
-        with_plugin = arm == ARM_WITH
+        with_plugin = arm in PLUGIN_PART_ARMS
         # Every agent's other arms stage the same members only, so a server any with-plugin arm runs is unstaged there.
         agent_servers = [self.agent_mcp_servers.get(agent, ())] if with_plugin else self.agent_mcp_servers.values()
         mcp_servers = list(dict.fromkeys((*self.mcp_servers, *(name for names in agent_servers for name in names))))
@@ -1291,8 +1301,11 @@ class PluginSignalsContext:
             if hidden:
                 declared[DECLARED_UNSTAGED_NAMES] = hidden
         else:
-            # Still declared, so a call the agent makes to one anyway is recorded.
-            unstaged = [kind for kind in self.agent_unstaged.get(agent, ()) if declared.get(kind)]
+            # Still declared, so a call the agent makes to one anyway is recorded. The loose-parts arm runs
+            # only where every one of these loads standalone (native Claude Code).
+            unstaged = (
+                [kind for kind in self.agent_unstaged.get(agent, ()) if declared.get(kind)] if arm == ARM_WITH else []
+            )
             if lsp_elsewhere:
                 unstaged.append(COMPONENT_LSP)
         if unstaged:
@@ -1304,8 +1317,8 @@ class PluginSignalsContext:
         return self.agent_lsp_servers.get(agent, {}) if arm == ARM_WITH else {}
 
     def aliases_for(self, arm: str) -> Mapping[str, str]:
-        """Subagent name aliases for ``arm`` (declared subagents count in the with-plugin arm only)."""
-        return self.subagent_aliases if arm == ARM_WITH and self.subagents else {}
+        """Subagent name aliases for ``arm`` (declared subagents count in the with-plugin and loose-parts arms)."""
+        return self.subagent_aliases if arm in PLUGIN_PART_ARMS and self.subagents else {}
 
     def case_spec(self, case_id: str) -> Mapping[str, Any]:
         return self.cases.get(case_id) or {}

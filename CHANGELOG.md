@@ -17,8 +17,19 @@ All notable changes to SkillEvaluator are documented in this file.
   and wrapper mode reports a Wrapper effect with no verdict. HTML, Markdown,
   CLI and `BENCHMARK.md` show the ladder; it is report-only and costs one more
   arm (+33% trials over `both`). Version 1 runs on native Claude Code only;
-  Codex, OpenCode and Hermes are not measured. The runner does not run the arm
-  yet.
+  Codex, OpenCode and Hermes are not measured, with the reason recorded per
+  agent.
+- `--lift-mode ladder` on `tier3 evaluate-plugin` and `validate --tier3` runs
+  the lift ladder: `skillevaluator tier3 evaluate-plugin ./my-plugin -a
+  claude-code --plugin-load native --lift-mode ladder`. The runner adds a
+  fourth, report-only Harbor job per measured agent (`looseparts`) with the
+  same attempts, timeouts, retries and resources as the other arms, hashes the
+  emitted tasks of the full, loose and skills-only arms, reads Claude Code's own
+  load report for every scored trial, and drops a case whose part did not load
+  from every ladder arm. Without cross-component evidence it falls back to
+  effectiveness; with nothing loose to stage, in wrapper mode, or with no native
+  Claude Code agent it falls back to `both`; the reason is recorded in
+  `ladder_skip_reason`. With `--skip-baseline` it is refused.
 - Loose-parts staging for native Claude Code (`skillevaluator.tier3.loose_parts`):
   skills, rules, MCP servers, subagents, commands and hooks staged as plain
   user-level pieces, per-piece content hashes across the full, loose and

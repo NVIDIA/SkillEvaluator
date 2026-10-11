@@ -1980,9 +1980,9 @@ baseline without it. Runs saved before this rule, which filed the interval under
   arm only for native Claude Code, where the skills, rules, MCP servers,
   subagents, commands and hooks all load as plain pieces; only what cannot load
   standalone (output styles, LSP servers, plugin settings, `bin/`, the manifest
-  and `userConfig`) counts as glue. The staging, hashes, load evidence,
-  statistics and reports are built; the runner does not run the arm yet
-  (`--lift-mode ladder` is not wired).
+  and `userConfig`) counts as glue. Run it with `skillevaluator tier3
+  evaluate-plugin ./my-plugin -a claude-code --plugin-load native --lift-mode
+  ladder`.
 - In native mode the with-plugin arm can also load hooks, subagents and
   commands (which ones depends on the harness), and the member-skills arm never
   does, so they land in the Bundle lift too. Loading as a plugin also renames
@@ -2265,10 +2265,32 @@ harness, listed (files found, not confirmed), staged only, and not loaded.
 The loose-parts arm (arm key `loose_parts`, label "Loose parts") holds the same
 skills, rules, MCP servers, subagents, commands and hooks as the native Claude
 Code plugin arm, but as plain pieces that Claude Code loads without any plugin.
-Full plugin minus loose parts then measures only the plugin's glue. The staging,
-content hashes, load evidence, ladder statistics and reports are built
-(`skillevaluator.tier3.loose_parts`, `lift_ladder`); the runner does not run the
-arm yet (`--lift-mode ladder` is not wired), so no run records a ladder yet.
+Full plugin minus loose parts then measures only the plugin's glue.
+
+```bash title="Run the four-arm lift ladder on native Claude Code"
+skillevaluator tier3 evaluate-plugin ./my-plugin -a claude-code \
+  --plugin-load native --lift-mode ladder --n-attempts 3 --harbor-keep-jobs
+```
+
+`validate --type plugin --tier3` takes the same `--lift-mode ladder`. The runner
+adds a fourth Harbor job per measured agent (`<package>-<agent>-looseparts`,
+tasks in `_harbor-tasks/<agent>/looseparts/`, results in
+`<agent>/loose-parts/`). It is report-only, like the skills-only arm: its
+failure never fails the run. It gets the same cases, attempts, timeouts,
+retries, resources and verifier settings as the other three arms, and the
+per-agent concurrency is split over four jobs. Its tasks are staged like the
+skills-only arm's (no target skill, `has_skill: false`, the same task names),
+plus the loose bundle. `run_config.json` records
+`skill_workspace.loose_parts_arm` and, per agent, `loose_parts.agents.<agent>`
+with `measured` and, for an agent that does not run the arm,
+`not_measured_reason`. `result.json` and the plugin provenance carry the run's
+`loose_parts` block (the staging's info below, the content hashes of the
+emitted tasks, the load evidence and the per-agent reasons), and each measured
+agent gets `loose_parts_lift.json` (full plugin minus loose parts per
+dimension) and `loose_parts_load_evidence.json` (every scored trial's
+evidence). The loose arm runs wherever the native full-plugin arm runs: it uses
+the same native bundle route, and its Harbor wrapper over the stock Claude Code
+agent is allowed on the same Harbor backends as the native wrapper.
 
 It runs only with `--plugin-load native` on Claude Code, where the plugin arm is
 the real `--plugin-dir` load. In wrapper mode the plugin arm is SkillEvaluator's
@@ -2316,9 +2338,10 @@ listed per run in `loose_parts.dropped_as_glue` with its reason: output styles,
 
 **How hashes prove equality.** `loose_parts.content_hashes` has one sha256 per
 piece for the full plugin arm (`with_skill`), the loose-parts arm
-(`loose_parts`) and the skills-only arm (`sum_of_parts`). Each arm is staged
-into a private directory by the runner's own staging code and the staged bytes
-are hashed: a file is the sha256 of its bytes; a skill or directory is the
+(`loose_parts`) and the skills-only arm (`sum_of_parts`). The runner hashes the
+`environment/` of every Harbor task it emitted for those three arms
+(`content_basis: emitted Harbor tasks`, `tasks_hashed`); the tasks of one arm
+must agree with each other too. The staged bytes are hashed: a file is the sha256 of its bytes; a skill or directory is the
 sha256 of its file list (path, file sha256, executable bit); an MCP server or a
 hook source is the sha256 of its JSON with the loose root written back as
 `${CLAUDE_PLUGIN_ROOT}`. A file the plugin arm rewrites only to census-wrap its
@@ -2329,8 +2352,12 @@ piece that differs or that one arm lacks. Piece ids use bare names
 difference.
 
 **How load is verified.** Only Claude Code's own `system/init` event marks a
-piece loaded (`loose_parts.load_evidence`, per piece `loaded`, `source`,
-`evidence`): skills, subagents and commands by bare name in the loose arm
+piece loaded (per trial and piece `loaded`, `source`, `evidence`, saved in
+`<agent>/loose_parts_load_evidence.json`; `loose_parts.load_evidence` keeps the
+counts per arm and piece and `load_failures_by_case`). The collector reads it
+from `agent/claude-code.txt` of every scored trial of the full, loose and
+skills-only arms (an attempt without a score adds nothing to the ladder, so it
+is not checked): skills, subagents and commands by bare name in the loose arm
 (`<plugin>:<name>` in the plugin arm, which must also list the plugin), an MCP
 server with status `connected`. A slow-starting server is often reported
 `pending` at startup although it works; then a successful call of one of its
@@ -2444,11 +2471,21 @@ integration`. The existing Plugin lift, Bundle lift and their verdict are
 reported next to the ladder, unchanged.
 
 It needs what `both` needs (a baseline, member skills, cross-component evidence)
-plus at least one rule, runnable MCP server, subagent, command or hook. Without
-one, the loose parts equal the skills alone, so the run falls back to `both`
-and records `ladder_skip_reason`; without cross-component evidence it falls back to
-`effectiveness`, as `both` does. Version 1 builds the loose-parts arm for native
-Claude Code (`--plugin-load native`); for Codex, OpenCode and Hermes the
+plus at least one rule, runnable MCP server, subagent, command or hook. The
+fallbacks are recorded in `requested_lift_mode`, `effective_lift_mode` and
+`ladder_skip_reason` (plugin provenance and `run_config.lift_mode`):
+
+| Situation | Effective mode | Recorded |
+| --- | --- | --- |
+| `--skip-baseline` | refused, nothing runs | "lift ladder requires a baseline" |
+| No cross-component evidence (or no member skills) | `effectiveness`, as `both` does | `integration_skip_reason` and `ladder_skip_reason` |
+| Nothing loose to stage (the loose parts equal the skills alone) | `both` | `ladder_skip_reason` |
+| Wrapper mode (`--plugin-load wrapper`) | `both` | `ladder_skip_reason` "not supported: use native ..." |
+| No selected agent is native Claude Code | `both` | `ladder_skip_reason` with each agent's reason |
+| Native Claude Code and other agents | `ladder` | the other agents: `loose_parts.agents.<agent>.not_measured_reason` |
+
+Version 1 builds the loose-parts arm for native Claude Code
+(`-a claude-code --plugin-load native`); for Codex, OpenCode and Hermes the
 ladder says "not measured" with the reason.
 
 **One common basis.** The steps add up only when every step uses one set of

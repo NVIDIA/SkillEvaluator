@@ -542,6 +542,7 @@ Plugin baselines are controlled with `--lift-mode`:
 | `effectiveness` | Full plugin versus no plugin; default |
 | `integration` | Full plugin versus its member skills staged individually (the Bundle lift) |
 | `both` | Effectiveness plus a third, report-only sum-of-parts arm |
+| `ladder` | `both` plus a fourth, report-only loose-parts arm (native Claude Code: `-a claude-code --plugin-load native`); reports the [lift ladder](plugin-evaluation.mdx#lift-ladder-loose-parts-arm) |
 
 Integration is only meaningful when the dataset contains composition evidence:
 at least one case with `cross_component: true` and two or more distinct member
@@ -596,7 +597,8 @@ eval cases × agents × attempts × arms
 ```
 
 A standard comparison has two arms (with-skill and without-skill); a plugin run
-with `--lift-mode both` adds a third, member-skills arm. Each trial
+with `--lift-mode both` adds a third, member-skills arm, and `--lift-mode ladder`
+a fourth, loose-parts arm (native Claude Code). Each trial
 can make multiple agent-model requests, standard grading adds evaluator-model
 calls, dataset generation can add more, and the optional runtime preflight adds
 one extra agent execution per agent. Actual charges therefore depend on the selected

@@ -128,7 +128,7 @@ cases may add these optional fields:
 | Field | Purpose |
 | --- | --- |
 | `cross_component` | `true` marks a case that needs several member skills together |
-| `expected_skills` | The member skills the case should combine. A case with `cross_component: true` and at least two distinct names here is the evidence that Integration (`--lift-mode integration` or `both`) requires |
+| `expected_skills` | The member skills the case should combine. A case with `cross_component: true` and at least two distinct names here is the evidence that Integration (`--lift-mode integration`, `both` or `ladder`) requires |
 | `expected_tools`, `acceptable_tools`, `decoy_tools` | Tool and component refs (such as `Skill:release-notes`, `MCP:tracker`, or `mcp__tracker__*`) for the report-only tool-selection signal |
 | `tool_arguments` | Argument rules for matching calls: `required`, a small JSON Schema subset, `equals`, `contains`, and `pattern` |
 | `expected_order` | `[before, after]` precedence edges between components or tools |

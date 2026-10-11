@@ -6,6 +6,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `tier3 evaluate-plugin` takes `validate`'s report options, `-r/--report` (`cli`, `json`, `html`, `markdown`, `sarif`; default `cli`) and `-o/--output-dir` (default `reports`), and writes the plugin's Tier 3 result through the same reporters and file names as `validate`. Without either option it prints and writes what it did before. A run that did not complete still writes its reports, marked INCOMPLETE, before it exits 1.
 - Plugin Tier 3 statistics and reports for the lift ladder (`--lift-mode
   ladder`): a fourth, loose-parts arm (the plugin's skills, rules, MCP servers,
   subagents, commands and hooks as plain Claude Code pieces) splits the plugin

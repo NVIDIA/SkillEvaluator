@@ -489,6 +489,17 @@ skillevaluator tier3 evaluate-plugin ./my-plugin --lift-mode both \
 | `--override-memory-mb INTEGER` | unset | Override eval-environment memory in MB. |
 | `--override-storage-mb INTEGER` | unset | Override eval-environment storage in MB. |
 | `--progress [auto\|rich\|plain\|off]` | `auto` | Progress display for the run. |
+| `-r, --report [cli\|json\|html\|markdown\|sarif]` | `cli` | Report format(s), as for `validate`: comma- or space-separated, repeatable. |
+| `-o, --output-dir DIRECTORY` | `reports` | Directory for the report files, as for `validate`. |
+
+Without `-r` or `-o`, `evaluate-plugin` prints the run summary and refreshes
+the run's own `report.html`, as before. With either, it also reports the run
+the way `validate` reports a plugin's Tier 3 result: the same `AGENT_EVAL`
+result in the same formats and file names
+(`skillevaluator-output-<timestamp>.json`, `.html`, `.md`, `.sarif.json`), and
+`-r cli` prints the full terminal report. A run that did not complete still
+writes its reports, marked INCOMPLETE, and then exits 1. `BENCHMARK.md` is not
+written: it is the full `validate` card.
 
 Integration requires at least one dataset case with `cross_component: true`
 and two or more distinct `expected_skills`. An explicit `integration` run is

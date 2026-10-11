@@ -391,6 +391,17 @@ _validate_json_report_var: ContextVar[str | None] = ContextVar(
 )
 
 
+def _report_target(report_root: Path) -> tuple[str, Path]:
+    """What the reports name as the target (its Git remote, else the path) and the SARIF repository root."""
+    from skillevaluator.utils.helpers import resolve_git_remote_url, resolve_git_root
+
+    target_display = resolve_git_remote_url(report_root) or str(report_root)
+    sarif_repository_root = resolve_git_root(report_root)
+    if sarif_repository_root is None:
+        sarif_repository_root = report_root if report_root.is_dir() else report_root.parent
+    return target_display, sarif_repository_root
+
+
 def _effective_report_formats(report_formats: tuple[str, ...], *, quiet: bool) -> tuple[str, ...]:
     """Resolve the report formats ``validate`` will actually emit."""
     if quiet and not _report_formats_explicit():
@@ -456,7 +467,12 @@ def _consume_validate_json_report() -> str | None:
 
 
 def _report_formats_explicit() -> bool:
-    """True when the user passed ``-r``/``--report`` on the command line.
+    """True when the user passed ``-r``/``--report`` on the command line."""
+    return _option_on_command_line("report_formats")
+
+
+def _option_on_command_line(name: str) -> bool:
+    """True when the user passed the option whose parameter is *name* on the command line.
 
     Catalog mode re-invokes ``validate`` through a child context that records
     no parameter sources, so the walk climbs to the original invocation.
@@ -465,7 +481,7 @@ def _report_formats_explicit() -> bool:
 
     ctx = click.get_current_context(silent=True)
     while ctx is not None:
-        source = ctx.get_parameter_source("report_formats")
+        source = ctx.get_parameter_source(name)
         if source is not None:
             return source == ParameterSource.COMMANDLINE
         ctx = ctx.parent
@@ -1155,36 +1171,81 @@ def _incomplete_plugin_agent_eval_result(
     """An INCOMPLETE ``AGENT_EVAL`` result for a plugin run that did not complete.
 
     Writes ``plugin_provenance.json`` first, then builds the result from this
-    run's own output so the with-plugin canary, load census, hook census, and
-    coverage stay in every report. Falls back to an advisory skip only when the
-    run left no usable results.
+    run's own output (:func:`_plugin_agent_eval_result`).
+    """
+    provenance = _incomplete_plugin_provenance(prepared, engine_result, mcp_proof, failure, metadata)
+    return _plugin_agent_eval_result(
+        plugin_dir,
+        prepared=prepared,
+        engine_result=engine_result,
+        provenance=provenance,
+        failure=failure,
+        metadata=metadata,
+        results_dir=results_dir,
+        env_mode=env_mode,
+    )
+
+
+def _plugin_agent_eval_result(
+    plugin_dir: Path,
+    *,
+    prepared: PluginEvalPackage,
+    engine_result: Any,
+    provenance: dict[str, Any] | None,
+    failure: str | None,
+    metadata: dict[str, str],
+    results_dir: Path | None,
+    env_mode: str,
+) -> ValidationResult:
+    """The ``AGENT_EVAL`` result a plugin run reports, once its provenance exists.
+
+    ``validate`` and ``tier3 evaluate-plugin`` both report a plugin run with it.
+    A run that did not complete (*failure*) is INCOMPLETE, built from this run's
+    own output so the with-plugin canary, load census, hook census, and coverage
+    stay in every report; a completed run is read from its results directory.
+    Either falls back to an advisory skip only when the run left no usable
+    results. ``report.html`` is re-rendered from the result: the runner wrote it
+    before the provenance sidecar existed.
     """
     from skillevaluator.evaluation.tier3_report import (
         advisory_skip_result,
+        agent_eval_result_from_run,
         incomplete_reason,
         refresh_plugin_run_report,
     )
 
-    message = f"Tier 3 plugin evaluation did not complete: {failure}"
-    provenance = _incomplete_plugin_provenance(prepared, engine_result, mcp_proof, failure, metadata)
-    result = _partial_agent_eval_result(
-        plugin_dir,
-        engine_result=engine_result,
-        failure=message,
-        results_dir=results_dir,
-        env_mode=env_mode,
-        dataset_source=prepared.package_path,
-        plugin_provenance=provenance,
-    )
-    if result is None:
-        return advisory_skip_result(message, skill_name=plugin_dir.name)
-    result.passed = False
-    result.metadata["execution_status"] = "skipped"
-    result.metadata["skip_reason"] = incomplete_reason(provenance or {"execution_incomplete": message})
+    if failure:
+        message = f"Tier 3 plugin evaluation did not complete: {failure}"
+        result = _partial_agent_eval_result(
+            plugin_dir,
+            engine_result=engine_result,
+            failure=message,
+            results_dir=results_dir,
+            env_mode=env_mode,
+            dataset_source=prepared.package_path,
+            plugin_provenance=provenance,
+        )
+        if result is None:
+            return advisory_skip_result(message, skill_name=plugin_dir.name)
+        result.passed = False
+        result.metadata["execution_status"] = "skipped"
+        result.metadata["skip_reason"] = incomplete_reason(provenance or {"execution_incomplete": message})
+    else:
+        result = agent_eval_result_from_run(
+            plugin_dir,
+            results_dir=results_dir,
+            dataset_source=prepared.package_path,
+            env_mode=env_mode,
+            engine_result=engine_result if isinstance(engine_result, dict) else None,
+            plugin_provenance=provenance,
+        )
+        if result is None:
+            return advisory_skip_result(
+                "Tier 3 plugin evaluation produced no parseable results.", skill_name=plugin_dir.name
+            )
     result.metadata.update(metadata)
     run_dir = _engine_run_dir(engine_result)
     if run_dir is not None:
-        # The runner rendered report.html before the sidecar existed.
         refresh_plugin_run_report(plugin_dir, run_dir, result=result)
     return result
 
@@ -1250,11 +1311,7 @@ def _run_plugin_agent_eval(
 
     from skillevaluator.cli_core import resolve_plugin_path
     from skillevaluator.evaluation import EvaluationService
-    from skillevaluator.evaluation.tier3_report import (
-        advisory_skip_result,
-        agent_eval_result_from_run,
-        refresh_plugin_run_report,
-    )
+    from skillevaluator.evaluation.tier3_report import advisory_skip_result
     from skillevaluator.tier3.plugin_eval import prepare_plugin_eval_package
 
     plugin_dir = resolve_plugin_path(plugin_target)
@@ -1262,7 +1319,6 @@ def _run_plugin_agent_eval(
     def _skipped(message: str) -> ValidationResult:
         return advisory_skip_result(message, skill_name=plugin_dir.name)
 
-    lift_metadata: dict[str, str] = {}
     try:
         with tempfile.TemporaryDirectory(prefix="skillevaluator-plugin-eval-") as temp_dir:
             prepared = prepare_plugin_eval_package(
@@ -1339,25 +1395,18 @@ def _run_plugin_agent_eval(
                     env_mode=env_mode,
                 )
             provenance = _completed_plugin_provenance(prepared, engine_result, mcp_proof, lift_metadata)
-            result = agent_eval_result_from_run(
+            return _plugin_agent_eval_result(
                 plugin_dir,
+                prepared=prepared,
+                engine_result=engine_result,
+                provenance=provenance,
+                failure=None,
+                metadata=lift_metadata,
                 results_dir=results_dir,
-                dataset_source=prepared.package_path,
                 env_mode=env_mode,
-                engine_result=engine_result if isinstance(engine_result, dict) else None,
-                plugin_provenance=provenance,
             )
-            run_dir = _engine_run_dir(engine_result)
-            if result is not None and run_dir is not None:
-                # The runner rendered report.html before the sidecar existed.
-                refresh_plugin_run_report(plugin_dir, run_dir, result=result)
     except Exception as exc:
         return _skipped(f"Tier 3 plugin evaluation skipped: {exc}")
-
-    if result is None:
-        return _skipped("Tier 3 plugin evaluation produced no parseable results.")
-    result.metadata.update(lift_metadata)
-    return result
 
 
 # Per-tier section headings printed by ``validate`` as each tier runs. They give
@@ -2659,7 +2708,7 @@ def validate(
     )
     from skillevaluator.reporting import CLIReporter
     from skillevaluator.reporting.naming import REPORT_PREFIX
-    from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url, resolve_git_root
+    from skillevaluator.utils.helpers import make_timestamped_basename
     from skillevaluator.validators.policy import apply_policy, resolve_policy
 
     declared_is_link = _declared_target_is_link(target_path)
@@ -2968,10 +3017,7 @@ def validate(
     # Reports and the footer name the validated content root, not the lexical "." or manifest-file argument.
     report_root = resolved_target.resolve()
     _content_relative_finding_paths(results, resolved_target, report_root)
-    target_display = resolve_git_remote_url(report_root) or str(report_root)
-    sarif_repository_root = resolve_git_root(report_root)
-    if sarif_repository_root is None:
-        sarif_repository_root = report_root if report_root.is_dir() else report_root.parent
+    target_display, sarif_repository_root = _report_target(report_root)
 
     # Quiet mode defaults the reports to html+json (the terminal shows only
     # the summary; the files carry the findings) and points at them from the
@@ -3631,6 +3677,37 @@ def evaluate(
         raise click.ClickException(str(exc)) from exc
 
 
+def _emit_plugin_run_reports(
+    result: ValidationResult,
+    plugin_dir: Path,
+    *,
+    report_formats: tuple[str, ...],
+    output_dir: Path,
+    policy: Any,
+) -> ReportsNotWrittenError | None:
+    """Write *result* in *report_formats* as ``validate`` does; return the error if a report was not written."""
+    from skillevaluator.reporting.naming import REPORT_PREFIX
+    from skillevaluator.utils.helpers import make_timestamped_basename
+
+    report_root = plugin_dir.resolve()
+    target_display, sarif_repository_root = _report_target(report_root)
+    try:
+        emit_reports(
+            [result],
+            report_formats=report_formats,
+            output_dir=output_dir,
+            basename=make_timestamped_basename(f"{REPORT_PREFIX}-output"),
+            policy=policy,
+            target_path=target_display,
+            content_label="Plugin",
+            sarif_scan_root=report_root,
+            sarif_repository_root=sarif_repository_root,
+        )
+    except ReportsNotWrittenError as exc:
+        return exc
+    return None
+
+
 @cli.command("evaluate-plugin", hidden=True)
 @click.argument("plugin_path", type=click.Path(exists=True, path_type=Path))
 @click.option(
@@ -3738,6 +3815,7 @@ def evaluate(
     default="auto",
     show_default=True,
 )
+@_report_options
 def evaluate_plugin(
     plugin_path: Path,
     evals_source: Path | None,
@@ -3770,8 +3848,15 @@ def evaluate_plugin(
     override_memory_mb: int | None,
     override_storage_mb: int | None,
     progress: str,
+    report_formats: tuple[str, ...],
+    output_dir: Path,
 ) -> None:
-    """Run Tier 3 live evaluation for a public agent plugin."""
+    """Run Tier 3 live evaluation for a public agent plugin.
+
+    Without -r or -o only the run summary prints, and the run's own report.html
+    is refreshed. With either, the run is also reported as validate reports it:
+    -r picks the formats (default cli) and -o the directory (default reports).
+    """
     import tempfile
 
     from skillevaluator.cli_core import resolve_plugin_path
@@ -3782,6 +3867,8 @@ def evaluate_plugin(
     from skillevaluator.validators.policy import resolve_policy
 
     plugin_dir = resolve_plugin_path(plugin_path)
+    # Reports only when asked for, so a run without -r/-o prints and writes what it always did.
+    write_reports = _option_on_command_line("report_formats") or _option_on_command_line("output_dir")
     service = EvaluationService()
     try:
         policy = resolve_policy(policy_path=policy_path)
@@ -3905,7 +3992,30 @@ def evaluate_plugin(
             if provenance_error is not None:
                 raise provenance_error
             run_dir = _engine_run_dir(engine_result)
-            if run_dir is not None and provenance is not None:
+            reports_error: ReportsNotWrittenError | None = None
+            if write_reports:
+                # The result validate reports for this run; building it also refreshes report.html.
+                try:
+                    result = _plugin_agent_eval_result(
+                        plugin_dir,
+                        prepared=prepared,
+                        engine_result=engine_result,
+                        provenance=provenance,
+                        failure=failure,
+                        metadata=lift_metadata,
+                        results_dir=results_dir,
+                        env_mode=env_mode,
+                    )
+                except Exception as exc:  # as in validate: an advisory skip says why, the run's outcome stands
+                    from skillevaluator.evaluation.tier3_report import advisory_skip_result
+
+                    result = advisory_skip_result(
+                        f"Tier 3 plugin evaluation skipped: {exc}", skill_name=plugin_dir.name
+                    )
+                reports_error = _emit_plugin_run_reports(
+                    result, plugin_dir, report_formats=report_formats, output_dir=output_dir, policy=policy
+                )
+            elif run_dir is not None and provenance is not None:
                 # The runner rendered report.html before the sidecar existed.
                 refresh_plugin_run_report(
                     plugin_dir,
@@ -3914,12 +4024,15 @@ def evaluate_plugin(
                     engine_result=engine_result,
                     plugin_provenance=provenance,
                 )
+            also = f", and {reports_error.message}" if reports_error is not None else ""
             if failure:
                 # The INCOMPLETE reason every report gives: why the run did not complete, then what it deferred.
                 fallback = {"execution_incomplete": f"Tier 3 plugin evaluation did not complete: {failure}"}
-                raise click.ClickException(incomplete_reason(provenance or fallback))
+                raise click.ClickException(incomplete_reason(provenance or fallback) + also)
             if provenance and provenance.get("partial"):
-                raise click.ClickException(incomplete_reason(provenance))
+                raise click.ClickException(incomplete_reason(provenance) + also)
+            if reports_error is not None:
+                raise reports_error
     except click.ClickException:
         raise
     except Exception as exc:

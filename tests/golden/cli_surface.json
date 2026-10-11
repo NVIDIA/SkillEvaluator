@@ -942,6 +942,33 @@
             "--progress"
           ],
           "param_type": "option"
+        },
+        {
+          "choices": [
+            "cli",
+            "json",
+            "html",
+            "markdown",
+            "sarif"
+          ],
+          "default": "('cli',)",
+          "multiple": true,
+          "name": "report_formats",
+          "opts": [
+            "--report",
+            "-r"
+          ],
+          "param_type": "option"
+        },
+        {
+          "default": "reports",
+          "name": "output_dir",
+          "opts": [
+            "--output-dir",
+            "-o"
+          ],
+          "param_type": "option",
+          "type": "directory"
         }
       ]
     },
@@ -3141,6 +3168,33 @@
                 "--progress"
               ],
               "param_type": "option"
+            },
+            {
+              "choices": [
+                "cli",
+                "json",
+                "html",
+                "markdown",
+                "sarif"
+              ],
+              "default": "('cli',)",
+              "multiple": true,
+              "name": "report_formats",
+              "opts": [
+                "--report",
+                "-r"
+              ],
+              "param_type": "option"
+            },
+            {
+              "default": "reports",
+              "name": "output_dir",
+              "opts": [
+                "--output-dir",
+                "-o"
+              ],
+              "param_type": "option",
+              "type": "directory"
             }
           ]
         },

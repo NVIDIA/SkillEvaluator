@@ -8928,6 +8928,10 @@ def check_error_recovery(
             "agent_faults": 0,
         }
 
+    # Same list as the container verifier. No "timeout": passing output can hold it
+    # ("timeout: 300.0s" from pytest-timeout). No "connectionrefused": Python's
+    # ConnectionRefusedError already matches "error". A failure that prints neither
+    # word nor an exit code (curl's "Connection refused") is not seen as one.
     error_keywords = [
         "error",
         "traceback",
@@ -8940,8 +8944,6 @@ def check_error_recovery(
         "no such file",
         "filenotfounderror",
         "modulenotfounderror",
-        "connectionrefused",
-        "timeout",
     ]
     # Match exit_code=N / "exit code N" for any nonzero N (not just 1/2).
     nonzero_exit_re = re.compile(r"(?:exit_code|exit\s+code)\s*[=:]?\s*(?!0\b)(\d+)", re.IGNORECASE)
@@ -9235,9 +9237,13 @@ def check_tool_efficiency(
     expected_skill: str | None = None,
     expected_script: str | None = None,
 ) -> dict[str, Any]:
-    """Measure what fraction of tool calls were productive vs wasted."""
+    """Measure what fraction of tool calls were productive vs wasted.
+
+    Like the container verifier, the result holds counts only (in ``reason``),
+    never the command text of a wasted call: that text can carry a credential.
+    """
     if not tool_calls:
-        return {"passed": True, "score": 1.0, "reason": "No tool calls", "details": {}}
+        return {"passed": True, "score": 1.0, "reason": "No tool calls"}
 
     if _has_unsupported_native_codex_call(tool_calls):
         return _unsupported_native_codex_result(
@@ -9246,7 +9252,6 @@ def check_tool_efficiency(
 
     productive = 0
     wasted = 0
-    wasted_details: list[str] = []
 
     for tc in tool_calls:
         action = tc["action"].lower()
@@ -9276,7 +9281,6 @@ def check_tool_efficiency(
             productive += 1
         else:
             wasted += 1
-            wasted_details.append(f"{tc['action']}({cmd[:60]})")
 
     total = productive + wasted
     score = productive / total if total > 0 else 1.0
@@ -9285,12 +9289,6 @@ def check_tool_efficiency(
         "passed": score >= 0.5,
         "score": round(score, 4),
         "reason": f"{productive}/{total} productive calls ({score:.0%})",
-        "details": {
-            "productive": productive,
-            "wasted": wasted,
-            "total": total,
-            "wasted_calls": wasted_details[:5],
-        },
     }
 
 

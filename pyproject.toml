@@ -191,6 +191,8 @@ ignore = [
 "tests/**" = ["INP001"]
 # Test helper / fixture scripts run standalone and print to stdout by design.
 "tests/golden/generate_cli_surface.py" = ["T201"]
+# Tier 3 measuring tools under tests/tier3/_tools print their reports by design.
+"tests/tier3/_tools/**" = ["T201"]
 "tests/fixtures/skills/**" = ["T201"]
 
 [tool.ruff.lint.isort]

@@ -1907,8 +1907,9 @@ spend money on a run.
 | Arm | Staged | Runs in |
 | --- | --- | --- |
 | **With plugin** | Wrapper `SKILL.md` with embedded rules, member skills, runnable plugin MCP servers | Every mode |
-| **Without plugin** | Nothing from the plugin | `effectiveness` and `both` |
-| **Member skills only** | Member skills. No wrapper, no rules, no plugin MCP servers | `integration` (as the baseline) and `both` (as a third, report-only arm) |
+| **Without plugin** | Nothing from the plugin | `effectiveness`, `both` and `ladder` |
+| **Member skills only** | Member skills. No wrapper, no rules, no plugin MCP servers | `integration` (as the baseline), `both` and `ladder` (as a report-only arm) |
+| **Loose parts** | The same member skills, rules and MCP servers as plain pieces: no wrapper, no plugin manifest, no hooks, subagents or commands | `ladder` (report-only arm) |
 
 `--lift-mode` chooses the comparison:
 
@@ -1917,6 +1918,7 @@ spend money on a run.
 | `effectiveness` (default) | With plugin vs without plugin | Plugin lift (`lift_uncertainty.effectiveness`; per-metric deltas in `lift.json`) |
 | `integration` | With plugin vs member skills only | The single baseline is the member-skills arm, so its interval is filed under `lift_uncertainty.integration`, the Integration block describes plugin minus members, and no plugin-vs-no-plugin lift is reported |
 | `both` | Effectiveness, plus a third, report-only member-skills arm | Plugin lift from the no-plugin baseline; Integration from the member-skills arm (`integration_lift.json` keeps per-metric deltas) |
+| `ladder` | `both`, plus a fourth, report-only loose-parts arm | Everything `both` reports, unchanged, plus the [lift ladder](#lift-ladder-loose-parts-arm) (`lift_ladder`) |
 
 Reports call the with-plugin minus member-skills lift the **Bundle lift** (its
 previous name was Integration lift). Bundle lift = full plugin minus its skills
@@ -1970,22 +1972,26 @@ baseline without it. Runs saved before this rule, which filed the interval under
 ### Known limitations and planned work
 
 - The Bundle lift (full plugin minus its skills alone) includes the plugin's
-  rules, MCP servers and wrapper, not only how the parts coordinate. A
-  loose-parts arm is planned: the same skills, rules and MCP servers staged
-  separately, with no wrapper. Full plugin minus loose parts could then be
-  called the Integration lift, and Bundle lift = extras + integration.
+  rules, MCP servers and wrapper, not only how the parts coordinate.
+  `--lift-mode ladder` adds a loose-parts arm and splits it: Bundle lift =
+  Capability lift + Integration lift, on one common basis (see
+  [Lift ladder](#lift-ladder-loose-parts-arm)). Version 1 stages skills, rules
+  and MCP servers only, and only for native Claude Code; hooks, subagents,
+  commands, output styles, LSP servers and settings cannot load as loose parts
+  there, so they count as glue.
 - In native mode the with-plugin arm can also load hooks, subagents and
   commands (which ones depends on the harness), and the member-skills arm never
-  does, so they land in the Bundle lift too; they are not compared as loose
-  parts. Loading as a plugin also renames things
-  (`plugin:skill`), so part of the gap is packaging.
+  does, so they land in the Bundle lift too. Loading as a plugin also renames
+  things (`plugin:skill`), so part of the gap is packaging, and the ladder's
+  Integration lift includes that packaging.
 - Small runs (a handful of cases, 1-2 attempts) often end `inconclusive`: the
   ±0.05 bands are narrower than the interval. Use at least 10 cases and 3
   attempts before reading either lift.
-- A three-step split (skills, extras, integration) adds up exactly only on one
-  common set of scores. Today each lift uses the dimensions its own two arms
-  scored, and the no-plugin arm has the skill-specific scores as N/A, so the
-  Plugin lift is not the sum of the other lifts.
+- The headline Plugin lift and Bundle lift each use the dimensions their own two
+  arms scored, and the no-plugin arm has the skill-specific scores as N/A, so
+  they do not add up. Only the lift ladder's steps add up, because the ladder
+  scores all four arms on one common basis; its total is labeled "Plugin lift
+  on the common basis" and can differ from the headline Plugin lift.
 - The `by_case_type` split is a hint, not proof: a lift on cross-component cases
   still includes the plugin's extras.
 - Each lift is measured with one agent model on one harness. It is not
@@ -2323,6 +2329,126 @@ result per agent.
 The block also records `components`, `with_plugin`, `sum_of_parts`,
 `integration_lift`, `complete`, `completeness`, `lift_uncertainty`, `by_case_type`, an
 `interpretation`, `agent`, and both lift modes.
+
+### Lift ladder (loose-parts arm)
+
+`--lift-mode ladder` runs four arms: no plugin, member skills only, **loose
+parts** and the full plugin. The loose-parts arm stages the same skills, rules
+and MCP servers as plain pieces (rules as ordinary rule files, MCP servers as
+ordinary MCP config with the same tool descriptions), with no wrapper and no
+plugin manifest. The plugin lift then splits into steps that add up:
+
+| Step (`lift_ladder.steps.*`) | Arms | Report label |
+| --- | --- | --- |
+| `skill` | skills only minus no plugin | Skill lift |
+| `capability` | loose parts minus skills only | Capability lift (rules and MCP tools) |
+| `integration` | full plugin minus loose parts | Integration lift (glue) |
+| `plugin` | full plugin minus no plugin | Plugin lift on the common basis |
+
+`skill + capability + integration = plugin`, and the Bundle lift on the same
+basis (`lift_ladder.bundle`, full plugin minus skills only) is `capability +
+integration`. The existing Plugin lift, Bundle lift and their verdict are
+reported next to the ladder, unchanged.
+
+It needs what `both` needs (a baseline, member skills, cross-component evidence)
+plus at least one rule or runnable MCP server. Without a rule or MCP server the
+loose parts equal the skills alone, so the run falls back to `both` and records
+`ladder_skip_reason`; without cross-component evidence it falls back to
+`effectiveness`, as `both` does. Version 1 builds the loose-parts arm for native
+Claude Code (`--plugin-load native`); for Codex, OpenCode and Hermes the
+ladder says "not measured" with the reason.
+
+**One common basis.** The steps add up only when every step uses one set of
+scores. Each case is scored in every arm on the dimensions that **all four**
+arms scored for it, out of Security, Correctness and Effectiveness (the no-plugin
+arm has no Discoverability or Efficiency). A case is dropped from every arm,
+and listed in `excluded_cases` with its reason, when any arm did not score it
+(`not_scored`), when its load verification failed in any arm (`load_failed`: a
+loose or plugin part that Claude Code's startup report did not mark loaded and
+that was never called), or when the arms share no dimension for it
+(`no_common_dimension`). `partial` is then `true`. Every step goes through the
+same paired case bootstrap with the same seed over the same cases, so the steps
+add up per case, on the means, and in every bootstrap resample; the intervals
+do not add (percentiles are not additive), and rounding to four decimals can
+leave up to 0.0002. The ladder total is labeled "Plugin lift on the common
+basis" and can differ from the headline Plugin lift, which compares two arms on
+the dimensions both scored. `by_case_type` repeats the steps on the
+cross-component cases and on the other cases.
+
+**The glue verdict.** Only the Integration lift gets a verdict, read on
+cross-component cases only (cases marked `cross_component: true` that name two
+or more member skills). Glue shows up mostly in routing and wasted work, which
+the common basis leaves out, so the verdict uses a second basis
+(`lift_ladder.glue`): the same cases, scored on all five dimensions the three
+skill-staging arms (skills only, loose parts, full plugin) share. The bands and
+rules are the Bundle lift's: `real_integration` when the 95% interval clears
++0.05, `negative_integration` when it stays below −0.05, `cosmetic_bundling`
+when it lies inside the band, and `inconclusive` when
+
+- fewer than 5 cross-component cases pair up, or the interval crosses a band
+  edge;
+- the loose-parts arm did not cover the same cases with the configured attempts
+  as the full plugin (`integration_completeness.loose_parts`), or a
+  cross-component case was dropped from any arm;
+- the capability is not identical across arms (below).
+
+The Skill and Capability lifts get intervals only, never a verdict. In wrapper
+mode the full arm loads SkillEvaluator's generated wrapper, so full minus loose
+parts measures that wrapper: the reports call it "Wrapper effect (full wrapper
+arm minus loose parts)", never Integration lift, and issue no verdict. The same
+holds when the run did not record a native load for the full arm
+(`full_arm_load` is `wrapper` or `unknown`; only `native` earns a verdict).
+
+**Same capability in every arm.** `lift_ladder.loose_parts` lists the loader,
+the staged `rules` and `mcp_servers`, `dropped_as_glue` (the plugin-only pieces
+that cannot load standalone, such as `hook:hooks/hooks.json`,
+`agent:release-reviewer` and `command:release-check`), and `content_hashes`
+(`{arm: {piece_id: sha256}}` for skills, rules, agents, commands, hooks and MCP
+config). `equal_across_arms` is `true` when every full-plugin piece that is not
+glue is in the loose-parts arm with the same hash, the loose-parts arm stages
+nothing else, and the skills-only arm stages exactly the full plugin's skills;
+`mismatches` names each piece that breaks this (the full arm may be keyed
+`with_skill` or `with_plugin`). When it is `false`, the Integration lift is
+still shown, but its verdict is `inconclusive` with the reason "capability not
+identical across arms"; when no hashes were recorded (`null`), the verdict is
+`inconclusive` too, because nothing shows that the loose arm staged the same
+bytes. Version 1 counts hooks as glue,
+policy hooks included (enforcement, not coordination); the reports say so next
+to the number.
+
+**Reports.** Every format shows one line and one table per agent, for example
+"Bundle lift +0.18 = capability +0.11 + integration (glue) +0.07 (common basis,
+16 cases). Integration lift on cross-component cases: +0.07 [-0.02, +0.16]
+(n=10), inconclusive.", the excluded cases, the loose-parts line, the capability
+check, and the routing, tool selection, order, handoff and conflict signals of
+the loose-parts and full arms next to the glue. `BENCHMARK.md` adds one row per
+agent to its lift table. SARIF is unchanged. The ladder is advisory and
+report-only: it never changes a score, verdict, band or exit code.
+
+**Cost.** Trials per agent are cases × attempts × arms, so `ladder` (4 arms)
+costs one more arm than `both` (3 arms): +33%. Release-kit's 9 cases × 3
+attempts are 108 trials instead of 81. A per-plugin glue interval needs about
+10 cross-component cases × 3 attempts; aim for 20.
+
+**Limits.**
+
+- A case scored only by an overall score (custom graders with no standard
+  dimension) has no dimension in common with the no-plugin arm, so the ladder
+  drops it (`no_common_dimension`) even though the headline lift can use it.
+- Each rendered term is rounded on its own; when the rounded terms miss the
+  rounded Bundle lift by 0.01 the line says "terms rounded".
+- Most per-plugin glue intervals end `inconclusive` at 10-20 cross-component
+  cases. Pooling the glue across plugins is a paper analysis outside the
+  product.
+- Rule exposure differs: the full arm can see rules only after it opens the
+  plugin, the loose arm has them always on, which can push the glue down.
+- A loose MCP server has only its tool descriptions, so an agent may ignore it;
+  then the glue absorbs "the plugin told the agent the tools exist". Compare the
+  MCP calls per arm.
+- Native loading renames skills and MCP tools, so a grader that matches only one
+  name turns a scoring artefact into glue.
+- The plugin listing adds context, so a negative glue can be dilution; compare
+  the measured context cost of the two arms.
 
 ### Report-only statistics
 

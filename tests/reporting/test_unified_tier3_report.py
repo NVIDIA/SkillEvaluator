@@ -1812,6 +1812,40 @@ def test_escape_heavy_payload_has_bounded_html_and_one_recoverable_canonical_cop
     assert _embedded_tier3_payload(html)["dataset"][0]["prompt"] == escape_heavy_prompt
     assert "HTML preview omitted" in html
     assert "characters" in html
+    # The notice names only what was cut, by count; never the dict's own items method.
+    notice = " ".join(html.split("HTML preview omitted", 1)[1].split("JSON Downloads", 1)[0].split())
+    assert re.fullmatch(r"\d+ characters\.", notice), notice
+    assert "built-in method" not in html
+
+
+@pytest.mark.parametrize(
+    ("prompt", "cases", "expected"),
+    [("p" * 300, 6000, r"\d+ items\."), ("<" * 3000, 600, r"\d+ characters and \d+ items\.")],
+    ids=["items", "characters-and-items"],
+)
+def test_html_preview_notice_counts_the_items_it_cut(prompt: str, cases: int, expected: str) -> None:
+    payload = build_agent_eval_payload(
+        "many-cases",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0},
+                "rewards": [{"entry_id": "case-0", "security": 1.0}],
+            }
+        },
+        dataset=[{"id": f"case-{index}", "prompt": prompt} for index in range(cases)],
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+
+    notice = " ".join(html.split("HTML preview omitted", 1)[1].split("JSON Downloads", 1)[0].split())
+    assert re.fullmatch(expected, notice), notice
+    assert "built-in method" not in html
 
 
 def test_canonical_payload_enforces_total_serialized_budget() -> None:

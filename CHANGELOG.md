@@ -113,6 +113,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The HTML report's "HTML preview omitted" note on a large Tier 3 run printed Python's `<built-in method items of dict object at 0x…>` in place of the number of items it left out (seen on the release-kit four-arm pilot report). It now reads, for example, "66623 characters and 536 items."
 - Every report gives a run the same headline. The JSON `overall_status`, the Markdown and HTML status, and the new SARIF `overallStatus` run property now follow the rule the terminal and `BENCHMARK.md` already used: a real failure outranks missing evidence, so a run whose Tier 1 failed while SkillSpector was partial is `failed` everywhere instead of `incomplete` in three reports, and a gated partial Tier 3 run is `incomplete` everywhere instead of `failed` in three. A tier outside the exit gate no longer changes the JSON, Markdown or HTML headline. The HTML Tier 1 and Tier 2 cards show FAIL, INCOMPLETE or SKIPPED instead of N/A or PASS, and a skipped check is SKIP, not PASS, in the terminal table, the Markdown and HTML rows, and the JSON `status`. The JSON adds `tier_status` and `status_reasons`. One module, `reporting/run_status.py`, decides these statuses for every report.
 - Brought the published documentation in line with 0.5.0. It now covers how
   standard grading builds judge evidence and rebuilds trajectories from

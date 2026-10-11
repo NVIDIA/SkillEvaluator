@@ -2335,11 +2335,14 @@
             <span>The canonical payload omits bounded diagnostic details; retained Harbor artifacts remain available from the run directory.</span>
             {% endif %}
             {% if tier3_preview_notice %}
+            {#- .get('items'): .items and ['items'] both fall back to the dict's own items method. #}
+            {% set omitted_characters = tier3_preview_notice.get('characters') %}
+            {% set omitted_items = tier3_preview_notice.get('items') %}
             <span>
                 HTML preview omitted
-                {% if tier3_preview_notice.characters %}{{ tier3_preview_notice.characters }} characters{% endif %}
-                {% if tier3_preview_notice.characters and tier3_preview_notice.items %} and {% endif %}
-                {% if tier3_preview_notice.items %}{{ tier3_preview_notice.items }} items{% endif %}.
+                {%- if omitted_characters %} {{ omitted_characters }} characters{% endif %}
+                {%- if omitted_characters and omitted_items %} and{% endif %}
+                {%- if omitted_items %} {{ omitted_items }} items{% endif %}.
                 JSON Downloads preserve the complete bounded canonical payload.
             </span>
             {% endif %}

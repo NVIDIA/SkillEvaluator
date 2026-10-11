@@ -698,7 +698,8 @@
           "choices": [
             "effectiveness",
             "integration",
-            "both"
+            "both",
+            "ladder"
           ],
           "default": "effectiveness",
           "name": "lift_mode",
@@ -2896,7 +2897,8 @@
               "choices": [
                 "effectiveness",
                 "integration",
-                "both"
+                "both",
+                "ladder"
               ],
               "default": "effectiveness",
               "name": "lift_mode",
@@ -3945,7 +3947,8 @@
           "choices": [
             "effectiveness",
             "integration",
-            "both"
+            "both",
+            "ladder"
           ],
           "default": "effectiveness",
           "name": "lift_mode",

@@ -89,6 +89,7 @@ from skillevaluator.tier3.harbor.collector import (
     harbor_job_retries,
     validate_harbor_job_result,
 )
+from skillevaluator.tier3.harbor.loose_parts_arm import LOOSE_PARTS_VARIANT, NEEDS_BASE_ARMS, plan_loose_parts
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_definition
 from skillevaluator.tier3.harbor.progress import (
     MIN_EXACT_SECRET_CHARS,
@@ -1402,15 +1403,19 @@ HARBOR_AGENT_IMPORT_PATHS = {
 def _native_backend_agent_import_paths() -> frozenset[str]:
     """Custom agents allowed on Harbor-native backends.
 
-    These are the gateway Codex wrapper and each native plugin wrapper over a stock
-    agent or over that wrapper; the other routing wrappers need SkillEvaluator's
-    Docker or local environment.
+    These are the gateway Codex wrapper and each native plugin (or loose-parts)
+    wrapper over a stock agent or over that wrapper; the other routing wrappers
+    need SkillEvaluator's Docker or local environment.
     """
+    from skillevaluator.tier3.loose_parts import LOOSE_PARTS_AGENT_IMPORT_PATHS
     from skillevaluator.tier3.plugin_native import NATIVE_AGENT_IMPORT_PATHS
 
     return _NATIVE_BACKEND_AGENT_IMPORT_PATHS | {
         wrapper
-        for (_agent, base_import_path), wrapper in NATIVE_AGENT_IMPORT_PATHS.items()
+        for (_agent, base_import_path), wrapper in (
+            *NATIVE_AGENT_IMPORT_PATHS.items(),
+            *LOOSE_PARTS_AGENT_IMPORT_PATHS.items(),
+        )
         if base_import_path is None or base_import_path in _NATIVE_BACKEND_AGENT_IMPORT_PATHS
     }
 
@@ -3655,7 +3660,9 @@ def _run_stop_on_pass_variant(
 
 _SUM_OF_PARTS_VARIANT = "sumofparts"
 # Report-only arms: their launch failures and crashes never fail the run.
-_REPORT_ONLY_VARIANTS = frozenset({_SUM_OF_PARTS_VARIANT})
+_REPORT_ONLY_VARIANTS = frozenset({_SUM_OF_PARTS_VARIANT, LOOSE_PARTS_VARIANT})
+# Job variant of each staged task directory, in the order agent_task_dirs holds them.
+_ARM_VARIANTS = ("with", "without", _SUM_OF_PARTS_VARIANT, LOOSE_PARTS_VARIANT)
 
 
 def _run_agent_pair(
@@ -3667,6 +3674,8 @@ def _run_agent_pair(
     with_skill: Path,
     baseline: Path | None,
     sum_of_parts: Path | None = None,
+    loose_parts: Path | None = None,
+    loose_agent_import_path: str | None = None,
     jobs_dir: Path,
     run_env: dict[str, str],
     n_attempts: int,
@@ -3688,14 +3697,24 @@ def _run_agent_pair(
     """Launch the with-skill arm and its baselines for one agent.
 
     ``with_agent_import_path`` overrides the Harbor agent for the with-skill arm
-    only (native plugin loading); baselines keep ``agent_import_path``.
+    only (native plugin loading); baselines keep ``agent_import_path``. The
+    report-only loose-parts arm (``loose_parts``) runs last, with its own
+    wrapper (``loose_agent_import_path``), which writes the loose parts before
+    the agent starts; it is refused without one. Every job gets the same
+    attempts, timeouts, retries, resources and verifier settings.
     """
+    if loose_parts is not None and not loose_agent_import_path:
+        raise ValueError(
+            f"{agent} loose-parts arm has no Harbor wrapper: the stock agent would start without its loose parts"
+        )
     # (job variant, task dataset, Harbor agent import path)
     jobs = [("with", with_skill, with_agent_import_path or agent_import_path)]
     if baseline is not None:
         jobs.append(("without", baseline, agent_import_path))
     if sum_of_parts is not None:
         jobs.append((_SUM_OF_PARTS_VARIANT, sum_of_parts, agent_import_path))
+    if loose_parts is not None:
+        jobs.append((LOOSE_PARTS_VARIANT, loose_parts, loose_agent_import_path))
     if stop_on_pass:
         # A later attempt is launched only after the previous one scored, so
         # stop-on-pass runs each condition sequentially, one attempt at a time.
@@ -3726,7 +3745,7 @@ def _run_agent_pair(
             except Exception as exc:
                 if variant not in _REPORT_ONLY_VARIANTS:
                     raise
-                _log_report_only_arm_failure(agent, exc)
+                _log_report_only_arm_failure(agent, exc, variant)
                 continue
             if variant not in _REPORT_ONLY_VARIANTS:
                 sequential_errors.extend(variant_errors)
@@ -3772,21 +3791,22 @@ def _run_agent_pair(
             try:
                 ok, detail = future.result()
             except Exception as exc:
-                # The sum-of-parts arm is report-only: its crash must not discard the
-                # with-plugin and baseline results. The collector records it as failed.
+                # The sum-of-parts and loose-parts arms are report-only: a crash must not discard
+                # the with-plugin and baseline results. The collector records the arm as failed.
                 if variant not in _REPORT_ONLY_VARIANTS:
                     raise
-                _log_report_only_arm_failure(agent, exc)
+                _log_report_only_arm_failure(agent, exc, variant)
                 continue
             if not ok and variant not in _REPORT_ONLY_VARIANTS:
                 errors.append(f"{agent} {variant}-skill Harbor run failed: {detail}")
     return errors
 
 
-def _log_report_only_arm_failure(agent: str, exc: BaseException) -> None:
+def _log_report_only_arm_failure(agent: str, exc: BaseException, variant: str = _SUM_OF_PARTS_VARIANT) -> None:
     logger.warning(
-        "%s sum-of-parts (report-only) Harbor run raised %s; keeping the other arms",
+        "%s %s (report-only) Harbor run raised %s; keeping the other arms",
         agent,
+        variant,
         redact_progress_detail(f"{type(exc).__name__}: {exc}")[:500],
     )
 
@@ -3930,9 +3950,11 @@ def _run_harbor_eval_impl(
     include_skills: list[str | Path] | None = None,
     workspace_skills_baseline: bool = True,
     sum_of_parts_arm: bool = False,
+    loose_parts_arm: bool = False,
     eval_target_kind: str = "skill",
     lift_mode_requested: str | None = None,
     integration_skip_reason: str | None = None,
+    ladder_skip_reason: str | None = None,
     plugin_load: str = "wrapper",
     native_plugin_source: Any = None,
     copy_repo: bool = False,
@@ -4435,6 +4457,15 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
     run_sum_of_parts = bool(sum_of_parts_arm and not skip_baseline and workspace_skills)
+    # The loose-parts arm (``--lift-mode ladder``): per agent, its native staging and Harbor wrapper, or why not.
+    loose_plan = plan_loose_parts(
+        requested=bool(is_plugin_run and loose_parts_arm),
+        agents=agents,
+        decisions=plugin_load_decisions,
+        source=native_plugin_source,
+        agent_import_paths=agent_import_paths,
+        unavailable=None if run_sum_of_parts else NEEDS_BASE_ARMS,
+    )
     run_config["eval_target"] = {"kind": eval_target}
     run_config["skill_workspace"] = {
         "mode": workspace_mode,
@@ -4442,11 +4473,16 @@ def _run_harbor_eval_impl(
         "staged_skills": [path.name for path in workspace_skills],
         "baseline_includes_workspace_skills": workspace_skills_baseline,
         "sum_of_parts_arm": run_sum_of_parts,
+        "loose_parts_arm": loose_plan.measured,
     }
+    if loose_plan.requested:
+        run_config["loose_parts"] = loose_plan.run_config()
     if is_plugin_run and lift_mode_requested:
         # Record what the operator asked for next to what actually ran, so a
         # report can explain an Integration comparison that was not measured.
-        if run_sum_of_parts:
+        if loose_plan.measured:
+            effective_lift_mode = "ladder"
+        elif run_sum_of_parts:
             effective_lift_mode = "both"
         elif workspace_skills_baseline and workspace_skills and not skip_baseline:
             effective_lift_mode = "integration"
@@ -4457,6 +4493,11 @@ def _run_harbor_eval_impl(
             "effective": effective_lift_mode,
             "integration_skip_reason": integration_skip_reason,
         }
+        if lift_mode_requested == "ladder" and not loose_plan.measured:
+            # Why the ladder did not run: the runner's own per-agent reasons, else the CLI's fallback reason.
+            ladder_reason = loose_plan.skip_reason or ladder_skip_reason or integration_skip_reason
+            if ladder_reason:
+                run_config["lift_mode"]["ladder_skip_reason"] = ladder_reason
     if plugin_load_decisions:
         from skillevaluator.tier3.plugin_native import plugin_load_provenance
 
@@ -4588,7 +4629,10 @@ def _run_harbor_eval_impl(
                     detail="base image build failed; falling back to per-task Dockerfiles",
                 )
             )
-    agent_task_dirs: dict[str, tuple[Path, Path | None, Path | None]] = {}
+    # Per agent: the with, without, sum-of-parts and loose-parts task directories (see _ARM_VARIANTS).
+    agent_task_dirs: dict[str, tuple[Path, Path | None, Path | None, Path | None]] = {}
+    # Per agent and arm, the emitted task directories the loose-parts content hashes read.
+    emitted_tasks: dict[str, dict[str, list[Path]]] = {}
     expected_task_selectors: list[str] | None = None
     expected_case_id_by_task_selector: dict[str, str] | None = None
     reporter.emit(
@@ -4627,6 +4671,7 @@ def _run_harbor_eval_impl(
             with_dir = tasks_dir / agent / "with"
             without_dir = None if skip_baseline else tasks_dir / agent / "without"
             sumofparts_dir = tasks_dir / agent / "sumofparts" if run_sum_of_parts else None
+            loose_dir = tasks_dir / agent / LOOSE_PARTS_VARIANT if loose_plan.arm_for(agent) is not None else None
             native_kwargs: dict[str, Any] = {}
             decision = plugin_load_decisions.get(agent)
             if decision is not None and decision.native:
@@ -4658,7 +4703,8 @@ def _run_harbor_eval_impl(
                 or case_id_by_task_selector != expected_case_id_by_task_selector
             ):
                 raise ValueError(f"Generated task identities differ for agent {agent}")
-            agent_task_dirs[agent] = (with_dir, without_dir, sumofparts_dir)
+            agent_task_dirs[agent] = (with_dir, without_dir, sumofparts_dir, loose_dir)
+            emitted_tasks[agent] = {"with_skill": list(task_paths)}
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="ready", detail="task inputs staged"))
         baseline_workspace_skills = workspace_skills if workspace_skills_baseline else []
         baseline_alias_validation = None
@@ -4710,7 +4756,7 @@ def _run_harbor_eval_impl(
                     raise ValueError(f"Baseline task identities differ for agent {agent}")
             sumofparts_dir = agent_task_dirs[agent][2]
             if sumofparts_dir is not None:
-                emitter(
+                emitted_tasks[agent]["sum_of_parts"] = emitter(
                     skill_path,
                     sumofparts_dir,
                     with_skill=False,
@@ -4720,6 +4766,30 @@ def _run_harbor_eval_impl(
                     _baseline_alias_validation=sumofparts_alias_validation,
                     **shared_task_inputs,
                 )
+            loose_dir = agent_task_dirs[agent][3]
+            loose_arm = loose_plan.arm_for(agent)
+            if loose_dir is not None and loose_arm is not None:
+                # Staged like the skills-only arm (no target skill, same suffix and alias proof), plus the loose bundle.
+                loose_task_paths = emitter(
+                    skill_path,
+                    loose_dir,
+                    with_skill=False,
+                    workspace_skill_paths=workspace_skills,
+                    runtime_env=dict(runtime_plans[agent].staged_env),
+                    arm_suffix=without_arm_suffix,
+                    _baseline_alias_validation=sumofparts_alias_validation,
+                    native_plugin=loose_arm.staging,
+                    **shared_task_inputs,
+                )
+                loose_task_selectors = validate_case_ids(task.name for task in loose_task_paths)
+                loose_case_ids = validate_case_ids(_native_entry_id(task) for task in loose_task_paths)
+                if (
+                    loose_task_selectors != expected_task_selectors
+                    or dict(zip(loose_task_selectors, loose_case_ids, strict=True)) != expected_case_id_by_task_selector
+                ):
+                    raise ValueError(f"Loose-parts task identities differ for agent {agent}")
+                emitted_tasks[agent]["loose_parts"] = loose_task_paths
+                loose_plan.hash_tasks(agent, emitted_tasks[agent])
         if not skip_baseline:
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="ready", detail="baseline inputs staged"))
         else:
@@ -4736,8 +4806,10 @@ def _run_harbor_eval_impl(
     except DatasetSnapshotContractError as exc:
         return _persist_pre_execution_failure([str(exc)])
     expected_trials = len(task_selectors) * n_attempts
-    variants = (1 if skip_baseline else 2) + (1 if run_sum_of_parts else 0)
-    matrix_trials = expected_trials * len(agents) * variants
+    # Each agent's arms: with, without, sum-of-parts, and (where it runs) loose-parts.
+    matrix_trials = expected_trials * sum(
+        sum(1 for path in agent_task_dirs[agent] if path is not None) for agent in agents
+    )
     preflight_trials = len(agents) if agent_runtime_preflight else 0
     try:
         task_timeout_seconds = _task_timeout_plan(
@@ -4854,6 +4926,8 @@ def _run_harbor_eval_impl(
             with_skill=agent_task_dirs[agent][0],
             baseline=agent_task_dirs[agent][1],
             sum_of_parts=agent_task_dirs[agent][2],
+            loose_parts=agent_task_dirs[agent][3],
+            loose_agent_import_path=getattr(loose_plan.arm_for(agent), "import_path", None),
             jobs_dir=jobs_dir,
             run_env={**runtime_plans[agent].subprocess_env, **job_judge_subprocess_env},
             n_attempts=n_attempts,
@@ -4930,7 +5004,7 @@ def _run_harbor_eval_impl(
     harbor_job_names.extend(
         f"{skill_path.name}-{agent}-{variant}"
         for agent in agents
-        for variant, dataset in zip(("with", "without", _SUM_OF_PARTS_VARIANT), agent_task_dirs[agent], strict=True)
+        for variant, dataset in zip(_ARM_VARIANTS, agent_task_dirs[agent], strict=True)
         if dataset is not None
     )
     _record_trial_retries_used(run_config, jobs_dir, harbor_job_names)
@@ -4974,6 +5048,7 @@ def _run_harbor_eval_impl(
             plugin_load_census=_plugin_load_census_plan(
                 plugin_load, plugin_load_decisions, native_stagings, native_plugin_source
             ),
+            loose_parts=loose_plan if loose_plan.requested else None,
         )
     except Exception:
         reporter.emit(ProgressEvent(stage="collection", state="failed", detail="result collection failed"))

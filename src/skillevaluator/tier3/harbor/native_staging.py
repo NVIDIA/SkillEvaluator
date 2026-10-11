@@ -50,7 +50,7 @@ _PLUGIN_TREE_IGNORED_ROOT = frozenset(
 
 @dataclass(frozen=True)
 class NativeTaskStaging:
-    """One agent's native staging plan for its with-plugin arm."""
+    """One agent's native staging plan for its with-plugin arm (or, with a control-arm adapter, its loose-parts arm)."""
 
     agent: str
     adapter: HarnessAdapter
@@ -68,6 +68,11 @@ class NativeTaskStaging:
     @property
     def plugin_mcp_via_task(self) -> bool:
         return self.adapter.plugin_mcp_via_task
+
+    @property
+    def control_arm(self) -> bool:
+        """Staged into an arm without the target skill (the loose-parts arm), not into the with-plugin arm."""
+        return bool(getattr(self.adapter, "control_arm", False))
 
     def workspace_skill_aliases(self) -> list[str]:
         """Extra names the harness may report for the staged skills (for routing grades)."""

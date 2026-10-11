@@ -499,10 +499,11 @@ def test_the_real_emitter_stages_the_loose_arm_with_plain_member_skills(tmp_path
     from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks
 
     staging = loose_parts_task_staging("claude-code", package.native_source)
+    # The loose arm is staged like the skills-only arm: no target skill (has_skill false), plus the loose bundle.
     tasks = generate_harbor_tasks(
         package.package_path,
         tmp_path / "out" / "claude-code" / "looseparts",
-        with_skill=True,
+        with_skill=False,
         workspace_skill_paths=list(package.include_skills),
         workspace_mode="group",
         native_plugin=staging,
@@ -515,6 +516,7 @@ def test_the_real_emitter_stages_the_loose_arm_with_plain_member_skills(tmp_path
     assert "mcp_servers" not in task_toml.get("environment", {})
     entry = json.loads((tasks[0] / "tests" / "entry.json").read_text(encoding="utf-8"))
     assert "native_plugin_prefix" not in entry
+    assert entry["has_skill"] is False
 
 
 def _run_setup(bundle: Path, root: Path, env: dict[str, str]) -> dict[str, Any]:
@@ -911,17 +913,18 @@ def test_a_plugin_file_server_named_like_a_task_server_is_refused_in_the_loose_a
         package.package_path / "evals" / "environment" / "mcp_servers.toml",
         '[[mcp_servers]]\nname = "reltools"\ncommand = "/usr/bin/reltools"\n',
     )
-    common = {"with_skill": True, "workspace_skill_paths": list(package.include_skills), "workspace_mode": "group"}
+    common = {"workspace_skill_paths": list(package.include_skills), "workspace_mode": "group"}
     with pytest.raises(ValueError, match="collide"):
         generate_harbor_tasks(
             package.package_path,
             tmp_path / "loose",
+            with_skill=False,
             native_plugin=loose_parts_task_staging("claude-code", package.native_source),
             **common,
         )
     # The plugin arm names the server plugin:shipit:reltools, so it keeps working as before.
     full = build_native_task_staging("claude-code", ClaudeCodeAdapter(), package.native_source)
-    assert generate_harbor_tasks(package.package_path, tmp_path / "full", native_plugin=full, **common)
+    assert generate_harbor_tasks(package.package_path, tmp_path / "full", with_skill=True, native_plugin=full, **common)
 
 
 def test_readiness_follows_the_runs_load_plan(tmp_path: Path) -> None:

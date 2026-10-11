@@ -42,6 +42,14 @@ from skillevaluator.tier3.eval_core.runtime_evidence import (
     summarize_canary,
     summarize_hook_census,
 )
+from skillevaluator.tier3.harbor.loose_parts_arm import (
+    LOAD_EVIDENCE_FILENAME,
+    LOOSE_PARTS_VARIANT,
+    LooseAgentArm,
+    LoosePartsPlan,
+    TrialRef,
+    write_load_evidence,
+)
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -71,6 +79,7 @@ from skillevaluator.tier3.harbor.metrics import (
     score_value,
 )
 from skillevaluator.tier3.harbor.stats import (
+    ARM_LOOSE_PARTS,
     ARM_SUM_OF_PARTS,
     ARM_WITH,
     ARM_WITHOUT,
@@ -195,17 +204,33 @@ _SUM_OF_PARTS_ARM = _ArmSpec(
     trial_variant="sumofparts",
     arm_suffix="-without-skill",
 )
+# The report-only loose-parts arm (``--lift-mode ladder``) is staged like the sum-of-parts arm; its plugin hooks
+# run in every trial too.
+_LOOSE_PARTS_ARM = _ArmSpec(
+    key=ARM_LOOSE_PARTS,
+    variant=LOOSE_PARTS_VARIANT,
+    directory="loose-parts",
+    trial_variant=LOOSE_PARTS_VARIANT,
+    arm_suffix="-without-skill",
+    hook_census_every_trial=True,
+)
+# The arms whose staged parts the loose-parts load evidence checks (the no-plugin arm stages none).
+_LOAD_EVIDENCE_ARMS = (ARM_WITH, ARM_LOOSE_PARTS, ARM_SUM_OF_PARTS)
 
 GENERATED_AGENT_ARTIFACTS = (
     "lift.json",
     "integration_lift.json",
+    "loose_parts_lift.json",
+    LOAD_EVIDENCE_FILENAME,
     "custom_lift.json",
     "pass_at_k_lift.json",
     "security_attribution.json",
     "findings.json",
     "statistics.json",
 )
-GENERATED_CONDITION_DIRS = tuple(arm.directory for arm in (_WITH_SKILL_ARM, _WITHOUT_SKILL_ARM, _SUM_OF_PARTS_ARM))
+GENERATED_CONDITION_DIRS = tuple(
+    arm.directory for arm in (_WITH_SKILL_ARM, _WITHOUT_SKILL_ARM, _SUM_OF_PARTS_ARM, _LOOSE_PARTS_ARM)
+)
 GENERATED_ROOT_ARTIFACTS = ("attempt_policy.json", "comparison.json")
 _MAX_FAILED_JUDGE_SIDECARS = 64
 _MAX_FAILED_JUDGE_STEP_PATHS_SCANNED = 256
@@ -7628,6 +7653,44 @@ def _collect_missing_arm(arm: _ArmSpec, collection: _AgentCollection, job_name: 
     return _CollectedArm(execution=execution, job_failure=job_failure)
 
 
+@dataclass(frozen=True)
+class _LooseLoad:
+    """One agent's loose-parts load evidence: per arm, case and attempt; and the cases it drops."""
+
+    evidence: dict[str, dict[str, list[dict[str, Any]]]]
+    failures: dict[str, list[dict[str, Any]]]
+
+
+def _loose_parts_load(
+    loose_arm: LooseAgentArm,
+    arms: Mapping[str, _CollectedArm],
+    *,
+    expected_case_ids: list[str] | None,
+) -> _LooseLoad:
+    """Read Claude Code's own load report for every scored trial of the full, loose and skills-only arms.
+
+    Only scored attempts count: an attempt with no score adds nothing to the
+    ladder, so a part it failed to load cannot bias it. A part that did not
+    load in any scored attempt of any of these arms drops that case from every
+    ladder arm (``stats.lift_ladder``), with the reason recorded.
+    """
+    from skillevaluator.tier3.loose_parts import load_failures_by_case
+
+    expected_set = set(expected_case_ids or []) or None
+    trials: list[TrialRef] = []
+    for arm in _LOAD_EVIDENCE_ARMS:
+        collected = arms.get(arm)
+        if collected is None or collected.job_dir is None:
+            continue
+        for reward in sorted(collected.logical_rewards, key=_attempt_sort_key):
+            root = _safe_trial_path_component(reward.get("_trial_root_name"))
+            case_id = _entry_id(reward, expected_set)
+            if root and case_id and case_id != "unknown":
+                trials.append((arm, case_id, collected.job_dir / root))
+    evidence = loose_arm.load_evidence(trials, read_trajectory=_plugin_signal_trajectory)
+    return _LooseLoad(evidence=evidence, failures=load_failures_by_case(evidence))
+
+
 def collect_harbor_results(
     skill_name: str,
     agents: list[str],
@@ -7649,6 +7712,7 @@ def collect_harbor_results(
     launch_errors: list[str] | None = None,
     plugin_signals: PluginSignalsContext | None = None,
     plugin_load_census: Mapping[str, Mapping[str, Any]] | None = None,
+    loose_parts: LoosePartsPlan | None = None,
 ) -> dict[str, Any]:
     """Collect results from Harbor jobs into evals/results/<agent>/ structure.
 
@@ -7658,6 +7722,11 @@ def collect_harbor_results(
     ``plugin_load_census`` (``--plugin-load native|auto``) maps an agent to its
     load mode and declared native components; it adds a per-trial
     ``plugin_load_census`` and a per-agent ``plugin_load_census`` summary.
+    ``loose_parts`` (``--lift-mode ladder``) adds, for every agent it measures,
+    the report-only loose-parts arm (``<agent>/loose-parts/``), its load
+    evidence over the three staged arms (a case whose part did not load is
+    dropped from every ladder arm), the ``lift_ladder`` statistics and
+    ``loose_parts_lift.json``; the run gets its ``loose_parts`` block.
     """
     if expected_trials is not None and expected_total_trials is not None and expected_trials != expected_total_trials:
         raise ValueError("Conflicting expected trial counts were provided")
@@ -7682,6 +7751,7 @@ def collect_harbor_results(
     }
 
     _prepare_generated_outputs(output_dir, agents)
+    loose_infos: dict[str, dict[str, Any]] = {}
 
     # A run without a baseline stages its with-skill tasks without a dual-arm suffix.
     with_skill_arm = replace(_WITH_SKILL_ARM, arm_suffix="") if skip_baseline else _WITH_SKILL_ARM
@@ -7720,6 +7790,15 @@ def collect_harbor_results(
         else:
             sum_of_parts = _CollectedArm(execution={"execution_status": "skipped", "execution_errors": []})
         arms = {ARM_WITH: with_skill, ARM_WITHOUT: without_skill, ARM_SUM_OF_PARTS: sum_of_parts}
+        loose_plan = loose_parts.arm_for(agent) if loose_parts is not None else None
+        loose_load: _LooseLoad | None = None
+        if loose_plan is not None:
+            arms[ARM_LOOSE_PARTS] = _collect_arm(
+                _LOOSE_PARTS_ARM, collection, load_census_plan=loose_plan.census_plan()
+            )
+            loose_load = _loose_parts_load(loose_plan, arms, expected_case_ids=expected_case_ids)
+            write_load_evidence(agent_dir / LOAD_EVIDENCE_FILENAME, loose_load.evidence)
+            loose_infos[agent] = loose_plan.info(loose_load.evidence, load_census=arms[ARM_LOOSE_PARTS].load_census)
 
         integration_lift: dict[str, Any] = {}
         if with_skill.scores and sum_of_parts.scores:
@@ -7735,6 +7814,10 @@ def collect_harbor_results(
             arm_observations[ARM_WITHOUT] = _arm_observations(without_skill, expected_case_ids=expected_case_ids)
         if sum_of_parts_arm:
             arm_observations[ARM_SUM_OF_PARTS] = _arm_observations(sum_of_parts, expected_case_ids=expected_case_ids)
+        if ARM_LOOSE_PARTS in arms:
+            arm_observations[ARM_LOOSE_PARTS] = _arm_observations(
+                arms[ARM_LOOSE_PARTS], expected_case_ids=expected_case_ids
+            )
         statistics = build_agent_statistics(
             arm_observations,
             expected_case_ids=expected_case_ids,
@@ -7750,6 +7833,7 @@ def collect_harbor_results(
                 and not skip_baseline
             ),
             cross_component_case_ids=plugin_signals.cross_component_cases if plugin_signals is not None else None,
+            load_failures_by_case=loose_load.failures if loose_load is not None else None,
         )
         # Keep the legacy per-arm execution snapshots next to the per-case
         # completeness verdict so earlier consumers still find them.
@@ -7822,6 +7906,18 @@ def collect_harbor_results(
                 # Save the with-skill trials again so each reward.json carries its attribution.
                 collection.save_trials(with_skill_arm, with_skill.rewards, with_skill.job_dir)
 
+        loose_lift: dict[str, Any] = {}
+        loose = arms.get(ARM_LOOSE_PARTS)
+        if loose is not None and with_skill.scores and loose.scores:
+            # Full plugin minus loose parts per dimension (arm averages); the ladder holds the paired interval.
+            loose_lift = _compute_lift(
+                with_skill.scores,
+                loose.scores,
+                with_not_applicable=with_skill.not_applicable,
+                without_not_applicable=loose.not_applicable,
+            )
+            _write_generated_root_json(agent_dir / "loose_parts_lift.json", output_dir, loose_lift)
+
         agent_execution = _aggregate_execution([with_skill.execution, without_skill.execution])
         all_results["agents"][agent] = {
             "model": collection.agent_model,
@@ -7867,6 +7963,18 @@ def collect_harbor_results(
             "num_trials_sum_of_parts": len(sum_of_parts.logical_rewards),
             "output_dir": str(agent_dir.resolve()),
         }
+        if loose is not None:
+            # Report-only, like the sum-of-parts arm; absent for an agent without a loose-parts arm.
+            all_results["agents"][agent].update(
+                {
+                    "loose_parts": loose.scores,
+                    "overall_loose_parts": loose.overall_score,
+                    "custom_loose_parts": loose.custom_scores,
+                    "dimensions_loose_parts": loose.dimensions,
+                    "num_trials_loose_parts": len(loose.logical_rewards),
+                    "loose_parts_lift": loose_lift,
+                }
+            )
         canary = canary_arm_comparison({key: arm.canary_summary for key, arm in arms.items()})
         if canary is not None:
             # Per-arm canary exfiltration results; the verifier already scored each leak.
@@ -7879,6 +7987,10 @@ def collect_harbor_results(
         if with_skill.load_census is not None:
             # Report-only native load census (``--plugin-load native|auto``).
             all_results["agents"][agent]["plugin_load_census"] = with_skill.load_census
+
+    if loose_parts is not None and loose_parts.requested:
+        # The staging's info block per measured agent, and why every other agent is not measured.
+        all_results["loose_parts"] = loose_parts.record(loose_infos)
 
     _write_generated_root_json(output_dir / "attempt_policy.json", output_dir, all_results["attempt_policy"])
 

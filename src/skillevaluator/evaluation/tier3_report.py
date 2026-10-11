@@ -1037,6 +1037,32 @@ def integration_reports_for(
     )
 
 
+def ladder_reports_for(
+    agents: dict[str, dict[str, Any]],
+    run_config: dict[str, Any] | None,
+    plugin_provenance: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, dict[str, Any]]]:
+    """Return the lift ladder blocks the report for this run carries, without building the report.
+
+    Like :func:`integration_reports_for`: the run-level block
+    (``payload["lift_ladder"]``, the best agent's, else the first's), ``None``
+    when the ladder was neither run nor requested, and each agent's own named
+    block. *agents* is the engine result's per-agent data, which holds the raw
+    ladder statistics, the completeness check and the per-arm signals.
+    """
+    agent_payloads = _agent_payloads(agents, run_config, plugin_provenance)
+    ladder_agents = {name: dict(agent) for name, agent in agents.items() if isinstance(agent, dict)}
+    payload: dict[str, Any] = {}
+    _attach_ladder_reports(payload, ladder_agents, _pick_best_agent(agent_payloads), run_config, plugin_provenance)
+    per_agent = {
+        name: _sanitize_json_numbers(agent["lift_ladder"])
+        for name, agent in ladder_agents.items()
+        if isinstance(agent.get("lift_ladder"), dict)
+    }
+    run_block = payload.get("lift_ladder")
+    return (_sanitize_json_numbers(run_block) if isinstance(run_block, dict) else None), per_agent
+
+
 def _agent_payloads(
     agents: dict[str, dict[str, Any]],
     run_config: dict[str, Any] | None,

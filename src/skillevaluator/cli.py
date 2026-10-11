@@ -855,15 +855,25 @@ def _run_agent_eval_or_skip(
     return result
 
 
+#: ``--lift-mode`` values. ``ladder`` adds the loose-parts arm to the ``both`` arms (native Claude Code in v1).
+PLUGIN_LIFT_MODES = ("effectiveness", "integration", "both", "ladder")
+_INTEGRATION_LIFT_MODES = frozenset({"integration", "both", "ladder"})
+
+
 def _plugin_lift_mode_for_evidence(
     prepared: PluginEvalPackage,
     requested_lift_mode: str,
 ) -> tuple[str, str | None]:
-    """Resolve a plugin lift mode without discarding a valid effectiveness run."""
-    if requested_lift_mode not in {"integration", "both"}:
+    """Resolve a plugin lift mode without discarding a valid effectiveness run.
+
+    ``both`` and ``ladder`` fall back to effectiveness when the dataset has no
+    composition evidence (a cross-component case naming two or more member
+    skills); ``integration`` reports the reason and is refused by the caller.
+    """
+    if requested_lift_mode not in _INTEGRATION_LIFT_MODES:
         return requested_lift_mode, None
     evidence_error = prepared.integration_evidence_error()
-    if evidence_error and requested_lift_mode == "both":
+    if evidence_error and requested_lift_mode in {"both", "ladder"}:
         return "effectiveness", evidence_error
     return requested_lift_mode, evidence_error
 
@@ -872,28 +882,89 @@ def _plugin_integration_error(lift_mode: str, skip_baseline: bool, reason: str |
     """Why a requested plugin Integration comparison cannot run, or ``None``.
 
     Integration compares against the without-plugin baseline, so it needs that
-    arm. ``--lift-mode integration`` also needs composition evidence (*reason*
-    says what is missing); ``both`` falls back to effectiveness instead. The
-    refusal says the comparison was not run, never a verdict on one.
+    arm, and so does the lift ladder (its first rung is skills only minus no
+    plugin). ``--lift-mode integration`` also needs composition evidence
+    (*reason* says what is missing); ``both`` and ``ladder`` fall back to
+    effectiveness instead. The refusal says the comparison was not run, never
+    a verdict on one.
     """
-    if lift_mode not in {"integration", "both"}:
+    if lift_mode not in _INTEGRATION_LIFT_MODES:
         return None
     if skip_baseline:
+        if lift_mode == "ladder":
+            return "lift ladder requires a baseline (the no-plugin arm); remove --skip-baseline."
         return "Integration requires a baseline; remove --skip-baseline."
     if reason and lift_mode == "integration":
         return f"Integration was not run: {reason}. Fix that, or use --lift-mode effectiveness."
     return None
 
 
+def _plugin_ladder_mode(
+    prepared: PluginEvalPackage,
+    effective_lift_mode: str,
+    agents: str | None,
+) -> tuple[str, str | None]:
+    """The effective mode once the loose-parts arm is checked, and why the ladder does not run (or ``None``).
+
+    Only an effective ``ladder`` is checked. It stays ``ladder`` when at least
+    one selected agent can run the loose-parts arm (native Claude Code in v1;
+    with no ``-a`` the plugin-level check decides and the runner decides per
+    agent). It falls back to ``both`` when none can: wrapper mode, only other
+    harnesses, or a plugin whose loose parts equal its skills. Agents that
+    cannot run it are recorded by the runner as not measured, with the reason.
+    """
+    if effective_lift_mode != "ladder":
+        return effective_lift_mode, None
+    from skillevaluator.tier3.harbor import canonical_agent_name
+    from skillevaluator.tier3.loose_parts import LOOSE_AGENT, ladder_skip_reason
+
+    names = list(
+        dict.fromkeys(canonical_agent_name(item.strip()) for item in (agents or "").split(",") if item.strip())
+    )
+    reasons = {agent: prepared.loose_parts_error(agent) for agent in names or [LOOSE_AGENT]}
+    if any(reason is None for reason in reasons.values()):
+        return "ladder", None
+    return "both", ladder_skip_reason({agent: str(reason) for agent, reason in reasons.items()})
+
+
+class _PluginLiftPlan(NamedTuple):
+    effective: str
+    integration_skip_reason: str | None
+    ladder_skip_reason: str | None
+    refusal: str | None
+
+
+def _plugin_lift_plan(
+    prepared: PluginEvalPackage, lift_mode: str, *, skip_baseline: bool, agents: str | None
+) -> _PluginLiftPlan:
+    """The requested lift mode resolved for this plugin: effective mode, skip reasons, or a refusal.
+
+    The fallback table: no composition evidence turns ``both`` and ``ladder``
+    into effectiveness (the reason is recorded for Integration and the
+    ladder); ``ladder`` with no agent that can run the loose-parts arm turns
+    into ``both``; ``integration`` without evidence, and ``integration``,
+    ``both`` or ``ladder`` with ``--skip-baseline``, are refused.
+    """
+    effective, integration_skip_reason = _plugin_lift_mode_for_evidence(prepared, lift_mode)
+    if refusal := _plugin_integration_error(lift_mode, skip_baseline, integration_skip_reason):
+        return _PluginLiftPlan(effective, integration_skip_reason, None, refusal)
+    effective, ladder_skip_reason = _plugin_ladder_mode(prepared, effective, agents)
+    if lift_mode == "ladder" and effective != "ladder" and ladder_skip_reason is None:
+        ladder_skip_reason = integration_skip_reason
+    return _PluginLiftPlan(effective, integration_skip_reason, ladder_skip_reason, None)
+
+
 def _plugin_lift_metadata(
     requested_lift_mode: str,
     effective_lift_mode: str,
     integration_skip_reason: str | None,
+    *,
+    ladder_skip_reason: str | None = None,
 ) -> dict[str, str]:
     """Record the requested and effective plugin lift modes for reports and provenance.
 
     Always emitted, not only on a fallback: a report must know that
-    ``--lift-mode integration|both`` was asked for to explain an Integration
+    ``--lift-mode integration|both|ladder`` was asked for to explain a
     comparison that was not measured instead of silently omitting it.
     """
     metadata = {
@@ -902,6 +973,8 @@ def _plugin_lift_metadata(
     }
     if integration_skip_reason is not None:
         metadata["integration_skip_reason"] = integration_skip_reason
+    if ladder_skip_reason is not None:
+        metadata["ladder_skip_reason"] = ladder_skip_reason
     return metadata
 
 
@@ -918,6 +991,7 @@ def _plugin_evaluation_options(
     integration_skip_reason: str | None,
     plugin_load: str,
     results_dir: Path | None,
+    ladder_skip_reason: str | None = None,
     **run_options: Any,
 ) -> EvaluationOptions:
     """The ``EvaluationOptions`` for a prepared plugin package.
@@ -936,10 +1010,13 @@ def _plugin_evaluation_options(
         skill_workspace_mode="group",
         include_skills=prepared.include_skills,
         workspace_skills_baseline=effective_lift_mode == "integration",
-        sum_of_parts_arm=effective_lift_mode == "both",
+        # The ladder runs the three ``both`` arms and the loose-parts arm.
+        sum_of_parts_arm=effective_lift_mode in {"both", "ladder"},
+        loose_parts_arm=effective_lift_mode == "ladder",
         eval_target_kind="plugin",
         lift_mode_requested=lift_mode,
         integration_skip_reason=integration_skip_reason,
+        ladder_skip_reason=ladder_skip_reason,
         plugin_load=plugin_load,
         native_plugin_source=prepared.native_source,
         results_dir=results_dir,
@@ -1050,6 +1127,7 @@ def _plugin_provenance_with_runtime_evidence(
     prepared: PluginEvalPackage, engine_result: Any, mcp_proof: dict[str, Any] | None
 ) -> dict[str, Any]:
     """Plugin provenance plus runtime coverage (``exercised``) and the MCP proof."""
+    from skillevaluator.tier3.plugin_eval import finalize_loose_parts_provenance
     from skillevaluator.tier3.plugin_native import finalize_native_provenance
     from skillevaluator.tier3.plugin_runtime import apply_runtime_evidence
 
@@ -1058,6 +1136,8 @@ def _plugin_provenance_with_runtime_evidence(
         provenance["mcp_proof"] = mcp_proof
     # Native load census first: runtime evidence reads provenance["plugin_load"].
     finalize_native_provenance(provenance, engine_result)
+    # The lift ladder's loose-parts block (staged parts, content hashes, load evidence, per-agent reasons).
+    finalize_loose_parts_provenance(provenance, engine_result)
     return apply_runtime_evidence(provenance, engine_result if isinstance(engine_result, dict) else None)
 
 
@@ -1201,10 +1281,13 @@ def _run_plugin_agent_eval(
                 return _skipped(
                     f"Tier 3 plugin evaluation skipped: {prepared.skip_reason or 'nothing locally evaluable'}"
                 )
-            effective_lift_mode, integration_skip_reason = _plugin_lift_mode_for_evidence(prepared, lift_mode)
-            if integration_error := _plugin_integration_error(lift_mode, skip_baseline, integration_skip_reason):
-                return _skipped(f"Tier 3 plugin {integration_error}")
-            lift_metadata = _plugin_lift_metadata(lift_mode, effective_lift_mode, integration_skip_reason)
+            lift_plan = _plugin_lift_plan(prepared, lift_mode, skip_baseline=skip_baseline, agents=agents)
+            if lift_plan.refusal:
+                return _skipped(f"Tier 3 plugin {lift_plan.refusal}")
+            effective_lift_mode, integration_skip_reason = lift_plan.effective, lift_plan.integration_skip_reason
+            lift_metadata = _plugin_lift_metadata(
+                lift_mode, effective_lift_mode, integration_skip_reason, ladder_skip_reason=lift_plan.ladder_skip_reason
+            )
             mcp_proof = _plugin_mcp_proof(
                 prepared,
                 probe_mcp=probe_mcp,
@@ -1217,6 +1300,7 @@ def _run_plugin_agent_eval(
                 lift_mode=lift_mode,
                 effective_lift_mode=effective_lift_mode,
                 integration_skip_reason=integration_skip_reason,
+                ladder_skip_reason=lift_plan.ladder_skip_reason,
                 plugin_load=plugin_load,
                 results_dir=results_dir,
                 agents=agents,
@@ -2319,12 +2403,15 @@ def _resolve_validate_target(
 )
 @click.option(
     "--lift-mode",
-    type=click.Choice(["effectiveness", "integration", "both"]),
+    type=click.Choice(PLUGIN_LIFT_MODES),
     default="effectiveness",
     show_default=True,
     cls=GroupedOption,
     help_group=_TIER3_GROUP,
-    help="Plugin only: compare against no plugin, sum-of-parts, or both baselines.",
+    help=(
+        "Plugin only: compare against no plugin, sum-of-parts, or both baselines; 'ladder' adds the "
+        "loose-parts arm (native Claude Code) for the Skill, Capability and Integration lifts."
+    ),
 )
 @click.option(
     "--probe-mcp",
@@ -3590,13 +3677,16 @@ def evaluate(
 @click.option("--skip-baseline", is_flag=True, help="Skip without-plugin baseline.")
 @click.option(
     "--lift-mode",
-    type=click.Choice(["effectiveness", "integration", "both"]),
+    type=click.Choice(PLUGIN_LIFT_MODES),
     default="effectiveness",
     show_default=True,
     help=(
         "Compare against no plugin, sum-of-parts, or both baselines. Integration "
         "requires a cross-component dataset case; 'both' falls back to effectiveness "
-        "when composition evidence is unavailable."
+        "when composition evidence is unavailable. 'ladder' runs both plus a loose-parts arm "
+        "(the plugin's skills, rules, MCP servers, subagents, commands and hooks staged standalone; "
+        "-a claude-code --plugin-load native) and reports the lift ladder: Skill, Capability and "
+        "Integration lift. It falls back to 'both' where no agent can stage loose parts."
     ),
 )
 @click.option(
@@ -3754,14 +3844,21 @@ def evaluate_plugin(
                     f"[yellow]Skipping plugin evaluation:[/yellow] {escape_markup(str(prepared.skip_reason))}"
                 )
                 return
-            effective_lift_mode, integration_skip_reason = _plugin_lift_mode_for_evidence(prepared, lift_mode)
-            if integration_error := _plugin_integration_error(lift_mode, skip_baseline, integration_skip_reason):
-                raise click.ClickException(f"Plugin {integration_error}")
+            lift_plan = _plugin_lift_plan(prepared, lift_mode, skip_baseline=skip_baseline, agents=agents)
+            if lift_plan.refusal:
+                raise click.ClickException(f"Plugin {lift_plan.refusal}")
+            effective_lift_mode, integration_skip_reason = lift_plan.effective, lift_plan.integration_skip_reason
             if integration_skip_reason:
-                # --lift-mode both without composition evidence.
+                # --lift-mode both|ladder without composition evidence.
                 console.print(
                     f"[yellow]Integration skipped:[/yellow] {escape_markup(integration_skip_reason)}. "
                     "Running effectiveness only."
+                )
+            elif lift_plan.ladder_skip_reason:
+                # --lift-mode ladder where no selected agent can run the loose-parts arm.
+                console.print(
+                    f"[yellow]Lift ladder skipped:[/yellow] {escape_markup(lift_plan.ladder_skip_reason)}. "
+                    "Running the no-plugin, skills-only and full-plugin arms."
                 )
             allowed_private_hosts = tuple(policy.mcp_allowed_private_hosts) if probe_mcp else ()
             mcp_proof = _plugin_mcp_proof(
@@ -3783,6 +3880,7 @@ def evaluate_plugin(
                 lift_mode=lift_mode,
                 effective_lift_mode=effective_lift_mode,
                 integration_skip_reason=integration_skip_reason,
+                ladder_skip_reason=lift_plan.ladder_skip_reason,
                 plugin_load=plugin_load,
                 results_dir=results_dir,
                 agents=agents,
@@ -3808,7 +3906,9 @@ def evaluate_plugin(
             )
             reporter = create_progress_reporter(progress, stream=click.get_text_stream("stderr"))
             engine_result = service.evaluate(options, progress_reporter=reporter)
-            lift_metadata = _plugin_lift_metadata(lift_mode, effective_lift_mode, integration_skip_reason)
+            lift_metadata = _plugin_lift_metadata(
+                lift_mode, effective_lift_mode, integration_skip_reason, ladder_skip_reason=lift_plan.ladder_skip_reason
+            )
             failure = service.failure_reason(engine_result)
             # Build the plugin provenance (and write its sidecar) before the summary, so the summary shows the
             # same coverage, completeness, and load blocks as the reports (the engine result alone has none).

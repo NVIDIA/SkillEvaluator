@@ -39,9 +39,12 @@ class EvaluationOptions:
     include_skills: tuple[Path, ...] = ()
     workspace_skills_baseline: bool = True
     sum_of_parts_arm: bool = False
+    # Plugin ``--lift-mode ladder``: the loose-parts arm (native Claude Code in v1), next to the sum-of-parts arm.
+    loose_parts_arm: bool = False
     eval_target_kind: str = "skill"
     lift_mode_requested: str | None = None
     integration_skip_reason: str | None = None
+    ladder_skip_reason: str | None = None
     # Plugin only: ``wrapper`` (default), ``native``, or ``auto``, plus the
     # prepared plugin snapshot the native harness adapters stage.
     plugin_load: str = "wrapper"

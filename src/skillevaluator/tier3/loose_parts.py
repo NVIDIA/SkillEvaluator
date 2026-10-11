@@ -186,6 +186,14 @@ def not_supported_reason(agent: str) -> str:
     )
 
 
+def ladder_skip_reason(not_measured: Mapping[str, str]) -> str | None:
+    """Why no agent runs the loose-parts arm: the one reason they share, else each agent's own (``None`` if none)."""
+    reasons = list(dict.fromkeys(str(reason) for reason in not_measured.values() if reason))
+    if len(reasons) <= 1:
+        return reasons[0] if reasons else None
+    return "; ".join(f"{agent}: {reason}" for agent, reason in not_measured.items() if reason)
+
+
 def loose_parts_launch_env() -> dict[str, str]:
     """The plugin-root variables the loose launch exports, so scripts reading them find the loose root."""
     return {"CLAUDE_PLUGIN_ROOT": LOOSE_ROOT, "CLAUDE_PLUGIN_DATA": LOOSE_DATA}
@@ -328,6 +336,37 @@ class LooseParts:
             report["normalized"] = dict(self._normalized)
         return report
 
+    def content_report_for_tasks(self, task_dirs_by_arm: Mapping[str, Sequence[Path]]) -> dict[str, Any]:
+        """The :meth:`content_report` of tasks the runner emitted: ``{arm: [task dir, ...]}`` per compared arm.
+
+        Each task's ``environment/`` is hashed as that arm staged it. One arm's
+        tasks must agree with each other (a piece that differs between two
+        tasks of one arm is a mismatch too); the first task's hashes are then
+        compared across arms. ``tasks_hashed`` counts the tasks read.
+        """
+        if self.error is not None:
+            return {"content_hashes": {}, "equal_across_arms": None, "mismatches": [], "tasks_hashed": 0}
+        per_arm: dict[str, dict[str, str]] = {}
+        uneven: set[str] = set()
+        counted = 0
+        for arm, task_dirs in task_dirs_by_arm.items():
+            arm_hashes = [self.hash_staged_arm(arm, Path(task) / "environment") for task in task_dirs]
+            counted = max(counted, len(arm_hashes))
+            if not arm_hashes:
+                continue
+            first = arm_hashes[0]
+            for other in arm_hashes[1:]:
+                uneven.update(piece for piece in first.keys() | other.keys() if first.get(piece) != other.get(piece))
+            per_arm[_arm_key(arm)] = first
+        report = compare_content_hashes(per_arm)
+        if uneven:
+            report["mismatches"] = sorted(set(report["mismatches"]) | uneven)
+            report["equal_across_arms"] = False
+        report["tasks_hashed"] = counted
+        if self._normalized:
+            report["normalized"] = dict(self._normalized)
+        return report
+
     @cached_property
     def pieces(self) -> tuple[LoosePiece, ...]:
         """Every staged loose part with its loose-arm sha256 (staged privately once, then cached)."""
@@ -421,6 +460,8 @@ class LoosePartsClaudeCodeAdapter(HarnessAdapter):
         "command": "native",
     }
     stage_wrapper_skill = False
+    #: Staged into an arm without the target skill (scored like the skills-only arm, ``has_skill`` false).
+    control_arm = True
     #: Member skills go through the task skills projection, exactly as in the skills-only arm.
     stage_member_skills = True
     plugin_mcp_via_task = False

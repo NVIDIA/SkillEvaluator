@@ -1479,6 +1479,30 @@ def _tier3_cost_view(staging: _ArmStaging | None, agents: Sequence[str]) -> dict
     return {"harness": harness, "load_mode": load_mode, "extra_notes": tuple(notes)}
 
 
+def finalize_loose_parts_provenance(provenance: dict[str, Any], engine_result: Any) -> None:
+    """Add the run's ``loose_parts`` block and the ladder's skip reason to plugin provenance.
+
+    ``loose_parts`` is what the collector recorded (``engine_result["loose_parts"]``:
+    the staging's info with the emitted tasks' content hashes, glue, and load
+    evidence, plus ``agents.<agent>`` with each ``not_measured_reason``); the
+    report reads it from here. ``ladder_skip_reason`` comes from the runner's
+    lift-mode record unless the CLI already set one. Tolerates absent keys, so
+    a run without the ladder gains nothing.
+    """
+    from collections.abc import Mapping
+
+    if not isinstance(engine_result, Mapping):
+        return
+    record = engine_result.get("loose_parts")
+    if isinstance(record, Mapping):
+        provenance["loose_parts"] = dict(record)
+    run_config = engine_result.get("run_config")
+    lift_mode = run_config.get("lift_mode") if isinstance(run_config, Mapping) else None
+    reason = lift_mode.get("ladder_skip_reason") if isinstance(lift_mode, Mapping) else None
+    if reason and not provenance.get("ladder_skip_reason"):
+        provenance["ladder_skip_reason"] = str(reason)
+
+
 def write_plugin_provenance(run_dir: Path, provenance: dict[str, Any]) -> Path | None:
     """Persist plugin provenance next to the run so it survives temp cleanup.
 

@@ -92,6 +92,16 @@ _REPORT_ARMS = (
         "rewards_sum_of_parts",
         report_only=True,
     ),
+    # ``--lift-mode ladder``: the plugin's parts staged loose, collected like the sum-of-parts arm.
+    _ReportArm(
+        "loose-parts",
+        "loose_parts",
+        "Loose parts",
+        "num_trials_loose_parts",
+        "num_reward_rows_loose_parts",
+        "rewards_loose_parts",
+        report_only=True,
+    ),
 )
 
 DATASET_SNAPSHOT_MAX_BYTES = _MAX_JSON_BYTES

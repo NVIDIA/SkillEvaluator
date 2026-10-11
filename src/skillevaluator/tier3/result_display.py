@@ -857,12 +857,57 @@ def _with_report_integration(result: Mapping[str, Any]) -> Mapping[str, Any]:
     return {**result, "integration": integration, "agents": named_agents}
 
 
+def _with_report_ladder(result: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Replace the raw lift ladder statistics with the report's ladder blocks (``--lift-mode ladder``).
+
+    The engine result carries each agent's ladder statistics only; the report
+    adds the glue verdict, the Integration lift or Wrapper effect label (from
+    how the full arm loaded the plugin), and the loose-parts census
+    (:func:`~skillevaluator.evaluation.tier3_report.ladder_reports_for`).
+    Without them the summary would call a native Integration lift a Wrapper
+    effect. A run without a ladder is returned unchanged.
+    """
+    from skillevaluator.reporting.plugin_sections import is_plugin_payload
+
+    raw_agents = result.get("agents")
+    if isinstance(result.get("lift_ladder"), Mapping) or not is_plugin_payload(result):
+        return result
+    if not isinstance(raw_agents, Mapping):
+        return result
+    agents = {str(name): dict(agent) for name, agent in raw_agents.items() if isinstance(agent, Mapping)}
+    run_config = result.get("run_config")
+    provenance = result.get("plugin_provenance")
+    recorded = run_config.get("lift_mode") if isinstance(run_config, Mapping) else None
+    modes = {
+        *((recorded.get("requested"), recorded.get("effective")) if isinstance(recorded, Mapping) else ()),
+        *((provenance.get("requested_lift_mode"),) if isinstance(provenance, Mapping) else ()),
+    }
+    if "ladder" not in modes and not any(isinstance(agent.get("lift_ladder"), Mapping) for agent in agents.values()):
+        return result  # neither run nor requested: nothing to build
+    try:
+        from skillevaluator.evaluation.tier3_report import ladder_reports_for
+
+        ladder, per_agent = ladder_reports_for(
+            agents,
+            dict(run_config) if isinstance(run_config, Mapping) else None,
+            dict(provenance) if isinstance(provenance, Mapping) else None,
+        )
+    except Exception:  # advisory block: never break the run summary
+        logging.getLogger(__name__).debug("Lift ladder block for the run summary skipped", exc_info=True)
+        return result
+    named_agents = {name: {**agent, "lift_ladder": per_agent.get(name)} for name, agent in agents.items()}
+    updated = {**result, "agents": named_agents}
+    if ladder is not None:
+        updated["lift_ladder"] = ladder
+    return updated
+
+
 def _render_plugin_blocks(*, console: Console, result: Mapping[str, Any], safe: Any) -> None:
     """Render advisory plugin statistics and signals carried by a plugin run's engine result."""
     from skillevaluator.reporting.cli import print_plugin_tier3
     from skillevaluator.reporting.plugin_sections import tier3_plugin_view
 
-    view = tier3_plugin_view(_with_report_integration(result))
+    view = tier3_plugin_view(_with_report_ladder(_with_report_integration(result)))
     if view is not None:
         print_plugin_tier3(_redact_strings(view, safe), console)
 

@@ -4180,11 +4180,15 @@ def _write_dockerfile(
     if not has_skill and skill_path is not None:
         _check_staged_baseline_does_not_contain_target(env_dir, skill_path)
 
+    control_staging = native_plugin is not None and not has_skill and bool(getattr(native_plugin, "control_arm", False))
     agent_config_lines = _write_agent_configs(
         env_dir,
-        native_plugin=native_plugin if has_skill else None,
+        native_plugin=native_plugin if has_skill or control_staging else None,
         excluded_roots=repo_context_exclude_paths,
     )
+    if control_staging and skill_path is not None:
+        # The loose-parts bundle is staged after the baseline check above; it must not carry the target either.
+        _check_staged_baseline_does_not_contain_target(env_dir, skill_path)
     if canary_token:
         agent_config_lines = [*agent_config_lines, *_stage_canary_context(env_dir, canary_token)]
     include_repo = (env_dir / "repo").exists()
@@ -6087,12 +6091,16 @@ def _generate_harbor_tasks_into(
         native_plugin: With-plugin arm only: a native plugin staging plan
             (``--plugin-load native|auto``). The harness adapter decides whether
             the wrapper skill, the member skills, and the plugin MCP servers
-            still go through the task, and stages the native bundle.
+            still go through the task, and stages the native bundle. The one
+            exception is a control-arm staging (the loose-parts arm), which goes
+            with ``with_skill=False``: the arm is scored like the skills-only arm.
 
     Returns:
         List of generated task directory paths.
     """
-    if native_plugin is not None and not with_skill:
+    if native_plugin is not None and with_skill == bool(getattr(native_plugin, "control_arm", False)):
+        if with_skill:
+            raise ValueError("A control-arm (loose-parts) staging applies to an arm without the target skill only")
         raise ValueError("Native plugin staging applies to the with-plugin arm only")
     if not isinstance(arm_suffix, str):
         raise TypeError("arm_suffix must be a string before generating Harbor tasks")

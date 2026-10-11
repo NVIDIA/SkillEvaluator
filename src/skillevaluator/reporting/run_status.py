@@ -14,7 +14,8 @@ The precedence (docs/plugin-evaluation.mdx, "Reports and verdicts"):
    the same run, or in the same check, did not complete; the reasons still name what did not complete.
 2. Missing evidence outranks a pass. A scanner that did not complete, or a partial Tier 3 plugin run, is INCOMPLETE.
 3. A skipped check is not a pass. It is SKIPPED, and a tier where nothing ran is SKIPPED.
-4. An INCONCLUSIVE Integration is advisory and never changes a verdict.
+4. The Integration block (Bundle lift) and the lift ladder are advisory: an INCONCLUSIVE or negative lift, or a
+   ladder that was not measured, never changes a verdict.
 5. The headline is the exit gate: a result outside the gate (an advisory tier) never changes it. It is PASSED
    exactly when ``validate`` exits 0, and the advisory problems are named instead.
 

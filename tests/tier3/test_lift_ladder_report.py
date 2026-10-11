@@ -746,3 +746,62 @@ def test_a_partial_glue_interval_says_so(tmp_path: Path) -> None:
     assert (glue["n"], glue["partial"], glue["verdict"]) == (5, True, "inconclusive")
     row = next(line for line in benchmark(built).splitlines() if line.startswith("| Integration lift (glue"))
     assert "partial: 5 of 6 cases" in row
+
+
+# ---------------------------------------------------------------------------
+# The run status (reporting/run_status.py) with a ladder in the payload
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("blocking", [False, True], ids=["advisory", "gated"])
+@pytest.mark.parametrize("shape", ["negative_glue", "wrapper", "fell_back"])
+def test_the_ladder_never_changes_the_run_status_on_any_surface(tmp_path: Path, shape: str, blocking: bool) -> None:
+    """A ladder, whatever its glue says, leaves every status to run_status, and every surface still shows it."""
+    from tests.reporting._saved_run import render_surfaces
+
+    from skillevaluator.reporting.run_status import resolve_run_status
+
+    if shape == "negative_glue":
+        built = _build(tmp_path / "ladder", {"claude-code": _ladder([-0.2])})
+        shown = "Negative integration lift"
+    elif shape == "wrapper":
+        built = _build(tmp_path / "ladder", {"claude-code": _ladder([-0.2])}, modes={"claude-code": "wrapper"})
+        shown = WRAPPER_LABEL
+    else:
+        reason = "No rule or runnable MCP server: loose parts equal the skills alone."
+        built = _build(
+            tmp_path / "ladder",
+            {"claude-code": None},
+            effective="both",
+            loose_parts=None,
+            provenance_extra={"ladder_skip_reason": reason},
+        )
+        shown = reason
+    plain = _build(tmp_path / "plain", {"claude-code": None}, requested="both", effective="both", loose_parts=None)
+    assert plain.get("lift_ladder") is None
+
+    def _result(payload: dict[str, Any]) -> Any:
+        result = result_for(payload)
+        result.metadata["gating"]["blocking"] = blocking
+        return result
+
+    status, without = resolve_run_status([_result(built)]), resolve_run_status([_result(plain)])
+    assert (status.headline, status.publication, status.plugin, status.reasons) == (
+        without.headline,
+        without.publication,
+        without.plugin,
+        without.reasons,
+    )
+    assert (status.tiers[3].status, status.tiers[3].publication) == (
+        without.tiers[3].status,
+        without.tiers[3].publication,
+    )
+
+    surfaces = render_surfaces([_result(built)], name=SKILL)
+    assert surfaces["headlines"] == dict.fromkeys(surfaces["headlines"], status.headline.value)
+    assert surfaces["benchmark"] == status.publication.verdict
+    assert surfaces["html_tier_cards"]["tier3"] == status.tiers[3].status.verdict
+    outputs = surfaces["outputs"]
+    for rendered in (outputs["markdown"], outputs["html"], outputs["terminal"]):
+        assert shown in _flat(rendered)
+    assert shown in _flat(benchmark(built))

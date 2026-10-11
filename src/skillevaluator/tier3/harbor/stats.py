@@ -549,6 +549,14 @@ EXCLUDED_LOAD_FAILED = "load_failed"
 EXCLUDED_NOT_SCORED = "not_scored"
 EXCLUDED_NO_COMMON_DIMENSION = "no_common_dimension"
 
+# Per case, the arms whose staged parts did not load: ``{arm: reason}``, or the loose-parts staging's own records
+# ``[{arm, attempt, piece, reason}]`` (``skillevaluator.tier3.loose_parts.load_failures_by_case``), folded into one
+# bounded reason per arm.
+LoadFailures = Mapping[str, Mapping[str, str] | Sequence[Mapping[str, Any]]]
+_LOAD_FAILURES_PER_ARM = 4
+_LOAD_FAILURE_PIECE_CHARS = 100
+_LOAD_FAILURE_REASON_CHARS = 120
+
 
 @dataclass(frozen=True)
 class CommonCaseScores:
@@ -587,11 +595,36 @@ def _shared_case_score(
     }
 
 
-def _clean_load_failures(load_failures_by_case: Mapping[str, Mapping[str, str]] | None) -> dict[str, dict[str, str]]:
+def _failure_records_by_arm(records: Sequence[Any]) -> dict[str, str]:
+    """The staging's failure records (``{arm, attempt, piece, reason}``) as one bounded reason per arm."""
+    by_arm: dict[str, list[str]] = {}
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        piece = str(record.get("piece") or "a staged part")[:_LOAD_FAILURE_PIECE_CHARS]
+        attempt = record.get("attempt")
+        where = f"{piece} (attempt {attempt})" if type(attempt) is int else piece
+        reason = str(record.get("reason") or "not loaded")[:_LOAD_FAILURE_REASON_CHARS]
+        by_arm.setdefault(str(record.get("arm") or "unknown"), []).append(f"{where}: {reason}")
+    return {
+        arm: "; ".join(items[:_LOAD_FAILURES_PER_ARM])
+        + (f" (+{len(items) - _LOAD_FAILURES_PER_ARM} more)" if len(items) > _LOAD_FAILURES_PER_ARM else "")
+        for arm, items in by_arm.items()
+    }
+
+
+def _clean_load_failures(load_failures_by_case: LoadFailures | None) -> dict[str, dict[str, str]]:
+    """``{case: {arm: reason}}`` from either shape :data:`LoadFailures` accepts; an empty entry is no failure."""
     failures: dict[str, dict[str, str]] = {}
-    for case_id, by_arm in (load_failures_by_case or {}).items():
-        if isinstance(by_arm, Mapping) and by_arm:
-            failures[str(case_id)] = {str(arm): str(reason) for arm, reason in by_arm.items()}
+    for case_id, recorded in (load_failures_by_case or {}).items():
+        if isinstance(recorded, Mapping):
+            by_arm = {str(arm): str(reason) for arm, reason in recorded.items()}
+        elif isinstance(recorded, Sequence) and not isinstance(recorded, str | bytes):
+            by_arm = _failure_records_by_arm(recorded)
+        else:
+            continue
+        if by_arm:
+            failures[str(case_id)] = by_arm
     return failures
 
 
@@ -600,13 +633,13 @@ def common_case_scores(
     *,
     dimensions: Collection[str] = COMMON_BASIS_DIMENSIONS,
     expected_case_ids: Sequence[str] | None = None,
-    load_failures_by_case: Mapping[str, Mapping[str, str]] | None = None,
+    load_failures_by_case: LoadFailures | None = None,
 ) -> CommonCaseScores:
     """Score every arm per case on the *dimensions* that every arm scored for that case.
 
     Listwise: a case is kept only when every arm scored it, no arm failed its
-    load verification for it (``load_failures_by_case``: ``{case: {arm:
-    reason}}``, any arm counts), and the arms share at least one of
+    load verification for it (``load_failures_by_case``, see
+    :data:`LoadFailures`; any arm counts), and the arms share at least one of
     *dimensions* for it. Otherwise it is dropped from every arm and listed in
     ``excluded_cases``. Correctness is N/A in every arm for a case without
     ``ground_truth``, so it drops out of that case for all arms alike. An
@@ -752,7 +785,7 @@ def lift_ladder(
     cross_component_case_ids: Collection[str] | None,
     *,
     expected_case_ids: Sequence[str] | None = None,
-    load_failures_by_case: Mapping[str, Mapping[str, str]] | None = None,
+    load_failures_by_case: LoadFailures | None = None,
 ) -> dict[str, Any]:
     """Split the plugin lift into four steps that add up, on one common basis.
 
@@ -1185,7 +1218,7 @@ def build_agent_statistics(
     sum_of_parts_requested: bool,
     baseline_is_sum_of_parts: bool = False,
     cross_component_case_ids: Collection[str] | None = None,
-    load_failures_by_case: Mapping[str, Mapping[str, str]] | None = None,
+    load_failures_by_case: LoadFailures | None = None,
 ) -> dict[str, Any]:
     """Assemble every C4 statistics block for one agent.
 

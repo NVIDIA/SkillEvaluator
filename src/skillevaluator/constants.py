@@ -605,6 +605,11 @@ LIFT_CI_MIN_PAIRED_CASES = 5
 # A wider interval than this (in score units) is reported as ``low`` precision.
 LIFT_CI_LOW_PRECISION_WIDTH = 0.20
 
+# Lift ladder: the full-plugin-minus-loose-parts step. Only a natively loaded full arm measures the plugin's own
+# glue; in wrapper mode the step measures SkillEvaluator's generated wrapper and is never called the Integration lift.
+LADDER_INTEGRATION_LABEL = "Integration lift"
+LADDER_WRAPPER_LABEL = "Wrapper effect (full wrapper arm minus loose parts)"
+
 AGENT_EVAL_DATASET_REQUIRED_FIELDS = [
     "id",
     "question",

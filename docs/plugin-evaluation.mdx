@@ -2351,6 +2351,22 @@ piece that differs or that one arm lacks. Piece ids use bare names
 (`skill:changelog-collect`, `mcp:reltools`), so namespacing never counts as a
 difference.
 
+Equal bytes are not always the same capability. Claude Code ignores
+`permissionMode`, `hooks` and `mcpServers` in a plugin subagent's frontmatter
+but honours them in a user subagent, so a subagent that sets one is listed in
+`capability_differences` with the reason, counts as a mismatch, and the
+Integration verdict is inconclusive. Claude Code also writes the plugin root
+into a plugin skill, subagent or command text for `${CLAUDE_PLUGIN_ROOT}`
+(and `${CLAUDE_PLUGIN_DATA}`); the loose copy keeps the variable, which only a
+shell expands. Those pieces are listed in `plugin_root_in_text` (recorded, not
+a mismatch: the files are the plugin's own) so a reader can set them aside.
+
+The verifier treats a plugin command the same in both arms: Claude Code runs
+it through its `Skill` tool as `<plugin>:<command>` in the plugin arm and as
+`<command>` in the loose arm, and the loose tasks' `entry.json` lists the
+staged command names in `native_plugin_commands`, so neither arm counts the
+command as a skill call in its activation and routing grades.
+
 **How load is verified.** Only Claude Code's own `system/init` event marks a
 piece loaded (per trial and piece `loaded`, `source`, `evidence`, saved in
 `<agent>/loose_parts_load_evidence.json`; `loose_parts.load_evidence` keeps the

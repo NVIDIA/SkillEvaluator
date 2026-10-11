@@ -156,6 +156,18 @@ _ROOT_PATH_RE = re.compile(
     r"(?:\$\{CLAUDE_PLUGIN_ROOT\}|\$CLAUDE_PLUGIN_ROOT(?![A-Za-z0-9_]))[\"']?(/[^\s\"'`;|&<>(){}$\\:,]*)?"
 )
 _HOOK_ID_SOURCE_RE = re.compile(r"^(?P<source>.+)#[^#]*\[\d+\]\.hooks\[\d+\]$")
+#: Subagent frontmatter fields Claude Code ignores in a plugin agent but honours in a user agent
+#: ("Plugin agent file ... sets <field>, which is ignored for plugin agents", Claude Code 2.1).
+_PLUGIN_IGNORED_AGENT_FIELDS = {
+    "permissionmode": "permissionMode",
+    "hooks": "hooks",
+    "mcpservers": "mcpServers",
+}
+PLUGIN_ROOT_IN_TEXT = (
+    "Claude Code writes the plugin root into a plugin skill, subagent or command text for ${CLAUDE_PLUGIN_ROOT} "
+    "(and ${CLAUDE_PLUGIN_DATA}); the loose copy keeps the variable, which only a shell expands (the loose "
+    "launch exports it), so the model reads a different text in the two arms"
+)
 _SERVER_NAME_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 _GLUE_REASONS = {
@@ -270,6 +282,10 @@ class LooseParts:
     _loose: tuple[_Placement, ...] = field(default=(), repr=False, compare=False)
     _full: tuple[_Placement, ...] = field(default=(), repr=False, compare=False)
     _normalized: tuple[tuple[str, str], ...] = field(default=(), repr=False, compare=False)
+    #: ``(piece id, reason)`` for a piece staged byte for byte that Claude Code still loads differently in the two arms.
+    _capability_differences: tuple[tuple[str, str], ...] = field(default=(), repr=False, compare=False)
+    #: ``(piece id, reason)`` for a skill, subagent or command whose text names the plugin root (recorded, not compared).
+    _root_text: tuple[tuple[str, str], ...] = field(default=(), repr=False, compare=False)
 
     # -- staging -------------------------------------------------------------- #
     def task_staging(self) -> Any:
@@ -334,7 +350,7 @@ class LooseParts:
         )
         if self._normalized:
             report["normalized"] = dict(self._normalized)
-        return report
+        return self._with_capability_differences(report)
 
     def content_report_for_tasks(self, task_dirs_by_arm: Mapping[str, Sequence[Path]]) -> dict[str, Any]:
         """The :meth:`content_report` of tasks the runner emitted: ``{arm: [task dir, ...]}`` per compared arm.
@@ -365,6 +381,23 @@ class LooseParts:
         report["tasks_hashed"] = counted
         if self._normalized:
             report["normalized"] = dict(self._normalized)
+        if ARM_WITH in per_arm and LOOSE_PARTS_ARM in per_arm:
+            report = self._with_capability_differences(report)
+        return report
+
+    def _with_capability_differences(self, report: dict[str, Any]) -> dict[str, Any]:
+        """``report`` with every piece that loads differently in the two arms counted as a mismatch.
+
+        Equal bytes are not equal capability when Claude Code reads the same
+        file differently as a plugin part and as a user part, so the arms are
+        never called equal then and the reason is kept per piece.
+        """
+        if not self._capability_differences:
+            return report
+        differences = dict(self._capability_differences)
+        report["mismatches"] = sorted(set(report.get("mismatches", [])) | set(differences))
+        report["equal_across_arms"] = False
+        report["capability_differences"] = differences
         return report
 
     @cached_property
@@ -420,6 +453,8 @@ class LooseParts:
             "mismatches": list(report.get("mismatches", [])),
             "dropped_as_glue": [piece.to_dict() for piece in self.dropped_as_glue],
             "not_staged": [piece.to_dict() for piece in self.not_staged],
+            "capability_differences": dict(report.get("capability_differences") or {}),
+            "plugin_root_in_text": dict(self._root_text),
             "load_evidence": dict(load_evidence or {}),
         }
         if report.get("normalized"):
@@ -620,6 +655,8 @@ class _Builder:
         self.not_staged: list[GluePiece] = []
         self.references: list[str] = []
         self.normalized: dict[str, str] = {}
+        self.capability_differences: dict[str, str] = {}
+        self.root_text: dict[str, str] = {}
         self.staged_skills = self.adapter.staged_skills(source)
         self.rewrites = self._frontmatter_rewrites()
         # Paths inside the plugin copy that are not plugin source files: the files the plugin arm generates and
@@ -669,7 +706,13 @@ class _Builder:
             _loose=tuple(sorted(self.loose, key=lambda item: item.id)),
             _full=tuple(sorted(self.full, key=lambda item: item.id)),
             _normalized=tuple(sorted(self.normalized.items())),
+            _capability_differences=tuple(sorted(self.capability_differences.items())),
+            _root_text=tuple(sorted(self.root_text.items())),
         )
+
+    def _note_root_text(self, piece_id: str, text: str) -> None:
+        if _ROOT_VAR_RE.search(text) or _DATA_VAR_RE.search(text):
+            self.root_text[piece_id] = PLUGIN_ROOT_IN_TEXT
 
     def _place(self, piece_id: str, kind: str, source: str | None, *, full: str, loose: str, **extra: Any) -> None:
         full_overrides = tuple(
@@ -713,7 +756,9 @@ class _Builder:
         for skill in self.source.member_skills:
             name = skill.name
             loose_names.add(name)
-            self._note_references(_skill_manifest_text(skill))
+            manifest_text = _skill_manifest_text(skill)
+            self._note_references(manifest_text)
+            self._note_root_text(f"skill:{name}", manifest_text)
             self.checks.append(
                 CensusCheck(
                     "skill", name, "file", f"$CLAUDE_CONFIG_DIR/skills/{name}/SKILL.md", label="user skills listing"
@@ -887,6 +932,13 @@ class _Builder:
             bundle_rel = f"{LOOSE_BUNDLE_DIR}/{dest_rel}"
             # A body can run a plugin file (``!`${CLAUDE_PLUGIN_ROOT}/scripts/x.sh` ``): copy what it names.
             self._note_references(text.text)
+            piece_id = f"{text.type}:{harness_name}"
+            self._note_root_text(piece_id, text.text)
+            if text.type == "agent" and (ignored := _plugin_ignored_agent_fields(text.text)):
+                self.capability_differences[piece_id] = (
+                    f"the subagent sets {', '.join(ignored)}: Claude Code says this is ignored for plugin agents, "
+                    "but a user agent honours it, so the same file is a different capability in the two arms"
+                )
             if text.rel is None:
                 self.bundle.generated[bundle_rel] = text.text
             else:
@@ -906,7 +958,7 @@ class _Builder:
                 )
             )
             self._place(
-                f"{text.type}:{harness_name}",
+                piece_id,
                 text.type,
                 text.rel,
                 full=f"{_PLUGIN_BUNDLE}/{full_rel}",
@@ -1070,6 +1122,19 @@ class _Builder:
         if isinstance(user_config, Mapping):
             for key in sorted(str(item) for item in user_config):
                 self.glue.append(GluePiece(f"userConfig:{key}", _GLUE_REASONS["userConfig"]))
+
+
+def _plugin_ignored_agent_fields(text: str) -> list[str]:
+    """The frontmatter fields of a subagent that Claude Code ignores in a plugin agent (in declared spelling)."""
+    from skillevaluator.plugin_components import parse_markdown
+
+    frontmatter = parse_markdown(text).frontmatter
+    found: list[str] = []
+    for key in frontmatter:
+        spelled = _PLUGIN_IGNORED_AGENT_FIELDS.get(str(key).replace("-", "").replace("_", "").casefold())
+        if spelled is not None and spelled not in found:
+            found.append(spelled)
+    return sorted(found)
 
 
 def _skill_manifest_text(skill_dir: Path) -> str:

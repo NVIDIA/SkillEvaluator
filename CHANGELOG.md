@@ -7,17 +7,24 @@ All notable changes to SkillEvaluator are documented in this file.
 ### Added
 
 - Plugin Tier 3 statistics and reports for the lift ladder (`--lift-mode
-  ladder`): a fourth, loose-parts arm (the plugin's skills, rules and MCP
-  servers as plain pieces) splits the plugin lift into Skill lift, Capability
-  lift and Integration lift (glue), which add up to the Plugin lift on one
-  common basis (`lift_ladder` per agent; cases any arm did not score or did not
+  ladder`): a fourth, loose-parts arm (the plugin's skills, rules, MCP servers,
+  subagents, commands and hooks as plain Claude Code pieces) splits the plugin
+  lift into Skill lift, Capability lift and Integration lift (glue), which add
+  up to the Plugin lift on one common basis (`lift_ladder` per agent; cases any arm did not score or did not
   load are dropped from every arm and listed). Only the Integration lift gets a
   verdict, on cross-component cases, with the Bundle lift's ±0.05 rules; it is
   inconclusive when the capability is not identical across arms by content hash,
   and wrapper mode reports a Wrapper effect with no verdict. HTML, Markdown,
   CLI and `BENCHMARK.md` show the ladder; it is report-only and costs one more
-  arm (+33% trials over `both`). Version 1 stages skills, rules and MCP servers
-  only.
+  arm (+33% trials over `both`). Version 1 runs on native Claude Code only;
+  Codex, OpenCode and Hermes are not measured. The runner does not run the arm
+  yet.
+- Loose-parts staging for native Claude Code (`skillevaluator.tier3.loose_parts`):
+  skills, rules, MCP servers, subagents, commands and hooks staged as plain
+  user-level pieces, per-piece content hashes across the full, loose and
+  skills-only arms, load evidence from Claude Code's `system/init` (with MCP
+  call evidence for slow-starting servers), and `dropped_as_glue` listing only
+  what cannot load standalone, each with its reason.
 - `--trial-retries N` (default 0) lets Harbor rerun a Tier 3 trial, up to 5
   times, after an environment-start timeout, an agent-setup timeout, or a
   network failure during agent setup in SkillEvaluator's agent wrappers, never

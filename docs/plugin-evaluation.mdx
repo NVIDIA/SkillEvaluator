@@ -1909,7 +1909,7 @@ spend money on a run.
 | **With plugin** | Wrapper `SKILL.md` with embedded rules, member skills, runnable plugin MCP servers | Every mode |
 | **Without plugin** | Nothing from the plugin | `effectiveness`, `both` and `ladder` |
 | **Member skills only** | Member skills. No wrapper, no rules, no plugin MCP servers | `integration` (as the baseline), `both` and `ladder` (as a report-only arm) |
-| **Loose parts** | The same member skills, rules and MCP servers as plain pieces: no wrapper, no plugin manifest, no hooks, subagents or commands | `ladder` (report-only arm) |
+| **Loose parts** | The same member skills, rules, MCP servers, subagents, commands and hooks as plain Claude Code pieces: no wrapper, no plugin manifest | `ladder` (report-only arm, native Claude Code only) |
 
 `--lift-mode` chooses the comparison:
 
@@ -2266,9 +2266,9 @@ The loose-parts arm (arm key `loose_parts`, label "Loose parts") holds the same
 skills, rules, MCP servers, subagents, commands and hooks as the native Claude
 Code plugin arm, but as plain pieces that Claude Code loads without any plugin.
 Full plugin minus loose parts then measures only the plugin's glue. The staging,
-content hashes, and load evidence are built (`skillevaluator.tier3.loose_parts`);
-the `--lift-mode ladder` option that runs the arm and the `lift_ladder` report
-are not wired yet.
+content hashes, load evidence, ladder statistics and reports are built
+(`skillevaluator.tier3.loose_parts`, `lift_ladder`); the runner does not run the
+arm yet (`--lift-mode ladder` is not wired), so no run records a ladder yet.
 
 It runs only with `--plugin-load native` on Claude Code, where the plugin arm is
 the real `--plugin-dir` load. In wrapper mode the plugin arm is SkillEvaluator's
@@ -2424,15 +2424,17 @@ The block also records `components`, `with_plugin`, `sum_of_parts`,
 ### Lift ladder (loose-parts arm)
 
 `--lift-mode ladder` runs four arms: no plugin, member skills only, **loose
-parts** and the full plugin. The loose-parts arm stages the same skills, rules
-and MCP servers as plain pieces (rules as ordinary rule files, MCP servers as
-ordinary MCP config with the same tool descriptions), with no wrapper and no
+parts** and the full plugin. The loose-parts arm stages the same skills, rules,
+MCP servers, subagents, commands and hooks as plain Claude Code pieces (rules as
+ordinary rule files, MCP servers as ordinary MCP config with the same tool
+descriptions, hooks in the user settings; see
+[Loose-parts arm](#loose-parts-arm-native-claude-code)), with no wrapper and no
 plugin manifest. The plugin lift then splits into steps that add up:
 
 | Step (`lift_ladder.steps.*`) | Arms | Report label |
 | --- | --- | --- |
 | `skill` | skills only minus no plugin | Skill lift |
-| `capability` | loose parts minus skills only | Capability lift (rules and MCP tools) |
+| `capability` | loose parts minus skills only | Capability lift (rules, MCP tools, subagents, commands, hooks) |
 | `integration` | full plugin minus loose parts | Integration lift (glue) |
 | `plugin` | full plugin minus no plugin | Plugin lift on the common basis |
 
@@ -2442,9 +2444,9 @@ integration`. The existing Plugin lift, Bundle lift and their verdict are
 reported next to the ladder, unchanged.
 
 It needs what `both` needs (a baseline, member skills, cross-component evidence)
-plus at least one rule or runnable MCP server. Without a rule or MCP server the
-loose parts equal the skills alone, so the run falls back to `both` and records
-`ladder_skip_reason`; without cross-component evidence it falls back to
+plus at least one rule, runnable MCP server, subagent, command or hook. Without
+one, the loose parts equal the skills alone, so the run falls back to `both`
+and records `ladder_skip_reason`; without cross-component evidence it falls back to
 `effectiveness`, as `both` does. Version 1 builds the loose-parts arm for native
 Claude Code (`--plugin-load native`); for Codex, OpenCode and Hermes the
 ladder says "not measured" with the reason.
@@ -2455,8 +2457,10 @@ arms scored for it, out of Security, Correctness and Effectiveness (the no-plugi
 arm has no Discoverability or Efficiency). A case is dropped from every arm,
 and listed in `excluded_cases` with its reason, when any arm did not score it
 (`not_scored`), when its load verification failed in any arm (`load_failed`: a
-loose or plugin part that Claude Code's startup report did not mark loaded and
-that was never called), or when the arms share no dimension for it
+loose or plugin part that Claude Code's startup report did not mark loaded, or
+an MCP server that was also never called successfully; the staging's
+`load_failures_by_case` records each arm, attempt and piece, and the excluded
+case keeps one reason per arm), or when the arms share no dimension for it
 (`no_common_dimension`). `partial` is then `true`. Every step goes through the
 same paired case bootstrap with the same seed over the same cases, so the steps
 add up per case, on the means, and in every bootstrap resample; the intervals
@@ -2492,11 +2496,13 @@ holds when the run did not record a native load for the full arm
 (`full_arm_load` is `wrapper` or `unknown`; only `native` earns a verdict).
 
 **Same capability in every arm.** `lift_ladder.loose_parts` lists the loader,
-the staged `rules` and `mcp_servers`, `dropped_as_glue` (the plugin-only pieces
-that cannot load standalone, such as `hook:hooks/hooks.json`,
-`agent:release-reviewer` and `command:release-check`), and `content_hashes`
-(`{arm: {piece_id: sha256}}` for skills, rules, agents, commands, hooks and MCP
-config). `equal_across_arms` is `true` when every full-plugin piece that is not
+the staged `rules`, `mcp_servers`, `subagents`, `commands` and `hooks`,
+`dropped_as_glue` (the ids of the plugin-only pieces that cannot load
+standalone, such as `manifest:.claude-plugin/plugin.json`, `output_style:terse`
+and `lsp:go`; the staging's own block in the plugin provenance keeps the reason
+next to each), and `content_hashes` (`{arm: {piece_id: sha256}}` for skills,
+rules, agents, commands, hooks, MCP config and the plugin files they name).
+`equal_across_arms` is `true` when every full-plugin piece that is not
 glue is in the loose-parts arm with the same hash, the loose-parts arm stages
 nothing else, and the skills-only arm stages exactly the full plugin's skills;
 `mismatches` names each piece that breaks this (the full arm may be keyed
@@ -2504,9 +2510,8 @@ nothing else, and the skills-only arm stages exactly the full plugin's skills;
 still shown, but its verdict is `inconclusive` with the reason "capability not
 identical across arms"; when no hashes were recorded (`null`), the verdict is
 `inconclusive` too, because nothing shows that the loose arm staged the same
-bytes. Version 1 counts hooks as glue,
-policy hooks included (enforcement, not coordination); the reports say so next
-to the number.
+bytes. A policy hook (for example one that blocks `git push`) is a loose part,
+not glue.
 
 **Reports.** Every format shows one line and one table per agent, for example
 "Bundle lift +0.18 = capability +0.11 + integration (glue) +0.07 (common basis,

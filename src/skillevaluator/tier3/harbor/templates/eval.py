@@ -4889,13 +4889,15 @@ def split_native_command_calls(skill_tool_names, native_prefix="", native_comman
     Claude Code runs plugin commands through its ``Skill`` tool as
     ``<plugin>:<command>``. Those are command activations, not skill
     activations, so they stay out of skill activation and routing grades. A
-    name that is also a staged skill stays a skill.
+    name that is also a staged skill stays a skill. Without a ``native_prefix``
+    (the loose-parts arm stages the plugin's commands as user commands, which
+    Claude Code runs as ``<command>``) a listed command matches by its bare name.
     """
     commands = {str(name).strip().lower() for name in (native_commands or []) if str(name).strip()}
     skills = {str(name).strip().lower() for name in (skill_names or []) if str(name).strip()}
     kept, command_calls = [], []
     for name in skill_tool_names or []:
-        bare = _native_bare_name(name, native_prefix)
+        bare = _native_bare_name(name, native_prefix) if native_prefix else str(name).strip().lower()
         is_command = (
             bare is not None
             and (bare in commands or bare.replace(":", "/") in commands)

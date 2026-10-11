@@ -2271,10 +2271,17 @@ def _native_plugin_names(native_plugin: NativeTaskStaging | None) -> dict[str, A
     compares names exactly. ``native_plugin_commands`` lists the staged plugin
     commands, which the harness runs through its ``Skill`` tool as
     ``<plugin>:<command>``. Empty for wrapper mode and for harnesses that keep
-    bare names.
+    bare names. A control-arm staging (the loose-parts arm) stages the plugin's
+    commands as user commands, which Claude Code runs as ``<command>``: it gets
+    ``native_plugin_commands`` with those bare names and no prefix, so the
+    verifier keeps them out of skill routing exactly as in the full-plugin arm.
     """
     if native_plugin is None:
         return {}
+    if getattr(native_plugin, "control_arm", False):
+        staged = [row for row in native_plugin.bundle.declared if row.get("type") == "command"]
+        names = sorted({str(row.get("harness_name") or row.get("name")) for row in staged if row.get("name")})
+        return {"native_plugin_commands": names} if names else {}
     prefix = str(native_plugin.adapter.skill_namespace(native_plugin.source) or "")
     if not prefix:
         return {}

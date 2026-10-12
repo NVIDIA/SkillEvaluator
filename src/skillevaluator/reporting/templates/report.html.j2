@@ -2658,6 +2658,33 @@
             </details>
             {% endif %}
 
+            {% if t3_agents %}
+            <details class="t3-details" open>
+                <summary>Measured Agent Resources</summary>
+                <div class="t3-details-body">
+                <p class="t3-section-hint">Efficiency scores measure routing and productive tool use. These separate measurements show observed agent resource use. Delta = with skill minus baseline; negative means less use. Judge and setup time are excluded. Deltas require complete telemetry and matching case counts in both arms.</p>
+                <div class="table-scroll"><table class="summary-table">
+                    <thead><tr><th>Agent</th><th>Measurement</th><th>With skill total</th><th>Baseline total</th><th>Delta</th><th>Measured trials (skill / baseline)</th></tr></thead>
+                    <tbody>
+                    {% for name, agent in t3_agents.items() %}
+                    {% if agent.resources is defined %}
+                    {% for field, label in [('tokens', 'Prompt + completion tokens (cache included)'), ('agent_seconds', 'Agent execution seconds')] %}
+                    {% set measured = agent.resources[field] %}
+                    <tr><td>{{ name }}</td><td>{{ label }}</td>
+                        <td>{{ '%.2f' | format(measured.with_skill.total) if measured.with_skill.total is not none else 'N/A' }}</td>
+                        <td>{{ '%.2f' | format(measured.baseline.total) if measured.baseline.total is not none else 'N/A' }}</td>
+                        <td>{{ '%+.2f' | format(measured.delta) if measured.delta is not none else 'N/A' }}</td>
+                        <td>{{ measured.with_skill.measured_trials }}/{{ measured.with_skill.trials }} / {{ measured.baseline.measured_trials }}/{{ measured.baseline.trials }}</td>
+                    </tr>
+                    {% endfor %}
+                    {% endif %}
+                    {% endfor %}
+                    </tbody>
+                </table></div>
+                </div>
+            </details>
+            {% endif %}
+
             {% if tier3.trials %}
 
             {% set t3_trial_agent_groups = (tier3.trials or []) | groupby('agent') %}

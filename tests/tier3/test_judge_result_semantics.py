@@ -49,6 +49,46 @@ def _load_template_module() -> ModuleType:
 eval_template = _load_template_module()
 
 
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
+@pytest.mark.parametrize("skill_verdict", [True, False])
+def test_negative_accuracy_excludes_skill_identification(module, skill_verdict, monkeypatch):
+    criteria = dict.fromkeys(_CRITERIA, True)
+    criteria["SKILL_IDENTIFIED"] = skill_verdict
+    criteria["ACTION_CORRECT"] = False
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "call_public_llm",
+        _pair_script([(json.dumps({"criteria": criteria, "score": 0.1, "reason": "case"}), None)], calls),
+    )
+    result = module.judge_accuracy("question", "answer", "evidence", skill_identification_applicable=False)
+    assert result["score"] == 0.75
+    assert result["excluded_criteria"] == ["SKILL_IDENTIFIED"]
+    assert "other four criteria" in calls[0]
+
+
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
+def test_negative_accuracy_requires_criterion_evidence(module, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        module, "call_public_llm", _pair_script([('{"score":1,"reason":"missing verdicts"}', None)], calls)
+    )
+    result = module.judge_accuracy("question", "answer", "evidence", skill_identification_applicable=False)
+    assert result["score"] is None
+    assert result["status"] == "error"
+
+
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
+def test_negative_rubric_does_not_rewrite_supplied_evidence(module, monkeypatch):
+    calls = []
+    criteria = dict.fromkeys(_CRITERIA, True)
+    response = json.dumps({"criteria": criteria, "score": 1.0, "reason": "valid"})
+    monkeypatch.setattr(module, "call_public_llm", _pair_script([(response, None)], calls))
+    evidence = 'Evidence literal: Compute score = count(true) / 5. "SKILL_IDENTIFIED": true, "score": 0.8'
+    module.judge_accuracy("question", "answer", evidence, skill_identification_applicable=False)
+    assert evidence in calls[0]
+
+
 @pytest.fixture(params=["shared", "template"])
 def judge_module(request: pytest.FixtureRequest) -> ModuleType:
     return llm_judge if request.param == "shared" else eval_template

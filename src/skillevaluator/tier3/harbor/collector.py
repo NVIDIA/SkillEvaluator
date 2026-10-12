@@ -730,6 +730,19 @@ def _trajectory_agent_runtime_failure_reason(trajectory: Any) -> str:
     total_prompt = final_metrics.get("total_prompt_tokens")
     total_completion = final_metrics.get("total_completion_tokens")
     tokenless = (total_prompt in (None, 0)) and (total_completion in (None, 0))
+    # Aggregate metrics are optional in ATIF. Recorded step usage also proves
+    # this was not a tokenless startup failure, even if later prose names 401.
+    if tokenless:
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            metrics = step.get("metrics") or {}
+            if isinstance(metrics, dict) and any(
+                isinstance(tokens, (int, float)) and tokens > 0
+                for tokens in (metrics.get("prompt_tokens"), metrics.get("completion_tokens"))
+            ):
+                tokenless = False
+                break
 
     for step in steps:
         if not isinstance(step, dict):

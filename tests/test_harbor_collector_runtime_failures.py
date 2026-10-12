@@ -283,6 +283,75 @@ def test_actual_harbor_022_single_step_success_serializes_and_scores(tmp_path: P
     assert summary["overall_score"] == 1.0
 
 
+@pytest.mark.parametrize("token_field", ("prompt_tokens", "completion_tokens"))
+@pytest.mark.parametrize("final_metrics", (None, {}, {"total_prompt_tokens": 0, "total_completion_tokens": 0}))
+def test_step_token_usage_keeps_authentication_answer_scored(
+    tmp_path: Path,
+    token_field: str,
+    final_metrics: dict[str, int] | None,
+) -> None:
+    """Optional aggregate metrics must not hide recorded per-step token usage."""
+    from harbor.models.trajectories.trajectory import Trajectory
+
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, reward=1.0)
+    agent_dir = job_dir / trial_name / "agent"
+    agent_dir.mkdir()
+    trajectory = Trajectory.model_validate(
+        {
+            "schema_version": "ATIF-v1.7",
+            "agent": {"name": "opencode", "version": "test"},
+            "steps": [
+                {"step_id": 1, "source": "agent", "message": "Checking the HTTP status.", "metrics": {token_field: 12}},
+                {"step_id": 2, "source": "agent", "message": "401 Unauthorized"},
+            ],
+            "final_metrics": final_metrics,
+        }
+    )
+    (agent_dir / "trajectory.json").write_text(trajectory.model_dump_json(), encoding="utf-8")
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert results["execution_status"] == "succeeded"
+    assert results["agents"]["opencode"]["num_trials_with"] == 1
+    assert results["agents"]["opencode"]["agent_runtime_failures"]["with_skill"] == []
+
+
+@pytest.mark.parametrize("metrics", (None, {}, {"prompt_tokens": 0, "completion_tokens": 0}))
+def test_tokenless_trajectory_still_reports_authentication_failure(metrics: dict[str, int] | None) -> None:
+    assert collector_module._trajectory_agent_runtime_failure_reason(
+        {"steps": [{"source": "agent", "message": "401 Unauthorized", "metrics": metrics}]}
+    ) == "Unauthorized"
+
+
+@pytest.mark.parametrize("failure_artifact", ("result.json", "agent/opencode.txt"))
+def test_explicit_runtime_failure_wins_over_step_token_usage(tmp_path: Path, failure_artifact: str) -> None:
+    trial_dir = tmp_path / "case-001__attempt"
+    agent_dir = trial_dir / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "trajectory.json").write_text(
+        json.dumps({"steps": [{"source": "agent", "message": "401", "metrics": {"completion_tokens": 12}}]}),
+        encoding="utf-8",
+    )
+    if failure_artifact == "result.json":
+        payload = {"exception_info": {"exception_type": "AgentAuthenticationError", "exception_message": "401 Unauthorized"}}
+    else:
+        payload = {"type": "error", "error": {"name": "AgentAuthenticationError", "message": "401 Unauthorized"}}
+    (trial_dir / failure_artifact).write_text(json.dumps(payload), encoding="utf-8")
+
+    assert _agent_runtime_failure_reason(trial_dir)
+
+
 @pytest.mark.parametrize("verifier_mode", ("null", "missing"))
 def test_actual_harbor_022_null_or_missing_reward_is_unscored(
     tmp_path: Path,

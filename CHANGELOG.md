@@ -85,6 +85,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Preserve scored Harbor trials when agent answers mention authentication errors
+  and per-step token usage is present but aggregate ATIF token metrics are absent
+  or zero. Explicit runtime exceptions and error events still invalidate trials.
 - Safety-classifier refusals, content filters and output-token truncation are
   detected instead of being read as empty or malformed output. `--llm-verify`
   and rubric evaluation report the cause, and `--llm-verify` keeps the

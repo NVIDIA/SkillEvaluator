@@ -85,6 +85,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Include schema-valid ATIF message content parts in final answers, conversation
+  summaries, and judge evidence references in the host and Harbor verifier.
+  Image and audio parts use markers without exposing their source paths.
 - Preserve scored Harbor trials when agent answers mention authentication errors
   and per-step token usage is present but aggregate ATIF token metrics are absent
   or zero. Explicit runtime exceptions and error events still invalidate trials.

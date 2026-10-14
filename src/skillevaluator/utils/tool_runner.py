@@ -227,15 +227,17 @@ class ExternalTool:
 
         try:
             child_env = dict(env or {}) if replace_env else ({**os.environ, **env} if env else None)
-            # text=True decodes strictly with the locale codec, so a child that
-            # emits non-UTF-8 bytes (a Windows traceback with a CJK path, for
-            # example) raises UnicodeDecodeError in the reader thread and leaves
-            # proc.stdout/stderr unset -> None. Capture bytes and decode
-            # tolerantly so a scanner's diagnostic output can never turn into an
-            # AttributeError in the caller.
+            # Text mode decodes with Python's selected codec (the locale codec,
+            # or UTF-8 in UTF-8 mode), which is what Python scanners write. A
+            # strict decode of bytes outside that codec (a Windows traceback
+            # with a CJK path, for example) raises UnicodeDecodeError in the
+            # reader thread and leaves proc.stdout/stderr as None, so replace
+            # undecodable bytes instead of failing.
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
+                text=True,
+                errors="replace",
                 timeout=timeout,
                 cwd=cwd,
                 env=child_env,

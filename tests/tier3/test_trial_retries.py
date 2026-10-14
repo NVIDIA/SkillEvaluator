@@ -172,7 +172,11 @@ def test_harbor_never_retries_a_task_or_verifier_failure_under_the_include_list(
 
 
 class _NetworkFailingEnvironment:
-    """Agent environment whose every command, after Harbor's setup mkdir, fails with curl's DNS error."""
+    """Agent environment whose every command, after Harbor's setup mkdir, fails with curl's DNS error.
+
+    The Docker bootstrap's installer-branch probe only reads local files, so it answers as a glibc image
+    with a CA bundle would.
+    """
 
     default_user = None
 
@@ -183,6 +187,8 @@ class _NetworkFailingEnvironment:
         self.commands.append(command)
         if command.startswith("[ -d /installed-agent ]"):
             return SimpleNamespace(return_code=0, stdout="", stderr="")
+        if command.startswith("if ") and "printf '%s' bundled-without-ca" in command:
+            return SimpleNamespace(return_code=0, stdout="bundled", stderr="")
         return SimpleNamespace(return_code=6, stdout="", stderr="curl: (6) Could not resolve host: mirror.example.test")
 
     async def upload_file(self, *_args: object, **_kwargs: object) -> None:

@@ -33,9 +33,11 @@ LOCAL_AGENT_IMPORT_PATHS = {
 }
 
 # Docker wrappers retain Harbor's installers while avoiding redundant Node/npm
-# packages on the branches that bootstrap their own runtime.
+# packages on the branches that bootstrap their own runtime. Codex uses the
+# local_agents subclass of that wrapper, which also converts the main thread's
+# rollout when the agent spawns subagents.
 DOCKER_AGENT_IMPORT_PATHS = {
-    "codex": "skillevaluator.tier3.harbor.installed_agents:SkillEvaluatorCodex",
+    "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorCodex",
     "claude-code": "skillevaluator.tier3.harbor.installed_agents:SkillEvaluatorClaudeCode",
 }
 

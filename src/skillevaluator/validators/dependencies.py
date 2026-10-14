@@ -142,7 +142,7 @@ class DependencySecurityValidator(ValidatorBase):
             with SecureRoot(pyproject.parent) as root:
                 raw, _ = root.read_bytes(Path(pyproject.name), 1024 * 1024)
             data = tomllib.loads(raw.decode("utf-8"))
-        except (OSError, SecurePathError, UnicodeError, tomllib.TOMLDecodeError):
+        except (OSError, SecurePathError, UnicodeError, tomllib.TOMLDecodeError, RecursionError):
             incomplete("cannot read a bounded regular TOML file")
             return result
 
@@ -180,7 +180,7 @@ class DependencySecurityValidator(ValidatorBase):
                     if not isinstance(declaration, str) or "\n" in declaration or "\r" in declaration:
                         raise InvalidRequirement("invalid declaration")
                     requirement = Requirement(declaration)
-                except InvalidRequirement:
+                except (InvalidRequirement, RecursionError):
                     incomplete(f"{label}: invalid requirement")
                     continue
                 if requirement.url:
@@ -189,7 +189,13 @@ class DependencySecurityValidator(ValidatorBase):
                 if requirement.marker:
                     # Audit every optional group, evaluating `extra` in its group context.
                     extra = group.removeprefix("optional group ") if group.startswith("optional group ") else ""
-                    if not requirement.marker.evaluate({"extra": extra}):
+                    try:
+                        # Unevaluable markers raise ValueError subclasses such as UndefinedComparison.
+                        marker_matches = requirement.marker.evaluate({"extra": extra})
+                    except (ValueError, RecursionError):
+                        incomplete(f"{label}: environment marker cannot be evaluated")
+                        continue
+                    if not marker_matches:
                         result.add_message(f"pyproject.toml: {label} skipped (marker does not match scanner platform)")
                         continue
                 specifiers = list(requirement.specifier)
@@ -209,61 +215,77 @@ class DependencySecurityValidator(ValidatorBase):
             incomplete(f"pip-audit not installed. {Tools.pip_audit.get_install_hint()}")
             return result
 
-        with tempfile.TemporaryDirectory(prefix="skillevaluator-dependencies-") as temporary_dir:
-            requirements = Path(temporary_dir) / "requirements.txt"
-            requirements.write_text("\n".join(sorted(pins)) + "\n", encoding="utf-8")
-            tool_result = Tools.pip_audit.run(
-                [
-                    "-r",
-                    str(requirements),
-                    "--no-deps",
-                    "--disable-pip",
-                    "--format",
-                    "json",
-                    "--progress-spinner",
-                    "off",
-                ],
-                timeout=180,
-            )
+        # pip-audit rejects a requirements file that names one package twice, and
+        # optional groups may pin different versions of one package. Audit each
+        # version of a package in its own batch so neither pin is dropped.
+        batches: list[list[str]] = []
+        batch_counts: dict[str, int] = {}
+        for pin in sorted(pins):
+            name = canonicalize_name(Requirement(pin).name)
+            index = batch_counts.get(name, 0)
+            batch_counts[name] = index + 1
+            if index == len(batches):
+                batches.append([])
+            batches[index].append(pin)
 
-        if tool_result.error_message or tool_result.exit_code not in (0, 1):
-            incomplete("pip-audit did not complete successfully")
-            return result
-        try:
-            audit = json.loads(tool_result.stdout)
-            dependencies = audit if isinstance(audit, list) else audit["dependencies"]
-            if not isinstance(dependencies, list):
-                raise ValueError("invalid inventory")
-            returned_pins = set()
-            for dep in dependencies:
-                if not isinstance(dep, dict) or not isinstance(dep.get("vulns"), list):
-                    raise ValueError("invalid dependency")
-                returned_pins.add((canonicalize_name(dep["name"]), Version(dep["version"])))
-                if any(
-                    not isinstance(vuln, dict)
-                    or not isinstance(vuln.get("id"), str)
-                    or not isinstance(vuln.get("fix_versions", []), list)
-                    or any(not isinstance(version, str) for version in vuln.get("fix_versions", []))
-                    or ("severity" in vuln and not isinstance(vuln["severity"], str))
-                    or not isinstance(vuln.get("aliases", []), list)
-                    or any(not isinstance(alias, str) for alias in vuln.get("aliases", []))
-                    for vuln in dep["vulns"]
-                ):
-                    raise ValueError("invalid advisory")
-            expected_pins = {
-                (canonicalize_name(requirement.name), Version(next(iter(requirement.specifier)).version))
-                for pin in pins
-                for requirement in [Requirement(pin)]
-            }
-            if returned_pins != expected_pins:
-                raise ValueError("incomplete inventory")
-            if tool_result.exit_code == 1 and not any(dep["vulns"] for dep in dependencies):
-                raise ValueError("unexpected finding exit")
-        except (KeyError, TypeError, ValueError, RecursionError):
-            incomplete("pip-audit returned incomplete or invalid target evidence")
-            return result
-        self._process_pip_audit(tool_result.stdout, result, pyproject.name)
-        result.metadata["dependency_coverage"]["audited_pins"] = sorted(pins)
+        audited: list[str] = []
+        for batch in batches:
+            with tempfile.TemporaryDirectory(prefix="skillevaluator-dependencies-") as temporary_dir:
+                requirements = Path(temporary_dir) / "requirements.txt"
+                requirements.write_text("\n".join(batch) + "\n", encoding="utf-8")
+                tool_result = Tools.pip_audit.run(
+                    [
+                        "-r",
+                        str(requirements),
+                        "--no-deps",
+                        "--disable-pip",
+                        "--format",
+                        "json",
+                        "--progress-spinner",
+                        "off",
+                    ],
+                    timeout=180,
+                )
+
+            if tool_result.error_message or tool_result.exit_code not in (0, 1):
+                incomplete("pip-audit did not complete successfully")
+                return result
+            try:
+                audit = json.loads(tool_result.stdout)
+                dependencies = audit if isinstance(audit, list) else audit["dependencies"]
+                if not isinstance(dependencies, list):
+                    raise ValueError("invalid inventory")
+                returned_pins = set()
+                for dep in dependencies:
+                    if not isinstance(dep, dict) or not isinstance(dep.get("vulns"), list):
+                        raise ValueError("invalid dependency")
+                    returned_pins.add((canonicalize_name(dep["name"]), Version(dep["version"])))
+                    if any(
+                        not isinstance(vuln, dict)
+                        or not isinstance(vuln.get("id"), str)
+                        or not isinstance(vuln.get("fix_versions", []), list)
+                        or any(not isinstance(version, str) for version in vuln.get("fix_versions", []))
+                        or ("severity" in vuln and not isinstance(vuln["severity"], str))
+                        or not isinstance(vuln.get("aliases", []), list)
+                        or any(not isinstance(alias, str) for alias in vuln.get("aliases", []))
+                        for vuln in dep["vulns"]
+                    ):
+                        raise ValueError("invalid advisory")
+                expected_pins = {
+                    (canonicalize_name(requirement.name), Version(next(iter(requirement.specifier)).version))
+                    for pin in batch
+                    for requirement in [Requirement(pin)]
+                }
+                if returned_pins != expected_pins:
+                    raise ValueError("incomplete inventory")
+                if tool_result.exit_code == 1 and not any(dep["vulns"] for dep in dependencies):
+                    raise ValueError("unexpected finding exit")
+            except (KeyError, TypeError, ValueError, RecursionError):
+                incomplete("pip-audit returned incomplete or invalid target evidence")
+                return result
+            self._process_pip_audit(tool_result.stdout, result, pyproject.name)
+            audited.extend(batch)
+            result.metadata["dependency_coverage"]["audited_pins"] = sorted(audited)
 
         return result
 

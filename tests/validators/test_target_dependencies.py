@@ -13,15 +13,19 @@ from skillevaluator.validators.dependencies import DependencySecurityValidator
 
 def audit(tmp_path, text, monkeypatch, *, exit_code=0, output=None, available=True):
     target = tmp_path / "pyproject.toml"
-    target.write_text(text)
+    target.write_text(text, encoding="utf-8")
     calls = []
     monkeypatch.setattr(type(Tools.pip_audit), "is_available", property(lambda _self: available))
 
     def run(args, **kwargs):
         assert "--local" not in args
         assert "--no-deps" in args and "--disable-pip" in args
-        requirements = Path(args[args.index("-r") + 1]).read_text().splitlines()
+        requirements = Path(args[args.index("-r") + 1]).read_text(encoding="utf-8").splitlines()
         calls.extend(requirements)
+        names = [pin.split("==")[0].lower() for pin in requirements]
+        if len(names) != len(set(names)):
+            # Like pip-audit, reject one requirements file that names a package twice.
+            return ToolResult(True, "", "duplicate requirements", 1)
         dependencies = [
             {"name": pin.split("==")[0].lower(), "version": pin.split("==")[1], "vulns": []} for pin in requirements
         ]
@@ -43,6 +47,17 @@ def test_audits_target_pins_and_optional_groups(tmp_path, monkeypatch):
     assert calls == ["Requests==2.32.5", "idna==3.10"]
     assert result.metadata["dependency_coverage"]["audited_pins"] == calls
     assert result.metadata["dependency_coverage"]["transitive_dependencies"] == "not audited"
+
+
+def test_conflicting_group_pins_are_each_audited(tmp_path, monkeypatch):
+    result, calls = audit(
+        tmp_path,
+        '[project]\ndependencies=["idna==3.10"]\n[project.optional-dependencies]\nlegacy=["idna==3.7"]',
+        monkeypatch,
+    )
+    assert result.status == "passed"
+    assert sorted(calls) == ["idna==3.10", "idna==3.7"]
+    assert result.metadata["dependency_coverage"]["audited_pins"] == ["idna==3.10", "idna==3.7"]
 
 
 @pytest.mark.parametrize(
@@ -67,6 +82,21 @@ def test_unresolved_declarations_are_incomplete(tmp_path, monkeypatch, declarati
     ],
 )
 def test_invalid_or_dynamic_metadata_is_incomplete(tmp_path, monkeypatch, text):
+    result, calls = audit(tmp_path, text, monkeypatch)
+    assert result.status == "incomplete"
+    assert not calls
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "x = " + "[" * 5000 + "]" * 5000,
+        "[project]\ndependencies=[\"idna==3.10; python_version ~= '3'\"]",
+        '[project]\ndependencies=["idna==3.10; ' + "(" * 3000 + "python_version > '3'" + ")" * 3000 + '"]',
+    ],
+    ids=["deeply-nested-toml", "unevaluable-marker", "deeply-nested-marker"],
+)
+def test_malformed_target_metadata_is_incomplete_not_a_crash(tmp_path, monkeypatch, text):
     result, calls = audit(tmp_path, text, monkeypatch)
     assert result.status == "incomplete"
     assert not calls

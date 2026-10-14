@@ -347,7 +347,7 @@ def _comment_line_numbers(file_path: Path, lines: list[str]) -> frozenset[int]:
         return _yaml_comment_line_numbers(lines)
     if suffix == ".sh":
         return _shell_comment_line_numbers(lines)
-    if suffix in {".md", ".markdown"}:
+    if suffix in {".md", ".mdc", ".markdown"}:
         return _markdown_comment_line_numbers(lines)
     return _leading_hash_or_slash_comment_lines(lines)
 

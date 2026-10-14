@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from skillevaluator.tier3.eval_core import llm_judge
+from skillevaluator.tier3.harbor import report
 
 _TEMPLATE = (
     Path(__file__).resolve().parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
@@ -87,6 +88,27 @@ def test_negative_rubric_does_not_rewrite_supplied_evidence(module, monkeypatch)
     evidence = 'Evidence literal: Compute score = count(true) / 5. "SKILL_IDENTIFIED": true, "score": 0.8'
     module.judge_accuracy("question", "answer", evidence, skill_identification_applicable=False)
     assert evidence in calls[0]
+
+
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
+def test_report_reasons_omit_excluded_accuracy_criteria(module, monkeypatch):
+    criteria = dict.fromkeys(_CRITERIA, True)
+    criteria["SKILL_IDENTIFIED"] = False
+    criteria["ACTION_CORRECT"] = False
+    response = json.dumps({"criteria": criteria, "score": 0.6, "reason": "declined correctly"})
+    monkeypatch.setattr(module, "call_public_llm", _pair_script([(response, None)], []))
+    detail = module.judge_accuracy("question", "answer", "evidence", skill_identification_applicable=False)
+    reward = {
+        "entry_id": "negative-001",
+        **dict.fromkeys(("security", "skill_execution", "skill_efficiency", "goal_accuracy", "behavior_check"), 1.0),
+        "accuracy": detail["score"],
+        "details": {"accuracy": detail},
+    }
+    findings = {finding["metric"]: finding for finding in report._extract_findings([reward])}
+    reasons = findings["accuracy"]["reasons"]
+    assert findings["accuracy"]["score"] == 0.75
+    assert "ACTION_CORRECT failed" in reasons
+    assert not any("SKILL_IDENTIFIED" in reason for reason in reasons)
 
 
 @pytest.fixture(params=["shared", "template"])

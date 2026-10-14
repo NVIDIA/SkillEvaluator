@@ -12,6 +12,11 @@ All notable changes to SkillEvaluator are documented in this file.
   scanner release, so reviewers can tell which SkillSpector produced them
   without rerunning the scan. The version is shown even when the report omits
   its timestamp.
+- `--env-mode kata` runs Tier 3 trials through the hardened Docker backend with
+  every task service in a Kata Containers microVM. It requires a Linux host with
+  `/dev/kvm` and a Kata runtime registered with Docker, and accepts only the
+  `kata_runtime` and `kata_dns` environment kwargs. Image builds still run on
+  the host, and tasks with Compose sidecars are rejected.
 
 ### Changed
 
@@ -82,6 +87,9 @@ All notable changes to SkillEvaluator are documented in this file.
   only for the Codex process. Skills whose scripts, tasks, or stdio MCP servers
   need these tools must install them through `scripts/apt-packages.txt` or a
   custom `evals/environment/Dockerfile`.
+- Exposed `kata` as the 24th Harbor 0.24 backend alongside local mode.
+  `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `runta`, `prime`,
+  `mosaic`, and `smol` remain disabled.
 
 ### Fixed
 

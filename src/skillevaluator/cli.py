@@ -1877,6 +1877,7 @@ def validate(
         view.tier_start(tier3_index)
         env_note = {
             "docker": "isolated containers per trial",
+            "kata": "isolated Kata microVMs per trial",
             "local": "experimental host sandbox — trusted skills and workspaces only",
         }.get(env_mode, "")
         model_display = ", ".join(agent_model) if agent_model else (model or "agent defaults")

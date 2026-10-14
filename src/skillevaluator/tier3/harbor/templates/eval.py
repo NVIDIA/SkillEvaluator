@@ -81,6 +81,7 @@ try:
         AMBIGUOUS_OUTER_EXEC_OBSERVATION,
         UNOBSERVED_INNER_CALL,
         UNSUPPORTED_NATIVE_CODEX_EXEC,
+        atif_content_has_text,
         atif_content_text,
         iter_normalized_tool_calls,
         normalized_tool_call_observation,
@@ -91,6 +92,7 @@ except ImportError:  # pragma: no cover -- source-tree import only
         AMBIGUOUS_OUTER_EXEC_OBSERVATION,
         UNOBSERVED_INNER_CALL,
         UNSUPPORTED_NATIVE_CODEX_EXEC,
+        atif_content_has_text,
         atif_content_text,
         iter_normalized_tool_calls,
         normalized_tool_call_observation,
@@ -536,8 +538,8 @@ def get_agent_text(traj):
     parts = []
     for step in traj.get("steps", []):
         if step.get("source") == "agent":
-            msg = step.get("message") or ""
-            if isinstance(msg, str) and msg.strip():
+            msg = atif_content_text(step.get("message"))
+            if msg.strip():
                 parts.append(msg)
     return "\n".join(parts)
 
@@ -744,20 +746,21 @@ class _FileChange(NamedTuple):
 
 
 def _final_response_index(steps):
-    """Index of the final response: the last agent step with a non-empty message, or ``None``."""
+    """Index of the final response: the last agent step whose message has text, or ``None``.
+
+    The message may be a string or ATIF content parts; a media-only message is skipped.
+    """
     for index in range(len(steps) - 1, -1, -1):
         step = steps[index]
-        if step.get("source") == "agent":
-            msg = step.get("message") or ""
-            if isinstance(msg, str) and msg.strip():
-                return index
+        if step.get("source") == "agent" and atif_content_has_text(step.get("message")):
+            return index
     return None
 
 
 def _get_final_response(traj):
     steps = traj.get("steps", [])
     index = _final_response_index(steps)
-    return "" if index is None else steps[index]["message"]
+    return "" if index is None else atif_content_text(steps[index]["message"])
 
 
 def _cut_sizes(limit):
@@ -1046,8 +1049,8 @@ def _history_entries(traj, question, *, write_bodies=True, final_chars=_HISTORY_
             if content:
                 entries.append(_Entry(f"Tool returned: {content}", _RANK_LOW))
 
-        msg = step.get("message") or ""
-        if isinstance(msg, str) and msg.strip() and not step.get("tool_calls"):
+        msg = atif_content_text(step.get("message"))
+        if msg.strip() and not step.get("tool_calls"):
             is_final = index == final_index
             final_listed = final_listed or is_final
             rank = final_rank if is_final else _RANK_MESSAGE
@@ -1055,7 +1058,7 @@ def _history_entries(traj, question, *, write_bodies=True, final_chars=_HISTORY_
             entries.append(_Entry(f"Agent: {_judge_excerpt(msg, limit)}", rank))
 
     if final_index is not None and not final_listed:
-        final = _judge_excerpt(steps[final_index].get("message"), final_chars)
+        final = _judge_excerpt(atif_content_text(steps[final_index].get("message")), final_chars)
         entries.append(_Entry(f"Agent final answer: {final}", final_rank))
     _demote_superseded_writes(entries)
     return entries
@@ -1419,7 +1422,7 @@ def _final_response_ref(traj):
             json_pointer=f"/steps/{index}",
             kind="final_response",
             label="Final response",
-            excerpt=steps[index]["message"],
+            excerpt=atif_content_text(steps[index]["message"]),
         )
     ]
 

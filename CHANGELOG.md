@@ -513,6 +513,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Preserved multiline skill descriptions when saving and loading Tier 2
   embedding catalogs. Descriptions can contain line breaks and tabs, while
   catalog identifiers and other control characters remain strictly validated.
+- Include schema-valid ATIF message content parts in final answers, conversation
+  summaries, and judge evidence references in the host and Harbor verifier.
+  Image and audio parts use markers without exposing their source paths.
 
 ### Security
 

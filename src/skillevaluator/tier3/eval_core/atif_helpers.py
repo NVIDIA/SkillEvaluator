@@ -29,7 +29,7 @@ from skillevaluator.tier3.eval_core.checks import (
     _SHELL_WORD,
     _TEE_OPERANDS_RE,
 )
-from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_has_text, atif_content_text
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     iter_normalized_tool_calls as iter_tool_calls,
 )
@@ -78,8 +78,8 @@ def get_agent_text(traj: dict[str, Any]) -> str:
     parts: list[str] = []
     for step in traj.get("steps", []):
         if step.get("source") == "agent":
-            msg = step.get("message") or ""
-            if isinstance(msg, str) and msg.strip():
+            msg = atif_content_text(step.get("message"))
+            if msg.strip():
                 parts.append(msg)
     return "\n".join(parts)
 
@@ -93,21 +93,22 @@ def _agent_tool_calls(traj: dict[str, Any]) -> Iterator[tuple[int, dict[str, Any
 
 
 def _final_response_index(steps: list[dict[str, Any]]) -> int | None:
-    """Index of the final response: the last agent step with a non-empty message, or ``None``."""
+    """Index of the final response: the last agent step whose message has text, or ``None``.
+
+    The message may be a string or ATIF content parts; a media-only message is skipped.
+    """
     for index in range(len(steps) - 1, -1, -1):
         step = steps[index]
-        if step.get("source") == "agent":
-            msg = step.get("message") or ""
-            if isinstance(msg, str) and msg.strip():
-                return index
+        if step.get("source") == "agent" and atif_content_has_text(step.get("message")):
+            return index
     return None
 
 
 def get_final_response(traj: dict[str, Any]) -> str:
-    """Get the last non-empty agent message from the trajectory."""
+    """Get the last text-bearing agent message from the trajectory."""
     steps = traj.get("steps", [])
     index = _final_response_index(steps)
-    return "" if index is None else steps[index]["message"]
+    return "" if index is None else atif_content_text(steps[index]["message"])
 
 
 def build_conversation_summary(
@@ -590,8 +591,8 @@ def _history_entries(
             if content:
                 entries.append(_Entry(f"Tool returned: {content}", _RANK_LOW))
 
-        msg = step.get("message") or ""
-        if isinstance(msg, str) and msg.strip() and not step.get("tool_calls"):
+        msg = atif_content_text(step.get("message"))
+        if msg.strip() and not step.get("tool_calls"):
             is_final = index == final_index
             final_listed = final_listed or is_final
             rank = final_rank if is_final else _RANK_MESSAGE
@@ -599,7 +600,7 @@ def _history_entries(
             entries.append(_Entry(f"Agent: {_judge_excerpt(msg, limit)}", rank))
 
     if final_index is not None and not final_listed:
-        final = _judge_excerpt(steps[final_index].get("message"), final_chars)
+        final = _judge_excerpt(atif_content_text(steps[final_index].get("message")), final_chars)
         entries.append(_Entry(f"Agent final answer: {final}", final_rank))
     _demote_superseded_writes(entries)
     return entries
@@ -993,7 +994,7 @@ def _final_response_ref(traj: dict[str, Any]) -> list[dict[str, Any]]:
             json_pointer=f"/steps/{index}",
             kind="final_response",
             label="Final response",
-            excerpt=steps[index]["message"],
+            excerpt=atif_content_text(steps[index]["message"]),
         )
     ]
 

@@ -4385,6 +4385,15 @@ def _canonical_case_id(
             if candidate in expected_case_ids:
                 return candidate
 
+        prefix_matches = {
+            expected_id
+            for candidate in candidates
+            for expected_id in expected_case_ids
+            if expected_id.startswith(candidate)
+        }
+        if len(prefix_matches) == 1:
+            return next(iter(prefix_matches))
+
     return _strip_attempt_suffix(name_part)
 
 

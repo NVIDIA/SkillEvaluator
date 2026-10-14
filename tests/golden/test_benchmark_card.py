@@ -245,6 +245,23 @@ def test_legacy_neutral_verdict_is_incomplete_without_required_evidence() -> Non
     assert "| Tier 3 | Live agent evaluation | **INCOMPLETE** |" in rendered
 
 
+def test_benchmark_does_not_publish_pass_without_a_complete_passing_agent() -> None:
+    tier3 = _live_tier3_result()
+    payload = tier3.metadata["agent_eval"]
+    payload["verdict"] = "pass"
+    payload["summary"]["verdict"] = "pass"
+    payload["agents"]["claude-code"]["dimensions"] = []
+    payload["agents"]["codex"]["dimensions"] = [
+        {"id": dimension, "with_skill": 0.238 if dimension == "security" else 0.9}
+        for dimension in ("security", "correctness", "discoverability", "effectiveness", "efficiency")
+    ]
+
+    rendered = BenchmarkReporter(include_timestamp=False).render_all([*_deterministic_results(), tier3])
+
+    assert "Overall verdict: INCOMPLETE" in rendered
+    assert "> ✅ **Overall verdict: PASS" not in rendered
+
+
 def test_verdict_callout_falls_back_for_future_statuses() -> None:
     assert _verdict_callout("WARN") == "> **Overall verdict: WARN**"
 

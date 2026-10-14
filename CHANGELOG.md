@@ -104,6 +104,9 @@ All notable changes to SkillEvaluator are documented in this file.
   distribution Node/npm before Harbor's own installers. Native, gateway Codex,
   and NVIDIA Build agents now provision Node/npm only on the installer branches
   that need them, while preserving installed-agent and version-pin checks.
+- Canonicalised uniquely truncated Harbor task IDs against the evaluation
+  dataset so token-usage coverage stays attached to the real case instead of
+  producing phantom rows.
 - Preserved multiline skill descriptions when saving and loading Tier 2
   embedding catalogs. Descriptions can contain line breaks and tabs, while
   catalog identifiers and other control characters remain strictly validated.

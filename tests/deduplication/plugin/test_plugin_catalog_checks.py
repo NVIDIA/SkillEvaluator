@@ -571,7 +571,8 @@ class _FakeLLM:
     instances: ClassVar[list[_FakeLLM]] = []
     responses: ClassVar[dict[str, object]] = {}
 
-    def __init__(self, **_kwargs: object) -> None:
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
         self.prompts: list[str] = []
         _FakeLLM.instances.append(self)
 
@@ -636,6 +637,8 @@ class TestInterPluginLLMVerdict:
         assert result.metadata["llm_analysis"]["candidates_completed"] == 2
         [client] = fake_llm.instances
         assert all("Member skills:" in prompt for prompt in client.prompts)
+        # Deduplication verdicts get medium reasoning effort, as in intra-skill Tier 2.
+        assert client.kwargs["reasoning_effort"] == "medium"
         assert result.passed
 
     def test_unique_verdict_keeps_a_name_collision(self, plugins: Path, fake_llm) -> None:

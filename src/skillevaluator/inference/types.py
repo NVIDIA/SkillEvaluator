@@ -158,8 +158,9 @@ def parse_bounded_llm_verdict(
 
     confidence = _require_unit_interval(data.get("confidence", 0.0), f"{context} confidence")
 
+    # Prompts ask for ``rationale``; replies that still say ``reasoning`` are accepted.
     reasoning = require_bounded_llm_string(
-        data.get("reasoning", ""),
+        data.get("rationale", data.get("reasoning", "")),
         f"{context} reasoning",
         max_chars=TIER2_LLM_MAX_RESPONSE_SCALAR_CHARS,
     )

@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from skillevaluator.constants import (
+    CONTENT_DEDUP_LLM_REASONING_EFFORT,
     INTER_PLUGIN_MEMBER_OVERLAP_THRESHOLD,
     INTER_PLUGIN_TOP_K,
     INTER_SKILL_CATALOG_TOP_K,
@@ -318,7 +319,11 @@ def _llm_verdicts(
             max_calls=min(TIER2_LLM_MAX_CALLS, INTER_PLUGIN_TOP_K),
             max_total_chars=TIER2_LLM_MAX_TOTAL_PROMPT_CHARS,
         )
-        llm = LLMClient(model=llm_model, max_tokens=LLM_VERIFY_MAX_TOKENS)
+        llm = LLMClient(
+            model=llm_model,
+            max_tokens=LLM_VERIFY_MAX_TOKENS,
+            reasoning_effort=CONTENT_DEDUP_LLM_REASONING_EFFORT,
+        )
         config = llm._resolved_config()
         provider, model = safe_llm_labels(config.provider, config.model)
     except LLMClientError as exc:

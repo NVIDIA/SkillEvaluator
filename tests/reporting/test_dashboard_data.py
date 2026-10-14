@@ -711,7 +711,8 @@ def test_native_duplicate_reward_rows_require_authoritative_step_scope(tmp_path:
     shutil.copytree(first, second)
     summary_path = condition / "summary.json"
     summary = json.loads(summary_path.read_text())
-    summary["num_trials"] = 2
+    # The collector counts one logical trial and records its two reward rows.
+    summary["num_reward_rows"] = 2
     summary_path.write_text(json.dumps(summary))
     for trial_dir in (first, second):
         result_path = trial_dir / "result.json"

@@ -224,6 +224,13 @@ def _set_usage(row: dict[str, Any], usages: list[dict[str, Any]], expected: int 
     )
 
 
+def _ambiguous_resource_notice(source: str) -> str:
+    return (
+        f"{source}: canonical multi-step resource ownership is ambiguous; "
+        "usage totals are unavailable. Load the retained run directory for authoritative step measurements."
+    )
+
+
 def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
     """Normalize canonical Tier 3, validate-report, and embedded catalog JSON."""
     output = DashboardData()
@@ -295,10 +302,7 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                 physical_counts = Counter(str(trial["trial_id"]) for trial in trials if trial.get("trial_id"))
                 ambiguous_ids = {trial_id for trial_id, count in physical_counts.items() if count > 1}
                 if ambiguous_ids:
-                    notice = (
-                        f"{source}: canonical multi-step resource ownership is ambiguous; "
-                        "usage totals are unavailable. Load the retained run directory for authoritative step measurements."
-                    )
+                    notice = _ambiguous_resource_notice(source)
                     if notice not in output.warnings:
                         output.warnings.append(notice)
                 complete = (
@@ -539,17 +543,34 @@ def _load_native(path: Path) -> DashboardData:
             trial_paths, truncated = _directory_entries(trials_dir, 4096)
             trial_dirs = [candidate for candidate in trial_paths if candidate.is_dir() and not candidate.is_symlink()]
             truncated |= len(trial_dirs) > 512
+            loaded: list[tuple[Path, dict[str, Any] | None]] = []
             for trial_dir in trial_dirs[:512]:
                 if not trial_dir.is_dir() or trial_dir.is_symlink():
                     continue
                 try:
-                    reward = _dict(_read_native_json(trial_dir / "reward.json", path))
-                    physical_id = str(reward.get("trial_id") or trial_dir.name)
-                    if physical_id not in usages_by_trial:
-                        usages_by_trial[physical_id] = _native_usage(
-                            trial_dir, path, require_steps=physical_id in row["_ambiguous_trial_ids"]
-                        )
-                        unresolved_scope |= usages_by_trial[physical_id].get("_resource_scope_valid") is False
+                    loaded.append((trial_dir, _dict(_read_native_json(trial_dir / "reward.json", path))))
+                except (OSError, ValueError, RecursionError) as exc:
+                    output.warnings.append(f"{trial_dir}: cannot read usage: {exc}")
+                    loaded.append((trial_dir, None))
+            # Canonical reports collapse reward rows that share one physical
+            # trial, so count shared identities in the retained rows themselves.
+            physical_counts = Counter(
+                str(reward.get("trial_id") or trial_dir.name) for trial_dir, reward in loaded if reward is not None
+            )
+            for trial_dir, reward in loaded:
+                if reward is None:
+                    usages_by_trial[trial_dir.name] = {}
+                    continue
+                physical_id = str(reward.get("trial_id") or trial_dir.name)
+                if physical_id in usages_by_trial:
+                    continue
+                try:
+                    usages_by_trial[physical_id] = _native_usage(
+                        trial_dir,
+                        path,
+                        require_steps=physical_counts[physical_id] > 1 or physical_id in row["_ambiguous_trial_ids"],
+                    )
+                    unresolved_scope |= usages_by_trial[physical_id].get("_resource_scope_valid") is False
                 except (OSError, ValueError, RecursionError) as exc:
                     output.warnings.append(f"{trial_dir}: cannot read usage: {exc}")
                     usages_by_trial[trial_dir.name] = {}
@@ -562,6 +583,8 @@ def _load_native(path: Path) -> DashboardData:
         output.warnings = [
             warning for warning in output.warnings if "canonical multi-step resource ownership" not in warning
         ]
+    elif not any("canonical multi-step resource ownership" in warning for warning in output.warnings):
+        output.warnings.append(_ambiguous_resource_notice(str(path)))
     return output
 
 

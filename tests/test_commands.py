@@ -1047,6 +1047,39 @@ def test_validate_catalog_rejects_one_previous_version_for_every_skill() -> None
         assert not Path("skillevaluator-results").exists()
 
 
+@pytest.mark.parametrize("workers", ["1", "2"])
+def test_validate_catalog_rejects_one_previous_skill_for_every_skill(workers: str) -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        for name in ("simple", "simple2"):
+            shutil.copytree(FIXTURE, catalog / name)
+        second = catalog / "simple2" / "SKILL.md"
+        second.write_text(second.read_text(encoding="utf-8").replace("name: simple", "name: simple2"), encoding="utf-8")
+        previous = Path("previous")
+        shutil.copytree(FIXTURE, previous)
+
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                str(catalog.resolve()),
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "schema",
+                "--workers",
+                workers,
+                "--previous-skill",
+                str(previous.resolve()),
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "--previous-skill applies to one skill" in result.output
+        assert not Path("skillevaluator-results").exists()
+
+
 def test_validate_quiet_failing_run_renders_verdict_and_fails_cleanly(monkeypatch) -> None:
     # Regression: a failing DEFAULT (quiet) run must render the verdict panel
     # and exit via the machine-readable ClickException — not an AttributeError.

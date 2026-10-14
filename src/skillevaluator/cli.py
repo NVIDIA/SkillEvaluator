@@ -907,6 +907,8 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
         argv.extend(["--checks", str(params["checks"])])
     if params.get("previous_version"):
         argv.extend(["--previous-version", str(params["previous_version"])])
+    if params.get("previous_skill"):
+        argv.extend(["--previous-skill", str(params["previous_skill"])])
     if params.get("fail_fast"):
         argv.append("--fail-fast")
     if params.get("continue_on_failure"):
@@ -1126,6 +1128,11 @@ def _validate_catalog(
         raise click.ClickException(
             "--previous-version applies to one skill and cannot be reused for a catalog; "
             "validate each skill separately with its own previous version"
+        )
+    if ctx.params.get("previous_skill"):
+        raise click.ClickException(
+            "--previous-skill applies to one skill and cannot be reused for a catalog; "
+            "validate each skill separately with its own previous copy"
         )
 
     skill_dirs = sorted(marker.parent for marker in resolved_target.glob("*/SKILL.md"))

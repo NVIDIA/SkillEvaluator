@@ -608,3 +608,58 @@ def test_duplicate_agent_model_aliases_fail_before_generation(skill, configured,
     assert "same agent" in result.output
     assert not (skill / "evals").exists()
     assert not configured
+
+
+def _previous_copy(skill: Path, tmp_path: Path, *, metadata: str) -> Path:
+    previous = tmp_path / "previous" / skill.name
+    previous.mkdir(parents=True)
+    previous_manifest = skill.joinpath("SKILL.md").read_text(encoding="utf-8")
+    previous.joinpath("SKILL.md").write_text(
+        previous_manifest.replace("---\n#", f"metadata:\n  owner: {metadata}\n---\n#", 1),
+        encoding="utf-8",
+    )
+    previous.joinpath("BENCHMARK.md").write_text("# Prior result\n", encoding="utf-8")
+    return previous
+
+
+def test_metadata_only_change_skips_preparation_and_evaluation(skill, monkeypatch, tmp_path):
+    from skillevaluator.tier3.harbor import runner
+
+    previous = _previous_copy(skill, tmp_path, metadata="platform")
+    manifest = skill / "SKILL.md"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace("---\n#", "metadata:\n  owner: release\n---\n#", 1),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kwargs: ["Docker Compose v2 is required"])
+    monkeypatch.setattr(
+        EvaluationService, "create_autopilot_dataset", lambda *_args, **_kwargs: pytest.fail("must not generate")
+    )
+    monkeypatch.setattr(EvaluationService, "evaluate", lambda *_args, **_kwargs: pytest.fail("must not evaluate"))
+
+    result = CliRunner().invoke(_command(), [str(skill), "--previous-skill", str(previous), "--progress", "off"])
+
+    assert result.exit_code == 0, result.output
+    assert "metadata_only_change" in result.output
+    assert not (skill / "evals").exists()
+
+
+def test_behavioral_change_still_prepares_before_evaluation(skill, configured, monkeypatch, tmp_path):
+    previous = _previous_copy(skill, tmp_path, metadata="platform")
+    manifest = skill / "SKILL.md"
+    manifest.write_text(manifest.read_text(encoding="utf-8") + "Also report warnings.\n", encoding="utf-8")
+    calls = []
+
+    def generate(self, skill_path, *, use_llm):
+        calls.append(use_llm)
+        return _dataset(skill_path)
+
+    monkeypatch.setattr(EvaluationService, "create_autopilot_dataset", generate)
+
+    result = CliRunner().invoke(_command(), [str(skill), "--previous-skill", str(previous), "--progress", "off"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [True]
+    assert len(configured) == 1

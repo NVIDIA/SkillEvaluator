@@ -3724,7 +3724,7 @@ def _run_harbor_eval_impl(
     except (RecursionError, TypeError, ValueError) as exc:
         detail = f"Invalid --environment-kwarg: {exc}"
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
-        return {"error": [detail]}
+        return _terminal_failure_result([detail], error_code=EvaluatorErrorCode.INVALID_CONFIGURATION)
     environment_kwarg_sources = dict.fromkeys(effective_environment_kwargs, "CLI")
 
     if not isinstance(n_attempts, int) or n_attempts < 1:
@@ -4357,7 +4357,7 @@ def _run_harbor_eval_impl(
     try:
         dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=case_ids)
     except DatasetSnapshotContractError as exc:
-        return _persist_pre_execution_failure([str(exc)])
+        return _persist_pre_execution_failure([str(exc)], error_code=EvaluatorErrorCode.UNKNOWN)
     expected_trials = len(task_selectors) * n_attempts
     variants = 1 if skip_baseline else 2
     matrix_trials = expected_trials * len(agents) * variants
@@ -4369,7 +4369,7 @@ def _run_harbor_eval_impl(
         )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid staged timeout"))
-        return _persist_pre_execution_failure([str(exc)])
+        return _persist_pre_execution_failure([str(exc)], error_code=EvaluatorErrorCode.INVALID_CONFIGURATION)
     reporter.start(
         Tier3RunPlan(
             skill_name=skill_path.name,

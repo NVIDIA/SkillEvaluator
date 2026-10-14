@@ -1088,6 +1088,45 @@ def test_conflicting_terminal_probe_codes_collapse_to_unknown(
 
 
 @pytest.mark.parametrize(
+    ("failing_step", "expected_code"),
+    [
+        ("_persist_dataset_truth", "SKILLEVALUATOR-UNKNOWN-001"),
+        ("_task_timeout_plan", "SKILLEVALUATOR-CONFIG-001"),
+    ],
+)
+def test_post_staging_failures_persist_a_coded_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failing_step: str,
+    expected_code: str,
+) -> None:
+    from skillevaluator.tier3.harbor.report_data import DatasetSnapshotContractError
+
+    launches: list[dict[str, Any]] = []
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        run_agent=lambda **kwargs: launches.append(kwargs) or [],
+    )
+
+    def fail(*_args: Any, **_kwargs: Any) -> Any:
+        if failing_step == "_persist_dataset_truth":
+            raise DatasetSnapshotContractError
+        raise ValueError("task.toml: agent.timeout_sec produces a non-finite Harbor timeout")
+
+    monkeypatch.setattr(runner, failing_step, fail)
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+
+    assert result["execution_status"] == "failed"
+    assert result["error_code"] == expected_code
+    assert result["error"] == result["execution_errors"][:1]
+    assert launches == []
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+    assert persisted["error_code"] == expected_code
+
+
+@pytest.mark.parametrize(
     ("provider_name", "provider_base_url", "failure_kind", "http_status", "detail"),
     [
         ("openai", "https://api.openai.com/v1", "unavailable", None, "model catalog request timed out"),

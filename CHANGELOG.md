@@ -13,12 +13,26 @@ All notable changes to SkillEvaluator are documented in this file.
   without rerunning the scan. The version is shown even when the report omits
   its timestamp.
 
+### Changed
+
+- Docker Claude Code and Codex containers no longer get the distribution
+  `nodejs` and `npm` packages from agent setup, except on Alpine images. On
+  Debian-based images, including the default eval image, those packages also
+  provided `npx`, `gcc`, `g++`, and `make`. Claude Code containers now have no
+  Node.js unless the image provides it, and Codex's own Node.js is on `PATH`
+  only for the Codex process. Skills whose scripts, tasks, or stdio MCP servers
+  need these tools must install them through `scripts/apt-packages.txt` or a
+  custom `evals/environment/Dockerfile`.
+
 ### Fixed
 
 - Fixed Docker Codex and Claude Code setup wasting its timeout installing
   distribution Node/npm before Harbor's own installers. Native, gateway Codex,
   and NVIDIA Build agents now provision Node/npm only on the installer branches
   that need them, while preserving installed-agent and version-pin checks.
+- Preserved multiline skill descriptions when saving and loading Tier 2
+  embedding catalogs. Descriptions can contain line breaks and tabs, while
+  catalog identifiers and other control characters remain strictly validated.
 - Brought the published documentation in line with 0.5.0. It now covers how
   standard grading builds judge evidence and rebuilds trajectories from
   OpenCode and Codex logs, structured judge output and retries, the evidence

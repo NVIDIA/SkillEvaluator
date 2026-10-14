@@ -13,6 +13,11 @@ from harbor.agents.installed.codex import Codex
 if TYPE_CHECKING:
     from harbor.environments.base import BaseEnvironment
 
+# Harbor's installers download over HTTPS but never request a CA bundle; apt
+# images used to get one only as a dependency of the skipped npm package.
+_CA_BUNDLE_PREDICATE = "[ -s /etc/ssl/certs/ca-certificates.crt ] || [ -s /etc/pki/tls/certs/ca-bundle.crt ]"
+_INSTALLER_BRANCHES = frozenset({"system", "bundled", "bundled-without-ca"})
+
 
 async def _installer_dependencies(
     environment: BaseEnvironment,
@@ -27,15 +32,22 @@ async def _installer_dependencies(
     # Codex supplies Node via NVM on glibc; Claude's native installer needs no
     # Node. Both still need system npm on their respective fallback branches.
     result = await environment.exec(
-        command=f"if {system_npm_predicate}; then printf '%s' system; else printf '%s' bundled; fi",
+        command=(
+            f"if {system_npm_predicate}; then printf '%s' system; "
+            f"elif {_CA_BUNDLE_PREDICATE}; then printf '%s' bundled; "
+            "else printf '%s' bundled-without-ca; fi"
+        ),
         user="root",
     )
     installer = (result.stdout or "").strip()
-    if result.return_code != 0 or installer not in {"system", "bundled"}:
+    if result.return_code != 0 or installer not in _INSTALLER_BRANCHES:
         raise RuntimeError("Could not determine agent installer system dependency requirements")
     if installer == "system":
         return dependencies
-    return tuple(dependency for dependency in dependencies if dependency not in {"nodejs", "npm"})
+    bundled = tuple(dependency for dependency in dependencies if dependency not in {"nodejs", "npm"})
+    if installer == "bundled-without-ca":
+        return (*bundled, "ca_certificates")
+    return bundled
 
 
 class SkillEvaluatorCodex(Codex):

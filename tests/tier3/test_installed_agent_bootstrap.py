@@ -35,6 +35,7 @@ class _BootstrapEnvironment:
         *,
         manager: str = "apt-get",
         system_node: bool = False,
+        ca_bundle: bool = True,
         missing_commands: tuple[str, ...] = ("node", "npm"),
         installed: bool = False,
         installed_version: str = "1.2.3",
@@ -45,6 +46,7 @@ class _BootstrapEnvironment:
         self.exec_kwargs: list[dict[str, object]] = []
         self.manager = manager
         self.system_node = system_node
+        self.ca_bundle = ca_bundle
         self.missing_commands = missing_commands
         self.installed = installed
         self.installed_version = installed_version
@@ -85,7 +87,9 @@ class _BootstrapEnvironment:
                 raise self.probe_error
             if self.probe_result is not None:
                 return self.probe_result
-            return ExecResult(return_code=0, stdout="system" if self.system_node else "bundled", stderr="")
+            if self.system_node:
+                return ExecResult(return_code=0, stdout="system", stderr="")
+            return ExecResult(return_code=0, stdout="bundled" if self.ca_bundle else "bundled-without-ca", stderr="")
         return ExecResult(return_code=0, stdout="", stderr="")
 
 
@@ -120,6 +124,29 @@ def test_native_bootstrap_avoids_system_node_and_keeps_vendor_installer(
     else:
         assert "command -v apk" in environment.probes[0]
         assert any("https://downloads.claude.ai/claude-code-releases/bootstrap.sh" in c for c in environment.commands)
+
+
+@pytest.mark.parametrize("agent_class", [SkillEvaluatorCodex, SkillEvaluatorClaudeCode])
+@pytest.mark.parametrize(
+    ("manager", "expected_install"),
+    [
+        ("apt-get", "set -o pipefail; apt-get update && apt-get install -y ca-certificates"),
+        ("dnf", "set -o pipefail; dnf install -y ca-certificates"),
+    ],
+)
+def test_bundled_installer_without_ca_bundle_installs_ca_certificates(
+    tmp_path: Path, agent_class: type, manager: str, expected_install: str
+) -> None:
+    # Without npm, nothing else pulls in the CA bundle the vendor downloads need.
+    environment = _BootstrapEnvironment(manager=manager, ca_bundle=False)
+    agent = agent_class(logs_dir=tmp_path, model_name="openai/test-model")
+
+    asyncio.run(agent.install(environment))
+
+    assert len(environment.probes) == 1
+    assert "[ -s /etc/ssl/certs/ca-certificates.crt ]" in environment.probes[0]
+    assert "[ -s /etc/pki/tls/certs/ca-bundle.crt ]" in environment.probes[0]
+    assert environment.package_installs == [expected_install]
 
 
 @pytest.mark.parametrize("agent_class", [SkillEvaluatorCodex, SkillEvaluatorClaudeCode])

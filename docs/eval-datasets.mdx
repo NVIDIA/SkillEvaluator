@@ -309,6 +309,25 @@ command = "python /workspace/tools/server.py"
 transport = "stdio"
 ```
 
+<Note>
+  In Docker mode, Claude Code and Codex setup no longer installs the
+  distribution `nodejs` and `npm` packages, except on Alpine images. On
+  Debian-based images, including the default `python:3.12-slim` image, those
+  packages also brought `npx` and a C/C++ toolchain (`gcc`, `g++`, `make`).
+  Claude Code containers now have no Node.js unless the image provides it.
+  Codex installs its own Node.js, which is on `PATH` only for the Codex process
+  and the commands it runs. If your skill's scripts, its tasks, or a stdio MCP
+  server (for example `command = "npx ..."`) need these tools, install them in
+  the image: list the packages in `scripts/apt-packages.txt`, one per line, for
+  the auto-generated image, or install them in `evals/environment/Dockerfile`.
+</Note>
+
+```text title="my-skill/scripts/apt-packages.txt"
+nodejs
+npm
+build-essential
+```
+
 ## Validate before you run
 
 Check the whole contract — dataset fields, case IDs, `config.yml`, Dockerfile

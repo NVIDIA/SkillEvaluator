@@ -5403,6 +5403,23 @@ def _judge_models_by_case(
     return models
 
 
+def _judge_mixed_cases(
+    with_rewards: list[dict[str, Any]], without_rewards: list[dict[str, Any]], expected_case_ids: set[str] | None
+) -> dict[str, set[str]]:
+    """Map each judge metric to the cases whose two arms were judged by different models."""
+    mixed: dict[str, set[str]] = {}
+    for metric in _LLM_JUDGE_METRICS:
+        with_models = _judge_models_by_case(with_rewards, metric, expected_case_ids)
+        without_models = _judge_models_by_case(without_rewards, metric, expected_case_ids)
+        if cases := {
+            case_id
+            for case_id in with_models.keys() & without_models.keys()
+            if len(with_models[case_id] | without_models[case_id]) > 1
+        }:
+            mixed[metric] = cases
+    return mixed
+
+
 def _metric_average_excluding(
     rewards: list[dict[str, Any]], metric: str, excluded_cases: set[str], expected_case_ids: set[str] | None
 ) -> float | None:
@@ -5435,23 +5452,18 @@ def _compute_lift(
     paired_scores: dict[str, tuple[float, float]] = {}
     mixed_counts: dict[str, int] = {}
     expected_set = set(expected_case_ids) if expected_case_ids else None
+    mixed_by_metric = (
+        _judge_mixed_cases(with_rewards, without_rewards, expected_set) if with_rewards and without_rewards else {}
+    )
     for metric in (m for m in DISPLAY_METRICS if m in with_scores and m in without_scores):
         w = with_scores[metric]
         wo = without_scores[metric]
-        if metric in _LLM_JUDGE_METRICS and with_rewards and without_rewards:
-            with_models = _judge_models_by_case(with_rewards, metric, expected_set)
-            without_models = _judge_models_by_case(without_rewards, metric, expected_set)
-            mixed = {
-                case_id
-                for case_id in with_models.keys() & without_models.keys()
-                if len(with_models[case_id] | without_models[case_id]) > 1
-            }
-            if mixed:
-                mixed_counts[metric] = len(mixed)
-                w = _metric_average_excluding(with_rewards, metric, mixed, expected_set)
-                wo = _metric_average_excluding(without_rewards, metric, mixed, expected_set)
-                if w is None or wo is None:
-                    continue
+        if mixed := mixed_by_metric.get(metric):
+            mixed_counts[metric] = len(mixed)
+            w = _metric_average_excluding(with_rewards or [], metric, mixed, expected_set)
+            wo = _metric_average_excluding(without_rewards or [], metric, mixed, expected_set)
+            if w is None or wo is None:
+                continue
         paired_scores[metric] = (w, wo)
         delta = round(w - wo, 4)
         lift[metric] = {
@@ -5492,7 +5504,9 @@ def _paired_lift(
 
     Each metric keeps only the cases both arms scored it on (and none in
     *dropped_cases*), so the two sides average the same trial set; the file's
-    ``basis`` block records the counts and every case or metric left out.
+    ``basis`` block records the counts and every case or metric left out. A
+    case whose arms were judged by different models is left out of that judge
+    metric and counted in ``judge_mixed_cases``.
     """
     expected = set(expected_case_ids or []) or None
     active = set(treatment.metrics) | set(control.metrics)
@@ -5503,6 +5517,7 @@ def _paired_lift(
         metrics=[metric for metric in DISPLAY_METRICS if metric in active],
         expected_case_ids=expected_case_ids or (),
         dropped_cases=dropped_cases,
+        judge_mixed_cases=_judge_mixed_cases(treatment.logical_rewards, control.logical_rewards, expected),
     )
     lift = _compute_lift(
         paired.treatment,
@@ -5511,6 +5526,8 @@ def _paired_lift(
         without_not_applicable=[*control.not_applicable, *paired.not_comparable],
     )
     if lift:
+        if paired.judge_mixed:
+            lift["judge_mixed_cases"] = dict(paired.judge_mixed)
         lift["basis"] = paired.basis
     return lift
 

@@ -9,14 +9,16 @@ scored, so the two averages covered different cases whenever one arm recorded a
 metric as not applicable on some cases (an arm without a case's skill), missed
 a case, or a case was dropped for load evidence. Here each metric keeps only the
 cases both arms scored it on; each arm's value is the mean of its scored trials
-on those cases (the arm average itself when nothing is left out). The
-``basis`` block says what each metric covers and what was left out, and why.
+on those cases (the arm average itself when nothing is left out). A case whose
+two arms were judged by different models (a judge fallback in one arm) is left
+out of that judge metric. The ``basis`` block says what each metric covers and
+what was left out, and why.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from skillevaluator.tier3.harbor.metrics import metric_is_not_applicable, metric_set_for_reward, metric_value
@@ -28,6 +30,7 @@ EXCLUDED_NOT_APPLICABLE = "not_applicable"  # the arm's verifier recorded the me
 EXCLUDED_NO_VALUE = "no_value"  # the arm scored the case but has no number for the metric
 EXCLUDED_NO_SHARED_CASE = "no_shared_case"  # both arms scored the metric, never on the same case
 EXCLUDED_UNIDENTIFIED = "unidentified_case"  # trials whose case could not be resolved
+EXCLUDED_JUDGE_MIXED = "judge_mixed"  # the two arms were judged by different models on this case
 _UNIDENTIFIED_CASES = frozenset({"", "unknown"})
 # Reasons that leave a whole case out, whatever the metric.
 _CASE_LEVEL_REASONS = frozenset({EXCLUDED_LOAD_FAILED, EXCLUDED_NOT_SCORED, EXCLUDED_UNIDENTIFIED})
@@ -51,6 +54,8 @@ class PairedScores:
     control: dict[str, float]
     not_comparable: tuple[str, ...]
     basis: dict[str, Any]
+    # Judge metric -> number of cases left out because the arms' judge models differed.
+    judge_mixed: dict[str, int] = field(default_factory=dict)
 
 
 def _scored(reward: dict[str, Any], metric: str) -> float | None:
@@ -75,6 +80,7 @@ def pair_metric_scores(
     metrics: Sequence[str],
     expected_case_ids: Sequence[str] = (),
     dropped_cases: Mapping[str, Sequence[str]] | None = None,
+    judge_mixed_cases: Mapping[str, Collection[str]] | None = None,
 ) -> PairedScores:
     """Score both arms per metric on the cases both scored it on.
 
@@ -83,6 +89,8 @@ def pair_metric_scores(
     evidence failed: the case is left out of every metric. A case one arm never
     scored, an expected case no arm scored, and a trial without a case id are
     left out too. A metric one arm scored on no case is not compared at all.
+    *judge_mixed_cases* maps a judge metric to the cases whose two arms were
+    judged by different models: each is left out of that metric only.
     """
     rows = dict(zip(arms, (treatment, control), strict=True))
     by_case: dict[str, dict[str, list[dict[str, Any]]]] = {arm: {} for arm in arms}
@@ -94,6 +102,8 @@ def pair_metric_scores(
             else:
                 by_case[arm].setdefault(str(case_id), []).append(reward)
     dropped = {str(case): sorted({str(arm) for arm in failed}) for case, failed in (dropped_cases or {}).items()}
+    judge_mixed = {str(metric): {str(case) for case in cases} for metric, cases in (judge_mixed_cases or {}).items()}
+    judge_mixed_counts: dict[str, int] = {}
     universe = sorted({*by_case[arms[0]], *by_case[arms[1]], *(str(case) for case in expected_case_ids if case)})
 
     excluded_metrics: list[dict[str, Any]] = []
@@ -127,6 +137,10 @@ def pair_metric_scores(
             excluded[key or (case_id, EXCLUDED_NOT_SCORED, missing)] = list(compared)
             continue
         for metric in compared:
+            if case_id in judge_mixed.get(metric, ()):
+                excluded.setdefault((case_id, EXCLUDED_JUDGE_MIXED, tuple(arms)), []).append(metric)
+                judge_mixed_counts[metric] = judge_mixed_counts.get(metric, 0) + 1
+                continue
             statuses = {arm: _status(by_case[arm][case_id], metric) for arm in arms}
             if all(status is None for status in statuses.values()):
                 shared[metric].add(case_id)
@@ -186,4 +200,5 @@ def pair_metric_scores(
         control=means[arms[1]],
         not_comparable=tuple(not_comparable),
         basis=basis,
+        judge_mixed=judge_mixed_counts,
     )

@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _f90_lift_fixtures import collect, metrics
 
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
 
 AGENT = "codex"
 
@@ -200,3 +200,50 @@ def test_a_long_exclusion_list_is_capped_so_the_report_can_still_load_the_file()
     assert len(paired.basis["excluded_cases"]) == MAX_EXCLUDED_CASE_ENTRIES
     assert paired.basis["excluded_case_entries"] == len(many)
     assert paired.basis["excluded_cases_truncated"] is True
+
+
+def _judged(case_id: str, accuracy: float, judge_model: str) -> dict:
+    reward = {"entry_id": case_id, **_reward(**dict.fromkeys(DEFAULT_METRICS, 0.5)), "accuracy": accuracy}
+    reward["details"] = {"accuracy": {"score": accuracy, "judge_model_used": judge_model}}
+    return reward
+
+
+def test_paired_lift_leaves_out_cases_whose_arms_used_different_judges() -> None:
+    from skillevaluator.tier3.harbor.collector import _CollectedArm, _paired_lift
+
+    treatment = _CollectedArm(
+        execution={},
+        logical_rewards=[_judged("case-1", 1.0, "claude-opus-4-8"), _judged("case-2", 0.8, "judge")],
+    )
+    control = _CollectedArm(
+        execution={},
+        logical_rewards=[_judged("case-1", 0.0, "judge"), _judged("case-2", 0.4, "judge")],
+    )
+
+    lift = _paired_lift(
+        treatment, control, arms=("with_skill", "without_skill"), expected_case_ids=["case-1", "case-2"]
+    )
+
+    # Accuracy compares case-2 only; every other metric keeps both cases.
+    assert lift["accuracy"] == {"with_skill": 0.8, "without_skill": 0.4, "delta": 0.4, "direction": "up"}
+    assert lift["judge_mixed_cases"] == {"accuracy": 1}
+    assert lift["overall"]["delta"] == round(0.4 / len(DEFAULT_METRICS), 4)
+    basis = lift["basis"]
+    assert basis["metrics"]["accuracy"]["cases"] == 1
+    assert basis["metrics"]["security"]["cases"] == 2
+    assert basis["excluded_cases"] == [
+        {"case": "case-1", "reason": "judge_mixed", "arms": ["with_skill", "without_skill"], "metrics": ["accuracy"]}
+    ]
+
+
+def test_paired_lift_without_a_judge_fallback_reports_no_judge_mixed_cases() -> None:
+    from skillevaluator.tier3.harbor.collector import _CollectedArm, _paired_lift
+
+    treatment = _CollectedArm(execution={}, logical_rewards=[_judged("case-1", 1.0, "judge")])
+    control = _CollectedArm(execution={}, logical_rewards=[_judged("case-1", 0.0, "judge")])
+
+    lift = _paired_lift(treatment, control, arms=("with_skill", "without_skill"), expected_case_ids=["case-1"])
+
+    assert "judge_mixed_cases" not in lift
+    assert lift["accuracy"]["delta"] == 1.0
+    assert lift["basis"]["excluded_cases"] == []

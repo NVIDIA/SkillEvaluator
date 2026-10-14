@@ -1972,8 +1972,10 @@ out, the values are the arm averages. Each file's `basis` block gives, per
 metric, the number of cases and each arm's trials (`metrics`), the metrics not
 compared at all (`excluded_metrics`, for example the skill metrics of a
 no-plugin baseline), and every case left out with its reason and arms
-(`excluded_cases`: `not_applicable`, `no_value`, `not_scored`, `load_failed` or
-`unidentified_case`). A long list keeps its first 64 entries;
+(`excluded_cases`: `not_applicable`, `no_value`, `not_scored`, `load_failed`,
+`judge_mixed` or `unidentified_case`). A `judge_mixed` case had its two arms
+judged by different models (a judge fallback in one arm); it is left out of
+that judge metric only, and `judge_mixed_cases` counts these cases per metric. A long list keeps its first 64 entries;
 `excluded_case_entries` gives the full number and `excluded_cases_truncated`
 says when entries were left off. `loose_parts_lift.json` also leaves out the
 cases the lift ladder drops because a part did not load.

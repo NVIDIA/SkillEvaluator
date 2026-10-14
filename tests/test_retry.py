@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ssl
 import urllib.error
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -20,6 +21,7 @@ from skillevaluator.inference.retry import (
     DEFAULT_MAX_DELAY,
     DEFAULT_MAX_RETRIES,
     calculate_full_jitter_delay,
+    is_retriable_exception,
     is_retriable_status_code,
     parse_retry_after,
     resolve_retry_config,
@@ -38,15 +40,20 @@ def _http_headers(retry_after: str | None = None) -> Message:
 @pytest.mark.parametrize(
     ("code", "expected"),
     [
+        (408, True),
         (429, True),
         (500, True),
         (502, True),
         (503, True),
         (504, True),
+        (520, True),
+        (529, True),
         (400, False),
         (401, False),
         (403, False),
         (404, False),
+        (501, False),
+        (505, False),
         (200, False),
         (None, False),
     ],
@@ -54,6 +61,14 @@ def _http_headers(retry_after: str | None = None) -> Message:
 def test_is_retriable_status_code(code: int | None, expected: bool) -> None:
     """Verify is_retriable_status_code correctly classifies transient status codes."""
     assert is_retriable_status_code(code) is expected
+
+
+def test_host_and_verifier_retry_the_same_http_statuses() -> None:
+    """Verify the host client and the Harbor verifier retry exactly the same HTTP statuses."""
+    verifier = load_harbor_eval_template("harbor_template_retry_status_parity")
+    host = {code for code in range(100, 600) if is_retriable_status_code(code)}
+    template = {code for code in range(100, 600) if verifier._is_retriable_http_status(code)}
+    assert host == template
 
 
 @pytest.mark.parametrize(
@@ -99,6 +114,22 @@ def test_parse_retry_after_naive_date() -> None:
     """Verify parse_retry_after correctly handles offset-naive parsed datetimes without raising."""
     result = parse_retry_after("Sun, 06 Nov 1994 08:49:37", fallback_delay=5.0)
     assert result == 0.0
+
+
+def test_verifier_parses_an_http_date_retry_after_without_datetime_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify the verifier honors an HTTP-date Retry-After on Python 3.9/3.10 task images (no ``datetime.UTC``)."""
+    import datetime as datetime_module
+
+    verifier = load_harbor_eval_template("harbor_template_retry_after_http_date")
+    soon = format_datetime(datetime.now(UTC) + timedelta(seconds=20), usegmt=True)
+    far = format_datetime(datetime.now(UTC) + timedelta(hours=1), usegmt=True)
+    monkeypatch.delattr(datetime_module, "UTC")
+
+    assert 18.0 <= verifier._parse_retry_after(soon, fallback_delay=1.0) <= 21.0
+    # A date past SKILL_EVAL_LLM_RETRY_MAX_DELAY still fails fast instead of becoming the 1 s fallback.
+    error = urllib.error.HTTPError("https://judge.invalid/v1", 429, "Too Many Requests", hdrs=_http_headers(), fp=None)
+    with pytest.raises(urllib.error.HTTPError):
+        verifier._compute_bounded_retry_delay(far, attempt=0, base_delay=1.0, max_delay=30.0, error=error)
 
 
 @pytest.mark.parametrize("attempt", [0, 1, 2, 3, 5, 10])
@@ -201,6 +232,94 @@ def test_verifier_preserves_rate_limit_error_body_when_retry_after_exceeds_cap(
         verifier._urlopen_with_retry(request)
 
     assert "capacity returns in one hour" in verifier._format_http_error(exc_info.value)
+
+
+def _raised_from(outer: BaseException, inner: BaseException) -> BaseException:
+    """Return ``outer`` raised while handling ``inner``, the way SDKs wrap transport errors."""
+    try:
+        try:
+            raise inner
+        except BaseException as caught:
+            raise outer from caught
+    except BaseException as raised:
+        return raised
+
+
+def _cert_error() -> ssl.SSLCertVerificationError:
+    return ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+
+
+def _sdk_connection_error(cause: BaseException) -> BaseException:
+    """Build openai.APIConnectionError the way the SDK raises it over httpx."""
+    import httpx
+    import openai
+
+    request = httpx.Request("POST", "https://judge.invalid/v1/chat/completions")
+    connect_error = _raised_from(httpx.ConnectError(str(cause), request=request), cause)
+    return _raised_from(openai.APIConnectionError(request=request), connect_error)
+
+
+@pytest.mark.parametrize(
+    ("make_error", "expected"),
+    [
+        pytest.param(lambda: urllib.error.URLError(_cert_error()), False, id="urllib-cert"),
+        pytest.param(lambda: _sdk_connection_error(_cert_error()), False, id="sdk-cert"),
+        pytest.param(lambda: _sdk_connection_error(ConnectionResetError("reset")), True, id="sdk-connection-reset"),
+        pytest.param(lambda: urllib.error.URLError(ConnectionResetError("reset")), True, id="urllib-connection-reset"),
+    ],
+)
+def test_is_retriable_exception_never_retries_a_certificate_failure(
+    make_error: Callable[[], BaseException], expected: bool
+) -> None:
+    """Verify a failed TLS certificate check is not retried, however the SDK wraps it."""
+    assert is_retriable_exception(make_error()) is expected
+
+
+def test_host_and_verifier_classify_certificate_failures_alike() -> None:
+    """Verify the host and the verifier template agree on wrapped certificate failures."""
+    import botocore.exceptions
+
+    from skillevaluator.inference import retry
+
+    verifier = load_harbor_eval_template("harbor_template_cert_parity")
+    cases = [
+        urllib.error.URLError(_cert_error()),
+        _sdk_connection_error(_cert_error()),
+        botocore.exceptions.SSLError(endpoint_url="https://bedrock-runtime.invalid", error=_cert_error()),
+        _sdk_connection_error(ConnectionResetError("reset")),
+        ConnectionResetError("reset"),
+    ]
+    assert [retry._is_certificate_failure(case) for case in cases] == [True, True, True, False, False]
+    assert [verifier._is_certificate_failure(case) for case in cases] == [True, True, True, False, False]
+
+
+def test_llm_client_does_not_retry_a_certificate_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify one judge call against a bad certificate makes one connection, not 1 + max_retries."""
+    import httpx
+
+    from skillevaluator.inference.client import LLMClient
+
+    slept: list[float] = []
+    monkeypatch.setattr("skillevaluator.inference.retry.time.sleep", slept.append)
+    connections: list[str] = []
+
+    def bad_certificate(request: httpx.Request) -> httpx.Response:
+        connections.append(str(request.url))
+        raise _raised_from(httpx.ConnectError("certificate verify failed", request=request), _cert_error())
+
+    client = LLMClient(
+        model="judge-model",
+        base_url="https://judge.invalid/v1",
+        api_key="test-judge-key",
+        max_retries=3,
+        http_client=httpx.Client(transport=httpx.MockTransport(bad_certificate)),
+    )
+
+    with pytest.raises(Exception, match="Connection error"):
+        client.completions("sys", "judge this")
+
+    assert len(connections) == 1
+    assert slept == []
 
 
 def test_retry_call_with_backoff_immediate_success() -> None:
@@ -591,6 +710,31 @@ def test_bedrock_converse_transport_retries_transient_connection_error(
     assert (content, error) == ("reconnected", None)
     assert bedrock_harness.requests_sent == 2
     assert len(bedrock_harness.slept) == 1
+
+
+def test_bedrock_converse_transport_does_not_retry_a_certificate_failure(
+    bedrock_harness: _BedrockTransportHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify _call_bedrock fails fast on a failed TLS certificate check instead of retrying it as a network blip."""
+    import botocore.exceptions
+    import urllib3.exceptions
+
+    monkeypatch.setenv("AWS_MAX_ATTEMPTS", "1")
+    monkeypatch.setenv("SKILL_EVAL_LLM_MAX_RETRIES", "3")
+
+    def bad_certificate(req: Any) -> Any:
+        cert = _cert_error()
+        urllib3_error = _raised_from(urllib3.exceptions.SSLError(cert), cert)
+        raise _raised_from(botocore.exceptions.SSLError(endpoint_url=req.url, error=urllib3_error), urllib3_error)
+
+    bedrock_harness.set_handler(bad_certificate)
+
+    content, error = bedrock_harness.call_bedrock()
+    assert content is None
+    assert error is not None and "Bedrock request failed" in error and "CERTIFICATE_VERIFY_FAILED" in error
+    assert bedrock_harness.requests_sent == 1
+    assert bedrock_harness.slept == []
 
 
 @pytest.mark.parametrize("exc_cls", [FileNotFoundError, PermissionError, IsADirectoryError, NotADirectoryError])

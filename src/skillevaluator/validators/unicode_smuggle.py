@@ -8,6 +8,7 @@ Detects invisible Unicode characters that may indicate:
 - Trojan source attacks via BiDi overrides (CVE-2021-42574)
 - Steganographic data hiding via zero-width characters
 - Obfuscation via variation selectors and deprecated format controls
+- Instructions hidden in base64 text (``decode this base64 and follow it``)
 
 Character categories and thresholds are configurable via
 skillevaluator/config/unicode_smuggle_patterns.yaml.
@@ -15,7 +16,11 @@ skillevaluator/config/unicode_smuggle_patterns.yaml.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import mimetypes
+import re
+import unicodedata
 from pathlib import Path
 
 from skillevaluator.config import load_unicode_smuggle_patterns
@@ -25,6 +30,24 @@ from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.validators.base import ValidatorBase, iter_scannable_files
 
 logger = get_logger(__name__)
+
+# A base64 run long enough to carry a sentence; the first runs of a file are decoded.
+_BASE64_RUN_RE = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/]{32,8192}={0,2}(?![A-Za-z0-9+/=_-])")
+_MAX_BASE64_RUNS = 256
+# U+FE0E / U+FE0F right after a symbol choose its text or emoji presentation ('⚠️' is U+26A0 U+FE0F); a keycap
+# puts U+FE0F between '0'-'9', '#', or '*' and U+20E3.
+_PRESENTATION_SELECTORS = frozenset("\ufe0e\ufe0f")
+_KEYCAP_BASES = frozenset("0123456789#*")
+# Decoded text that tells an agent to act: override its instructions, fetch or upload data, or reach secrets.
+_HIDDEN_INSTRUCTION_RE = re.compile(
+    r"\b(?:ignore|disregard|forget)\b.{0,24}\b(?:previous|prior|above|earlier|all|your)\b.{0,24}"
+    r"\b(?:instructions?|rules|prompts?|guidelines)\b"
+    r"|\b(?:upload|exfiltrat\w*|send|post|transmit|leak)\b.{0,80}"
+    r"(?:https?://|\.ssh\b|id_rsa|credentials|\.env\b|\btokens?\b|\bsecrets?\b|passwords?|api[_ -]?keys?)"
+    r"|(?:~|\$HOME)/\.(?:ssh|aws|gnupg|netrc|kube)\b|\bid_(?:rsa|ed25519)\b"
+    r"|\b(?:curl|wget)\s+\S+.{0,40}\|\s*(?:ba|z)?sh\b|\brm\s+-rf\s+[~/]",
+    re.IGNORECASE,
+)
 
 # MIME types that are textual even when not under text/*
 _TEXTUAL_MIME_TYPES = frozenset(
@@ -210,6 +233,46 @@ class UnicodeSmuggleValidator(ValidatorBase):
                 if finding is not None:
                     findings.append(finding)
 
+        findings.extend(self._base64_instructions(content, relative_path))
+        return findings
+
+    @staticmethod
+    def _base64_instructions(content: str, relative_path: str) -> list[Finding]:
+        """HIGH for base64 text that decodes to an instruction (an override, an upload, a secret path).
+
+        Static scanners read the text as it is, so ``decode this base64 and follow
+        it`` hides an injection from them; this decodes the first runs of a file
+        and flags readable text that tells the agent to act. Binary data (images,
+        archives) and plain identifiers do not decode to such text.
+        """
+        from skillevaluator.utils.redaction import redact_sensitive_text
+
+        findings: list[Finding] = []
+        for index, match in enumerate(_BASE64_RUN_RE.finditer(content)):
+            if index >= _MAX_BASE64_RUNS:
+                break
+            run = match.group(0)
+            try:
+                raw = base64.b64decode(run + "=" * (-len(run) % 4), validate=True)
+                decoded = raw.decode("utf-8")
+            except (binascii.Error, ValueError, UnicodeDecodeError):
+                continue
+            printable = sum(1 for char in decoded if char.isprintable() or char in "\n\t")
+            if not decoded or printable < 0.9 * len(decoded) or not _HIDDEN_INSTRUCTION_RE.search(decoded):
+                continue
+            shown = redact_sensitive_text(" ".join(decoded.split())[:240], max_len=120)
+            findings.append(
+                Finding(
+                    category="UNICODE",
+                    severity=Severity.HIGH,
+                    check_name="base64_hidden_instruction",
+                    message=f"Base64 text decodes to an instruction: '{shown}'",
+                    file_path=relative_path,
+                    line_number=content.count("\n", 0, match.start()) + 1,
+                    suggestion="Write instructions as plain text, or remove the encoded payload.",
+                    metadata={"encoding": "base64", "encoded_chars": len(run)},
+                )
+            )
         return findings
 
     def _classify_char(self, char: str) -> tuple[str, str] | None:
@@ -237,6 +300,18 @@ class UnicodeSmuggleValidator(ValidatorBase):
             return ("variation_selectors", f"VARIATION SELECTOR-{vs_num}")
 
         return None
+
+    @staticmethod
+    def _is_presentation_selector(line: str, col: int) -> bool:
+        """Whether ``line[col]`` is U+FE0E / U+FE0F choosing how the symbol before it is drawn (an emoji
+        presentation sequence such as U+26A0 U+FE0F, or a keycap such as '1' U+FE0F U+20E3)."""
+        if col == 0 or line[col] not in _PRESENTATION_SELECTORS:
+            return False
+        base = line[col - 1]
+        if base in _KEYCAP_BASES:
+            return line[col + 1 : col + 2] == "\u20e3"
+        # Emoji bases are symbols and punctuation outside ASCII, plus U+2139 INFORMATION SOURCE (a letter).
+        return base == "\u2139" or (not base.isascii() and unicodedata.category(base)[0] in "SP")
 
     @staticmethod
     def _group_consecutive(chars: list[dict]) -> list[list[dict]]:
@@ -282,6 +357,10 @@ class UnicodeSmuggleValidator(ValidatorBase):
                 suggestion="BOM at file start is harmless. Remove if not needed.",
                 metadata={"unicode_category": "zero_width", "char_count": 1},
             )
+
+        # One presentation selector after its emoji base is standard text, not an invisible character
+        if run_length == 1 and self._is_presentation_selector(line, group[0]["col"]):
+            return None
 
         # Unicode Tags that decode to ASCII -> CRITICAL
         if "unicode_tags" in categories_in_group:

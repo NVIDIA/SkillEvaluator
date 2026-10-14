@@ -27,6 +27,16 @@ def _isolate_output_provenance_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_dependency_audit_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the dependency audit's online lookups (OSV advisories, npm registry) offline in tests.
+
+    Tests that exercise a lookup replace its fetch function, which bypasses this switch.
+    """
+    monkeypatch.setenv("SKILLEVALUATOR_OSV_API_URL", "off")
+    monkeypatch.setenv("SKILLEVALUATOR_NPM_REGISTRY_URL", "off")
+
+
 # =============================================================================
 # SKILLS FIXTURES
 # =============================================================================

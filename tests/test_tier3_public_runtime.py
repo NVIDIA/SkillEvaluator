@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import tomllib
 import urllib.request
@@ -43,7 +44,7 @@ from skillevaluator.tier3.harbor.runner import (
     build_harbor_run_command,
 )
 from skillevaluator.tier3.harbor.runtime_preflight import ModelProbeResult
-from skillevaluator.tier3_environments import HARBOR_ENV_MODES, HARBOR_NATIVE_ENV_MODES
+from skillevaluator.tier3_environments import HARBOR_ENV_MODES, HARBOR_NATIVE_ENV_MODES, HARBOR_VERSION
 
 
 def _load_verifier_template():
@@ -58,14 +59,16 @@ def _load_verifier_template():
 
 def test_live_eval_exposes_only_harbor_native_environments() -> None:
     result = CliRunner().invoke(cli, ["evaluate", "--help"])
+    # Click wraps the long choice list mid-word, so read it without line breaks.
+    choices = "".join(result.output.split())
 
     assert result.exit_code == 0
-    assert "docker" in result.output
-    assert "e2b" in result.output
-    assert "modal" in result.output
+    assert "[docker|" in choices
+    assert "|e2b|" in choices
+    assert "|modal|" in choices
     assert "harbor-environment" not in result.output
     assert "k8s-sandbox" not in result.output
-    assert "local" in result.output
+    assert "|local]" in choices
     assert "base-image-mode" not in result.output
     assert "--agent-runtime-preflight" in result.output
 
@@ -129,7 +132,8 @@ def test_native_environment_is_forwarded_to_harbor() -> None:
     assert "--environment-import-path" not in command
     assert "-a" not in command
     assert command.count("--agent") == 1
-    assert command[command.index("--agent") + 1] == "codex"
+    # Plain Codex runs through SkillEvaluator's subclass so the main thread's rollout is converted (proof H4).
+    assert command[command.index("--agent") + 1] == "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorCodex"
     assert command.count("--env") == 1
     assert command[command.index("--env") + 1] == "e2b"
 
@@ -190,8 +194,9 @@ def test_native_environment_kwargs_round_trip_through_real_harbor_parser() -> No
 
 
 @pytest.mark.parametrize("env_mode", sorted(HARBOR_NATIVE_ENV_MODES - {"docker"}))
-def test_native_environment_kwargs_reject_unknown_harbor_022_names(env_mode: str) -> None:
-    with pytest.raises(ValueError, match=rf"Harbor 0\.24\.0 environment '{env_mode}'.*totally_ignored"):
+def test_native_environment_kwargs_reject_unknown_harbor_names(env_mode: str) -> None:
+    version = re.escape(HARBOR_VERSION)
+    with pytest.raises(ValueError, match=rf"Harbor {version} environment '{env_mode}'.*totally_ignored"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="codex",
@@ -575,10 +580,10 @@ def test_native_environment_required_kwargs_reject_whitespace_padded_ec2_launch_
     assert errors == ["Harbor environment 'ec2' requires launch_mode to be 'ephemeral' or 'attach'"]
 
 
-def test_native_environment_install_hints_use_real_harbor_022_extra_names() -> None:
-    assert "harbor[gke]==0.24.0" in _environment_extra_install_hint("ack")
-    assert "harbor[cloud]==0.24.0" not in _environment_extra_install_hint("ack")
-    assert "harbor[cwsandbox]==0.24.0" in _environment_extra_install_hint("wandb")
+def test_native_environment_install_hints_use_real_harbor_extra_names() -> None:
+    assert f"harbor[gke]=={HARBOR_VERSION}" in _environment_extra_install_hint("ack")
+    assert f"harbor[cloud]=={HARBOR_VERSION}" not in _environment_extra_install_hint("ack")
+    assert f"harbor[cwsandbox]=={HARBOR_VERSION}" in _environment_extra_install_hint("wandb")
     assert "no Python extra" in _environment_extra_install_hint("openshift")
 
 
@@ -2446,6 +2451,7 @@ def test_native_harbor_metadata_entry_id_seam_across_runner_collector_and_datase
         verifier_env: object = None,
         include_task_names: list[str] | None = None,
         environment_kwargs: object = None,
+        trial_retries: int = 0,
     ) -> tuple[bool, str]:
         from datetime import UTC, datetime
         from uuid import uuid4

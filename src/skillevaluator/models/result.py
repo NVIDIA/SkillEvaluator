@@ -141,6 +141,21 @@ class Finding:
         """Convert to legacy error string format for backward compatibility."""
         return f"{self.tag} {self.message} in {self.location}"
 
+    def legacy_string_forms(self) -> list[str]:
+        """Every form this finding's legacy string can take in ``errors`` / ``warnings``.
+
+        ``merge_with_prefix`` puts a bundled skill's label before the legacy
+        string but inside the finding's path, so ``[TAG] msg in [skill] path``
+        is listed as ``[skill] [TAG] msg in path`` (also for nested merges).
+        """
+        forms = [self.to_legacy_string()]
+        location, prefix = self.location, ""
+        while location.startswith("[") and "] " in location:
+            label, _separator, location = location.partition("] ")
+            prefix += label + "] "
+            forms.append(f"{prefix}{self.tag} {self.message} in {location}")
+        return forms
+
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         severity_value = self.severity.value if isinstance(self.severity, Severity) else str(self.severity).lower()
@@ -276,6 +291,11 @@ class ValidationResult:
     warnings: list[str] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
+    # Errors and warnings added as plain strings (``add_error``/``add_warning``,
+    # legacy ``add_finding(tag, ...)``), with no Finding behind them. A rebuild
+    # from findings (``recalculate_from_findings(keep_legacy=True)``) keeps them.
+    legacy_errors: list[str] = field(default_factory=list, repr=False, compare=False)
+    legacy_warnings: list[str] = field(default_factory=list, repr=False, compare=False)
 
     @property
     def incomplete_scans(self) -> list[str]:
@@ -405,17 +425,28 @@ class ValidationResult:
 
         legacy_msg = f"[{finding.category}-{severity_str}] {finding.message} in {location}"
 
+        # The string mirrors a Finding, so it is not a legacy-only message.
         if is_error:
-            self.add_error(legacy_msg)
+            self.errors.append(legacy_msg)
+            self.passed = False
+            self.summary.errors += 1
         else:
-            self.add_warning(legacy_msg)
+            self.warnings.append(legacy_msg)
+            self.summary.warnings += 1
 
-    def recalculate_from_findings(self) -> None:
+    def recalculate_from_findings(self, *, keep_legacy: bool = False) -> None:
         """Rebuild passed, errors, warnings, and summary counts from current findings.
 
         Call after mutating finding severities (e.g. LLM verification downgrade)
         so that result state is consistent with the actual finding objects.
+
+        With ``keep_legacy`` the errors and warnings that were added as plain
+        strings (no Finding behind them) and are still listed stay listed, and a
+        kept error still fails the result. A severity override then cannot erase
+        a blocking legacy error (``apply_policy`` uses this).
         """
+        kept_errors = self._listed_legacy(self.errors, self.legacy_errors) if keep_legacy else []
+        kept_warnings = self._listed_legacy(self.warnings, self.legacy_warnings) if keep_legacy else []
         self.errors.clear()
         self.warnings.clear()
         self.passed = not self.is_incomplete
@@ -437,12 +468,34 @@ class ValidationResult:
                 self.warnings.append(legacy_msg)
                 self.summary.warnings += 1
 
+        for message in kept_errors:
+            self.errors.append(message)
+            self.passed = False
+            self.summary.errors += 1
+        for message in kept_warnings:
+            self.warnings.append(message)
+            self.summary.warnings += 1
+
+    @staticmethod
+    def _listed_legacy(listed: list[str], legacy: list[str]) -> list[str]:
+        """The legacy-only strings still in ``listed``, in list order (a caller may have removed some)."""
+        remaining: dict[str, int] = {}
+        for message in legacy:
+            remaining[message] = remaining.get(message, 0) + 1
+        kept: list[str] = []
+        for message in listed:
+            if remaining.get(message, 0) > 0:
+                remaining[message] -= 1
+                kept.append(message)
+        return kept
+
     def add_error(self, message: str) -> None:
         """Add a legacy error string and mark validation as failed.
 
         For backward compatibility with existing validators.
         """
         self.errors.append(message)
+        self.legacy_errors.append(message)
         self.passed = False
         self.summary.errors += 1
 
@@ -452,6 +505,7 @@ class ValidationResult:
         For backward compatibility with existing validators.
         """
         self.warnings.append(message)
+        self.legacy_warnings.append(message)
         self.summary.warnings += 1
 
     def add_message(self, message: str) -> None:
@@ -483,6 +537,8 @@ class ValidationResult:
         self.success_details.extend(other.success_details)
         self.errors.extend(other.errors)
         self.warnings.extend(other.warnings)
+        self.legacy_errors.extend(other.legacy_errors)
+        self.legacy_warnings.extend(other.legacy_warnings)
         self.messages.extend(other.messages)
         # dict.update would let one sub-result's incomplete_scans clobber
         # another's (e.g. bandit and semgrep both failing); concatenate.
@@ -501,8 +557,13 @@ class ValidationResult:
         self.summary.medium_count += other.summary.medium_count
         self.summary.low_count += other.summary.low_count
 
-    def merge_with_prefix(self, other: ValidationResult, prefix: str) -> None:
-        """Merge another result, prefixing all errors/warnings with skill name."""
+    def merge_with_prefix(self, other: ValidationResult, prefix: str, *, include_success_details: bool = True) -> None:
+        """Merge another result, prefixing all errors/warnings with skill name.
+
+        Findings keep their severity counts, so a bundled skill's findings are
+        counted in ``severity_counts`` like the root's. ``include_success_details``
+        is False when the caller records the skill's checks itself.
+        """
         if not other.passed:
             self.passed = False
 
@@ -510,6 +571,8 @@ class ValidationResult:
             self.errors.append(f"[{prefix}] {error}")
         for warning in other.warnings:
             self.warnings.append(f"[{prefix}] {warning}")
+        self.legacy_errors.extend(f"[{prefix}] {error}" for error in other.legacy_errors)
+        self.legacy_warnings.extend(f"[{prefix}] {warning}" for warning in other.legacy_warnings)
 
         # Prefix findings with skill name in file_path
         for finding in other.findings:
@@ -527,7 +590,7 @@ class ValidationResult:
             self.findings.append(prefixed_finding)
 
         # Carry over success_details (prefixed) so contributor info is preserved
-        for detail in other.success_details:
+        for detail in other.success_details if include_success_details else ():
             prefixed_detail = SuccessDetail(
                 check_name=f"[{prefix}] {detail.check_name}",
                 message=detail.message,
@@ -542,6 +605,10 @@ class ValidationResult:
         # Merge summary
         self.summary.errors += other.summary.errors
         self.summary.warnings += other.summary.warnings
+        self.summary.critical_count += other.summary.critical_count
+        self.summary.high_count += other.summary.high_count
+        self.summary.medium_count += other.summary.medium_count
+        self.summary.low_count += other.summary.low_count
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""

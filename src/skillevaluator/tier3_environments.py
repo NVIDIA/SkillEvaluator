@@ -208,3 +208,36 @@ for _alias, _harbor_type in HARBOR_ENVIRONMENT_TYPE_ALIASES.items():
     )
 ENV_MODE_LOCAL = "local"
 DEFAULT_ENV_MODE = "docker"
+
+#: ``--plugin-load`` choices for plugin Tier 3 runs; ``wrapper`` is the default.
+PLUGIN_LOAD_CHOICES: tuple[str, ...] = ("wrapper", "native", "auto")
+
+#: Upper bound for ``--trial-retries``. Each retry repeats a trial's environment
+#: start and agent setup, so a small cap keeps a broken backend from multiplying
+#: the run's wall time.
+MAX_TRIAL_RETRIES = 5
+
+#: Exception names ``--trial-retries`` lets Harbor retry, each passed as
+#: ``--retry-include``. Harbor 0.24 compares a trial's ``type(exc).__name__`` with
+#: these strings exactly, so a subclass or parent class never matches, and its
+#: default exclusions (agent and verifier timeouts, reward and verifier-output
+#: errors, usage limits, refusals, authentication, unknown models) still win.
+#: The two timeouts are raised while the agent's environment starts or the agent
+#: installs, before it receives the task; ``EnvironmentStartTimeoutError`` also
+#: names a single-step task's separate verifier environment failing to start,
+#: which is why the runner refuses retries for such a task.
+#: ``AgentSetupNetworkError`` is SkillEvaluator's own name, raised only by its
+#: Harbor agent wrappers, for a ``NetworkConnectionError`` from the agent's
+#: setup. Harbor raises that for a failed command whose output's last error
+#: pattern match is one of its network patterns ("Could not resolve host",
+#: "Connection refused", "Connection timed out", "Request timed out", "No route
+#: to host", "SSL_connect", "SSL_ERROR_SYSCALL", or "curl: (N)"); other install
+#: failures, such as apt's "Temporary failure resolving", are not retried.
+#: Harbor raises ``NetworkConnectionError`` from the agent's task commands too,
+#: so that name is never retried, and a stock Harbor agent gets only the two
+#: timeouts retried.
+HARBOR_TRIAL_RETRY_EXCEPTIONS: tuple[str, ...] = (
+    "EnvironmentStartTimeoutError",
+    "AgentSetupTimeoutError",
+    "AgentSetupNetworkError",
+)

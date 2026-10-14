@@ -156,6 +156,16 @@ def test_top_level_version_is_ignored_when_metadata_version_missing(tmp_path: Pa
     assert any(detail.check_name == "version_optional" for detail in result.success_details)
 
 
+def test_top_level_version_message_names_the_field_that_is_read(tmp_path: Path) -> None:
+    """A skill with only a top-level ``version`` has a label, just not the one this check reads."""
+    skill_dir = _write_skill(tmp_path, top_level_version="0.1.0")
+
+    result = VersionValidator().validate(skill_dir)
+
+    [detail] = [detail for detail in result.success_details if detail.check_name == "version_optional"]
+    assert detail.message.startswith("No metadata.version label present (the top-level 'version' field is not read")
+
+
 def test_top_level_version_is_ignored_when_metadata_version_present(tmp_path: Path) -> None:
     """A top-level ``version`` is shadowed by ``metadata.version``.
 

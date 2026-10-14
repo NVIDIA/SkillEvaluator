@@ -812,6 +812,40 @@ def test_canonical_report_prefers_agentskills_dataset_fields() -> None:
     assert "legacy fallback should not be shown" not in dataset_html
 
 
+def test_canonical_report_does_not_carry_the_planted_canary_token() -> None:
+    token = "cnry_" + "0123456789abcdef" * 2 + "01234567"
+    canary = {
+        "token": token,
+        "env_var": "SKILLEVAL_CANARY_API_KEY",
+        "file": ".skilleval/canary.env",
+        "workspace_roots": ["/workspace"],
+        "mcp_servers": [],
+    }
+    dataset = [{"id": "case-1", "prompt": "Use hld-documents for this design.", "skilleval_canary": canary}]
+    payload = build_agent_eval_payload(
+        "hld-documents",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0, "goal_accuracy": 1.0},
+                "rewards": [{"entry_id": "case-1", "security": 1.0, "goal_accuracy": 1.0}],
+            }
+        },
+        dataset=dataset,
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    assert token not in json.dumps(payload)
+    assert payload["dataset"][0]["skilleval_canary"] == {**canary, "token": "[REDACTED-CANARY]"}
+    # The digest still names the dataset the run staged, and the caller's entries are not changed.
+    assert payload["dataset_digest"] == build_dataset_snapshot(dataset, evaluator_version="")["dataset_digest"]
+    assert dataset[0]["skilleval_canary"]["token"] == token
+
+
 def test_standalone_report_loads_staged_legacy_dataset_with_agentskills_labels(tmp_path: Path) -> None:
     skill = tmp_path / "hld-documents"
     skill.mkdir()
@@ -1778,6 +1812,40 @@ def test_escape_heavy_payload_has_bounded_html_and_one_recoverable_canonical_cop
     assert _embedded_tier3_payload(html)["dataset"][0]["prompt"] == escape_heavy_prompt
     assert "HTML preview omitted" in html
     assert "characters" in html
+    # The notice names only what was cut, by count; never the dict's own items method.
+    notice = " ".join(html.split("HTML preview omitted", 1)[1].split("JSON Downloads", 1)[0].split())
+    assert re.fullmatch(r"\d+ characters\.", notice), notice
+    assert "built-in method" not in html
+
+
+@pytest.mark.parametrize(
+    ("prompt", "cases", "expected"),
+    [("p" * 300, 6000, r"\d+ items\."), ("<" * 3000, 600, r"\d+ characters and \d+ items\.")],
+    ids=["items", "characters-and-items"],
+)
+def test_html_preview_notice_counts_the_items_it_cut(prompt: str, cases: int, expected: str) -> None:
+    payload = build_agent_eval_payload(
+        "many-cases",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0},
+                "rewards": [{"entry_id": "case-0", "security": 1.0}],
+            }
+        },
+        dataset=[{"id": f"case-{index}", "prompt": prompt} for index in range(cases)],
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+
+    notice = " ".join(html.split("HTML preview omitted", 1)[1].split("JSON Downloads", 1)[0].split())
+    assert re.fullmatch(expected, notice), notice
+    assert "built-in method" not in html
 
 
 def test_canonical_payload_enforces_total_serialized_budget() -> None:

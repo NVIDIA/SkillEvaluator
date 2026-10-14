@@ -166,6 +166,20 @@ class TestVariationSelectors:
         assert len(result.findings) == 1
         assert result.findings[0].severity == Severity.LOW
 
+    def test_emoji_presentation_selector_after_its_base_is_not_reported(self, tmp_path: Path) -> None:
+        # U+26A0 U+FE0F (warning sign), U+2764 U+FE0F (heart), U+2139 U+FE0F (information), keycap 1, U+2122 U+FE0E.
+        content = "\u26a0\ufe0f Warning\n\u2764\ufe0f \u2139\ufe0f 1\ufe0f\u20e3 \u2122\ufe0e\n"
+        skill_dir = _make_skill(tmp_path, "emoji.md", content)
+        result = UnicodeSmuggleValidator().validate(skill_dir)
+        assert result.findings == []
+
+    def test_selector_without_an_emoji_base_is_still_reported(self, tmp_path: Path) -> None:
+        # After an ASCII letter, a bare digit, or another selector it is not a presentation sequence.
+        content = "x\ufe0f\n1\ufe0f\n\u26a0\ufe0f\U000e0100\n"
+        skill_dir = _make_skill(tmp_path, "vs.md", content)
+        result = UnicodeSmuggleValidator().validate(skill_dir)
+        assert [finding.line_number for finding in result.findings] == [1, 2, 3]
+
 
 class TestConfusableSpaces:
     def test_nbsp_not_detected_by_default(self, tmp_path: Path) -> None:

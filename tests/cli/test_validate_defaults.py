@@ -122,3 +122,69 @@ def test_default_tier3_runs_after_tier1_failure(monkeypatch, tmp_path):
     assert result.exit_code == 1
     assert calls == ["dataset", "tier3"]
     assert list((tmp_path / "reports").glob("*.json"))
+
+
+def _embedding_backend(monkeypatch, *, openai_installed: bool, provider_error: str | None) -> dict:
+    """Fake the Tier 2 extra and embedding provider; record what each dedup entry point ran."""
+    import importlib.util
+
+    from skillevaluator import provider_config
+    from skillevaluator.tier2 import commands as tier2_commands
+
+    real_find_spec = importlib.util.find_spec
+
+    def find_spec(name, *args, **kwargs):
+        if name == "openai" and not openai_installed:
+            return None
+        return real_find_spec(name, *args, **kwargs)
+
+    def resolve_embedding_provider():
+        if provider_error is not None:
+            raise provider_config.ProviderConfigurationError(provider_error)
+
+    ran: dict = {}
+
+    def run_dedup_scan(path):
+        ran["skill"] = path
+        return []
+
+    def run_plugin_dedup_scan(path, *, run_context):
+        ran["plugin"] = run_context
+        return []
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    monkeypatch.setattr(provider_config, "resolve_embedding_provider", resolve_embedding_provider)
+    monkeypatch.setattr(tier2_commands, "run_dedup_scan", run_dedup_scan)
+    monkeypatch.setattr(tier2_commands, "run_plugin_dedup_scan", run_plugin_dedup_scan)
+    return ran
+
+
+@pytest.mark.parametrize(
+    ("openai_installed", "provider_error", "skip_text"),
+    [
+        (False, None, "install the Tier 2 extra"),
+        (True, "SKILL_EVAL_EMBEDDING_PROVIDER is required", "embedding setup is required"),
+    ],
+)
+def test_dedup_degrades_to_a_skip_without_an_embedding_backend(
+    monkeypatch, tmp_path, openai_installed, provider_error, skip_text
+):
+    ran = _embedding_backend(monkeypatch, openai_installed=openai_installed, provider_error=provider_error)
+
+    skipped = cli_module._run_dedup_or_skip(tmp_path)
+    cli_module._run_plugin_dedup_or_skip(tmp_path)
+
+    assert skipped[0].metadata["skipped"] is True
+    assert skip_text in skipped[0].warnings[0]
+    assert "skill" not in ran
+    # The plugin contract still runs, without its embedding-based context checks.
+    assert ran["plugin"] is False
+
+
+def test_dedup_runs_with_an_embedding_backend(monkeypatch, tmp_path):
+    ran = _embedding_backend(monkeypatch, openai_installed=True, provider_error=None)
+
+    cli_module._run_dedup_or_skip(tmp_path)
+    cli_module._run_plugin_dedup_or_skip(tmp_path)
+
+    assert ran == {"skill": tmp_path, "plugin": True}

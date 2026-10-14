@@ -17,6 +17,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+# A card is titled for its evaluated target type; either title satisfies the
+# first required marker, which is reported under the skill title when absent.
+TITLE_MARKERS = ("# Skill Benchmark:", "# Plugin Benchmark:")
+
 REQUIRED_MARKERS = (
     "# Skill Benchmark:",
     "Overall verdict:",
@@ -286,7 +290,8 @@ def scan_file(path: Path, *, require_source_provenance: bool = False) -> list[Of
 
     markers = REQUIRED_MARKERS + (_SOURCE_PROVENANCE_MARKERS if require_source_provenance else ())
     for marker in markers:
-        if marker not in text:
+        present = any(title in text for title in TITLE_MARKERS) if marker == TITLE_MARKERS[0] else marker in text
+        if not present:
             offenders.append(Offender(path, 1, f"missing required section: {marker}"))
 
     for line_number, line in enumerate(text.splitlines(), 1):

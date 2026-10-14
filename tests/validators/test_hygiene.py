@@ -180,6 +180,99 @@ Check the [config file](./config/settings.yaml) for settings.
             "dead link" in e.lower() or "docs/README.md" in e or "config/settings.yaml" in e for e in result.errors
         )
 
+    @pytest.mark.parametrize(
+        ("content", "target"),
+        [
+            ("See [the guide][guide].\n\n[guide]: missing-reference.md\n", "missing-reference.md"),
+            ("See [guide][].\n\n[guide]: missing-collapsed.md\n", "missing-collapsed.md"),
+            ("See [guide].\n\n[guide]: missing-shortcut.md\n", "missing-shortcut.md"),
+            ('See <a href="missing-html.md">the guide</a>.\n', "missing-html.md"),
+            ("![diagram](missing-image.png)\n", "missing-image.png"),
+        ],
+    )
+    def test_commonmark_dead_links_are_detected(self, tmp_path: Path, content: str, target: str):
+        """Navigation and image targets discovered by CommonMark are checked."""
+        skill_dir = tmp_path / "commonmark-dead-links"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+
+        result = HygieneValidator()._check_dead_links(skill_dir)
+
+        assert result.errors == [f"Dead link in SKILL.md: {target}"]
+
+    def test_commonmark_non_navigation_contexts_are_ignored(self, tmp_path: Path):
+        """Frontmatter, code, comments, and non-navigation HTML stay inert."""
+        skill_dir = tmp_path / "inert-links"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            '---\ndescription: "[metadata](frontmatter.md)"\n---\n\n'
+            '`[inline](inline.md)`\n\n'
+            "```markdown\n[fenced](fenced.md)\n```\n\n"
+            "<!-- <a href='comment.md'>comment</a> -->\n"
+            "<template><a href='template.md'>template</a></template>\n",
+            encoding="utf-8",
+        )
+
+        result = HygieneValidator()._check_dead_links(skill_dir)
+
+        assert result.errors == []
+
+    def test_commonmark_local_targets_are_normalized_before_lookup(self, tmp_path: Path):
+        """Encoded spaces, queries, fragments, and directory links resolve locally."""
+        skill_dir = tmp_path / "normalized-links"
+        skill_dir.mkdir()
+        (skill_dir / "my file.md").write_text("# Existing\n", encoding="utf-8")
+        (skill_dir / "guide.md").write_text("# Existing\n", encoding="utf-8")
+        (skill_dir / "docs").mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "[space](<my file.md>)\n[query](guide.md?view=1)\n"
+            "[fragment](guide.md#overview)\n[directory](docs/)\n",
+            encoding="utf-8",
+        )
+
+        result = HygieneValidator()._check_dead_links(skill_dir)
+
+        assert result.errors == []
+
+    def test_missing_directory_target_is_reported(self, tmp_path: Path):
+        """Trailing slashes remain checkable for dead directory links."""
+        skill_dir = tmp_path / "missing-directory"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("[docs](missing-dir/)\n", encoding="utf-8")
+
+        result = HygieneValidator()._check_dead_links(skill_dir)
+
+        assert result.errors == ["Dead link in SKILL.md: missing-dir/"]
+
+    def test_non_local_and_root_absolute_targets_are_ignored(self, tmp_path: Path):
+        """External, anchor-only, and root-absolute destinations are not host paths."""
+        skill_dir = tmp_path / "non-local-links"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "[root](/config/settings.yaml)\n[protocol](//example.com/missing.md)\n"
+            "[web](https://example.com/missing.md)\n[email](mailto:user@example.com)\n"
+            "[anchor](#overview)\n",
+            encoding="utf-8",
+        )
+
+        result = HygieneValidator()._check_dead_links(skill_dir)
+
+        assert result.errors == []
+
+    def test_repeated_dead_targets_are_reported_once(self, tmp_path: Path):
+        """Repeated links do not generate duplicate findings without line metadata."""
+        skill_dir = tmp_path / "duplicate-links"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "[first](missing.md), [second](./missing.md#part), and [third][same].\n\n"
+            "[same]: missing.md?view=1\n",
+            encoding="utf-8",
+        )
+
+        result = HygieneValidator()._check_dead_links(skill_dir)
+
+        assert result.errors == ["Dead link in SKILL.md: missing.md"]
+
     def test_valid_relative_links_pass(self, tmp_path: Path):
         """Test that valid relative links pass."""
         skill_dir = tmp_path / "valid-links-skill"
@@ -266,6 +359,100 @@ pandas
         # Should warn about unpinned packages
         all_messages = result.errors + result.warnings
         assert any("unpinned" in m.lower() for m in all_messages)
+
+    @pytest.mark.parametrize(
+        "requirement",
+        [
+            'requests; python_version < "3.13"',
+            'requests; python_version != "3.12"',
+            'requests;python_version<"3.13"',
+            'requests ; python_version < "3.13"',
+            'requests; sys_platform == "win32"',
+            'requests; implementation_name == "cpython@corp"',
+            'requests[security]; python_version >= "3.9"',
+        ],
+    )
+    def test_environment_marker_comparisons_do_not_hide_unpinned_requirements(self, tmp_path: Path, requirement: str):
+        """Marker operators must not count as package version constraints."""
+        requirements = tmp_path / "requirements.txt"
+        requirements.write_text(f"{requirement}\n", encoding="utf-8")
+
+        result = HygieneValidator()._check_requirements_file(requirements)
+
+        assert result.errors == []
+        assert result.warnings == [f"requirements.txt:1 - Unpinned: {requirement}"]
+
+    @pytest.mark.parametrize(
+        "requirement",
+        [
+            "requests # owner@example.com",
+            "requests[security] # contact @ owner",
+            "requests # consider >=2 later",
+        ],
+    )
+    def test_inline_comments_do_not_hide_unpinned_requirements(self, tmp_path: Path, requirement: str):
+        """Pip-style inline comments must not affect constraint detection."""
+        requirements = tmp_path / "requirements.txt"
+        requirements.write_text(f"{requirement}\n", encoding="utf-8")
+
+        result = HygieneValidator()._check_requirements_file(requirements)
+
+        assert result.errors == []
+        assert result.warnings == [f"requirements.txt:1 - Unpinned: {requirement}"]
+
+    @pytest.mark.parametrize(
+        "requirement",
+        [
+            "requests @",
+            "requests @ # owner@example.com",
+            'requests @ ; python_version < "3.13"',
+        ],
+    )
+    def test_empty_direct_references_are_not_treated_as_pinned(self, tmp_path: Path, requirement: str):
+        """A direct-reference separator must be followed by a target."""
+        requirements = tmp_path / "requirements.txt"
+        requirements.write_text(f"{requirement}\n", encoding="utf-8")
+
+        result = HygieneValidator()._check_requirements_file(requirements)
+
+        assert result.errors == []
+        assert result.warnings == [f"requirements.txt:1 - Unpinned: {requirement}"]
+
+    @pytest.mark.parametrize(
+        "requirement",
+        [
+            'requests>=2; python_version < "3.13"',
+            "requests>=2.0,<3.0",
+            "requests==2.31.0",
+            "requests~=2.31",
+            "requests!=2.30.0",
+            "requests>=2 # owner@example.com",
+            "requests @ https://example.invalid/requests.whl",
+            "requests @ https://example.invalid/a;v=1/requests.whl",
+            "requests @ https://example.invalid/requests.whl#sha256=abc123",
+            "requests @ https://example.invalid/requests.whl # owner@example.com",
+            'requests @ https://example.invalid/requests.whl ; python_version < "3.13"',
+        ],
+    )
+    def test_marker_handling_preserves_constrained_and_direct_requirements(self, tmp_path: Path, requirement: str):
+        """Version constraints remain accepted, and direct references are treated as pinned."""
+        requirements = tmp_path / "requirements.txt"
+        requirements.write_text(f"{requirement}\n", encoding="utf-8")
+
+        result = HygieneValidator()._check_requirements_file(requirements)
+
+        assert result.errors == []
+        assert result.warnings == []
+
+    def test_banned_requirement_with_marker_remains_an_error(self, tmp_path: Path):
+        """Banned-package errors keep precedence over marker-aware warnings."""
+        requirements = tmp_path / "requirements.txt"
+        requirements.write_text('pycrypto; python_version < "3.13"\n', encoding="utf-8")
+
+        result = HygieneValidator()._check_requirements_file(requirements)
+
+        assert result.errors == ["requirements.txt:1 - Banned package: pycrypto"]
+        assert result.warnings == []
 
     def test_detects_banned_packages(self, tmp_path: Path):
         """Test detection of banned/deprecated packages."""

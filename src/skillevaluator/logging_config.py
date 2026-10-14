@@ -5,11 +5,27 @@
 
 import logging
 
-from rich.console import Console
+from rich.console import Console, ConsoleRenderable
 from rich.logging import RichHandler
 
 # Global console instance for rich output
 console = Console()
+
+# Log messages interpolate skill paths, provider errors, and tool output, so the
+# handlers must not parse them as Rich markup: "[/x]" in a message would raise
+# rich.errors.MarkupError out of the logging call itself, and "[link=...]"
+# could spoof the log line.
+_LOG_MARKUP = False
+
+
+class _LiteralRichHandler(RichHandler):
+    """Rich handler that also drops terminal escape sequences from log messages."""
+
+    def render_message(self, record: logging.LogRecord, message: str) -> ConsoleRenderable:
+        # Imported here: skillevaluator.utils imports this module.
+        from skillevaluator.utils.rich_markup import strip_terminal_controls
+
+        return super().render_message(record, strip_terminal_controls(message))
 
 
 def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
@@ -29,11 +45,11 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
         logger.setLevel(level)
 
         # Rich handler for console output
-        handler = RichHandler(
+        handler = _LiteralRichHandler(
             console=console,
             show_time=False,
             show_path=False,
-            markup=True,
+            markup=_LOG_MARKUP,
             rich_tracebacks=True,
         )
         handler.setLevel(level)
@@ -67,11 +83,11 @@ def setup_logging(verbose: bool = False) -> None:
         root_logger.removeHandler(handler)
 
     # Add Rich handler
-    handler = RichHandler(
+    handler = _LiteralRichHandler(
         console=console,
         show_time=False,
         show_path=False,
-        markup=True,
+        markup=_LOG_MARKUP,
         rich_tracebacks=True,
     )
     handler.setLevel(level)

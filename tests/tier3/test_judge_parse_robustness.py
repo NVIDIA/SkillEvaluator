@@ -36,6 +36,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from skillevaluator import provider_config
 from skillevaluator.tier3.eval_core import llm_judge
 
 _TEMPLATE = (
@@ -51,6 +52,20 @@ def _load_template_module():
 
 
 eval_template = _load_template_module()
+
+
+class _JSONResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode()
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +249,18 @@ def test_extract_json_rejects_nonstandard_json_constants(constant):
     assert eval_template.extract_json(text) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param('{"metadata": 1e999}', id="positive-overflow"),
+        pytest.param('{"nested": [{"value": -1e999}]}', id="negative-nested-overflow"),
+    ],
+)
+def test_extract_json_rejects_finite_syntax_that_overflows_to_infinity(text):
+    assert llm_judge._extract_json(text) is None
+    assert eval_template.extract_json(text) is None
+
+
 def test_behavior_judge_treats_list_payload_as_unparseable(monkeypatch):
     # A bare array is valid JSON but not a judge object; old code raised
     # AttributeError on parsed.get -- now it takes the structured-error path.
@@ -258,6 +285,13 @@ def test_salvage_recovers_complete_entries_from_truncated_results():
 
     assert [r["step"] for r in salvaged] == [1, 2]
     assert [r["passed"] for r in salvaged] == [True, False]
+
+
+def test_salvage_rejects_complete_entries_with_overflowed_numeric_metadata():
+    text = '{"results":[{"step":1,"passed":true,"metadata":1e999},{"step":2'
+
+    assert llm_judge._salvage_behavior_results(text) == []
+    assert eval_template._salvage_behavior_results(text) == []
 
 
 def test_salvage_returns_empty_for_empty_or_alien_text():
@@ -432,29 +466,65 @@ def test_template_behavior_judge_matches_eval_core(monkeypatch, responses):
 
 def test_template_behavior_judge_max_tokens_matches_eval_core_constant():
     assert eval_template.BEHAVIOR_JUDGE_MAX_TOKENS == llm_judge.BEHAVIOR_JUDGE_MAX_TOKENS
+    assert eval_template.BEHAVIOR_JUDGE_MAX_TOKENS == eval_template.STRUCTURED_JUDGE_MAX_TOKENS
+    assert llm_judge.BEHAVIOR_JUDGE_MAX_TOKENS == llm_judge.STRUCTURED_JUDGE_MAX_TOKENS
     assert llm_judge.BEHAVIOR_JUDGE_MAX_TOKENS >= 4096
 
 
-def test_template_default_judge_model_matches_central_constant():
-    from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI
-
-    assert eval_template.DEFAULT_JUDGE_MODEL == llm_judge.DEFAULT_JUDGE_MODEL
-    assert llm_judge.DEFAULT_JUDGE_MODEL == CHAT_DEFAULT_OPENAI
-    assert CHAT_DEFAULT_OPENAI == "gpt-5.6-sol"
+def test_template_default_judge_models_match_provider_chat_defaults():
+    assert eval_template.DEFAULT_JUDGE_MODELS == provider_config.CHAT_DEFAULT_MODELS
 
 
-def test_template_gpt5_temperature_guard_matches_eval_core():
-    for model in (
+@pytest.mark.parametrize("provider", sorted(provider_config.CHAT_DEFAULT_MODELS))
+def test_template_last_resort_judge_follows_the_selected_provider(judge_env, provider):
+    judge_env.setenv("SKILL_EVAL_LLM_PROVIDER", provider)
+
+    assert eval_template._selected_judge_model() == provider_config.CHAT_DEFAULT_MODELS[provider]
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
         "gpt-5.6-sol",
         "openai/gpt-5.6-sol",
         "openai/openai/gpt-5.6-sol",
         "gpt-5.4-mini",
+        "gpt-6.1-sol",
+        "openai/openai/gpt-6.1-sol",
         "gpt-4.1-mini",
+        "gpt-oss-120b",
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "us.anthropic.claude-opus-5-5",
+        "aws/anthropic/bedrock-claude-opus-5",
+        "aws/anthropic/bedrock-claude-opus-5-5",
+        "claude-3-5-sonnet-20241022",
         "claude-mythos-preview",
         "anthropic/claude-mythos-preview",
-    ):
-        assert eval_template._model_leaf(model) == llm_judge._model_leaf(model)
-        assert eval_template._supports_custom_temperature(model) == llm_judge._supports_custom_temperature(model)
+        "nvidia/nemotron-3-super-120b-a12b",
+    ],
+)
+def test_template_model_capabilities_match_provider_config(model):
+    assert eval_template._model_leaf(model) == provider_config._model_leaf(model)
+    assert eval_template._supports_custom_temperature(model) == provider_config._supports_custom_temperature(model)
+    assert eval_template._is_openai_reasoning_model(model) == provider_config.is_openai_reasoning_model(model)
+    assert eval_template._is_claude_5_5_or_later(model) == provider_config.is_claude_5_5_or_later(model)
+    assert eval_template._completion_token_limit(model, 512) == provider_config.completion_token_limit(model, 512)
+    for provider in ("openai", "openai-compatible", "nv_build", "anthropic", "bedrock"):
+        assert eval_template._effective_reasoning_effort(
+            provider, model, "medium"
+        ) == provider_config.effective_reasoning_effort(provider, model, "medium")
+
+
+def test_template_budget_effort_and_fallback_constants_match_package():
+    assert eval_template.REASONING_MAX_COMPLETION_TOKENS == provider_config.REASONING_MAX_COMPLETION_TOKENS
+    assert eval_template.STRUCTURED_JUDGE_MAX_TOKENS == llm_judge.STRUCTURED_JUDGE_MAX_TOKENS
+    assert llm_judge.STRUCTURED_JUDGE_MAX_TOKENS == provider_config.MAX_COMPLETION_TOKENS
+    assert eval_template.JUDGE_REASONING_EFFORT == llm_judge.JUDGE_REASONING_EFFORT
+    assert eval_template.ANTHROPIC_REFUSAL_FALLBACK_MODEL == provider_config.ANTHROPIC_REFUSAL_FALLBACK_MODEL
+    assert eval_template.ANTHROPIC_SERVER_SIDE_FALLBACK_BETA == provider_config.ANTHROPIC_SERVER_SIDE_FALLBACK_BETA
 
 
 @pytest.mark.parametrize(
@@ -524,6 +594,81 @@ def test_template_bedrock_request_uses_model_compatible_temperature(monkeypatch,
 
 
 @pytest.mark.parametrize(
+    ("judge_name", "valid_response"),
+    [
+        pytest.param(
+            "judge_accuracy",
+            {"score": 1.0, "reason": "recovered"},
+            id="accuracy",
+        ),
+        pytest.param(
+            "judge_goal_accuracy",
+            {
+                "achieved": True,
+                "score": 1.0,
+                "reason": "recovered",
+                "user_goal": "complete the task",
+                "end_state": "task completed",
+            },
+            id="custom-goal",
+        ),
+    ],
+)
+def test_template_structured_judges_retry_nullable_openai_content(
+    monkeypatch,
+    judge_name,
+    valid_response,
+):
+    responses = iter(
+        [
+            {"choices": [{"message": {"content": None}}]},
+            {"choices": [{"message": {"content": json.dumps(valid_response)}}]},
+        ]
+    )
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 90
+        requests.append(json.loads(request.data))
+        return _JSONResponse(next(responses))
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", "https://openai-compatible.example/v1")
+    monkeypatch.delenv("LLM_JUDGE_FALLBACK_MODELS", raising=False)
+    monkeypatch.setattr(eval_template.urllib.request, "urlopen", fake_urlopen)
+
+    result = getattr(eval_template, judge_name)("question", "ground truth", "agent response")
+
+    assert result["score"] == 1.0
+    assert len(requests) == 2
+    assert [request["max_tokens"] for request in requests] == [eval_template.REASONING_MAX_COMPLETION_TOKENS] * 2
+    assert "previous reply could not be parsed or validated" in requests[1]["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("content", [{"nested": "text"}, ["text"], 1])
+def test_template_non_string_openai_content_remains_a_provider_error(monkeypatch, content):
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(json.loads(request.data))
+        return _JSONResponse({"choices": [{"message": {"content": content}}]})
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", "https://openai-compatible.example/v1")
+    monkeypatch.delenv("LLM_JUDGE_FALLBACK_MODELS", raising=False)
+    monkeypatch.setattr(eval_template.urllib.request, "urlopen", fake_urlopen)
+
+    result = eval_template.judge_accuracy("question", "ground truth", "agent response")
+
+    assert len(requests) == 1
+    assert result["score"] is None
+    assert result["status"] == "error"
+    assert result["reason"].startswith("LLM judge error: Public provider call failed")
+
+
+@pytest.mark.parametrize(
     "model",
     ["gpt-5.6-sol", "openai/gpt-5.6-sol", "openai/openai/gpt-5.6-sol"],
 )
@@ -543,6 +688,23 @@ def test_template_native_openai_gpt5_payload_matches_eval_core(model):
     assert "max_tokens" not in template_payload
 
 
+def test_template_schema_and_payload_match_eval_core():
+    assert eval_template.ACCURACY_JSON_SCHEMA == llm_judge.ACCURACY_JSON_SCHEMA
+    assert eval_template.GOAL_ACCURACY_JSON_SCHEMA == llm_judge.GOAL_ACCURACY_JSON_SCHEMA
+    assert eval_template.BEHAVIOR_CHECK_JSON_SCHEMA == llm_judge.BEHAVIOR_CHECK_JSON_SCHEMA
+    kwargs = {
+        "model": "gpt-4o",
+        "prompt": "Judge this response",
+        "max_tokens": 512,
+        "temperature": 0.0,
+        "provider": "openai",
+        "request_url": llm_judge.OPENAI_CHAT_URL,
+        "response_schema": llm_judge.ACCURACY_JSON_SCHEMA,
+        "schema_name": "accuracy_judgment",
+    }
+    assert eval_template._chat_completion_payload(**kwargs) == llm_judge._chat_completion_payload(**kwargs)
+
+
 def test_template_salvage_score_matches_eval_core_on_partial_recovery(monkeypatch):
     # Drift guard for the salvage denominator fix: 3 salvaged of 7 expected
     # must score 3/7 in BOTH the shared judge and the in-sandbox template.
@@ -559,3 +721,179 @@ def test_template_salvage_score_matches_eval_core_on_partial_recovery(monkeypatc
     assert template == shared
     assert shared["score"] == round(3 / 7, 4)
     assert "3/7" in template["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-model request shape, refusals and judge provenance
+# ---------------------------------------------------------------------------
+
+VALID_GOAL_RESPONSE = json.dumps(
+    {"user_goal": "do it", "end_state": "done", "achieved": True, "score": 1.0, "reason": "met"}
+)
+
+
+@pytest.fixture
+def judge_env(monkeypatch):
+    for name in (
+        "LLM_JUDGE_MODEL",
+        "SKILL_EVAL_JUDGE_MODEL",
+        "SKILL_EVAL_LLM_MODEL",
+        "LLM_JUDGE_FALLBACK_MODELS",
+        "SKILL_EVAL_LLM_BASE_URL",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_BASE_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    return monkeypatch
+
+
+def _anthropic_body(text, *, stop_reason="end_turn", served_by=None):
+    content = []
+    if served_by:
+        content.append({"type": "fallback", "from": {"model": "requested"}, "to": {"model": served_by}})
+    if text:
+        content.append({"type": "text", "text": text})
+    return {"content": content, "stop_reason": stop_reason}
+
+
+def _replay(monkeypatch, replies):
+    requests = []
+    pending = iter(replies)
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        return _JSONResponse(next(pending))
+
+    monkeypatch.setattr(eval_template.urllib.request, "urlopen", fake_urlopen)
+    return requests
+
+
+@pytest.mark.parametrize(("model", "claude_5_5"), [("claude-opus-5-5", True), ("claude-opus-5", False)])
+def test_template_anthropic_claude_5_5_sends_effort_and_server_side_fallback(judge_env, model, claude_5_5):
+    judge_env.setenv("ANTHROPIC_API_KEY", "test-key")
+    requests = _replay(judge_env, [_anthropic_body("Done")])
+
+    assert eval_template._call_anthropic("prompt", model, 4096, 0.0) == ("Done", None)
+
+    payload = json.loads(requests[0].data)
+    if claude_5_5:
+        assert payload["output_config"] == {"effort": "medium"}
+        assert payload["fallbacks"] == [{"model": "claude-opus-4-8"}]
+        assert requests[0].get_header("Anthropic-beta") == "server-side-fallback-2026-07-01"
+    else:
+        assert {"output_config", "fallbacks"}.isdisjoint(payload)
+        assert requests[0].get_header("Anthropic-beta") is None
+
+
+def test_template_anthropic_gateway_gets_effort_without_server_side_fallback(judge_env):
+    judge_env.setenv("ANTHROPIC_API_KEY", "test-key")
+    judge_env.setenv("ANTHROPIC_BASE_URL", "https://gateway.example")
+    requests = _replay(judge_env, [_anthropic_body("Done")])
+
+    eval_template._call_anthropic("prompt", "claude-opus-5-5", 4096, 0.0)
+
+    payload = json.loads(requests[0].data)
+    assert payload["output_config"] == {"effort": "medium"}
+    assert "fallbacks" not in payload
+
+
+def test_template_required_judge_records_the_model_that_answered(judge_env):
+    judge_env.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+    judge_env.setenv("ANTHROPIC_API_KEY", "test-key")
+    judge_env.setenv("LLM_JUDGE_MODEL", "claude-opus-5-5")
+    _replay(judge_env, [_anthropic_body(VALID_GOAL_RESPONSE, served_by="claude-opus-4-8")])
+
+    result = eval_template._call_required_judge(
+        "goal_accuracy", eval_template._judge_goal_accuracy_custom, "q", "gt", "agent", ""
+    )
+
+    assert result["score"] == 1.0
+    assert result["judge_model_used"] == "claude-opus-4-8"
+    assert result["judge_reasoning_effort"] == "medium"
+    assert result["judge_fallback_used"] is True
+
+
+def test_template_anthropic_refusal_tries_the_configured_fallback_model(judge_env):
+    judge_env.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+    judge_env.setenv("ANTHROPIC_API_KEY", "test-key")
+    judge_env.setenv("LLM_JUDGE_FALLBACK_MODELS", "claude-opus-4-8")
+    requests = _replay(judge_env, [_anthropic_body("", stop_reason="refusal"), _anthropic_body("Done")])
+
+    content, error, provenance = eval_template._call_public_llm_with_provenance("prompt", model="claude-opus-5-5")
+
+    assert (content, error) == ("Done", None)
+    assert provenance == {"provider": "anthropic", "model": "claude-opus-4-8"}
+    assert [json.loads(request.data)["model"] for request in requests] == ["claude-opus-5-5", "claude-opus-4-8"]
+
+
+def test_template_refusal_without_a_fallback_is_a_judge_error(judge_env):
+    judge_env.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+    judge_env.setenv("ANTHROPIC_API_KEY", "test-key")
+    _replay(judge_env, [_anthropic_body("", stop_reason="refusal")])
+
+    content, error = eval_template.call_public_llm("prompt", model="claude-opus-5-5")
+
+    assert content is None
+    assert "declined the request" in error
+
+
+@pytest.mark.parametrize(
+    "first_reply",
+    [
+        pytest.param({"choices": [{"finish_reason": "content_filter", "message": {"content": ""}}]}, id="filter"),
+        pytest.param({"choices": [{"message": {"content": None, "refusal": "I can't help."}}]}, id="refusal"),
+        pytest.param({"choices": [{"finish_reason": "length", "message": {"content": ""}}]}, id="empty"),
+    ],
+)
+def test_template_openai_refusal_or_empty_reply_tries_the_fallback_model(judge_env, first_reply):
+    judge_env.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    judge_env.setenv("OPENAI_API_KEY", "test-key")
+    judge_env.setenv("SKILL_EVAL_LLM_BASE_URL", "https://gateway.example/v1")
+    judge_env.setenv("LLM_JUDGE_FALLBACK_MODELS", "fallback-model")
+    _replay(judge_env, [first_reply, {"choices": [{"message": {"content": "Done"}}]}])
+
+    content, error, provenance = eval_template._call_public_llm_with_provenance("prompt", model="primary-model")
+
+    assert (content, error, provenance["model"]) == ("Done", None, "fallback-model")
+
+
+@pytest.mark.parametrize("model", ["us.anthropic.claude-opus-5-5", "eu.anthropic.claude-sonnet-5-5"])
+def test_template_bedrock_classifier_refusal_retries_on_opus_4_8(monkeypatch, model):
+    import boto3
+
+    client = MagicMock()
+    client.converse.side_effect = [
+        {"stopReason": "content_filtered", "output": {"message": {"content": []}}},
+        {"stopReason": "end_turn", "output": {"message": {"content": [{"text": "Done"}]}}},
+    ]
+    monkeypatch.setattr(boto3, "client", lambda *_args, **_kwargs: client)
+    provenance = {"provider": "bedrock", "model": model}
+
+    content, error = eval_template._call_bedrock("prompt", model, 4096, 0.0, provenance=provenance)
+
+    fallback = model.split("anthropic.", 1)[0] + "anthropic.claude-opus-4-8"
+    assert (content, error) == ("Done", None)
+    assert [call.kwargs["modelId"] for call in client.converse.call_args_list] == [model, fallback]
+    assert provenance["model"] == fallback
+
+
+def test_template_bedrock_refusal_without_a_fallback_route_is_reported(monkeypatch):
+    import boto3
+
+    client = MagicMock()
+    client.converse.return_value = {"stopReason": "content_filtered", "output": {"message": {"content": []}}}
+    monkeypatch.setattr(boto3, "client", lambda *_args, **_kwargs: client)
+
+    with pytest.raises(eval_template._JudgeRefusedError):
+        eval_template._call_bedrock("prompt", "us.anthropic.claude-opus-5", 4096, 0.0)
+
+    assert client.converse.call_count == 1
+
+
+@pytest.mark.parametrize(("model", "enabled"), [("gpt-5.6-sol", False), ("gpt-6.1-sol", False), ("gpt-4.1-mini", True)])
+def test_template_ragas_goal_scorer_skips_reasoning_judges(judge_env, model, enabled):
+    judge_env.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    judge_env.setenv("OPENAI_API_KEY", "test-key")
+    judge_env.setenv("LLM_JUDGE_MODEL", model)
+
+    assert eval_template._ragas_goal_accuracy_enabled() is enabled

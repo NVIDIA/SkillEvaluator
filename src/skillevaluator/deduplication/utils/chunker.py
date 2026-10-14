@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from markdown_it import MarkdownIt
+
 from skillevaluator.constants import CONTENT_DEDUP_MIN_CHUNK_CHARS
 from skillevaluator.spdx import is_spdx_only_html_comment
 
@@ -67,13 +69,20 @@ def chunk_markdown(
 ) -> list[ContentChunk]:
     """Split markdown into heading-level sections with line tracking."""
     lines = collected.content.splitlines(keepends=True)
+    # A heading-like line in a fenced example is literal content, not a section.
+    fenced_lines = {
+        line + collected.line_offset + 1
+        for token in MarkdownIt("commonmark").parse(collected.content)
+        if token.type == "fence" and token.map is not None
+        for line in range(*token.map)
+    }
     sections: list[ContentChunk] = []
     current_heading = "(preamble)"
     current_start = collected.line_offset + 1
     current_lines: list[str] = []
 
     for i, line in enumerate(lines, start=collected.line_offset + 1):
-        match = HEADING_PATTERN.match(line)
+        match = None if i in fenced_lines else HEADING_PATTERN.match(line)
         if match:
             if current_lines:
                 text = "".join(current_lines).strip()

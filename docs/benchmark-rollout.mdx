@@ -56,7 +56,8 @@ skillevaluator validate ./skills/example-skill \
   --output-dir ./benchmark-backfill/example-skill
 ```
 
-Tier 3 is publication-required by default. Omitting `--agent-eval` therefore
+Tier 3 runs by default for skills and is publication-required by default.
+Excluding it, with `--no-tier3` or a `--tiers` selection without `3`, therefore
 produces an `INCOMPLETE` card with Tier 3 marked `NOT RUN`, and never a
 publication recommendation. If a catalog intentionally makes Tier 3 optional,
 its orchestration must persist `benchmark_policy.tier3_required = false`; the
@@ -108,6 +109,26 @@ Scan all candidates before copying them into skills:
 python scripts/ci/check_public_benchmarks.py \
   --require-files \
   ./benchmark-backfill
+```
+
+Add `--require-source-provenance` for any tree whose cards were generated with
+the evaluated-source identity supplied. SkillEvaluator's own CI runs the scan
+with the flag. It requires every scanned card to carry `Evaluated source`,
+`Evaluated source revision` and `Evaluator container revision`, and fails any
+card publishing a `PASS` that does not record the repository and revision it
+evaluated, or whose evaluator container is named by a mutable tag rather than
+pinned by digest. That includes a card whose Tier 3 row is skipped under an
+`optional by policy` contract. The flag stays opt-in because cards generated
+before the identity contract existed cannot satisfy it; without it the scan
+skips these identity checks.
+
+Supply the identity when regenerating a card:
+
+```bash
+skillevaluator validate ./my-skill \
+  --evaluated-source-repository NVIDIA/NVFlare \
+  --evaluated-source-revision 2263a2ebdab903e87f7e7c0a001d22c3a926a9cf \
+  --evaluator-container-revision ghcr.io/nvidia/skillevaluator@sha256:0117bc2e...
 ```
 
 The linter rejects configured known leak patterns such as retired product

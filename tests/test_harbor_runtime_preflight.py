@@ -151,6 +151,7 @@ def test_runtime_preflight_runs_one_case_once_without_verification(monkeypatch, 
     def run(command, **kwargs):
         captured["command"] = command
         captured["run_kwargs"] = kwargs
+        captured["cwd_entries"] = sorted(path.name for path in Path(kwargs["cwd"]).iterdir())
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(runtime_preflight, "build_harbor_run_command", build)
@@ -160,6 +161,10 @@ def test_runtime_preflight_runs_one_case_once_without_verification(monkeypatch, 
         "validate_harbor_agent_only_job_result",
         lambda *_args, **_kwargs: (True, "ok"),
     )
+    operator_dir = tmp_path / "operator"
+    operator_dir.mkdir()
+    (operator_dir / ".env.local").write_text("SE_DOTENV_SENTINEL=leaked\n", encoding="utf-8")
+    monkeypatch.chdir(operator_dir)
 
     result = runtime_preflight.run_agent_runtime_preflight(
         dataset=_dataset(tmp_path),
@@ -181,7 +186,11 @@ def test_runtime_preflight_runs_one_case_once_without_verification(monkeypatch, 
     run_kwargs = captured["run_kwargs"]
     assert isinstance(run_kwargs, dict)
     assert run_kwargs["timeout"] == 321
-    assert run_kwargs["env"] == {"NVIDIA_API_KEY": "secret"}
+    assert run_kwargs["env"] == {"NVIDIA_API_KEY": "secret", "HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_DISABLED": "1"}
+    # Harbor starts in an empty evaluator-owned directory, never the operator's.
+    assert Path(run_kwargs["cwd"]) != operator_dir
+    assert captured["cwd_entries"] == []
+    assert not Path(run_kwargs["cwd"]).exists()
 
 
 def test_runtime_preflight_hands_nvidia_build_key_only_over_stdin(monkeypatch, tmp_path: Path) -> None:
@@ -229,7 +238,11 @@ def test_runtime_preflight_hands_nvidia_build_key_only_over_stdin(monkeypatch, t
 
 def test_runtime_preflight_accepts_harbor_0132_unscored_agent_success(monkeypatch, tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
-    _write_harbor_0132_unscored_result(jobs_dir)
+    result_path = _write_harbor_0132_unscored_result(jobs_dir)
+    # A real completed agent run always leaves its transcript on the mounted host path.
+    agent_dir = result_path.parent / "case-001__attempt" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "opencode.txt").write_text("agent transcript", encoding="utf-8")
     monkeypatch.setattr(runtime_preflight, "build_harbor_run_command", lambda **_kwargs: ["harbor", "run"])
     monkeypatch.setattr(
         runtime_preflight.subprocess,
@@ -247,6 +260,72 @@ def test_runtime_preflight_accepts_harbor_0132_unscored_agent_success(monkeypatc
     )
 
     assert result.ok is True
+
+
+def test_agent_only_validation_accepts_actual_harbor_022_single_step_result(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+    from uuid import UUID
+
+    from harbor.models.job.result import JobResult, JobStats
+    from harbor.models.trial.result import TrialResult
+
+    job_dir = tmp_path / "jobs" / "runtime-preflight-opencode"
+    trial_dir = job_dir / "case-001__attempt"
+    trial_dir.mkdir(parents=True)
+    now = datetime(2026, 8, 25, tzinfo=UTC)
+    trial_result = TrialResult.model_validate(
+        {
+            "id": UUID(int=2),
+            "task_name": "nvidia/skillevaluator-case-001",
+            "trial_name": trial_dir.name,
+            "trial_uri": trial_dir.as_uri(),
+            "task_id": {"path": str(job_dir / "task" / "case-001")},
+            "task_checksum": "harbor-0.22-agent-only-fixture",
+            "config": {
+                "task": {"path": str(job_dir / "task" / "case-001")},
+                "trial_name": trial_dir.name,
+                "verifier": {"disable": True},
+            },
+            "agent_info": {
+                "name": "opencode",
+                "version": "test",
+                "model_info": {"name": "test-model"},
+            },
+            "agent_result": {
+                "n_input_tokens": 100,
+                "n_cache_tokens": 20,
+                "n_output_tokens": 10,
+            },
+            "verifier_result": None,
+            "exception_info": None,
+            "started_at": now,
+            "finished_at": now,
+            "step_results": None,
+        }
+    )
+    job_result = JobResult(
+        id=UUID(int=1),
+        started_at=now,
+        updated_at=now,
+        finished_at=now,
+        n_total_trials=1,
+        stats=JobStats.from_trial_results([trial_result], n_total_trials=1),
+        trial_results=[trial_result],
+    )
+    result_path = job_dir / "result.json"
+    result_path.write_text(job_result.model_dump_json(indent=2), encoding="utf-8")
+    (trial_dir / "result.json").write_text(trial_result.model_dump_json(indent=2), encoding="utf-8")
+
+    persisted_job = JobResult.model_validate_json(result_path.read_text(encoding="utf-8"))
+    persisted_trial = TrialResult.model_validate_json((trial_dir / "result.json").read_text(encoding="utf-8"))
+
+    assert persisted_job.stats.n_completed_trials == 1
+    assert persisted_job.stats.n_errored_trials == 0
+    assert persisted_job.stats.n_input_tokens == 100
+    assert persisted_job.stats.n_cache_tokens == 20
+    assert persisted_job.stats.n_output_tokens == 10
+    assert persisted_trial.step_results is None
+    assert runtime_preflight.validate_harbor_agent_only_job_result(result_path, expected_trials=1) == (True, "")
 
 
 def test_agent_only_validation_accepts_harbor_0132_unscored_multistep_agent_success(tmp_path: Path) -> None:
@@ -657,6 +736,32 @@ def test_task_timeout_plan_uses_largest_staged_timeout(tmp_path: Path) -> None:
         (task / "task.toml").write_text(f"[agent]\ntimeout_sec = {timeout}.0\n")
 
     assert runner._task_timeout_plan([root], 2.0) == 600.0
+
+
+@pytest.mark.parametrize(
+    "task_toml",
+    [
+        "[agent]\ntimeout_sec = 900.0\n",
+        "[verifier]\ntimeout_sec = 900.0\n",
+        "[environment]\nbuild_timeout_sec = 900.0\n",
+        '[[steps]]\nname = "one"\n[steps.agent]\ntimeout_sec = 900.0\n',
+        '[[steps]]\nname = "one"\n[steps.verifier]\ntimeout_sec = 900.0\n',
+    ],
+    ids=["agent", "verifier", "environment-build", "step-agent", "step-verifier"],
+)
+def test_task_timeout_plan_rejects_staged_timeout_product_overflow(
+    tmp_path: Path,
+    task_toml: str,
+) -> None:
+    from skillevaluator.tier3.evals_config import MAX_HARBOR_TIMEOUT_MULTIPLIER
+    from skillevaluator.tier3.harbor import runner
+
+    task = tmp_path / "tasks" / "case-1"
+    task.mkdir(parents=True)
+    (task / "task.toml").write_text(task_toml, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="non-finite Harbor timeout"):
+        runner._task_timeout_plan([task.parent], MAX_HARBOR_TIMEOUT_MULTIPLIER)
 
 
 def test_model_probe_delegates_to_shared_catalog_client_without_exposing_key(monkeypatch) -> None:
@@ -3587,6 +3692,10 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
 
     assert result["execution_status"] == "failed"
     assert result["execution_errors"] == ["opencode runtime preflight failed: 401 Unauthorized"]
+    assert result["error"] == result["execution_errors"][:1]
+    assert result["execution_error_details_total"] == 1
+    assert result["execution_error_details_shown"] == 1
+    assert result["execution_error_details_truncated"] is False
     assert preflight_run_env["LLM_JUDGE_MODEL"] == "host-legacy"
     assert preflight_run_env["SKILL_EVAL_JUDGE_MODEL"] == "host-legacy"
     full_matrix.assert_not_called()
@@ -3604,6 +3713,8 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
         "model catalog access does not verify runtime credentials for this endpoint"
     }
     persisted = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result_path.stat().st_size <= 2 * 1024 * 1024
+    assert persisted["error"] == persisted["execution_errors"][:1]
     assert persisted["run_config"] == result["run_config"]
     run_config_path = Path(result["run_dir"]) / "run_config.json"
     assert json.loads(run_config_path.read_text(encoding="utf-8")) == result["run_config"]
@@ -3647,3 +3758,230 @@ def test_live_custom_catalog_401_is_inconclusive_without_exposing_secret(provide
     assert runtime_preflight.credential_probe_disposition(provider, result) == "degraded"
     assert secret not in result.detail
     assert requests == ["/v1/models"]
+
+
+def test_agent_only_validation_accepts_visible_agent_artifacts_in_docker_mode(tmp_path: Path) -> None:
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    agent_dir = result_path.parent / "case-001__attempt" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "opencode.txt").write_text("agent transcript", encoding="utf-8")
+
+    assert runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    ) == (True, "")
+
+
+def test_agent_only_validation_accepts_visible_multistep_agent_artifacts_in_docker_mode(tmp_path: Path) -> None:
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    trial_dir = result_path.parent / "case-001__attempt"
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": "case-001__attempt",
+                "agent_result": None,
+                "exception_info": None,
+                "step_results": [
+                    {
+                        "step_name": "author-skill",
+                        "agent_result": {"n_input_tokens": 100},
+                        "exception_info": None,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    step_agent_dir = trial_dir / "steps" / "author-skill" / "agent"
+    step_agent_dir.mkdir(parents=True)
+    (step_agent_dir / "opencode.txt").write_text("agent transcript", encoding="utf-8")
+
+    assert runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    ) == (True, "")
+
+
+def test_agent_only_validation_rejects_invisible_agent_artifacts_in_docker_mode(tmp_path: Path) -> None:
+    """An empty host-side agent tree means the daemon never shared the results directory."""
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    # Harbor creates the mount points, but a daemon-side bind source leaves them empty.
+    (result_path.parent / "case-001__attempt" / "agent" / "setup").mkdir(parents=True)
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail
+
+
+def test_agent_only_validation_skips_mount_check_outside_docker_mode(tmp_path: Path) -> None:
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    (result_path.parent / "case-001__attempt" / "agent" / "setup").mkdir(parents=True)
+
+    assert runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="local"
+    ) == (True, "")
+
+
+def test_agent_only_validation_ignores_empty_files_when_checking_visibility(tmp_path: Path) -> None:
+    """A zero-byte placeholder is not evidence that container writes reached the host."""
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    agent_dir = result_path.parent / "case-001__attempt" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "opencode.txt").write_text("", encoding="utf-8")
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail
+
+
+def _write_multistep_agent_only_result(jobs_dir: Path, step_name: str) -> Path:
+    """Write a completed agent-only job whose single trial has one named step."""
+    result_path = _write_harbor_0132_unscored_result(jobs_dir)
+    (result_path.parent / "case-001__attempt" / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": "case-001__attempt",
+                "agent_result": None,
+                "exception_info": None,
+                "step_results": [
+                    {
+                        "step_name": step_name,
+                        "agent_result": {"n_input_tokens": 100},
+                        "exception_info": None,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return result_path
+
+
+def test_agent_only_validation_finds_nested_step_agent_artifacts(tmp_path: Path) -> None:
+    """Harbor declares StepConfig.name as a bare str, so a step name may nest."""
+    result_path = _write_multistep_agent_only_result(tmp_path / "jobs", "phase/author")
+    agent_dir = result_path.parent / "case-001__attempt" / "steps" / "phase" / "author" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "opencode.txt").write_text("agent transcript", encoding="utf-8")
+
+    assert runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    ) == (True, "")
+
+
+def test_agent_only_validation_rejects_empty_nested_step_agent_directory(tmp_path: Path) -> None:
+    result_path = _write_multistep_agent_only_result(tmp_path / "jobs", "phase/author")
+    (result_path.parent / "case-001__attempt" / "steps" / "phase" / "author" / "agent").mkdir(parents=True)
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail
+
+
+def test_agent_only_validation_ignores_step_names_that_escape_the_trial(tmp_path: Path) -> None:
+    """A traversing step name must not be joined onto the trial directory."""
+    result_path = _write_multistep_agent_only_result(tmp_path / "jobs", "../../escape")
+    outside = tmp_path / "jobs" / "escape" / "agent"
+    outside.mkdir(parents=True)
+    (outside / "opencode.txt").write_text("attacker controlled", encoding="utf-8")
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail
+
+
+def test_agent_only_validation_does_not_follow_agent_authored_symlinks(tmp_path: Path) -> None:
+    """A link into the host must not be accepted as proof the mount worked."""
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    outside = tmp_path / "outside.log"
+    outside.write_text("host file the container does not own", encoding="utf-8")
+    agent_dir = result_path.parent / "case-001__attempt" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "claimed.log").symlink_to(outside)
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail
+
+
+def test_agent_only_validation_does_not_follow_symlinked_agent_directory(tmp_path: Path) -> None:
+    """The walk must reject a link at its root, not just links found below it."""
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "opencode.txt").write_text("host file the container does not own", encoding="utf-8")
+    agent_dir = result_path.parent / "case-001__attempt" / "agent"
+    agent_dir.symlink_to(outside_dir, target_is_directory=True)
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail
+
+
+def test_agent_only_validation_does_not_follow_nested_step_ancestor_symlink(tmp_path: Path) -> None:
+    """Each path component leading to a nested step's agent tree is untrusted."""
+    result_path = _write_multistep_agent_only_result(tmp_path / "jobs", "phase/author")
+    outside_phase = tmp_path / "outside-phase"
+    outside_agent = outside_phase / "author" / "agent"
+    outside_agent.mkdir(parents=True)
+    (outside_agent / "opencode.txt").write_text("host file the container does not own", encoding="utf-8")
+    steps_dir = result_path.parent / "case-001__attempt" / "steps"
+    steps_dir.mkdir()
+    (steps_dir / "phase").symlink_to(outside_phase, target_is_directory=True)
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail
+
+
+def test_visible_artifact_scan_stops_enumerating_at_entry_limit(monkeypatch, tmp_path: Path) -> None:
+    """The limit must bound directory enumeration, not only later stat calls."""
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    empty_file = agent_dir / "empty.log"
+    empty_file.touch()
+
+    def hostile_iterdir(_directory: Path):
+        for _ in range(runtime_preflight._MAX_ARTIFACT_SCAN_ENTRIES + 1):
+            yield empty_file
+        raise AssertionError("artifact scan enumerated beyond its declared limit")
+
+    monkeypatch.setattr(Path, "iterdir", hostile_iterdir)
+
+    assert runtime_preflight._has_visible_artifact(agent_dir, root=tmp_path) is False
+
+
+def test_agent_only_validation_does_not_follow_symlinked_agent_subdirectories(tmp_path: Path) -> None:
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "opencode.txt").write_text("host file the container does not own", encoding="utf-8")
+    agent_dir = result_path.parent / "case-001__attempt" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "sessions").symlink_to(outside_dir, target_is_directory=True)
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail

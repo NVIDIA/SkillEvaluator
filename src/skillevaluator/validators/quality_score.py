@@ -27,6 +27,7 @@ from urllib.parse import unquote, urlsplit
 import yaml
 
 from skillevaluator.constants import (
+    EXECUTABLE_SKILL_DIRS,
     QUALITY_EXCLUDED_DIRS,
     QUALITY_RECOMMENDED_MAX_TOKENS,
     QUALITY_RESERVED_NAMES,
@@ -37,6 +38,7 @@ from skillevaluator.models.quality import QualityScoreResult
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.models.skill import XML_TAG_RE
 from skillevaluator.validators.base import ValidatorBase
+from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.markdown import markdown_link_targets
 
 logger = get_logger(__name__)
@@ -80,8 +82,12 @@ def _has_api_documentation(content: str) -> bool:
     return any(re.search(pattern, content, re.IGNORECASE) for pattern in api_patterns)
 
 
-def _normalized_local_path(href: str) -> str | None:
-    """Return a once-decoded, normalized local file path from a link destination."""
+def _normalized_quality_local_path(href: str) -> str | None:
+    """Normalize a local path using Quality Score's legacy classification order.
+
+    This intentionally remains separate from Hygiene's stricter path policy:
+    issue #108 requires this PR to leave existing Quality scores unchanged.
+    """
     href = _URL_EDGE_C0_OR_SPACE_RE.sub("", href)
     try:
         parsed = urlsplit(href)
@@ -106,7 +112,7 @@ def _normalized_local_path(href: str) -> str | None:
 def _has_nested_markdown_reference(content: str) -> bool:
     """Return whether a reference document links to another local Markdown document."""
     for target in markdown_link_targets(content):
-        path = _normalized_local_path(target)
+        path = _normalized_quality_local_path(target)
         if path is None or not path.casefold().endswith(".md"):
             continue
         if path.casefold() == "../skill.md":
@@ -142,13 +148,26 @@ class QualityScoreValidator(ValidatorBase):
     # -----------------------------------------------------------------
 
     @staticmethod
+    def _executable_files(skill_path: Path, patterns: tuple[str, ...] = ("*.py", "*.sh")) -> list[Path]:
+        files: list[Path] = []
+        for dirname in EXECUTABLE_SKILL_DIRS:
+            directory = skill_path / dirname
+            if directory.is_dir():
+                for pattern in patterns:
+                    files.extend(sorted(directory.glob(pattern)))
+        return files
+
+    @staticmethod
+    def _has_executable_directory(skill_path: Path) -> bool:
+        return any((skill_path / dirname).is_dir() for dirname in EXECUTABLE_SKILL_DIRS)
+
+    @staticmethod
     def detect_skill_type(skill_path: Path) -> str:
         """Auto-detect skill type from directory structure.
 
         Returns one of: script-based, lib-based, resource-based, guide-only, hybrid.
         """
-        scripts_dir = skill_path / "scripts"
-        has_scripts = scripts_dir.is_dir() and bool(list(scripts_dir.glob("*.py")) + list(scripts_dir.glob("*.sh")))
+        has_scripts = bool(QualityScoreValidator._executable_files(skill_path))
 
         has_lib = False
         for d in skill_path.iterdir():
@@ -263,7 +282,7 @@ class QualityScoreValidator(ValidatorBase):
             result.metadata["quality_scores"] = qs.to_dict()
             return result
 
-        content = manifest.read_text(encoding="utf-8")
+        content = manifest.read_text(encoding="utf-8-sig")
         lines = content.split("\n")
 
         frontmatter_data = self._parse_frontmatter(content)
@@ -315,7 +334,7 @@ class QualityScoreValidator(ValidatorBase):
 
     @staticmethod
     def _parse_frontmatter(content: str) -> dict | None:
-        fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+        fm_match = FRONTMATTER_PATTERN.match(content)
         if not fm_match:
             return None
         try:
@@ -384,7 +403,7 @@ class QualityScoreValidator(ValidatorBase):
     def _references_readme(content: str) -> bool:
         """Return whether SKILL.md contains a parsed Markdown link to README.md."""
         for link_target in markdown_link_targets(content):
-            path = _normalized_local_path(link_target)
+            path = _normalized_quality_local_path(link_target)
             if path is not None and path.casefold() == "readme.md":
                 return True
         return False
@@ -444,19 +463,18 @@ class QualityScoreValidator(ValidatorBase):
         skill_type = qs.skill_type
 
         if skill_type in ("script-based", "hybrid"):
-            scripts_dir = skill_path / "scripts"
-            if scripts_dir.exists():
+            script_files = self._executable_files(skill_path)
+            if self._has_executable_directory(skill_path):
                 qs.has_scripts = True
-                py_sh = list(scripts_dir.glob("*.py")) + list(scripts_dir.glob("*.sh"))
-                qs.script_count = len(py_sh)
+                qs.script_count = len(script_files)
                 if qs.script_count == 0:
-                    dim.deduct(10, "warning", "scripts/ directory exists but contains no .py or .sh files")
+                    dim.deduct(10, "warning", "scripts/ or tools/ exists but contains no .py or .sh files")
             else:
                 dim.deduct(
                     25,
                     "error",
-                    "No scripts/ directory found (detected as script-based skill)",
-                    "Create scripts/ directory with at least one executable script",
+                    "No scripts/ or tools/ directory found (detected as script-based skill)",
+                    "Create scripts/ or tools/ with at least one executable script",
                 )
 
             if "## Available Scripts" not in content and "| Script |" not in content:
@@ -672,11 +690,8 @@ class QualityScoreValidator(ValidatorBase):
             )
 
     def _check_script_reliability(self, dim, skill_path: Path) -> None:
-        scripts_dir = skill_path / "scripts"
-        if not scripts_dir.exists():
-            return
         no_error_handling = []
-        for script in scripts_dir.glob("*.py"):
+        for script in self._executable_files(skill_path, patterns=("*.py",)):
             try:
                 sc = script.read_text(encoding="utf-8")
             except Exception:
@@ -744,7 +759,7 @@ class QualityScoreValidator(ValidatorBase):
 
         # Token estimates
         qs.total_tokens = len(content) // 4
-        fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+        fm_match = FRONTMATTER_PATTERN.match(content)
         if fm_match:
             qs.frontmatter_tokens = len(fm_match.group(1)) // 4
         inst_start = content.find("---", 3) + 3

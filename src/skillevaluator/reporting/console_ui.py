@@ -18,6 +18,10 @@ once, statically, as it completes.
 
 ``validate --verbose`` bypasses this module entirely and keeps the historical
 full-detail stream.
+
+Skill names, finding messages, failure reasons and paths are untrusted. The
+view strips terminal control sequences from every string it renders, and its
+consoles are created with ``emoji=False`` so ``:name:`` codes print literally.
 """
 
 from __future__ import annotations
@@ -32,6 +36,8 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
+
+from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 if TYPE_CHECKING:
     from skillevaluator.models.result import ValidationResult
@@ -136,7 +142,7 @@ def make_view_console(file: TextIO | None = None) -> Console:
     engine-capture window (``redirect_stdout``) or the output lands in the
     capture buffer -- pass the already-pinned view console's file instead.
     """
-    return Console(highlight=False, file=file if file is not None else sys.stdout)
+    return Console(highlight=False, emoji=False, file=file if file is not None else sys.stdout)
 
 
 def _pill(label: str, color: str, ink: str = INK) -> Text:
@@ -226,7 +232,7 @@ class ValidateView:
         # Pin the output stream at construction: the Tier 3 engine's narration
         # is captured via redirect_stdout, and the view must keep writing to
         # the real stream (or the test runner's buffer) while that happens.
-        self.console = console or Console(highlight=False, file=sys.stdout)
+        self.console = console or Console(highlight=False, emoji=False, file=sys.stdout)
         # Design width is 98 columns; degrade gracefully on narrower terminals.
         self.width = max(60, min(WIDTH, self.console.width))
         self.blocks = [TierBlock(number=number, name=name, caption=caption) for number, name, caption in tiers]
@@ -333,7 +339,7 @@ class ValidateView:
             ("skillevaluator", f"bold {TEXT}"),
             (f" {self.command}", MUTED),
         )
-        right = _pill(self.skill, GREEN)
+        right = _pill(strip_terminal_controls(self.skill), GREEN)
         pad = max(1, inner - left.cell_len - right.cell_len)
         return Panel(
             left + Text(" " * pad) + right,
@@ -415,9 +421,9 @@ class ValidateView:
         for row in block.rows:
             t = Text()
             t.append(f"{row.glyph} ", style=row.glyph_style)
-            t.append(f"{row.label:<{LABEL}}", style=MUTED)
+            t.append(f"{strip_terminal_controls(row.label):<{LABEL}}", style=MUTED)
             for chunk, style in row.segments:
-                t.append(chunk, style=style)
+                t.append(strip_terminal_controls(chunk), style=style)
             lines.append(t)
         body = Group(*lines) if lines else Text("…", style=FAINT)
         return Panel(
@@ -433,27 +439,32 @@ class ValidateView:
         )
 
     def _verdict_panel(self, verdict: Verdict) -> Panel:
+        headline = strip_terminal_controls(verdict.headline)
         if verdict.passed:
             body = _pill("✓ PASS", GREEN) + Text.assemble(
-                ("  ", ""), (verdict.headline, f"bold {TEXT}"), ("  ·  exit 0", MUTED)
+                ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 0", MUTED)
             )
             return Panel(body, box=box.ROUNDED, border_style=GREEN, width=self.width, padding=(0, 2))
         line1 = _pill("✗ FAIL", RED, ink="#1C0605") + Text.assemble(
-            ("  ", ""), (verdict.headline, f"bold {TEXT}"), ("  ·  exit 1", MUTED)
+            ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 1", MUTED)
         )
         parts: list = [line1]
         if verdict.fix:
             fix = Text.assemble(("fix     ", f"bold {MUTED}"))
             for chunk, style in verdict.fix:
-                fix.append(chunk, style=style)
+                fix.append(strip_terminal_controls(chunk), style=style)
             parts.extend([Text(), fix])
         if verdict.rerun:
-            parts.append(Text.assemble(("        ", ""), (verdict.rerun, GREEN)))
+            parts.append(Text.assemble(("        ", ""), (strip_terminal_controls(verdict.rerun), GREEN)))
         return Panel(Group(*parts), box=box.ROUNDED, border_style=RED, width=self.width, padding=(0, 2))
 
     def _footer_lines(self):
         for label, target in self.links:
-            yield Text.assemble(("      ", ""), (f"{label:<{LABEL}}", MUTED), (target, MUTED))
+            yield Text.assemble(
+                ("      ", ""),
+                (f"{strip_terminal_controls(label):<{LABEL}}", MUTED),
+                (strip_terminal_controls(target), MUTED),
+            )
 
     def _refresh(self) -> None:
         if self._live is not None:

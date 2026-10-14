@@ -70,7 +70,7 @@ jobs:
         run: python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json
       - name: Lint committed BENCHMARK.md fixtures for leak patterns
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
-        run: python scripts/ci/check_public_benchmarks.py --require-files tests/golden
+        run: python scripts/ci/check_public_benchmarks.py --require-files tests/golden --require-source-provenance
       - name: Lint
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         run: uv run ruff check .
@@ -123,6 +123,32 @@ jobs:
       - run: uv sync --all-extras --locked --python 3.13
       - name: Run tests
         run: uv run pytest -q
+
+  html-parser-compatibility:
+    name: HTML parser compatibility (Python ${{ matrix.python-version }})
+    needs: classify-changes
+    if: ${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12.11", "3.13.5"]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: "0.11.27"
+      - run: uv sync --extra dev --locked --python "${{ matrix.python-version }}"
+      - name: Run HTML parser compatibility tests
+        run: >-
+          uv run --python "${{ matrix.python-version }}" pytest -q
+          tests/validators/test_markdown.py
+          tests/test_cli_html_parser_compat.py
 
   rhel8-security-install:
     name: RHEL 8 security install
@@ -185,23 +211,25 @@ jobs:
         run: python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json --archive dist/*.whl --archive dist/*.tar.gz
       - name: Validate distribution metadata
         run: uvx --from twine==6.2.0 twine check --strict dist/*
-      - name: Install and smoke-test the wheel
+      - name: Install and smoke-test the wheel on Python 3.12 and 3.13
         shell: bash
         run: |
           wheel="$(find "$PWD/dist" -maxdepth 1 -type f -name 'skillevaluator-*.whl' -print -quit)"
           test -n "$wheel"
-          venv="$RUNNER_TEMP/skillevaluator-wheel"
-          uv venv --python 3.13 "$venv"
-          uv pip install --python "$venv/bin/python" "${wheel}[tier3,llm]"
-          cd "$RUNNER_TEMP"
-          "$venv/bin/python" -c 'import anthropic, harbor, openai, skillevaluator, skillevaluator.model_catalog, skillevaluator.model_commands'
-          "$venv/bin/python" -c 'from importlib.resources import files; assert files("skillevaluator.tier3.harbor").joinpath("templates/eval.py").is_file()'
-          "$venv/bin/skillevaluator" --version
-          "$venv/bin/skillevaluator" --help >/dev/null
-          "$venv/bin/skillevaluator" models --help >/dev/null
-          SKILL_EVAL_LLM_PROVIDER=nv_build NVIDIA_API_KEY=nvapi-ci-placeholder \
-            "$venv/bin/skillevaluator" doctor --agents opencode --env-mode docker >/dev/null
-          "$venv/bin/python" -c 'import io; from skillevaluator.tier3.harbor.progress import PlainProgressReporter,ProgressEvent,Tier3RunPlan; s=io.StringIO(); r=PlainProgressReporter(stream=s,refresh_interval=60); r.start(Tier3RunPlan(skill_name="wheel-smoke",environment="docker",agents=("opencode",))); r.emit(ProgressEvent(stage="configuration",state="complete")); r.close(); assert "configuration: complete" in s.getvalue()'
+          for python_version in 3.12 3.13; do
+            venv="$RUNNER_TEMP/skillevaluator-wheel-${python_version}"
+            uv venv --python "$python_version" "$venv"
+            uv pip install --python "$venv/bin/python" "${wheel}[tier3]"
+            cd "$RUNNER_TEMP"
+            "$venv/bin/python" -c 'import anthropic, harbor, openai, skillevaluator, skillevaluator.model_catalog, skillevaluator.model_commands'
+            "$venv/bin/python" -c 'from importlib.resources import files; assert files("skillevaluator.tier3.harbor").joinpath("templates/eval.py").is_file()'
+            "$venv/bin/skillevaluator" --version
+            "$venv/bin/skillevaluator" --help >/dev/null
+            "$venv/bin/skillevaluator" models --help >/dev/null
+            SKILL_EVAL_LLM_PROVIDER=nv_build NVIDIA_API_KEY=nvapi-ci-placeholder \
+              "$venv/bin/skillevaluator" doctor --agents opencode --env-mode docker >/dev/null
+            "$venv/bin/python" -c 'import io; from skillevaluator.tier3.harbor.progress import PlainProgressReporter,ProgressEvent,Tier3RunPlan; s=io.StringIO(); r=PlainProgressReporter(stream=s,refresh_interval=60); r.start(Tier3RunPlan(skill_name="wheel-smoke",environment="docker",agents=("opencode",))); r.emit(ProgressEvent(stage="configuration",state="complete")); r.close(); assert "configuration: complete" in s.getvalue()'
+          done
 
   tier3-macos:
     name: Tier 3 macOS contract and progress
@@ -277,6 +305,7 @@ jobs:
           tests/reporting
           tests/test_cli.py
           tests/test_harbor_output_provenance.py
+          tests/test_harbor_runner_status.py
           tests/test_harbor_runtime_skill_isolation.py
           tests/test_harbor_secure_copy.py::test_checked_windows_fallback_accepts_crt_descriptor_identity
           tests/test_harbor_secure_copy.py::test_checked_windows_fallback_verifies_portable_chmod_semantics

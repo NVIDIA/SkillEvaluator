@@ -199,6 +199,14 @@ class TestSkillTypeDetection:
         (sd / "run.py").write_text("print('hi')")
         assert QualityScoreValidator.detect_skill_type(d) == "script-based"
 
+    def test_tools_dir_is_script_based(self, tmp_path):
+        d = tmp_path / "tooled"
+        d.mkdir()
+        tools = d / "tools"
+        tools.mkdir()
+        (tools / "run.py").write_text("print('hi')")
+        assert QualityScoreValidator.detect_skill_type(d) == "script-based"
+
     def test_lib_based(self, tmp_path):
         d = tmp_path / "lib"
         d.mkdir()
@@ -312,6 +320,33 @@ class TestQualityScoreValidator:
 
         result = QualityScoreValidator(min_score=0).validate(skill_dir)
 
+        assert any("Description contains XML tags" in finding.message for finding in result.findings)
+
+    def test_bom_prefixed_manifest_still_parses_frontmatter(self, tmp_path):
+        """A UTF-8 BOM must not hide frontmatter from the quality parser."""
+        skill_dir = tmp_path / "bom-xml-desc"
+        skill_dir.mkdir()
+        body = (
+            "---\n"
+            "name: bom-xml-desc\n"
+            "description: \"A skill <script>alert('xss')</script> with injected tags\"\n"
+            "metadata:\n"
+            "  author: Test User <test@nvidia.com>\n"
+            "---\n\n"
+            "# XML Description\n\n"
+            "## Instructions\n\n1. Inspect frontmatter quality findings.\n\n"
+            "## Examples\n\n"
+            "```text\n"
+            "Validate the skill.\n"
+            "```\n"
+        )
+        (skill_dir / "SKILL.md").write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+
+        result = QualityScoreValidator(min_score=0).validate(skill_dir)
+        scores = result.metadata["quality_scores"]
+
+        assert scores["metrics"]["has_frontmatter"] is True
+        assert scores["metrics"]["frontmatter_tokens"] > 0
         assert any("Description contains XML tags" in finding.message for finding in result.findings)
 
     def test_unclosed_xml_tag_in_description_remains_quality_error(self, tmp_path):
@@ -831,6 +866,60 @@ class TestQualityScoreDeterministicContracts:
         messages = _finding_messages(skill_dir)
 
         assert all("Deeply nested references" not in message for message in messages)
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "foo%3Abar.md",
+            "%66oo%3Abar.md",
+            "custom%2Bscheme%3Aguide.md",
+        ],
+    )
+    def test_percent_encoded_scheme_preserves_legacy_quality_score(self, tmp_path: Path, target: str):
+        skill_dir = _write_issue_skill(tmp_path)
+        references = skill_dir / "references"
+        references.mkdir()
+        (references / "mechanisms.md").write_text(f"See [more details]({target}).\n")
+
+        result = QualityScoreValidator(min_score=99).validate(skill_dir)
+
+        assert result.passed
+        assert result.metadata["quality_scores"]["overall_score"] == 100.0
+        assert all("Deeply nested references" not in finding.message for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "./foo%3Abar.md",
+            "dir/../foo%3Abar.md",
+            "foo%253Abar.md",
+            "x/../C:/outside.md",
+        ],
+    )
+    def test_once_decoded_local_paths_preserve_legacy_quality_score(self, tmp_path: Path, target: str):
+        skill_dir = _write_issue_skill(tmp_path)
+        references = skill_dir / "references"
+        references.mkdir()
+        (references / "mechanisms.md").write_text(f"See [more details]({target}).\n")
+
+        result = QualityScoreValidator(min_score=99).validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata["quality_scores"]["overall_score"] == 98.5
+        assert "Deeply nested references in mechanisms.md" in [finding.message for finding in result.findings]
+
+    def test_percent_encoded_scheme_does_not_normalize_into_readme_reference(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(
+            tmp_path,
+            extra_body="\nSee [documentation](foo%3A/../README.md).\n",
+        )
+        (skill_dir / "README.md").write_text("# Human documentation\n")
+
+        result = QualityScoreValidator(min_score=99).validate(skill_dir)
+
+        assert result.passed
+        assert result.metadata["quality_scores"]["overall_score"] == 100.0
+        assert all("SKILL.md references README.md" not in finding.message for finding in result.findings)
 
     @pytest.mark.parametrize(
         "target",

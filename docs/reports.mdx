@@ -36,9 +36,10 @@ the terminal instead.
 | `json` | Machine-readable JSON (default) | CI needs to parse scores and findings |
 | `html` | Standalone HTML report (default) | A human needs to review or archive a run |
 | `markdown` | Markdown for PR comments | You want the result posted on a pull request |
+| `sarif` | SARIF 2.1.0 JSON | GitHub Code Scanning or other SARIF consumers need inline annotations |
 
-```bash title="One run, three report files"
-skillevaluator validate ./my-skill -r json,html,markdown -o reports
+```bash title="One run, four report files"
+skillevaluator validate ./my-skill -r json,html,markdown,sarif -o reports
 ```
 
 For gating a pipeline on the JSON output, see [Gate Your CI](ci-integration.mdx).
@@ -59,7 +60,7 @@ Report filenames follow two patterns, both under the output directory:
 | `context-optimization-check` | `skillevaluator-context` | Yes |
 | `dedup-scan` | `skillevaluator-dedup` | Yes |
 
-The extension matches the format (`.json`, `.html`, `.md`); the `cli` format
+The extension matches the format (`.json`, `.html`, `.md`, `.sarif.json`); the `cli` format
 prints to the terminal and never writes a file. A full `validate` run's
 timestamp is `YYYYMMDDHHMMSS`, so
 `-r json` produces something like `skillevaluator-output-20260709141530.json`
@@ -86,6 +87,60 @@ by default, so a missing, skipped, or incomplete live evaluation produces
 `INCOMPLETE` rather than a publication recommendation. A catalog may
 explicitly persist `benchmark_policy.tier3_required = false`; the card
 discloses that exception instead of implying that Tier 3 ran.
+
+### Evaluated source provenance
+
+The Evaluation Metadata section distinguishes the source tree that was evaluated
+from the evaluator build that evaluated it:
+
+```text
+- Evaluator version: `0.8.2`
+- Evaluated source: `NVIDIA/NVFlare`
+- Evaluated source revision: `2263a2ebdab903e87f7e7c0a001d22c3a926a9cf`
+- Evaluator container revision: `ghcr.io/nvidia/skillevaluator@sha256:0117bc2e...`
+```
+
+Without that separation, two skills evaluated from different repositories by the
+same evaluator container publish cards whose only recorded revision is the shared
+container tag, and a reader cannot tell which version of a skill was evaluated or
+whether the card has gone stale.
+
+The identity is supplied by the orchestration input and carried through the
+evaluation-result contract unchanged. It is never inferred from repository state
+while rendering, because the tree that renders a card is the evaluator checkout
+rather than the evaluated skill's source. The supported seams are:
+
+- `--evaluated-source-repository`, `--evaluated-source-revision` and
+  `--evaluator-container-revision`, accepted by both `validate` and
+  `tier3 evaluate`, which record the identity on the card and, for a Tier 3 run,
+  persist it into that run's `run_config.json`;
+- the `evaluated_source` argument to `build_agent_eval_payload` or
+  `agent_eval_result_from_directory`;
+- an `evaluated_source` object in the run's `run_config.json`. Note that
+  SkillEvaluator writes that file itself, so a publication pipeline using this
+  route has to add the key to the generated run artifact before the card is
+  rendered;
+- `metadata["evaluated_source"]` on any validation result, which is how a card
+  that publishes without a completed Tier 3 run records its identity.
+
+Where any two carriers supply a field and disagree, rendering fails rather than
+silently choosing one, so the order results happen to arrive in can never decide
+which source tree a card names. `Evaluated source revision` records a full Git
+object id of 40 or 64 hex characters, or a canonical `sha256`/`sha384`/`sha512`
+digest of the evaluated skill content at that algorithm's own width when a run
+has no upstream commit. A short revision prefix is refused, because it can grow
+a second match as a tree grows. `Evaluator container revision` records an image
+reference validated component by component: a repository path of at most 255
+characters, an optional tag of at most 128 characters, and an optional digest at
+its own algorithm's width. The 255 bound measures the path once the registry
+host has been split off it. Path components are lower case, as the OCI grammar
+requires, while a registry host may use any case and is read as a host only when
+it is `localhost`, carries a dot, or carries a port. A bare name is refused
+because it identifies a repository rather than the build that ran, and a
+published PASS additionally requires the digest, or a full implementation
+revision, because a tag can be repointed after the card is published. Fields
+the orchestration did not supply render as
+`not recorded (not supplied by the orchestration input)`.
 
 Keep the file with the skill and refresh it whenever the skill, eval dataset,
 agent/model, evaluator version, scoring policy, attempt policy, or execution
@@ -140,8 +195,14 @@ completed run directly:
           - trials/
 </FileTree>
 
-- **`result.json`** — the run summary: run ID, per-agent scores and lift,
-  pass@k, the resolved run configuration, and execution status.
+- **`result.json`** — the bounded run summary: run ID, per-agent scores and
+  lift, pass@k aggregates, the resolved run configuration, and execution
+  status. When repeated case, security, or failure details would make this
+  browser-facing file too large, `result_projection` records exactly which
+  fields were omitted and points to the canonical per-agent JSON artifacts by
+  relative path, byte size, and SHA-256 digest. The in-process return value
+  remains complete; readers rebuilding a report from disk follow those
+  artifact references.
 - **`run_config.json`** / **`attempt_policy.json`** — exactly how the run was
   configured: environment, attempts, concurrency, grading mode, pass threshold.
 - **`report.html`** — the human-readable report, generated automatically at
@@ -153,7 +214,13 @@ completed run directly:
   (a `--skip-baseline` run has neither).
 - **`<agent>/{with-skill,without-skill}/`** — each arm's `summary.json`
   (scores, dimensions, pass@k, trial counts) and a `trials/` directory of
-  per-trial artifacts.
+  per-trial artifacts: the trial's `reward.json`, Harbor's `trajectory.json`
+  when available, and redacted, size-capped diagnostic copies such as
+  `trial.log`, `exception.txt`, and agent logs (`codex.txt`, `opencode.txt`).
+  With standard grading, `reward.json` records `trajectory_source` (the
+  trajectory or agent log that was graded) and, under each LLM judge's
+  `details`, an `omitted` record showing whether its evidence was truncated to
+  fit the [evidence budget](tier3-live-evaluation.mdx#evidence-budgets).
 
 <Note>
   Read commands (`view`, `compare`, `create-eval-dataset --refine`) honor the
@@ -244,6 +311,20 @@ baseline-only passes, both-pass, and neither-pass — plus a two-sided exact
 McNemar diagnostic over the discordant pairs. Partial or unidentified pairing
 is labeled and does not receive that exact-test result.
 
+Each logical attempt counts once: a multi-step native task's step rewards
+combine into one attempt score for averages and pass@k. When one condition
+mixes standard-metric and custom-only rewards, its overall score and lift use
+that logical-attempt overall rather than the mean of the standard dimensions,
+which would cover only the standard rows.
+
+Case identifiers used as JSON keys must be printable, free of credential
+material, and no larger than 512 UTF-8 bytes. A reward with an unsafe identity
+is retained as a failed diagnostic but is not scored. For large evaluations,
+`summary.json` keeps exact pass, attempt, failure, and pairing totals while
+publishing bounded case, attempt, and failure-detail samples. The matching
+`*_total`, `*_shown`, and `*_truncated` fields make every omission explicit;
+sampling does not change the aggregate score or paired comparison.
+
 The paired record also reports its pass-rate delta and the minimum p-value the
 exact test could attain with the observed number of discordant pairs. When that
 minimum is above 0.05, the report labels the test resolution-limited at that
@@ -319,6 +400,13 @@ For CI and tooling, two JSON entry points matter:
   tiers. Each result carries finalized gating metadata. Tier 3 is advisory by
   default and becomes blocking with `--block-on-agent-eval`; Tier 2 is blocking
   by default and becomes advisory with `--no-block-on-dedup`.
+- **The evaluated source identity**: every JSON report always carries a
+  top-level `evaluated_source` object, resolved from every carrier the run
+  recorded, so the JSON and `BENCHMARK.md` name the same source tree. It is
+  `null` when the orchestration input supplied none. Carriers that name
+  different sources abort the run before any report file is written, so a
+  contradictory identity is never published in one format and reported in
+  another.
 
 Both paths speak the same dialect: standalone `tier3 evaluate` and
 `validate --tier3` share one HTML renderer for `report.html`, and both embed

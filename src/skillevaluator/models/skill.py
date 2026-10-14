@@ -22,6 +22,7 @@ from skillevaluator.constants import (
     NAME_MIN_LENGTH,
     RESERVED_SKILL_NAMES,
 )
+from skillevaluator.models.field_validators import parse_nested_model
 
 XML_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9_-]*(?:\s[^<>]*)?/?>|</?[A-Za-z][A-Za-z0-9_-]*\s[^<>]*$")
 
@@ -170,11 +171,7 @@ class SkillFrontmatter(BaseModel):
     @classmethod
     def parse_metadata(cls, v: Any) -> SkillMetadata | None:
         """Parse metadata dict into SkillMetadata model."""
-        if v is None:
-            return None
-        if isinstance(v, dict):
-            return SkillMetadata(**v)
-        return v
+        return parse_nested_model(SkillMetadata, v)
 
     @model_validator(mode="before")
     @classmethod

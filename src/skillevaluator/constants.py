@@ -6,7 +6,7 @@
 Based on SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md, HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specifications.
 """
 
-from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI
+from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, EMBEDDING_DEFAULT_NVIDIA, MAX_COMPLETION_TOKENS
 
 # =============================================================================
 # SKILLS CONSTANTS
@@ -45,6 +45,10 @@ RECOMMENDED_BODY_SECTIONS = ["## Instructions", "## Examples"]
 DEFAULT_ALLOWED_SKILL_DIRS = frozenset(
     {"agents", "references", "scripts", "assets", "evals", "tests", "tools", "config"}
 )
+
+# Directories that hold skill executables. ``scripts/`` is the historical
+# SkillEvaluator name; ``tools/`` is the agentskills.io name.
+EXECUTABLE_SKILL_DIRS = ("scripts", "tools")
 
 # Env var that lets consumers EXTEND the allowed skill-root directory set per
 # repo (comma- or whitespace-separated) without editing bundled config — e.g.
@@ -215,7 +219,7 @@ LICENSE_HEADER_SCAN_LINES = 50
 LICENSE_HEADER_EXTENSIONS = {".py", ".sh", ".js", ".ts", ".yaml", ".yml", ".md", ".txt", ".json"}
 
 # SPDX header pattern for source files
-SPDX_LICENSE_PATTERN = r"SPDX-License-Identifier:\s*([A-Za-z0-9.\-+]+)"
+SPDX_LICENSE_PATTERN = r"SPDX-License-Identifier:\s*([^\n]+)"
 
 
 # =============================================================================
@@ -232,7 +236,7 @@ SIMILARITY_LOW_THRESHOLD = 0.50  # LOOSELY_RELATED
 SIMILARITY_DEFAULT_THRESHOLD = 0.75
 
 # Embedding model configuration
-SIMILARITY_DEFAULT_MODEL = "nvidia/nv-embed-v1"
+SIMILARITY_DEFAULT_MODEL = EMBEDDING_DEFAULT_NVIDIA
 SIMILARITY_CHUNK_SIZE = 512  # tokens per chunk for full-body mode
 SIMILARITY_CHUNK_OVERLAP = 64  # token overlap between chunks
 
@@ -264,8 +268,17 @@ CONTENT_DEDUP_MAX_TOTAL_BYTES = 8 * 1024 * 1024
 CONTENT_DEDUP_MAX_CHUNKS = 512
 CONTENT_DEDUP_MAX_LLM_CLUSTERS = 50
 
-CONTENT_DEDUP_LLM_DEFAULT_MODEL = "azure/anthropic/claude-opus-4-8"
-CONTENT_DEDUP_LLM_TEMPERATURE = 0.1
+# Collection-wide similarity budgets are independent of a single skill's file limit.
+SIMILARITY_DEFAULT_MAX_ENTRIES = 1_024
+SIMILARITY_MAX_ENTRIES = 5_000
+# Allow directories, manifests, and supporting paths at the maximum entry count,
+# without raising the independent per-skill content-deduplication path ceiling.
+SIMILARITY_MAX_DISCOVERED_PATHS = 4 * SIMILARITY_MAX_ENTRIES
+SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS = 128_000_000
+
+# Reasoning effort for the dedup verdict model (GPT-6 and Claude 5.5 or later only):
+# a DUPLICATE verdict creates a blocking finding, so precision outweighs latency.
+CONTENT_DEDUP_LLM_REASONING_EFFORT = "medium"
 
 CONTENT_DEDUP_SCANNABLE_EXTENSIONS = frozenset({".md", ".mdc", ".py", ".sh"})
 CONTENT_DEDUP_BINARY_EXTENSIONS = frozenset(
@@ -301,9 +314,11 @@ CONTENT_DEDUP_EXCLUDED_FILES = frozenset({"skill-card.md", "benchmark.md", "skil
 # LLM FINDING VERIFICATION CONSTANTS
 # =============================================================================
 
-LLM_VERIFY_MODEL = "azure/anthropic/claude-opus-4-8"
-LLM_VERIFY_MAX_TOKENS = 512
+LLM_VERIFY_MAX_TOKENS = MAX_COMPLETION_TOKENS
 LLM_VERIFY_TEMPERATURE = 0.0
+# A wrong false_positive verdict hides a real finding in adversarial input, and
+# verification is opt-in and low volume, so it gets the most reasoning.
+LLM_VERIFY_REASONING_EFFORT = "high"
 
 
 # =============================================================================
@@ -347,6 +362,7 @@ QUALITY_RESERVED_NAMES = ["anthropic", "claude"]
 QUALITY_EXCLUDED_DIRS = frozenset(
     {
         "scripts",
+        "tools",
         "references",
         "assets",
         "eval",
@@ -376,8 +392,9 @@ QUALITY_RESOURCE_DIRS = ("assets", "templates", "design-system", "resources")
 # LLM RUBRIC EVALUATION CONSTANTS (ported from SkillEvaluator Tier 2)
 # =============================================================================
 
-RUBRIC_MAX_TOKENS = 4096
+RUBRIC_MAX_TOKENS = MAX_COMPLETION_TOKENS
 RUBRIC_MIN_SCORE = 60
+RUBRIC_REASONING_EFFORT = "medium"
 
 RUBRIC_CRITERIA = [
     {
@@ -568,16 +585,18 @@ TOKEN_EFFICIENCY_EVALUATOR_NAME: str = "token_efficiency"
 # =============================================================================
 
 DIMENSION_JUDGE_MODEL = CHAT_DEFAULT_OPENAI
-DIMENSION_JUDGE_MAX_TOKENS = 4096
+DIMENSION_JUDGE_MAX_TOKENS = MAX_COMPLETION_TOKENS
 DIMENSION_JUDGE_TEMPERATURE: float | None = 0.0
+DIMENSION_JUDGE_REASONING_EFFORT = "medium"
 DIMENSION_VERDICT_PASS_THRESHOLD = 0.5
 DIMENSION_VERDICT_NEUTRAL_THRESHOLD = 0.4
 
 # LLM-as-Judge for the Insights tab (additional Conclusions and Recommendations
 # on top of the deterministic ones produced by tier3_normalizer).
 INSIGHTS_JUDGE_MODEL = DIMENSION_JUDGE_MODEL
-INSIGHTS_JUDGE_MAX_TOKENS = 4096
+INSIGHTS_JUDGE_MAX_TOKENS = MAX_COMPLETION_TOKENS
 INSIGHTS_JUDGE_TEMPERATURE: float | None = None
+INSIGHTS_JUDGE_REASONING_EFFORT = DIMENSION_JUDGE_REASONING_EFFORT
 INSIGHTS_JUDGE_MAX_CONCLUSIONS = 5
 INSIGHTS_JUDGE_MAX_RECOMMENDATIONS = 5
 

@@ -33,7 +33,7 @@ personal_paths:
       - "DELETE /users"
       - "api/users"
 
-  - pattern: 'C:\\Users\\[^\\s]+'
+  - pattern: "C:\\\\Users\\\\[^\\\\\\s]+"
     severity: high
     description: Personal Windows user path
     suggestion: "Use generic path like C:\\path\\to\\file or %USERPROFILE% variable"

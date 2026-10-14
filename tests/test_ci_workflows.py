@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
+GITLEAKS_CONFIG = ROOT / ".gitleaks.toml"
 
 REQUIRED_CI_JOBS = {
     "test-python-312": "Tests (Python 3.12)",
@@ -58,6 +60,10 @@ def _all_uses(workflow: dict[str, Any]) -> list[str]:
 
 def _all_steps(workflow: dict[str, Any]) -> list[dict[str, Any]]:
     return [step for job in workflow["jobs"].values() for step in job.get("steps", [])]
+
+
+def _workflow_names() -> list[str]:
+    return sorted(path.name for path in WORKFLOWS.glob("*.y*ml"))
 
 
 def test_ci_preserves_required_contexts_as_explicit_jobs() -> None:
@@ -141,6 +147,7 @@ def test_full_lane_keeps_the_existing_commands_and_runners() -> None:
     assert jobs["tier2-windows"]["runs-on"] == "windows-latest"
     assert "tests/embedding" in _runs(jobs["tier2-macos"])
     assert "tests/embedding" in _runs(jobs["tier2-windows"])
+    assert "tests/test_harbor_runner_status.py" in _runs(jobs["tier2-windows"])
     assert jobs["tier3-macos"]["runs-on"] == "macos-latest"
     assert "tests/test_tier3_progress.py" in _runs(jobs["tier3-macos"])
     assert jobs["native-windows-local-mode"]["runs-on"] == "windows-latest"
@@ -183,6 +190,70 @@ def test_security_keeps_gitleaks_always_on_and_skips_only_nonessential_jobs() ->
     assert "vars.ENABLE_GITHUB_ADVANCED_SECURITY == 'true'" in codeql_if
 
 
+def test_gitleaks_single_value_allowlists_are_exactly_scoped() -> None:
+    config = tomllib.loads(GITLEAKS_CONFIG.read_text(encoding="utf-8"))
+    allowlists = {entry["description"]: entry for entry in config["allowlists"]}
+
+    expected = {
+        "Synthetic NVIDIA Build token used by streaming redaction tests": (
+            "^Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8$",
+            r"^tests/test_harbor_local_mode\.py$",
+        ),
+        "Synthetic main-container values used by Docker isolation tests": (
+            r"^main-(persistent|task|scoped)-secret-[0-9]{5}$",
+            r"^tests/test_harbor_secure_docker_environment\.py$",
+        ),
+        "Synthetic cwsandbox API key used by Harbor environment contract tests": (
+            "^cw-key-123456$",
+            r"^tests/test_harbor_environment_contract\.py$",
+        ),
+        "Bedrock model ID that follows a credential name in SkillSpector bridge tests": (
+            r"^us\.anthropic\.claude-opus-5$",
+            r"^tests/validators/test_security\.py$",
+        ),
+    }
+    for description, (regex, path) in expected.items():
+        entry = allowlists[description]
+        assert entry == {
+            "description": description,
+            "condition": "AND",
+            "targetRules": ["generic-api-key"],
+            "regexes": [regex],
+            "paths": [path],
+        }
+
+
+def test_gitleaks_uses_event_specific_full_history_scopes() -> None:
+    job = _load("security.yml")["jobs"]["gitleaks"]
+    checkout = next(
+        step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@")
+    )
+    verify = next(step for step in job["steps"] if step.get("name") == "Verify full Git checkout")
+    scan = next(step for step in job["steps"] if step.get("name") == "Scan Git history")
+
+    assert str(checkout["with"]["fetch-depth"]) == "0"
+    assert 'test "$(git rev-parse --is-shallow-repository)" = "false"' in verify["run"]
+    assert 'git rev-parse --verify "HEAD^{commit}"' in verify["run"]
+    assert (
+        "gitleaks:v8.30.0@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9"
+        in scan["run"]
+    )
+    scan_run = scan["run"]
+    head_opts = "--full-history --diff-filter=tuxdb HEAD --"
+    audit_opts = "--full-history --all --diff-filter=tuxdb --"
+    assignments = re.findall(r'log_opts="([^"]+)"', scan_run)
+
+    assert assignments == [head_opts, audit_opts]
+    assert scan["shell"] == "bash"
+    assert "set -euo pipefail" in scan_run
+    assert 'case "$GITHUB_EVENT_NAME" in' in scan_run
+    assert re.search(
+        rf'pull_request\|push\)\s+log_opts="{re.escape(head_opts)}"\s+;;', scan_run
+    )
+    assert re.search(rf'\*\)\s+log_opts="{re.escape(audit_opts)}"\s+;;', scan_run)
+    assert '--log-opts="$log_opts"' in scan_run
+
+
 def test_dco_stays_unconditional_and_has_no_path_filter() -> None:
     dco = _load("dco.yml")
 
@@ -196,19 +267,31 @@ def test_non_pr_workflow_triggers_are_preserved() -> None:
     security = _load("security.yml")
 
     assert ci["on"]["push"] == {"branches": ["main"]}
+    assert set(security["on"]) == {"pull_request", "push", "schedule", "workflow_dispatch"}
     assert security["on"]["push"] == {"branches": ["main"]}
     assert security["on"]["schedule"] == [{"cron": "23 7 * * 1"}]
     assert "workflow_dispatch" in security["on"]
 
 
-def test_changed_workflows_pin_every_action_to_a_commit() -> None:
-    for workflow_name in ("ci.yml", "security.yml"):
+def test_all_workflows_pin_every_action_to_a_commit() -> None:
+    for workflow_name in _workflow_names():
         for uses in _all_uses(_load(workflow_name)):
             assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", uses), uses
 
 
-def test_changed_workflows_do_not_persist_checkout_credentials() -> None:
-    for workflow_name in ("ci.yml", "security.yml"):
-        checkout_steps = [step for step in _all_steps(_load(workflow_name)) if step.get("uses", "").startswith("actions/checkout@")]
+def test_all_workflows_do_not_persist_checkout_credentials() -> None:
+    for workflow_name in _workflow_names():
+        checkout_steps = [
+            step for step in _all_steps(_load(workflow_name)) if step.get("uses", "").startswith("actions/checkout@")
+        ]
         assert checkout_steps
         assert all(step.get("with", {}).get("persist-credentials") == "false" for step in checkout_steps)
+
+
+def test_all_workflows_declare_restricted_permissions() -> None:
+    for workflow_name in _workflow_names():
+        workflow = _load(workflow_name)
+        assert "permissions" in workflow
+        assert workflow["permissions"] != "write-all"
+        for job in workflow["jobs"].values():
+            assert job.get("permissions", {}) != "write-all"

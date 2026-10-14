@@ -9,6 +9,41 @@ import pytest
 
 from skillevaluator.validators.license import LicenseDetection, LicenseValidator
 
+GPL_V3_LICENSE_TEXT = """
+                    GNU GENERAL PUBLIC LICENSE
+                       Version 3, 29 June 2007
+
+ Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
+"""
+
+APACHE_2_LICENSE_TEXT = """
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+"""
+
+MIT_LICENSE_TEXT = """MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+"""
+
 # =============================================================================
 # FIXTURES
 # =============================================================================
@@ -63,19 +98,7 @@ license: MIT
 # MIT Licensed Skill
 """)
 
-    # Create MIT LICENSE file
-    (skill_dir / "LICENSE").write_text("""MIT License
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-""")
+    (skill_dir / "LICENSE").write_text(MIT_LICENSE_TEXT)
 
     return skill_dir
 
@@ -94,15 +117,7 @@ description: A skill with GPL license
 # GPL Licensed Skill
 """)
 
-    # Create GPL v3 LICENSE file
-    (skill_dir / "LICENSE").write_text("""
-                    GNU GENERAL PUBLIC LICENSE
-                       Version 3, 29 June 2007
-
- Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
- Everyone is permitted to copy and distribute verbatim copies
- of this license document, but changing it is not allowed.
-""")
+    (skill_dir / "LICENSE").write_text(GPL_V3_LICENSE_TEXT)
 
     return skill_dir
 
@@ -320,7 +335,159 @@ class TestFrontmatterDetection:
         result = LicenseValidator().validate(skill_with_mit_license)
 
         assert result.passed
+        assert result.metadata.get("license_status") == "allowed"
         assert all(f.check_name != "frontmatter_license_mismatch" for f in result.findings)
+
+    def test_mit_frontmatter_does_not_hide_gpl_license_file(self, tmp_path: Path):
+        """MIT in frontmatter must not hide a GPL LICENSE file (#85)."""
+        skill_dir = create_skill_with_declared_license_and_file(
+            tmp_path,
+            "mit-claims-gpl-body",
+            "MIT",
+            GPL_V3_LICENSE_TEXT,
+        )
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        error_text = " ".join(result.errors).lower()
+        assert any(token in error_text for token in ("gpl", "copyleft", "blocked", "conflict", "mismatch"))
+        assert not any("License: MIT (ALLOWED" in message for message in result.messages)
+        assert result.metadata.get("license_status") != "allowed"
+
+    def test_mit_frontmatter_without_license_file_is_allowed(self, tmp_path: Path):
+        """Frontmatter-only MIT remains allowed when no LICENSE file exists."""
+        skill_dir = tmp_path / "mit-frontmatter-only"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: mit-frontmatter-only
+description: MIT in frontmatter with no LICENSE file
+license: MIT
+---
+
+# MIT Frontmatter Only
+""")
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert result.passed
+        assert result.metadata.get("license") == "MIT"
+        assert result.metadata.get("license_status") == "allowed"
+
+    def test_gpl_license_file_without_frontmatter_is_blocked(self, skill_with_gpl_license: Path):
+        """LICENSE-only GPL remains blocked when frontmatter has no license field."""
+        result = LicenseValidator().validate(skill_with_gpl_license)
+
+        assert not result.passed
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+        error_text = " ".join(result.errors).lower()
+        assert "gpl" in error_text or "copyleft" in error_text
+
+    def test_gpl_frontmatter_is_not_hidden_by_mit_license_file(self, tmp_path: Path):
+        """Blocked frontmatter must still fail even if the LICENSE file is allowed."""
+        skill_dir = create_skill_with_declared_license_and_file(
+            tmp_path,
+            "gpl-claims-mit-body",
+            "GPL-3.0",
+            MIT_LICENSE_TEXT,
+        )
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+        assert result.metadata.get("license_status") != "allowed"
+
+    def test_conflicting_allowed_licenses_fail_closed(self, tmp_path: Path):
+        """MIT frontmatter vs Apache LICENSE must not silently pick either side."""
+        skill_dir = create_skill_with_declared_license_and_file(
+            tmp_path,
+            "mit-vs-apache-body",
+            "MIT",
+            APACHE_2_LICENSE_TEXT,
+        )
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        error_text = " ".join(result.errors).lower()
+        assert any(token in error_text for token in ("conflict", "mismatch", "differ"))
+        assert any(f.check_name == "frontmatter_license_mismatch" for f in result.findings)
+        assert result.metadata.get("license_status") == "conflict"
+        assert not any("ALLOWED - permissive" in message for message in result.messages)
+
+    def test_copying_gpl_is_not_hidden_by_mit_license_file(self, tmp_path: Path):
+        """MIT LICENSE plus GPL COPYING must fail closed even with MIT frontmatter."""
+        skill_dir = create_skill_with_declared_license_and_file(
+            tmp_path,
+            "mit-license-gpl-copying",
+            "MIT",
+            MIT_LICENSE_TEXT,
+        )
+        (skill_dir / "COPYING").write_text(GPL_V3_LICENSE_TEXT)
+
+        result = LicenseValidator(strict_mode=True).validate(skill_dir)
+
+        assert not result.passed
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+        assert result.metadata.get("license_status") == "blocked"
+        assert not any("License: MIT (ALLOWED" in message for message in result.messages)
+
+    def test_single_file_mit_and_gpl_signatures_fail_closed(self, tmp_path: Path):
+        """One LICENSE file matching both MIT and GPL patterns must not report MIT allowed."""
+        skill_dir = tmp_path / "dual-signature-license"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: dual-signature-license
+description: LICENSE file contains both MIT and GPL signatures
+license: MIT
+---
+
+# Dual signature
+""")
+        (skill_dir / "LICENSE").write_text(MIT_LICENSE_TEXT + "\n" + GPL_V3_LICENSE_TEXT)
+
+        result = LicenseValidator(strict_mode=True).validate(skill_dir)
+
+        assert not result.passed
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+        assert result.metadata.get("license_status") == "blocked"
+
+    def test_unrecognized_lgpl21_license_file_fails_closed(self, tmp_path: Path):
+        """A present LICENSE file without a configured signature cannot be treated as absent."""
+        skill_dir = create_skill_with_declared_license_and_file(
+            tmp_path,
+            "mit-frontmatter-lgpl21-file",
+            "MIT",
+            """GNU LESSER GENERAL PUBLIC LICENSE
+Version 2.1, February 1999
+
+Copyright (C) 1991, 1999 Free Software Foundation, Inc.
+""",
+        )
+
+        result = LicenseValidator(strict_mode=True).validate(skill_dir)
+
+        assert not result.passed
+        assert any(f.check_name == "unrecognized_license_file" for f in result.findings)
+        assert result.metadata.get("license_status") == "unrecognized"
+        assert result.metadata.get("license_status") != "allowed"
+
+    def test_notice_apache_attribution_does_not_conflict_with_mit(self, tmp_path: Path):
+        """NOTICE stays informational; Apache text there must not mismatch MIT LICENSE."""
+        skill_dir = create_skill_with_declared_license_and_file(
+            tmp_path,
+            "mit-with-apache-notice",
+            "MIT",
+            MIT_LICENSE_TEXT,
+        )
+        (skill_dir / "NOTICE").write_text(APACHE_2_LICENSE_TEXT)
+
+        result = LicenseValidator(strict_mode=True).validate(skill_dir)
+
+        assert result.passed
+        assert all(f.check_name != "frontmatter_license_mismatch" for f in result.findings)
+        assert result.metadata.get("license_status") == "allowed"
 
     def test_strict_dual_license_expression_with_unknown_component_fails(self, tmp_path: Path):
         """Strict mode should fail when any expression component is unknown."""
@@ -464,6 +631,130 @@ description: Multiple files with SPDX
 
         assert result.passed
         assert "MIT" in result.metadata.get("license", "")
+
+    def test_spdx_or_expression_with_gpl_is_blocked(self, tmp_path: Path):
+        """MIT OR GPL-3.0 in an SPDX header must not be truncated to allowed MIT (#86)."""
+        skill_dir = tmp_path / "spdx-or-gpl"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: spdx-or-gpl
+description: Skill whose only license signal is an SPDX OR expression
+---
+
+# SPDX OR
+""")
+        (skill_dir / "script.py").write_text("""# SPDX-License-Identifier: MIT OR GPL-3.0
+print("hi")
+""")
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata.get("license_status") == "blocked"
+        assert "GPL-3.0" in (result.metadata.get("license") or "")
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+        assert not any("License: MIT (ALLOWED" in message for message in result.messages)
+
+    def test_spdx_or_expression_in_block_comment_is_blocked(self, tmp_path: Path):
+        """`*/` after MIT OR GPL-3.0 must not turn the GPL half into an unknown id."""
+        skill_dir = tmp_path / "spdx-js-block"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: spdx-js-block
+description: Skill whose SPDX header is inside a JavaScript block comment
+---
+
+# SPDX JS
+""")
+        (skill_dir / "script.js").write_text("/* SPDX-License-Identifier: MIT OR GPL-3.0 */\n")
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata.get("license_status") == "blocked"
+        assert "GPL-3.0" in (result.metadata.get("license") or "")
+        assert "*/" not in (result.metadata.get("license") or "")
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+
+    def test_spdx_inline_block_comment_with_code_suffix_is_blocked(self, tmp_path: Path):
+        """Inline `*/` plus trailing code must not leave GPL-3.0 */ attached to the symbol."""
+        skill_dir = tmp_path / "spdx-js-inline"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: spdx-js-inline
+description: Skill whose SPDX header shares a line with trailing code
+---
+
+# SPDX inline
+""")
+        (skill_dir / "script.js").write_text("/* SPDX-License-Identifier: MIT OR GPL-3.0 */ const x = 1;\n")
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata.get("license_status") == "blocked"
+        assert "GPL-3.0" in (result.metadata.get("license") or "")
+        assert "*/" not in (result.metadata.get("license") or "")
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+
+    def test_spdx_or_expression_in_html_comment_is_blocked(self, tmp_path: Path):
+        """`-->` after MIT OR GPL-3.0 must not hide the GPL half."""
+        skill_dir = tmp_path / "spdx-html-comment"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: spdx-html-comment
+description: Skill whose SPDX header is inside an HTML comment
+---
+
+# SPDX HTML
+""")
+        (skill_dir / "notes.md").write_text("<!-- SPDX-License-Identifier: MIT OR GPL-3.0 -->\n")
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata.get("license_status") == "blocked"
+        assert "GPL-3.0" in (result.metadata.get("license") or "")
+        assert "-->" not in (result.metadata.get("license") or "")
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+
+    def test_spdx_and_expression_with_gpl_is_blocked(self, tmp_path: Path):
+        """Apache-2.0 AND GPL-3.0 must evaluate the copyleft half, not only Apache-2.0."""
+        skill_dir = tmp_path / "spdx-and-gpl"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: spdx-and-gpl
+description: Skill whose only license signal is an SPDX AND expression
+---
+
+# SPDX AND
+""")
+        (skill_dir / "script.py").write_text("# SPDX-License-Identifier: Apache-2.0 AND GPL-3.0\n")
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+        assert result.metadata.get("license_status") != "allowed"
+
+    def test_spdx_or_expression_of_allowed_licenses_passes(self, tmp_path: Path):
+        """Compound expressions stay allowed when every symbol is permissive."""
+        skill_dir = tmp_path / "spdx-or-mit"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: spdx-or-mit
+description: Skill whose SPDX header is MIT OR MIT-0
+---
+
+# SPDX OR allowed
+""")
+        (skill_dir / "script.py").write_text("# SPDX-License-Identifier: MIT OR MIT-0\n")
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert result.passed
+        assert result.metadata.get("license_status") == "allowed"
+        assert "MIT OR MIT-0" in (result.metadata.get("license") or "")
 
 
 # =============================================================================

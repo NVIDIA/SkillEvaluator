@@ -19,9 +19,10 @@ from skillevaluator.constants import (
     CONTENT_TYPE_WORKFLOWS,
 )
 from skillevaluator.models.result import ValidationResult
-from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
+from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
 from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
+from skillevaluator.utils.rich_markup import escape_markup
 from skillevaluator.validators.base import continue_on_failure_scope
 from skillevaluator.validators.code_risk import CodeRiskValidator
 from skillevaluator.validators.dependencies import DependencySecurityValidator
@@ -40,7 +41,8 @@ from skillevaluator.validators.unicode_smuggle import UnicodeSmuggleValidator
 from skillevaluator.validators.version import VersionValidator
 from skillevaluator.validators.workflows_schema import WorkflowsSchemaValidator
 
-console = Console()
+# emoji=False: ":name:" codes in untrusted text (such as "root:x:0:0:") must print literally.
+console = Console(emoji=False)
 
 # Per-check progress goes to stderr so piped stdout (reports, JSON) stays
 # clean; without it, slow targets print nothing for minutes and look hung.
@@ -70,6 +72,7 @@ REPORTERS = {
     "json": JSONReporter,
     "html": HTMLReporter,
     "markdown": MarkdownReporter,
+    "sarif": SARIFReporter,
 }
 
 
@@ -332,6 +335,8 @@ def emit_reports(
     target_path: str | None = None,
     content_label: str = "Skill",
     announce_paths: bool = True,
+    sarif_scan_root: Path | None = None,
+    sarif_repository_root: Path | None = None,
 ) -> bool:
     """Render reports and return whether every result passed.
 
@@ -356,11 +361,16 @@ def emit_reports(
         reporter_cls = REPORTERS[fmt]
         if fmt == "html":
             reporter = reporter_cls(target_path=target_path, content_label=content_label, tabs=html_tabs)
+        elif fmt == "sarif":
+            reporter = reporter_cls(
+                workspace_root=sarif_repository_root,
+                scan_root=sarif_scan_root,
+            )
         else:
             reporter = reporter_cls()
         output_path = output_dir / f"{basename}{reporter.get_file_extension()}"
         reporter.save(results, output_path)
         if announce_paths:
-            console.print(f"[dim]{fmt} report:[/dim] [cyan]{output_path}[/cyan]")
+            console.print(f"[dim]{fmt} report:[/dim] [cyan]{escape_markup(str(output_path))}[/cyan]")
 
     return all(result.passed for result in results)

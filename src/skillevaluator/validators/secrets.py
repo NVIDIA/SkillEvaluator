@@ -85,7 +85,7 @@ tags = ["nvidia", "api-key"]
         )
 
     def _validate_single_skill(self, skill_path: Path) -> ValidationResult:
-        """Run Gitleaks scan on a single skill directory."""
+        """Run Gitleaks scan on a single skill directory or file."""
         result = ValidationResult()
 
         if not Tools.gitleaks.is_available:
@@ -95,13 +95,26 @@ tags = ["nvidia", "api-key"]
             result.mark_scan_incomplete("gitleaks")
             return result
 
+        scan_root = skill_path.resolve()
+        if self.scan_git_history:
+            source = str(scan_root)
+            cwd = None
+        else:
+            # Keep no-git finding paths relative to the requested scan root so
+            # allowlists cannot match unrelated absolute ancestors. Direct
+            # files run from their parent, with "./" protecting option-like
+            # filenames while preserving Gitleaks' native ignore semantics.
+            scan_is_dir = scan_root.is_dir()
+            source = "." if scan_is_dir else f"./{scan_root.name}"
+            cwd = scan_root if scan_is_dir else scan_root.parent
+
         config_path = self._create_gitleaks_config()
         try:
             tool_result = Tools.gitleaks.run(
                 [
                     "detect",
                     "--source",
-                    str(skill_path.resolve()),
+                    source,
                     "--report-format",
                     "json",
                     "--report-path",
@@ -112,6 +125,7 @@ tags = ["nvidia", "api-key"]
                     str(config_path),
                     *([] if self.scan_git_history else ["--no-git"]),
                 ],
+                cwd=cwd,
                 timeout=120,
             )
 
@@ -163,6 +177,10 @@ tags = ["nvidia", "api-key"]
         Tier 1 artifact dirs (evals/, results/, versions/, ...) hold Tier 3
         output snapshots that routinely carry harvested test credentials;
         gitleaks has to skip them via config since it takes no exclude flag.
+
+        Test/example/fixture/mock skips are directory path components, not
+        substrings. ``(.*)?test(.*)?`` would also skip ``latest`` and
+        ``attestation``.
         """
         artifact_paths = "\n".join(f"    '''(^|/){re.escape(name)}(/|$)'''," for name in sorted(SCAN_EXCLUDED_DIRS))
         config = f"""
@@ -172,10 +190,7 @@ useDefault = true
 [allowlist]
 description = "SkillEvaluator allowlist"
 paths = [
-    '''(.*)?test(.*)?''',
-    '''(.*)?example(.*)?''',
-    '''(.*)?fixture(.*)?''',
-    '''(.*)?mock(.*)?''',
+    '''(^|/)(tests?|examples?|fixtures?|mocks?)(/|$)''',
 {artifact_paths}
 ]
 regexes = [

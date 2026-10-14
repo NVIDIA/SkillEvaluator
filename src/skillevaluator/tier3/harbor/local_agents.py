@@ -24,10 +24,12 @@ from urllib.parse import urlsplit
 
 from harbor.agents.installed.base import NetworkConnectionError, NonZeroAgentExitCodeError
 from harbor.agents.installed.claude_code import ClaudeCode
-from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.opencode import OpenCode
 from harbor.models.trial.paths import EnvironmentPaths
 
+from skillevaluator.provider_config import is_claude_5_5_or_later, is_gpt6_model
+from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorClaudeCode
+from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorCodex as _BootstrapCodex
 from skillevaluator.tier3.harbor.nvidia_build_bridge import (
     MAX_REQUESTS_PER_BRIDGE,
     RunningBridge,
@@ -52,6 +54,11 @@ _NVIDIA_BUILD_BRIDGE_API_KEY_ENV = "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_API_KEY"
 _NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN_ENV = "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN"
 _NVIDIA_BUILD_FILE_BACKED_SENTINEL_KEY = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_HOST_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
+# Local mode runs the CLI installed on the host, not the release Harbor installs
+# in other environments. These are the oldest releases that run each model family.
+_CLAUDE_CODE_MIN_VERSION_FOR_CLAUDE_5_5 = (2, 1, 280)
+_CODEX_MIN_VERSION_FOR_GPT_6 = (0, 159, 1)
+_CLI_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
 async def _await_task_uninterruptibly(
@@ -109,6 +116,17 @@ def _merge_codex_openai_compatible_config(config: dict[str, Any], base_url: str)
     return config
 
 
+def _require_cli_version(cli: str, version: str, minimum: tuple[int, int, int], model: str) -> None:
+    """Fail before the agent starts when the installed ``cli`` is too old for ``model``."""
+    match = _CLI_VERSION_RE.search(version)
+    if match is None or tuple(int(part) for part in match.groups()) < minimum:
+        required = ".".join(str(part) for part in minimum)
+        raise RuntimeError(
+            f"{model} needs {cli} {required} or newer, but the installed {cli} reports version {version!r}. "
+            f"Update the {cli} CLI or use --env-mode docker."
+        )
+
+
 def _rewrite_launcher_segment(command: str, rewrite: Callable[[str], str]) -> str:
     """Apply launcher rewrites before the CLI ``--`` prompt separator only."""
     launcher, separator, prompt = command.partition(" -- ")
@@ -149,7 +167,11 @@ class SkillEvaluatorLocalClaudeCode(SetupNetworkErrorAgent, ClaudeCode):
     _REMOTE_CLAUDE_TMP = PurePosixPath(EnvironmentPaths.agent_dir / "claude-tmp")
 
     async def install(self, environment: BaseEnvironment) -> None:
-        await self.exec_as_agent(environment, command="claude --version")
+        result = await self.exec_as_agent(environment, command="claude --version")
+        self._version = self.parse_version(result.stdout or "")
+        model = self.model_name or ""
+        if is_claude_5_5_or_later(model):
+            _require_cli_version("claude", self._version, _CLAUDE_CODE_MIN_VERSION_FOR_CLAUDE_5_5, model)
 
     def get_version_command(self) -> str | None:
         return "claude --version"
@@ -287,7 +309,7 @@ def _sum_counts(base: int | None, extra: list[Any]) -> int | None:
     return sum(values) if values else None
 
 
-class SkillEvaluatorCodex(SetupNetworkErrorAgent, Codex):
+class SkillEvaluatorCodex(SetupNetworkErrorAgent, _BootstrapCodex):
     """Harbor's Codex, converting the main thread's rollout and folding subagent rollouts in as sidechain steps.
 
     Each Codex thread writes its own rollout. When the agent calls ``spawn_agent``, the child thread's rollout
@@ -298,6 +320,9 @@ class SkillEvaluatorCodex(SetupNetworkErrorAgent, Codex):
     prompt is not added as a user step (it was written by the main agent, which the ``spawn_agent`` call
     already shows), and no child step is placed after the main thread's final answer, which is what the judge
     grades. A run with one rollout, or with no main thread, keeps Harbor's own conversion.
+
+    Its base is the Docker bootstrap wrapper, so setup skips the distribution Node/npm that Harbor's own
+    Codex installer makes redundant.
     """
 
     def convert_trajectory(self, logs_dir: Path) -> Trajectory | None:
@@ -507,7 +532,11 @@ class SkillEvaluatorLocalCodex(SkillEvaluatorGatewayCodex):
     _REMOTE_CODEX_SECRETS_DIR = PurePosixPath(EnvironmentPaths.agent_dir / "codex-secrets")
 
     async def install(self, environment: BaseEnvironment) -> None:
-        await self.exec_as_agent(environment, command="codex --version")
+        result = await self.exec_as_agent(environment, command="codex --version")
+        self._version = self.parse_version(result.stdout or "")
+        model = self.model_name or ""
+        if is_gpt6_model(model):
+            _require_cli_version("codex", self._version, _CODEX_MIN_VERSION_FOR_GPT_6, model)
 
     def get_version_command(self) -> str | None:
         return "codex --version"
@@ -1024,7 +1053,7 @@ class SkillEvaluatorNvidiaBuildCodex(_NvidiaBuildBridgeAgent, SkillEvaluatorCode
         return _rewrite_launcher_segment(command, lambda text: _CODEX_MODEL_ARG_RE.sub(replace, text))
 
 
-class SkillEvaluatorNvidiaBuildClaudeCode(_NvidiaBuildBridgeAgent, SetupNetworkErrorAgent, ClaudeCode):
+class SkillEvaluatorNvidiaBuildClaudeCode(_NvidiaBuildBridgeAgent, SetupNetworkErrorAgent, SkillEvaluatorClaudeCode):
     """Stock Claude Code CLI routed through the in-trial NVIDIA Build bridge."""
 
     def _bridge_client_environment(self) -> dict[str, str]:

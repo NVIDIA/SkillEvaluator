@@ -1078,13 +1078,16 @@ def _validate_plugin_entry_fields(
 
 def _validate_text_fields(entry_id: str, name: object, description: object) -> None:
     _validate_catalog_string(name, f"Catalog entry '{entry_id}' name")
-    _validate_catalog_string(description, f"Catalog entry '{entry_id}' description")
+    _validate_catalog_string(description, f"Catalog entry '{entry_id}' description", allow_text_whitespace=True)
 
 
-def _validate_catalog_string(value: object, label: str) -> str:
+def _validate_catalog_string(value: object, label: str, *, allow_text_whitespace: bool = False) -> str:
     if not isinstance(value, str) or not value or len(value) > MAX_CATALOG_TEXT_LENGTH:
         raise ValueError(f"{label} must be a non-empty bounded string")
-    if any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value):
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Cs"} and not (allow_text_whitespace and character in "\t\n\r")
+        for character in value
+    ):
         raise ValueError(f"{label} contains unsafe control or surrogate characters")
     return value
 

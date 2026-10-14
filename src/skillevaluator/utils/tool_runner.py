@@ -178,7 +178,7 @@ class ExternalTool:
                 "Install Semgrep separately with: brew install semgrep (macOS) "
                 "or uv tool install semgrep"
             ),
-            "skillspector": "Install with: uv tool install git+https://github.com/NVIDIA/SkillSpector.git",
+            "skillspector": "Install with: uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0",
             "osv-scanner": (
                 "Install OSV-Scanner with: brew install osv-scanner (macOS) or "
                 "go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2"

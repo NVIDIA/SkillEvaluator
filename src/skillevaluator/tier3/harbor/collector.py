@@ -863,6 +863,19 @@ def _trajectory_agent_runtime_failure_reason(trajectory: Any) -> str:
     total_prompt = final_metrics.get("total_prompt_tokens")
     total_completion = final_metrics.get("total_completion_tokens")
     tokenless = (total_prompt in (None, 0)) and (total_completion in (None, 0))
+    # Aggregate metrics are optional in ATIF. Recorded step usage also proves
+    # this was not a tokenless startup failure, even if later prose names 401.
+    if tokenless:
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            metrics = step.get("metrics") or {}
+            if isinstance(metrics, dict) and any(
+                isinstance(tokens, (int, float)) and tokens > 0
+                for tokens in (metrics.get("prompt_tokens"), metrics.get("completion_tokens"))
+            ):
+                tokenless = False
+                break
 
     for step in steps:
         if not isinstance(step, dict):
@@ -4829,6 +4842,14 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
                 logical_reward["_logical_mixed_contracts"] = True
         if any(row.get("_has_trajectory") for row in rows):
             logical_reward["_has_trajectory"] = True
+        # Keep every step's judge models so lift can spot a judge fallback in any step.
+        judge_models = {
+            metric: sorted(models)
+            for metric in _LLM_JUDGE_METRICS
+            if (models := set().union(*(_reward_judge_models(row, metric) for row in rows)))
+        }
+        if judge_models:
+            logical_reward["_judge_models"] = judge_models
         logical.append(logical_reward)
     return logical
 
@@ -5353,9 +5374,48 @@ def _shared_metric_pass_lift(
     }
 
 
+_LLM_JUDGE_METRICS = ("accuracy", "goal_accuracy", "behavior_check")
+
+
+def _reward_judge_models(reward: dict[str, Any], metric: str) -> set[str]:
+    """Return the judge models that scored ``metric`` in one reward row.
+
+    A multi-step logical reward carries its steps' models in ``_judge_models``.
+    """
+    carried = reward.get("_judge_models")
+    if isinstance(carried, dict):
+        models = carried.get(metric)
+        return {model for model in models if isinstance(model, str) and model} if isinstance(models, list) else set()
+    details = reward.get("details")
+    detail = details.get(metric) if isinstance(details, dict) else None
+    model = detail.get("judge_model_used") if isinstance(detail, dict) else None
+    return {model} if isinstance(model, str) and model else set()
+
+
+def _judge_models_by_case(
+    rewards: list[dict[str, Any]], metric: str, expected_case_ids: set[str] | None
+) -> dict[str, set[str]]:
+    """Map each case to the judge models that scored ``metric`` in these rewards."""
+    models: dict[str, set[str]] = {}
+    for reward in rewards:
+        if reward_models := _reward_judge_models(reward, metric):
+            models.setdefault(_entry_id(reward, expected_case_ids), set()).update(reward_models)
+    return models
+
+
+def _metric_average_excluding(
+    rewards: list[dict[str, Any]], metric: str, excluded_cases: set[str], expected_case_ids: set[str] | None
+) -> float | None:
+    kept = [reward for reward in rewards if _entry_id(reward, expected_case_ids) not in excluded_cases]
+    return average_metrics(kept)[0].get(metric)
+
+
 def _compute_lift(
     with_scores: dict[str, float],
     without_scores: dict[str, float],
+    with_rewards: list[dict[str, Any]] | None = None,
+    without_rewards: list[dict[str, Any]] | None = None,
+    expected_case_ids: list[str] | None = None,
     *,
     with_not_applicable: list[str] | tuple[str, ...] = (),
     without_not_applicable: list[str] | tuple[str, ...] = (),
@@ -5366,12 +5426,33 @@ def _compute_lift(
     from that arm's scores, so it gets no per-metric lift row. The overall lift
     is then the mean over the metrics both arms scored, with the same
     denominator on each side. Any other missing metric still suppresses it.
+
+    With the per-trial rewards, a case whose arms were judged by different
+    models (a judge fallback in one arm) is left out of that judge metric's
+    lift and counted in ``judge_mixed_cases``.
     """
     lift: dict[str, Any] = {}
-    metrics = tuple(m for m in DISPLAY_METRICS if m in with_scores and m in without_scores)
-    for metric in metrics:
+    paired_scores: dict[str, tuple[float, float]] = {}
+    mixed_counts: dict[str, int] = {}
+    expected_set = set(expected_case_ids) if expected_case_ids else None
+    for metric in (m for m in DISPLAY_METRICS if m in with_scores and m in without_scores):
         w = with_scores[metric]
         wo = without_scores[metric]
+        if metric in _LLM_JUDGE_METRICS and with_rewards and without_rewards:
+            with_models = _judge_models_by_case(with_rewards, metric, expected_set)
+            without_models = _judge_models_by_case(without_rewards, metric, expected_set)
+            mixed = {
+                case_id
+                for case_id in with_models.keys() & without_models.keys()
+                if len(with_models[case_id] | without_models[case_id]) > 1
+            }
+            if mixed:
+                mixed_counts[metric] = len(mixed)
+                w = _metric_average_excluding(with_rewards, metric, mixed, expected_set)
+                wo = _metric_average_excluding(without_rewards, metric, mixed, expected_set)
+                if w is None or wo is None:
+                    continue
+        paired_scores[metric] = (w, wo)
         delta = round(w - wo, 4)
         lift[metric] = {
             "with_skill": w,
@@ -5379,14 +5460,23 @@ def _compute_lift(
             "delta": delta,
             "direction": "up" if delta > 0 else ("down" if delta < 0 else "flat"),
         }
-    if _lift_overall_basket_complete(metrics, with_scores, without_scores, with_not_applicable, without_not_applicable):
-        overall_with = sum(with_scores[m] for m in metrics) / len(metrics)
-        overall_without = sum(without_scores[m] for m in metrics) / len(metrics)
+    metrics = tuple(paired_scores)
+    if _lift_overall_basket_complete(
+        metrics,
+        {metric: scores[0] for metric, scores in paired_scores.items()},
+        {metric: scores[1] for metric, scores in paired_scores.items()},
+        with_not_applicable,
+        without_not_applicable,
+    ):
+        overall_with = sum(paired_scores[m][0] for m in metrics) / len(metrics)
+        overall_without = sum(paired_scores[m][1] for m in metrics) / len(metrics)
         lift["overall"] = {
             "with_skill": round(overall_with, 4),
             "without_skill": round(overall_without, 4),
             "delta": round(overall_with - overall_without, 4),
         }
+    if mixed_counts:
+        lift["judge_mixed_cases"] = mixed_counts
     return lift
 
 

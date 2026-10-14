@@ -12,6 +12,8 @@ from skillevaluator.inference.finding_verifier import FindingVerifier
 from skillevaluator.inference.types import (
     EmptyLLMResponseError,
     LLMClientError,
+    LLMClientRefusedError,
+    LLMClientTruncatedError,
     LLMConfigError,
     LLMVerdict,
     parse_bounded_llm_verdict,
@@ -27,6 +29,8 @@ __all__ = [
     "FindingVerifier",
     "LLMClient",
     "LLMClientError",
+    "LLMClientRefusedError",
+    "LLMClientTruncatedError",
     "LLMConfigError",
     "LLMVerdict",
     "parse_bounded_llm_verdict",

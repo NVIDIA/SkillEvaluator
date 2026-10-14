@@ -71,3 +71,10 @@ condition = "AND"
 targetRules = ["private-key"]
 commits = ["2c5afed9274221fb8a408eeee0601ad53bad9090"]
 paths = ['''^tests/validators/test_url_policy\.py$''']
+
+[[allowlists]]
+description = "Bedrock model ID that follows a credential name in SkillSpector bridge tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^us\.anthropic\.claude-opus-5$''']
+paths = ['''^tests/validators/test_security\.py$''']

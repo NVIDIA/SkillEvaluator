@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from skillevaluator.constants import LLM_VERIFY_MAX_TOKENS
+from skillevaluator.constants import LLM_VERIFY_MAX_TOKENS, LLM_VERIFY_REASONING_EFFORT
 from skillevaluator.inference.client import LLMClient
 from skillevaluator.logging_config import get_logger
 
@@ -31,6 +31,9 @@ class FindingVerifier(LLMClient):
     """Classifies security / PII findings as true or false positives."""
 
     default_max_tokens: int | None = LLM_VERIFY_MAX_TOKENS
+    default_reasoning_effort: str | None = LLM_VERIFY_REASONING_EFFORT
+    # Verdicts are one JSON object per line, so a cut-off reply still holds complete ones.
+    salvage_truncated_response = True
 
     # -- Prompt definitions -----------------------------------------------
 
@@ -40,7 +43,7 @@ class FindingVerifier(LLMClient):
         "true positives or false positives, given the surrounding code context.\n\n"
         "For EACH finding, respond with a JSON object on its own line:\n"
         '{"index": <int>, "verdict": "true_positive"|"false_positive"|"uncertain", '
-        '"confidence": "high"|"medium"|"low", "reasoning": "<brief explanation>"}\n\n'
+        '"confidence": "high"|"medium"|"low", "rationale": "<brief explanation>"}\n\n'
         "Guidelines:\n"
         "- Test card numbers (4111...), placeholder data, documentation examples, "
         "and CLI command samples are false positives.\n"
@@ -127,7 +130,7 @@ class FindingVerifier(LLMClient):
                 )
 
         parts.append(
-            "\nFor each finding above, output one JSON object per line with index, verdict, confidence, and reasoning."
+            "\nFor each finding above, output one JSON object per line with index, verdict, confidence, and rationale."
         )
         return "\n".join(parts)
 

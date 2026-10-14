@@ -17,6 +17,7 @@ from typing import Any
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_EMBEDDING_BATCH_SIZE,
+    CONTENT_DEDUP_LLM_REASONING_EFFORT,
     CONTENT_DEDUP_MAX_CHUNKS,
     CONTENT_DEDUP_MAX_CLUSTER_MEMBERS,
     CONTENT_DEDUP_MAX_LLM_CLUSTERS,
@@ -358,7 +359,11 @@ class IntraSkillValidator(ValidatorBase):
         """Ask the LLM about each cluster concurrently and report the duplicates."""
         logger.info("Running LLM analysis on %d cluster(s) concurrently...", len(reviews))
         try:
-            llm = LLMClient(model=self._llm_model, max_tokens=LLM_VERIFY_MAX_TOKENS)
+            llm = LLMClient(
+                model=self._llm_model,
+                max_tokens=LLM_VERIFY_MAX_TOKENS,
+                reasoning_effort=CONTENT_DEDUP_LLM_REASONING_EFFORT,
+            )
             config = llm._resolved_config()
             provider, model = safe_llm_labels(config.provider, config.model)
         except LLMClientError:

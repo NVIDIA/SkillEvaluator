@@ -8,7 +8,7 @@ Builds prompts from content clusters, calls LLMClient, maps verdicts to severity
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from skillevaluator.inference import (
     LLMClient,
@@ -22,6 +22,18 @@ if TYPE_CHECKING:
     from skillevaluator.deduplication.intra_skill.semantic_clustering import ContentCluster
 
 VALID_VERDICTS = {"DUPLICATE", "INTENTIONAL_DETAIL", "RELATED_BUT_DISTINCT"}
+
+VERDICT_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": sorted(VALID_VERDICTS)},
+        "confidence": {"type": "number"},
+        "rationale": {"type": "string"},
+        "suggestion": {"type": "string"},
+    },
+    "required": ["verdict", "confidence", "rationale", "suggestion"],
+    "additionalProperties": False,
+}
 
 SYSTEM_PROMPT = """You are a technical content analyst for AI agent skill packages.
 You analyze groups of text chunks from different files within the same skill directory.
@@ -42,7 +54,7 @@ Respond with ONLY a JSON object:
 {
   "verdict": "DUPLICATE" | "INTENTIONAL_DETAIL" | "RELATED_BUT_DISTINCT",
   "confidence": <float 0.0-1.0>,
-  "reasoning": "<2-3 sentence explanation>",
+  "rationale": "<2-3 sentence explanation>",
   "suggestion": "<actionable recommendation for the content author>"
 }"""
 
@@ -73,7 +85,12 @@ def analyze_cluster(
     """Run LLM analysis on a single content cluster."""
     user_prompt = build_user_prompt(cluster) if user_prompt is None else user_prompt
     user_prompt = validate_tier2_llm_prompt(user_prompt, context="Content deduplication")
-    data = client.extract_json_from_response(SYSTEM_PROMPT, user_prompt)
+    data = client.extract_json_from_response(
+        SYSTEM_PROMPT,
+        user_prompt,
+        response_schema=VERDICT_JSON_SCHEMA,
+        schema_name="dedup_verdict",
+    )
     return parse_bounded_llm_verdict(
         data,
         valid_verdicts=VALID_VERDICTS,

@@ -113,6 +113,19 @@ All notable changes to SkillEvaluator are documented in this file.
   budget and judge time-budget variables, and the Harbor process environment.
   The CLI reference adds `validate --workers`, the full `--env-mode` list, and
   the exit codes the CLI actually returns (`0`, `1`, `2`).
+- External scanners no longer crash the scan when they print bytes that the
+  selected text codec cannot decode (for example a Windows traceback with a
+  CJK path). Those bytes are replaced, so the captured output is never `None`,
+  and valid output keeps its codec and line endings.
+- The Tier 1 LLM rubric gives reasoning models (DeepSeek R and V4, OpenAI o1,
+  o3, o4 and GPT-5 families, and models named "reasoning") a 32,768-token
+  budget instead of the default 16,384, so their hidden reasoning no longer truncates the
+  rubric JSON. The budget follows the model each request resolves to, is
+  capped at 16,384 on the Anthropic provider, and an explicit `max_tokens`
+  still wins.
+- `doctor --env-mode docker` and Tier 3 runs on Windows now find the Harbor
+  CLI installed next to the active interpreter as `harbor.exe` or
+  `harbor.cmd`, instead of reporting "harbor CLI not found".
 
 ## 0.5.0 - 2026-10-06
 

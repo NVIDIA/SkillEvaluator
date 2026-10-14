@@ -640,11 +640,18 @@ def _command_reads_skill_md_arg(command: list[str], cmd_idx: int, assignments: d
     return False
 
 
+# Brace, glob, parameter and command expansion can turn one shell word into
+# several files. Quotes are gone after tokenizing, so any operand holding one of
+# these characters is treated as possibly naming more than one file.
+_SHELL_EXPANSION_CHARS = frozenset("{*?[$`")
+
+
 def _failed_single_skill_read(call):
     """A shell failure only proves the skill read failed for an isolated read.
 
-    Compound commands and multi-file reads may print SKILL.md successfully
-    before an unrelated operation fails.
+    Compound commands, multi-file reads and operands that the shell may expand
+    into several files can print SKILL.md successfully before another file or
+    operation fails.
     """
     if call.get("is_error") is not True:
         return False
@@ -662,7 +669,7 @@ def _failed_single_skill_read(call):
             options_ended = True
         elif options_ended or arg == "-" or not arg.startswith("-"):
             files.append(arg)
-    return len(files) == 1 and _skill_md_arg(files[0], {})
+    return len(files) == 1 and not _SHELL_EXPANSION_CHARS.intersection(files[0]) and _skill_md_arg(files[0], {})
 
 
 def _cmd_reads_skill_md(cmd) -> bool:

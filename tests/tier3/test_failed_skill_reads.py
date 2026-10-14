@@ -312,6 +312,67 @@ def test_failed_cat_with_dash_prefixed_second_file_keeps_read_credit(
     assert scorer.check_routing(calls, "demo-skill")["score"] == 1.0
 
 
+def test_failed_brace_expanded_cat_keeps_read_credit(grader: tuple[ModuleType, ModuleType], tmp_path: Path) -> None:
+    extractor, scorer = grader
+    skill = tmp_path / "skills" / "demo-skill" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: demo-skill\n---\n# Demo skill\n", encoding="utf-8")
+    command = f"cat {shlex.quote(str(tmp_path / 'skills'))}/{{demo-skill,missing}}/SKILL.md"
+    result = subprocess.run(["bash", "-c", command], cwd=tmp_path, capture_output=True, text=True, encoding="utf-8")
+    assert result.returncode == 1
+    assert result.stdout == skill.read_text(encoding="utf-8")
+    assert "missing/SKILL.md" in result.stderr
+    trajectory = _claude_tool_result(
+        name="Bash",
+        arguments={"command": command},
+        is_error=True,
+        content=result.stdout + result.stderr,
+    )
+    calls = extractor.extract_tool_calls_as_dicts(trajectory)
+
+    assert calls[0]["is_error"] is True
+    assert scorer.check_activation(calls, "demo-skill")["score"] == 0.75
+    assert scorer.check_workflow_order(calls, expected_skill="demo-skill")["score"] == 1.0
+    assert scorer.check_routing(calls, "demo-skill")["score"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "cat /skills/*/SKILL.md",
+        "cat /skills/[a-z]*/SKILL.md",
+        "cat /skills/demo-skill?/SKILL.md",
+        "cat $SKILLS_DIR/SKILL.md",
+        "cat `pwd`/SKILL.md",
+    ),
+)
+def test_failed_cat_with_expanding_operand_keeps_read_credit(grader, command: str) -> None:
+    _, scorer = grader
+    read = {
+        "action": "Bash",
+        "action_input": {"command": command},
+        "observation": "---\nname: demo-skill\n---\n# Demo skill\ncat: /skills/other/SKILL.md: Is a directory",
+        "is_error": True,
+    }
+    execute = {"action": "Bash", "action_input": {"command": "python scripts/run.py"}}
+    assert scorer.check_activation([read], "demo-skill")["score"] == 0.75
+    assert scorer.check_workflow_order([read, execute], expected_skill="demo-skill")["score"] == 1.0
+    assert scorer.check_routing([read], "demo-skill")["score"] == 1.0
+
+
+def test_failed_cat_of_home_relative_skill_loses_credit(grader) -> None:
+    # Tilde expansion always yields one path, so this is still an isolated read.
+    _, scorer = grader
+    read = {
+        "action": "Bash",
+        "action_input": {"command": "cat ~/.claude/skills/demo-skill/SKILL.md"},
+        "observation": "cat: /root/.claude/skills/demo-skill/SKILL.md: No such file or directory",
+        "is_error": True,
+    }
+    assert scorer.check_activation([read], "demo-skill")["score"] == 0.0
+    assert scorer.check_routing([read], "demo-skill")["score"] == 0.0
+
+
 @pytest.mark.parametrize("options", ("--", "'--'", "-n", "-n --"))
 @pytest.mark.parametrize("is_error", (False, True))
 def test_single_cat_read_with_options(grader: tuple[ModuleType, ModuleType], options: str, is_error: bool) -> None:

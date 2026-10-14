@@ -11,10 +11,21 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 ## What lives here
 
 - `index.mdx` — landing page and three-tier overview (Fern slug `/`)
-- `installation.mdx`, `configuration.mdx` — setup and credential reference
-- `tier1-validation.mdx`, `tier2-deduplication.mdx`, `tier3-live-evaluation.mdx`
-  — the three evaluation tiers
-- `developer-guide.mdx` — contributor setup
+- `quickstart.mdx` — install, one provider and key, and first runs
+- `installation.mdx` — extras, uv, pip, Docker, requirements
+- `configuration.mdx` — providers, embeddings, and Tier 3 credential roles
+- `tier1-validation.mdx` — Tier 1 checks, profiles, scanner setup, exit codes
+- `tier2-deduplication.mdx` — Tier 2 dedup commands, catalogs, thresholds, limits
+- `tier3-live-evaluation.mdx` — Tier 3 live agent evaluation workflow
+- `eval-datasets.mdx` — the `evals/` contract, dataset generation, run policy
+- `agents-and-sandboxes.mdx` — agents, environment backends, local mode, readiness
+- `custom-graders.mdx` — bring-your-own graders and native Harbor tasks
+- `reports.mdx` — report formats, scores, and the results-on-disk contract
+- `benchmark-rollout.mdx` — regenerating and promoting `BENCHMARK.md` cards
+- `ci-integration.mdx` — exit codes, GitHub Actions recipe, progressive adoption
+- `cli-reference.mdx` — every command and flag
+- `environment-variables.mdx` — variable-by-variable inventory
+- `developer-guide.mdx` — contributor setup, tests, and docs workflow
 - `assets/` — images referenced by the pages
 - `README.md` (human authoring guide) and this `AGENTS.md` are **not** published
   pages — do not add them to the navigation

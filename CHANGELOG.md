@@ -9,6 +9,122 @@ All notable changes to SkillEvaluator are documented in this file.
 - Optional `skillevaluator dashboard` tables for comparing saved Tier 3 reports
   and retained runs across skills, models, harnesses, and skill conditions,
   with paired token, agent runtime, and recorded USD cost differences.
+- The HTML report's Tier 1 card now shows the SkillSpector version that ran
+  the security scan (for example `SkillSpector v2.12.0`), and the embedded
+  report JSON records it as `skillspector_versions`. Findings depend on the
+  scanner release, so reviewers can tell which SkillSpector produced them
+  without rerunning the scan. The version is shown even when the report omits
+  its timestamp.
+
+### Changed
+
+- SkillSpector now has its own default model per provider instead of
+  following the chat default, so chat-default upgrades no longer reach
+  SkillSpector before it supports them. An explicit `SKILL_EVAL_LLM_MODEL`
+  still reaches it, and `SKILLSPECTOR_MODEL` still overrides both. The bridge
+  forwards your `SKILLSPECTOR_MODEL_<SLOT>`, `SKILLSPECTOR_MODEL_REGISTRY` and
+  `SKILLSPECTOR_REASONING_EFFORT` settings (never `SKILLSPECTOR_TEMPERATURE`),
+  defaults the reasoning effort to `medium` for GPT-6 models, and records the
+  requested `skillspector_model` and `skillspector_reasoning_effort` next to
+  `skillspector_version` in the security result.
+- Install instructions and the missing-scanner hint now pin SkillSpector to
+  `v2.12.0` instead of its default branch.
+- GPT-6 models get the GPT-5 request shape everywhere SkillEvaluator calls a
+  model: no `temperature`, and `max_completion_tokens` on the native OpenAI
+  endpoint. Gateway catalog IDs such as `aws/anthropic/bedrock-claude-opus-5`
+  are recognized as the Claude model they name.
+- Output-token limits are sized per model family. OpenAI reasoning models get
+  at least 32,768 tokens; other models get 16,384 for `--llm-verify`, rubric
+  evaluation, deduplication verdicts and judges, 8,192 for report suggestions
+  and 16,000 for dataset generation. On the Anthropic API, Claude Opus 4 and
+  4.1 stay at the 8,192 tokens the Anthropic SDK allows without streaming.
+- Reasoning effort is sent only to GPT-6 models and to Claude 5.5 or later on
+  the Anthropic API: `high` for `--llm-verify`, `medium` for rubric evaluation,
+  deduplication verdicts and judges.
+- Rubric evaluation and deduplication verdicts request structured output. The
+  verifier and deduplication prompts ask for `rationale` instead of
+  `reasoning`; replies that still say `reasoning` are accepted.
+- The `goal_accuracy` RAGAS scorer is skipped for GPT-5 and GPT-6 judges, which
+  reject its sampling settings.
+- `run_config.json` records the judge reasoning effort, and each standard
+  judge's details record `judge_model_used`, `judge_reasoning_effort` and
+  `judge_fallback_used`. Skill lift leaves out a case whose two conditions were
+  judged by different models and counts it in `judge_mixed_cases`.
+- Removed the unused `CONTENT_DEDUP_LLM_*` constants and `LLM_VERIFY_MODEL`; an
+  LLM client built from explicit credentials uses the provider default model.
+- Tier 3 pins the agent CLIs Harbor installs: Codex 0.161.0 and Claude Code
+  2.1.292, instead of the latest release. Claude Code runs Claude 5.5 and later
+  models with `reasoning_effort=medium`; Codex keeps `high`. Local mode keeps
+  your installed CLIs and fails a trial early when they are too old for the
+  model: Claude 5.5 needs Claude Code 2.1.280 or newer, and GPT-6 needs Codex
+  0.159.1 or newer.
+- OpenAI-compatible gateway agent defaults: Codex moves to
+  `openai/openai/gpt-6.1-sol` and Claude Code to
+  `aws/anthropic/bedrock-claude-opus-5-5`. OpenCode stays on
+  `nvidia/nvidia/nemotron-3-super-120b-long-ctx`, no longer tied to the gateway
+  chat default. Claude Code on the shared gateway key runs with
+  `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, so gateways that forward to
+  another provider do not reject its pre-release request fields.
+- The OpenAI default model moves from `gpt-5.6-sol` to `gpt-6.1-sol` for chat,
+  judging, Codex and SkillSpector, which runs it at `medium` reasoning effort,
+  so the effort values above apply to the OpenAI defaults. OpenCode keeps
+  `openai/gpt-5.6-sol` unless `SKILL_EVAL_LLM_MODEL` is set, because
+  GPT-6.1 Sol supports tool calls only on the Responses API.
+- The Anthropic and Bedrock default models move from Claude Opus 5 to Claude
+  Opus 5.5 (`claude-opus-5-5` and `us.anthropic.claude-opus-5-5`) for chat,
+  judging and Claude Code. On the Claude API they get the effort values above
+  and server-side refusal fallback, and Claude Code runs them at
+  `reasoning_effort=medium`.
+  SkillSpector stays on `claude-opus-5` and `us.anthropic.claude-opus-5`, which
+  SkillSpector v2.12.0 supports.
+- Docker Claude Code and Codex containers no longer get the distribution
+  `nodejs` and `npm` packages from agent setup, except on Alpine images. On
+  Debian-based images, including the default eval image, those packages also
+  provided `npx`, `gcc`, `g++`, and `make`. Claude Code containers now have no
+  Node.js unless the image provides it, and Codex's own Node.js is on `PATH`
+  only for the Codex process. Skills whose scripts, tasks, or stdio MCP servers
+  need these tools must install them through `scripts/apt-packages.txt` or a
+  custom `evals/environment/Dockerfile`.
+
+### Fixed
+
+- Preserve missing Tier 3 token counters as `null` in canonical JSON exports
+  instead of reporting unmeasured usage as zero.
+- Keep dashboard comparisons unavailable for contradictory trial identities or
+  invalid coverage counts, and enforce the documented 16 MB browser upload limit.
+- Preserve scored Harbor trials when agent answers mention authentication errors
+  and per-step token usage is present but aggregate ATIF token metrics are absent
+  or zero. Explicit runtime exceptions and error events still invalidate trials.
+- Safety-classifier refusals, content filters and output-token truncation are
+  detected instead of being read as empty or malformed output. `--llm-verify`
+  and rubric evaluation report the cause, and `--llm-verify` keeps the
+  complete verdicts of a truncated reply. Claude 5.5 or later requests to the
+  native Claude API use server-side fallback to Claude Opus 4.8. In the Harbor
+  verifier, Bedrock retries a filtered Claude 5.5 reply on Claude Opus 4.8, and
+  a refusal or empty judge reply moves on to the next
+  `LLM_JUDGE_FALLBACK_MODELS` entry.
+- The Harbor verifier's last-resort judge model follows the selected provider.
+  With no judge or chat model configured, it used to request an OpenAI model
+  from Anthropic, Bedrock, NVIDIA Build and gateways. The unused host-side
+  `llm_judge.DEFAULT_JUDGE_MODEL` constant is removed.
+- Fixed Docker Codex and Claude Code setup wasting its timeout installing
+  distribution Node/npm before Harbor's own installers. Native, gateway Codex,
+  and NVIDIA Build agents now provision Node/npm only on the installer branches
+  that need them, while preserving installed-agent and version-pin checks.
+- Preserved multiline skill descriptions when saving and loading Tier 2
+  embedding catalogs. Descriptions can contain line breaks and tabs, while
+  catalog identifiers and other control characters remain strictly validated.
+- Brought the published documentation in line with 0.5.0. It now covers how
+  standard grading builds judge evidence and rebuilds trajectories from
+  OpenCode and Codex logs, structured judge output and retries, the evidence
+  budget and judge time-budget variables, and the Harbor process environment.
+  The CLI reference adds `validate --workers`, the full `--env-mode` list, and
+  the exit codes the CLI actually returns (`0`, `1`, `2`).
+
+## 0.5.0 - 2026-10-06
+
+### Added
+
 - Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for
   LLM judges in both the Harbor container verifier (`eval.py`) and host runtime
   (`LLMClient`). Features zero-dependency full jitter exponential backoff,
@@ -31,12 +147,50 @@ All notable changes to SkillEvaluator are documented in this file.
   (`opencode.txt`) and structured Codex tee logs (`codex.txt`) when
   `trajectory.json` is missing or empty.
 
+### Changed
+
+- Upgraded the optional Tier 3 backend to Harbor 0.24.0 and its compatible
+  LiteLLM 1.92-1.93 window. Existing SkillEvaluator agent and environment
+  options now use Harbor's unified selectors; installed Codex adapters preserve
+  merged user and MCP configuration; Docker and local execution stream redacted
+  callbacks under a shared 16 MiB per-command output limit, while the parent
+  Harbor orchestration process has a separate 16 MiB combined stdout/stderr
+  limit; and Docker supports stdin plus isolated sidecar operations without
+  exposing environment values on Compose argv. Generated schema 1.3 and
+  unmodified native task schemas remain compatible, while collection accepts
+  Harbor 0.24 job, trial, reward, and ATIF v1.8 artifacts. Multimodal tool
+  output reaches judges and reports as text with `[image]`/`[audio]` markers.
+  Native tasks' own test scripts must write numeric `reward.json` values, which
+  Harbor 0.24 enforces; a failed job now names the trial or step exception that
+  Harbor recorded.
+- Exposed 23 Harbor 0.24 backends alongside local mode. `cua-cloud`,
+  `opensandbox`, `hf-sandbox`, `podman`, `kata`, `runta`, `prime`, `mosaic`,
+  and `smol` remain disabled until generated tasks can be projected through a
+  trusted image or backend-native provisioning path. Non-secret backend
+  constructor options can be supplied with repeatable, operator-only
+  `--environment-kwarg` / `--ek` flags; skill-owned configuration,
+  credentials, and sandbox-policy overrides remain outside that surface.
+  Harbor's `stream` and `enable_environment_dir_upload` options are reserved,
+  and Modal's `modal_sandbox_v2` option no longer exists.
+- `--env-mode wandb` now runs Harbor's `cwsandbox` backend with W&B
+  authentication, because Harbor 0.24 merged the two. Install
+  `harbor[cwsandbox]==0.24.0` instead of the removed `harbor[wandb]` extra.
+- Harbor now always starts in an empty, evaluator-owned working directory with
+  `.env` loading and Harbor telemetry disabled. A `.env.local` or `.env` file
+  near the operator's project can no longer add credentials or settings that
+  SkillEvaluator's allowlisted environment removed. The `tier3` extra requires
+  python-dotenv 1.2.0.
+- Codex runs with `reasoning_effort=high`, the default under Harbor 0.22, so
+  scores and cost stay comparable after Harbor stopped pinning it.
+- Native tasks follow Harbor 0.24's separate-verifier precedence. A dedicated
+  verifier image or build definition must ship its own test script and never
+  receives SkillEvaluator's grader. Otherwise the verifier is built from
+  `environment/`, whose Compose model must stay within the verifier's
+  environment allowlist. `docker-compose.yml` verifier definitions, which
+  Harbor ignores, are rejected.
+
 ### Fixed
 
-- Preserve missing Tier 3 token counters as `null` in canonical JSON exports
-  instead of reporting unmeasured usage as zero.
-- Keep dashboard comparisons unavailable for contradictory trial identities or
-  invalid coverage counts, and enforce the documented 16 MB browser upload limit.
 - Report non-string YAML keys as validation errors in skills, rules, workflows,
   and plugin manifests instead of raising a `TypeError`, including frontmatter
   `metadata` keys. Show boolean, null, and date keys in a readable YAML form.
@@ -45,14 +199,57 @@ All notable changes to SkillEvaluator are documented in this file.
 - Codex log synthesis maps ``web_search`` action payloads and ``collab_tool_call``
   thread items into ATIF, and error-recovery checks recognize ``status=failed`` /
   ``exit_code=`` terminal evidence emitted by Codex converters.
-
-### Fixed
-
 - Tier 3 Harbor dual-arm evaluation propagates arm suffixes (`-with-skill`,
   `-without-skill`) to `[task] name` in staged native `task.toml` files,
   normalizes external repository and namespace prefixes, and commutatively
   resolves canonical case IDs across attempt and arm suffix combinations
   while preserving expected case IDs.
+- Tier 3 native-task collection now keeps Harbor's staged directory selector,
+  logical dataset ID, and display name separate; ambiguous or unresolved
+  persisted identities fail closed instead of trusting grader-authored IDs.
+  Runner-owned attempt ordinals are carried structurally, so `attempt`-like
+  text in authored selectors, logical IDs, or display names cannot corrupt
+  pass@k or `stop_on_pass` accounting, including truncated aggregate names.
+- Tier 3 Harbor subprocess, Docker, and local diagnostics now redact raw and
+  percent-decoded URI/proxy userinfo components across streamed callbacks,
+  nonzero exits, timeouts, output limits, and persisted launch errors.
+- Tier 3 local OpenCode runs routed through NVIDIA Build now retain the rendered
+  user instruction for ATIF conversion and fail on OpenCode error events, in
+  parity with Harbor's upstream agent lifecycle. Remote MCP servers in that
+  configuration disable OAuth, as Harbor's own OpenCode configuration does.
+- Tier 3 reports now use the collector's logical attempt overall whenever a
+  condition mixes standard and custom rewards, including across separate
+  trials, and aggregate execution summaries preserve child-declared hidden
+  error counts and truncation through launch-error overlays.
+- Tier 3 now rejects non-finite, overflowing, and finite-but-unscalable timeout
+  multipliers at YAML, programmatic, and Harbor command boundaries.
+- Tier 3 now preserves paired baseline isolation by rejecting skill-owned
+  pre-agent setup, native task/step healthchecks, native step workdir overlays,
+  and Harbor task-shipped prior trajectories whenever the baseline arm is
+  enabled. Native standard grading also fails closed on step test overlays,
+  separate verifier contexts, post-agent collect hooks, and task-controlled
+  verifier executable-path, shell, loader, proxy/TLS, provider, and judge
+  environment controls; exact operator-staged provider/judge placeholders and
+  unrelated verifier variables remain compatible. Operator-configured judge
+  fallback models are forwarded only to standard verifier jobs, not agent or
+  `custom_only` environments. Its Python payload now runs from a replaced
+  evaluator-owned directory in isolated mode. `custom_only`
+  retains Harbor-native collect hooks and Harbor's shared/separate
+  step-test resolution, and fully authored native test paths are left untouched
+  instead of replacing their unused `tests/skill_evaluator/` package.
+  All native grading modes reject Windows agent or effective verifier
+  environments until evaluator projection and verifier scripts are OS-aware.
+- Tier 3 collection now fails closed on unsafe reward identities and malformed
+  custom-metric contracts, publishes exact truncation metadata for bounded
+  case and failure-detail samples, and keeps findings, attribution, and
+  per-trial JSON inside the report loader's artifact envelope.
+- Tier 3 progress output, diagnostics, and result summaries no longer redact
+  counts such as `0/1 scored` or `1 errored` when a credential-named
+  environment variable holds a short flag value such as `1`. Short credential
+  fragments in proxy URLs are still redacted.
+- `create-eval-dataset --refine` no longer requires the `tier3` extra to read
+  case IDs from Harbor result files, and no longer fails on multimodal
+  trajectory messages.
 
 ## 0.4.0 - 2026-09-30
 

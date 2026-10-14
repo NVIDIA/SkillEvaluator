@@ -20,6 +20,32 @@ _MAX_STATEMENTS = 256
 _MAX_TOOL_CALLS = 128
 
 
+def atif_content_text(content: object) -> str:
+    """Return the text of an ATIF message or observation content value.
+
+    ATIF content is a string or a list of content parts. Text parts are joined;
+    image and audio parts become ``[image]``/``[audio]`` markers so their
+    agent-controlled source paths never reach judges or reports.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                kind = part.get("type")
+                if kind == "text" and isinstance(part.get("text"), str):
+                    parts.append(part["text"])
+                elif kind in ("image", "audio"):
+                    parts.append(f"[{kind}]")
+        return "\n".join(parts)
+    return str(content)
+
+
 def iter_normalized_tool_calls(traj: dict[str, Any]):
     """Yield each trajectory tool call after safe native-Codex normalization."""
     for step in traj.get("steps", []):
@@ -33,7 +59,7 @@ def _outer_tool_call_observation(
 ) -> str:
     tool_call_id = tool_call.get("tool_call_id")
     return "".join(
-        str(result.get("content", ""))
+        atif_content_text(result.get("content"))
         for result in (step.get("observation") or {}).get("results") or []
         if (
             tool_call_id

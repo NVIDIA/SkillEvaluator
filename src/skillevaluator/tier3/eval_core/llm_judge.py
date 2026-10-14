@@ -15,16 +15,28 @@ import re
 import urllib.error
 import urllib.request
 from typing import Any
-from urllib.parse import urlparse
 
-from skillevaluator.inference.types import EmptyLLMResponseError
-from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, _model_leaf, _supports_custom_temperature
+from skillevaluator.inference.types import EmptyLLMResponseError, LLMClientTruncatedError
+from skillevaluator.provider_config import (
+    MAX_COMPLETION_TOKENS,
+    ProviderConfig,
+    effective_reasoning_effort,
+)
+from skillevaluator.tier3.eval_core.atif_helpers import (
+    _SECTION_COMPACT_TOOL_HISTORY,
+    _SECTION_FINAL_RESPONSE,
+    _SECTION_USER_REQUEST,
+    _behavior_check_budget,
+    _behavior_final_response_limit,
+    _truncate_for_behavior,
+)
 
 logger = logging.getLogger(__name__)
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 NVIDIA_BUILD_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-DEFAULT_JUDGE_MODEL = CHAT_DEFAULT_OPENAI
+# Sent only where effective_reasoning_effort allows it (GPT-6, Claude 5.5+ on the anthropic provider).
+JUDGE_REASONING_EFFORT = "medium"
 
 _ERROR_REDACTION_MARKER = "[REDACTED]"
 _JUDGE_ERROR_REASON_LIMIT = 512
@@ -84,37 +96,6 @@ def _resolve_url(provider: str) -> str:
         return os.environ.get("SKILL_EVAL_LLM_BASE_URL") or NVIDIA_BUILD_CHAT_URL
     base_url = os.environ.get("SKILL_EVAL_LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
     return base_url.rstrip("/") + "/chat/completions" if base_url else OPENAI_CHAT_URL
-
-
-def _is_native_openai_chat_url(provider: str, request_url: str) -> bool:
-    if str(provider or "").strip().casefold() != "openai":
-        return False
-
-    raw_url = str(request_url or "")
-    if raw_url != raw_url.strip() or any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw_url):
-        return False
-    try:
-        parsed = urlparse(raw_url)
-        port = parsed.port
-    except ValueError:
-        return False
-
-    return (
-        parsed.scheme.casefold() == "https"
-        and parsed.hostname is not None
-        and parsed.hostname.casefold() == "api.openai.com"
-        and parsed.netloc.casefold() in {"api.openai.com", "api.openai.com:443"}
-        and port in {None, 443}
-        and parsed.path in {"/v1/chat/completions", "/v1/chat/completions/"}
-        and parsed.username is None
-        and parsed.password is None
-        and not parsed.params
-        and not parsed.query
-        and not parsed.fragment
-        and ";" not in raw_url
-        and "?" not in raw_url
-        and "#" not in raw_url
-    )
 
 
 def _configured_secret_values(extra_secret_values: tuple[str | None, ...] = ()) -> list[str]:
@@ -201,23 +182,40 @@ def _chat_completion_payload(
     temperature: float,
     provider: str | None = None,
     request_url: str | None = None,
+    response_schema: dict[str, Any] | None = None,
+    schema_name: str = "judge_response",
 ) -> dict[str, Any]:
+    """Return the OpenAI-compatible judge request body ``LLMClient`` would send.
+
+    Built from the shared client's request helpers, so the drift test holds the
+    Harbor template's in-container copy to what the client sends.
+    """
+    from skillevaluator.inference.client import (
+        _build_openai_response_format,
+        _temperature_kwargs,
+        _token_limit_kwargs,
+    )
+
     resolved_provider = _provider() if provider is None else provider
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
-    token_key = (
-        "max_completion_tokens"
-        if _model_leaf(model).startswith("gpt-5")
-        and _is_native_openai_chat_url(resolved_provider, resolved_request_url)
-        else "max_tokens"
+    config = ProviderConfig(
+        provider=resolved_provider,
+        model=model,
+        api_key=None,
+        base_url=resolved_request_url.rstrip("/").removesuffix("/chat/completions"),
+        litellm_model=f"openai/{model}",
     )
     payload: dict[str, Any] = {
         "model": model,
-        token_key: max_tokens,
+        **_token_limit_kwargs(config, max_tokens),
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
+        **_temperature_kwargs(model, temperature),
     }
-    if temperature is not None and _supports_custom_temperature(model):
-        payload["temperature"] = temperature
+    if effort := effective_reasoning_effort(resolved_provider, model, JUDGE_REASONING_EFFORT):
+        payload["reasoning_effort"] = effort
+    if response_schema is not None:
+        payload["response_format"] = _build_openai_response_format(response_schema, schema_name)
     return payload
 
 
@@ -226,10 +224,12 @@ def call_public_llm(
     *,
     model: str | None = None,
     api_key: str | None = None,
-    max_tokens: int = 1024,
+    max_tokens: int = 4096,
     temperature: float = 0.0,
     timeout: int = 60,
     allow_model_fallback: bool = True,
+    response_schema: dict[str, Any] | None = None,
+    schema_name: str = "judge_response",
 ) -> tuple[str | None, str | None]:
     """Call the configured public provider through the shared client.
 
@@ -246,10 +246,22 @@ def call_public_llm(
             api_key=api_key,
             max_tokens=max_tokens,
             temperature=temperature,
+            reasoning_effort=JUDGE_REASONING_EFFORT,
         )
-        return client.completions("You are a precise evaluation judge.", prompt), None
+        return (
+            client.completions(
+                "You are a precise evaluation judge.",
+                prompt,
+                response_schema=response_schema,
+                schema_name=schema_name,
+            ),
+            None,
+        )
     except EmptyLLMResponseError:
         return "", None
+    except LLMClientTruncatedError as exc:
+        # Hand back the partial reply so judges can salvage its complete entries.
+        return exc.content, None
     except Exception as exc:
         detail = f"Public provider call failed: {exc}"
         return None, _redact_configured_credentials(detail, (api_key,))
@@ -585,7 +597,7 @@ def _salvage_behavior_results(text: str) -> list[dict[str, Any]]:
             return []
 
 
-STRUCTURED_JUDGE_MAX_TOKENS = 4096
+STRUCTURED_JUDGE_MAX_TOKENS = MAX_COMPLETION_TOKENS
 
 _JUDGE_RETRY_REMINDER = (
     "\n\nIMPORTANT: Your previous reply could not be parsed or validated. Respond with ONLY the "
@@ -600,6 +612,7 @@ def _call_validated_json_judge(
     extract: Any,
     **call_kwargs: Any,
 ) -> tuple[Any, str | None, dict[str, Any]]:
+    """Invoke a JSON judge with one format-correction retry when payload validation fails."""
     call_kwargs.setdefault("max_tokens", STRUCTURED_JUDGE_MAX_TOKENS)
 
     def invoke(call_prompt: str) -> tuple[Any, str | None, dict[str, Any], str | None]:
@@ -627,8 +640,72 @@ def _call_validated_json_judge(
 # Accuracy judge (5-criterion)
 # ---------------------------------------------------------------------------
 
+ACCURACY_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "criteria": {
+            "type": "object",
+            "properties": {
+                "SKILL_IDENTIFIED": {"type": "boolean"},
+                "ACTION_CORRECT": {"type": "boolean"},
+                "FACTUALLY_ACCURATE": {"type": "boolean"},
+                "TASK_ADDRESSED": {"type": "boolean"},
+                "ACTIONABLE": {"type": "boolean"},
+            },
+            "required": [
+                "SKILL_IDENTIFIED",
+                "ACTION_CORRECT",
+                "FACTUALLY_ACCURATE",
+                "TASK_ADDRESSED",
+                "ACTIONABLE",
+            ],
+            "additionalProperties": False,
+        },
+        "score": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["criteria", "score", "reason"],
+    "additionalProperties": False,
+}
+
+GOAL_ACCURACY_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "user_goal": {"type": "string"},
+        "end_state": {"type": "string"},
+        "achieved": {"type": "boolean"},
+        "score": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["user_goal", "end_state", "achieved", "score", "reason"],
+    "additionalProperties": False,
+}
+
+BEHAVIOR_CHECK_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "step": {"type": "integer"},
+                    "passed": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["step", "passed", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        "score": {"type": "number"},
+        "summary": {"type": "string"},
+    },
+    "required": ["results", "score", "summary"],
+    "additionalProperties": False,
+}
+
 ACCURACY_PROMPT = """You are an expert evaluator for AI agent responses. Evaluate by checking \
-each criterion below against the expected answer. For each, answer YES or NO.
+each criterion below against the expected answer. For each criterion, determine true (satisfied) or false (not satisfied).
 
 1. SKILL_IDENTIFIED: Does the response reference or use the correct skill for the task?
 2. ACTION_CORRECT: Does the response describe or execute the correct actions/scripts?
@@ -636,8 +713,7 @@ each criterion below against the expected answer. For each, answer YES or NO.
 4. TASK_ADDRESSED: Does the response directly address the user's request?
 5. ACTIONABLE: Does the response provide actionable information (not just acknowledgment)?
 
-For each criterion write: YES or NO with a brief reason.
-Then compute score = count(YES) / 5.
+Compute score = count(true) / 5.
 Be lenient on exact wording but strict on factual correctness.
 
 Respond with ONLY a JSON object:
@@ -666,6 +742,7 @@ _ACCURACY_CRITERIA_KEYS = frozenset(
 
 
 def _valid_accuracy_criteria(value: Any) -> bool:
+    """Return True when value is a complete 5-criterion boolean mapping."""
     return (
         isinstance(value, dict)
         and value.keys() == _ACCURACY_CRITERIA_KEYS
@@ -674,6 +751,7 @@ def _valid_accuracy_criteria(value: Any) -> bool:
 
 
 def _accuracy_payload_error(parsed: Any) -> str | None:
+    """Validate a parsed accuracy judge payload and return an error message if malformed."""
     if not isinstance(parsed, dict):
         return "Judge response was not a valid JSON object"
     if "reason" in parsed and not isinstance(parsed["reason"], str):
@@ -702,6 +780,8 @@ def judge_accuracy(
         ground_truth=ground_truth,
         agent_text=agent_text,
     )
+    kwargs.setdefault("response_schema", ACCURACY_JSON_SCHEMA)
+    kwargs.setdefault("schema_name", "accuracy_judgment")
 
     parsed, error, _provenance = _call_validated_json_judge(
         prompt,
@@ -761,6 +841,7 @@ Respond with ONLY a JSON object:
 
 
 def _goal_payload_error(parsed: Any) -> str | None:
+    """Validate a parsed goal-accuracy judge payload and return an error message if malformed."""
     if not isinstance(parsed, dict):
         return "Judge response was not a valid JSON object"
     for field in ("reason", "user_goal", "end_state"):
@@ -790,6 +871,8 @@ def judge_goal_accuracy(
         tool_summary=tool_summary,
         agent_text=agent_text,
     )
+    kwargs.setdefault("response_schema", GOAL_ACCURACY_JSON_SCHEMA)
+    kwargs.setdefault("schema_name", "goal_accuracy_judgment")
 
     parsed, error, _provenance = _call_validated_json_judge(
         prompt,
@@ -832,24 +915,93 @@ CONVERSATION:
 EXPECTED BEHAVIORS:
 {behaviors}
 
-For each behavior, respond YES (observed) or NO (not observed) with a brief reason.
+For each behavior, set "passed" to true (observed) or false (not observed) with a brief reason.
 
 Respond with ONLY a JSON object:
 {{"results": [{{"step": 1, "passed": true/false, "reason": "..."}}, ...], \
 "score": <float between 0.0 and 1.0>, "summary": "<brief summary>"}}"""
 
 
-def _compact_behavior_conversation(conversation_text: str, limit: int = 8000) -> str:
+def _slice_with_middle_marker(
+    text: str,
+    budget: int,
+    marker: str,
+    *,
+    max_head: int | None = None,
+    fallback_tail: bool = False,
+) -> str:
+    """Compact *text* to fit *budget* by replacing the middle with *marker*."""
+    if budget <= 0 or not text:
+        return ""
+    if len(text) <= budget:
+        return text
+    if budget <= len(marker) + 2:
+        return text[-budget:] if fallback_tail else text[:budget]
+    avail = budget - len(marker)
+    head = max(1, avail // 2 if max_head is None else min(max_head, avail // 2))
+    tail = max(1, avail - head)
+    return f"{text[:head]}{marker}{text[-tail:]}"
+
+
+def _compact_behavior_conversation(conversation_text: str, limit: int | None = None) -> str:
     """Keep both setup context and late outcome evidence in behavior prompts."""
+    if limit is None:
+        limit = _behavior_check_budget()
     if len(conversation_text) <= limit:
         return conversation_text
 
     marker = "\n...[middle truncated for behavior check]...\n"
-    if limit <= len(marker):
+    if limit <= len(marker) + 1:
         return conversation_text[:limit]
 
-    head = max(1, (limit - len(marker)) * 2 // 3)
-    tail = max(1, limit - len(marker) - head)
+    final_limit = _behavior_final_response_limit()
+    final_header = f"{_SECTION_FINAL_RESPONSE}\n"
+    final_idx = -1
+    if conversation_text.startswith(final_header):
+        final_idx = 0
+    else:
+        pos = conversation_text.find(f"\n\n{final_header}")
+        if pos != -1:
+            final_idx = pos + 2
+
+    if final_idx != -1:
+        final_end = len(conversation_text)
+        for next_hdr in (f"\n\n{_SECTION_USER_REQUEST}\n", f"\n\n{_SECTION_COMPACT_TOOL_HISTORY}\n"):
+            pos = conversation_text.find(next_hdr, final_idx)
+            if pos != -1 and pos < final_end:
+                final_end = pos
+        prefix = conversation_text[:final_idx]
+        final_sec = conversation_text[final_idx:final_end]
+        suffix = conversation_text[final_end:]
+
+        reserved_other = min(1600, max(0, limit - final_limit), limit // 2)
+        max_final = min(final_limit, max(1, limit - reserved_other))
+        if len(final_sec) > max_final:
+            final_body = final_sec[len(final_header) :]
+            body_limit = max(1, max_final - len(final_header))
+            final_sec = f"{final_header}{_truncate_for_behavior(final_body, body_limit)}"[:max_final]
+
+        rem = limit - len(final_sec)
+        if rem <= 0:
+            return final_sec[:limit]
+        if len(prefix) + len(suffix) <= rem:
+            return f"{prefix}{final_sec}{suffix}"
+        if not suffix:
+            pre_comp = _slice_with_middle_marker(prefix, rem, marker)
+            return f"{pre_comp}{final_sec}"[:limit]
+        if len(prefix) <= rem // 2:
+            suf_comp = _slice_with_middle_marker(suffix, rem - len(prefix), marker, max_head=800, fallback_tail=True)
+            return f"{prefix}{final_sec}{suf_comp}"[:limit]
+        pre_budget = max(1, min(len(prefix), rem // 2))
+        suf_budget = max(0, rem - pre_budget)
+        pre_comp = _slice_with_middle_marker(prefix, pre_budget, marker)
+        suf_comp = _slice_with_middle_marker(suffix, suf_budget, marker, max_head=800, fallback_tail=True)
+        return f"{pre_comp}{final_sec}{suf_comp}"[:limit]
+
+    available = limit - len(marker)
+    reserved_head = min(1600, available // 2)
+    tail = max(1, available // 3, min(final_limit, max(1, available - max(1, reserved_head))))
+    head = max(1, available - tail)
     return f"{conversation_text[:head]}{marker}{conversation_text[-tail:]}"
 
 
@@ -882,12 +1034,15 @@ def judge_behavior_check(
         behaviors=behaviors_text,
     )
     kwargs.setdefault("max_tokens", BEHAVIOR_JUDGE_MAX_TOKENS)
+    kwargs.setdefault("response_schema", BEHAVIOR_CHECK_JSON_SCHEMA)
+    kwargs.setdefault("schema_name", "behavior_check_judgment")
 
     content, error = call_public_llm(prompt, **kwargs)
     if error:
         return _judge_error(f"LLM judge error: {error}", results=[])
 
-    def _parse_judge_object(text: str) -> dict[str, Any] | list[Any] | None:
+    def _parse_judge_object(text: str | None) -> dict[str, Any] | list[Any] | None:
+        """Parse a JSON object or list from judge response text."""
         return _extract_json(text) if text else None
 
     parsed = _parse_judge_object(content)

@@ -19,6 +19,11 @@ import click
 
 from skillevaluator import __version__
 from skillevaluator.cli_help import GroupedOption, RichGroup
+from skillevaluator.constants import (
+    SIMILARITY_DEFAULT_MAX_ENTRIES,
+    SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
+    SIMILARITY_MAX_ENTRIES,
+)
 from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.reporting.console_ui import (
@@ -52,6 +57,7 @@ from skillevaluator.tier1.commands import (
 )
 from skillevaluator.tier3_environments import HARBOR_ENVIRONMENTS
 from skillevaluator.tier_group import TierGroup
+from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 from skillevaluator.utils.tier2_paths import (
     is_link_or_reparse,
     paths_refer_to_same_location,
@@ -575,6 +581,7 @@ def _run_agent_eval_or_skip(
     *,
     agents: str | None,
     env_mode: str,
+    environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
     n_concurrent: int | None,
     max_agents: int | None,
@@ -627,6 +634,7 @@ def _run_agent_eval_or_skip(
         skill_path=target_path,
         agents=agents,
         env_mode=env_mode,
+        environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
         n_concurrent=n_concurrent,
         max_agents=max_agents,
@@ -782,7 +790,7 @@ def _print_catalog_divider(index: int, total: int, name: str) -> None:
         ("━━ ", FAINT),
         (f"skill {index}/{total}", f"bold {GREEN}"),
         (" · ", FAINT),
-        (name, "bold"),
+        (strip_terminal_controls(name), "bold"),
         (" ", ""),
     )
     fill = max(0, width - label.cell_len)
@@ -818,7 +826,11 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
         )
         lines: list = [headline, Text()]
         for name, reason in failures[:10]:
-            lines.append(Text.assemble(("  ✗ ", f"bold {RED}"), (f"{name:<28}", TEXT), (reason[:56], MUTED)))
+            # Strip before padding and truncating, so controls neither print nor count toward the widths.
+            name_text = f"{strip_terminal_controls(name):<28}"
+            lines.append(
+                Text.assemble(("  ✗ ", f"bold {RED}"), (name_text, TEXT), (strip_terminal_controls(reason)[:56], MUTED))
+            )
         if len(failures) > 10:
             lines.append(Text(f"  … {len(failures) - 10} more — see per-skill reports", style=MUTED))
         body = Group(*lines)
@@ -842,7 +854,8 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
             title_align="left",
         )
     )
-    console_.print(Text.assemble(("      reports     ", MUTED), (f"{reports_root}/<skill>/", MUTED)))
+    reports = f"{strip_terminal_controls(str(reports_root))}/<skill>/"
+    console_.print(Text.assemble(("      reports     ", MUTED), (reports, MUTED)))
 
 
 CATALOG_SUMMARY_FILENAME = "catalog-summary.json"
@@ -908,6 +921,8 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
     env_mode = params.get("env_mode", "docker")
     if env_mode != "docker":
         argv.extend(["--env-mode", str(env_mode)])
+    for environment_kwarg in params.get("environment_kwarg") or ():
+        argv.extend(["--environment-kwarg", str(environment_kwarg)])
     if params.get("skip_baseline"):
         argv.append("--skip-baseline")
     if params.get("n_concurrent") is not None:
@@ -1124,7 +1139,7 @@ def _validate_catalog(
     if failures:
         raise click.ClickException(
             f"{len(failures)}/{len(skill_dirs)} skills failed validation: "
-            + ", ".join(name for name, _reason in failures)
+            + ", ".join(strip_terminal_controls(name) for name, _reason in failures)
         )
 
 
@@ -1185,7 +1200,7 @@ def _validate_catalog_parallel(
     if failures:
         raise click.ClickException(
             f"{len(failures)}/{len(skill_dirs)} skills failed validation: "
-            + ", ".join(name for name, _reason in failures)
+            + ", ".join(strip_terminal_controls(name) for name, _reason in failures)
         )
 
 
@@ -1274,11 +1289,11 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     run up front instead of opening straight on the Tier 1 section.
     """
     console.print(f"\n[bold]SkillEvaluator {content_type.title()} Validation[/bold]")
-    console.print(f"Target: {target_path}")
+    console.print(f"Target: {escape_markup(str(target_path))}")
     console.print(f"Type: {content_type}")
     if profile:
         profile_color = "cyan"
-        console.print(f"Profile: [{profile_color}]{profile}[/{profile_color}]")
+        console.print(f"Profile: [{profile_color}]{escape_markup(str(profile))}[/{profile_color}]")
 
 
 @cli.command(epilog=_VALIDATE_EPILOG)
@@ -1476,6 +1491,14 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Harbor environment backend.",
 )
 @click.option(
+    "--environment-kwarg",
+    "--ek",
+    multiple=True,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
+)
+@click.option(
     "--skip-baseline",
     is_flag=True,
     cls=GroupedOption,
@@ -1633,6 +1656,7 @@ def validate(
     autopilot: bool | None,
     agents: str | None,
     env_mode: str,
+    environment_kwarg: tuple[str, ...],
     skip_baseline: bool,
     n_concurrent: int | None,
     max_agents: int | None,
@@ -1893,6 +1917,7 @@ def validate(
             tier3_path,
             agents=agents,
             env_mode=env_mode,
+            environment_kwarg=environment_kwarg,
             skip_baseline=skip_baseline,
             n_concurrent=n_concurrent,
             max_agents=max_agents,
@@ -2127,6 +2152,20 @@ def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir:
 @click.option("--full-body", is_flag=True, help="Embed full file bodies instead of descriptions.")
 @click.option("--model", default=None, help="Embedding model override.")
 @click.option(
+    "--max-entries",
+    type=click.IntRange(1, SIMILARITY_MAX_ENTRIES),
+    default=SIMILARITY_DEFAULT_MAX_ENTRIES,
+    show_default=True,
+    help="Maximum selected manifests for a fresh collection scan.",
+)
+@click.option(
+    "--max-scalar-comparisons",
+    type=click.IntRange(min=1),
+    default=SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
+    show_default=True,
+    help="Maximum comparisons multiplied by embedding dimensions.",
+)
+@click.option(
     "--catalog",
     type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
     default=None,
@@ -2147,6 +2186,8 @@ def similarity_check(
     threshold: float,
     full_body: bool,
     model: str | None,
+    max_entries: int,
+    max_scalar_comparisons: int,
     catalog: Path | None,
     save_catalog: Path | None,
     cache: Path | None,
@@ -2187,6 +2228,8 @@ def similarity_check(
         threshold=threshold,
         full_body=full_body,
         model=model,
+        max_entries=max_entries,
+        max_scalar_comparisons=max_scalar_comparisons,
         catalog=resolved_catalog,
         save_catalog=resolved_save_catalog,
     )
@@ -2394,6 +2437,12 @@ def _tier2_workflow(
 )
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
 @click.option(
+    "--environment-kwarg",
+    "--ek",
+    multiple=True,
+    help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
+)
+@click.option(
     "--autopilot",
     is_flag=True,
     help="Create one eval case when no dataset/task source exists, then evaluate.",
@@ -2454,6 +2503,7 @@ def evaluate(
     skill_path: Path,
     agents: str | None,
     env_mode: str,
+    environment_kwarg: tuple[str, ...],
     autopilot: bool,
     skip_baseline: bool,
     n_attempts: int | None,
@@ -2499,6 +2549,7 @@ def evaluate(
         skill_path=skill_path,
         agents=agents,
         env_mode=env_mode,
+        environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
         n_attempts=n_attempts,
         pass_threshold=pass_threshold,
@@ -2710,14 +2761,26 @@ def models_command(limit: int, as_json: bool) -> None:
         "NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
     ),
 )
-@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
+@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE, metavar="MODE")
+@click.option(
+    "--environment-kwarg",
+    "--ek",
+    multiple=True,
+    help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
+)
 @click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")
 @click.option(
     "--verify-models",
     is_flag=True,
     help="Check resolved agent-model catalog reachability with a live credential-bearing request.",
 )
-def doctor(agents: str | None, env_mode: str, agent_model: tuple[str, ...], verify_models: bool) -> None:
+def doctor(
+    agents: str | None,
+    env_mode: str,
+    environment_kwarg: tuple[str, ...],
+    agent_model: tuple[str, ...],
+    verify_models: bool,
+) -> None:
     """Check live-evaluation runtime readiness."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
@@ -2725,6 +2788,7 @@ def doctor(agents: str | None, env_mode: str, agent_model: tuple[str, ...], veri
         tier3_doctor(
             agents=agents,
             env_mode=env_mode,
+            environment_kwarg=environment_kwarg,
             verify_models=verify_models,
             agent_model=agent_model,
         )
@@ -2738,12 +2802,26 @@ def doctor(agents: str | None, env_mode: str, agent_model: tuple[str, ...], veri
     default=None,
     help="Agent list; default follows the configured provider.",
 )
-@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
-def health_check(agents: str | None, env_mode: str) -> None:
+@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE, metavar="MODE")
+@click.option(
+    "--environment-kwarg",
+    "--ek",
+    multiple=True,
+    help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
+)
+def health_check(agents: str | None, env_mode: str, environment_kwarg: tuple[str, ...]) -> None:
     """Quick readiness check for the CLI and selected live-eval backend."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
-    raise SystemExit(tier3_doctor(agents=agents, env_mode=env_mode, verify_models=False, agent_model=()))
+    raise SystemExit(
+        tier3_doctor(
+            agents=agents,
+            env_mode=env_mode,
+            environment_kwarg=environment_kwarg,
+            verify_models=False,
+            agent_model=(),
+        )
+    )
 
 
 @tier3.command("validate")

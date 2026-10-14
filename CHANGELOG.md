@@ -4,8 +4,289 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- The HTML report's Tier 1 card now shows the SkillSpector version that ran
+  the security scan (for example `SkillSpector v2.12.0`), and the embedded
+  report JSON records it as `skillspector_versions`. Findings depend on the
+  scanner release, so reviewers can tell which SkillSpector produced them
+  without rerunning the scan. The version is shown even when the report omits
+  its timestamp.
+
+### Changed
+
+- SkillSpector now has its own default model per provider instead of
+  following the chat default, so chat-default upgrades no longer reach
+  SkillSpector before it supports them. An explicit `SKILL_EVAL_LLM_MODEL`
+  still reaches it, and `SKILLSPECTOR_MODEL` still overrides both. The bridge
+  forwards your `SKILLSPECTOR_MODEL_<SLOT>`, `SKILLSPECTOR_MODEL_REGISTRY` and
+  `SKILLSPECTOR_REASONING_EFFORT` settings (never `SKILLSPECTOR_TEMPERATURE`),
+  defaults the reasoning effort to `medium` for GPT-6 models, and records the
+  requested `skillspector_model` and `skillspector_reasoning_effort` next to
+  `skillspector_version` in the security result.
+- Install instructions and the missing-scanner hint now pin SkillSpector to
+  `v2.12.0` instead of its default branch.
+- GPT-6 models get the GPT-5 request shape everywhere SkillEvaluator calls a
+  model: no `temperature`, and `max_completion_tokens` on the native OpenAI
+  endpoint. Gateway catalog IDs such as `aws/anthropic/bedrock-claude-opus-5`
+  are recognized as the Claude model they name.
+- Output-token limits are sized per model family. OpenAI reasoning models get
+  at least 32,768 tokens; other models get 16,384 for `--llm-verify`, rubric
+  evaluation, deduplication verdicts and judges, 8,192 for report suggestions
+  and 16,000 for dataset generation. On the Anthropic API, Claude Opus 4 and
+  4.1 stay at the 8,192 tokens the Anthropic SDK allows without streaming.
+- Reasoning effort is sent only to GPT-6 models and to Claude 5.5 or later on
+  the Anthropic API: `high` for `--llm-verify`, `medium` for rubric evaluation,
+  deduplication verdicts and judges.
+- Rubric evaluation and deduplication verdicts request structured output. The
+  verifier and deduplication prompts ask for `rationale` instead of
+  `reasoning`; replies that still say `reasoning` are accepted.
+- The `goal_accuracy` RAGAS scorer is skipped for GPT-5 and GPT-6 judges, which
+  reject its sampling settings.
+- `run_config.json` records the judge reasoning effort, and each standard
+  judge's details record `judge_model_used`, `judge_reasoning_effort` and
+  `judge_fallback_used`. Skill lift leaves out a case whose two conditions were
+  judged by different models and counts it in `judge_mixed_cases`.
+- Removed the unused `CONTENT_DEDUP_LLM_*` constants and `LLM_VERIFY_MODEL`; an
+  LLM client built from explicit credentials uses the provider default model.
+- Tier 3 pins the agent CLIs Harbor installs: Codex 0.161.0 and Claude Code
+  2.1.292, instead of the latest release. Claude Code runs Claude 5.5 and later
+  models with `reasoning_effort=medium`; Codex keeps `high`. Local mode keeps
+  your installed CLIs and fails a trial early when they are too old for the
+  model: Claude 5.5 needs Claude Code 2.1.280 or newer, and GPT-6 needs Codex
+  0.159.1 or newer.
+- OpenAI-compatible gateway agent defaults: Codex moves to
+  `openai/openai/gpt-6.1-sol` and Claude Code to
+  `aws/anthropic/bedrock-claude-opus-5-5`. OpenCode stays on
+  `nvidia/nvidia/nemotron-3-super-120b-long-ctx`, no longer tied to the gateway
+  chat default. Claude Code on the shared gateway key runs with
+  `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, so gateways that forward to
+  another provider do not reject its pre-release request fields.
+- The OpenAI default model moves from `gpt-5.6-sol` to `gpt-6.1-sol` for chat,
+  judging, Codex and SkillSpector, which runs it at `medium` reasoning effort,
+  so the effort values above apply to the OpenAI defaults. OpenCode keeps
+  `openai/gpt-5.6-sol` unless `SKILL_EVAL_LLM_MODEL` is set, because
+  GPT-6.1 Sol supports tool calls only on the Responses API.
+- The Anthropic and Bedrock default models move from Claude Opus 5 to Claude
+  Opus 5.5 (`claude-opus-5-5` and `us.anthropic.claude-opus-5-5`) for chat,
+  judging and Claude Code. On the Claude API they get the effort values above
+  and server-side refusal fallback, and Claude Code runs them at
+  `reasoning_effort=medium`.
+  SkillSpector stays on `claude-opus-5` and `us.anthropic.claude-opus-5`, which
+  SkillSpector v2.12.0 supports.
+- Docker Claude Code and Codex containers no longer get the distribution
+  `nodejs` and `npm` packages from agent setup, except on Alpine images. On
+  Debian-based images, including the default eval image, those packages also
+  provided `npx`, `gcc`, `g++`, and `make`. Claude Code containers now have no
+  Node.js unless the image provides it, and Codex's own Node.js is on `PATH`
+  only for the Codex process. Skills whose scripts, tasks, or stdio MCP servers
+  need these tools must install them through `scripts/apt-packages.txt` or a
+  custom `evals/environment/Dockerfile`.
+
 ### Fixed
 
+- Preserve scored Harbor trials when agent answers mention authentication errors
+  and per-step token usage is present but aggregate ATIF token metrics are absent
+  or zero. Explicit runtime exceptions and error events still invalidate trials.
+- Safety-classifier refusals, content filters and output-token truncation are
+  detected instead of being read as empty or malformed output. `--llm-verify`
+  and rubric evaluation report the cause, and `--llm-verify` keeps the
+  complete verdicts of a truncated reply. Claude 5.5 or later requests to the
+  native Claude API use server-side fallback to Claude Opus 4.8. In the Harbor
+  verifier, Bedrock retries a filtered Claude 5.5 reply on Claude Opus 4.8, and
+  a refusal or empty judge reply moves on to the next
+  `LLM_JUDGE_FALLBACK_MODELS` entry.
+- The Harbor verifier's last-resort judge model follows the selected provider.
+  With no judge or chat model configured, it used to request an OpenAI model
+  from Anthropic, Bedrock, NVIDIA Build and gateways. The unused host-side
+  `llm_judge.DEFAULT_JUDGE_MODEL` constant is removed.
+- Fixed Docker Codex and Claude Code setup wasting its timeout installing
+  distribution Node/npm before Harbor's own installers. Native, gateway Codex,
+  and NVIDIA Build agents now provision Node/npm only on the installer branches
+  that need them, while preserving installed-agent and version-pin checks.
+- Preserved multiline skill descriptions when saving and loading Tier 2
+  embedding catalogs. Descriptions can contain line breaks and tabs, while
+  catalog identifiers and other control characters remain strictly validated.
+- Brought the published documentation in line with 0.5.0. It now covers how
+  standard grading builds judge evidence and rebuilds trajectories from
+  OpenCode and Codex logs, structured judge output and retries, the evidence
+  budget and judge time-budget variables, and the Harbor process environment.
+  The CLI reference adds `validate --workers`, the full `--env-mode` list, and
+  the exit codes the CLI actually returns (`0`, `1`, `2`).
+
+## 0.5.0 - 2026-10-06
+
+### Added
+
+- Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for
+  LLM judges in both the Harbor container verifier (`eval.py`) and host runtime
+  (`LLMClient`). Features zero-dependency full jitter exponential backoff,
+  RFC-7231 `Retry-After` header parsing, finite-value environment overrides
+  (`SKILL_EVAL_LLM_MAX_RETRIES`, `SKILL_EVAL_LLM_RETRY_BASE_DELAY`, and
+  `SKILL_EVAL_LLM_RETRY_MAX_DELAY`), and
+  automatic container forwarding via Harbor `task.toml`, and a per-judge
+  verifier time budget that leaves room for failure artifacts, without altering
+  benchmark metrics or scoring formulas.
+- Provider-aware structured JSON schema enforcement (`response_format` for
+  OpenAI-compatible / Gemini Vertex / NVIDIA NIM endpoints and `output_config`
+  for Anthropic `/v1/messages`) across the custom `judge_accuracy`,
+  `judge_goal_accuracy`, and `judge_behavior_check` paths, with automatic
+  schema-specific `HTTP 400`/`422` downgrade and per-target memoization
+  (`_SCHEMA_UNSUPPORTED_TARGETS`), boolean prompt alignment, and a guard for
+  missing `message` fields on reasoning token exhaustion. The canonical OpenAI
+  RAGAS goal scorer retains its separate scoring path.
+- Configurable evidence bundle budgets (`SKILL_EVAL_ACCURACY_BUDGET`, `SKILL_EVAL_GOAL_ACCURACY_BUDGET`, `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`) and final response limit (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`).
+- Tier 3 log converters now rebuild ATIF trajectories from OpenCode JSON streams
+  (`opencode.txt`) and structured Codex tee logs (`codex.txt`) when
+  `trajectory.json` is missing or empty.
+
+### Changed
+
+- Upgraded the optional Tier 3 backend to Harbor 0.24.0 and its compatible
+  LiteLLM 1.92-1.93 window. Existing SkillEvaluator agent and environment
+  options now use Harbor's unified selectors; installed Codex adapters preserve
+  merged user and MCP configuration; Docker and local execution stream redacted
+  callbacks under a shared 16 MiB per-command output limit, while the parent
+  Harbor orchestration process has a separate 16 MiB combined stdout/stderr
+  limit; and Docker supports stdin plus isolated sidecar operations without
+  exposing environment values on Compose argv. Generated schema 1.3 and
+  unmodified native task schemas remain compatible, while collection accepts
+  Harbor 0.24 job, trial, reward, and ATIF v1.8 artifacts. Multimodal tool
+  output reaches judges and reports as text with `[image]`/`[audio]` markers.
+  Native tasks' own test scripts must write numeric `reward.json` values, which
+  Harbor 0.24 enforces; a failed job now names the trial or step exception that
+  Harbor recorded.
+- Exposed 23 Harbor 0.24 backends alongside local mode. `cua-cloud`,
+  `opensandbox`, `hf-sandbox`, `podman`, `kata`, `runta`, `prime`, `mosaic`,
+  and `smol` remain disabled until generated tasks can be projected through a
+  trusted image or backend-native provisioning path. Non-secret backend
+  constructor options can be supplied with repeatable, operator-only
+  `--environment-kwarg` / `--ek` flags; skill-owned configuration,
+  credentials, and sandbox-policy overrides remain outside that surface.
+  Harbor's `stream` and `enable_environment_dir_upload` options are reserved,
+  and Modal's `modal_sandbox_v2` option no longer exists.
+- `--env-mode wandb` now runs Harbor's `cwsandbox` backend with W&B
+  authentication, because Harbor 0.24 merged the two. Install
+  `harbor[cwsandbox]==0.24.0` instead of the removed `harbor[wandb]` extra.
+- Harbor now always starts in an empty, evaluator-owned working directory with
+  `.env` loading and Harbor telemetry disabled. A `.env.local` or `.env` file
+  near the operator's project can no longer add credentials or settings that
+  SkillEvaluator's allowlisted environment removed. The `tier3` extra requires
+  python-dotenv 1.2.0.
+- Codex runs with `reasoning_effort=high`, the default under Harbor 0.22, so
+  scores and cost stay comparable after Harbor stopped pinning it.
+- Native tasks follow Harbor 0.24's separate-verifier precedence. A dedicated
+  verifier image or build definition must ship its own test script and never
+  receives SkillEvaluator's grader. Otherwise the verifier is built from
+  `environment/`, whose Compose model must stay within the verifier's
+  environment allowlist. `docker-compose.yml` verifier definitions, which
+  Harbor ignores, are rejected.
+
+### Fixed
+
+- Report non-string YAML keys as validation errors in skills, rules, workflows,
+  and plugin manifests instead of raising a `TypeError`, including frontmatter
+  `metadata` keys. Show boolean, null, and date keys in a readable YAML form.
+- Harbor ``result.json`` case ids now prefer canonical ``task_id.path`` metadata
+  over repository-prefixed ``task_name`` values when resolving eval entries.
+- Codex log synthesis maps ``web_search`` action payloads and ``collab_tool_call``
+  thread items into ATIF, and error-recovery checks recognize ``status=failed`` /
+  ``exit_code=`` terminal evidence emitted by Codex converters.
+- Tier 3 Harbor dual-arm evaluation propagates arm suffixes (`-with-skill`,
+  `-without-skill`) to `[task] name` in staged native `task.toml` files,
+  normalizes external repository and namespace prefixes, and commutatively
+  resolves canonical case IDs across attempt and arm suffix combinations
+  while preserving expected case IDs.
+- Tier 3 native-task collection now keeps Harbor's staged directory selector,
+  logical dataset ID, and display name separate; ambiguous or unresolved
+  persisted identities fail closed instead of trusting grader-authored IDs.
+  Runner-owned attempt ordinals are carried structurally, so `attempt`-like
+  text in authored selectors, logical IDs, or display names cannot corrupt
+  pass@k or `stop_on_pass` accounting, including truncated aggregate names.
+- Tier 3 Harbor subprocess, Docker, and local diagnostics now redact raw and
+  percent-decoded URI/proxy userinfo components across streamed callbacks,
+  nonzero exits, timeouts, output limits, and persisted launch errors.
+- Tier 3 local OpenCode runs routed through NVIDIA Build now retain the rendered
+  user instruction for ATIF conversion and fail on OpenCode error events, in
+  parity with Harbor's upstream agent lifecycle. Remote MCP servers in that
+  configuration disable OAuth, as Harbor's own OpenCode configuration does.
+- Tier 3 reports now use the collector's logical attempt overall whenever a
+  condition mixes standard and custom rewards, including across separate
+  trials, and aggregate execution summaries preserve child-declared hidden
+  error counts and truncation through launch-error overlays.
+- Tier 3 now rejects non-finite, overflowing, and finite-but-unscalable timeout
+  multipliers at YAML, programmatic, and Harbor command boundaries.
+- Tier 3 now preserves paired baseline isolation by rejecting skill-owned
+  pre-agent setup, native task/step healthchecks, native step workdir overlays,
+  and Harbor task-shipped prior trajectories whenever the baseline arm is
+  enabled. Native standard grading also fails closed on step test overlays,
+  separate verifier contexts, post-agent collect hooks, and task-controlled
+  verifier executable-path, shell, loader, proxy/TLS, provider, and judge
+  environment controls; exact operator-staged provider/judge placeholders and
+  unrelated verifier variables remain compatible. Operator-configured judge
+  fallback models are forwarded only to standard verifier jobs, not agent or
+  `custom_only` environments. Its Python payload now runs from a replaced
+  evaluator-owned directory in isolated mode. `custom_only`
+  retains Harbor-native collect hooks and Harbor's shared/separate
+  step-test resolution, and fully authored native test paths are left untouched
+  instead of replacing their unused `tests/skill_evaluator/` package.
+  All native grading modes reject Windows agent or effective verifier
+  environments until evaluator projection and verifier scripts are OS-aware.
+- Tier 3 collection now fails closed on unsafe reward identities and malformed
+  custom-metric contracts, publishes exact truncation metadata for bounded
+  case and failure-detail samples, and keeps findings, attribution, and
+  per-trial JSON inside the report loader's artifact envelope.
+- Tier 3 progress output, diagnostics, and result summaries no longer redact
+  counts such as `0/1 scored` or `1 errored` when a credential-named
+  environment variable holds a short flag value such as `1`. Short credential
+  fragments in proxy URLs are still redacted.
+- `create-eval-dataset --refine` no longer requires the `tier3` extra to read
+  case IDs from Harbor result files, and no longer fails on multimodal
+  trajectory messages.
+
+## 0.4.0 - 2026-09-30
+
+### Fixed
+
+- Render untrusted skill content, paths, tool messages, and LLM output literally
+  in CLI reports and logs. Escape Rich markup and strip terminal control
+  sequences to prevent rendering failures and misleading output, including
+  catalog summaries and the compact validation view. Preserve Windows paths
+  and literal emoji codes
+  ([#173](https://github.com/NVIDIA/SkillEvaluator/pull/173),
+  [#175](https://github.com/NVIDIA/SkillEvaluator/pull/175)).
+- Make sensitive-assignment, JWT, and private-key redaction linear-time,
+  preventing long adversarial text from stalling logs and reports. Apply the
+  JWT fix to Tier 3 command output and the bundled Harbor verifier
+  ([#172](https://github.com/NVIDIA/SkillEvaluator/pull/172),
+  [#176](https://github.com/NVIDIA/SkillEvaluator/pull/176)).
+- `--no-llm` full datasets include a negative bucket only when eval guidance
+  supplies an off-skill prompt; template mode no longer guesses canned
+  negatives from a fixed question list. CLI and docs now describe `--full` as
+  up to four cases instead of always four.
+- Treat `apply_patch` file headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`,
+  `*** Move to:`) as write targets in the Tier 3 security check. A patch that targets a shell
+  profile, SSH, credential, or privileged config path, sent as an `apply_patch` tool call or a
+  shell heredoc, is now a critical `sensitive_file_write` finding whose evidence names the
+  protected path, not the patch. Every header in the patch is checked.
+- Mask GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, and `github_pat_`) in Tier 3
+  evidence excerpts and Harbor verifier log output.
+- Stop the PII scan reporting User-Agent product versions such as `Chrome/140.0.0.0`
+  as public IP addresses. Chromium's reduced User-Agent gives every version this shape.
+- Separate Tier 2 collection limits from the 256-file per-skill limit. Fresh
+  similarity scans now allow 1,024 selected manifests and 128 million scalar
+  comparisons by default, covering 343 skills with 2,048-dimensional embeddings.
+  Add `--max-entries` and `--max-scalar-comparisons` for explicit scan budgets;
+  exceeded limits fail with actionable errors and never truncate the collection.
+  Fresh pairwise scans reject excessive scalar work after the first validated
+  embedding response, before requesting more embeddings or saving a catalog.
+  Collection discovery has its own 20,000-path ceiling, allowing the supported
+  5,000-entry maximum for minimal collections while retaining the 4,096-path
+  per-skill ceiling. Invalid Python command API budgets raise option-specific
+  errors before provider initialization. Similarity comparisons validate and
+  normalize each vector once instead of once per pair, making large pairwise
+  scans more than an order of magnitude faster. Equal nonzero embeddings score
+  exactly 1.0, so `--threshold 1` reports exact duplicates.
 - Keep headings and comments inside fenced code examples in their enclosing Markdown
   section during Tier 2 content chunking, preserving original source line numbers.
 - Run the public Docker image as an unprivileged user, with writable default report and home directories.
@@ -27,6 +308,78 @@ All notable changes to SkillEvaluator are documented in this file.
 - Report Tier 2 embedding and LLM service failures as incomplete checks, retaining
   a nonzero exit without inventing duplicate-content findings. Provider error
   messages include recovery guidance without echoing raw response bodies.
+- Tier 3 script execution credit now requires evidence that the expected script
+  was invoked. `check_script_execution` previously treated the script name as a
+  substring of an execution command, so reading, printing or searching the
+  script, or running a similarly named file, scored a full `Executed <script>`.
+  Credit is now given only for a recognised invocation: the script run directly,
+  an interpreter given it as its script argument, a `source`, or a `sh -c`
+  payload that does one of those, with `cd` tracked and script identity compared
+  exactly. Interpreter and wrapper options come from grammars derived by running
+  each option against a script that records whether it executed, so `--help`,
+  `perl -c` and `bash -n` run no script while `python -Wignore` and
+  `env FOO=1` still resolve to theirs. A command the walk cannot resolve keeps
+  the existing 0.75 partial credit rather than being scored either way: a path
+  built at run time, an option outside a grammar, a name only in heredoc data,
+  inline code or a module that names the script, and anything reaching a command
+  through standard input, including `xargs` and `parallel`, whose behaviour the
+  command text never determines. Partial credit is only ever given for a
+  command that names the script: an unresolved command that never mentions it
+  scores zero, as before. Redirections standing before the script
+  (`python3 < /dev/null run.py`), a script's own arguments that look like shell
+  options (`bash run.sh -c '...'`), invocations inside `if`, `while`, `until`
+  and `for` bodies, and versioned interpreter names (`perl5.38.2`, `python3.13`)
+  resolve as the shell runs them. A loop over an empty list keeps the earlier
+  binding and its body is not read; a binding made inside `( ... )` stays
+  there; the last command of a pipeline keeps its bindings where the shell
+  does (zsh, ksh) and not where it forks it (bash, dash, mksh), with an
+  option change that could move it (`shopt -s lastpipe`, `emulate sh`)
+  read as unresolved; a quoted or escaped word that would read as syntax
+  (`'done'`, `printf "("`, `';|'`) is the ordinary word it is; groups and
+  compound pipeline stages nest in either order, each compound tested for its
+  own pipe; `((` closed by `))` is an arithmetic command where the shell has
+  one; the positional
+  parameters are empty unless the text gives some, so `for f; do` at the top
+  level runs nothing and keeps the variable's value; an interpreter fed its
+  program by a pipe (`cat run.py | python3`) is unresolved like
+  `python3 < run.py`; a variable bound by `export` or `readonly`, or by
+  `declare` and `typeset` where the shell has them, holds the value it had
+  when the builtin ran, `unset` empties it, `+x` and `export -n` unexport it
+  however the builtin is reached, and one bound from data the text does not
+  carry (`read`, `printf -v`, `local` outside a function, `declare -u`, a name
+  `eval` may bind, including from a program held in a variable) is
+  unresolved, as is a later assignment to a name given `-i`, `-u` or `-n`,
+  while `-l` lowercases it and an array is never exported; what is done to a
+  `-n` name (`nameref` in ksh and mksh) leaves the name it refers to
+  unresolved; `let`, `$((...))` and `$[...]` assign as `((...))` does; an
+  assignment the shell rejects (a value that is not a number for an `-i`
+  name) and a special builtin given an option the shell rejects end the
+  credit where the shell stops there; an assignment written before a command,
+  `env NAME=value` included, is that command's environment only, reaching
+  neither its own words nor the commands after it, except before a special
+  builtin in the POSIX shells; a `-c` payload's shell sees the exported names,
+  its command's own prefix and what `env` adds and removes, and a `$` quoted
+  or escaped from the outer shell is expanded there (one left unquoted is
+  expanded here, a name never bound to nothing), with the payload's own
+  heredoc bodies kept as data; text that `eval`, inline
+  code or a shell reading a heredoc may expand again is unresolved when a
+  variable in it holds the script; every heredoc declared on a line takes its
+  body after the line, in order, and past the number a shell accepts on one
+  line (16 in bash) the line and the rest are data; a here-string, which dash
+  and busybox ash reject before running anything, leaves nothing credited
+  under those shells, and so does a compound's opening word written after an
+  assignment (`A=1 for ...`, `A=1 if ...`, `A=1 ( ... )`), which every
+  modelled shell rejects and which no longer raises; `(((` is a subshell
+  around `((` in bash, zsh and mksh; and `ksh`, `mksh` and `ash` are
+  recognised shells.
+  Applied to both the host checker and the bundled Harbor verifier.
+
+- Added `scripts/script_invocation_differential.py`, a differential harness that
+  executes each command for real against fixtures that record whether they ran,
+  and compares the result against both implementations. `--baseline REF` also
+  scores every command with the checker at an earlier ref and lists each score
+  that moved, so a change that lowers a command that ran, or raises one that
+  did not, is seen before it is pushed.
 
 ### Added
 
@@ -48,6 +401,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Show elapsed waiting time during autopilot dataset generation and identify
+  deterministic starter datasets used after a provider failure. Fully unscored
+  Tier 3 runs show an `INCOMPLETE` summary with coverage, consolidated execution
+  errors, and recovery steps; completed comparisons highlight overall Skill
+  Lift ([#152](https://github.com/NVIDIA/SkillEvaluator/pull/152)).
+- Harden documentation publishing with restricted token permissions, pinned
+  checkout and Fern versions, and disabled persisted checkout credentials.
+  Apply the checkout credential restriction to DCO checks
+  ([#158](https://github.com/NVIDIA/SkillEvaluator/pull/158)).
+- Add the methodology paper as the preferred citation and link research,
+  developer-blog, and livestream resources from the README
+  ([#146](https://github.com/NVIDIA/SkillEvaluator/pull/146),
+  [#159](https://github.com/NVIDIA/SkillEvaluator/pull/159)).
 - `validate PATH` now runs all three tiers for skills by default. Tier 3
   autopilot reuses an existing evaluation source or creates one starter case
   when none exists. `--full` remains compatible but is unnecessary;
@@ -126,10 +492,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- `--no-llm` full datasets include a negative bucket only when eval guidance
-  supplies an off-skill prompt; template mode no longer guesses canned
-  negatives from a fixed question list. CLI and docs now describe `--full` as
-  up to four cases instead of always four.
 - Fully covered documentation-only skills no longer fail security validation
   solely because non-applicable SkillSpector analyzers report a partial status
   ([#137](https://github.com/NVIDIA/SkillEvaluator/issues/137)).

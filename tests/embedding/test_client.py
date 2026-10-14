@@ -18,6 +18,8 @@ from skillevaluator.embedding.client import (
     _fixed_size_chunks,
     _split_by_headings,
     _split_into_chunks,
+    normalize_embedding_vector,
+    unit_vector_similarity,
 )
 
 
@@ -46,6 +48,34 @@ class TestCosineSimilarity:
         b = [1.0, 0.9]
         score = EmbeddingClient.cosine_similarity(a, b)
         assert 0.99 < score < 1.0
+
+    def test_matches_exactly_summed_reference(self) -> None:
+        a = [math.sin(index * 0.37) * (index % 7 + 1) for index in range(2_048)]
+        b = [math.cos(index * 0.11) - 0.25 for index in range(2_048)]
+        norm_a = math.sqrt(math.fsum(value * value for value in a))
+        norm_b = math.sqrt(math.fsum(value * value for value in b))
+        expected = math.fsum((x / norm_a) * (y / norm_b) for x, y in zip(a, b, strict=True))
+
+        assert EmbeddingClient.cosine_similarity(a, b) == pytest.approx(expected, abs=1e-15)
+
+    def test_equal_nonzero_vectors_score_exactly_one(self) -> None:
+        vector = [-5.479683767155414, -6.166558151604646]
+        unit = normalize_embedding_vector(vector)
+
+        assert math.sumprod(unit, unit) < 1.0  # Rounding alone would hide the duplicate at --threshold 1.
+        assert unit_vector_similarity(unit, list(unit)) == 1.0
+        assert EmbeddingClient.cosine_similarity(vector, list(vector)) == 1.0
+        assert unit_vector_similarity([0.0, 0.0], [0.0, 0.0]) == 0.0
+
+    def test_normalized_vectors_reuse_the_same_score(self) -> None:
+        a, b = [3.0, 4.0, 0.0], [4.0, 3.0, 0.0]
+        unit_a, unit_b = normalize_embedding_vector(a), normalize_embedding_vector(b)
+
+        assert unit_a == [0.6, 0.8, 0.0]
+        assert unit_vector_similarity(unit_a, unit_b) == EmbeddingClient.cosine_similarity(a, b)
+        assert normalize_embedding_vector([0.0, 0.0], allow_zero=True) == [0.0, 0.0]
+        with pytest.raises(SimilarityConfigError, match="zero vector"):
+            normalize_embedding_vector([0.0, 0.0])
 
 
 @dataclass

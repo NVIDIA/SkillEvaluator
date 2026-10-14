@@ -55,6 +55,45 @@ def validate_embedding_vector(
     return len(values)
 
 
+def normalize_embedding_vector(
+    vector: object,
+    expected_dimension: int | None = None,
+    *,
+    context: str = "Embedding provider",
+    allow_zero: bool = False,
+) -> list[float]:
+    """Validate a vector and return a unit-vector copy for repeated comparisons.
+
+    Zero vectors remain zero when ``allow_zero`` is enabled, matching
+    :meth:`EmbeddingClient.cosine_similarity`.
+    """
+    values, norm = _validated_vector_values(
+        vector,
+        expected_dimension,
+        context=context,
+        allow_zero=allow_zero,
+    )
+    if norm == 0.0:
+        return values
+    return [value / norm for value in values]
+
+
+def unit_vector_similarity(left: list[float], right: list[float]) -> float:
+    """Return the cosine similarity of two same-width normalized vectors.
+
+    Pairwise scans normalize each vector once with :func:`normalize_embedding_vector`
+    instead of revalidating and renormalizing both vectors for every pair.
+    Equal nonzero vectors score exactly 1.0 so rounding cannot hide exact
+    duplicates at ``--threshold 1``; zero vectors still score 0.0.
+    """
+    if left == right:
+        return 1.0 if any(left) else 0.0
+    score = math.sumprod(left, right)
+    if not math.isfinite(score):
+        raise SimilarityConfigError("Cosine similarity produced a non-finite result.")
+    return max(-1.0, min(1.0, score))
+
+
 class EmbeddingClient:
     """Public OpenAI-compatible client for generating text embeddings.
 
@@ -246,24 +285,19 @@ class EmbeddingClient:
                 "This usually means the embeddings were produced by different models "
                 "or a stale cache is being used."
             )
-        values_a, norm_a = _validated_vector_values(
+        unit_a = normalize_embedding_vector(
             vec_a,
             len(vec_a),
             context="First similarity",
             allow_zero=True,
         )
-        values_b, norm_b = _validated_vector_values(
+        unit_b = normalize_embedding_vector(
             vec_b,
             len(vec_a),
             context="Second similarity",
             allow_zero=True,
         )
-        if norm_a == 0.0 or norm_b == 0.0:
-            return 0.0
-        score = math.fsum((a / norm_a) * (b / norm_b) for a, b in zip(values_a, values_b, strict=True))
-        if not math.isfinite(score):
-            raise SimilarityConfigError("Cosine similarity produced a non-finite result.")
-        return max(-1.0, min(1.0, score))
+        return unit_vector_similarity(unit_a, unit_b)
 
 
 # ---------------------------------------------------------------------------

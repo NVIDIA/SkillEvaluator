@@ -24,6 +24,7 @@ import hashlib
 import json
 import math
 import pkgutil
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import resources
@@ -48,6 +49,9 @@ if TYPE_CHECKING:
 
 
 _TIER2_VALIDATOR_MARKERS = ("similarity", "dedup", "context optimization")
+# SkillSpector reports ``metadata.skillspector_version`` as a bare semantic
+# version. Anything else is dropped rather than echoed into the report.
+_SKILLSPECTOR_VERSION_RE = re.compile(r"\d{1,6}\.\d{1,6}\.\d{1,6}(?:[-+][0-9A-Za-z.-]{1,64})?")
 
 # Tier 3 already enforces a 2 MiB canonical payload limit. HTML needs a
 # separate bound because script-safe escaping (``<`` -> ``\u003c``), pretty
@@ -145,6 +149,17 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
         if value > 0
     }
     return preview, notice
+
+
+def _skillspector_versions(results: list[ValidationResult]) -> list[str]:
+    """Return the distinct SkillSpector versions recorded on ``results``, in first-seen order."""
+    versions: dict[str, None] = {}
+    for result in results:
+        metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        raw_version = metadata.get("skillspector_version")
+        if isinstance(raw_version, str) and _SKILLSPECTOR_VERSION_RE.fullmatch(raw_version.strip()):
+            versions.setdefault(raw_version.strip(), None)
+    return list(versions)
 
 
 def is_tier2_validator_name(validator_name: str | None) -> bool:
@@ -1147,6 +1162,7 @@ class HTMLReporter(ReporterBase):
         # from the global aggregate counters.
         tier1_results, tier2_results, tier3_results = self._split_results_by_tier(results)
         tier1_summary = self._compute_tier_summary(tier1_results)
+        tier1_skillspector_versions = _skillspector_versions(tier1_results)
         tier2_summary = self._compute_tier_summary(tier2_results)
         tier3_summary = self._compute_tier_summary(tier3_results)
         tier3_data = self._tier3_report_data(tier3_results)
@@ -1314,6 +1330,7 @@ class HTMLReporter(ReporterBase):
             # copy inside ``#report-data``.
             "tier3": {"$ref": "#tier3-full"} if tier3_data else None,
             "gating": gating,
+            "skillspector_versions": tier1_skillspector_versions,
         }
         report_json = (
             json.dumps(report_data, indent=2, allow_nan=False)
@@ -1390,6 +1407,7 @@ class HTMLReporter(ReporterBase):
             tier3_truncation=tier3_truncation,
             tier3_preview_notice=tier3_preview_notice,
             tier1_summary=tier1_summary,
+            skillspector_versions=tier1_skillspector_versions,
             tier2_summary=tier2_summary,
             tier3_summary=tier3_summary,
             tier1_display_results=tier1_display_results,

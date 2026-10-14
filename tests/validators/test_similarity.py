@@ -97,6 +97,7 @@ class TestValidateNoContent:
             tmp_path,
             "rules",
             minimum_entries=2,
+            for_pairwise_scan=True,
         )
 
 

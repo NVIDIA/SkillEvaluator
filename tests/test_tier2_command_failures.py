@@ -18,16 +18,44 @@ from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.tier2 import commands
 
 
+@pytest.mark.parametrize("option", ["max_entries", "max_scalar_comparisons"])
+@pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "private-input", None])
+def test_similarity_check_rejects_invalid_limit_options_before_construction(
+    tmp_path: Path, monkeypatch, option: str, value: object
+) -> None:
+    def unexpected_construction(**_kwargs):
+        pytest.fail("Invalid limit options must be rejected before constructing the validator")
+
+    monkeypatch.setattr(commands, "SimilarityValidator", unexpected_construction)
+
+    with pytest.raises(ValueError, match=option) as failure:
+        commands.run_similarity_check(tmp_path, **{option: value})
+
+    assert f"--{option.replace('_', '-')}" in str(failure.value)
+    assert "private-input" not in str(failure.value)
+    assert "provider" not in str(failure.value)
+
+
+def test_similarity_check_rejects_entry_limit_above_hard_cap(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match=r"max_entries.*--max-entries"):
+        commands.run_similarity_check(tmp_path, max_entries=5_001)
+
+
+@pytest.mark.parametrize("during_construction", [False, True])
+@pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
 def test_similarity_check_wraps_unexpected_validator_exceptions(
     tmp_path: Path,
     monkeypatch,
+    during_construction: bool,
+    error_type: type[Exception],
 ) -> None:
     class BrokenSimilarityValidator:
         def __init__(self, **_kwargs):
-            pass
+            if during_construction:
+                raise error_type("provider body contains private-token")
 
         def validate(self, _content_path: Path):
-            raise RuntimeError("provider body contains private-token")
+            raise error_type("provider body contains private-token")
 
     monkeypatch.setattr(commands, "SimilarityValidator", BrokenSimilarityValidator)
 
@@ -217,6 +245,9 @@ def test_chat_http_diagnostics_after_successful_embedding(tmp_path: Path, monkey
         monkeypatch.setenv(f"SKILL_EVAL_{purpose}_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1")
         monkeypatch.setenv(f"SKILL_EVAL_{purpose}_API_KEY", "local-test-key")
         monkeypatch.setenv(f"SKILL_EVAL_{purpose}_MODEL", f"local-{purpose.lower()}-model")
+    monkeypatch.setenv("SKILL_EVAL_LLM_MAX_RETRIES", "2")
+    monkeypatch.setenv("SKILL_EVAL_LLM_RETRY_BASE_DELAY", "0")
+    monkeypatch.setenv("SKILL_EVAL_LLM_RETRY_MAX_DELAY", "0")
     try:
         invocation = CliRunner().invoke(cli, ["tier2", str(skill), "-o", str(reports)])
     finally:
@@ -226,7 +257,7 @@ def test_chat_http_diagnostics_after_successful_embedding(tmp_path: Path, monkey
 
     assert requests[0][0] == "/v1/embeddings"
     chat_requests = [body for path, body in requests if path == "/v1/chat/completions"]
-    assert len(chat_requests) == 6
+    assert len(chat_requests) == 6 * (3 if chat_status == 429 else 1)
     assert all(body["model"] == "local-llm-model" and body["stream"] is False for body in chat_requests)
     payload = json.loads((reports / "skillevaluator-tier2.json").read_text())
     html = (reports / "skillevaluator-tier2.html").read_text()

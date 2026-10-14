@@ -34,9 +34,23 @@ logger = get_logger(__name__)
 _SPDX_PATTERN = re.compile(SPDX_LICENSE_PATTERN, re.IGNORECASE)
 _LICENSE_SUFFIX_PATTERN = re.compile(r"(-license|-licence)$")
 _THE_PREFIX_PATTERN = re.compile(r"^(the-)?")
+_SPDX_EXPRESSION_SPLIT = re.compile(r"\s+(?:OR|AND|WITH)\s+", re.IGNORECASE)
+
+
+def _strip_spdx_capture(raw: str) -> str:
+    """Drop inline comment terminators and trailing source after the SPDX value."""
+    raw = raw.split("#", 1)[0]
+    for marker in ("*/", "-->"):
+        idx = raw.find(marker)
+        if idx != -1:
+            raw = raw[:idx]
+    return raw.strip()
+
 
 # File reference indicators in license field values
 _FILE_REFERENCE_KEYWORDS = frozenset(["see ", "refer to ", "license.txt", "license.md", "copying"])
+_LICENSE_DECLARATION_STEMS = frozenset({"license", "licence", "copying"})
+_TERMINAL_LICENSE_STATUSES = frozenset({"conflict", "unrecognized"})
 
 
 @dataclass(slots=True)
@@ -48,6 +62,19 @@ class LicenseDetection:
     confidence: str
     file_path: str | None = None
     details: str | None = None
+
+
+def _is_license_declaration_filename(name: str) -> bool:
+    """Return True for LICENSE/COPYING-style names, not NOTICE files."""
+    return Path(name).stem.lower() in _LICENSE_DECLARATION_STEMS
+
+
+@dataclass(slots=True)
+class _LicenseFileScan:
+    """All detections and unidentified declaration files under an asset."""
+
+    detections: list[LicenseDetection]
+    unrecognized_declaration_files: list[str]
 
 
 class LicenseValidator(ValidatorBase):
@@ -126,6 +153,8 @@ class LicenseValidator(ValidatorBase):
         result = ValidationResult()
         detection = self._detect_license(asset_path, result)
 
+        if result.metadata.get("license_status") in _TERMINAL_LICENSE_STATUSES:
+            return result
         if detection is None:
             self._handle_no_license(result)
         else:
@@ -143,22 +172,25 @@ class LicenseValidator(ValidatorBase):
 
     def _detect_license(self, asset_path: Path, result: ValidationResult) -> LicenseDetection | None:
         """Attempt to detect license using multi-tier approach."""
-        # Tier 1: Frontmatter declaration
+        scan = self._collect_license_files(asset_path)
+
         if detection := self._check_frontmatter(asset_path):
             result.add_message(f"Tier 1: Found license declaration in {detection.source}")
             if detection.license_id and self._is_file_reference(detection.license_id):
                 result.add_message(f"  License field references file: '{detection.license_id}'")
-                if file_detection := self._check_license_file(asset_path):
-                    return file_detection
+                chosen = self._choose_from_license_files(scan, result)
+                if chosen is not None or result.metadata.get("license_status") in _TERMINAL_LICENSE_STATUSES:
+                    return chosen
             else:
-                return detection
+                return self._resolve_frontmatter_and_files(detection, scan, result)
 
-        # Tier 2: LICENSE file
-        if detection := self._check_license_file(asset_path):
-            result.add_message(f"Tier 2: Detected {detection.license_id} from {detection.file_path}")
-            return detection
+        chosen = self._choose_from_license_files(scan, result)
+        if result.metadata.get("license_status") in _TERMINAL_LICENSE_STATUSES:
+            return chosen
+        if chosen is not None:
+            result.add_message(f"Tier 2: Detected {chosen.license_id} from {chosen.file_path}")
+            return chosen
 
-        # Tier 3: SPDX headers in source files
         if detection := self._scan_source_headers(asset_path):
             result.add_message(f"Tier 3: Found SPDX header '{detection.license_id}' in {detection.file_path}")
             return detection
@@ -198,55 +230,236 @@ class LicenseValidator(ValidatorBase):
         lower = license_value.lower()
         return any(ref in lower for ref in _FILE_REFERENCE_KEYWORDS)
 
-    def _check_license_file(self, asset_path: Path) -> LicenseDetection | None:
-        """Tier 2: Parse LICENSE files and match against known patterns."""
+    def _collect_license_files(self, asset_path: Path) -> _LicenseFileScan:
+        """Read every conventional license filename and collect all matches."""
+        detections: list[LicenseDetection] = []
+        unrecognized: list[str] = []
         for license_name in LICENSE_FILE_NAMES:
             license_path = asset_path / license_name
-            if not license_path.exists():
+            if not license_path.is_file() or not _is_license_declaration_filename(license_name):
                 continue
-
             try:
                 content = license_path.read_text(encoding="utf-8", errors="ignore")
-
-                if detected := self._identify_license_from_content(content):
-                    return LicenseDetection(
-                        license_id=detected["license_id"],
+            except Exception as exc:
+                logger.debug("Could not read %s: %s", license_path, exc)
+                if _is_license_declaration_filename(license_name):
+                    unrecognized.append(license_name)
+                continue
+            matches = self._identify_all_licenses_from_content(content)
+            if matches:
+                detections.extend(
+                    LicenseDetection(
+                        license_id=match["license_id"],
                         source="license_file",
-                        confidence=detected["confidence"],
+                        confidence=match["confidence"],
                         file_path=license_name,
                     )
-
-                if indicator := self._find_proprietary_indicator(content):
-                    return LicenseDetection(
+                    for match in matches
+                )
+                continue
+            if indicator := self._find_proprietary_indicator(content):
+                detections.append(
+                    LicenseDetection(
                         license_id="Proprietary",
                         source="license_file",
                         confidence="high",
                         file_path=license_name,
                         details=f"Found proprietary indicator: '{indicator}'",
                     )
-            except Exception as e:
-                logger.debug("Could not read %s: %s", license_path, e)
+                )
+                continue
+            if _is_license_declaration_filename(license_name):
+                unrecognized.append(license_name)
+        return _LicenseFileScan(detections, unrecognized)
 
-        return None
-
-    def _identify_license_from_content(self, content: str) -> dict | None:
-        """Match LICENSE content against known patterns."""
+    def _identify_all_licenses_from_content(self, content: str) -> list[dict]:
+        """Return every configured license pattern that matches the file text."""
         content_upper = content.upper()
-
+        matches: list[dict] = []
         for license_id, pattern_config in self.config.get("license_patterns", {}).items():
             required = pattern_config.get("required", [])
             exclude = pattern_config.get("exclude", [])
-
             if not self._all_patterns_match(required, content, content_upper):
                 continue
             if self._any_pattern_matches(exclude, content_upper):
                 continue
+            matches.append(
+                {
+                    "license_id": license_id,
+                    "confidence": pattern_config.get("confidence", "medium"),
+                }
+            )
+        return matches
 
-            return {
-                "license_id": license_id,
-                "confidence": pattern_config.get("confidence", "medium"),
+    def _identify_license_from_content(self, content: str) -> dict | None:
+        """Match LICENSE content against known patterns."""
+        matches = self._identify_all_licenses_from_content(content)
+        return matches[0] if matches else None
+
+    def _license_bucket(self, license_id: str | None) -> str:
+        """Classify a license id as allowed, blocked, or unknown."""
+        if not license_id:
+            return "unknown"
+        normalized = self._normalize_license_id(license_id)
+        if normalized in self._normalized_blocklist:
+            return "blocked"
+        if normalized in self._normalized_allowlist:
+            return "allowed"
+        return "unknown"
+
+    def _record_unrecognized_license_file(
+        self,
+        result: ValidationResult,
+        filenames: list[str],
+        frontmatter: LicenseDetection | None = None,
+    ) -> None:
+        """Fail closed when a LICENSE/COPYING file exists but cannot be identified."""
+        joined = ", ".join(filenames)
+        declared = f" Frontmatter declares '{frontmatter.license_id}'." if frontmatter and frontmatter.license_id else ""
+        result.add_structured_finding(
+            Finding(
+                category="LICENSE",
+                severity="HIGH",
+                check_name="unrecognized_license_file",
+                message=(
+                    f"License file '{joined}' is present but could not be identified.{declared} "
+                    "Manual review is required."
+                ),
+                file_path=filenames[0],
+                suggestion=(
+                    "Identify the license in the file, add a detection pattern, or remove the file."
+                ),
+            ),
+            is_error=True,
+        )
+        result.metadata.update(
+            {
+                "license": frontmatter.license_id if frontmatter else None,
+                "license_status": "unrecognized",
+                "license_source": "license_file",
             }
+        )
 
+    def _choose_from_license_files(
+        self,
+        scan: _LicenseFileScan,
+        result: ValidationResult,
+    ) -> LicenseDetection | None:
+        """Pick a file detection, failing closed on blocked or conflicting ids."""
+        if scan.unrecognized_declaration_files:
+            self._record_unrecognized_license_file(result, scan.unrecognized_declaration_files)
+            return None
+        if not scan.detections:
+            return None
+        blocked = [item for item in scan.detections if self._license_bucket(item.license_id) == "blocked"]
+        if blocked:
+            return blocked[0]
+        unique: dict[str, LicenseDetection] = {}
+        for item in scan.detections:
+            if not item.license_id:
+                continue
+            unique.setdefault(self._normalize_license_id(item.license_id), item)
+        if len(unique) == 1:
+            return next(iter(unique.values()))
+        first, second = list(unique.values())[:2]
+        self._add_license_mismatch_finding(result, first, second, check_name="license_file_mismatch")
+        return None
+
+    def _resolve_frontmatter_and_files(
+        self,
+        frontmatter: LicenseDetection,
+        scan: _LicenseFileScan,
+        result: ValidationResult,
+    ) -> LicenseDetection | None:
+        """Reconcile a concrete frontmatter license with every license file."""
+        if scan.unrecognized_declaration_files:
+            self._record_unrecognized_license_file(result, scan.unrecognized_declaration_files, frontmatter)
+            return None
+        if not scan.detections:
+            return frontmatter
+
+        blocked_files = [item for item in scan.detections if self._license_bucket(item.license_id) == "blocked"]
+        if blocked_files:
+            chosen = blocked_files[0]
+            result.add_message(
+                f"Frontmatter license '{frontmatter.license_id}' differs from "
+                f"{chosen.file_path} license '{chosen.license_id}'"
+            )
+            result.add_message(f"Tier 2: Detected {chosen.license_id} from {chosen.file_path}")
+            return chosen
+        if self._license_bucket(frontmatter.license_id) == "blocked":
+            return frontmatter
+
+        file_by_id: dict[str, LicenseDetection] = {}
+        for item in scan.detections:
+            if item.license_id:
+                file_by_id.setdefault(self._normalize_license_id(item.license_id), item)
+        fm_norm = self._normalize_license_id(frontmatter.license_id or "")
+        if set(file_by_id) == {fm_norm}:
+            return frontmatter
+
+        other = next((item for key, item in file_by_id.items() if key != fm_norm), None)
+        if (
+            other is not None
+            and self._license_bucket(frontmatter.license_id) == "allowed"
+            and self._license_bucket(other.license_id) == "allowed"
+        ):
+            result.add_message(
+                f"Frontmatter license '{frontmatter.license_id}' differs from "
+                f"{other.file_path} license '{other.license_id}'"
+            )
+            self._add_license_mismatch_finding(result, frontmatter, other)
+            return None
+        if other is not None and self._license_bucket(other.license_id) == "unknown":
+            return other
+        return frontmatter
+
+    def _add_license_mismatch_finding(
+        self,
+        result: ValidationResult,
+        first: LicenseDetection,
+        second: LicenseDetection,
+        check_name: str = "frontmatter_license_mismatch",
+    ) -> None:
+        """Fail closed when two allowed licenses disagree, without marking allowed."""
+        result.add_structured_finding(
+            Finding(
+                category="LICENSE",
+                severity="HIGH",
+                check_name=check_name,
+                message=(
+                    f"License '{first.license_id}' conflicts with "
+                    f"{second.file_path} license '{second.license_id}'"
+                ),
+                file_path=second.file_path or first.file_path or "unknown",
+                suggestion=(
+                    "Make every license declaration agree, or remove the conflicting file."
+                ),
+            ),
+            is_error=True,
+        )
+        result.metadata.update(
+            {
+                "license": f"{first.license_id} vs {second.license_id}",
+                "license_status": "conflict",
+                "license_source": "frontmatter+license_file" if first.source.startswith("frontmatter") else "license_file",
+            }
+        )
+
+    def _check_license_file(self, asset_path: Path) -> LicenseDetection | None:
+        """Tier 2 helper: first blocked file detection, else the sole identified id."""
+        scan = self._collect_license_files(asset_path)
+        if scan.unrecognized_declaration_files or not scan.detections:
+            return None
+        blocked = [item for item in scan.detections if self._license_bucket(item.license_id) == "blocked"]
+        if blocked:
+            return blocked[0]
+        unique: dict[str, LicenseDetection] = {}
+        for item in scan.detections:
+            if item.license_id:
+                unique.setdefault(self._normalize_license_id(item.license_id), item)
+        if len(unique) == 1:
+            return next(iter(unique.values()))
         return None
 
     @staticmethod
@@ -309,16 +522,28 @@ class LicenseValidator(ValidatorBase):
             with file_path.open(encoding="utf-8", errors="ignore") as f:
                 header = "".join(islice(f, LICENSE_HEADER_SCAN_LINES))
                 if match := _SPDX_PATTERN.search(header):
-                    return match.group(1).strip()
+                    raw = _strip_spdx_capture(match.group(1))
+                    return raw or None
         except Exception as e:
             logger.debug("Could not scan %s: %s", file_path, e)
         return None
+
+    @staticmethod
+    def _expression_symbols(license_id: str) -> list[str]:
+        """Split an SPDX expression into identifiers, keeping hyphenated ids intact."""
+        stripped = license_id.replace("(", " ").replace(")", " ").strip()
+        return [part.strip() for part in _SPDX_EXPRESSION_SPLIT.split(stripped) if part.strip()]
 
     def _validate_license(self, detection: LicenseDetection, result: ValidationResult) -> None:
         """Validate detected license against allowlist/blocklist."""
         license_id = detection.license_id
         if not license_id:
             result.add_warning("License detection returned empty identifier")
+            return
+
+        symbols = self._expression_symbols(license_id)
+        if len(symbols) > 1:
+            self._validate_license_expression(detection, symbols, result)
             return
 
         normalized = self._normalize_license_id(license_id)
@@ -332,6 +557,32 @@ class LicenseValidator(ValidatorBase):
         else:
             self._set_license_metadata(result, detection, "unknown")
             self._handle_unknown_license(result, license_id, detection.file_path)
+
+    def _validate_license_expression(
+        self,
+        detection: LicenseDetection,
+        symbols: list[str],
+        result: ValidationResult,
+    ) -> None:
+        """Fail closed if any SPDX expression symbol is blocked or unknown when required."""
+        blocked = [symbol for symbol in symbols if self._normalize_license_id(symbol) in self._normalized_blocklist]
+        if blocked:
+            self._set_license_metadata(result, detection, "blocked")
+            result.add_message(
+                f"SPDX expression '{detection.license_id}' includes blocked license '{blocked[0]}'"
+            )
+            self._add_blocked_license_finding(result, blocked[0], detection.file_path)
+            return
+        if all(self._normalize_license_id(symbol) in self._normalized_allowlist for symbol in symbols):
+            self._set_license_metadata(result, detection, "allowed")
+            result.add_message(f"License: {detection.license_id} (ALLOWED - permissive)")
+            return
+        unknown = next(
+            (symbol for symbol in symbols if self._normalize_license_id(symbol) not in self._normalized_allowlist),
+            detection.license_id,
+        )
+        self._set_license_metadata(result, detection, "unknown")
+        self._handle_unknown_license(result, unknown, detection.file_path)
 
     @staticmethod
     def _set_license_metadata(result: ValidationResult, detection: LicenseDetection, status: str) -> None:

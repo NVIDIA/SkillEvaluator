@@ -28,7 +28,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.models.skill import SkillFrontmatter, SkillManifest
 from skillevaluator.validators.base import ValidationResult, ValidatorBase
-from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
+from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN, format_validation_location
 from skillevaluator.validators.policy import ValidationPolicy, default_policy
 
 logger = get_logger(__name__)
@@ -179,7 +179,7 @@ class SchemaValidator(ValidatorBase):
         file_path = str(skill_md)
 
         try:
-            content = skill_md.read_text(encoding="utf-8")
+            content = skill_md.read_text(encoding="utf-8-sig")
         except Exception as e:
             result.add_finding(
                 Finding(
@@ -244,7 +244,7 @@ class SchemaValidator(ValidatorBase):
             return result
 
         try:
-            frontmatter = SkillFrontmatter(**data)
+            frontmatter = SkillFrontmatter.model_validate(data)
             result.add_success(
                 check_name="frontmatter_valid",
                 message=f"Valid frontmatter for skill '{frontmatter.name}'",
@@ -259,7 +259,7 @@ class SchemaValidator(ValidatorBase):
             )
         except ValidationError as e:
             for error in e.errors():
-                field = ".".join(str(loc) for loc in error["loc"])
+                field = format_validation_location(error)
                 result.add_finding(
                     Finding(
                         category="SCHEMA",
@@ -439,7 +439,7 @@ class SchemaValidator(ValidatorBase):
         file_path = str(skill_md)
 
         try:
-            line_count = len(skill_md.read_text(encoding="utf-8").splitlines())
+            line_count = len(skill_md.read_text(encoding="utf-8-sig").splitlines())
             if line_count > MAX_SKILL_MD_LINES:
                 result.add_finding(
                     Finding(
@@ -490,7 +490,7 @@ class SchemaValidator(ValidatorBase):
         file_path = str(skill_md)
 
         try:
-            content = skill_md.read_text(encoding="utf-8")
+            content = skill_md.read_text(encoding="utf-8-sig")
         except Exception:
             return result
 

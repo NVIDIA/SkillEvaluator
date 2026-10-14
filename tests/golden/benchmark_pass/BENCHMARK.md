@@ -11,6 +11,9 @@ Recommended for publication based on the completed evaluation evidence in this r
 - Skill: `demo-skill`
 - Evaluation date: 2026-07-24
 - Evaluator version: `0.8.2`
+- Evaluated source: `NVIDIA/demo_skills`
+- Evaluated source revision: `2263a2ebdab903e87f7e7c0a001d22c3a926a9cf`
+- Evaluator container revision: `ghcr.io/nvidia/skillevaluator@sha256:0117bc2e3e54da4244a656466526c5b1b5a559ea0117bc2e3e54da4244a65646`
 - Agents: Claude Code (`claude-sonnet`), Codex (`gpt-codex`)
 - Tasks: 8 evaluation tasks (6 positive, 2 negative)
 - Dataset digest: `sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` (skill-evaluator-dataset-snapshot/1)

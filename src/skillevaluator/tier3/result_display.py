@@ -9,12 +9,13 @@ import io
 import logging
 import math
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from rich.box import SIMPLE
-from rich.console import Console
+from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -186,6 +187,147 @@ def _trial_failures(agent: str, data: Mapping[str, Any]) -> list[str]:
             reason = str(failure.get("reason") or "trial did not complete")
             rendered.append(f"{agent} {label} {trial}: {reason}")
     return rendered
+
+
+def _error_messages(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    return [str(item) for item in value if str(item).strip()] if isinstance(value, list) else []
+
+
+def _attempt_coverage(data: Mapping[str, Any]) -> str:
+    scored, expected = data.get("scored_attempts"), data.get("expected_attempts")
+    if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in (scored, expected)):
+        return f"{scored}/{expected}"
+    return ""
+
+
+def _concise_trial_reason(reason: str) -> str:
+    """Collapse identical judge errors while retaining the affected metrics."""
+    prefix = "Required judge evaluation failed: "
+    if reason.startswith(prefix):
+        parts = [part.partition(": LLM judge error: ") for part in reason.removeprefix(prefix).split("; ")]
+        if parts and all(separator and detail == parts[0][2] for _, separator, detail in parts):
+            metrics = ", ".join(metric for metric, _, _ in parts)
+            return f"Judge evaluation failed ({metrics}): {parts[0][2]}"
+    return reason
+
+
+def _render_incomplete_execution(*, result: Mapping[str, Any], console: Console, safe: Any) -> set[str]:
+    """Show execution evidence once, without implying an unscored skill failed."""
+    body = Text("Evaluation did not complete; skill lift was not measured.\n")
+    coverage = _attempt_coverage(result)
+    if coverage:
+        body.append(f"Scored attempts: {coverage}\n", style="bold")
+    covered: set[str] = set()
+    rendered: set[tuple[str, str]] = set()
+    reasons: list[str] = []
+
+    def add(scope: str, message: str) -> None:
+        covered.add(message)
+        key = (scope, message)
+        if key not in rendered:
+            rendered.add(key)
+            body.append(f"\n{safe(scope)}: " if scope else "\n", style="bold")
+            body.append(safe(message) + "\n")
+
+    agents = result.get("agents")
+    for agent, raw in agents.items() if isinstance(agents, Mapping) else []:
+        if not isinstance(raw, Mapping):
+            continue
+        conditions = raw.get("conditions")
+        conditions = conditions if isinstance(conditions, Mapping) else {}
+        trial_failures = raw.get("trial_failures")
+        trial_failures = trial_failures if isinstance(trial_failures, Mapping) else {}
+        agent_covered: set[str] = set()
+        for variant in dict.fromkeys([*conditions, *trial_failures]):
+            arm_rendered_count = len(rendered)
+            condition = conditions.get(variant)
+            condition = condition if isinstance(condition, Mapping) else {}
+            failures = trial_failures.get(variant)
+            failures = failures if isinstance(failures, list) else []
+            label = str(variant).replace("_", "-")
+            scope = f"{agent} {label}"
+            arm_coverage = _attempt_coverage(condition)
+            if arm_coverage:
+                scope += f" ({arm_coverage} scored)"
+            redundant: set[str] = set()
+            trial_names: list[str] = []
+            for failure in failures:
+                if not isinstance(failure, Mapping):
+                    continue
+                trial = str(failure.get("trial") or "unknown trial")
+                reason = str(failure.get("reason") or "trial did not complete")
+                reasons.append(reason)
+                trial_names.append(trial)
+                add(f"{scope} / {trial}", _concise_trial_reason(reason))
+                redundant.update(
+                    [reason, f"Agent runtime failed in {trial}: {reason}", f"Unscoreable reward in {trial}: {reason}"]
+                )
+                covered.add(f"{label.replace('-', ' ').capitalize()} trial {trial}: {reason}")
+            errors = _error_messages(condition.get("execution_errors") or condition.get("detail"))
+            for error in errors:
+                coverage_error = bool(arm_coverage and error == f"Scored attempt coverage is {arm_coverage}")
+                missing_prefix = "Missing scored attempts for cases: "
+                missing_cases = error.removeprefix(missing_prefix).split(", ")
+                missing_explained = error.startswith(missing_prefix) and all(
+                    any(trial.startswith(case + "__") for trial in trial_names) for case in missing_cases
+                )
+                aggregate = re.fullmatch(r"Harbor job did not complete successfully: (\d+) errored", error)
+                aggregate_error = bool(aggregate and int(aggregate[1]) == len(set(trial_names)))
+                if error not in redundant and not (coverage_error or missing_explained or aggregate_error):
+                    add(scope, error)
+                redundant.add(error)
+                if aggregate_error:
+                    redundant.add(f"{agent} {label} Harbor run failed: {error}")
+                    redundant.add(f"{label.replace('-', ' ').capitalize()} aggregate job: {error}")
+            if len(rendered) == arm_rendered_count and _condition_status(raw, str(variant)) not in {
+                "succeeded",
+                "complete",
+                "skipped",
+            }:
+                add(scope, "condition did not complete")
+            agent_covered.update(redundant)
+        for error in _error_messages(raw.get("execution_errors")):
+            if error not in agent_covered:
+                add(str(agent), error)
+            agent_covered.add(error)
+        if not conditions and not trial_failures and not agent_covered:
+            add(str(agent), "evaluation failed without diagnostic details")
+        covered.update(agent_covered)
+    for error in _error_messages(result.get("execution_errors") or result.get("error")):
+        if error not in covered:
+            add("", error)
+    for warning in _error_messages(result.get("warnings")):
+        add("Warning", warning)
+
+    body.append("\nNext steps\n", style="bold")
+    if any("AgentTimeoutError" in reason for reason in reasons):
+        body.append(
+            "  • Inspect the timed-out agent's trial.log and transcript; reduce the task or adjust --timeout-multiplier.\n"
+        )
+    if any("judge" in reason.casefold() and "timed out" in reason.casefold() for reason in reasons):
+        body.append("  • Check the judge provider's availability and retry after resolving the request timeout.\n")
+    if result.get("result_path") or result.get("run_dir") or result.get("output_dir"):
+        body.append("  • Inspect result.json and the trial artifacts for the full execution diagnostics.\n")
+    else:
+        body.append("  • Resolve the execution error before retrying evaluation.\n")
+    console.print(Panel(body, title=Text("Tier 3 Evaluation: INCOMPLETE", style="bold yellow"), border_style="yellow"))
+
+    # Feedback sometimes re-emits a semicolon-joined copy of these same errors.
+    # Suppress only messages composed entirely of evidence already displayed;
+    # preserve any additional recommendation or unknown diagnostic.
+    known_parts = {part for message in covered for part in message.split("; ")}
+    feedback = result.get("tier3_feedback") or result.get("agent_eval")
+    if isinstance(feedback, Mapping):
+        for key in ("conclusions", "recommendations", "suggestions", "suggestions_v2"):
+            for item in feedback.get(key, []) if isinstance(feedback.get(key), list) else []:
+                message = (
+                    str(item.get("message") or item.get("suggestion") or "") if isinstance(item, Mapping) else str(item)
+                )
+                if message and all(part in known_parts for part in message.split("; ")):
+                    covered.add(message)
+    return covered
 
 
 def _display_metrics(result: Mapping[str, Any], agents: Mapping[str, Any]) -> list[str]:
@@ -362,9 +504,23 @@ def _render_agent_scores(
         if subtitle.plain:
             subtitle.append("\n")
         subtitle.append(safe(agent_output), style="dim")
+    # Repeat the stored evaluator lift prominently without changing either
+    # table or deriving a headline from dimensions or incomplete comparisons.
+    content: Table | Group = table
+    if (
+        with_usable
+        and baseline_usable
+        and all(_finite_number(value) is not None for value in (with_overall, baseline_overall, overall.get("delta")))
+    ):
+        headline = Text("OVERALL SKILL LIFT   ", style="bold")
+        headline.append_text(_delta_cell(overall["delta"]))
+        agents = result.get("agents")
+        if isinstance(agents, Mapping) and len(agents) > 1:
+            headline.append(f" · {safe(agent)}", style="dim")
+        content = Group(headline, Text(""), table)
     console.print(
         Panel(
-            table,
+            content,
             title=title,
             subtitle=subtitle if subtitle.plain else None,
             border_style="cyan",
@@ -567,7 +723,15 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
         console.print(f"Time: {float(duration):.1f}s")
 
     agents = result.get("agents")
-    if isinstance(agents, Mapping) and agents:
+    incomplete = status in {"failed", "incomplete"} and not any(
+        _condition_usable(raw, variant)
+        for raw in (agents.values() if isinstance(agents, Mapping) else [])
+        if isinstance(raw, Mapping)
+        for variant in ("with_skill", "without_skill")
+    )
+    if incomplete:
+        rendered_feedback_messages = _render_incomplete_execution(result=result, console=console, safe=safe)
+    if isinstance(agents, Mapping) and agents and not incomplete:
         metrics = _display_metrics(result, agents)
         for agent, raw in agents.items():
             data = raw if isinstance(raw, Mapping) else {}
@@ -579,6 +743,7 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
                 metrics=metrics,
                 safe=safe,
             )
+
         _render_dimensions(console=console, agents=agents, safe=safe)
 
         # The per-evaluator findings report — evaluator reasonings, evidence
@@ -611,7 +776,7 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
                 rendered_errors.extend(agent_errors)
                 if raw.get("execution_status") not in {None, "succeeded", "complete", "skipped"} and not agent_errors:
                     rendered_errors.append(f"{agent} evaluation failed without diagnostic details")
-    if rendered_errors or warnings:
+    if not incomplete and (rendered_errors or warnings):
         status_style = "bold red" if rendered_errors else "bold yellow"
         console.print(Text(f"Tier 3 Evaluation: {display_status.upper()}", style=status_style))
         findings = Text()

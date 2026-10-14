@@ -212,7 +212,7 @@ proprietary_indicators:
 
 spdx_detection:
   # Regex pattern to extract SPDX identifier
-  pattern: "SPDX-License-Identifier:\\s*([A-Za-z0-9.+-]+)"
+  pattern: "SPDX-License-Identifier:\\s*([^\\n]+)"
 
   # Number of lines to scan from the beginning of each file
   scan_lines: 50

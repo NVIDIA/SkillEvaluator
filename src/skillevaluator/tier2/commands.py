@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from skillevaluator.constants import SIMILARITY_DEFAULT_MAX_ENTRIES, SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
+from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.tier1.commands import emit_reports
 from skillevaluator.validators.similarity import SimilarityValidator
@@ -18,7 +20,14 @@ def _guarded_result(title: str, target_path: Path, callback) -> list[ValidationR
         result = callback()
     except Exception as exc:  # validators convert expected failures; this protects CLI UX
         result = ValidationResult(validator_name=title, validator_description="Tier 2 check")
-        result.add_error(f"{title} failed: {exc}")
+        result.mark_scan_incomplete(title)
+        # SDK exceptions may contain response bodies, request data, or credentials.
+        # Expected provider failures are explained by the validators themselves.
+        result.add_error(
+            f"{title} could not complete because of an unexpected error ({type(exc).__name__}). "
+            "Check the provider configuration and connectivity, then rerun Tier 2. "
+            "If the problem persists, report this error type to the maintainers."
+        )
     if not result.validator_name:
         result.validator_name = title
     if not result.validator_description:
@@ -37,7 +46,13 @@ def run_similarity_check(
     save_catalog: Path | None = None,
     cache: Path | None = None,
     save_cache: Path | None = None,
+    max_entries: int = SIMILARITY_DEFAULT_MAX_ENTRIES,
+    max_scalar_comparisons: int = SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
 ) -> list[ValidationResult]:
+    # Caller option errors have safe diagnostics and should not become provider failures.
+    validate_max_entries(max_entries)
+    validate_max_scalar_comparisons(max_scalar_comparisons)
+
     def _run() -> ValidationResult:
         validator = SimilarityValidator(
             threshold=threshold,
@@ -48,6 +63,8 @@ def run_similarity_check(
             save_cache_path=save_cache,
             content_type=None if content_type == "auto" else content_type,
             full_body=full_body,
+            max_entries=max_entries,
+            max_scalar_comparisons=max_scalar_comparisons,
         )
         return validator.validate(content_path)
 
@@ -61,16 +78,15 @@ def run_context_optimization_check(
     model: str | None = None,
     llm_model: str | None = None,
 ) -> list[ValidationResult]:
-    validator = IntraSkillValidator(
-        threshold=threshold,
-        embedding_model=model,
-        llm_model=llm_model,
-    )
-    return _guarded_result(
-        "Context Deduplication",
-        skill_path,
-        lambda: validator.validate(skill_path),
-    )
+    def _run() -> ValidationResult:
+        validator = IntraSkillValidator(
+            threshold=threshold,
+            embedding_model=model,
+            llm_model=llm_model,
+        )
+        return validator.validate(skill_path)
+
+    return _guarded_result("Context Deduplication", skill_path, _run)
 
 
 def run_dedup_scan(

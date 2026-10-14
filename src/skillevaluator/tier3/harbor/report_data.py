@@ -13,6 +13,7 @@ import hashlib
 import heapq
 import json
 import logging
+import math
 import os
 import stat
 from collections.abc import Callable, Iterable
@@ -20,7 +21,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS, metric_set_for_reward
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ _MAX_JSON_BYTES = 2 * 1024 * 1024
 _MAX_JSON_DEPTH = 64
 _MAX_JSON_NODES = 50_000
 _MAX_JSON_NUMBER_CHARS = 4_300
+_MAX_JSON_SAFE_INTEGER = (1 << 53) - 1
 _MAX_AGENTS = 64
 _MAX_AGENT_PATHS_SCANNED = 512
 _MAX_TRIALS_PER_CONDITION = 512
@@ -38,21 +40,45 @@ _MAX_DATASET_RECORDS = 4096
 _MAX_DIAGNOSTIC_REASONS = 8
 _INVALID_JSON = object()
 
+DATASET_SNAPSHOT_MAX_BYTES = _MAX_JSON_BYTES
+DATASET_SNAPSHOT_MAX_DEPTH = _MAX_JSON_DEPTH
+DATASET_SNAPSHOT_MAX_NODES = _MAX_JSON_NODES
+DATASET_SNAPSHOT_LIMIT_ERROR = (
+    "Dataset snapshot exceeds the 2 MiB, depth-64, or 50,000-node publication limit; "
+    "reduce dataset size or structural complexity."
+)
+
 __all__ = (
     "DATASET_SNAPSHOT_DIGEST_ALGORITHM",
+    "DATASET_SNAPSHOT_LIMIT_ERROR",
+    "DATASET_SNAPSHOT_MAX_BYTES",
+    "DATASET_SNAPSHOT_MAX_DEPTH",
+    "DATASET_SNAPSHOT_MAX_NODES",
+    "DatasetSnapshotContractError",
+    "aggregate_execution_error_details",
     "build_dataset_snapshot",
+    "dataset_snapshot_manifest",
     "deduplicate_dataset_entries",
+    "encode_dataset_snapshot",
     "load_agent_data",
     "load_dataset",
     "load_dataset_snapshot",
     "load_staged_harbor_dataset",
     "logical_trial_reward_groups",
     "metrics_for_agents",
+    "metrics_for_condition",
     "summarize_dataset_entries",
 )
 
 DATASET_SNAPSHOT_DIGEST_ALGORITHM = "skill-evaluator-dataset-snapshot/1"
 DATASET_SNAPSHOT_SCHEMA_VERSION = "1.0"
+
+
+class DatasetSnapshotContractError(ValueError):
+    """Raised when exact dataset truth cannot fit the public artifact contract."""
+
+    def __init__(self) -> None:
+        super().__init__(DATASET_SNAPSHOT_LIMIT_ERROR)
 
 
 def _canonical_dataset_json(value: Any) -> str:
@@ -110,12 +136,63 @@ def build_dataset_snapshot(entries: list[dict[str, Any]], *, evaluator_version: 
     }
 
 
+def encode_dataset_snapshot(snapshot: object) -> bytes:
+    """Encode one snapshot within the same bounds enforced by the report loader."""
+    try:
+        _validate_json_tree(snapshot)
+        stack = [snapshot]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, dict):
+                stack.extend(current.values())
+            elif isinstance(current, list):
+                stack.extend(current)
+            elif isinstance(current, bool) or current is None or isinstance(current, str):
+                continue
+            elif isinstance(current, int):
+                if abs(current) > _MAX_JSON_SAFE_INTEGER:
+                    raise ValueError("browser-unsafe JSON integer")
+            elif isinstance(current, float):
+                if not math.isfinite(current):
+                    raise ValueError("non-finite JSON number")
+            else:
+                raise TypeError("value is not JSON serializable")
+        encoded = json.dumps(
+            snapshot,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    except (MemoryError, RecursionError, TypeError, UnicodeError, ValueError):
+        raise DatasetSnapshotContractError from None
+    if len(encoded) > DATASET_SNAPSHOT_MAX_BYTES:
+        raise DatasetSnapshotContractError
+    return encoded
+
+
+def dataset_snapshot_manifest(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Return validated dataset metadata suitable for embedding in ``result.json``."""
+    encode_dataset_snapshot(snapshot)
+    return {
+        "schema_version": snapshot.get("schema_version"),
+        "evaluator_version": snapshot.get("evaluator_version"),
+        "dataset_summary": dict(snapshot.get("dataset_summary", {})),
+        "dataset_digest": snapshot.get("dataset_digest"),
+        "dataset_digest_algorithm": snapshot.get("dataset_digest_algorithm"),
+    }
+
+
 def load_dataset_snapshot(run_dir: Path) -> dict[str, Any] | None:
     """Load a validated run-owned dataset snapshot, if one was persisted."""
     path = run_dir / "dataset_snapshot.json"
     diagnostics: list[dict[str, Any]] = []
     snapshot = _load_bounded_json(path, diagnostics, artifact="dataset_snapshot")
     if not isinstance(snapshot, dict) or snapshot.get("schema_version") != DATASET_SNAPSHOT_SCHEMA_VERSION:
+        return None
+    try:
+        encode_dataset_snapshot(snapshot)
+    except DatasetSnapshotContractError:
         return None
     dataset = snapshot.get("dataset")
     summary = snapshot.get("dataset_summary")
@@ -414,21 +491,30 @@ def _load_bounded_jsonl(raw: bytes, diagnostics: list[dict[str, Any]]) -> list[A
 
 
 def _metrics_for_rewards(rewards: list[dict[str, Any]]) -> list[str]:
-    if any(isinstance(reward.get("security"), int | float) for reward in rewards):
+    inferred = [metric_set_for_reward(reward)[1] for reward in rewards]
+    if any(metrics == DEFAULT_METRICS for metrics in inferred):
         return list(DEFAULT_METRICS)
-    if any(any(isinstance(reward.get(metric), int | float) for metric in LEGACY_METRICS) for reward in rewards):
+    if any(metrics == LEGACY_METRICS for metrics in inferred):
         return list(LEGACY_METRICS)
     return []
 
 
-def _skill_evaluator_metrics_for_agent(agent_info: dict[str, Any]) -> list[str]:
-    configured = agent_info.get("metrics_with_skill")
+def metrics_for_condition(agent_info: dict[str, Any], condition: str) -> list[str]:
+    """Return the standard metric contract declared by one agent condition."""
+    if condition == "with_skill":
+        metrics_key, scores_key, rewards_key = "metrics_with_skill", "with_skill", "rewards"
+    elif condition == "without_skill":
+        metrics_key, scores_key, rewards_key = "metrics_without_skill", "without_skill", "rewards_baseline"
+    else:
+        return []
+
+    configured = agent_info.get(metrics_key)
     if isinstance(configured, list):
         return [str(metric) for metric in configured]
-    scores = agent_info.get("with_skill", {})
+    scores = agent_info.get(scores_key, {})
     if isinstance(scores, dict) and "security" in scores:
         return list(DEFAULT_METRICS)
-    rewards = agent_info.get("rewards", [])
+    rewards = agent_info.get(rewards_key, [])
     return _metrics_for_rewards(rewards) if isinstance(rewards, list) else []
 
 
@@ -436,7 +522,7 @@ def metrics_for_agents(agents: dict[str, dict[str, Any]]) -> list[str]:
     """Return the canonical default or legacy metric set represented by agents."""
     saw_metrics = False
     for info in agents.values():
-        metrics = _skill_evaluator_metrics_for_agent(info)
+        metrics = metrics_for_condition(info, "with_skill")
         if metrics:
             saw_metrics = True
         if "security" in metrics:
@@ -462,6 +548,63 @@ def logical_trial_reward_groups(rewards: list[dict[str, Any]]) -> list[list[dict
 
 def _nonnegative_counter(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _execution_error_details(data: dict[str, Any], displayed_count: int) -> dict[str, Any]:
+    """Normalize bounded execution-error detail metadata around visible errors."""
+    raw_total = data.get("execution_error_details_total")
+    declared_total = (
+        raw_total
+        if isinstance(raw_total, int) and not isinstance(raw_total, bool) and 0 <= raw_total <= _MAX_JSON_SAFE_INTEGER
+        else displayed_count
+    )
+    raw_shown = data.get("execution_error_details_shown")
+    declared_shown = (
+        raw_shown
+        if isinstance(raw_shown, int) and not isinstance(raw_shown, bool) and 0 <= raw_shown <= _MAX_JSON_SAFE_INTEGER
+        else displayed_count
+    )
+    declared_total = max(declared_total, declared_shown, displayed_count)
+    truncated = data.get("execution_error_details_truncated") is True
+    if truncated and declared_total <= displayed_count:
+        declared_total = min(_MAX_JSON_SAFE_INTEGER, displayed_count + 1)
+    return {
+        "execution_error_details_total": declared_total,
+        "execution_error_details_shown": displayed_count,
+        "execution_error_details_truncated": truncated or displayed_count < declared_total,
+    }
+
+
+def aggregate_execution_error_details(
+    summaries: Iterable[dict[str, Any]],
+    displayed_count: int,
+) -> dict[str, Any]:
+    """Sum condition occurrence counts while deduplicating only displayed text."""
+    total = 0
+    child_truncated = False
+    for summary in summaries:
+        raw_errors = summary.get("execution_errors")
+        visible_count = len([error for error in raw_errors if error]) if isinstance(raw_errors, list) else 0
+        details = _execution_error_details(summary, visible_count)
+        total = min(_MAX_JSON_SAFE_INTEGER, total + details["execution_error_details_total"])
+        child_truncated = child_truncated or details["execution_error_details_truncated"]
+    total = max(total, displayed_count)
+    if child_truncated and total <= displayed_count:
+        total = min(_MAX_JSON_SAFE_INTEGER, displayed_count + 1)
+    return {
+        "execution_error_details_total": total,
+        "execution_error_details_shown": displayed_count,
+        "execution_error_details_truncated": child_truncated or displayed_count < total,
+    }
+
+
+def _trajectory_token_counter(value: Any) -> int | None:
+    """Return a browser-safe token counter without inventing zero usage."""
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_JSON_SAFE_INTEGER
+        else None
+    )
 
 
 def _condition_status(agent_info: dict[str, Any], condition: str) -> str:
@@ -525,10 +668,18 @@ def load_agent_data(
                     agent_info[metric_key] = data.get("metrics", [])
                     custom_key = "custom_with_skill" if variant == "with-skill" else "custom_without_skill"
                     if "custom_scores" in data:
-                        agent_info[custom_key] = data.get("custom_scores", {})
+                        custom_scores = data.get("custom_scores")
+                        agent_info[custom_key] = custom_scores if isinstance(custom_scores, dict) else {}
                     overall_key = "overall_with_skill" if variant == "with-skill" else "overall_without_skill"
                     if "overall_score" in data:
                         agent_info[overall_key] = data.get("overall_score")
+                    mixed_contract_key = (
+                        "mixed_metric_contracts_with_skill"
+                        if variant == "with-skill"
+                        else "mixed_metric_contracts_without_skill"
+                    )
+                    if isinstance(data.get("mixed_metric_contracts"), bool):
+                        agent_info[mixed_contract_key] = data["mixed_metric_contracts"]
                     dimension_key = "dimensions_with_skill" if variant == "with-skill" else "dimensions_without_skill"
                     if "dimensions" in data:
                         agent_info[dimension_key] = data.get("dimensions", {})
@@ -557,6 +708,7 @@ def load_agent_data(
                     condition_execution[key] = {
                         "execution_status": status,
                         "execution_errors": condition_errors,
+                        **_execution_error_details(data, len(condition_errors)),
                         "expected_attempts": _nonnegative_counter(data.get("expected_attempts")),
                         "scored_attempts": _nonnegative_counter(data.get("scored_attempts")),
                     }
@@ -564,6 +716,14 @@ def load_agent_data(
                     num_trials = data.get("num_trials")
                     if isinstance(num_trials, int) and not isinstance(num_trials, bool) and num_trials >= 0:
                         agent_info[count_key] = num_trials
+                    reward_row_count_key = "num_reward_rows" if variant == "with-skill" else "num_reward_rows_baseline"
+                    num_reward_rows = data.get("num_reward_rows")
+                    if (
+                        isinstance(num_reward_rows, int)
+                        and not isinstance(num_reward_rows, bool)
+                        and num_reward_rows >= 0
+                    ):
+                        agent_info[reward_row_count_key] = num_reward_rows
 
         lift_file = agent_dir / "lift.json"
         if lift_file.exists():
@@ -581,13 +741,15 @@ def load_agent_data(
         if custom_lift_file.exists():
             custom_lift = _load_bounded_json(custom_lift_file, agent_diagnostics, artifact="custom_lift")
             if custom_lift is not _INVALID_JSON:
-                agent_info["custom_lift"] = custom_lift
+                agent_info["custom_lift"] = custom_lift if isinstance(custom_lift, dict) else {}
 
         for variant_key, variant_dir_name in (("rewards", "with-skill"), ("rewards_baseline", "without-skill")):
             trial_list: list[dict[str, Any]] = []
             count_key = "num_trials" if variant_key == "rewards" else "num_trials_baseline"
-            expected_reward_rows = agent_info.get(count_key)
-            rewards_complete = isinstance(expected_reward_rows, int)
+            reward_row_count_key = "num_reward_rows" if variant_key == "rewards" else "num_reward_rows_baseline"
+            expected_logical_trials = agent_info.get(count_key)
+            expected_reward_rows = agent_info.get(reward_row_count_key)
+            rewards_complete = isinstance(expected_logical_trials, int)
             trials_dir = agent_dir / variant_dir_name / "trials"
             if _is_safe_directory(trials_dir, results_dir):
                 try:
@@ -638,17 +800,22 @@ def load_agent_data(
                             final_metrics = trajectory.get("final_metrics", {})
                             if not isinstance(final_metrics, dict):
                                 final_metrics = {}
-                            steps = trajectory.get("steps", [])
+                            steps = trajectory.get("steps")
                             reward["_traj"] = {
-                                "steps": len(steps) if isinstance(steps, list) else 0,
-                                "prompt_tokens": final_metrics.get("total_prompt_tokens", 0),
-                                "completion_tokens": final_metrics.get("total_completion_tokens", 0),
-                                "cached_tokens": final_metrics.get("total_cached_tokens", 0),
+                                "steps": len(steps) if isinstance(steps, list) else None,
+                                "prompt_tokens": _trajectory_token_counter(final_metrics.get("total_prompt_tokens")),
+                                "completion_tokens": _trajectory_token_counter(
+                                    final_metrics.get("total_completion_tokens")
+                                ),
+                                "cached_tokens": _trajectory_token_counter(final_metrics.get("total_cached_tokens")),
                             }
                     trial_list.append(reward)
             else:
-                rewards_complete = expected_reward_rows == 0
-            if expected_reward_rows != len(trial_list):
+                rewards_complete = expected_logical_trials == 0
+            logical_trial_count = len(logical_trial_reward_groups(trial_list))
+            if expected_logical_trials != logical_trial_count:
+                rewards_complete = False
+            if isinstance(expected_reward_rows, int) and expected_reward_rows != len(trial_list):
                 rewards_complete = False
             agent_info[variant_key] = trial_list
             agent_info[f"{variant_key}_complete"] = rewards_complete
@@ -668,11 +835,13 @@ def load_agent_data(
             execution_status = "skipped"
         else:
             execution_status = "succeeded"
+        public_execution_errors = list(dict.fromkeys(execution_errors))
         agent_info.update(
             {
                 "conditions": condition_execution,
                 "execution_status": execution_status,
-                "execution_errors": list(dict.fromkeys(execution_errors)),
+                "execution_errors": public_execution_errors,
+                **aggregate_execution_error_details(active_conditions, len(public_execution_errors)),
                 "expected_attempts": sum(
                     _nonnegative_counter(condition.get("expected_attempts")) for condition in active_conditions
                 ),

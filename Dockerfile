@@ -17,5 +17,11 @@ RUN python -m pip install --no-cache-dir --upgrade pip && \
     python -m pip install --no-cache-dir ".[all]" && \
     skillevaluator --help >/dev/null
 
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin skillevaluator && \
+    mkdir /app/reports && \
+    chown skillevaluator:skillevaluator /app/reports
+
+USER skillevaluator
+
 ENTRYPOINT ["skillevaluator"]
 CMD ["--help"]

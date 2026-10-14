@@ -6,8 +6,9 @@ description: "Run a real agent with and without your skill in a sandboxed enviro
 
 Tier 3 answers the question the other tiers can't: **does your skill actually
 make an agent better at the task?** It is the one tier that needs real
-infrastructure — an evaluator LLM key, the selected agent's own credential, and
-Docker or another sandbox. This guide takes you from a skill directory to a
+infrastructure — model access for the evaluator and selected agent, and
+Docker or another sandbox. NVIDIA Build in Docker or local mode uses one key
+for both roles; OpenAI with Codex can also share its key. This guide takes you from a skill directory to a
 finished with-skill vs. without-skill comparison.
 
 ## What a live eval measures
@@ -46,18 +47,122 @@ depth.
 | Requirement | How to check | Covered in |
 | --- | --- | --- |
 | The `tier3` extra installed (`[all]` includes it) | `skillevaluator health-check` | [Installation](installation.mdx) |
-| An evaluator LLM provider key | `skillevaluator doctor --agents codex --env-mode docker` names any missing key | [Providers & Credentials](configuration.mdx) |
+| An evaluator LLM provider key | `skillevaluator doctor --env-mode docker` names any missing key | [Providers & Credentials](configuration.mdx) |
 | The agent and its credential | Same `doctor` run, with your agents; `tier3 evaluate` re-validates before any run | [Agents & Sandboxes](agents-and-sandboxes.mdx) |
 | Docker running (the default environment) | `docker info` | [Agents & Sandboxes](agents-and-sandboxes.mdx) |
 
-## Run your first evaluation
+## Harbor 0.24 compatibility
+
+The `tier3` extra installs Harbor 0.24.0, the supported Tier 3 backend for this
+release. The `[all]` extra includes `tier3`. Existing SkillEvaluator commands do
+not change: the public `--agents` and `--env-mode` options map built-in names and
+installed adapters to Harbor's unified `--agent` and `--env` selectors.
+
+The exact Harbor pin is deliberate: its CLI, Python models, result artifacts,
+and environment/agent subclass interfaces form one compatibility surface. This
+release targets stable Harbor 0.24.0 rather than unreleased `main`. Harbor stays
+behind the operator-selected `tier3` extra, so static Tier 1 installs do not pull
+it in. The shared LLM client window (`litellm>=1.92.0,<1.94.0.dev0`) admits
+patched 1.92 and 1.93 releases validated with this integration while excluding
+prerelease and as-yet unvalidated 1.94 behavior.
+
+The integration preserves SkillEvaluator's runtime and artifact contracts while
+using Harbor 0.24:
+
+- Every Harbor process starts in an empty, evaluator-owned working directory
+  with `.env` loading and Harbor telemetry disabled. Harbor ignores `.env.local`
+  and `.env` files around your project, so it sees only SkillEvaluator's
+  allowlisted environment. Relative host paths such as `KUBECONFIG` keep their
+  meaning. Disabling `.env` loading needs python-dotenv 1.2.0 or newer, which
+  the `tier3` extra requires; with an older release, `doctor` and
+  `tier3 evaluate` fail the prerequisite check until you reinstall the extra.
+- Codex runs with `reasoning_effort=high`, the effort Harbor 0.22 used by
+  default, so results stay comparable across Harbor upgrades.
+- Harbor installs Codex 0.161.0 and Claude Code 2.1.292 rather than the latest
+  release, so a new CLI release does not change results. Claude Code runs
+  Claude 5.5 and later models with `reasoning_effort=medium`. Local mode uses
+  your installed CLIs and checks that they are new enough for the model.
+- Installed Codex adapters merge existing user and MCP configuration before the
+  selected runtime provider and endpoint take precedence over conflicting route
+  keys.
+- Docker and local execution stream stdout and stderr through secret redaction
+  before Harbor callbacks receive them. Each command has a 16 MiB combined raw
+  stdout/stderr limit; exceeding it terminates the command process tree and
+  fails the trial instead of returning partial output.
+- The parent Harbor orchestration process has its own 16 MiB combined
+  stdout/stderr limit for the full job. Overflow or timeout terminates and reaps
+  the Harbor POSIX process group or Windows task tree while retaining only a
+  bounded, redacted diagnostic tail. A POSIX process that deliberately creates
+  a new session can escape process-group cleanup, so the host-side Harbor CLI,
+  configuration, and local-mode skills must be trusted. Run untrusted evaluated
+  workloads in Docker or another isolated Harbor backend instead of local mode.
+- Docker accepts Harbor stdin payloads and isolates main-container execution
+  from sidecar operations without placing environment values on Compose argv.
+  For NVIDIA Build, the credential reaches the trusted parent over stdin; each
+  main-container exec then uses a short-lived, container-only stdin handoff that
+  is removed before the requested command runs.
+- Native Windows main-container artifact transfer requires `tar` in the image
+  and accepts regular files and directories only. Links, junctions, hardlinks,
+  sparse files, special files, compressed streams, and unsafe or colliding
+  Windows path spellings fail closed before publication.
+- Generated tasks retain schema 1.3, which Harbor 0.24 accepts. User-owned native
+  tasks, including schema 1.4, are staged without a schema rewrite. Collection
+  accepts Harbor 0.24 job, trial, reward, and ATIF v1.8 artifacts, including
+  single-step `step_results: null`, authoritative multi-step results, and
+  multimodal tool output, which judges and reports see as text with
+  `[image]`/`[audio]` markers.
+- Native tasks follow Harbor 0.24's separate-verifier precedence. For a verify
+  pass that runs in a separate verifier container, a `docker_image` in the step
+  or task `[verifier.environment]`, or a `Dockerfile` or `docker-compose.yaml`
+  in the step or task `tests/` directory, defines a dedicated verifier that
+  must ship its own test script and never receives SkillEvaluator's grader.
+  Otherwise the separate verifier is built from `environment/` and receives the
+  uploaded tests. SkillEvaluator validates the verifier's Compose model against
+  its environment allowlist, and rejects `docker-compose.yml` verifier
+  definitions, which Harbor ignores. Standard grading modes reject separate
+  verifiers entirely; see [Custom Graders & Tasks](custom-graders.mdx).
+- Harbor 0.24 rejects a `reward.json` whose top-level values are not all
+  finite numbers. SkillEvaluator's verifier and wrapped custom graders already
+  write numeric rewards; a native task's own test script must do the same. When
+  Harbor's job statistics do not account for every trial, the failure names the
+  first trial or step exception Harbor recorded, such as
+  `VerifierOutputParseError`, instead of reporting only a trial count.
+
+## Start with one command
+
+After the [provider setup](configuration.mdx) and runtime prerequisites above:
+
+```bash title="Run Tier 3"
+skillevaluator tier3 ./my-skill
+```
+
+The direct workflow uses Docker and selects an agent from the provider: OpenCode
+for NVIDIA Build, Codex for OpenAI, or Claude Code for Anthropic. If no accepted
+dataset or task source exists, it generates one starter case and proceeds to the
+live with-skill and without-skill comparison. It reuses valid existing sources
+unchanged; invalid sources produce an error rather than being replaced.
+A generated starter case lets you try the pipeline, but does not establish
+broad positive and negative coverage.
+
+The same agent, model, environment, grading, and reporting options described for
+`tier3 evaluate` apply to this direct workflow. For example:
+
+```bash title="Choose the agent"
+skillevaluator tier3 ./my-skill --agents opencode --env-mode docker
+```
+
+`tier3 evaluate` remains available for explicit execution; its missing-source
+generation requires `--autopilot`. To prepare and review a fuller dataset before
+running, follow the steps below.
+
+## Prepare and review a fuller evaluation
 
 <Steps toc={true}>
 
 ### Check readiness
 
 ```bash title="Verify the runtime before spending compute"
-skillevaluator doctor --agents codex --env-mode docker
+skillevaluator doctor --env-mode docker
 ```
 
 `doctor` takes seconds and names anything missing: the evaluator provider,
@@ -65,8 +170,9 @@ the selected backend's prerequisites, and unsupported agent names. Add
 `--verify-models` to live-probe each agent's model against the provider's
 catalog — one pass, warn, or fail row per agent — and `--agent-model AGENT=MODEL`
 to check an override before committing to a run. Warnings identify catalog
-results that do not authoritatively prove inference access. Tier 3's runtime
-preflight is the stronger check for agent routes; it does not invoke a separate
+results that do not authoritatively prove inference access. If you need proof
+before the measured matrix, `--agent-runtime-preflight` adds an agent-only
+execution of the first staged task. It does not invoke a separate
 standard-grader-only route before the evaluation reaches grading.
 `skillevaluator health-check` is the quicker
 CLI-and-backend variant; [Agents & Sandboxes](agents-and-sandboxes.mdx) covers
@@ -78,9 +184,11 @@ both in depth.
 skillevaluator create-eval-dataset ./my-skill --full
 ```
 
-`--full` generates four case buckets — explicit, implicit, and contextual
-positives plus a negative case that should *not* trigger the skill. Generation
-uses your configured evaluator provider; `--no-llm` falls back to keyless local
+`--full` with an LLM provider generates all four buckets (explicit, implicit,
+contextual, and negative). With `--no-llm`, template mode emits the three
+positive buckets and adds a negative case only when `evals/EVAL.md` supplies an
+off-skill prompt under a supported negative heading. Generation uses your
+configured evaluator provider by default; `--no-llm` falls back to keyless local
 templates. The dataset format, `EVAL.md` guidance, and refinement options live
 in [Eval Datasets](eval-datasets.mdx).
 
@@ -157,8 +265,7 @@ skill source.
 ### Run the comparison
 
 ```bash title="With-skill vs. without-skill in Docker"
-skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
-  --agent-model codex=gpt-5.6-sol
+skillevaluator tier3 ./my-skill --env-mode docker
 ```
 
 Every supported agent harness works the same way:
@@ -211,20 +318,22 @@ immediately. Non-authoritative OpenAI catalog permission or membership results,
 compatible-gateway catalog authentication, unsupported catalogs, and transient
 failures are reported as degraded rather than blocking the run. A successful
 NVIDIA Build or compatible-gateway listing is also inconclusive when that
-catalog does not authenticate inference; the real per-agent runtime preflight
-is the stronger check for agent routes. A degraded route used only by the
+catalog does not authenticate inference. The optional real per-agent runtime
+preflight is the stronger check for agent routes. A degraded route used only by the
 standard grader remains unproven until grading begins. Native Harbor judge selection is likewise inconclusive
 until runtime when no host judge override is set. `result.json` retains the
 redacted target-by-target outcome under `run_config.credential_validation`,
-including when the subsequent agent runtime preflight fails.
+including when an enabled agent runtime preflight fails.
 
 SkillEvaluator then builds the Harbor task bundle. Before spending the full
-A/B matrix, a runtime preflight runs one real, bounded smoke task per agent to
-confirm each agent runtime actually works (on by default; disable with
-`--no-agent-runtime-preflight`). Harbor then starts the selected environment
-and runs the agent in both arms; with standard grading, each transcript is
+A/B matrix, you can pass `--agent-runtime-preflight` to run one extra agent-only
+execution per agent. It uses the first staged evaluation task and its real prompt,
+so it can consume substantial tokens and exercise task actions; grading is the
+only part disabled. It is off by default. Harbor then starts the selected
+environment and runs the agent in both arms; with standard grading, each transcript is
 judged against the case's expected output and assertions using the configured
-evaluator provider. Finally, SkillEvaluator collects the artifacts and
+evaluator provider (see
+[How standard grading judges a trial](#how-standard-grading-judges-a-trial)). Finally, SkillEvaluator collects the artifacts and
 computes the dimension scores, pass rates, and Skill Lift. Harbor task and job
 directories are transient: they are deleted after collection whether the run
 succeeds or fails, unless you pass `--harbor-keep-jobs`.
@@ -261,12 +370,11 @@ One deliberate exception collapses the two roles: with the `nv_build` provider
 in `--env-mode docker` or `local`, a single `NVIDIA_API_KEY` powers the
 evaluator and all three agents. Direct OpenCode talks to NVIDIA Build directly;
 Codex and experimental Claude Code use a Docker or local compatibility bridge.
-SkillEvaluator never changes models silently: explicit overrides are preserved.
-Without an override, bridged agents default to Nemotron Super
-(`nvidia/nemotron-3-super-120b-a12b`); direct OpenCode defaults to
-`nvidia/nemotron-3-nano-30b-a3b` (rendered
-`nvidia/nvidia/nemotron-3-nano-30b-a3b`). Override models explicitly when you
-want to compare harnesses or models:
+Explicit model overrides are preserved exactly. Without an override, all three
+agents default to Nemotron Super (`nvidia/nemotron-3-super-120b-a12b`); direct
+OpenCode renders it as `nvidia/nvidia/nemotron-3-super-120b-a12b` because its
+adapter namespace precedes the NVIDIA catalog ID. Override models explicitly
+when you want to compare harnesses or models:
 
 ```bash title="NVIDIA Build model overrides"
 skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
@@ -286,12 +394,39 @@ explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
 ## Where agents run
 
-Docker is the default and needs only a running daemon. The same `--env-mode`
-flag also selects **local mode**, which runs the agent CLI directly on the
-host under an OS-sandbox policy, and 14 additional Harbor-native backends
-(such as `daytona`, `e2b`, and `modal`), each requiring the matching Harbor
-environment extra. The complete environment matrix, Docker resource tuning, local-mode
-safety controls, and workspace modes live in
+`--env-mode` selects one of 24 environment modes: 23 Harbor-native backends,
+including the default Docker backend, plus SkillEvaluator's **local mode**,
+which runs the agent CLI directly on the host under an OS-sandbox policy.
+Managed backends such as `daytona`, `e2b`, and `modal` require their mapped
+Harbor 0.24 extra; OpenShift, Apple Container, and Singularity instead use
+system CLIs and have no Harbor Python extra. These are selectable integration
+modes, not evidence that every managed backend was exercised end to end for
+this release. Harbor 0.24 transport verification covers Docker and local;
+validate any managed backend's extra, credentials, infrastructure, and
+constructor settings with `doctor` and its Harbor preflight before relying on
+it.
+
+Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `kata`, `runta`,
+`prime`, `mosaic`, and `smol` backends are not selectable because they cannot
+yet receive SkillEvaluator's complete generated task bundle through a trusted
+image or backend-native provisioning path.
+
+Environment kwargs are only for Harbor-native non-Docker backends. Pass
+non-secret constructor settings with the repeatable, operator-only
+`--environment-kwarg KEY=VALUE` / `--ek KEY=VALUE` option. Skill-owned
+`evals/config.yml` cannot set them. `docker` and `local` reject any environment
+kwargs. Fields owned by Harbor runtime policy are also reserved: resource
+overrides, mounts, network policy, extra Compose definitions, SkillEvaluator's
+own lifecycle fields (`delete`, `force_build`, `keep_containers`), and
+Kubernetes pod security are not exposed through this surface. Other
+backend-specific timeout and retention knobs remain operator-owned. Use the same
+eligible-backend flags with `doctor` and `health-check`; never pass secrets
+through constructor kwargs. GKE requires
+`cluster_name`, `region`, `namespace`, `registry_location`, and
+`registry_name`; ACK requires `namespace`; EC2 requires `region` plus `ami_id`
+for its default ephemeral launch mode or `instance_id` with
+`launch_mode=attach`. The complete environment/extra matrix, examples, Docker
+resource tuning, local-mode safety controls, and workspace modes live in
 [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
 <Warning>
@@ -304,27 +439,29 @@ cloud backend for untrusted code.
 
 | Use case | Command | When to use |
 | --- | --- | --- |
-| Full validation | `skillevaluator validate ./my-skill --tier3` | Add Tier 3 after the standard stages; advisory by default, optionally blocking |
+| Full validation | `skillevaluator validate ./my-skill` | Run all three tiers; Tier 3 uses autopilot and is advisory by default, optionally blocking |
 | Focused evaluation | `skillevaluator tier3 evaluate ./my-skill --agents codex` | Iterate on datasets, agents, environments, and grading settings |
 
 Attached to `validate`, Tier 3 is advisory by default: its results appear in the
 combined reports without changing the exit code. Add `--block-on-agent-eval`
 to make its findings gate, including evidence that the selected YAML/JSON
-dataset or native Harbor source is missing or invalid. `--full` is the one-shot
-variant — Tier 1+2+3 with `--autopilot` dataset generation — and `--autopilot`
-on its own enables Tier 3 while generating an eval case when none exists.
+dataset or native Harbor source is missing or invalid. Autopilot is enabled
+by default for skills: it generates one starter case when no source exists and
+reuses valid existing sources unchanged. `--full` remains supported but is
+unnecessary. Use `--tiers 1,2` or `--no-tier3` to skip live evaluation;
+`--no-autopilot` requires an existing evaluation source.
 
 ```bash title="Make attached Tier 3 blocking"
-skillevaluator validate ./my-skill --tier3 --agents codex \
+skillevaluator validate ./my-skill --agents codex \
   --block-on-agent-eval
 ```
 
 <Note>
 `validate` forwards a dedicated Tier 3 flag group (`--agents`, `--env-mode`,
 `--grading-mode`, and the rest) to the live-eval engine whenever Tier 3 is
-enabled — via `--tier3`, `--autopilot`, `--full`, or the `--agent-eval` alias.
-`--agent-eval` is a supported compatibility alias and is not currently
-deprecated. See the [CLI Reference](cli-reference.mdx) for the full group.
+enabled, which is the default for skills. `--agent-eval` remains a supported
+alias for `--tier3`; explicit tier selection and disable flags control the
+scope. See the [CLI Reference](cli-reference.mdx) for the full group.
 </Note>
 
 ## Plan for cost
@@ -339,8 +476,8 @@ eval cases × agents × attempts × arms
 
 A standard comparison has two arms (with-skill and without-skill). Each trial
 can make multiple agent-model requests, standard grading adds evaluator-model
-calls, dataset generation can add more, and the default runtime preflight adds
-one small smoke task per agent. Actual charges therefore depend on the selected
+calls, dataset generation can add more, and the optional runtime preflight adds
+one extra agent execution per agent. Actual charges therefore depend on the selected
 models, token usage, agent behavior, and environment pricing; SkillEvaluator
 does not estimate a fixed dollar amount. Check the current pricing for your
 [NVIDIA API Catalog](https://build.nvidia.com/),
@@ -354,7 +491,7 @@ dataset iteration, `--skip-baseline` removes the without-skill arm and usually
 cuts the live trial count roughly in half, but that run cannot produce Skill
 Lift. Re-enable the baseline for any result you intend to compare or publish.
 For multi-attempt runs, `--stop-on-pass` can avoid remaining attempts after a
-pass; it is not applicable with `--n-attempts 1`. By contrast,
+pass; it is rejected with `--n-attempts 1`. By contrast,
 `--n-concurrent` and `--max-agents` control parallelism and elapsed time; they
 do not reduce the total planned trials or model work.
 
@@ -388,13 +525,13 @@ The high-signal flags, with defaults:
 | `--max-agents` | selected-agent count | Maximum agents run in parallel |
 | `--skip-baseline` | off | Skip the without-skill arm; faster, but no Skill Lift |
 | `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
-| `--agent-runtime-preflight` | on | One real, bounded smoke task per agent before the full A/B matrix; `--no-agent-runtime-preflight` skips it |
+| `--agent-runtime-preflight` | off | Add one agent-only execution of the first staged task per agent before the full A/B matrix; `--no-agent-runtime-preflight` overrides a config value that enables it |
 | `--progress` | `auto` | Progress rendering: `auto`, `rich` (live TTY view with secret redaction), `plain`, or `off` |
 | `--autopilot` | off | When no evaluation source exists, generate exactly one eval case — with the configured provider, falling back to a deterministic keyless template — never overwriting an existing source |
 | `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](custom-graders.mdx) |
 | `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory |
 | `--harbor-keep-jobs` | off | Retain Harbor job directories for inspection |
-| `--timeout-multiplier` | `1.0` | Scale Harbor step timeouts |
+| `--timeout-multiplier` | `1.0` | Scale Harbor's agent, verifier, and environment-build timeouts; must be a finite number greater than 0 whose scaled timeouts stay finite |
 | `--copy-repo` | off | Copy the surrounding repository into the task environment |
 | `--include-skills` | none | Stage additional skill directories; requires `--skill-workspace-mode group` |
 
@@ -405,6 +542,126 @@ modes, is in the [CLI Reference](cli-reference.mdx).
 While iterating on a dataset, `--skip-baseline` roughly halves the runtime.
 Re-enable the baseline arm for any run whose Skill Lift you intend to trust.
 </Tip>
+
+## How standard grading judges a trial
+
+With `default` or `default_plus_custom` grading, SkillEvaluator's verifier
+grades each trial after the agent finishes. `security`, `skill_execution`, and
+`skill_efficiency` are deterministic trajectory checks. `accuracy`,
+`goal_accuracy`, and `behavior_check` are LLM judges that call the configured
+evaluator provider. `custom_only` runs none of them.
+
+### The graded trajectory
+
+The verifier grades Harbor's ATIF `trajectory.json`. When that file is missing
+or has no steps, it rebuilds a trajectory from the agent's own log in the
+trial's agent log directory, trying `claude-code.txt`, `cursor-cli.txt`,
+`cline.txt`, `opencode.txt`, and `codex.txt` in that order:
+
+- `opencode.txt` is OpenCode's JSON event stream. Text events become agent
+  messages, and completed tool events become tool calls whose output keeps the
+  tool's status, exit code, and error text.
+- `codex.txt` is the Codex JSON event log. Shell commands, file changes, MCP
+  tool calls, `web_search` actions (with the full search, open-page, or
+  find-in-page payload), and `collab_tool_call` items become tool calls. Failed
+  commands keep their `status=failed` and `exit_code=` evidence, so
+  error-recovery checks still see them.
+
+Each trial's reward records the artifact it graded in `trajectory_source`. If
+neither `trajectory.json` nor a supported log yields any steps, the reward
+records `No trajectory or reconstructible agent log`. Custom graders read
+`trajectory.json` directly and do not get this rebuild.
+
+### Evidence budgets
+
+Each LLM judge sees a bounded evidence bundle drawn from the trajectory rather
+than the full transcript. Sections are added in priority order until the
+judge's character budget runs out, so lower-priority sections are dropped or
+clipped first:
+
+| Judge | Evidence, highest priority first | Budget variable |
+| --- | --- | --- |
+| `accuracy` | Final response, produced files and writes, the six most recent tool results | `SKILL_EVAL_ACCURACY_BUDGET` |
+| `goal_accuracy` | Final response, end-state file changes, the twelve most recent tool results | `SKILL_EVAL_GOAL_ACCURACY_BUDGET` |
+| `behavior_check` | File changes, final response (capped by `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`), the user request, and a compact tool history | `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` |
+
+When the case's expected output or assertions contain a backtick-quoted
+snippet of four or more characters, or an output path under
+`/workspace/output`, `/output`, or `/logs/agent`, every bundle starts with a
+short deterministic fact list marking each one observed or not observed in the
+agent's tool calls.
+
+A judge can score only what its bundle contains. Evidence that was dropped or
+clipped cannot count, so on a long trajectory a behavior that appears only in
+truncated history can be judged as not observed. In the results tree, each
+judge's details in a trial's `reward.json` include an `omitted` record
+(`count`, `truncated`, and `reason`); when `truncated` is `true` on cases that
+matter, raise that judge's budget. Larger budgets send longer judge prompts and
+use more evaluator tokens. The behavior budget never falls below the
+final-response limit plus 4,000 characters, so raising the limit leaves room
+for the tool history. Set these variables in the host environment;
+SkillEvaluator forwards them to the verifier. Defaults and accepted values are
+in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
+
+### Judge requests and retries
+
+- **Structured output.** Each judge requests a fixed JSON schema. OpenAI and
+  OpenAI-compatible chat-completions endpoints, including NVIDIA Build, receive
+  a strict JSON Schema `response_format`; Anthropic `/v1/messages` receives
+  `output_config`. Bedrock judges use prompt-only JSON.
+- **Automatic downgrade.** If an endpoint rejects the schema option itself
+  with HTTP 400 or 422 (for example, `response_format` is unsupported, or a
+  gateway turned the schema into a `tool_choice` the model rejects), the
+  judge repeats that request without the schema and logs a warning. It then
+  skips the schema for that provider, endpoint, and model for the remaining
+  judge calls in that verifier run. Other 400 and 422 errors are not
+  downgraded.
+- **Reply validation.** Replies are checked against the expected fields either
+  way. An empty, unparseable, or invalid reply, including an empty reply from a
+  reasoning model that ran out of output tokens, gets one retry with a stricter
+  format reminder. `behavior_check` can also salvage complete per-behavior
+  results from a truncated reply and counts the missing behaviors as not
+  passed.
+- **Reasoning models.** GPT-5 and GPT-6 judges get no `temperature` and at
+  least 32,768 output tokens, because reasoning tokens count against the
+  limit; other judges get 16,384. GPT-6 judges and Claude 5.5 or later judges
+  on the Anthropic API are sent reasoning effort `medium`; other models keep
+  their default effort.
+- **Refusals.** A safety-classifier refusal is never scored as an answer. On
+  the native Claude API, Claude 5.5 or later judges use server-side fallback to
+  `claude-opus-4-8`, and on Bedrock a filtered Claude 5.5 reply is retried
+  once on Claude Opus 4.8 in the same geography. A refusal or an empty reply
+  then moves on to the next `LLM_JUDGE_FALLBACK_MODELS` entry, if any.
+  Each judge's details in the trial's `skill_evaluator_reward.json` record
+  `judge_model_used`, `judge_reasoning_effort`, and `judge_fallback_used`.
+  When the two conditions of a case were judged by different models, the case
+  is left out of that judge's skill lift and counted in `judge_mixed_cases`
+  in `lift.json`.
+- **RAGAS goal scorer.** With the `openai` provider on the canonical
+  `https://api.openai.com/v1` endpoint and a judge model that is not a GPT-5 or
+  GPT-6 reasoning model, `goal_accuracy` first tries the RAGAS
+  `AgentGoalAccuracyWithReference` scorer through its own client, without the
+  schema or retry handling above but within the same time budget. If RAGAS is
+  unavailable or fails, the prompt judge runs instead.
+- **Transient failures.** HTTP 429, 500, 502, 503, and 504 responses,
+  connection errors, timeouts, and Bedrock throttling or service-unavailable
+  errors are retried transparently with jittered exponential backoff. A
+  `Retry-After` header, in seconds or as an HTTP date, sets the wait; a value
+  above the maximum retry delay fails immediately instead of stalling.
+- **Time budget.** Each judge has its own wall-time budget (180 seconds by
+  default) inside the generated task's 600-second verifier timeout, which
+  leaves time to write failure artifacts. Requests are cut off at the
+  deadline, and a retry whose wait would reach it is not attempted. If you
+  raise the per-judge budget, scale the verifier timeout with
+  `--timeout-multiplier` so the three judges still fit.
+
+Retry counts, delays, and the per-judge budget come from the host environment
+and are forwarded to the verifier; see
+[LLM retries and judge time budget](environment-variables.mdx#llm-retries-and-judge-time-budget).
+Retries and downgrades do not change scoring formulas. A judge that still fails
+is an evaluation infrastructure failure, not a `0.0` score, and the affected
+condition publishes no scores; see
+[Tier 3 judge failure semantics](environment-variables.mdx#tier-3-judge-failure-semantics).
 
 ## Reading results
 

@@ -16,14 +16,18 @@ import os
 import re
 from typing import Any
 
+from skillevaluator.evidence import evidence_ref_identity
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+    iter_normalized_tool_calls as iter_tool_calls,
+)
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+    normalized_tool_call_observation as _tool_call_observation,
+)
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+    normalized_tool_call_wrapper_observation as _tool_call_wrapper_observation,
+)
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
-
-
-def iter_tool_calls(traj: dict[str, Any]):
-    """Yield ``(step_dict, tool_call_dict)`` for every tool call in the trajectory."""
-    for step in traj.get("steps", []):
-        for tc in step.get("tool_calls") or []:
-            yield step, tc
 
 
 def get_all_tool_calls(traj: dict[str, Any]) -> list[dict[str, Any]]:
@@ -35,17 +39,12 @@ def get_all_tool_calls(traj: dict[str, Any]) -> list[dict[str, Any]]:
     for step, tc in iter_tool_calls(traj):
         fn = tc.get("function_name") or ""
         args = tc.get("arguments") or {}
-        obs_text = ""
-        obs = step.get("observation") or {}
-        for r in obs.get("results") or []:
-            if r.get("source_call_id") == tc.get("tool_call_id") or not r.get("source_call_id"):
-                obs_text += str(r.get("content", ""))
         calls.append(
             {
                 "fn": fn,
                 "args": args,
                 "args_text": json.dumps(args).lower(),
-                "obs": obs_text.lower(),
+                "obs": _tool_call_observation(step, tc).lower(),
             }
         )
     return calls
@@ -143,14 +142,14 @@ def build_conversation_summary(traj: dict[str, Any], question: str) -> str:
         if reasoning:
             parts.append(f"Agent reasoning: {str(reasoning)[:200]}")
 
-        for tc in step.get("tool_calls") or []:
+        for _, tc in iter_tool_calls({"steps": [step]}):
             fn = tc.get("function_name", "")
             args = tc.get("arguments") or {}
             parts.append(f"Agent called: {fn}({json.dumps(args)[:200]})")
 
         obs = step.get("observation") or {}
         for r in obs.get("results") or []:
-            content = str(r.get("content", ""))
+            content = atif_content_text(r.get("content"))
             if content:
                 parts.append(f"Tool returned: {content[:400]}")
 
@@ -166,6 +165,39 @@ def build_conversation_summary(traj: dict[str, Any], question: str) -> str:
 
 
 _BEHAVIOR_EVIDENCE_MAX_CHARS = 4000
+_DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT = 800
+_DEFAULT_BEHAVIOR_CHECK_BUDGET = 8000
+_DEFAULT_TOOL_HISTORY_HEADROOM = 4000
+_MIN_BEHAVIOR_HISTORY_HEADROOM = 1600
+_SECTION_COMPACT_TOOL_HISTORY = "COMPACT TOOL HISTORY"
+_SECTION_FILE_CHANGES = "FILE CHANGES"
+_SECTION_FINAL_RESPONSE = "FINAL RESPONSE"
+_SECTION_USER_REQUEST = "USER REQUEST"
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    """Parse a positive integer from environment variable *name* or return *default*."""
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return default
+
+
+def _behavior_final_response_limit() -> int:
+    """Return the configured behavior final response section limit or default."""
+    return _env_positive_int("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", _DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT)
+
+
+def _behavior_check_budget() -> int:
+    """Return the configured behavior check evidence budget or reconciled default."""
+    final_limit = _behavior_final_response_limit()
+    base_budget = _env_positive_int("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", _DEFAULT_BEHAVIOR_CHECK_BUDGET)
+    return max(base_budget, final_limit + _DEFAULT_TOOL_HISTORY_HEADROOM)
+
+
 _BEHAVIOR_WRITE_TOOLS = {
     "write",
     "write_file",
@@ -191,7 +223,7 @@ def _truncate_for_behavior(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     marker = "\n...[truncated]...\n"
-    if limit <= len(marker):
+    if limit <= len(marker) + 1:
         return text[:limit]
     head = max(1, (limit - len(marker)) * 2 // 3)
     tail = max(1, limit - len(marker) - head)
@@ -260,14 +292,7 @@ def _collect_file_change_evidence(traj: dict[str, Any]) -> list[str]:
     for step in traj.get("steps", []):
         if step.get("source") != "agent":
             continue
-        observations_by_id: dict[str, str] = {}
-        for result in (step.get("observation") or {}).get("results") or []:
-            call_id = str(result.get("source_call_id") or "")
-            content = str(result.get("content") or "")
-            if call_id and content:
-                observations_by_id[call_id] = content
-
-        for tc in step.get("tool_calls") or []:
+        for _, tc in iter_tool_calls({"steps": [step]}):
             fn = str(tc.get("function_name") or "")
             fn_lower = fn.lower()
             args = tc.get("arguments") or {}
@@ -289,7 +314,7 @@ def _collect_file_change_evidence(traj: dict[str, Any]) -> list[str]:
             if not is_write_call or (not body and not file_path):
                 continue
 
-            obs = observations_by_id.get(str(tc.get("tool_call_id") or ""), "")
+            obs = _tool_call_observation(step, tc)
             entry_parts = [f"Agent called: {fn}"]
             if file_path:
                 entry_parts.append(f"Path: {file_path}")
@@ -304,7 +329,8 @@ def _collect_file_change_evidence(traj: dict[str, Any]) -> list[str]:
 def build_behavior_evidence(
     traj: dict[str, Any],
     question: str,
-    max_chars: int = _BEHAVIOR_EVIDENCE_MAX_CHARS,
+    max_chars: int | None = None,
+    final_response_limit: int | None = None,
 ) -> str:
     """Build compact, behavior-check-specific evidence from an ATIF trajectory.
 
@@ -312,33 +338,89 @@ def build_behavior_evidence(
     Put final output and write/edit evidence before exploratory reads so a
     fixed-size judge prompt does not miss late file creation.
     """
+    effective_final_limit = (
+        _behavior_final_response_limit()
+        if final_response_limit is None
+        else max(1, int(final_response_limit))
+    )
+
+    if max_chars is None:
+        raw_budget = os.environ.get("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "").strip()
+        if raw_budget:
+            max_chars = _behavior_check_budget()
+        else:
+            max_chars = max(
+                _BEHAVIOR_EVIDENCE_MAX_CHARS,
+                effective_final_limit + _MIN_BEHAVIOR_HISTORY_HEADROOM,
+            )
+
     parts: list[str] = []
     remaining = max_chars
 
     file_changes = "\n\n".join(_collect_file_change_evidence(traj))
-    if file_changes:
-        remaining = _append_section_with_budget(parts, "FILE CHANGES", file_changes, remaining)
-
     final = get_final_response(traj)
-    if final:
+    history = build_conversation_summary(traj, question)
+    user_needed = (
+        min(800, len(_SECTION_USER_REQUEST) + len(question.strip()) + 2) if question and question.strip() else 0
+    )
+    history_needed = (
+        len(_SECTION_COMPACT_TOOL_HISTORY) + len(history.strip()) + 2 if history and history.strip() else 0
+    )
+    tail_needed = user_needed + (2 if user_needed and history_needed else 0) + history_needed
+
+    if file_changes:
+        file_section_limit: int | None = None
+        if final and final.strip():
+            reserved_tail = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, max_chars // 4, tail_needed)
+            reserved_final = min(
+                effective_final_limit,
+                len(_SECTION_FINAL_RESPONSE) + len(final.strip()) + 2,
+                max(1, max_chars - min(_MIN_BEHAVIOR_HISTORY_HEADROOM, max_chars // 2)),
+            )
+            if (
+                len(_SECTION_FILE_CHANGES) + len(file_changes.strip()) + 2 + reserved_final + reserved_tail + 4
+                > remaining
+            ):
+                file_section_limit = max(
+                    min(800, remaining // 3),
+                    remaining - reserved_final - reserved_tail - 4,
+                )
         remaining = _append_section_with_budget(
             parts,
-            "FINAL RESPONSE",
+            _SECTION_FILE_CHANGES,
+            file_changes,
+            remaining,
+            section_limit=file_section_limit,
+        )
+
+    if final:
+        if max_chars > effective_final_limit:
+            reserved_headroom = min(
+                _MIN_BEHAVIOR_HISTORY_HEADROOM,
+                remaining // 2,
+                tail_needed,
+                max(800, remaining - effective_final_limit),
+            )
+        else:
+            reserved_headroom = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, remaining // 2, tail_needed)
+        bounded_final_limit = min(effective_final_limit, max(1, remaining - reserved_headroom))
+        remaining = _append_section_with_budget(
+            parts,
+            _SECTION_FINAL_RESPONSE,
             final,
             remaining,
-            section_limit=800,
+            section_limit=bounded_final_limit,
         )
 
     remaining = _append_section_with_budget(
         parts,
-        "USER REQUEST",
+        _SECTION_USER_REQUEST,
         question,
         remaining,
         section_limit=800,
     )
 
-    history = build_conversation_summary(traj, question)
-    remaining = _append_section_with_budget(parts, "COMPACT TOOL HISTORY", history, remaining)
+    remaining = _append_section_with_budget(parts, _SECTION_COMPACT_TOOL_HISTORY, history, remaining)
 
     return "\n\n".join(parts)[:max_chars]
 
@@ -378,6 +460,7 @@ def _evidence_ref(
     path: str | None = None,
     excerpt: str = "",
     status: str | None = None,
+    evidence_id: str | None = None,
 ) -> dict[str, Any]:
     ref: dict[str, Any] = {
         "source": source,
@@ -392,18 +475,19 @@ def _evidence_ref(
         ref["excerpt"] = _evidence_excerpt(excerpt)
     if status:
         ref["status"] = status
+    if evidence_id:
+        ref["evidence_id"] = evidence_id
     return ref
 
 
 def _dedupe_evidence_refs(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     deduped: list[dict[str, Any]] = []
     for ref in refs:
         key = (
             str(ref.get("source") or ""),
-            str(ref.get("json_pointer") or ""),
+            evidence_ref_identity(ref),
             str(ref.get("kind") or ""),
-            str(ref.get("path") or ""),
         )
         if key in seen:
             continue
@@ -432,7 +516,7 @@ def _final_response_ref(traj: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _tool_call_ref(step_idx: int, tool_idx: int, tc: dict[str, Any], *, kind: str) -> dict[str, Any]:
+def _tool_call_ref(step_idx: int, tc: dict[str, Any], *, kind: str) -> dict[str, Any]:
     fn = str(tc.get("function_name") or "")
     args = tc.get("arguments") or {}
     if not isinstance(args, dict):
@@ -445,13 +529,16 @@ def _tool_call_ref(step_idx: int, tool_idx: int, tc: dict[str, Any], *, kind: st
         path = _first_expected_artifact_path(command)
     excerpt = command or path or json.dumps(args, sort_keys=True)
     label_detail = command or path or fn
+    json_pointer = f"/steps/{step_idx}/tool_calls/{tc['_atif_raw_tool_index']}"
+    inner_index = tc.get("_atif_inner_tool_index")
     return _evidence_ref(
         source="trajectory.json",
-        json_pointer=f"/steps/{step_idx}/tool_calls/{tool_idx}",
+        json_pointer=json_pointer,
         kind=kind,
         label=f"{fn}: {label_detail}" if label_detail else fn,
         path=path or None,
         excerpt=excerpt,
+        evidence_id=f"{json_pointer}/normalized/{inner_index}" if inner_index is not None else None,
     )
 
 
@@ -460,10 +547,10 @@ def _tool_call_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
     for step_idx, step in enumerate(traj.get("steps", [])):
         if step.get("source") != "agent":
             continue
-        for tool_idx, tc in enumerate(step.get("tool_calls") or []):
+        for _, tc in iter_tool_calls({"steps": [step]}):
             if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
                 return refs
-            refs.append(_tool_call_ref(step_idx, tool_idx, tc, kind="tool_call"))
+            refs.append(_tool_call_ref(step_idx, tc, kind="tool_call"))
     return refs
 
 
@@ -475,7 +562,7 @@ def _tool_observation_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
         for result_idx, result in enumerate((step.get("observation") or {}).get("results") or []):
             if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
                 return refs
-            content = str(result.get("content") or "")
+            content = atif_content_text(result.get("content"))
             if not content.strip():
                 continue
             call_id = str(result.get("source_call_id") or f"result-{result_idx}")
@@ -496,7 +583,7 @@ def _file_change_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
     for step_idx, step in enumerate(traj.get("steps", [])):
         if step.get("source") != "agent":
             continue
-        for tool_idx, tc in enumerate(step.get("tool_calls") or []):
+        for _, tc in iter_tool_calls({"steps": [step]}):
             if len(refs) >= _METRIC_EVIDENCE_MAX_FILE_REFS:
                 return refs
             fn = str(tc.get("function_name") or "")
@@ -510,7 +597,7 @@ def _file_change_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
             )
             if not is_write:
                 continue
-            refs.append(_tool_call_ref(step_idx, tool_idx, tc, kind="file_change"))
+            refs.append(_tool_call_ref(step_idx, tc, kind="file_change"))
     return refs
 
 
@@ -649,9 +736,34 @@ def attach_metric_evidence_refs(
 # ---------------------------------------------------------------------------
 
 _BUNDLE_ITEM_CHARS = 1500  # per-item excerpt for the judge prompt (refs use 300)
-_BUNDLE_BUDGETS = {"accuracy": 8000, "goal_accuracy": 12000, "behavior_check": 8000}
+_DEFAULT_ACCURACY_BUDGET = 8000
+_DEFAULT_GOAL_ACCURACY_BUDGET = 12000
+_BUNDLE_BUDGETS = {
+    "accuracy": _DEFAULT_ACCURACY_BUDGET,
+    "goal_accuracy": _DEFAULT_GOAL_ACCURACY_BUDGET,
+    "behavior_check": _DEFAULT_BEHAVIOR_CHECK_BUDGET,
+}
 _BUNDLE_ACCURACY_MAX_OBS = 6  # newest observations fed to accuracy (<= ~6x1500 <= budget)
 _BUNDLE_GOAL_MAX_OBS = 12  # newest observations fed to goal_accuracy (end-state)
+
+
+def _accuracy_budget() -> int:
+    """Return the configured accuracy evidence budget or default."""
+    return _env_positive_int("SKILL_EVAL_ACCURACY_BUDGET", _DEFAULT_ACCURACY_BUDGET)
+
+
+def _goal_accuracy_budget() -> int:
+    """Return the configured goal accuracy evidence budget or default."""
+    return _env_positive_int("SKILL_EVAL_GOAL_ACCURACY_BUDGET", _DEFAULT_GOAL_ACCURACY_BUDGET)
+
+
+def _bundle_budgets() -> dict[str, int]:
+    """Return effective bundle budgets taking into account runtime overrides."""
+    return {
+        "accuracy": _accuracy_budget(),
+        "goal_accuracy": _goal_accuracy_budget(),
+        "behavior_check": _behavior_check_budget(),
+    }
 
 
 def _clip(text: str, limit: int) -> str:
@@ -666,7 +778,7 @@ def _late_observation_excerpts(traj: dict[str, Any], limit: int) -> list[str]:
         if step.get("source") != "agent":
             continue
         for result in reversed((step.get("observation") or {}).get("results") or []):
-            content = str(result.get("content") or "").strip()
+            content = atif_content_text(result.get("content")).strip()
             if content:
                 out.append(_clip(content, limit))
     return out
@@ -678,14 +790,32 @@ def _assemble(sections: list[tuple[str, str]], budget: int) -> tuple[str, int, b
     used = 0
     dropped = 0
     truncated = False
-    for title, body in sections:
-        body = str(body or "").strip()
-        if not body:
-            continue
+    non_empty = [(title, str(body or "").strip()) for title, body in sections if str(body or "").strip()]
+    for idx, (title, body) in enumerate(non_empty):
         block = f"{title}\n{body}"
         if used + len(block) <= budget:
             parts.append(block)
             used += len(block) + 2
+        elif title == _SECTION_FINAL_RESPONSE and budget - used > 0:
+            avail = budget - used
+            later_blocks = [len(f"{t}\n{b}") + 2 for t, b in non_empty[idx + 1 :]]
+            if later_blocks and avail >= 160:
+                reserve_later = min(avail // 2, *later_blocks)
+                if avail - reserve_later > len(title) + 16:
+                    avail -= reserve_later
+            header = f"{title}\n"
+            clip_suffix = " …[clipped]"
+            if avail > len(header) + len(clip_suffix):
+                clipped_body = _clip(body, avail - len(header) - len(clip_suffix))
+                clipped_block = f"{header}{clipped_body}"
+            elif avail > len(header):
+                clipped_block = f"{header}{body[: avail - len(header)]}"
+            else:
+                clipped_block = block[:avail]
+            parts.append(clipped_block)
+            used += len(clipped_block) + 2
+            dropped += 1
+            truncated = True
         else:
             dropped += 1
             truncated = True
@@ -749,7 +879,7 @@ def build_verified_facts(
             if step.get("source") != "agent":
                 continue
             # Check tool call arguments: command/cmd/code and file-path args
-            for tc in step.get("tool_calls") or []:
+            for _, tc in iter_tool_calls({"steps": [step]}):
                 args = tc.get("arguments") or {}
                 if not isinstance(args, dict):
                     continue
@@ -851,17 +981,18 @@ def build_metric_evidence_bundles(
         return facts_section
 
     bundles: dict[str, dict[str, Any]] = {}
+    budgets = _bundle_budgets()
 
     acc_text, acc_drop, acc_trunc = _assemble(
         [
-            ("FINAL RESPONSE", final),
+            (_SECTION_FINAL_RESPONSE, final),
             ("PRODUCED FILES / WRITES", file_changes),
             ("KEY OBSERVATIONS", "\n---\n".join(late_obs[:_BUNDLE_ACCURACY_MAX_OBS])),
         ],
-        _BUNDLE_BUDGETS["accuracy"],
+        budgets["accuracy"],
     )
     bundles["accuracy"] = {
-        "prompt_evidence": _prepend_facts(acc_text or _clip(get_agent_text(traj), _BUNDLE_BUDGETS["accuracy"])),
+        "prompt_evidence": _prepend_facts(acc_text or _clip(get_agent_text(traj), budgets["accuracy"])),
         "evidence_refs": refs["accuracy"],
         "omitted": {
             "count": acc_drop,
@@ -873,14 +1004,14 @@ def build_metric_evidence_bundles(
 
     goal_text, goal_drop, goal_trunc = _assemble(
         [
-            ("FINAL RESPONSE", final),
+            (_SECTION_FINAL_RESPONSE, final),
             ("END-STATE FILE CHANGES", file_changes),
             ("RECENT TOOL RESULTS (newest first)", "\n---\n".join(late_obs[:_BUNDLE_GOAL_MAX_OBS])),
         ],
-        _BUNDLE_BUDGETS["goal_accuracy"],
+        budgets["goal_accuracy"],
     )
     bundles["goal_accuracy"] = {
-        "prompt_evidence": _prepend_facts(goal_text or _clip(get_agent_text(traj), _BUNDLE_BUDGETS["goal_accuracy"])),
+        "prompt_evidence": _prepend_facts(goal_text or _clip(get_agent_text(traj), budgets["goal_accuracy"])),
         "evidence_refs": refs["goal_accuracy"],
         "omitted": {
             "count": goal_drop,
@@ -890,7 +1021,9 @@ def build_metric_evidence_bundles(
         "verified": facts,
     }
 
-    bc_text = build_behavior_evidence(traj, question, max_chars=_BUNDLE_BUDGETS["behavior_check"])
+    facts_overhead = len(facts_section) + 2 if facts_section else 0
+    bc_budget = max(1, budgets["behavior_check"] - facts_overhead)
+    bc_text = build_behavior_evidence(traj, question, max_chars=bc_budget)
     bc_full = build_behavior_evidence(traj, question, max_chars=10**9)
     bc_trunc = len(bc_full) > len(bc_text)
     bundles["behavior_check"] = {
@@ -914,17 +1047,17 @@ def extract_tool_calls_as_dicts(traj: dict[str, Any]) -> list[dict[str, Any]]:
     for step in traj.get("steps", []):
         if step.get("source") != "agent":
             continue
-        for tc in step.get("tool_calls") or []:
-            obs_text = ""
-            obs = step.get("observation") or {}
-            for r in obs.get("results") or []:
-                if r.get("source_call_id") == tc.get("tool_call_id") or not r.get("source_call_id"):
-                    obs_text += str(r.get("content", ""))
-            result.append(
-                {
-                    "action": tc.get("function_name", ""),
-                    "action_input": tc.get("arguments") or {},
-                    "observation": obs_text,
-                }
-            )
+        for _, tc in iter_tool_calls({"steps": [step]}):
+            call = {
+                "action": tc.get("function_name", ""),
+                "action_input": tc.get("arguments") or {},
+                "observation": _tool_call_observation(step, tc),
+            }
+            if status := tc.get("_atif_normalization_status"):
+                call["normalization_status"] = status
+            if status := tc.get("_atif_observation_status"):
+                call["observation_status"] = status
+            if wrapper_observation := _tool_call_wrapper_observation(step, tc):
+                call["wrapper_observation"] = wrapper_observation
+            result.append(call)
     return result

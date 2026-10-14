@@ -8,11 +8,42 @@ Based on SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md specification.
 
 from pathlib import Path
 
+import pytest
+
 from skillevaluator.validators.schema import SchemaValidator
 
 
 class TestSchemaValidator:
     """Test cases for SchemaValidator based on SkillEvaluator spec."""
+
+    @pytest.mark.parametrize("key", ["123", "true", "false", "null", "2026-01-01"])
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_non_string_key_returns_validation_error(self, sample_skill_dir, key, nested):
+        manifest = sample_skill_dir / "SKILL.md"
+        content = manifest.read_text()
+        marker = "metadata:\n" if nested else "---\n"
+        indentation = "  " if nested else ""
+        manifest.write_text(content.replace(marker, f"{marker}{indentation}{key}: extra value\n", 1))
+
+        result = SchemaValidator().validate(sample_skill_dir)
+
+        assert not result.passed
+        field = f"metadata.{key}" if nested else key
+        findings = [finding for finding in result.findings if finding.check_name == "frontmatter_field"]
+        assert any(finding.message == f"Field '{field}': Keys should be strings" for finding in findings)
+        assert any(finding.metadata == {"field": field, "error_type": "invalid_key"} for finding in findings)
+
+    @pytest.mark.parametrize("key", ["123", "true", "false", "null", "2026-01-01"])
+    def test_quoted_extra_keys_remain_strings(self, sample_skill_dir, key):
+        manifest = sample_skill_dir / "SKILL.md"
+        content = manifest.read_text().replace("---\n", f'---\n"{key}": top-level\n', 1)
+        manifest.write_text(content.replace("metadata:\n", f'metadata:\n  "{key}": nested\n', 1))
+
+        result = SchemaValidator().validate(sample_skill_dir)
+
+        assert result.passed, result.errors
+        assert result.metadata["frontmatter"].model_extra[key] == "top-level"
+        assert result.metadata["frontmatter"].metadata.model_extra[key] == "nested"
 
     def test_valid_skill(self, sample_skill_dir: Path):
         """Test validation passes for valid skill with proper SkillEvaluator structure."""
@@ -684,6 +715,34 @@ print("hello")
         result = validator.validate(skill_dir)
 
         assert result.passed, f"Skill with complete body should pass. Errors: {result.errors}"
+
+    def test_utf8_bom_skill_md_passes_schema(self, tmp_path: Path):
+        """A valid SKILL.md that only adds a UTF-8 BOM must still pass schema (#91)."""
+        skill_dir = tmp_path / "bom-skill"
+        skill_dir.mkdir()
+        body = """---
+name: bom-skill
+description: Valid skill whose SKILL.md starts with a UTF-8 BOM
+metadata:
+  author: Bom User <bomuser@example.com>
+---
+
+# BOM Skill
+
+## Instructions
+
+1. Open the file in an editor that writes a BOM.
+
+## Examples
+
+Example usage.
+"""
+        (skill_dir / "SKILL.md").write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert result.passed, f"BOM-only difference should still pass schema. Errors: {result.errors}"
+        assert all(f.check_name != "frontmatter_format" for f in result.findings)
 
     def test_canonical_support_dirs_accepted(self, tmp_path: Path):
         """Canonical public skill support directories must not be flagged.

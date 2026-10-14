@@ -48,6 +48,8 @@ from skillevaluator.tier3.harbor.progress import (
 from skillevaluator.tier3.harbor.runner import (
     _check_prerequisites,
     _harbor_bin,
+    _harbor_launch_cwd,
+    _harbor_launch_environment,
     _model_for_agent,
     _resolve_agent_runtime_plan,
     run_harbor_eval,
@@ -62,10 +64,19 @@ from skillevaluator.tier3.results_location import (
     resolve_results_root,
 )
 from skillevaluator.tier3.toml_utils import toml_quote
+from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 
-console = Console()
+# emoji=False: ":name:" codes in untrusted text must print literally.
+console = Console(emoji=False)
 
 _HARBOR_RESERVED_CASE_NAMES = frozenset({"dataset.toml", "readme.md", "metric.py", "results"})
+_DEFAULT_AGENT_BY_PROVIDER = {
+    "nv_build": "opencode",
+    "openai": "codex",
+    "anthropic": "claude-code",
+    "bedrock": "claude-code",
+    "openai-compatible": "codex",
+}
 
 
 def _engine_env_mode(value: str) -> str:
@@ -331,7 +342,7 @@ def _write_harbor_dataset(harbor_dir: Path, case_id: str) -> None:
 def parse_agents(raw_agents: str | None) -> list[str]:
     """Parse a comma-separated Harbor agent list."""
     if not raw_agents:
-        return ["codex"]
+        return []
     agents = [canonical_agent_name(item.strip()) for item in raw_agents.split(",") if item.strip()]
     seen: set[str] = set()
     deduped: list[str] = []
@@ -340,6 +351,18 @@ def parse_agents(raw_agents: str | None) -> list[str]:
             deduped.append(agent)
             seen.add(agent)
     return deduped
+
+
+def resolve_agents(raw_agents: str | None, *, provider: str) -> list[str]:
+    """Resolve an explicit agent list or choose the provider's native default."""
+    if raw_agents is not None:
+        return parse_agents(raw_agents)
+    try:
+        return [_DEFAULT_AGENT_BY_PROVIDER[provider]]
+    except KeyError as exc:
+        raise ValueError(
+            f"No automatic Harbor agent is configured for provider '{provider}'; select one with --agents."
+        ) from exc
 
 
 def parse_agent_model_overrides(raw_overrides: tuple[str, ...]) -> dict[str, list[str]]:
@@ -442,7 +465,10 @@ def init_custom_grader(
         existing = [path for path in (grader_py, grader_sh) if path.exists()]
         if existing and not force:
             names = ", ".join(str(evals_dir / path.name) for path in existing)
-            console.print(f"[red]Error:[/red] custom grader already exists: {names}. Re-run with --force to overwrite.")
+            console.print(
+                f"[red]Error:[/red] custom grader already exists: {escape_markup(names)}. "
+                "Re-run with --force to overwrite."
+            )
             return 1
         if force:
             for existing_path in existing:
@@ -457,7 +483,7 @@ def init_custom_grader(
         copytree_secure(private_evals, evals_dir, replace_existing=True, allowed_root=private_root)
 
     grader_path = evals_dir / private_grader.name
-    console.print(f"Created SkillEvaluator custom grader starter at [cyan]{grader_path}[/cyan]")
+    console.print(f"Created SkillEvaluator custom grader starter at [cyan]{escape_markup(str(grader_path))}[/cyan]")
     return 0
 
 
@@ -516,7 +542,10 @@ def init_harbor_task(
         public_case = evals_dir / "harbor" / case_id
         if os.path.lexists(private_case):
             if not force:
-                console.print(f"[red]Error:[/red] {public_case} already exists. Re-run with --force to overwrite.")
+                console.print(
+                    f"[red]Error:[/red] {escape_markup(str(public_case))} already exists. "
+                    "Re-run with --force to overwrite."
+                )
                 return 1
             if not private_case.is_dir() or private_case.is_symlink():
                 raise ValueError(f"existing Harbor case must be a real directory: {public_case}")
@@ -595,7 +624,7 @@ Keep the result contract stable:
 
         copytree_secure(private_evals, evals_dir, replace_existing=True, allowed_root=private_root)
 
-    console.print(f"Created Harbor BYOT starter at [cyan]{evals_dir / 'harbor'}[/cyan]")
+    console.print(f"Created Harbor BYOT starter at [cyan]{escape_markup(str(evals_dir / 'harbor'))}[/cyan]")
     return 0
 
 
@@ -604,6 +633,7 @@ def evaluate(
     *,
     agents: str | None,
     env_mode: str,
+    environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
     n_attempts: int | None,
     pass_threshold: float | None,
@@ -624,12 +654,22 @@ def evaluate(
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
+    evaluated_source: dict[str, str] | None = None,
     progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     """Run Harbor live-agent evaluation for a skill."""
     env_mode = _engine_env_mode(env_mode)
 
-    agent_list = parse_agents(agents)
+    if agents is None:
+        try:
+            provider = resolve_llm_provider()
+        except ProviderConfigurationError as exc:
+            raise ValueError(f"A public LLM provider is required for live evaluation: {exc}") from exc
+        agent_list = resolve_agents(None, provider=provider.provider)
+    else:
+        agent_list = parse_agents(agents)
+        if not agent_list:
+            raise ValueError("Select at least one agent with --agents.")
     reporter = safe_progress_reporter(progress_reporter or NullProgressReporter())
     engine_started = False
     try:
@@ -652,12 +692,16 @@ def evaluate(
             supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))
             raise ValueError(f"Unknown agent(s): {', '.join(unknown)}. Supported agents: {supported}")
 
-        try:
-            resolve_llm_provider()
-        except ProviderConfigurationError as exc:
-            raise ValueError(f"A public LLM provider is required for live evaluation: {exc}") from exc
+        if agents is not None:
+            try:
+                resolve_llm_provider()
+            except ProviderConfigurationError as exc:
+                raise ValueError(f"A public LLM provider is required for live evaluation: {exc}") from exc
 
         agent_models = parse_agent_model_overrides(agent_model)
+        from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+
+        environment_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
         unknown_model_agents = sorted(set(agent_models) - set(agent_list))
         if unknown_model_agents:
             raise ValueError(
@@ -687,7 +731,9 @@ def evaluate(
             agent_runtime_preflight=agent_runtime_preflight,
             env_mode=env_mode,
             env_mode_source="CLI",
+            environment_kwargs=environment_kwargs,
             timeout_multiplier=timeout_multiplier,
+            evaluated_source=evaluated_source,
             override_cpus=override_cpus,
             override_memory_mb=override_memory_mb,
             override_storage_mb=override_storage_mb,
@@ -705,12 +751,13 @@ def doctor(
     *,
     agents: str | None,
     env_mode: str,
+    environment_kwarg: tuple[str, ...] = (),
     verify_models: bool = False,
     agent_model: tuple[str, ...] = (),
 ) -> int:
     """Check whether live evaluation dependencies are available."""
     env_mode = _engine_env_mode(env_mode)
-    agent_list = parse_agents(agents)
+    agent_list = parse_agents(agents) if agents is not None else []
     rows: list[tuple[str, str, str]] = []
     rows.append(("CLI package", "pass", f"skillevaluator {__version__}"))
 
@@ -722,6 +769,7 @@ def doctor(
     except ProviderConfigurationError as exc:
         rows.append(("Public LLM provider", "fail", str(exc)))
     else:
+        agent_list = resolve_agents(agents, provider=provider.provider)
         rows.append(("Public LLM provider", "pass", f"{provider.provider} / {provider.model}"))
         try:
             overrides = parse_agent_model_overrides(agent_model)
@@ -777,10 +825,28 @@ def doctor(
     unknown = validate_agents(agent_list)
     if unknown:
         rows.append(("Harbor agents", "fail", f"Unknown: {', '.join(unknown)}"))
+    elif agents is not None and not agent_list:
+        rows.append(("Harbor agents", "fail", "Select at least one agent with --agents."))
+    elif not agent_list:
+        rows.append(("Harbor agents", "warn", "automatic selection requires a configured provider"))
     else:
         rows.append(("Harbor agents", "pass", ", ".join(agent_list)))
 
-    prereq_errors = _check_prerequisites(env_mode=env_mode, agents=agent_list)
+    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+
+    try:
+        environment_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
+    except ValueError as exc:
+        environment_kwargs = {}
+        prereq_errors = [str(exc)]
+    else:
+        prerequisite_subprocess_env = dict(next(iter(runtime_plans.values())).subprocess_env) if runtime_plans else None
+        prereq_errors = _check_prerequisites(
+            env_mode=env_mode,
+            agents=agent_list,
+            environment_kwargs=environment_kwargs,
+            subprocess_env=prerequisite_subprocess_env,
+        )
     if prereq_errors:
         for error in prereq_errors:
             rows.append((f"{env_mode} prerequisite", "fail", error))
@@ -821,7 +887,7 @@ def doctor(
     status_styles = {"pass": "green", "warn": "yellow", "fail": "red"}
     for name, status, detail in rows:
         style = status_styles[status]
-        table.add_row(name, f"[{style}]{status}[/{style}]", detail)
+        table.add_row(escape_markup(str(name)), f"[{style}]{status}[/{style}]", escape_markup(str(detail)))
     console.print(table)
     return 1 if any(row[1] == "fail" for row in rows) else 0
 
@@ -887,8 +953,8 @@ def _print_validate_results(skill_path: Path, results: list[Any]) -> None:
         icon, style = status_icon.get(result.status, ("[ ? ]", "dim"))
         body.append(f"  {icon:<10s}", style=style)
         path_style = "bold" if result.status in ("error", "missing") else "white"
-        body.append(f"{result.path:<38s}", style=path_style)
-        body.append(f"{result.message}\n", style="dim")
+        body.append(f"{strip_terminal_controls(str(result.path)):<38s}", style=path_style)
+        body.append(f"{strip_terminal_controls(str(result.message))}\n", style="dim")
 
     n_ok = sum(1 for result in results if result.status == "ok")
     n_warn = sum(1 for result in results if result.status == "warning")
@@ -907,7 +973,8 @@ def _print_validate_results(skill_path: Path, results: list[Any]) -> None:
     console.print(
         Panel(
             body,
-            title=f"[bold]Validate: {skill_path.name}/evals/[/bold]",
+            # Panel parses a str title with emoji enabled whatever the console says.
+            title=Text.from_markup(f"[bold]Validate: {escape_markup(skill_path.name)}/evals/[/bold]", emoji=False),
             border_style="cyan" if not n_err else "red",
             padding=(1, 1),
         )
@@ -932,7 +999,7 @@ def view_results(skill_path: Path, *, results_dir: Path | None = None) -> Path:
     report_path = target / "report.html"
     if not report_path.exists():
         report_path = render_agent_eval_html_report(skill_path, target)
-    console.print(f"Opening: [cyan]{report_path}[/cyan]")
+    console.print(f"Opening: [cyan]{escape_markup(str(report_path))}[/cyan]")
     webbrowser.open(report_path.as_uri())
     return report_path
 
@@ -941,7 +1008,8 @@ def harbor_view(jobs_dir: Path) -> int:
     """Open retained Harbor job artifacts with Harbor's trajectory browser."""
     cmd = [_harbor_bin(), "view", str(jobs_dir.resolve())]
     try:
-        return subprocess.call(cmd)
+        with _harbor_launch_cwd() as launch_cwd:
+            return subprocess.call(cmd, cwd=launch_cwd, env=_harbor_launch_environment(os.environ))
     except FileNotFoundError:
         console.print("[red]Error: harbor binary not found.[/red]")
         return 1
@@ -955,7 +1023,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     candidate_roots = iter_candidate_results_roots(skill_path, results_dir)
     if not any(root.exists() for root in candidate_roots):
         searched = ", ".join(str(p) for p in candidate_roots)
-        console.print(f"[red]Error: No results found. Searched: {searched}[/red]")
+        console.print(f"[red]Error: No results found. Searched: {escape_markup(searched)}[/red]")
         return 1
 
     agent_with: dict[str, dict[str, float]] = {}
@@ -1022,12 +1090,12 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     table = Table(show_header=True, header_style="bold dim", box=SIMPLE, padding=(0, 1), show_edge=False, expand=True)
     table.add_column("Evaluator", style="white", min_width=18, no_wrap=True)
     for agent in agents:
-        table.add_column(f"{agent}\nscore", justify="right", min_width=7)
+        table.add_column(f"{escape_markup(agent)}\nscore", justify="right", min_width=7)
         if agent in agent_without:
             table.add_column("\nlift", justify="right", min_width=7)
 
     for metric in display_metrics:
-        row: list[str | Text] = [Text(metric)]
+        row: list[str | Text] = [Text(strip_terminal_controls(metric))]
         for agent in agents:
             with_score = _safe_score(agent_with[agent], metric)
             row.append(Text(f"{with_score:.2f}", style=f"bold {_score_style(with_score)}"))
@@ -1059,12 +1127,19 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
 
     console.print()
     console.print(
-        Panel(table, title=f"[bold]Skill Evaluation - {skill_path.name}[/bold]", border_style="cyan", padding=(1, 1))
+        Panel(
+            table,
+            title=Text.from_markup(f"[bold]Skill Evaluation - {escape_markup(skill_path.name)}[/bold]", emoji=False),
+            border_style="cyan",
+            padding=(1, 1),
+        )
     )
     console.print()
     for agent in agents:
         meta = agent_meta[agent]
-        console.print(f"  [dim]{agent:<16s} {meta['timestamp']} (Harbor, {meta.get('num_trials', '?')} trials)[/dim]")
+        # Pad before escaping so escape backslashes do not count toward the column width.
+        run_line = f"{agent:<16s} {meta['timestamp']} (Harbor, {meta.get('num_trials', '?')} trials)"
+        console.print(f"  [dim]{escape_markup(run_line)}[/dim]")
     console.print()
     return 0
 

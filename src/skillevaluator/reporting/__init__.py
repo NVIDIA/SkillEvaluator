@@ -10,6 +10,7 @@ in various formats for different use cases:
 - JSONReporter: Machine-readable JSON for CI/CD pipelines
 - HTMLReporter: Standalone HTML reports for archiving/sharing
 - MarkdownReporter: Markdown for PR comments and documentation
+- SARIFReporter: SARIF 2.1.0 for GitHub Code Scanning
 
 All reporters consume the same ValidationResult data structure from
 skillevaluator.models, ensuring consistent information across all output formats.
@@ -36,6 +37,7 @@ from skillevaluator.reporting.cli import CLIReporter
 from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.reporting.markdown import MarkdownReporter
+from skillevaluator.reporting.sarif_reporter import SARIFReporter
 
 __all__ = [
     "BenchmarkReporter",
@@ -44,4 +46,5 @@ __all__ = [
     "JSONReporter",
     "MarkdownReporter",
     "ReporterBase",
+    "SARIFReporter",
 ]

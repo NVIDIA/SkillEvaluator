@@ -358,6 +358,7 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                     else None,
                     "_complete": complete,
                     "_invalid_counts": invalid_counts,
+                    "_coverage_truncated": coverage_truncated,
                     "_report_index": report_index,
                     "_agent_key": str(name),
                     "_trial_keys": keys,
@@ -396,6 +397,28 @@ def dedupe_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
     return kept, len(rows) - len(kept)
 
 
+def _ineligible_reason(with_row: dict[str, Any], without_row: dict[str, Any]) -> str:
+    """Name the first check that keeps a with/without pair from being comparable."""
+    arms = (("with-skill", with_row), ("without-skill", without_row))
+    for label, row in arms:
+        if row.get("status") != "succeeded":
+            return f"{label} arm status {row.get('status') or 'unknown'}"
+    if with_row.get("_invalid_counts") or without_row.get("_invalid_counts"):
+        return "invalid trial counts"
+    if with_row.get("_coverage_truncated") or without_row.get("_coverage_truncated"):
+        return "trial data truncated"
+    for label, row in arms:
+        if not row.get("_complete"):
+            return f"{label} trial coverage incomplete"
+    if with_row.get("_trial_keys") != without_row.get("_trial_keys"):
+        return "different cases or attempts"
+    if with_row.get("_dataset_digest") != without_row.get("_dataset_digest"):
+        return "different dataset"
+    if with_row.get("_attempt_policy") != without_row.get("_attempt_policy"):
+        return "different attempt policy"
+    return ""
+
+
 def comparison_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Compute with-minus-without differences only within an identical run."""
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
@@ -408,9 +431,11 @@ def comparison_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         without_rows = [row for row in arms if row["condition"] == "without_skill"]
         result = dict(zip(_PAIRING_IDENTITY, identity, strict=True))
         status = "missing condition"
+        reason = f"no {'without' if with_rows else 'with'}-skill arm for this run and configuration"
         paired = False
         if len(with_rows) > 1 or len(without_rows) > 1:
             status = "ambiguous duplicate conditions"
+            reason = "same arm loaded more than once"
         elif with_rows and without_rows:
             with_row, without_row = with_rows[0], without_rows[0]
             paired = (
@@ -421,7 +446,9 @@ def comparison_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 and with_row.get("_attempt_policy") == without_row.get("_attempt_policy")
             )
             status = "comparable" if paired else "incomplete or mismatched coverage"
+            reason = "" if paired else _ineligible_reason(with_row, without_row)
         result["comparison_status"] = status
+        result["comparison_reason"] = reason
         result["coverage"] = (
             f"{with_rows[0]['trials']} with / {without_rows[0]['trials']} without"
             if with_rows and without_rows

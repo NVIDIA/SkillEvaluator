@@ -181,7 +181,16 @@ def test_unmeasured_and_failed_baseline_are_not_zero_or_comparable(tmp_path: Pat
     app.multiselect(key="filter_status").set_value(["succeeded"]).run()
     assert not app.exception
     assert len(app.dataframe[0].value) == 1
-    assert app.dataframe[1].value["comparison_status"].iloc[0] == "missing condition"
+    # Status narrows performance only, so the comparison still names the failed arm.
+    comparison = app.dataframe[1].value
+    assert comparison["comparison_status"].iloc[0] == "incomplete or mismatched coverage"
+    assert comparison["comparison_reason"].iloc[0] == "without-skill arm status failed"
+    assert comparison["coverage"].iloc[0] == "1 with / 1 without"
+    assert comparison["score_delta"].isna().all()
+    app.multiselect(key="filter_status").set_value(["failed"]).run()
+    assert not app.exception
+    assert app.dataframe[0].value["condition"].tolist() == ["without_skill"]
+    assert app.dataframe[1].value["comparison_reason"].tolist() == ["without-skill arm status failed"]
 
 
 def test_bad_report_does_not_hide_other_results(tmp_path: Path) -> None:
@@ -277,7 +286,11 @@ def test_status_filter_does_not_pair_arms_from_separate_embedded_reports(tmp_pat
     assert not app.exception
     comparisons = app.dataframe[1].value
     assert len(comparisons) == 2
-    assert comparisons["comparison_status"].tolist() == ["missing condition", "missing condition"]
+    assert comparisons["comparison_status"].tolist() == ["incomplete or mismatched coverage"] * 2
+    assert comparisons["comparison_reason"].tolist() == [
+        "without-skill arm status failed",
+        "with-skill arm status failed",
+    ]
     assert comparisons["score_delta"].isna().all()
 
 
@@ -429,6 +442,7 @@ def test_comparison_views_keep_measurements_numeric(tmp_path: Path, view: str, m
     config = json.loads(comparison.proto.columns)
     assert config[measured_column]["type_config"]["type"] == "number"
     assert config["comparison_status"]["type_config"]["type"] == "text"
+    assert config["comparison_reason"]["type_config"]["type"] == "text"
     assert comparison.value["comparison_status"].iloc[0] == "comparable"
     assert len(comparison.value.columns) == len(set(comparison.value.columns))
     if view == "All metrics":

@@ -68,6 +68,7 @@ def test_with_without_differences_and_explicit_features() -> None:
     assert data.rows[0]["features"] == "memory, rules"
     comparison = comparison_rows(data.rows)[0]
     assert comparison["comparison_status"] == "comparable"
+    assert comparison["comparison_reason"] == ""
     assert comparison["score_delta"] == pytest.approx(0.2)
     assert comparison["total_tokens_delta"] == 30
     assert comparison["total_tokens_percent"] == 25
@@ -144,8 +145,18 @@ def test_unrecorded_legacy_coverage_counts_preserve_observed_trial_pairing() -> 
     assert comparison_rows(parse_dashboard_report(report, "legacy.json").rows)[0]["comparison_status"] == "comparable"
 
 
-@pytest.mark.parametrize("mutation", ["failed", "missing_trial", "truncated", "different_case", "missing_attempt"])
-def test_incomplete_or_unmatched_arms_block_all_deltas(mutation: str) -> None:
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("failed", "without-skill arm status failed"),
+        ("missing_trial", "without-skill trial coverage incomplete"),
+        ("truncated", "trial data truncated"),
+        ("different_case", "different cases or attempts"),
+        ("missing_attempt", "without-skill trial coverage incomplete"),
+        ("invalid_count", "invalid trial counts"),
+    ],
+)
+def test_incomplete_or_unmatched_arms_block_all_deltas(mutation: str, reason: str) -> None:
     report = _report()
     agent = report["agents"]["claude-code"]
     if mutation == "failed":
@@ -158,22 +169,46 @@ def test_incomplete_or_unmatched_arms_block_all_deltas(mutation: str) -> None:
         agent["trials_baseline"][0]["entry_id"] = "case-b"
     elif mutation == "missing_attempt":
         agent["conditions"]["without_skill"]["expected_attempts"] = 2
+    elif mutation == "invalid_count":
+        agent["num_trials_baseline"] = -1
     comparison = comparison_rows(parse_dashboard_report(report, "same.json").rows)[0]
     assert comparison["comparison_status"] == "incomplete or mismatched coverage"
+    assert comparison["comparison_reason"] == reason
     assert comparison["score_delta"] is None
     assert comparison["total_tokens_delta"] is None
+
+
+@pytest.mark.parametrize(
+    ("field", "reason"),
+    [("_dataset_digest", "different dataset"), ("_attempt_policy", "different attempt policy")],
+)
+def test_tautological_pair_checks_have_reasons(field: str, reason: str) -> None:
+    rows = parse_dashboard_report(_report(), "same.json").rows
+    rows[1][field] = "other"
+    comparison = comparison_rows(rows)[0]
+    assert comparison["comparison_status"] == "incomplete or mismatched coverage"
+    assert comparison["comparison_reason"] == reason
+    assert comparison["score_delta"] is None
 
 
 def test_disjoint_runs_features_and_duplicate_conditions_cannot_pair() -> None:
     data = parse_dashboard_report(_report(), "first.json")
     rows = copy.deepcopy(data.rows)
     rows[1]["source"] = "second.json"
-    assert all(row["comparison_status"] == "missing condition" for row in comparison_rows(rows))
+    comparisons = comparison_rows(rows)
+    assert all(row["comparison_status"] == "missing condition" for row in comparisons)
+    assert [row["comparison_reason"] for row in comparisons] == [
+        "no without-skill arm for this run and configuration",
+        "no with-skill arm for this run and configuration",
+    ]
     rows = copy.deepcopy(data.rows)
     rows[1]["features"] = "rules"
-    assert all(row["comparison_status"] == "missing condition" for row in comparison_rows(rows))
+    comparisons = comparison_rows(rows)
+    assert all(row["comparison_status"] == "missing condition" for row in comparisons)
+    assert all(row["comparison_reason"].startswith("no ") for row in comparisons)
     duplicate = comparison_rows([*data.rows, data.rows[0]])[0]
     assert duplicate["comparison_status"] == "ambiguous duplicate conditions"
+    assert duplicate["comparison_reason"] == "same arm loaded more than once"
     assert duplicate["score_delta"] is None
 
 

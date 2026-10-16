@@ -416,12 +416,15 @@ accept up to 16 MiB (16,777,216 bytes); larger files produce a notice while othe
 valid reports remain available.
 
 Filter the sortable tables by skill, model, harness, recorded harness features,
-condition, and execution status. Download the visible performance or comparison
+condition, and execution status. The status and condition filters narrow the
+performance table only, so comparisons keep both arms; the other filters also
+remove arms from comparisons. Download the visible performance or comparison
 rows as CSV. Each performance row represents one run, harness, and condition.
 The comparison table calculates **with skill minus without skill**, and percent
 change relative to without skill. A negative usage difference means less usage;
 a positive score difference means higher performance. Comparisons stay within
 the same run and require successful conditions with matching trial coverage.
+When a pair's differences stay blank, the **Comparison reason** column says why.
 Repeated attempts pair by case, as in the HTML report: each arm must record the
 same number of attempts for every case, and each attempt must have its own
 trial ID. A trajectory above the report loader's size bound leaves that trial's

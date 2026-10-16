@@ -65,6 +65,7 @@ _COMPARISON_COLUMNS = (
     "cost_usd_delta",
     "cost_usd_percent",
     "comparison_status",
+    "comparison_reason",
     "features",
     "coverage",
     "with_score",
@@ -236,7 +237,7 @@ def _show_comparisons(rows: list[dict[str, Any]]) -> None:
         key="comparison_metrics",
     )
     identity = ("skill", "model", "harness")
-    details = ("comparison_status", "features", "coverage", "run_id", "source")
+    details = ("comparison_status", "comparison_reason", "features", "coverage", "run_id", "source")
     metric_sets = {
         "Overview": (
             "score_delta",
@@ -362,9 +363,9 @@ def main(paths: list[str] | None = None) -> None:
     dimension_rows = rows
     for field in _DIMENSIONS:
         dimension_rows = _filter_rows(dimension_rows, field, rows)
-    dimension_rows = _filter_rows(dimension_rows, "status", rows)
-    performance_rows = _filter_rows(dimension_rows, "condition", rows)
-    st.sidebar.caption("The condition filter applies to performance. Comparisons retain both conditions.")
+    performance_rows = _filter_rows(dimension_rows, "status", rows)
+    performance_rows = _filter_rows(performance_rows, "condition", rows)
+    st.sidebar.caption("Status and condition filters apply to performance. Comparisons retain both conditions.")
 
     run_count = len({(row["source"], row["run_id"]) for row in performance_rows})
     skill_count = len({row["skill"] for row in performance_rows})

@@ -183,9 +183,25 @@ def test_ctrl_c_returns_zero(monkeypatch) -> None:
 
     result, fake = _capture_launch(monkeypatch, popen=InterruptedPopen)
     assert result.exit_code == 0
-    # The launcher waits for Streamlit to finish its own Ctrl+C shutdown.
+    # The launcher waits for Streamlit to finish its own Ctrl+C shutdown, and
+    # passes SIGINT on in case it was sent to the launcher alone.
     assert fake.wait_timeouts == [None, 10]
-    assert fake.sent == []
+    assert fake.sent == ([] if sys.platform == "win32" else [signal.SIGINT])
+
+
+def test_ctrl_c_terminates_streamlit_that_does_not_stop(monkeypatch) -> None:
+    class StuckPopen(FakePopen):
+        def exit_code(self) -> int:
+            if len(self.wait_timeouts) == 1:
+                raise KeyboardInterrupt
+            if self.wait_timeouts[-1] is not None:
+                raise subprocess.TimeoutExpired(self.command, self.wait_timeouts[-1])
+            return -signal.SIGTERM
+
+    result, fake = _capture_launch(monkeypatch, popen=StuckPopen)
+    assert result.exit_code == 0
+    assert fake.wait_timeouts == [None, 10, None]
+    assert fake.sent == ([] if sys.platform == "win32" else [signal.SIGINT]) + [signal.SIGTERM]
 
 
 def test_streamlit_script_directory_cannot_shadow_modules() -> None:

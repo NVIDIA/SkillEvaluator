@@ -58,8 +58,8 @@ def launch_dashboard(paths: tuple[Path, ...], *, port: int | None = None, no_bro
     ]
     env = {**os.environ, "STREAMLIT_SERVER_ALLOWED_HOSTS": "127.0.0.1 localhost"}
     proc = subprocess.Popen(command, cwd=str(_APP.parent), env=env)
-    # Ctrl+C reaches the whole process group, but a SIGTERM or SIGHUP sent only
-    # to this process would otherwise leave Streamlit running on the port.
+    # A SIGTERM, SIGHUP, or SIGINT sent only to this process would otherwise
+    # leave Streamlit running on the port.
     previous: dict[int, Any] = {}
     if threading.current_thread() is threading.main_thread():
         for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
@@ -68,6 +68,10 @@ def launch_dashboard(paths: tuple[Path, ...], *, port: int | None = None, no_bro
     try:
         code = proc.wait()
     except KeyboardInterrupt:
+        # Ctrl+C reaches the whole process group, but kill -INT on this pid does
+        # not; a repeated SIGINT only repeats Streamlit's stop request.
+        if sys.platform != "win32":
+            proc.send_signal(signal.SIGINT)
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:

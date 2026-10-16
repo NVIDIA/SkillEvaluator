@@ -38,6 +38,28 @@ def _email_findings(result):
 
 
 class TestPiiGroupingByValue:
+    @pytest.mark.parametrize("as_file", [True, False])
+    def test_mdc_rule_and_workflow_pii_is_scanned(self, tmp_path, as_file):
+        rule = tmp_path / "instructions.mdc"
+        rule.write_text("---\ndescription: Contact rule\n---\nContact boss@company.com.\n", encoding="utf-8")
+        target = rule if as_file else tmp_path
+        result = SecurityValidator().validate_pii_only(target)
+        assert "boss@company.com" in {f.metadata.get("matched_value") for f in _email_findings(result)}
+
+    def test_clean_mdc_has_no_pii(self, tmp_path):
+        rule = tmp_path / "clean.mdc"
+        rule.write_text("Respond briefly and use the configured contact directory.\n", encoding="utf-8")
+        assert SecurityValidator().validate_pii_only(rule).passed
+
+    def test_mdc_headings_and_slash_lines_are_scanned_like_markdown(self, tmp_path):
+        rule = tmp_path / "escalation.mdc"
+        rule.write_text(
+            "---\ndescription: Escalation rule\n---\n# Escalate to lead@company.com\n// Owner: owner@company.com\n",
+            encoding="utf-8",
+        )
+        found = {f.metadata.get("matched_value") for f in _email_findings(SecurityValidator().validate_pii_only(rule))}
+        assert {"lead@company.com", "owner@company.com"} <= found
+
     def test_repeated_value_collapses_to_one_finding(self, skill_with_repeated_emails):
         result = SecurityValidator().validate_pii_only(skill_with_repeated_emails)
 

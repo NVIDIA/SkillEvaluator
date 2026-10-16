@@ -422,10 +422,10 @@ resolution-markers = [
     "sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "license-expression" },
-    { name = "packageurl-python" },
-    { name = "py-serializable" },
-    { name = "sortedcontainers" },
+    { name = "license-expression", marker = "sys_platform == 'linux'" },
+    { name = "packageurl-python", marker = "sys_platform == 'linux'" },
+    { name = "py-serializable", marker = "sys_platform == 'linux'" },
+    { name = "sortedcontainers", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/66/fc/abaad5482f7b59c9a0a9d8f354ce4ce23346d582a0d85730b559562bbeb4/cyclonedx_python_lib-9.1.0.tar.gz", hash = "sha256:86935f2c88a7b47a529b93c724dbd3e903bc573f6f8bd977628a7ca1b5dadea1", size = 1048735, upload-time = "2025-02-27T17:23:40.367Z" }
 wheels = [
@@ -442,11 +442,11 @@ resolution-markers = [
     "sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "license-expression" },
-    { name = "packageurl-python" },
-    { name = "py-serializable" },
-    { name = "sortedcontainers" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "license-expression", marker = "sys_platform != 'linux'" },
+    { name = "packageurl-python", marker = "sys_platform != 'linux'" },
+    { name = "py-serializable", marker = "sys_platform != 'linux'" },
+    { name = "sortedcontainers", marker = "sys_platform != 'linux'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' and sys_platform != 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/75/c9/5d0ccdd19bc7d8ab803b90695c1706aa2ea8529685d18e682dc2524d2630/cyclonedx_python_lib-11.11.0.tar.gz", hash = "sha256:4b3194db72b613717f2912447e67ab618c75ff7dcac6c4af3c0e9e1ac617c102", size = 1442983, upload-time = "2026-06-17T11:57:49.055Z" }
 wheels = [
@@ -1830,6 +1830,7 @@ dependencies = [
     { name = "idna" },
     { name = "jinja2" },
     { name = "markdown-it-py" },
+    { name = "packaging" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "rich" },
@@ -1898,6 +1899,7 @@ requires-dist = [
     { name = "markdown-it-py", specifier = ">=4.2,<5" },
     { name = "mcp", marker = "extra == 'tier3'", specifier = ">=1.28.1,<2" },
     { name = "openai", marker = "extra == 'llm'", specifier = ">=2.21.0" },
+    { name = "packaging", specifier = ">=24" },
     { name = "pip-audit", marker = "extra == 'security'", specifier = ">=2.10.0" },
     { name = "pydantic", specifier = ">=2.11.0" },
     { name = "pyjwt", extras = ["crypto"], marker = "extra == 'tier3'", specifier = ">=2.13.0" },

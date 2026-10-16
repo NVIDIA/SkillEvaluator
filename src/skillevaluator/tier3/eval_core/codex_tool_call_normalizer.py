@@ -46,6 +46,26 @@ def atif_content_text(content: object) -> str:
     return str(content)
 
 
+def atif_content_has_text(content: object) -> bool:
+    """Check for meaningful text rather than media-only placeholders.
+
+    Keep atif_content_text unchanged: other evidence sections still need
+    safe [image]/[audio] markers for non-text media.
+    """
+    if isinstance(content, list):
+        return any(
+            (isinstance(part, str) and bool(part.strip()))
+            or (
+                isinstance(part, dict)
+                and part.get("type") == "text"
+                and isinstance(part.get("text"), str)
+                and bool(part["text"].strip())
+            )
+            for part in content
+        )
+    return bool(atif_content_text(content).strip())
+
+
 def iter_normalized_tool_calls(traj: dict[str, Any]):
     """Yield each trajectory tool call after safe native-Codex normalization."""
     for step in traj.get("steps", []):

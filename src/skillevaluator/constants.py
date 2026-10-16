@@ -157,7 +157,7 @@ BANNED_PACKAGES = [
 ]
 
 # File extensions to scan
-SCANNABLE_EXTENSIONS = {".py", ".sh", ".yaml", ".yml", ".json", ".md", ".txt"}
+SCANNABLE_EXTENSIONS = {".py", ".sh", ".yaml", ".yml", ".json", ".md", ".mdc", ".txt"}
 
 # Directories to skip at any depth during Tier 1 file-tree walks (scan artifact roots, version snapshots, build caches).
 SCAN_EXCLUDED_DIRS = frozenset(

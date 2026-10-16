@@ -85,6 +85,18 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 1 pyproject dependency audits now inspect static target declarations
+  rather than the evaluator environment. Exact direct pins (including optional
+  groups) are queried without installation or build-script execution;
+  unresolved declarations and invalid scanner evidence are incomplete.
+- Tier 1 PII scanning now includes `.mdc` rules and workflows.
+- Tier 3 negative-case accuracy excludes inapplicable skill identification and
+  records its scoring policy. Reports separately expose measured token and
+  agent execution-time differences with complete matching-arm coverage, while
+  efficiency continues to measure routing and productive tool use.
+- Include schema-valid ATIF message content parts in final answers, conversation
+  summaries, and judge evidence references in the host and Harbor verifier.
+  Image and audio parts use markers without exposing their source paths.
 - Preserve scored Harbor trials when agent answers mention authentication errors
   and per-step token usage is present but aggregate ATIF token metrics are absent
   or zero. Explicit runtime exceptions and error events still invalidate trials.

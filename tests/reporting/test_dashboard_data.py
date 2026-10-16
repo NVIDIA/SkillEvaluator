@@ -117,6 +117,26 @@ def test_canonical_missing_attempt_keeps_usage_totals_unknown() -> None:
     assert "tokens 1/2" in row["coverage"]
 
 
+def test_canonical_missing_trial_counts_each_declared_trial_once() -> None:
+    report = _report()
+    agent = report["agents"]["claude-code"]
+    agent["num_trials"] = 10
+    agent["conditions"]["with_skill"].update(expected_attempts=10, scored_attempts=10)
+    agent["trials"] = [
+        {**copy.deepcopy(agent["trials"][0]), "entry_id": f"case-{index}", "trial_id": f"case-{index}__trial0"}
+        for index in range(9)
+    ]
+    row = parse_dashboard_report(report, "report.json").rows[0]
+    assert row["total_tokens"] is None
+    assert "tokens 9/10" in row["coverage"]
+    # Without case identities the shortfall still keeps totals unknown.
+    for trial in agent["trials"]:
+        trial.pop("entry_id")
+    row = parse_dashboard_report(report, "report.json").rows[0]
+    assert row["total_tokens"] is None
+    assert "tokens 9/10" in row["coverage"]
+
+
 def test_per_trial_usage_normalizes_trial_counts() -> None:
     per_trial = []
     for count in (2, 4):

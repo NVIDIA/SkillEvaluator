@@ -382,7 +382,8 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                     else [
                         {} if str(trial.get("trial_id") or "") in ambiguous_ids else _usage(trial) for trial in trials
                     ],
-                    expected=declared + max(0, row["_expected_usage_trials"] - logical_count),
+                    # Trials missing from the declared count are already part of it.
+                    expected=declared + max(0, row["_expected_usage_trials"] - max(logical_count, declared)),
                 )
                 output.rows.append(row)
     if not output.rows and not output.warnings:

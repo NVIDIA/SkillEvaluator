@@ -55,6 +55,12 @@ from skillevaluator.provider_config import (
     refresh_host_vertex_adc_environment,
     sync_refreshed_adc_persistent_env,
 )
+from skillevaluator.tier3.harbor.progress import secret_values_from_environment
+from skillevaluator.tier3.harbor.secure_copy import (
+    _absolute_lexical,
+    copy_file_secure,
+    copytree_secure,
+)
 from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_KEY_STDIN_ENV,
     NVIDIA_BUILD_STDIN_SENTINEL,
@@ -3456,6 +3462,13 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
             getattr(self, "_persistent_env", None),
             fresh_token=merged.get("OPENAI_API_KEY"),
         )
+        secret_values = set(_eligible_secret_values(merged.values()))
+        secret_values.update(_sensitive_environment_values(merged))
+        secret_values.update(_credential_uri_environment_values(merged))
+        if secret_values:
+            # Fail before writing or uploading a handoff if no structurally
+            # safe output marker can represent these values.
+            _collision_safe_redaction_marker(secret_values, include_short=True)
         remote_path = f"/tmp/.skillevaluator-exec-env-{uuid.uuid4().hex}.sh"
         handoff_scope = _SecureHandoffScope(
             environment_names=frozenset(merged),

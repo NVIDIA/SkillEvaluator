@@ -8,25 +8,28 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import os
 import re
 import secrets
 import shlex
 import tempfile
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from harbor.agents.installed.base import NonZeroAgentExitCodeError
-from harbor.agents.installed.claude_code import ClaudeCode
 from harbor.agents.installed.opencode import OpenCode
+from harbor.agents.model_connection import ResolvedModelConnection, without_inferred_endpoint
 from harbor.models.trial.paths import EnvironmentPaths
+from harbor.utils.env import parse_bool_env_value
 
 from skillevaluator.provider_config import is_claude_5_5_or_later, is_gpt6_model
-from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorClaudeCode, SkillEvaluatorCodex
+from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorClaudeCode as _InstalledClaudeCode
+from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorCodex
 from skillevaluator.tier3.harbor.nvidia_build_bridge import (
     MAX_REQUESTS_PER_BRIDGE,
     RunningBridge,
@@ -54,6 +57,8 @@ _NVIDIA_BUILD_HOST_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
 _CLAUDE_CODE_MIN_VERSION_FOR_CLAUDE_5_5 = (2, 1, 280)
 _CODEX_MIN_VERSION_FOR_GPT_6 = (0, 159, 1)
 _CLI_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+logger = logging.getLogger(__name__)
 
 
 async def _await_task_uninterruptibly(
@@ -130,8 +135,104 @@ def _rewrite_launcher_segment(command: str, rewrite: Callable[[str], str]) -> st
     return f"{rewrite(launcher)}{separator}{prompt}"
 
 
-class SkillEvaluatorClaudeCode(ClaudeCode):
-    """Wrap Claude Code to preserve rich MCP server declarations (transport, headers)."""
+class SkillEvaluatorClaudeCode(_InstalledClaudeCode):
+    """Wrap Claude Code to preserve rich MCP server declarations and Vertex AI routing.
+
+    It extends the installed-agent wrapper, so Harbor's installer still skips
+    the distribution Node/npm packages that the native installer does not need.
+    """
+
+    def _env_sources(self) -> tuple[Mapping[str, str], ...]:
+        """Environment sources in runtime precedence order, safe for partially initialized instances."""
+        sources: list[Mapping[str, str]] = []
+        resolved = getattr(self, "_resolved_env_vars", None)
+        if isinstance(resolved, Mapping):
+            sources.append(resolved)
+        extra = getattr(self, "_extra_env", None)
+        if isinstance(extra, Mapping):
+            sources.append(extra)
+        sources.append(os.environ)
+        return tuple(sources)
+
+    def _uses_vertex_auth(self) -> bool:
+        """Return whether Claude Code is configured to route through Vertex AI."""
+        try:
+            return bool(
+                parse_bool_env_value(
+                    self._get_env("CLAUDE_CODE_USE_VERTEX"),
+                    name="CLAUDE_CODE_USE_VERTEX",
+                    default=False,
+                )
+            )
+        except (ValueError, AttributeError):
+            logger.debug("Ignoring invalid boolean environment value CLAUDE_CODE_USE_VERTEX")
+            return False
+
+    @property
+    def model_connection(self) -> ResolvedModelConnection:
+        """Suppress Anthropic API endpoint inference when Vertex AI routing is active."""
+        access = super().model_connection
+        if self._uses_vertex_auth():
+            return without_inferred_endpoint(access)
+        return access
+
+    def _resolve_auth_env(self) -> dict[str, str]:
+        """Resolve Claude Code authentication environment including Vertex AI variables."""
+        if not self._uses_vertex_auth():
+            return super()._resolve_auth_env()
+
+        env: dict[str, str] = {"CLAUDE_CODE_USE_VERTEX": "1"}
+        for vertex_var in (
+            "CLOUD_ML_REGION",
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+            "GOOGLE_CLOUD_PROJECT",
+            "GCLOUD_PROJECT",
+            "CLOUDSDK_CORE_PROJECT",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "CLOUDSDK_CONFIG",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+        ):
+            val = (self._get_env(vertex_var) or "").strip()
+            if val:
+                env[vertex_var] = val
+        if (self._get_env("DISABLE_PROMPT_CACHING") or "").strip() == "1":
+            env["DISABLE_PROMPT_CACHING"] = "1"
+        return env
+
+    async def exec_as_agent(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+    ):
+        if self._uses_vertex_auth():
+            command = (
+                f"unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN; {command}"
+            )
+            if env:
+                env = {
+                    k: v
+                    for k, v in env.items()
+                    if k
+                    not in {
+                        "ANTHROPIC_API_KEY",
+                        "ANTHROPIC_AUTH_TOKEN",
+                        "ANTHROPIC_BASE_URL",
+                        "CLAUDE_CODE_OAUTH_TOKEN",
+                    }
+                }
+        return await super().exec_as_agent(
+            environment,
+            command=command,
+            env=env,
+            cwd=cwd,
+            timeout_sec=timeout_sec,
+        )
 
     def _resolve_task_path(self) -> Path | None:
         """Resolve the task directory path from trial config.json."""
@@ -178,11 +279,6 @@ class SkillEvaluatorClaudeCode(ClaudeCode):
         mcp_servers = self._resolve_task_mcp_servers()
         if not mcp_servers:
             return super()._build_register_mcp_servers_command()
-
-        from skillevaluator.tier3.harbor.adapter import validate_mcp_server_declarations
-
-        runtime_env = self._resolve_task_runtime_env()
-        validate_mcp_server_declarations(mcp_servers, allowed_runtime_env=runtime_env)
 
         servers: dict[str, dict[str, Any]] = {}
         for server in mcp_servers:
@@ -977,11 +1073,10 @@ class SkillEvaluatorLocalNvidiaBuildClaudeCode(
     """Managed local Claude Code CLI routed through an authenticated host bridge."""
 
 
-LOCAL_AGENT_IMPORT_PATHS = {
-    "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalClaudeCode",
-    "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalCodex",
-    "opencode": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalOpenCode",
-}
+from skillevaluator.tier3.harbor import (  # noqa: F401
+    CONTAINER_AGENT_IMPORT_PATHS,
+    LOCAL_AGENT_IMPORT_PATHS,
+)
 
 NVIDIA_BUILD_AGENT_IMPORT_PATHS = {
     "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildClaudeCode",
@@ -991,8 +1086,4 @@ NVIDIA_BUILD_AGENT_IMPORT_PATHS = {
 NVIDIA_BUILD_LOCAL_AGENT_IMPORT_PATHS = {
     "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalNvidiaBuildClaudeCode",
     "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalNvidiaBuildCodex",
-}
-
-CONTAINER_AGENT_IMPORT_PATHS = {
-    "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorClaudeCode",
 }

@@ -554,6 +554,31 @@ def test_gke_environment_create_pod_autopilot_storage_idempotency_and_custom_pro
 
 
 @pytest.mark.parametrize(
+    ("node_name", "labels", "expected"),
+    [
+        ("gke-std-pool-1", {"autopilot.gke.io/selected-node-type": "general-purpose"}, True),
+        ("gke-std-pool-1", {"cloud.google.com/gke-autopilot": "true"}, True),
+        ("gk3-eval-pool-1", {}, True),
+        ("gke-std-pool-1", {"evil.example.com/autopilot.gke.io/x": "1"}, False),
+        ("gke-std-pool-1", {"autopilot.gke.io.evil.example/x": "1"}, False),
+        ("gke-std-pool-1", {"x-autopilot.gke.io/y": "1"}, False),
+        ("gke-std-pool-1", {"autopilot.gke.io/": "1"}, False),
+        ("gke-std-pool-1", {"autopilot.gke.io/a/b": "1"}, False),
+        ("gke-std-pool-1", {"team": "autopilot.gke.io/primary-container"}, False),
+    ],
+)
+def test_is_autopilot_node_matches_the_autopilot_label_prefix_exactly(
+    node_name: str,
+    labels: dict[str, str],
+    expected: bool,
+) -> None:
+    """Treat only a well-formed autopilot.gke.io/<name> label key as Autopilot, not that text elsewhere."""
+    node = SimpleNamespace(metadata=SimpleNamespace(name=node_name, labels=labels))
+
+    assert gke_env_mod._is_autopilot_node(node) is expected
+
+
+@pytest.mark.parametrize(
     ("init_exit_code", "init_waiting_reason", "pod_phase", "expected_error_snippet"),
     [
         # 1. Init probe succeeds (rc=0) and pod is Running/Ready -> succeeds
@@ -988,34 +1013,53 @@ def test_gke_environment_seam_routes_untargeted_exec_to_main_and_probes_trusted_
     ]
 
 
+def _pre_dispatch_exec_api(handshake_errors: list[str | None]) -> SimpleNamespace:
+    """Return a fake CoreV1Api whose routed exec handshake fails with each queued error before dispatch."""
+
+    def connect_get_namespaced_pod_exec(*_args: object, **_kwargs: object) -> object:
+        error = handshake_errors.pop(0) if handshake_errors else None
+        if error is not None:
+            raise RuntimeError(error)
+        return object()
+
+    api = SimpleNamespace(connect_get_namespaced_pod_exec=connect_get_namespaced_pod_exec)
+    gke_env_mod._ensure_default_exec_container_routing(api)
+    return api
+
+
+async def _harbor_style_exec(api: SimpleNamespace, result: ExecResult) -> ExecResult:
+    """Open the exec stream the way Harbor does, reporting a failed handshake as an ExecResult."""
+    try:
+        await asyncio.to_thread(api.connect_get_namespaced_pod_exec, "pod-under-test", "skilleval", command=["sh"])
+    except Exception as exc:
+        return ExecResult(stdout=None, stderr=str(exc), return_code=1)
+    return result
+
+
 def test_gke_environment_exec_retries_transient_kubelet_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Retry transient kubelet 10250 errors during exec(), but do not retry regular command failures."""
+    """Retry transient kubelet 10250 errors raised before dispatch, but do not retry regular command failures."""
 
     async def fast_sleep(_sec: float) -> None:
         return None
 
     monkeypatch.setattr(gke_env_mod.asyncio, "sleep", fast_sleep)
+    transient_error = (
+        "invalid literal for int() with base 10: "
+        "'error sending request: Post \"https://10.128.0.47:10250/exec/skilleval/pod/main?command=sh&command=-c&command=OPENAI_API_KEY=ya29.super-secret\"'"
+    )
 
-    # 1. Transient kubelet error recovers on second attempt
+    # 1. Transient kubelet error before dispatch recovers on second attempt
     exec_calls = 0
+    flaky_api = _pre_dispatch_exec_api([transient_error])
 
     async def flaky_super_exec(
         self: GKEEnvironment, command: str, *args: object, env: dict[str, str] | None = None, **kwargs: object
     ) -> ExecResult:
         nonlocal exec_calls
         exec_calls += 1
-        if exec_calls == 1:
-            return ExecResult(
-                stdout=None,
-                stderr=(
-                    "invalid literal for int() with base 10: "
-                    "'error sending request: Post \"https://10.128.0.47:10250/exec/skilleval/pod/main?command=sh&command=-c&command=OPENAI_API_KEY=ya29.super-secret\"'"
-                ),
-                return_code=1,
-            )
-        return ExecResult(stdout="created", stderr="", return_code=0)
+        return await _harbor_style_exec(flaky_api, ExecResult(stdout="created", stderr="", return_code=0))
 
     monkeypatch.setattr(GKEEnvironment, "exec", flaky_super_exec)
     env = object.__new__(SkillEvaluatorGKEEnvironment)
@@ -1041,20 +1085,18 @@ def test_gke_environment_exec_retries_transient_kubelet_errors(
 
     # 3. Exhausted transient retries scrub secrets from stderr before returning
     exhausted_calls = 0
+    exhausted_error = (
+        "invalid literal for int() with base 10: "
+        "'error sending request: Post \"https://10.128.0.47:10250/exec/skilleval/pod/main?command=sh&command=-c&command=OPENAI_API_KEY=ya29.super-secret-token\"'"
+    )
+    exhausted_api = _pre_dispatch_exec_api([exhausted_error] * 4)
 
     async def always_failing_super_exec(
         self: GKEEnvironment, command: str, *args: object, env: dict[str, str] | None = None, **kwargs: object
     ) -> ExecResult:
         nonlocal exhausted_calls
         exhausted_calls += 1
-        return ExecResult(
-            stdout=None,
-            stderr=(
-                "invalid literal for int() with base 10: "
-                "'error sending request: Post \"https://10.128.0.47:10250/exec/skilleval/pod/main?command=sh&command=-c&command=OPENAI_API_KEY=ya29.super-secret-token\"'"
-            ),
-            return_code=1,
-        )
+        return await _harbor_style_exec(exhausted_api, ExecResult(stdout="", stderr="", return_code=0))
 
     monkeypatch.setattr(GKEEnvironment, "exec", always_failing_super_exec)
     res_fail = asyncio.run(
@@ -1068,6 +1110,112 @@ def test_gke_environment_exec_retries_transient_kubelet_errors(
     assert "ya29.super-secret-token" not in (res_fail.stderr or "")
     assert "?command=sh" not in (res_fail.stderr or "")
     assert "?command=<redacted>" in (res_fail.stderr or "")
+
+
+@pytest.mark.parametrize(
+    ("scenario", "statuses", "command_stderr", "expected_handshakes", "expected_runs", "expect_stream_closed"),
+    [
+        # The command appends once, then its completion status is lost: never replay it ([P1]).
+        ("status_lost_once", [None, 0], "", 1, 1, True),
+        # Every status is lost: still exactly one dispatch before raising.
+        ("status_always_lost", [None, None, None, None], "", 1, 1, True),
+        # A dispatched command whose own stderr looks like a kubelet error is not replayed.
+        ("dispatched_command_kubelet_like_stderr", [1, 0], "error sending request: upstream", 1, 1, False),
+        # A handshake rejected before dispatch is retried, and the command runs once.
+        ("pre_dispatch_no_agent", ["no-agent", 0], "", 2, 1, False),
+    ],
+)
+def test_gke_environment_exec_never_replays_dispatched_command(
+    monkeypatch: pytest.MonkeyPatch,
+    make_gke_env: Callable[..., SkillEvaluatorGKEEnvironment],
+    scenario: str,
+    statuses: list[int | str | None],
+    command_stderr: str,
+    expected_handshakes: int,
+    expected_runs: int,
+    expect_stream_closed: bool,
+) -> None:
+    """Drive Harbor's real GKE exec so a lost completion status after the side effect raises after one dispatch."""
+    from harbor.environments.gke import GKEExecStreamClosedError
+
+    _ = scenario
+    secret_val = "sk-ant-api03-replaytestvalue"
+    handshakes: list[str | None] = []
+    side_effects: list[str] = []
+    queued_statuses = list(statuses)
+
+    class FakeWSResponse:
+        def __init__(self, returncode: int | None) -> None:
+            self.returncode = returncode
+
+        def is_open(self) -> bool:
+            return False
+
+        def run_forever(self, timeout: int | float | None = None) -> None:
+            _ = timeout
+
+        def close(self) -> None:
+            return
+
+    class FakeCoreV1Api:
+        def __init__(self) -> None:
+            self.api_client = object()
+
+        def connect_get_namespaced_pod_exec(
+            self, _name: str, _namespace: str, *, container: str | None = None, **_kwargs: object
+        ) -> FakeWSResponse:
+            handshakes.append(container)
+            status = queued_statuses.pop(0)
+            if status == "no-agent":
+                raise ApiException(status=500, reason="Internal Server Error", http_resp=None)
+            # The command runs once the stream is open, before any status is reported.
+            side_effects.append("appended")
+            return FakeWSResponse(returncode=status if isinstance(status, int) else None)
+
+    def passthrough_stream(fn: Callable[..., FakeWSResponse], *args: object, **kwargs: object) -> FakeWSResponse:
+        assert hasattr(getattr(fn, "__self__", None), "api_client")
+        return fn(*args, **kwargs)
+
+    async def direct_ensure_client(self: GKEEnvironment) -> None:
+        return None
+
+    async def fast_sleep(_sec: float) -> None:
+        return None
+
+    monkeypatch.setattr("harbor.environments.gke.stream", passthrough_stream)
+    monkeypatch.setattr(GKEEnvironment, "_ensure_client", direct_ensure_client)
+    monkeypatch.setattr(gke_env_mod.asyncio, "sleep", fast_sleep)
+
+    fake_api = FakeCoreV1Api()
+    if "no-agent" in statuses:
+        # Harbor reports this 500 handshake rejection as "No agent available" when the body says so.
+        original_connect = fake_api.connect_get_namespaced_pod_exec
+
+        def no_agent_connect(*args: object, **kwargs: object) -> FakeWSResponse:
+            try:
+                return original_connect(*args, **kwargs)
+            except ApiException as exc:
+                exc.body = "No agent available"
+                raise
+
+        no_agent_connect.__self__ = fake_api  # type: ignore[attr-defined]
+        fake_api.connect_get_namespaced_pod_exec = no_agent_connect  # type: ignore[method-assign]
+    gke_env_mod._ensure_default_exec_container_routing(fake_api)
+    env = make_gke_env(namespace="skilleval", fake_api=fake_api)
+    env._persistent_env = {"ANTHROPIC_API_KEY": secret_val}
+    env._read_exec_output = lambda _resp: ("", command_stderr)  # type: ignore[method-assign]
+
+    if expect_stream_closed:
+        with pytest.raises(GKEExecStreamClosedError) as exc_info:
+            asyncio.run(env.exec("echo line >> /logs/agent/out.txt"))
+        assert secret_val not in str(exc_info.value)
+    else:
+        result = asyncio.run(env.exec("echo line >> /logs/agent/out.txt"))
+        assert result.return_code == (1 if command_stderr else 0)
+
+    assert len(handshakes) == expected_handshakes
+    assert set(handshakes) == {"main"}
+    assert side_effects == ["appended"] * expected_runs
 
 
 @pytest.mark.parametrize(
@@ -1341,3 +1489,74 @@ def test_wait_for_container_exec_ready_aborts_immediately_on_gke_warden_missing_
         asyncio.run(env_obj._wait_for_container_exec_ready(max_attempts=60))
 
     assert sleep_calls == []
+
+
+def test_gke_environment_preflight_normalizes_multipath_kubeconfig(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Accept split KUBECONFIG in SkillEvaluatorGKEEnvironment.preflight() and raise SystemExit when missing."""
+    monkeypatch.setattr("skillevaluator.tier3.harbor.gke_environment.shutil.which", lambda cmd: f"/usr/bin/{cmd}")
+
+    valid_kc = tmp_path / "valid_kubeconfig"
+    valid_kc.write_text("apiVersion: v1\nclusters: []\n", encoding="utf-8")
+    missing_kc = tmp_path / "missing_kubeconfig"
+    monkeypatch.setenv("KUBECONFIG", f"{missing_kc}{os.pathsep}{valid_kc}")
+
+    # Split KUBECONFIG with one valid file succeeds where stock GKEEnvironment.preflight() would fail
+    SkillEvaluatorGKEEnvironment.preflight()
+
+    # All-missing KUBECONFIG raises SystemExit
+    monkeypatch.setenv("KUBECONFIG", str(missing_kc))
+    with pytest.raises(SystemExit, match="Kubernetes credentials"):
+        SkillEvaluatorGKEEnvironment.preflight()
+
+
+def test_gke_environment_exec_handles_harbor_024_stream_closed_and_pod_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+    make_gke_env: Callable[..., SkillEvaluatorGKEEnvironment],
+) -> None:
+    """Raise GKEExecStreamClosedError without replaying the command, redact it, and raise GKEPodNotFoundError on Warden missing pod."""
+    from harbor.environments.base import ExecResult
+    from harbor.environments.gke import GKEEnvironment, GKEExecStreamClosedError, GKEPodNotFoundError
+
+    async def _no_sleep(_sec: float) -> None:
+        return None
+
+    monkeypatch.setattr("skillevaluator.tier3.harbor.gke_environment.asyncio.sleep", _no_sleep)
+    secret_val = "sk-ant-api03-supersecretvalue123456"
+    env_obj = make_gke_env(namespace="default")
+    env_obj._persistent_env = {"ANTHROPIC_API_KEY": secret_val}
+
+    # 1-2. A lost completion status is not replayed and raises with a redacted message
+    attempts = 0
+
+    async def _closed_exec(self_inner: object, **kwargs: object) -> ExecResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise GKEExecStreamClosedError(f"WebSocket closed: token={secret_val}")
+        return ExecResult(stdout="ok", stderr=None, return_code=0)
+
+    monkeypatch.setattr(GKEEnvironment, "exec", _closed_exec)
+    with pytest.raises(GKEExecStreamClosedError) as exc_info:
+        asyncio.run(env_obj.exec("echo hi"))
+    assert attempts == 1
+    assert exc_info.value.__cause__ is None
+    assert secret_val not in str(exc_info.value)
+    assert "<redacted>" in str(exc_info.value)
+
+    # 3. Warden 400 missing-pod in stderr raises GKEPodNotFoundError with redacted message
+    async def _warden_missing_exec(self_inner: object, **kwargs: object) -> ExecResult:
+        return ExecResult(
+            stdout="",
+            stderr=f'Handshake status 400 Bad Request: {{"message":"Cannot connect to pod default/pod-1, not found."}} key={secret_val}',
+            return_code=1,
+        )
+
+    monkeypatch.setattr(GKEEnvironment, "exec", _warden_missing_exec)
+    with pytest.raises(GKEPodNotFoundError) as pod_exc_info:
+        asyncio.run(env_obj.exec("echo hi"))
+    assert secret_val not in str(pod_exc_info.value)
+    assert "<redacted>" in str(pod_exc_info.value)
+

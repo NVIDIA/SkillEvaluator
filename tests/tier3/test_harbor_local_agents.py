@@ -2,9 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextlib
 import json
+import os
 import shlex
+import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1030,3 +1034,81 @@ def test_claude_mcp_servers_preserves_task_runtime_env_args(tmp_path: Path) -> N
     assert command is not None
     assert "db-server" in command
     assert "${LOCAL_DB_PATH}" in command
+
+
+def test_claude_code_vertex_model_connection_and_auth_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Suppress inferred Anthropic endpoint and forward Vertex AI env vars when CLAUDE_CODE_USE_VERTEX=1."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    agent = SkillEvaluatorClaudeCode(
+        logs_dir=tmp_path,
+        model_name="vertex_ai/claude-sonnet-4-6",
+        extra_env={
+            "CLAUDE_CODE_USE_VERTEX": "1",
+            "CLOUD_ML_REGION": "global",
+            "ANTHROPIC_VERTEX_PROJECT_ID": "my-gcp-project",
+            "GOOGLE_CLOUD_PROJECT": "my-gcp-project",
+            "GOOGLE_APPLICATION_CREDENTIALS": "/run/secrets/vertex-adc.json",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-6",
+            "DISABLE_PROMPT_CACHING": "1",
+        },
+    )
+
+    conn = agent.model_connection
+    assert conn.provider is None
+    assert conn.api_key is None
+    assert conn.configured_base_url is None
+    assert agent._resolved_model_name() == "claude-sonnet-4-6"
+
+    auth_env = agent._resolve_auth_env()
+    assert auth_env == {
+        "CLAUDE_CODE_USE_VERTEX": "1",
+        "CLOUD_ML_REGION": "global",
+        "ANTHROPIC_VERTEX_PROJECT_ID": "my-gcp-project",
+        "GOOGLE_CLOUD_PROJECT": "my-gcp-project",
+        "GOOGLE_APPLICATION_CREDENTIALS": "/run/secrets/vertex-adc.json",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-6",
+        "DISABLE_PROMPT_CACHING": "1",
+    }
+    assert "CLAUDE_CODE_USE_BEDROCK" not in auth_env
+    assert "AWS_REGION" not in auth_env
+    assert "ANTHROPIC_API_KEY" not in auth_env
+    assert "ANTHROPIC_BASE_URL" not in auth_env
+
+
+def test_claude_code_vertex_exec_as_agent_unsets_anthropic_vars(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Prepend defensive unset for Anthropic direct-API vars only when Vertex auth is active."""
+    captured: list[str] = []
+
+    async def fake_parent_exec(self, environment, command, **kwargs):
+        captured.append(command)
+
+    monkeypatch.setattr(
+        "harbor.agents.installed.base.BaseInstalledAgent.exec_as_agent",
+        fake_parent_exec,
+    )
+
+    vertex_agent = SkillEvaluatorClaudeCode(
+        logs_dir=tmp_path,
+        model_name="vertex_ai/claude-sonnet-4-6",
+        extra_env={"CLAUDE_CODE_USE_VERTEX": "1"},
+    )
+    asyncio.run(vertex_agent.exec_as_agent(object(), "claude --version"))
+    assert captured[-1] == (
+        "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN; claude --version"
+    )
+
+    direct_agent = SkillEvaluatorClaudeCode(
+        logs_dir=tmp_path,
+        model_name="anthropic/claude-sonnet-4-6",
+        extra_env={"ANTHROPIC_API_KEY": "sk-ant-test"},
+    )
+    asyncio.run(direct_agent.exec_as_agent(object(), "claude --version"))
+    assert captured[-1] == "claude --version"
+

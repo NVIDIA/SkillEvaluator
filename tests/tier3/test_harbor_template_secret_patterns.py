@@ -168,6 +168,7 @@ def test_security_constants_stay_in_sync_with_eval_core(name):
         "LOG_NVAPI_RE",
         "LOG_CRSR_RE",
         "OPENSHIFT_TOKEN_RE",
+        "LOG_YA29_RE",
         "LOG_JWT_RE",
         "LOG_GITHUB_TOKEN_RE",
         "LOG_GITHUB_PAT_RE",

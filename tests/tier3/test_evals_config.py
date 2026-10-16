@@ -7,9 +7,10 @@ import pytest
 
 from skillevaluator.tier3.dataset_utils import load_dataset_entries_with_format
 from skillevaluator.tier3.evals_config import (
-    _GKE_INFRASTRUCTURE_KWARGS,
     EvalsConfigError,
     load_evals_config,
+    parse_environment_kwarg_overrides,
+    validate_environment_kwargs,
 )
 from skillevaluator.tier3.evals_spec import validate_skillevaluators as validate_skill_evals
 
@@ -319,130 +320,21 @@ harbor:
         load_evals_config(skill)
 
 
-def test_load_evals_config_valid_environment_kwargs(tmp_path):
-    skill = tmp_path / "gke-skill"
-    (skill / "evals").mkdir(parents=True)
-    (skill / "evals" / "config.yml").write_text(
-        """\
-schema_version: 1
-harbor:
-  environment_kwargs:
-    custom_setting: custom_val
-    workload_profile: memory-optimized
-""",
-        encoding="utf-8",
-    )
-
-    config, path = load_evals_config(skill)
-
-    assert path == skill / "evals" / "config.yml"
-    assert config["harbor"]["environment_kwargs"] == {
-        "custom_setting": "custom_val",
-        "workload_profile": "memory-optimized",
-    }
-
-
-def test_load_evals_config_invalid_environment_kwargs(tmp_path):
-    skill = tmp_path / "invalid-skill"
-    (skill / "evals").mkdir(parents=True)
-
-    # Not a mapping
-    (skill / "evals" / "config.yml").write_text(
-        """\
-schema_version: 1
-harbor:
-  environment_kwargs:
-    - custom_setting
-""",
-        encoding="utf-8",
-    )
-    with pytest.raises(EvalsConfigError, match=r"harbor\.environment_kwargs must be a mapping"):
-        load_evals_config(skill)
-
-    # Non-string value
-    (skill / "evals" / "config.yml").write_text(
-        """\
-schema_version: 1
-harbor:
-  environment_kwargs:
-    custom_setting: 12345
-""",
-        encoding="utf-8",
-    )
-    with pytest.raises(
-        EvalsConfigError,
-        match=r"harbor\.environment_kwargs\.custom_setting must be a non-empty string",
-    ):
-        load_evals_config(skill)
-
-
-def test_gke_infrastructure_kwargs_contains_expected_keys():
-    """Verify all 10 GKE infrastructure and security control kwargs are protected."""
-    expected = {
-        "allow_workload_identity",
-        "cluster_name",
-        "region",
-        "namespace",
-        "registry_location",
-        "registry_name",
-        "project_id",
-        "cloud_build_machine_type",
-        "cloud_build_disk_size_gb",
-        "memory_limit_multiplier",
-    }
-    assert expected == _GKE_INFRASTRUCTURE_KWARGS
-
-
-@pytest.mark.parametrize("blocked_key", sorted(_GKE_INFRASTRUCTURE_KWARGS))
-def test_load_evals_config_blocked_infrastructure_kwargs(tmp_path, blocked_key):
-    """Untrusted skills must not configure infrastructure keys in evals/config.yml."""
-    skill = tmp_path / "blocked-skill"
-    (skill / "evals").mkdir(parents=True)
-    (skill / "evals" / "config.yml").write_text(
-        f"""\
-schema_version: 1
-harbor:
-  environment_kwargs:
-    {blocked_key}: forbidden-val
-""",
-        encoding="utf-8",
-    )
-    with pytest.raises(
-        EvalsConfigError,
-        match=rf"harbor\.environment_kwargs\.{blocked_key} cannot be configured in skill evals/config\.yml",
-    ):
-        load_evals_config(skill)
-
-
 @pytest.mark.parametrize(
-    "forbidden_key",
+    ("entry", "secret"),
     [
-        "network_block_all",
-        "langsmith_endpoint",
-        "extra_docker_compose",
-        "arbitrary_backend_knob",
-        "cookie",
-        "oauth",
+        ("custom_setting=sk-ant-api03-1234567890abcdefghijklmnop", "sk-ant-api03-1234567890abcdefghijklmnop"),
+        ("custom_setting=ghp_1234567890abcdefghijklmnopqrstuvwxyz", "ghp_1234567890abcdefghijklmnopqrstuvwxyz"),
+        ("custom_setting=AIzaSyA1234567890abcdefghijklmnopqrstuvw", "AIzaSyA1234567890abcdefghijklmnopqrstuvw"),
+        ("custom_setting=-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----"),
+        ("service_account_key=my-secret-sa-key", "my-secret-sa-key"),
     ],
 )
-def test_load_evals_config_blocked_backend_security_controls(tmp_path, forbidden_key):
-    """Verify skills can only configure keys from the safe allowlist."""
-    skill = tmp_path / "forbidden-skill"
-    (skill / "evals").mkdir(parents=True)
-    (skill / "evals" / "config.yml").write_text(
-        f"""\
-schema_version: 1
-harbor:
-  environment_kwargs:
-    {forbidden_key}: some-value
-""",
-        encoding="utf-8",
-    )
-    with pytest.raises(
-        EvalsConfigError,
-        match=rf"harbor\.environment_kwargs\.{forbidden_key} cannot be configured in skill evals/config\.yml",
-    ):
-        load_evals_config(skill)
+def test_cli_environment_kwargs_reject_secret_value_patterns_without_echoing(entry, secret):
+    with pytest.raises(ValueError, match="Sensitive key or value detected") as caught:
+        parse_environment_kwarg_overrides((entry,))
+
+    assert secret not in str(caught.value)
 
 
 def test_validate_skill_evals_does_not_warn_expected_script_for_guide_only_skill(tmp_path):
@@ -580,3 +472,32 @@ def test_legacy_evals_json_is_accepted_with_deprecation_warning(tmp_path):
 
     assert not any(r.status == "error" for r in results)
     assert any("Deprecated eval dataset format" in r.message for r in results)
+
+
+@pytest.mark.parametrize(
+    "infra_key",
+    [
+        "allow_workload_identity",
+        "autopilot",
+        "cluster_name",
+        "region",
+        "namespace",
+        "registry_location",
+        "registry_name",
+        "project_id",
+        "cloud_build_machine_type",
+        "cloud_build_disk_size_gb",
+        "memory_limit_multiplier",
+    ],
+)
+def test_validate_environment_kwargs_gke_infrastructure_boundary(infra_key: str) -> None:
+    """Reject GKE infrastructure keys when allow_gke_infrastructure_kwargs=False while allowing them on host CLI."""
+    from skillevaluator.tier3.evals_config import validate_environment_kwargs
+
+    with pytest.raises(ValueError, match=r"GKE infrastructure setting .* is not allowed in skill config"):
+        validate_environment_kwargs({infra_key: "test-val"}, allow_gke_infrastructure_kwargs=False)
+
+    assert validate_environment_kwargs({infra_key: "test-val"}, allow_gke_infrastructure_kwargs=True) == {
+        infra_key: "test-val"
+    }
+

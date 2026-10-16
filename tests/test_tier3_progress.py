@@ -653,6 +653,15 @@ def test_redact_progress_detail_preserves_hyphenated_identifiers_while_redacting
     assert progress.redact_progress_detail(raw_text) == expected_text
 
 
+def test_progress_redaction_scales_linearly_for_large_non_uri_text() -> None:
+    progress = _progress_module()
+    payload = "x" * (1024 * 1024)
+
+    rendered = progress.redact_progress_detail(payload)
+
+    assert rendered == payload
+
+
 def test_plain_reporter_redacts_secrets_from_plan_values() -> None:
     progress = _progress_module()
     output = io.StringIO()

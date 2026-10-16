@@ -41,7 +41,7 @@ import urllib.error
 import urllib.request
 from contextvars import ContextVar
 from fnmatch import fnmatchcase
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import quote, unquote_to_bytes, urlparse, urlsplit
@@ -217,7 +217,24 @@ LOG_NVAPI_RE = re.compile(r"(?<![A-Za-z0-9_-])nvapi-[a-zA-Z0-9_-]{8,}|nvapi-" + 
 LOG_CRSR_RE = re.compile(r"(?<![A-Za-z0-9_-])crsr_[a-f0-9]{16,}")
 OPENSHIFT_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])sha256~[A-Za-z0-9._~-]+")
 LOG_YA29_RE = re.compile(r"(?<![A-Za-z0-9_-])ya29\.[A-Za-z0-9_-]{20,}")
-LOG_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b")
+# A JWT used to start at any ``\beyJ``, so in a run of JWT characters such as
+# "eyJ-" * n every "-eyJ" was a start, and each start scanned to the end of the
+# run looking for ".". Now a match starts only at the beginning of a run. The part
+# of the run before its first ``\beyJ`` is captured as ``lead`` and written back
+# unchanged, which keeps JWTs glued to a "-" (x-eyJ...) redacted. Later starts in
+# the same run are never tried: their first segment reaches the same "." with
+# fewer characters, so they could only fail where the first start failed. ``lead``
+# stops at the first ``\beyJ`` and every earlier offset fails ``\beyJ``, so
+# backtracking into it is cheap. No atomic groups or possessive quantifiers: the
+# Harbor verifier copy runs on the task image's python3, which may predate 3.11.
+LOG_JWT_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?P<lead>(?:(?!\beyJ)[A-Za-z0-9_-])*)"
+    r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"
+)
+# GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained (github_pat_) tokens.
+# Single bounded character classes keep both patterns linear.
+LOG_GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,255}\b")
+LOG_GITHUB_PAT_RE = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,255}\b")
 
 
 def redact_secrets_in_log_line(line, *, extra_secret_values=None):
@@ -232,7 +249,9 @@ def redact_secrets_in_log_line(line, *, extra_secret_values=None):
     line = LOG_GITHUB_PAT_RE.sub("github_pat_<redacted>", line)
     line = OPENSHIFT_TOKEN_RE.sub("sha256~<redacted>", line)
     line = LOG_YA29_RE.sub("ya29.<redacted>", line)
-    return LOG_JWT_RE.sub("jwt-<redacted>", line)
+    if "eyJ" not in line:  # every JWT match contains "eyJ"; skip the scan on ordinary lines
+        return line
+    return LOG_JWT_RE.sub(r"\g<lead>jwt-<redacted>", line)
 
 
 _DESTRUCTIVE_PATTERNS = [
@@ -1663,7 +1682,36 @@ def _get_vertex_access_token(timeout_seconds=10.0):
     return None
 
 
-def _chat_completion_payload(model, prompt, max_tokens, temperature, provider=None, request_url=None):
+def _build_openai_response_format(schema, schema_name="judge_response"):
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema_name,
+            "strict": True,
+            "schema": schema,
+        },
+    }
+
+
+def _build_anthropic_output_config(schema):
+    return {
+        "format": {
+            "type": "json_schema",
+            "schema": schema,
+        }
+    }
+
+
+def _chat_completion_payload(
+    model,
+    prompt,
+    max_tokens,
+    temperature,
+    provider=None,
+    request_url=None,
+    response_schema=None,
+    schema_name="judge_response",
+):
     resolved_provider = _public_provider() if provider is None else provider
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
     token_key = (
@@ -2386,7 +2434,7 @@ def _call_openai_compatible(
     target_key = SchemaTargetKey(provider=provider, base_url=request_url, model=model)
     use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
 
-    def _build_request(include_schema):
+    def _build_request(include_schema, *, _key=api_key):
         payload = _chat_completion_payload(
             model,
             prompt,
@@ -2400,16 +2448,40 @@ def _call_openai_compatible(
         return urllib.request.Request(
             request_url,
             data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {_key}"},
         )
 
     # request_url was validated by _resolve_url() before this request.
-    raw_response = _urlopen_with_schema_fallback(
-        _build_request,
-        target_key=target_key,
-        use_schema=use_schema,
-        timeout=90,
-    )
+    try:
+        raw_response = _urlopen_with_schema_fallback(
+            _build_request,
+            target_key=target_key,
+            use_schema=use_schema,
+            timeout=90,
+        )
+    except urllib.error.HTTPError as http_err:
+        if (
+            http_err.code == 401
+            and _is_vertex_openapi_url(request_url)
+            and os.environ.get("SKILL_EVAL_LLM_CREDENTIAL_SOURCE", "").strip() == "ADC"
+        ):
+            logger.info("Vertex AI OpenAPI 401 received; attempting in-process ADC token refresh")
+            refreshed_token = _get_vertex_access_token()
+            if refreshed_token and refreshed_token != api_key:
+                if "OPENAI_API_KEY" in os.environ:
+                    os.environ["OPENAI_API_KEY"] = refreshed_token
+                if "SKILL_EVAL_LLM_API_KEY" in os.environ:
+                    os.environ["SKILL_EVAL_LLM_API_KEY"] = refreshed_token
+                raw_response = _urlopen_with_schema_fallback(
+                    partial(_build_request, _key=refreshed_token),
+                    target_key=target_key,
+                    use_schema=use_schema,
+                    timeout=90,
+                )
+            else:
+                raise
+        else:
+            raise
     body = json.loads(raw_response)
     choices = body.get("choices") or [{}]
     first_choice = choices[0] if choices and isinstance(choices[0], dict) else {}
@@ -2461,71 +2533,34 @@ def _call_public_llm_with_provenance(
         last_provenance = provenance
         try:
             if provider == "anthropic":
-                content, error = _call_anthropic(prompt, candidate_model, max_tokens, temperature)
-                if error:
-                    return None, _redact_configured_credentials(error), provenance
-                return content, None, provenance
-            if provider == "bedrock":
-                content, error = _call_bedrock(prompt, candidate_model, max_tokens, temperature)
-                if error:
-                    return None, _redact_configured_credentials(error), provenance
-                return content, None, provenance
-
-            api_key = (
-                os.environ.get("NVIDIA_API_KEY", "")
-                if provider == "nv_build"
-                else os.environ.get("SKILL_EVAL_LLM_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
-            )
-            if not api_key:
-                return None, f"No API key configured for {provider}", provenance
-            request_url = _resolve_url(provider)
-            request = urllib.request.Request(
-                request_url,
-                data=json.dumps(
-                    _chat_completion_payload(
-                        candidate_model,
-                        prompt,
-                        max_tokens,
-                        temperature,
-                        provider=provider,
-                        request_url=request_url,
-                    )
-                ).encode(),
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            )
-            # request_url was validated by _resolve_url() before this request.
-            try:
-                with urllib.request.urlopen(request, timeout=90) as response:  # nosec B310
-                    body = json.loads(response.read())
-            except urllib.error.HTTPError as http_err:
-                if (
-                    http_err.code == 401
-                    and _is_vertex_openapi_url(request_url)
-                    and os.environ.get("SKILL_EVAL_LLM_CREDENTIAL_SOURCE", "").strip() == "ADC"
-                ):
-                    logger.info("Vertex AI OpenAPI 401 received; attempting in-process ADC token refresh")
-                    refreshed_token = _get_vertex_access_token()
-                    if refreshed_token and refreshed_token != api_key:
-                        api_key = refreshed_token
-                        if "OPENAI_API_KEY" in os.environ:
-                            os.environ["OPENAI_API_KEY"] = refreshed_token
-                        if "SKILL_EVAL_LLM_API_KEY" in os.environ:
-                            os.environ["SKILL_EVAL_LLM_API_KEY"] = refreshed_token
-                        request.add_header("Authorization", f"Bearer {refreshed_token}")
-                        with urllib.request.urlopen(request, timeout=90) as response:  # nosec B310
-                            body = json.loads(response.read())
-                    else:
-                        raise
-                else:
-                    raise
-            content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
-            if content is None:
-                content = ""
-            if candidate_model != requested_model:
-                logger.warning("LLM judge model %s failed; using fallback model %s", requested_model, candidate_model)
-            return content.strip(), None, provenance
-        except urllib.error.HTTPError as error:
-            detail, should_try_fallback = _format_http_error_with_fallback(error)
+                content, error = _call_anthropic(
+                    prompt,
+                    candidate_model,
+                    max_tokens,
+                    temperature,
+                    response_schema=response_schema,
+                    provenance=provenance,
+                )
+            elif provider == "bedrock":
+                content, error = _call_bedrock(prompt, candidate_model, max_tokens, temperature, provenance=provenance)
+            else:
+                content, error = _call_openai_compatible(
+                    prompt,
+                    provider,
+                    candidate_model,
+                    max_tokens,
+                    temperature,
+                    response_schema=response_schema,
+                    schema_name=schema_name,
+                )
+        except _JudgeRefusedError as refusal:
+            # A classifier refusal is fallback-eligible like a missing model.
+            errors.append(f"{candidate_model}: {refusal}")
+            if not allow_model_fallback:
+                return None, str(refusal), provenance
+            continue
+        except urllib.error.HTTPError as http_error:
+            detail, should_try_fallback = _format_http_error_with_fallback(http_error)
             errors.append(f"{candidate_model}: {detail}")
             if not allow_model_fallback or not should_try_fallback:
                 return None, detail, provenance

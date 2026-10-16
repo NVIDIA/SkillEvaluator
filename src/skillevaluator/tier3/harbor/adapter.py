@@ -243,7 +243,6 @@ _VERIFIER_PROVIDER_ENV_VARS = frozenset(
         "SKILL_EVAL_LLM_MODEL",
         "SKILL_EVAL_LLM_API_KEY",
         "SKILL_EVAL_LLM_BASE_URL",
-        "SKILL_EVAL_LLM_CREDENTIAL_SOURCE",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "ANTHROPIC_API_KEY",
@@ -314,6 +313,7 @@ _VERIFIER_PROVIDER_ENV_VARS = frozenset(
         "BOTOCORE_TCP_KEEPALIVE",
         *_VERIFIER_BUDGET_ENV_VARS,
         *_VERIFIER_RETRY_ENV_VARS,
+        "SKILL_EVAL_LLM_CREDENTIAL_SOURCE",
     }
 )
 _RUNTIME_PROCESS_CONTROL_ENV_NAMES = frozenset(
@@ -2089,15 +2089,9 @@ def _load_mcp_servers(
 ) -> list[dict[str, Any]]:
     """Load MCP server declarations from evals/environment/mcp_servers.toml."""
     if allowed_runtime_env is None:
-        try:
-            from skillevaluator.tier3.evals_config import load_evals_config
+        from skillevaluator.tier3.evals_config import load_allowed_runtime_env
 
-            cfg, _ = load_evals_config(skill_path)
-            env_from_cfg = cfg.get("harbor", {}).get("runtime_env", {})
-            if isinstance(env_from_cfg, dict):
-                allowed_runtime_env = env_from_cfg
-        except Exception:
-            pass
+        allowed_runtime_env = load_allowed_runtime_env(skill_path)
 
     evals_dir = skill_path / "evals"
     environment_dir = evals_dir / "environment"

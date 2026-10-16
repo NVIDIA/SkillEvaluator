@@ -7,7 +7,12 @@ from __future__ import annotations
 
 import pytest
 
-from skillevaluator.provider_config import ProviderConfig
+from skillevaluator.provider_config import (
+    CHAT_DEFAULT_OPENAI,
+    OPENCODE_OPENAI_DEFAULT_MODEL,
+    ProviderConfig,
+    resolve_llm_provider,
+)
 from skillevaluator.tier3.harbor.runner import (
     _OPERATOR_OWNED_AGENT_ENV,
     _agent_provider_config,

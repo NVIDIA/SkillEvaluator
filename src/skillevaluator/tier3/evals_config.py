@@ -52,7 +52,6 @@ _HARBOR_KEYS = {
     "passthrough_env",
     "setup_commands",
     "agents",
-    "environment_kwargs",
 }
 HARBOR_TASK_SOURCES = {"auto", "evals_json", "native_harbor"}
 # Harbor 0.22 multiplies its 600-second default verifier/build timeout by
@@ -79,12 +78,42 @@ _GKE_INFRASTRUCTURE_KWARGS: frozenset[str] = frozenset(
         "memory_limit_multiplier",
     }
 )
-_SKILL_SAFE_ENVIRONMENT_KWARGS: frozenset[str] = frozenset(
-    {
-        "workload_profile",
-        "custom_setting",
-    }
+_URI_AUTHORITY_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]{0,31}://(?P<authority>[^\s/?#]*)")
+_SCHEMELESS_CREDENTIAL_AUTHORITY_RE = re.compile(r"[^\s/:@]+:[^\s/@]+@[^\s/?#]+")
+_SECRET_VALUE_PATTERNS = (
+    re.compile(r"\bsk-[a-zA-Z0-9_-]{12,}\b"),
+    re.compile(r"\bnvapi-[a-zA-Z0-9_-]{12,}\b"),
+    re.compile(r"(?<![A-Za-z0-9._-])ya29\.[A-Za-z0-9._-]{16,}"),
+    re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+    re.compile(r"\bcrsr_[a-fA-F0-9]{12,}\b"),
+    re.compile(r"\bsha256~[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"(?<![A-Za-z0-9_-])(?:AKIA|ASIA)[0-9A-Z]{12,}"),
+    re.compile(r"-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----"),
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]{15,}"),
+    re.compile(r"(?i)\b(?:gh[pours]_[A-Za-z0-9._-]{36,}|github_pat_[A-Za-z0-9_]{20,})\b"),
+    re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b"),
 )
+_NON_CREDENTIAL_TOKEN_KEY_RE = re.compile(
+    r"^(?:max|min|num|total|count|prompt|completion|input|output|request)?[_-]?tokens$|"
+    r"^(?:max|min|num|total|count|prompt|completion|input|output)[_-]token$|"
+    r"(?:^|.*[_-])tokens?[_-](?:bucket|rate|count|limit|budget|window|usage|size|per[_-]\w+)$|"
+    r"(?:^|.*[_-])(?:tokenizer|tokenizers|detokenize|detokenizer|tokenization|detokenization)(?:[_-].*)?$",
+    re.IGNORECASE,
+)
+_REFERENCE_KWARG_NAMES_BY_ENV_MODE = {
+    "ack": frozenset({"image_pull_secret"}),
+    "cwsandbox": frozenset({"secrets"}),
+    "daytona": frozenset({"secrets"}),
+    "modal": frozenset({"registry_secret", "secrets"}),
+    "skypilot": frozenset({"secrets"}),
+    "wandb": frozenset({"secrets"}),
+}
+_CWSANDBOX_SECRET_REFERENCE_KEYS = frozenset({"env_var", "field", "name", "store"})
+_KUBERNETES_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
+_MAX_ENVIRONMENT_KWARGS_JSON_BYTES = 64 * 1024
+_MAX_ENVIRONMENT_KWARGS_DEPTH = 32
+_MAX_ENVIRONMENT_KWARGS_NODES = 4096
+_MAX_ENVIRONMENT_REFERENCE_BYTES = 512
 
 
 class EvalsConfigError(ValueError):
@@ -220,8 +249,6 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
             harbor["pre_agent_setup"] = _pre_agent_setup(pre_agent_setup_value, config_path)
         if "agents" in harbor_raw:
             harbor["agents"] = _agents(harbor_raw["agents"], config_path)
-        if "environment_kwargs" in harbor_raw:
-            harbor["environment_kwargs"] = _environment_kwargs(harbor_raw["environment_kwargs"], config_path)
 
         out["harbor"] = harbor
 
@@ -356,14 +383,22 @@ def _is_sensitive_environment_kwarg_name(name: str) -> bool:
     normalized = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
     normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", normalized)
     tokens = tuple(part for part in re.sub(r"[^A-Za-z0-9]+", "_", normalized).lower().split("_") if part)
+    if _NON_CREDENTIAL_TOKEN_KEY_RE.search("_".join(tokens)):
+        return False
     if any(
         token
         in {
             "auth",
             "authorization",
             "authentication",
+            "bearer",
+            "cert",
+            "certificate",
+            "cookie",
             "credential",
             "credentials",
+            "oauth",
+            "passphrase",
             "passwd",
             "password",
             "secret",
@@ -374,7 +409,8 @@ def _is_sensitive_environment_kwarg_name(name: str) -> bool:
     ):
         return True
     if any(
-        pair in {("api", "key"), ("access", "key"), ("private", "key"), ("secret", "key")} for pair in pairwise(tokens)
+        pair in {("api", "key"), ("access", "key"), ("private", "key"), ("secret", "key"), ("account", "key")}
+        for pair in pairwise(tokens)
     ):
         return True
     compact = "".join(tokens)
@@ -384,11 +420,18 @@ def _is_sensitive_environment_kwarg_name(name: str) -> bool:
             "accesskey",
             "privatekey",
             "secretkey",
+            "serviceaccountkey",
             "auth",
             "authorization",
             "authentication",
+            "bearer",
+            "cert",
+            "certificate",
+            "cookie",
             "credential",
             "credentials",
+            "oauth",
+            "passphrase",
             "passwd",
             "password",
             "secret",
@@ -449,8 +492,13 @@ def _environment_kwarg_shape_error(value: Any) -> str | None:
         if isinstance(current, str):
             if _contains_credential_bearing_uri(current):
                 return (
-                    f"{_safe_environment_kwarg_path(path)} contains a credential-bearing URI; "
-                    "pass credentials through the host environment instead"
+                    f"Sensitive key or value detected in {_safe_environment_kwarg_path(path)}: "
+                    "contains a credential-bearing URI; pass credentials through the host environment instead"
+                )
+            if any(pattern.search(current) for pattern in _SECRET_VALUE_PATTERNS):
+                return (
+                    f"Sensitive key or value detected in {_safe_environment_kwarg_path(path)}: "
+                    "contains a credential value; pass credentials through the host environment instead"
                 )
             continue
         if current is None or isinstance(current, bool | int):
@@ -519,7 +567,7 @@ def _reference_kwarg_error(env_mode: str | None, name: str, value: Any) -> str |
                 elif error := _secret_reference_name_error(field_value, label=f"secrets {field_name} field"):
                     return error
         return None
-    return f"{name} is secret-bearing; pass credentials through the host environment instead"
+    return f"Sensitive key or value detected in {name}: is secret-bearing; pass credentials through the host environment instead"
 
 
 def _environment_kwarg_secret_policy_error(value: dict[str, Any], *, env_mode: str | None) -> str | None:
@@ -537,8 +585,8 @@ def _environment_kwarg_secret_policy_error(value: dict[str, Any], *, env_mode: s
                     continue
                 if _is_sensitive_environment_kwarg_name(raw_key):
                     return (
-                        f"{_safe_environment_kwarg_path(item_path)} is secret-bearing; "
-                        "pass credentials through the host environment instead"
+                        f"Sensitive key or value detected in {_safe_environment_kwarg_path(item_path)}: "
+                        "is secret-bearing; pass credentials through the host environment instead"
                     )
                 if isinstance(item, dict | list):
                     stack.append((item, item_path))
@@ -549,13 +597,23 @@ def _environment_kwarg_secret_policy_error(value: dict[str, Any], *, env_mode: s
     return None
 
 
-def validate_environment_kwargs(value: Any, *, env_mode: str | None = None) -> dict[str, Any]:
+def validate_environment_kwargs(
+    value: Any,
+    *,
+    env_mode: str | None = None,
+    allow_gke_infrastructure_kwargs: bool = True,
+) -> dict[str, Any]:
     """Validate non-secret Harbor constructor kwargs for safe argv forwarding."""
     if not isinstance(value, dict):
         raise ValueError("must be a mapping")
     for raw_name in value:
         if not isinstance(raw_name, str) or not _ENV_NAME_RE.fullmatch(raw_name):
             raise ValueError("keys must be valid Python keyword names")
+        if not allow_gke_infrastructure_kwargs and raw_name in _GKE_INFRASTRUCTURE_KWARGS:
+            raise ValueError(
+                f"GKE infrastructure setting '{raw_name}' is not allowed in skill config; "
+                "pass via --environment-kwarg or host environment"
+            )
     if error := _environment_kwarg_shape_error(value):
         raise ValueError(error)
     if error := _environment_kwarg_secret_policy_error(value, env_mode=env_mode):
@@ -702,23 +760,14 @@ def _grading(value: Any, config_path: Path) -> dict[str, str]:
     return out
 
 
-def _environment_kwargs(value: Any, config_path: Path) -> dict[str, str]:
-    """Validate Harbor environment kwargs mapping."""
-    field = "harbor.environment_kwargs"
-    if not isinstance(value, dict):
-        raise EvalsConfigError(f"{config_path}: {field} must be a mapping")
+def load_allowed_runtime_env(skill_path: Path) -> dict[str, str]:
+    """Load declared harbor.runtime_env mapping from a skill's evals config if present."""
+    try:
+        cfg, _ = load_evals_config(skill_path)
+        env_from_cfg = cfg.get("harbor", {}).get("runtime_env", {})
+        if isinstance(env_from_cfg, dict):
+            return dict(env_from_cfg)
+    except Exception:
+        pass
+    return {}
 
-    out: dict[str, str] = {}
-    for key, val in value.items():
-        if not isinstance(key, str) or not key.strip():
-            raise EvalsConfigError(f"{config_path}: {field} keys must be non-empty strings")
-        stripped_key = key.strip()
-        if stripped_key not in _SKILL_SAFE_ENVIRONMENT_KWARGS:
-            raise EvalsConfigError(
-                f"{config_path}: {field}.{stripped_key} cannot be configured in skill evals/config.yml. "
-                "Infrastructure, network, mount, endpoint, and credential settings must be provided via CLI flags (--ek) or host environment variables."
-            )
-        if not isinstance(val, str) or not val.strip():
-            raise EvalsConfigError(f"{config_path}: {field}.{stripped_key} must be a non-empty string")
-        out[stripped_key] = val.strip()
-    return out

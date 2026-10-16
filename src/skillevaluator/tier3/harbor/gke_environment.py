@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import os
 import re
 import shlex
@@ -16,7 +17,13 @@ import urllib.parse
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from harbor.environments.gke import GKEEnvironment, stream
+from harbor.environments.gke import (
+    GKEEnvironment,
+    GKEExecStreamClosedError,
+    GKEPodNotFoundError,
+    _is_pod_not_found_error,
+    stream,
+)
 from kubernetes import client as k8s_client
 
 from skillevaluator.provider_config import (
@@ -73,6 +80,7 @@ _DNS_PORT = 53
 _DNS_PROTOCOLS = frozenset({"UDP", "TCP"})
 _EXEC_QUERY_COMMAND_RE = re.compile(r"(?P<sep>[?&])command=[^\s\"']+")
 _GKE_CLOUD_DNS_METADATA_CIDR = "169.254.169.254/32"
+_GKE_AUTOPILOT_LABEL_PREFIX = "autopilot.gke.io"
 _GKE_DIRECT_WIF_PRINCIPAL_ANNOTATION = "iam.gke.io/return-principal-id-as-email"
 _GKE_METADATA_PROBE_URLS = (
     "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token",
@@ -84,6 +92,8 @@ _KUBE_DNS_POD_LABEL_KEY = "k8s-app"
 _KUBE_DNS_POD_LABEL_VALUE = "kube-dns"
 _KUBE_SYSTEM_NAMESPACE_LABEL_KEY = "kubernetes.io/metadata.name"
 _KUBE_SYSTEM_NAMESPACE_LABEL_VALUE = "kube-system"
+# The name segment of a qualified Kubernetes label key.
+_LABEL_KEY_NAME_RE = re.compile(r"[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?")
 _MAX_TRANSIENT_EXEC_ATTEMPTS = 4
 _METADATA_PROBE_HTTP_TIMEOUT_SEC = 2
 _METADATA_PROBE_ISOLATED_SENTINEL = "SKILLEVALUATOR_METADATA_ISOLATED_OK"
@@ -258,6 +268,8 @@ def _extract_pod_missing_exec_detail(exc: BaseException) -> str | None:
     cur: BaseException | None = exc
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
+        if isinstance(cur, GKEPodNotFoundError) or _is_pod_not_found_error(cur):
+            return str(cur)
         if isinstance(cur, Exception) and _is_k8s_http_status(cur, 404, "not found"):
             return str(cur)
         text = str(cur)
@@ -272,6 +284,33 @@ def _extract_pod_missing_exec_detail(exc: BaseException) -> str | None:
     return None
 
 
+class _ExecDispatchRecord:
+    """Count exec stream handshakes for one exec() attempt.
+
+    The Kubernetes exec API starts the command only after the WebSocket
+    handshake succeeds, so an attempt whose handshakes all failed never ran
+    the command and is safe to retry.
+    """
+
+    __slots__ = ("attempted", "established")
+
+    def __init__(self) -> None:
+        self.attempted = 0
+        self.established = 0
+
+    @property
+    def failed_before_dispatch(self) -> bool:
+        return self.attempted > 0 and self.established == 0
+
+
+# A mutable record per exec() attempt; asyncio.to_thread copies the context, so
+# the wrapped API call updates the same record object the caller holds.
+_EXEC_DISPATCH_RECORD: contextvars.ContextVar[_ExecDispatchRecord | None] = contextvars.ContextVar(
+    "skillevaluator_gke_exec_dispatch_record",
+    default=None,
+)
+
+
 def _ensure_default_exec_container_routing(api: Any, *, default_container: str = "main") -> None:
     """Ensure untargeted connect_get_namespaced_pod_exec calls default to the main task container."""
     orig = getattr(api, "connect_get_namespaced_pod_exec", None)
@@ -281,17 +320,23 @@ def _ensure_default_exec_container_routing(api: Any, *, default_container: str =
     def _wrapped_exec(*args: Any, **kwargs: Any) -> Any:
         if kwargs.get("container") is None:
             kwargs["container"] = default_container
+        record = _EXEC_DISPATCH_RECORD.get()
+        if record is not None:
+            record.attempted += 1
         try:
-            return orig(*args, **kwargs)
+            response = orig(*args, **kwargs)
         except Exception as exc:
             missing_detail = _extract_pod_missing_exec_detail(exc)
             if missing_detail is not None:
                 pod_name = str(args[0] if len(args) > 0 else kwargs.get("name", "unknown"))
                 namespace = str(args[1] if len(args) > 1 else kwargs.get("namespace", "default"))
-                raise RuntimeError(
+                raise GKEPodNotFoundError(
                     f"Pod {pod_name} in namespace {namespace} no longer exists (deleted or preempted): {missing_detail}"
                 ) from exc
             raise
+        if record is not None:
+            record.established += 1
+        return response
 
     _wrapped_exec._skillevaluator_default_container_wrapped = True  # type: ignore[attr-defined]
     _wrapped_exec.__self__ = getattr(orig, "__self__", api)  # type: ignore[attr-defined]
@@ -391,9 +436,9 @@ def _redact_exec_stderr(stderr: str | None, env_values: Mapping[str, str] | None
         if secret in redacted:
             redacted = redacted.replace(secret, "<redacted>")
     redacted = _redact_truncated_secret_suffix(redacted, secret_variants)
+    redacted = _GOOGLE_CREDENTIAL_RE.sub("<redacted>", redacted)
     redacted = redact_secrets_in_log_line(redacted, extra_secret_values=secret_variants)
-    redacted = redact_sensitive_text(redacted)
-    return _GOOGLE_CREDENTIAL_RE.sub("<redacted>", redacted)
+    return redact_sensitive_text(redacted)
 
 
 def _call_k8s_with_timeout(
@@ -679,6 +724,16 @@ def ensure_gke_metadata_network_policy(
     _validate_existing_metadata_network_policy(reread, namespace=namespace)
 
 
+def _qualified_label_key_prefix(key: object) -> str | None:
+    """Return the prefix of a well-formed ``prefix/name`` Kubernetes label key, or None."""
+    if not isinstance(key, str):
+        return None
+    prefix, separator, name = key.partition("/")
+    if not separator or not prefix or not _LABEL_KEY_NAME_RE.fullmatch(name):
+        return None
+    return prefix
+
+
 def _is_autopilot_node(node: Any) -> bool:
     """Return True if a Kubernetes V1Node exhibits GKE Autopilot naming or label conventions."""
     metadata = getattr(node, "metadata", None)
@@ -687,7 +742,7 @@ def _is_autopilot_node(node: Any) -> bool:
         return True
     labels = getattr(metadata, "labels", None)
     if isinstance(labels, Mapping):
-        if any(str(k).startswith("autopilot.gke.io/") for k in labels):
+        if any(_qualified_label_key_prefix(key) == _GKE_AUTOPILOT_LABEL_PREFIX for key in labels):
             return True
         if parse_optional_bool_flag(labels.get("cloud.google.com/gke-autopilot")) is True:
             return True
@@ -696,6 +751,23 @@ def _is_autopilot_node(node: Any) -> bool:
 
 class SkillEvaluatorGKEEnvironment(GKEEnvironment):
     """Enforce least-privilege pod identity, exec readiness, and ADC refresh for GKE evaluation pods."""
+
+    @classmethod
+    def preflight(cls) -> None:
+        """Verify gcloud and Kubernetes credentials, supporting split KUBECONFIG paths."""
+        if not shutil.which("gcloud"):
+            raise SystemExit(
+                "GKE requires the gcloud CLI to be installed. See https://cloud.google.com/sdk/docs/install"
+            )
+        from skillevaluator.tier3.harbor.kubeconfig import _resolve_single_kubeconfig
+
+        if _resolve_single_kubeconfig() is None:
+            raise SystemExit(
+                "GKE requires Kubernetes credentials. Run "
+                "'gcloud container clusters get-credentials <CLUSTER> "
+                "--region <REGION>' to configure credentials, or set the "
+                "KUBECONFIG environment variable."
+            )
 
     def __init__(
         self,
@@ -711,6 +783,18 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
         self._autopilot = parse_optional_bool_flag(autopilot)
         self._detected_autopilot: bool | None = None
         super().__init__(*args, **kwargs)
+
+    def _get_core_api(self) -> Any:
+        """Return the initialized Kubernetes CoreV1Api client without raising on uninitialized property access."""
+        instance_dict = getattr(self, "__dict__", {})
+        if "_api" in instance_dict and instance_dict["_api"] is not None:
+            return instance_dict["_api"]
+        core_api = getattr(self, "_core_api", None)
+        if core_api is not None:
+            return core_api
+        with contextlib.suppress(Exception):
+            return getattr(self, "_api", None)
+        return None
 
     def _is_workload_identity_enabled(self) -> bool:
         """Return True when the operator explicitly opted into GKE Workload Identity."""
@@ -819,7 +903,7 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
             persistent = getattr(self, "_persistent_env", None)
             if isinstance(persistent, dict):
                 persistent.setdefault("GCE_METADATA_HOST", _BLOCKED_GCE_METADATA_HOST)
-            api = getattr(self, "_api", None)
+            api = self._get_core_api()
             namespace = getattr(self, "namespace", "default")
             if api is None:
                 raise RuntimeError(
@@ -872,7 +956,7 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
 
     async def _delete_unisolated_pod_best_effort(self) -> None:
         """Delete the evaluation pod on metadata isolation verification failure."""
-        api = getattr(self, "_api", None)
+        api = self._get_core_api()
         delete_pod = getattr(api, "delete_namespaced_pod", None)
         if callable(delete_pod):
             with contextlib.suppress(Exception):
@@ -1050,8 +1134,8 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
                 namespace=namespace,
             )
         except Exception as exc:
-            if _is_k8s_http_status(exc, 404, "not found"):
-                raise RuntimeError(
+            if _is_pod_not_found_error(exc) or _is_k8s_http_status(exc, 404, "not found"):
+                raise GKEPodNotFoundError(
                     f"Pod {self.pod_name} in namespace {namespace} no longer exists (deleted or preempted) "
                     "and cannot accept exec."
                 ) from exc
@@ -1077,7 +1161,7 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
     async def _wait_for_container_exec_ready(self, max_attempts: int = 60) -> None:
         """Wait until the GKE kubelet accepts exec streams and verify metadata server isolation."""
         if not getattr(self, "_compose_mode", False):
-            api = getattr(self, "_api", None)
+            api = self._get_core_api()
             if api is not None:
                 _ensure_default_exec_container_routing(api, default_container="main")
 
@@ -1101,6 +1185,15 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
         if not self._is_workload_identity_enabled():
             await self._verify_in_pod_metadata_isolation()
 
+    def _merge_env(self, env: dict[str, str] | None) -> dict[str, str] | None:
+        """Merge environment variables while ensuring _exec_env_overlays exists for object.__new__ instances."""
+        if not hasattr(self, "_exec_env_overlays"):
+            self._exec_env_overlays = contextvars.ContextVar(
+                f"exec_env_overlays_{id(self)}",
+                default=(),
+            )
+        return super()._merge_env(env)
+
     async def exec(
         self,
         command: str,
@@ -1108,8 +1201,9 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
         env: dict[str, str] | None = None,
         timeout_sec: int | None = None,
         user: str | int | None = None,
+        service: str | None = None,
     ) -> ExecResult:
-        """Refresh ADC-sourced Vertex OpenAPI credentials and retry transient kubelet exec errors."""
+        """Refresh ADC-sourced Vertex OpenAPI credentials and retry kubelet errors raised before dispatch."""
         merged = dict(self._merge_env(env) or {})
         fresh_token = await asyncio.to_thread(
             refresh_host_vertex_adc_environment,
@@ -1138,14 +1232,38 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
 
         result: ExecResult | None = None
         for attempt in range(_MAX_TRANSIENT_EXEC_ATTEMPTS):
-            result = await super().exec(
-                command=command,
-                cwd=cwd,
-                env=env,
-                timeout_sec=timeout_sec,
-                user=user,
-            )
-            if result.return_code == 0 or not _is_transient_kubelet_exec_error(result.stderr):
+            dispatch = _ExecDispatchRecord()
+            dispatch_token = _EXEC_DISPATCH_RECORD.set(dispatch)
+            try:
+                result = await super().exec(
+                    command=command,
+                    cwd=cwd,
+                    env=env,
+                    timeout_sec=timeout_sec,
+                    user=user,
+                    **({"service": service} if service is not None else {}),
+                )
+            except GKEExecStreamClosedError as exc:
+                # The stream was open, so the command may have run before its
+                # status was lost. Replaying it could repeat its side effects.
+                redacted_msg = _redact_exec_stderr(str(exc), merged) or str(exc)
+                raise GKEExecStreamClosedError(redacted_msg) from None
+            finally:
+                _EXEC_DISPATCH_RECORD.reset(dispatch_token)
+            if (
+                result.return_code != 0
+                and result.stderr
+                and _extract_pod_missing_exec_detail(RuntimeError(result.stderr)) is not None
+            ):
+                redacted_msg = _redact_exec_stderr(result.stderr, merged) or result.stderr
+                raise GKEPodNotFoundError(redacted_msg)
+            # Retry only a kubelet error from an attempt whose exec handshake
+            # never completed; a dispatched command's own stderr can match too.
+            if (
+                result.return_code == 0
+                or not dispatch.failed_before_dispatch
+                or not _is_transient_kubelet_exec_error(result.stderr)
+            ):
                 break
             if attempt < _MAX_TRANSIENT_EXEC_ATTEMPTS - 1:
                 await asyncio.sleep(1.5 * (attempt + 1))

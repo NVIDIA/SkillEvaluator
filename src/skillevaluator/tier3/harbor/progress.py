@@ -35,7 +35,7 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     rf"(?<![A-Za-z0-9]){_SECRET_KEY_WORDS}\b\s*=)\s*)"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
-_SECRET_ENV_NAME_RE = re.compile(r"(?i)(?:api[_-]?key|access[_-]?key|auth|credential|password|secret|token)")
+_SECRET_ENV_NAME_RE = re.compile(r"(?i)(?:api[_-]?key|access[_-]?key|auth|credential|password|secret|token(?!s))")
 # Whole environment values shorter than this are never treated as exact secrets;
 # shorter credential fragments come only from URI userinfo.
 MIN_EXACT_SECRET_CHARS = 4

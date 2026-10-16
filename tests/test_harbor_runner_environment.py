@@ -1753,6 +1753,9 @@ def test_harbor_backend_environment_allowlist_covers_every_native_022_mode() -> 
             "GOOGLE_CLOUD_PROJECT",
             "GOOGLE_CLOUD_QUOTA_PROJECT",
             "KUBECONFIG",
+            "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY",
+            "SKILLEVALUATOR_GKE_AUTOPILOT",
+            "SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE",
         },
         "ack": {
             "COMPOSE_ANSI",
@@ -2354,10 +2357,10 @@ def test_run_harbor_reissues_adc_token_for_bounded_jobs(monkeypatch: pytest.Monk
         nonlocal captured_timeout
         captured_command.extend(command)
         captured_env.update(kwargs.get("env") or {})
-        captured_timeout = kwargs.get("timeout")
-        return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
+        captured_timeout = kwargs.get("timeout_seconds")
+        return runner._BoundedHarborProcessResult(returncode=0, output_tail="", output_exceeded=False)
 
-    monkeypatch.setattr(runner.subprocess, "run", mock_run)
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", mock_run)
     monkeypatch.setattr(runner, "_validate_harbor_job_result", lambda *_args, **_kwargs: (True, "success"))
     monkeypatch.setattr(runner, "_get_google_access_token", lambda **_kw: "fresh-reissued-token")
 
@@ -2407,10 +2410,10 @@ def test_run_harbor_preserves_explicit_vertex_credential(
     def mock_run(command, *args, **kwargs):
         nonlocal captured_timeout
         captured_env.update(kwargs.get("env") or {})
-        captured_timeout = kwargs.get("timeout")
-        return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
+        captured_timeout = kwargs.get("timeout_seconds")
+        return runner._BoundedHarborProcessResult(returncode=0, output_tail="", output_exceeded=False)
 
-    monkeypatch.setattr(runner.subprocess, "run", mock_run)
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", mock_run)
     monkeypatch.setattr(runner, "_validate_harbor_job_result", lambda *_args, **_kwargs: (True, "success"))
     monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kw: "ambient-host-adc")
 
@@ -2485,9 +2488,9 @@ def test_run_harbor_enforces_adc_job_timeout_and_stages_credential_source(
     assert "SKILL_EVAL_LLM_CREDENTIAL_SOURCE" in _verifier_env_vars(provider_env)
 
     def timeout_run(command, *args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout", 3300))
+        raise runner._HarborRunTimeoutError(f"timed out after {kwargs.get('timeout_seconds', 3300)}s")
 
-    monkeypatch.setattr(runner.subprocess, "run", timeout_run)
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", timeout_run)
     adc_env = {
         "OPENAI_API_KEY": "initial-adc-token",
         "OPENAI_BASE_URL": base_url,
@@ -2529,10 +2532,10 @@ def test_run_harbor_caps_configured_adc_timeout_and_rejects_near_expiry(
     captured_timeouts: list[float | None] = []
 
     def fake_run(command, *args, **kwargs):
-        captured_timeouts.append(kwargs.get("timeout"))
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        captured_timeouts.append(kwargs.get("timeout_seconds"))
+        return runner._BoundedHarborProcessResult(returncode=0, output_tail="", output_exceeded=False)
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", fake_run)
     monkeypatch.setattr(runner, "_validate_harbor_job_result", lambda *_args, **_kwargs: (True, "success"))
 
     # 1. 600s token + SKILLEVALUATOR_VERTEX_ADC_JOB_TIMEOUT_SEC=5000 -> capped at 540s
@@ -2680,7 +2683,7 @@ def test_harbor_subprocess_environment_forwards_gke_probe_and_autopilot_vars(
     tmp_path: Path,
 ) -> None:
     """Forward SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE and SKILLEVALUATOR_GKE_AUTOPILOT in gke mode and allow --ek autopilot."""
-    from skillevaluator.tier3.evals_config import _GKE_INFRASTRUCTURE_KWARGS
+    from skillevaluator.tier3.evals_config import _GKE_INFRASTRUCTURE_KWARGS, encode_environment_kwarg
 
     monkeypatch.setenv("SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE", "us-docker.pkg.dev/my-proj/repo/python:3.12-alpine")
     monkeypatch.setenv("SKILLEVALUATOR_GKE_AUTOPILOT", "true")
@@ -2718,4 +2721,4 @@ def test_harbor_subprocess_environment_forwards_gke_probe_and_autopilot_vars(
         env_mode="gke",
         environment_kwargs={"autopilot": "true", "cluster_name": "c"},
     )
-    assert "autopilot=true" in cmd
+    assert encode_environment_kwarg("autopilot", "true") in cmd

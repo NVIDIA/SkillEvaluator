@@ -607,6 +607,7 @@ def test_secure_docker_exec_refreshes_adc_token_per_trial_and_verifier_exec(
     from skillevaluator.tier3.harbor import secure_docker_environment
 
     environment = object.__new__(secure_docker_environment.SkillEvaluatorSecureDockerEnvironment)
+    _initialize_harbor_context(environment)
     environment._persistent_env = {}
     environment.default_user = "1000"
     environment.task_env_config = SimpleNamespace(workdir="/workspace")
@@ -619,14 +620,13 @@ def test_secure_docker_exec_refreshes_adc_token_per_trial_and_verifier_exec(
         command: list[str],
         check: bool = True,
         timeout_sec: int | None = None,
-        *,
-        stdin_bytes: bytes | None = None,
-        redact_values: set[str] | None = None,
-        stop_main_on_interrupt: bool = False,
+        stdin_data: bytes | None = None,
+        on_output: object | None = None,
+        **_kwargs,
     ):
-        del check, timeout_sec, redact_values, stop_main_on_interrupt
-        if stdin_bytes is not None:
-            handoff_payloads.append(stdin_bytes.decode("utf-8"))
+        del check, timeout_sec, on_output
+        if stdin_data is not None:
+            handoff_payloads.append(stdin_data.decode("utf-8"))
         docker_commands.append(command)
         return SimpleNamespace(stdout="ok", stderr=None, return_code=0)
 
@@ -789,12 +789,12 @@ def test_short_expiry_adc_docker_handoff_and_failed_refresh_fails_closed(
     captured_timeout: float | None = None
 
     def fake_harbor_run(command, *args, **kwargs):
-        del args
+        del command, args
         nonlocal captured_timeout
-        captured_timeout = kwargs.get("timeout")
-        return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
+        captured_timeout = kwargs.get("timeout_seconds")
+        return runner._BoundedHarborProcessResult(returncode=0, output_tail="", output_exceeded=False)
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_harbor_run)
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", fake_harbor_run)
     monkeypatch.setattr(runner, "_validate_harbor_job_result", lambda *_a, **_kw: (True, "ok"))
 
     ok, _detail = runner._run_harbor(

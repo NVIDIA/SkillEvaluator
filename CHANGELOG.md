@@ -7,8 +7,14 @@ All notable changes to SkillEvaluator are documented in this file.
 ### Added
 
 - Optional `skillevaluator dashboard` tables for comparing saved Tier 3 reports
-  and retained runs across skills, models, harnesses, and skill conditions,
-  with paired token, agent runtime, and recorded USD cost differences.
+  and retained runs across skills, models, harnesses, recorded harness
+  features, and skill conditions. Paired with/without differences cover score,
+  pass@k, tokens, and agent execution time, plus USD cost when retained runs
+  record it, with per-trial means alongside totals. Comparisons require
+  matching complete trial coverage (repeated attempts pair by case, as in the
+  HTML report) and name the reason when a pair is not comparable. Inputs are
+  read once and reused between interactions (**Reload reports** re-reads them);
+  browser uploads are limited to 16 MB. Install it with the `dashboard` extra.
 - The HTML report's Tier 1 card now shows the SkillSpector version that ran
   the security scan (for example `SkillSpector v2.12.0`), and the embedded
   report JSON records it as `skillspector_versions`. Findings depend on the
@@ -116,10 +122,6 @@ All notable changes to SkillEvaluator are documented in this file.
   runtimes (passing applicable criteria divided by applicable criteria), so an
   inconsistent model-supplied total cannot distort Skill Lift. Correct the
   Harbor prompt example to score five passing criteria as 1.0.
-- Omit unmeasured Tier 3 token usage from canonical JSON exports instead of
-  reporting it as zero.
-- Keep dashboard comparisons unavailable for contradictory trial identities or
-  invalid coverage counts, and enforce the documented 16 MB browser upload limit.
 - Include schema-valid ATIF message content parts in final answers, conversation
   summaries, and judge evidence references in the host and Harbor verifier.
   Image and audio parts use markers without exposing their source paths.

@@ -1087,3 +1087,43 @@ def test_native_duplicate_reward_rows_require_authoritative_step_scope(tmp_path:
     assert data.rows[0]["total_tokens"] is None
     assert data.rows[0]["duration_seconds"] is None
     assert any("resource ownership is ambiguous" in warning for warning in data.warnings)
+
+
+def test_retained_feature_metadata_precedence_summary_over_agent_over_root(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _native_run(run)
+    (run / "run_config.json").write_text(
+        json.dumps(
+            {
+                "dashboard_metadata": {"harness_features": ["root"]},
+                "agents": {
+                    "opencode": {
+                        "agent": "opencode",
+                        "model": "m",
+                        "dashboard_metadata": {"harness_features": ["agent"]},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    summary_path = run / "opencode" / "without-skill" / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["dashboard_metadata"] = {"harness_features": ["summary"]}
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    rows = {row["condition"]: row for row in load_dashboard_path(run).rows}
+
+    assert rows["with_skill"]["features"] == "agent"
+    assert rows["without_skill"]["features"] == "summary"
+    assert all(item["comparison_status"] == "missing condition" for item in comparison_rows(list(rows.values())))
+
+
+def test_empty_feature_list_and_string_and_mapping_forms() -> None:
+    labels = []
+    for value in ([], "rules on", {"memory": False, "rules": True}):
+        report = _report()
+        report["dashboard_metadata"] = {"harness_features": value}
+        labels.append(parse_dashboard_report(report, "r.json").rows[0]["features"])
+
+    assert labels == ["none (recorded)", "rules on", '{"memory": false, "rules": true}']

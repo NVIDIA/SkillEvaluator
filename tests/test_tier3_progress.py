@@ -1165,24 +1165,6 @@ def test_staged_environment_rejection_persists_a_coded_result(
     assert persisted["error_code"] == "SKILLEVALUATOR-UNKNOWN-001"
 
 
-def test_publication_source_change_during_snapshot_is_coded(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    runner, skill = _stub_runner(monkeypatch, tmp_path)
-    targets = iter(({"skill_name": "before"}, {"skill_name": "after"}))
-    monkeypatch.setattr(runner, "publication_target_from_path", lambda _path: next(targets))
-
-    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
-
-    assert result == {
-        "execution_status": "failed",
-        "error_code": "SKILLEVALUATOR-UNKNOWN-001",
-        "execution_errors": ["Publication source changed while its private evaluator snapshot was created"],
-        "error": ["Publication source changed while its private evaluator snapshot was created"],
-    }
-
-
 @pytest.mark.parametrize(
     ("provider_name", "provider_base_url", "failure_kind", "http_status", "detail"),
     [
@@ -2499,7 +2481,13 @@ def test_runner_rejects_source_change_after_private_snapshot_before_engine_launc
 
     result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
 
-    assert result == {"error": ["Publication source changed while its private evaluator snapshot was created"]}
+    detail = "Publication source changed while its private evaluator snapshot was created"
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-UNKNOWN-001",
+        "execution_errors": [detail],
+        "error": [detail],
+    }
     assert publication_target_from_path(skill) != initial_target
     assert task_calls == []
     assert engine_calls == []

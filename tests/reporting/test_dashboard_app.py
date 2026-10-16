@@ -35,6 +35,7 @@ def _write_report(
     features: list[str] | None = None,
     baseline_status: str = "succeeded",
     measured: bool = True,
+    record_features: bool = True,
 ) -> Path:
     def trial(score: float, tokens: int) -> dict:
         value = {"entry_id": "case-1", "trial_id": "case-1__attempt1", "overall": score}
@@ -71,6 +72,8 @@ def _write_report(
             },
         },
     }
+    if not record_features:
+        del report["agents"][harness]["dashboard_metadata"]
     path.write_text(json.dumps(report), encoding="utf-8")
     return path
 
@@ -157,7 +160,7 @@ def test_dimension_filters_and_condition_retain_baseline_for_comparison(tmp_path
     assert not app.exception
     assert len(app.dataframe) == 0
     assert "No rows match these filters" in app.info[0].value
-    assert "No comparisons are available" in app.info[1].value
+    assert "No rows match these filters" in app.info[1].value
 
     for widget in app.multiselect:
         widget.set_value([])
@@ -191,6 +194,25 @@ def test_unmeasured_and_failed_baseline_are_not_zero_or_comparable(tmp_path: Pat
     assert not app.exception
     assert app.dataframe[0].value["condition"].tolist() == ["without_skill"]
     assert app.dataframe[1].value["comparison_reason"].tolist() == ["without-skill arm status failed"]
+
+
+def test_no_comparable_pair_hint(tmp_path: Path) -> None:
+    app = _app([_write_report(tmp_path / "failed.json", baseline_status="failed")])
+    assert not app.exception
+    assert any("No pair is comparable" in message.value for message in app.info)
+    app = _app([_write_report(tmp_path / "paired.json")])
+    assert not app.exception
+    assert not any("No pair is comparable" in message.value for message in app.info)
+
+
+def test_unrecorded_features_caption(tmp_path: Path) -> None:
+    app = _app([_write_report(tmp_path / "unrecorded.json", record_features=False)])
+    assert not app.exception
+    assert app.dataframe[0].value["features"].tolist() == ["unknown", "unknown"]
+    assert any("No harness features are recorded" in caption.value for caption in app.caption)
+    app = _app([_write_report(tmp_path / "recorded.json")])
+    assert not app.exception
+    assert not any("No harness features are recorded" in caption.value for caption in app.caption)
 
 
 def test_bad_report_does_not_hide_other_results(tmp_path: Path) -> None:

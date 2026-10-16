@@ -246,7 +246,8 @@ def _set_usage(row: dict[str, Any], usages: list[dict[str, Any]], *, expected: i
         )
     eligibility = "complete" if row["_complete"] else "incomplete or unknown trial coverage"
     row["coverage"] = (
-        f"{row['trials']} trials ({eligibility}); tokens {row['_usage_coverage']['total_tokens']}, "
+        f"{row['trials']} trial{'' if row['trials'] == 1 else 's'} ({eligibility}); "
+        f"tokens {row['_usage_coverage']['total_tokens']}, "
         f"time {row['_usage_coverage']['duration_seconds']}, cost {row['_usage_coverage']['cost_usd']}"
     )
 

@@ -76,6 +76,10 @@ def test_with_without_differences_and_explicit_features() -> None:
     assert comparison["cost_usd_percent"] == 100
 
 
+def test_single_trial_coverage_label_is_singular() -> None:
+    assert parse_dashboard_report(_report(), "r").rows[0]["coverage"].startswith("1 trial (complete)")
+
+
 def test_authoritative_validator_results_exclude_top_level_mirror() -> None:
     first, second = _report(), _report()
     second["skill_name"] = "second-skill"

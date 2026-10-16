@@ -463,8 +463,10 @@ totals from authoritative step results.
 
 ### Recorded harness features
 
-Features are experiment metadata, not inferred from the harness name. In a
-canonical Tier 3 JSON payload, an agent or condition can include:
+Features are experiment metadata, not inferred from the harness name. Current
+SkillEvaluator commands do not record this field; add it to the canonical JSON
+or to `run_config.json` by hand. In a canonical Tier 3 JSON payload, an agent or
+condition can include:
 
 ```json
 "dashboard_metadata": {

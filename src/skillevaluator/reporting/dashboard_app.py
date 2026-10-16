@@ -226,6 +226,9 @@ def _show_performance(rows: list[dict[str, Any]]) -> None:
 
 
 def _show_comparisons(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        st.info("No rows match these filters. Clear a filter to include more results.")
+        return
     comparisons = comparison_rows(rows)
     st.caption("Conditions are paired within each run, skill, model, harness, and feature configuration.")
     if not comparisons:
@@ -272,6 +275,8 @@ def _show_comparisons(rows: list[dict[str, Any]]) -> None:
     }
     columns = (*identity, *metric_sets[view], *details) if view in metric_sets else _COMPARISON_COLUMNS
     visible = [{column: row.get(column) for column in columns} for row in comparisons]
+    if not any(row["comparison_status"] == "comparable" for row in comparisons):
+        st.info("No pair is comparable. The Comparison reason column explains why.")
     st.dataframe(
         visible,
         column_order=columns,
@@ -378,6 +383,12 @@ def main(paths: list[str] | None = None) -> None:
     st.caption(
         "Blank cells mean a measurement is missing, incomplete, or ambiguous. Unknown settings remain labeled unknown."
     )
+    # Evaluator commands do not write harness features; "none (recorded)" counts as recorded.
+    if all(row.get("features") == "unknown" for row in rows):
+        st.caption(
+            "No harness features are recorded in these reports. Add dashboard_metadata.harness_features to compare "
+            "feature configurations; see Recorded harness features in the reports guide."
+        )
     performance_tab, comparison_tab = st.tabs(["Performance", "With vs without skill"])
     with performance_tab:
         _show_performance(performance_rows)

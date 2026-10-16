@@ -494,10 +494,11 @@ condition can include:
 object. For canonical JSON the condition's value wins over the agent's, which
 wins over the report's. For retained runs the order is the condition's
 `summary.json`, then the agent entry in `run_config.json`, then the root of
-`run_config.json`. An empty feature list records that no features were enabled
-and is shown as **none (recorded)**; an absent field is displayed as
-**unknown**. Differing recorded models or feature configurations are kept
-separate when pairing conditions.
+`run_config.json`. Edit the run directory's `run_config.json`; the copy embedded
+in `result.json` is used only when that file cannot be read. An empty feature
+list records that no features were enabled and is shown as **none (recorded)**;
+an absent field is displayed as **unknown**. Differing recorded models or
+feature configurations are kept separate when pairing conditions.
 
 An explicitly imported adverse condition uses `conditions.adverse`,
 `trials_adverse`, `num_trials_adverse`, and `adverse` for its score in the same

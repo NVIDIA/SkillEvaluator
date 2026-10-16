@@ -622,12 +622,12 @@ def test_catalog_index_loads_authoritative_local_reports_with_containment(tmp_pa
 def _native_run(path: Path) -> None:
     metrics = ["security", "skill_execution", "skill_efficiency", "accuracy", "goal_accuracy", "behavior_check"]
     path.mkdir()
+    run_config = {"agents": {"opencode": {"agent": "opencode", "model": "m"}}}
+    # Like the runner, result.json embeds the config that run_config.json holds.
     (path / "result.json").write_text(
-        json.dumps({"skill_name": "native-skill", "run_id": "native-run"}), encoding="utf-8"
+        json.dumps({"skill_name": "native-skill", "run_id": "native-run", "run_config": run_config}), encoding="utf-8"
     )
-    (path / "run_config.json").write_text(
-        json.dumps({"agents": {"opencode": {"agent": "opencode", "model": "m"}}}), encoding="utf-8"
-    )
+    (path / "run_config.json").write_text(json.dumps(run_config), encoding="utf-8")
     for variant, input_tokens in (("with-skill", 200), ("without-skill", 100)):
         condition = path / "opencode" / variant
         trial = condition / "trials" / "case-a__random"
@@ -1208,6 +1208,11 @@ def test_retained_feature_metadata_precedence_summary_over_agent_over_root(tmp_p
     assert rows["with_skill"]["features"] == "agent"
     assert rows["without_skill"]["features"] == "summary"
     assert all(item["comparison_status"] == "missing condition" for item in comparison_rows(list(rows.values())))
+    # An unreadable run_config.json falls back to the copy in result.json.
+    (run / "run_config.json").write_text("{", encoding="utf-8")
+    data = load_dashboard_path(run)
+    assert [row["features"] for row in data.rows] == ["unknown", "summary"]
+    assert any("cannot read run config" in warning for warning in data.warnings)
 
 
 def test_empty_feature_list_and_string_and_mapping_forms() -> None:

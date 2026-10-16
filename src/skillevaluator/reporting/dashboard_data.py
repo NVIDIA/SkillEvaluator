@@ -592,11 +592,19 @@ def _load_native(path: Path) -> DashboardData:
         return DashboardData(warnings=[f"{path}: no supported retained agent summaries found."])
     canonical = result.metadata["agent_eval"]
     canonical["run_id"] = engine_result.get("run_id") or path.name
+    # The runner writes the same config into result.json, but run_config.json is
+    # the copy users edit to add dashboard_metadata, so it wins when readable.
     run_config = _dict(engine_result.get("run_config"))
-    if not run_config and (path / "run_config.json").is_file():
-        run_config = _dict(_read_native_json(path / "run_config.json", path))
+    config_warning = None
+    if (path / "run_config.json").is_file():
+        try:
+            run_config = _dict(_read_native_json(path / "run_config.json", path)) or run_config
+        except (OSError, ValueError, RecursionError) as exc:
+            config_warning = f"{path / 'run_config.json'}: cannot read run config: {exc}"
     canonical["dashboard_metadata"] = run_config.get("dashboard_metadata")
     output = parse_dashboard_report(canonical, str(path))
+    if config_warning:
+        output.warnings.append(config_warning)
     unresolved_scope = False
     for row in output.rows:
         # The report's agent keys identify repeated harness occurrences on disk.

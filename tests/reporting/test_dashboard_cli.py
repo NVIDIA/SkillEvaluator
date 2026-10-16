@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import signal
 import subprocess
 import sys
@@ -100,6 +101,25 @@ def test_launch_uses_loopback_and_literal_absolute_paths(tmp_path: Path, monkeyp
         assert flag in command
     assert "--browser.gatherUsageStats=false" in command
     assert command[-2:] == ["--", str(report.resolve())]
+
+
+def test_launch_settings_exist_in_installed_streamlit(monkeypatch) -> None:
+    # Streamlit silently ignores settings it does not define; server.allowedHosts needs 1.61.
+    config = pytest.importorskip("streamlit.config")
+    # Filled on import; config._config_options stays None until Streamlit loads its config.
+    options = config._config_options_template
+    monkeypatch.delenv("STREAMLIT_SERVER_ALLOWED_HOSTS", raising=False)
+    _result, fake = _capture_launch(monkeypatch, "--port", "8517", "--no-browser")
+    command, env = fake.command, fake.kwargs["env"]
+    flags = command[command.index("run") + 2 : command.index("--")]
+    assert flags
+    for flag in flags:
+        name, separator, _value = flag.removeprefix("--").partition("=")
+        assert flag.startswith("--") and separator, flag
+        assert name in options and not options[name].deprecated, flag
+    env_options = {option.env_var: name for name, option in options.items()}
+    added = {name for name, value in env.items() if os.environ.get(name) != value}
+    assert {env_options.get(name) for name in added} == {"server.allowedHosts"}
 
 
 def test_default_launch_lets_streamlit_choose_port(monkeypatch) -> None:

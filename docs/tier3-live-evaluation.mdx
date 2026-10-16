@@ -34,7 +34,7 @@ human-readable dimensions:
 | Correctness | Does it do what it's supposed to? |
 | Discoverability | Is it loaded when it should be? |
 | Effectiveness | Is it better with the skill than without? |
-| Efficiency | Does it use fewer tool calls and tokens? |
+| Efficiency | Does it route correctly and use tools productively? |
 
 In `custom_only` mode, your own grader defines the score instead — see
 [Custom Graders & Tasks](custom-graders.mdx).
@@ -551,6 +551,12 @@ grades each trial after the agent finishes. `security`, `skill_execution`, and
 `goal_accuracy`, and `behavior_check` are LLM judges that call the configured
 evaluator provider. `custom_only` runs none of them.
 
+When `should_trigger` is false or no `expected_skill` is declared, accuracy
+excludes `SKILL_IDENTIFIED` and calculates the score from the other four
+criterion verdicts. The reward details record the excluded criterion and
+`applicable-accuracy-criteria/v1` scoring policy. Missing criterion evidence is
+an error. Positive cases retain their existing scoring contract.
+
 ### The graded trajectory
 
 The verifier grades Harbor's ATIF `trajectory.json`. When that file is missing
@@ -681,6 +687,16 @@ a bare exception.
 
 `token_efficiency` is a standalone report signal, not a dimension source. It
 never changes a dimension score or the overall verdict.
+
+The report's **Measured Agent Resources** table separately compares prompt plus
+completion tokens and Harbor's measured agent execution seconds. Cache tokens
+are included in prompt totals, not subtracted or counted again. Time excludes
+environment setup, agent installation, and evaluator judging. Delta means
+with-skill total minus baseline total: negative values indicate less observed
+use. A delta requires complete telemetry, complete successful arms, and matching
+case counts including repeated attempts. Missing measurements, skipped baselines,
+partial runs, and unsupported multi-step timing remain `N/A`; they are not zero.
+These are observations for this run, not a graded efficiency or cost claim.
 
 Each dimension receives a score and a diagnostic band: **PASS** at 0.50 or
 above, **NEUTRAL** from 0.40 to below 0.50, and **FAIL** below 0.40. A supported

@@ -616,14 +616,21 @@ def test_trajectory_reason_does_not_hide_missing_trial() -> None:
     assert status == "incomplete or mismatched coverage"
 
 
-def test_bad_input_is_diagnostic_and_directory_skips_symlinks(tmp_path: Path) -> None:
+def test_bad_input_is_diagnostic(tmp_path: Path) -> None:
     malformed = tmp_path / "broken.json"
     malformed.write_text("{", encoding="utf-8")
     assert load_dashboard_path(malformed).warnings
     assert load_dashboard_path(tmp_path / "missing").warnings
+
+
+def test_directory_skips_symlinks(tmp_path: Path) -> None:
+    (tmp_path / "broken.json").write_text("{", encoding="utf-8")
     good = tmp_path / "report.json"
     good.write_text(json.dumps(_report()), encoding="utf-8")
-    (tmp_path / "loop").symlink_to(tmp_path, target_is_directory=True)
+    try:
+        (tmp_path / "loop").symlink_to(tmp_path, target_is_directory=True)
+    except OSError:
+        pytest.skip("Symlinks are unavailable on this host")
     data = load_dashboard_path(tmp_path)
     assert len(data.rows) == 2
     assert any("cannot read" in warning for warning in data.warnings)

@@ -40,6 +40,58 @@ def test_discover_trajectories_uses_env_results_root(tmp_path, monkeypatch):
     assert _discover_trajectories(skill) == {"case-001": trajectory}
 
 
+def test_discover_trajectories_opencode_txt_fallback(tmp_path):
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    results_root = tmp_path / "results"
+    skill_results = results_root / "my-skill"
+    run_id = "20260709_120000"
+    run_dir = skill_results / run_id
+    trial = run_dir / "opencode" / "with-skill" / "trials" / "case-001"
+    trial.mkdir(parents=True)
+    (trial / "opencode.txt").write_text(
+        '{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"c1",'
+        '"state":{"status":"completed","input":{"command":"echo hi"},"output":"hi"}}}\n',
+        encoding="utf-8",
+    )
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (skill_results / "latest").symlink_to(run_id)
+
+    trajectories = _discover_trajectories(skill, results_dir=results_root)
+    assert "case-001" in trajectories
+    assert trajectories["case-001"].get("steps")
+
+
+def test_discover_trajectories_opencode_maps_harbor_folder_via_result_metadata(tmp_path):
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    results_root = tmp_path / "results"
+    run_id = "20260709_120000"
+    run_dir = results_root / "demo" / run_id
+    trial_folder = "case-001__LRZctSP"
+    trial = run_dir / "opencode" / "with-skill" / "trials" / trial_folder
+    trial.mkdir(parents=True)
+    trajectory = {"steps": [{"tool_calls": [{"tool": "Read"}]}]}
+    trial.joinpath("trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    trial.joinpath("result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_folder,
+                "config": {"task": {"path": "tasks/case-001"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (results_root / "demo" / "latest").symlink_to(run_id)
+
+    found = _discover_trajectories(skill, results_dir=results_root)
+    assert list(found) == ["case-001"]
+    assert found["case-001"] == trajectory
+
+
 def test_discover_trajectories_maps_harbor_trial_folder_to_case_id(tmp_path, monkeypatch):
     """Harbor persists trials as ``{case_id}__{suffix}``; refine looks up by case id."""
     skill = tmp_path / "demo"
@@ -570,3 +622,46 @@ def test_parse_skill_includes_tools_dir_scripts(tmp_path):
     (tools / "run.py").write_text("print('hello')\n", encoding="utf-8")
     parsed = generate_dataset._parse_skill(skill)
     assert parsed["scripts"] == ["run.py"]
+
+
+_BLOCK_HARBOR_AND_RESOLVE_CASE = """
+import importlib.abc
+import json
+import sys
+from pathlib import Path
+
+
+class _BlockHarbor(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name == "harbor" or name.startswith("harbor."):
+            raise ImportError(name)
+        return None
+
+
+sys.meta_path.insert(0, _BlockHarbor())
+from skillevaluator.tier3 import generate_dataset
+
+case_id = generate_dataset._case_id_from_trial_dir(Path(sys.argv[1]))
+print(json.dumps({"case_id": case_id, "harbor_loaded": "harbor" in sys.modules}))
+"""
+
+
+def test_refine_resolves_result_case_ids_without_the_tier3_extra(tmp_path: Path) -> None:
+    import subprocess
+
+    trial = tmp_path / "case-007__abc1234"
+    trial.mkdir()
+    (trial / "result.json").write_text(
+        json.dumps({"task_id": {"path": str(tmp_path / "tasks" / "case-007")}}),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _BLOCK_HARBOR_AND_RESOLVE_CASE, str(trial)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {"case_id": "case-007", "harbor_loaded": False}

@@ -27,8 +27,9 @@ from skillevaluator.constants import (
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.models.skill import SkillFrontmatter, SkillManifest
+from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.validators.base import ValidationResult, ValidatorBase
-from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
+from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN, format_validation_location
 from skillevaluator.validators.policy import ValidationPolicy, default_policy
 
 logger = get_logger(__name__)
@@ -244,7 +245,7 @@ class SchemaValidator(ValidatorBase):
             return result
 
         try:
-            frontmatter = SkillFrontmatter(**data)
+            frontmatter = SkillFrontmatter.model_validate(data)
             result.add_success(
                 check_name="frontmatter_valid",
                 message=f"Valid frontmatter for skill '{frontmatter.name}'",
@@ -259,7 +260,7 @@ class SchemaValidator(ValidatorBase):
             )
         except ValidationError as e:
             for error in e.errors():
-                field = ".".join(str(loc) for loc in error["loc"])
+                field = format_validation_location(error)
                 result.add_finding(
                     Finding(
                         category="SCHEMA",
@@ -746,7 +747,7 @@ class SchemaValidator(ValidatorBase):
         allowed_hint = ", ".join(f"{d}/" for d in sorted(allowed_dirs))
         unexpected_items = []
         for item in skill_path.iterdir():
-            if item.name.lower() in SCAN_EXCLUDED_FILES:
+            if matches_filesystem_name(item, SCAN_EXCLUDED_FILES):
                 continue
             if item.name not in expected and not item.name.startswith("."):
                 unexpected_items.append(item.name)

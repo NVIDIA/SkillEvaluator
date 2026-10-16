@@ -22,21 +22,28 @@ RAGAS is used for goal_accuracy and accuracy when available.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import ipaddress
 import json
 import logging
 import math
 import os
+import random
 import re
 import shlex
+import signal
 import sys
+import threading
+import time
 import unicodedata
 import urllib.error
 import urllib.request
+from contextvars import ContextVar
 from fnmatch import fnmatchcase
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import quote, unquote_to_bytes, urlparse, urlsplit
 
 import idna
@@ -67,7 +74,10 @@ try:
         AMBIGUOUS_OUTER_EXEC_OBSERVATION,
         UNOBSERVED_INNER_CALL,
         UNSUPPORTED_NATIVE_CODEX_EXEC,
+        atif_content_has_text,
+        atif_content_text,
         iter_normalized_tool_calls,
+        normalized_tool_call_is_error,
         normalized_tool_call_observation,
         normalized_tool_call_wrapper_observation,
     )
@@ -76,7 +86,10 @@ except ImportError:  # pragma: no cover -- source-tree import only
         AMBIGUOUS_OUTER_EXEC_OBSERVATION,
         UNOBSERVED_INNER_CALL,
         UNSUPPORTED_NATIVE_CODEX_EXEC,
+        atif_content_has_text,
+        atif_content_text,
         iter_normalized_tool_calls,
+        normalized_tool_call_is_error,
         normalized_tool_call_observation,
         normalized_tool_call_wrapper_observation,
     )
@@ -109,9 +122,20 @@ SKILL_EVALUATOR_REWARD_JSON = _env_path(
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 NVIDIA_BUILD_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-# Keep in sync with skillevaluator.provider_config.CHAT_DEFAULT_OPENAI
-# (sandbox template cannot import the package — see drift test).
-DEFAULT_JUDGE_MODEL = "gpt-5.6-sol"
+# Last-resort judge per provider when no model is configured. Keep in sync with
+# skillevaluator.provider_config.CHAT_DEFAULT_MODELS (sandbox template cannot
+# import the package — see drift tests).
+DEFAULT_JUDGE_MODELS = {
+    "openai": "gpt-6.1-sol",
+    "anthropic": "claude-opus-5-5",
+    "nv_build": "nvidia/nemotron-3-super-120b-a12b",
+    "bedrock": "us.anthropic.claude-opus-5-5",
+    "openai-compatible": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
+}
+JUDGE_REASONING_EFFORT = "medium"
+REASONING_MAX_COMPLETION_TOKENS = 32768
+ANTHROPIC_REFUSAL_FALLBACK_MODEL = "claude-opus-4-8"
+ANTHROPIC_SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 _ANTHROPIC_DNS_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 _ANTHROPIC_INTERNAL_LABEL_RE = re.compile(r"^[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$")
 _ANTHROPIC_IPV6_ZONE_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
@@ -381,11 +405,15 @@ def get_all_tool_calls(traj):
 
 def get_skill_tool_calls(traj):
     skills = []
-    for tc in get_all_tool_calls(traj):
-        if tc["fn"].lower() == "skill":
-            name = tc["args"].get("skill", tc["args"].get("name", ""))
-            if name:
-                skills.append(str(name))
+    for step, tc in iter_tool_calls(traj):
+        if (tc.get("function_name") or "").lower() != "skill":
+            continue
+        if normalized_tool_call_is_error(step, tc):
+            continue
+        args = tc.get("arguments") or {}
+        name = args.get("skill", args.get("name", ""))
+        if name:
+            skills.append(str(name))
     return skills
 
 
@@ -419,8 +447,8 @@ def get_agent_text(traj):
     parts = []
     for step in traj.get("steps", []):
         if step.get("source") == "agent":
-            msg = step.get("message") or ""
-            if isinstance(msg, str) and msg.strip():
+            msg = atif_content_text(step.get("message"))
+            if msg.strip():
                 parts.append(msg)
     return "\n".join(parts)
 
@@ -436,6 +464,8 @@ def extract_tool_calls_as_dicts(traj):
                 "action_input": tc.get("arguments") or {},
                 "observation": _tool_call_observation(step, tc),
             }
+            if normalized_tool_call_is_error(step, tc):
+                call["is_error"] = True
             if status := tc.get("_atif_normalization_status"):
                 call["normalization_status"] = status
             if status := tc.get("_atif_observation_status"):
@@ -460,11 +490,11 @@ def build_conversation_summary(traj, question):
             parts.append(f"Agent called: {fn}({json.dumps(args)[:200]})")
         obs = step.get("observation") or {}
         for r in obs.get("results") or []:
-            content = str(r.get("content", ""))
+            content = atif_content_text(r.get("content"))
             if content:
                 parts.append(f"Tool returned: {content[:400]}")
-        msg = step.get("message") or ""
-        if msg and isinstance(msg, str) and msg.strip() and not step.get("tool_calls"):
+        msg = atif_content_text(step.get("message"))
+        if msg.strip() and not step.get("tool_calls"):
             parts.append(f"Agent: {msg[:1500]}")
     return "\n".join(parts)
 
@@ -525,9 +555,9 @@ _TOOL_NAME_SEPARATORS = (".", ":", "/", "__")
 def _get_final_response(traj):
     for step in reversed(traj.get("steps", [])):
         if step.get("source") == "agent":
-            msg = step.get("message") or ""
-            if isinstance(msg, str) and msg.strip():
-                return msg
+            content = step.get("message")
+            if atif_content_has_text(content):
+                return atif_content_text(content)
     return ""
 
 
@@ -641,9 +671,7 @@ def build_behavior_evidence(
 ):
     """Build compact, behavior-check-specific evidence from an ATIF trajectory."""
     effective_final_limit = (
-        _behavior_final_response_limit()
-        if final_response_limit is None
-        else max(1, int(final_response_limit))
+        _behavior_final_response_limit() if final_response_limit is None else max(1, int(final_response_limit))
     )
 
     if max_chars is None:
@@ -665,9 +693,7 @@ def build_behavior_evidence(
     user_needed = (
         min(800, len(_SECTION_USER_REQUEST) + len(question.strip()) + 2) if question and question.strip() else 0
     )
-    history_needed = (
-        len(_SECTION_COMPACT_TOOL_HISTORY) + len(history.strip()) + 2 if history and history.strip() else 0
-    )
+    history_needed = len(_SECTION_COMPACT_TOOL_HISTORY) + len(history.strip()) + 2 if history and history.strip() else 0
     tail_needed = user_needed + (2 if user_needed and history_needed else 0) + history_needed
 
     if file_changes:
@@ -792,8 +818,9 @@ def _final_response_ref(traj):
         step = steps[step_idx]
         if step.get("source") != "agent":
             continue
-        msg = step.get("message") or ""
-        if isinstance(msg, str) and msg.strip():
+        content = step.get("message")
+        if atif_content_has_text(content):
+            msg = atif_content_text(content)
             return [
                 _evidence_ref(
                     source="trajectory.json",
@@ -852,7 +879,7 @@ def _tool_observation_refs(traj):
         for result_idx, result in enumerate((step.get("observation") or {}).get("results") or []):
             if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
                 return refs
-            content = str(result.get("content") or "")
+            content = atif_content_text(result.get("content"))
             if not content.strip():
                 continue
             call_id = str(result.get("source_call_id") or f"result-{result_idx}")
@@ -1048,7 +1075,7 @@ def _late_observation_excerpts(traj, limit):
         if step.get("source") != "agent":
             continue
         for result in reversed((step.get("observation") or {}).get("results") or []):
-            content = str(result.get("content") or "").strip()
+            content = atif_content_text(result.get("content")).strip()
             if content:
                 out.append(_clip(content, limit))
     return out
@@ -1488,28 +1515,54 @@ def _should_try_fallback(error):
     )
 
 
+# Model capability helpers. Keep in sync with skillevaluator.provider_config (drift test).
+
+
 def _model_leaf(model):
-    # Keep in sync with skillevaluator.tier3.eval_core.llm_judge (drift test).
     leaf = str(model or "").strip().casefold().rsplit("/", 1)[-1]
+    leaf = re.sub(r"^(?:[a-z]+-)+?(?=(?:claude|gpt)-)", "", leaf, count=1)
     return re.sub(r"^(?:(?:[a-z]{2}|global)\.)?anthropic\.", "", leaf, count=1)
 
 
-def _supports_custom_temperature(model):
-    # Keep in sync with skillevaluator.tier3.eval_core.llm_judge (drift test).
-    leaf = _model_leaf(model)
-    if leaf.startswith("gpt-5") or leaf == "claude-mythos-preview":
-        return False
+def _claude_version(model):
     match = re.fullmatch(
         r"claude-[a-z][a-z-]*-(?P<major>\d+)"
         r"(?:-(?P<minor>\d{1,2}))?"
         r"(?:-(?:\d{8}|latest))?"
         r"(?:-v\d+)?(?::\d+)?",
-        leaf,
+        _model_leaf(model),
     )
     if match is None:
-        return True
-    version = (int(match.group("major")), int(match.group("minor") or 0))
-    return version < (4, 7)
+        return None
+    return int(match.group("major")), int(match.group("minor") or 0)
+
+
+def _is_openai_reasoning_model(model):
+    return _model_leaf(model).startswith(("gpt-5", "gpt-6"))
+
+
+def _is_claude_5_5_or_later(model):
+    version = _claude_version(model)
+    return version is not None and version >= (5, 5)
+
+
+def _supports_custom_temperature(model):
+    if _is_openai_reasoning_model(model) or _model_leaf(model) == "claude-mythos-preview":
+        return False
+    version = _claude_version(model)
+    return version is None or version < (4, 7)
+
+
+def _completion_token_limit(model, max_tokens):
+    return max(max_tokens, REASONING_MAX_COMPLETION_TOKENS) if _is_openai_reasoning_model(model) else max_tokens
+
+
+def _effective_reasoning_effort(provider, model, effort):
+    if provider == "anthropic":
+        supported = _is_claude_5_5_or_later(model)
+    else:
+        supported = provider != "bedrock" and _model_leaf(model).startswith("gpt-6")
+    return effort if supported else None
 
 
 def _is_native_openai_chat_url(provider, request_url):
@@ -1543,23 +1596,55 @@ def _is_native_openai_chat_url(provider, request_url):
     )
 
 
-def _chat_completion_payload(model, prompt, max_tokens, temperature, provider=None, request_url=None):
+def _build_openai_response_format(schema, schema_name="judge_response"):
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema_name,
+            "strict": True,
+            "schema": schema,
+        },
+    }
+
+
+def _build_anthropic_output_config(schema):
+    return {
+        "format": {
+            "type": "json_schema",
+            "schema": schema,
+        }
+    }
+
+
+def _chat_completion_payload(
+    model,
+    prompt,
+    max_tokens,
+    temperature,
+    provider=None,
+    request_url=None,
+    response_schema=None,
+    schema_name="judge_response",
+):
     resolved_provider = _public_provider() if provider is None else provider
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
     token_key = (
         "max_completion_tokens"
-        if _model_leaf(model).startswith("gpt-5")
-        and _is_native_openai_chat_url(resolved_provider, resolved_request_url)
+        if _is_openai_reasoning_model(model) and _is_native_openai_chat_url(resolved_provider, resolved_request_url)
         else "max_tokens"
     )
     payload = {
         "model": model,
-        token_key: max_tokens,
+        token_key: _completion_token_limit(model, max_tokens),
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
     }
     if temperature is not None and _supports_custom_temperature(model):
         payload["temperature"] = temperature
+    if effort := _effective_reasoning_effort(resolved_provider, model, JUDGE_REASONING_EFFORT):
+        payload["reasoning_effort"] = effort
+    if response_schema is not None:
+        payload["response_format"] = _build_openai_response_format(response_schema, schema_name)
     return payload
 
 
@@ -1746,59 +1831,495 @@ def _anthropic_url():
     return _validate_http_url(url)
 
 
-def _call_anthropic(prompt, model, max_tokens, temperature):
+_RETRIABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+_DEFAULT_MAX_RETRIES = 3
+_DEFAULT_BASE_DELAY = 1.0
+_DEFAULT_MAX_DELAY = 30.0
+# Three required judges run sequentially under the managed 600-second Harbor
+# verifier timeout. Reserve one minute for deterministic checks and artifacts.
+_JUDGE_WALL_TIME_BUDGET_SEC = 180.0
+_ACTIVE_JUDGE_DEADLINE: ContextVar[float | None] = ContextVar("active_judge_deadline", default=None)
+_ACTIVE_JUDGE_CALLS: ContextVar[list[dict[str, Any]] | None] = ContextVar("active_judge_calls", default=None)
+
+
+class EvalRetryConfig(NamedTuple):
+    """Represent bounded retry and backoff settings for direct verifier LLM calls."""
+
+    max_retries: int
+    base_delay: float
+    max_delay: float
+
+
+class SchemaTargetKey(NamedTuple):
+    """Identify a provider endpoint and model for structured output schema memoization."""
+
+    provider: str
+    base_url: str
+    model: str
+
+
+def _resolve_judge_wall_time_budget():
+    """Resolve the per-judge wall-time budget in seconds from the environment."""
+    raw = str(os.environ.get("SKILL_EVAL_LLM_JUDGE_BUDGET_SEC", "")).strip()
+    if raw:
+        try:
+            val = float(raw)
+            if math.isfinite(val) and val > 0.0:
+                return val
+        except ValueError:
+            pass
+    return _JUDGE_WALL_TIME_BUDGET_SEC
+
+
+def _remaining_judge_timeout(timeout):
+    """Bound one provider request by the remaining time for its judge."""
+    deadline = _ACTIVE_JUDGE_DEADLINE.get()
+    if deadline is None:
+        return timeout
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("LLM judge time budget exhausted")
+    return min(timeout, remaining)
+
+
+def _parse_retry_after(header_value, fallback_delay):
+    """Parse a Retry-After header as seconds or HTTP date, falling back to default."""
+    if not header_value:
+        return fallback_delay
+    clean_val = str(header_value).strip()
+    try:
+        return max(0.0, float(clean_val))
+    except ValueError:
+        pass
+    try:
+        from datetime import UTC, datetime
+        from email.utils import parsedate_to_datetime
+
+        target = parsedate_to_datetime(clean_val)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=UTC)
+        now = datetime.now(UTC)
+        return max(0.0, (target - now).total_seconds())
+    except Exception:
+        return fallback_delay
+
+
+def _calculate_jitter_delay(attempt, base_delay=1.0, max_delay=30.0):
+    """Calculate exponential backoff with full jitter."""
+    calculated = min(max_delay, base_delay * (2.0**attempt))
+    return random.uniform(0.0, calculated)
+
+
+def _resolve_eval_retry_config():
+    """Resolve retry and backoff limits from environment variables with safe defaults."""
+
+    def _read_int(name, default):
+        """Read a non-negative integer from the environment variable or return default."""
+        raw = str(os.environ.get(name, "")).strip()
+        if raw:
+            try:
+                val = int(raw)
+                return val if val >= 0 else default
+            except ValueError:
+                return default
+        return default
+
+    def _read_float(name, default):
+        """Read a non-negative float from the environment variable or return default."""
+        raw = str(os.environ.get(name, "")).strip()
+        if raw:
+            try:
+                val = float(raw)
+                return val if math.isfinite(val) and val >= 0.0 else default
+            except ValueError:
+                return default
+        return default
+
+    max_retries = _read_int("SKILL_EVAL_LLM_MAX_RETRIES", _DEFAULT_MAX_RETRIES)
+    base_delay = _read_float("SKILL_EVAL_LLM_RETRY_BASE_DELAY", _DEFAULT_BASE_DELAY)
+    raw_max_delay = _read_float("SKILL_EVAL_LLM_RETRY_MAX_DELAY", _DEFAULT_MAX_DELAY)
+    return EvalRetryConfig(max_retries=max_retries, base_delay=base_delay, max_delay=max(base_delay, raw_max_delay))
+
+
+def _compute_bounded_retry_delay(retry_after_str, *, attempt, base_delay, max_delay, error):
+    """Compute a bounded retry sleep duration and verify the judge deadline allows it."""
+    if retry_after_str is not None:
+        parsed = _parse_retry_after(retry_after_str, fallback_delay=base_delay)
+        if parsed > max_delay:
+            raise error
+        delay = parsed + random.uniform(0.1, 0.5)
+    else:
+        delay = _calculate_jitter_delay(attempt, base_delay=base_delay, max_delay=max_delay)
+
+    sleep_duration = min(delay, max_delay)
+    deadline = _ACTIVE_JUDGE_DEADLINE.get()
+    if deadline is not None and time.monotonic() + sleep_duration >= deadline:
+        raise TimeoutError("LLM judge time budget exhausted before retry") from error
+    return sleep_duration
+
+
+def _urlopen_with_retry(request, timeout=90):
+    """Open a URL request with exponential backoff and full jitter on transient failures."""
+    retry_config = _resolve_eval_retry_config()
+    attempt = 0
+    while True:
+        request_timeout = _remaining_judge_timeout(timeout)
+        try:
+            with urllib.request.urlopen(request, timeout=request_timeout) as response:  # nosec B310
+                return response.read()
+        except Exception as error:
+            is_http = isinstance(error, urllib.error.HTTPError)
+            is_network = isinstance(error, (urllib.error.URLError, ConnectionError, OSError))
+            if (
+                attempt >= retry_config.max_retries
+                or (not is_http and not is_network)
+                or (is_http and error.code not in _RETRIABLE_HTTP_CODES)
+            ):
+                raise
+
+            retry_after_str = None
+            if is_http and error.headers:
+                retry_after_str = error.headers.get("retry-after") or error.headers.get("Retry-After")
+
+            sleep_duration = _compute_bounded_retry_delay(
+                retry_after_str,
+                attempt=attempt,
+                base_delay=retry_config.base_delay,
+                max_delay=retry_config.max_delay,
+                error=error,
+            )
+            status_label = f"HTTP {error.code}" if is_http else type(error).__name__
+            logger.warning(
+                "LLM judge transient error (%s). Retrying in %.2fs (attempt %d/%d)...",
+                status_label,
+                sleep_duration,
+                attempt + 1,
+                retry_config.max_retries,
+            )
+            if is_http:
+                error.close()
+            time.sleep(sleep_duration)
+            attempt += 1
+
+
+_UNSUPPORTED_REASON_INDICATORS = (
+    "unsupported",
+    "not supported",
+    "extra input",
+    "extra inputs",
+    "unknown parameter",
+    "unknown field",
+    "unknown argument",
+    "unrecognized request argument",
+    "unrecognized parameter",
+    "unexpected keyword argument",
+    "unexpected argument",
+    "invalid parameter",
+    "invalid argument",
+    "not permitted",
+    "not allowed",
+    "disallowed",
+)
+
+# Gateways can turn a schema into a forced tool call, so a tool_choice rejection is a schema rejection too.
+_SCHEMA_OPTION_PATTERN = (
+    r"(?:response_format|response format|output_config|json_schema|structured[_ ]outputs?|tool_choice)"
+)
+_SCHEMA_REJECTION_REASON = (
+    r"(?:unsupported|not supported|not permitted|not allowed|disallowed|"
+    r"unknown (?:parameter|field|argument)|unrecognized (?:request argument|parameter)|"
+    r"unexpected (?:keyword )?argument|extra inputs?(?: are not permitted)?)"
+)
+_SCHEMA_REJECTION_AFTER_OPTION = re.compile(
+    rf"\b{_SCHEMA_OPTION_PATTERN}\b(?:\.[a-z0-9_]+)*"
+    rf"(?:\s+of\s+type\s+['\"]?[a-z0-9_]+['\"]?)?"
+    rf"\s*(?:(?:is|are|was|were)\s+(?:an?\s+)?|:\s*)?"
+    rf"{_SCHEMA_REJECTION_REASON}\b",
+    re.IGNORECASE,
+)
+_SCHEMA_REJECTION_BEFORE_OPTION = re.compile(
+    rf"\b(?:unsupported|not supported|extra inputs?(?: are not permitted)?|unknown (?:parameter|field|argument)|"
+    rf"unrecognized (?:request argument|parameter)|unexpected (?:keyword argument|argument)|"
+    rf"invalid (?:parameter|argument)|not permitted|not allowed|disallowed)\b"
+    rf"(?:\s+supplied)?[\s:'\"\[\]{{}}(),-]{{0,32}}\b{_SCHEMA_OPTION_PATTERN}\b",
+    re.IGNORECASE,
+)
+
+
+def _message_rejects_schema_option(text, param=None):
+    """Match a rejection of the schema option itself, not unrelated error text."""
+    if param:
+        if not re.search(rf"\b{_SCHEMA_OPTION_PATTERN}\b", param, re.IGNORECASE):
+            return False
+        return any(indicator in text.lower() for indicator in _UNSUPPORTED_REASON_INDICATORS)
+    return bool(_SCHEMA_REJECTION_AFTER_OPTION.search(text) or _SCHEMA_REJECTION_BEFORE_OPTION.search(text))
+
+
+def _is_schema_unsupported_http_error(error):
+    """Determine whether an HTTP error indicates structured output schema is unsupported."""
+    if getattr(error, "code", None) not in {400, 422}:
+        return False
+    body_text = ""
+    try:
+        body_bytes = error.read()
+        error.fp = io.BytesIO(body_bytes)
+        body_text = body_bytes.decode("utf-8", "replace")
+    except Exception:
+        pass
+    error_param = None
+    try:
+        body = json.loads(body_text)
+        if isinstance(body, dict) and isinstance(body.get("error"), dict):
+            param = body["error"].get("param")
+            if isinstance(param, str):
+                error_param = param
+    except (TypeError, ValueError):
+        pass
+    text = f"{error} {getattr(error, 'reason', '')} {body_text}"
+    return _message_rejects_schema_option(text, error_param)
+
+
+_SCHEMA_UNSUPPORTED_TARGETS: set[SchemaTargetKey] = set()
+
+
+class _JudgeRefusedError(RuntimeError):
+    """The judge model declined the request (a safety-classifier refusal or content filter)."""
+
+
+def _urlopen_with_schema_fallback(build_request, *, target_key, use_schema, timeout=90):
+    """Open URL with retry, falling back to prompt-only on confirmed schema capability errors."""
+    normalized_key = target_key if isinstance(target_key, SchemaTargetKey) else SchemaTargetKey(*target_key)
+    try:
+        return _urlopen_with_retry(build_request(use_schema), timeout=timeout)
+    except urllib.error.HTTPError as error:
+        if use_schema and _is_schema_unsupported_http_error(error):
+            error.close()
+            logger.warning(
+                "Structured output schema unsupported by provider=%s model=%s; "
+                "downgrading to prompt-only JSON and memoizing target.",
+                normalized_key.provider,
+                normalized_key.model,
+            )
+            response = _urlopen_with_retry(build_request(False), timeout=timeout)
+            _SCHEMA_UNSUPPORTED_TARGETS.add(normalized_key)
+            return response
+        raise
+
+
+def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None, provenance=None):
+    """Call the Messages API; ``provenance["model"]`` becomes the model that served the reply."""
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return None, "ANTHROPIC_API_KEY is required for the anthropic provider"
-    payload = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
-    }
-    if temperature is not None and _supports_custom_temperature(model):
-        payload["temperature"] = temperature
-    request = urllib.request.Request(
-        _anthropic_url(),
-        data=json.dumps(payload).encode(),
-        headers={
+    target_url = _anthropic_url()
+    target_key = SchemaTargetKey(provider="anthropic", base_url=target_url, model=model)
+    use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
+    effort = _effective_reasoning_effort("anthropic", model, JUDGE_REASONING_EFFORT)
+    # Server-side fallback (beta, native Claude API only): a safety-classifier
+    # refusal is retried on the fallback model within the same call.
+    server_side_fallback = _is_claude_5_5_or_later(model) and urlparse(target_url).hostname == "api.anthropic.com"
+
+    def _build_request(include_schema):
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+        }
+        if temperature is not None and _supports_custom_temperature(model):
+            payload["temperature"] = temperature
+        output_config = _build_anthropic_output_config(response_schema) if include_schema else {}
+        if effort is not None:
+            output_config["effort"] = effort
+        if output_config:
+            payload["output_config"] = output_config
+        headers = {
             "Content-Type": "application/json",
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
-        },
-    )
+        }
+        if server_side_fallback:
+            payload["fallbacks"] = [{"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}]
+            headers["anthropic-beta"] = ANTHROPIC_SERVER_SIDE_FALLBACK_BETA
+        return urllib.request.Request(target_url, data=json.dumps(payload).encode(), headers=headers)
+
     # _anthropic_url() validates the configured base URL before this request.
-    with urllib.request.urlopen(request, timeout=90) as response:  # nosec B310
-        body = json.loads(response.read())
-    content = "".join(
-        str(block.get("text", ""))
-        for block in body.get("content", [])
-        if isinstance(block, dict) and block.get("type") == "text"
+    raw_response = _urlopen_with_schema_fallback(
+        _build_request,
+        target_key=target_key,
+        use_schema=use_schema,
+        timeout=90,
     )
+    body = json.loads(raw_response)
+    if body.get("stop_reason") == "refusal":
+        raise _JudgeRefusedError("judge model declined the request (stop_reason=refusal)")
+    blocks = [block for block in body.get("content", []) if isinstance(block, dict)]
+    for block in blocks:
+        served = block.get("to") if block.get("type") == "fallback" else None
+        if provenance is not None and isinstance(served, dict) and isinstance(served.get("model"), str):
+            provenance["model"] = served["model"]
+    content = "".join(str(block.get("text", "")) for block in blocks if block.get("type") == "text")
     return content.strip(), None
 
 
-def _call_bedrock(prompt, model, max_tokens, temperature):
+_RETRIABLE_BEDROCK_ERROR_CODES = frozenset(
+    {
+        "ThrottlingException",
+        "Throttling",
+        "TooManyRequestsException",
+        "ServiceUnavailableException",
+        "ServiceUnavailable",
+        "InternalServerException",
+        "InternalServerError",
+        "InternalFailure",
+        "ModelTimeoutException",
+        "RequestTimeout",
+        "RequestTimeoutException",
+    }
+)
+_RETRIABLE_BOTOCORE_EXCEPTION_NAMES = frozenset(
+    {
+        "EndpointConnectionError",
+        "ConnectionClosedError",
+        "ReadTimeoutError",
+        "ConnectTimeoutError",
+    }
+)
+
+
+def _classify_bedrock_retry_error(error):
+    """Return (is_retriable, status_label, retry_after_str) for a Bedrock Converse exception."""
+    if isinstance(error, TimeoutError) and "LLM judge time budget exhausted" in str(error):
+        return False, type(error).__name__, None
+    if isinstance(error, (FileNotFoundError, IsADirectoryError, NotADirectoryError, PermissionError)):
+        return False, type(error).__name__, None
+
+    response = getattr(error, "response", None)
+    if not isinstance(response, dict):
+        response = {}
+    metadata = response.get("ResponseMetadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    http_status = metadata.get("HTTPStatusCode")
+    if not isinstance(http_status, int) or isinstance(http_status, bool):
+        http_status = None
+
+    err_info = response.get("Error")
+    if not isinstance(err_info, dict):
+        err_info = {}
+    error_code = str(err_info.get("Code") or "").strip()
+
+    headers = metadata.get("HTTPHeaders")
+    retry_after_str = None
+    if isinstance(headers, dict):
+        for k, v in headers.items():
+            if isinstance(k, str) and k.lower() == "retry-after" and v is not None:
+                retry_after_str = str(v)
+                break
+
+    if http_status is not None or error_code:
+        is_retriable = (
+            http_status in _RETRIABLE_HTTP_CODES or http_status == 408 or error_code in _RETRIABLE_BEDROCK_ERROR_CODES
+        )
+        status_label = f"HTTP {http_status}" if http_status is not None else error_code
+        return is_retriable, status_label, retry_after_str
+
+    type_name = type(error).__name__
+    is_network = (
+        isinstance(error, (ConnectionError, TimeoutError, OSError)) or type_name in _RETRIABLE_BOTOCORE_EXCEPTION_NAMES
+    )
+    return is_network, type_name, None
+
+
+def _bedrock_refusal_fallback_model(model):
+    """Return Opus 4.8 in the same Bedrock geography as a Claude 5.5 or later model, else None."""
+    prefix = re.match(r"(?:(?:[a-z]{2}|global)\.)?anthropic\.", str(model or ""))
+    if prefix is None or not _is_claude_5_5_or_later(model):
+        return None
+    return prefix.group(0) + ANTHROPIC_REFUSAL_FALLBACK_MODEL
+
+
+def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance=None):
+    """Call Bedrock Converse; ``provenance["model"]`` becomes the model that served the reply."""
     try:
         import boto3
     except ImportError:
         return None, "boto3 is required for the bedrock provider"
+    BotoConfig = None
+    with contextlib.suppress(ImportError):
+        from botocore.config import Config as BotoConfig
     try:
-        client = boto3.client("bedrock-runtime", region_name=os.environ.get("AWS_REGION", "us-west-2"))
+        retry_config = _resolve_eval_retry_config()
+        region_name = os.environ.get("AWS_REGION", "us-west-2")
+        initial_timeout = _remaining_judge_timeout(timeout)
+        client_kwargs = {"region_name": region_name}
+        if BotoConfig is not None:
+            client_kwargs["config"] = BotoConfig(
+                connect_timeout=initial_timeout,
+                read_timeout=initial_timeout,
+                retries={"max_attempts": 0, "mode": "standard"},
+            )
+        try:
+            client = boto3.client("bedrock-runtime", **client_kwargs)
+        except TypeError:
+            client = boto3.client("bedrock-runtime", region_name=region_name)
+
         inference_config = {"maxTokens": max_tokens}
         if temperature is not None and _supports_custom_temperature(model):
             inference_config["temperature"] = temperature
-        response = client.converse(
-            modelId=model,
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig=inference_config,
-        )
+
+        def _converse(model_id):
+            attempt = 0
+            while True:
+                request_timeout = _remaining_judge_timeout(timeout)
+                endpoint = getattr(client, "_endpoint", None)
+                if endpoint is not None and hasattr(endpoint, "timeout"):
+                    endpoint.timeout = request_timeout
+                try:
+                    return client.converse(
+                        modelId=model_id,
+                        messages=[{"role": "user", "content": [{"text": prompt}]}],
+                        inferenceConfig=inference_config,
+                    )
+                except Exception as error:
+                    is_retriable, status_label, retry_after_str = _classify_bedrock_retry_error(error)
+                    if attempt >= retry_config.max_retries or not is_retriable:
+                        raise
+
+                    sleep_duration = _compute_bounded_retry_delay(
+                        retry_after_str,
+                        attempt=attempt,
+                        base_delay=retry_config.base_delay,
+                        max_delay=retry_config.max_delay,
+                        error=error,
+                    )
+                    logger.warning(
+                        "LLM judge transient error (%s). Retrying in %.2fs (attempt %d/%d)...",
+                        status_label,
+                        sleep_duration,
+                        attempt + 1,
+                        retry_config.max_retries,
+                    )
+                    time.sleep(sleep_duration)
+                    attempt += 1
+
+        response = _converse(model)
+        fallback_model = _bedrock_refusal_fallback_model(model)
+        if response.get("stopReason") == "content_filtered" and fallback_model:
+            # Bedrock has no server-side fallback, so retry a classifier refusal here.
+            response = _converse(fallback_model)
+            if provenance is not None:
+                provenance["model"] = fallback_model
+        if response.get("stopReason") == "content_filtered":
+            raise _JudgeRefusedError("judge model declined the request (stopReason=content_filtered)")
         content = "".join(
             str(block.get("text", ""))
             for block in response.get("output", {}).get("message", {}).get("content", [])
             if isinstance(block, dict)
         )
         return content.strip(), None
+    except _JudgeRefusedError:
+        raise
     except Exception as exc:
         return None, f"Bedrock request failed: {exc}"
 
@@ -1809,11 +2330,87 @@ def _selected_judge_model(model=None):
         or os.environ.get("LLM_JUDGE_MODEL")
         or os.environ.get("SKILL_EVAL_JUDGE_MODEL")
         or os.environ.get("SKILL_EVAL_LLM_MODEL")
-        or DEFAULT_JUDGE_MODEL
+        or DEFAULT_JUDGE_MODELS.get(_public_provider(), DEFAULT_JUDGE_MODELS["openai"])
     )
 
 
-def _call_public_llm_with_provenance(prompt, model=None, max_tokens=1024, temperature=0.0, allow_model_fallback=True):
+def _call_openai_compatible(
+    prompt, provider, model, max_tokens, temperature, response_schema=None, schema_name="judge_response"
+):
+    api_key = (
+        os.environ.get("NVIDIA_API_KEY", "")
+        if provider == "nv_build"
+        else os.environ.get("SKILL_EVAL_LLM_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+    )
+    if not api_key:
+        return None, f"No API key configured for {provider}"
+    request_url = _resolve_url(provider)
+    target_key = SchemaTargetKey(provider=provider, base_url=request_url, model=model)
+    use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
+
+    def _build_request(include_schema):
+        payload = _chat_completion_payload(
+            model,
+            prompt,
+            max_tokens,
+            temperature,
+            provider=provider,
+            request_url=request_url,
+            response_schema=response_schema if include_schema else None,
+            schema_name=schema_name,
+        )
+        return urllib.request.Request(
+            request_url,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        )
+
+    # request_url was validated by _resolve_url() before this request.
+    raw_response = _urlopen_with_schema_fallback(
+        _build_request,
+        target_key=target_key,
+        use_schema=use_schema,
+        timeout=90,
+    )
+    body = json.loads(raw_response)
+    choices = body.get("choices") or [{}]
+    first_choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message = first_choice.get("message")
+    refusal = message.get("refusal") if isinstance(message, dict) else None
+    if first_choice.get("finish_reason") == "content_filter" or (isinstance(refusal, str) and refusal):
+        raise _JudgeRefusedError(
+            f"judge model declined the request (finish_reason={first_choice.get('finish_reason')})"
+        )
+    content = message.get("content", "") if isinstance(message, dict) else ""
+    if content is None:
+        content = ""
+    return content.strip(), None
+
+
+def _record_judge_call(provenance, requested_model, sent_model):
+    """Record the model that answered for the required judge in progress (see _call_required_judge)."""
+    calls = _ACTIVE_JUDGE_CALLS.get()
+    if calls is not None:
+        calls.append(
+            {
+                "model": provenance["model"],
+                "reasoning_effort": _effective_reasoning_effort(
+                    provenance["provider"], sent_model, JUDGE_REASONING_EFFORT
+                ),
+                "fallback_used": provenance["model"] != requested_model,
+            }
+        )
+
+
+def _call_public_llm_with_provenance(
+    prompt,
+    model=None,
+    max_tokens=4096,
+    temperature=0.0,
+    allow_model_fallback=True,
+    response_schema=None,
+    schema_name="judge_response",
+):
     provider = _public_provider()
     if not provider:
         return None, _public_provider_error(), {}
@@ -1826,66 +2423,72 @@ def _call_public_llm_with_provenance(prompt, model=None, max_tokens=1024, temper
         last_provenance = provenance
         try:
             if provider == "anthropic":
-                content, error = _call_anthropic(prompt, candidate_model, max_tokens, temperature)
-                if error:
-                    return None, _redact_configured_credentials(error), provenance
-                return content, None, provenance
-            if provider == "bedrock":
-                content, error = _call_bedrock(prompt, candidate_model, max_tokens, temperature)
-                if error:
-                    return None, _redact_configured_credentials(error), provenance
-                return content, None, provenance
-
-            api_key = (
-                os.environ.get("NVIDIA_API_KEY", "")
-                if provider == "nv_build"
-                else os.environ.get("SKILL_EVAL_LLM_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
-            )
-            if not api_key:
-                return None, f"No API key configured for {provider}", provenance
-            request_url = _resolve_url(provider)
-            request = urllib.request.Request(
-                request_url,
-                data=json.dumps(
-                    _chat_completion_payload(
-                        candidate_model,
-                        prompt,
-                        max_tokens,
-                        temperature,
-                        provider=provider,
-                        request_url=request_url,
-                    )
-                ).encode(),
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            )
-            # request_url was validated by _resolve_url() before this request.
-            with urllib.request.urlopen(request, timeout=90) as response:  # nosec B310
-                body = json.loads(response.read())
-            content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
-            if content is None:
-                content = ""
-            if candidate_model != requested_model:
-                logger.warning("LLM judge model %s failed; using fallback model %s", requested_model, candidate_model)
-            return content.strip(), None, provenance
-        except urllib.error.HTTPError as error:
-            detail, should_try_fallback = _format_http_error_with_fallback(error)
+                content, error = _call_anthropic(
+                    prompt,
+                    candidate_model,
+                    max_tokens,
+                    temperature,
+                    response_schema=response_schema,
+                    provenance=provenance,
+                )
+            elif provider == "bedrock":
+                content, error = _call_bedrock(prompt, candidate_model, max_tokens, temperature, provenance=provenance)
+            else:
+                content, error = _call_openai_compatible(
+                    prompt,
+                    provider,
+                    candidate_model,
+                    max_tokens,
+                    temperature,
+                    response_schema=response_schema,
+                    schema_name=schema_name,
+                )
+        except _JudgeRefusedError as refusal:
+            # A classifier refusal is fallback-eligible like a missing model.
+            errors.append(f"{candidate_model}: {refusal}")
+            if not allow_model_fallback:
+                return None, str(refusal), provenance
+            continue
+        except urllib.error.HTTPError as http_error:
+            detail, should_try_fallback = _format_http_error_with_fallback(http_error)
             errors.append(f"{candidate_model}: {detail}")
             if not allow_model_fallback or not should_try_fallback:
                 return None, detail, provenance
+            continue
         except Exception as exc:
             detail = f"Public provider call failed for {candidate_model}: {exc}"
             return None, _redact_configured_credentials(detail), provenance
+        if error:
+            return None, _redact_configured_credentials(error), provenance
+        if not content and candidate_model != models[-1]:
+            # So is an empty reply, for example reasoning that used up the output budget.
+            errors.append(f"{candidate_model}: empty response")
+            continue
+        if candidate_model != requested_model:
+            logger.warning("LLM judge model %s failed; using fallback model %s", requested_model, candidate_model)
+        _record_judge_call(provenance, requested_model, candidate_model)
+        return content, None, provenance
     detail = "LLM judge model fallback exhausted: " + " | ".join(errors)
     return None, _redact_configured_credentials(detail), last_provenance
 
 
-def call_public_llm(prompt, model=None, max_tokens=1024, temperature=0.0, allow_model_fallback=True):
+def call_public_llm(
+    prompt,
+    model=None,
+    max_tokens=4096,
+    temperature=0.0,
+    allow_model_fallback=True,
+    response_schema=None,
+    schema_name="judge_response",
+):
     content, error, _provenance = _call_public_llm_with_provenance(
         prompt,
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,
         allow_model_fallback=allow_model_fallback,
+        response_schema=response_schema,
+        schema_name=schema_name,
     )
     return content, error
 
@@ -2663,6 +3266,38 @@ def _command_reads_skill_md_arg(command, cmd_idx, assignments):
         if _skill_md_arg(arg, assignments):
             return True
     return False
+
+
+# Brace, glob, parameter and command expansion can turn one shell word into
+# several files. Quotes are gone after tokenizing, so any operand holding one of
+# these characters is treated as possibly naming more than one file.
+_SHELL_EXPANSION_CHARS = frozenset("{*?[$`")
+
+
+def _failed_single_skill_read(call):
+    """A shell failure only proves the skill read failed for an isolated read.
+
+    Compound commands, multi-file reads and operands that the shell may expand
+    into several files can print SKILL.md successfully before another file or
+    operation fails.
+    """
+    if call.get("is_error") is not True:
+        return False
+    tokens = _shell_tokens(_command_text(call))
+    if not tokens or any(token in _SHELL_SEPARATORS for token in tokens):
+        return False
+    command = tokens[0].rsplit("/", 1)[-1].lower()
+    if command not in {"cat", "nl", "bat", "less", "more"}:
+        return False
+    files = []
+    options_ended = False
+    for arg in tokens[1:]:
+        arg = arg.removeprefix(_QUOTED_SYNTAX_MARK)
+        if not options_ended and arg == "--":
+            options_ended = True
+        elif options_ended or arg == "-" or not arg.startswith("-"):
+            files.append(arg)
+    return len(files) == 1 and not _SHELL_EXPANSION_CHARS.intersection(files[0]) and _skill_md_arg(files[0], {})
 
 
 def _cmd_reads_skill_md(cmd) -> bool:
@@ -3725,7 +4360,7 @@ def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None
     findings = []
     agent_text = get_agent_text(traj)
     user_text = "\n".join(
-        str(step.get("message") or "") for step in traj.get("steps", []) if step.get("source") == "user"
+        atif_content_text(step.get("message")) for step in traj.get("steps", []) if step.get("source") == "user"
     )
 
     if user_text and any(pattern.search(user_text) for pattern in _PROMPT_INJECTION_PATTERNS):
@@ -3979,7 +4614,7 @@ def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptab
                     "reason": reason,
                     "details": {**_skill_match_details(expected_skill, acceptable_skills), **match},
                 }
-    read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower()]
+    read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower() and tc.get("is_error") is not True]
     for call in read_calls:
         path_arg = _extract_path(call)
         if "SKILL.md" not in path_arg:
@@ -3997,7 +4632,7 @@ def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptab
                 "details": {**_skill_match_details(expected_skill, acceptable_skills), **match, "path": path_arg},
             }
     for call in tool_calls:
-        if _is_execution_action(call["action"]):
+        if _is_execution_action(call["action"]) and not _failed_single_skill_read(call):
             cmd = _command_text(call)
             if _cmd_reads_skill_md(cmd):
                 match = _classify_skill_match(cmd, expected_skill, acceptable_skills, fuzzy=True)
@@ -4029,7 +4664,10 @@ def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptab
         has_skill_read_evidence = ("read" in action.lower() and "SKILL.md" in str(tc.get("action_input", ""))) or (
             _is_execution_action(action) and _cmd_reads_skill_md(cmd)
         )
-        if not has_skill_read_evidence:
+        if not has_skill_read_evidence or (
+            tc.get("is_error") is True
+            and (not _is_execution_action(action) or _failed_single_skill_read(tc))
+        ):
             continue
         obs = str(tc.get("observation", "")).lower()
         if "skill.md" in obs:
@@ -7046,7 +7684,10 @@ def check_workflow_order(tool_calls, skill_tool_names=None, expected_skill=None)
         args_str = str(call.get("action_input", ""))
         cmd = _command_text(call)
         if ("read" in action and "SKILL.md" in args_str) or (_is_execution_action(action) and _cmd_reads_skill_md(cmd)):
-            sequence.append("read_skill")
+            if call.get("is_error") is not True or (
+                _is_execution_action(action) and not _failed_single_skill_read(call)
+            ):
+                sequence.append("read_skill")
         elif _is_execution_action(action) and cmd and "--help" not in cmd and "which " not in cmd:
             sequence.append("execution")
     if not sequence:
@@ -7129,7 +7770,7 @@ def check_routing(
     acceptable_skills=None,
 ):
     unsupported_native_codex_call = _has_unsupported_native_codex_call(tool_calls)
-    read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower()]
+    read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower() and tc.get("is_error") is not True]
     skills_read, wrong_skills = [], []
     matched_expected = False
     matched_alternate = False
@@ -7157,7 +7798,7 @@ def check_routing(
     for call in tool_calls:
         action = call["action"].lower()
         cmd = _command_text(call)
-        if not (_is_execution_action(action) and _cmd_reads_skill_md(cmd)):
+        if not (_is_execution_action(action) and _cmd_reads_skill_md(cmd)) or _failed_single_skill_read(call):
             continue
         skills_read.append(cmd)
         skill_name = _skill_name_from_ref(cmd)
@@ -7289,8 +7930,8 @@ def check_error_recovery(tool_calls, expected_script=None):
         "error",
         "traceback",
         "exception",
-        "exit code 1",
-        "exit code 2",
+        "status=failed",
+        "status=error",
         "not found",
         "command not found",
         "permission denied",
@@ -7298,6 +7939,8 @@ def check_error_recovery(tool_calls, expected_script=None):
         "filenotfounderror",
         "modulenotfounderror",
     ]
+    # Match exit_code=N / "exit code N" for any nonzero N (not just 1/2).
+    nonzero_exit_re = re.compile(r"(?:exit_code|exit\s+code)\s*[=:]?\s*(?!0\b)(\d+)", re.IGNORECASE)
     skill_fault_kw = [
         "no such file",
         "filenotfounderror",
@@ -7311,6 +7954,8 @@ def check_error_recovery(tool_calls, expected_script=None):
 
     def _is_failure(tc):
         obs = str(tc.get("observation", "")).lower()
+        if nonzero_exit_re.search(obs):
+            return True
         return any(kw in obs for kw in error_kw)
 
     def _cmd_text(tc):
@@ -7503,7 +8148,8 @@ def score_skill_execution(
     return {"score": round(avg, 4), "details": checks}
 
 
-STRUCTURED_JUDGE_MAX_TOKENS = 4096
+# Keep in sync with skillevaluator.provider_config.MAX_COMPLETION_TOKENS (drift test).
+STRUCTURED_JUDGE_MAX_TOKENS = 16384
 
 _JUDGE_RETRY_REMINDER = (
     "\n\nIMPORTANT: Your previous reply could not be parsed or validated. Respond with ONLY the "
@@ -7512,6 +8158,7 @@ _JUDGE_RETRY_REMINDER = (
 
 
 def _call_validated_json_judge(prompt, validate, call, extract, **call_kwargs):
+    """Invoke a JSON judge with one format-correction retry when payload validation fails."""
     call_kwargs.setdefault("max_tokens", STRUCTURED_JUDGE_MAX_TOKENS)
 
     def invoke(call_prompt):
@@ -7550,6 +8197,7 @@ _ACCURACY_CRITERIA_KEYS = frozenset(
 
 
 def _valid_accuracy_criteria(value):
+    """Return True when value is a complete 5-criterion boolean mapping."""
     return (
         isinstance(value, dict)
         and value.keys() == _ACCURACY_CRITERIA_KEYS
@@ -7558,6 +8206,7 @@ def _valid_accuracy_criteria(value):
 
 
 def _accuracy_payload_error(parsed):
+    """Validate a parsed accuracy judge payload and return an error message if malformed."""
     if not isinstance(parsed, dict):
         return "Judge response was not a valid JSON object"
     if "reason" in parsed and not isinstance(parsed["reason"], str):
@@ -7572,6 +8221,7 @@ def _accuracy_payload_error(parsed):
 
 
 def _goal_payload_error(parsed):
+    """Validate a parsed goal-accuracy judge payload and return an error message if malformed."""
     if not isinstance(parsed, dict):
         return "Judge response was not a valid JSON object"
     for field in ("reason", "user_goal", "end_state"):
@@ -7584,11 +8234,76 @@ def _goal_payload_error(parsed):
     return None
 
 
-def judge_accuracy(question, ground_truth, agent_text):
+ACCURACY_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "criteria": {
+            "type": "object",
+            "properties": {
+                "SKILL_IDENTIFIED": {"type": "boolean"},
+                "ACTION_CORRECT": {"type": "boolean"},
+                "FACTUALLY_ACCURATE": {"type": "boolean"},
+                "TASK_ADDRESSED": {"type": "boolean"},
+                "ACTIONABLE": {"type": "boolean"},
+            },
+            "required": [
+                "SKILL_IDENTIFIED",
+                "ACTION_CORRECT",
+                "FACTUALLY_ACCURATE",
+                "TASK_ADDRESSED",
+                "ACTIONABLE",
+            ],
+            "additionalProperties": False,
+        },
+        "score": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["criteria", "score", "reason"],
+    "additionalProperties": False,
+}
+
+GOAL_ACCURACY_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "user_goal": {"type": "string"},
+        "end_state": {"type": "string"},
+        "achieved": {"type": "boolean"},
+        "score": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["user_goal", "end_state", "achieved", "score", "reason"],
+    "additionalProperties": False,
+}
+
+BEHAVIOR_CHECK_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "step": {"type": "integer"},
+                    "passed": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["step", "passed", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        "score": {"type": "number"},
+        "summary": {"type": "string"},
+    },
+    "required": ["results", "score", "summary"],
+    "additionalProperties": False,
+}
+
+
+def judge_accuracy(question, ground_truth, agent_text, *, skill_identification_applicable=True):
     if not ground_truth:
         return {"score": 1.0, "reason": "No ground_truth -- skipped"}
-    prompt = f"""You are an expert evaluator for AI agent responses. Evaluate by checking \
-each criterion below against the expected answer. For each, answer YES or NO.
+    prompt = """You are an expert evaluator for AI agent responses. Evaluate by checking \
+each criterion below against the expected answer. For each criterion, determine true (satisfied) or false (not satisfied).
 
 1. SKILL_IDENTIFIED: Does the response reference or use the correct skill for the task?
 2. ACTION_CORRECT: Does the response describe or execute the correct actions/scripts?
@@ -7596,12 +8311,11 @@ each criterion below against the expected answer. For each, answer YES or NO.
 4. TASK_ADDRESSED: Does the response directly address the user's request?
 5. ACTIONABLE: Does the response provide actionable information (not just acknowledgment)?
 
-For each criterion write: YES or NO with a brief reason.
-Then compute score = count(YES) / 5.
+Compute score = count(true) / 5.
 Be lenient on exact wording but strict on factual correctness.
 
 Respond with ONLY a JSON object:
-{{"criteria": {{"SKILL_IDENTIFIED": true, "ACTION_CORRECT": true, "FACTUALLY_ACCURATE": true, "TASK_ADDRESSED": true, "ACTIONABLE": true}}, "score": 0.8, "reason": "brief summary"}}
+{{"criteria": {{"SKILL_IDENTIFIED": true, "ACTION_CORRECT": true, "FACTUALLY_ACCURATE": true, "TASK_ADDRESSED": true, "ACTIONABLE": true}}, "score": 1.0, "reason": "brief summary"}}
 
 USER QUESTION:
 {question}
@@ -7612,11 +8326,28 @@ EXPECTED ANSWER:
 SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may be omitted):
 {agent_text}"""
 
+    if not skill_identification_applicable:
+        prompt = prompt.replace(
+            "1. SKILL_IDENTIFIED: Does the response reference or use the correct skill for the task?",
+            "1. SKILL_IDENTIFIED: Inapplicable: no skill is expected. Set false; exclude it from the score.",
+        ).replace("Compute score = count(true) / 5.", "Compute score = count(true among the other four criteria) / 4.")
+        prompt = prompt.replace('"SKILL_IDENTIFIED": true', '"SKILL_IDENTIFIED": false')
+    # Adjust the rubric before interpolation so task/evidence text stays intact.
+    prompt = prompt.format(question=question, ground_truth=ground_truth, agent_text=agent_text)
+
+    def validate_payload(parsed):
+        error = _accuracy_payload_error(parsed)
+        if not error and not skill_identification_applicable and not _valid_accuracy_criteria(parsed.get("criteria")):
+            return "Accuracy requires complete criterion verdicts when skill identification is inapplicable"
+        return error
+
     parsed, error, _provenance = _call_validated_json_judge(
         prompt,
-        _accuracy_payload_error,
+        validate_payload,
         call_public_llm,
         extract_json,
+        response_schema=ACCURACY_JSON_SCHEMA,
+        schema_name="accuracy_judgment",
     )
     if error:
         return _judge_error(error)
@@ -7625,15 +8356,25 @@ SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may 
     criteria = parsed.get("criteria")
     criteria_valid = _valid_accuracy_criteria(criteria)
 
-    score = _finite_score(parsed.get("score"))
-    if score is None:
-        assert criteria_valid
-        score = sum(1 for v in criteria.values() if v is True) / 5.0
-    return {
+    if criteria_valid:
+        # Score only applicable verdicts; excluded criteria leave both numerator and denominator.
+        excluded = set() if skill_identification_applicable else {"SKILL_IDENTIFIED"}
+        applicable = [verdict for name, verdict in criteria.items() if name not in excluded]
+        score = sum(verdict is True for verdict in applicable) / len(applicable)
+    else:
+        # Legacy score-only payloads; validate_payload rejects them when a criterion is excluded.
+        assert skill_identification_applicable
+        score = _finite_score(parsed.get("score"))
+        assert score is not None
+    result = {
         "score": round(score, 4),
         "reason": _bounded_judge_text(parsed.get("reason", "")),
         "criteria": criteria if criteria_valid else {},
     }
+    if not skill_identification_applicable:
+        result["excluded_criteria"] = ["SKILL_IDENTIFIED"]
+        result["scoring_policy"] = "applicable-accuracy-criteria/v1"
+    return result
 
 
 # ── LLM Judge: Goal Accuracy ─────────────────────────────────────────────────
@@ -7655,8 +8396,11 @@ def judge_goal_accuracy(question, ground_truth, agent_text, tool_summary=""):
 
 
 def _ragas_goal_accuracy_enabled():
-    """RAGAS is an OpenAI-only optimization, never an agent-key fallback."""
-    if _public_provider() != "openai":
+    """RAGAS is an OpenAI-only optimization, never an agent-key fallback.
+
+    Reasoning judges reject the sampling settings RAGAS sends, so they use the prompt judge.
+    """
+    if _public_provider() != "openai" or _is_openai_reasoning_model(_selected_judge_model()):
         return False
     try:
         request_url = _resolve_url("openai")
@@ -7699,7 +8443,12 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
 
     loop = asyncio.new_event_loop()
     try:
-        result = loop.run_until_complete(metric.ascore(sample))
+        result = loop.run_until_complete(
+            asyncio.wait_for(
+                metric.ascore(sample),
+                timeout=_remaining_judge_timeout(_resolve_judge_wall_time_budget()),
+            )
+        )
     finally:
         loop.close()
 
@@ -7744,6 +8493,8 @@ Respond with ONLY a JSON object:
         _goal_payload_error,
         _call_public_llm_with_provenance,
         extract_json,
+        response_schema=GOAL_ACCURACY_JSON_SCHEMA,
+        schema_name="goal_accuracy_judgment",
     )
     if error:
         return _judge_error(error, **provenance)
@@ -7796,12 +8547,17 @@ CONVERSATION:
 EXPECTED BEHAVIORS:
 {behaviors_text}
 
-For each behavior, respond YES (observed) or NO (not observed) with a brief reason.
+For each behavior, set "passed" to true (observed) or false (not observed) with a brief reason.
 
 Respond with ONLY a JSON object:
 {{"results": [{{"step": 1, "passed": true, "reason": "..."}}, ...], "score": 0.67, "summary": "brief summary"}}"""
 
-    content, error = call_public_llm(prompt, max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS)
+    content, error = call_public_llm(
+        prompt,
+        max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
+        response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
+        schema_name="behavior_check_judgment",
+    )
     if error:
         return _judge_error(f"LLM judge error: {error}", results=[])
 
@@ -7815,7 +8571,10 @@ Respond with ONLY a JSON object:
     if score is None:
         # One retry max, with an explicit machine-readable-output reminder.
         retry_content, retry_error = call_public_llm(
-            prompt + _BEHAVIOR_RETRY_REMINDER, max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS
+            prompt + _BEHAVIOR_RETRY_REMINDER,
+            max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
+            response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
+            schema_name="behavior_check_judgment",
         )
         if not retry_error:
             parsed = _parse_judge_object(retry_content)
@@ -7915,11 +8674,58 @@ def _normalize_required_judge_result(metric, result):
 
 
 def _call_required_judge(metric, judge, *args, **kwargs):
+    """Run a required LLM judge under a bounded wall-time deadline and normalize its result.
+
+    The result records the model that produced it (``judge_model_used``), the
+    reasoning effort sent, and whether a fallback model answered, so lift can
+    leave out cases whose two arms were judged by different models.
+    """
+    previous_deadline = _ACTIVE_JUDGE_DEADLINE.get()
+    own_deadline = time.monotonic() + _resolve_judge_wall_time_budget()
+    deadline = min(previous_deadline, own_deadline) if previous_deadline is not None else own_deadline
+    token = _ACTIVE_JUDGE_DEADLINE.set(deadline)
+    calls = []
+    calls_token = _ACTIVE_JUDGE_CALLS.set(calls)
+    alarm_armed = False
+    previous_alarm_handler = None
+
+    # The standalone Harbor verifier runs judges on its main thread. Its
+    # interval timer also interrupts a response body that keeps trickling data
+    # inside one socket read, where urllib's idle timeout cannot help.
     try:
-        result = judge(*args, **kwargs)
+        try:
+            if hasattr(signal, "setitimer") and threading.current_thread() is threading.main_thread():
+                active_alarm, repeat_interval = signal.getitimer(signal.ITIMER_REAL)
+                if active_alarm == 0 and repeat_interval == 0:
+                    previous_alarm_handler = signal.getsignal(signal.SIGALRM)
+
+                    def _raise_judge_timeout(_signum, _frame):
+                        raise TimeoutError("LLM judge time budget exhausted")
+
+                    signal.signal(signal.SIGALRM, _raise_judge_timeout)
+                    try:
+                        signal.setitimer(signal.ITIMER_REAL, max(deadline - time.monotonic(), 1e-6))
+                        alarm_armed = True
+                    except OSError:
+                        signal.signal(signal.SIGALRM, previous_alarm_handler)
+            result = judge(*args, **kwargs)
+        finally:
+            if alarm_armed:
+                try:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                finally:
+                    signal.signal(signal.SIGALRM, previous_alarm_handler)
     except Exception as exc:
         result = _judge_error(f"Required {metric} judge raised {type(exc).__name__}: {exc}")
-    return _normalize_required_judge_result(metric, result)
+    finally:
+        _ACTIVE_JUDGE_DEADLINE.reset(token)
+        _ACTIVE_JUDGE_CALLS.reset(calls_token)
+    normalized = _normalize_required_judge_result(metric, result)
+    if calls:
+        normalized["judge_model_used"] = calls[-1]["model"]
+        normalized["judge_reasoning_effort"] = calls[-1]["reasoning_effort"]
+        normalized["judge_fallback_used"] = any(call["fallback_used"] for call in calls)
+    return normalized
 
 
 def _numeric_reward_payload(result, overall):
@@ -8059,6 +8865,7 @@ def main():
         question,
         ground_truth,
         bundles["accuracy"]["prompt_evidence"],
+        skill_identification_applicable=should_trigger and bool(expected_skill),
     )
     acc_score = acc_result["score"]
     details["accuracy"] = acc_result
@@ -8092,7 +8899,7 @@ def main():
             details[_m]["omitted"] = _b["omitted"]
 
     # ── Write results ────────────────────────────────────────────────────
-    result = {
+    result: dict[str, Any] = {
         "security": security_score,
         "skill_execution": se_score,
         "skill_efficiency": sef_score,
@@ -8114,7 +8921,7 @@ def main():
     if judge_errors:
         result["evaluation_status"] = "failed"
         result["evaluation_errors"] = judge_errors
-        # Harbor 0.13.2 still parses reward.json when the verifier exits nonzero.
+        # Harbor 0.22 still parses reward.json when the verifier exits nonzero.
         # Keep this artifact deliberately incomplete so the collector cannot
         # score it even if the richer diagnostic sidecar is unavailable.
         write_reward_outputs(result, 0.0)

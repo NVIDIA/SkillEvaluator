@@ -6,7 +6,7 @@
 Based on SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md, HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specifications.
 """
 
-from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, EMBEDDING_DEFAULT_NVIDIA
+from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, EMBEDDING_DEFAULT_NVIDIA, MAX_COMPLETION_TOKENS
 
 # =============================================================================
 # SKILLS CONSTANTS
@@ -156,7 +156,7 @@ BANNED_PACKAGES = [
 ]
 
 # File extensions to scan
-SCANNABLE_EXTENSIONS = {".py", ".sh", ".yaml", ".yml", ".json", ".md", ".txt"}
+SCANNABLE_EXTENSIONS = {".py", ".sh", ".yaml", ".yml", ".json", ".md", ".mdc", ".txt"}
 
 # Directories to skip at any depth during Tier 1 file-tree walks (scan artifact roots, version snapshots, build caches).
 SCAN_EXCLUDED_DIRS = frozenset(
@@ -177,7 +177,7 @@ SCAN_EXCLUDED_DIRS = frozenset(
 # Generated publishing/signing artifacts that may live in a skill root after
 # NVSkills CI runs. They are derived from the author-owned skill content, so
 # Tier 1 should not scan them as independent source files.
-SCAN_EXCLUDED_FILES = frozenset({"skill-card.md", "benchmark.md", "skill.oms.sig"})
+SCAN_EXCLUDED_FILES = frozenset({"skill-card.md", "BENCHMARK.md", "skill.oms.sig"})
 
 # Environment variables consulted (in order) to identify who is submitting a
 # skill, for the home-path PII check. A ``/home/<user>/`` path is only flagged
@@ -276,8 +276,9 @@ SIMILARITY_MAX_ENTRIES = 5_000
 SIMILARITY_MAX_DISCOVERED_PATHS = 4 * SIMILARITY_MAX_ENTRIES
 SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS = 128_000_000
 
-CONTENT_DEDUP_LLM_DEFAULT_MODEL = "azure/anthropic/claude-opus-4-8"
-CONTENT_DEDUP_LLM_TEMPERATURE = 0.1
+# Reasoning effort for the dedup verdict model (GPT-6 and Claude 5.5 or later only):
+# a DUPLICATE verdict creates a blocking finding, so precision outweighs latency.
+CONTENT_DEDUP_LLM_REASONING_EFFORT = "medium"
 
 CONTENT_DEDUP_SCANNABLE_EXTENSIONS = frozenset({".md", ".mdc", ".py", ".sh"})
 CONTENT_DEDUP_BINARY_EXTENSIONS = frozenset(
@@ -301,21 +302,36 @@ CONTENT_DEDUP_BINARY_EXTENSIONS = frozenset(
 # snapshots mirror the live skill and would dominate reports with self-matches.
 # Tier 1 has its own (broader) :data:`SCAN_EXCLUDED_DIRS`; keep these two in
 # sync for the artifact-dir entries.
-CONTENT_DEDUP_EXCLUDED_DIRS = frozenset({"evals", ".evals", "results", ".results", "versions", ".versions"})
+CONTENT_DEDUP_EXCLUDED_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+        "evals",
+        ".evals",
+        "results",
+        ".results",
+        "versions",
+        ".versions",
+    }
+)
 
 # Skipped by basename by Tier 2 dedup: generated reports/metadata are not
 # author-owned context, so comparing them against SKILL.md produces structural
 # self-matches.
-CONTENT_DEDUP_EXCLUDED_FILES = frozenset({"skill-card.md", "benchmark.md", "skill.oms.sig"})
+CONTENT_DEDUP_EXCLUDED_FILES = frozenset({"skill-card.md", "BENCHMARK.md", "skill.oms.sig"})
 
 
 # =============================================================================
 # LLM FINDING VERIFICATION CONSTANTS
 # =============================================================================
 
-LLM_VERIFY_MODEL = "azure/anthropic/claude-opus-4-8"
-LLM_VERIFY_MAX_TOKENS = 512
+LLM_VERIFY_MAX_TOKENS = MAX_COMPLETION_TOKENS
 LLM_VERIFY_TEMPERATURE = 0.0
+# A wrong false_positive verdict hides a real finding in adversarial input, and
+# verification is opt-in and low volume, so it gets the most reasoning.
+LLM_VERIFY_REASONING_EFFORT = "high"
 
 
 # =============================================================================
@@ -389,8 +405,9 @@ QUALITY_RESOURCE_DIRS = ("assets", "templates", "design-system", "resources")
 # LLM RUBRIC EVALUATION CONSTANTS (ported from SkillEvaluator Tier 2)
 # =============================================================================
 
-RUBRIC_MAX_TOKENS = 4096
+RUBRIC_MAX_TOKENS = MAX_COMPLETION_TOKENS
 RUBRIC_MIN_SCORE = 60
+RUBRIC_REASONING_EFFORT = "medium"
 
 RUBRIC_CRITERIA = [
     {
@@ -581,16 +598,18 @@ TOKEN_EFFICIENCY_EVALUATOR_NAME: str = "token_efficiency"
 # =============================================================================
 
 DIMENSION_JUDGE_MODEL = CHAT_DEFAULT_OPENAI
-DIMENSION_JUDGE_MAX_TOKENS = 4096
+DIMENSION_JUDGE_MAX_TOKENS = MAX_COMPLETION_TOKENS
 DIMENSION_JUDGE_TEMPERATURE: float | None = 0.0
+DIMENSION_JUDGE_REASONING_EFFORT = "medium"
 DIMENSION_VERDICT_PASS_THRESHOLD = 0.5
 DIMENSION_VERDICT_NEUTRAL_THRESHOLD = 0.4
 
 # LLM-as-Judge for the Insights tab (additional Conclusions and Recommendations
 # on top of the deterministic ones produced by tier3_normalizer).
 INSIGHTS_JUDGE_MODEL = DIMENSION_JUDGE_MODEL
-INSIGHTS_JUDGE_MAX_TOKENS = 4096
+INSIGHTS_JUDGE_MAX_TOKENS = MAX_COMPLETION_TOKENS
 INSIGHTS_JUDGE_TEMPERATURE: float | None = None
+INSIGHTS_JUDGE_REASONING_EFFORT = DIMENSION_JUDGE_REASONING_EFFORT
 INSIGHTS_JUDGE_MAX_CONCLUSIONS = 5
 INSIGHTS_JUDGE_MAX_RECOMMENDATIONS = 5
 

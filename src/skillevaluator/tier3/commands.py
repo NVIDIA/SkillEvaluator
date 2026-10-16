@@ -48,6 +48,8 @@ from skillevaluator.tier3.harbor.progress import (
 from skillevaluator.tier3.harbor.runner import (
     _check_prerequisites,
     _harbor_bin,
+    _harbor_launch_cwd,
+    _harbor_launch_environment,
     _model_for_agent,
     _resolve_agent_runtime_plan,
     run_harbor_eval,
@@ -631,6 +633,7 @@ def evaluate(
     *,
     agents: str | None,
     env_mode: str,
+    environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
     n_attempts: int | None,
     pass_threshold: float | None,
@@ -651,6 +654,7 @@ def evaluate(
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
+    repo_context_exclude_paths: tuple[Path, ...] = (),
     evaluated_source: dict[str, str] | None = None,
     progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
@@ -696,6 +700,9 @@ def evaluate(
                 raise ValueError(f"A public LLM provider is required for live evaluation: {exc}") from exc
 
         agent_models = parse_agent_model_overrides(agent_model)
+        from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+
+        environment_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
         unknown_model_agents = sorted(set(agent_models) - set(agent_list))
         if unknown_model_agents:
             raise ValueError(
@@ -725,11 +732,13 @@ def evaluate(
             agent_runtime_preflight=agent_runtime_preflight,
             env_mode=env_mode,
             env_mode_source="CLI",
+            environment_kwargs=environment_kwargs,
             timeout_multiplier=timeout_multiplier,
             evaluated_source=evaluated_source,
             override_cpus=override_cpus,
             override_memory_mb=override_memory_mb,
             override_storage_mb=override_storage_mb,
+            repo_context_exclude_paths=repo_context_exclude_paths,
             progress_reporter=reporter,
         )
     except Exception as exc:
@@ -744,6 +753,7 @@ def doctor(
     *,
     agents: str | None,
     env_mode: str,
+    environment_kwarg: tuple[str, ...] = (),
     verify_models: bool = False,
     agent_model: tuple[str, ...] = (),
 ) -> int:
@@ -824,7 +834,21 @@ def doctor(
     else:
         rows.append(("Harbor agents", "pass", ", ".join(agent_list)))
 
-    prereq_errors = _check_prerequisites(env_mode=env_mode, agents=agent_list)
+    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+
+    try:
+        environment_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
+    except ValueError as exc:
+        environment_kwargs = {}
+        prereq_errors = [str(exc)]
+    else:
+        prerequisite_subprocess_env = dict(next(iter(runtime_plans.values())).subprocess_env) if runtime_plans else None
+        prereq_errors = _check_prerequisites(
+            env_mode=env_mode,
+            agents=agent_list,
+            environment_kwargs=environment_kwargs,
+            subprocess_env=prerequisite_subprocess_env,
+        )
     if prereq_errors:
         for error in prereq_errors:
             rows.append((f"{env_mode} prerequisite", "fail", error))
@@ -986,7 +1010,8 @@ def harbor_view(jobs_dir: Path) -> int:
     """Open retained Harbor job artifacts with Harbor's trajectory browser."""
     cmd = [_harbor_bin(), "view", str(jobs_dir.resolve())]
     try:
-        return subprocess.call(cmd)
+        with _harbor_launch_cwd() as launch_cwd:
+            return subprocess.call(cmd, cwd=launch_cwd, env=_harbor_launch_environment(os.environ))
     except FileNotFoundError:
         console.print("[red]Error: harbor binary not found.[/red]")
         return 1

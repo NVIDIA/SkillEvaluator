@@ -18,6 +18,11 @@ from typing import Any
 
 from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+    atif_content_has_text,
+    atif_content_text,
+    normalized_tool_call_is_error,
+)
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     iter_normalized_tool_calls as iter_tool_calls,
 )
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
@@ -52,11 +57,15 @@ def get_all_tool_calls(traj: dict[str, Any]) -> list[dict[str, Any]]:
 def get_skill_tool_calls(traj: dict[str, Any]) -> list[str]:
     """Get skill names from Claude Code's native ``Skill`` tool invocations."""
     skills: list[str] = []
-    for tc in get_all_tool_calls(traj):
-        if tc["fn"].lower() == "skill":
-            name = tc["args"].get("skill", tc["args"].get("name", ""))
-            if name:
-                skills.append(str(name))
+    for step, tc in iter_tool_calls(traj):
+        if (tc.get("function_name") or "").lower() != "skill":
+            continue
+        if normalized_tool_call_is_error(step, tc):
+            continue
+        args = tc.get("arguments") or {}
+        name = args.get("skill", args.get("name", ""))
+        if name:
+            skills.append(str(name))
     return skills
 
 
@@ -97,19 +106,19 @@ def get_agent_text(traj: dict[str, Any]) -> str:
     parts: list[str] = []
     for step in traj.get("steps", []):
         if step.get("source") == "agent":
-            msg = step.get("message") or ""
-            if isinstance(msg, str) and msg.strip():
+            msg = atif_content_text(step.get("message"))
+            if msg.strip():
                 parts.append(msg)
     return "\n".join(parts)
 
 
 def get_final_response(traj: dict[str, Any]) -> str:
-    """Get the last non-empty agent message from the trajectory."""
+    """Get the last text-bearing agent message from the trajectory."""
     for step in reversed(traj.get("steps", [])):
         if step.get("source") == "agent":
-            msg = step.get("message") or ""
-            if isinstance(msg, str) and msg.strip():
-                return msg
+            content = step.get("message")
+            if atif_content_has_text(content):
+                return atif_content_text(content)
     return ""
 
 
@@ -148,12 +157,12 @@ def build_conversation_summary(traj: dict[str, Any], question: str) -> str:
 
         obs = step.get("observation") or {}
         for r in obs.get("results") or []:
-            content = str(r.get("content", ""))
+            content = atif_content_text(r.get("content"))
             if content:
                 parts.append(f"Tool returned: {content[:400]}")
 
-        msg = step.get("message") or ""
-        if msg and isinstance(msg, str) and msg.strip() and not step.get("tool_calls"):
+        msg = atif_content_text(step.get("message"))
+        if msg.strip() and not step.get("tool_calls"):
             parts.append(f"Agent: {msg[:1500]}")
 
     final = get_final_response(traj)
@@ -501,8 +510,9 @@ def _final_response_ref(traj: dict[str, Any]) -> list[dict[str, Any]]:
         step = steps[step_idx]
         if step.get("source") != "agent":
             continue
-        msg = step.get("message") or ""
-        if isinstance(msg, str) and msg.strip():
+        content = step.get("message")
+        if atif_content_has_text(content):
+            msg = atif_content_text(content)
             return [
                 _evidence_ref(
                     source="trajectory.json",
@@ -561,7 +571,7 @@ def _tool_observation_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
         for result_idx, result in enumerate((step.get("observation") or {}).get("results") or []):
             if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
                 return refs
-            content = str(result.get("content") or "")
+            content = atif_content_text(result.get("content"))
             if not content.strip():
                 continue
             call_id = str(result.get("source_call_id") or f"result-{result_idx}")
@@ -777,7 +787,7 @@ def _late_observation_excerpts(traj: dict[str, Any], limit: int) -> list[str]:
         if step.get("source") != "agent":
             continue
         for result in reversed((step.get("observation") or {}).get("results") or []):
-            content = str(result.get("content") or "").strip()
+            content = atif_content_text(result.get("content")).strip()
             if content:
                 out.append(_clip(content, limit))
     return out
@@ -1052,6 +1062,8 @@ def extract_tool_calls_as_dicts(traj: dict[str, Any]) -> list[dict[str, Any]]:
                 "action_input": tc.get("arguments") or {},
                 "observation": _tool_call_observation(step, tc),
             }
+            if normalized_tool_call_is_error(step, tc):
+                call["is_error"] = True
             if status := tc.get("_atif_normalization_status"):
                 call["normalization_status"] = status
             if status := tc.get("_atif_observation_status"):

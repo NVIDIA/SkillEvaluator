@@ -348,6 +348,20 @@ class TestIterScannableFiles:
         rel_paths = sorted(p.relative_to(tmp_path).as_posix() for p in out)
         assert rel_paths == ["live.md"]
 
+    def test_excluded_directory_case_alias_follows_filesystem_semantics(self, tmp_path: Path):
+        alias = tmp_path / ".VENV"
+        alias.mkdir()
+        scanned = alias / "evil.py"
+        scanned.write_text("print('scanned')\n")
+        canonical = tmp_path / ".venv"
+
+        out = iter_scannable_files(tmp_path, {".py"})
+
+        if canonical.exists() and alias.samefile(canonical):
+            assert scanned not in out
+        else:
+            assert scanned in out
+
     def test_skips_generated_skill_artifacts_by_default(self, tmp_path: Path):
         (tmp_path / "SKILL.md").write_text("x")
         (tmp_path / "notes.md").write_text("x")
@@ -359,6 +373,18 @@ class TestIterScannableFiles:
         out = iter_scannable_files(tmp_path, {".md", ".sig"})
         rel_paths = sorted(p.relative_to(tmp_path).as_posix() for p in out)
         assert rel_paths == ["SKILL.md", "benchmarks.md", "notes.md"]
+
+    def test_generated_file_case_alias_follows_filesystem_semantics(self, tmp_path: Path):
+        alias = tmp_path / "BENCHMARK.MD"
+        alias.write_text("case-sensitive authored content")
+        canonical = tmp_path / "BENCHMARK.md"
+
+        out = iter_scannable_files(tmp_path, {".MD"})
+
+        if canonical.exists() and alias.samefile(canonical):
+            assert alias not in out
+        else:
+            assert alias in out
 
     def test_single_generated_artifact_file_returns_empty(self, tmp_path: Path):
         f = tmp_path / "skill-card.md"

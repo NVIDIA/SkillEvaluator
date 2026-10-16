@@ -10,10 +10,10 @@ import importlib
 import io
 import json
 import os
-import subprocess
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -527,6 +527,77 @@ def test_reporters_redact_exact_values_and_secret_shaped_details() -> None:
     assert "<redacted>" in rendered
 
 
+@pytest.mark.parametrize(
+    "proxy_uri",
+    [
+        "http://proxy-user:proxy-password@proxy.example:8080",
+        "https://proxy-user:password@fragment@proxy.example:8443",
+        "https://bearer-token@proxy.example",
+        "socks5://user%3Apassword@proxy.example:1080",
+    ],
+)
+def test_progress_redacts_proxy_uri_userinfo_even_before_secret_values_are_registered(proxy_uri: str) -> None:
+    progress = _progress_module()
+
+    extracted = progress.secret_values_from_environment({"HTTP_PROXY": proxy_uri})
+    rendered = progress.redact_progress_detail(f"Cannot connect to proxy {proxy_uri}", secret_values=set())
+
+    assert proxy_uri in extracted
+    assert "proxy-user" not in rendered
+    assert "proxy-password" not in rendered
+    assert "password@fragment" not in rendered
+    assert "bearer-token" not in rendered
+    assert "user%3Apassword" not in rendered
+    assert "<redacted>@proxy.example" in rendered
+
+
+@pytest.mark.parametrize(
+    ("proxy_uri", "diagnostic", "secrets"),
+    [
+        (
+            "http://proxy-user:proxy-password@proxy.example:8080",
+            "proxy auth failed for proxy-user with proxy-password",
+            ("proxy-user", "proxy-password"),
+        ),
+        (
+            "http://proxy%2Duser:proxy%2Dpassword@proxy.example:8080",
+            "proxy auth failed for proxy-user with proxy-password",
+            ("proxy-user", "proxy-password"),
+        ),
+        (
+            "proxy-user:proxy-password@proxy.example:8080",
+            "proxy auth failed for proxy-user with proxy-password",
+            ("proxy-user", "proxy-password"),
+        ),
+    ],
+)
+def test_progress_registers_proxy_userinfo_components(
+    proxy_uri: str,
+    diagnostic: str,
+    secrets: tuple[str, ...],
+) -> None:
+    progress = _progress_module()
+
+    extracted = progress.secret_values_from_environment({"HTTPS_PROXY": proxy_uri})
+    rendered = progress.redact_progress_detail(diagnostic, secret_values=extracted)
+
+    assert all(secret in extracted for secret in secrets)
+    assert all(secret not in rendered for secret in secrets)
+
+
+@pytest.mark.parametrize("short_secret", ["x", "pw", "usr"])
+def test_progress_redacts_short_exact_credential_fragments_as_standalone_tokens(short_secret: str) -> None:
+    progress = _progress_module()
+    rendered = progress.redact_progress_detail(
+        f"proxy rejected credential {short_secret}; password remains a normal word",
+        secret_values={short_secret},
+    )
+
+    assert f" {short_secret};" not in rendered
+    assert "<redacted>" in rendered
+    assert "password remains" in rendered
+
+
 def test_progress_detail_strips_osc_title_and_hyperlink_payloads() -> None:
     progress = _progress_module()
 
@@ -538,6 +609,15 @@ def test_progress_detail_strips_osc_title_and_hyperlink_payloads() -> None:
     assert "malicious.example" not in rendered
     assert "\x1b" not in rendered
     assert rendered == "safe text click done"
+
+
+def test_progress_redaction_scales_linearly_for_large_non_uri_text() -> None:
+    progress = _progress_module()
+    payload = "x" * (1024 * 1024)
+
+    rendered = progress.redact_progress_detail(payload)
+
+    assert rendered == payload
 
 
 def test_plain_reporter_redacts_secrets_from_plan_values() -> None:
@@ -696,7 +776,7 @@ def _stub_runner(
     monkeypatch.setattr(runner, "find_evals_file", lambda _path: evals_file)
     monkeypatch.setattr(runner, "generate_harbor_tasks", task_emitter or emit_tasks)
     monkeypatch.setattr(runner, "_provider_environment", lambda _provider: {"OPENAI_API_KEY": provider.api_key})
-    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates: ({}, []))
+    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates, **_kwargs: ({}, []))
     monkeypatch.setattr(
         runner,
         "_validate_agent_provider_credentials",
@@ -738,6 +818,59 @@ def _stub_runner(
     return runner, skill
 
 
+def test_runner_rejects_custom_in_skill_results_root_before_creating_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, skill = _stub_runner(monkeypatch, tmp_path)
+    results_root = skill / "custom-results"
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=results_root)
+
+    assert result.get("error")
+    assert "canonical" in json.dumps(result)
+    assert "evals/results" in json.dumps(result)
+    assert not results_root.exists()
+
+
+def test_run_result_bounds_multibyte_launch_errors_for_report_loader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    github_token = "ghp_" + ("A" * 36)
+    launch_errors = [f"launch {index}: {github_token}\x1b[2J" + ("😀" * 2_048) for index in range(256)]
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        run_agent=lambda **_kwargs: launch_errors,
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    result_path = Path(result["result_path"])
+    serialized = result_path.read_bytes()
+    persisted = json.loads(serialized)
+    assert len(serialized) <= 2 * 1024 * 1024
+    assert persisted["execution_status"] == "failed"
+    assert persisted["execution_error_details_total"] == len(launch_errors)
+    assert persisted["execution_error_details_shown"] == len(persisted["execution_errors"])
+    assert persisted["execution_error_details_truncated"] is True
+    assert persisted["error"] == persisted["execution_errors"][:1]
+    assert github_token not in serialized.decode("utf-8")
+    assert "\\u001b" not in serialized.decode("utf-8")
+
+    from skillevaluator.tier3.harbor import report_data
+
+    diagnostics: list[dict[str, Any]] = []
+    assert report_data._load_bounded_json(result_path, diagnostics, artifact="result") == persisted
+    assert diagnostics == []
+
+
 def _configure_native_task_source(
     monkeypatch: pytest.MonkeyPatch,
     runner,
@@ -775,6 +908,80 @@ def _configure_native_task_source(
         return [output / "case-1"]
 
     monkeypatch.setattr(runner, "stage_native_harbor_tasks", emit_native)
+
+
+def test_ack_eval_preflight_uses_the_exact_prospective_bedrock_child_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.provider_config import ProviderConfig
+    from skillevaluator.tier3.harbor import runner as runner_module
+
+    real_harbor_subprocess_environment = runner_module._harbor_subprocess_environment
+    real_provider_environment = runner_module._provider_environment
+    captured: dict[str, Any] = {}
+    launched_env: dict[str, str] = {}
+
+    def capture_preflight(**kwargs: Any) -> list[str]:
+        captured.update(kwargs)
+        return []
+
+    def capture_launch(**kwargs: Any) -> list[str]:
+        launched_env.update(kwargs["run_env"])
+        return []
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        environment_check=capture_preflight,
+        run_agent=capture_launch,
+        provider_name="bedrock",
+        provider_model="us.anthropic.claude-test",
+    )
+    provider = ProviderConfig(
+        provider="bedrock",
+        model="us.anthropic.claude-test",
+        api_key=None,
+        base_url=None,
+        litellm_model="bedrock/us.anthropic.claude-test",
+        region="us-west-2",
+    )
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "eks-exec-auth-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "eks-exec-auth-secret")
+    monkeypatch.setenv("KUBECONFIG", "/config/eks")
+    monkeypatch.setenv("SKILL_EVAL_JUDGE_MODEL", "judge-model")
+    monkeypatch.setenv("ALIBABA_CLOUD_ACCESS_KEY_ID", "ambient-parent-only")
+    monkeypatch.setattr(runner, "resolve_llm_provider", lambda: provider)
+    monkeypatch.setattr(runner, "_provider_environment", real_provider_environment)
+    monkeypatch.setattr(runner, "_harbor_subprocess_environment", real_harbor_subprocess_environment)
+    monkeypatch.setattr(
+        runner,
+        "_resolve_runtime_env",
+        lambda _templates, **_kwargs: ({"SAFE_RUNTIME_FLAG": "enabled"}, []),
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["claude-code"],
+        env_mode="ack",
+        environment_kwargs={"namespace": "skill-evals"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert result["execution_status"] == "succeeded"
+    child_env = captured["subprocess_env"]
+    assert isinstance(child_env, dict)
+    assert child_env == launched_env
+    assert child_env["KUBECONFIG"] == "/config/eks"
+    assert child_env["AWS_ACCESS_KEY_ID"] == "eks-exec-auth-key"
+    assert child_env["AWS_SECRET_ACCESS_KEY"] == "eks-exec-auth-secret"
+    assert child_env["AWS_REGION"] == "us-west-2"
+    assert child_env["CLAUDE_CODE_USE_BEDROCK"] == "1"
+    assert child_env["SAFE_RUNTIME_FLAG"] == "enabled"
+    assert child_env["LLM_JUDGE_MODEL"] == "judge-model"
+    assert child_env["SKILL_EVAL_JUDGE_MODEL"] == "judge-model"
+    assert "ALIBABA_CLOUD_ACCESS_KEY_ID" not in child_env
 
 
 @pytest.mark.parametrize("agent_runtime_preflight", [True, False])
@@ -1319,6 +1526,7 @@ def test_native_standard_grading_host_override_is_the_exact_judge_probe(
         "model": "host-judge-model",
         "source": override_name,
         "override_applied": True,
+        "reasoning_effort": None,
         "catalog_verification": "verified",
     }
 
@@ -1842,6 +2050,389 @@ def test_runner_persists_compact_feedback_to_result_json(
     assert "agent_eval" not in persisted
 
 
+def test_runner_persists_run_owned_publication_identity_in_final_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    report_identity: dict[str, Any] = {}
+
+    def write_html(_skill_path: Path, run_dir: Path, *, engine_result: dict[str, Any], **_kwargs: Any) -> Path:
+        report_identity.update(
+            {
+                "run_id": engine_result.get("run_id"),
+                "publication_target": engine_result.get("publication_target"),
+            }
+        )
+        path = run_dir / "report.html"
+        path.write_text("<html></html>", encoding="utf-8")
+        return path
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, html_report=write_html)
+    expected_target = publication_target_from_path(skill)
+    assert expected_target is not None
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+
+    assert result["publication_target"] == expected_target
+    assert persisted["publication_target"] == expected_target
+    assert persisted["run_id"] == result["run_id"] == Path(result["run_dir"]).name
+    assert report_identity == {
+        "run_id": result["run_id"],
+        "publication_target": expected_target,
+    }
+
+
+@pytest.mark.parametrize(
+    ("context_mode", "source_is_target_bound"),
+    [("linked", False), ("full", False), ("full", True)],
+)
+def test_runner_fails_publication_closed_for_external_repo_runtime_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    context_mode: str,
+    source_is_target_bound: bool,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    external_source = tmp_path / "shared-runtime.txt"
+    external_source.write_text("agent-visible external input\n", encoding="utf-8")
+
+    def emit_tasks(skill: Path, output: Path, **_kwargs: Any) -> list[Path]:
+        task = output / "case-1"
+        environment = task / "environment"
+        environment.mkdir(parents=True)
+        staged_source = skill / "SKILL.md" if source_is_target_bound else external_source
+        (environment / "repo-context.json").write_text(
+            json.dumps(
+                {
+                    "mode": context_mode,
+                    "repo_root": str(tmp_path),
+                    "files": [
+                        {
+                            "source": str(staged_source),
+                            "container": "/workspace/repo/shared-runtime.txt",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return [task]
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, task_emitter=emit_tasks)
+    (skill / "SKILL.md").write_text("# evaluated target\n", encoding="utf-8")
+    expected_target = publication_target_from_path(skill)
+    assert expected_target is not None
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+
+    assert result["publication_target"] is None
+    assert result["publication_target_conflict"] == {
+        "run_start": expected_target,
+        "run_end": None,
+        "reason_code": "runtime_context_outside_publication_target",
+    }
+    assert persisted["publication_target"] is None
+    assert persisted["publication_target_conflict"] == result["publication_target_conflict"]
+
+
+def test_runtime_context_binding_rejects_external_reference_and_workspace_skills(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.runner import _runtime_context_is_bound_to_publication_target
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    references = tmp_path / "references"
+    (references / "reference-skill").mkdir(parents=True)
+    workspace = tmp_path / "workspace-skill"
+    workspace.mkdir()
+
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=references,
+        workspace_skill_paths=(),
+    )
+    (references / "reference-skill").rmdir()
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=references,
+        workspace_skill_paths=(),
+    )
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=None,
+        workspace_skill_paths=(workspace,),
+    )
+
+    internal_references = skill / "references"
+    (internal_references / "reference-skill").mkdir(parents=True)
+    internal_workspace = skill / "workspace-skill"
+    internal_workspace.mkdir()
+    assert _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=internal_references,
+        workspace_skill_paths=(internal_workspace,),
+    )
+
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=tmp_path / "missing-references",
+        workspace_skill_paths=(),
+    )
+
+    external_alias = tmp_path / "external-workspace-alias"
+    try:
+        external_alias.symlink_to(internal_workspace, target_is_directory=True)
+    except OSError:
+        pass
+    else:
+        assert not _runtime_context_is_bound_to_publication_target(
+            skill,
+            (),
+            reference_skills_dir=None,
+            workspace_skill_paths=(external_alias,),
+        )
+
+
+@pytest.mark.parametrize(
+    "excluded_parent",
+    [
+        Path("results"),
+        Path(".results"),
+        Path(".venv"),
+        Path("node_modules"),
+        Path("evals/results"),
+    ],
+)
+def test_runtime_context_binding_rejects_workspace_skill_excluded_from_target_digest(
+    tmp_path: Path,
+    excluded_parent: Path,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+    from skillevaluator.tier3.harbor.runner import _runtime_context_is_bound_to_publication_target
+
+    skill = (tmp_path / "demo").resolve()
+    workspace = skill / excluded_parent / "workspace-skill"
+    workspace.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# evaluated target\n", encoding="utf-8")
+    workspace_manifest = workspace / "SKILL.md"
+    workspace_manifest.write_text("# runtime input v1\n", encoding="utf-8")
+
+    target_before = publication_target_from_path(skill)
+    assert target_before is not None
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=None,
+        workspace_skill_paths=(workspace.resolve(),),
+    )
+
+    workspace_manifest.write_text("# attacker-controlled runtime input v2\n", encoding="utf-8")
+
+    assert publication_target_from_path(skill) == target_before
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=None,
+        workspace_skill_paths=(workspace.resolve(),),
+    )
+
+
+def test_runtime_context_binding_rejects_reference_child_excluded_from_target_digest(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.runner import _runtime_context_is_bound_to_publication_target
+
+    skill = (tmp_path / "demo").resolve()
+    references = skill / "evals"
+    excluded_reference = references / "results" / "reference-skill"
+    excluded_reference.mkdir(parents=True)
+
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=references,
+        workspace_skill_paths=(),
+    )
+
+
+def test_runtime_context_binding_fails_closed_for_unstable_relative_or_oversized_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    missing_skill = tmp_path / "missing-skill"
+    assert not runner._runtime_context_is_bound_to_publication_target(
+        missing_skill,
+        (),
+        reference_skills_dir=None,
+        workspace_skill_paths=(),
+    )
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    missing_manifest_task = tmp_path / "missing-manifest-task"
+    (missing_manifest_task / "environment" / "repo").mkdir(parents=True)
+    assert not runner._runtime_context_is_bound_to_publication_target(
+        skill,
+        (missing_manifest_task,),
+        reference_skills_dir=None,
+        workspace_skill_paths=(),
+    )
+
+    task = tmp_path / "task"
+    environment = task / "environment"
+    environment.mkdir(parents=True)
+    (environment / "repo-context.json").write_text(
+        json.dumps(
+            {
+                "mode": "linked",
+                "repo_root": str(tmp_path),
+                "files": [{"source": "demo/SKILL.md", "container": "/workspace/repo/demo/SKILL.md"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert not runner._runtime_context_is_bound_to_publication_target(
+        skill,
+        (task,),
+        reference_skills_dir=None,
+        workspace_skill_paths=(),
+    )
+
+    monkeypatch.setattr(runner, "_MAX_REPO_CONTEXT_METADATA_BYTES", 32)
+    (environment / "repo-context.json").write_text("{" + " " * 32 + "}", encoding="utf-8")
+    assert not runner._runtime_context_is_bound_to_publication_target(
+        skill,
+        (task,),
+        reference_skills_dir=None,
+        workspace_skill_paths=(),
+    )
+
+
+def test_runner_rejects_source_change_after_private_snapshot_before_engine_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    task_calls: list[Path] = []
+    engine_calls: list[dict[str, Any]] = []
+
+    def emit_tasks(_skill: Path, output: Path, **_kwargs: Any) -> list[Path]:
+        task_calls.append(output)
+        return [output / "case-1"]
+
+    def run_agent(**kwargs: Any) -> list[str]:
+        engine_calls.append(kwargs)
+        return []
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        task_emitter=emit_tasks,
+        run_agent=run_agent,
+    )
+    original_snapshot = runner.private_evaluator_skill_snapshot
+    initial_target = publication_target_from_path(skill)
+    assert initial_target is not None
+
+    @contextmanager
+    def mutate_after_copy(path: Path):
+        with original_snapshot(path) as snapshot:
+            assert (snapshot / "evals" / "evals.json").read_text(encoding="utf-8") == "{}"
+            (path / "evals" / "evals.json").write_text('{"changed": true}', encoding="utf-8")
+            yield snapshot
+
+    monkeypatch.setattr(runner, "private_evaluator_skill_snapshot", mutate_after_copy)
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+
+    assert result == {"error": ["Publication source changed while its private evaluator snapshot was created"]}
+    assert publication_target_from_path(skill) != initial_target
+    assert task_calls == []
+    assert engine_calls == []
+    assert not (tmp_path / "results").exists()
+
+
+def test_runner_marks_publication_identity_conflict_when_source_changes_mid_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    skill_ref: list[Path] = []
+
+    def collect_after_mutation(**_kwargs: Any) -> dict[str, Any]:
+        (skill_ref[0] / "SKILL.md").write_text("# changed during evaluation\n", encoding="utf-8")
+        return {"execution_status": "succeeded", "execution_errors": [], "metrics": []}
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, collect=collect_after_mutation)
+    (skill / "SKILL.md").write_text("# evaluated source\n", encoding="utf-8")
+    skill_ref.append(skill)
+    run_start_target = publication_target_from_path(skill)
+    assert run_start_target is not None
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+    run_end_target = publication_target_from_path(skill)
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+
+    assert run_end_target is not None and run_end_target != run_start_target
+    assert result["publication_target"] is None
+    assert result["publication_target_conflict"] == {
+        "run_start": run_start_target,
+        "run_end": run_end_target,
+    }
+    assert persisted["publication_target"] is None
+    assert persisted["publication_target_conflict"] == result["publication_target_conflict"]
+
+
+def test_runner_rechecks_identity_after_report_generation_and_renders_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    skill_ref: list[Path] = []
+    rendered_targets: list[object] = []
+
+    def write_html(_skill_path: Path, run_dir: Path, *, engine_result: dict[str, Any], **_kwargs: Any) -> Path:
+        rendered_targets.append(engine_result.get("publication_target"))
+        if len(rendered_targets) == 1:
+            (skill_ref[0] / "SKILL.md").write_text("# changed during report\n", encoding="utf-8")
+        path = run_dir / "report.html"
+        path.write_text("<html></html>", encoding="utf-8")
+        return path
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, html_report=write_html)
+    (skill / "SKILL.md").write_text("# evaluated source\n", encoding="utf-8")
+    skill_ref.append(skill)
+    run_start_target = publication_target_from_path(skill)
+    assert run_start_target is not None
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+    run_end_target = publication_target_from_path(skill)
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+
+    assert run_end_target is not None and run_end_target != run_start_target
+    assert rendered_targets == [run_start_target, None]
+    assert result["publication_target"] is None
+    assert result["publication_target_conflict"] == {
+        "run_start": run_start_target,
+        "run_end": run_end_target,
+    }
+    assert persisted["publication_target"] is None
+    assert persisted["publication_target_conflict"] == result["publication_target_conflict"]
+
+
 def test_keep_flag_retains_harbor_artifacts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1889,7 +2480,7 @@ def test_default_task_staging_failure_cleans_transient_artifacts(
         {
             "labels": ["codex"],
             "provider": "openai-compatible",
-            "model": "openai/openai/gpt-5.6-sol",
+            "model": "openai/openai/gpt-6.1-sol",
             "status": "degraded",
             "detail": "model catalog access does not verify runtime credentials for this endpoint",
         },
@@ -1905,6 +2496,27 @@ def test_default_task_staging_failure_cleans_transient_artifacts(
     assert persisted["run_config"] == result["run_config"]
     run_config_path = run_dir / "run_config.json"
     assert json.loads(run_config_path.read_text(encoding="utf-8")) == result["run_config"]
+
+
+def test_runner_persists_run_owned_identity_for_pre_execution_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    def fail_staging(*_args: Any, **_kwargs: Any) -> list[Path]:
+        raise ValueError("invalid task")
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, task_emitter=fail_staging)
+    expected_target = publication_target_from_path(skill)
+    assert expected_target is not None
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+
+    assert result["publication_target"] == expected_target
+    assert persisted["publication_target"] == expected_target
+    assert persisted["run_id"] == result["run_id"] == Path(result["run_dir"]).name
 
 
 @pytest.mark.parametrize("failure_arm", ["with-skill", "baseline"])
@@ -2127,7 +2739,7 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
     monkeypatch.setattr(runner, "find_evals_file", lambda _path: evals_file)
     monkeypatch.setattr(runner, "generate_harbor_tasks", _emit_tasks)
     monkeypatch.setattr(runner, "_provider_environment", lambda _provider: {"OPENAI_API_KEY": "sk-test-secret"})
-    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates: ({}, []))
+    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates, **_kwargs: ({}, []))
     monkeypatch.setattr(runner, "_validate_agent_provider_credentials", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(runner, "_harbor_subprocess_environment", lambda **_kwargs: {})
     from skillevaluator.tier3.harbor import runtime_preflight
@@ -2621,7 +3233,11 @@ def test_runner_registers_exact_secrets_before_skill_and_model_render(
         skill_name=secret,
         provider_model=secret,
     )
-    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates: ({"CUSTOM_VALUE": secret}, []))
+    monkeypatch.setattr(
+        runner,
+        "_resolve_runtime_env",
+        lambda _templates, **_kwargs: ({"CUSTOM_VALUE": secret}, []),
+    )
     output = io.StringIO()
     reporter = _progress_module().PlainProgressReporter(stream=output, refresh_interval=60)
 
@@ -2647,13 +3263,12 @@ def test_harbor_failure_detail_redacts_runtime_secrets_without_streaming(
     secret = "plain-runtime-secret"
     monkeypatch.setattr(runner, "build_harbor_run_command", lambda **_kwargs: ["harbor", "run"])
     monkeypatch.setattr(
-        runner.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            ["harbor", "run"],
-            17,
-            stdout=f"OPENAI_API_KEY={secret}\nraw agent output",
-            stderr=f"token={secret}\nraw verifier output",
+        runner,
+        "_run_bounded_harbor_process",
+        lambda *_args, **_kwargs: runner._BoundedHarborProcessResult(
+            returncode=17,
+            output_tail=f"OPENAI_API_KEY={secret}\nraw agent output\ntoken={secret}\nraw verifier output",
+            output_exceeded=False,
         ),
     )
 
@@ -2675,6 +3290,46 @@ def test_harbor_failure_detail_redacts_runtime_secrets_without_streaming(
 
     assert ok is False
     assert secret not in detail
+    assert "<redacted>" in detail
+
+
+def test_harbor_failure_detail_redacts_before_tail_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    secret = "SYNTHETIC_SECRET_ABCDEF"
+    monkeypatch.setattr(runner, "build_harbor_run_command", lambda **_kwargs: ["harbor", "run"])
+    monkeypatch.setattr(
+        runner,
+        "_run_bounded_harbor_process",
+        lambda *_args, **_kwargs: runner._BoundedHarborProcessResult(
+            returncode=17,
+            output_tail="prefix|" + secret + "x" * 1988,
+            output_exceeded=False,
+        ),
+    )
+
+    ok, detail = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="codex",
+        job_name="demo-codex-with",
+        env_mode="docker",
+        model="gpt-5",
+        jobs_dir=tmp_path,
+        run_env={"CUSTOM_RUNTIME_VALUE": secret},
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+    )
+
+    assert ok is False
+    assert secret not in detail
+    assert "CRET_ABCDEF" not in detail
     assert "<redacted>" in detail
 
 
@@ -2901,3 +3556,29 @@ def test_command_runner_terminalizes_inherited_configuration_stage(
         ("run-finished", "failed"),
     ]
     assert transitions.count(("run-finished", "failed")) == 1
+
+
+def test_short_credential_named_flags_do_not_redact_counts() -> None:
+    from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
+
+    secrets = secret_values_from_environment(
+        {
+            "SDK_HAS_HOST_AUTH_REFRESH": "1",
+            "FEATURE_TOKEN_ENABLED": "yes",
+            "SERVICE_API_KEY": "service-key-123456",
+            "HTTPS_PROXY": "http://u:p@proxy.example:8080",
+        }
+    )
+
+    assert "1" not in secrets
+    assert "yes" not in secrets
+    assert "service-key-123456" in secrets
+    detail = redact_progress_detail(
+        "Harbor job did not complete successfully: 1 errored; codex with-skill (0/1 scored) "
+        "via http://u:p@proxy.example:8080 using service-key-123456",
+        secret_values=secrets,
+    )
+    assert "1 errored" in detail
+    assert "(0/1 scored)" in detail
+    assert "service-key-123456" not in detail
+    assert "u:p@" not in detail

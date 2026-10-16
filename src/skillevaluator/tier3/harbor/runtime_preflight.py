@@ -20,7 +20,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from threading import BoundedSemaphore, Thread
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 from urllib.request import getproxies
 
@@ -73,7 +73,13 @@ from skillevaluator.model_catalog import (
     fetch_model_records,
 )
 from skillevaluator.tier3.harbor.progress import redact_progress_detail
-from skillevaluator.tier3.harbor.runner import _nvidia_build_key_handoff, build_harbor_run_command
+from skillevaluator.tier3.harbor.runner import (
+    _harbor_launch_cwd,
+    _harbor_launch_environment,
+    _nvidia_build_key_handoff,
+    build_harbor_run_command,
+)
+from skillevaluator.tier3_environments import HARBOR_DOCKER_ENGINE_ENV_MODES
 
 if TYPE_CHECKING:
     from skillevaluator.provider_config import ProviderConfig
@@ -187,6 +193,9 @@ _BEDROCK_ENDPOINT_ENVIRONMENT_VARIABLES = (
     "AWS_ENDPOINT_URL",
     "AWS_ENDPOINT_URL_BEDROCK",
     "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+    "AWS_ENDPOINT_URL_SIGNIN",
+    "AWS_ENDPOINT_URL_SSO",
+    "AWS_ENDPOINT_URL_SSO_OIDC",
     "AWS_ENDPOINT_URL_STS",
 )
 _BEDROCK_RUNTIME_SERVICE_MODELS = ("bedrock", "bedrock-runtime")
@@ -943,7 +952,7 @@ def validate_harbor_agent_only_job_result(
 ) -> tuple[bool, str]:
     """Validate a verification-disabled Harbor job and its agent result.
 
-    Harbor 0.13.2 records an agent-only trial as completed at the job level,
+    Harbor 0.22 records an agent-only trial as completed at the job level,
     but intentionally leaves its evaluation trial and reward counts at zero.
     The per-trial result is therefore the proof that the agent actually ran.
     """
@@ -1076,7 +1085,7 @@ def validate_harbor_agent_only_job_result(
                     f"Harbor agent-only trial {trial_result_path.parent.name} step {step_name!r} has no agent result"
                 )
 
-    if env_mode == "docker" and not any(
+    if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES and not any(
         _has_visible_artifact(agent_dir, root=job_dir) for agent_dir in agent_artifact_dirs
     ):
         return False, (
@@ -1469,6 +1478,7 @@ def run_agent_runtime_preflight(
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
     agent_import_path: str | None = None,
+    environment_kwargs: Mapping[str, Any] | None = None,
 ) -> PreflightResult:
     """Start one real agent task and stop before the full A/B matrix."""
     task_name = _first_task_name(dataset)
@@ -1492,18 +1502,21 @@ def run_agent_runtime_preflight(
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
         agent_import_path=agent_import_path,
+        environment_kwargs=environment_kwargs,
     )
     try:
         handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            input=handoff.stdin_text,
-            env=handoff.subprocess_env,
-            timeout=timeout_seconds,
-            check=False,
-        )
+        with _harbor_launch_cwd() as launch_cwd:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                input=handoff.stdin_text,
+                cwd=launch_cwd,
+                env=_harbor_launch_environment(handoff.subprocess_env),
+                timeout=timeout_seconds,
+                check=False,
+            )
     except subprocess.TimeoutExpired:
         return PreflightResult(
             False,

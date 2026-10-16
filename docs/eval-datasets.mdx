@@ -200,8 +200,12 @@ skillevaluator create-eval-dataset ./my-skill --full --refine
 ```
 
 Collecting a fresh trajectory needs Docker, the `tier3` extra, and a configured
-provider. With `--no-llm`, refinement still works — it applies template-based
-updates from the trajectory instead of an LLM rewrite.
+provider. Refining from existing results does not need the `tier3` extra: case
+IDs are read from each trial's `reward.json` or Harbor `result.json`, and
+multimodal trajectory messages are read as text, with image and audio parts
+shown as `[image]` and `[audio]` markers. With `--no-llm`, refinement still
+works — it applies template-based updates from the trajectory instead of an LLM
+rewrite.
 
 ## Run policy: evals/config.yml
 
@@ -223,7 +227,7 @@ harbor:
     memory_mb: 4096
   runtime_env:
     - SERVICE_API_TOKEN          # expands to ${SERVICE_API_TOKEN} at run time
-  pre_agent_setup:
+  pre_agent_setup:               # with-skill-only runs (--skip-baseline)
     - service-cli auth login --token "$SERVICE_API_TOKEN"
     - service-cli whoami >/dev/null
   agents:
@@ -249,16 +253,23 @@ grading:
 | `harbor.stop_on_pass` | boolean | Stop a case's remaining attempts after the first pass. Requires `n_attempts` > 1. |
 | `harbor.n_concurrent` | integer ≥ 1 | Concurrent trials. |
 | `harbor.max_agents` | integer ≥ 1 | Cap on agents evaluated in one run. |
-| `harbor.timeout_multiplier` | number > 0 | Scales task timeouts. |
+| `harbor.timeout_multiplier` | finite number > 0 | Scales task timeouts. Values that would overflow Harbor's mandatory lifecycle timeouts are rejected before execution. |
 | `harbor.agent_runtime_preflight` | boolean | Opt-in extra agent-only execution of the first staged task before the measured evaluation. Default: `false`; the CLI flag overrides this value. |
 | `harbor.agent_workdir` | string | Working directory for the agent inside the container. |
 | `harbor.resources` | `cpus`, `memory_mb`, `storage_mb` | Per-container resource requests. |
 | `harbor.runtime_env` | list or mapping | Non-credential task values passed into the container. Prefer a list of plain names — each expands to `${NAME}` from your shell; a mapping sets explicit templates. Entries that name or reference operator-owned credentials (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, base-URL variables, AWS credential variables) fail with a hard error. Alias: `passthrough_env`. |
-| `harbor.pre_agent_setup` | string or list | Shell commands run in the container before the agent starts. Alias: `setup_commands`. |
+| `harbor.pre_agent_setup` | string or list | Shell commands run in the container before the agent starts. This skill-owned code is allowed only for with-skill-only runs (`--skip-baseline`); paired runs reject it so setup cannot distinguish or alter the baseline arm. Alias: `setup_commands`. Both spellings normalize to the same policy. |
 | `harbor.agents.<name>.model` | string | Per-agent model override; whitespace is trimmed. `claude` is accepted as an alias of `claude-code`, but configuring both spellings in one config is an error. |
 | `skill_workspace.mode` | `isolated`, `group` | Whether sibling skills are visible — see [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `skill_workspace.include` | list of paths | Extra skills staged into a `group` workspace. |
 | `grading.mode` | `default`, `default_plus_custom`, `custom_only` | Grading pipeline — see [Custom Graders & Tasks](custom-graders.mdx). Legacy spellings `aces_default` and `aces_plus_custom` are accepted and normalized to `default` and `default_plus_custom`. |
+
+Environment constructor kwargs are deliberately not accepted in this
+skill-owned file. Operators can pass non-secret kwargs for Harbor-native
+non-Docker backends with repeatable `--environment-kwarg KEY=VALUE` / `--ek
+KEY=VALUE` CLI flags. Backend credentials stay in the host environment;
+runtime-policy, mount, network, lifecycle, and pod-security fields are
+reserved.
 
 <Note>
   Unknown keys are rejected, not ignored — a typo like `n_attemps` fails the
@@ -283,7 +294,7 @@ documents. An eval entry's `files` string or list selects only those paths
 | File | Rules |
 | --- | --- |
 | `Dockerfile` | At most 20 KB; the first non-comment line must be `FROM`. The build context is `environment/` itself, so `COPY` paths are relative to it (`COPY skills/`, not `COPY environment/skills/`). If absent, an image is auto-generated from `scripts/requirements.txt` and `scripts/apt-packages.txt` on a `python:3.12-slim` base. |
-| `docker-compose.yaml` | Sidecar services only (databases, APIs, mock servers) launched alongside the agent container. A strict allowlist applies: host port mappings are removed, and host mounts, privileged access, and unrecognized keys are rejected. Also accepted as `docker-compose.yml`. |
+| `docker-compose.yaml` | Sidecar services only (databases, APIs, mock servers) launched alongside the agent container. Not supported with `--env-mode kata`, where services cannot resolve each other by name. A strict allowlist applies: host port mappings are removed, and host mounts, privileged access, and unrecognized keys are rejected. Also accepted as `docker-compose.yml`. |
 | `mcp_servers.toml` | MCP servers injected into the container. TOML array-of-tables `[[mcp_servers]]`; each entry needs `name` plus `url` or `command`. Command-based servers use `transport = "stdio"` (auto-inferred); URL-based servers default to `sse`. |
 | Subdirectories | Copied into the container environment (config files, seed data for sidecars). Any name except `__pycache__` and `.git`. |
 
@@ -296,6 +307,25 @@ url = "http://localhost:8080"
 name = "my-tool"
 command = "python /workspace/tools/server.py"
 transport = "stdio"
+```
+
+<Note>
+  In Docker mode, Claude Code and Codex setup no longer installs the
+  distribution `nodejs` and `npm` packages, except on Alpine images. On
+  Debian-based images, including the default `python:3.12-slim` image, those
+  packages also brought `npx` and a C/C++ toolchain (`gcc`, `g++`, `make`).
+  Claude Code containers now have no Node.js unless the image provides it.
+  Codex installs its own Node.js, which is on `PATH` only for the Codex process
+  and the commands it runs. If your skill's scripts, its tasks, or a stdio MCP
+  server (for example `command = "npx ..."`) need these tools, install them in
+  the image: list the packages in `scripts/apt-packages.txt`, one per line, for
+  the auto-generated image, or install them in `evals/environment/Dockerfile`.
+</Note>
+
+```text title="my-skill/scripts/apt-packages.txt"
+nodejs
+npm
+build-essential
 ```
 
 ## Validate before you run

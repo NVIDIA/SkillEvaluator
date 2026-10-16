@@ -55,7 +55,12 @@ import yaml
 
 from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
+
+# Output budget for generation and refinement; OpenAI reasoning models get the
+# larger reasoning ceiling from the shared client.
+_GENERATION_MAX_TOKENS = 16000
 
 _INTERACTIVE_RE = re.compile(
     r"interactive|opens?\s+a?\s*browser|waits?\s+for\s+(the\s+)?user|device.code\s+flow",
@@ -484,7 +489,7 @@ No other fields."""
         if announce_provider:
             print(f"  Using public provider: {provider.provider} / {provider.model}")
         text = await asyncio.to_thread(
-            LLMClient(max_tokens=2000, temperature=0.3).completions,
+            LLMClient(max_tokens=_GENERATION_MAX_TOKENS, temperature=0.3).completions,
             "You generate high-quality JSON evaluation datasets for AI agent skills.",
             prompt,
         )
@@ -647,7 +652,16 @@ def _discover_trajectories(
     if not results_dir.exists():
         return {}
 
-    agent_priority = ["claude-code", "cursor-cli", "codex", "openhands", "mini-swe-agent", "aider", "gemini-cli"]
+    agent_priority = [
+        "claude-code",
+        "cursor-cli",
+        "opencode",
+        "codex",
+        "openhands",
+        "mini-swe-agent",
+        "aider",
+        "gemini-cli",
+    ]
     for agent_name in agent_priority:
         trials_dir = results_dir / agent_name / "with-skill" / "trials"
         if not trials_dir.exists():
@@ -698,7 +712,7 @@ def _summarize_trajectory(trajectory: dict[str, Any], max_steps: int = 25) -> st
                 args_str = json.dumps(args, ensure_ascii=False)[:120]
                 lines.append(f"  {n}. [{fn}] {args_str}")
 
-        msg = (step.get("message") or "").strip()
+        msg = atif_content_text(step.get("message")).strip()
         if msg and len(msg) > 30 and n < max_steps:
             n += 1
             truncated = msg[:250] + "..." if len(msg) > 250 else msg
@@ -875,7 +889,7 @@ Return ONLY the refined JSON array. No other text."""
 
         print(f"  Refining with public provider: {provider.provider} / {provider.model}")
         text = await asyncio.to_thread(
-            LLMClient(max_tokens=4000, temperature=0.2).completions,
+            LLMClient(max_tokens=_GENERATION_MAX_TOKENS, temperature=0.2).completions,
             "You refine JSON evaluation datasets using execution evidence.",
             prompt,
         )
@@ -905,7 +919,7 @@ def _extract_agent_final_message(trajectory: dict[str, Any]) -> str:
     for step in reversed(trajectory.get("steps", [])):
         if step.get("source") != "agent":
             continue
-        msg = (step.get("message") or "").strip()
+        msg = atif_content_text(step.get("message")).strip()
         if msg and len(msg) > 20 and not step.get("tool_calls"):
             return msg
     return ""

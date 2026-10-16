@@ -319,6 +319,7 @@ class TestFrontmatterDetection:
         assert result.metadata.get("license") == "MIT"
         assert result.metadata.get("license_status") == "allowed"
         assert all(f.check_name != "frontmatter_license_missing" for f in result.findings)
+        assert any(detail.check_name == "license_compliance" for detail in result.success_details)
 
     def test_detects_file_reference_in_frontmatter(self, skill_with_apache_license: Path):
         """Test detection of license file reference in frontmatter."""

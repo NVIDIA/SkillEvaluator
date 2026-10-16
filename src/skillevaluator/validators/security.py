@@ -22,6 +22,7 @@ import re
 import shutil
 import tempfile
 import tokenize
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -39,8 +40,14 @@ from skillevaluator.constants import (
 )
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.skill import SEMVER_RE
-from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
+from skillevaluator.provider_config import (
+    SKILLSPECTOR_DEFAULT_MODELS,
+    ProviderConfigurationError,
+    resolve_llm_provider,
+    skillspector_reasoning_effort,
+)
 from skillevaluator.spdx import is_spdx_only_html_comment
+from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
 from skillevaluator.validators.base import (
     Finding,
@@ -67,6 +74,21 @@ _SKILLSPECTOR_DOCS_ONLY_NOT_APPLICABLE_ANALYZERS = frozenset(
         "meta_analyzer",
     }
 )
+
+
+def _is_filesystem_safe_path_text(value: str) -> bool:
+    """Return whether an untrusted report path can be passed to OS path APIs."""
+    try:
+        encoded = os.fsencode(value)
+    except (ValueError, UnicodeError):
+        return False
+    return bool(encoded) and b"\x00" not in encoded and not any(
+        unicodedata.category(character).startswith("C")
+        or unicodedata.category(character) in {"Zl", "Zp"}
+        for character in value
+    )
+
+
 _SKILLSPECTOR_SEMANTIC_ANALYZERS = frozenset(
     {
         "semantic_developer_intent",
@@ -342,7 +364,7 @@ def _comment_line_numbers(file_path: Path, lines: list[str]) -> frozenset[int]:
         return _yaml_comment_line_numbers(lines)
     if suffix == ".sh":
         return _shell_comment_line_numbers(lines)
-    if suffix in {".md", ".markdown"}:
+    if suffix in {".md", ".mdc", ".markdown"}:
         return _markdown_comment_line_numbers(lines)
     return _leading_hash_or_slash_comment_lines(lines)
 
@@ -368,10 +390,23 @@ def _skillspector_process_env(environ: Mapping[str, str] | None = None) -> dict[
     return _copy_selected_environment(source, _SKILLSPECTOR_PROCESS_ENV_NAMES)
 
 
-def _skillspector_child_env() -> dict[str, str]:
+def _skillspector_operator_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """Return operator-set SkillSpector slot models, model registry and reasoning effort.
+
+    ``SKILLSPECTOR_TEMPERATURE`` stays out: current reasoning models reject a
+    custom temperature, which would fail every LLM request.
+    """
+    return _copy_selected_environment(
+        environ,
+        (name for name in environ if name.startswith("SKILLSPECTOR_MODEL_") or name == "SKILLSPECTOR_REASONING_EFFORT"),
+    )
+
+
+def _skillspector_provider_env() -> dict[str, str]:
     """Map public provider settings into an invocation-scoped SkillSpector environment."""
     source = os.environ
     child_env = _skillspector_process_env(source)
+    child_env.update(_skillspector_operator_env(source))
     skillspector_provider = source.get("SKILLSPECTOR_PROVIDER", "").strip().lower()
     skillspector_model = source.get("SKILLSPECTOR_MODEL", "").strip()
 
@@ -407,7 +442,10 @@ def _skillspector_child_env() -> dict[str, str]:
         return child_env
 
     child_env["SKILLSPECTOR_PROVIDER"] = mapped_provider
-    child_env["SKILLSPECTOR_MODEL"] = skillspector_model or provider.model
+    # An explicit SKILL_EVAL_LLM_MODEL reaches SkillSpector; the chat default does not.
+    child_env["SKILLSPECTOR_MODEL"] = skillspector_model or (
+        provider.model if "SKILL_EVAL_LLM_MODEL" in resolution_env else SKILLSPECTOR_DEFAULT_MODELS[provider.provider]
+    )
 
     if provider.provider in {"nv_build", "openai-compatible"}:
         if provider.api_key:
@@ -419,6 +457,32 @@ def _skillspector_child_env() -> dict[str, str]:
         if provider.provider == "bedrock":
             child_env.update(_copy_selected_environment(source, _SKILLSPECTOR_AWS_ENV_NAMES))
 
+    return child_env
+
+
+def _skillspector_default_reasoning_effort(child_env: Mapping[str, str]) -> str | None:
+    """Return SkillEvaluator's reasoning effort when every configured SkillSpector model takes it.
+
+    The effort is one global SkillSpector setting, so a slot override naming a
+    model without one (for example a Claude model) leaves it unset. Without
+    ``SKILLSPECTOR_MODEL`` SkillSpector picks its own model and effort.
+    """
+    if "SKILLSPECTOR_MODEL" not in child_env:
+        return None
+    efforts = {
+        skillspector_reasoning_effort(model)
+        for name, model in child_env.items()
+        if name.startswith("SKILLSPECTOR_MODEL") and name != "SKILLSPECTOR_MODEL_REGISTRY"
+    }
+    return efforts.pop() if len(efforts) == 1 else None
+
+
+def _skillspector_child_env() -> dict[str, str]:
+    """Return the SkillSpector environment plus SkillEvaluator's default reasoning effort."""
+    child_env = _skillspector_provider_env()
+    effort = _skillspector_default_reasoning_effort(child_env)
+    if effort is not None:
+        child_env.setdefault("SKILLSPECTOR_REASONING_EFFORT", effort)
     return child_env
 
 
@@ -765,6 +829,10 @@ class SecurityValidator(ValidatorBase):
 
         logger.info("Running %s on %s", stage_name, scan_root)
         child_env = _skillspector_child_env() if use_llm else _skillspector_process_env()
+        if use_llm:
+            # Requested LLM configuration; None leaves the choice to SkillSpector.
+            result.metadata["skillspector_model"] = child_env.get("SKILLSPECTOR_MODEL")
+            result.metadata["skillspector_reasoning_effort"] = child_env.get("SKILLSPECTOR_REASONING_EFFORT")
         tool_result = Tools.skillspector.run(args, timeout=300, env=child_env, replace_env=True)
 
         if tool_result.exit_code not in _SKILLSPECTOR_POLICY_EXIT_CODES:
@@ -825,7 +893,7 @@ class SecurityValidator(ValidatorBase):
             result.mark_scan_incomplete(stage_name)
             return result
 
-        self._process_skillspector_cli_result(data, result)
+        self._process_skillspector_cli_result(data, result, source_root=original_root or scan_root)
         return result
 
     @staticmethod
@@ -2034,6 +2102,11 @@ class SecurityValidator(ValidatorBase):
         if file_path is not None and not isinstance(file_path, str):
             result.add_error(f"{prefix}.location.file' must be a string or null; security scan did not complete")
             return False
+        if isinstance(file_path, str) and file_path and not _is_filesystem_safe_path_text(file_path):
+            result.add_error(
+                f"{prefix}.location.file' must be a filesystem-safe string; security scan did not complete"
+            )
+            return False
         for field in ("start_line", "line", "end_line"):
             line_number = location.get(field)
             if line_number is not None and (
@@ -2049,6 +2122,8 @@ class SecurityValidator(ValidatorBase):
         self,
         data: dict,
         result: ValidationResult,
+        *,
+        source_root: Path | None = None,
     ) -> None:
         """Convert a validated SkillSpector JSON report into ValidationResult entries."""
         self._store_skillspector_metadata(data, result)
@@ -2062,7 +2137,7 @@ class SecurityValidator(ValidatorBase):
         for issue in issues:
             if not isinstance(issue, dict):
                 continue
-            if self._is_generated_artifact_issue(issue):
+            if self._is_generated_artifact_issue(issue, source_root=source_root):
                 removed_issues.append(issue)
                 skipped_generated += 1
                 continue
@@ -2136,15 +2211,36 @@ class SecurityValidator(ValidatorBase):
             self._summarize_skillspector_results(scanned_issues, has_critical_or_high, result)
 
     @staticmethod
-    def _is_generated_artifact_issue(issue: dict) -> bool:
+    def _is_generated_artifact_issue(issue: dict, *, source_root: Path | None = None) -> bool:
         """Return True when a skillspector issue points at generated output."""
         if issue.get("id") == "SC8":
             return False
         file_path, _line_number = SecurityValidator._parse_issue_location(issue)
+        if not _is_filesystem_safe_path_text(file_path):
+            return False
         path = Path(file_path)
-        if path.name.lower() in SCAN_EXCLUDED_FILES:
+
+        if source_root is None:
+            if path.name in SCAN_EXCLUDED_FILES:
+                return True
+            return any(part in SCAN_EXCLUDED_DIRS for part in path.parts)
+
+        root = Path(os.path.abspath(source_root))  # noqa: PTH100 - do not follow untrusted path links
+        candidate = path if path.is_absolute() else root / path
+        candidate = Path(os.path.abspath(candidate))  # noqa: PTH100 - lexical containment is intentional
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError:
+            return False
+
+        if matches_filesystem_name(candidate, SCAN_EXCLUDED_FILES):
             return True
-        return any(part in SCAN_EXCLUDED_DIRS for part in path.parts)
+        current = root
+        for part in relative.parts[:-1]:
+            current /= part
+            if matches_filesystem_name(current, SCAN_EXCLUDED_DIRS):
+                return True
+        return False
 
     @staticmethod
     def _is_spdx_only_hidden_instruction(issue: dict) -> bool:
@@ -2746,7 +2842,8 @@ class SecurityValidator(ValidatorBase):
 
         if not verdicts:
             result.mark_scan_incomplete("llm-verification")
-            result.add_message("LLM finding verification was skipped (no verdicts returned)")
+            cause = f": {verifier.last_failure}" if verifier.last_failure else ""
+            result.add_message(f"LLM finding verification was skipped (no verdicts returned{cause})")
             return
 
         suppressed = 0
@@ -2758,7 +2855,8 @@ class SecurityValidator(ValidatorBase):
 
             verdict = verdict_data.get("verdict")
             confidence = verdict_data.get("confidence")
-            reasoning = verdict_data.get("reasoning")
+            # The prompt asks for "rationale"; replies that still say "reasoning" count too.
+            reasoning = verdict_data.get("rationale", verdict_data.get("reasoning"))
             if (
                 not isinstance(verdict, str)
                 or verdict not in _LLM_VERDICTS
@@ -2788,9 +2886,10 @@ class SecurityValidator(ValidatorBase):
             result.mark_scan_incomplete("llm-verification")
             noun = "finding" if unverified == 1 else "findings"
             verb = "was" if unverified == 1 else "were"
+            cause = f": {verifier.last_failure}" if verifier.last_failure else ""
             result.add_message(
                 f"LLM verification returned verdicts for {verified} of {len(result.findings)} findings; "
-                f"{unverified} {noun} {verb} not verified"
+                f"{unverified} {noun} {verb} not verified{cause}"
             )
         elif not suppressed:
             result.add_message("LLM verification reviewed all findings; no high-confidence false positives identified")

@@ -12,16 +12,15 @@ Turn SkillEvaluator into a merge gate for your skill repository. The recommended
 | Exit code | Meaning | What to do |
 | --- | --- | --- |
 | `0` | Success — every gating check passed | Merge |
-| `1` | Validation failed — one or more gating checks failed | Fix the skill; read the report |
-| `2` | Configuration error — bad flags or an unreadable target | Fix the pipeline, not the skill |
-| `3` | Runtime error — an unexpected internal failure | Re-run; the skill was never judged. File an issue if it persists |
+| `1` | Validation failed — a gating check failed, the run could not complete, or an unexpected internal error occurred | Read the report or log; fix the skill, or re-run and file an issue if the run itself failed |
+| `2` | Usage error — an unknown flag, a value outside an option's type or choices, or a target path that does not exist | Fix the pipeline, not the skill |
 
 Tier 1 checks always gate the exit code. Tier 2 deduplication findings gate when dedup runs unless you pass `--no-block-on-dedup`; the recommended keyless gate below selects `--tiers 1` to exclude Tier 2 and Tier 3. Tier 3 live-evaluation results are advisory inside `validate` unless you pass `--block-on-agent-eval`. Reports record the effective choice for each tier. Without an explicit scope, `validate` runs all three tiers for skills, including Tier 3 autopilot.
 
 ## The recommended gate
 
 ```bash title="Keyless CI gate"
-skillevaluator validate ./skills --external --tiers 1 -r json,markdown -o reports --min-score 70
+skillevaluator validate ./skills --external --tiers 1 -r json,markdown,sarif -o reports --min-score 70
 ```
 
 Each flag earns its place:
@@ -67,7 +66,7 @@ jobs:
       - name: Install external Python scanners
         run: |
           uv tool install semgrep
-          uv tool install git+https://github.com/NVIDIA/SkillSpector.git
+          uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0
 
       - name: Install Gitleaks
         run: |
@@ -233,10 +232,21 @@ When the exit code is not enough — dashboards, custom thresholds, badge genera
 | --- | --- | --- |
 | `overall_passed` | boolean | `true` when every check passed |
 | `overall_status` | string | `passed`, `failed`, or `incomplete` (a required scanner produced no evidence) |
+| `publication_status` | string | `pass`, `neutral`, `fail`, or `incomplete`; use this field for publication eligibility |
+| `publication` | object | Publication decision, eligibility, reasons, and Tier 3 evidence status |
+| `benchmark_policy` | object | Persisted `tier2_required` and `tier3_required` evidence policy used for the publication decision |
+| `results[].publication_target` | object | Exact NFC filesystem-entry name, versioned source-tree digest, and digest algorithm used to bind split-tier evidence |
+| `results[].publication_evidence` | object | Validated built-in Tier 1 or Tier 2 producer contract: schema version, producer, tier, and canonical check ID |
+| `tier3.run_id` | string | Run-owned Tier 3 identity; duplicated in the Tier 3 summary for consistency checks |
 | `severity_counts` | object | Totals for `critical`, `high`, `medium`, `low` |
 | `total_errors`, `total_warnings` | number | Aggregate counts across all validators |
 | `skills` | array | Per-skill `{ name, passed, issue_count }` |
 | `quality_summary` | array | Quality details with `overall_score` (0–100) and `grade` (A–F); a folder target reports the collection average plus a `skill_count` |
+
+`overall_status` and `overall_passed` describe the configured command gate. They
+can be green when an advisory tier did not run, so do not use them as a
+publication signal. Require `publication_status == "pass"` (or
+`publication.eligible == true`) before publishing a benchmark.
 
 A step that enforces a stricter score than the built-in gate:
 

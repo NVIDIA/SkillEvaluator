@@ -15,6 +15,7 @@ from skillevaluator.evaluation.tier3_report import (
     _attach_harbor_evidence_to_conclusions,
     _attach_harbor_evidence_to_recommendations,
     _attach_harbor_evidence_to_suggestions_v2,
+    _cases,
     _evaluator_cards,
     _metric_evidence,
     _normalize_trials,
@@ -27,10 +28,12 @@ from skillevaluator.evaluation.tier3_report import (
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting import html as html_module
+from skillevaluator.reporting.base import agent_eval_publication_evidence_complete
 from skillevaluator.reporting.html import PackageLoader, _compact_json
 from skillevaluator.tier3.harbor.collector import _paired_pass_comparison, _wilson_score_interval
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
-from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, MAX_CUSTOM_METRIC_NAME_BYTES
+from skillevaluator.tier3.harbor.report import _extract_findings
+from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot, metrics_for_agents
 
 
 def _write_summary(
@@ -193,6 +196,261 @@ def test_normalize_trials_preserves_only_trusted_standard_invocation_evidence() 
         assert "invocation_evidence_source" not in trial
 
 
+def test_normalize_trials_collapses_multi_step_rows_to_one_logical_attempt() -> None:
+    [trial] = _normalize_trials(
+        [
+            {
+                "trial_id": "case-1__attempt1",
+                "entry_id": "case-1",
+                "metric_set": "skill-evaluator-default-v2",
+                **dict.fromkeys(DEFAULT_METRICS, 0.2),
+                "overall": 0.2,
+                "_traj": {"steps": 2, "prompt_tokens": 10},
+                "skill_invoked": True,
+                "invocation_evidence_source": "trajectory",
+                "warnings": ["first warning"],
+            },
+            {
+                "trial_id": "case-1__attempt1",
+                "entry_id": "case-1",
+                "metric_set": "skill-evaluator-default-v2",
+                **dict.fromkeys(DEFAULT_METRICS, 1.0),
+                "overall": 1.0,
+                "_traj": {"steps": 3, "prompt_tokens": 20},
+                "skill_invoked": False,
+                "invocation_evidence_source": "trajectory",
+                "warnings": ["second warning"],
+            },
+        ],
+        ["accuracy"],
+    )
+
+    assert trial["trial_id"] == "case-1__attempt1"
+    assert trial["entry_id"] == "case-1"
+    assert trial["scores"] == {"accuracy": 0.6}
+    assert trial["overall"] == 0.6
+    assert trial["warnings"] == ["first warning", "second warning"]
+    # Step trajectories may be independent or cumulative.  Without the merged
+    # root trajectory, omit counters rather than double-counting resume data.
+    assert "steps" not in trial
+    assert "tokens" not in trial
+    assert "skill_invoked" not in trial
+    assert "invocation_evidence_source" not in trial
+
+
+def test_normalize_trials_omits_unavailable_tokens_but_preserves_steps() -> None:
+    missing, available = _normalize_trials(
+        [
+            {
+                "trial_id": "missing",
+                "entry_id": "missing",
+                "overall": 1.0,
+                "_traj": {
+                    "steps": 4,
+                    "prompt_tokens": None,
+                    "completion_tokens": None,
+                    "cached_tokens": None,
+                },
+            },
+            {
+                "trial_id": "available",
+                "entry_id": "available",
+                "overall": 1.0,
+                "_traj": {
+                    "steps": 3,
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "cached_tokens": None,
+                },
+            },
+        ],
+        [],
+    )
+
+    assert missing["steps"] == 4
+    assert "tokens" not in missing
+    assert available["steps"] == 3
+    assert available["tokens"] == {"prompt": 10, "completion": 4}
+
+
+def test_normalize_trials_omits_unavailable_steps_but_preserves_tokens() -> None:
+    [trial] = _normalize_trials(
+        [
+            {
+                "trial_id": "missing-steps",
+                "entry_id": "missing-steps",
+                "overall": 1.0,
+                "_traj": {
+                    "steps": None,
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "cached_tokens": 2,
+                },
+            }
+        ],
+        [],
+    )
+
+    assert "steps" not in trial
+    assert trial["tokens"] == {"prompt": 10, "completion": 4, "cached": 2}
+
+
+def test_normalize_trials_fails_closed_when_a_grouped_standard_row_is_incomplete() -> None:
+    complete = {
+        "trial_id": "case-1__attempt1",
+        "entry_id": "case-1",
+        "metric_set": "skill-evaluator-default-v2",
+        **dict.fromkeys(DEFAULT_METRICS, 1.0),
+    }
+    incomplete = {
+        "trial_id": "case-1__attempt1",
+        "entry_id": "case-1",
+        "metric_set": "skill-evaluator-default-v2",
+        "accuracy": 0.0,
+    }
+
+    [trial] = _normalize_trials([complete, incomplete], list(DEFAULT_METRICS))
+
+    assert trial["scores"] == {"accuracy": 0.5}
+    assert trial["overall"] is None
+    assert _cases({"rewards": [complete, incomplete]}) == [{"entry_id": "case-1", "overall": None}]
+
+
+def test_normalize_trials_fails_closed_for_conflicting_grouped_entry_identities() -> None:
+    rows = [
+        {
+            "trial_id": "shared-attempt",
+            "entry_id": entry_id,
+            "metric_set": "skill-evaluator-default-v2",
+            **dict.fromkeys(DEFAULT_METRICS, 1.0),
+        }
+        for entry_id in ("case-1", "case-2")
+    ]
+
+    [trial] = _normalize_trials(rows, list(DEFAULT_METRICS))
+
+    assert trial["overall"] is None
+    assert _cases({"rewards": rows}) == [{"entry_id": "case-1", "overall": None}]
+
+
+@pytest.mark.parametrize("reverse_rows", [False, True])
+def test_normalize_trials_uses_group_wide_metric_precedence_for_mixed_step_verifiers(
+    reverse_rows: bool,
+) -> None:
+    rows = [
+        {
+            "trial_id": "case-1__attempt1",
+            "entry_id": "case-1",
+            "metric_set": "custom-only",
+            **dict.fromkeys(DEFAULT_METRICS, 0.0),
+            "metrics": {
+                "domain_quality": {"score": 0.2},
+                "skill_execution": {"score": 0.0},
+            },
+            "details": {"skill_execution": {"reason": "spoofed canonical evidence"}},
+            "overall": 0.2,
+        },
+        {
+            "trial_id": "case-1__attempt1",
+            "entry_id": "case-1",
+            "metric_set": "skill-evaluator-default-v2",
+            **dict.fromkeys(DEFAULT_METRICS, 1.0),
+        },
+    ]
+    if reverse_rows:
+        rows.reverse()
+
+    [trial] = _normalize_trials(rows, list(DEFAULT_METRICS))
+
+    assert trial["scores"] == dict.fromkeys(DEFAULT_METRICS, 1.0)
+    assert trial["overall"] == 0.6
+    assert _cases({"rewards": rows}) == [{"entry_id": "case-1", "overall": 0.6}]
+    assert _metric_evidence("skill_execution", rows, _ReportBudget()) == []
+    assert _extract_findings(rows, canonical_scores=dict.fromkeys(DEFAULT_METRICS, 1.0)) == []
+
+
+def test_report_metric_discovery_honors_explicit_custom_only_declaration() -> None:
+    assert (
+        metrics_for_agents(
+            {
+                "codex": {
+                    "with_skill": {},
+                    "rewards": [
+                        {
+                            "metric_set": "custom-only",
+                            **dict.fromkeys(DEFAULT_METRICS, 1.0),
+                            "overall": 0.5,
+                        }
+                    ],
+                }
+            }
+        )
+        == []
+    )
+
+
+def test_best_agent_compares_standard_and_custom_only_agent_overall_scores() -> None:
+    payload = build_agent_eval_payload(
+        "mixed-agent-contracts",
+        {
+            "standard-agent": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.8),
+                "metrics_with_skill": list(DEFAULT_METRICS),
+                "overall_with_skill": 0.8,
+                "rewards": [
+                    {
+                        "entry_id": "standard-case",
+                        "metric_set": "skill-evaluator-default-v2",
+                        **dict.fromkeys(DEFAULT_METRICS, 0.8),
+                        "overall": 0.8,
+                    }
+                ],
+            },
+            "custom-agent": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {},
+                "metrics_with_skill": [],
+                "overall_with_skill": 0.9,
+                "without_skill": {},
+                "metrics_without_skill": [],
+                "overall_without_skill": 0.4,
+                "rewards": [
+                    {
+                        "entry_id": "custom-case",
+                        "metric_set": "custom-only",
+                        "overall": 0.9,
+                        "custom_metrics": {"task_quality": 0.9},
+                    }
+                ],
+                "rewards_baseline": [
+                    {
+                        "entry_id": "custom-case",
+                        "metric_set": "custom-only",
+                        "overall": 0.4,
+                        "custom_metrics": {"task_quality": 0.4},
+                    }
+                ],
+            },
+        },
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["agents"]["standard-agent"]["with_skill"] == 0.8
+    assert payload["agents"]["custom-agent"]["with_skill"] == 0.9
+    assert payload["agents"]["custom-agent"]["baseline"] == 0.4
+    assert payload["agents"]["custom-agent"]["lift"] == 0.5
+    assert payload["best_agent"] == "custom-agent"
+    assert payload["overall_score"] == 0.9
+
+
 def test_case_grounded_harbor_links_win_over_positional_fallback() -> None:
     evidence_links = [
         {"url": "https://harbor.example.test/case-1", "entry_id": "case-1", "label": "case-1"},
@@ -280,6 +538,250 @@ def test_standalone_tier3_uses_generic_tier3_only_report(tmp_path: Path) -> None
     assert 'data-tier3-tab="trials"' in html
     assert "Diagnostics" in html
     assert "SkillEvaluator" in html
+
+
+def test_standalone_tier3_binds_report_to_requested_skill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator import reporting as reporting_module
+
+    captured: dict[str, object] = {}
+
+    class CapturingHTMLReporter:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def save(self, results: list[ValidationResult], target: Path) -> None:
+            captured["results"] = results
+            target.write_text("<html>captured</html>", encoding="utf-8")
+
+    skill = tmp_path / "requested-skill"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "20260709_120000"
+    _write_summary(run_dir)
+    monkeypatch.setattr(reporting_module, "HTMLReporter", CapturingHTMLReporter)
+
+    report = render_agent_eval_html_report(skill, run_dir, use_llm_judge=False)
+
+    assert report.read_text(encoding="utf-8") == "<html>captured</html>"
+    assert captured["expected_skill_name"] == "requested-skill"
+
+
+def test_trial_report_renders_unavailable_tokens_as_unavailable() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "cached_tokens": None,
+                        },
+                    }
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Steps per Eval Case" in trials_html
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert "With-Skill Per-Evaluator Drill-Down" in trials_html
+    assert re.search(r"<td>4</td>\s*<td>—</td>", trials_html)
+
+
+def test_trial_report_omits_token_chart_for_incomplete_agent_telemetry() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": None,
+                        },
+                    },
+                    {
+                        "trial_id": "case-2__attempt1",
+                        "entry_id": "case-2",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 3,
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "cached_tokens": None,
+                        },
+                    },
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
+    assert re.search(r"<td>4</td>\s*<td>14</td>", trials_html)
+    assert re.search(r"<td>3</td>\s*<td>—</td>", trials_html)
+
+
+def test_trial_report_omits_token_chart_when_any_agent_telemetry_is_incomplete() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": 2,
+                        },
+                    }
+                ],
+            },
+            "opencode": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 3,
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "cached_tokens": None,
+                        },
+                    }
+                ],
+            },
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
+
+
+def test_trial_report_omits_token_chart_when_reported_agent_has_no_trials() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": 2,
+                        },
+                    }
+                ],
+            },
+            "opencode": {
+                "execution_status": "failed",
+                "execution_errors": ["malformed judge response"],
+                "expected_attempts": 1,
+                "scored_attempts": 0,
+                "with_skill": {},
+                "rewards": [],
+            },
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    assert set(payload["agents"]) == {"codex", "opencode"}
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
+
+
+def test_trial_charts_preserve_token_and_step_counter_semantics() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": 2,
+                        },
+                    }
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+    trials_html = _tier3_page(html, "trials", "agents")
+
+    assert 'id="tier3-token-chart"' in trials_html
+    assert '{ label: "Prompt (total)"' in html
+    assert '{ label: "Cached (included in prompt)"' in html
+    assert "if (observed.length !== matching.length) return null;" in html
 
 
 def test_authenticated_pre_status_rerender_preserves_historical_scores(tmp_path: Path) -> None:
@@ -705,6 +1207,228 @@ def test_reward_custom_metric_discovery_and_evidence_do_not_materialize_full_map
     assert budget.omitted["evaluator_cards"] > 0
 
 
+def test_findings_prefer_custom_details_only_for_custom_metric_collisions() -> None:
+    reward = {
+        "entry_id": "case-1",
+        "metric_set": "skill-evaluator-default-v2",
+        "security": 0.9,
+        "custom_metrics": {"domain_quality": 0.8},
+        "details": {
+            "security": {"reason": "standard evidence"},
+            "domain_quality": {"reason": "ordinary collision"},
+        },
+        "custom_details": {
+            "security": {"reason": "custom collision"},
+            "domain_quality": {"reason": "custom evidence"},
+        },
+    }
+
+    findings = _extract_findings(
+        [reward],
+        canonical_scores={"security": 0.9, "domain_quality": 0.8},
+    )
+
+    by_metric = {finding["metric"]: finding for finding in findings}
+    assert by_metric["security"]["reasons"] == ["standard evidence"]
+    assert by_metric["domain_quality"]["reasons"] == ["custom evidence"]
+
+
+def test_unified_evidence_prefers_custom_details_only_for_custom_metric_collisions() -> None:
+    reward = {
+        "entry_id": "case-1",
+        "metric_set": "skill-evaluator-default-v2",
+        "security": 0.9,
+        "custom_metrics": {"domain_quality": 0.8},
+        "details": {
+            "security": {"reason": "standard evidence"},
+            "domain_quality": {"reason": "ordinary collision"},
+        },
+        "custom_details": {
+            "security": {"reason": "custom collision"},
+            "domain_quality": {"reason": "custom evidence"},
+        },
+    }
+
+    standard = _metric_evidence("security", [reward], _ReportBudget())
+    custom = _metric_evidence("domain_quality", [reward], _ReportBudget())
+
+    assert standard[0]["notes"] == ["standard evidence"]
+    assert custom[0]["notes"] == ["custom evidence"]
+
+
+def test_unified_evidence_does_not_fallback_from_explicit_malformed_custom_detail() -> None:
+    reward = {
+        "entry_id": "case-1",
+        "metric_set": "custom-only",
+        "custom_metrics": {"domain_quality": 0.8},
+        "details": {"domain_quality": {"reason": "ordinary collision"}},
+        "custom_details": {"domain_quality": None},
+    }
+
+    evidence = _metric_evidence("domain_quality", [reward], _ReportBudget())
+
+    assert evidence == []
+
+
+def test_unified_evidence_keeps_legacy_custom_detail_fallback_when_custom_key_is_absent() -> None:
+    reward = {
+        "entry_id": "case-1",
+        "metric_set": "custom-only",
+        "custom_metrics": {"domain_quality": 0.8},
+        "details": {"domain_quality": {"reason": "legacy custom evidence"}},
+        "custom_details": {"another_metric": {"reason": "unrelated"}},
+    }
+
+    evidence = _metric_evidence("domain_quality", [reward], _ReportBudget())
+
+    assert evidence[0]["notes"] == ["legacy custom evidence"]
+
+
+@pytest.mark.parametrize("source", ["configured", "reward"])
+def test_custom_evaluator_cards_reject_scores_outside_the_unit_interval(source: str) -> None:
+    custom_with_skill = {"domain_quality": 1e308} if source == "configured" else {}
+    rewards = (
+        [
+            {
+                "metric_set": "custom-only",
+                "overall": 0.5,
+                "custom_metrics": {"domain_quality": 1e308},
+            }
+        ]
+        if source == "reward"
+        else []
+    )
+
+    cards = _evaluator_cards(
+        {},
+        rewards=rewards,
+        custom_with_skill=custom_with_skill,
+        custom_without_skill={},
+        custom_lift={},
+        report_budget=_ReportBudget(),
+    )
+
+    assert not any(card["id"] == "domain_quality" for card in cards)
+
+
+def test_legacy_summary_custom_metric_names_follow_current_publication_policy(tmp_path: Path) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "legacy-custom-metrics"
+    summary = run_dir / "opencode" / "with-skill" / "summary.json"
+    summary.parent.mkdir(parents=True)
+    credential_name = "ghp_" + ("a" * 36)
+    credential_field = "api_key_quality"
+    oversized_name = ("é" * (MAX_CUSTOM_METRIC_NAME_BYTES // 2)) + "x"
+    assert len(oversized_name.encode("utf-8")) == MAX_CUSTOM_METRIC_NAME_BYTES + 1
+    trial_reward = summary.parent / "trials" / "case-001" / "reward.json"
+    trial_reward.parent.mkdir(parents=True)
+    trial_reward.write_text(
+        json.dumps(
+            {
+                "entry_id": "case-001",
+                "metric_set": "custom-only",
+                "overall": 0.8,
+                "custom_metrics": {
+                    credential_name: 0.5,
+                    credential_field: 0.6,
+                    oversized_name: 0.7,
+                    "domain_quality": 0.8,
+                },
+                credential_name: 0.5,
+                credential_field: 0.6,
+                oversized_name: 0.7,
+                "domain_quality": 0.8,
+            }
+        ),
+        encoding="utf-8",
+    )
+    summary.write_text(
+        json.dumps(
+            {
+                "scores": {},
+                "custom_scores": {
+                    credential_name: 0.5,
+                    credential_field: 0.6,
+                    oversized_name: 0.7,
+                    "domain_quality": 0.8,
+                },
+                "overall_score": 0.8,
+                "metrics": [],
+                "num_trials": 1,
+                "num_reward_rows": 1,
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    custom_card_ids = [
+        card["id"] for card in payload["agents"]["opencode"]["evaluator_cards"] if card["label"].startswith("Custom: ")
+    ]
+    assert custom_card_ids == ["domain_quality"]
+    [raw_reward] = payload["provenance"]["raw_trial_rewards"]["opencode"]
+    assert raw_reward["entry_id"] == "case-001"
+    assert raw_reward["metric_set"] == "custom-only"
+    assert raw_reward["overall"] == 0.8
+    assert raw_reward["custom_metrics"] == {"domain_quality": 0.8}
+    assert raw_reward["domain_quality"] == 0.8
+    serialized = json.dumps(payload)
+    assert credential_name not in serialized
+    assert credential_field not in serialized
+    assert oversized_name not in serialized
+
+
+def test_legacy_non_mapping_custom_scores_and_lift_degrade_safely(tmp_path: Path) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "legacy-malformed-custom-maps"
+    agent_dir = run_dir / "opencode"
+
+    for variant, overall, custom_scores in (
+        ("with-skill", 0.8, {"domain_quality": 0.8}),
+        ("without-skill", 0.4, "not-a-custom-score-map"),
+    ):
+        summary = agent_dir / variant / "summary.json"
+        summary.parent.mkdir(parents=True)
+        summary.write_text(
+            json.dumps(
+                {
+                    "scores": {},
+                    "custom_scores": custom_scores,
+                    "overall_score": overall,
+                    "metrics": [],
+                    "num_trials": 0,
+                    "num_reward_rows": 0,
+                    "execution_status": "succeeded",
+                    "execution_errors": [],
+                    "expected_attempts": 0,
+                    "scored_attempts": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+    (agent_dir / "custom_lift.json").write_text(json.dumps("not-a-custom-lift-map"), encoding="utf-8")
+
+    result = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    [custom_card] = [
+        card for card in payload["agents"]["opencode"]["evaluator_cards"] if card["id"] == "domain_quality"
+    ]
+    assert custom_card["with_skill"] == 0.8
+    assert custom_card["baseline"] is None
+    assert custom_card["lift"] is None
+
+
 def test_raw_reward_projection_bulk_stops_when_field_budget_is_full() -> None:
     class ExplodingReward(dict[str, float]):
         def items(self):
@@ -867,8 +1591,97 @@ def test_payload_prunes_oversized_non_best_conditions_before_best_evidence() -> 
     assert any(card["evidence"] for card in best_cards)
     assert any(card["evidence"] for card in payload["evaluator_cards"])
     assert payload["provenance"]["raw_trial_rewards"]["zzz"]
-    assert payload["agents"]["aaa"]["conditions"] == {}
+    assert payload["agents"]["aaa"]["conditions"] == {
+        "with_skill": {
+            "execution_status": None,
+            "execution_errors": None,
+            "expected_attempts": 0,
+            "scored_attempts": 0,
+        }
+    }
     assert payload["report_truncation"]["omitted"]["non_best_agent_details"] > 0
+
+
+def _publication_ready_oversized_condition_payload(*, extra_condition: bool = False) -> dict:
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    conditions = {
+        "with_skill": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+            "diagnostic": "x" * (3 * 1024 * 1024),
+        },
+        "without_skill": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+        },
+    }
+    if extra_condition:
+        conditions["forged"] = {"execution_status": "succeeded"}
+    payload = build_agent_eval_payload(
+        "condition-budget",
+        {
+            "codex": {
+                "model": "test-model",
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "conditions": conditions,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.9),
+                "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.4),
+                "lift": dict.fromkeys(DEFAULT_METRICS, 0.5),
+                "rewards": [{"entry_id": "case-1", **dict.fromkeys(DEFAULT_METRICS, 0.9)}],
+                "rewards_baseline": [{"entry_id": "case-1", **dict.fromkeys(DEFAULT_METRICS, 0.4)}],
+            }
+        },
+        dataset=[{"id": "case-1", "expected_skill": "condition-budget"}],
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5, "stop_on_pass": False},
+        env_mode="docker",
+        evaluated_at="2026-09-12T12:00:00+00:00",
+        evaluator_version="1.0.0",
+        run_id="condition-budget-run",
+        publication_target={
+            "skill_name": "condition-budget",
+            "skill_digest": "sha256:" + "a" * 64,
+            "skill_digest_algorithm": "skill-evaluator-source-tree/2",
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    return payload
+
+
+def test_payload_budget_preserves_publication_condition_truth_fields() -> None:
+    payload = _publication_ready_oversized_condition_payload()
+
+    assert agent_eval_publication_evidence_complete(payload) is True
+    assert payload["agents"]["codex"]["conditions"] == {
+        "with_skill": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+        },
+        "without_skill": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+        },
+    }
+
+
+def test_payload_budget_does_not_repair_extra_condition_keys() -> None:
+    payload = _publication_ready_oversized_condition_payload(extra_condition=True)
+
+    conditions = payload["agents"]["codex"]["conditions"]
+    assert "invalid_condition_shape" in conditions
+    assert agent_eval_publication_evidence_complete(payload) is False
 
 
 def test_non_finite_report_numbers_are_sanitized_before_canonical_json() -> None:
@@ -920,14 +1733,100 @@ def test_non_finite_report_numbers_are_sanitized_before_canonical_json() -> None
     assert _embedded_tier3_payload(html)["dataset"][0]["score"] is None
 
 
-def test_canonical_html_serializer_rejects_non_finite_numbers() -> None:
+def test_canonical_payload_sanitizes_unsafe_integers_for_browser_json_semantics() -> None:
+    safe_integer_metadata = {
+        "max_safe": (1 << 53) - 1,
+        "min_safe": -((1 << 53) - 1),
+        "enabled": True,
+    }
+    unsafe_integer_metadata = {
+        **safe_integer_metadata,
+        "too_large": 10**400,
+        "too_small": -(10**400),
+    }
+    payload = build_agent_eval_payload(
+        "browser-safe-json",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0},
+                "rewards": [
+                    {
+                        "entry_id": "case-1",
+                        "security": 1.0,
+                        "overall": 1.0,
+                        "metadata": unsafe_integer_metadata,
+                    }
+                ],
+            }
+        },
+        dataset=[{"id": "case-1", "metadata": unsafe_integer_metadata}],
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    canonical_metadata = (
+        payload["dataset"][0]["metadata"],
+        payload["provenance"]["raw_trial_rewards"]["codex"][0]["metadata"],
+    )
+    for metadata in canonical_metadata:
+        assert metadata["too_large"] is None
+        assert metadata["too_small"] is None
+        assert metadata["max_safe"] == (1 << 53) - 1
+        assert type(metadata["max_safe"]) is int
+        assert metadata["min_safe"] == -((1 << 53) - 1)
+        assert type(metadata["min_safe"]) is int
+        assert metadata["enabled"] is True
+
+    encoded = json.dumps(payload, allow_nan=False)
+    browser_payload = json.loads(encoded, parse_int=float)
+    dataset_metadata = browser_payload["dataset"][0]["metadata"]
+    raw_metadata = browser_payload["provenance"]["raw_trial_rewards"]["codex"][0]["metadata"]
+
+    for metadata in (dataset_metadata, raw_metadata):
+        assert metadata["too_large"] is None
+        assert metadata["too_small"] is None
+        assert metadata["max_safe"] == float((1 << 53) - 1)
+        assert metadata["min_safe"] == -float((1 << 53) - 1)
+        assert metadata["enabled"] is True
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf"), 10**400])
+def test_invalid_legacy_attempt_threshold_does_not_crash_canonical_report(invalid: float | int) -> None:
+    payload = build_agent_eval_payload(
+        "invalid-policy-number",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 1.0),
+            }
+        },
+        attempt_policy={"pass_threshold": invalid},
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["verdict_policy"]["attempt_pass_threshold"] is None
+    json.dumps(payload, allow_nan=False)
+
+
+def test_canonical_report_serializers_disclose_non_finite_numbers() -> None:
     with pytest.raises(ValueError, match="Out of range float values"):
         _compact_json({"score": float("nan")})
 
     result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
     result.metadata["agent_eval"] = {"score": float("inf")}
-    with pytest.raises(ValueError, match="Out of range float values"):
-        JSONReporter(include_timestamp=False).render_all([result])
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+    assert payload["tier3"]["score"] is None
+    assert payload["tier3"]["_serialization_truncated"] is True
+    assert payload["publication_status"] == "incomplete"
 
 
 def test_sampled_evidence_carries_lower_bound_metadata_and_honest_wording() -> None:
@@ -1166,6 +2065,194 @@ def test_rerender_uses_run_owned_dataset_and_evaluator_version(tmp_path: Path) -
     assert payload["evaluator_version"] == "evaluated-version-1.2.3"
 
 
+def test_rerender_uses_persisted_publication_identity_after_live_source_changes(tmp_path: Path) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    manifest = skill / "SKILL.md"
+    manifest.write_text("# evaluated source\n", encoding="utf-8")
+    persisted_target = publication_target_from_path(skill)
+    assert persisted_target is not None
+
+    run_dir = tmp_path / "results" / "20260709_120009"
+    _write_summary(run_dir)
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "publication_target": persisted_target,
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest.write_text("# changed after evaluation\n", encoding="utf-8")
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["publication_target"] == persisted_target
+    assert payload["summary"]["publication_target"] == persisted_target
+    assert payload["run_id"] == run_dir.name
+    assert payload["summary"]["run_id"] == run_dir.name
+    assert tier3.metadata["publication_target"] == persisted_target
+    assert tier3.metadata["run_id"] == run_dir.name
+
+
+def test_rerender_preserves_persisted_skill_name_when_live_path_is_renamed(tmp_path: Path) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    original_skill = tmp_path / "demo"
+    original_skill.mkdir()
+    (original_skill / "SKILL.md").write_text("# evaluated source\n", encoding="utf-8")
+    persisted_target = publication_target_from_path(original_skill)
+    assert persisted_target is not None
+
+    renamed_skill = original_skill.rename(tmp_path / "renamed")
+    run_dir = tmp_path / "results" / "20260709_120012"
+    _write_summary(run_dir)
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "publication_target": persisted_target,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    tier3 = agent_eval_result_from_directory(renamed_skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["skill_name"] == persisted_target["skill_name"] == "demo"
+    assert payload["summary"]["skill_name"] == "demo"
+
+
+def test_rerender_rejects_canonical_target_when_run_marks_identity_conflict(tmp_path: Path) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+    from skillevaluator.reporting.base import assess_tier3_evidence
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# evaluated source\n", encoding="utf-8")
+    run_start_target = publication_target_from_path(skill)
+    assert run_start_target is not None
+    run_end_target = {**run_start_target, "skill_digest": "sha256:" + "f" * 64}
+
+    run_dir = tmp_path / "results" / "20260709_120010"
+    _write_summary(run_dir)
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "publication_target": run_start_target,
+                "publication_target_conflict": {
+                    "run_start": run_start_target,
+                    "run_end": run_end_target,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["publication_target"] is None
+    assert payload["summary"]["publication_target"] is None
+    assert payload["publication_target_conflict"] == "source changed during evaluation"
+    assert payload["summary"]["publication_target_conflict"] == "source changed during evaluation"
+    assert "publication_target" not in tier3.metadata
+    assert tier3.metadata["publication_target_conflict"] == "source changed during evaluation"
+    assert tier3.metadata["run_id"] == run_dir.name
+    assessment = assess_tier3_evidence([tier3], payload, expected_skill_name="demo")
+    assert assessment.evidence_complete is False
+    assert assessment.reason == "Tier 3 source identity changed during evaluation."
+    report = json.loads(JSONReporter(include_timestamp=False).render_all([tier3]))
+    assert report["results"][0]["publication_target_conflict"] == "source changed during evaluation"
+
+
+def test_rerender_reports_runtime_context_conflict_without_claiming_source_mutation(tmp_path: Path) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+    from skillevaluator.reporting.base import assess_tier3_evidence
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# evaluated source\n", encoding="utf-8")
+    run_start_target = publication_target_from_path(skill)
+    assert run_start_target is not None
+
+    run_dir = tmp_path / "results" / "20260709_120013"
+    _write_summary(run_dir)
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "publication_target": None,
+                "publication_target_conflict": {
+                    "run_start": run_start_target,
+                    "run_end": None,
+                    "reason_code": "runtime_context_outside_publication_target",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    marker = "runtime context is not bound to publication target"
+    assert payload["publication_target"] is None
+    assert payload["summary"]["publication_target"] is None
+    assert payload["publication_target_conflict"] == marker
+    assert payload["summary"]["publication_target_conflict"] == marker
+    assert "publication_target" not in tier3.metadata
+    assert tier3.metadata["publication_target_conflict"] == marker
+    assessment = assess_tier3_evidence([tier3], payload, expected_skill_name="demo")
+    assert assessment.evidence_complete is False
+    assert assessment.reason == "Tier 3 runtime context is not bound to the publication target."
+    report = json.loads(JSONReporter(include_timestamp=False).render_all([tier3]))
+    assert report["results"][0]["publication_target_conflict"] == marker
+
+
+def test_rerender_does_not_replace_malformed_persisted_identity_with_engine_claim(tmp_path: Path) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# evaluated source\n", encoding="utf-8")
+    engine_target = publication_target_from_path(skill)
+    assert engine_target is not None
+
+    run_dir = tmp_path / "results" / "20260709_120011"
+    _write_summary(run_dir)
+    (run_dir / "result.json").write_text("{not-json", encoding="utf-8")
+
+    tier3 = agent_eval_result_from_directory(
+        skill,
+        run_dir,
+        engine_result={
+            "run_id": run_dir.name,
+            "publication_target": engine_target,
+        },
+        use_llm_judge=False,
+    )
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["publication_target"] is None
+    assert payload["summary"]["publication_target"] is None
+    assert payload["run_id"] is None
+    assert payload["summary"]["run_id"] is None
+    assert "publication_target" not in tier3.metadata
+    assert "run_id" not in tier3.metadata
+
+
 def test_legacy_rerender_does_not_claim_current_dataset_or_reader_version(tmp_path: Path) -> None:
     skill = tmp_path / "demo"
     (skill / "evals").mkdir(parents=True)
@@ -1362,6 +2449,312 @@ def test_pass_at_k_uncertainty_and_paired_evidence_render() -> None:
     assert "Exact McNemar p=1" in html
     assert "Minimum attainable p with 1 observed discordant pair:" in html
     assert "resolution-limited at \N{GREEK SMALL LETTER ALPHA}=0.05" in html
+
+
+def _render_paired_comparison(paired_comparison: object) -> str:
+    payload = build_agent_eval_payload(
+        "paired-sanitization-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "overall_with_skill": 1.0,
+                "overall_without_skill": 0.0,
+                "pass_with_skill": {"rate": 1.0, "passed_cases": 1, "total_cases": 1},
+                "pass_without_skill": {"rate": 0.0, "passed_cases": 0, "total_cases": 1},
+                "pass_lift": {"delta": 1.0, "paired_comparison": paired_comparison},
+            }
+        },
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    return _render_agent_payload(payload)
+
+
+@pytest.mark.parametrize("paired_comparison", [[1], "bad"], ids=["list", "string"])
+def test_pass_at_k_render_drops_nonmapping_paired_comparison(paired_comparison: object) -> None:
+    html = _render_paired_comparison(paired_comparison)
+    sanitized = _embedded_tier3_payload(html)
+
+    assert "Paired cases:" not in html
+    assert "Exact McNemar p=" not in html
+    assert "paired_comparison" not in sanitized["agents"]["codex"]["pass_at_k"]["lift"]
+
+
+@pytest.mark.parametrize(
+    "mcnemar_exact",
+    [
+        [1],
+        "bad",
+        {},
+        {"p_value": None},
+        {"p_value": "bad"},
+        {"p_value": []},
+        {"p_value": {}},
+    ],
+    ids=["list", "string", "missing", "none", "numeric-string", "nested-list", "nested-mapping"],
+)
+def test_pass_at_k_render_drops_malformed_mcnemar_exact(mcnemar_exact: object) -> None:
+    html = _render_paired_comparison(
+        {
+            "pairing_status": "complete",
+            "paired_cases": 1,
+            "with_skill_only_pass": 1,
+            "without_skill_only_pass": 0,
+            "both_pass": 0,
+            "neither_pass": 0,
+            "discordant_cases": 1,
+            "paired_rate_delta": 1.0,
+            "mcnemar_exact": mcnemar_exact,
+        }
+    )
+
+    assert "Paired cases: 1" in html
+    assert "Exact McNemar p=" not in html
+
+
+@pytest.mark.parametrize(
+    "minimum_attainable_p_value",
+    [None, "bad", [], {}],
+    ids=["none", "string", "list", "mapping"],
+)
+def test_pass_at_k_render_drops_malformed_minimum_attainable_probability(
+    minimum_attainable_p_value: object,
+) -> None:
+    html = _render_paired_comparison(
+        {
+            "pairing_status": "complete",
+            "paired_cases": 1,
+            "with_skill_only_pass": 1,
+            "without_skill_only_pass": 0,
+            "both_pass": 0,
+            "neither_pass": 0,
+            "discordant_cases": 1,
+            "paired_rate_delta": 1.0,
+            "mcnemar_exact": {
+                "p_value": 1.0,
+                "p_value_text": "1",
+                "minimum_attainable_p_value": minimum_attainable_p_value,
+            },
+        }
+    )
+
+    assert "Exact McNemar p=1." in html
+    assert "Minimum attainable p" not in html
+
+
+def test_pass_at_k_render_preserves_valid_underflow_and_omission_contract() -> None:
+    html = _render_paired_comparison(
+        {
+            "pairing_status": "complete",
+            "paired_cases": 15_000,
+            "with_skill_only_pass": 15_000,
+            "without_skill_only_pass": 0,
+            "both_pass": 0,
+            "neither_pass": 0,
+            "discordant_cases": 15_000,
+            "paired_rate_delta": 1.0,
+            "mcnemar_exact": {
+                "p_value": None,
+                "p_value_text": "1.395e-4515",
+                "p_value_exact": None,
+                "p_value_exact_omitted": True,
+                "p_value_exact_omitted_reason": "decimal_digit_limit",
+                "p_value_numeric_underflow": True,
+                "minimum_attainable_p_value": None,
+                "minimum_attainable_p_value_text": "1.395e-4515",
+                "minimum_attainable_p_value_exact": None,
+                "minimum_attainable_p_value_exact_omitted": True,
+                "minimum_attainable_p_value_exact_omitted_reason": "decimal_digit_limit",
+                "minimum_attainable_p_value_numeric_underflow": True,
+                "resolution_limited_at_alpha_0_05": False,
+            },
+        }
+    )
+    embedded = _embedded_tier3_payload(html)
+    exact = embedded["agents"]["codex"]["pass_at_k"]["lift"]["paired_comparison"]["mcnemar_exact"]
+
+    assert "Exact McNemar p=1.395e-4515." in html
+    assert exact["p_value"] is None
+    assert exact["minimum_attainable_p_value"] is None
+    assert exact["p_value_exact"] is None
+    assert exact["minimum_attainable_p_value_exact"] is None
+    assert exact["p_value_exact_omitted"] is True
+    assert exact["minimum_attainable_p_value_exact_omitted"] is True
+
+
+@pytest.mark.parametrize(
+    ("p_value_text", "underflow_flag"),
+    [("0.5", True), ("0", True), ("1e-5000", False), ("1e-5000", None)],
+    ids=["representable", "zero", "false-flag", "missing-flag"],
+)
+def test_pass_at_k_render_rejects_false_mcnemar_underflow(
+    p_value_text: str,
+    underflow_flag: bool | None,
+) -> None:
+    mcnemar_exact: dict[str, object] = {
+        "p_value": None,
+        "p_value_text": p_value_text,
+    }
+    if underflow_flag is not None:
+        mcnemar_exact["p_value_numeric_underflow"] = underflow_flag
+    html = _render_paired_comparison(
+        {
+            "pairing_status": "complete",
+            "paired_cases": 1,
+            "with_skill_only_pass": 1,
+            "without_skill_only_pass": 0,
+            "both_pass": 0,
+            "neither_pass": 0,
+            "discordant_cases": 1,
+            "mcnemar_exact": mcnemar_exact,
+        }
+    )
+
+    assert "Exact McNemar p=" not in html
+
+
+@pytest.mark.parametrize(
+    ("minimum_text", "underflow_flag"),
+    [("0.5", True), ("0", True), ("1e-5000", False), ("1e-5000", None)],
+    ids=["representable", "zero", "false-flag", "missing-flag"],
+)
+def test_pass_at_k_render_rejects_false_minimum_attainable_underflow(
+    minimum_text: str,
+    underflow_flag: bool | None,
+) -> None:
+    mcnemar_exact: dict[str, object] = {
+        "p_value": 1.0,
+        "p_value_text": "1",
+        "minimum_attainable_p_value": None,
+        "minimum_attainable_p_value_text": minimum_text,
+    }
+    if underflow_flag is not None:
+        mcnemar_exact["minimum_attainable_p_value_numeric_underflow"] = underflow_flag
+    html = _render_paired_comparison(
+        {
+            "pairing_status": "complete",
+            "paired_cases": 1,
+            "with_skill_only_pass": 1,
+            "without_skill_only_pass": 0,
+            "both_pass": 0,
+            "neither_pass": 0,
+            "discordant_cases": 1,
+            "mcnemar_exact": mcnemar_exact,
+        }
+    )
+
+    assert "Exact McNemar p=1." in html
+    assert "Minimum attainable p" not in html
+
+
+@pytest.mark.parametrize(
+    "paired_comparison",
+    [
+        {
+            "pairing_status": "partial",
+            "paired_cases": 1,
+            "with_skill_only_pass": 1,
+            "without_skill_only_pass": 0,
+            "both_pass": 0,
+            "neither_pass": 0,
+            "discordant_cases": 1,
+            "mcnemar_exact": {"p_value": 1.0, "p_value_text": "1"},
+        },
+        {
+            "pairing_status": "complete",
+            "paired_cases": 1,
+            "with_skill_only_pass": 10,
+            "without_skill_only_pass": 5,
+            "both_pass": 10,
+            "neither_pass": 5,
+            "discordant_cases": 15,
+            "mcnemar_exact": {"p_value": 1.0, "p_value_text": "1"},
+        },
+        {
+            "pairing_status": "complete",
+            "paired_cases": 1,
+            "with_skill_only_pass": 1,
+            "without_skill_only_pass": 0,
+            "both_pass": 0,
+            "neither_pass": 0,
+            "discordant_cases": 99,
+            "mcnemar_exact": {"p_value": 1.0, "p_value_text": "1"},
+        },
+    ],
+    ids=["partial", "outcome-sum", "discordant-sum"],
+)
+def test_pass_at_k_render_drops_exact_test_for_inconsistent_pairing(
+    paired_comparison: dict[str, object],
+) -> None:
+    html = _render_paired_comparison(paired_comparison)
+
+    assert "Exact McNemar p=" not in html
+
+
+def test_pass_at_k_render_derives_paired_delta_from_validated_outcomes() -> None:
+    html = _render_paired_comparison(
+        {
+            "pairing_status": "complete",
+            "paired_cases": 4,
+            "with_skill_only_pass": 1,
+            "without_skill_only_pass": 0,
+            "both_pass": 2,
+            "neither_pass": 1,
+            "discordant_cases": 1,
+            "paired_rate_delta": -1.0,
+            "mcnemar_exact": {"p_value": 1.0, "p_value_text": "1"},
+        }
+    )
+    embedded = _embedded_tier3_payload(html)
+    paired = embedded["agents"]["codex"]["pass_at_k"]["lift"]["paired_comparison"]
+
+    assert "Paired pass-rate delta: +25.0%." in html
+    assert paired["paired_rate_delta"] == 0.25
+
+
+def test_pass_at_k_render_preserves_rounded_subnormal_mcnemar_probability() -> None:
+    pair_count = 1_024
+    case_ids = [f"case-{index}" for index in range(pair_count)]
+    paired = _paired_pass_comparison(
+        {
+            "total_cases": pair_count,
+            "cases": {case_id: {"passed": True} for case_id in case_ids},
+        },
+        {
+            "total_cases": pair_count,
+            "cases": {case_id: {"passed": False} for case_id in case_ids},
+        },
+    )
+
+    html = _render_paired_comparison(paired)
+
+    assert paired["mcnemar_exact"]["p_value_text"] == "1.112536929e-308"
+    assert "Exact McNemar p=1.112536929e-308." in html
+    assert "Minimum attainable p with 1024 observed discordant pairs: 1.112536929e-308." in html
+
+
+def test_pass_at_k_render_preserves_adjacent_subnormal_mcnemar_probability() -> None:
+    pair_count = 1_079
+    case_ids = [f"case-{index}" for index in range(pair_count)]
+    paired = _paired_pass_comparison(
+        {
+            "total_cases": pair_count,
+            "cases": {case_id: {"passed": index < pair_count - 1} for index, case_id in enumerate(case_ids)},
+        },
+        {
+            "total_cases": pair_count,
+            "cases": {case_id: {"passed": index == pair_count - 1} for index, case_id in enumerate(case_ids)},
+        },
+    )
+    expected_text = paired["mcnemar_exact"]["p_value_text"]
+
+    html = _render_paired_comparison(paired)
+
+    assert f"Exact McNemar p={expected_text}." in html
 
 
 def test_pass_at_k_render_preserves_exact_subnormal_mcnemar_probability() -> None:

@@ -13,9 +13,15 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("streamlit")
+# st.dataframe otherwise imports these inside AppTest's timed script thread.
+pytest.importorskip("pandas")
+pytest.importorskip("pyarrow")
 from streamlit.testing.v1 import AppTest
 
 from skillevaluator.reporting.dashboard_app import rows_csv
+
+# A ceiling for cold imports under xdist and coverage; passing runs finish far sooner.
+_APP_TIMEOUT_SECONDS = 60
 
 
 def _write_report(
@@ -69,7 +75,7 @@ def _write_report(
 
 def _app(paths: list[Path]) -> AppTest:
     script = f"from skillevaluator.reporting.dashboard_app import main\nmain({[str(path) for path in paths]!r})\n"
-    return AppTest.from_string(script, default_timeout=15).run()
+    return AppTest.from_string(script, default_timeout=_APP_TIMEOUT_SECONDS).run()
 
 
 def test_empty_dashboard_has_upload_direction() -> None:
@@ -162,11 +168,11 @@ def test_bad_report_does_not_hide_other_results(tmp_path: Path) -> None:
 
 def test_status_filter_does_not_pair_arms_from_separate_embedded_reports(tmp_path: Path) -> None:
     path = _write_report(tmp_path / "combined.json", baseline_status="failed")
-    first = json.loads(path.read_text())
-    second = json.loads(path.read_text())
+    first = json.loads(path.read_text(encoding="utf-8"))
+    second = json.loads(path.read_text(encoding="utf-8"))
     second["agents"]["opencode"]["conditions"]["with_skill"]["execution_status"] = "failed"
     second["agents"]["opencode"]["conditions"]["without_skill"]["execution_status"] = "succeeded"
-    path.write_text(json.dumps([first, second]))
+    path.write_text(json.dumps([first, second]), encoding="utf-8")
     app = _app([path])
     app.multiselect(key="filter_status").set_value(["succeeded"]).run()
     assert not app.exception

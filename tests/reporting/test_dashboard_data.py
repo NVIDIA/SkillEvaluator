@@ -359,7 +359,7 @@ def test_bad_input_is_diagnostic_and_directory_skips_symlinks(tmp_path: Path) ->
 def test_catalog_index_loads_authoritative_local_reports_with_containment(tmp_path: Path) -> None:
     reports = tmp_path / "calculator"
     reports.mkdir()
-    (reports / "current.json").write_text(json.dumps(_report()))
+    (reports / "current.json").write_text(json.dumps(_report()), encoding="utf-8")
     index = tmp_path / "catalog-summary.json"
     index.write_text(
         json.dumps(
@@ -369,7 +369,8 @@ def test_catalog_index_loads_authoritative_local_reports_with_containment(tmp_pa
                     {"report_dir": "..", "json_report": "outside.json"},
                 ]
             }
-        )
+        ),
+        encoding="utf-8",
     )
     data = load_dashboard_path(index)
     assert len(data.rows) == 2
@@ -379,8 +380,12 @@ def test_catalog_index_loads_authoritative_local_reports_with_containment(tmp_pa
 def _native_run(path: Path) -> None:
     metrics = ["security", "skill_execution", "skill_efficiency", "accuracy", "goal_accuracy", "behavior_check"]
     path.mkdir()
-    (path / "result.json").write_text(json.dumps({"skill_name": "native-skill", "run_id": "native-run"}))
-    (path / "run_config.json").write_text(json.dumps({"agents": {"opencode": {"agent": "opencode", "model": "m"}}}))
+    (path / "result.json").write_text(
+        json.dumps({"skill_name": "native-skill", "run_id": "native-run"}), encoding="utf-8"
+    )
+    (path / "run_config.json").write_text(
+        json.dumps({"agents": {"opencode": {"agent": "opencode", "model": "m"}}}), encoding="utf-8"
+    )
     for variant, input_tokens in (("with-skill", 200), ("without-skill", 100)):
         condition = path / "opencode" / variant
         trial = condition / "trials" / "case-a__random"
@@ -397,7 +402,8 @@ def _native_run(path: Path) -> None:
                     "expected_attempts": 1,
                     "scored_attempts": 1,
                 }
-            )
+            ),
+            encoding="utf-8",
         )
         (trial / "reward.json").write_text(
             json.dumps(
@@ -407,7 +413,8 @@ def _native_run(path: Path) -> None:
                     "trial_id": "case-a__random",
                     "overall": 0.8,
                 }
-            )
+            ),
+            encoding="utf-8",
         )
         (trial / "trajectory.json").write_text(
             json.dumps(
@@ -415,7 +422,8 @@ def _native_run(path: Path) -> None:
                     "steps": [],
                     "final_metrics": {"total_prompt_tokens": input_tokens, "total_completion_tokens": 10},
                 }
-            )
+            ),
+            encoding="utf-8",
         )
         (trial / "result.json").write_text(
             json.dumps(
@@ -423,14 +431,15 @@ def _native_run(path: Path) -> None:
                     "agent_result": {"n_input_tokens": input_tokens, "n_output_tokens": 10, "cost_usd": None},
                     "agent_execution": {"started_at": "2026-10-01T00:00:00Z", "finished_at": "2026-10-01T00:00:10Z"},
                 }
-            )
+            ),
+            encoding="utf-8",
         )
 
 
 def test_native_results_use_real_usage_and_prune_nested_mirrors(tmp_path: Path) -> None:
     run = tmp_path / "run"
     _native_run(run)
-    (run / "report.json").write_text(json.dumps(_report()))
+    (run / "report.json").write_text(json.dumps(_report()), encoding="utf-8")
     data = load_dashboard_path(tmp_path)
     assert len(data.rows) == 2
     assert data.rows[0]["skill"] == "native-skill"
@@ -449,23 +458,25 @@ def test_catalog_native_and_mixed_references_are_loaded_without_cycles(tmp_path:
     _native_run(run)
     index = tmp_path / "catalog.json"
     reference = {"report_dir": "run", "json_report": "result.json"}
-    index.write_text(json.dumps({"skills": [reference]}))
+    index.write_text(json.dumps({"skills": [reference]}), encoding="utf-8")
     assert load_dashboard_path(index).rows == load_dashboard_path(run).rows
-    index.write_text(json.dumps({"skills": [{"tier3": _report()}, reference]}))
+    index.write_text(json.dumps({"skills": [{"tier3": _report()}, reference]}), encoding="utf-8")
     assert len(load_dashboard_path(index).rows) == 4
-    index.write_text(json.dumps({"skills": [reference, {"report_dir": ".", "json_report": "catalog.json"}]}))
+    index.write_text(
+        json.dumps({"skills": [reference, {"report_dir": ".", "json_report": "catalog.json"}]}), encoding="utf-8"
+    )
     data = load_dashboard_path(index)
     assert len(data.rows) == 2
     assert any("cyclic" in warning for warning in data.warnings)
 
 
 def test_nested_catalog_references_load_each_report_once(tmp_path: Path) -> None:
-    (tmp_path / "report.json").write_text(json.dumps(_report()))
+    (tmp_path / "report.json").write_text(json.dumps(_report()), encoding="utf-8")
     reference = {"report_dir": ".", "json_report": "report.json"}
-    (tmp_path / "child.json").write_text(json.dumps({"skills": [reference] * 10}))
+    (tmp_path / "child.json").write_text(json.dumps({"skills": [reference] * 10}), encoding="utf-8")
     child = {"report_dir": ".", "json_report": "child.json"}
     index = tmp_path / "catalog.json"
-    index.write_text(json.dumps({"skills": [child] * 10}))
+    index.write_text(json.dumps({"skills": [child] * 10}), encoding="utf-8")
     data = load_dashboard_path(index)
     assert len(data.rows) == 2
     assert comparison_rows(data.rows)[0]["comparison_status"] == "comparable"
@@ -477,14 +488,15 @@ def test_catalog_file_budget_is_shared_across_nested_references(tmp_path: Path, 
 
     monkeypatch.setattr(dashboard_data, "_MAX_FILES", 3)
     index = tmp_path / "catalog.json"
-    (tmp_path / "one.json").write_text(json.dumps(_report()))
+    (tmp_path / "one.json").write_text(json.dumps(_report()), encoding="utf-8")
     second = _report()
     second["skill_name"] = "second-skill"
-    (tmp_path / "two.json").write_text(json.dumps(second))
+    (tmp_path / "two.json").write_text(json.dumps(second), encoding="utf-8")
     (tmp_path / "child.json").write_text(
-        json.dumps({"skills": [{"report_dir": ".", "json_report": name} for name in ("one.json", "two.json")]})
+        json.dumps({"skills": [{"report_dir": ".", "json_report": name} for name in ("one.json", "two.json")]}),
+        encoding="utf-8",
     )
-    index.write_text(json.dumps({"skills": [{"report_dir": ".", "json_report": "child.json"}]}))
+    index.write_text(json.dumps({"skills": [{"report_dir": ".", "json_report": "child.json"}]}), encoding="utf-8")
     data = load_dashboard_path(index)
     assert len(data.rows) == 2
     assert any("catalog limit" in warning for warning in data.warnings)
@@ -510,7 +522,7 @@ def test_directory_enumeration_stops_before_materializing_all_entries(tmp_path: 
                 yield entry
 
     for index in range(20):
-        (tmp_path / f"report-{index}.json").write_text(json.dumps(_report()))
+        (tmp_path / f"report-{index}.json").write_text(json.dumps(_report()), encoding="utf-8")
     monkeypatch.setattr(dashboard_data, "_MAX_PATHS", 4)
     monkeypatch.setattr(dashboard_data.os, "scandir", lambda _path: CountingScanner())
     data = load_dashboard_path(tmp_path)
@@ -524,7 +536,7 @@ def test_directory_file_budget_counts_malformed_reports(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(dashboard_data, "_MAX_FILES", 3)
     for index in range(20):
-        (tmp_path / f"broken-{index}.json").write_text("{")
+        (tmp_path / f"broken-{index}.json").write_text("{", encoding="utf-8")
     data = load_dashboard_path(tmp_path)
     assert sum("cannot read report" in warning for warning in data.warnings) == 3
     assert any("file limit" in warning for warning in data.warnings)
@@ -538,7 +550,7 @@ def test_cyclic_input_catalog_and_native_symlinks_are_diagnostics(tmp_path: Path
         pytest.skip("Symlinks are unavailable on this host")
     assert load_dashboard_path(loop).warnings
     index = tmp_path / "catalog.json"
-    index.write_text(json.dumps({"skills": [{"report_dir": ".", "json_report": "loop.json"}]}))
+    index.write_text(json.dumps({"skills": [{"report_dir": ".", "json_report": "loop.json"}]}), encoding="utf-8")
     assert load_dashboard_path(index).warnings
     run = tmp_path / "run"
     _native_run(run)
@@ -575,13 +587,13 @@ def test_malformed_native_schema_is_diagnostic_and_preserves_other_sources(tmp_p
     _native_run(run)
     if malformation == "summary_status":
         path = run / "opencode" / "with-skill" / "summary.json"
-        summary = json.loads(path.read_text())
+        summary = json.loads(path.read_text(encoding="utf-8"))
         summary["execution_status"] = ["succeeded"]
-        path.write_text(json.dumps(summary))
+        path.write_text(json.dumps(summary), encoding="utf-8")
     else:
-        (run / "run_config.json").write_text(json.dumps({"agents": [{"agent": "opencode"}]}))
+        (run / "run_config.json").write_text(json.dumps({"agents": [{"agent": "opencode"}]}), encoding="utf-8")
     assert load_dashboard_path(run / "result.json").warnings
-    (tmp_path / "valid.json").write_text(json.dumps(_report()))
+    (tmp_path / "valid.json").write_text(json.dumps(_report()), encoding="utf-8")
     data = load_dashboard_path(tmp_path)
     assert len(data.rows) == 2
     assert {row["skill"] for row in data.rows} == {"calculator"}
@@ -593,9 +605,9 @@ def test_native_missing_attempt_does_not_publish_partial_usage_as_total(tmp_path
     _native_run(run)
     for variant in ("with-skill", "without-skill"):
         summary_path = run / "opencode" / variant / "summary.json"
-        summary = json.loads(summary_path.read_text())
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
         summary.update(num_trials=2, expected_attempts=2, scored_attempts=2)
-        summary_path.write_text(json.dumps(summary))
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
     data = load_dashboard_path(run)
     assert all(row["score"] is None and row["total_tokens"] is None for row in data.rows)
     assert all(row["duration_seconds"] is None for row in data.rows)
@@ -615,13 +627,13 @@ def test_native_generated_stop_on_pass_names_preserve_attempt_sets(tmp_path: Pat
         shutil.copytree(first, second)
         for trial_dir in (first, second):
             reward_path = trial_dir / "reward.json"
-            reward = json.loads(reward_path.read_text())
+            reward = json.loads(reward_path.read_text(encoding="utf-8"))
             reward["trial_id"] = trial_dir.name
-            reward_path.write_text(json.dumps(reward))
+            reward_path.write_text(json.dumps(reward), encoding="utf-8")
         summary_path = condition / "summary.json"
-        summary = json.loads(summary_path.read_text())
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
         summary.update(num_trials=2, expected_attempts=2, scored_attempts=2)
-        summary_path.write_text(json.dumps(summary))
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
     data = load_dashboard_path(run)
     assert all(row["trials"] == 2 and row["score"] == 0.8 for row in data.rows)
     assert comparison_rows(data.rows)[0]["comparison_status"] == "comparable"
@@ -631,9 +643,9 @@ def test_native_different_condition_models_cannot_pair(tmp_path: Path) -> None:
     run = tmp_path / "run"
     _native_run(run)
     baseline_summary = run / "opencode" / "without-skill" / "summary.json"
-    summary = json.loads(baseline_summary.read_text())
+    summary = json.loads(baseline_summary.read_text(encoding="utf-8"))
     summary["model"] = "different-model"
-    baseline_summary.write_text(json.dumps(summary))
+    baseline_summary.write_text(json.dumps(summary), encoding="utf-8")
     comparisons = comparison_rows(load_dashboard_path(run).rows)
     assert len(comparisons) == 2
     assert all(row["comparison_status"] == "missing condition" for row in comparisons)
@@ -647,9 +659,9 @@ def test_native_invalid_coverage_counts_cannot_be_hidden_by_canonical_normalizat
     run = tmp_path / "run"
     _native_run(run)
     summary_path = run / "opencode" / "with-skill" / "summary.json"
-    summary = json.loads(summary_path.read_text())
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
     summary[field] = value
-    summary_path.write_text(json.dumps(summary))
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
     data = load_dashboard_path(run)
     row = next(row for row in data.rows if row["condition"] == "with_skill")
     assert row["score"] is None
@@ -682,20 +694,20 @@ def test_multistep_native_cost_time_and_tokens_require_every_step(tmp_path: Path
     run = tmp_path / "run"
     _native_run(run)
     trial_result = run / "opencode" / "with-skill" / "trials" / "case-a__random" / "result.json"
-    result = json.loads(trial_result.read_text())
+    result = json.loads(trial_result.read_text(encoding="utf-8"))
     step = {
         "agent_result": {"n_input_tokens": 50, "n_output_tokens": 5, "n_cache_tokens": 0, "cost_usd": 0.1},
         "agent_execution": {"started_at": "2026-10-01T00:00:00Z", "finished_at": "2026-10-01T00:00:03Z"},
     }
     result["step_results"] = [step, copy.deepcopy(step)]
-    trial_result.write_text(json.dumps(result))
+    trial_result.write_text(json.dumps(result), encoding="utf-8")
     row = load_dashboard_path(run).rows[0]
     assert row["prompt_tokens"] == 100
     assert row["duration_seconds"] == 6
     assert row["cost_usd"] == pytest.approx(0.2)
     result["step_results"][1]["agent_result"].pop("n_input_tokens")
     result["step_results"][1]["agent_result"].pop("cost_usd")
-    trial_result.write_text(json.dumps(result))
+    trial_result.write_text(json.dumps(result), encoding="utf-8")
     row = load_dashboard_path(run).rows[0]
     assert row["prompt_tokens"] is None
     assert row["total_tokens"] is None
@@ -710,20 +722,20 @@ def test_native_duplicate_reward_rows_require_authoritative_step_scope(tmp_path:
     second = first.with_name("case-a__random__finish")
     shutil.copytree(first, second)
     summary_path = condition / "summary.json"
-    summary = json.loads(summary_path.read_text())
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
     # The collector counts one logical trial and records its two reward rows.
     summary["num_reward_rows"] = 2
-    summary_path.write_text(json.dumps(summary))
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
     for trial_dir in (first, second):
         result_path = trial_dir / "result.json"
-        result = json.loads(result_path.read_text())
+        result = json.loads(result_path.read_text(encoding="utf-8"))
         step = {
             "step_name": "prepare",
             "agent_result": {"n_input_tokens": 50, "n_output_tokens": 5, "n_cache_tokens": 0, "cost_usd": 0.1},
             "agent_execution": result["agent_execution"],
         }
         result["step_results"] = [step, {**copy.deepcopy(step), "step_name": "finish"}]
-        result_path.write_text(json.dumps(result))
+        result_path.write_text(json.dumps(result), encoding="utf-8")
     row = load_dashboard_path(run).rows[0]
     assert row["score"] == 0.8
     assert row["total_tokens"] == 110
@@ -731,9 +743,9 @@ def test_native_duplicate_reward_rows_require_authoritative_step_scope(tmp_path:
     assert row["cost_usd"] == pytest.approx(0.2)
     for trial_dir in (first, second):
         result_path = trial_dir / "result.json"
-        result = json.loads(result_path.read_text())
+        result = json.loads(result_path.read_text(encoding="utf-8"))
         result.pop("step_results")
-        result_path.write_text(json.dumps(result))
+        result_path.write_text(json.dumps(result), encoding="utf-8")
     data = load_dashboard_path(run)
     assert data.rows[0]["score"] == 0.8
     assert data.rows[0]["total_tokens"] is None

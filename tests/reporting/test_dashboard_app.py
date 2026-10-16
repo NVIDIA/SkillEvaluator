@@ -293,6 +293,16 @@ def test_directory_and_file_inside_it_load_once(tmp_path: Path) -> None:
     assert any("duplicate" in text.value for text in app.text)
 
 
+def test_rewritten_file_inside_directory_input_is_reloaded(tmp_path: Path) -> None:
+    report = _write_report(tmp_path / "run.json")
+    # The directory comes first, and its own fingerprint misses an in-place rewrite of the file.
+    app = _app([tmp_path, report])
+    _rewrite_score(report, 0.5)
+    app.run()
+    assert not app.exception
+    assert app.dataframe[0].value["score"].tolist() == [0.5, 0.6]
+
+
 def test_results_dir_and_latest_symlink_load_once(tmp_path: Path) -> None:
     results = tmp_path / "results"
     run = results / "run-1"

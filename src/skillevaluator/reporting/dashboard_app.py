@@ -327,6 +327,7 @@ def main(paths: list[str] | None = None) -> None:
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
     seen_paths: set[Path] = set()
+    inputs: list[Path] = []
     for supplied_path in paths or []:
         try:
             path = Path(supplied_path).expanduser().resolve()
@@ -336,6 +337,10 @@ def main(paths: list[str] | None = None) -> None:
         if path in seen_paths:
             continue
         seen_paths.add(path)
+        inputs.append(path)
+    # A directory's fingerprint misses in-place rewrites of files inside it, so load
+    # deeper inputs first and let dedupe_rows keep their fresher copy of shared rows.
+    for path in sorted(inputs, key=lambda item: len(item.parts), reverse=True):
         data = _load_path_cached(str(path), _input_fingerprint(path))
         rows.extend(data.rows)
         warnings.extend(data.warnings)

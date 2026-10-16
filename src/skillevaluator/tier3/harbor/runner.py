@@ -8,6 +8,7 @@ from __future__ import annotations
 import codecs
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import logging
 import math
@@ -23,7 +24,7 @@ import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
@@ -57,6 +58,11 @@ from skillevaluator.provider_config import (
     is_claude_5_5_or_later,
     resolve_llm_provider,
 )
+from skillevaluator.publication_identity import (
+    PUBLICATION_ANY_DEPTH_EXCLUDED_NAMES,
+    publication_source_path_is_excluded,
+    publication_target_from_path,
+)
 from skillevaluator.source_identity import normalized_evaluated_source
 from skillevaluator.tier3.case_ids import validate_case_ids
 from skillevaluator.tier3.eval_core.llm_judge import JUDGE_REASONING_EFFORT
@@ -76,6 +82,7 @@ from skillevaluator.tier3.harbor.adapter import (
     _VERIFIER_RETRY_ENV_VARS,
     _native_entry_id,
     _prevalidate_baseline_skill_candidates,
+    _read_regular_evals_file,
     build_eval_base_image,
     find_evals_file,
     generate_harbor_tasks,
@@ -110,7 +117,10 @@ from skillevaluator.tier3.harbor.report_data import (
     load_staged_harbor_dataset,
 )
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
-from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_DOCKER_ENV_IMPORT_PATH
+from skillevaluator.tier3.harbor.secure_docker_environment import (
+    SECURE_DOCKER_ENV_IMPORT_PATH,
+    SECURE_KATA_ENV_IMPORT_PATH,
+)
 from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_KEY_STDIN_ENV as _NVIDIA_BUILD_KEY_STDIN_ENV,
 )
@@ -133,6 +143,7 @@ from skillevaluator.tier3.results_location import publish_latest_results
 from skillevaluator.tier3_environments import (
     DEFAULT_ENV_MODE,
     ENV_MODE_LOCAL,
+    HARBOR_DOCKER_ENGINE_ENV_MODES,
     HARBOR_ENV_MODES,
     HARBOR_ENVIRONMENT_ALIAS_KWARGS,
     HARBOR_ENVIRONMENT_EXTRAS,
@@ -140,10 +151,150 @@ from skillevaluator.tier3_environments import (
     HARBOR_VERSION,
     harbor_environment_type,
 )
+from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 
 logger = logging.getLogger(__name__)
+_MAX_REPO_CONTEXT_METADATA_BYTES = 16 * 1024 * 1024
+
+
+def _runtime_source_is_bound_to_target(source: Path, target: Path) -> bool:
+    """Return whether one staged runtime source is covered by the target digest."""
+    try:
+        source.absolute().relative_to(target.absolute())
+        metadata = source.lstat()
+        reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & reparse_point:
+            return False
+        resolved_source = source.resolve(strict=True)
+        resolved_target = target.resolve(strict=True)
+        resolved_source.relative_to(resolved_target)
+        if publication_source_path_is_excluded(resolved_target, resolved_source):
+            return False
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _task_stages_digest_excluded_entries(task_path: Path) -> bool:
+    """Return whether a generated task carries entries the source digest omits.
+
+    Task inputs (``evals/files`` and per-entry ``files`` references) and the
+    custom ``evals/environment`` are copied as authored, while the digest omits
+    ``.git``, ``.venv``, ``__pycache__`` and ``node_modules`` at any depth. Such
+    staged bytes could change Tier 3 inputs or outcomes without changing the
+    certified digest. Generated task content never uses these names, and
+    runtime skill and repository projections already omit them.
+    """
+    try:
+        for dirpath, dirnames, filenames in os.walk(task_path, followlinks=False):
+            base = Path(dirpath)
+            for name in (*dirnames, *filenames):
+                if matches_filesystem_name(base / name, PUBLICATION_ANY_DEPTH_EXCLUDED_NAMES):
+                    return True
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return False
+
+
+def _runtime_context_is_bound_to_publication_target(
+    skill_path: Path,
+    task_paths: Sequence[Path],
+    *,
+    reference_skills_dir: Path | None,
+    workspace_skill_paths: Sequence[Path],
+) -> bool:
+    """Check that every staged runtime source is covered by the skill digest.
+
+    ``publication_target`` deliberately identifies only the evaluated target
+    tree. Repository links, full-repository context, and separately configured
+    reference/workspace skills can add agent-visible bytes outside that tree.
+    Until those inputs have their own versioned publication identity, retain
+    the evaluation but fail its publication evidence closed.
+    """
+    try:
+        target = skill_path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+    if reference_skills_dir is not None:
+        try:
+            reference_metadata = reference_skills_dir.stat()
+            if not stat.S_ISDIR(reference_metadata.st_mode):
+                return False
+            if not _runtime_source_is_bound_to_target(reference_skills_dir, target):
+                return False
+            reference_candidates: list[Path] = []
+            for path in reference_skills_dir.iterdir():
+                if path.name.startswith("."):
+                    continue
+                child_metadata = path.stat()
+                if stat.S_ISDIR(child_metadata.st_mode):
+                    reference_candidates.append(path)
+            if any(not _runtime_source_is_bound_to_target(path, target) for path in reference_candidates):
+                return False
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+    if any(not _runtime_source_is_bound_to_target(path, target) for path in workspace_skill_paths):
+        return False
+
+    for task_path in task_paths:
+        if _task_stages_digest_excluded_entries(task_path):
+            return False
+        environment_path = task_path / "environment"
+        context_path = environment_path / "repo-context.json"
+        staged_repo_context = False
+        for staged_name in ("repo", "repo-linked-root"):
+            try:
+                (environment_path / staged_name).lstat()
+                staged_repo_context = True
+            except FileNotFoundError:
+                continue
+            except (OSError, RuntimeError, ValueError):
+                return False
+        try:
+            context_path.lstat()
+        except FileNotFoundError:
+            if staged_repo_context:
+                return False
+            continue
+        except (OSError, RuntimeError, ValueError):
+            return False
+        try:
+            encoded_context = _read_regular_evals_file(
+                context_path,
+                label="Repo context metadata",
+                max_bytes=_MAX_REPO_CONTEXT_METADATA_BYTES,
+                allowed_root=task_path,
+            )
+            context = json.loads(encoded_context.decode("utf-8"))
+            files = context.get("files") if isinstance(context, dict) else None
+        except (OSError, RecursionError, UnicodeError, ValueError):
+            return False
+        if not isinstance(files, list):
+            return False
+        mode = context.get("mode")
+        if mode not in {"full", "linked"}:
+            return False
+        for entry in files:
+            source = entry.get("source") if isinstance(entry, dict) else None
+            if (
+                not isinstance(source, str)
+                or not source
+                or not Path(source).is_absolute()
+                or not _runtime_source_is_bound_to_target(Path(source), target)
+            ):
+                return False
+        # Repository projection depends on source bytes and topology outside
+        # the target-only digest (and full mode additionally depends on
+        # excluded Git/operator selection state). Keep the run, but do not let
+        # any nonempty repo context certify this target identity.
+        if files or staged_repo_context:
+            return False
+    return True
+
 
 PUBLISHED_EXECUTION_ERRORS_MAX = 256
 PUBLISHED_EXECUTION_ERROR_MAX_CHARS = 4096
@@ -768,6 +919,7 @@ _DOCKER_HOST_ENV_VARS = frozenset(
 )
 _HARBOR_ENV_MODE_VARS = {
     "docker": _DOCKER_HOST_ENV_VARS,
+    "kata": _DOCKER_HOST_ENV_VARS,
     "daytona": frozenset(
         {
             "DAYTONA_API_KEY",
@@ -1075,7 +1227,7 @@ def _nvidia_build_key_handoff(
     subprocess_env.pop(_NVIDIA_BUILD_KEY_STDIN_ENV, None)
     api_key = subprocess_env.get("NVIDIA_API_KEY", "")
     if (
-        env_mode == "docker"
+        env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES
         and subprocess_env.get("SKILL_EVAL_LLM_PROVIDER") == "nv_build"
         and api_key
         and api_key not in {_NVIDIA_BUILD_FILE_SENTINEL, _NVIDIA_BUILD_STDIN_SENTINEL}
@@ -1157,6 +1309,10 @@ _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS: dict[str, frozenset[str]] = {
 }
 
 
+_KATA_RUNTIME_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_KATA_DNS_SERVER_RE = re.compile(r"[0-9A-Fa-f:.]{2,45}")
+
+
 def _environment_kwarg_policy_error(env_mode: str, environment_kwargs: Mapping[str, Any]) -> str | None:
     if not environment_kwargs:
         return None
@@ -1171,6 +1327,64 @@ def _environment_kwarg_policy_error(env_mode: str, environment_kwargs: Mapping[s
         return f"Harbor {HARBOR_VERSION} environment '{env_mode}' does not accept environment kwarg(s): " + ", ".join(
             unknown
         )
+    if env_mode == "kata":
+        return _kata_environment_kwarg_error(environment_kwargs)
+    return None
+
+
+def _kata_environment_kwarg_error(environment_kwargs: Mapping[str, Any]) -> str | None:
+    """Keep Kata's runtime overlay pointed at a Kata handler and literal DNS servers."""
+    runtime = environment_kwargs.get("kata_runtime", "kata")
+    # Harbor treats Docker runtimes whose names contain "kata" as Kata handlers;
+    # any other handler, such as runc, would silently drop the microVM boundary.
+    if not isinstance(runtime, str) or "kata" not in runtime or not _KATA_RUNTIME_NAME_RE.fullmatch(runtime):
+        return "Harbor environment 'kata' requires kata_runtime to name a registered Kata runtime handler"
+    # Harbor writes each server into the microVM's resolv.conf. Parse them the
+    # way Harbor does (comma strings are split and trimmed) and allow only IP
+    # literals: an IPv6 zone ID (%...) could otherwise carry resolver directives.
+    if "kata_dns" not in environment_kwargs:
+        return None
+    dns = environment_kwargs["kata_dns"]
+    if isinstance(dns, str):
+        servers = [server.strip() for server in dns.split(",") if server.strip()]
+    elif isinstance(dns, list) and all(isinstance(server, str) for server in dns):
+        servers = dns
+    else:
+        return "Harbor environment 'kata' requires kata_dns to be a list of IP addresses"
+    # Without a server Harbor keeps Docker's embedded resolver, which a Kata VM cannot reach.
+    if not servers:
+        return "Harbor environment 'kata' requires kata_dns to list at least one IP address"
+    for server in servers:
+        if not _KATA_DNS_SERVER_RE.fullmatch(server):
+            return "Harbor environment 'kata' requires kata_dns to be a list of IP addresses"
+        try:
+            ipaddress.ip_address(server)
+        except ValueError:
+            return "Harbor environment 'kata' requires kata_dns to be a list of IP addresses"
+    return None
+
+
+def _staged_task_environment_error(env_mode: str, task_dirs: Iterable[Path]) -> str | None:
+    """Reject staged task environments the selected backend cannot run."""
+    if env_mode != "kata":
+        return None
+    import yaml
+
+    for task_dir in task_dirs:
+        compose_path = task_dir / "environment" / "docker-compose.yaml"
+        if not compose_path.is_file():
+            continue
+        try:
+            compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            return f"Could not read the Docker Compose model of task '{task_dir.name}'"
+        services = compose.get("services") if isinstance(compose, dict) else None
+        if sidecars := sorted(str(name) for name in services or {} if name != "main"):
+            # Kata replaces each service's resolv.conf, so Compose service-name DNS stops working.
+            return (
+                f"Harbor environment 'kata' cannot run task '{task_dir.name}' with Compose sidecar services "
+                f"({', '.join(sidecars)}): services in Kata microVMs cannot resolve each other by name"
+            )
     return None
 
 
@@ -1238,10 +1452,10 @@ def build_harbor_run_command(
     timeout_multiplier = _validated_timeout_multiplier(timeout_multiplier)
     if (
         agent_import_path
-        and env_mode not in {"docker", ENV_MODE_LOCAL}
+        and env_mode not in HARBOR_DOCKER_ENGINE_ENV_MODES | {ENV_MODE_LOCAL}
         and agent_import_path not in _NATIVE_BACKEND_AGENT_IMPORT_PATHS
     ):
-        raise ValueError("agent_import_path is supported only with --env docker or local")
+        raise ValueError("agent_import_path is supported only with --env docker, kata, or local")
     validated_environment_kwargs = validate_environment_kwargs(
         dict(environment_kwargs or {}),
         env_mode=env_mode,
@@ -1297,11 +1511,11 @@ def build_harbor_run_command(
                 f"inherit_agent_keys={str(local_sandbox.coerce_flag(None, env_var=local_sandbox.INHERIT_AGENT_KEYS_ENV)).lower()}",
             ]
         )
-    elif env_mode == "docker":
+    elif env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES:
         from skillevaluator.tier3.harbor import DOCKER_AGENT_IMPORT_PATHS
 
         command.extend(["--agent", agent_import_path or DOCKER_AGENT_IMPORT_PATHS.get(agent, agent)])
-        command.extend(["--env", SECURE_DOCKER_ENV_IMPORT_PATH])
+        command.extend(["--env", SECURE_KATA_ENV_IMPORT_PATH if env_mode == "kata" else SECURE_DOCKER_ENV_IMPORT_PATH])
     else:
         command.extend(["--agent", agent_import_path or agent, "--env", harbor_environment_type(env_mode)])
     for name, value in sorted(_harbor_agent_kwargs(agent, model, env_mode).items()):
@@ -1490,7 +1704,7 @@ def _validate_agent_provider_credentials(
                 "NVIDIA Build local agents require network access; unset SKILLEVALUATOR_LOCAL_ALLOW_NET or set it to 1."
             ]
 
-    if env_mode in {"docker", ENV_MODE_LOCAL}:
+    if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES | {ENV_MODE_LOCAL}:
         for agent in agents:
             model = models.get(agent, "")
             raw_model = model.removeprefix("nvidia/") if agent == "opencode" else model
@@ -1842,7 +2056,8 @@ def _check_prerequisites(
         except ValueError as exc:
             return [f"Invalid local runtime configuration: {exc}"]
 
-    if env_mode == "docker":
+    if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES:
+        mode_label = "Kata" if env_mode == "kata" else "Docker"
         try:
             compose = subprocess.run(
                 ["docker", "compose", "version"],
@@ -1856,7 +2071,7 @@ def _check_prerequisites(
                 exc,
                 secret_values=secret_values_from_environment(os.environ),
             )
-            return [f"Docker Compose v2 is required for Tier 3 Docker mode: {detail}"]
+            return [f"Docker Compose v2 is required for Tier 3 {mode_label} mode: {detail}"]
         if compose.returncode != 0:
             detail = (compose.stderr or compose.stdout).strip()
             safe_detail = redact_progress_detail(
@@ -1864,7 +2079,7 @@ def _check_prerequisites(
                 secret_values=secret_values_from_environment(os.environ),
             )
             suffix = f": {safe_detail}" if safe_detail else ""
-            return [f"Docker Compose v2 is required for Tier 3 Docker mode{suffix}"]
+            return [f"Docker Compose v2 is required for Tier 3 {mode_label} mode{suffix}"]
 
     try:
         from harbor.environments.factory import EnvironmentFactory
@@ -1873,6 +2088,13 @@ def _check_prerequisites(
         if cwsandbox_errors := _cwsandbox_prerequisite_errors(env_mode):
             return cwsandbox_errors
         EnvironmentFactory.run_preflight(EnvironmentType(harbor_environment_type(env_mode)))
+        if env_mode == "kata":
+            from harbor.environments.kata import DEFAULT_KATA_RUNTIME, KataEnvironment
+
+            # Harbor's preflight only requires some Kata handler; require the selected one.
+            kata_runtime = (environment_kwargs or {}).get("kata_runtime", DEFAULT_KATA_RUNTIME)
+            if kata_runtime not in KataEnvironment._registered_kata_runtimes():
+                return [f"Harbor environment 'kata' requires Docker to register the Kata runtime {kata_runtime!r}."]
         if env_mode == "ack":
             ack_subprocess_env = (
                 dict(subprocess_env)
@@ -2140,7 +2362,7 @@ def _agent_credentials(
             if env_mode == ENV_MODE_LOCAL:
                 return _local_agent_credentials(provider)
             return {"NVIDIA_API_KEY": provider.api_key or ""}
-        if env_mode in {"docker", ENV_MODE_LOCAL} and agent in {"claude-code", "codex"}:
+        if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES | {ENV_MODE_LOCAL} and agent in {"claude-code", "codex"}:
             # The Docker bridge wrapper reads the evaluator credential from
             # the Harbor parent handoff; the vendor CLI receives only a local
             # sentinel and must not inherit NVIDIA_API_KEY in task env.
@@ -2219,11 +2441,7 @@ def _agent_provider_config(
     if (
         evaluator_provider.provider == "nv_build"
         and agent == "claude-code"
-        and env_mode
-        not in {
-            "docker",
-            ENV_MODE_LOCAL,
-        }
+        and env_mode not in HARBOR_DOCKER_ENGINE_ENV_MODES | {ENV_MODE_LOCAL}
     ):
         resolved_model = model.removeprefix("anthropic/")
         return ProviderConfig(
@@ -2236,11 +2454,7 @@ def _agent_provider_config(
     if (
         evaluator_provider.provider == "nv_build"
         and agent == "codex"
-        and env_mode
-        not in {
-            "docker",
-            ENV_MODE_LOCAL,
-        }
+        and env_mode not in HARBOR_DOCKER_ENGINE_ENV_MODES | {ENV_MODE_LOCAL}
     ):
         resolved_model = model.removeprefix("openai/")
         return ProviderConfig(
@@ -2494,7 +2708,7 @@ def _agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> s
     """Select only the provider-specific wrappers required for this environment."""
     if provider.provider == "openai-compatible" and agent == "codex" and env_mode != ENV_MODE_LOCAL:
         return _GATEWAY_CODEX_IMPORT_PATH
-    if provider.provider == "openai-compatible" and agent == "opencode" and env_mode == "docker":
+    if provider.provider == "openai-compatible" and agent == "opencode" and env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES:
         return "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayOpenCode"
     return _nvidia_build_agent_import_path(provider, agent, env_mode)
 
@@ -2508,7 +2722,7 @@ def _nvidia_build_agent_import_path(provider: ProviderConfig, agent: str, env_mo
         NVIDIA_BUILD_LOCAL_AGENT_IMPORT_PATHS,
     )
 
-    if env_mode == "docker":
+    if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES:
         return NVIDIA_BUILD_AGENT_IMPORT_PATHS.get(agent)
     if env_mode == ENV_MODE_LOCAL:
         return NVIDIA_BUILD_LOCAL_AGENT_IMPORT_PATHS.get(agent)
@@ -3642,7 +3856,9 @@ def _run_harbor_eval_impl(
     override_storage_mb: int | None = None,
     evaluated_source: dict[str, str] | None = None,
     progress_reporter: ProgressReporter | None = None,
+    repo_context_exclude_paths: Sequence[Path] = (),
     _evaluator_skill_path: Path | None = None,
+    _snapshot_publication_target: dict[str, str] | None = None,
     _monotonic_start: float | None = None,
 ) -> dict[str, Any]:
     """Run a public Harbor evaluation with and without the target skill."""
@@ -3676,11 +3892,15 @@ def _run_harbor_eval_impl(
         forwarded.pop("agents")
         with ExitStack() as snapshot_stack:
             try:
+                snapshot_publication_target = publication_target_from_path(skill_path)
                 evaluator_skill_path = snapshot_stack.enter_context(private_evaluator_skill_snapshot(skill_path))
+                if publication_target_from_path(skill_path) != snapshot_publication_target:
+                    raise ValueError("Publication source changed while its private evaluator snapshot was created")
             except (OSError, ValueError) as exc:
                 reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
                 return _terminal_failure_result([str(exc)], error_code=EvaluatorErrorCode.UNKNOWN)
             forwarded["_evaluator_skill_path"] = evaluator_skill_path
+            forwarded["_snapshot_publication_target"] = snapshot_publication_target
             forwarded["_monotonic_start"] = started_at
             return _run_harbor_eval_impl(skill_path, agents, **forwarded)
 
@@ -4121,6 +4341,7 @@ def _run_harbor_eval_impl(
         return _terminal_failure_result([str(exc)], error_code=EvaluatorErrorCode.INVALID_CONFIGURATION)
 
     root = Path(output_dir) if output_dir is not None else skill_path / "evals" / "results"
+    effective_repo_context_exclude_paths = (root, *(Path(path) for path in repo_context_exclude_paths))
     try:
         validate_output_provenance_key_location(
             skill_path,
@@ -4144,10 +4365,46 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
         return _terminal_failure_result([str(exc)], error_code=EvaluatorErrorCode.UNKNOWN)
     run_id = run_dir.name
+    publication_target = _snapshot_publication_target
     jobs_dir = run_dir / "_harbor-jobs"
     tasks_dir = run_dir / "_harbor-tasks"
     result_path = run_dir / "result.json"
     report_path: Path | None = None
+    publication_target_conflict: dict[str, Any] | None = None
+
+    def _run_owned_publication_fields() -> dict[str, Any]:
+        """Return the boundary identity, or a fail-closed mutation marker."""
+        nonlocal publication_target_conflict
+        if publication_target_conflict is not None:
+            conflict: dict[str, Any] = {
+                "run_start": (
+                    dict(publication_target_conflict["run_start"])
+                    if isinstance(publication_target_conflict["run_start"], dict)
+                    else None
+                ),
+                "run_end": (
+                    dict(publication_target_conflict["run_end"])
+                    if isinstance(publication_target_conflict["run_end"], dict)
+                    else None
+                ),
+            }
+            reason_code = publication_target_conflict.get("reason_code")
+            if isinstance(reason_code, str):
+                conflict["reason_code"] = reason_code
+            return {"publication_target": None, "publication_target_conflict": conflict}
+        run_end_target = publication_target_from_path(skill_path)
+        if run_end_target == publication_target:
+            return {
+                "publication_target": dict(publication_target) if publication_target is not None else None,
+            }
+        publication_target_conflict = {
+            "run_start": dict(publication_target) if publication_target is not None else None,
+            "run_end": dict(run_end_target) if run_end_target is not None else None,
+        }
+        return {
+            "publication_target": None,
+            "publication_target_conflict": dict(publication_target_conflict),
+        }
 
     def _emit_run_finished(state: str, detail: str, *, include_artifacts: bool = True) -> None:
         reporter.emit(
@@ -4184,6 +4441,7 @@ def _run_harbor_eval_impl(
             # complete diagnostic sample a second time.
             "error": published_errors[:1],
             "run_id": run_id,
+            **_run_owned_publication_fields(),
             "run_dir": str(run_dir),
             "harbor_jobs_dir": str(jobs_dir),
             "harbor_jobs_retained": jobs_dir.is_dir(),
@@ -4213,7 +4471,7 @@ def _run_harbor_eval_impl(
 
     emitter = stage_native_harbor_tasks if task_source == "native_harbor" else generate_harbor_tasks
     resource_config = harbor_config.get("resources", {})
-    use_base_image = env_mode == "docker" and base_image_mode != "disabled"
+    use_base_image = env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES and base_image_mode != "disabled"
     base_image = ""
     if use_base_image:
         reporter.emit(
@@ -4228,7 +4486,7 @@ def _run_harbor_eval_impl(
             reference_skills_dir,
             workspace_skill_paths=workspace_skills,
             evaluator_skill_path=evaluator_skill_path,
-            excluded_roots=(root,),
+            excluded_roots=effective_repo_context_exclude_paths,
             force_rebuild=base_image_mode == "rebuild",
         )
         if base_image:
@@ -4244,6 +4502,7 @@ def _run_harbor_eval_impl(
                 )
             )
     agent_task_dirs: dict[str, tuple[Path, Path | None]] = {}
+    staged_task_paths: list[Path] = []
     expected_task_selectors: list[str] | None = None
     expected_case_id_by_task_selector: dict[str, str] | None = None
     reporter.emit(
@@ -4273,7 +4532,7 @@ def _run_harbor_eval_impl(
                 base_image=base_image,
                 custom_dockerfile_mode=dockerfile_mode,
                 copy_repo=copy_repo,
-                repo_context_exclude_paths=(root,),
+                repo_context_exclude_paths=effective_repo_context_exclude_paths,
                 runtime_env=dict(runtime_plans[agent].staged_env),
                 verifier_env=staged_verifier_env,
                 pre_agent_setup=harbor_config.get("pre_agent_setup", []),
@@ -4282,6 +4541,9 @@ def _run_harbor_eval_impl(
                 evaluator_skill_path=evaluator_skill_path,
                 arm_suffix=with_arm_suffix,
             )
+            staged_task_paths.extend(task_paths)
+            if staged_environment_error := _staged_task_environment_error(env_mode, task_paths):
+                raise ValueError(staged_environment_error)
             task_selectors = validate_case_ids(task.name for task in task_paths)
             logical_case_ids = validate_case_ids(_native_entry_id(task) for task in task_paths)
             case_id_by_task_selector = dict(zip(task_selectors, logical_case_ids, strict=True))
@@ -4302,7 +4564,7 @@ def _run_harbor_eval_impl(
                 skill_path,
                 reference_skills_dir,
                 workspace_skills,
-                excluded_roots=(root,),
+                excluded_roots=effective_repo_context_exclude_paths,
             )
         else:
             baseline_alias_validation = None
@@ -4320,7 +4582,7 @@ def _run_harbor_eval_impl(
                     base_image=base_image,
                     custom_dockerfile_mode=dockerfile_mode,
                     copy_repo=copy_repo,
-                    repo_context_exclude_paths=(root,),
+                    repo_context_exclude_paths=effective_repo_context_exclude_paths,
                     runtime_env=dict(runtime_plans[agent].staged_env),
                     verifier_env=staged_verifier_env,
                     pre_agent_setup=harbor_config.get("pre_agent_setup", []),
@@ -4335,6 +4597,7 @@ def _run_harbor_eval_impl(
                 baseline_case_id_by_task_selector = dict(
                     zip(baseline_task_selectors, baseline_logical_case_ids, strict=True)
                 )
+                staged_task_paths.extend(baseline_task_paths)
                 if (
                     baseline_task_selectors != expected_task_selectors
                     or baseline_case_id_by_task_selector != expected_case_id_by_task_selector
@@ -4350,6 +4613,18 @@ def _run_harbor_eval_impl(
             [str(exc)],
             error_code=EvaluatorErrorCode.UNKNOWN,
         )
+
+    if not _runtime_context_is_bound_to_publication_target(
+        skill_path,
+        staged_task_paths,
+        reference_skills_dir=reference_skills_dir,
+        workspace_skill_paths=workspace_skills,
+    ):
+        publication_target_conflict = {
+            "run_start": dict(publication_target) if publication_target is not None else None,
+            "run_end": None,
+            "reason_code": "runtime_context_outside_publication_target",
+        }
 
     task_selectors = expected_task_selectors or []
     case_id_by_task_selector = expected_case_id_by_task_selector or {}
@@ -4563,6 +4838,7 @@ def _run_harbor_eval_impl(
         {
             "skill_name": skill_path.name,
             "run_id": run_id,
+            **_run_owned_publication_fields(),
             "run_dir": str(run_dir),
             "result_path": str(result_path),
             "harbor_jobs_dir": str(jobs_dir),
@@ -4600,21 +4876,43 @@ def _run_harbor_eval_impl(
         _emit_run_finished("failed", "report artifacts could not be written")
         raise
 
-    report_warning: str | None = None
-    try:
-        candidate_report_path = render_agent_eval_html_report(
-            skill_path,
-            run_dir,
-            env_mode=env_mode,
-            engine_result=results,
-        )
-        if candidate_report_path.is_file():
-            report_path = candidate_report_path
+    def _render_current_report() -> tuple[Path | None, str | None]:
+        try:
+            candidate = render_agent_eval_html_report(
+                skill_path,
+                run_dir,
+                env_mode=env_mode,
+                engine_result=results,
+            )
+            if candidate.is_file():
+                return candidate, None
+            return None, "HTML report was not generated: report file is missing"
+        except Exception as exc:
+            return None, f"HTML report was not generated: {exc}"
+
+    identity_before_report = {
+        key: results[key] for key in ("publication_target", "publication_target_conflict") if key in results
+    }
+    report_path, report_warning = _render_current_report()
+    if report_path is not None:
+        results["report_path"] = str(report_path)
+
+    identity_after_report = _run_owned_publication_fields()
+    if identity_after_report != identity_before_report:
+        stale_report_path = report_path
+        results.pop("publication_target", None)
+        results.pop("publication_target_conflict", None)
+        results.update(identity_after_report)
+        results.pop("report_path", None)
+        report_path, report_warning = _render_current_report()
+        if report_path is not None:
             results["report_path"] = str(report_path)
-        else:
-            report_warning = "HTML report was not generated: report file is missing"
-    except Exception as exc:
-        report_warning = f"HTML report was not generated: {exc}"
+        elif stale_report_path is not None:
+            try:
+                stale_report_path.resolve().relative_to(run_dir.resolve())
+                stale_report_path.unlink(missing_ok=True)
+            except (OSError, RuntimeError, ValueError):
+                pass
     if report_warning:
         results.setdefault("warnings", []).append(report_warning)
         results["report_status"] = "degraded"

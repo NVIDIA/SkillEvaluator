@@ -13,17 +13,20 @@ from pathlib import Path
 
 from skillevaluator.config import CONFIG_DIR
 from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SCAN_EXCLUDED_FILES
+from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.tool_runner import Severity, Tools, parse_json_output
 from skillevaluator.validators.base import Finding, ValidationResult, ValidatorBase, iter_scannable_files
 
 
-def _semgrep_file_excludes() -> list[str]:
-    """Return generated file patterns for Semgrep's case-sensitive excludes."""
+def _semgrep_file_excludes(skill_path: Path) -> list[str]:
+    """Return generated file patterns using the target filesystem's case semantics."""
     excludes = set(SCAN_EXCLUDED_FILES)
-    for name in SCAN_EXCLUDED_FILES:
-        path = Path(name)
-        if path.suffix:
-            excludes.add(f"{path.stem.upper()}{path.suffix}")
+    try:
+        for entry in skill_path.iterdir():
+            if entry.is_file() and matches_filesystem_name(entry, SCAN_EXCLUDED_FILES):
+                excludes.add(entry.name)
+    except OSError:
+        pass
     return sorted(excludes)
 
 
@@ -74,7 +77,11 @@ class CodeRiskValidator(ValidatorBase):
 
         file_counts = self._count_code_files(skill_path)
         if not any(file_counts.values()):
-            result.add_message("No code files found - skipping code risk analysis")
+            result.add_success(
+                check_name="code_file_discovery",
+                message="No code files found - code risk analysis is not applicable",
+                file_counts=file_counts,
+            )
             return result
 
         result.add_message(
@@ -189,7 +196,10 @@ class CodeRiskValidator(ValidatorBase):
 
         if not issues:
             if not errors:
-                result.add_message("Bandit: No security issues found")
+                result.add_success(
+                    check_name="bandit",
+                    message="Bandit: No security issues found",
+                )
             return
 
         # Summarize by severity
@@ -275,7 +285,7 @@ class CodeRiskValidator(ValidatorBase):
             args.extend(["--exclude", "tests", "--exclude", "test"])
         for d in sorted(SCAN_EXCLUDED_DIRS):
             args.extend(["--exclude", d])
-        for f in _semgrep_file_excludes():
+        for f in _semgrep_file_excludes(skill_path):
             args.extend(["--exclude", f])
         args.append(str(skill_path.resolve()))
 
@@ -355,8 +365,11 @@ class CodeRiskValidator(ValidatorBase):
             result.mark_scan_incomplete("semgrep")
 
         if not findings:
-            if not scan_errors:
-                result.add_message("Semgrep: No security issues found")
+            if not scan_errors and not result.is_incomplete:
+                result.add_success(
+                    check_name="semgrep",
+                    message="Semgrep: No security issues found",
+                )
             return
 
         result.add_message(f"Semgrep found {len(findings)} issue(s)")

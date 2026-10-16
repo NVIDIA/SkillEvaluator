@@ -46,6 +46,26 @@ def atif_content_text(content: object) -> str:
     return str(content)
 
 
+def atif_content_has_text(content: object) -> bool:
+    """Check for meaningful text rather than media-only placeholders.
+
+    Keep atif_content_text unchanged: other evidence sections still need
+    safe [image]/[audio] markers for non-text media.
+    """
+    if isinstance(content, list):
+        return any(
+            (isinstance(part, str) and bool(part.strip()))
+            or (
+                isinstance(part, dict)
+                and part.get("type") == "text"
+                and isinstance(part.get("text"), str)
+                and bool(part["text"].strip())
+            )
+            for part in content
+        )
+    return bool(atif_content_text(content).strip())
+
+
 def iter_normalized_tool_calls(traj: dict[str, Any]):
     """Yield each trajectory tool call after safe native-Codex normalization."""
     for step in traj.get("steps", []):
@@ -79,6 +99,22 @@ def normalized_tool_call_observation(step: dict[str, Any], tool_call: dict[str, 
         tool_call,
         include_unscoped=tool_call.get("_atif_raw_tool_index", 0) == 0,
     )
+
+
+def normalized_tool_call_is_error(step: dict[str, Any], tool_call: dict[str, Any]) -> bool:
+    """Preserve explicit failure metadata only for an attributable tool result."""
+    if tool_call.get("_atif_observation_status") not in (None, MAPPED_OUTER_EXEC_OBSERVATION):
+        return False
+    tool_call_id = tool_call.get("tool_call_id")
+    for result in (step.get("observation") or {}).get("results") or []:
+        source_call_id = result.get("source_call_id")
+        # Unscoped observations cannot prove that this particular call failed.
+        if not tool_call_id or source_call_id != tool_call_id:
+            continue
+        extra = result.get("extra") or {}
+        if isinstance(extra, dict) and extra.get("tool_result_is_error") is True:
+            return True
+    return False
 
 
 def normalized_tool_call_wrapper_observation(step: dict[str, Any], tool_call: dict[str, Any]) -> str:

@@ -17,10 +17,11 @@ import re
 import stat
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
 from itertools import islice
 from pathlib import Path
 from typing import Any
+
+from skillevaluator.tier3.harbor.resource_usage import agent_execution_seconds
 
 _USAGE = ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "duration_seconds", "cost_usd")
 _IDENTITY = ("source", "run_id", "skill", "model", "harness", "features")
@@ -200,7 +201,11 @@ def _usage(trial: dict[str, Any]) -> dict[str, float | None]:
         "completion_tokens": completion,
         "total_tokens": prompt + completion if prompt is not None and completion is not None else None,
         "cached_tokens": _measurement(tokens.get("cached")),
-        "duration_seconds": _measurement(trial.get("duration_seconds")),
+        # Canonical Tier 3 JSON records agent_seconds; duration_seconds is only
+        # read from hand-built payloads and never replaces an invalid agent_seconds.
+        "duration_seconds": _measurement(
+            trial["agent_seconds"] if "agent_seconds" in trial else trial.get("duration_seconds")
+        ),
         "cost_usd": _measurement(trial.get("cost_usd")),
     }
 
@@ -435,16 +440,6 @@ def _read_native_json(path: Path, run_root: Path) -> Any:
     return _read_json(path)
 
 
-def _duration(result: dict[str, Any]) -> float | None:
-    execution = _dict(result.get("agent_execution"))
-    try:
-        started = datetime.fromisoformat(str(execution["started_at"]))
-        finished = datetime.fromisoformat(str(execution["finished_at"]))
-        return _measurement((finished - started).total_seconds())
-    except (KeyError, TypeError, ValueError, OverflowError):
-        return None
-
-
 def _native_usage(trial_dir: Path, run_root: Path, *, require_steps: bool = False) -> dict[str, Any]:
     trajectory = (
         _dict(_read_native_json(trial_dir / "trajectory.json", run_root))
@@ -480,7 +475,7 @@ def _native_usage(trial_dir: Path, run_root: Path, *, require_steps: bool = Fals
         prompt = step_total("n_input_tokens")
         completion = step_total("n_output_tokens")
         cached = step_total("n_cache_tokens")
-    durations = [_duration(_dict(step)) for step in constituents]
+    durations = [agent_execution_seconds(_dict(step)) for step in constituents]
     costs = [_measurement(_dict(_dict(step).get("agent_result")).get("cost_usd")) for step in constituents]
     return {
         "_resource_scope_valid": True,

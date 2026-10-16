@@ -120,7 +120,7 @@ def _performance_column_config() -> dict[str, Any]:
         "condition": st.column_config.TextColumn("Condition"),
         "score": st.column_config.NumberColumn("Score", format="%.3f", width="small"),
         "pass_rate": st.column_config.NumberColumn("Pass rate", format="percent", width="small"),
-        "duration_seconds": st.column_config.NumberColumn("Duration (s)", format="%.2f", width="small"),
+        "duration_seconds": st.column_config.NumberColumn("Agent time (s)", format="%.2f", width="small"),
         "cost_usd": st.column_config.NumberColumn("Cost (USD)", format="$%.4f", width="small"),
         "status": st.column_config.TextColumn("Status"),
         "trials": st.column_config.NumberColumn("Trials", format="%d"),
@@ -139,8 +139,10 @@ def _comparison_column_config(columns: tuple[str, ...]) -> dict[str, Any]:
         "score_delta": "Score Δ",
         "total_tokens_delta": "Tokens Δ",
         "total_tokens_percent": "Tokens Δ (%)",
-        "duration_seconds_delta": "Time Δ (s)",
-        "duration_seconds_percent": "Time Δ (%)",
+        "duration_seconds_delta": "Agent time Δ (s)",
+        "duration_seconds_percent": "Agent time Δ (%)",
+        "with_duration_seconds": "With skill: agent time (s)",
+        "without_duration_seconds": "Without skill: agent time (s)",
         "cost_usd_delta": "Cost Δ (USD)",
         "cost_usd_percent": "Cost Δ (%)",
     }
@@ -257,7 +259,7 @@ def main(paths: list[str] | None = None) -> None:
     """Render the app, accepting CLI paths or a supplied path list for embedding."""
     st.set_page_config(page_title="Skill performance · SkillEvaluator", page_icon="▦", layout="wide")
     st.title("Skill performance")
-    st.caption("SKILLEVALUATOR · Compare agent quality, tokens, duration, and cost across evaluation runs.")
+    st.caption("SKILLEVALUATOR · Compare agent quality, tokens, agent time, and cost across evaluation runs.")
     st.sidebar.header("Reports")
     uploads = st.sidebar.file_uploader(
         "Upload JSON reports",

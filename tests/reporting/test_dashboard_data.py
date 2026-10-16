@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory
 from skillevaluator.reporting.dashboard_data import comparison_rows, load_dashboard_path, parse_dashboard_report
 
 
@@ -20,7 +21,9 @@ def _report() -> dict:
             "trial_id": "case-a__random",
             "overall": 0.8,
             "tokens": {"prompt": prompt, "completion": completion, "cached": 0},
-            "duration_seconds": seconds,
+            "agent_seconds": seconds,
+            # Tier 3 canonical JSON does not produce cost_usd; it is kept to
+            # exercise the reader for hand-imported payloads.
             "cost_usd": cost,
         }
 
@@ -223,7 +226,7 @@ def test_zero_baseline_and_nonfinite_values() -> None:
     report = _report()
     agent = report["agents"]["claude-code"]
     agent["trials_baseline"][0]["cost_usd"] = 0
-    agent["trials"][0]["duration_seconds"] = float("inf")
+    agent["trials"][0]["agent_seconds"] = float("inf")
     agent["trials"][0]["tokens"]["cached"] = True
     report["dashboard_metadata"] = {"harness_features": {"invalid": float("nan")}}
     data = parse_dashboard_report(report, "report.json")
@@ -233,6 +236,24 @@ def test_zero_baseline_and_nonfinite_values() -> None:
     assert comparison["cost_usd_delta"] == 0.02
     assert comparison["cost_usd_percent"] is None
     assert comparison["duration_seconds_delta"] is None
+
+
+def test_invalid_agent_seconds_does_not_fall_back_to_legacy_duration() -> None:
+    report = _report()
+    trial = report["agents"]["claude-code"]["trials"][0]
+    trial.update(agent_seconds=-1, duration_seconds=5)
+    row = parse_dashboard_report(report, "report.json").rows[0]
+    assert row["duration_seconds"] is None
+    assert "time 0/1" in row["coverage"]
+
+
+def test_legacy_trial_duration_seconds_is_still_read() -> None:
+    report = _report()
+    agent = report["agents"]["claude-code"]
+    for field in ("trials", "trials_baseline"):
+        agent[field][0]["duration_seconds"] = agent[field][0].pop("agent_seconds")
+    data = parse_dashboard_report(report, "report.json")
+    assert [row["duration_seconds"] for row in data.rows] == [8.0, 10.0]
 
 
 def test_malformed_status_and_aggregate_overflow_fail_closed() -> None:
@@ -451,6 +472,43 @@ def test_native_results_use_real_usage_and_prune_nested_mirrors(tmp_path: Path) 
     assert comparison["comparison_status"] == "comparable"
     assert comparison["total_tokens_delta"] == 100
     assert load_dashboard_path(run / "result.json").rows == load_dashboard_path(run).rows
+
+
+def _canonical_export(run: Path) -> dict:
+    result = agent_eval_result_from_directory(Path("native-skill"), run, use_llm_judge=False)
+    assert result is not None
+    return json.loads(json.dumps(result.metadata["agent_eval"]))
+
+
+def test_canonical_export_agent_seconds_matches_retained_run(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _native_run(run)
+    canonical = parse_dashboard_report(_canonical_export(run), "r.json")
+    retained = load_dashboard_path(run)
+    assert (
+        [row["duration_seconds"] for row in canonical.rows]
+        == [row["duration_seconds"] for row in retained.rows]
+        == [10.0, 10.0]
+    )
+    assert all("time 1/1" in row["coverage"] for row in canonical.rows)
+    comparison = comparison_rows(canonical.rows)[0]
+    assert comparison["comparison_status"] == "comparable"
+    assert comparison["duration_seconds_delta"] == 0.0
+
+
+def test_retained_naive_timestamps_follow_canonical_timezone_policy(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _native_run(run)
+    for result_path in run.glob("*/*/trials/*/result.json"):
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        result["agent_execution"] = {"started_at": "2026-10-01T00:00:00", "finished_at": "2026-10-01T00:00:10"}
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+    rows = load_dashboard_path(run).rows
+    assert len(rows) == 2
+    assert all(row["duration_seconds"] is None for row in rows)
+    assert all("time 0/1" in row["coverage"] for row in rows)
+    agent = _canonical_export(run)["agents"]["opencode"]
+    assert all("agent_seconds" not in trial for trial in agent["trials"] + agent["trials_baseline"])
 
 
 def test_catalog_native_and_mixed_references_are_loaded_without_cycles(tmp_path: Path) -> None:

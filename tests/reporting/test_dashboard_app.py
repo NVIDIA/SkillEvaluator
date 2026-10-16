@@ -103,6 +103,7 @@ def test_dashboard_renders_numeric_performance_and_paired_comparison(tmp_path: P
     assert comparison["comparison_status"].iloc[0] == "comparable"
     assert "raw_transcript" not in performance.columns
     assert all(not column.startswith("_") for column in performance.columns)
+    assert json.loads(app.dataframe[0].proto.columns)["duration_seconds"]["label"] == "Agent time (s)"
     assert [metric.value for metric in app.metric] == ["1", "1", "2", "2"]
 
 

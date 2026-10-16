@@ -423,13 +423,18 @@ change relative to without skill. A negative usage difference means less usage;
 a positive score difference means higher performance. Comparisons stay within
 the same run and require successful conditions with matching trial coverage.
 
-Missing measurements stay unavailable: older JSON reports may contain token
-counts without time or cost, and cost is shown only when recorded in USD.
+Missing measurements stay unavailable, and cost is shown only when recorded in
+USD. Canonical Tier 3 JSON records each single-step trial's agent execution time
+(`agent_seconds`) when Harbor's timestamps carry a timezone. Timestamps without a
+timezone are treated as unavailable, as in the HTML report's
+[measured agent resources](#measured-agent-resources). Agent time excludes
+environment setup and verification. Canonical JSON never records USD cost; open
+the retained run directory to show Harbor's recorded `agent_result.cost_usd` and
+multi-step totals.
 Some older exports encoded missing token counters as zero. Open their retained
 run directories to recover recorded counters, or regenerate the canonical JSON
 with this version, which omits unmeasured token usage instead of recording zero.
-For retained runs, duration measures agent execution rather than the entire
-evaluation workflow. Cached tokens are shown separately and are not added again
+Cached tokens are shown separately and are not added again
 to prompt plus completion tokens. No pricing estimates or new agent evaluations
 are performed. Adverse conditions and harness features are displayed when
 explicitly recorded; the dashboard does not run these experiments.

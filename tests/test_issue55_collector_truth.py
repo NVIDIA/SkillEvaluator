@@ -14,7 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.evaluation.tier3_report import build_agent_eval_payload, render_agent_eval_html_report
+from skillevaluator.evaluation.tier3_report import (
+    agent_eval_result_from_directory,
+    build_agent_eval_payload,
+    render_agent_eval_html_report,
+)
 from skillevaluator.tier3.harbor import collector as collector_module
 from skillevaluator.tier3.harbor import report, report_data
 from skillevaluator.tier3.harbor.collector import (
@@ -25,12 +29,16 @@ from skillevaluator.tier3.harbor.collector import (
 )
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
+    CUSTOM_SCORE_POLICY,
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
     DEFAULT_SCORE_POLICY,
     LEGACY_METRIC_SET,
     LEGACY_METRICS,
     LEGACY_SCORE_POLICY,
+    MAX_CUSTOM_METRIC_NAME_BYTES,
+    MAX_CUSTOM_METRICS,
+    extract_custom_metrics,
     overall_score,
 )
 
@@ -393,6 +401,52 @@ def test_multi_agent_collection_rejects_incomparable_score_policies(tmp_path: Pa
     assert any("score policies" in error.lower() for error in result["execution_errors"])
 
 
+def test_multi_agent_collection_ranks_custom_only_agent_against_standard_agent(tmp_path: Path) -> None:
+    rewards = {
+        "opencode": {
+            "entry_id": "case-001",
+            "metric_set": DEFAULT_METRIC_SET,
+            "score_policy": DEFAULT_SCORE_POLICY,
+            **dict.fromkeys(DEFAULT_METRICS, 0.8),
+            "overall": 0.8,
+        },
+        "codex": {
+            "entry_id": "case-001",
+            "metric_set": CUSTOM_ONLY_METRIC_SET,
+            "overall": 0.9,
+            "domain_quality": 0.9,
+        },
+    }
+    for agent, reward in rewards.items():
+        job_dir = tmp_path / "jobs" / f"demo-{agent}-with"
+        _write_reward(job_dir, "case-001__attempt", reward)
+        _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = collect_harbor_results(
+        skill_name="demo",
+        agents=list(rewards),
+        output_dir=tmp_path / "results",
+        jobs_dir=tmp_path / "jobs",
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert result["execution_status"] == "succeeded"
+    assert result["score_policy"] == result["attempt_policy"]["score_policy"] == DEFAULT_SCORE_POLICY
+    assert result["agents"]["codex"]["score_policy_with_skill"] == CUSTOM_SCORE_POLICY
+    assert "comparison" in result
+    for agents in (result["agents"], report_data.load_agent_data(tmp_path / "results")):
+        payload = build_agent_eval_payload("demo", agents, attempt_policy=result["attempt_policy"], use_llm_judge=False)
+        assert payload is not None
+        assert payload["execution_status"] == "succeeded"
+        assert payload["agents"]["opencode"]["with_skill"] == 0.8
+        assert payload["agents"]["codex"]["with_skill"] == 0.9
+        assert payload["best_agent"] == "codex"
+        assert report._pick_best_agent(agents) == "codex"
+
+
 def test_failed_later_agent_does_not_relabel_a_successful_legacy_agent(tmp_path: Path) -> None:
     job_dir = tmp_path / "jobs" / "demo-opencode-with"
     _write_reward(
@@ -422,6 +476,112 @@ def test_failed_later_agent_does_not_relabel_a_successful_legacy_agent(tmp_path:
     assert result["execution_status"] == "failed"
     assert result["score_policy"] == LEGACY_SCORE_POLICY
     assert LEGACY_SCORE_POLICY in result["attempt_policy"]["score_definition"]
+
+
+@pytest.mark.parametrize("reverse_conditions", [False, True])
+def test_different_condition_metric_sets_preserve_scores_without_overall_lift(
+    tmp_path: Path, reverse_conditions: bool
+) -> None:
+    legacy = {
+        "entry_id": "case-001",
+        "metric_set": LEGACY_METRIC_SET,
+        "score_policy": LEGACY_SCORE_POLICY,
+        **dict.fromkeys(LEGACY_METRICS, 0.8),
+        "overall": 0.8,
+    }
+    historical = {**legacy, "metric_set": DEFAULT_METRIC_SET, "security": 0.0, "overall": 0.6667}
+    conditions = [legacy, historical]
+    if reverse_conditions:
+        conditions.reverse()
+    for variant, reward in zip(("with", "without"), conditions, strict=True):
+        job_dir = tmp_path / "jobs" / f"demo-opencode-{variant}"
+        _write_reward(job_dir, "case-001__attempt", reward)
+        _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=False, case_ids=["case-001"])
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "succeeded"
+    assert agent["overall_with_skill"] == conditions[0]["overall"]
+    assert agent["overall_without_skill"] == conditions[1]["overall"]
+    assert "overall" not in agent["lift"]
+    assert all(agent["lift"][metric]["delta"] == 0.0 for metric in LEGACY_METRICS)
+    assert agent["pass_at_k"]["lift"] == {}
+    persisted_lift = json.loads((tmp_path / "results/opencode/lift.json").read_text(encoding="utf-8"))
+    assert "overall" not in persisted_lift
+    assert not (tmp_path / "results/opencode/pass_at_k_lift.json").exists()
+
+    # Rendering older artifacts must not revive the invalid comparisons either.
+    persisted_lift["overall"] = {"with_skill": 0.8, "without_skill": 0.6667, "delta": 0.1333}
+    (tmp_path / "results/opencode/lift.json").write_text(json.dumps(persisted_lift), encoding="utf-8")
+    (tmp_path / "results/opencode/pass_at_k_lift.json").write_text(
+        json.dumps({"with_skill": 1.0, "without_skill": 0.0, "delta": 1.0}), encoding="utf-8"
+    )
+    for agents in (result["agents"], report_data.load_agent_data(tmp_path / "results")):
+        payload = build_agent_eval_payload(
+            "demo", agents, attempt_policy=result["attempt_policy"], use_llm_judge=False
+        )
+        assert payload is not None
+        assert payload["overall_score"] == conditions[0]["overall"]
+        assert payload["agents"]["opencode"]["baseline"] == conditions[1]["overall"]
+        assert payload["agents"]["opencode"]["lift"] is None
+        assert payload["overall_lift"] is None
+        assert payload["pass_at_k"]["lift"] == {}
+        assert all("baseline_overall" not in trial for trial in payload["trials"])
+
+
+@pytest.mark.parametrize("reverse_agents", [False, True])
+@pytest.mark.parametrize("same_metric_set", [False, True])
+def test_multi_agent_legacy_reports_preserve_each_agents_metric_set(
+    tmp_path: Path, reverse_agents: bool, same_metric_set: bool
+) -> None:
+    agents = ["opencode", "codex"]
+    for agent, score in zip(agents, (0.9, 0.7), strict=True):
+        use_legacy = agent == "opencode" or same_metric_set
+        metrics = LEGACY_METRICS if use_legacy else DEFAULT_METRICS
+        job_dir = tmp_path / "jobs" / f"demo-{agent}-with"
+        _write_reward(
+            job_dir,
+            "case-001__attempt",
+            {
+                "entry_id": "case-001",
+                "metric_set": LEGACY_METRIC_SET if use_legacy else DEFAULT_METRIC_SET,
+                "score_policy": LEGACY_SCORE_POLICY,
+                **dict.fromkeys(metrics, score),
+                "overall": score,
+            },
+        )
+        _write_complete_job_result(job_dir, ["case-001__attempt"])
+    if reverse_agents:
+        agents.reverse()
+    result = collect_harbor_results(
+        skill_name="demo",
+        agents=agents,
+        output_dir=tmp_path / "results",
+        jobs_dir=tmp_path / "jobs",
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    for data in (result["agents"], report_data.load_agent_data(tmp_path / "results")):
+        payload = build_agent_eval_payload(
+            "demo", data, attempt_policy=result["attempt_policy"], use_llm_judge=False
+        )
+        assert payload is not None
+        assert payload["agents"]["opencode"]["with_skill"] == 0.9
+        assert payload["agents"]["codex"]["with_skill"] == 0.7
+        if same_metric_set:
+            assert payload["execution_status"] == "succeeded"
+            assert payload["best_agent"] == "opencode"
+            assert payload["overall_score"] == 0.9
+            assert report._pick_best_agent(data) == "opencode"
+        else:
+            assert payload["best_agent"] == ""
+            assert payload["overall_score"] is None
+            assert payload["execution_status"] == "failed"
+            assert any("metric sets" in error.lower() for error in payload["execution_errors"])
+            assert report._pick_best_agent(data) == ""
 
 
 def test_failed_judge_sidecar_is_merged_but_never_scored_and_reason_is_safe(tmp_path: Path) -> None:

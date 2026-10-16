@@ -37,9 +37,11 @@ from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_SCORE_POLICY,
     LEGACY_METRICS,
     LEGACY_SCORE_POLICY,
+    MAX_CUSTOM_METRIC_NAME_BYTES,
     PARTIAL_SCORE_POLICY,
 )
-from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot
+from skillevaluator.tier3.harbor.report import _extract_findings
+from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot, metrics_for_agents
 
 
 def _write_summary(
@@ -817,12 +819,18 @@ def test_authenticated_pre_status_rerender_preserves_historical_scores(tmp_path:
         pytest.param(0.5583, "future-weighted-policy-v2", "future-weighted-policy-v2", 0.5583, id="future-policy"),
     ],
 )
+@pytest.mark.parametrize(
+    "evaluated_source",
+    [None, {"repository": "NVIDIA/SkillEvaluator", "commit": "a" * 40}],
+    ids=["without-source", "with-source"],
+)
 def test_default_v2_rerender_respects_recorded_or_historical_policy(
     tmp_path: Path,
     stored_overall: object,
     recorded_policy: str | None,
     expected_policy: str,
     expected_score: float,
+    evaluated_source: dict[str, str] | None,
 ) -> None:
     skill = tmp_path / "demo"
     skill.mkdir()
@@ -886,6 +894,9 @@ def test_default_v2_rerender_respects_recorded_or_historical_policy(
     assert payload["overall_score"] == pytest.approx(expected_score)
     assert payload["agents"]["opencode"]["with_skill"] == pytest.approx(expected_score)
     assert payload["score_policy"] == expected_policy
+    assert payload["summary"]["score_policy"] == expected_policy
+    assert payload["evaluated_source"] == evaluated_source
+    assert payload["summary"]["evaluated_source"] == evaluated_source
     assert payload["attempt_policy"]["score_policy"] == expected_policy
     if expected_policy == LEGACY_SCORE_POLICY:
         assert payload["best_agent"] == "opencode"
@@ -958,6 +969,7 @@ def test_canonical_report_fails_closed_on_different_condition_policies() -> None
     assert payload["execution_status"] == "failed"
     assert payload["overall_score"] is None
     assert payload["overall_lift"] is None
+    assert payload["agents"]["opencode"]["lift"] is None
     assert any("conflicting score policies" in error.lower() for error in payload["execution_errors"])
 
 
@@ -1031,6 +1043,77 @@ def test_known_legacy_policy_lift_uses_condition_scores_not_stale_lift_artifact(
     assert payload["overall_score"] == 0.6
     assert payload["overall_lift"] == 0.2
     assert payload["agents"]["opencode"]["lift"] == 0.2
+
+
+def test_legacy_report_honors_recorded_metric_membership_and_ignores_order() -> None:
+    payload = build_agent_eval_payload(
+        "recorded-metrics-demo",
+        {
+            "opencode": {
+                "execution_status": "succeeded",
+                "with_skill": {**dict.fromkeys(LEGACY_METRICS, 0.8), "security": 0.0},
+                "without_skill": dict.fromkeys(LEGACY_METRICS, 0.6),
+                "metrics_with_skill": list(LEGACY_METRICS),
+                "metrics_without_skill": list(reversed(LEGACY_METRICS)),
+                "score_policy_with_skill": LEGACY_SCORE_POLICY,
+                "score_policy_without_skill": LEGACY_SCORE_POLICY,
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    assert payload["overall_score"] == 0.8
+    assert payload["agents"]["opencode"]["baseline"] == 0.6
+    assert payload["overall_lift"] == 0.2
+
+
+def test_partial_reports_do_not_rank_agents_scored_on_different_metrics() -> None:
+    payload = build_agent_eval_payload(
+        "partial-metrics-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "with_skill": {"security": 0.8},
+                "score_policy_with_skill": PARTIAL_SCORE_POLICY,
+            },
+            "opencode": {
+                "execution_status": "succeeded",
+                "with_skill": {"security": 0.4, "accuracy": 0.6},
+                "score_policy_with_skill": PARTIAL_SCORE_POLICY,
+            },
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    assert payload["agents"]["codex"]["with_skill"] == 0.8
+    assert payload["agents"]["opencode"]["with_skill"] == 0.5
+    assert payload["best_agent"] == ""
+    assert payload["overall_score"] is None
+    assert payload["execution_status"] == "failed"
+
+
+@pytest.mark.parametrize("missing_metric", [False, True])
+def test_legacy_report_keeps_declared_metric_set_when_metric_names_are_absent(
+    tmp_path: Path, missing_metric: bool
+) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run_dir = tmp_path / "results"
+    _write_summary(run_dir, score=0.6)
+    summary_path = run_dir / "opencode/with-skill/summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary.pop("metrics")
+    summary["metric_set"] = "skill-evaluator-default-v2"
+    summary["score_policy"] = LEGACY_SCORE_POLICY
+    if missing_metric:
+        summary["scores"].pop("security")
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    result = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    assert payload["agents"]["opencode"]["metrics_with_skill"] == list(DEFAULT_METRICS)
+    assert payload["agents"]["opencode"]["with_skill"] == (None if missing_metric else 0.6)
 
 
 def test_unknown_report_policy_without_a_persisted_score_is_incomplete() -> None:

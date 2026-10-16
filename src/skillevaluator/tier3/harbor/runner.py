@@ -86,6 +86,7 @@ from skillevaluator.tier3.harbor.adapter import (
 )
 from skillevaluator.tier3.harbor.artifact_retention import HarborArtifactLifecycle, RetentionOutcome
 from skillevaluator.tier3.harbor.collector import (
+    TRUNCATED_AGGREGATE_ATTEMPT_PREFIX,
     _score_definition_for_policy,
     collect_harbor_results,
     harbor_job_passed,

@@ -38,9 +38,12 @@ from skillevaluator.tier3.harbor import (
     canonical_agent_name,
 )
 from skillevaluator.tier3.harbor.metrics import (
+    CUSTOM_ONLY_METRIC_SET,
     CUSTOM_SCORE_POLICY,
+    DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
     DEFAULT_SCORE_POLICY,
+    LEGACY_METRIC_SET,
     LEGACY_METRICS,
     LEGACY_SCORE_POLICY,
     PARTIAL_SCORE_POLICY,
@@ -1080,11 +1083,15 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                         "num_trials": data.get("num_trials", "?"),
                         "overall_with_skill": overall,
                         "score_policy_with_skill": _summary_score_policy(data),
+                        "standard_metrics": _summary_standard_metrics(data),
+                        "custom_only": _summaries_are_custom_only([data]),
                     }
                     wo_summary = agent_dir / "without-skill" / "summary.json"
                     if wo_summary.exists():
                         try:
                             wo_data = json.loads(wo_summary.read_text(encoding="utf-8"))
+                            if isinstance(wo_data, dict):
+                                root_meta[agent_name]["custom_only"] = _summaries_are_custom_only([data, wo_data])
                             wo_scores = _summary_scores(
                                 wo_data,
                                 allow_missing_status=allow_missing_status,
@@ -1118,14 +1125,24 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
         return 1
 
     agents = sorted(agent_with)
+    # Custom-only agents are compared by their grader's own overall, as in the
+    # canonical report. Standard agents must share one policy and metric set.
+    standard_agents = [agent for agent in agents if not agent_meta[agent].get("custom_only")]
     comparison_policies = {
         _effective_compare_policy(agent_meta[agent].get("score_policy_with_skill"), agent_with[agent])
-        for agent in agents
+        for agent in standard_agents
     }
     if len(comparison_policies) > 1:
         console.print(
             "[red]Cannot compare overall scores across agents with different score policies. "
             "Rerun the agents under one policy.[/red]"
+        )
+        return 1
+    comparison_metric_sets = {agent_meta[agent].get("standard_metrics") for agent in standard_agents}
+    if len(comparison_metric_sets) > 1:
+        console.print(
+            "[red]Cannot compare overall scores across agents scored on different metric sets. "
+            "Rerun the agents with one metric set.[/red]"
         )
         return 1
     display_metrics, overall_metrics = _display_metrics(agent_with)
@@ -1251,6 +1268,33 @@ def _summary_overall(data: dict[str, Any]) -> float | None:
 def _summary_score_policy(data: dict[str, Any]) -> str | None:
     value = data.get("score_policy")
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _summary_standard_metrics(data: dict[str, Any]) -> frozenset[str]:
+    """Return the standard metric set one condition summary declares."""
+    metrics = data.get("metrics")
+    if isinstance(metrics, list):
+        return frozenset(str(metric) for metric in metrics)
+    metric_set = data.get("metric_set")
+    if metric_set == DEFAULT_METRIC_SET:
+        return frozenset(DEFAULT_METRICS)
+    if metric_set == LEGACY_METRIC_SET:
+        return frozenset(LEGACY_METRICS)
+    if metric_set == CUSTOM_ONLY_METRIC_SET:
+        return frozenset()
+    scores = data.get("scores")
+    return frozenset(metric for metric in DEFAULT_METRICS if isinstance(scores, dict) and metric in scores)
+
+
+def _summaries_are_custom_only(summaries: list[dict[str, Any]]) -> bool:
+    """Return whether every condition of an agent is scored only by its custom grader.
+
+    Recorded policies win; without them, no condition may declare standard metrics.
+    """
+    recorded = {policy for summary in summaries if (policy := _summary_score_policy(summary))}
+    if recorded:
+        return recorded == {CUSTOM_SCORE_POLICY}
+    return not any(_summary_standard_metrics(summary) for summary in summaries)
 
 
 def _effective_compare_policy(policy: object, scores: dict[str, float]) -> str:

@@ -27,7 +27,10 @@ from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRICS,
     LEGACY_METRIC_SET,
     LEGACY_METRICS,
+    PARTIAL_SCORE_POLICY,
+    metric_set_for_reward,
 )
+from skillevaluator.tier3.harbor.resource_usage import agent_execution_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -506,8 +509,19 @@ def _metrics_for_rewards(rewards: list[dict[str, Any]]) -> list[str]:
 
 
 def metrics_for_condition(agent_info: dict[str, Any], condition: str) -> list[str]:
-    """Use one condition's recorded metrics, inferring only for older artifacts."""
-    configured = agent_info.get(f"metrics_{condition}")
+    """Return the standard metric contract declared by one agent condition.
+
+    Recorded metrics win. Older artifacts fall back to the recorded metric set,
+    then to the standard metrics present in the condition scores, then rewards.
+    """
+    if condition == "with_skill":
+        metrics_key, scores_key, rewards_key = "metrics_with_skill", "with_skill", "rewards"
+    elif condition == "without_skill":
+        metrics_key, scores_key, rewards_key = "metrics_without_skill", "without_skill", "rewards_baseline"
+    else:
+        return []
+
+    configured = agent_info.get(metrics_key)
     if isinstance(configured, list):
         return list(dict.fromkeys(str(metric) for metric in configured))
     recorded_set = agent_info.get(f"metric_set_{condition}")
@@ -517,10 +531,14 @@ def metrics_for_condition(agent_info: dict[str, Any], condition: str) -> list[st
         return list(LEGACY_METRICS)
     if recorded_set == CUSTOM_ONLY_METRIC_SET:
         return []
-    scores = agent_info.get(condition, {})
+    scores = agent_info.get(scores_key, {})
     if isinstance(scores, dict) and scores:
+        if "security" in scores and agent_info.get(f"score_policy_{condition}") != PARTIAL_SCORE_POLICY:
+            # Unversioned Security scores claim the default v2 contract, so a
+            # missing evaluator leaves the condition incomplete, not partial.
+            return list(DEFAULT_METRICS)
         return [metric for metric in DEFAULT_METRICS if metric in scores]
-    rewards = agent_info.get("rewards" if condition == "with_skill" else "rewards_baseline", [])
+    rewards = agent_info.get(rewards_key, [])
     return _metrics_for_rewards(rewards) if isinstance(rewards, list) else []
 
 
@@ -687,6 +705,13 @@ def load_agent_data(
                     )
                     if isinstance(data.get("score_policy"), str) and data["score_policy"].strip():
                         agent_info[score_policy_key] = data["score_policy"].strip()
+                    mixed_contract_key = (
+                        "mixed_metric_contracts_with_skill"
+                        if variant == "with-skill"
+                        else "mixed_metric_contracts_without_skill"
+                    )
+                    if isinstance(data.get("mixed_metric_contracts"), bool):
+                        agent_info[mixed_contract_key] = data["mixed_metric_contracts"]
                     dimension_key = "dimensions_with_skill" if variant == "with-skill" else "dimensions_without_skill"
                     if "dimensions" in data:
                         agent_info[dimension_key] = data.get("dimensions", {})

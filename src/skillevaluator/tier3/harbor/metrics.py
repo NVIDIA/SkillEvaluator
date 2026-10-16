@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 from skillevaluator.constants import DEFAULT_SCORE_POLICY, DIMENSION_MAPPING
+from skillevaluator.utils.redaction import contains_credential_value, is_sensitive_key
 
 DEFAULT_METRIC_SET = "skill-evaluator-default-v2"
 LEGACY_METRIC_SET = "skill-evaluator-default-v1"
@@ -391,9 +393,7 @@ def overall_score(reward: dict[str, Any]) -> float | None:
     SkillEvaluator metrics can still pass through by emitting numeric ``overall``.
     """
     _, metrics = metric_set_for_reward(reward)
-    persisted = _finite_number(reward.get("overall"))
-    if persisted is not None and not 0.0 <= persisted <= 1.0:
-        persisted = None
+    persisted = score_value(reward.get("overall"))
     policy = reward.get("score_policy")
     policy = policy.strip() if isinstance(policy, str) and policy.strip() else None
     if not metrics:

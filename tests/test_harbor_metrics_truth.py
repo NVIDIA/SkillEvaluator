@@ -29,6 +29,7 @@ from skillevaluator.tier3.harbor.collector import (
     _pass_rate_delta,
     _pass_summary,
     _probability_text,
+    _public_pass_summary,
     _score_policy_for_rewards,
     _wilson_score_interval,
 )
@@ -41,13 +42,19 @@ from skillevaluator.tier3.harbor.metrics import (
     LEGACY_METRIC_SET,
     LEGACY_METRICS,
     LEGACY_SCORE_POLICY,
+    MAX_CUSTOM_METRIC_NAME_BYTES,
+    MAX_CUSTOM_METRICS,
+    CustomMetricContractError,
+    average_custom_metrics,
     average_metrics,
     canonical_dimension_mean,
+    custom_metric_contract_error,
     extract_custom_metrics,
     metric_set_for_reward,
     metric_value,
     overall_score,
     overall_score_from_metrics,
+    rewards_have_mixed_metric_contracts,
     score_definition,
     score_policy_for_metrics,
 )
@@ -661,7 +668,8 @@ def test_lift_leaves_out_cases_whose_arms_used_different_judges() -> None:
 
     assert lift["accuracy"] == {"with_skill": 0.8, "without_skill": 0.4, "delta": 0.4, "direction": "up"}
     assert lift["judge_mixed_cases"] == {"accuracy": 1}
-    assert lift["overall"]["delta"] == round(0.4 / len(DEFAULT_METRICS), 4)
+    # Accuracy is the whole Correctness dimension in the five-dimension overall.
+    assert lift["overall"]["delta"] == round(0.4 / 5, 4)
     assert "judge_mixed_cases" not in _compute_lift(with_scores, without_scores, with_rewards[1:], without_rewards)
 
 

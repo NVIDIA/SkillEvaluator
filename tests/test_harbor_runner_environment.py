@@ -21,6 +21,7 @@ from skillevaluator.provider_config import ProviderConfig, ProviderConfiguration
 from skillevaluator.tier3.harbor import runner, runtime_preflight
 from skillevaluator.tier3.harbor.adapter import _verifier_env_vars
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_SCORE_POLICY
+from skillevaluator.tier3_environments import HARBOR_NATIVE_ENV_MODES
 
 
 def _provider(provider: str = "openai") -> ProviderConfig:
@@ -1191,17 +1192,20 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
     monkeypatch.setattr(
         runner,
         "collect_harbor_results",
-        lambda **_kwargs: {
-            "execution_status": "complete",
-            "execution_errors": [],
-            "metrics": list(DEFAULT_METRICS),
-            "score_policy": LEGACY_SCORE_POLICY,
-            "attempt_policy": {
+        lambda **kwargs: (
+            collected.update(kwargs)
+            or {
+                "execution_status": "complete",
+                "execution_errors": [],
+                "metrics": list(DEFAULT_METRICS),
                 "score_policy": LEGACY_SCORE_POLICY,
-                "score_definition": "historical six-metric mean",
-            },
-            "agents": {},
-        },
+                "attempt_policy": {
+                    "score_policy": LEGACY_SCORE_POLICY,
+                    "score_definition": "historical six-metric mean",
+                },
+                "agents": {},
+            }
+        ),
     )
     monkeypatch.setattr(runner, "render_agent_eval_html_report", lambda *_args, **_kwargs: tmp_path / "report.html")
     result = runner.run_harbor_eval(

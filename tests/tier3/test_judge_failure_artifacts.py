@@ -26,6 +26,8 @@ from skillevaluator.tier3.harbor.adapter import _EVALUATOR_TESTS_SUBDIR, _write_
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
     DEFAULT_SCORE_POLICY,
+    MAX_CUSTOM_METRIC_NAME_BYTES,
+    MAX_CUSTOM_METRICS,
     RESERVED_METRIC_NAMES,
     custom_metric_name_is_publishable,
     extract_custom_metrics,

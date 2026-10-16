@@ -405,8 +405,12 @@ set. A shared policy name alone does not make five-metric and six-metric means
 comparable. When two conditions use different metric sets under the same
 policy, their individual scores and shared per-metric deltas remain available,
 but overall Skill Lift and the pass@k comparison are omitted. Reports containing
-agents scored on different metric sets retain their individual scores and mark
-the overall comparison as incomplete, without selecting a best agent.
+agents scored on different standard metric sets retain their individual scores
+and mark the overall comparison as incomplete, without selecting a best agent.
+A custom-only agent, one whose conditions use only its grader's own overall
+(`custom-overall-v1`), is still ranked against standard agents by that score,
+and `tier3 compare` shows it beside them. `tier3 compare` refuses standard
+agents scored under different policies or metric sets.
 
 ### Skill Lift
 

@@ -17,6 +17,7 @@ from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_SCORE_POLICY,
     DEFAULT_METRICS,
     DEFAULT_SCORE_POLICY,
+    LEGACY_METRICS,
     LEGACY_SCORE_POLICY,
 )
 from skillevaluator.tier3.output_provenance import mark_generated_output_root
@@ -68,6 +69,102 @@ def test_compare_rejects_cross_agent_overalls_with_different_score_policies(
 
     assert compare_results(skill_path, results_dir=tmp_path / "results") == 1
     assert "different score policies" in capsys.readouterr().out.lower()
+
+
+def _write_compare_summary(run_dir: Path, agent: str, condition: str, summary: dict[str, object]) -> None:
+    path = run_dir / agent / condition / "summary.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"execution_status": "succeeded", "num_trials": 1, **summary}), encoding="utf-8")
+
+
+_STANDARD_COMPARE_SUMMARY = {
+    "scores": dict.fromkeys(DEFAULT_METRICS, 0.8),
+    "overall_score": 0.8,
+    "score_policy": DEFAULT_SCORE_POLICY,
+    "metric_set": "skill-evaluator-default-v2",
+    "metrics": list(DEFAULT_METRICS),
+}
+
+
+@pytest.mark.parametrize("recorded_policy", [True, False], ids=("recorded-policy", "unversioned"))
+def test_compare_scores_custom_only_agent_against_standard_agent(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    recorded_policy: bool,
+) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    run_dir = tmp_path / "results" / "demo" / "20260709_010000"
+    _write_compare_summary(run_dir, "codex", "with-skill", _STANDARD_COMPARE_SUMMARY)
+    custom_summary: dict[str, object] = {
+        "scores": {},
+        "custom_scores": {"domain_quality": 0.9},
+        "overall_score": 0.9,
+        "metric_set": "custom-only",
+        "metrics": [],
+    }
+    if recorded_policy:
+        custom_summary["score_policy"] = CUSTOM_SCORE_POLICY
+    _write_compare_summary(run_dir, "opencode", "with-skill", custom_summary)
+    _complete_current_run(run_dir)
+
+    assert compare_results(skill_path, results_dir=tmp_path / "results") == 0
+    output = capsys.readouterr().out
+    assert "different score policies" not in output.lower()
+    assert "different metric sets" not in output.lower()
+    overall_line = next(line for line in output.splitlines() if "Overall" in line)
+    assert "0.80" in overall_line
+    assert "0.90" in overall_line
+
+
+def test_compare_still_rejects_custom_agent_with_a_standard_baseline(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    run_dir = tmp_path / "results" / "demo" / "20260709_010000"
+    _write_compare_summary(run_dir, "codex", "with-skill", _STANDARD_COMPARE_SUMMARY)
+    _write_compare_summary(
+        run_dir,
+        "opencode",
+        "with-skill",
+        {"scores": {}, "overall_score": 0.9, "score_policy": CUSTOM_SCORE_POLICY, "metrics": []},
+    )
+    _write_compare_summary(run_dir, "opencode", "without-skill", _STANDARD_COMPARE_SUMMARY)
+    _complete_current_run(run_dir)
+
+    assert compare_results(skill_path, results_dir=tmp_path / "results") == 1
+    assert "different score policies" in capsys.readouterr().out.lower()
+
+
+def test_compare_rejects_cross_agent_overalls_with_different_standard_metric_sets(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    run_dir = tmp_path / "results" / "demo" / "20260709_010000"
+    for agent, metric_set, metrics in (
+        ("current", "skill-evaluator-default-v2", DEFAULT_METRICS),
+        ("historical", "skill-evaluator-default-v1", LEGACY_METRICS),
+    ):
+        _write_compare_summary(
+            run_dir,
+            agent,
+            "with-skill",
+            {
+                "scores": dict.fromkeys(metrics, 0.5),
+                "overall_score": 0.5,
+                "score_policy": LEGACY_SCORE_POLICY,
+                "metric_set": metric_set,
+                "metrics": list(metrics),
+            },
+        )
+    _complete_current_run(run_dir)
+
+    assert compare_results(skill_path, results_dir=tmp_path / "results") == 1
+    assert "different metric sets" in capsys.readouterr().out.lower()
 
 
 def test_overall_display_preserves_pre_policy_default_v2_semantics() -> None:

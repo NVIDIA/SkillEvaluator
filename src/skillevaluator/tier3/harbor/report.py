@@ -20,16 +20,14 @@ from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.tier3.eval_core.llm_judge import _redact_configured_credentials
 from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.metrics import (
-    DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
-    LEGACY_METRIC_SET,
-    LEGACY_SCORE_POLICY,
+    MAX_CUSTOM_METRICS,
     METRIC_DESCRIPTIONS,
     METRIC_DISPLAY,
     METRIC_QUESTIONS,
     extract_custom_metrics,
-    overall_score,
-    overall_score_from_metrics,
+    metric_set_for_reward,
+    metric_value,
 )
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
 from skillevaluator.utils.redaction import redact_sensitive_data, redact_sensitive_text
@@ -129,9 +127,10 @@ def _pick_best_agent(
     from skillevaluator.evaluation.tier3_report import _canonical_agent_rank_from_info
 
     best_agent = ""
-    best_score = -1.0
+    best_rank: tuple[float, float] | None = None
     scored_metric_sets: set[frozenset[str]] = set()
-    for agent, data in agents_data.items():
+    for agent in sorted(agents_data):
+        data = agents_data[agent]
         if not _findings_eligible(data):
             continue
         persisted = persisted_agents.get(agent) if isinstance(persisted_agents, dict) else None
@@ -143,24 +142,17 @@ def _pick_best_agent(
             or any(metric_value(with_scores, metric) is None for metric in standard_metrics)
         ):
             continue
-        metrics = tuple(m for m in DISPLAY_METRICS if m in with_scores) or DISPLAY_METRICS
-        if data.get("score_policy_with_skill") == LEGACY_SCORE_POLICY:
-            overall = overall_score(
-                {
-                    "metric_set": DEFAULT_METRIC_SET if "security" in with_scores else LEGACY_METRIC_SET,
-                    "score_policy": LEGACY_SCORE_POLICY,
-                    **with_scores,
-                }
-            )
-        else:
-            overall = overall_score_from_metrics(with_scores, metrics)
-        if overall is None:
+        rank = _canonical_agent_rank_from_info(ranking_data)
+        if rank is None:
             continue
-        scored_metric_sets.add(frozenset(metrics))
+        # Overall scores from different standard metric sets cannot be ranked
+        # against each other. Custom-only agents rank by their grader's overall.
+        if standard_metrics:
+            scored_metric_sets.add(frozenset(standard_metrics))
         if len(scored_metric_sets) > 1:
             return ""
-        if overall > best_score:
-            best_score = overall
+        if best_rank is None or rank > best_rank:
+            best_rank = rank
             best_agent = agent
     return best_agent
 

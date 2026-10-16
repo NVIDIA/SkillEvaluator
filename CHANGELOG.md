@@ -119,9 +119,258 @@ All notable changes to SkillEvaluator are documented in this file.
   two votes and could reverse the reported lift direction. Current artifacts
   persist `skill-evaluator-dimension-mean-v1`; legacy and partial artifacts
   retain their historical semantics. Conditions keep their own recorded metric
-  sets; overall lift and best-agent rankings are omitted across incomparable
-  metric sets while individual scores are preserved
+  sets; overall lift and best-agent rankings are omitted across different
+  standard metric sets while individual scores are preserved, and
+  `tier3 compare` refuses standard agents with different policies or metric
+  sets. Custom-only agents keep their grader's own overall and are ranked and
+  compared against standard agents
   (Relates to [#61](https://github.com/NVIDIA/SkillEvaluator/issues/61)).
+- Preserve explicit Claude and OpenCode read failure metadata in reconstructed
+  ATIF trajectories. Failed isolated SKILL.md reads and failed native Skill
+  calls lose credit; compound shell failures and shell reads whose path may
+  expand to several files (braces, globs, `$` or backticks) remain ambiguous
+  and retain prior credit in host and verifier grading. Unattributed errors do
+  not cancel successful reads, and shell reads count dash-prefixed filenames
+  after `--`.
+- Tier 1 pyproject dependency audits now inspect static target declarations
+  rather than the evaluator environment. Exact direct pins (including optional
+  groups) are queried without installation or build-script execution;
+  unresolved declarations and invalid scanner evidence are incomplete.
+- Tier 1 PII scanning now includes `.mdc` rules and workflows.
+- Tier 3 negative-case accuracy excludes inapplicable skill identification and
+  records its scoring policy. Reports separately expose measured token and
+  agent execution-time differences with complete matching-arm coverage, while
+  efficiency continues to measure routing and productive tool use.
+- Derive accuracy scores from complete criterion verdicts in both judge
+  runtimes (passing applicable criteria divided by applicable criteria), so an
+  inconsistent model-supplied total cannot distort Skill Lift. Correct the
+  Harbor prompt example to score five passing criteria as 1.0.
+- Include schema-valid ATIF message content parts in final answers, conversation
+  summaries, and judge evidence references in the host and Harbor verifier.
+  Image and audio parts use markers without exposing their source paths.
+- Preserve scored Harbor trials when agent answers mention authentication errors
+  and per-step token usage is present but aggregate ATIF token metrics are absent
+  or zero. Explicit runtime exceptions and error events still invalidate trials.
+- Safety-classifier refusals, content filters and output-token truncation are
+  detected instead of being read as empty or malformed output. `--llm-verify`
+  and rubric evaluation report the cause, and `--llm-verify` keeps the
+  complete verdicts of a truncated reply. Claude 5.5 or later requests to the
+  native Claude API use server-side fallback to Claude Opus 4.8. In the Harbor
+  verifier, Bedrock retries a filtered Claude 5.5 reply on Claude Opus 4.8, and
+  a refusal or empty judge reply moves on to the next
+  `LLM_JUDGE_FALLBACK_MODELS` entry.
+- The Harbor verifier's last-resort judge model follows the selected provider.
+  With no judge or chat model configured, it used to request an OpenAI model
+  from Anthropic, Bedrock, NVIDIA Build and gateways. The unused host-side
+  `llm_judge.DEFAULT_JUDGE_MODEL` constant is removed.
+- Fixed Docker Codex and Claude Code setup wasting its timeout installing
+  distribution Node/npm before Harbor's own installers. Native, gateway Codex,
+  and NVIDIA Build agents now provision Node/npm only on the installer branches
+  that need them, while preserving installed-agent and version-pin checks.
+- Preserved multiline skill descriptions when saving and loading Tier 2
+  embedding catalogs. Descriptions can contain line breaks and tabs, while
+  catalog identifiers and other control characters remain strictly validated.
+- Brought the published documentation in line with 0.5.0. It now covers how
+  standard grading builds judge evidence and rebuilds trajectories from
+  OpenCode and Codex logs, structured judge output and retries, the evidence
+  budget and judge time-budget variables, and the Harbor process environment.
+  The CLI reference adds `validate --workers`, the full `--env-mode` list, and
+  the exit codes the CLI actually returns (`0`, `1`, `2`).
+- `BENCHMARK.md` publication verdicts now require completed Tier 1 and Tier 2
+  execution evidence by default (Tier 1 must cover every default check that
+  applies to the content type, so a run narrowed with `--checks` cannot
+  certify publication), conservatively resolve conflicting peer
+  policy and Tier 3 result metadata, bind every tier and policy claim to one
+  versioned source-tree digest, preserve the Tier 3 run ID, persist an explicit
+  publication status in JSON and HTML, and reject
+  publication `PASS` cards whose decision evidence is missing, incomplete,
+  linked, or hidden in raw HTML. Tier 3 evidence now cross-checks complete
+  per-condition attempt and error records, and the public-card gate rejects
+  ambiguous structural headings, browser-rendered decision-text aliases, and
+  literal or entity-encoded Unicode control/format characters. The source
+  identity is read without following links before and after each producer,
+  follows the host filesystem's case aliases, and records a bounded
+  source-change marker. Tier 3 runs that stage repository context, external
+  reference or workspace skills, or task inputs with `.git`, `.venv`,
+  `__pycache__`, or `node_modules` entries remain runnable but cannot certify
+  publication, and neither can a target whose authored paths below the root
+  use names that Tier 1 skips (such as `references/results/`).
+- Clean and not-applicable License, Code Risk, Secrets, and Dependency Audit
+  runs now record structured execution evidence, so legitimate built-in Tier 1
+  results can satisfy publication without relying on findings or errors.
+- Skip reasons are bounded, control-free, and escaped in reports and in the
+  terminal, so oversized metadata, Rich markup, or terminal escape sequences
+  cannot corrupt them. Reports show one line; the pipeline view keeps the
+  reason's line breaks.
+- SkillSpector issue paths with NUL bytes or lone surrogates now make the
+  security scan incomplete instead of being accepted.
+- The public benchmark gate rejects `PASS` cards with placeholder identities,
+  malformed or future evaluation dates, a missing Tier 3 run ID, hostile
+  benchmark-policy metadata, or environment-label substitutions in required
+  proof fields.
+- Hardened Tier 3 HTML and Markdown reporting against recursive or malformed
+  display metadata, Markdown structure injection, and inline-JavaScript
+  injection through untrusted agent or skill names.
+
+## 0.5.0 - 2026-10-06
+
+### Added
+
+- Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for
+  LLM judges in both the Harbor container verifier (`eval.py`) and host runtime
+  (`LLMClient`). Features zero-dependency full jitter exponential backoff,
+  RFC-7231 `Retry-After` header parsing, finite-value environment overrides
+  (`SKILL_EVAL_LLM_MAX_RETRIES`, `SKILL_EVAL_LLM_RETRY_BASE_DELAY`, and
+  `SKILL_EVAL_LLM_RETRY_MAX_DELAY`), and
+  automatic container forwarding via Harbor `task.toml`, and a per-judge
+  verifier time budget that leaves room for failure artifacts, without altering
+  benchmark metrics or scoring formulas.
+- Provider-aware structured JSON schema enforcement (`response_format` for
+  OpenAI-compatible / Gemini Vertex / NVIDIA NIM endpoints and `output_config`
+  for Anthropic `/v1/messages`) across the custom `judge_accuracy`,
+  `judge_goal_accuracy`, and `judge_behavior_check` paths, with automatic
+  schema-specific `HTTP 400`/`422` downgrade and per-target memoization
+  (`_SCHEMA_UNSUPPORTED_TARGETS`), boolean prompt alignment, and a guard for
+  missing `message` fields on reasoning token exhaustion. The canonical OpenAI
+  RAGAS goal scorer retains its separate scoring path.
+- Configurable evidence bundle budgets (`SKILL_EVAL_ACCURACY_BUDGET`, `SKILL_EVAL_GOAL_ACCURACY_BUDGET`, `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`) and final response limit (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`).
+- Tier 3 log converters now rebuild ATIF trajectories from OpenCode JSON streams
+  (`opencode.txt`) and structured Codex tee logs (`codex.txt`) when
+  `trajectory.json` is missing or empty.
+
+### Changed
+
+- Upgraded the optional Tier 3 backend to Harbor 0.24.0 and its compatible
+  LiteLLM 1.92-1.93 window. Existing SkillEvaluator agent and environment
+  options now use Harbor's unified selectors; installed Codex adapters preserve
+  merged user and MCP configuration; Docker and local execution stream redacted
+  callbacks under a shared 16 MiB per-command output limit, while the parent
+  Harbor orchestration process has a separate 16 MiB combined stdout/stderr
+  limit; and Docker supports stdin plus isolated sidecar operations without
+  exposing environment values on Compose argv. Generated schema 1.3 and
+  unmodified native task schemas remain compatible, while collection accepts
+  Harbor 0.24 job, trial, reward, and ATIF v1.8 artifacts. Multimodal tool
+  output reaches judges and reports as text with `[image]`/`[audio]` markers.
+  Native tasks' own test scripts must write numeric `reward.json` values, which
+  Harbor 0.24 enforces; a failed job now names the trial or step exception that
+  Harbor recorded.
+- Exposed 23 Harbor 0.24 backends alongside local mode. `cua-cloud`,
+  `opensandbox`, `hf-sandbox`, `podman`, `kata`, `runta`, `prime`, `mosaic`,
+  and `smol` remain disabled until generated tasks can be projected through a
+  trusted image or backend-native provisioning path. Non-secret backend
+  constructor options can be supplied with repeatable, operator-only
+  `--environment-kwarg` / `--ek` flags; skill-owned configuration,
+  credentials, and sandbox-policy overrides remain outside that surface.
+  Harbor's `stream` and `enable_environment_dir_upload` options are reserved,
+  and Modal's `modal_sandbox_v2` option no longer exists.
+- `--env-mode wandb` now runs Harbor's `cwsandbox` backend with W&B
+  authentication, because Harbor 0.24 merged the two. Install
+  `harbor[cwsandbox]==0.24.0` instead of the removed `harbor[wandb]` extra.
+- Harbor now always starts in an empty, evaluator-owned working directory with
+  `.env` loading and Harbor telemetry disabled. A `.env.local` or `.env` file
+  near the operator's project can no longer add credentials or settings that
+  SkillEvaluator's allowlisted environment removed. The `tier3` extra requires
+  python-dotenv 1.2.0.
+- Codex runs with `reasoning_effort=high`, the default under Harbor 0.22, so
+  scores and cost stay comparable after Harbor stopped pinning it.
+- Native tasks follow Harbor 0.24's separate-verifier precedence. A dedicated
+  verifier image or build definition must ship its own test script and never
+  receives SkillEvaluator's grader. Otherwise the verifier is built from
+  `environment/`, whose Compose model must stay within the verifier's
+  environment allowlist. `docker-compose.yml` verifier definitions, which
+  Harbor ignores, are rejected.
+
+### Fixed
+
+- Report non-string YAML keys as validation errors in skills, rules, workflows,
+  and plugin manifests instead of raising a `TypeError`, including frontmatter
+  `metadata` keys. Show boolean, null, and date keys in a readable YAML form.
+- Harbor ``result.json`` case ids now prefer canonical ``task_id.path`` metadata
+  over repository-prefixed ``task_name`` values when resolving eval entries.
+- Codex log synthesis maps ``web_search`` action payloads and ``collab_tool_call``
+  thread items into ATIF, and error-recovery checks recognize ``status=failed`` /
+  ``exit_code=`` terminal evidence emitted by Codex converters.
+- Tier 3 Harbor dual-arm evaluation propagates arm suffixes (`-with-skill`,
+  `-without-skill`) to `[task] name` in staged native `task.toml` files,
+  normalizes external repository and namespace prefixes, and commutatively
+  resolves canonical case IDs across attempt and arm suffix combinations
+  while preserving expected case IDs.
+- Tier 3 native-task collection now keeps Harbor's staged directory selector,
+  logical dataset ID, and display name separate; ambiguous or unresolved
+  persisted identities fail closed instead of trusting grader-authored IDs.
+  Runner-owned attempt ordinals are carried structurally, so `attempt`-like
+  text in authored selectors, logical IDs, or display names cannot corrupt
+  pass@k or `stop_on_pass` accounting, including truncated aggregate names.
+- Tier 3 Harbor subprocess, Docker, and local diagnostics now redact raw and
+  percent-decoded URI/proxy userinfo components across streamed callbacks,
+  nonzero exits, timeouts, output limits, and persisted launch errors.
+- Tier 3 local OpenCode runs routed through NVIDIA Build now retain the rendered
+  user instruction for ATIF conversion and fail on OpenCode error events, in
+  parity with Harbor's upstream agent lifecycle. Remote MCP servers in that
+  configuration disable OAuth, as Harbor's own OpenCode configuration does.
+- Tier 3 reports now use the collector's logical attempt overall whenever a
+  condition mixes standard and custom rewards, including across separate
+  trials, and aggregate execution summaries preserve child-declared hidden
+  error counts and truncation through launch-error overlays.
+- Tier 3 now rejects non-finite, overflowing, and finite-but-unscalable timeout
+  multipliers at YAML, programmatic, and Harbor command boundaries.
+- Tier 3 now preserves paired baseline isolation by rejecting skill-owned
+  pre-agent setup, native task/step healthchecks, native step workdir overlays,
+  and Harbor task-shipped prior trajectories whenever the baseline arm is
+  enabled. Native standard grading also fails closed on step test overlays,
+  separate verifier contexts, post-agent collect hooks, and task-controlled
+  verifier executable-path, shell, loader, proxy/TLS, provider, and judge
+  environment controls; exact operator-staged provider/judge placeholders and
+  unrelated verifier variables remain compatible. Operator-configured judge
+  fallback models are forwarded only to standard verifier jobs, not agent or
+  `custom_only` environments. Its Python payload now runs from a replaced
+  evaluator-owned directory in isolated mode. `custom_only`
+  retains Harbor-native collect hooks and Harbor's shared/separate
+  step-test resolution, and fully authored native test paths are left untouched
+  instead of replacing their unused `tests/skill_evaluator/` package.
+  All native grading modes reject Windows agent or effective verifier
+  environments until evaluator projection and verifier scripts are OS-aware.
+- Tier 3 collection now fails closed on unsafe reward identities and malformed
+  custom-metric contracts, publishes exact truncation metadata for bounded
+  case and failure-detail samples, and keeps findings, attribution, and
+  per-trial JSON inside the report loader's artifact envelope.
+- Tier 3 progress output, diagnostics, and result summaries no longer redact
+  counts such as `0/1 scored` or `1 errored` when a credential-named
+  environment variable holds a short flag value such as `1`. Short credential
+  fragments in proxy URLs are still redacted.
+- `create-eval-dataset --refine` no longer requires the `tier3` extra to read
+  case IDs from Harbor result files, and no longer fails on multimodal
+  trajectory messages.
+
+## 0.4.0 - 2026-09-30
+
+### Fixed
+
+- Render untrusted skill content, paths, tool messages, and LLM output literally
+  in CLI reports and logs. Escape Rich markup and strip terminal control
+  sequences to prevent rendering failures and misleading output, including
+  catalog summaries and the compact validation view. Preserve Windows paths
+  and literal emoji codes
+  ([#173](https://github.com/NVIDIA/SkillEvaluator/pull/173),
+  [#175](https://github.com/NVIDIA/SkillEvaluator/pull/175)).
+- Make sensitive-assignment, JWT, and private-key redaction linear-time,
+  preventing long adversarial text from stalling logs and reports. Apply the
+  JWT fix to Tier 3 command output and the bundled Harbor verifier
+  ([#172](https://github.com/NVIDIA/SkillEvaluator/pull/172),
+  [#176](https://github.com/NVIDIA/SkillEvaluator/pull/176)).
+- `--no-llm` full datasets include a negative bucket only when eval guidance
+  supplies an off-skill prompt; template mode no longer guesses canned
+  negatives from a fixed question list. CLI and docs now describe `--full` as
+  up to four cases instead of always four.
+- Treat `apply_patch` file headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`,
+  `*** Move to:`) as write targets in the Tier 3 security check. A patch that targets a shell
+  profile, SSH, credential, or privileged config path, sent as an `apply_patch` tool call or a
+  shell heredoc, is now a critical `sensitive_file_write` finding whose evidence names the
+  protected path, not the patch. Every header in the patch is checked.
+- Mask GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, and `github_pat_`) in Tier 3
+  evidence excerpts and Harbor verifier log output.
+- Stop the PII scan reporting User-Agent product versions such as `Chrome/140.0.0.0`
+  as public IP addresses. Chromium's reduced User-Agent gives every version this shape.
 - Separate Tier 2 collection limits from the 256-file per-skill limit. Fresh
   similarity scans now allow 1,024 selected manifests and 128 million scalar
   comparisons by default, covering 343 skills with 2,048-dimensional embeddings.
@@ -341,14 +590,46 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Tier 3 now uses one versioned, equal-weight five-dimension overall-score
-  policy across Harbor rewards, pass@k, Skill Lift, reports, comparisons, and
-  best-agent selection. Previously, some paths averaged all six evaluators
-  directly while reports averaged five dimensions, which gave Effectiveness
-  two votes and could reverse the reported lift direction. Current artifacts
-  persist `skill-evaluator-dimension-mean-v1`; legacy and partial artifacts
-  retain their historical semantics
-  (Relates to [#61](https://github.com/NVIDIA/SkillEvaluator/issues/61)).
+- Fully covered documentation-only skills no longer fail security validation
+  solely because non-applicable SkillSpector analyzers report a partial status
+  ([#137](https://github.com/NVIDIA/SkillEvaluator/issues/137)).
+- Embedding chunking now rejects zero-sized or non-progressing windows before
+  entering the splitter or contacting the embedding provider
+  ([#139](https://github.com/NVIDIA/SkillEvaluator/issues/139)).
+- Scoped network exfiltration command flag patterns in security checks, enforcing command-position anchoring, quote-aware argument segmentation, explicit HTTP method flags, and case-sensitive `-F`/`-d`/`-T` flags to prevent false-positive flags on safe URLs, packages, or download scripts while reliably detecting quoted secrets and subshell wrappers.
+- Malformed, non-UTF-8, or unreadable bundled and custom policy files now
+  produce path-specific CLI errors instead of leaking raw parser or I/O errors
+  ([#128](https://github.com/NVIDIA/SkillEvaluator/issues/128)).
+- `create-eval-dataset --refine` resolves Harbor trial case ids from persisted
+  `reward.json` `entry_id` metadata, using folder-name parsing only as an
+  unambiguous legacy fallback.
+- Tier 3 local mode now drops evaluator-managed empty process-loader resets
+  while continuing to reject non-empty loader overrides, allowing generated
+  tasks to reach agent execution
+  ([#132](https://github.com/NVIDIA/SkillEvaluator/issues/132)).
+- Unpinned-dependency warnings are no longer suppressed by comparison
+  operators inside PEP 508 environment markers; requirements such as
+  `pkg; python_version < "3.13"` are now correctly reported, while direct
+  references are treated as pinned independently of marker contents.
+- Schema, frontmatter, quality parsing, and security PII scanning accept a leading
+  UTF-8 BOM, matching the unicode scanner's "benign BOM" note
+  ([#91](https://github.com/NVIDIA/SkillEvaluator/issues/91)).
+- SPDX headers keep the full license expression, so `MIT OR GPL-3.0` is
+  no longer truncated to MIT and allowed. Closing comment markers such as
+  `*/` and `-->` are not treated as part of the expression
+  ([#86](https://github.com/NVIDIA/SkillEvaluator/issues/86)).
+- Windows personal-path PII now flags `C:\Users\...` usernames that start with
+  `s` (for example `steve`), matching the intended whitespace class rather than
+  excluding the letter `s` ([#87](https://github.com/NVIDIA/SkillEvaluator/issues/87)).
+- Quality scoring, script lint, and `create-eval-dataset` now treat `tools/`
+  the same as `scripts/` for executable helpers.
+- License detection no longer treats a frontmatter `license` identifier as
+  authoritative when a LICENSE file declares a different license. Claiming
+  MIT while shipping GPL-3.0 now fails closed. Every LICENSE/COPYING file is
+  reconciled, NOTICE files stay informational, an unidentified license file is
+  not treated as absent, and a blocking conflict no longer publishes
+  `license_status=allowed`
+  ([#85](https://github.com/NVIDIA/SkillEvaluator/issues/85)).
 - `--llm-verify` now refuses to send file context from paths outside the
   skill root, including `..`, absolute paths, and outbound file symlinks.
 - Gitleaks path allowlist now skips test/example/fixture/mock directories

@@ -29,6 +29,7 @@ from harbor.models.trial.paths import TrialPaths
 from harbor.verifier.verifier import Verifier
 
 import skillevaluator.tier3.harbor.adapter as adapter_module
+from skillevaluator.publication_identity import publication_source_digest
 from skillevaluator.tier3.harbor.adapter import (
     _collect_all_skill_deps,
     _dockerfile_resolved_build_context_sources,
@@ -159,6 +160,144 @@ def _assert_runtime_projection(task: Path, target: Path, workspace: Path) -> Non
     assert "UNDECLARED-ORACLE" not in readable_environment
     assert "GROUND-TRUTH-SECRET" not in readable_environment
     assert (target / "evals" / "evals.json").is_file(), "source evaluation assets must remain intact"
+
+
+def test_runtime_projection_omits_every_publication_digest_exclusion(tmp_path: Path) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    (target / "vendor").mkdir()
+    original_digest = publication_source_digest(target)
+    original_fingerprint = adapter_module._runtime_skill_fingerprint(target)
+    assert original_digest is not None
+    assert original_fingerprint is not None
+
+    excluded_files = {
+        target / ".git" / "HEAD": "git metadata\n",
+        target / "vendor" / ".git": "gitdir: /tmp/checkout/.git/modules/vendor\n",
+        target / ".venv" / "state.py": "venv state\n",
+        target / "__pycache__" / "state.pyc": "bytecode\n",
+        target / "node_modules" / "package" / "index.js": "generated module\n",
+        target / ".evals" / "state.json": "generated eval\n",
+        target / ".results" / "state.json": "generated result\n",
+        target / ".versions" / "state.json": "generated version\n",
+        target / "results" / "state.json": "generated result\n",
+        target / "versions" / "state.json": "generated version\n",
+        target / "evals" / "results" / "run" / "result.json": "generated run\n",
+        target / "BENCHMARK.md": "generated benchmark\n",
+        target / "skill-card.md": "generated card\n",
+        target / "skill.oms.sig": "generated signature\n",
+    }
+    for path, content in excluded_files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    ignore = adapter_module._runtime_skill_copy_ignore(target)
+    assert publication_source_digest(target) == original_digest
+    assert adapter_module._runtime_skill_fingerprint(target) == original_fingerprint
+    for path in excluded_files:
+        assert adapter_module._runtime_projection_path_is_ignored(path, target, ignore), path
+
+    nested_authored = target / "references" / "results" / "BENCHMARK.md"
+    nested_authored.parent.mkdir(parents=True)
+    nested_authored.write_text("authored nested content\n", encoding="utf-8")
+    assert not adapter_module._runtime_projection_path_is_ignored(nested_authored, target, ignore)
+    assert publication_source_digest(target) != original_digest
+    assert adapter_module._runtime_skill_fingerprint(target) != original_fingerprint
+
+
+def test_copy_repo_omits_target_publication_digest_exclusions(tmp_path: Path) -> None:
+    repo, target, references_dir, workspace = _write_projection_fixture(tmp_path)
+    (repo / ".git").mkdir()
+    excluded_files = (
+        target / "BENCHMARK.md",
+        target / "skill-card.md",
+        target / "skill.oms.sig",
+        target / ".results" / "prior.json",
+        target / ".versions" / "prior.json",
+        target / "results" / "prior.json",
+        target / "versions" / "prior.json",
+        target / ".venv" / "state.py",
+        target / "vendor" / ".git",
+    )
+    for path in excluded_files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("EXCLUDED-PUBLICATION-BYTE\n", encoding="utf-8")
+    nested_authored = target / "references" / "results" / "BENCHMARK.md"
+    nested_authored.parent.mkdir(parents=True)
+    nested_authored.write_text("NESTED-AUTHORED-BYTE\n", encoding="utf-8")
+
+    task = generate_harbor_tasks(
+        target,
+        tmp_path / "generated-publication-exclusions",
+        reference_skills_dir=references_dir,
+        workspace_skill_paths=[workspace],
+        copy_repo=True,
+    )[0]
+    staged_target = task / "environment" / "repo" / target.relative_to(repo)
+
+    for path in excluded_files:
+        assert not (staged_target / path.relative_to(target)).exists(), path
+    assert (staged_target / nested_authored.relative_to(target)).read_text(encoding="utf-8") == (
+        "NESTED-AUTHORED-BYTE\n"
+    )
+
+
+def test_runtime_projection_generated_file_case_alias_follows_filesystem_semantics(tmp_path: Path) -> None:
+    repo, target, references_dir, workspace = _write_projection_fixture(tmp_path)
+    original_digest = publication_source_digest(target)
+    original_fingerprint = adapter_module._runtime_skill_fingerprint(target)
+    assert original_digest is not None
+    assert original_fingerprint is not None
+
+    alias = target / "SKILL-CARD.MD"
+    alias.write_text("case-variant card\n", encoding="utf-8")
+    canonical = target / "skill-card.md"
+    ignore = adapter_module._runtime_skill_copy_ignore(target)
+    ignored = adapter_module._runtime_projection_path_is_ignored(alias, target, ignore)
+
+    task = generate_harbor_tasks(
+        target,
+        tmp_path / "generated-case-variant",
+        reference_skills_dir=references_dir,
+        workspace_skill_paths=[workspace],
+        copy_repo=True,
+    )[0]
+    staged_alias = task / "environment" / "repo" / alias.relative_to(repo)
+
+    if canonical.exists() and alias.samefile(canonical):
+        assert ignored
+        assert publication_source_digest(target) == original_digest
+        assert adapter_module._runtime_skill_fingerprint(target) == original_fingerprint
+        assert not staged_alias.exists()
+    else:
+        assert not ignored
+        assert publication_source_digest(target) != original_digest
+        assert adapter_module._runtime_skill_fingerprint(target) != original_fingerprint
+        assert staged_alias.read_text(encoding="utf-8") == "case-variant card\n"
+
+
+def test_runtime_fingerprint_does_not_trust_scandir_identity_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    original_scandir = adapter_module.os.scandir
+
+    class EntryWithoutPortableIdentity:
+        def __init__(self, entry: os.DirEntry[str]) -> None:
+            self.name = entry.name
+            self.path = entry.path
+
+        def stat(self, *, follow_symlinks: bool = True) -> object:
+            del follow_symlinks
+            raise AssertionError("DirEntry.stat identity is not portable on Windows")
+
+    def guarded_scandir(path: object) -> list[EntryWithoutPortableIdentity]:
+        with original_scandir(path) as entries:
+            return [EntryWithoutPortableIdentity(entry) for entry in entries]
+
+    monkeypatch.setattr(adapter_module.os, "scandir", guarded_scandir)
+
+    assert adapter_module._runtime_skill_fingerprint(target) is not None
 
 
 def test_generated_tasks_project_runtime_skills_without_root_evals(tmp_path: Path) -> None:
@@ -982,6 +1121,30 @@ def test_copy_repo_excludes_configured_in_repo_output_root(tmp_path: Path) -> No
     assert not (task / "environment" / "repo" / output_dir.name).exists()
 
 
+def test_copy_repo_excludes_separate_report_output_root(tmp_path: Path) -> None:
+    repo, target, references_dir, workspace = _write_projection_fixture(tmp_path)
+    report_root = repo / "reports"
+    prior_report = report_root / "BENCHMARK.md"
+    prior_report.parent.mkdir()
+    prior_report.write_text("PRIOR-REPORT-SECRET\n", encoding="utf-8")
+
+    task = generate_harbor_tasks(
+        target,
+        tmp_path / "generated",
+        reference_skills_dir=references_dir,
+        workspace_skill_paths=[workspace],
+        copy_repo=True,
+        repo_context_exclude_paths=(report_root,),
+    )[0]
+
+    assert not (task / "environment" / "repo" / report_root.name).exists()
+    assert "PRIOR-REPORT-SECRET" not in "\n".join(
+        path.read_text(encoding="utf-8", errors="ignore")
+        for path in (task / "environment").rglob("*")
+        if path.is_file()
+    )
+
+
 @pytest.mark.parametrize("stager", ["generated", "native"])
 def test_copy_repo_excludes_private_in_repo_staging_root(
     tmp_path: Path,
@@ -1144,11 +1307,12 @@ def test_default_results_root_remains_supported(tmp_path: Path) -> None:
     assert tasks
 
 
-def test_declared_custom_in_skill_results_root_remains_supported(tmp_path: Path) -> None:
+def test_declared_custom_in_skill_results_root_is_rejected_for_stable_publication_identity(tmp_path: Path) -> None:
     _, target, _, _ = _write_projection_fixture(tmp_path)
 
-    validate_results_root_location(target, target / "custom-results")
-    with pytest.raises(ValueError, match="runtime skill source"):
+    with pytest.raises(ValueError, match=r"canonical.*evals/results"):
+        validate_results_root_location(target, target / "custom-results")
+    with pytest.raises(ValueError, match=r"canonical.*evals/results"):
         validate_results_root_location(target, target / "scripts" / "results")
 
 
@@ -1456,7 +1620,7 @@ def test_declared_output_does_not_trust_authored_dataset_manifest(tmp_path: Path
     assert sentinel.read_text(encoding="utf-8") == "preserve\n"
 
 
-def test_marked_prior_run_does_not_block_declared_results_root(tmp_path: Path) -> None:
+def test_marked_prior_run_does_not_make_a_custom_in_skill_results_root_publishable(tmp_path: Path) -> None:
     _, target, _, _ = _write_projection_fixture(tmp_path)
     results_root = target / "custom-results"
     prior_run = results_root / "run-old"
@@ -1465,7 +1629,8 @@ def test_marked_prior_run_does_not_block_declared_results_root(tmp_path: Path) -
     retained_skill.mkdir(parents=True)
     (retained_skill / "SKILL.md").write_text("# Retained generated copy\n", encoding="utf-8")
 
-    validate_results_root_location(target, results_root)
+    with pytest.raises(ValueError, match=r"canonical.*evals/results"):
+        validate_results_root_location(target, results_root)
 
 
 @pytest.mark.parametrize("copy_repo", [False, True])
@@ -4709,3 +4874,85 @@ def test_native_standard_grading_rejects_fallback_separate_verifier(tmp_path: Pa
             tmp_path / "native-standard-fallback-verifier",
             grading_mode="default",
         )
+
+
+@pytest.mark.parametrize(
+    ("authored_parent", "excluded_input"),
+    [
+        ("evals/files", "node_modules/answers/hint.txt"),
+        ("evals/files", ".venv/lib/hint.txt"),
+        ("evals/environment/sidecar", "__pycache__/hint.pyc"),
+        ("evals/environment/sidecar", "node_modules/hint.txt"),
+    ],
+)
+def test_staged_digest_excluded_task_inputs_do_not_bind_publication(
+    tmp_path: Path,
+    authored_parent: str,
+    excluded_input: str,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+    from skillevaluator.tier3.harbor.adapter import private_evaluator_skill_snapshot
+    from skillevaluator.tier3.harbor.runner import _runtime_context_is_bound_to_publication_target
+
+    skill = tmp_path / "simple"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: simple\ndescription: Demo skill.\n---\n", encoding="utf-8")
+    (skill / "evals" / "files").mkdir(parents=True)
+    (skill / "evals" / "files" / "project.txt").write_text("fixture\n", encoding="utf-8")
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps([{"id": "case-001", "question": "Summarize the fixture.", "ground_truth": "42"}]),
+        encoding="utf-8",
+    )
+    (skill / authored_parent).mkdir(parents=True, exist_ok=True)
+    (skill / authored_parent / "authored.txt").write_text("authored\n", encoding="utf-8")
+
+    def stage() -> list[Path]:
+        with private_evaluator_skill_snapshot(skill) as evaluator_skill:
+            return generate_harbor_tasks(skill, tmp_path / "tasks", evaluator_skill_path=evaluator_skill)
+
+    clean_tasks = stage()
+    assert _runtime_context_is_bound_to_publication_target(
+        skill, clean_tasks, reference_skills_dir=None, workspace_skill_paths=[]
+    )
+
+    before = publication_target_from_path(skill)
+    hidden = skill / authored_parent / excluded_input
+    hidden.parent.mkdir(parents=True, exist_ok=True)
+    hidden.write_text("the expected answer is 7\n", encoding="utf-8")
+    assert publication_target_from_path(skill) == before
+
+    tasks = stage()
+
+    # The digest omits these bytes, so a run that stages them cannot be bound
+    # to that digest.
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill, tasks, reference_skills_dir=None, workspace_skill_paths=[]
+    )
+
+
+@pytest.mark.parametrize("link_name", [".git", "results", "__pycache__", "scripts/__pycache__"])
+def test_runtime_projection_skips_linked_generated_entries(tmp_path: Path, link_name: str) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    skill = tmp_path / "simple"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: simple\ndescription: Demo skill.\n---\n", encoding="utf-8")
+    (skill / "scripts" / "run.sh").write_text("echo ok\n", encoding="utf-8")
+    (skill / "evals").mkdir()
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps([{"id": "case-001", "question": "Summarize.", "ground_truth": "x"}]),
+        encoding="utf-8",
+    )
+    try:
+        (skill / link_name).symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symbolic links are unavailable on this platform")
+
+    with private_evaluator_skill_snapshot(skill) as evaluator_skill:
+        tasks = generate_harbor_tasks(skill, tmp_path / "tasks", evaluator_skill_path=evaluator_skill)
+
+    staged = tasks[0] / "environment" / "skills" / "simple"
+    assert (staged / "SKILL.md").is_file()
+    assert (staged / "scripts" / "run.sh").is_file()
+    assert not os.path.lexists(staged / link_name)

@@ -654,6 +654,7 @@ def evaluate(
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
+    repo_context_exclude_paths: tuple[Path, ...] = (),
     evaluated_source: dict[str, str] | None = None,
     progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
@@ -737,6 +738,7 @@ def evaluate(
             override_cpus=override_cpus,
             override_memory_mb=override_memory_mb,
             override_storage_mb=override_storage_mb,
+            repo_context_exclude_paths=repo_context_exclude_paths,
             progress_reporter=reporter,
         )
     except Exception as exc:

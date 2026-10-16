@@ -171,7 +171,9 @@ def _agent_eval_result(payload: str) -> ValidationResult:
 def _advisory_skip_result(payload: str) -> ValidationResult:
     result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live agent evaluation")
     result.metadata["agent_eval"] = {
-        "provenance": {"advisory": True, "reason": "skipped", "message": f"Skipped because {payload}"}
+        "execution_status": "skipped",
+        "verdict": "neutral",
+        "provenance": {"advisory": True, "reason": "skipped", "message": f"Skipped because {payload}"},
     }
     return result
 

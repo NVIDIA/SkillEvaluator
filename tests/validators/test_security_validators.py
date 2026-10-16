@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from skillevaluator.utils.tool_runner import Severity, Tools
+from skillevaluator.utils.tool_runner import Severity, ToolResult, Tools
 from skillevaluator.validators.base import ValidationResult
 from skillevaluator.validators.code_risk import CodeRiskValidator
 from skillevaluator.validators.dependencies import DependencySecurityValidator
@@ -92,6 +92,7 @@ class TestSecretsValidator:
 
         assert result.passed
         assert any("No secrets detected" in m for m in result.messages)
+        assert any(detail.check_name == "gitleaks" for detail in result.success_details)
 
     def test_validate_skill_with_secrets(self, skill_with_security_issues: Path, mock_tool_available):
         """Test detection of secrets in a skill."""
@@ -167,6 +168,7 @@ class TestDependencySecurityValidator:
 
         assert result.passed
         assert any("No dependency files found" in m for m in result.messages)
+        assert any(detail.check_name == "dependency_file_discovery" for detail in result.success_details)
 
     def test_validate_with_requirements(self, tmp_path: Path, mock_tool_available):
         """Test validation with requirements.txt."""
@@ -186,7 +188,7 @@ description: Test skill
         mock_result = MagicMock()
         mock_result.success = True
         mock_result.exit_code = 0
-        mock_result.stdout = '{"dependencies": []}'
+        mock_result.stdout = '{"dependencies": [], "fixes": []}'
         mock_result.error_message = None
 
         with (
@@ -196,6 +198,7 @@ description: Test skill
             result = validator.validate(skill_dir)
 
         assert result.passed
+        assert any(detail.check_name == "pip_audit" for detail in result.success_details)
 
     def test_validate_with_vulnerabilities(self, tmp_path: Path, mock_tool_available):
         """Test detection of vulnerable dependencies."""
@@ -227,7 +230,7 @@ description: Vulnerable skill
                     }
                 ]
             }
-        ]}"""
+        ], "fixes": []}"""
 
         with (
             mock_tool_available("pip_audit", "/usr/bin/pip-audit"),
@@ -235,7 +238,9 @@ description: Vulnerable skill
         ):
             result = validator.validate(skill_dir)
 
+        assert not result.is_incomplete
         assert any("CVE" in e or "PYSEC" in e for e in result.errors + result.warnings)
+        assert any(detail.check_name == "pip_audit" for detail in result.success_details)
 
     def test_no_tools_installed(self, tmp_path: Path, mock_tool_unavailable):
         """Test graceful handling when no audit tools installed."""
@@ -254,8 +259,179 @@ description: Test
         with mock_tool_unavailable("pip_audit"), mock_tool_unavailable("safety"):
             result = validator.validate(skill_dir)
 
-        assert result.passed
+        assert result.status == "incomplete"
+        assert not result.passed
+        assert result.incomplete_scans == ["pip-audit"]
         assert any("pip-audit not installed" in w for w in result.warnings)
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "No known vulnerabilities found",
+            "{}",
+            '{"dependencies": "not-a-list"}',
+            '{"dependencies": [{"name": "requests", "version": "2.32.0"}]}',
+            '{"dependencies": [{"name": "requests", "version": "2.32.0", "vulns": [{}]}]}',
+            '{"dependencies": [{"name": "requests", "version": "2.32.0", '
+            '"vulns": [{"id": "PYSEC-1", "fix_versions": [], "severity": "urgent"}]}]}',
+            '{"dependencies": [{"name": "requests", "version": "2.32.0", '
+            '"vulns": [{"id": "PYSEC-1", "fix_versions": [], '
+            '"aliases": [{"cvss": {"score": 11}}]}]}]}',
+            '{"dependencies": [{"name": "requests", "version": "2.32.0", '
+            '"vulns": [{"id": "PYSEC-1", "fix_versions": [], '
+            '"aliases": [{"cvss": {"score": -0.1}}]}]}]}',
+            '{"dependencies": [{"name": "requests", "version": "2.32.0", '
+            '"vulns": [{"id": "PYSEC-1", "fix_versions": [], '
+            '"aliases": [{"cvss": {"score": NaN}}]}]}]}',
+            json.dumps(
+                {
+                    "dependencies": [
+                        {
+                            "name": "requests",
+                            "version": "2.32.0",
+                            "vulns": [
+                                {
+                                    "id": "PYSEC-1",
+                                    "fix_versions": [],
+                                    "aliases": [{"cvss": {"score": 10**400}}],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ),
+            '{"dependencies": [{"name": "requests", "version": "2.32.0", '
+            '"vulns": [{"id": "PYSEC-1", "fix_versions": [], '
+            '"aliases": [{"cvss": {"score": '
+            + "9" * 5000
+            + "}}]}]}]}]}",
+        ],
+        ids=[
+            "non-json",
+            "missing-dependencies",
+            "bad-dependencies",
+            "missing-vulns",
+            "bad-vulnerability",
+            "unknown-severity",
+            "cvss-too-high",
+            "cvss-negative",
+            "cvss-nan",
+            "cvss-huge-integer",
+            "cvss-over-parser-limit",
+        ],
+    )
+    def test_malformed_pip_audit_reports_are_incomplete(
+        self,
+        sample_skill_dir: Path,
+        mock_tool_available,
+        stdout: str,
+    ):
+        """Malformed reports cannot certify successful dependency scanning."""
+        (sample_skill_dir / "requirements.txt").write_text("requests==2.32.0\n")
+        tool_result = ToolResult(success=True, stdout=stdout, stderr="", exit_code=0)
+
+        with (
+            mock_tool_available("pip_audit", "/usr/bin/pip-audit"),
+            patch.object(Tools.pip_audit, "run", return_value=tool_result),
+        ):
+            result = DependencySecurityValidator(use_safety=False).validate(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["pip-audit"]
+        assert not any(detail.check_name == "pip_audit" for detail in result.success_details)
+
+    @pytest.mark.parametrize(
+        "tool_result",
+        [
+            ToolResult(success=False, stdout="", stderr="", exit_code=-1, error_message="pip-audit timed out"),
+            ToolResult(
+                success=True,
+                stdout='{"dependencies": [], "fixes": []}',
+                stderr="",
+                exit_code=2,
+            ),
+        ],
+        ids=["operational-error", "unexpected-exit-code"],
+    )
+    def test_incomplete_pip_audit_processes_do_not_publish_success(
+        self,
+        sample_skill_dir: Path,
+        mock_tool_available,
+        tool_result: ToolResult,
+    ):
+        """A failed process is incomplete even when stdout resembles a clean report."""
+        (sample_skill_dir / "requirements.txt").write_text("requests==2.32.0\n")
+
+        with (
+            mock_tool_available("pip_audit", "/usr/bin/pip-audit"),
+            patch.object(Tools.pip_audit, "run", return_value=tool_result),
+        ):
+            result = DependencySecurityValidator(use_safety=False).validate(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["pip-audit"]
+        assert not any(detail.check_name == "pip_audit" for detail in result.success_details)
+
+    @pytest.mark.parametrize(
+        ("exit_code", "stdout"),
+        [
+            (
+                0,
+                '{"dependencies": [{"name": "demo", "version": "1", '
+                '"vulns": [{"id": "PYSEC-1", "fix_versions": []}]}], "fixes": []}',
+            ),
+            (1, '{"dependencies": [], "fixes": []}'),
+        ],
+        ids=["clean-exit-with-findings", "findings-exit-without-findings"],
+    )
+    def test_pip_audit_exit_code_must_match_report(
+        self,
+        sample_skill_dir: Path,
+        mock_tool_available,
+        exit_code: int,
+        stdout: str,
+    ):
+        """Contradictory process and report states fail closed."""
+        (sample_skill_dir / "requirements.txt").write_text("demo==1\n")
+        tool_result = ToolResult(success=True, stdout=stdout, stderr="", exit_code=exit_code)
+
+        with (
+            mock_tool_available("pip_audit", "/usr/bin/pip-audit"),
+            patch.object(Tools.pip_audit, "run", return_value=tool_result),
+        ):
+            result = DependencySecurityValidator(use_safety=False).validate(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["pip-audit"]
+        assert not any(detail.check_name == "pip_audit" for detail in result.success_details)
+
+    def test_skipped_dependencies_make_pip_audit_evidence_partial(
+        self,
+        sample_skill_dir: Path,
+        mock_tool_available,
+    ):
+        """pip-audit skip entries describe missing coverage, not a completed scan."""
+        (sample_skill_dir / "requirements.txt").write_text("local-package @ file:///tmp/local-package\n")
+        tool_result = ToolResult(
+            success=True,
+            stdout=(
+                '{"dependencies": [{"name": "local-package", '
+                '"skip_reason": "Dependency not found on index"}], "fixes": []}'
+            ),
+            stderr="",
+            exit_code=0,
+        )
+
+        with (
+            mock_tool_available("pip_audit", "/usr/bin/pip-audit"),
+            patch.object(Tools.pip_audit, "run", return_value=tool_result),
+        ):
+            result = DependencySecurityValidator(use_safety=False).validate(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["pip-audit"]
+        assert any("scan coverage is incomplete" in warning for warning in result.warnings)
+        assert not any(detail.check_name == "pip_audit" for detail in result.success_details)
 
 
 # =============================================================================
@@ -288,6 +464,7 @@ class TestCodeRiskValidator:
 
         assert result.passed
         assert any("No code files found" in m for m in result.messages)
+        assert any(detail.check_name == "code_file_discovery" for detail in result.success_details)
 
     def test_validate_no_tools_installed(self, skill_with_security_issues: Path, mock_tool_unavailable):
         """Test graceful handling when no analysis tools installed."""
@@ -318,6 +495,7 @@ class TestCodeRiskValidator:
             result = validator.validate(skill_with_security_issues)
 
         assert result.passed
+        assert any(detail.check_name == "bandit" for detail in result.success_details)
 
     def test_validate_bandit_findings(self, skill_with_security_issues: Path, mock_tool_available):
         """Test Bandit analysis with security findings."""
@@ -544,7 +722,8 @@ class TestCodeRiskValidator:
 
         assert result.passed
         assert not result.errors
-        assert result.messages == ["Semgrep: No security issues found"]
+        assert any(detail.check_name == "semgrep" for detail in result.success_details)
+        assert result.messages == ["[OK] semgrep: Semgrep: No security issues found"]
 
     def test_validate_semgrep_findings(self, skill_with_security_issues: Path, mock_tool_available):
         """Test Semgrep analysis with findings."""

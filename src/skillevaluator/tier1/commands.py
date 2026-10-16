@@ -17,8 +17,20 @@ from skillevaluator.constants import (
     CONTENT_TYPE_SKILL,
     CONTENT_TYPE_UNKNOWN,
     CONTENT_TYPE_WORKFLOWS,
+    SCAN_EXCLUDED_DIRS,
+    SCAN_EXCLUDED_FILES,
 )
 from skillevaluator.models.result import ValidationResult
+from skillevaluator.publication_evidence import (
+    TIER1_UNSCANNED_PATHS_KEY,
+    stamp_publication_evidence,
+    stamp_tier1_required_checks,
+)
+from skillevaluator.publication_identity import (
+    finalize_publication_target,
+    publication_paths_skipped_by_scan,
+    publication_target_from_path,
+)
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
 from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
@@ -76,12 +88,36 @@ REPORTERS = {
 }
 
 
-def _as_result(name: str, description: str, validator: ValidatorRunner, target: Path) -> ValidationResult:
+def _stamp_tier1_scan_scope(results: list[ValidationResult], target: Path) -> None:
+    """Record certified source paths that the Tier 1 scans skipped by name."""
+    skipped = publication_paths_skipped_by_scan(target, SCAN_EXCLUDED_DIRS, SCAN_EXCLUDED_FILES)
+    for result in results:
+        result.metadata[TIER1_UNSCANNED_PATHS_KEY] = list(skipped)
+
+
+def _as_result(
+    name: str,
+    description: str,
+    validator: ValidatorRunner,
+    target: Path,
+    *,
+    publication_check_id: str,
+    bind_publication_target: bool = True,
+    skill_like: bool = True,
+) -> ValidationResult:
+    initial_target = publication_target_from_path(target) if bind_publication_target else None
     result = validator(target)
     if not result.validator_name:
         result.validator_name = name
     if not result.validator_description:
         result.validator_description = description
+    stamp_publication_evidence([result], tier=1, check_id=publication_check_id)
+    # Record the whole applicable lineup, so a run narrowed with --checks (or a
+    # standalone single-check command) cannot certify Tier 1 by itself.
+    stamp_tier1_required_checks([result], skill_like=skill_like)
+    if bind_publication_target:
+        _stamp_tier1_scan_scope([result], target)
+        finalize_publication_target([result], target, initial_target)
     return result
 
 
@@ -168,49 +204,66 @@ def run_validation(
     """
     enabled = _enabled_checks(checks)
     results: list[ValidationResult] = []
+    initial_target = publication_target_from_path(target_path)
     skill_like = content_type in (None, CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
+
+    def _run_result(
+        check_id: str,
+        name: str,
+        description: str,
+        validator: ValidatorRunner,
+    ) -> ValidationResult:
+        return _as_result(
+            name,
+            description,
+            validator,
+            target_path,
+            publication_check_id=check_id,
+            bind_publication_target=False,
+            skill_like=skill_like,
+        )
 
     def _schema_results() -> list[ValidationResult]:
         v = _schema_validator_for(content_type, policy)
-        return [_as_result(v.name, v.description, v.validate, target_path)]
+        return [_run_result("schema", v.name, v.description, v.validate)]
 
     def _security_results() -> list[ValidationResult]:
         v = SecurityValidator(use_llm=use_llm, verify_llm=llm_verify)
-        return [_as_result("Security Scan", v.description, v.validate_security_only, target_path)]
+        return [_run_result("security", "Security Scan", v.description, v.validate_security_only)]
 
     def _pii_results() -> list[ValidationResult]:
         v = SecurityValidator(use_llm=False, verify_llm=llm_verify)
-        return [_as_result("PII Scan", "Detect PII and local identifiers", v.validate_pii_only, target_path)]
+        return [_run_result("pii", "PII Scan", "Detect PII and local identifiers", v.validate_pii_only)]
 
     def _code_integrity_results() -> list[ValidationResult]:
         return [
-            _as_result(v.name, v.description, v.validate, target_path)
+            _run_result("code-integrity", v.name, v.description, v.validate)
             for v in (CodeRiskValidator(), SecretsValidator(), HygieneValidator())
         ]
 
     def _unicode_results() -> list[ValidationResult]:
         v = UnicodeSmuggleValidator()
-        return [_as_result(v.name, v.description, v.validate, target_path)]
+        return [_run_result("unicode", v.name, v.description, v.validate)]
 
     def _quality_results() -> list[ValidationResult]:
         v = QualityScoreValidator(min_score=min_score)
-        return [_as_result(v.name, v.description, v.validate, target_path)]
+        return [_run_result("quality", v.name, v.description, v.validate)]
 
     def _lint_results() -> list[ValidationResult]:
         v = ScriptLintValidator()
-        return [_as_result(v.name, v.description, v.validate, target_path)]
+        return [_run_result("lint", v.name, v.description, v.validate)]
 
     def _version_results() -> list[ValidationResult]:
         v = VersionValidator(previous_version=previous_version)
-        return [_as_result(v.name, v.description, v.validate, target_path)]
+        return [_run_result("version", v.name, v.description, v.validate)]
 
     def _license_results() -> list[ValidationResult]:
         v = LicenseValidator()
-        return [_as_result(v.name, v.description, v.validate, target_path)]
+        return [_run_result("license", v.name, v.description, v.validate)]
 
     def _dependency_results() -> list[ValidationResult]:
         v = DependencySecurityValidator()
-        return [_as_result(v.name, v.description, v.validate, target_path)]
+        return [_run_result("dependency", v.name, v.description, v.validate)]
 
     # (check name, builder, applies-to-this-content-type). Quality scoring and
     # script linting are skill-oriented and skipped for rules/workflows. Finding
@@ -259,6 +312,8 @@ def run_validation(
                 )
 
             if fail_fast and not continue_on_failure and any(not r.passed for r in results):
+                _stamp_tier1_scan_scope(results, target_path)
+                finalize_publication_target(results, target_path, initial_target)
                 return results
 
     unknown = enabled - RECOGNIZED_CHECKS
@@ -270,17 +325,35 @@ def run_validation(
         result.add_error(f"Unknown Tier 1 check(s): {', '.join(sorted(unknown))}")
         results.insert(0, result)
 
+    _stamp_tier1_scan_scope(results, target_path)
+    finalize_publication_target(results, target_path, initial_target)
     return results
 
 
 def run_quality_check(target_path: Path, *, min_score: int = 70) -> list[ValidationResult]:
     validator = QualityScoreValidator(min_score=min_score)
-    return [_as_result(validator.name, validator.description, validator.validate, target_path)]
+    return [
+        _as_result(
+            validator.name,
+            validator.description,
+            validator.validate,
+            target_path,
+            publication_check_id="quality",
+        )
+    ]
 
 
 def run_rubric_eval(target_path: Path, *, min_score: int = 70) -> list[ValidationResult]:
     validator = RubricEvalValidator(min_score=min_score)
-    return [_as_result(validator.name, validator.description, validator.validate, target_path)]
+    return [
+        _as_result(
+            validator.name,
+            validator.description,
+            validator.validate,
+            target_path,
+            publication_check_id="rubric",
+        )
+    ]
 
 
 def run_security_scan(
@@ -290,17 +363,41 @@ def run_security_scan(
     llm_verify: bool = False,
 ) -> list[ValidationResult]:
     validator = SecurityValidator(use_llm=use_llm, verify_llm=llm_verify)
-    return [_as_result("Security Scan", validator.description, validator.validate_security_only, target_path)]
+    return [
+        _as_result(
+            "Security Scan",
+            validator.description,
+            validator.validate_security_only,
+            target_path,
+            publication_check_id="security",
+        )
+    ]
 
 
 def run_pii_scan(target_path: Path, *, llm_verify: bool = False) -> list[ValidationResult]:
     validator = SecurityValidator(use_llm=False, verify_llm=llm_verify)
-    return [_as_result("PII Scan", "Detect PII and local identifiers", validator.validate_pii_only, target_path)]
+    return [
+        _as_result(
+            "PII Scan",
+            "Detect PII and local identifiers",
+            validator.validate_pii_only,
+            target_path,
+            publication_check_id="pii",
+        )
+    ]
 
 
 def run_lint_scripts(target_path: Path) -> list[ValidationResult]:
     validator = ScriptLintValidator()
-    return [_as_result(validator.name, validator.description, validator.validate, target_path)]
+    return [
+        _as_result(
+            validator.name,
+            validator.description,
+            validator.validate,
+            target_path,
+            publication_check_id="lint",
+        )
+    ]
 
 
 def _is_dedup_result(result: ValidationResult) -> bool:
@@ -333,6 +430,7 @@ def emit_reports(
     basename: str = DEFAULT_REPORT_BASENAME,
     policy: ValidationPolicy | None = None,
     target_path: str | None = None,
+    expected_skill_name: str | None = None,
     content_label: str = "Skill",
     announce_paths: bool = True,
     sarif_scan_root: Path | None = None,
@@ -360,14 +458,19 @@ def emit_reports(
             continue
         reporter_cls = REPORTERS[fmt]
         if fmt == "html":
-            reporter = reporter_cls(target_path=target_path, content_label=content_label, tabs=html_tabs)
+            reporter = reporter_cls(
+                target_path=target_path,
+                content_label=content_label,
+                tabs=html_tabs,
+                expected_skill_name=expected_skill_name,
+            )
         elif fmt == "sarif":
             reporter = reporter_cls(
                 workspace_root=sarif_repository_root,
                 scan_root=sarif_scan_root,
             )
         else:
-            reporter = reporter_cls()
+            reporter = reporter_cls(expected_skill_name=expected_skill_name)
         output_path = output_dir / f"{basename}{reporter.get_file_extension()}"
         reporter.save(results, output_path)
         if announce_paths:

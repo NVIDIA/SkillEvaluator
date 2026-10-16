@@ -17,6 +17,10 @@ All notable changes to SkillEvaluator are documented in this file.
   `/dev/kvm` and a Kata runtime registered with Docker, and accepts only the
   `kata_runtime` and `kata_dns` environment kwargs. Image builds still run on
   the host, and tasks with Compose sidecars are rejected.
+- `--env-mode runta` and `--env-mode mosaic` run Tier 3 trials on Harbor's Runta
+  and Mosaic backends. Runta's `mode` and Mosaic's `volume`, `persist`,
+  `enable_ssh`, `build_args`, and `build_target` kwargs are reserved because they
+  bypass the task image or let state and access outlive one isolated trial.
 
 ### Changed
 
@@ -87,9 +91,9 @@ All notable changes to SkillEvaluator are documented in this file.
   only for the Codex process. Skills whose scripts, tasks, or stdio MCP servers
   need these tools must install them through `scripts/apt-packages.txt` or a
   custom `evals/environment/Dockerfile`.
-- Exposed `kata` as the 24th Harbor 0.24 backend alongside local mode.
-  `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `runta`, `prime`,
-  `mosaic`, and `smol` remain disabled.
+- Exposed `kata`, `runta`, and `mosaic` as the 24th, 25th, and 26th Harbor 0.24
+  backends alongside local mode. `cua-cloud`, `opensandbox`, `hf-sandbox`,
+  `podman`, `prime`, and `smol` remain disabled.
 - The public benchmark gate (`scripts/ci/check_public_benchmarks.py`) now
   requires a `PASS` card to record its `Source digest` and `Tier 3 run ID`.
   `PASS` cards rendered by earlier releases fail the scan until they are

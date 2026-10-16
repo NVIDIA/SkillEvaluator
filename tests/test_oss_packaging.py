@@ -182,8 +182,8 @@ def test_harbor_environment_extra_mapping_matches_installed_metadata() -> None:
     provided_extras = set(metadata("harbor").get_all("Provides-Extra") or ())
     system_or_base_backends = {"docker", "kata", "openshift", "apple-container", "singularity"}
 
-    assert len(HARBOR_ENVIRONMENTS) == 25
-    assert len(HARBOR_NATIVE_ENV_MODES) == 24
+    assert len(HARBOR_ENVIRONMENTS) == 27
+    assert len(HARBOR_NATIVE_ENV_MODES) == 26
     assert frozenset(HARBOR_ENVIRONMENTS) - {"local"} == HARBOR_NATIVE_ENV_MODES
     assert set(HARBOR_ENVIRONMENT_EXTRAS) == HARBOR_NATIVE_ENV_MODES
     assert {mode for mode, extra in HARBOR_ENVIRONMENT_EXTRAS.items() if extra is None} == system_or_base_backends
@@ -317,8 +317,8 @@ def test_public_docs_match_harbor_environment_and_kwarg_contract() -> None:
     public_docs = f"{agents}\n{cli_reference}\n{configuration}\n{tier3}\n{eval_config}"
     normalized_docs = " ".join(public_docs.split())
 
-    assert "25 environment modes" in public_docs
-    assert "24 Harbor-native backends" in public_docs
+    assert "27 environment modes" in public_docs
+    assert "26 Harbor-native backends" in public_docs
     assert "All 16 values" not in public_docs
     assert "same 16 values" not in public_docs
     assert "14 additional Harbor-native backends" not in public_docs

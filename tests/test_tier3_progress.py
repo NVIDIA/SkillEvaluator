@@ -1142,6 +1142,47 @@ def test_post_staging_failures_persist_a_coded_result(
     assert persisted["error_code"] == expected_code
 
 
+def test_staged_environment_rejection_persists_a_coded_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    launches: list[dict[str, Any]] = []
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        run_agent=lambda **kwargs: launches.append(kwargs) or [],
+    )
+    detail = "Harbor environment 'kata' cannot run task 'case-1' with Docker Compose sidecars"
+    monkeypatch.setattr(runner, "_staged_task_environment_error", lambda _env_mode, _task_dirs: detail)
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+
+    assert result["execution_status"] == "failed"
+    assert result["error_code"] == "SKILLEVALUATOR-UNKNOWN-001"
+    assert result["execution_errors"] == [detail]
+    assert launches == []
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+    assert persisted["error_code"] == "SKILLEVALUATOR-UNKNOWN-001"
+
+
+def test_publication_source_change_during_snapshot_is_coded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, skill = _stub_runner(monkeypatch, tmp_path)
+    targets = iter(({"skill_name": "before"}, {"skill_name": "after"}))
+    monkeypatch.setattr(runner, "publication_target_from_path", lambda _path: next(targets))
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-UNKNOWN-001",
+        "execution_errors": ["Publication source changed while its private evaluator snapshot was created"],
+        "error": ["Publication source changed while its private evaluator snapshot was created"],
+    }
+
+
 @pytest.mark.parametrize(
     ("provider_name", "provider_base_url", "failure_kind", "http_status", "detail"),
     [

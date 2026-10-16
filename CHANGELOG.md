@@ -116,6 +116,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 now uses one versioned, equal-weight five-dimension overall-score
+  policy across Harbor rewards, pass@k, Skill Lift, reports, comparisons, and
+  best-agent selection. Previously, some paths averaged all six evaluators
+  directly while reports averaged five dimensions, which gave Effectiveness
+  two votes and could reverse the reported lift direction. Current artifacts
+  persist `skill-evaluator-dimension-mean-v1`; legacy and partial artifacts
+  retain their historical semantics. Conditions keep their own recorded metric
+  sets; overall lift and best-agent rankings are omitted across different
+  standard metric sets while individual scores are preserved, and
+  `tier3 compare` refuses standard agents with different policies or metric
+  sets. Custom-only agents keep their grader's own overall and are ranked and
+  compared against standard agents
+  (Relates to [#61](https://github.com/NVIDIA/SkillEvaluator/issues/61)).
 - Preserve explicit Claude and OpenCode read failure metadata in reconstructed
   ATIF trajectories. Failed isolated SKILL.md reads and failed native Skill
   calls lose credit; compound shell failures and shell reads whose path may

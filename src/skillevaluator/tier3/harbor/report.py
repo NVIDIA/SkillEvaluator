@@ -128,6 +128,7 @@ def _pick_best_agent(
 
     best_agent = ""
     best_rank: tuple[float, float] | None = None
+    scored_metric_sets: set[frozenset[str]] = set()
     for agent in sorted(agents_data):
         data = agents_data[agent]
         if not _findings_eligible(data):
@@ -144,6 +145,12 @@ def _pick_best_agent(
         rank = _canonical_agent_rank_from_info(ranking_data)
         if rank is None:
             continue
+        # Overall scores from different standard metric sets cannot be ranked
+        # against each other. Custom-only agents rank by their grader's overall.
+        if standard_metrics:
+            scored_metric_sets.add(frozenset(standard_metrics))
+        if len(scored_metric_sets) > 1:
+            return ""
         if best_rank is None or rank > best_rank:
             best_rank = rank
             best_agent = agent

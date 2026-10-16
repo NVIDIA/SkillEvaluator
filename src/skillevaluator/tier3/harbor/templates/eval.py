@@ -174,6 +174,7 @@ WASTE_INDICATORS = [
 ]
 
 DEFAULT_METRIC_SET = "skill-evaluator-default-v2"
+DEFAULT_SCORE_POLICY = "skill-evaluator-dimension-mean-v1"
 DISPLAY_METRICS = [
     "security",
     "skill_execution",
@@ -8752,6 +8753,7 @@ def main():
             "goal_accuracy": 0,
             "behavior_check": 0,
             "metric_set": DEFAULT_METRIC_SET,
+            "score_policy": DEFAULT_SCORE_POLICY,
             "error": "No trajectory or reconstructible agent log",
             "trajectory_source": traj_meta.get("source"),
             "trajectory_detail": traj_meta.get("warning") or traj_meta.get("note"),
@@ -8888,6 +8890,7 @@ def main():
         "goal_accuracy": ga_score,
         "behavior_check": bc_score,
         "metric_set": DEFAULT_METRIC_SET,
+        "score_policy": DEFAULT_SCORE_POLICY,
         "entry_id": entry.get("id"),
         "has_skill": entry.get("has_skill", True),
         "trajectory_source": traj_meta.get("source"),
@@ -8909,8 +8912,14 @@ def main():
         logger.error("Required LLM judging failed for: %s", ", ".join(sorted(judge_errors)))
         raise SystemExit(1)
 
-    scores = [float(result[metric]) for metric in DISPLAY_METRICS]
-    overall = round(sum(scores) / len(scores), 4)
+    dimensions = (
+        security_score,
+        acc_score,
+        se_score,
+        round((ga_score + bc_score) / 2, 4),
+        sef_score,
+    )
+    overall = round(sum(dimensions) / len(dimensions), 4)
 
     write_reward_outputs(result, overall)
 

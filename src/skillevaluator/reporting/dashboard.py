@@ -81,4 +81,5 @@ def launch_dashboard(paths: tuple[Path, ...], *, port: int | None = None, no_bro
         click.echo(
             f"Streamlit exited with status {code}. If port {port} is in use, choose another with --port.", err=True
         )
-    return code
+    # A child killed by signal N reports -N; exit with 128 + N as a shell would.
+    return 128 - code if code < 0 else code

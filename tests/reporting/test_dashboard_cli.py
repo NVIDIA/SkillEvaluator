@@ -153,9 +153,25 @@ def test_sigterm_is_forwarded_to_streamlit(monkeypatch) -> None:
             signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
             return -15
 
-    _result, fake = _capture_launch(monkeypatch, popen=TerminatedPopen)
+    result, fake = _capture_launch(monkeypatch, popen=TerminatedPopen)
     assert fake.sent == [signal.SIGTERM]
     assert signal.getsignal(signal.SIGTERM) is original
+    assert result.exit_code == 128 + signal.SIGTERM
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="SIGHUP is POSIX-only")
+def test_streamlit_killed_by_signal_exits_like_a_shell(monkeypatch) -> None:
+    class HungUpPopen(FakePopen):
+        def exit_code(self) -> int:
+            # Streamlit has no SIGHUP handler, so the forwarded signal kills it.
+            signal.getsignal(signal.SIGHUP)(signal.SIGHUP, None)
+            return -signal.SIGHUP
+
+    result, fake = _capture_launch(monkeypatch, "--port", "8517", popen=HungUpPopen)
+    assert fake.sent == [signal.SIGHUP]
+    assert result.exit_code == 128 + signal.SIGHUP
+    # The busy-port hint is only for Streamlit's own failures.
+    assert "choose another with --port" not in result.output
 
 
 def test_ctrl_c_returns_zero(monkeypatch) -> None:

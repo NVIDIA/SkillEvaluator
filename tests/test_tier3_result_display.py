@@ -12,7 +12,13 @@ import pytest
 from rich.console import Console
 from rich.panel import Panel
 
-from skillevaluator.tier3.harbor.metrics import CUSTOM_ONLY_METRIC_SET, DEFAULT_METRIC_SET, DEFAULT_METRICS
+from skillevaluator.tier3.harbor.metrics import (
+    CUSTOM_ONLY_METRIC_SET,
+    DEFAULT_METRIC_SET,
+    DEFAULT_METRICS,
+    DEFAULT_SCORE_POLICY,
+    LEGACY_SCORE_POLICY,
+)
 from skillevaluator.tier3.result_display import _with_skill_overall, render_evaluation_result, render_result
 
 
@@ -187,6 +193,65 @@ def test_skip_baseline_success_uses_canonical_default_metric_aggregate() -> None
     assert "0.50" in output
     assert output.count("No Skill") == 1  # Dimension context remains explicit when baseline is skipped.
     assert "skipped" in output
+
+
+def test_skip_baseline_default_overall_uses_the_dimension_score_policy() -> None:
+    agent = _skip_baseline_agent(
+        {
+            "security": 0.3875,
+            "skill_execution": 0.3875,
+            "skill_efficiency": 0.3875,
+            "accuracy": 0.3875,
+            "goal_accuracy": 0.9,
+            "behavior_check": 0.9,
+        }
+    )
+
+    assert _with_skill_overall(agent, DEFAULT_METRIC_SET) == pytest.approx(0.49)
+
+
+def test_skip_baseline_historical_default_keeps_its_recorded_metric_mean() -> None:
+    agent = _skip_baseline_agent(
+        {
+            "security": 0.3875,
+            "skill_execution": 0.3875,
+            "skill_efficiency": 0.3875,
+            "accuracy": 0.3875,
+            "goal_accuracy": 0.9,
+            "behavior_check": 0.9,
+        }
+    )
+    agent["score_policy_with_skill"] = LEGACY_SCORE_POLICY
+    agent["overall_with_skill"] = 0.5583
+
+    assert _with_skill_overall(agent, DEFAULT_METRIC_SET, score_policy=LEGACY_SCORE_POLICY) == 0.5583
+    assert _with_skill_overall(agent, DEFAULT_METRIC_SET, score_policy=DEFAULT_SCORE_POLICY) == 0.49
+
+
+def test_paired_custom_only_result_displays_its_recorded_overall_lift() -> None:
+    result = {
+        "execution_status": "succeeded",
+        "metric_set": CUSTOM_ONLY_METRIC_SET,
+        "metrics": [],
+        "agents": {
+            "opencode": {
+                "execution_status": "succeeded",
+                "with_skill": {},
+                "without_skill": {},
+                "lift": {},
+                "custom_lift": {"overall": {"with_skill": 0.8, "without_skill": 0.7, "delta": 0.1}},
+                "conditions": {
+                    "with_skill": {"execution_status": "succeeded"},
+                    "without_skill": {"execution_status": "succeeded"},
+                },
+            }
+        },
+    }
+
+    output = render_result(result)
+
+    assert re.search(r"Overall\s+0\.80\s+\S*\s+0\.70\s+\S*\s+\+0\.10", output)
+    assert "OVERALL SKILL LIFT   +0.10" in output
 
 
 def test_skip_baseline_custom_only_uses_persisted_attempt_scores() -> None:

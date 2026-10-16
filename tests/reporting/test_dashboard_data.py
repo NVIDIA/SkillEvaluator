@@ -409,6 +409,56 @@ def test_artifact_loading_truncation_blocks_comparisons() -> None:
     assert comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]["score_delta"] is None
 
 
+_TRAJECTORY_BYTES = {"code": "json_bytes", "artifact": "trajectory", "limit": 2 * 1024 * 1024}
+
+
+@pytest.mark.parametrize(
+    ("marker", "status"),
+    [
+        ({"truncated": True, "omitted": {}, "artifact_loading": [_TRAJECTORY_BYTES]}, "comparable"),
+        (
+            {
+                "truncated": True,
+                "omitted": {},
+                "artifact_loading": [
+                    _TRAJECTORY_BYTES,
+                    {"code": "json_bytes", "artifact": "reward", "limit": 2 * 1024 * 1024},
+                ],
+            },
+            "incomplete or mismatched coverage",
+        ),
+        (
+            {"truncated": True, "artifact_loading": [{"artifact": "with-skill", "code": "trial_limit"}]},
+            "incomplete or mismatched coverage",
+        ),
+        (
+            {"truncated": True, "artifact_loading": [{"artifact": "mystery", "code": "json_bytes"}]},
+            "incomplete or mismatched coverage",
+        ),
+        (
+            {"truncated": True, "artifact_loading": [{"artifact": ["trajectory"], "code": "json_bytes"}]},
+            "incomplete or mismatched coverage",
+        ),
+        ({"truncated": True}, "incomplete or mismatched coverage"),
+        ({"truncated": True, "artifact_loading": _TRAJECTORY_BYTES}, "incomplete or mismatched coverage"),
+    ],
+)
+def test_only_trajectory_loader_bounds_keep_trial_coverage(marker: dict, status: str) -> None:
+    report = _report()
+    report["report_truncation"] = marker
+    data = parse_dashboard_report(report, "report.json")
+    assert data.warnings
+    assert comparison_rows(data.rows)[0]["comparison_status"] == status
+
+
+def test_trajectory_reason_does_not_hide_missing_trial() -> None:
+    report = _report()
+    report["agents"]["claude-code"]["trials_baseline"] = []
+    report["report_truncation"] = {"truncated": True, "omitted": {}, "artifact_loading": [_TRAJECTORY_BYTES]}
+    status = comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]["comparison_status"]
+    assert status == "incomplete or mismatched coverage"
+
+
 def test_bad_input_is_diagnostic_and_directory_skips_symlinks(tmp_path: Path) -> None:
     malformed = tmp_path / "broken.json"
     malformed.write_text("{", encoding="utf-8")
@@ -554,6 +604,23 @@ def test_retained_naive_timestamps_follow_canonical_timezone_policy(tmp_path: Pa
     assert all("time 0/1" in row["coverage"] for row in rows)
     agent = _canonical_export(run)["agents"]["opencode"]
     assert all("agent_seconds" not in trial for trial in agent["trials"] + agent["trials_baseline"])
+
+
+def test_oversized_trajectory_keeps_scores_comparable(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _native_run(run)
+    trajectory = run / "opencode" / "with-skill" / "trials" / "case-a__random" / "trajectory.json"
+    # Larger than the report loader's 2 MiB JSON bound, below the dashboard's own.
+    trajectory.write_text(json.dumps({"steps": [], "padding": "x" * (3 * 1024 * 1024)}), encoding="utf-8")
+    comparison = comparison_rows(load_dashboard_path(run).rows)[0]
+    assert comparison["comparison_status"] == "comparable"
+    assert comparison["score_delta"] == 0
+    canonical = _canonical_export(run)
+    assert canonical["report_truncation"]["artifact_loading"][0]["artifact"] == "trajectory"
+    rows = parse_dashboard_report(canonical, "r.json").rows
+    assert comparison_rows(rows)[0]["comparison_status"] == "comparable"
+    assert rows[0]["condition"] == "with_skill"
+    assert rows[0]["total_tokens"] is None
 
 
 def test_catalog_native_and_mixed_references_are_loaded_without_cycles(tmp_path: Path) -> None:

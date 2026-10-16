@@ -424,7 +424,9 @@ a positive score difference means higher performance. Comparisons stay within
 the same run and require successful conditions with matching trial coverage.
 Repeated attempts pair by case, as in the HTML report: each arm must record the
 same number of attempts for every case, and each attempt must have its own
-trial ID.
+trial ID. A trajectory above the report loader's size bound leaves that trial's
+token counts unavailable in canonical JSON but does not block score comparisons;
+any other loader truncation keeps comparisons unavailable.
 
 Missing measurements stay unavailable, and cost is shown only when recorded in
 USD. Canonical Tier 3 JSON records each single-step trial's agent execution time

@@ -29,6 +29,9 @@ _PAIRING_IDENTITY = (*_IDENTITY, "_report_index", "_agent_key", "_feature_key")
 _MAX_FILE_BYTES = 16 * 1024 * 1024
 _MAX_FILES = 1000
 _MAX_PATHS = 20_000
+# Loader bounds on these artifacts drop only per-trial telemetry (tokens, steps).
+# Canonical trials then omit those counters, so coverage counts keep totals blank.
+_TELEMETRY_ARTIFACTS = frozenset({"trajectory"})
 
 
 @dataclass
@@ -99,7 +102,16 @@ def _is_native_result(value: dict[str, Any]) -> bool:
 def _trial_coverage_truncated(marker: dict[str, Any]) -> bool:
     if not marker.get("truncated"):
         return False
-    if marker.get("artifact_loading"):
+    loading = marker.get("artifact_loading")
+    if loading and (
+        not isinstance(loading, list)
+        or any(
+            not isinstance(reason, dict)
+            or not isinstance(reason.get("artifact"), str)
+            or reason["artifact"] not in _TELEMETRY_ARTIFACTS
+            for reason in loading
+        )
+    ):
         return True
     omitted = _dict(marker.get("omitted"))
     # These budgets affect diagnostics, not the normalized trial population.
@@ -117,7 +129,9 @@ def _trial_coverage_truncated(marker: dict[str, Any]) -> bool:
         "custom_metric_discovery_trials",
         "non_best_agent_details",
     }
-    return not omitted or any(section not in diagnostics for section in omitted)
+    if not omitted:
+        return not loading  # an unexplained truncation still fails closed
+    return any(section not in diagnostics for section in omitted)
 
 
 def _payloads(value: Any, depth: int = 0):

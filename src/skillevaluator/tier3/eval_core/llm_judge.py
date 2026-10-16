@@ -810,9 +810,13 @@ def judge_accuracy(
     criteria_valid = _valid_accuracy_criteria(criteria)
 
     if criteria_valid:
-        yes_count = sum(1 for v in criteria.values() if v is True)
-        score = yes_count / 5.0
+        # Score only applicable verdicts; excluded criteria leave both numerator and denominator.
+        excluded = set() if skill_identification_applicable else {"SKILL_IDENTIFIED"}
+        applicable = [verdict for name, verdict in criteria.items() if name not in excluded]
+        score = sum(verdict is True for verdict in applicable) / len(applicable)
     else:
+        # Legacy score-only payloads; validate_payload rejects them when a criterion is excluded.
+        assert skill_identification_applicable
         score = _finite_score(parsed.get("score"))
         assert score is not None
 

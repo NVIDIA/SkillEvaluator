@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Accuracy scores must implement the five-criterion rubric in both runtimes."""
+"""Accuracy scores must implement the applicable-criterion rubric in both runtimes."""
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from tests.conftest import load_harbor_eval_template
@@ -35,6 +36,33 @@ def test_accuracy_derives_score_from_complete_criteria(monkeypatch, accuracy_jud
     assert result["score"] == pytest.approx(passed / 5)
     assert result["criteria"] == payload["criteria"]
     assert "error" not in result
+
+
+@pytest.mark.parametrize("skill_verdict", [True, False])
+@pytest.mark.parametrize("passed", range(5))
+def test_negative_accuracy_scores_only_applicable_criteria(monkeypatch, accuracy_judge, passed, skill_verdict):
+    # Negative cases drop SKILL_IDENTIFIED from numerator and denominator; the model total stays ignored.
+    applicable = sorted(llm_judge._ACCURACY_CRITERIA_KEYS - {"SKILL_IDENTIFIED"})
+    criteria = {key: index < passed for index, key in enumerate(applicable)}
+    criteria["SKILL_IDENTIFIED"] = skill_verdict
+    payload = {"criteria": criteria, "score": 0.1, "reason": "declined correctly"}
+    monkeypatch.setattr(accuracy_judge, "call_public_llm", lambda *_args, **_kwargs: (json.dumps(payload), None))
+
+    result = accuracy_judge.judge_accuracy("question", "reference", "answer", skill_identification_applicable=False)
+
+    assert result["score"] == pytest.approx(passed / 4)
+    assert result["criteria"] == criteria
+    assert result["excluded_criteria"] == ["SKILL_IDENTIFIED"]
+    assert result["scoring_policy"] == "applicable-accuracy-criteria/v1"
+
+
+def test_tier3_docs_describe_criterion_derived_accuracy():
+    docs = (Path(__file__).resolve().parents[1] / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    normalized = " ".join(docs.split())
+
+    assert "passing applicable criteria divided by applicable criteria" in normalized
+    assert "falls back to the judge's numeric score" in normalized
+    assert "existing scoring contract" not in normalized
 
 
 @pytest.mark.parametrize(

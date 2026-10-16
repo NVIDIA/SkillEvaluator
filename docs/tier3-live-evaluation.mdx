@@ -552,11 +552,14 @@ grades each trial after the agent finishes. `security`, `skill_execution`, and
 `goal_accuracy`, and `behavior_check` are LLM judges that call the configured
 evaluator provider. `custom_only` runs none of them.
 
-When `should_trigger` is false or no `expected_skill` is declared, accuracy
-excludes `SKILL_IDENTIFIED` and calculates the score from the other four
-criterion verdicts. The reward details record the excluded criterion and
-`applicable-accuracy-criteria/v1` scoring policy. Missing criterion evidence is
-an error. Positive cases retain their existing scoring contract.
+Accuracy is calculated from the judge's criterion verdicts, not its numeric
+total: passing applicable criteria divided by applicable criteria. Positive
+cases score all five criteria; a positive-case reply with no criteria falls
+back to the judge's numeric score. When `should_trigger` is false or no
+`expected_skill` is declared, accuracy excludes `SKILL_IDENTIFIED` from both
+counts and scores the other four criterion verdicts. The reward details record
+the excluded criterion and `applicable-accuracy-criteria/v1` scoring policy.
+Missing criterion evidence is an error for these cases.
 
 ### The graded trajectory
 

@@ -8266,9 +8266,7 @@ SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may 
             "1. SKILL_IDENTIFIED: Does the response reference or use the correct skill for the task?",
             "1. SKILL_IDENTIFIED: Inapplicable: no skill is expected. Set false; exclude it from the score.",
         ).replace("Compute score = count(true) / 5.", "Compute score = count(true among the other four criteria) / 4.")
-        prompt = prompt.replace('"SKILL_IDENTIFIED": true', '"SKILL_IDENTIFIED": false').replace(
-            '"score": 0.8', '"score": 1.0'
-        )
+        prompt = prompt.replace('"SKILL_IDENTIFIED": true', '"SKILL_IDENTIFIED": false')
     # Adjust the rubric before interpolation so task/evidence text stays intact.
     prompt = prompt.format(question=question, ground_truth=ground_truth, agent_text=agent_text)
 
@@ -8294,11 +8292,16 @@ SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may 
     criteria_valid = _valid_accuracy_criteria(criteria)
 
     if criteria_valid:
-        score = sum(1 for v in criteria.values() if v is True) / 5.0
+        # Score only applicable verdicts; excluded criteria leave both numerator and denominator.
+        excluded = set() if skill_identification_applicable else {"SKILL_IDENTIFIED"}
+        applicable = [verdict for name, verdict in criteria.items() if name not in excluded]
+        score = sum(verdict is True for verdict in applicable) / len(applicable)
     else:
+        # Legacy score-only payloads; validate_payload rejects them when a criterion is excluded.
+        assert skill_identification_applicable
         score = _finite_score(parsed.get("score"))
         assert score is not None
-    return {
+    result = {
         "score": round(score, 4),
         "reason": _bounded_judge_text(parsed.get("reason", "")),
         "criteria": criteria if criteria_valid else {},

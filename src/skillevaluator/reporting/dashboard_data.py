@@ -21,6 +21,8 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from packaging.version import Version
+
 from skillevaluator.tier3.harbor.resource_usage import agent_execution_seconds
 
 _USAGE = ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "duration_seconds", "cost_usd")
@@ -39,6 +41,8 @@ _DISCOVERY_LIMIT_NOTICE = "Dashboard discovery limit reached; some inputs were o
 # Loader bounds on these artifacts drop only per-trial telemetry (tokens, steps).
 # Canonical trials then omit those counters, so coverage counts keep totals blank.
 _TELEMETRY_ARTIFACTS = frozenset({"trajectory"})
+# Canonical exports from earlier evaluators wrote missing token counters as zero.
+_ZERO_TOKEN_COUNTERS_FIXED_IN = Version("0.5.0")
 
 
 @dataclass
@@ -215,15 +219,35 @@ def _trial_keys(trials: list[dict[str, Any]]) -> tuple[tuple[str, str], ...] | N
     return tuple(sorted(keys))
 
 
-def _usage(trial: dict[str, Any]) -> dict[str, float | None]:
+def _zero_encodes_missing_tokens(report: dict[str, Any]) -> bool:
+    # The version names the run's evaluator, so re-exports of older runs also fail closed.
+    version = report.get("evaluator_version") or _dict(report.get("summary")).get("evaluator_version")
+    if not isinstance(version, str):
+        return False
+    try:
+        return Version(version) < _ZERO_TOKEN_COUNTERS_FIXED_IN
+    except ValueError:  # InvalidVersion, or more digits than int() converts
+        return False
+
+
+def _has_zero_token_counter(trials: list[dict[str, Any]]) -> bool:
+    return any(
+        _measurement(_dict(trial.get("tokens")).get(key)) == 0
+        for trial in trials
+        for key in ("prompt", "completion", "cached")
+    )
+
+
+def _usage(trial: dict[str, Any], *, zero_tokens_missing: bool = False) -> dict[str, float | None]:
     tokens = _dict(trial.get("tokens"))
-    prompt = _measurement(tokens.get("prompt"))
-    completion = _measurement(tokens.get("completion"))
+    prompt, completion, cached = (_measurement(tokens.get(key)) for key in ("prompt", "completion", "cached"))
+    if zero_tokens_missing:
+        prompt, completion, cached = (value or None for value in (prompt, completion, cached))
     return {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": prompt + completion if prompt is not None and completion is not None else None,
-        "cached_tokens": _measurement(tokens.get("cached")),
+        "cached_tokens": cached,
         # Canonical Tier 3 JSON records agent_seconds; duration_seconds is only
         # read from hand-built payloads and never replaces an invalid agent_seconds.
         "duration_seconds": _measurement(
@@ -263,6 +287,13 @@ def _ambiguous_resource_notice(source: str) -> str:
     )
 
 
+def _zero_token_notice(source: str) -> str:
+    return (
+        f"{source}: exports before v0.5.0 may record missing token counters as zero; "
+        "zero token counters are shown as unavailable. Load the retained run directory for recorded counters."
+    )
+
+
 def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
     """Normalize canonical Tier 3, validate-report, and embedded catalog JSON."""
     output = DashboardData()
@@ -282,6 +313,7 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
             run_id = str(report.get("evaluated_at") or summary.get("evaluated_at") or "unknown")
         truncation = _dict(report.get("report_truncation")) or _dict(report.get("truncation"))
         coverage_truncated = _trial_coverage_truncated(truncation)
+        zero_tokens_missing = _zero_encodes_missing_tokens(report)
         non_best_pruned = bool(truncation.get("truncated")) and "non_best_agent_details" in _dict(
             truncation.get("omitted")
         )
@@ -350,6 +382,10 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                     notice = _ambiguous_resource_notice(source)
                     if notice not in output.warnings:
                         output.warnings.append(notice)
+                if zero_tokens_missing and _has_zero_token_counter(trials):
+                    notice = _zero_token_notice(source)
+                    if notice not in output.warnings:
+                        output.warnings.append(notice)
                 complete = (
                     status == "succeeded"
                     and not invalid_counts
@@ -394,7 +430,10 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                     []
                     if invalid_counts
                     else [
-                        {} if str(trial.get("trial_id") or "") in ambiguous_ids else _usage(trial) for trial in trials
+                        {}
+                        if str(trial.get("trial_id") or "") in ambiguous_ids
+                        else _usage(trial, zero_tokens_missing=zero_tokens_missing)
+                        for trial in trials
                     ],
                     # Trials missing from the declared count are already part of it.
                     expected=declared + max(0, row["_expected_usage_trials"] - max(logical_count, declared)),
@@ -603,6 +642,8 @@ def _load_native(path: Path) -> DashboardData:
             config_warning = f"{path / 'run_config.json'}: cannot read run config: {exc}"
     canonical["dashboard_metadata"] = run_config.get("dashboard_metadata")
     output = parse_dashboard_report(canonical, str(path))
+    # Retained usage is read from disk below, so the export notice does not apply.
+    output.warnings = [warning for warning in output.warnings if warning != _zero_token_notice(str(path))]
     if config_warning:
         output.warnings.append(config_warning)
     unresolved_scope = False

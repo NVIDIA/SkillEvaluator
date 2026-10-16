@@ -107,6 +107,32 @@ def test_partial_missing_metrics_never_become_zero_or_partial_total() -> None:
     assert "cost 0/1" in data.rows[0]["coverage"]
 
 
+def test_pre_v050_zero_token_counters_are_unavailable() -> None:
+    report = _report()
+    report["evaluator_version"] = "0.4.0"
+    report["agents"]["claude-code"]["trials_baseline"][0]["tokens"] = {"prompt": 0, "completion": 0, "cached": 0}
+    data = parse_dashboard_report(report, "legacy.json")
+    with_row, without_row = data.rows
+    assert without_row["prompt_tokens"] is None
+    assert without_row["total_tokens"] is None
+    assert with_row["total_tokens"] == 150
+    assert with_row["cached_tokens"] is None
+    comparison = comparison_rows(data.rows)[0]
+    assert comparison["comparison_status"] == "comparable"
+    assert comparison["score_delta"] == pytest.approx(0.2)
+    assert comparison["total_tokens_delta"] is None
+    assert any("before v0.5.0" in warning for warning in data.warnings)
+    report.pop("evaluator_version")
+    report["summary"] = {"evaluator_version": "0.4.1"}
+    assert parse_dashboard_report(report, "legacy.json").rows[1]["total_tokens"] is None
+    # Current, missing, or unparsable versions keep recorded zeros.
+    for version in ("0.5.0", None, "not-a-version", "9" * 5000):
+        report["summary"]["evaluator_version"] = version
+        data = parse_dashboard_report(report, "current.json")
+        assert data.rows[1]["total_tokens"] == 0
+        assert not data.warnings
+
+
 def test_canonical_missing_attempt_keeps_usage_totals_unknown() -> None:
     report = _report()
     agent = report["agents"]["claude-code"]
@@ -738,6 +764,23 @@ def test_unreadable_trajectory_keeps_retained_time_and_token_fallback(tmp_path: 
     # Harbor's agent_result counters stand in for the unreadable trajectory totals.
     assert retained.rows[0]["total_tokens"] == 210
     assert any("cannot read trajectory" in warning for warning in retained.warnings)
+
+
+def test_retained_run_ignores_export_zero_token_notice(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _native_run(run)
+    engine_result = json.loads((run / "result.json").read_text(encoding="utf-8"))
+    engine_result["evaluator_version"] = "0.4.0"
+    (run / "result.json").write_text(json.dumps(engine_result), encoding="utf-8")
+    for trajectory_path in run.glob("opencode/*/trials/*/trajectory.json"):
+        trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+        trajectory["final_metrics"]["total_cached_tokens"] = 0
+        trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+    assert any("before v0.5.0" in warning for warning in parse_dashboard_report(_canonical_export(run), "r").warnings)
+    data = load_dashboard_path(run)
+    # Retained trajectories hold recorded counters, so their zeros stay measured.
+    assert [row["cached_tokens"] for row in data.rows] == [0, 0]
+    assert not any("before v0.5.0" in warning for warning in data.warnings)
 
 
 def test_retained_naive_timestamps_follow_canonical_timezone_policy(tmp_path: Path) -> None:

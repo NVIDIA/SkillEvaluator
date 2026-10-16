@@ -465,8 +465,10 @@ the retained run directory to show Harbor's recorded `agent_result.cost_usd` and
 multi-step totals. For retained runs whose trajectory lacks token totals or
 cannot be read, the dashboard falls back to Harbor's `agent_result` token
 counters and keeps the trial's agent time and cost.
-Some exports written before v0.5.0 encoded missing token counters as zero; open
-their retained run directories to recover recorded counters.
+Exports written before v0.5.0 could encode missing token counters as zero, so
+when a canonical JSON report's `evaluator_version` is earlier than 0.5.0 the
+dashboard shows its zero token counters as unavailable and adds a notice; open
+the retained run directory to recover recorded counters.
 Cached tokens are shown separately and are not added again
 to prompt plus completion tokens. No pricing estimates or new agent evaluations
 are performed. Adverse conditions and harness features are displayed when

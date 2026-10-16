@@ -808,7 +808,13 @@ def load_dashboard_path(path: Path) -> DashboardData:
         if visited >= _MAX_PATHS or files >= _MAX_FILES:
             output.warnings.append(_DISCOVERY_LIMIT_NOTICE)
             break
-        if (root / "result.json").is_file() and (root / "run_config.json").is_file():
+        try:
+            # is_file() re-raises EACCES for a subdirectory without search permission.
+            native_run = (root / "result.json").is_file() and (root / "run_config.json").is_file()
+        except OSError as exc:
+            output.warnings.append(f"{root}: cannot discover reports: {exc}")
+            continue
+        if native_run:
             try:
                 data = _load_native(root)
             except (OSError, ValueError, RecursionError, RuntimeError, TypeError, AttributeError) as exc:

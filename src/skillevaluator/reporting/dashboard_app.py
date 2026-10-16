@@ -341,7 +341,11 @@ def main(paths: list[str] | None = None) -> None:
     # A directory's fingerprint misses in-place rewrites of files inside it, so load
     # deeper inputs first and let dedupe_rows keep their fresher copy of shared rows.
     for path in sorted(inputs, key=lambda item: len(item.parts), reverse=True):
-        data = _load_path_cached(str(path), _input_fingerprint(path))
+        try:
+            data = _load_path_cached(str(path), _input_fingerprint(path))
+        except Exception as exc:  # one unreadable input must not hide the others
+            warnings.append(f"{path}: cannot load dashboard input: {exc}")
+            continue
         rows.extend(data.rows)
         warnings.extend(data.warnings)
     seen_uploads: set[str] = set()

@@ -8,6 +8,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -239,6 +240,42 @@ def test_bad_report_does_not_hide_other_results(tmp_path: Path) -> None:
     assert len(app.warning) == 1
     assert len(app.text) == 2
     assert len(app.dataframe[0].value) == 2
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="Needs POSIX permissions enforced for this user")
+def test_unreadable_subdirectory_does_not_hide_other_results(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    _write_report(runs / "run.json")
+    locked = runs / "locked"
+    locked.mkdir()
+    other = _write_report(tmp_path / "other.json", model="model-b")
+    locked.chmod(0)
+    try:
+        app = _app([runs, other])
+    finally:
+        locked.chmod(0o755)
+    assert not app.exception
+    assert len(app.dataframe[0].value) == 4
+    assert any(text.value.startswith(f"{locked.resolve()}: cannot discover reports") for text in app.text)
+
+
+def test_input_that_fails_to_load_does_not_hide_other_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = dashboard_app.load_dashboard_path
+    unreadable = _write_report(tmp_path / "unreadable.json")
+    valid = _write_report(tmp_path / "valid.json", model="model-b")
+
+    def failing(path: Path):
+        # Stands in for any error the loader does not anticipate.
+        if path == unreadable.resolve():
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path)
+
+    monkeypatch.setattr(dashboard_app, "load_dashboard_path", failing)
+    app = _app([unreadable, valid])
+    assert not app.exception
+    assert app.dataframe[0].value["model"].tolist() == ["model-b", "model-b"]
+    assert any(text.value.startswith(f"{unreadable.resolve()}: cannot load dashboard input:") for text in app.text)
 
 
 def test_oversized_trial_count_keeps_other_reports(tmp_path: Path) -> None:

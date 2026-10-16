@@ -330,11 +330,11 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                 continue
             conditions = _dict(agent.get("conditions"))
             # The embedded-size budget empties a non-best agent's trial details
-            # but keeps its declared counts.
+            # but keeps its declared counts. Older reports also dropped its
+            # conditions; current ones keep a compacted copy.
             details_pruned = (
                 non_best_pruned
                 and str(name) != str(report.get("best_agent") or "")
-                and not conditions
                 and not agent.get("trials")
                 and not agent.get("trials_baseline")
             )

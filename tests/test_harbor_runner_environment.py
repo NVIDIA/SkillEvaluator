@@ -1902,7 +1902,12 @@ def test_direct_run_returns_configuration_error_for_cyclic_environment_kwargs(
         _evaluator_skill_path=tmp_path,
     )
 
-    assert result == {"error": ["Invalid --environment-kwarg: must not contain cyclic values"]}
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-CONFIG-001",
+        "execution_errors": ["Invalid --environment-kwarg: must not contain cyclic values"],
+        "error": ["Invalid --environment-kwarg: must not contain cyclic values"],
+    }
 
 
 @pytest.mark.parametrize("timeout_multiplier", [float("nan"), float("inf"), float("-inf")])
@@ -1926,7 +1931,12 @@ def test_direct_run_rejects_nonfinite_timeout_multiplier_before_creating_results
         _evaluator_skill_path=tmp_path,
     )
 
-    assert result == {"error": ["timeout_multiplier must be a finite number greater than 0"]}
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-CONFIG-001",
+        "execution_errors": ["timeout_multiplier must be a finite number greater than 0"],
+        "error": ["timeout_multiplier must be a finite number greater than 0"],
+    }
     assert not (tmp_path / "results").exists()
 
 
@@ -1949,7 +1959,12 @@ def test_direct_run_rejects_overflowing_timeout_multiplier_before_creating_resul
         _evaluator_skill_path=tmp_path,
     )
 
-    assert result == {"error": ["timeout_multiplier must be a finite number greater than 0"]}
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-CONFIG-001",
+        "execution_errors": ["timeout_multiplier must be a finite number greater than 0"],
+        "error": ["timeout_multiplier must be a finite number greater than 0"],
+    }
     assert not (tmp_path / "results").exists()
 
 
@@ -1972,7 +1987,12 @@ def test_direct_run_rejects_finite_multiplier_that_overflows_default_timeouts(
         _evaluator_skill_path=tmp_path,
     )
 
-    assert result == {"error": ["timeout_multiplier must yield finite Harbor timeouts"]}
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-CONFIG-001",
+        "execution_errors": ["timeout_multiplier must yield finite Harbor timeouts"],
+        "error": ["timeout_multiplier must yield finite Harbor timeouts"],
+    }
     assert not (tmp_path / "results").exists()
 
 
@@ -1995,7 +2015,12 @@ def test_direct_run_rejects_overflowing_pass_threshold_before_creating_results(
         _evaluator_skill_path=tmp_path,
     )
 
-    assert result == {"error": ["pass_threshold must be a finite number between 0.0 and 1.0"]}
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-CONFIG-001",
+        "execution_errors": ["pass_threshold must be a finite number between 0.0 and 1.0"],
+        "error": ["pass_threshold must be a finite number between 0.0 and 1.0"],
+    }
     assert not (tmp_path / "results").exists()
 
 
@@ -2026,11 +2051,15 @@ def test_paired_run_rejects_normalized_skill_owned_setup_before_environment_pref
         _evaluator_skill_path=skill,
     )
 
+    expected_errors = [
+        "harbor.pre_agent_setup/setup_commands cannot run in a paired evaluation; "
+        "use --skip-baseline for a with-skill-only run"
+    ]
     assert result == {
-        "error": [
-            "harbor.pre_agent_setup/setup_commands cannot run in a paired evaluation; "
-            "use --skip-baseline for a with-skill-only run"
-        ]
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-CONFIG-001",
+        "execution_errors": expected_errors,
+        "error": expected_errors,
     }
     assert not (tmp_path / "results").exists()
 
@@ -2059,7 +2088,12 @@ def test_skip_baseline_keeps_normalized_skill_owned_setup_enabled(
         _evaluator_skill_path=skill,
     )
 
-    assert result == {"error": ["preflight sentinel"]}
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-UNKNOWN-001",
+        "execution_errors": ["preflight sentinel"],
+        "error": ["preflight sentinel"],
+    }
 
 
 @pytest.mark.parametrize(

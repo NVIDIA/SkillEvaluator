@@ -17,6 +17,10 @@ All notable changes to SkillEvaluator are documented in this file.
   `/dev/kvm` and a Kata runtime registered with Docker, and accepts only the
   `kata_runtime` and `kata_dns` environment kwargs. Image builds still run on
   the host, and tasks with Compose sidecars are rejected.
+- Added an append-only, vendor-neutral error-code registry for evaluator
+  execution failures. Terminal provider and runtime-preflight results now
+  include a structured `error_code` while preserving `execution_errors` and
+  existing lowercase provider failure subtypes for compatibility.
 
 ### Changed
 

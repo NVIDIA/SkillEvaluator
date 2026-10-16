@@ -37,6 +37,13 @@ from typing import Any, NoReturn
 from uuid import uuid4
 
 from skillevaluator import __version__
+from skillevaluator.error_codes import (
+    EvaluatorErrorCode,
+    is_registered_error_code,
+    primary_error_code,
+    provider_failure_error_code,
+    validate_error_code,
+)
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import (
     CHAT_DEFAULT_ANTHROPIC,
@@ -3806,6 +3813,20 @@ class _RunProgressLifecycle:
         return path if path is not None and Path(path).is_file() else None
 
 
+def _terminal_failure_result(
+    errors: list[str],
+    *,
+    error_code: EvaluatorErrorCode | str,
+) -> dict[str, Any]:
+    """Build the common serializable shape for an evaluator execution failure."""
+    return {
+        "execution_status": "failed",
+        "error_code": validate_error_code(error_code),
+        "execution_errors": errors,
+        "error": errors,
+    }
+
+
 def _run_harbor_eval_impl(
     skill_path: Path,
     agents: list[str],
@@ -3847,10 +3868,16 @@ def _run_harbor_eval_impl(
     reporter = safe_progress_reporter(progress_reporter or NullProgressReporter())
     if env_mode not in HARBOR_ENV_MODES:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="unsupported environment"))
-        return {"error": [f"env_mode must be one of: {', '.join(sorted(HARBOR_ENV_MODES))}"]}
+        return _terminal_failure_result(
+            [f"env_mode must be one of: {', '.join(sorted(HARBOR_ENV_MODES))}"],
+            error_code=EvaluatorErrorCode.INVALID_CONFIGURATION,
+        )
     if not agents:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="no agents selected"))
-        return {"error": ["At least one Harbor agent is required."]}
+        return _terminal_failure_result(
+            ["At least one Harbor agent is required."],
+            error_code=EvaluatorErrorCode.INVALID_CONFIGURATION,
+        )
     if env_mode == ENV_MODE_LOCAL:
         from skillevaluator.tier3.harbor import local_sandbox
 
@@ -3858,7 +3885,7 @@ def _run_harbor_eval_impl(
             local_sandbox.require_supported_platform()
         except local_sandbox.SandboxUnavailable as exc:
             reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
-            return {"error": [str(exc)]}
+            return _terminal_failure_result([str(exc)], error_code=EvaluatorErrorCode.UNKNOWN)
 
     if _evaluator_skill_path is None:
         assert forwarded is not None
@@ -3872,7 +3899,7 @@ def _run_harbor_eval_impl(
                     raise ValueError("Publication source changed while its private evaluator snapshot was created")
             except (OSError, ValueError) as exc:
                 reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
-                return {"error": [str(exc)]}
+                return _terminal_failure_result([str(exc)], error_code=EvaluatorErrorCode.UNKNOWN)
             forwarded["_evaluator_skill_path"] = evaluator_skill_path
             forwarded["_snapshot_publication_target"] = snapshot_publication_target
             forwarded["_monotonic_start"] = started_at
@@ -3885,7 +3912,7 @@ def _run_harbor_eval_impl(
         config, config_path = load_evals_config(evaluator_skill_path)
     except (ProviderConfigurationError, EvalsConfigError) as exc:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
-        return {"error": [str(exc)]}
+        return _terminal_failure_result([str(exc)], error_code=EvaluatorErrorCode.INVALID_CONFIGURATION)
 
     harbor_config = config.get("harbor", {})
     workspace_config = config.get("skill_workspace", {})
@@ -3918,44 +3945,62 @@ def _run_harbor_eval_impl(
     except (RecursionError, TypeError, ValueError) as exc:
         detail = f"Invalid --environment-kwarg: {exc}"
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
-        return {"error": [detail]}
+        return _terminal_failure_result([detail], error_code=EvaluatorErrorCode.INVALID_CONFIGURATION)
     environment_kwarg_sources = dict.fromkeys(effective_environment_kwargs, "CLI")
 
     if not isinstance(n_attempts, int) or n_attempts < 1:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid attempt count"))
-        return {"error": ["n_attempts must be >= 1"]}
+        return _terminal_failure_result(
+            ["n_attempts must be >= 1"],
+            error_code=EvaluatorErrorCode.INVALID_CONFIGURATION,
+        )
     if stop_on_pass and n_attempts == 1:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid attempt policy"))
-        return {"error": ["stop_on_pass requires n_attempts > 1"]}
+        return _terminal_failure_result(
+            ["stop_on_pass requires n_attempts > 1"],
+            error_code=EvaluatorErrorCode.INVALID_CONFIGURATION,
+        )
     if not isinstance(n_concurrent, int) or n_concurrent < 1:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid concurrency"))
-        return {"error": ["n_concurrent must be >= 1"]}
+        return _terminal_failure_result(
+            ["n_concurrent must be >= 1"],
+            error_code=EvaluatorErrorCode.INVALID_CONFIGURATION,
+        )
     if not isinstance(max_agents, int) or max_agents < 1:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid agent concurrency"))
-        return {"error": ["max_agents must be >= 1"]}
+        return _terminal_failure_result(
+            ["max_agents must be >= 1"],
+            error_code=EvaluatorErrorCode.INVALID_CONFIGURATION,
+        )
     try:
         timeout_multiplier = _validated_timeout_multiplier(timeout_multiplier)
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid timeout multiplier"))
-        return {"error": [str(exc)]}
+        return _terminal_failure_result([str(exc)], error_code=EvaluatorErrorCode.INVALID_CONFIGURATION)
     try:
         pass_threshold = _validated_pass_threshold(pass_threshold)
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid pass threshold"))
-        return {"error": [str(exc)]}
+        return _terminal_failure_result([str(exc)], error_code=EvaluatorErrorCode.INVALID_CONFIGURATION)
     if grading_mode not in {"default", "default_plus_custom", "custom_only"}:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid grading mode"))
-        return {"error": ["grading.mode must be default, default_plus_custom, or custom_only"]}
+        return _terminal_failure_result(
+            ["grading.mode must be default, default_plus_custom, or custom_only"],
+            error_code=EvaluatorErrorCode.INVALID_CONFIGURATION,
+        )
     if workspace_mode not in {"isolated", "group"}:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid workspace mode"))
-        return {"error": ["skill_workspace.mode must be isolated or group"]}
+        return _terminal_failure_result(
+            ["skill_workspace.mode must be isolated or group"],
+            error_code=EvaluatorErrorCode.INVALID_CONFIGURATION,
+        )
     if not skip_baseline and harbor_config.get("pre_agent_setup"):
         detail = (
             "harbor.pre_agent_setup/setup_commands cannot run in a paired evaluation; "
             "use --skip-baseline for a with-skill-only run"
         )
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
-        return {"error": [detail]}
+        return _terminal_failure_result([detail], error_code=EvaluatorErrorCode.INVALID_CONFIGURATION)
 
     reporter.emit(ProgressEvent(stage="configuration", state="ready", detail="evaluation config validated"))
     reporter.emit(ProgressEvent(stage="model-resolution", state="running"))
@@ -4029,7 +4074,7 @@ def _run_harbor_eval_impl(
     )
     if prereq_errors:
         reporter.emit(ProgressEvent(stage="environment-preflight", state="failed", detail="; ".join(prereq_errors)))
-        return {"error": prereq_errors}
+        return _terminal_failure_result(prereq_errors, error_code=EvaluatorErrorCode.UNKNOWN)
     reporter.emit(ProgressEvent(stage="environment-preflight", state="complete", detail=env_mode))
 
     # Resolve the effective source before constructing credential-probe targets.
@@ -4041,18 +4086,27 @@ def _run_harbor_eval_impl(
         task_source = "evals_json" if evals_exists else "native_harbor" if native_exists else ""
     if task_source == "evals_json" and not evals_exists:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="evaluation dataset missing"))
-        return {"error": ["No evals/evals.json found. Run create-eval-dataset or add a dataset."]}
+        return _terminal_failure_result(
+            ["No evals/evals.json found. Run create-eval-dataset or add a dataset."],
+            error_code=EvaluatorErrorCode.INVALID_CONFIGURATION,
+        )
     if task_source == "native_harbor" and not native_exists:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="native Harbor tasks missing"))
-        return {"error": ["No native Harbor task source found at evals/harbor."]}
+        return _terminal_failure_result(
+            ["No native Harbor task source found at evals/harbor."],
+            error_code=EvaluatorErrorCode.INVALID_CONFIGURATION,
+        )
     if task_source not in {"evals_json", "native_harbor"}:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid task source"))
-        return {"error": ["harbor.task_source must be auto, evals_json, or native_harbor"]}
+        return _terminal_failure_result(
+            ["harbor.task_source must be auto, evals_json, or native_harbor"],
+            error_code=EvaluatorErrorCode.INVALID_CONFIGURATION,
+        )
 
     reporter.emit(ProgressEvent(stage="credential-validation", state="running"))
     if runtime_errors:
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail="; ".join(runtime_errors)))
-        return {"error": runtime_errors}
+        return _terminal_failure_result(runtime_errors, error_code=EvaluatorErrorCode.INVALID_CONFIGURATION)
     try:
         runtime_plans = _resolve_agent_runtime_plan(
             provider=provider,
@@ -4064,7 +4118,7 @@ def _run_harbor_eval_impl(
         )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=str(exc)))
-        return {"error": [str(exc)]}
+        return _terminal_failure_result([str(exc)], error_code=EvaluatorErrorCode.INVALID_CONFIGURATION)
     agent_import_paths = {
         agent: import_path
         for agent in agents
@@ -4157,6 +4211,7 @@ def _run_harbor_eval_impl(
         }
 
     probe_errors: list[str] = []
+    probe_error_codes: list[str] = []
     for route_key, (selected_provider, selected_labels) in probe_targets.items():
         label = ", ".join(selected_labels)
         try:
@@ -4179,6 +4234,12 @@ def _run_harbor_eval_impl(
 
         safe_detail = redact_progress_detail(probe.detail, secret_values=runtime_secret_values)
         disposition = credential_probe_disposition(selected_provider, probe)
+        probe_error_code = getattr(probe, "error_code", None)
+        if not probe.ok and not is_registered_error_code(probe_error_code):
+            probe_error_code = provider_failure_error_code(
+                getattr(probe, "failure_kind", None),
+                getattr(probe, "http_status", None),
+            ).value
         if probe.ok and disposition == CredentialProbeDisposition.DEGRADED:
             safe_detail = "model catalog access does not verify runtime credentials for this endpoint"
         credential_validation_targets.append(
@@ -4194,6 +4255,7 @@ def _run_harbor_eval_impl(
             judge_config["catalog_verification"] = disposition.value
         if disposition == CredentialProbeDisposition.FATAL:
             probe_errors.append(f"{label} provider verification failed: {safe_detail}")
+            probe_error_codes.append(validate_error_code(probe_error_code))
         elif disposition == CredentialProbeDisposition.DEGRADED:
             probe_degraded.append(f"{label}: {safe_detail}")
 
@@ -4205,7 +4267,10 @@ def _run_harbor_eval_impl(
                 detail="; ".join(probe_errors),
             )
         )
-        return {"error": probe_errors}
+        return _terminal_failure_result(
+            probe_errors,
+            error_code=primary_error_code(probe_error_codes),
+        )
     if probe_degraded:
         reporter.emit(
             ProgressEvent(
@@ -4266,12 +4331,15 @@ def _run_harbor_eval_impl(
     include_values = [*workspace_config.get("include", []), *(include_skills or [])]
     if include_values and workspace_mode != "group":
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid included skills"))
-        return {"error": ["include_skills requires skill_workspace.mode=group"]}
+        return _terminal_failure_result(
+            ["include_skills requires skill_workspace.mode=group"],
+            error_code=EvaluatorErrorCode.INVALID_CONFIGURATION,
+        )
     try:
         workspace_skills = _workspace_skills(skill_path.resolve(), include_values if workspace_mode == "group" else [])
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
-        return {"error": [str(exc)]}
+        return _terminal_failure_result([str(exc)], error_code=EvaluatorErrorCode.INVALID_CONFIGURATION)
 
     root = Path(output_dir) if output_dir is not None else skill_path / "evals" / "results"
     effective_repo_context_exclude_paths = (root, *(Path(path) for path in repo_context_exclude_paths))
@@ -4290,13 +4358,13 @@ def _run_harbor_eval_impl(
         )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
-        return {"error": [str(exc)]}
+        return _terminal_failure_result([str(exc)], error_code=EvaluatorErrorCode.INVALID_CONFIGURATION)
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     try:
         run_dir = _reserve_run_dir(root, timestamp)
     except (OSError, RuntimeError, ValueError) as exc:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
-        return {"error": [str(exc)]}
+        return _terminal_failure_result([str(exc)], error_code=EvaluatorErrorCode.UNKNOWN)
     run_id = run_dir.name
     publication_target = _snapshot_publication_target
     jobs_dir = run_dir / "_harbor-jobs"
@@ -4355,12 +4423,17 @@ def _run_harbor_eval_impl(
             )
         )
 
-    def _persist_pre_execution_failure(errors: list[str]) -> dict[str, Any]:
+    def _persist_pre_execution_failure(
+        errors: list[str],
+        *,
+        error_code: EvaluatorErrorCode | str,
+    ) -> dict[str, Any]:
         """Retain redacted probe provenance for failures after run reservation."""
         published_errors, error_total = _published_execution_errors(errors)
         failed_result: dict[str, Any] = {
             "skill_name": skill_path.name,
             "execution_status": "failed",
+            "error_code": validate_error_code(error_code),
             "execution_errors": published_errors,
             "execution_error_details_total": error_total,
             "execution_error_details_shown": len(published_errors),
@@ -4395,7 +4468,7 @@ def _run_harbor_eval_impl(
         if reservation_identity is not None:
             remove_generated_output_root_if_owned(run_dir, expected_identity=reservation_identity)
         _emit_run_finished("failed", "Harbor jobs directory could not be created", include_artifacts=False)
-        return {"error": [str(exc)]}
+        return _terminal_failure_result([str(exc)], error_code=EvaluatorErrorCode.UNKNOWN)
 
     emitter = stage_native_harbor_tasks if task_source == "native_harbor" else generate_harbor_tasks
     resource_config = harbor_config.get("resources", {})
@@ -4537,7 +4610,10 @@ def _run_harbor_eval_impl(
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="skipped", detail="baseline disabled"))
     except (OSError, ValueError) as exc:
         reporter.emit(ProgressEvent(stage=staging_failure_stage, state="failed", detail=str(exc)))
-        return _persist_pre_execution_failure([str(exc)])
+        return _persist_pre_execution_failure(
+            [str(exc)],
+            error_code=EvaluatorErrorCode.UNKNOWN,
+        )
 
     if not _runtime_context_is_bound_to_publication_target(
         skill_path,
@@ -4557,7 +4633,7 @@ def _run_harbor_eval_impl(
     try:
         dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=case_ids)
     except DatasetSnapshotContractError as exc:
-        return _persist_pre_execution_failure([str(exc)])
+        return _persist_pre_execution_failure([str(exc)], error_code=EvaluatorErrorCode.UNKNOWN)
     expected_trials = len(task_selectors) * n_attempts
     variants = 1 if skip_baseline else 2
     matrix_trials = expected_trials * len(agents) * variants
@@ -4569,7 +4645,7 @@ def _run_harbor_eval_impl(
         )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid staged timeout"))
-        return _persist_pre_execution_failure([str(exc)])
+        return _persist_pre_execution_failure([str(exc)], error_code=EvaluatorErrorCode.INVALID_CONFIGURATION)
     reporter.start(
         Tier3RunPlan(
             skill_name=skill_path.name,
@@ -4608,6 +4684,7 @@ def _run_harbor_eval_impl(
 
         reporter.emit(ProgressEvent(stage="agent-runtime-preflight", state="running"))
         preflight_errors: list[str] = []
+        preflight_error_codes: list[str] = []
         for agent in agents:
             preflight = run_agent_runtime_preflight(
                 dataset=agent_task_dirs[agent][0],
@@ -4625,10 +4702,14 @@ def _run_harbor_eval_impl(
             )
             if not preflight.ok:
                 preflight_errors.append(f"{agent} runtime preflight failed: {preflight.detail}")
+                preflight_error_codes.append(preflight.error_code or EvaluatorErrorCode.UNKNOWN.value)
         if preflight_errors:
             detail = "; ".join(preflight_errors)
             reporter.emit(ProgressEvent(stage="agent-runtime-preflight", state="failed", detail=detail))
-            failed_result = _persist_pre_execution_failure(preflight_errors)
+            failed_result = _persist_pre_execution_failure(
+                preflight_errors,
+                error_code=primary_error_code(preflight_error_codes),
+            )
             _emit_run_finished("failed", "agent runtime preflight failed")
             return failed_result
         reporter.emit(
@@ -4797,6 +4878,8 @@ def _run_harbor_eval_impl(
     )
     if errors:
         _merge_launch_execution_errors(results, errors)
+    if results.get("execution_status") == "failed":
+        results.setdefault("error_code", EvaluatorErrorCode.UNKNOWN.value)
     reporter.emit(ProgressEvent(stage="report", state="running"))
     try:
         (run_dir / "run_config.json").write_text(json.dumps(run_config, indent=2), encoding="utf-8")

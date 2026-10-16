@@ -7,7 +7,7 @@ description: "Run a real agent with and without your skill in a sandboxed enviro
 Tier 3 answers the question the other tiers can't: **does your skill actually
 make an agent better at the task?** It is the one tier that needs real
 infrastructure — model access for the evaluator and selected agent, and
-Docker or another sandbox. NVIDIA Build in Docker or local mode uses one key
+Docker or another sandbox. NVIDIA Build in Docker, Kata, or local mode uses one key
 for both roles; OpenAI with Codex can also share its key. This guide takes you from a skill directory to a
 finished with-skill vs. without-skill comparison.
 
@@ -34,7 +34,7 @@ human-readable dimensions:
 | Correctness | Does it do what it's supposed to? |
 | Discoverability | Is it loaded when it should be? |
 | Effectiveness | Is it better with the skill than without? |
-| Efficiency | Does it use fewer tool calls and tokens? |
+| Efficiency | Does it route correctly and use tools productively? |
 
 In `custom_only` mode, your own grader defines the score instead — see
 [Custom Graders & Tasks](custom-graders.mdx).
@@ -85,7 +85,7 @@ using Harbor 0.24:
 - Installed Codex adapters merge existing user and MCP configuration before the
   selected runtime provider and endpoint take precedence over conflicting route
   keys.
-- Docker and local execution stream stdout and stderr through secret redaction
+- Docker, Kata, and local execution stream stdout and stderr through secret redaction
   before Harbor callbacks receive them. Each command has a 16 MiB combined raw
   stdout/stderr limit; exceeding it terminates the command process tree and
   fails the trial instead of returning partial output.
@@ -218,11 +218,17 @@ native-task identities. The snapshot is removed when the run returns and
 requires temporary space only for the selected compatibility scope.
 
 Tier 3 does not install evaluator-owned directories from the target or any
-nested, reference, or workspace skill into agent-visible copies. `--copy-repo`
-uses the same filtering and excludes generated result roots. Authenticated
-historical result roots remain excluded after the configured output location is
-changed; a present marker that is copied, stale, or cannot be authenticated
-fails staging closed instead of copying that tree. Custom result roots created
+nested, reference, or workspace skill into agent-visible copies. Runtime skill
+projection and `--copy-repo` also omit every generated path excluded by the
+versioned publication-source digest. The active report directory and the whole
+catalog report root are explicitly excluded from full repo context, preventing
+a repeated run from exposing prior reports or Tier 3 evidence to the agent. An
+in-repository report directory is excluded only after SkillEvaluator reserves
+or authenticates it as generated output; a nonempty unowned directory is
+rejected instead of silently removing authored files from `--copy-repo`.
+Authenticated historical result roots remain excluded after the configured
+output location is changed; a present marker that is copied, stale, or cannot
+be authenticated fails staging closed instead of copying that tree. Custom result roots created
 outside `evals/` by a pre-marker version cannot be identified safely after the
 configured location changes. Move or delete that old content before
 `--copy-repo` or another full-context evaluation, then rerun with the current
@@ -234,6 +240,16 @@ subtree such as `evals/data/`, and should be declared as task inputs with
 dataset/configuration files, graders, developer eval guidance, benchmark
 conversion reports, native Harbor tasks, custom environments, evaluator tests,
 or generated results.
+
+Publication identity covers the evaluated skill tree itself. A Tier 3 run that
+actually stages linked or full-repository context, or separately configured
+external reference/workspace skills, still executes and remains available for
+diagnosis, but its publication evidence fails closed as `INCOMPLETE`.
+Full-repository selection also depends on Git/operator state excluded from the
+skill digest, even when the repository root is the skill directory. Keep
+publication-certifying runtime inputs inside the evaluated skill tree without
+repository-context staging. Binding arbitrary repository projections under a
+separate, versioned identity is not currently supported.
 
 MCP declarations are read only from a bounded, stable, single-link regular
 `evals/environment/mcp_servers.toml` through a descriptor-anchored evaluator
@@ -367,9 +383,9 @@ Compose, proxy, or tracing controls. Configure the selected backend in the
 host environment instead.
 
 One deliberate exception collapses the two roles: with the `nv_build` provider
-in `--env-mode docker` or `local`, a single `NVIDIA_API_KEY` powers the
+in `--env-mode docker`, `kata`, or `local`, a single `NVIDIA_API_KEY` powers the
 evaluator and all three agents. Direct OpenCode talks to NVIDIA Build directly;
-Codex and experimental Claude Code use a Docker or local compatibility bridge.
+Codex and experimental Claude Code use an in-container (Docker and Kata) or local compatibility bridge.
 Explicit model overrides are preserved exactly. Without an override, all three
 agents default to Nemotron Super (`nvidia/nemotron-3-super-120b-a12b`); direct
 OpenCode renders it as `nvidia/nvidia/nemotron-3-super-120b-a12b` because its
@@ -394,7 +410,7 @@ explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
 ## Where agents run
 
-`--env-mode` selects one of 24 environment modes: 23 Harbor-native backends,
+`--env-mode` selects one of 25 environment modes: 24 Harbor-native backends,
 including the default Docker backend, plus SkillEvaluator's **local mode**,
 which runs the agent CLI directly on the host under an OS-sandbox policy.
 Managed backends such as `daytona`, `e2b`, and `modal` require their mapped
@@ -402,12 +418,13 @@ Harbor 0.24 extra; OpenShift, Apple Container, and Singularity instead use
 system CLIs and have no Harbor Python extra. These are selectable integration
 modes, not evidence that every managed backend was exercised end to end for
 this release. Harbor 0.24 transport verification covers Docker and local;
-validate any managed backend's extra, credentials, infrastructure, and
+Kata mode reuses the Docker transport but has not been exercised on a KVM host.
+Validate any managed backend's extra, credentials, infrastructure, and
 constructor settings with `doctor` and its Harbor preflight before relying on
 it.
 
-Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `kata`, `runta`,
-`prime`, `mosaic`, and `smol` backends are not selectable because they cannot
+Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `runta`, `prime`,
+`mosaic`, and `smol` backends are not selectable because they cannot
 yet receive SkillEvaluator's complete generated task bundle through a trusted
 image or backend-native provisioning path.
 
@@ -415,7 +432,7 @@ Environment kwargs are only for Harbor-native non-Docker backends. Pass
 non-secret constructor settings with the repeatable, operator-only
 `--environment-kwarg KEY=VALUE` / `--ek KEY=VALUE` option. Skill-owned
 `evals/config.yml` cannot set them. `docker` and `local` reject any environment
-kwargs. Fields owned by Harbor runtime policy are also reserved: resource
+kwargs, and `kata` accepts only `kata_runtime` and `kata_dns`. Fields owned by Harbor runtime policy are also reserved: resource
 overrides, mounts, network policy, extra Compose definitions, SkillEvaluator's
 own lifecycle fields (`delete`, `force_build`, `keep_containers`), and
 Kubernetes pod security are not exposed through this surface. Other
@@ -445,7 +462,9 @@ cloud backend for untrusted code.
 Attached to `validate`, Tier 3 is advisory by default: its results appear in the
 combined reports without changing the exit code. Add `--block-on-agent-eval`
 to make its findings gate, including evidence that the selected YAML/JSON
-dataset or native Harbor source is missing or invalid. Autopilot is enabled
+dataset or native Harbor source is missing or invalid. A blocking Tier 3 passes
+only with a completed `PASS` verdict and complete attempt coverage; `NEUTRAL`
+and `FAIL` verdicts exit 1. Autopilot is enabled
 by default for skills: it generates one starter case when no source exists and
 reuses valid existing sources unchanged. `--full` remains supported but is
 unnecessary. Use `--tiers 1,2` or `--no-tier3` to skip live evaluation;
@@ -529,7 +548,7 @@ The high-signal flags, with defaults:
 | `--progress` | `auto` | Progress rendering: `auto`, `rich` (live TTY view with secret redaction), `plain`, or `off` |
 | `--autopilot` | off | When no evaluation source exists, generate exactly one eval case — with the configured provider, falling back to a deterministic keyless template — never overwriting an existing source |
 | `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](custom-graders.mdx) |
-| `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory |
+| `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory; custom in-skill roots are rejected |
 | `--harbor-keep-jobs` | off | Retain Harbor job directories for inspection |
 | `--timeout-multiplier` | `1.0` | Scale Harbor's agent, verifier, and environment-build timeouts; must be a finite number greater than 0 whose scaled timeouts stay finite |
 | `--copy-repo` | off | Copy the surrounding repository into the task environment |
@@ -550,6 +569,15 @@ grades each trial after the agent finishes. `security`, `skill_execution`, and
 `skill_efficiency` are deterministic trajectory checks. `accuracy`,
 `goal_accuracy`, and `behavior_check` are LLM judges that call the configured
 evaluator provider. `custom_only` runs none of them.
+
+Accuracy is calculated from the judge's criterion verdicts, not its numeric
+total: passing applicable criteria divided by applicable criteria. Positive
+cases score all five criteria; a positive-case reply with no criteria falls
+back to the judge's numeric score. When `should_trigger` is false or no
+`expected_skill` is declared, accuracy excludes `SKILL_IDENTIFIED` from both
+counts and scores the other four criterion verdicts. The reward details record
+the excluded criterion and `applicable-accuracy-criteria/v1` scoring policy.
+Missing criterion evidence is an error for these cases.
 
 ### The graded trajectory
 
@@ -682,6 +710,16 @@ a bare exception.
 `token_efficiency` is a standalone report signal, not a dimension source. It
 never changes a dimension score or the overall verdict.
 
+The report's **Measured Agent Resources** table separately compares prompt plus
+completion tokens and Harbor's measured agent execution seconds. Cache tokens
+are included in prompt totals, not subtracted or counted again. Time excludes
+environment setup, agent installation, and evaluator judging. Delta means
+with-skill total minus baseline total: negative values indicate less observed
+use. A delta requires complete telemetry, complete successful arms, and matching
+case counts including repeated attempts. Missing measurements, skipped baselines,
+partial runs, and unsupported multi-step timing remain `N/A`; they are not zero.
+These are observations for this run, not a graded efficiency or cost claim.
+
 Each dimension receives a score and a diagnostic band: **PASS** at 0.50 or
 above, **NEUTRAL** from 0.40 to below 0.50, and **FAIL** below 0.40. A supported
 agent passes only when every dimension passes. The top-level Tier 3 verdict is:
@@ -734,7 +772,7 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
     Export the agent's credential in the host environment where you run
     `skillevaluator` — agent credentials are read only from the host, never
     from `evals/config.yml`. It is a separate role from the evaluator key,
-    except with `nv_build` in Docker or local mode, where one
+    except with `nv_build` in Docker, Kata, or local mode, where one
     `NVIDIA_API_KEY` covers both.
   </Accordion>
   <Accordion title="evaluate cannot start the environment">

@@ -160,6 +160,14 @@ class LicenseValidator(ValidatorBase):
         else:
             self._validate_license(detection, result)
 
+        if result.passed:
+            license_status = str(result.metadata.get("license_status") or "not_detected")
+            result.add_success(
+                check_name="license_compliance",
+                message=f"License compliance scan completed ({license_status.replace('_', ' ')})",
+                license_status=license_status,
+            )
+
         return result
 
     def _handle_no_license(self, result: ValidationResult) -> None:

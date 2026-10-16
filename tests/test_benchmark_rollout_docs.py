@@ -14,7 +14,7 @@ def test_rollout_runbook_covers_safe_backfill_and_freshness() -> None:
     runbook = (REPO / "docs/benchmark-rollout.mdx").read_text(encoding="utf-8")
 
     assert "--output-dir ./benchmark-backfill/example-skill" in runbook
-    assert "check_public_benchmarks.py" in runbook
+    assert "uv run python scripts/ci/check_public_benchmarks.py" in runbook
     assert "assets/benchmark-card-before.png" in runbook
     assert "assets/benchmark-card-after.png" in runbook
     assert "--require-files" in runbook
@@ -22,9 +22,19 @@ def test_rollout_runbook_covers_safe_backfill_and_freshness() -> None:
     assert "The generated evaluation date must come from the live run artifact" in runbook
     assert "Effectiveness=50% `goal_accuracy` + 50% `behavior_check`" in runbook
     assert "A dimension passes at 50%" in runbook
+    assert "benchmark_policy.tier2_required = false" in runbook
     assert "benchmark_policy.tier3_required = false" in runbook
+    assert "--no-block-on-dedup" in runbook
+    assert "it is not a publication waiver" in runbook
+    assert "incomplete split-tier merge" in runbook
     assert "publication `PASS`" in runbook
-    assert "without completed required Tier 3 evidence" in runbook
+    assert "without completed required Tier 1, Tier 2," in runbook
+
+
+def test_ci_runs_benchmark_gate_with_project_dependencies() -> None:
+    workflow = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert "uv run python scripts/ci/check_public_benchmarks.py --require-files tests/golden" in workflow
 
 
 def test_tier3_reference_uses_canonical_dimension_mapping() -> None:

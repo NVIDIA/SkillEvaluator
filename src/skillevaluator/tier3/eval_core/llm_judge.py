@@ -769,23 +769,35 @@ def judge_accuracy(
     question: str,
     ground_truth: str,
     agent_text: str,
+    *,
+    skill_identification_applicable: bool = True,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Run the 5-criterion accuracy judge. Returns ``{"score": float, "reason": str, ...}``."""
+    """Judge accuracy; exclude skill identification when no skill is expected."""
     if not ground_truth:
         return {"score": 1.0, "reason": "No ground_truth -- skipped"}
 
-    prompt = ACCURACY_PROMPT.format(
-        question=question,
-        ground_truth=ground_truth,
-        agent_text=agent_text,
-    )
+    prompt = ACCURACY_PROMPT
+    if not skill_identification_applicable:
+        prompt = prompt.replace(
+            "1. SKILL_IDENTIFIED: Does the response reference or use the correct skill for the task?",
+            "1. SKILL_IDENTIFIED: Inapplicable: no skill is expected. Set false; exclude it from the score.",
+        ).replace("Compute score = count(true) / 5.", "Compute score = count(true among the other four criteria) / 4.")
+    # Adjust the rubric before interpolation so task/evidence text stays intact.
+    prompt = prompt.format(question=question, ground_truth=ground_truth, agent_text=agent_text)
+
+    def validate_payload(parsed: Any) -> str | None:
+        error = _accuracy_payload_error(parsed)
+        if not error and not skill_identification_applicable and not _valid_accuracy_criteria(parsed.get("criteria")):
+            return "Accuracy requires complete criterion verdicts when skill identification is inapplicable"
+        return error
+
     kwargs.setdefault("response_schema", ACCURACY_JSON_SCHEMA)
     kwargs.setdefault("schema_name", "accuracy_judgment")
 
     parsed, error, _provenance = _call_validated_json_judge(
         prompt,
-        _accuracy_payload_error,
+        validate_payload,
         call_public_llm,
         _extract_json,
         **kwargs,
@@ -797,17 +809,26 @@ def judge_accuracy(
     criteria = parsed.get("criteria")
     criteria_valid = _valid_accuracy_criteria(criteria)
 
-    score = _finite_score(parsed.get("score"))
-    if score is None:
-        assert criteria_valid
-        yes_count = sum(1 for v in criteria.values() if v is True)
-        score = yes_count / 5.0
+    if criteria_valid:
+        # Score only applicable verdicts; excluded criteria leave both numerator and denominator.
+        excluded = set() if skill_identification_applicable else {"SKILL_IDENTIFIED"}
+        applicable = [verdict for name, verdict in criteria.items() if name not in excluded]
+        score = sum(verdict is True for verdict in applicable) / len(applicable)
+    else:
+        # Legacy score-only payloads; validate_payload rejects them when a criterion is excluded.
+        assert skill_identification_applicable
+        score = _finite_score(parsed.get("score"))
+        assert score is not None
 
-    return {
+    result = {
         "score": round(score, 4),
         "reason": _bounded_judge_text(parsed.get("reason", "")),
         "criteria": criteria if criteria_valid else {},
     }
+    if not skill_identification_applicable:
+        result["excluded_criteria"] = ["SKILL_IDENTIFIED"]
+        result["scoring_policy"] = "applicable-accuracy-criteria/v1"
+    return result
 
 
 # ---------------------------------------------------------------------------

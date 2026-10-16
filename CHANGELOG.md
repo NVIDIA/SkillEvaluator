@@ -6,6 +6,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Optional `skillevaluator dashboard` tables for comparing saved Tier 3 reports
+  and retained runs across skills, models, harnesses, recorded harness
+  features, and skill conditions. Paired with/without differences cover score,
+  pass@k, tokens, and agent execution time, plus USD cost when retained runs
+  record it; the performance table also shows per-trial means alongside
+  totals. Comparisons require matching complete trial coverage (repeated
+  attempts pair by case, as in the HTML report) and name the reason when a
+  pair is not comparable. Inputs are read once and reused between
+  interactions (**Reload reports** re-reads them); browser uploads are limited
+  to 16 MB. Install it with the `dashboard` extra.
 - The HTML report's Tier 1 card now shows the SkillSpector version that ran
   the security scan (for example `SkillSpector v2.12.0`), and the embedded
   report JSON records it as `skillspector_versions`. Findings depend on the

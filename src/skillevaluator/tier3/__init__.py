@@ -13,11 +13,15 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
+from skillevaluator.tier3.change_detection import Tier3RunDecision, tier3_run_decision
+
 __all__ = [
+    "Tier3RunDecision",
     "compare_results",
     "create_dataset",
     "doctor",
     "evaluate",
+    "tier3_run_decision",
     "validate_evals",
     "view_results",
 ]

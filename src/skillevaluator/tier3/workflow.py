@@ -233,6 +233,16 @@ def _prepare_dataset(skill_path: Path, *, source_path: Path, progress: str = "au
         click.echo("Tier 3: reusing the existing evaluation source unchanged.", err=True)
 
 
+def _previous_evaluation_still_applies(params: dict[str, Any]) -> bool:
+    """Return whether ``--previous-skill`` lets the expert command skip this run."""
+    previous_skill = params.get("previous_skill")
+    if previous_skill is None:
+        return False
+    from skillevaluator.tier3.change_detection import tier3_run_decision
+
+    return tier3_run_decision(params["skill_path"], previous_skill).should_skip
+
+
 def build_tier3_workflow(evaluate_command: click.Command) -> click.Command:
     """Clone the expert command with automatic dataset preparation enabled.
 
@@ -262,10 +272,13 @@ def build_tier3_workflow(evaluate_command: click.Command) -> click.Command:
         try:
             _validate_skill_root(params["skill_path"])
             params["skill_path"] = params["skill_path"].resolve()
-            with _source_snapshot(params["skill_path"]) as source_path:
-                _preflight_options(source_path, params)
-                _preflight_environment(params)
-                _prepare_dataset(params["skill_path"], source_path=source_path, progress=params["progress"])
+            # A run the expert command will skip needs no credentials, runtime,
+            # or generated dataset; that command reports the skip itself.
+            if not _previous_evaluation_still_applies(params):
+                with _source_snapshot(params["skill_path"]) as source_path:
+                    _preflight_options(source_path, params)
+                    _preflight_environment(params)
+                    _prepare_dataset(params["skill_path"], source_path=source_path, progress=params["progress"])
         except ImportError as exc:
             raise click.ClickException(
                 "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again."

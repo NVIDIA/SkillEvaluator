@@ -17,6 +17,10 @@ All notable changes to SkillEvaluator are documented in this file.
   `/dev/kvm` and a Kata runtime registered with Docker, and accepts only the
   `kata_runtime` and `kata_dns` environment kwargs. Image builds still run on
   the host, and tasks with Compose sidecars are rejected.
+- `skillevaluator validate --tier3 --previous-skill <path>` now skips a fresh
+  Tier 3 run when only the `metadata` field in `SKILL.md` changed and the prior
+  skill has a generated `skill-card.md` or `BENCHMARK.md`. The decision fails
+  closed for any behavioral change, invalid frontmatter, or missing evidence.
 
 ### Changed
 

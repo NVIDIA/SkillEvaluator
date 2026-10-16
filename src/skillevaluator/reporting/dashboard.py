@@ -18,7 +18,7 @@ import click
 _APP = Path(__file__).with_name("dashboard_ui") / "skillevaluator_dashboard.py"
 
 
-def launch_dashboard(paths: tuple[Path, ...], *, port: int = 8501, no_browser: bool = False) -> int:
+def launch_dashboard(paths: tuple[Path, ...], *, port: int | None = None, no_browser: bool = False) -> int:
     """Run Streamlit on loopback with explicit paths and usage telemetry disabled."""
     if importlib.util.find_spec("streamlit") is None:
         raise click.ClickException(
@@ -38,7 +38,9 @@ def launch_dashboard(paths: tuple[Path, ...], *, port: int = 8501, no_browser: b
         "run",
         str(_APP),
         "--server.address=127.0.0.1",
-        f"--server.port={port}",
+        # A port on the command line counts as manually set, and Streamlit then
+        # exits instead of moving to the next free port, so pass only a chosen one.
+        *([f"--server.port={port}"] if port is not None else []),
         "--server.maxUploadSize=16",
         "--server.showEmailPrompt=false",
         "--server.fileWatcherType=none",
@@ -53,6 +55,11 @@ def launch_dashboard(paths: tuple[Path, ...], *, port: int = 8501, no_browser: b
     ]
     env = {**os.environ, "STREAMLIT_SERVER_ALLOWED_HOSTS": "127.0.0.1 localhost"}
     try:
-        return subprocess.call(command, cwd=str(_APP.parent), env=env)
+        code = subprocess.call(command, cwd=str(_APP.parent), env=env)
     except KeyboardInterrupt:
         return 0
+    if port is not None and code > 0:
+        click.echo(
+            f"Streamlit exited with status {code}. If port {port} is in use, choose another with --port.", err=True
+        )
+    return code

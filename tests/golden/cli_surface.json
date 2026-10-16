@@ -184,7 +184,6 @@
           "type": "path"
         },
         {
-          "default": "8501",
           "name": "port",
           "opts": [
             "--port"

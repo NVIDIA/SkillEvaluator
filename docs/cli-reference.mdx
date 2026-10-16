@@ -516,7 +516,7 @@ skillevaluator dashboard --no-browser --port 8502
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--port` | `8501` | Local server port, from 1 through 65535. |
+| `--port` | `8501`, or the next free port | Local port on 127.0.0.1, from 1 through 65535. Pass it to require a specific port; the command fails if that port is busy. |
 | `--no-browser` | off | Start the server without opening a browser. |
 
 The server listens on `127.0.0.1`; Ctrl+C stops it. See the

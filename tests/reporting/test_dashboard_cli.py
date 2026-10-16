@@ -17,14 +17,14 @@ from skillevaluator.cli import cli
 from skillevaluator.reporting import dashboard
 
 
-def _capture_launch(monkeypatch, *args: str):
+def _capture_launch(monkeypatch, *args: str, returncode: int = 7):
     """Invoke the dashboard command with Streamlit present and the child process faked."""
     calls = []
     monkeypatch.setattr(dashboard.importlib.util, "find_spec", lambda _name: object())
 
     def capture(command, **kwargs):
         calls.append((command, kwargs))
-        return 7
+        return returncode
 
     monkeypatch.setattr(dashboard.subprocess, "call", capture)
     result = CliRunner().invoke(cli, ["dashboard", *args])
@@ -37,6 +37,7 @@ def test_dashboard_help_and_input_validation() -> None:
     help_result = runner.invoke(cli, ["dashboard", "--help"])
     assert help_result.exit_code == 0
     assert "retained Tier 3" in help_result.output
+    assert "next free port" in " ".join(help_result.output.split())
     assert runner.invoke(cli, ["dashboard", "--port", "0"]).exit_code == 2
     assert runner.invoke(cli, ["dashboard", "missing-report-170.json"]).exit_code == 2
 
@@ -75,6 +76,18 @@ def test_launch_uses_loopback_and_literal_absolute_paths(tmp_path: Path, monkeyp
         assert flag in command
     assert "--browser.gatherUsageStats=false" in command
     assert command[-2:] == ["--", str(report.resolve())]
+
+
+def test_default_launch_lets_streamlit_choose_port(monkeypatch) -> None:
+    # Streamlit moves to the next free port only when the port was not set explicitly.
+    _result, command, _kwargs = _capture_launch(monkeypatch)
+    assert not any(arg.startswith("--server.port") for arg in command)
+
+
+def test_explicit_port_failure_has_hint(monkeypatch) -> None:
+    result, _command, _kwargs = _capture_launch(monkeypatch, "--port", "8517", returncode=1)
+    assert result.exit_code == 1
+    assert "choose another with --port" in result.output
 
 
 def test_default_launch_does_not_force_headless(monkeypatch) -> None:

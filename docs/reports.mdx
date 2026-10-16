@@ -412,8 +412,9 @@ From a checkout, use `uv run --extra dashboard skillevaluator dashboard ...`.
 For live reload while developing the dashboard, run
 `PYTHONPATH=src uv run --extra dashboard streamlit run src/skillevaluator/reporting/dashboard_ui/skillevaluator_dashboard.py -- PATH`;
 `PYTHONPATH=src` lets Streamlit watch the package modules for changes.
-The server runs at `http://127.0.0.1:8501`; use `--port 8502` for another port,
-`--no-browser` to suppress opening a browser, and Ctrl+C to stop it.
+The server runs at `http://127.0.0.1:8501`, or the next free port when 8501 is
+busy; pass `--port 8502` to require a specific port. Use `--no-browser` to
+suppress opening a browser, and Ctrl+C to stop it.
 The dashboard runs from its own package directory, so Streamlit settings or
 secrets in your project's `.streamlit/` folder are not applied. It accepts
 browser connections only for 127.0.0.1 and localhost.

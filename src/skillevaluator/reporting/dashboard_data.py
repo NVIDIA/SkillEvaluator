@@ -29,6 +29,7 @@ _PAIRING_IDENTITY = (*_IDENTITY, "_report_index", "_agent_key", "_feature_key")
 _MAX_FILE_BYTES = 16 * 1024 * 1024
 _MAX_FILES = 1000
 _MAX_PATHS = 20_000
+_MAX_COUNT = 1_000_000  # far above report_data's 512-trial bound; larger values are malformed
 # Loader bounds on these artifacts drop only per-trial telemetry (tokens, steps).
 # Canonical trials then omit those counters, so coverage counts keep totals blank.
 _TELEMETRY_ARTIFACTS = frozenset({"trajectory"})
@@ -67,7 +68,7 @@ def _measurement(value: Any) -> float | None:
 
 
 def _count(value: Any) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_COUNT else None
 
 
 def _feature_config(*owners: dict[str, Any]) -> tuple[str, str]:
@@ -563,8 +564,15 @@ def _load_native(path: Path) -> DashboardData:
             _set_usage(row, [], expected=row["_expected_usage_trials"])
             continue
         if trials_dir.is_dir():
-            trial_paths, truncated = _directory_entries(trials_dir, 4096)
-            trial_dirs = [candidate for candidate in trial_paths if candidate.is_dir() and not candidate.is_symlink()]
+            try:
+                trial_paths, truncated = _directory_entries(trials_dir, 4096)
+                trial_dirs = [
+                    candidate for candidate in trial_paths if candidate.is_dir() and not candidate.is_symlink()
+                ]
+            except (OSError, ValueError) as exc:
+                output.warnings.append(f"{trials_dir}: cannot read retained trials: {exc}")
+                _set_usage(row, [], expected=row["_expected_usage_trials"])
+                continue
             truncated |= len(trial_dirs) > 512
             loaded: list[tuple[Path, dict[str, Any] | None]] = []
             for trial_dir in trial_dirs[:512]:

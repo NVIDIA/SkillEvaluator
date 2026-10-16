@@ -195,6 +195,21 @@ def test_bad_report_does_not_hide_other_results(tmp_path: Path) -> None:
     assert len(app.dataframe[0].value) == 2
 
 
+def test_oversized_trial_count_keeps_other_reports(tmp_path: Path) -> None:
+    valid = _write_report(tmp_path / "valid.json")
+    oversized = _write_report(tmp_path / "oversized.json")
+    report = json.loads(oversized.read_text(encoding="utf-8"))
+    agent = report["agents"]["opencode"]
+    agent["num_trials"] = 10**20
+    for trial in agent["trials"]:
+        trial.pop("entry_id")
+    oversized.write_text(json.dumps(report), encoding="utf-8")
+    app = _app([valid, oversized])
+    assert not app.exception
+    assert len(app.dataframe[0].value) == 4
+    assert any("invalid trial coverage counts" in text.value for text in app.text)
+
+
 def test_report_notices_are_plain_text(tmp_path: Path) -> None:
     path = _write_report(tmp_path / "beacon.json")
     report = json.loads(path.read_text(encoding="utf-8"))

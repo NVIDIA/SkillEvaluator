@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -111,7 +112,7 @@ def test_canonical_missing_attempt_keeps_usage_totals_unknown() -> None:
     assert "tokens 1/2" in row["coverage"]
 
 
-@pytest.mark.parametrize("value", [True, -1, 1.5, "1"])
+@pytest.mark.parametrize("value", [True, -1, 1.5, "1", 10**30])
 @pytest.mark.parametrize("field", ["declared", "expected", "both_attempt_counts"])
 def test_present_invalid_coverage_counts_never_become_inferred_complete_counts(value: object, field: str) -> None:
     report = _report()
@@ -835,7 +836,7 @@ def test_native_different_condition_models_cannot_pair(tmp_path: Path) -> None:
     assert all(row["comparison_status"] == "missing condition" for row in comparisons)
 
 
-@pytest.mark.parametrize("value", [True, -1, 1.5, "1"])
+@pytest.mark.parametrize("value", [True, -1, 1.5, "1", 10**30])
 @pytest.mark.parametrize("field", ["num_trials", "expected_attempts", "scored_attempts"])
 def test_native_invalid_coverage_counts_cannot_be_hidden_by_canonical_normalization(
     tmp_path: Path, field: str, value: object
@@ -853,6 +854,22 @@ def test_native_invalid_coverage_counts_cannot_be_hidden_by_canonical_normalizat
     assert row["duration_seconds"] is None
     assert any("invalid trial coverage counts" in warning for warning in data.warnings)
     assert comparison_rows(data.rows)[0]["score_delta"] is None
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="Needs POSIX permissions enforced for this user")
+def test_unreadable_condition_trials_keep_other_rows(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _native_run(run)
+    trials = run / "opencode" / "with-skill" / "trials"
+    trials.chmod(0)
+    try:
+        data = load_dashboard_path(run)
+    finally:
+        trials.chmod(0o755)
+    assert len(data.rows) == 2
+    assert next(row for row in data.rows if row["condition"] == "with_skill")["total_tokens"] is None
+    assert next(row for row in data.rows if row["condition"] == "without_skill")["total_tokens"] == 110
+    assert any("cannot read retained trials" in warning for warning in data.warnings)
 
 
 @pytest.mark.parametrize("artifact", ["trials", "trajectory.json", "result.json", "reward.json"])

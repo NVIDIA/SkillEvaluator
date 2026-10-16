@@ -6,11 +6,16 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import click
+
+# Streamlit runs from this directory, so the caller's .streamlit/ settings and
+# modules cannot replace the dashboard's own.
+_APP = Path(__file__).with_name("dashboard_ui") / "skillevaluator_dashboard.py"
 
 
 def launch_dashboard(paths: tuple[Path, ...], *, port: int = 8501, no_browser: bool = False) -> int:
@@ -22,23 +27,32 @@ def launch_dashboard(paths: tuple[Path, ...], *, port: int = 8501, no_browser: b
             "(from a checkout: uv run --extra dashboard skillevaluator dashboard, "
             'or python -m pip install -e ".[dashboard]")'
         )
-    app = Path(__file__).with_name("dashboard_app.py")
+    # -P keeps the working directory off sys.path. An explicit headless=false
+    # would trigger the first-run email prompt and override Streamlit's
+    # display detection, so the flag is only ever set to true.
     command = [
         sys.executable,
+        "-P",
         "-m",
         "streamlit",
         "run",
-        str(app),
+        str(_APP),
         "--server.address=127.0.0.1",
         f"--server.port={port}",
         "--server.maxUploadSize=16",
-        f"--server.headless={str(no_browser).lower()}",
+        "--server.showEmailPrompt=false",
+        "--server.fileWatcherType=none",
+        "--server.enableCORS=true",
+        "--server.enableXsrfProtection=true",
+        "--client.toolbarMode=viewer",
+        *(["--server.headless=true"] if no_browser else []),
         "--browser.gatherUsageStats=false",
         "--theme.primaryColor=#76b900",
         "--",
         *(str(path.resolve()) for path in paths),
     ]
+    env = {**os.environ, "STREAMLIT_SERVER_ALLOWED_HOSTS": "127.0.0.1 localhost"}
     try:
-        return subprocess.call(command)
+        return subprocess.call(command, cwd=str(_APP.parent), env=env)
     except KeyboardInterrupt:
         return 0

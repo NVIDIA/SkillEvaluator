@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib.util
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -17,19 +18,41 @@ from skillevaluator.cli import cli
 from skillevaluator.reporting import dashboard
 
 
-def _capture_launch(monkeypatch, *args: str, returncode: int = 7):
+class FakePopen:
+    """Stand in for the Streamlit child: record the launch, waits, and forwarded signals."""
+
+    def __init__(self, command: list[str], **kwargs) -> None:
+        self.command = command
+        self.kwargs = kwargs
+        self.sent: list[int] = []
+        self.wait_timeouts: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.wait_timeouts.append(timeout)
+        return self.exit_code()
+
+    def exit_code(self) -> int:
+        return 7
+
+    def send_signal(self, signum: int) -> None:
+        self.sent.append(signum)
+
+    def terminate(self) -> None:
+        self.send_signal(signal.SIGTERM)
+
+
+def _capture_launch(monkeypatch, *args: str, popen: type[FakePopen] = FakePopen):
     """Invoke the dashboard command with Streamlit present and the child process faked."""
-    calls = []
+    launched: list[FakePopen] = []
     monkeypatch.setattr(dashboard.importlib.util, "find_spec", lambda _name: object())
 
-    def capture(command, **kwargs):
-        calls.append((command, kwargs))
-        return returncode
+    def start(command, **kwargs):
+        launched.append(popen(command, **kwargs))
+        return launched[-1]
 
-    monkeypatch.setattr(dashboard.subprocess, "call", capture)
+    monkeypatch.setattr(dashboard.subprocess, "Popen", start)
     result = CliRunner().invoke(cli, ["dashboard", *args])
-    command, kwargs = calls[0]
-    return result, command, kwargs
+    return result, launched[0]
 
 
 def test_dashboard_help_and_input_validation() -> None:
@@ -54,8 +77,9 @@ def test_missing_extra_has_actionable_error(monkeypatch) -> None:
 def test_launch_uses_loopback_and_literal_absolute_paths(tmp_path: Path, monkeypatch) -> None:
     report = tmp_path / "report with spaces; literal.json"
     report.write_text("{}", encoding="utf-8")
-    result, command, kwargs = _capture_launch(monkeypatch, str(report), "--port", "8517", "--no-browser")
+    result, fake = _capture_launch(monkeypatch, str(report), "--port", "8517", "--no-browser")
     assert result.exit_code == 7
+    command, kwargs = fake.command, fake.kwargs
     assert command[:4] == [sys.executable, "-P", "-m", "streamlit"]
     app = Path(command[command.index("run") + 1])
     assert app.name == "skillevaluator_dashboard.py"
@@ -80,20 +104,52 @@ def test_launch_uses_loopback_and_literal_absolute_paths(tmp_path: Path, monkeyp
 
 def test_default_launch_lets_streamlit_choose_port(monkeypatch) -> None:
     # Streamlit moves to the next free port only when the port was not set explicitly.
-    _result, command, _kwargs = _capture_launch(monkeypatch)
-    assert not any(arg.startswith("--server.port") for arg in command)
+    _result, fake = _capture_launch(monkeypatch)
+    assert not any(arg.startswith("--server.port") for arg in fake.command)
 
 
 def test_explicit_port_failure_has_hint(monkeypatch) -> None:
-    result, _command, _kwargs = _capture_launch(monkeypatch, "--port", "8517", returncode=1)
+    class BusyPortPopen(FakePopen):
+        def exit_code(self) -> int:
+            return 1
+
+    result, _fake = _capture_launch(monkeypatch, "--port", "8517", popen=BusyPortPopen)
     assert result.exit_code == 1
     assert "choose another with --port" in result.output
 
 
 def test_default_launch_does_not_force_headless(monkeypatch) -> None:
     # An explicit headless=false makes Streamlit prompt for an email and exit without a TTY.
-    _result, command, _kwargs = _capture_launch(monkeypatch)
-    assert not any(arg.startswith("--server.headless") for arg in command)
+    _result, fake = _capture_launch(monkeypatch)
+    assert not any(arg.startswith("--server.headless") for arg in fake.command)
+
+
+def test_sigterm_is_forwarded_to_streamlit(monkeypatch) -> None:
+    original = signal.getsignal(signal.SIGTERM)
+
+    class TerminatedPopen(FakePopen):
+        def exit_code(self) -> int:
+            # A process manager sends SIGTERM to the launcher alone.
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            return -15
+
+    _result, fake = _capture_launch(monkeypatch, popen=TerminatedPopen)
+    assert fake.sent == [signal.SIGTERM]
+    assert signal.getsignal(signal.SIGTERM) is original
+
+
+def test_ctrl_c_returns_zero(monkeypatch) -> None:
+    class InterruptedPopen(FakePopen):
+        def exit_code(self) -> int:
+            if len(self.wait_timeouts) == 1:
+                raise KeyboardInterrupt
+            return 0
+
+    result, fake = _capture_launch(monkeypatch, popen=InterruptedPopen)
+    assert result.exit_code == 0
+    # The launcher waits for Streamlit to finish its own Ctrl+C shutdown.
+    assert fake.wait_timeouts == [None, 10]
+    assert fake.sent == []
 
 
 def test_streamlit_script_directory_cannot_shadow_modules() -> None:
@@ -108,7 +164,10 @@ def test_streamlit_script_directory_cannot_shadow_modules() -> None:
 
 def test_streamlit_is_not_shadowed_by_cwd(tmp_path: Path, monkeypatch) -> None:
     pytest.importorskip("streamlit")
-    _result, command, _kwargs = _capture_launch(monkeypatch)
+    _result, fake = _capture_launch(monkeypatch)
+    command = fake.command
+    # Restore the real subprocess.Popen before starting Python below.
+    monkeypatch.undo()
     (tmp_path / "streamlit.py").write_text("raise SystemExit(3)\n", encoding="utf-8")
     completed = subprocess.run(
         [*command[:4], "version"],

@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -54,10 +57,26 @@ def launch_dashboard(paths: tuple[Path, ...], *, port: int | None = None, no_bro
         *(str(path.resolve()) for path in paths),
     ]
     env = {**os.environ, "STREAMLIT_SERVER_ALLOWED_HOSTS": "127.0.0.1 localhost"}
+    proc = subprocess.Popen(command, cwd=str(_APP.parent), env=env)
+    # Ctrl+C reaches the whole process group, but a SIGTERM or SIGHUP sent only
+    # to this process would otherwise leave Streamlit running on the port.
+    previous: dict[int, Any] = {}
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+            if sig is not None:
+                previous[sig] = signal.signal(sig, lambda signum, _frame: proc.send_signal(signum))
     try:
-        code = subprocess.call(command, cwd=str(_APP.parent), env=env)
+        code = proc.wait()
     except KeyboardInterrupt:
-        return 0
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            proc.wait()
+        code = 0
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
     if port is not None and code > 0:
         click.echo(
             f"Streamlit exited with status {code}. If port {port} is in use, choose another with --port.", err=True

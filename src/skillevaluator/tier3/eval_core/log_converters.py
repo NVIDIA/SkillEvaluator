@@ -54,7 +54,9 @@ def _stringify_tool_result_content(content: Any) -> str:
     return str(content)
 
 
-def _attach_tool_result(steps: list[dict[str, Any]], tool_use_id: str, content_text: str) -> None:
+def _attach_tool_result(
+    steps: list[dict[str, Any]], tool_use_id: str, content_text: str, *, is_error: bool = False
+) -> None:
     for step in reversed(steps):
         if step.get("source") != "agent":
             continue
@@ -62,12 +64,11 @@ def _attach_tool_result(steps: list[dict[str, Any]], tool_use_id: str, content_t
             if tc.get("tool_call_id") == tool_use_id:
                 step.setdefault("observation", {"results": []})
                 step["observation"].setdefault("results", [])
-                step["observation"]["results"].append(
-                    {
-                        "source_call_id": tool_use_id,
-                        "content": content_text,
-                    }
-                )
+                result: dict[str, Any] = {"source_call_id": tool_use_id, "content": content_text}
+                if is_error:
+                    # Match Harbor's native Claude Code ATIF result metadata.
+                    result["extra"] = {"tool_result_is_error": True}
+                step["observation"]["results"].append(result)
                 return
 
 
@@ -158,7 +159,7 @@ def synthetic_trajectory_from_claude_stream_jsonl(text: str) -> dict[str, Any] |
                 tid = str(block.get("tool_use_id") or "")
                 res_text = _stringify_tool_result_content(block.get("content"))
                 if tid:
-                    _attach_tool_result(steps, tid, res_text)
+                    _attach_tool_result(steps, tid, res_text, is_error=block.get("is_error") is True)
 
         elif et == "result":
             res = evt.get("result")
@@ -564,13 +565,12 @@ def synthetic_trajectory_from_opencode_json(text: str) -> dict[str, Any] | None:
             "observation": {"results": []},
         }
         observation_text = _opencode_tool_observation(state)
-        if observation_text:
-            step["observation"]["results"].append(
-                {
-                    "source_call_id": call_id,
-                    "content": observation_text,
-                }
-            )
+        failed_read = status == "error" and function_name.lower() in {"read", "read_file"}
+        if observation_text or failed_read:
+            result = {"source_call_id": call_id, "content": observation_text}
+            if failed_read:
+                result["extra"] = {"tool_result_is_error": True}
+            step["observation"]["results"].append(result)
         steps.append(step)
 
     if not saw_content or not steps:

@@ -93,6 +93,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Preserve explicit Claude and OpenCode read failure metadata in reconstructed
+  ATIF trajectories. Failed isolated SKILL.md reads and failed native Skill
+  calls lose credit; compound shell failures and shell reads whose path may
+  expand to several files (braces, globs, `$` or backticks) remain ambiguous
+  and retain prior credit in host and verifier grading. Unattributed errors do
+  not cancel successful reads, and shell reads count dash-prefixed filenames
+  after `--`.
 - Tier 1 pyproject dependency audits now inspect static target declarations
   rather than the evaluator environment. Exact direct pins (including optional
   groups) are queried without installation or build-script execution;

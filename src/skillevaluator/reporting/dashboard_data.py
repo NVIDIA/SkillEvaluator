@@ -524,12 +524,17 @@ def _read_native_json(path: Path, run_root: Path) -> Any:
     return _read_json(path)
 
 
-def _native_usage(trial_dir: Path, run_root: Path, *, require_steps: bool = False) -> dict[str, Any]:
-    trajectory = (
-        _dict(_read_native_json(trial_dir / "trajectory.json", run_root))
-        if (trial_dir / "trajectory.json").is_file()
-        else {}
-    )
+def _native_usage(
+    trial_dir: Path, run_root: Path, warnings: list[str], *, require_steps: bool = False
+) -> dict[str, Any]:
+    trajectory: dict[str, Any] = {}
+    if (trial_dir / "trajectory.json").is_file():
+        try:
+            trajectory = _dict(_read_native_json(trial_dir / "trajectory.json", run_root))
+        except (OSError, ValueError, RecursionError) as exc:
+            # As in canonical JSON, this loses only the trajectory's token totals;
+            # result.json still records time, cost, and agent_result counters.
+            warnings.append(f"{trial_dir}: cannot read trajectory: {exc}")
     final = _dict(trajectory.get("final_metrics"))
     result = (
         _dict(_read_native_json(trial_dir / "result.json", run_root)) if (trial_dir / "result.json").is_file() else {}
@@ -655,6 +660,7 @@ def _load_native(path: Path) -> DashboardData:
                     usages_by_trial[physical_id] = _native_usage(
                         trial_dir,
                         path,
+                        output.warnings,
                         require_steps=physical_counts[physical_id] > 1 or physical_id in row["_ambiguous_trial_ids"],
                     )
                     unresolved_scope |= usages_by_trial[physical_id].get("_resource_scope_valid") is False

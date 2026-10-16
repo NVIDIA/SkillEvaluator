@@ -462,8 +462,9 @@ timezone are treated as unavailable, as in the HTML report's
 [measured agent resources](#measured-agent-resources). Agent time excludes
 environment setup and verification. Canonical JSON never records USD cost; open
 the retained run directory to show Harbor's recorded `agent_result.cost_usd` and
-multi-step totals. For retained runs whose trajectory lacks token totals, the
-dashboard falls back to Harbor's `agent_result` token counters.
+multi-step totals. For retained runs whose trajectory lacks token totals or
+cannot be read, the dashboard falls back to Harbor's `agent_result` token
+counters and keeps the trial's agent time and cost.
 Some exports written before v0.5.0 encoded missing token counters as zero; open
 their retained run directories to recover recorded counters.
 Cached tokens are shown separately and are not added again

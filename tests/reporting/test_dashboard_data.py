@@ -726,6 +726,20 @@ def test_canonical_export_agent_seconds_matches_retained_run(tmp_path: Path) -> 
     assert comparison["duration_seconds_delta"] == 0.0
 
 
+def test_unreadable_trajectory_keeps_retained_time_and_token_fallback(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _native_run(run)
+    trajectory = run / "opencode" / "with-skill" / "trials" / "case-a__random" / "trajectory.json"
+    trajectory.write_text("{not json", encoding="utf-8")
+    retained = load_dashboard_path(run)
+    canonical = parse_dashboard_report(_canonical_export(run), "r.json")
+    assert retained.rows[0]["duration_seconds"] == canonical.rows[0]["duration_seconds"] == 10.0
+    assert comparison_rows(retained.rows)[0]["duration_seconds_delta"] == 0.0
+    # Harbor's agent_result counters stand in for the unreadable trajectory totals.
+    assert retained.rows[0]["total_tokens"] == 210
+    assert any("cannot read trajectory" in warning for warning in retained.warnings)
+
+
 def test_retained_naive_timestamps_follow_canonical_timezone_policy(tmp_path: Path) -> None:
     run = tmp_path / "run"
     _native_run(run)
@@ -1091,8 +1105,13 @@ def test_native_usage_rejects_intermediate_directory_and_file_symlinks(tmp_path:
         pytest.skip("Symlinks are unavailable on this host")
     data = load_dashboard_path(run)
     row = next(row for row in data.rows if row["condition"] == "with_skill")
-    assert row["total_tokens"] is None
-    assert row["duration_seconds"] is None
+    if artifact == "trajectory.json":
+        # A skipped trajectory loses only its own totals; result.json still measures the trial.
+        assert row["total_tokens"] == 210
+        assert row["duration_seconds"] == 10
+    else:
+        assert row["total_tokens"] is None
+        assert row["duration_seconds"] is None
     assert any("symlink" in warning for warning in data.warnings)
 
 

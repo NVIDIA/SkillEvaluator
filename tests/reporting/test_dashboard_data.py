@@ -716,6 +716,59 @@ def test_directory_enumeration_stops_before_materializing_all_entries(tmp_path: 
     assert any("discovery limit" in warning for warning in data.warnings)
 
 
+def test_native_trial_bounds_mirror_report_data() -> None:
+    from skillevaluator.reporting import dashboard_data
+    from skillevaluator.tier3.harbor import report_data
+
+    assert dashboard_data._MAX_NATIVE_TRIALS == report_data._MAX_TRIALS_PER_CONDITION
+    assert dashboard_data._MAX_NATIVE_TRIAL_ENTRIES == report_data._MAX_TRIAL_PATHS_SCANNED
+
+
+def test_native_trial_discovery_limit_keeps_usage_unavailable(tmp_path: Path, monkeypatch) -> None:
+    from skillevaluator.reporting import dashboard_data
+
+    run = tmp_path / "run"
+    _native_run(run)
+    condition = run / "opencode" / "with-skill"
+    original = condition / "trials" / "case-a__random"
+    for index in (1, 2):
+        trial_dir = shutil.copytree(original, original.with_name(f"case-a__trial{index}"))
+        reward_path = trial_dir / "reward.json"
+        reward = json.loads(reward_path.read_text(encoding="utf-8"))
+        reward["trial_id"] = trial_dir.name
+        reward_path.write_text(json.dumps(reward), encoding="utf-8")
+    summary_path = condition / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary.update(num_trials=3, expected_attempts=3, scored_attempts=3)
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    # Within the bound all three trials are measured.
+    assert next(row for row in load_dashboard_path(run).rows if row["condition"] == "with_skill")["total_tokens"] == 630
+    monkeypatch.setattr(dashboard_data, "_MAX_NATIVE_TRIALS", 2)
+    data = load_dashboard_path(run)
+    row = next(row for row in data.rows if row["condition"] == "with_skill")
+    assert any("trial discovery limit reached; usage totals are unavailable." in warning for warning in data.warnings)
+    assert row["total_tokens"] is None
+    assert row["duration_seconds"] is None
+
+
+def test_local_json_over_limit_is_a_notice_and_other_reports_load(tmp_path: Path, monkeypatch) -> None:
+    from skillevaluator.reporting import dashboard_data
+
+    monkeypatch.setattr(dashboard_data, "_MAX_FILE_BYTES", 2048)
+    content = json.dumps(_report())
+    exact = tmp_path / "exact.json"
+    exact.write_text(content.ljust(2048), encoding="utf-8")
+    oversized = tmp_path / "oversized.json"
+    oversized.write_text(content.ljust(2049), encoding="utf-8")
+    assert (exact.stat().st_size, oversized.stat().st_size) == (2048, 2049)
+    assert len(load_dashboard_path(exact).rows) == 2
+    assert any("16 MiB" in warning for warning in load_dashboard_path(oversized).warnings)
+    data = load_dashboard_path(tmp_path)
+    assert {row["source"] for row in data.rows} == {str(exact.resolve())}
+    assert len(data.rows) == 2
+    assert any(str(oversized.resolve()) in warning and "16 MiB" in warning for warning in data.warnings)
+
+
 def test_directory_file_budget_counts_malformed_reports(tmp_path: Path, monkeypatch) -> None:
     from skillevaluator.reporting import dashboard_data
 
@@ -937,7 +990,9 @@ def test_native_duplicate_reward_rows_require_authoritative_step_scope(tmp_path:
         }
         result["step_results"] = [step, {**copy.deepcopy(step), "step_name": "finish"}]
         result_path.write_text(json.dumps(result), encoding="utf-8")
-    row = load_dashboard_path(run).rows[0]
+    data = load_dashboard_path(run)
+    assert not any("resource ownership is ambiguous" in warning for warning in data.warnings)
+    row = data.rows[0]
     assert row["score"] == 0.8
     assert row["total_tokens"] == 110
     assert row["duration_seconds"] == 20

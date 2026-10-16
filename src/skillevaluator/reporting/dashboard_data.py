@@ -30,6 +30,12 @@ _MAX_FILE_BYTES = 16 * 1024 * 1024
 _MAX_FILES = 1000
 _MAX_PATHS = 20_000
 _MAX_COUNT = 1_000_000  # far above report_data's 512-trial bound; larger values are malformed
+# Mirror report_data._MAX_TRIALS_PER_CONDITION / _MAX_TRIAL_PATHS_SCANNED so the
+# dashboard totals the same bounded trial population as the canonical loader.
+_MAX_NATIVE_TRIALS = 512
+_MAX_NATIVE_TRIAL_ENTRIES = 4096
+_CATALOG_LIMIT_NOTICE = "Dashboard catalog limit reached; some inputs were omitted."
+_DISCOVERY_LIMIT_NOTICE = "Dashboard discovery limit reached; some inputs were omitted."
 # Loader bounds on these artifacts drop only per-trial telemetry (tokens, steps).
 # Canonical trials then omit those counters, so coverage counts keep totals blank.
 _TELEMETRY_ARTIFACTS = frozenset({"trajectory"})
@@ -227,8 +233,7 @@ def _usage(trial: dict[str, Any]) -> dict[str, float | None]:
     }
 
 
-def _set_usage(row: dict[str, Any], usages: list[dict[str, Any]], expected: int | None = None) -> None:
-    expected = row["trials"] if expected is None else expected
+def _set_usage(row: dict[str, Any], usages: list[dict[str, Any]], *, expected: int) -> None:
     row["_usage_coverage"] = {}
     for metric in _USAGE:
         values = [_measurement(usage.get(metric)) for usage in usages]
@@ -440,7 +445,8 @@ def comparison_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _read_json(path: Path) -> Any:
-    if not stat.S_ISREG(path.stat().st_mode) or path.stat().st_size > _MAX_FILE_BYTES:
+    info = path.stat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_FILE_BYTES:
         raise ValueError("JSON must be a regular file no larger than 16 MiB")
     with path.open("rb") as stream:
         data = stream.read(_MAX_FILE_BYTES + 1)
@@ -565,7 +571,7 @@ def _load_native(path: Path) -> DashboardData:
             continue
         if trials_dir.is_dir():
             try:
-                trial_paths, truncated = _directory_entries(trials_dir, 4096)
+                trial_paths, truncated = _directory_entries(trials_dir, _MAX_NATIVE_TRIAL_ENTRIES)
                 trial_dirs = [
                     candidate for candidate in trial_paths if candidate.is_dir() and not candidate.is_symlink()
                 ]
@@ -573,11 +579,9 @@ def _load_native(path: Path) -> DashboardData:
                 output.warnings.append(f"{trials_dir}: cannot read retained trials: {exc}")
                 _set_usage(row, [], expected=row["_expected_usage_trials"])
                 continue
-            truncated |= len(trial_dirs) > 512
+            truncated |= len(trial_dirs) > _MAX_NATIVE_TRIALS
             loaded: list[tuple[Path, dict[str, Any] | None]] = []
-            for trial_dir in trial_dirs[:512]:
-                if not trial_dir.is_dir() or trial_dir.is_symlink():
-                    continue
+            for trial_dir in trial_dirs[:_MAX_NATIVE_TRIALS]:
                 try:
                     loaded.append((trial_dir, _dict(_read_native_json(trial_dir / "reward.json", path))))
                 except (OSError, ValueError, RecursionError) as exc:
@@ -610,12 +614,11 @@ def _load_native(path: Path) -> DashboardData:
                 usages_by_trial["__omitted_trials__"] = {}
                 row["_expected_usage_trials"] = max(row["_expected_usage_trials"], len(usages_by_trial))
         _set_usage(row, list(usages_by_trial.values()), expected=row["_expected_usage_trials"])
+    notice = _ambiguous_resource_notice(str(path))
     if not unresolved_scope:
-        output.warnings = [
-            warning for warning in output.warnings if "canonical multi-step resource ownership" not in warning
-        ]
-    elif not any("canonical multi-step resource ownership" in warning for warning in output.warnings):
-        output.warnings.append(_ambiguous_resource_notice(str(path)))
+        output.warnings = [warning for warning in output.warnings if warning != notice]
+    elif notice not in output.warnings:
+        output.warnings.append(notice)
     return output
 
 
@@ -629,7 +632,7 @@ def _load_report_file(
     if path in budget.seen:
         return DashboardData()
     if budget.files_remaining <= 0 or budget.references_remaining <= 0:
-        return DashboardData(warnings=["Dashboard catalog limit reached; some inputs were omitted."])
+        return DashboardData(warnings=[_CATALOG_LIMIT_NOTICE])
     budget.seen.add(path)
     budget.files_remaining -= 1
     if path.name == "result.json" and (path.parent / "run_config.json").is_file():
@@ -645,7 +648,7 @@ def _load_report_file(
         if not isinstance(report_dir, str) or not isinstance(report_name, str):
             continue
         if budget.files_remaining <= 0 or budget.references_remaining <= 0:
-            output.warnings.append("Dashboard catalog limit reached; some inputs were omitted.")
+            output.warnings.append(_CATALOG_LIMIT_NOTICE)
             break
         budget.references_remaining -= 1
         try:
@@ -658,7 +661,7 @@ def _load_report_file(
         output.rows.extend(report.rows)
         output.warnings.extend(report.warnings)
     if len(payload["skills"]) > _MAX_FILES:
-        output.warnings.append("Dashboard catalog limit reached; some inputs were omitted.")
+        output.warnings.append(_CATALOG_LIMIT_NOTICE)
     if not output.rows:
         output.warnings.extend(data.warnings)
     return output
@@ -696,7 +699,7 @@ def load_dashboard_path(path: Path) -> DashboardData:
     while pending:
         root = pending.pop()
         if visited >= _MAX_PATHS or files >= _MAX_FILES:
-            output.warnings.append("Dashboard discovery limit reached; some inputs were omitted.")
+            output.warnings.append(_DISCOVERY_LIMIT_NOTICE)
             break
         if (root / "result.json").is_file() and (root / "run_config.json").is_file():
             try:
@@ -714,7 +717,7 @@ def load_dashboard_path(path: Path) -> DashboardData:
             continue
         visited += len(entries)
         if truncated:
-            output.warnings.append("Dashboard discovery limit reached; some inputs were omitted.")
+            output.warnings.append(_DISCOVERY_LIMIT_NOTICE)
         subdirectories = []
         for entry in entries:
             if files >= _MAX_FILES:

@@ -177,6 +177,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
   <Accordion title="pii — PII, credentials, and local identifiers">
     `pii-scan`, and the `pii` check inside `validate`, use configurable regex patterns to detect sensitive values.
+    Instruction content in `.mdc` rules and workflow files is included, for both
+    direct file inputs and directory scans.
 
     | Group | Examples | Notes |
     | --- | --- | --- |
@@ -290,7 +292,21 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
   </Accordion>
 
   <Accordion title="dependency — CVE audit (opt-in)">
-    Scans `requirements*.txt` for known Python package vulnerabilities. When `pyproject.toml` is present, `pip-audit --local` audits the active Python environment rather than resolving the dependencies declared in that file. `pip-audit` is the primary scanner; Safety supplies secondary coverage for requirements files when installed separately. The audit may use network-backed vulnerability databases.
+    Scans `requirements*.txt` for known Python package vulnerabilities. For
+    `pyproject.toml`, reads static PEP 621 dependencies and every optional group,
+    then audits their exact version pins without installing the target or
+    executing its build scripts. This covers direct declarations only;
+    transitive dependencies require a resolved requirements file. Markers are
+    evaluated against the scanner's Python/platform and optional-group context;
+    nonmatching declarations are reported as skipped. Version ranges, URL/path
+    dependencies, dynamic or Poetry metadata, malformed declarations, and
+    missing or failed scanner evidence leave the audit `INCOMPLETE`. Supply
+    pinned `requirements.txt` for unresolved declarations. `pip-audit` is the
+    primary scanner; Safety supplies secondary coverage for requirements files
+    when installed separately. The audit may use network-backed vulnerability databases.
+    JSON and HTML export data retain `dependency_coverage` per target, including
+    requested and actually audited pins. Unreadable declarations have unknown
+    declaration counts and an empty audited inventory, not a completed scan.
 
     ```bash title="Opt-in dependency audit"
     skillevaluator validate ./my-skill --checks dependency

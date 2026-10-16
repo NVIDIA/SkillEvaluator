@@ -219,6 +219,10 @@ class JSONReporter(ReporterBase):
         }
 
         # Quality scores (from QualityScoreValidator)
+        coverage = result.metadata.get("dependency_coverage")
+        if isinstance(coverage, list):
+            data["dependency_coverage"] = coverage
+
         qs = result.metadata.get("quality_scores")
         if qs:
             data["quality"] = qs

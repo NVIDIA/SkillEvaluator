@@ -1264,6 +1264,14 @@ def _build_agent(
     trials = _normalize_trials(info.get("rewards") or [], with_metrics)
     baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], baseline_metrics)
     _attach_baseline_pairs(trials, baseline_trials, with_metrics)
+    from skillevaluator.tier3.harbor.resource_usage import resource_comparison
+
+    resources = resource_comparison(
+        trials,
+        baseline_trials,
+        with_complete=with_quality_available and info.get("rewards_complete") is True,
+        baseline_complete=baseline_quality_available and info.get("rewards_baseline_complete") is True,
+    )
 
     execution_errors = (
         [str(error) for error in info.get("execution_errors", [])]
@@ -1295,6 +1303,7 @@ def _build_agent(
         "num_trials_baseline": int(info.get("num_trials_baseline", len(baseline_trials)) or 0),
         "trials": trials,
         "trials_baseline": baseline_trials,
+        "resources": resources,
         "pass_at_k": {
             "with_skill": info.get("pass_with_skill") or {},
             "without_skill": info.get("pass_without_skill") or {},
@@ -1919,6 +1928,9 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
             "scores": scores,
             "overall": _complete_mean([overall_score(item) for item in group]) if group_is_consistent else None,
         }
+        seconds = _finite_float(reward.get("_agent_seconds"))
+        if not is_multi_row and seconds is not None and seconds >= 0:
+            trial["agent_seconds"] = seconds
         traj = reward.get("_traj")
         if not is_multi_row and isinstance(traj, dict):
             steps = _token_counter(traj.get("steps"))

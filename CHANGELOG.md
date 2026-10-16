@@ -88,6 +88,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 1 pyproject dependency audits now inspect static target declarations
+  rather than the evaluator environment. Exact direct pins (including optional
+  groups) are queried without installation or build-script execution;
+  unresolved declarations and invalid scanner evidence are incomplete.
+- Tier 1 PII scanning now includes `.mdc` rules and workflows.
+- Tier 3 negative-case accuracy excludes inapplicable skill identification and
+  records its scoring policy. Reports separately expose measured token and
+  agent execution-time differences with complete matching-arm coverage, while
+  efficiency continues to measure routing and productive tool use.
 - Omit unmeasured Tier 3 token usage from canonical JSON exports instead of
   reporting it as zero.
 - Keep dashboard comparisons unavailable for contradictory trial identities or

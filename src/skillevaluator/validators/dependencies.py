@@ -9,8 +9,16 @@ the PyPI Advisory Database, OSV, and PyUp.io Safety DB.
 
 from __future__ import annotations
 
+import json
+import tempfile
+import tomllib
 from pathlib import Path
 
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import Version
+
+from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 from skillevaluator.utils.tool_runner import Severity, Tools, cvss_to_severity, parse_json_output
 from skillevaluator.validators.base import ValidationResult, ValidatorBase
 
@@ -20,7 +28,9 @@ class DependencySecurityValidator(ValidatorBase):
 
     Uses pip-audit (primary) and Safety (secondary) to detect known
     security issues in Python dependencies from requirements.txt,
-    pyproject.toml, and setup.py files.
+    and static PEP 621 pyproject.toml declarations. Pyproject coverage is
+    limited to directly declared exact versions; transitive packages require
+    a separately supplied requirements file.
     """
 
     def __init__(self, use_safety: bool = True, fail_on_medium: bool = False):
@@ -43,11 +53,30 @@ class DependencySecurityValidator(ValidatorBase):
 
     def validate(self, skill_path: Path) -> ValidationResult:
         """Run dependency audit on skill(s) at path."""
-        return self._validate_folder_or_skill(
+        coverages = []
+
+        def audit_target(target: Path) -> ValidationResult:
+            result = self._validate_single_skill(target)
+            coverage = result.metadata.get("dependency_coverage")
+            if isinstance(coverage, dict):
+                relative_target = target.relative_to(skill_path).as_posix()
+                coverages.append({"target": relative_target, **coverage})
+                result.add_message(
+                    f"{relative_target}/pyproject.toml coverage: "
+                    f"{len(coverage['requested_pins'])} requested pin(s), "
+                    f"{len(coverage['audited_pins'])} audited pin(s); "
+                    "direct declarations only, transitive dependencies not audited"
+                )
+            return result
+
+        result = self._validate_folder_or_skill(
             skill_path,
-            self._validate_single_skill,
+            audit_target,
             action_description="Auditing dependencies for",
         )
+        if coverages:
+            result.metadata["dependency_coverage"] = coverages
+        return result
 
     def _validate_single_skill(self, skill_path: Path) -> ValidationResult:
         """Audit dependencies for a single skill directory."""
@@ -73,7 +102,9 @@ class DependencySecurityValidator(ValidatorBase):
         """Locate dependency files in skill directory."""
         return {
             "requirements": list(skill_path.glob("requirements*.txt")),
-            "pyproject": skill_path / "pyproject.toml" if (skill_path / "pyproject.toml").exists() else None,
+            "pyproject": skill_path / "pyproject.toml"
+            if (skill_path / "pyproject.toml").exists() or (skill_path / "pyproject.toml").is_symlink()
+            else None,
         }
 
     def _audit_requirements(self, req_file: Path) -> ValidationResult:
@@ -89,24 +120,172 @@ class DependencySecurityValidator(ValidatorBase):
         return result
 
     def _audit_pyproject(self, pyproject: Path) -> ValidationResult:
-        """Audit pyproject.toml dependencies via local environment."""
+        """Audit declared pins without installing the target or running build code."""
         result = ValidationResult()
-        result.add_message(f"Auditing {pyproject.name}")
-
-        if not Tools.pip_audit.is_available:
-            result.add_warning(f"pip-audit not installed. {Tools.pip_audit.get_install_hint()}")
-            return result
-
-        tool_result = Tools.pip_audit.run(
-            ["--local", "--format", "json", "--progress-spinner", "off"],
-            cwd=pyproject.parent,
-            timeout=180,
+        result.metadata["dependency_coverage"] = {
+            "source": "pyproject.toml",
+            "scope": "direct declared pins (all optional groups), scanner-platform markers",
+            "declarations": None,
+            "requested_pins": [],
+            "audited_pins": [],
+            "transitive_dependencies": "not audited",
+        }
+        result.add_message(
+            "Auditing pyproject.toml: direct declared pins, including optional groups; no transitive audit"
         )
 
-        if tool_result.error_message:
-            result.add_warning(tool_result.error_message)
+        def incomplete(message: str) -> None:
+            result.mark_scan_incomplete("pip-audit")
+            result.add_warning(f"pyproject.toml: {message}")
+
+        try:
+            with SecureRoot(pyproject.parent) as root:
+                raw, _ = root.read_bytes(Path(pyproject.name), 1024 * 1024)
+            data = tomllib.loads(raw.decode("utf-8"))
+        except (OSError, SecurePathError, UnicodeError, tomllib.TOMLDecodeError, RecursionError):
+            incomplete("cannot read a bounded regular TOML file")
+            return result
+
+        project = data.get("project")
+        if not isinstance(project, dict):
+            incomplete("no static PEP 621 project metadata; supply pinned requirements.txt")
+            return result
+        dynamic = project.get("dynamic", [])
+        if not isinstance(dynamic, list) or any(name in dynamic for name in ("dependencies", "optional-dependencies")):
+            incomplete("dynamic dependency metadata is unsupported; supply pinned requirements.txt")
+        tool = data.get("tool", {})
+        if isinstance(tool, dict) and "poetry" in tool:
+            incomplete("Poetry dependency metadata is not audited; supply pinned requirements.txt")
+
+        groups = {"dependencies": project.get("dependencies", [])}
+        optional = project.get("optional-dependencies", {})
+        if not isinstance(optional, dict):
+            incomplete("optional-dependencies must be a table of requirement lists")
         else:
+            groups.update({f"optional group {name}": values for name, values in optional.items()})
+        pins: set[str] = set()
+        declaration_count = 0
+        for group, declarations in groups.items():
+            if not isinstance(declarations, list):
+                incomplete(f"{group} must be a list")
+                continue
+            for index, declaration in enumerate(declarations):
+                declaration_count += 1
+                if declaration_count > 4096:
+                    incomplete("dependency declaration limit (4096) exceeded")
+                    return result
+                # Never include arbitrary declaration text (e.g. URL credentials) in diagnostics.
+                label = f"{group}, declaration {index + 1}"
+                try:
+                    if not isinstance(declaration, str) or "\n" in declaration or "\r" in declaration:
+                        raise InvalidRequirement("invalid declaration")
+                    requirement = Requirement(declaration)
+                except (InvalidRequirement, RecursionError):
+                    incomplete(f"{label}: invalid requirement")
+                    continue
+                if requirement.url:
+                    incomplete(f"{label}: URL/path dependencies are unsupported")
+                    continue
+                if requirement.marker:
+                    # Audit every optional group, evaluating `extra` in its group context.
+                    extra = group.removeprefix("optional group ") if group.startswith("optional group ") else ""
+                    try:
+                        # Unevaluable markers raise ValueError subclasses such as UndefinedComparison.
+                        marker_matches = requirement.marker.evaluate({"extra": extra})
+                    except (ValueError, RecursionError):
+                        incomplete(f"{label}: environment marker cannot be evaluated")
+                        continue
+                    if not marker_matches:
+                        result.add_message(f"pyproject.toml: {label} skipped (marker does not match scanner platform)")
+                        continue
+                specifiers = list(requirement.specifier)
+                if len(specifiers) != 1 or specifiers[0].operator != "==" or "*" in specifiers[0].version:
+                    incomplete(f"{label}: an exact version pin is required; supply resolved requirements.txt")
+                    continue
+                pins.add(f"{requirement.name}=={specifiers[0].version}")
+
+        result.metadata["dependency_coverage"].update(
+            {"declarations": declaration_count, "requested_pins": sorted(pins)}
+        )
+        if not pins:
+            result.add_message("pyproject.toml: no applicable exact pins to audit")
+            return result
+
+        if not Tools.pip_audit.is_available:
+            incomplete(f"pip-audit not installed. {Tools.pip_audit.get_install_hint()}")
+            return result
+
+        # pip-audit rejects a requirements file that names one package twice, and
+        # optional groups may pin different versions of one package. Audit each
+        # version of a package in its own batch so neither pin is dropped.
+        batches: list[list[str]] = []
+        batch_counts: dict[str, int] = {}
+        for pin in sorted(pins):
+            name = canonicalize_name(Requirement(pin).name)
+            index = batch_counts.get(name, 0)
+            batch_counts[name] = index + 1
+            if index == len(batches):
+                batches.append([])
+            batches[index].append(pin)
+
+        audited: list[str] = []
+        for batch in batches:
+            with tempfile.TemporaryDirectory(prefix="skillevaluator-dependencies-") as temporary_dir:
+                requirements = Path(temporary_dir) / "requirements.txt"
+                requirements.write_text("\n".join(batch) + "\n", encoding="utf-8")
+                tool_result = Tools.pip_audit.run(
+                    [
+                        "-r",
+                        str(requirements),
+                        "--no-deps",
+                        "--disable-pip",
+                        "--format",
+                        "json",
+                        "--progress-spinner",
+                        "off",
+                    ],
+                    timeout=180,
+                )
+
+            if tool_result.error_message or tool_result.exit_code not in (0, 1):
+                incomplete("pip-audit did not complete successfully")
+                return result
+            try:
+                audit = json.loads(tool_result.stdout)
+                dependencies = audit if isinstance(audit, list) else audit["dependencies"]
+                if not isinstance(dependencies, list):
+                    raise ValueError("invalid inventory")
+                returned_pins = set()
+                for dep in dependencies:
+                    if not isinstance(dep, dict) or not isinstance(dep.get("vulns"), list):
+                        raise ValueError("invalid dependency")
+                    returned_pins.add((canonicalize_name(dep["name"]), Version(dep["version"])))
+                    if any(
+                        not isinstance(vuln, dict)
+                        or not isinstance(vuln.get("id"), str)
+                        or not isinstance(vuln.get("fix_versions", []), list)
+                        or any(not isinstance(version, str) for version in vuln.get("fix_versions", []))
+                        or ("severity" in vuln and not isinstance(vuln["severity"], str))
+                        or not isinstance(vuln.get("aliases", []), list)
+                        or any(not isinstance(alias, str) for alias in vuln.get("aliases", []))
+                        for vuln in dep["vulns"]
+                    ):
+                        raise ValueError("invalid advisory")
+                expected_pins = {
+                    (canonicalize_name(requirement.name), Version(next(iter(requirement.specifier)).version))
+                    for pin in batch
+                    for requirement in [Requirement(pin)]
+                }
+                if returned_pins != expected_pins:
+                    raise ValueError("incomplete inventory")
+                if tool_result.exit_code == 1 and not any(dep["vulns"] for dep in dependencies):
+                    raise ValueError("unexpected finding exit")
+            except (KeyError, TypeError, ValueError, RecursionError):
+                incomplete("pip-audit returned incomplete or invalid target evidence")
+                return result
             self._process_pip_audit(tool_result.stdout, result, pyproject.name)
+            audited.extend(batch)
+            result.metadata["dependency_coverage"]["audited_pins"] = sorted(audited)
 
         return result
 

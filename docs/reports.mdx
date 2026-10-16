@@ -297,6 +297,16 @@ Lift requires both arms; if you ran with `--skip-baseline`, there is no lift to
 report. In `custom_only` grading, your own grader defines the score and lift —
 see [Custom Graders & Tasks](custom-graders.mdx).
 
+### Measured agent resources
+
+Each agent's canonical JSON payload contains a `resources` object. The HTML
+table shows total prompt plus completion tokens and agent execution seconds for
+each arm, telemetry coverage, and the with-skill-minus-baseline difference.
+Routing/tool-productivity efficiency remains a separate score. Missing counters
+and incomplete arms produce null totals or deltas (`N/A` in HTML). Resource
+deltas require matching case counts and complete measurements in both arms;
+they do not measure evaluator tokens, setup time, price, or statistical savings.
+
 ### pass@k
 
 pass@k is the reliability signal, reported separately from the dimension

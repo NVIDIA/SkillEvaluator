@@ -345,13 +345,18 @@ def test_zero_attempt_identity_and_conflicting_attempt_fields() -> None:
     assert comparison["score_delta"] is None
 
 
-def test_long_numeric_attempt_suffix_is_normalized_without_integer_conversion() -> None:
+def test_long_numeric_attempt_field_is_normalized_without_integer_conversion() -> None:
     report = _report()
     agent = report["agents"]["claude-code"]
-    for field in ("trials", "trials_baseline"):
-        agent[field][0]["trial_id"] = "case-a__attempt" + "9" * 5000
+    # Longer than int()'s default 4300-digit limit for decimal strings.
+    agent["trials"][0]["attempt"] = "0" * 10 + "9" * 5000
+    agent["trials_baseline"][0]["attempt"] = "9" * 5000
     comparison = comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]
     assert comparison["comparison_status"] == "comparable"
+    agent["trials_baseline"][0]["attempt"] = "9" * 4999 + "8"
+    comparison = comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]
+    assert comparison["comparison_status"] == "incomplete or mismatched coverage"
+    assert comparison["comparison_reason"] == "different cases or attempts"
 
 
 def test_zero_baseline_and_nonfinite_values() -> None:

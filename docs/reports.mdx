@@ -428,6 +428,13 @@ trial ID. A trajectory above the report loader's size bound leaves that trial's
 token counts unavailable in canonical JSON but does not block score comparisons;
 any other loader truncation keeps comparisons unavailable.
 
+The dashboard reads each input once and reuses it while you filter or switch
+views. Rewriting a JSON file passed on the command line, or adding an entry
+directly inside a directory input, is picked up on the next interaction. Edits
+deeper inside a directory input (for example a run that is still writing trials)
+or in reports a catalog references appear after **Reload reports** in the
+sidebar; a browser refresh does not re-read them.
+
 Missing measurements stay unavailable, and cost is shown only when recorded in
 USD. Canonical Tier 3 JSON records each single-step trial's agent execution time
 (`agent_seconds`) when Harbor's timestamps carry a timezone. Timestamps without a

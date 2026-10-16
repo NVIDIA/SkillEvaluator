@@ -16,8 +16,10 @@ pytest.importorskip("streamlit")
 # st.dataframe otherwise imports these inside AppTest's timed script thread.
 pytest.importorskip("pandas")
 pytest.importorskip("pyarrow")
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+from skillevaluator.reporting import dashboard_app
 from skillevaluator.reporting.dashboard_app import rows_csv
 
 # A ceiling for cold imports under xdist and coverage; passing runs finish far sooner.
@@ -78,6 +80,28 @@ def _app(paths: list[Path]) -> AppTest:
     return AppTest.from_string(script, default_timeout=_APP_TIMEOUT_SECONDS).run()
 
 
+def _upload_app() -> AppTest:
+    app = _app([])
+    if not hasattr(app, "file_uploader"):
+        pytest.skip("This Streamlit version's AppTest cannot drive st.file_uploader")
+    return app
+
+
+def _rewrite_score(path: Path, score: float) -> None:
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["agents"]["opencode"]["with_skill"] = score
+    report["agents"]["opencode"]["padding"] = "x" * 10  # change the size too, for coarse mtimes
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def _clear_dashboard_cache():
+    # Cached loads are process-wide, so keep each test's inputs isolated.
+    st.cache_data.clear()
+    yield
+    st.cache_data.clear()
+
+
 def test_empty_dashboard_has_upload_direction() -> None:
     app = _app([])
     assert not app.exception
@@ -105,6 +129,9 @@ def test_dashboard_renders_numeric_performance_and_paired_comparison(tmp_path: P
     assert all(not column.startswith("_") for column in performance.columns)
     assert json.loads(app.dataframe[0].proto.columns)["duration_seconds"]["label"] == "Agent time (s)"
     assert [metric.value for metric in app.metric] == ["1", "1", "2", "2"]
+    downloads = app.get("download_button")
+    assert len(downloads) == 2
+    assert all(button.proto.ignore_rerun for button in downloads)
 
 
 def test_dimension_filters_and_condition_retain_baseline_for_comparison(tmp_path: Path) -> None:
@@ -220,6 +247,102 @@ def test_cyclic_input_path_does_not_hide_valid_report(tmp_path: Path) -> None:
     assert not app.exception
     assert len(app.text) == 1
     assert str(loop) in app.text[0].value
+    assert len(app.dataframe[0].value) == 2
+
+
+def test_filter_reruns_do_not_reload_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[Path] = []
+    real = dashboard_app.load_dashboard_path
+
+    def counting(path: Path):
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(dashboard_app, "load_dashboard_path", counting)
+    path = _write_report(tmp_path / "run.json")
+    app = _app([path])
+    for value in (["model-a"], [], ["model-a"]):
+        app.multiselect(key="filter_model").set_value(value).run()
+        assert not app.exception
+    assert calls == [path.resolve()]
+
+
+def test_rewritten_report_file_is_reloaded_on_next_rerun(tmp_path: Path) -> None:
+    path = _write_report(tmp_path / "run.json")
+    app = _app([path])
+    assert app.dataframe[0].value["score"].tolist() == [0.9, 0.6]
+    _rewrite_score(path, 0.5)
+    app.run()
+    assert not app.exception
+    assert app.dataframe[0].value["score"].tolist() == [0.5, 0.6]
+
+
+def test_reload_button_rereads_nested_directory_edits(tmp_path: Path) -> None:
+    nested = tmp_path / "runs" / "a"
+    nested.mkdir(parents=True)
+    path = _write_report(nested / "run.json")
+    app = _app([tmp_path / "runs"])
+    assert app.dataframe[0].value["score"].tolist() == [0.9, 0.6]
+    _rewrite_score(path, 0.5)
+    app.button(key="reload_reports").click().run()
+    assert not app.exception
+    assert app.dataframe[0].value["score"].tolist() == [0.5, 0.6]
+
+
+def test_uploads_are_parsed_once_per_uploaded_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    real = dashboard_app.parse_dashboard_report
+
+    def counting(payload, source):
+        calls.append(source)
+        return real(payload, source)
+
+    monkeypatch.setattr(dashboard_app, "parse_dashboard_report", counting)
+    content = _write_report(tmp_path / "upload.json").read_bytes()
+    app = _upload_app()
+    app.file_uploader(key="report_uploads").set_value([("upload.json", content, "application/json")]).run()
+    assert len(app.dataframe[0].value) == 2
+    app.multiselect(key="filter_condition").set_value(["with_skill"]).run()
+    assert not app.exception
+    assert calls == ["upload:1:upload.json"]
+
+
+def test_uploaded_report_renders_with_upload_source(tmp_path: Path) -> None:
+    content = _write_report(tmp_path / "run.json").read_bytes()
+    app = _upload_app()
+    app.file_uploader(key="report_uploads").set_value(("run.json", content, "application/json")).run()
+    assert not app.exception
+    performance = app.dataframe[0].value
+    assert performance["source"].tolist() == ["upload:1:run.json", "upload:1:run.json"]
+    assert performance["total_tokens"].tolist() == [140.0, 120.0]
+
+
+def test_upload_batch_reports_oversize_and_invalid_and_keeps_valid(tmp_path: Path) -> None:
+    content = _write_report(tmp_path / "run.json").read_bytes()
+    oversized = content + b" " * (16_000_001 - len(content))
+    app = _upload_app()
+    app.file_uploader(key="report_uploads").set_value(
+        [
+            ("big.json", oversized, "application/json"),
+            ("broken.json", b"{", "application/json"),
+            ("deep.json", b"[" * 100_000, "application/json"),
+            ("run.json", content, "application/json"),
+        ]
+    ).run()
+    assert not app.exception
+    notices = [text.value for text in app.text]
+    assert any(notice.startswith("big.json: report exceeds 16 MB") for notice in notices), notices
+    assert sum("invalid JSON" in notice for notice in notices) == 2, notices
+    assert len(app.dataframe[0].value) == 2
+
+
+def test_upload_at_exact_limit_is_accepted(tmp_path: Path) -> None:
+    content = _write_report(tmp_path / "run.json").read_bytes()
+    exact = content + b" " * (16_000_000 - len(content))
+    assert len(exact) == 16_000_000
+    app = _upload_app()
+    app.file_uploader(key="report_uploads").set_value(("exact.json", exact, "application/json")).run()
+    assert not app.exception
     assert len(app.dataframe[0].value) == 2
 
 

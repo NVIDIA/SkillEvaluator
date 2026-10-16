@@ -19,10 +19,16 @@ from typing import Any
 
 import streamlit as st
 
-from skillevaluator.reporting.dashboard_data import comparison_rows, load_dashboard_path, parse_dashboard_report
+from skillevaluator.reporting.dashboard_data import (
+    DashboardData,
+    comparison_rows,
+    load_dashboard_path,
+    parse_dashboard_report,
+)
 
 _DIMENSIONS = ("skill", "model", "harness", "features")
 _MAX_UPLOAD_BYTES = 16_000_000
+_CACHE_ENTRIES = 64
 _CONDITION_NAMES = {"with_skill": "With skill", "without_skill": "Without skill", "adverse": "Adverse skill"}
 _USAGE_METRICS = ("total_tokens", "prompt_tokens", "completion_tokens", "cached_tokens", "duration_seconds", "cost_usd")
 _PERFORMANCE_COLUMNS = (
@@ -81,6 +87,31 @@ _COMPARISON_COLUMNS = (
     "run_id",
     "source",
 )
+
+
+def _input_fingerprint(path: Path) -> tuple[int, int, int] | None:
+    """Cheap identity for one CLI input; nested directory edits need Reload reports."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_mtime_ns, info.st_size, info.st_ino)
+
+
+@st.cache_data(max_entries=_CACHE_ENTRIES, show_spinner="Loading reports…")
+def _load_path_cached(path: str, fingerprint: tuple[int, int, int] | None) -> DashboardData:
+    return load_dashboard_path(Path(path))  # fingerprint is a cache key only
+
+
+# Keyed on file_id, which is stable while the file stays in the widget;
+# the leading underscore stops Streamlit hashing the uploaded bytes.
+@st.cache_data(max_entries=_CACHE_ENTRIES, show_spinner=False)
+def _parse_upload_cached(file_id: str, source: str, name: str, _contents: bytes) -> DashboardData:
+    try:
+        payload = json.loads(_contents)
+    except (ValueError, RecursionError):  # UnicodeError is a ValueError subclass
+        return DashboardData(warnings=[f"{name}: invalid JSON. Upload a UTF-8 JSON evaluation report."])
+    return parse_dashboard_report(payload, source=source)
 
 
 def rows_csv(rows: list[dict[str, Any]], columns: tuple[str, ...]) -> str:
@@ -186,6 +217,7 @@ def _show_performance(rows: list[dict[str, Any]]) -> None:
         file_name="skill-performance.csv",
         mime="text/csv",
         key="download_performance",
+        on_click="ignore",
     )
 
 
@@ -254,6 +286,7 @@ def _show_comparisons(rows: list[dict[str, Any]]) -> None:
         file_name="skill-comparison.csv",
         mime="text/csv",
         key="download_comparisons",
+        on_click="ignore",
     )
 
 
@@ -270,6 +303,10 @@ def main(paths: list[str] | None = None) -> None:
         help="Use Tier 3 JSON reports or consolidated SkillEvaluator JSON reports, up to 16 MB (16,000,000 bytes) per file.",
         key="report_uploads",
     )
+    if paths and st.sidebar.button(
+        "Reload reports", key="reload_reports", help="Re-read report files and run directories from disk."
+    ):
+        _load_path_cached.clear()
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
     seen_paths: set[Path] = set()
@@ -282,22 +319,18 @@ def main(paths: list[str] | None = None) -> None:
         if path in seen_paths:
             continue
         seen_paths.add(path)
-        data = load_dashboard_path(path)
+        data = _load_path_cached(str(path), _input_fingerprint(path))
         rows.extend(data.rows)
         warnings.extend(data.warnings)
     for index, uploaded in enumerate(uploads):
-        contents = uploaded.getvalue()
-        if len(contents) > _MAX_UPLOAD_BYTES:
+        if uploaded.size > _MAX_UPLOAD_BYTES:
             warnings.append(
                 f"{uploaded.name}: report exceeds 16 MB (16,000,000 bytes). Upload a smaller evaluation report."
             )
             continue
-        try:
-            payload = json.loads(contents)
-        except (ValueError, UnicodeError, RecursionError):
-            warnings.append(f"{uploaded.name}: invalid JSON. Upload a UTF-8 JSON evaluation report.")
-            continue
-        data = parse_dashboard_report(payload, source=f"upload:{index + 1}:{uploaded.name}")
+        data = _parse_upload_cached(
+            uploaded.file_id, f"upload:{index + 1}:{uploaded.name}", uploaded.name, uploaded.getvalue()
+        )
         rows.extend(data.rows)
         warnings.extend(data.warnings)
     if warnings:

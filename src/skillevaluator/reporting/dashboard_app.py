@@ -10,18 +10,27 @@ starting Streamlit. Only normalized quantitative data is displayed or exported.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
 import streamlit as st
 
-from skillevaluator.reporting.dashboard_data import comparison_rows, load_dashboard_path, parse_dashboard_report
+from skillevaluator.reporting.dashboard_data import (
+    DashboardData,
+    comparison_rows,
+    dedupe_rows,
+    load_dashboard_path,
+    parse_dashboard_report,
+)
 
 _DIMENSIONS = ("skill", "model", "harness", "features")
 _MAX_UPLOAD_BYTES = 16_000_000
+_CACHE_ENTRIES = 64
 _CONDITION_NAMES = {"with_skill": "With skill", "without_skill": "Without skill", "adverse": "Adverse skill"}
 _USAGE_METRICS = ("total_tokens", "prompt_tokens", "completion_tokens", "cached_tokens", "duration_seconds", "cost_usd")
 _PERFORMANCE_COLUMNS = (
@@ -30,6 +39,9 @@ _PERFORMANCE_COLUMNS = (
     "harness",
     "condition",
     "score",
+    "total_tokens_per_trial",
+    "duration_seconds_per_trial",
+    "cost_usd_per_trial",
     "total_tokens",
     "duration_seconds",
     "cost_usd",
@@ -56,6 +68,7 @@ _COMPARISON_COLUMNS = (
     "cost_usd_delta",
     "cost_usd_percent",
     "comparison_status",
+    "comparison_reason",
     "features",
     "coverage",
     "with_score",
@@ -82,6 +95,32 @@ _COMPARISON_COLUMNS = (
 )
 
 
+def _input_fingerprint(path: Path) -> tuple[int, int, int] | None:
+    """Cheap identity for one CLI input; nested directory edits need Reload reports."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_mtime_ns, info.st_size, info.st_ino)
+
+
+@st.cache_data(max_entries=_CACHE_ENTRIES, show_spinner="Loading reports…")
+def _load_path_cached(path: str, fingerprint: tuple[int, int, int] | None) -> DashboardData:
+    return load_dashboard_path(Path(path))  # fingerprint is a cache key only
+
+
+# Keyed on file_id, which is stable while the file stays in the widget;
+# the leading underscore stops Streamlit hashing the uploaded bytes.
+@st.cache_data(max_entries=_CACHE_ENTRIES, show_spinner=False)
+def _parse_upload_cached(file_id: str, source: str, name: str, _contents: bytes) -> tuple[str, DashboardData]:
+    digest = hashlib.sha256(_contents).hexdigest()
+    try:
+        payload = json.loads(_contents)
+    except (ValueError, RecursionError):  # UnicodeError is a ValueError subclass
+        return digest, DashboardData(warnings=[f"{name}: invalid JSON. Upload a UTF-8 JSON evaluation report."])
+    return digest, parse_dashboard_report(payload, source=source)
+
+
 def rows_csv(rows: list[dict[str, Any]], columns: tuple[str, ...]) -> str:
     """Export visible quantitative columns with spreadsheet-safe text cells."""
     buffer = io.StringIO(newline="")
@@ -91,10 +130,11 @@ def rows_csv(rows: list[dict[str, Any]], columns: tuple[str, ...]) -> str:
         cells: dict[str, Any] = {}
         for column in columns:
             value = row.get(column)
-            if isinstance(value, str) and (
-                value.startswith(("\t", "\r", "\n")) or value.lstrip().startswith(("=", "+", "-", "@"))
-            ):
-                value = "'" + value
+            if isinstance(value, str):
+                # NFKC folds full-width prefixes such as U+FF1D to their ASCII forms.
+                probe = unicodedata.normalize("NFKC", value).lstrip()
+                if value.startswith(("\t", "\r", "\n")) or probe.startswith(("=", "+", "-", "@")):
+                    value = "'" + value
             cells[column] = value
         writer.writerow(cells)
     return buffer.getvalue()
@@ -120,7 +160,12 @@ def _performance_column_config() -> dict[str, Any]:
         "condition": st.column_config.TextColumn("Condition"),
         "score": st.column_config.NumberColumn("Score", format="%.3f", width="small"),
         "pass_rate": st.column_config.NumberColumn("Pass rate", format="percent", width="small"),
-        "duration_seconds": st.column_config.NumberColumn("Duration (s)", format="%.2f", width="small"),
+        "total_tokens_per_trial": st.column_config.NumberColumn("Tokens / trial", format="%.1f", width="small"),
+        "duration_seconds_per_trial": st.column_config.NumberColumn(
+            "Agent time / trial (s)", format="%.2f", width="small"
+        ),
+        "cost_usd_per_trial": st.column_config.NumberColumn("Cost / trial (USD)", format="$%.4f", width="small"),
+        "duration_seconds": st.column_config.NumberColumn("Agent time (s)", format="%.2f", width="small"),
         "cost_usd": st.column_config.NumberColumn("Cost (USD)", format="$%.4f", width="small"),
         "status": st.column_config.TextColumn("Status"),
         "trials": st.column_config.NumberColumn("Trials", format="%d"),
@@ -139,8 +184,10 @@ def _comparison_column_config(columns: tuple[str, ...]) -> dict[str, Any]:
         "score_delta": "Score Δ",
         "total_tokens_delta": "Tokens Δ",
         "total_tokens_percent": "Tokens Δ (%)",
-        "duration_seconds_delta": "Time Δ (s)",
-        "duration_seconds_percent": "Time Δ (%)",
+        "duration_seconds_delta": "Agent time Δ (s)",
+        "duration_seconds_percent": "Agent time Δ (%)",
+        "with_duration_seconds": "With skill: agent time (s)",
+        "without_duration_seconds": "Without skill: agent time (s)",
         "cost_usd_delta": "Cost Δ (USD)",
         "cost_usd_percent": "Cost Δ (%)",
     }
@@ -182,10 +229,14 @@ def _show_performance(rows: list[dict[str, Any]]) -> None:
         file_name="skill-performance.csv",
         mime="text/csv",
         key="download_performance",
+        on_click="ignore",
     )
 
 
 def _show_comparisons(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        st.info("No rows match these filters. Clear a filter to include more results.")
+        return
     comparisons = comparison_rows(rows)
     st.caption("Conditions are paired within each run, skill, model, harness, and feature configuration.")
     if not comparisons:
@@ -197,7 +248,7 @@ def _show_comparisons(rows: list[dict[str, Any]]) -> None:
         key="comparison_metrics",
     )
     identity = ("skill", "model", "harness")
-    details = ("comparison_status", "features", "coverage", "run_id", "source")
+    details = ("comparison_status", "comparison_reason", "features", "coverage", "run_id", "source")
     metric_sets = {
         "Overview": (
             "score_delta",
@@ -232,6 +283,8 @@ def _show_comparisons(rows: list[dict[str, Any]]) -> None:
     }
     columns = (*identity, *metric_sets[view], *details) if view in metric_sets else _COMPARISON_COLUMNS
     visible = [{column: row.get(column) for column in columns} for row in comparisons]
+    if not any(row["comparison_status"] == "comparable" for row in comparisons):
+        st.info("No pair is comparable. The Comparison reason column explains why.")
     st.dataframe(
         visible,
         column_order=columns,
@@ -250,6 +303,7 @@ def _show_comparisons(rows: list[dict[str, Any]]) -> None:
         file_name="skill-comparison.csv",
         mime="text/csv",
         key="download_comparisons",
+        on_click="ignore",
     )
 
 
@@ -257,7 +311,7 @@ def main(paths: list[str] | None = None) -> None:
     """Render the app, accepting CLI paths or a supplied path list for embedding."""
     st.set_page_config(page_title="Skill performance · SkillEvaluator", page_icon="▦", layout="wide")
     st.title("Skill performance")
-    st.caption("SKILLEVALUATOR · Compare agent quality, tokens, duration, and cost across evaluation runs.")
+    st.caption("SKILLEVALUATOR · Compare agent quality, tokens, agent time, and cost across evaluation runs.")
     st.sidebar.header("Reports")
     uploads = st.sidebar.file_uploader(
         "Upload JSON reports",
@@ -266,9 +320,14 @@ def main(paths: list[str] | None = None) -> None:
         help="Use Tier 3 JSON reports or consolidated SkillEvaluator JSON reports, up to 16 MB (16,000,000 bytes) per file.",
         key="report_uploads",
     )
+    if paths and st.sidebar.button(
+        "Reload reports", key="reload_reports", help="Re-read report files and run directories from disk."
+    ):
+        _load_path_cached.clear()
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
     seen_paths: set[Path] = set()
+    inputs: list[Path] = []
     for supplied_path in paths or []:
         try:
             path = Path(supplied_path).expanduser().resolve()
@@ -278,26 +337,44 @@ def main(paths: list[str] | None = None) -> None:
         if path in seen_paths:
             continue
         seen_paths.add(path)
-        data = load_dashboard_path(path)
-        rows.extend(data.rows)
-        warnings.extend(data.warnings)
-    for index, uploaded in enumerate(uploads):
-        contents = uploaded.getvalue()
-        if len(contents) > _MAX_UPLOAD_BYTES:
-            warnings.append(f"{uploaded.name}: report exceeds 16 MB (16,000,000 bytes). Upload a smaller evaluation report.")
-            continue
+        inputs.append(path)
+    # A directory's fingerprint misses in-place rewrites of files inside it, so load
+    # deeper inputs first and let dedupe_rows keep their fresher copy of shared rows.
+    for path in sorted(inputs, key=lambda item: len(item.parts), reverse=True):
         try:
-            payload = json.loads(contents)
-        except (ValueError, UnicodeError, RecursionError):
-            warnings.append(f"{uploaded.name}: invalid JSON. Upload a UTF-8 JSON evaluation report.")
+            data = _load_path_cached(str(path), _input_fingerprint(path))
+        except Exception as exc:  # one unreadable input must not hide the others
+            warnings.append(f"{path}: cannot load dashboard input: {exc}")
             continue
-        data = parse_dashboard_report(payload, source=f"upload:{index + 1}:{uploaded.name}")
         rows.extend(data.rows)
         warnings.extend(data.warnings)
+    seen_uploads: set[str] = set()
+    for index, uploaded in enumerate(uploads):
+        if uploaded.size > _MAX_UPLOAD_BYTES:
+            warnings.append(
+                f"{uploaded.name}: report exceeds 16 MB (16,000,000 bytes). Upload a smaller evaluation report."
+            )
+            continue
+        digest, data = _parse_upload_cached(
+            uploaded.file_id, f"upload:{index + 1}:{uploaded.name}", uploaded.name, uploaded.getvalue()
+        )
+        if digest in seen_uploads:
+            warnings.append(f"{uploaded.name}: identical to an earlier upload; skipped.")
+            continue
+        seen_uploads.add(digest)
+        rows.extend(data.rows)
+        warnings.extend(data.warnings)
+    # Overlapping CLI paths (a directory and a run inside it) reload rows under the same source.
+    rows, duplicate_count = dedupe_rows(rows)
+    if duplicate_count:
+        plural = "s" if duplicate_count != 1 else ""
+        warnings.append(f"Overlapping inputs: {duplicate_count} duplicate condition row{plural} loaded once.")
     if warnings:
-        with st.expander(f"Report notices ({len(warnings)})", expanded=True):
-            for warning in dict.fromkeys(warnings):
-                st.warning(warning)
+        notices = list(dict.fromkeys(warnings))
+        with st.expander(f"Report notices ({len(notices)})", expanded=True):
+            st.warning("Some inputs were skipped or have incomplete measurements.")
+            for notice in notices:
+                st.text(notice)  # st.text parses neither Markdown nor HTML
     if not rows:
         st.info("Upload JSON evaluation reports to start comparing results.")
         st.caption("You can also open saved run directories with skillevaluator dashboard PATH [PATH …].")
@@ -308,9 +385,9 @@ def main(paths: list[str] | None = None) -> None:
     dimension_rows = rows
     for field in _DIMENSIONS:
         dimension_rows = _filter_rows(dimension_rows, field, rows)
-    dimension_rows = _filter_rows(dimension_rows, "status", rows)
-    performance_rows = _filter_rows(dimension_rows, "condition", rows)
-    st.sidebar.caption("The condition filter applies to performance. Comparisons retain both conditions.")
+    performance_rows = _filter_rows(dimension_rows, "status", rows)
+    performance_rows = _filter_rows(performance_rows, "condition", rows)
+    st.sidebar.caption("Status and condition filters apply to performance. Comparisons retain both conditions.")
 
     run_count = len({(row["source"], row["run_id"]) for row in performance_rows})
     skill_count = len({row["skill"] for row in performance_rows})
@@ -320,7 +397,15 @@ def main(paths: list[str] | None = None) -> None:
     summary[1].metric("Skills", skill_count)
     summary[2].metric("Condition rows", len(performance_rows))
     summary[3].metric("Scored rows", scored_count)
-    st.caption("Blank cells mean a measurement is missing, incomplete, or ambiguous. Unknown settings remain labeled unknown.")
+    st.caption(
+        "Blank cells mean a measurement is missing, incomplete, or ambiguous. Unknown settings remain labeled unknown."
+    )
+    # Evaluator commands do not write harness features; "none (recorded)" counts as recorded.
+    if all(row.get("features") == "unknown" for row in rows):
+        st.caption(
+            "No harness features are recorded in these reports. Add dashboard_metadata.harness_features to compare "
+            "feature configurations; see Recorded harness features in the reports guide."
+        )
     performance_tab, comparison_tab = st.tabs(["Performance", "With vs without skill"])
     with performance_tab:
         _show_performance(performance_rows)

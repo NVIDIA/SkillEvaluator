@@ -3056,9 +3056,14 @@ def models_command(limit: int, as_json: bool) -> None:
 
 @cli.command("dashboard")
 @click.argument("paths", nargs=-1, type=click.Path(exists=True, path_type=Path))
-@click.option("--port", type=click.IntRange(1, 65535), default=8501, show_default=True)
+@click.option(
+    "--port",
+    type=click.IntRange(1, 65535),
+    default=None,
+    help="Local port on 127.0.0.1 (default 8501, or the next free port).",
+)
 @click.option("--no-browser", is_flag=True, help="Start the server without opening a browser.")
-def dashboard_command(paths: tuple[Path, ...], port: int, no_browser: bool) -> None:
+def dashboard_command(paths: tuple[Path, ...], port: int | None, no_browser: bool) -> None:
     """Compare saved JSON reports or retained Tier 3 run directories in tables.
 
     Install skillevaluator[dashboard] first. With no PATHS, upload JSON reports

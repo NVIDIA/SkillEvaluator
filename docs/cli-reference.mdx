@@ -504,9 +504,10 @@ skillevaluator compare ./my-skill
 
 ## dashboard
 
-Open the optional local tables dashboard. Install `skillevaluator[dashboard]`
-first, then pass JSON reports, retained run directories, or directories containing
-reports. With no paths, upload JSON files in the browser.
+Open the optional local tables dashboard. Install the
+[`dashboard` extra](installation.mdx#choosing-extras) first, then pass JSON
+reports, retained run directories, or directories containing reports. With no
+paths, upload JSON files in the browser.
 
 ```bash
 skillevaluator dashboard reports/run-a.json reports/run-b.json
@@ -515,7 +516,7 @@ skillevaluator dashboard --no-browser --port 8502
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--port` | `8501` | Local server port, from 1 through 65535. |
+| `--port` | `8501`, or the next free port | Local port on 127.0.0.1, from 1 through 65535. Pass it to require a specific port; the command fails if that port is busy. |
 | `--no-browser` | off | Start the server without opening a browser. |
 
 The server listens on `127.0.0.1`; Ctrl+C stops it. See the

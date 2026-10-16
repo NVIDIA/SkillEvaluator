@@ -79,7 +79,8 @@ security = [
 ]
 # Optional local UI for comparing saved reports; never imported by base commands.
 dashboard = [
-    "streamlit>=1.49,<2",
+    # server.allowedHosts, which limits the dashboard to loopback host names, needs 1.61.
+    "streamlit>=1.61,<2",
 ]
 # Full public install convenience bundle.
 all = [

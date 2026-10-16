@@ -2183,7 +2183,7 @@ requires-dist = [
     { name = "skillevaluator", extras = ["llm"], marker = "extra == 'tier2'" },
     { name = "skillevaluator", extras = ["llm"], marker = "extra == 'tier3'" },
     { name = "skillevaluator", extras = ["tier2", "tier3", "security"], marker = "extra == 'all'" },
-    { name = "streamlit", marker = "extra == 'dashboard'", specifier = ">=1.49,<2" },
+    { name = "streamlit", marker = "extra == 'dashboard'", specifier = ">=1.61,<2" },
 ]
 provides-extras = ["llm", "tier2", "tier3", "security", "dashboard", "all", "dev"]
 

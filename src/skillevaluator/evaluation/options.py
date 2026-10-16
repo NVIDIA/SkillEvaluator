@@ -62,6 +62,7 @@ class EvaluationOptions:
     override_cpus: int | None = None
     override_memory_mb: int | None = None
     override_storage_mb: int | None = None
+    repo_context_exclude_paths: tuple[Path, ...] = ()
     environment_kwarg: tuple[str, ...] = ()
     # Supplied by the orchestration input, never inferred from repository state:
     # the tree that runs the evaluator is not the tree being evaluated.

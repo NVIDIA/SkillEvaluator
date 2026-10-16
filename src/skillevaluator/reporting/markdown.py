@@ -15,7 +15,9 @@ The output is optimized for readability in code review contexts.
 from __future__ import annotations
 
 import html
+import math
 import re
+import unicodedata
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -23,14 +25,17 @@ from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.reporting.base import (
     ReporterBase,
     additional_errors,
+    assess_publication,
+    get_skip_reason,
     is_advisory_agent_eval_skip,
+    select_agent_eval_payload,
 )
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     normalize_harbor_viewer_for_display,
     safe_url,
 )
-from skillevaluator.reporting.plugin_sections import format_score, tier3_plugin_view
+from skillevaluator.reporting.plugin_sections import tier3_plugin_view
 from skillevaluator.reporting.run_status import RunStatus, Status, resolve_run_status
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
@@ -49,6 +54,21 @@ if TYPE_CHECKING:
 _MARKDOWN_INLINE_SPECIAL = re.compile(r"\\(?=[!-/:-@\[-`{-~])|[*~]|(?<=\])[\[(]|(?<![^\W_])_|_(?![^\W_])")
 
 
+_SKIP_REASON_MAX_CHARS = 1024
+
+
+def _markdown_safe_characters(value: str, *, preserve_newlines: bool = False) -> str:
+    """Remove control and separator characters from untrusted Markdown text."""
+    safe: list[str] = []
+    for character in value.replace("\r\n", "\n").replace("\r", "\n"):
+        category = unicodedata.category(character)
+        if category.startswith("C") or category in {"Zl", "Zp"}:
+            safe.append("\n" if preserve_newlines and character == "\n" else " ")
+        else:
+            safe.append(character)
+    return "".join(safe)
+
+
 def _markdown_table_cell(value: object) -> str:
     """Return untrusted text as inert Markdown that fits in one table cell.
 
@@ -58,7 +78,7 @@ def _markdown_table_cell(value: object) -> str:
     Markdown shows backslash escapes and entities literally inside a backtick
     code span, so never wrap it in backticks.
     """
-    normalized = strip_terminal_controls(str(value)).replace("\r\n", "\n").replace("\r", "\n")
+    normalized = _markdown_safe_characters(strip_terminal_controls(str(value)), preserve_newlines=True)
     escaped = html.escape(normalized, quote=False)
     escaped = _MARKDOWN_INLINE_SPECIAL.sub(lambda match: "\\" + match.group(0), escaped)
     return escaped.replace("|", "&#124;").replace("`", "&#96;").replace("\n", "<br>")
@@ -71,6 +91,88 @@ def _markdown_output(text: str) -> str:
     terminal escape sequences (which run when someone prints the file).
     """
     return strip_terminal_controls(text)
+
+
+def _finite_report_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _format_report_number(value: object, *, signed: bool = False) -> str:
+    number = _finite_report_number(value)
+    if number is None:
+        return "N/A"
+    return f"{number:+.2f}" if signed else f"{number:.2f}"
+
+
+def _markdown_inline_text(value: object, *, limit: int | None = None) -> str:
+    """Flatten untrusted metadata into one inert Markdown text fragment."""
+    if isinstance(value, str):
+        text = value
+    elif (
+        isinstance(value, bool)
+        or (isinstance(value, int) and value.bit_length() <= 256)
+        or (isinstance(value, float) and math.isfinite(value))
+    ):
+        text = str(value)
+    else:
+        return ""
+    flattened = " ".join(_markdown_safe_characters(text).split())
+    if limit is not None:
+        flattened = flattened[:limit]
+    escaped = html.escape(flattened, quote=False)
+    for character, entity in (
+        ("#", "&#35;"),
+        ("\\", "&#92;"),
+        ("`", "&#96;"),
+        ("*", "&#42;"),
+        ("_", "&#95;"),
+        ("[", "&#91;"),
+        ("]", "&#93;"),
+        ("@", "&#64;"),
+    ):
+        escaped = escaped.replace(character, entity)
+    return escaped
+
+
+def _markdown_code_text(value: object, *, limit: int | None = None) -> str:
+    """Flatten untrusted metadata for a code span without obscuring paths."""
+    if not isinstance(value, str):
+        return ""
+    flattened = " ".join(_markdown_safe_characters(value).split())
+    if limit is not None:
+        flattened = flattened[:limit]
+    return html.escape(flattened, quote=False).replace("`", "&#96;")
+
+
+def _mapping(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _dict_items(value: object) -> list[dict]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _markdown_untrusted_table_cell(value: object, *, limit: int | None = None) -> str:
+    """Return one inert table cell without double-escaping HTML entities."""
+    return _markdown_inline_text(value, limit=limit).replace("|", "&#124;")
+
+
+def _markdown_safe_url(value: object) -> str | None:
+    """Return an HTTP(S) URL that cannot terminate a Markdown destination."""
+    url = safe_url(value)
+    if url is None:
+        return None
+    if any(character.isspace() or unicodedata.category(character).startswith("C") for character in url):
+        return None
+    if any(character in "()<>" for character in url):
+        return None
+    return url
 
 
 def _related_paths(finding: Finding) -> list[str]:
@@ -638,6 +740,7 @@ class MarkdownReporter(ReporterBase):
         include_timestamp: bool = True,
         include_details: bool = True,
         max_findings_shown: int = 10,
+        expected_skill_name: str | None = None,
     ) -> None:
         """Initialize Markdown reporter.
 
@@ -649,6 +752,7 @@ class MarkdownReporter(ReporterBase):
         self.include_timestamp = include_timestamp
         self.include_details = include_details
         self.max_findings_shown = max_findings_shown
+        self.expected_skill_name = expected_skill_name
 
     @property
     def name(self) -> str:
@@ -674,9 +778,18 @@ class MarkdownReporter(ReporterBase):
 
         # Overall status: the headline every report gives, and why.
         status = resolve_run_status(results)
+        advisory_skip_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
         lines.append(f"**Status:** {_HEADLINE_MARKERS[status.headline]}")
         if status.reasons:
             lines.append(f"**Reasons:** {'; '.join(_markdown_table_cell(reason) for reason in status.reasons)}")
+        publication = assess_publication(results, expected_skill_name=self.expected_skill_name)
+        publication_label = {
+            "pass": "✅ PASS",
+            "fail": "❌ FAIL",
+            "neutral": "⚠️ NEUTRAL",
+            "incomplete": "⚠️ INCOMPLETE",
+        }.get(publication.status, publication.status.upper())
+        lines.append(f"**Publication status:** {publication_label}")
 
         policy = next(
             (result.metadata.get("policy") for result in results if isinstance(result.metadata.get("policy"), dict)),
@@ -699,12 +812,15 @@ class MarkdownReporter(ReporterBase):
         lines.append("|--------|-------|")
         rows = [status.of(r) for r in results]
         lines.append(f"| Validator Results | {len(results)} |")
+        lines.append(f"| Validators Run | {len(results) - rows.count(Status.SKIPPED)} |")
         lines.append(f"| ✅ Passed | {rows.count(Status.PASSED)} |")
         lines.append(f"| ❌ Failed | {rows.count(Status.FAILED)} |")
         lines.append(f"| ⚠️ Incomplete | {rows.count(Status.INCOMPLETE)} |")
         if rows.count(Status.SKIPPED):
             # A skipped check did not run, so it is neither passed nor failed.
             lines.append(f"| ⏭️ Skipped | {rows.count(Status.SKIPPED)} |")
+        if advisory_skip_count:
+            lines.append(f"| ⏭️ Advisory skips | {advisory_skip_count} |")
 
         total_errors = sum(r.summary.errors for r in results)
         total_warnings = sum(r.summary.warnings for r in results)
@@ -753,24 +869,29 @@ class MarkdownReporter(ReporterBase):
             lines.append("")
 
         # Tier 3: Agent Evaluation summary (if present)
-        tier3_results = [r for r in results if r.metadata.get("agent_eval")]
-        if tier3_results:
-            ae = tier3_results[0].metadata["agent_eval"]
+        ae = publication.tier3.payload or select_agent_eval_payload(results)
+        if ae:
             # The Tier 3 status, not the raw verdict: a partial run is INCOMPLETE and a skipped one SKIPPED.
+            # The publication evidence check can only make a completed run's status more conservative.
             verdict = status.tiers[3].status.verdict
+            evidence_verdict = publication.tier3.status.upper()
+            if verdict in {"PASS", "NEUTRAL"} and evidence_verdict in {"INCOMPLETE", "FAIL"}:
+                verdict = evidence_verdict
             composite = ae.get("composite_lift")
             runtime = ae.get("runtime_seconds", 0.0)
 
             lines.append("## Tier 3: Agent Evaluation")
             lines.append("")
-            composite_text = f"{composite:+.2f}" if isinstance(composite, int | float) else "N/A"
+            composite_text = _format_report_number(composite, signed=True)
             lines.append(f"**Verdict:** {verdict} (composite lift = {composite_text})")
-            lines.append(f"**Runtime:** {runtime:.1f}s")
+            runtime_number = _finite_report_number(runtime)
+            runtime_text = f"{runtime_number:.1f}s" if runtime_number is not None else "N/A"
+            lines.append(f"**Runtime:** {runtime_text}")
             harbor_viewer = normalize_harbor_viewer_for_display(ae)
-            if harbor_viewer.get("job_url"):
-                lines.append(f"**Harbor logs:** [Open Harbor logs]({harbor_viewer['job_url']})")
-            if harbor_viewer.get("analysis_url"):
-                lines.append(f"**Harbor analysis:** [Open Harbor analysis]({harbor_viewer['analysis_url']})")
+            if job_url := _markdown_safe_url(harbor_viewer.get("job_url")):
+                lines.append(f"**Harbor logs:** [Open Harbor logs]({job_url})")
+            if analysis_url := _markdown_safe_url(harbor_viewer.get("analysis_url")):
+                lines.append(f"**Harbor analysis:** [Open Harbor analysis]({analysis_url})")
             lines.append("")
 
             tier3_plugin = tier3_plugin_view(ae)
@@ -778,73 +899,84 @@ class MarkdownReporter(ReporterBase):
                 self._render_tier3_plugin(tier3_plugin, lines)
 
             evaluators = ae.get("evaluators", {})
-            if evaluators:
+            if isinstance(evaluators, dict) and evaluators:
                 lines.append("### Evaluator Scores")
                 lines.append("")
                 lines.append("| Evaluator | With Skill | Baseline | Lift |")
                 lines.append("|-----------|-----------|----------|------|")
                 for name, scores in evaluators.items():
-                    scores = scores if isinstance(scores, dict) else {}
-                    label = _markdown_table_cell(str(name).replace("_", " ").title())
-                    ws = format_score(scores.get("with_skill"), ".2f")
-                    bl = format_score(scores.get("baseline"), ".2f")
-                    lift = format_score(scores.get("lift"), "+.2f")
-                    lines.append(f"| {label} | {ws} | {bl} | {lift} |")
+                    if not isinstance(name, str) or not isinstance(scores, dict):
+                        continue
+                    ws = scores.get("with_skill", 0.0)
+                    bl = scores.get("baseline", 0.0)
+                    lift = scores.get("lift", 0.0)
+                    lines.append(
+                        f"| {_markdown_untrusted_table_cell(name.replace('_', ' ').title())} "
+                        f"| {_format_report_number(ws)} | "
+                        f"{_format_report_number(bl)} | {_format_report_number(lift, signed=True)} |"
+                    )
                 lines.append("")
 
-            insights = ae.get("insights", {})
-            if any(v.get("score") is not None for v in insights.values()):
+            insights = _mapping(ae.get("insights"))
+            insight_rows = [
+                (dimension, info)
+                for dimension, info in insights.items()
+                if isinstance(dimension, str) and isinstance(info, dict) and info.get("score") is not None
+            ]
+            if insight_rows:
                 lines.append("### LLM-as-Judge Insights")
                 lines.append("")
                 lines.append("| Dimension | Score | Explanation |")
                 lines.append("|-----------|-------|-------------|")
-                for dim, info in insights.items():
+                for dim, info in insight_rows:
                     score = info.get("score")
                     if score is None:
                         continue
-                    score_str = str(score).upper() if isinstance(score, str) else f"{score:.2f}"
-                    explanation = _markdown_table_cell(str(info.get("explanation") or "")[:60])
-                    label = _markdown_table_cell(str(dim).title())
-                    lines.append(f"| {label} | {_markdown_table_cell(score_str)} | {explanation} |")
+                    score_number = _finite_report_number(score)
+                    score_str = (
+                        f"{score_number:.2f}"
+                        if score_number is not None
+                        else _markdown_inline_text(score, limit=32).upper() or "N/A"
+                    )
+                    explanation = _markdown_untrusted_table_cell(info.get("explanation"), limit=60)
+                    lines.append(f"| {_markdown_untrusted_table_cell(dim.title())} | {score_str} | {explanation} |")
                 lines.append("")
 
-            suggestions_v2 = ae.get("suggestions_v2") or []
+            suggestions_v2 = _dict_items(ae.get("suggestions_v2"))
             if suggestions_v2:
                 lines.append("### Evidence-Backed Suggestions")
                 lines.append("")
                 for idx, suggestion in enumerate(suggestions_v2, start=1):
-                    recommendation = str(suggestion.get("recommendation") or "").strip()
+                    recommendation = _markdown_inline_text(suggestion.get("recommendation"))
                     if not recommendation:
                         continue
-                    metric = _markdown_table_cell(suggestion.get("metric", "unknown"))
-                    lines.append(f"{idx}. **{metric}**: {_markdown_table_cell(recommendation)}")
+                    metric = _markdown_inline_text(suggestion.get("metric")) or "unknown"
+                    lines.append(f"{idx}. **{metric}**: {recommendation}")
                     harbor_evidence = suggestion.get("harbor_evidence") or suggestion.get("evidence")
                     if isinstance(harbor_evidence, dict):
-                        url = safe_url(harbor_evidence.get("url"))
+                        url = _markdown_safe_url(harbor_evidence.get("url"))
                         if url:
-                            label = _markdown_table_cell(harbor_evidence_link_text(harbor_evidence))
+                            label = _markdown_inline_text(harbor_evidence_link_text(harbor_evidence)) or "Evidence"
                             lines.append(f"   - Evidence: [{label}]({url})")
-                    for ref in (suggestion.get("evidence_refs") or [])[:3]:
-                        kind = _markdown_table_cell(ref.get("kind", "evidence"))
-                        pointer = _markdown_table_cell(evidence_ref_identity(ref))
-                        excerpt = _markdown_table_cell(str(ref.get("excerpt") or ref.get("label") or "")[:120])
-                        lines.append(f"   - Evidence: <code>{kind}</code> <code>{pointer}</code> {excerpt}")
+                    for ref in _dict_items(suggestion.get("evidence_refs"))[:3]:
+                        pointer = _markdown_code_text(evidence_ref_identity(ref))
+                        excerpt = _markdown_inline_text(ref.get("excerpt") or ref.get("label"), limit=120)
+                        kind = _markdown_code_text(ref.get("kind")) or "evidence"
+                        lines.append(f"   - Evidence: `{kind}` `{pointer}` {excerpt}")
                 lines.append("")
-            elif ae.get("recommendations"):
+            elif recommendations := _dict_items(ae.get("recommendations")):
                 lines.append("### Recommendations")
                 lines.append("")
-                for idx, recommendation in enumerate(ae.get("recommendations") or [], start=1):
-                    if not isinstance(recommendation, dict):
-                        continue
-                    message = str(recommendation.get("message") or recommendation.get("title") or "").strip()
+                for idx, recommendation in enumerate(recommendations, start=1):
+                    message = _markdown_inline_text(recommendation.get("message") or recommendation.get("title"))
                     if not message:
                         continue
                     lines.append(f"{idx}. {_markdown_table_cell(message)}")
                     evidence = recommendation.get("evidence")
                     if isinstance(evidence, dict):
-                        url = safe_url(evidence.get("url"))
+                        url = _markdown_safe_url(evidence.get("url"))
                         if url:
-                            label = _markdown_table_cell(harbor_evidence_link_text(evidence))
+                            label = _markdown_inline_text(harbor_evidence_link_text(evidence)) or "Evidence"
                             lines.append(f"   - Evidence: [{label}]({url})")
                 lines.append("")
 
@@ -949,15 +1081,11 @@ class MarkdownReporter(ReporterBase):
 
         if result.is_incomplete:
             self._render_incomplete(result, lines)
-        elif is_advisory_agent_eval_skip(result):
-            payload = result.metadata.get("agent_eval", {}) if result.metadata else {}
-            provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
-            message = provenance.get("message") if isinstance(provenance, dict) else None
-            lines.append(f"- {_markdown_table_cell(message) if message else 'Live evaluation did not run.'}")
-        elif row is Status.SKIPPED:
-            reason = result.metadata.get("skip_reason") or next(iter(result.warnings or result.messages), "")
-            lines.append(f"- Skipped: {_markdown_table_cell(reason or 'the check did not run')}")
-            if result.findings:
+        elif is_advisory_agent_eval_skip(result) or row is Status.SKIPPED:
+            lines.append(
+                f"- Skip reason: {_markdown_inline_text(get_skip_reason(result), limit=_SKIP_REASON_MAX_CHARS)}"
+            )
+            if row is Status.SKIPPED and result.findings:
                 lines.extend(["", f"**Non-blocking findings: {len(result.findings)}**", ""])
                 self._render_findings(result.findings, lines)
         elif result.passed:

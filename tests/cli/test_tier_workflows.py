@@ -83,6 +83,25 @@ def test_direct_tier1_runs_only_requested_static_checks(skill, tmp_path):
     assert payload["results"][0]["workflow"]["tier"] == 1
 
 
+def test_direct_tier1_default_reports_stay_outside_publication_target(skill, tmp_path, monkeypatch):
+    from skillevaluator.publication_identity import publication_target_from_path
+    from skillevaluator.tier3.output_provenance import is_generated_output_root
+
+    initial_target = publication_target_from_path(skill)
+    assert initial_target is not None
+    monkeypatch.chdir(skill)
+
+    result = CliRunner().invoke(cli, ["tier1", ".", "--checks", "schema", "--no-llm", "-r", "json"])
+
+    # The minimal fixture fails schema; the report location is what matters here.
+    assert result.exception is None or isinstance(result.exception, SystemExit), result.output
+    relocated = skill.with_name(f"{skill.name}-reports")
+    assert _report(relocated)["results"][0]["workflow"]["tier"] == 1
+    assert is_generated_output_root(relocated)
+    assert not (skill / "reports").exists()
+    assert publication_target_from_path(skill) == initial_target
+
+
 def test_direct_tier1_options_before_path_and_failed_findings(skill, tmp_path):
     (skill / "SKILL.md").write_text("Missing required frontmatter\n")
     result = CliRunner().invoke(

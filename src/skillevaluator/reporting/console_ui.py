@@ -26,8 +26,10 @@ consoles are created with ``emoji=False`` so ``:name:`` codes print literally.
 
 from __future__ import annotations
 
+import math
 import sys
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TextIO
 
@@ -37,6 +39,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
+from skillevaluator.reporting.base import get_skip_reason
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 if TYPE_CHECKING:
@@ -64,6 +67,12 @@ WIDTH = 98
 LABEL = 12
 DUR = 8
 BAR = 10
+_SKIP_REASON_MAX_CHARS = 110
+# Setup instructions in a skip reason span several short lines (provider
+# variables, a docs link, the flag that skips the tier); keep them readable.
+_SKIP_REASON_MAX_LINES = 12
+_SKIP_REASON_SOURCE_MAX_CHARS = 4096
+_TIER3_TEXT_MAX_CHARS = 110
 SPIN = "◐◓◑◒"
 
 PENDING = "pending"
@@ -289,7 +298,9 @@ class ValidateView:
             return
         block = self.blocks[index]
         block.status = SKIP
-        block.rows = [TierRow("skipped", [(reason, MUTED)])]
+        # Multi-line reasons (setup instructions) continue on unlabeled rows.
+        lines = reason.split("\n") or [""]
+        block.rows = [TierRow("skipped" if index == 0 else "", [(line, MUTED)]) for index, line in enumerate(lines)]
         self._refresh()
         self._flush_static()
 
@@ -518,12 +529,115 @@ def _is_skipped(result: ValidationResult) -> bool:
     """True when a validator was recorded without executing (OSS conventions)."""
     if bool(getattr(result, "skipped", False)):
         return True
-    meta = result.metadata or {}
+    meta = result.metadata if isinstance(result.metadata, dict) else {}
     if meta.get("skipped") or meta.get("execution_status") == "skipped":
         return True
-    payload = meta.get("agent_eval") or {}
-    summary = payload.get("summary") or {}
+    payload = meta.get("agent_eval")
+    if not isinstance(payload, dict):
+        return False
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        summary = {}
     return payload.get("execution_status") == "skipped" or summary.get("execution_status") == "skipped"
+
+
+def _bounded_console_line(line: str) -> str:
+    """Flatten one line of untrusted text and bound it for the compact view."""
+    flattened = " ".join(
+        "".join(
+            " " if character.isspace() or unicodedata.category(character).startswith("C") else character
+            for character in line
+        ).split()
+    )
+    if len(flattened) <= _SKIP_REASON_MAX_CHARS:
+        return flattened
+    return flattened[: _SKIP_REASON_MAX_CHARS - 1] + "…"
+
+
+def _raw_skip_reason(result: ValidationResult) -> str:
+    """Return the untrusted reason text that ``get_skip_reason`` would select."""
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    payload = metadata.get("agent_eval")
+    provenance = payload.get("provenance") if isinstance(payload, dict) else None
+    candidates = (
+        metadata.get("skip_reason"),
+        provenance.get("message") if isinstance(provenance, dict) else None,
+        result.warnings[0] if result.warnings else None,
+    )
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if not isinstance(candidate, str):
+            # Non-text metadata keeps the shared single-line projection.
+            return ""
+        if _bounded_console_line(strip_terminal_controls(candidate)):
+            return candidate
+    return ""
+
+
+def _skip_reason(result: ValidationResult) -> str:
+    """Return a bounded, terminal-safe reason that keeps its line structure.
+
+    Each line is flattened and bounded separately, and at most
+    ``_SKIP_REASON_MAX_LINES`` lines are kept, so setup instructions stay
+    readable while escapes, controls, and oversized text cannot reach the
+    terminal.
+    """
+    raw = _raw_skip_reason(result)
+    if not raw:
+        return _bounded_console_line(get_skip_reason(result))
+    sample = strip_terminal_controls(raw[:_SKIP_REASON_SOURCE_MAX_CHARS])
+    lines = [
+        bounded
+        for line in sample.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if (bounded := _bounded_console_line(line))
+    ]
+    truncated = len(raw) > _SKIP_REASON_SOURCE_MAX_CHARS or len(lines) > _SKIP_REASON_MAX_LINES
+    lines = lines[:_SKIP_REASON_MAX_LINES]
+    if truncated and lines and not lines[-1].endswith("…"):
+        lines[-1] = lines[-1][: _SKIP_REASON_MAX_CHARS - 1] + "…"
+    return "\n".join(lines)
+
+
+def sanitize_tier3_console_text(value: object, *, limit: int = _TIER3_TEXT_MAX_CHARS) -> str:
+    """Project untrusted Tier 3 text into one bounded terminal-safe line."""
+    if not isinstance(value, str) or limit <= 0:
+        return ""
+    sample_limit = max(limit, limit * 4)
+    sample = value[:sample_limit]
+    flattened = " ".join(
+        "".join(
+            " "
+            if character.isspace() or unicodedata.category(character).startswith("C")
+            else character
+            for character in sample
+        ).split()
+    )
+    truncated = len(value) > len(sample) or len(flattened) > limit
+    if not truncated:
+        return flattened
+    if limit == 1:
+        return "…"
+    return flattened[: limit - 1] + "…"
+
+
+def _tier3_string_list(value: object, *, max_items: int = 16) -> list[str]:
+    """Return a small list of safe strings from a canonical JSON array."""
+    if not isinstance(value, list):
+        return []
+    projected = [sanitize_tier3_console_text(item, limit=64) for item in value[:max_items]]
+    return [item for item in projected if item]
+
+
+def _tier3_finite_number(value: object) -> float | None:
+    """Return a finite display number without overflowing on huge integers."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 _VALIDATOR_CHECK_KEYS = (
@@ -665,12 +779,7 @@ def summarize_tier2(results: list[ValidationResult]) -> tuple[bool, bool, list[T
         return False, True, [], "no deduplication results returned"
     skipped = [r for r in results if _is_skipped(r)]
     if skipped and len(skipped) == len(results):
-        first = skipped[0]
-        reason = str(
-            (first.metadata or {}).get("skip_reason")
-            or (first.warnings[0] if first.warnings else "prerequisite unavailable")
-        )
-        return False, True, [], reason
+        return False, True, [], _skip_reason(skipped[0])
     failed = [r for r in results if not r.passed and not _is_skipped(r)]
     advisories = sum(len(r.findings) for r in results if r.passed)
     rows: list[TierRow] = []
@@ -723,9 +832,12 @@ def _tier2_finding_is_scan_failure(finding: object) -> bool:
 
 def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow], str]:
     """Return (ran, passed, rows, skip_reason) for the agent-eval result."""
-    metadata = result.metadata or {}
-    payload = metadata.get("agent_eval") or {}
-    summary = payload.get("summary") or payload
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    raw_payload = metadata.get("agent_eval")
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    raw_summary = payload.get("summary")
+    has_summary = isinstance(raw_summary, dict) and bool(raw_summary)
+    summary = raw_summary if has_summary else payload
     # validate stamps a partial plugin run execution_status "skipped" to mark it INCOMPLETE, but a run
     # that scored trials did run; one that failed its gate keeps the FAIL row validate gives it.
     incomplete_run = (
@@ -734,43 +846,48 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
         and payload.get("execution_status") != "skipped"
         and not metadata.get("tier3_gate_failures")
     )
-    if (_is_skipped(result) and not incomplete_run) or (not result.passed and not payload.get("summary")):
-        reason = str(
-            metadata.get("skip_reason") or (result.warnings[0] if result.warnings else "prerequisite unavailable")
-        )
-        return False, True, [], reason
-    agents = summary.get("agents_run") or payload.get("agents_run") or []
-    agent_segments: list[tuple[str, str]] = [(", ".join(agents) or "n/a", TEXT)]
-    case_list = payload.get("cases") or []
-    if case_list:
+    if (_is_skipped(result) and not incomplete_run) or (not result.passed and not has_summary):
+        return False, True, [], _skip_reason(result)
+    raw_agents = summary.get("agents_run")
+    if not isinstance(raw_agents, list) or not raw_agents:
+        raw_agents = payload.get("agents_run")
+    agents = _tier3_string_list(raw_agents)
+    agent_label = sanitize_tier3_console_text(", ".join(agents)) or "n/a"
+    agent_segments: list[tuple[str, str]] = [(agent_label, TEXT)]
+    case_list = payload.get("cases")
+    if isinstance(case_list, list) and case_list:
         # A plain count: per-case pass/fail lives in the report, and rendering
         # a fabricated N/N ratio here would overstate what we measured.
         agent_segments.append((f"  eval cases {len(case_list)}", MUTED))
     rows = [TierRow("agent", agent_segments)]
-    lift = summary.get("overall_lift")
-    with_score = summary.get("overall_score")
-    if isinstance(lift, (int, float)) and isinstance(with_score, (int, float)):
+    lift = _tier3_finite_number(summary.get("overall_lift"))
+    with_score = _tier3_finite_number(summary.get("overall_score"))
+    if lift is not None and -1.0 <= lift <= 1.0 and with_score is not None and 0.0 <= with_score <= 1.0:
         basis = _lift_basis_scores(payload, summary)
         if basis is not None:
-            rows.append(lift_row(float(lift), *basis))
+            rows.append(lift_row(lift, *basis))
         else:
             # Older payloads have no lift basis; their lift is the full score minus the baseline.
-            baseline = max(0.0, min(1.0, float(with_score) - float(lift)))
-            rows.append(lift_row(float(lift), float(with_score), baseline))
+            baseline = with_score - lift
+            if 0.0 <= baseline <= 1.0:
+                rows.append(lift_row(lift, with_score, baseline))
     exec_status = payload.get("execution_status") or summary.get("execution_status")
     ok = bool(result.passed) and exec_status in (None, "succeeded")
     if incomplete_run:
+        reason = _skip_reason(result) if metadata.get("skip_reason") else "INCOMPLETE: Tier 3 did not complete"
         rows.append(
             TierRow(
                 "incomplete",
-                [(str(metadata.get("skip_reason") or "INCOMPLETE: Tier 3 did not complete")[:110], RED)],
+                [(sanitize_tier3_console_text(reason, limit=110), RED)],
                 glyph="!",
                 glyph_style=f"bold {RED}",
             )
         )
     elif not ok:
-        errors = list(payload.get("execution_errors") or []) or list(result.errors)
-        reason = str(errors[0]) if errors else "execution reported errors"
+        errors = _tier3_string_list(payload.get("execution_errors"), max_items=1)
+        if not errors:
+            errors = _tier3_string_list(result.errors, max_items=1)
+        reason = errors[0] if errors else "execution reported errors"
         rows.append(
             TierRow(
                 "error",
@@ -796,10 +913,11 @@ def _lift_basis_scores(payload: dict, summary: dict) -> tuple[float, float] | No
     basis = bases.get("effectiveness") if isinstance(bases, dict) else None
     if not isinstance(basis, dict):
         return None
-    scores = [basis.get("with_skill"), basis.get("baseline")]
-    if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in scores):
+    with_skill = _tier3_finite_number(basis.get("with_skill"))
+    baseline = _tier3_finite_number(basis.get("baseline"))
+    if with_skill is None or baseline is None or not (0.0 <= with_skill <= 1.0 and 0.0 <= baseline <= 1.0):
         return None
-    return float(scores[0]), float(scores[1])
+    return with_skill, baseline
 
 
 def _first_error(result: ValidationResult) -> str:

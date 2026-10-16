@@ -28,6 +28,7 @@ from skillevaluator.tier3.harbor.metrics import (
     metric_set_for_reward,
     not_applicable_list,
 )
+from skillevaluator.tier3.harbor.resource_usage import agent_execution_seconds
 from skillevaluator.tier3.harbor.stats import STATISTICS_BLOCKS
 
 logger = logging.getLogger(__name__)
@@ -875,6 +876,15 @@ def load_agent_data(
                         continue
                     if not reward.get("entry_id"):
                         reward["entry_id"] = trial_dir.name.split("__", 1)[0] if trial_dir.name else "unknown"
+                    result_file = trial_dir / "result.json"
+                    if result_file.exists():
+                        # Timing is optional telemetry. A malformed/oversized timing
+                        # source makes resources unavailable, not score evidence truncated.
+                        trial_result = _load_bounded_json(result_file, [], artifact="trial_result")
+                        if isinstance(trial_result, dict):
+                            seconds = agent_execution_seconds(trial_result)
+                            if seconds is not None:
+                                reward["_agent_seconds"] = seconds
                     trajectory_file = trial_dir / "trajectory.json"
                     if trajectory_file.exists():
                         trajectory = _load_bounded_json(

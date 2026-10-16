@@ -1281,6 +1281,8 @@
     {% set tier3_is_skipped = tier3_execution_status == 'skipped' or (tier3_provenance_data.get('advisory') and tier3_provenance_data.get('reason') == 'skipped') %}
     {% set tier3_skip_message = tier3_provenance_data.get('message') or 'Live evaluation did not run.' %}
     {%- from "plugin_sections.html.j2" import tier1_plugin_section, tier3_incomplete_callout, tier3_coverage_section, tier3_completeness_section, integration_section, lift_ladder_section, lift_modes_line, statistics_section, signals_section, hook_census_section, canary_section, mcp_proof_section, tier3_plugin_load_section %}
+    {#- The publication assessment's Tier 3 status (incomplete when its evidence is incomplete). #}
+    {% set tier3_verdict = (tier3_effective_status or tier3.get('verdict') or 'unknown') | lower if has_tier3 else 'unknown' %}
     {%- set tier3_plugin_incomplete = has_tier3 and tier3_plugin and tier3_plugin.partial and not tier3_is_skipped %}
     {#- The Tier 3 verdict and tone come from the run status (reporting/run_status.py), computed once for the tier card
         and the dashboard: a partial plugin run reads INCOMPLETE in the warn tone even when its raw verdict is pass,
@@ -1291,6 +1293,11 @@
     {%- set tier3_gated_skip = tier3_is_skipped and tier3_card.status == 'failed' %}
     {%- set tier3_display_verdict = tier3_card.verdict %}
     {%- set tier3_tone = tier3_card.tone %}
+    {#- The publication evidence check can only make a completed Tier 3 card more conservative. #}
+    {%- if has_tier3 and not tier3_is_skipped and tier3_card.status in ('passed', 'neutral') and tier3_verdict in ('incomplete', 'fail') %}
+        {%- set tier3_display_verdict = tier3_verdict | upper %}
+        {%- set tier3_tone = 'warn' if tier3_verdict == 'incomplete' else 'fail' %}
+    {%- endif %}
     <div class="main-header">
         <div class="header-content">
             <div class="logo-section">
@@ -1311,7 +1318,12 @@
                 {% if target_path %}<p class="header-meta-item"><strong>Target:</strong> {% if target_path.startswith('https://') %}<a href="{{ target_path }}" target="_blank" class="header-target-link" title="{{ target_path }}">{{ target_display or target_path }}</a>{% else %}{{ target_path }}{% endif %}</p>{% endif %}
                 {% if profile %}<p class="header-meta-item"><strong>Profile:</strong> <span class="header-profile-badge profile-{{ profile }}">{{ profile }}</span></p>{% endif %}
                 {% if timestamp %}<p class="header-meta-item">Generated: {{ timestamp }}{% if version %} &middot; SkillEvaluator v{{ version }}{% endif %}</p>{% endif %}
-                <span class="header-status-badge {{ 'warn' if has_incomplete else ('pass' if all_passed else 'fail') }}"{% if status_reasons %} title="{{ status_reasons | join('; ') }}"{% endif %}>{{ 'Incomplete' if has_incomplete else ('All Passed' if all_passed else 'Issues Found') }}</span>
+                <span class="header-status-badge {{ 'warn' if has_incomplete else ('pass' if all_passed else 'fail') }}"{% if status_reasons %} title="{{ status_reasons | join('; ') }}"{% endif %}>Process: {{ 'Incomplete' if has_incomplete else ('All Passed' if all_passed else 'Issues Found') }}</span>
+                <span class="header-status-badge {{ 'pass' if publication_status == 'pass' else ('fail' if publication_status == 'fail' else 'warn') }}"
+                      data-publication-status="{{ publication_status }}"
+                      {% if publication_reasons %}title="{{ publication_reasons | join(' ') }}"{% endif %}>
+                    Publication: {{ publication_status | title }}
+                </span>
             </div>
         </div>
     </div>
@@ -1382,9 +1394,10 @@
                 {% endif %}
                 {% else %}
                 <div>
-                    <div class="agent-hero-score {{ 'score-pass' if all_passed else 'score-fail' }}">{{ pass_percentage }}%</div>
+                    <div class="agent-hero-score {{ 'score-warn' if has_incomplete else ('score-pass' if all_passed else 'score-fail') }}">{{ pass_percentage }}%</div>
                     <div class="agent-hero-detail">
-                        <div><strong>Validators:</strong> {{ passed_count }}/{{ total_validators }} passed</div>
+                        <div><strong>Validators:</strong> {{ passed_count }}/{{ executed_count }} passed</div>
+                        {% if skipped_count %}<div><strong>Skipped:</strong> {{ skipped_count }}</div>{% endif %}
                         <div><strong>{{ content_label_plural }}:</strong> {{ passed_skills }}/{{ total_skills }} passed</div>
                         {% if total_issues %}<div><strong>Issues:</strong> {{ total_issues }}</div>{% endif %}
                     </div>
@@ -1424,7 +1437,8 @@
                     </div>
                     <h3 class="tier-card-title">Security &amp; Static Validation</h3>
                     <div class="tier-card-stats">
-                        <span><strong>{{ tier1_summary.passed_count }}</strong>/{{ tier1_summary.total }} validators passed</span>
+                        <span><strong>{{ tier1_summary.passed_count }}</strong>/{{ tier1_summary.executed_count }} validators passed</span>
+                        {% if tier1_summary.skipped_count %}<span><strong>{{ tier1_summary.skipped_count }}</strong> skipped</span>{% endif %}
                         {% if tier1_summary.issue_count %}<span><strong>{{ tier1_summary.issue_count }}</strong> issue(s)</span>{% endif %}
                         {% if skillspector_versions %}<span title="SkillSpector version that ran the Tier 1 security scan">SkillSpector <strong>v{{ skillspector_versions | join(', v') }}</strong></span>{% endif %}
                     </div>
@@ -1454,7 +1468,8 @@
                     </div>
                     <h3 class="tier-card-title">Deduplication</h3>
                     <div class="tier-card-stats">
-                        <span><strong>{{ tier2_summary.passed_count }}</strong>/{{ tier2_summary.total }} checks passed</span>
+                        <span><strong>{{ tier2_summary.passed_count }}</strong>/{{ tier2_summary.executed_count }} checks passed</span>
+                        {% if tier2_summary.skipped_count %}<span><strong>{{ tier2_summary.skipped_count }}</strong> skipped</span>{% endif %}
                         {% if tier2_summary.issue_count %}<span><strong>{{ tier2_summary.issue_count }}</strong> duplicate(s)</span>{% endif %}
                     </div>
                 </div>
@@ -1501,6 +1516,7 @@
         {% set contributors = tier1_contributors %}
         {% set total_validators = tier1_display_summary.total_validators %}
         {% set passed_count = tier1_display_summary.passed_count %}
+        {% set skipped_count = tier1_display_summary.skipped_count %}
         {% set failed_count = tier1_display_summary.failed_count %}
         {% set total_issues = tier1_display_summary.total_issues %}
         {% set pass_percentage = tier1_display_summary.pass_percentage %}
@@ -1518,6 +1534,13 @@
                 <p class="dashboard-card-value">{{ passed_count }}</p>
                 <p class="dashboard-card-subtitle">{{ pass_percentage }}% success rate</p>
             </div>
+            {% if skipped_count %}
+            <div class="dashboard-card">
+                <h3 class="dashboard-card-title">Skipped</h3>
+                <p class="dashboard-card-value">{{ skipped_count }}</p>
+                <p class="dashboard-card-subtitle">Not executed</p>
+            </div>
+            {% endif %}
             <div class="dashboard-card danger">
                 <h3 class="dashboard-card-title">Failed</h3>
                 <p class="dashboard-card-value">{{ failed_count }}</p>
@@ -1608,8 +1631,8 @@
                                     <div class="skills-pills">
                                         {% for skill in issue.skills_affected[:5] %}
                                         <span class="skill-pill-group">
-                                            <span class="skill-pill" data-skill="{{ skill }}" data-issue-key="{{ issue.issue_key }}" onclick="event.stopPropagation(); scrollToFinding(this.dataset.skill, this.dataset.issueKey)" title="Jump to this issue in {{ skill }}">{{ skill }}</span>
-                                            <span class="quality-pill" data-skill="{{ skill }}" onclick="event.stopPropagation(); scrollToQualityScore(this.dataset.skill)" title="View quality score for {{ skill }}">Q</span>
+                                            <span class="skill-pill" data-skill-name="{{ skill }}" data-issue-key="{{ issue.issue_key }}" onclick="event.stopPropagation(); scrollToFinding(this.getAttribute('data-skill-name'), this.getAttribute('data-issue-key'))" title="Jump to this issue in {{ skill }}">{{ skill }}</span>
+                                            <span class="quality-pill" data-skill-name="{{ skill }}" onclick="event.stopPropagation(); scrollToQualityScore(this.getAttribute('data-skill-name'))" title="View quality score for {{ skill }}">Q</span>
                                         </span>
                                         {% endfor %}
                                         {% if issue.skills_affected | length > 5 %}
@@ -1667,7 +1690,7 @@
                                 <td>
                                     <div class="contributor-items">
                                         {% for item in contrib['items'][:8] %}
-                                        <span class="contributor-item-pill {{ 'pass' if item.passed else 'fail' }}" data-skill="{{ item.name }}" onclick="scrollToSkill(this.dataset.skill)" title="{{ item.name }}: {{ 'Passed' if item.passed else 'Failed (' + item.issue_count|string + ' issues)' }}">{{ item.name }}</span>
+                                        <span class="contributor-item-pill {{ 'pass' if item.passed else 'fail' }}" data-skill-name="{{ item.name }}" onclick="scrollToSkill(this.getAttribute('data-skill-name'))" title="{{ item.name }}: {{ 'Passed' if item.passed else 'Failed (' + item.issue_count|string + ' issues)' }}">{{ item.name }}</span>
                                         {% endfor %}
                                         {% if contrib['items'] | length > 8 %}
                                         <span class="contributor-item-pill pass">+{{ contrib['items'] | length - 8 }} more</span>
@@ -1890,7 +1913,7 @@
         {% for result in results %}
         {% set badge = row_badge(result) %}
         <div class="validator-card" id="validator-{{ loop.index }}" data-status="{{ row_status(result) }}">
-            <button class="validator-collapsible {{ 'active' if not result.passed else '' }}" onclick="toggleValidator(this)">
+            <button class="validator-collapsible {{ 'active' if ((result | cleanly_skipped) or not result.passed) else '' }}" onclick="toggleValidator(this)">
                 <div class="collapsible-header">
                     <span class="status-indicator {{ badge[0] }}"></span>
                     <span>{{ result.validator_name }}</span>
@@ -1898,10 +1921,10 @@
                 </div>
                 <div style="display:flex;align-items:center;gap:0.75rem">
                     <span class="status-badge {{ badge[0] }}">{{ badge[1] }}</span>
-                    <span class="expand-text">{{ '▲ Collapse' if not result.passed else '▼ Expand' }}</span>
+                    <span class="expand-text">{{ '▲ Collapse' if ((result | cleanly_skipped) or not result.passed) else '▼ Expand' }}</span>
                 </div>
             </button>
-            <div class="validator-content {{ 'active' if not result.passed else '' }}">
+            <div class="validator-content {{ 'active' if (result_is_skipped or not result.passed) else '' }}">
                 {% if result.summary.files_scanned > 0 or result.summary.checks_performed > 0 %}
                 <div class="validator-summary">
                     {% if result.summary.files_scanned > 0 %}<span class="summary-stat">{{ icons.file | safe }} {{ result.summary.files_scanned }} files scanned</span>{% endif %}
@@ -1915,7 +1938,11 @@
                     <strong>Incomplete scanner evidence:</strong> {{ result.incomplete_scans | join(', ') }} did not produce a trustworthy report. Restore the scanner and rerun validation before publication.
                 </div>
                 {% endif %}
-                {% if result.passed %}
+                {% if result_is_skipped %}
+                <div class="suggestion" style="border-color:var(--warning-color);">
+                    <strong>Skip reason:</strong> {{ result | skip_reason }}
+                </div>
+                {% elif result.passed %}
                 <ul class="success-list">
                     {% if result.success_details %}{% for detail in result.success_details %}<li class="success-item">{{ icons.checkmark | safe }}<span>{{ detail.check_name }}: {{ detail.message }}{% if detail.metadata %} ({% for k, v in detail.metadata.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}</span></li>{% endfor %}
                     {% elif result.messages %}{% for msg in result.messages %}<li class="success-item">{{ icons.checkmark | safe }}<span>{{ msg }}</span></li>{% endfor %}
@@ -1971,7 +1998,7 @@
         <div class="dashboard">
             <div class="dashboard-card">
                 <h3 class="dashboard-card-title">Checks Run</h3>
-                <p class="dashboard-card-value">{{ tier2_results | length }}</p>
+                <p class="dashboard-card-value">{{ tier2_summary.executed_count }}</p>
                 <p class="dashboard-card-subtitle">Semantic overlap analysis</p>
             </div>
             <div class="dashboard-card danger">
@@ -1995,7 +2022,16 @@
                     </ul>
                 </div>
                 {% endif %}
-                {% if result.passed and not result.findings %}
+                {% if result | cleanly_skipped %}
+                <div style="background:var(--bg-secondary);border:1px solid var(--warning-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
+                    <strong style="color:var(--warning-color);">Skip reason:</strong> {{ result | skip_reason }}
+                </div>
+                {% elif result.is_incomplete %}
+                <div style="background:var(--bg-secondary);border:1px solid var(--warning-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
+                    <strong style="color:var(--warning-color);">Incomplete scanner evidence:</strong>
+                    {{ result.incomplete_scans | join(', ') }} did not produce trustworthy evidence. Restore the scanner and rerun validation.
+                </div>
+                {% elif result.passed and not result.findings %}
                 <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
                     {{ icons.checkmark | safe }} <strong style="color:var(--success-color);">No semantic overlaps detected.</strong>
                     {% if result.success_details %}
@@ -2063,8 +2099,10 @@
         {% set t3_dim_pass = t3_verdict_policy.get('dimension_pass_threshold') if t3_verdict_policy.get('dimension_pass_threshold') is number else 0.5 %}
         {% set t3_dim_neutral = t3_verdict_policy.get('dimension_neutral_threshold') if t3_verdict_policy.get('dimension_neutral_threshold') is number else 0.4 %}
         {% set t3_agent_anchor_ids = {} %}
+        {% set t3_agent_panel_ids = {} %}
         {% for name, _agent in t3_agents.items() %}
-            {% set _ = t3_agent_anchor_ids.update({name: 'tier3-agent-' ~ loop.index0}) %}
+            {% set _ = t3_agent_anchor_ids.update({name: 'tier3-agent-anchor-' ~ loop.index0}) %}
+            {% set _ = t3_agent_panel_ids.update({name: 'tier3-agent-panel-' ~ loop.index0}) %}
         {% endfor %}
 
         <style>
@@ -2371,7 +2409,7 @@
                 {% else %}
                 <strong>Verdict at a glance:</strong>
                 {%- if tier3_plugin_incomplete %} <span class="t3-pill critical">INCOMPLETE (partial)</span> &mdash;{% endif %}
-                {{ (tier3.verdict or 'unknown') | upper }} with an overall score of
+                {{ tier3_verdict | upper }} with an overall score of
                 {{ "%.2f" | format(tier3.overall_score) if tier3.overall_score is not none else "N/A" }}.
                 {% if t3_best_name %}Best performing agent is <strong>{{ t3_best_name }}</strong>{% else %}No successfully scored agent is available{% endif %}
                 {% if tier3.get('overall_lift') is not none %} with {{ "%+.2f" | format(tier3.get('overall_lift')) }} skill lift{% endif %}.
@@ -2720,7 +2758,7 @@
                         {% set lf = pak.lift or {} %}
                         {% set wi = wp.rate_interval or {} %}
                         {% set bi = bp.rate_interval or {} %}
-                        {% set paired = lf.paired_comparison or {} %}
+                        {% set paired = lf.paired_comparison if lf.paired_comparison is mapping else {} %}
                         {% if wp %}
                         <tr>
                             <td><strong>{{ name }}</strong></td>
@@ -2764,10 +2802,15 @@
                                 {% if paired.paired_rate_delta is defined and paired.paired_rate_delta is not none %}
                                 Paired pass-rate delta: {{ paired.paired_rate_delta | adaptive_percent(true) }}.
                                 {% endif %}
-                                {% if paired.mcnemar_exact %}
-                                Exact McNemar p={% if paired.mcnemar_exact.p_value_text is defined %}{{ paired.mcnemar_exact.p_value_text }}{% else %}{{ "%.4g" | format(paired.mcnemar_exact.p_value) }}{% endif %}.
-                                {% if paired.mcnemar_exact.minimum_attainable_p_value is defined %}
-                                Minimum attainable p with {{ paired.discordant_cases or 0 }} observed discordant pair{{ 's' if (paired.discordant_cases or 0) != 1 else '' }}: {% if paired.mcnemar_exact.minimum_attainable_p_value_text is defined %}{{ paired.mcnemar_exact.minimum_attainable_p_value_text }}{% else %}{{ "%.4g" | format(paired.mcnemar_exact.minimum_attainable_p_value) }}{% endif %}{% if paired.mcnemar_exact.resolution_limited_at_alpha_0_05 %}
+                                {% set exact = paired.mcnemar_exact if paired.mcnemar_exact is mapping else {} %}
+                                {% set exact_has_text = exact.p_value_text is defined and exact.p_value_text is string %}
+                                {% set exact_has_number = exact.p_value is defined and exact.p_value is number %}
+                                {% if exact_has_text or exact_has_number %}
+                                Exact McNemar p={% if exact_has_text %}{{ exact.p_value_text }}{% else %}{{ "%.4g" | format(exact.p_value) }}{% endif %}.
+                                {% set minimum_has_text = exact.minimum_attainable_p_value_text is defined and exact.minimum_attainable_p_value_text is string %}
+                                {% set minimum_has_number = exact.minimum_attainable_p_value is defined and exact.minimum_attainable_p_value is number %}
+                                {% if minimum_has_text or minimum_has_number %}
+                                Minimum attainable p with {{ paired.discordant_cases or 0 }} observed discordant pair{{ 's' if (paired.discordant_cases or 0) != 1 else '' }}: {% if minimum_has_text %}{{ exact.minimum_attainable_p_value_text }}{% else %}{{ "%.4g" | format(exact.minimum_attainable_p_value) }}{% endif %}{% if exact.resolution_limited_at_alpha_0_05 %}
                                 (resolution-limited at α=0.05){% endif %}.
                                 {% endif %}
                                 Diagnostic only.
@@ -2782,6 +2825,33 @@
                     </tbody>
                 </table>
                 </div>
+                </div>
+            </details>
+            {% endif %}
+
+            {% if t3_agents %}
+            <details class="t3-details" open>
+                <summary>Measured Agent Resources</summary>
+                <div class="t3-details-body">
+                <p class="t3-section-hint">Efficiency scores measure routing and productive tool use. These separate measurements show observed agent resource use. Delta = with skill minus baseline; negative means less use. Judge and setup time are excluded. Deltas require complete telemetry and matching case counts in both arms.</p>
+                <div class="table-scroll"><table class="summary-table">
+                    <thead><tr><th>Agent</th><th>Measurement</th><th>With skill total</th><th>Baseline total</th><th>Delta</th><th>Measured trials (skill / baseline)</th></tr></thead>
+                    <tbody>
+                    {% for name, agent in t3_agents.items() %}
+                    {% if agent.resources is defined %}
+                    {% for field, label in [('tokens', 'Prompt + completion tokens (cache included)'), ('agent_seconds', 'Agent execution seconds')] %}
+                    {% set measured = agent.resources[field] %}
+                    <tr><td>{{ name }}</td><td>{{ label }}</td>
+                        <td>{{ '%.2f' | format(measured.with_skill.total) if measured.with_skill.total is not none else 'N/A' }}</td>
+                        <td>{{ '%.2f' | format(measured.baseline.total) if measured.baseline.total is not none else 'N/A' }}</td>
+                        <td>{{ '%+.2f' | format(measured.delta) if measured.delta is not none else 'N/A' }}</td>
+                        <td>{{ measured.with_skill.measured_trials }}/{{ measured.with_skill.trials }} / {{ measured.baseline.measured_trials }}/{{ measured.baseline.trials }}</td>
+                    </tr>
+                    {% endfor %}
+                    {% endif %}
+                    {% endfor %}
+                    </tbody>
+                </table></div>
                 </div>
             </details>
             {% endif %}
@@ -3083,8 +3153,9 @@
                 <button class="t3-agent-tab-btn{% if loop.first %} active{% endif %}"
                         role="tab"
                         data-tier3-agent="{{ name }}"
+                        data-tier3-agent-panel-id="{{ t3_agent_panel_ids[name] }}"
                         style="--accent: {{ agent_color }};"
-                        onclick="showTier3Agent(this.dataset.tier3Agent, this)">
+                        onclick="showTier3Agent(this.getAttribute('data-tier3-agent-panel-id'), this)">
                     <span class="t3-tab-dot"></span>{{ name }}
                     <span class="t3-tab-score">{{ "%.2f" | format(agent_score) if agent_score is not none else "N/A" }}{% if agent.lift is not none %} ({{ "%+.2f" | format(agent.lift) }}){% endif %}</span>
                 </button>
@@ -3103,7 +3174,7 @@
                 {% if best_dim is none or dscore > (best_dim.score if best_dim.score is not none else best_dim.with_skill) %}{% set best_dim = d %}{% endif %}
                 {% if worst_dim is none or dscore < (worst_dim.score if worst_dim.score is not none else worst_dim.with_skill) %}{% set worst_dim = d %}{% endif %}
             {% endfor %}
-            <div class="t3-agent-panel{% if loop.first %} active{% endif %}" id="tier3-agent-{{ name }}" data-tier3-agent="{{ name }}" role="tabpanel">
+            <div class="t3-agent-panel{% if loop.first %} active{% endif %}" id="{{ t3_agent_panel_ids[name] }}" data-tier3-agent="{{ name }}" role="tabpanel">
                 {# Stable, index-based scroll target for jumpToTier3Agent. Raw agent
                    names can contain characters that are unsafe in CSS/HTML IDs (slashes,
                    dots), so deep-links from Overview point at this anchor instead of
@@ -3112,6 +3183,7 @@
                 <a id="{{ t3_agent_anchor_ids[name] }}"
                    class="t3-agent-anchor"
                    data-tier3-agent-name="{{ name }}"
+                   data-tier3-agent-panel-id="{{ t3_agent_panel_ids[name] }}"
                    tabindex="-1"
                    aria-hidden="true"></a>
 
@@ -3331,7 +3403,7 @@
                 {% set case_expected_output = case.expected_output or case.ground_truth %}
                 {% set case_assertions = case.assertions or case.expected_behavior %}
                 {% set _hay = (case.id or '') ~ ' ' ~ (case_prompt or '') ~ ' ' ~ (case.expected_skill or '') ~ ' ' ~ (case.expected_script or '') ~ ' ' ~ (case.category or '') ~ ' ' ~ (case_expected_output or '') %}
-                <details class="t3-ds-card" id="dataset-case-{{ case.id or loop.index }}" data-tier3-filterable="{{ _hay }}"{% if loop.first %} open{% endif %}>
+                <details class="t3-ds-card" id="tier3-dataset-case-{{ loop.index0 }}" data-tier3-filterable="{{ _hay }}"{% if loop.first %} open{% endif %}>
                     <summary>
                     <div class="t3-ds-head" style="margin-bottom:0;">
                         <span class="t3-ds-id">{{ case.id or 'case-' ~ loop.index }}</span>
@@ -3651,10 +3723,10 @@
             if (page) page.classList.add('active');
             if (btn) btn.classList.add('active');
         }
-        function showTier3Agent(name, btn) {
+        function showTier3Agent(panelId, btn) {
             document.querySelectorAll('.t3-agent-panel').forEach(function(p){ p.classList.remove('active'); });
             document.querySelectorAll('.t3-agent-tab-btn').forEach(function(t){ t.classList.remove('active'); });
-            var panel = document.getElementById('tier3-agent-' + name);
+            var panel = document.getElementById(panelId);
             if (panel) panel.classList.add('active');
             if (btn) btn.classList.add('active');
         }
@@ -3665,6 +3737,7 @@
             var anchor = document.getElementById(anchorId);
             if (!anchor) return;
             var name = anchor.getAttribute('data-tier3-agent-name');
+            var panelId = anchor.getAttribute('data-tier3-agent-panel-id');
             var subTabBtn = document.querySelector('.t3-subtab[data-tier3-tab="agents"]');
             showTier3SubTab('agents', subTabBtn);
             if (name) {
@@ -3677,7 +3750,7 @@
                     ? CSS.escape(name)
                     : name;
                 var agentTabBtn = document.querySelector('.t3-agent-tab-btn[data-tier3-agent="' + safeName + '"]');
-                showTier3Agent(name, agentTabBtn);
+                showTier3Agent(panelId, agentTabBtn);
             }
             if (typeof anchor.scrollIntoView === 'function') {
                 // requestAnimationFrame defers the scroll until after the browser has

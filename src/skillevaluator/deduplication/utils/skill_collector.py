@@ -18,6 +18,7 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_TOTAL_BYTES,
     CONTENT_DEDUP_SCANNABLE_EXTENSIONS,
 )
+from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, discover_secure_files
 from skillevaluator.utils.structured_data import (
     StructuredDataLimitError,
@@ -102,9 +103,10 @@ def collect_files(skill_root: Path) -> list[CollectedFile]:
     """
 
     def selected(relative: Path) -> bool:
-        return (
-            relative.suffix.lower() in CONTENT_DEDUP_SCANNABLE_EXTENSIONS
-            and relative.name.lower() not in CONTENT_DEDUP_EXCLUDED_FILES
+        # Generated files are matched by the filesystem's own name semantics, so a
+        # case alias of BENCHMARK.md is skipped only where it is the same file.
+        return relative.suffix.lower() in CONTENT_DEDUP_SCANNABLE_EXTENSIONS and not matches_filesystem_name(
+            skill_root / relative, CONTENT_DEDUP_EXCLUDED_FILES
         )
 
     try:

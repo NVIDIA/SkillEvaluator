@@ -29,7 +29,11 @@ from skillevaluator.tier3.eval_core.checks import (
     _SHELL_WORD,
     _TEE_OPERANDS_RE,
 )
-from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_has_text, atif_content_text
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+    atif_content_has_text,
+    atif_content_text,
+    normalized_tool_call_is_error,
+)
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     iter_normalized_tool_calls as iter_tool_calls,
 )
@@ -65,11 +69,15 @@ def get_all_tool_calls(traj: dict[str, Any]) -> list[dict[str, Any]]:
 def get_skill_tool_calls(traj: dict[str, Any]) -> list[str]:
     """Get skill names from Claude Code's native ``Skill`` tool invocations."""
     skills: list[str] = []
-    for tc in get_all_tool_calls(traj):
-        if tc["fn"].lower() == "skill":
-            name = tc["args"].get("skill", tc["args"].get("name", ""))
-            if name:
-                skills.append(str(name))
+    for step, tc in iter_tool_calls(traj):
+        if (tc.get("function_name") or "").lower() != "skill":
+            continue
+        if normalized_tool_call_is_error(step, tc):
+            continue
+        args = tc.get("arguments") or {}
+        name = args.get("skill", args.get("name", ""))
+        if name:
+            skills.append(str(name))
     return skills
 
 
@@ -1534,6 +1542,8 @@ def extract_tool_calls_as_dicts(traj: dict[str, Any]) -> list[dict[str, Any]]:
             "action_input": tc.get("arguments") or {},
             "observation": _tool_call_observation(step, tc),
         }
+        if normalized_tool_call_is_error(step, tc):
+            call["is_error"] = True
         if status := tc.get("_atif_normalization_status"):
             call["normalization_status"] = status
         if status := tc.get("_atif_observation_status"):

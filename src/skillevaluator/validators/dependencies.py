@@ -16,19 +16,31 @@ URL, and unparseable declarations cannot be matched to one released version;
 each produces an informational ``dependency-version-unverified`` finding rather
 than being silently dropped or audited against an unrelated environment.
 
+``pyproject.toml`` follows the static PEP 621 contract: the exact pins of
+``[project]`` dependencies and every optional group are audited, with markers
+evaluated for the scanner platform. Dynamic or Poetry metadata, URL
+dependencies, unevaluable markers, and declarations that are not exact pins
+make the audit INCOMPLETE, and ``metadata['dependency_coverage']`` records each
+target's requested and audited pins (direct declarations only).
+
+A pip-audit run that produces no trustworthy evidence (scanner missing, failed
+or unexpected exit, malformed or contradictory report, skipped packages) makes
+the audit INCOMPLETE, and a clean run records a ``pip_audit`` success detail.
+
 For plugins (inside a plugin tree scope) the audit also covers npm
 (``package.json`` / ``package-lock.json``) and container images (MCP
 ``docker|podman|nerdctl run`` commands and ``Dockerfile`` ``FROM`` lines); see
 :mod:`skillevaluator.validators.dependency_ecosystems`. A per-ecosystem summary
-is recorded as ``metadata['plugin']['cve_summary']``. In a plugin run the audit
-never passes silently: a manifest, lockfile, or Dockerfile that cannot be read
-or parsed, and a scanner run that produces no evidence (pip-audit included),
-make the ecosystem INCOMPLETE.
+is recorded as ``metadata['plugin']['cve_summary']``. The audit never passes
+silently: a manifest, lockfile, or Dockerfile that cannot be read or parsed, and
+a scanner run that produces no evidence (pip-audit included), make the
+ecosystem INCOMPLETE.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import tempfile
 import tomllib
@@ -36,6 +48,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePath, PurePosixPath
 from typing import TYPE_CHECKING, Any
+
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_FILE_BYTES,
@@ -73,6 +89,12 @@ UNVERIFIED_CHECK_NAME = eco.UNVERIFIED_CHECK_NAME
 # A Python advisory (pip-audit or Safety), and an exact pin the scanner could not audit.
 PYTHON_VULN_CHECK = "python-vulnerability"
 NOT_AUDITED_CHECK_NAME = "dependency-not-audited"
+# pip-audit exits 0 (no vulnerability) or 1 (vulnerabilities found) when it completes.
+_PIP_AUDIT_COMPLETED_EXIT_CODES = frozenset({0, 1})
+_PIP_AUDIT_SEVERITIES = frozenset(severity.value for severity in Severity)
+# Static pyproject.toml reads and declarations are bounded.
+_PYPROJECT_MAX_BYTES = 1024 * 1024
+_PYPROJECT_MAX_DECLARATIONS = 4096
 # At most this many npm manifests and Dockerfiles below one scanned directory are
 # audited. Their discovery walk is bounded like the whole-plugin walk that runs
 # before it (PLUGIN_TREE_MAX_DISCOVERED_PATHS).
@@ -324,8 +346,11 @@ class DependencySecurityValidator(ValidatorBase):
     """Scan declared dependencies for CVE vulnerabilities.
 
     Uses pip-audit (primary) and Safety (secondary) against the exactly pinned
-    declarations in ``requirements*.txt`` and ``pyproject.toml``. Nothing is
-    installed, and the evaluator's own Python environment is never audited.
+    declarations in ``requirements*.txt`` and static PEP 621 ``pyproject.toml``
+    declarations. Nothing is installed, and the evaluator's own Python
+    environment is never audited. Pyproject coverage is limited to directly
+    declared exact versions; transitive packages require a separately supplied
+    requirements file.
     """
 
     def __init__(
@@ -368,11 +393,29 @@ class DependencySecurityValidator(ValidatorBase):
         self._mcp_cache = {}
         self._advisories = eco.AdvisorySeverityLookup()
         self._npm_registry = eco.NpmRegistryCheck()
+        coverages: list[dict[str, Any]] = []
+
+        def audit_target(target: Path) -> ValidationResult:
+            result = self._validate_single_skill(target)
+            coverage = result.metadata.get("dependency_coverage")
+            if isinstance(coverage, dict):
+                relative_target = target.relative_to(skill_path).as_posix()
+                coverages.append({"target": relative_target, **coverage})
+                result.add_message(
+                    f"{relative_target}/pyproject.toml coverage: "
+                    f"{len(coverage['requested_pins'])} requested pin(s), "
+                    f"{len(coverage['audited_pins'])} audited pin(s); "
+                    "direct declarations only, transitive dependencies not audited"
+                )
+            return result
+
         result = self._validate_folder_or_skill(
             skill_path,
-            self._validate_single_skill,
+            audit_target,
             action_description="Auditing dependencies for",
         )
+        if coverages:
+            result.metadata["dependency_coverage"] = coverages
         if active_plugin_tree() is not None:
             # Plugin runs record a per-ecosystem CVE summary for the plugin report sections.
             result.metadata.setdefault("plugin", {})["cve_summary"] = {
@@ -399,7 +442,13 @@ class DependencySecurityValidator(ValidatorBase):
         # Find dependency files
         dep_files = self._find_dependency_files(skill_path)
         if not dep_files["requirements"] and not dep_files["pyproject"]:
-            result.add_message("No dependency files found for the Python audit (requirements*.txt, pyproject.toml)")
+            result.add_success(
+                check_name="dependency_file_discovery",
+                message=(
+                    "No dependency files found for the Python audit (requirements*.txt, pyproject.toml) - "
+                    "vulnerability audit is not applicable"
+                ),
+            )
             return result
 
         # Audit requirements.txt files
@@ -416,7 +465,10 @@ class DependencySecurityValidator(ValidatorBase):
         """Locate dependency files in skill directory."""
         return {
             "requirements": sorted(skill_path.glob("requirements*.txt")),
-            "pyproject": skill_path / "pyproject.toml" if (skill_path / "pyproject.toml").exists() else None,
+            # A linked pyproject.toml is found here and then refused by the bounded secure read.
+            "pyproject": skill_path / "pyproject.toml"
+            if (skill_path / "pyproject.toml").exists() or (skill_path / "pyproject.toml").is_symlink()
+            else None,
         }
 
     def _read_dependency_file(self, path: Path, result: ValidationResult) -> str | None:
@@ -439,17 +491,14 @@ class DependencySecurityValidator(ValidatorBase):
         return None
 
     def _python_unaudited(self, result: ValidationResult, label: str, reason: str) -> None:
-        """A Python manifest that could not be read or parsed: INCOMPLETE in a plugin run, a warning otherwise.
+        """A Python manifest that could not be read or parsed: the Python audit is INCOMPLETE.
 
-        Plugin runs never pass without evidence, as for an npm lockfile or a
-        Dockerfile that cannot be read; standalone skills keep the warning.
+        No run passes without evidence, as for an npm lockfile or a Dockerfile
+        that cannot be read.
         """
         message = f"{label}: Python dependencies were not audited: {reason}"
         result.add_warning(message)
         summary = self._summary.setdefault("python", eco.empty_ecosystem_summary())
-        if active_plugin_tree() is None:
-            summary["sources"] += 1
-            return
         outcome = eco.AuditOutcome(status="incomplete", error=message)
         eco.record_outcome(summary, outcome, declarations=0, audited=0, unverified=0)
         result.mark_scan_incomplete(PIP_AUDIT_SCAN)
@@ -472,29 +521,233 @@ class DependencySecurityValidator(ValidatorBase):
         return result
 
     def _audit_pyproject(self, pyproject: Path) -> ValidationResult:
-        """Audit the dependencies declared by ``pyproject.toml``.
+        """Audit declared pins without installing the target or running build code.
 
-        The declared dependencies are parsed from the target file; the Python
-        environment running SkillEvaluator is never audited in their place.
+        Only the exact pins of static PEP 621 metadata are audited, each package
+        version in its own batch; anything this contract cannot audit makes the
+        result INCOMPLETE. Declaration text never reaches diagnostics.
         """
         result = ValidationResult()
-        result.add_message(f"Auditing {pyproject.name}")
+        result.metadata["dependency_coverage"] = {
+            "source": "pyproject.toml",
+            "scope": "direct declared pins (all optional groups), scanner-platform markers",
+            "declarations": None,
+            "requested_pins": [],
+            "audited_pins": [],
+            "transitive_dependencies": "not audited",
+        }
+        result.add_message(
+            "Auditing pyproject.toml: direct declared pins, including optional groups; no transitive audit"
+        )
+        unverified = 0
 
-        text = self._read_dependency_file(pyproject, result)
-        if text is None:
+        def incomplete(message: str) -> None:
+            result.mark_scan_incomplete(PIP_AUDIT_SCAN)
+            result.add_warning(f"pyproject.toml: {message}")
+
+        def finish(outcome: eco.AuditOutcome | None) -> ValidationResult:
+            coverage = result.metadata["dependency_coverage"]
+            if result.is_incomplete:
+                outcome = outcome or eco.AuditOutcome()
+                outcome.status = "incomplete"
+                outcome.error = "pyproject.toml: the static dependency audit did not complete"
+            eco.record_outcome(
+                self._summary.setdefault("python", eco.empty_ecosystem_summary()),
+                outcome,
+                declarations=coverage["declarations"] or 0,
+                audited=len(coverage["audited_pins"]),
+                unverified=unverified,
+                partial=True,
+            )
             return result
+
         try:
-            data = tomllib.loads(text)
-        except tomllib.TOMLDecodeError as exc:
-            self._python_unaudited(result, pyproject.name, f"could not parse dependency declarations: {exc}")
-            return result
+            with SecureRoot(pyproject.parent) as root:
+                raw, _ = root.read_bytes(Path(pyproject.name), _PYPROJECT_MAX_BYTES)
+            data = tomllib.loads(raw.decode("utf-8"))
+        except (OSError, SecurePathError, UnicodeError, tomllib.TOMLDecodeError, RecursionError):
+            incomplete("cannot read a bounded regular TOML file")
+            return finish(None)
 
-        declarations = parse_pyproject_declarations(data)
-        if not declarations:
-            result.add_message(f"{pyproject.name}: no dependency declarations found")
-            return result
-        result.merge(self._audit_declarations(pyproject.name, declarations))
-        return result
+        project = data.get("project")
+        if not isinstance(project, dict):
+            incomplete("no static PEP 621 project metadata; supply pinned requirements.txt")
+            return finish(None)
+        dynamic = project.get("dynamic", [])
+        if not isinstance(dynamic, list) or any(name in dynamic for name in ("dependencies", "optional-dependencies")):
+            incomplete("dynamic dependency metadata is unsupported; supply pinned requirements.txt")
+        tool = data.get("tool", {})
+        if isinstance(tool, dict) and "poetry" in tool:
+            incomplete("Poetry dependency metadata is not audited; supply pinned requirements.txt")
+
+        groups = {"dependencies": project.get("dependencies", [])}
+        optional = project.get("optional-dependencies", {})
+        if not isinstance(optional, dict):
+            incomplete("optional-dependencies must be a table of requirement lists")
+        else:
+            groups.update({f"optional group {name}": values for name, values in optional.items()})
+        pins: set[str] = set()
+        declaration_count = 0
+        for group, declarations in groups.items():
+            if not isinstance(declarations, list):
+                incomplete(f"{group} must be a list")
+                continue
+            for index, declaration in enumerate(declarations):
+                declaration_count += 1
+                if declaration_count > _PYPROJECT_MAX_DECLARATIONS:
+                    incomplete(f"dependency declaration limit ({_PYPROJECT_MAX_DECLARATIONS}) exceeded")
+                    return finish(None)
+                # Never include arbitrary declaration text (e.g. URL credentials) in diagnostics.
+                label = f"{group}, declaration {index + 1}"
+                try:
+                    if not isinstance(declaration, str) or "\n" in declaration or "\r" in declaration:
+                        raise InvalidRequirement("invalid declaration")
+                    requirement = Requirement(declaration)
+                except (InvalidRequirement, RecursionError):
+                    unverified += 1
+                    incomplete(f"{label}: invalid requirement")
+                    continue
+                if requirement.url:
+                    unverified += 1
+                    incomplete(f"{label}: URL/path dependencies are unsupported")
+                    continue
+                if requirement.marker:
+                    # Audit every optional group, evaluating `extra` in its group context.
+                    extra = group.removeprefix("optional group ") if group.startswith("optional group ") else ""
+                    try:
+                        # Unevaluable markers raise ValueError subclasses such as UndefinedComparison.
+                        marker_matches = requirement.marker.evaluate({"extra": extra})
+                    except (ValueError, RecursionError):
+                        unverified += 1
+                        incomplete(f"{label}: environment marker cannot be evaluated")
+                        continue
+                    if not marker_matches:
+                        result.add_message(f"pyproject.toml: {label} skipped (marker does not match scanner platform)")
+                        continue
+                specifiers = list(requirement.specifier)
+                if len(specifiers) != 1 or specifiers[0].operator != "==" or "*" in specifiers[0].version:
+                    unverified += 1
+                    incomplete(f"{label}: an exact version pin is required; supply resolved requirements.txt")
+                    continue
+                pins.add(f"{requirement.name}=={specifiers[0].version}")
+
+        result.metadata["dependency_coverage"].update(
+            {"declarations": declaration_count, "requested_pins": sorted(pins)}
+        )
+        if not pins:
+            message = "pyproject.toml: no applicable exact pins to audit"
+            if result.is_incomplete:
+                result.add_message(message)
+            else:
+                # Like a target without dependency files, fully parsed static metadata
+                # with nothing to audit is completed Tier 1 work, not missing evidence.
+                result.add_success(check_name="pyproject_dependency_discovery", message=message)
+            return finish(None)
+
+        outcome = eco.AuditOutcome()
+        if not Tools.pip_audit.is_available:
+            incomplete(f"pip-audit not installed. {Tools.pip_audit.get_install_hint()}")
+            return finish(outcome)
+
+        # pip-audit rejects a requirements file that names one package twice, and
+        # optional groups may pin different versions of one package. Audit each
+        # version of a package in its own batch so neither pin is dropped.
+        batches: list[list[str]] = []
+        batch_counts: dict[str, int] = {}
+        for pin in sorted(pins):
+            name = canonicalize_name(Requirement(pin).name)
+            index = batch_counts.get(name, 0)
+            batch_counts[name] = index + 1
+            if index == len(batches):
+                batches.append([])
+            batches[index].append(pin)
+
+        audited: list[str] = []
+        reported: set[tuple[str, str, str]] = set()
+        for batch in batches:
+            with tempfile.TemporaryDirectory(prefix="skillevaluator-dependencies-") as temporary_dir:
+                requirements = Path(temporary_dir) / "requirements.txt"
+                requirements.write_text("\n".join(batch) + "\n", encoding="utf-8")
+                tool_result = Tools.pip_audit.run(
+                    [
+                        "-r",
+                        str(requirements),
+                        "--no-deps",
+                        "--disable-pip",
+                        "--format",
+                        "json",
+                        "--progress-spinner",
+                        "off",
+                    ],
+                    timeout=180,
+                )
+                if self.use_safety and Tools.safety.is_available:
+                    # Safety is secondary: its advisories add to pip-audit's, never replace them.
+                    result.merge(
+                        self._run_safety(requirements, file_path=pyproject.name, reported=reported, outcome=outcome)
+                    )
+
+            exit_code = tool_result.exit_code
+            if (
+                tool_result.success is not True
+                or tool_result.error_message
+                or isinstance(exit_code, bool)
+                or not isinstance(exit_code, int)
+                or exit_code not in _PIP_AUDIT_COMPLETED_EXIT_CODES
+            ):
+                incomplete("pip-audit did not complete successfully")
+                return finish(outcome)
+            try:
+                audit = json.loads(tool_result.stdout)
+                dependencies = audit if isinstance(audit, list) else audit["dependencies"]
+                if not isinstance(dependencies, list):
+                    raise ValueError("invalid inventory")
+                returned_pins = set()
+                for dep in dependencies:
+                    if not isinstance(dep, dict) or not isinstance(dep.get("vulns"), list):
+                        raise ValueError("invalid dependency")
+                    returned_pins.add((canonicalize_name(dep["name"]), Version(dep["version"])))
+                    if any(
+                        not isinstance(vuln, dict)
+                        or not isinstance(vuln.get("id"), str)
+                        or not isinstance(vuln.get("fix_versions", []), list)
+                        or any(not isinstance(version, str) for version in vuln.get("fix_versions", []))
+                        or ("severity" in vuln and not isinstance(vuln["severity"], str))
+                        or not isinstance(vuln.get("aliases", []), list)
+                        or any(not isinstance(alias, str) for alias in vuln.get("aliases", []))
+                        for vuln in dep["vulns"]
+                    ):
+                        raise ValueError("invalid advisory")
+                expected_pins = {
+                    (canonicalize_name(requirement.name), Version(next(iter(requirement.specifier)).version))
+                    for pin in batch
+                    for requirement in [Requirement(pin)]
+                }
+                if returned_pins != expected_pins:
+                    raise ValueError("incomplete inventory")
+                if tool_result.exit_code == 1 and not any(dep["vulns"] for dep in dependencies):
+                    raise ValueError("unexpected finding exit")
+            except (KeyError, TypeError, ValueError, RecursionError):
+                incomplete("pip-audit returned incomplete or invalid target evidence")
+                return finish(outcome)
+            batch_result = ValidationResult()
+            skipped = self._process_completed_pip_audit(
+                tool_result.stdout,
+                batch_result,
+                pyproject.name,
+                exit_code=exit_code,
+                reported=reported,
+                outcome=outcome,
+            )
+            result.merge(batch_result)
+            if skipped is None or skipped or batch_result.is_incomplete:
+                result.mark_scan_incomplete(PIP_AUDIT_SCAN)
+                return finish(outcome)
+            audited.extend(batch)
+            result.metadata["dependency_coverage"]["audited_pins"] = sorted(audited)
+            outcome.scanner = PIP_AUDIT_SCAN
+
+        return finish(outcome)
 
     def _audit_declarations(self, source: str, declarations: list[DependencyDeclaration]) -> ValidationResult:
         """Flag unverifiable declarations, then audit exact pins without resolution.
@@ -544,9 +797,9 @@ class DependencySecurityValidator(ValidatorBase):
             partial=True,
         )
         self._mark_unverified(summary, not_audited)
-        if outcome is not None and outcome.status == "incomplete" and active_plugin_tree() is not None:
-            # A plugin run never passes without evidence, as for the npm and container
-            # audits; standalone skills keep the warning.
+        if outcome is not None and (outcome.status == "incomplete" or not_audited):
+            # No run passes without evidence, as for the npm and container audits; a pin
+            # pip-audit skipped was not audited either.
             result.mark_scan_incomplete(PIP_AUDIT_SCAN)
         return result
 
@@ -708,66 +961,75 @@ class DependencySecurityValidator(ValidatorBase):
 
         error: str | None = None
         skipped: dict[str, str] = {}
-        if tool_result.error_message:
-            error = tool_result.error_message
-        elif tool_result.exit_code != 0 and parse_json_output(tool_result.stdout) is None:
+        exit_code = tool_result.exit_code
+        if tool_result.success is not True or tool_result.error_message:
+            error = tool_result.error_message or "pip-audit did not complete"
+        elif (
+            isinstance(exit_code, bool)
+            or not isinstance(exit_code, int)
+            or exit_code not in _PIP_AUDIT_COMPLETED_EXIT_CODES
+        ):
             detail = (tool_result.stderr or "").strip().splitlines()
-            reason = detail[-1][: eco.MAX_ERROR_CHARS] if detail else f"exit code {tool_result.exit_code}"
+            reason = detail[-1][: eco.MAX_ERROR_CHARS] if detail else f"unexpected exit code {exit_code}"
             error = f"pip-audit failed: {reason}"
         else:
-            processed = self._process_pip_audit(
-                tool_result.stdout, result, file_path, exact=exact, reported=reported, outcome=outcome
+            processed = self._process_completed_pip_audit(
+                tool_result.stdout,
+                result,
+                file_path,
+                exit_code=exit_code,
+                exact=exact,
+                reported=reported,
+                outcome=outcome,
             )
             if processed is None:
-                error = "pip-audit produced no JSON report"
+                if exit_code != 0 and parse_json_output(tool_result.stdout) is None:
+                    detail = (tool_result.stderr or "").strip().splitlines()
+                    reason = detail[-1][: eco.MAX_ERROR_CHARS] if detail else f"exit code {exit_code}"
+                    error = f"pip-audit failed: {reason}"
+                else:
+                    error = "pip-audit returned a malformed or contradictory JSON report"
             else:
                 skipped = processed
         if error is not None:
-            result.add_warning(f"{file_path}: {error}")
+            result.add_warning(f"{file_path}: {error}; scan did not complete")
         return result, error, skipped
 
-    def _process_pip_audit(
+    def _process_completed_pip_audit(
         self,
         output: str,
         result: ValidationResult,
         file_path: str,
         *,
+        exit_code: int,
         exact: Sequence[DependencyDeclaration] = (),
         reported: set[tuple[str, str, str]] | None = None,
         outcome: eco.AuditOutcome,
     ) -> dict[str, str] | None:
-        """Parse pip-audit output into ``python-vulnerability`` findings, tallied on *outcome*.
+        """Parse a completed pip-audit run into ``python-vulnerability`` findings, tallied on *outcome*.
 
         Returns the packages pip-audit skipped (canonical name -> ``skip_reason``,
-        for example a pin PyPI does not know), or ``None`` when there is no report.
+        for example a pin PyPI does not know), or ``None`` when the report is
+        malformed or its exit code contradicts it: that run is no evidence.
         """
-        data = parse_json_output(output, on_error="No known vulnerabilities found")
-        if data is None:
+        report = self._validated_pip_audit_report(output)
+        if report is None:
             return None
-
-        # Handle both list and dict output formats
-        dependencies = data if isinstance(data, list) else data.get("dependencies", [])
+        dependencies, skipped = report
         roles = {declaration.name: declaration.role for declaration in exact if declaration.name}
         reported = reported if reported is not None else set()
 
+        raw_vulns = sum(len(dep["vulns"]) for dep in dependencies)
+        if exit_code != (1 if raw_vulns else 0):
+            return None
+
         vuln_count = 0
-        skipped: dict[str, str] = {}
-        for dep in dependencies if isinstance(dependencies, list) else []:
-            if not isinstance(dep, dict):
-                continue
-
-            pkg_name = str(dep.get("name", "unknown"))
-            skip_reason = dep.get("skip_reason")
-            if skip_reason and not dep.get("vulns"):
-                skipped[canonicalize_package_name(pkg_name)] = str(skip_reason)
-                continue
-            pkg_version = str(dep.get("version", "unknown"))
-
-            for vuln in dep.get("vulns", []) or []:
-                if not isinstance(vuln, dict):
-                    continue
-                vuln_id = str(vuln.get("id", "Unknown"))
-                aliases = [str(alias) for alias in vuln.get("aliases", []) or [] if isinstance(alias, str)]
+        for dep in dependencies:
+            pkg_name = dep["name"]
+            pkg_version = dep["version"]
+            for vuln in dep["vulns"]:
+                vuln_id = vuln["id"]
+                aliases = [alias for alias in vuln.get("aliases", []) if isinstance(alias, str)]
                 # pip-audit can list the same advisory twice for one pin. The version is in the
                 # key: one file can pin a package twice (marker-split pins), and each pin is audited.
                 key = (canonicalize_package_name(pkg_name), pkg_version, vuln_id)
@@ -776,7 +1038,6 @@ class DependencySecurityValidator(ValidatorBase):
                 reported.add(key)
                 reported.update((key[0], pkg_version, alias) for alias in aliases)
                 vuln_count += 1
-                fix_versions = vuln.get("fix_versions", [])
                 self._report_vulnerability(
                     result,
                     outcome,
@@ -785,7 +1046,7 @@ class DependencySecurityValidator(ValidatorBase):
                     pkg_version=pkg_version,
                     vuln_id=vuln_id,
                     aliases=aliases,
-                    fix_versions=[str(item) for item in fix_versions] if isinstance(fix_versions, list) else [],
+                    fix_versions=list(vuln["fix_versions"]),
                     severity=self._get_vuln_severity(vuln),
                     scanner="pip-audit",
                     role=roles.get(canonicalize_package_name(pkg_name)),
@@ -794,8 +1055,101 @@ class DependencySecurityValidator(ValidatorBase):
         status = f"Found {vuln_count} vulnerability(ies)" if vuln_count else "No vulnerabilities found"
         if skipped:
             status += f"; {len(skipped)} pin(s) could not be audited"
-        result.add_message(f"{file_path}: {status} (pip-audit)")
+            result.add_message(f"{file_path}: {status} (pip-audit)")
+        else:
+            result.add_success(
+                check_name="pip_audit",
+                message=f"{file_path}: {status} (pip-audit)",
+                source=file_path,
+                vulnerability_count=vuln_count,
+            )
         return skipped
+
+    @staticmethod
+    def _validated_pip_audit_report(output: str) -> tuple[list[dict], dict[str, str]] | None:
+        """Return resolved dependencies and skipped packages (name -> reason) for canonical pip-audit JSON."""
+        try:
+            data = parse_json_output(output)
+        except (RecursionError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+
+        dependencies = data.get("dependencies")
+        if not isinstance(dependencies, list):
+            return None
+        if "fixes" in data and not isinstance(data["fixes"], list):
+            return None
+
+        resolved: list[dict] = []
+        skipped: dict[str, str] = {}
+        for dependency in dependencies:
+            if not isinstance(dependency, dict):
+                return None
+
+            name = dependency.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return None
+
+            if "skip_reason" in dependency:
+                skip_reason = dependency["skip_reason"]
+                if not isinstance(skip_reason, str) or not skip_reason.strip():
+                    return None
+                skipped[canonicalize_package_name(name)] = skip_reason
+                continue
+
+            version = dependency.get("version")
+            vulnerabilities = dependency.get("vulns")
+            if not isinstance(version, str) or not version.strip() or not isinstance(vulnerabilities, list):
+                return None
+
+            for vulnerability in vulnerabilities:
+                if not DependencySecurityValidator._valid_pip_audit_vulnerability(vulnerability):
+                    return None
+            resolved.append(dependency)
+
+        return resolved, skipped
+
+    @staticmethod
+    def _valid_pip_audit_vulnerability(vulnerability: object) -> bool:
+        """Validate fields consumed from one pip-audit vulnerability entry."""
+        if not isinstance(vulnerability, dict):
+            return False
+
+        vuln_id = vulnerability.get("id")
+        fix_versions = vulnerability.get("fix_versions")
+        if not isinstance(vuln_id, str) or not vuln_id.strip() or not isinstance(fix_versions, list):
+            return False
+        if any(not isinstance(version, str) or not version.strip() for version in fix_versions):
+            return False
+
+        severity = vulnerability.get("severity")
+        if severity is not None and (
+            not isinstance(severity, str) or severity.strip().casefold() not in _PIP_AUDIT_SEVERITIES
+        ):
+            return False
+        aliases = vulnerability.get("aliases", [])
+        if not isinstance(aliases, list):
+            return False
+        for alias in aliases:
+            if isinstance(alias, str):
+                if not alias.strip():
+                    return False
+                continue
+            if not isinstance(alias, dict):
+                return False
+            cvss = alias.get("cvss")
+            score = cvss.get("score") if isinstance(cvss, dict) else None
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, int | float)
+                or (isinstance(score, float) and not math.isfinite(score))
+                or not 0.0 <= score <= 10.0
+            ):
+                return False
+
+        description = vulnerability.get("description")
+        return description is None or isinstance(description, str)
 
     def _run_safety(
         self,

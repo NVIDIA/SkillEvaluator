@@ -403,6 +403,16 @@ def _dedupe_report_reasons(reasons: list[Any]) -> list[str]:
     return deduped
 
 
+def _applicable_accuracy_criteria(detail: dict[str, Any]) -> dict[Any, Any]:
+    """Return accuracy verdicts minus criteria the verifier excluded from the score."""
+    criteria = detail.get("criteria")
+    if not isinstance(criteria, dict):
+        return {}
+    raw_excluded = detail.get("excluded_criteria")
+    excluded = {name for name in raw_excluded if isinstance(name, str)} if isinstance(raw_excluded, list) else set()
+    return {name: verdict for name, verdict in criteria.items() if name not in excluded}
+
+
 def _collect_fail_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str]:
     """Extract human-readable failure reasons from trial details."""
     reasons: list[Any] = []
@@ -421,8 +431,7 @@ def _collect_fail_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
                     reasons.append(reason)
 
         elif metric == "accuracy":
-            criteria = detail.get("criteria")
-            criteria = criteria if isinstance(criteria, dict) else {}
+            criteria = _applicable_accuracy_criteria(detail)
             for crit, passed in criteria.items():
                 if not passed:
                     reasons.append(f"{str(crit)[:480]} failed")
@@ -505,8 +514,7 @@ def _collect_pass_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
                 reasons.append(reason)
 
         elif metric == "accuracy":
-            criteria = detail.get("criteria")
-            criteria = criteria if isinstance(criteria, dict) else {}
+            criteria = _applicable_accuracy_criteria(detail)
             passed = [k for k, v in criteria.items() if v]
             if passed:
                 reasons.append(f"Passed: {', '.join(str(item) for item in passed)[:504]}")

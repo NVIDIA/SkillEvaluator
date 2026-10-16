@@ -37,6 +37,7 @@ from skillevaluator.models.result import (
     ValidationResult,
     ValidationSummary,
 )
+from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.validators.plugin_tree import (
     PluginTree,
     active_plugin_tree,
@@ -125,13 +126,11 @@ def iter_scannable_files(
         order should sort the result themselves).
     """
     excluded = SCAN_EXCLUDED_DIRS if excluded_dirs is None else frozenset(excluded_dirs)
-    excluded_basenames = (
-        SCAN_EXCLUDED_FILES if excluded_files is None else frozenset(name.lower() for name in excluded_files)
-    )
+    excluded_basenames = SCAN_EXCLUDED_FILES if excluded_files is None else frozenset(excluded_files)
     ext_set = set(extensions)
 
     if root.is_file():
-        if root.name.lower() in excluded_basenames:
+        if matches_filesystem_name(root, excluded_basenames):
             return []
         return [root] if root.suffix in ext_set else []
 
@@ -144,14 +143,15 @@ def iter_scannable_files(
     owned_subtrees = plugin_tree_exclusions(root)
     out: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in excluded]
+        base = Path(dirpath)
+        dirnames[:] = [d for d in dirnames if not matches_filesystem_name(base / d, excluded)]
         if owned_subtrees:
-            relative = Path(dirpath).relative_to(root).parts
+            relative = base.relative_to(root).parts
             dirnames[:] = [d for d in dirnames if (*relative, d) not in owned_subtrees]
         for name in filenames:
             if not name.endswith(suffixes):
                 continue
-            if name.lower() in excluded_basenames:
+            if matches_filesystem_name(base / name, excluded_basenames):
                 continue
             out.append(Path(dirpath) / name)
     return out

@@ -37,6 +37,8 @@ from skillevaluator.reporting.base import (
     ReporterBase,
     additional_errors,
     additional_warnings,
+    get_skip_reason,
+    is_advisory_agent_eval_skip,
     passes_required_gate,
     plugin_catalog_similarity_summary,
 )
@@ -66,6 +68,9 @@ _ROW_LABELS = {
     Status.SKIPPED: "[yellow]SKIP[/yellow]",
     Status.NOT_RUN: "[yellow]SKIP[/yellow]",
 }
+
+
+_SKIP_REASON_MAX_CHARS = 1024
 
 
 def _related_paths(finding: Finding) -> list[str]:
@@ -505,6 +510,14 @@ def _print_plugin_statistics_scope(scope: dict, console: Console, *, show_label:
             parts.append(f"{len(completeness['attempt_shortfall'])} case(s) with attempt shortfall")
         detail = "; ".join(parts) or "the compared arms did not score the same cases"
         console.print(f"  [yellow]Integration completeness issues:[/yellow] {esc(detail)}", soft_wrap=True)
+
+
+def _rich_skip_reason(result: ValidationResult) -> str:
+    """Return one bounded, single-line skip reason inert to Rich markup."""
+    reason = " ".join(get_skip_reason(result).replace("\r\n", "\n").replace("\r", "\n").split())
+    if len(reason) > _SKIP_REASON_MAX_CHARS:
+        reason = reason[: _SKIP_REASON_MAX_CHARS - 1] + "…"
+    return escape_markup(reason)
 
 
 class CLIReporter(ReporterBase):
@@ -1102,20 +1115,14 @@ class CLIReporter(ReporterBase):
                 if self._advisory_tier3_gate_label(result):
                     label = "[red]FAIL[/red] (advisory)"
                 details = escape_markup(tier3_gate)
-                if skip_reason := (result.metadata or {}).get("skip_reason"):
+                if (result.metadata or {}).get("skip_reason"):
                     # A partial run that failed: the evaluated parts failed, and the rest was not evaluated.
-                    details += escape_markup(f"; {skip_reason}")
+                    details += "; " + _rich_skip_reason(result)
             elif self._gated_tier3_not_run(result):
                 # --block-on-agent-eval made Tier 3 gate, and it never ran: the gate failed.
-                agent_eval = result.metadata.get("agent_eval", {})
-                provenance = agent_eval.get("provenance", {}) if isinstance(agent_eval, dict) else {}
-                details = escape_markup(
-                    f"{provenance.get('message') or 'Live evaluation did not run'} (--block-on-agent-eval gates Tier 3)"
-                )
+                details = _rich_skip_reason(result) + escape_markup(" (--block-on-agent-eval gates Tier 3)")
             elif advisory_skip:
-                agent_eval = result.metadata.get("agent_eval", {})
-                provenance = agent_eval.get("provenance", {}) if isinstance(agent_eval, dict) else {}
-                details = escape_markup(str(provenance.get("message") or "Live evaluation did not run"))
+                details = _rich_skip_reason(result)
             elif result.is_incomplete:
                 scanners = escape_markup(", ".join(result.incomplete_scans))
                 details = f"[bold yellow]{scanners} did not complete[/bold yellow]"
@@ -1207,10 +1214,4 @@ class CLIReporter(ReporterBase):
     @staticmethod
     def _is_advisory_agent_eval_skip(result: ValidationResult) -> bool:
         """Return whether an AGENT_EVAL result records a skipped live run."""
-        if result.validator_name != "AGENT_EVAL":
-            return False
-        payload = result.metadata.get("agent_eval", {}) if result.metadata else {}
-        provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
-        return bool(
-            isinstance(provenance, dict) and provenance.get("advisory") and provenance.get("reason") == "skipped"
-        )
+        return is_advisory_agent_eval_skip(result)

@@ -350,11 +350,13 @@ _PASS_CARD = """\
 
 ## Evaluation Metadata
 
+- Source digest: `sha256:{digest}` (skill-evaluator-source-tree/2)
 - Evaluation date: 2026-07-25
 - Evaluator version: `0.8.3`
 {source_lines}- Agents: Codex (`gpt-codex`)
 - Tasks: 4 evaluation tasks
 - Dataset digest: `sha256:{digest}` (skill-evaluator-dataset-snapshot/1)
+- Tier 3 run ID: `fixture-demo-run`
 - Attempts per task: 1
 - Environment: `Isolated sandbox`
 - Tier 3 evidence: {tier3_evidence}

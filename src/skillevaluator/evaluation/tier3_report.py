@@ -55,6 +55,13 @@ VERDICT_NEUTRAL = "neutral"
 
 _AGENT_EVAL_VALIDATOR = "AGENT_EVAL"
 _AGENT_EVAL_DESCRIPTION = "Tier 3: Live Agent Evaluation (Harbor)"
+_PUBLICATION_TARGET_CONFLICT_MARKER = "source changed during evaluation"
+_RUNTIME_CONTEXT_CONFLICT_REASON_CODE = "runtime_context_outside_publication_target"
+_RUNTIME_CONTEXT_CONFLICT_MARKER = "runtime context is not bound to publication target"
+_PUBLICATION_TARGET_CONFLICT_MARKERS = (
+    _PUBLICATION_TARGET_CONFLICT_MARKER,
+    _RUNTIME_CONTEXT_CONFLICT_MARKER,
+)
 
 _DIMENSION_IDS = list(DIMENSION_MAPPING.keys())
 
@@ -518,8 +525,13 @@ def agent_eval_result_from_directory(
         or (load_dataset(dataset_source) if dataset_source is not None else None)
         or load_staged_harbor_dataset(run_dir)
     )
+    publication_target = run_truth.get("publication_target")
+    persisted_skill_name = publication_target.get("skill_name") if isinstance(publication_target, dict) else None
+    skill_name = (
+        persisted_skill_name if isinstance(persisted_skill_name, str) and persisted_skill_name else skill_path.name
+    )
     payload = build_agent_eval_payload(
-        skill_path.name,
+        skill_name,
         agents,
         dataset=dataset,
         attempt_policy=_read_attempt_policy(run_dir),
@@ -536,6 +548,9 @@ def agent_eval_result_from_directory(
         persisted_dataset_summary=run_truth.get("dataset_summary"),
         dataset_digest=run_truth.get("dataset_digest"),
         dataset_digest_algorithm=run_truth.get("dataset_digest_algorithm"),
+        run_id=run_truth.get("run_id"),
+        publication_target=publication_target,
+        publication_target_conflict=run_truth.get("publication_target_conflict"),
         evaluated_source=evaluated_source,
         use_llm_judge=use_llm_judge,
     )
@@ -569,6 +584,15 @@ def _validation_result_from_payload(payload: dict[str, Any] | None) -> Validatio
         validator_description=_AGENT_EVAL_DESCRIPTION,
     )
     result.metadata["agent_eval"] = payload
+    publication_target = payload.get("publication_target")
+    if isinstance(publication_target, dict):
+        result.metadata["publication_target"] = dict(publication_target)
+    publication_target_conflict = payload.get("publication_target_conflict")
+    if isinstance(publication_target_conflict, str):
+        result.metadata["publication_target_conflict"] = publication_target_conflict
+    run_id = payload.get("run_id")
+    if isinstance(run_id, str):
+        result.metadata["run_id"] = run_id
     best = payload.get("best_agent") or "n/a"
     plugin_provenance = payload.get("plugin_provenance") or {}
     partial = bool(isinstance(plugin_provenance, dict) and plugin_provenance.get("partial"))
@@ -682,6 +706,7 @@ def render_agent_eval_html_report(
 
 def _save_agent_eval_html(result: ValidationResult, skill_path: Path, target: Path) -> None:
     """Write the Tier 3-only canonical HTML report for one result."""
+    from skillevaluator.publication_identity import publication_target_name
     from skillevaluator.reporting import HTMLReporter
     from skillevaluator.reporting.plugin_sections import is_plugin_payload
 
@@ -690,6 +715,9 @@ def _save_agent_eval_html(result: ValidationResult, skill_path: Path, target: Pa
         target_path=str(skill_path),
         content_label="Plugin" if is_plugin_payload(payload) else "Skill",
         tabs=[{"id": "tier3", "label": "Tier 3: Live Agent Evaluation"}],
+        # The run records the filesystem entry name, which a lexical alias
+        # on a case- or normalization-insensitive filesystem need not match.
+        expected_skill_name=publication_target_name(skill_path) or skill_path.name,
     )
     reporter.save([result], target)
 
@@ -766,6 +794,9 @@ def build_agent_eval_payload(
     persisted_dataset_summary: dict[str, Any] | None = None,
     dataset_digest: str | None = None,
     dataset_digest_algorithm: str | None = None,
+    run_id: str | None = None,
+    publication_target: dict[str, str] | None = None,
+    publication_target_conflict: str | None = None,
     evaluated_source: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
 ) -> dict[str, Any] | None:
@@ -865,6 +896,8 @@ def build_agent_eval_payload(
         "dataset_summary": dataset_summary,
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
+        "run_id": run_id,
+        "publication_target": dict(publication_target) if isinstance(publication_target, dict) else None,
         "evaluated_source": effective_evaluated_source,
         "verdict_policy": verdict_policy,
         "execution_status": execution_status,
@@ -875,6 +908,8 @@ def build_agent_eval_payload(
         ),
         "scored_attempts": sum(_as_nonnegative_int(agent.get("scored_attempts")) for agent in agent_payloads.values()),
     }
+    if publication_target_conflict in _PUBLICATION_TARGET_CONFLICT_MARKERS:
+        summary["publication_target_conflict"] = publication_target_conflict
     if harbor_summary:
         summary["harbor_viewer"] = {
             key: harbor_summary[key] for key in ("job_url", "analysis_url") if harbor_summary.get(key)
@@ -938,6 +973,8 @@ def build_agent_eval_payload(
         "dataset_summary": dataset_summary,
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
+        "run_id": run_id,
+        "publication_target": dict(publication_target) if isinstance(publication_target, dict) else None,
         "evaluated_source": effective_evaluated_source,
         "verdict_policy": verdict_policy,
         "agents": agent_payloads,
@@ -969,6 +1006,8 @@ def build_agent_eval_payload(
             detail_priority=detail_priority,
         ),
     }
+    if publication_target_conflict in _PUBLICATION_TARGET_CONFLICT_MARKERS:
+        payload["publication_target_conflict"] = publication_target_conflict
     if harbor_summary:
         payload["harbor_viewer"] = harbor_summary
     if lift_band is not None:
@@ -1229,6 +1268,58 @@ def _bounded_raw_metric_mapping(value: dict[Any, Any], report_budget: _ReportBud
     return bounded
 
 
+def _compact_agent_conditions(agent: dict[str, Any]) -> bool:
+    """Bound condition diagnostics while preserving publication truth fields."""
+    conditions = agent.get("conditions")
+    if not isinstance(conditions, dict):
+        return False
+
+    def bounded_count(condition: dict[str, Any], key: str) -> int:
+        value = condition.get(key)
+        return (
+            value
+            if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**63 - 1
+            else 0
+        )
+
+    compact: dict[str, dict[str, Any]] = {}
+    canonical_names = {"with_skill", "without_skill"}
+    for condition_name in ("with_skill", "without_skill"):
+        condition = conditions.get(condition_name)
+        if not isinstance(condition, dict):
+            continue
+        raw_errors = condition.get("execution_errors")
+        if isinstance(raw_errors, list) and not raw_errors:
+            bounded_errors: list[str] | None = []
+        elif isinstance(raw_errors, list):
+            bounded_errors = [
+                error[:1024] if isinstance(error, str) else "Malformed condition execution error"
+                for error in raw_errors[:16]
+            ] or ["Condition execution errors were omitted"]
+        else:
+            bounded_errors = None
+        raw_status = condition.get("execution_status")
+        compact[condition_name] = {
+            "execution_status": raw_status if isinstance(raw_status, str) and len(raw_status) <= 16 else None,
+            "execution_errors": bounded_errors,
+            "expected_attempts": bounded_count(condition, "expected_attempts"),
+            "scored_attempts": bounded_count(condition, "scored_attempts"),
+        }
+    if set(conditions) - canonical_names:
+        # Preserve invalidity without retaining attacker-controlled keys or
+        # values. Publication validation requires exactly the two canonical
+        # condition names, so compaction must never repair malformed evidence.
+        compact["invalid_condition_shape"] = {
+            "execution_status": None,
+            "execution_errors": None,
+            "expected_attempts": 0,
+            "scored_attempts": 0,
+        }
+    changed = compact != conditions
+    agent["conditions"] = compact
+    return changed
+
+
 def _prune_non_best_agent_details(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
     """Drop duplicated lower-priority details before touching best-agent evidence."""
     best_agent = str(payload.get("best_agent") or "")
@@ -1247,9 +1338,8 @@ def _prune_non_best_agent_details(payload: dict[str, Any], report_budget: _Repor
             if isinstance(items, list) and items:
                 omitted += len(items)
                 agent[key] = []
-        if agent.get("conditions"):
+        if _compact_agent_conditions(agent):
             omitted += 1
-            agent["conditions"] = {}
         if isinstance(raw_rewards, dict):
             items = raw_rewards.get(name)
             if isinstance(items, list) and items:
@@ -1347,8 +1437,7 @@ def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _Repo
                 if isinstance(items, list) and items:
                     omitted_items += len(items)
                     agent[key] = []
-            if agent.get("conditions"):
-                agent["conditions"] = {}
+            if _compact_agent_conditions(agent):
                 omitted_items += 1
         report_budget.omit("dataset_and_trial_items", omitted_items)
         refresh_signal()
@@ -1723,6 +1812,14 @@ def _build_agent(
     trials = _normalize_trials(info.get("rewards") or [], with_metrics)
     baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], baseline_metrics)
     _attach_baseline_pairs(trials, baseline_trials, with_metrics)
+    from skillevaluator.tier3.harbor.resource_usage import resource_comparison
+
+    resources = resource_comparison(
+        trials,
+        baseline_trials,
+        with_complete=with_quality_available and info.get("rewards_complete") is True,
+        baseline_complete=baseline_quality_available and info.get("rewards_baseline_complete") is True,
+    )
 
     execution_errors = (
         [str(error) for error in info.get("execution_errors", [])]
@@ -1765,6 +1862,7 @@ def _build_agent(
         "num_trials_baseline": int(info.get("num_trials_baseline", len(baseline_trials)) or 0),
         "trials": trials,
         "trials_baseline": baseline_trials,
+        "resources": resources,
         "pass_at_k": {
             "with_skill": info.get("pass_with_skill") or {},
             "without_skill": info.get("pass_without_skill") or {},
@@ -2513,6 +2611,9 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
         }
         if not_applicable:
             trial["not_applicable"] = not_applicable
+        seconds = _finite_float(reward.get("_agent_seconds"))
+        if not is_multi_row and seconds is not None and seconds >= 0:
+            trial["agent_seconds"] = seconds
         traj = reward.get("_traj")
         if not is_multi_row and isinstance(traj, dict):
             steps = _token_counter(traj.get("steps"))
@@ -4493,7 +4594,8 @@ def _run_truth_metadata(
     """Read dataset/evaluator truth owned by the evaluated run, never live source."""
     persisted_result: dict[str, Any] | None = None
     result_file = run_dir / "result.json"
-    if result_file.exists():
+    result_file_present = result_file.exists()
+    if result_file_present:
         with contextlib.suppress(OSError, UnicodeError, ValueError):
             loaded = json.loads(result_file.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
@@ -4520,6 +4622,27 @@ def _run_truth_metadata(
             value = candidate.get(field_name)
             if field_name not in truth and isinstance(value, str) and value.strip():
                 truth[field_name] = value.strip()
+
+    # Publication identity is one run-owned pair. A completed ``result.json``
+    # is authoritative for rerenders; the in-memory engine result is used only
+    # while the runner is rendering before that final artifact exists.
+    identity_source = persisted_result if result_file_present else engine_result
+    if isinstance(identity_source, dict):
+        run_id = identity_source.get("run_id")
+        publication_target = identity_source.get("publication_target")
+        if isinstance(run_id, str) and run_id == run_dir.name:
+            truth["run_id"] = run_id
+            if "publication_target_conflict" in identity_source:
+                conflict = identity_source.get("publication_target_conflict")
+                marker = (
+                    _RUNTIME_CONTEXT_CONFLICT_MARKER
+                    if isinstance(conflict, dict)
+                    and conflict.get("reason_code") == _RUNTIME_CONTEXT_CONFLICT_REASON_CODE
+                    else _PUBLICATION_TARGET_CONFLICT_MARKER
+                )
+                truth["publication_target_conflict"] = marker
+            elif isinstance(publication_target, dict):
+                truth["publication_target"] = dict(publication_target)
     return truth
 
 

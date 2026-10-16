@@ -467,7 +467,19 @@ def test_verifier_retries_non_string_judge_text_before_collector_and_report(
         accuracy_calls.append(prompt)
         if len(accuracy_calls) == 1:
             return json.dumps({"score": 1.0, "reason": {"nested": "accuracy"}}), None
-        return json.dumps({"score": 1.0, "reason": "accuracy recovered"}), None
+        return json.dumps(
+            {
+                "score": 1.0,
+                "reason": "accuracy recovered",
+                "criteria": {
+                    "SKILL_IDENTIFIED": False,
+                    "ACTION_CORRECT": True,
+                    "FACTUALLY_ACCURATE": True,
+                    "TASK_ADDRESSED": True,
+                    "ACTIONABLE": True,
+                },
+            }
+        ), None
 
     def goal_call(prompt: str, **_kwargs):
         goal_calls.append(prompt)
@@ -511,6 +523,7 @@ def test_verifier_retries_non_string_judge_text_before_collector_and_report(
     assert len(accuracy_calls) == 2
     assert len(goal_calls) == 2
     assert collected["details"]["accuracy"]["reason"] == "accuracy recovered"
+    assert collected["details"]["accuracy"]["excluded_criteria"] == ["SKILL_IDENTIFIED"]
     assert collected["details"]["goal_accuracy"]["reason"] == "goal recovered"
     assert all(isinstance(reason, str) for finding in findings for reason in finding["reasons"])
 

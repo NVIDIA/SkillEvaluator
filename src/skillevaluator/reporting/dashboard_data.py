@@ -282,6 +282,9 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
             run_id = str(report.get("evaluated_at") or summary.get("evaluated_at") or "unknown")
         truncation = _dict(report.get("report_truncation")) or _dict(report.get("truncation"))
         coverage_truncated = _trial_coverage_truncated(truncation)
+        non_best_pruned = bool(truncation.get("truncated")) and "non_best_agent_details" in _dict(
+            truncation.get("omitted")
+        )
         if truncation.get("truncated"):
             message = (
                 "trial data may be truncated; comparisons are unavailable."
@@ -294,6 +297,15 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
             if not agent:
                 continue
             conditions = _dict(agent.get("conditions"))
+            # The embedded-size budget empties a non-best agent's trial details
+            # but keeps its declared counts.
+            details_pruned = (
+                non_best_pruned
+                and str(name) != str(report.get("best_agent") or "")
+                and not conditions
+                and not agent.get("trials")
+                and not agent.get("trials_baseline")
+            )
             for condition, trial_field, score_field, count_field in (
                 ("with_skill", "trials", "with_skill", "num_trials"),
                 ("without_skill", "trials_baseline", "baseline", "num_trials_baseline"),
@@ -327,6 +339,7 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                 declared = _count(agent.get(count_field))
                 if declared is None:
                     declared = len(trials)
+                pruned = details_pruned and not trials
                 expected = _count(details.get("expected_attempts"))
                 scored = _count(details.get("scored_attempts"))
                 keys = _trial_keys(trials)
@@ -356,7 +369,7 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                     "harness": str(agent.get("harness") or agent.get("name") or name),
                     "condition": condition,
                     "status": status,
-                    "trials": logical_count,
+                    "trials": declared if pruned else logical_count,
                     "score": _number(agent.get(score_field)) if complete else None,
                     "pass_rate": _number(_dict(_dict(agent.get("pass_at_k")).get(condition)).get("rate"))
                     if complete
@@ -364,6 +377,7 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                     "_complete": complete,
                     "_invalid_counts": invalid_counts,
                     "_coverage_truncated": coverage_truncated,
+                    "_details_pruned": pruned,
                     "_report_index": report_index,
                     "_agent_key": str(name),
                     "_trial_keys": keys,
@@ -413,6 +427,8 @@ def _ineligible_reason(with_row: dict[str, Any], without_row: dict[str, Any]) ->
         return "invalid trial counts"
     if with_row.get("_coverage_truncated") or without_row.get("_coverage_truncated"):
         return "trial data truncated"
+    if with_row.get("_details_pruned") or without_row.get("_details_pruned"):
+        return "trial details pruned from embedded report; load the retained run directory"
     for label, row in arms:
         if not row.get("_complete"):
             return f"{label} trial coverage incomplete"
@@ -563,7 +579,10 @@ def _load_native(path: Path) -> DashboardData:
 
     engine_result = _dict(_read_native_json(path / "result.json", path))
     skill = str(engine_result.get("skill_name") or "unknown")
-    result = agent_eval_result_from_directory(Path(skill), path, engine_result=engine_result, use_llm_judge=False)
+    # The payload is parsed in memory, never embedded, so keep every agent's trials.
+    result = agent_eval_result_from_directory(
+        Path(skill), path, engine_result=engine_result, use_llm_judge=False, enforce_embedded_size=False
+    )
     if result is None:
         return DashboardData(warnings=[f"{path}: no supported retained agent summaries found."])
     canonical = result.metadata["agent_eval"]

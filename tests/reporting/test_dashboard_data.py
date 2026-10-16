@@ -505,6 +505,26 @@ def test_diagnostic_truncation_preserves_complete_trial_comparisons(omitted: str
     assert comparison_rows(data.rows)[0]["comparison_status"] == "comparable"
 
 
+def test_pruned_non_best_agent_reports_declared_trials_and_reason() -> None:
+    report = _report()
+    report["best_agent"] = "best"
+    report["agents"]["best"] = copy.deepcopy(report["agents"]["claude-code"])
+    agent = report["agents"]["claude-code"]
+    agent.update(num_trials=5, num_trials_baseline=5, conditions={}, trials=[], trials_baseline=[])
+    report["report_truncation"] = {"truncated": True, "omitted": {"non_best_agent_details": 12}}
+    data = parse_dashboard_report(report, "report.json")
+    rows = [row for row in data.rows if row["_agent_key"] == "claude-code"]
+    assert [row["trials"] for row in rows] == [5, 5]
+    assert all(row["score"] is None and "tokens 0/5" in row["coverage"] for row in rows)
+    comparisons = {row["_agent_key"]: row for row in comparison_rows(data.rows)}
+    assert comparisons["best"]["comparison_status"] == "comparable"
+    assert comparisons["claude-code"]["comparison_status"] == "incomplete or mismatched coverage"
+    assert comparisons["claude-code"]["comparison_reason"] == (
+        "trial details pruned from embedded report; load the retained run directory"
+    )
+    assert comparisons["claude-code"]["score_delta"] is None
+
+
 def test_artifact_loading_truncation_blocks_comparisons() -> None:
     report = _report()
     report["report_truncation"] = {
@@ -736,6 +756,38 @@ def test_oversized_trajectory_keeps_scores_comparable(tmp_path: Path) -> None:
     assert comparison_rows(rows)[0]["comparison_status"] == "comparable"
     assert rows[0]["condition"] == "with_skill"
     assert rows[0]["total_tokens"] is None
+
+
+def test_retained_run_keeps_non_best_agent_trials_beyond_embedded_budget(tmp_path: Path, monkeypatch) -> None:
+    from skillevaluator.evaluation import tier3_report
+
+    run = tmp_path / "run"
+    _native_run(run)
+    shutil.copytree(run / "opencode", run / "codex")
+    config = json.loads((run / "run_config.json").read_text(encoding="utf-8"))
+    config["agents"]["codex"] = {"agent": "codex", "model": "m"}
+    (run / "run_config.json").write_text(json.dumps(config), encoding="utf-8")
+    for summary_path in run.glob("codex/*/summary.json"):
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["agent"] = "codex"
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    # A budget just below the full payload prunes only the non-best agent's details.
+    budget = tier3_report._serialized_payload_size(_canonical_export(run)) - 200
+    monkeypatch.setattr(tier3_report, "_MAX_EMBEDDED_REPORT_BYTES", budget)
+    canonical = _canonical_export(run)
+    assert canonical["report_truncation"]["omitted"]["non_best_agent_details"]
+    pruned = next(name for name in canonical["agents"] if name != canonical["best_agent"])
+
+    rows = load_dashboard_path(run).rows
+    assert len(rows) == 4
+    assert all(row["trials"] == 1 and row["score"] == 0.8 and row["total_tokens"] is not None for row in rows)
+    assert all(row["comparison_status"] == "comparable" for row in comparison_rows(rows))
+    # The bounded canonical export still fails closed for the pruned agent.
+    comparison = next(
+        row for row in comparison_rows(parse_dashboard_report(canonical, "r.json").rows) if row["_agent_key"] == pruned
+    )
+    assert comparison["coverage"] == "1 with / 1 without"
+    assert comparison["comparison_reason"].startswith("trial details pruned from embedded report")
 
 
 def test_catalog_native_and_mixed_references_are_loaded_without_cycles(tmp_path: Path) -> None:

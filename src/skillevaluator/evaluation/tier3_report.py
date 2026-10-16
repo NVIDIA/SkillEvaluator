@@ -439,8 +439,13 @@ def agent_eval_result_from_directory(
     evaluator_version: str | None = None,
     evaluated_source: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
+    enforce_embedded_size: bool = True,
 ) -> ValidationResult | None:
-    """Build the canonical ``AGENT_EVAL`` result for one explicit Harbor run."""
+    """Build the canonical ``AGENT_EVAL`` result for one explicit Harbor run.
+
+    Read-only consumers that never embed the payload pass
+    ``enforce_embedded_size=False`` to keep every agent's trial details.
+    """
     # Imported lazily so base-only Tier 1 workflows do not load Tier 3 helpers.
     from skillevaluator.tier3.harbor.report_data import (
         load_agent_data,
@@ -479,6 +484,7 @@ def agent_eval_result_from_directory(
         dataset_digest_algorithm=run_truth.get("dataset_digest_algorithm"),
         evaluated_source=evaluated_source,
         use_llm_judge=use_llm_judge,
+        enforce_embedded_size=enforce_embedded_size,
     )
     return _validation_result_from_payload(payload)
 
@@ -571,6 +577,7 @@ def build_agent_eval_payload(
     dataset_digest_algorithm: str | None = None,
     evaluated_source: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
+    enforce_embedded_size: bool = True,
 ) -> dict[str, Any] | None:
     """Assemble the canonical Tier 3 ``agent_eval`` payload from loaded agent data.
 
@@ -583,7 +590,8 @@ def build_agent_eval_payload(
     ``trials`` + ``pass_at_k``) feeds the Trials tab, deterministic + LLM
     ``conclusions`` / ``recommendations`` / ``suggestions`` feed the Insights tab,
     and ``provenance`` (raw evaluators, raw lift, raw trial rewards) feeds the
-    Diagnostics tab.
+    Diagnostics tab. ``enforce_embedded_size=False`` skips the embedded-report
+    size pruning; loader truncation is still recorded in ``report_truncation``.
     """
     from skillevaluator.tier3.harbor.report_data import (
         build_dataset_snapshot,
@@ -796,7 +804,7 @@ def build_agent_eval_payload(
             evidence_links,
         )
     payload = _sanitize_json_numbers(payload)
-    _enforce_report_payload_budget(payload, report_budget)
+    _enforce_report_payload_budget(payload, report_budget, enforce_size=enforce_embedded_size)
     return payload
 
 
@@ -1013,7 +1021,9 @@ def _prune_pass_at_k_pairing_diagnostics(payload: dict[str, Any], report_budget:
     report_budget.omit("unpaired_case_ids", omitted)
 
 
-def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
+def _enforce_report_payload_budget(
+    payload: dict[str, Any], report_budget: _ReportBudget, *, enforce_size: bool = True
+) -> None:
     """Keep the complete self-contained payload within a hard serialized budget.
 
     Cardinality limits normally keep the payload comfortably below the cap. The
@@ -1032,7 +1042,7 @@ def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _Repo
     # best-agent and top-level projections.
     _prune_pass_at_k_pairing_diagnostics(payload, report_budget)
     refresh_signal()
-    if _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES:
+    if not enforce_size or _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES:
         return
 
     provenance = payload.get("provenance")

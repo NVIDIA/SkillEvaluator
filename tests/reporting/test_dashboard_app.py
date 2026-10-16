@@ -163,8 +163,34 @@ def test_bad_report_does_not_hide_other_results(tmp_path: Path) -> None:
     invalid.write_text("{broken JSON", encoding="utf-8")
     app = _app([invalid, valid, tmp_path / "missing.json"])
     assert not app.exception
-    assert len(app.warning) == 2
+    assert len(app.warning) == 1
+    assert len(app.text) == 2
     assert len(app.dataframe[0].value) == 2
+
+
+def test_report_notices_are_plain_text(tmp_path: Path) -> None:
+    path = _write_report(tmp_path / "beacon.json")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    agent = report["agents"].pop("opencode")
+    agent["num_trials"] = -1
+    report["agents"]["![x](https://beacon.example.test/x.png)"] = agent
+    path.write_text(json.dumps(report), encoding="utf-8")
+    app = _app([path])
+    assert not app.exception
+    assert not any("](" in warning.value for warning in app.warning)
+    assert any("beacon.example.test" in text.value for text in app.text)
+
+
+def test_notice_count_matches_unique_notices(tmp_path: Path) -> None:
+    report = _write_report(tmp_path / "run.json")
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["agents"]["opencode"]["num_trials"] = -1
+    report.write_text(json.dumps(payload), encoding="utf-8")
+    # The directory walk and the direct file path report the same notice for one file.
+    app = _app([tmp_path, report])
+    assert not app.exception
+    assert app.expander[0].label == "Report notices (1)"
+    assert len(app.text) == 1
 
 
 def test_status_filter_does_not_pair_arms_from_separate_embedded_reports(tmp_path: Path) -> None:
@@ -192,8 +218,8 @@ def test_cyclic_input_path_does_not_hide_valid_report(tmp_path: Path) -> None:
         pytest.skip("Symlinks are unavailable on this host")
     app = _app([loop, valid])
     assert not app.exception
-    assert len(app.warning) == 1
-    assert str(loop) in app.warning[0].value
+    assert len(app.text) == 1
+    assert str(loop) in app.text[0].value
     assert len(app.dataframe[0].value) == 2
 
 
@@ -239,3 +265,13 @@ def test_csv_preserves_numeric_deltas_and_escapes_formula_strings() -> None:
     assert cells[1] == {"skill": "'\tprivate-name", "score_delta": "0.0", "cost_usd": "0.0"}
     assert cells[2]["skill"] == "'@SUM(A1)"
     assert "must not be exported" not in exported
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["\r=1", "\n=1", "\xa0=1", "\u3000=1", "\uff1d1", "\uff0b1", "\uff0d1", "\uff20A1"],
+)
+def test_csv_escapes_formula_prefixes_after_whitespace_and_width_folding(value: str) -> None:
+    exported = rows_csv([{"skill": value, "score_delta": -0.25, "cost_usd": 7}], ("skill", "score_delta", "cost_usd"))
+    cells = list(csv.DictReader(io.StringIO(exported)))
+    assert cells == [{"skill": "'" + value, "score_delta": "-0.25", "cost_usd": "7"}]

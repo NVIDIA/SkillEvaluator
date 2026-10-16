@@ -13,6 +13,7 @@ import csv
 import io
 import json
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -91,10 +92,11 @@ def rows_csv(rows: list[dict[str, Any]], columns: tuple[str, ...]) -> str:
         cells: dict[str, Any] = {}
         for column in columns:
             value = row.get(column)
-            if isinstance(value, str) and (
-                value.startswith(("\t", "\r", "\n")) or value.lstrip().startswith(("=", "+", "-", "@"))
-            ):
-                value = "'" + value
+            if isinstance(value, str):
+                # NFKC folds full-width prefixes such as U+FF1D to their ASCII forms.
+                probe = unicodedata.normalize("NFKC", value).lstrip()
+                if value.startswith(("\t", "\r", "\n")) or probe.startswith(("=", "+", "-", "@")):
+                    value = "'" + value
             cells[column] = value
         writer.writerow(cells)
     return buffer.getvalue()
@@ -299,9 +301,11 @@ def main(paths: list[str] | None = None) -> None:
         rows.extend(data.rows)
         warnings.extend(data.warnings)
     if warnings:
-        with st.expander(f"Report notices ({len(warnings)})", expanded=True):
-            for warning in dict.fromkeys(warnings):
-                st.warning(warning)
+        notices = list(dict.fromkeys(warnings))
+        with st.expander(f"Report notices ({len(notices)})", expanded=True):
+            st.warning("Some inputs were skipped or have incomplete measurements.")
+            for notice in notices:
+                st.text(notice)  # st.text parses neither Markdown nor HTML
     if not rows:
         st.info("Upload JSON evaluation reports to start comparing results.")
         st.caption("You can also open saved run directories with skillevaluator dashboard PATH [PATH …].")

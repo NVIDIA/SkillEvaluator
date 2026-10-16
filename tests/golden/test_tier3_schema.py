@@ -15,8 +15,10 @@ from __future__ import annotations
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
+    DEFAULT_SCORE_POLICY,
     metric_set_for_reward,
     score_definition,
+    score_policy_for_metrics,
 )
 
 
@@ -47,7 +49,9 @@ def test_metric_set_for_reward_defaults_to_skill_evaluator() -> None:
     assert metrics == DEFAULT_METRICS
 
 
-def test_score_definition_mentions_metrics() -> None:
+def test_score_definition_identifies_the_versioned_dimension_policy() -> None:
     definition = score_definition(DEFAULT_METRICS)
     assert isinstance(definition, str)
-    assert "security" in definition
+    assert "Security" in definition
+    assert DEFAULT_SCORE_POLICY in definition
+    assert score_policy_for_metrics(DEFAULT_METRICS) == DEFAULT_SCORE_POLICY

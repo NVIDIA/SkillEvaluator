@@ -21,7 +21,15 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS, metric_set_for_reward
+from skillevaluator.tier3.harbor.metrics import (
+    CUSTOM_ONLY_METRIC_SET,
+    DEFAULT_METRIC_SET,
+    DEFAULT_METRICS,
+    LEGACY_METRIC_SET,
+    LEGACY_METRICS,
+    PARTIAL_SCORE_POLICY,
+    metric_set_for_reward,
+)
 from skillevaluator.tier3.harbor.resource_usage import agent_execution_seconds
 
 logger = logging.getLogger(__name__)
@@ -501,7 +509,11 @@ def _metrics_for_rewards(rewards: list[dict[str, Any]]) -> list[str]:
 
 
 def metrics_for_condition(agent_info: dict[str, Any], condition: str) -> list[str]:
-    """Return the standard metric contract declared by one agent condition."""
+    """Return the standard metric contract declared by one agent condition.
+
+    Recorded metrics win. Older artifacts fall back to the recorded metric set,
+    then to the standard metrics present in the condition scores, then rewards.
+    """
     if condition == "with_skill":
         metrics_key, scores_key, rewards_key = "metrics_with_skill", "with_skill", "rewards"
     elif condition == "without_skill":
@@ -511,10 +523,21 @@ def metrics_for_condition(agent_info: dict[str, Any], condition: str) -> list[st
 
     configured = agent_info.get(metrics_key)
     if isinstance(configured, list):
-        return [str(metric) for metric in configured]
-    scores = agent_info.get(scores_key, {})
-    if isinstance(scores, dict) and "security" in scores:
+        return list(dict.fromkeys(str(metric) for metric in configured))
+    recorded_set = agent_info.get(f"metric_set_{condition}")
+    if recorded_set == DEFAULT_METRIC_SET:
         return list(DEFAULT_METRICS)
+    if recorded_set == LEGACY_METRIC_SET:
+        return list(LEGACY_METRICS)
+    if recorded_set == CUSTOM_ONLY_METRIC_SET:
+        return []
+    scores = agent_info.get(scores_key, {})
+    if isinstance(scores, dict) and scores:
+        if "security" in scores and agent_info.get(f"score_policy_{condition}") != PARTIAL_SCORE_POLICY:
+            # Unversioned Security scores claim the default v2 contract, so a
+            # missing evaluator leaves the condition incomplete, not partial.
+            return list(DEFAULT_METRICS)
+        return [metric for metric in DEFAULT_METRICS if metric in scores]
     rewards = agent_info.get(rewards_key, [])
     return _metrics_for_rewards(rewards) if isinstance(rewards, list) else []
 
@@ -666,7 +689,10 @@ def load_agent_data(
                     key = "with_skill" if variant == "with-skill" else "without_skill"
                     agent_info[key] = scores
                     metric_key = "metrics_with_skill" if variant == "with-skill" else "metrics_without_skill"
-                    agent_info[metric_key] = data.get("metrics", [])
+                    if isinstance(data.get("metrics"), list):
+                        agent_info[metric_key] = data["metrics"]
+                    if isinstance(data.get("metric_set"), str):
+                        agent_info[f"metric_set_{key}"] = data["metric_set"]
                     custom_key = "custom_with_skill" if variant == "with-skill" else "custom_without_skill"
                     if "custom_scores" in data:
                         custom_scores = data.get("custom_scores")
@@ -674,6 +700,11 @@ def load_agent_data(
                     overall_key = "overall_with_skill" if variant == "with-skill" else "overall_without_skill"
                     if "overall_score" in data:
                         agent_info[overall_key] = data.get("overall_score")
+                    score_policy_key = (
+                        "score_policy_with_skill" if variant == "with-skill" else "score_policy_without_skill"
+                    )
+                    if isinstance(data.get("score_policy"), str) and data["score_policy"].strip():
+                        agent_info[score_policy_key] = data["score_policy"].strip()
                     mixed_contract_key = (
                         "mixed_metric_contracts_with_skill"
                         if variant == "with-skill"

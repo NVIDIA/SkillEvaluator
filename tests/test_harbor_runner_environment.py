@@ -20,6 +20,7 @@ from harbor.utils.env import resolve_env_vars
 from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.tier3.harbor import runner, runtime_preflight
 from skillevaluator.tier3.harbor.adapter import _verifier_env_vars
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_SCORE_POLICY
 from skillevaluator.tier3_environments import HARBOR_NATIVE_ENV_MODES
 
 
@@ -1193,7 +1194,17 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
         "collect_harbor_results",
         lambda **kwargs: (
             collected.update(kwargs)
-            or {"execution_status": "complete", "execution_errors": [], "metrics": [], "agents": {}}
+            or {
+                "execution_status": "complete",
+                "execution_errors": [],
+                "metrics": list(DEFAULT_METRICS),
+                "score_policy": LEGACY_SCORE_POLICY,
+                "attempt_policy": {
+                    "score_policy": LEGACY_SCORE_POLICY,
+                    "score_definition": "historical six-metric mean",
+                },
+                "agents": {},
+            }
         ),
     )
     monkeypatch.setattr(runner, "render_agent_eval_html_report", lambda *_args, **_kwargs: tmp_path / "report.html")
@@ -1211,6 +1222,11 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
     )
 
     assert "error" not in result
+    assert result["score_policy"] == result["attempt_policy"]["score_policy"] == LEGACY_SCORE_POLICY
+    assert result["attempt_policy"]["score_definition"] == "historical six-metric mean"
+    assert result["attempt_policy"]["max_attempts"] == 1
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+    assert persisted["attempt_policy"]["score_policy"] == LEGACY_SCORE_POLICY
     assert {
         (path.split("/")[-2], path.split("/")[-1], with_skill)
         for path, with_skill, _runtime_env, _verifier_env in emitted

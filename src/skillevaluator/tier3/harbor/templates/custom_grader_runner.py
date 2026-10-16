@@ -53,6 +53,7 @@ RESERVED = {
     "metric_set_version",
     "metrics",
     "overall",
+    "score_policy",
     "trajectory_detail",
     "trajectory_source",
 }

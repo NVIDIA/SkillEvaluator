@@ -433,7 +433,9 @@ views. Rewriting a JSON file passed on the command line, or adding an entry
 directly inside a directory input, is picked up on the next interaction. Edits
 deeper inside a directory input (for example a run that is still writing trials)
 or in reports a catalog references appear after **Reload reports** in the
-sidebar; a browser refresh does not re-read them.
+sidebar; a browser refresh does not re-read them. Overlapping inputs, such as a
+results directory and a run inside it, are loaded once. Byte-identical uploads
+are skipped with a notice.
 
 Missing measurements stay unavailable, and cost is shown only when recorded in
 USD. Canonical Tier 3 JSON records each single-step trial's agent execution time

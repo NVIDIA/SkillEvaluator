@@ -378,6 +378,18 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
     return output
 
 
+def dedupe_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Drop rows reloaded from the same resolved source; keys are unique within one parse."""
+    seen: set[tuple[Any, ...]] = set()
+    kept = []
+    for row in rows:
+        key = (row.get("source"), row.get("_report_index"), row.get("_agent_key"), row.get("condition"))
+        if key not in seen:
+            seen.add(key)
+            kept.append(row)
+    return kept, len(rows) - len(kept)
+
+
 def comparison_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Compute with-minus-without differences only within an identical run."""
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}

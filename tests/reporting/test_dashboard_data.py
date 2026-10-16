@@ -11,7 +11,12 @@ from pathlib import Path
 import pytest
 
 from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory
-from skillevaluator.reporting.dashboard_data import comparison_rows, load_dashboard_path, parse_dashboard_report
+from skillevaluator.reporting.dashboard_data import (
+    comparison_rows,
+    dedupe_rows,
+    load_dashboard_path,
+    parse_dashboard_report,
+)
 
 
 def _report() -> dict:
@@ -169,6 +174,15 @@ def test_disjoint_runs_features_and_duplicate_conditions_cannot_pair() -> None:
     duplicate = comparison_rows([*data.rows, data.rows[0]])[0]
     assert duplicate["comparison_status"] == "ambiguous duplicate conditions"
     assert duplicate["score_delta"] is None
+
+
+def test_dedupe_rows_drops_only_reloaded_rows() -> None:
+    rows = parse_dashboard_report(_report(), "x").rows
+    deduped, dropped = dedupe_rows(rows + copy.deepcopy(rows))
+    assert (deduped, dropped) == (rows, 2)
+    # Identical embedded reports in one file are separate occurrences, not reloads.
+    assert dedupe_rows(parse_dashboard_report([_report(), _report()], "x").rows)[1] == 0
+    assert comparison_rows(deduped)[0]["comparison_status"] == "comparable"
 
 
 @pytest.mark.parametrize("scope", ["reports", "agents"])

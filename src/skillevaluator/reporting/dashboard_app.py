@@ -10,6 +10,7 @@ starting Streamlit. Only normalized quantitative data is displayed or exported.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import sys
@@ -22,6 +23,7 @@ import streamlit as st
 from skillevaluator.reporting.dashboard_data import (
     DashboardData,
     comparison_rows,
+    dedupe_rows,
     load_dashboard_path,
     parse_dashboard_report,
 )
@@ -106,12 +108,13 @@ def _load_path_cached(path: str, fingerprint: tuple[int, int, int] | None) -> Da
 # Keyed on file_id, which is stable while the file stays in the widget;
 # the leading underscore stops Streamlit hashing the uploaded bytes.
 @st.cache_data(max_entries=_CACHE_ENTRIES, show_spinner=False)
-def _parse_upload_cached(file_id: str, source: str, name: str, _contents: bytes) -> DashboardData:
+def _parse_upload_cached(file_id: str, source: str, name: str, _contents: bytes) -> tuple[str, DashboardData]:
+    digest = hashlib.sha256(_contents).hexdigest()
     try:
         payload = json.loads(_contents)
     except (ValueError, RecursionError):  # UnicodeError is a ValueError subclass
-        return DashboardData(warnings=[f"{name}: invalid JSON. Upload a UTF-8 JSON evaluation report."])
-    return parse_dashboard_report(payload, source=source)
+        return digest, DashboardData(warnings=[f"{name}: invalid JSON. Upload a UTF-8 JSON evaluation report."])
+    return digest, parse_dashboard_report(payload, source=source)
 
 
 def rows_csv(rows: list[dict[str, Any]], columns: tuple[str, ...]) -> str:
@@ -322,17 +325,27 @@ def main(paths: list[str] | None = None) -> None:
         data = _load_path_cached(str(path), _input_fingerprint(path))
         rows.extend(data.rows)
         warnings.extend(data.warnings)
+    seen_uploads: set[str] = set()
     for index, uploaded in enumerate(uploads):
         if uploaded.size > _MAX_UPLOAD_BYTES:
             warnings.append(
                 f"{uploaded.name}: report exceeds 16 MB (16,000,000 bytes). Upload a smaller evaluation report."
             )
             continue
-        data = _parse_upload_cached(
+        digest, data = _parse_upload_cached(
             uploaded.file_id, f"upload:{index + 1}:{uploaded.name}", uploaded.name, uploaded.getvalue()
         )
+        if digest in seen_uploads:
+            warnings.append(f"{uploaded.name}: identical to an earlier upload; skipped.")
+            continue
+        seen_uploads.add(digest)
         rows.extend(data.rows)
         warnings.extend(data.warnings)
+    # Overlapping CLI paths (a directory and a run inside it) reload rows under the same source.
+    rows, duplicate_count = dedupe_rows(rows)
+    if duplicate_count:
+        plural = "s" if duplicate_count != 1 else ""
+        warnings.append(f"Overlapping inputs: {duplicate_count} duplicate condition row{plural} loaded once.")
     if warnings:
         notices = list(dict.fromkeys(warnings))
         with st.expander(f"Report notices ({len(notices)})", expanded=True):

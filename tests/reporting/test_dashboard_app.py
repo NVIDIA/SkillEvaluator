@@ -216,8 +216,38 @@ def test_notice_count_matches_unique_notices(tmp_path: Path) -> None:
     # The directory walk and the direct file path report the same notice for one file.
     app = _app([tmp_path, report])
     assert not app.exception
-    assert app.expander[0].label == "Report notices (1)"
-    assert len(app.text) == 1
+    assert app.expander[0].label == "Report notices (2)"
+    assert len(app.text) == 2
+    assert app.text[1].value == "Overlapping inputs: 2 duplicate condition rows loaded once."
+
+
+def test_directory_and_file_inside_it_load_once(tmp_path: Path) -> None:
+    report = _write_report(tmp_path / "run.json")
+    app = _app([tmp_path, report])
+    assert not app.exception
+    assert len(app.dataframe[0].value) == 2
+    comparison = app.dataframe[1].value
+    assert comparison["comparison_status"].tolist() == ["comparable"]
+    assert comparison["score_delta"].iloc[0] == pytest.approx(0.3)
+    assert any("duplicate" in text.value for text in app.text)
+
+
+def test_results_dir_and_latest_symlink_load_once(tmp_path: Path) -> None:
+    results = tmp_path / "results"
+    run = results / "run-1"
+    run.mkdir(parents=True)
+    _write_report(run / "report.json")
+    try:
+        (results / "latest").symlink_to(run, target_is_directory=True)
+    except OSError:
+        pytest.skip("Symlinks are unavailable on this host")
+    app = _app([results, results / "latest"])
+    assert not app.exception
+    assert len(app.dataframe[0].value) == 2
+    comparison = app.dataframe[1].value
+    assert comparison["comparison_status"].tolist() == ["comparable"]
+    assert comparison["score_delta"].iloc[0] == pytest.approx(0.3)
+    assert any("duplicate" in text.value for text in app.text)
 
 
 def test_status_filter_does_not_pair_arms_from_separate_embedded_reports(tmp_path: Path) -> None:
@@ -334,6 +364,24 @@ def test_upload_batch_reports_oversize_and_invalid_and_keeps_valid(tmp_path: Pat
     assert any(notice.startswith("big.json: report exceeds 16 MB") for notice in notices), notices
     assert sum("invalid JSON" in notice for notice in notices) == 2, notices
     assert len(app.dataframe[0].value) == 2
+
+
+def test_identical_uploads_are_loaded_once(tmp_path: Path) -> None:
+    blob = _write_report(tmp_path / "run.json").read_bytes()
+    app = _upload_app()
+    app.file_uploader(key="report_uploads").set_value([("run.json", blob, "application/json")] * 2).run()
+    assert not app.exception
+    assert len(app.dataframe[0].value) == 2
+    assert [metric.value for metric in app.metric] == ["1", "1", "2", "2"]
+    assert any("identical to an earlier upload; skipped." in text.value for text in app.text)
+
+    other = _write_report(tmp_path / "other.json", model="model-b").read_bytes()
+    app.file_uploader(key="report_uploads").set_value(
+        [("run.json", blob, "application/json"), ("run.json", other, "application/json")]
+    ).run()
+    assert not app.exception
+    assert len(app.dataframe[0].value) == 4
+    assert not any("identical to an earlier upload" in text.value for text in app.text)
 
 
 def test_upload_at_exact_limit_is_accepted(tmp_path: Path) -> None:

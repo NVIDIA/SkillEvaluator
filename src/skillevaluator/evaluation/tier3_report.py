@@ -50,6 +50,12 @@ VERDICT_NEUTRAL = "neutral"
 _AGENT_EVAL_VALIDATOR = "AGENT_EVAL"
 _AGENT_EVAL_DESCRIPTION = "Tier 3: Live Agent Evaluation (Harbor)"
 _PUBLICATION_TARGET_CONFLICT_MARKER = "source changed during evaluation"
+_RUNTIME_CONTEXT_CONFLICT_REASON_CODE = "runtime_context_outside_publication_target"
+_RUNTIME_CONTEXT_CONFLICT_MARKER = "runtime context is not bound to publication target"
+_PUBLICATION_TARGET_CONFLICT_MARKERS = (
+    _PUBLICATION_TARGET_CONFLICT_MARKER,
+    _RUNTIME_CONTEXT_CONFLICT_MARKER,
+)
 
 _DIMENSION_IDS = list(DIMENSION_MAPPING.keys())
 
@@ -486,6 +492,7 @@ def agent_eval_result_from_directory(
         run_id=run_truth.get("run_id"),
         publication_target=publication_target,
         publication_target_conflict=run_truth.get("publication_target_conflict"),
+        evaluated_source=evaluated_source,
         use_llm_judge=use_llm_judge,
     )
     return _validation_result_from_payload(payload)
@@ -559,11 +566,15 @@ def render_agent_eval_html_report(
         }
 
     target = output_path.expanduser().resolve() if output_path is not None else run_dir / "report.html"
+    from skillevaluator.publication_identity import publication_target_name
+
     reporter = HTMLReporter(
         target_path=str(skill_path),
         content_label="Skill",
         tabs=[{"id": "tier3", "label": "Tier 3: Live Agent Evaluation"}],
-        expected_skill_name=skill_path.name,
+        # The run records the filesystem entry name, which a lexical alias
+        # on a case- or normalization-insensitive filesystem need not match.
+        expected_skill_name=publication_target_name(skill_path) or skill_path.name,
     )
     reporter.save([result], target)
     return target
@@ -590,6 +601,7 @@ def build_agent_eval_payload(
     run_id: str | None = None,
     publication_target: dict[str, str] | None = None,
     publication_target_conflict: str | None = None,
+    evaluated_source: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
 ) -> dict[str, Any] | None:
     """Assemble the canonical Tier 3 ``agent_eval`` payload from loaded agent data.
@@ -704,6 +716,7 @@ def build_agent_eval_payload(
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
         "run_id": run_id,
         "publication_target": dict(publication_target) if isinstance(publication_target, dict) else None,
+        "evaluated_source": effective_evaluated_source,
         "verdict_policy": verdict_policy,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
@@ -713,8 +726,8 @@ def build_agent_eval_payload(
         ),
         "scored_attempts": sum(_as_nonnegative_int(agent.get("scored_attempts")) for agent in agent_payloads.values()),
     }
-    if publication_target_conflict == _PUBLICATION_TARGET_CONFLICT_MARKER:
-        summary["publication_target_conflict"] = _PUBLICATION_TARGET_CONFLICT_MARKER
+    if publication_target_conflict in _PUBLICATION_TARGET_CONFLICT_MARKERS:
+        summary["publication_target_conflict"] = publication_target_conflict
     if harbor_summary:
         summary["harbor_viewer"] = {
             key: harbor_summary[key] for key in ("job_url", "analysis_url") if harbor_summary.get(key)
@@ -769,6 +782,7 @@ def build_agent_eval_payload(
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
         "run_id": run_id,
         "publication_target": dict(publication_target) if isinstance(publication_target, dict) else None,
+        "evaluated_source": effective_evaluated_source,
         "verdict_policy": verdict_policy,
         "agents": agent_payloads,
         "dimensions": best_dimensions,
@@ -797,8 +811,8 @@ def build_agent_eval_payload(
             detail_priority=detail_priority,
         ),
     }
-    if publication_target_conflict == _PUBLICATION_TARGET_CONFLICT_MARKER:
-        payload["publication_target_conflict"] = _PUBLICATION_TARGET_CONFLICT_MARKER
+    if publication_target_conflict in _PUBLICATION_TARGET_CONFLICT_MARKERS:
+        payload["publication_target_conflict"] = publication_target_conflict
     if harbor_summary:
         payload["harbor_viewer"] = harbor_summary
 
@@ -970,6 +984,58 @@ def _bounded_raw_metric_mapping(value: dict[Any, Any], report_budget: _ReportBud
     return bounded
 
 
+def _compact_agent_conditions(agent: dict[str, Any]) -> bool:
+    """Bound condition diagnostics while preserving publication truth fields."""
+    conditions = agent.get("conditions")
+    if not isinstance(conditions, dict):
+        return False
+
+    def bounded_count(condition: dict[str, Any], key: str) -> int:
+        value = condition.get(key)
+        return (
+            value
+            if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**63 - 1
+            else 0
+        )
+
+    compact: dict[str, dict[str, Any]] = {}
+    canonical_names = {"with_skill", "without_skill"}
+    for condition_name in ("with_skill", "without_skill"):
+        condition = conditions.get(condition_name)
+        if not isinstance(condition, dict):
+            continue
+        raw_errors = condition.get("execution_errors")
+        if isinstance(raw_errors, list) and not raw_errors:
+            bounded_errors: list[str] | None = []
+        elif isinstance(raw_errors, list):
+            bounded_errors = [
+                error[:1024] if isinstance(error, str) else "Malformed condition execution error"
+                for error in raw_errors[:16]
+            ] or ["Condition execution errors were omitted"]
+        else:
+            bounded_errors = None
+        raw_status = condition.get("execution_status")
+        compact[condition_name] = {
+            "execution_status": raw_status if isinstance(raw_status, str) and len(raw_status) <= 16 else None,
+            "execution_errors": bounded_errors,
+            "expected_attempts": bounded_count(condition, "expected_attempts"),
+            "scored_attempts": bounded_count(condition, "scored_attempts"),
+        }
+    if set(conditions) - canonical_names:
+        # Preserve invalidity without retaining attacker-controlled keys or
+        # values. Publication validation requires exactly the two canonical
+        # condition names, so compaction must never repair malformed evidence.
+        compact["invalid_condition_shape"] = {
+            "execution_status": None,
+            "execution_errors": None,
+            "expected_attempts": 0,
+            "scored_attempts": 0,
+        }
+    changed = compact != conditions
+    agent["conditions"] = compact
+    return changed
+
+
 def _prune_non_best_agent_details(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
     """Drop duplicated lower-priority details before touching best-agent evidence."""
     best_agent = str(payload.get("best_agent") or "")
@@ -988,9 +1054,8 @@ def _prune_non_best_agent_details(payload: dict[str, Any], report_budget: _Repor
             if isinstance(items, list) and items:
                 omitted += len(items)
                 agent[key] = []
-        if agent.get("conditions"):
+        if _compact_agent_conditions(agent):
             omitted += 1
-            agent["conditions"] = {}
         if isinstance(raw_rewards, dict):
             items = raw_rewards.get(name)
             if isinstance(items, list) and items:
@@ -1088,8 +1153,7 @@ def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _Repo
                 if isinstance(items, list) and items:
                     omitted_items += len(items)
                     agent[key] = []
-            if agent.get("conditions"):
-                agent["conditions"] = {}
+            if _compact_agent_conditions(agent):
                 omitted_items += 1
         report_budget.omit("dataset_and_trial_items", omitted_items)
         refresh_signal()
@@ -2820,7 +2884,14 @@ def _run_truth_metadata(
         if isinstance(run_id, str) and run_id == run_dir.name:
             truth["run_id"] = run_id
             if "publication_target_conflict" in identity_source:
-                truth["publication_target_conflict"] = _PUBLICATION_TARGET_CONFLICT_MARKER
+                conflict = identity_source.get("publication_target_conflict")
+                marker = (
+                    _RUNTIME_CONTEXT_CONFLICT_MARKER
+                    if isinstance(conflict, dict)
+                    and conflict.get("reason_code") == _RUNTIME_CONTEXT_CONFLICT_REASON_CODE
+                    else _PUBLICATION_TARGET_CONFLICT_MARKER
+                )
+                truth["publication_target_conflict"] = marker
             elif isinstance(publication_target, dict):
                 truth["publication_target"] = dict(publication_target)
     return truth

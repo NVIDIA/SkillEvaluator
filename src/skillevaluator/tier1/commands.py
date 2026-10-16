@@ -17,11 +17,21 @@ from skillevaluator.constants import (
     CONTENT_TYPE_SKILL,
     CONTENT_TYPE_UNKNOWN,
     CONTENT_TYPE_WORKFLOWS,
+    SCAN_EXCLUDED_DIRS,
+    SCAN_EXCLUDED_FILES,
 )
 from skillevaluator.models.result import ValidationResult
-from skillevaluator.publication_evidence import stamp_publication_evidence
-from skillevaluator.publication_identity import finalize_publication_target, publication_target_from_path
-from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
+from skillevaluator.publication_evidence import (
+    TIER1_UNSCANNED_PATHS_KEY,
+    stamp_publication_evidence,
+    stamp_tier1_required_checks,
+)
+from skillevaluator.publication_identity import (
+    finalize_publication_target,
+    publication_paths_skipped_by_scan,
+    publication_target_from_path,
+)
+from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
 from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
 from skillevaluator.utils.rich_markup import escape_markup
@@ -78,6 +88,13 @@ REPORTERS = {
 }
 
 
+def _stamp_tier1_scan_scope(results: list[ValidationResult], target: Path) -> None:
+    """Record certified source paths that the Tier 1 scans skipped by name."""
+    skipped = publication_paths_skipped_by_scan(target, SCAN_EXCLUDED_DIRS, SCAN_EXCLUDED_FILES)
+    for result in results:
+        result.metadata[TIER1_UNSCANNED_PATHS_KEY] = list(skipped)
+
+
 def _as_result(
     name: str,
     description: str,
@@ -86,6 +103,7 @@ def _as_result(
     *,
     publication_check_id: str,
     bind_publication_target: bool = True,
+    skill_like: bool = True,
 ) -> ValidationResult:
     initial_target = publication_target_from_path(target) if bind_publication_target else None
     result = validator(target)
@@ -94,7 +112,11 @@ def _as_result(
     if not result.validator_description:
         result.validator_description = description
     stamp_publication_evidence([result], tier=1, check_id=publication_check_id)
+    # Record the whole applicable lineup, so a run narrowed with --checks (or a
+    # standalone single-check command) cannot certify Tier 1 by itself.
+    stamp_tier1_required_checks([result], skill_like=skill_like)
     if bind_publication_target:
+        _stamp_tier1_scan_scope([result], target)
         finalize_publication_target([result], target, initial_target)
     return result
 
@@ -198,6 +220,7 @@ def run_validation(
             target_path,
             publication_check_id=check_id,
             bind_publication_target=False,
+            skill_like=skill_like,
         )
 
     def _schema_results() -> list[ValidationResult]:
@@ -289,6 +312,7 @@ def run_validation(
                 )
 
             if fail_fast and not continue_on_failure and any(not r.passed for r in results):
+                _stamp_tier1_scan_scope(results, target_path)
                 finalize_publication_target(results, target_path, initial_target)
                 return results
 
@@ -301,6 +325,7 @@ def run_validation(
         result.add_error(f"Unknown Tier 1 check(s): {', '.join(sorted(unknown))}")
         results.insert(0, result)
 
+    _stamp_tier1_scan_scope(results, target_path)
     finalize_publication_target(results, target_path, initial_target)
     return results
 
@@ -438,6 +463,11 @@ def emit_reports(
                 content_label=content_label,
                 tabs=html_tabs,
                 expected_skill_name=expected_skill_name,
+            )
+        elif fmt == "sarif":
+            reporter = reporter_cls(
+                workspace_root=sarif_repository_root,
+                scan_root=sarif_scan_root,
             )
         else:
             reporter = reporter_cls(expected_skill_name=expected_skill_name)

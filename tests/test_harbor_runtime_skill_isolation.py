@@ -4874,3 +4874,85 @@ def test_native_standard_grading_rejects_fallback_separate_verifier(tmp_path: Pa
             tmp_path / "native-standard-fallback-verifier",
             grading_mode="default",
         )
+
+
+@pytest.mark.parametrize(
+    ("authored_parent", "excluded_input"),
+    [
+        ("evals/files", "node_modules/answers/hint.txt"),
+        ("evals/files", ".venv/lib/hint.txt"),
+        ("evals/environment/sidecar", "__pycache__/hint.pyc"),
+        ("evals/environment/sidecar", "node_modules/hint.txt"),
+    ],
+)
+def test_staged_digest_excluded_task_inputs_do_not_bind_publication(
+    tmp_path: Path,
+    authored_parent: str,
+    excluded_input: str,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+    from skillevaluator.tier3.harbor.adapter import private_evaluator_skill_snapshot
+    from skillevaluator.tier3.harbor.runner import _runtime_context_is_bound_to_publication_target
+
+    skill = tmp_path / "simple"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: simple\ndescription: Demo skill.\n---\n", encoding="utf-8")
+    (skill / "evals" / "files").mkdir(parents=True)
+    (skill / "evals" / "files" / "project.txt").write_text("fixture\n", encoding="utf-8")
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps([{"id": "case-001", "question": "Summarize the fixture.", "ground_truth": "42"}]),
+        encoding="utf-8",
+    )
+    (skill / authored_parent).mkdir(parents=True, exist_ok=True)
+    (skill / authored_parent / "authored.txt").write_text("authored\n", encoding="utf-8")
+
+    def stage() -> list[Path]:
+        with private_evaluator_skill_snapshot(skill) as evaluator_skill:
+            return generate_harbor_tasks(skill, tmp_path / "tasks", evaluator_skill_path=evaluator_skill)
+
+    clean_tasks = stage()
+    assert _runtime_context_is_bound_to_publication_target(
+        skill, clean_tasks, reference_skills_dir=None, workspace_skill_paths=[]
+    )
+
+    before = publication_target_from_path(skill)
+    hidden = skill / authored_parent / excluded_input
+    hidden.parent.mkdir(parents=True, exist_ok=True)
+    hidden.write_text("the expected answer is 7\n", encoding="utf-8")
+    assert publication_target_from_path(skill) == before
+
+    tasks = stage()
+
+    # The digest omits these bytes, so a run that stages them cannot be bound
+    # to that digest.
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill, tasks, reference_skills_dir=None, workspace_skill_paths=[]
+    )
+
+
+@pytest.mark.parametrize("link_name", [".git", "results", "__pycache__", "scripts/__pycache__"])
+def test_runtime_projection_skips_linked_generated_entries(tmp_path: Path, link_name: str) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    skill = tmp_path / "simple"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: simple\ndescription: Demo skill.\n---\n", encoding="utf-8")
+    (skill / "scripts" / "run.sh").write_text("echo ok\n", encoding="utf-8")
+    (skill / "evals").mkdir()
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps([{"id": "case-001", "question": "Summarize.", "ground_truth": "x"}]),
+        encoding="utf-8",
+    )
+    try:
+        (skill / link_name).symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symbolic links are unavailable on this platform")
+
+    with private_evaluator_skill_snapshot(skill) as evaluator_skill:
+        tasks = generate_harbor_tasks(skill, tmp_path / "tasks", evaluator_skill_path=evaluator_skill)
+
+    staged = tasks[0] / "environment" / "skills" / "simple"
+    assert (staged / "SKILL.md").is_file()
+    assert (staged / "scripts" / "run.sh").is_file()
+    assert not os.path.lexists(staged / link_name)

@@ -40,6 +40,15 @@ _RECOGNIZED_CHECKS_BY_TIER = {
 }
 _PRODUCER_BY_TIER = {tier: f"skillevaluator.tier{tier}" for tier in _RECOGNIZED_CHECKS_BY_TIER}
 
+# Tier 1 checks a default run executes for every content type, and the checks
+# it adds for skills. ``--checks`` may narrow a run, but publication requires the
+# whole applicable lineup, which built-in Tier 1 producers record on each result.
+TIER1_PUBLICATION_CORE_CHECKS = frozenset({"schema", "security", "pii", "license", "code-integrity", "unicode"})
+TIER1_PUBLICATION_SKILL_CHECKS = frozenset({"version", "quality", "lint"})
+TIER1_REQUIRED_CHECKS_KEY = "tier1_required_checks"
+# Certified source paths below the target root that Tier 1 skipped by name.
+TIER1_UNSCANNED_PATHS_KEY = "tier1_unscanned_paths"
+
 
 @dataclass(frozen=True)
 class PublicationEvidenceIdentity:
@@ -123,13 +132,50 @@ def stamp_publication_evidence(
         result.metadata["publication_evidence"] = dict(marker)
 
 
+def tier1_required_checks(*, skill_like: bool) -> list[str]:
+    """Return the Tier 1 checks publication requires for one content type."""
+    required = TIER1_PUBLICATION_CORE_CHECKS | (TIER1_PUBLICATION_SKILL_CHECKS if skill_like else frozenset())
+    return sorted(required)
+
+
+def declared_tier1_required_checks(value: object) -> frozenset[str]:
+    """Parse a recorded Tier 1 lineup, failing closed to the full skill lineup.
+
+    A declaration can omit only the skill-only checks, so a malformed or
+    narrowed claim can never waive a core check.
+    """
+    full = TIER1_PUBLICATION_CORE_CHECKS | TIER1_PUBLICATION_SKILL_CHECKS
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        return full
+    declared = frozenset(value)
+    if len(declared) != len(value) or not declared >= TIER1_PUBLICATION_CORE_CHECKS or not declared <= full:
+        return full
+    return declared
+
+
+def stamp_tier1_required_checks(results: Iterable[ValidationResult], *, skill_like: bool) -> None:
+    """Record the applicable Tier 1 lineup on results from a built-in Tier 1 run."""
+    required = tier1_required_checks(skill_like=skill_like)
+    for result in results:
+        if not isinstance(result.metadata, dict):
+            result.metadata = {}
+        result.metadata[TIER1_REQUIRED_CHECKS_KEY] = list(required)
+
+
 __all__ = [
     "PUBLICATION_EVIDENCE_SCHEMA_VERSION",
+    "TIER1_PUBLICATION_CORE_CHECKS",
+    "TIER1_PUBLICATION_SKILL_CHECKS",
+    "TIER1_REQUIRED_CHECKS_KEY",
+    "TIER1_UNSCANNED_PATHS_KEY",
     "PublicationEvidenceIdentity",
+    "declared_tier1_required_checks",
     "publication_evidence_dict",
     "publication_evidence_identity",
     "result_has_publication_evidence",
     "result_publication_evidence",
     "result_publication_evidence_dict",
     "stamp_publication_evidence",
+    "stamp_tier1_required_checks",
+    "tier1_required_checks",
 ]

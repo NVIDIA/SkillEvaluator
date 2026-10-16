@@ -37,10 +37,20 @@ from skillevaluator.constants import (
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
 )
-from skillevaluator.publication_evidence import result_publication_evidence
+from skillevaluator.publication_evidence import (
+    TIER1_REQUIRED_CHECKS_KEY,
+    TIER1_UNSCANNED_PATHS_KEY,
+    declared_tier1_required_checks,
+    result_publication_evidence,
+)
 from skillevaluator.publication_identity import PUBLICATION_TARGET_DIGEST_ALGORITHM
-from skillevaluator.publication_text import publication_identity_present, publication_semantic_text
+from skillevaluator.publication_text import (
+    publication_free_text,
+    publication_identity_present,
+    publication_semantic_text,
+)
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
+from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 _AGENT_EVAL_MAX_FUTURE_CLOCK_SKEW = timedelta(minutes=5)
 
@@ -103,6 +113,8 @@ _AGENT_EVAL_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}")
 _PUBLICATION_TARGET_SKILL_NAME_MAX_BYTES = 1024
 _PUBLICATION_TARGET_CONFLICT_MAX_BYTES = 256
 _PUBLICATION_TARGET_CONFLICT_FALLBACK = "publication target identity conflict"
+_RUNTIME_CONTEXT_CONFLICT_MARKER = "runtime context is not bound to publication target"
+_SKIP_REASON_MAX_CHARS = 1024
 
 
 class UnsafeReportPathError(click.ClickException, ValueError):
@@ -428,21 +440,50 @@ def is_cleanly_skipped(result: ValidationResult) -> bool:
 
 
 def get_skip_reason(result: ValidationResult) -> str:
-    """Return a stable human-readable reason for a skipped result."""
+    """Return a bounded, single-line reason safe for downstream renderers."""
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
-    reason = metadata.get("skip_reason")
+    reason = _safe_skip_reason_text(metadata.get("skip_reason"))
     if reason:
-        return str(reason)
+        return reason
 
     payload = metadata.get("agent_eval")
     provenance = payload.get("provenance") if isinstance(payload, dict) else None
-    advisory_message = provenance.get("message") if isinstance(provenance, dict) else None
+    advisory_message = _safe_skip_reason_text(provenance.get("message")) if isinstance(provenance, dict) else ""
     if advisory_message:
-        return str(advisory_message)
+        return advisory_message
 
     if result.warnings:
-        return str(result.warnings[0])
+        warning = _safe_skip_reason_text(result.warnings[0])
+        if warning:
+            return warning
     return "Prerequisite unavailable"
+
+
+def _safe_skip_reason_text(value: object) -> str:
+    """Normalize one untrusted reason without changing identity-safe text rules."""
+    sample_truncated = False
+    if isinstance(value, str):
+        sample_limit = _SKIP_REASON_MAX_CHARS * 4
+        sample_truncated = len(value) > sample_limit
+        raw = value[:sample_limit].encode("utf-8", errors="replace").decode("utf-8")
+    else:
+        raw = _agent_eval_safe_text(value)
+    if not raw:
+        return ""
+    # Drop whole terminal escape sequences (OSC hyperlinks and titles, CSI
+    # styling) before flattening, so their payloads never reach a report.
+    raw = strip_terminal_controls(raw)
+    flattened = " ".join(
+        "".join(
+            " " if character.isspace() or unicodedata.category(character) in {"Cc", "Cf"} else character
+            for character in raw
+        ).split()
+    )
+    if not flattened:
+        return ""
+    if not sample_truncated and len(flattened) <= _SKIP_REASON_MAX_CHARS:
+        return flattened
+    return flattened[: _SKIP_REASON_MAX_CHARS - 1] + "…"
 
 
 def is_tier2_validator_name(validator_name: str | None) -> bool:
@@ -461,6 +502,11 @@ def agent_eval_report_text_limit() -> int:
     return AGENT_EVAL_REPORT_MAX_TEXT_BYTES
 
 
+# Tier 3 identity subtrees whose text must survive emission exactly. Other
+# payload strings are free text that may contain layout whitespace.
+AGENT_EVAL_EXACT_TEXT_KEYS = frozenset({"publication_target", "skill_name"})
+
+
 def agent_eval_report_serialization_issue(value: object) -> str | None:
     """Return why Tier 3 cannot be emitted losslessly within report limits."""
     if not isinstance(value, dict):
@@ -471,11 +517,11 @@ def agent_eval_report_serialization_issue(value: object) -> str | None:
     max_depth, max_nodes = agent_eval_report_serialization_limits()
     max_text_bytes = agent_eval_report_text_limit()
     active_containers: set[int] = set()
-    stack: list[tuple[object, int, bool]] = [(value, 0, False)]
+    stack: list[tuple[object, int, bool, bool]] = [(value, 0, False, False)]
     nodes = 0
     text_bytes = 0
     while stack:
-        current, depth, exiting = stack.pop()
+        current, depth, exiting, exact_text = stack.pop()
         if exiting:
             active_containers.remove(id(current))
             continue
@@ -491,7 +537,9 @@ def agent_eval_report_serialization_issue(value: object) -> str | None:
             if len(current) > max_text_bytes - text_bytes:
                 return f"The Tier 3 payload exceeds the {max_text_bytes:,}-byte report text limit."
             utf8_safe = current.encode("utf-8", errors="replace").decode("utf-8")
-            normalized = publication_semantic_text(current)
+            # Free text keeps line breaks and tabs; identity text and every
+            # other control, format, or invisible character stay rejected.
+            normalized = publication_semantic_text(current) if exact_text else publication_free_text(current)
             if utf8_safe != current or normalized != unicodedata.normalize("NFKC", utf8_safe):
                 return "The Tier 3 payload contains text that cannot be emitted losslessly."
             text_bytes += len(normalized.encode("utf-8"))
@@ -517,7 +565,7 @@ def agent_eval_report_serialization_issue(value: object) -> str | None:
         if container_id in active_containers:
             return "The Tier 3 payload contains a recursive container."
         active_containers.add(container_id)
-        stack.append((current, depth, True))
+        stack.append((current, depth, True, exact_text))
         if isinstance(current, dict):
             safe_keys: set[str] = set()
             for key in current:
@@ -535,11 +583,11 @@ def agent_eval_report_serialization_issue(value: object) -> str | None:
                 if text_bytes > max_text_bytes:
                     return f"The Tier 3 payload exceeds the {max_text_bytes:,}-byte report text limit."
                 safe_keys.add(safe_key)
-            children = current.values()
+            children = [(child, exact_text or key in AGENT_EVAL_EXACT_TEXT_KEYS) for key, child in current.items()]
         else:
-            children = current
-        for child in reversed(children):
-            stack.append((child, depth + 1, False))
+            children = [(child, exact_text) for child in current]
+        for child, child_exact_text in reversed(children):
+            stack.append((child, depth + 1, False, child_exact_text))
     return None
 
 
@@ -836,6 +884,29 @@ def _agent_eval_has_publication_target_conflict(payload: dict[str, Any] | None) 
     return "publication_target_conflict" in payload or "publication_target_conflict" in summary
 
 
+def _agent_eval_publication_target_conflict_markers(payload: dict[str, Any] | None) -> set[str]:
+    """Return bounded conflict markers from both canonical Tier 3 copies."""
+    if not isinstance(payload, dict):
+        return set()
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    return {
+        publication_target_conflict_marker(container.get("publication_target_conflict"))
+        for container in (payload, summary)
+        if "publication_target_conflict" in container
+    }
+
+
+def _result_publication_target_conflict_markers(result: ValidationResult) -> set[str]:
+    """Return bounded direct and nested conflict markers for one result."""
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    markers = _agent_eval_publication_target_conflict_markers(
+        metadata.get("agent_eval") if isinstance(metadata.get("agent_eval"), dict) else None
+    )
+    if "publication_target_conflict" in metadata:
+        markers.add(publication_target_conflict_marker(metadata.get("publication_target_conflict")))
+    return markers
+
+
 def agent_eval_publication_target(payload: dict[str, Any] | None) -> PublicationTargetIdentity | None:
     """Return the duplicated Tier 3 target claim only when both copies agree."""
     if not isinstance(payload, dict):
@@ -931,23 +1002,41 @@ def _agent_eval_agents(payload: dict[str, Any] | None) -> dict[str, dict[str, An
     return agents
 
 
-def _agent_eval_attempt_coverage_complete(payload: dict[str, Any] | None) -> bool:
+def _agent_eval_attempt_coverage_complete(
+    payload: dict[str, Any] | None,
+    *,
+    require_baseline: bool = True,
+) -> bool:
     """Return whether succeeded Tier 3 evidence proves positive attempt coverage."""
     expected_attempts = _agent_eval_consistent_count_field(payload, "expected_attempts")
     scored_attempts = _agent_eval_consistent_count_field(payload, "scored_attempts")
+    dataset_tasks = _agent_eval_dataset_count(payload) if isinstance(payload, dict) else 0
+    attempt_policy = payload.get("attempt_policy") if isinstance(payload, dict) else None
+    max_attempts = _agent_eval_count(attempt_policy.get("max_attempts")) if isinstance(attempt_policy, dict) else 0
+    stop_on_pass = attempt_policy.get("stop_on_pass") if isinstance(attempt_policy, dict) else None
+    pass_threshold = (
+        _agent_eval_finite_score(attempt_policy.get("pass_threshold")) if isinstance(attempt_policy, dict) else None
+    )
     if (
         expected_attempts is None
         or scored_attempts is None
         or expected_attempts <= 0
         or scored_attempts <= 0
-        or scored_attempts > expected_attempts
+        or scored_attempts != expected_attempts
+        or dataset_tasks <= 0
+        or max_attempts <= 0
+        or not isinstance(stop_on_pass, bool)
+        or pass_threshold is None
+        or (stop_on_pass and max_attempts <= 1)
     ):
         return False
 
-    scored_agents = 0
     summed_expected = 0
     summed_scored = 0
-    for agent in _agent_eval_agents(payload).values():
+    agents = _agent_eval_agents(payload)
+    if not agents:
+        return False
+    for agent in agents.values():
         raw_expected = agent.get("expected_attempts")
         raw_scored = agent.get("scored_attempts")
         if (
@@ -959,19 +1048,106 @@ def _agent_eval_attempt_coverage_complete(payload: dict[str, Any] | None) -> boo
             return False
         agent_expected = _agent_eval_count(agent.get("expected_attempts"))
         agent_scored = _agent_eval_count(agent.get("scored_attempts"))
-        if agent_scored > agent_expected:
+        if (
+            _agent_eval_safe_text(agent.get("execution_status")).casefold() != "succeeded"
+            or agent_expected <= 0
+            or agent_scored != agent_expected
+            or not _agent_eval_condition_attempt_coverage_complete(
+                agent,
+                expected_attempts=agent_expected,
+                scored_attempts=agent_scored,
+                dataset_tasks=dataset_tasks,
+                max_attempts=max_attempts,
+                stop_on_pass=stop_on_pass,
+                require_baseline=require_baseline,
+            )
+        ):
             return False
         summed_expected += agent_expected
         summed_scored += agent_scored
-        if _agent_eval_safe_text(agent.get("execution_status")).casefold() != "succeeded":
-            continue
-        if agent_expected <= 0 or agent_scored <= 0:
+    return summed_expected == expected_attempts and summed_scored == scored_attempts
+
+
+def _agent_eval_condition_attempt_coverage_complete(
+    agent: dict[str, Any],
+    *,
+    expected_attempts: int,
+    scored_attempts: int,
+    dataset_tasks: int,
+    max_attempts: int,
+    stop_on_pass: bool,
+    require_baseline: bool,
+) -> bool:
+    """Validate the two canonical conditions against one agent aggregate."""
+    conditions = agent.get("conditions")
+    if not isinstance(conditions, dict) or set(conditions) != {"with_skill", "without_skill"}:
+        return False
+
+    summed_expected = 0
+    summed_scored = 0
+    for condition_name, condition in conditions.items():
+        if not isinstance(condition, dict):
             return False
-        scored_agents += 1
-    return bool(scored_agents > 0 and summed_expected == expected_attempts and summed_scored == scored_attempts)
+        raw_expected = condition.get("expected_attempts")
+        raw_scored = condition.get("scored_attempts")
+        if (
+            isinstance(raw_expected, bool)
+            or not isinstance(raw_expected, int)
+            or isinstance(raw_scored, bool)
+            or not isinstance(raw_scored, int)
+        ):
+            return False
+        condition_expected = _agent_eval_count(raw_expected)
+        condition_scored = _agent_eval_count(raw_scored)
+        status = _agent_eval_safe_text(condition.get("execution_status")).casefold()
+        full_attempt_count = dataset_tasks * max_attempts
+        expected_count_is_valid = (
+            dataset_tasks <= condition_expected <= full_attempt_count
+            if stop_on_pass
+            else condition_expected == full_attempt_count
+        )
+        if condition_name == "without_skill" and not require_baseline and status == "skipped":
+            if condition_expected != 0 or condition_scored != 0:
+                return False
+            continue
+        if status != "succeeded" or not expected_count_is_valid or condition_scored != condition_expected:
+            return False
+        summed_expected += condition_expected
+        summed_scored += condition_scored
+
+    return summed_expected == expected_attempts and summed_scored == scored_attempts
 
 
-def _agent_eval_dimension_scores(agent: dict[str, Any]) -> list[float] | None:
+def _agent_eval_execution_errors_clear(payload: dict[str, Any] | None) -> bool:
+    """Return whether succeeded Tier 3 evidence contains no execution errors."""
+    if not isinstance(payload, dict):
+        return False
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    agents = _agent_eval_agents(payload)
+    containers = [payload, summary, *agents.values()]
+    for agent in agents.values():
+        if "conditions" not in agent:
+            continue
+        conditions = agent.get("conditions")
+        if not isinstance(conditions, dict):
+            return False
+        for condition in conditions.values():
+            if not isinstance(condition, dict) or "execution_errors" not in condition:
+                return False
+            containers.append(condition)
+    for container in containers:
+        errors = container.get("execution_errors")
+        if not isinstance(errors, list) or errors:
+            return False
+    return True
+
+
+def _agent_eval_dimension_scores(
+    agent: dict[str, Any],
+    *,
+    require_baseline: bool,
+) -> list[float] | None:
+    """Return with-skill scores only when matching baseline evidence exists."""
     raw_dimensions = agent.get("dimensions")
     if not isinstance(raw_dimensions, list):
         return None
@@ -985,19 +1161,55 @@ def _agent_eval_dimension_scores(agent: dict[str, Any]) -> list[float] | None:
         dimensions[dimension_id] = raw_dimension
 
     scores: list[float] = []
+    baselines: list[float] = []
     for dimension_id in DIMENSION_MAPPING:
         dimension = dimensions.get(dimension_id)
         if dimension is None:
             return None
         value = dimension.get("with_skill") if "with_skill" in dimension else dimension.get("score")
         score = _agent_eval_finite_score(value)
-        if score is None:
+        baseline = _agent_eval_finite_score(dimension.get("baseline"))
+        if score is None or (require_baseline and baseline is None):
             return None
+        if require_baseline:
+            assert baseline is not None
+            lift = _agent_eval_finite_number(dimension.get("lift"))
+            if lift is None or not math.isclose(lift, score - baseline, rel_tol=1e-9, abs_tol=5e-4):
+                return None
+            baselines.append(baseline)
         scores.append(score)
+
+    agent_score = _agent_eval_finite_score(agent.get("with_skill", agent.get("overall_score")))
+    if agent_score is None or not math.isclose(
+        agent_score,
+        sum(scores) / len(scores),
+        rel_tol=1e-9,
+        abs_tol=5e-4,
+    ):
+        return None
+    if require_baseline:
+        agent_baseline = _agent_eval_finite_score(agent.get("baseline"))
+        agent_lift = _agent_eval_finite_number(agent.get("lift"))
+        if (
+            agent_baseline is None
+            or agent_lift is None
+            or not math.isclose(
+                agent_baseline,
+                sum(baselines) / len(baselines),
+                rel_tol=1e-9,
+                abs_tol=5e-4,
+            )
+            or not math.isclose(agent_lift, agent_score - agent_baseline, rel_tol=1e-9, abs_tol=5e-4)
+        ):
+            return None
     return scores
 
 
-def agent_eval_dimension_verdict(payload: dict[str, Any] | None) -> str | None:
+def agent_eval_dimension_verdict(
+    payload: dict[str, Any] | None,
+    *,
+    require_baseline: bool = True,
+) -> str | None:
     """Recompute a Tier 3 verdict from complete supported-agent dimensions."""
     supported_agents = [
         agent
@@ -1010,7 +1222,7 @@ def agent_eval_dimension_verdict(payload: dict[str, Any] | None) -> str | None:
     verdicts: list[str] = []
     has_partial_evidence = False
     for agent in supported_agents:
-        scores = _agent_eval_dimension_scores(agent)
+        scores = _agent_eval_dimension_scores(agent, require_baseline=require_baseline)
         if scores is None:
             has_partial_evidence = True
             continue
@@ -1053,6 +1265,106 @@ def _agent_eval_dataset_count(payload: dict[str, Any]) -> int:
     return len(task_ids)
 
 
+def _agent_eval_publication_aggregates_consistent(
+    payload: dict[str, Any],
+    agents: dict[str, dict[str, Any]],
+) -> bool:
+    """Require duplicated publication summaries to match the selected agent."""
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        return False
+
+    raw_best_names = (payload.get("best_agent"), summary.get("best_agent"))
+    if (
+        any(not isinstance(name, str) or not name or name != name.strip() for name in raw_best_names)
+        or raw_best_names[0] != raw_best_names[1]
+    ):
+        return False
+    assert isinstance(raw_best_names[0], str)
+    best_name = publication_semantic_text(raw_best_names[0]).strip()
+    if best_name not in agents:
+        return False
+
+    raw_agents = payload.get("agents")
+    if not isinstance(raw_agents, dict) or any(not isinstance(name, str) for name in raw_agents):
+        return False
+    canonical_agent_names = [publication_semantic_text(name).strip() for name in sorted(raw_agents)]
+    if len(canonical_agent_names) != len(agents) or any(name not in agents for name in canonical_agent_names):
+        return False
+
+    eligible_agents: list[tuple[str, float, float]] = []
+    for name in canonical_agent_names:
+        agent = agents[name]
+        if _agent_eval_safe_text(agent.get("execution_status")).casefold() != "succeeded":
+            continue
+        score = _agent_eval_finite_score(agent.get("with_skill"))
+        if score is None:
+            continue
+        lift = _agent_eval_finite_number(agent.get("lift"))
+        eligible_agents.append((name, score, lift or 0.0))
+    if not eligible_agents or max(eligible_agents, key=lambda item: (item[1], item[2]))[0] != best_name:
+        return False
+
+    expected_agents = canonical_agent_names
+    raw_agents_run: list[list[str]] = []
+    for container in (payload, summary):
+        agents_run = container.get("agents_run")
+        if (
+            not isinstance(agents_run, list)
+            or any(not isinstance(name, str) for name in agents_run)
+        ):
+            return False
+        raw_agents_run.append(agents_run)
+    if raw_agents_run[0] != raw_agents_run[1] or [
+        publication_semantic_text(name).strip() for name in raw_agents_run[0]
+    ] != expected_agents:
+        return False
+
+    best_agent = agents[best_name]
+    if (
+        _agent_eval_safe_text(best_agent.get("execution_status")).casefold() != "succeeded"
+        or _agent_eval_dimension_scores(best_agent, require_baseline=True) is None
+    ):
+        return False
+    best_score = _agent_eval_finite_score(best_agent.get("with_skill", best_agent.get("overall_score")))
+    best_lift = _agent_eval_finite_number(best_agent.get("lift"))
+    if best_score is None or best_lift is None or not -1.0 <= best_lift <= 1.0:
+        return False
+
+    for key, expected, validator in (
+        ("overall_score", best_score, _agent_eval_finite_score),
+        ("overall_lift", best_lift, _agent_eval_finite_number),
+    ):
+        root_value = validator(payload.get(key))
+        summary_value = validator(summary.get(key))
+        if (
+            root_value is None
+            or summary_value is None
+            or not math.isclose(root_value, summary_value, rel_tol=1e-9, abs_tol=5e-4)
+            or not math.isclose(root_value, expected, rel_tol=1e-9, abs_tol=5e-4)
+        ):
+            return False
+
+    try:
+        root_dimensions = json.dumps(
+            payload.get("dimensions"),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        agent_dimensions = json.dumps(
+            best_agent.get("dimensions"),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError):
+        return False
+    return root_dimensions == agent_dimensions
+
+
 def agent_eval_publication_evidence_complete(payload: dict[str, Any] | None) -> bool:
     """Return whether a payload carries the minimum publication Tier 3 evidence."""
     if not isinstance(payload, dict):
@@ -1075,7 +1387,9 @@ def agent_eval_publication_evidence_complete(payload: dict[str, Any] | None) -> 
         truth_consistent
         and verdict in {"pass", "neutral", "fail"}
         and execution_status == "succeeded"
+        and _agent_eval_execution_errors_clear(payload)
         and agent_eval_dimension_verdict(payload) is not None
+        and _agent_eval_publication_aggregates_consistent(payload, agents)
         and agent_eval_publication_evaluated_at(payload) is not None
         and publication_identity_present(evaluator_version)
         and agent_eval_publication_dataset_provenance(payload) is not None
@@ -1600,6 +1914,69 @@ def is_tier2_result(result: ValidationResult) -> bool:
     )
 
 
+def missing_tier1_publication_checks(results: list[ValidationResult]) -> tuple[str, ...]:
+    """Return applicable built-in Tier 1 checks that no executed result covers.
+
+    Built-in Tier 1 producers record the content type's whole lineup, so a run
+    narrowed with ``--checks`` cannot certify Tier 1 with a subset of checks.
+    """
+    executed = [
+        (result, producer)
+        for result in results
+        if (producer := result_publication_evidence(result)) is not None
+        and producer.tier == 1
+        and not is_cleanly_skipped(result)
+    ]
+    declarations = [
+        result.metadata[TIER1_REQUIRED_CHECKS_KEY]
+        for result, _producer in executed
+        if isinstance(result.metadata, dict) and TIER1_REQUIRED_CHECKS_KEY in result.metadata
+    ]
+    if not declarations:
+        return ()
+    required = frozenset().union(*(declared_tier1_required_checks(value) for value in declarations))
+    covered = {producer.check_id for _result, producer in executed}
+    return tuple(sorted(required - covered))
+
+
+def tier1_unscanned_publication_paths(results: list[ValidationResult]) -> tuple[str, ...]:
+    """Return certified source paths that recognized Tier 1 runs skipped by name.
+
+    A malformed record fails closed with a placeholder entry.
+    """
+    paths: list[str] = []
+    for result in results:
+        producer = result_publication_evidence(result)
+        metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        if (
+            producer is None
+            or producer.tier != 1
+            or is_cleanly_skipped(result)
+            or TIER1_UNSCANNED_PATHS_KEY not in metadata
+        ):
+            continue
+        value = metadata[TIER1_UNSCANNED_PATHS_KEY]
+        if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+            paths.append("(unreadable Tier 1 scan scope)")
+            continue
+        paths.extend(value)
+    return tuple(dict.fromkeys(paths))
+
+
+def unrecognized_tier2_results(results: list[ValidationResult]) -> list[ValidationResult]:
+    """Return executed Tier 2 results that lack a recognized built-in producer.
+
+    Optional Tier 2 evidence may be absent or cleanly skipped. A present,
+    executed Tier 2 result whose producer marker is missing or invalid is
+    malformed evidence, not absence, so a waiver cannot hide it.
+    """
+    return [
+        result
+        for result in results
+        if result_publication_evidence(result) is None and is_tier2_result(result) and not is_cleanly_skipped(result)
+    ]
+
+
 def _publication_identity_key(value: object) -> str | None:
     """Normalize canonical aliases without folding filesystem distinctions."""
     if not publication_identity_present(value):
@@ -1669,10 +2046,10 @@ def assess_tier3_evidence(
             selected_payload,
             "Tier 3 scanner evidence is incomplete.",
         )
-    if any(
-        not result.passed and (serialization_issue is not None or not is_cleanly_skipped(result))
-        for result in tier3_results
-    ):
+    # A cleanly skipped advisory result is non-passing by construction. When
+    # its payload cannot be emitted losslessly, the serialization branch below
+    # decides between an explicit failure and incomplete evidence.
+    if any(not result.passed and not is_cleanly_skipped(result) for result in tier3_results):
         return Tier3EvidenceAssessment(
             "fail",
             False,
@@ -1681,16 +2058,22 @@ def assess_tier3_evidence(
             selected_payload,
             "A Tier 3 validator failed.",
         )
-    if _agent_eval_has_publication_target_conflict(selected_payload) or any(
-        _result_has_publication_target_conflict(result) for result in tier3_results
-    ):
+    conflict_markers = _agent_eval_publication_target_conflict_markers(selected_payload)
+    for result in tier3_results:
+        conflict_markers.update(_result_publication_target_conflict_markers(result))
+    if conflict_markers:
+        reason = (
+            "Tier 3 runtime context is not bound to the publication target."
+            if conflict_markers == {_RUNTIME_CONTEXT_CONFLICT_MARKER}
+            else "Tier 3 source identity changed during evaluation."
+        )
         return Tier3EvidenceAssessment(
             "incomplete",
             False,
             execution_status or "incomplete",
             raw_verdict or "incomplete",
             selected_payload,
-            "Tier 3 source identity changed during evaluation.",
+            reason,
         )
     if run_id_issue := next(
         (issue for result in tier3_results if (issue := _result_agent_eval_run_id_issue(result)) is not None),
@@ -1815,7 +2198,7 @@ def assess_tier3_evidence(
             _agent_eval_safe_text(agent.get("execution_status")).lower() == "succeeded"
             and (
                 _agent_eval_finite_score(agent.get("with_skill", agent.get("overall_score"))) is not None
-                or bool(_agent_eval_dimension_scores(agent))
+                or bool(_agent_eval_dimension_scores(agent, require_baseline=False))
             )
             and max(payload_attempts, _agent_eval_count(agent.get("scored_attempts"))) > 0
             for agent in _agent_eval_agents(selected_payload).values()
@@ -1967,6 +2350,13 @@ def assess_publication(
         reasons.append("Recognized built-in Tier 1 evidence is missing.")
     elif any(not result_has_execution_evidence(result) for result in executed_tier1):
         reasons.append("Tier 1 lacks trustworthy execution evidence.")
+    if missing_checks := missing_tier1_publication_checks(results):
+        reasons.append(f"Tier 1 did not run every required check: {', '.join(missing_checks)}.")
+    if unscanned_paths := tier1_unscanned_publication_paths(results):
+        reasons.append(
+            f"Tier 1 skipped {len(unscanned_paths)} certified source path(s) that use generated-artifact names "
+            "below the skill root."
+        )
     require_bound_evidence(executed_tier1, "Tier 1")
 
     executed_tier2 = [result for result in tier2_results if not is_cleanly_skipped(result)]
@@ -1974,6 +2364,8 @@ def assess_publication(
         reasons.append("Tier 2 lacks trustworthy execution evidence.")
     elif policy["tier2_required"] and not executed_tier2:
         reasons.append("Required recognized built-in Tier 2 evidence is missing.")
+    if unrecognized_tier2_results(results):
+        reasons.append("Tier 2 evidence lacks a recognized built-in producer identity.")
     require_bound_evidence(executed_tier2, "Tier 2")
 
     executed_tier3 = [result for result in tier3_results if not is_cleanly_skipped(result)]
@@ -2006,10 +2398,10 @@ def passes_required_gate(result: ValidationResult) -> bool:
                 and truth_consistent
                 and verdict == "pass"
                 and execution_status == "succeeded"
-                and agent_eval_dimension_verdict(payload) == "pass"
+                and agent_eval_dimension_verdict(payload, require_baseline=False) == "pass"
                 and isinstance(payload, dict)
                 and _agent_eval_dataset_count(payload) > 0
-                and _agent_eval_attempt_coverage_complete(payload)
+                and _agent_eval_attempt_coverage_complete(payload, require_baseline=False)
             )
         return bool(result.passed)
     return bool(result.passed or is_advisory_agent_eval_skip(result))

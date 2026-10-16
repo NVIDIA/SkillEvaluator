@@ -83,17 +83,15 @@ def run_context_optimization_check(
     model: str | None = None,
     llm_model: str | None = None,
 ) -> list[ValidationResult]:
-    validator = IntraSkillValidator(
-        threshold=threshold,
-        embedding_model=model,
-        llm_model=llm_model,
-    )
-    return _guarded_result(
-        "Context Deduplication",
-        skill_path,
-        lambda: validator.validate(skill_path),
-        check_id="context-optimization",
-    )
+    def _run() -> ValidationResult:
+        validator = IntraSkillValidator(
+            threshold=threshold,
+            embedding_model=model,
+            llm_model=llm_model,
+        )
+        return validator.validate(skill_path)
+
+    return _guarded_result("Context Deduplication", skill_path, _run, check_id="context-optimization")
 
 
 def run_dedup_scan(

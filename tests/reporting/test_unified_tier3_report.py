@@ -28,6 +28,7 @@ from skillevaluator.evaluation.tier3_report import (
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting import html as html_module
+from skillevaluator.reporting.base import agent_eval_publication_evidence_complete
 from skillevaluator.reporting.html import PackageLoader, _compact_json
 from skillevaluator.tier3.harbor.collector import _paired_pass_comparison, _wilson_score_interval
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, MAX_CUSTOM_METRIC_NAME_BYTES
@@ -565,6 +566,222 @@ def test_standalone_tier3_binds_report_to_requested_skill(
 
     assert report.read_text(encoding="utf-8") == "<html>captured</html>"
     assert captured["expected_skill_name"] == "requested-skill"
+
+
+def test_trial_report_renders_unavailable_tokens_as_unavailable() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "cached_tokens": None,
+                        },
+                    }
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Steps per Eval Case" in trials_html
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert "With-Skill Per-Evaluator Drill-Down" in trials_html
+    assert re.search(r"<td>4</td>\s*<td>—</td>", trials_html)
+
+
+def test_trial_report_omits_token_chart_for_incomplete_agent_telemetry() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": None,
+                        },
+                    },
+                    {
+                        "trial_id": "case-2__attempt1",
+                        "entry_id": "case-2",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 3,
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "cached_tokens": None,
+                        },
+                    },
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
+    assert re.search(r"<td>4</td>\s*<td>14</td>", trials_html)
+    assert re.search(r"<td>3</td>\s*<td>—</td>", trials_html)
+
+
+def test_trial_report_omits_token_chart_when_any_agent_telemetry_is_incomplete() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": 2,
+                        },
+                    }
+                ],
+            },
+            "opencode": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 3,
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "cached_tokens": None,
+                        },
+                    }
+                ],
+            },
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
+
+
+def test_trial_report_omits_token_chart_when_reported_agent_has_no_trials() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": 2,
+                        },
+                    }
+                ],
+            },
+            "opencode": {
+                "execution_status": "failed",
+                "execution_errors": ["malformed judge response"],
+                "expected_attempts": 1,
+                "scored_attempts": 0,
+                "with_skill": {},
+                "rewards": [],
+            },
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    assert set(payload["agents"]) == {"codex", "opencode"}
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
+
+
+def test_trial_charts_preserve_token_and_step_counter_semantics() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": 2,
+                        },
+                    }
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+    trials_html = _tier3_page(html, "trials", "agents")
+
+    assert 'id="tier3-token-chart"' in trials_html
+    assert '{ label: "Prompt (total)"' in html
+    assert '{ label: "Cached (included in prompt)"' in html
+    assert "if (observed.length !== matching.length) return null;" in html
 
 
 def test_authenticated_pre_status_rerender_preserves_historical_scores(tmp_path: Path) -> None:
@@ -1374,8 +1591,97 @@ def test_payload_prunes_oversized_non_best_conditions_before_best_evidence() -> 
     assert any(card["evidence"] for card in best_cards)
     assert any(card["evidence"] for card in payload["evaluator_cards"])
     assert payload["provenance"]["raw_trial_rewards"]["zzz"]
-    assert payload["agents"]["aaa"]["conditions"] == {}
+    assert payload["agents"]["aaa"]["conditions"] == {
+        "with_skill": {
+            "execution_status": None,
+            "execution_errors": None,
+            "expected_attempts": 0,
+            "scored_attempts": 0,
+        }
+    }
     assert payload["report_truncation"]["omitted"]["non_best_agent_details"] > 0
+
+
+def _publication_ready_oversized_condition_payload(*, extra_condition: bool = False) -> dict:
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    conditions = {
+        "with_skill": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+            "diagnostic": "x" * (3 * 1024 * 1024),
+        },
+        "without_skill": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+        },
+    }
+    if extra_condition:
+        conditions["forged"] = {"execution_status": "succeeded"}
+    payload = build_agent_eval_payload(
+        "condition-budget",
+        {
+            "codex": {
+                "model": "test-model",
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "conditions": conditions,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.9),
+                "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.4),
+                "lift": dict.fromkeys(DEFAULT_METRICS, 0.5),
+                "rewards": [{"entry_id": "case-1", **dict.fromkeys(DEFAULT_METRICS, 0.9)}],
+                "rewards_baseline": [{"entry_id": "case-1", **dict.fromkeys(DEFAULT_METRICS, 0.4)}],
+            }
+        },
+        dataset=[{"id": "case-1", "expected_skill": "condition-budget"}],
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5, "stop_on_pass": False},
+        env_mode="docker",
+        evaluated_at="2026-09-12T12:00:00+00:00",
+        evaluator_version="1.0.0",
+        run_id="condition-budget-run",
+        publication_target={
+            "skill_name": "condition-budget",
+            "skill_digest": "sha256:" + "a" * 64,
+            "skill_digest_algorithm": "skill-evaluator-source-tree/2",
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    return payload
+
+
+def test_payload_budget_preserves_publication_condition_truth_fields() -> None:
+    payload = _publication_ready_oversized_condition_payload()
+
+    assert agent_eval_publication_evidence_complete(payload) is True
+    assert payload["agents"]["codex"]["conditions"] == {
+        "with_skill": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+        },
+        "without_skill": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+        },
+    }
+
+
+def test_payload_budget_does_not_repair_extra_condition_keys() -> None:
+    payload = _publication_ready_oversized_condition_payload(extra_condition=True)
+
+    conditions = payload["agents"]["codex"]["conditions"]
+    assert "invalid_condition_shape" in conditions
+    assert agent_eval_publication_evidence_complete(payload) is False
 
 
 def test_non_finite_report_numbers_are_sanitized_before_canonical_json() -> None:
@@ -1425,6 +1731,89 @@ def test_non_finite_report_numbers_are_sanitized_before_canonical_json() -> None
 
     html = _render_agent_payload(payload)
     assert _embedded_tier3_payload(html)["dataset"][0]["score"] is None
+
+
+def test_canonical_payload_sanitizes_unsafe_integers_for_browser_json_semantics() -> None:
+    safe_integer_metadata = {
+        "max_safe": (1 << 53) - 1,
+        "min_safe": -((1 << 53) - 1),
+        "enabled": True,
+    }
+    unsafe_integer_metadata = {
+        **safe_integer_metadata,
+        "too_large": 10**400,
+        "too_small": -(10**400),
+    }
+    payload = build_agent_eval_payload(
+        "browser-safe-json",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0},
+                "rewards": [
+                    {
+                        "entry_id": "case-1",
+                        "security": 1.0,
+                        "overall": 1.0,
+                        "metadata": unsafe_integer_metadata,
+                    }
+                ],
+            }
+        },
+        dataset=[{"id": "case-1", "metadata": unsafe_integer_metadata}],
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    canonical_metadata = (
+        payload["dataset"][0]["metadata"],
+        payload["provenance"]["raw_trial_rewards"]["codex"][0]["metadata"],
+    )
+    for metadata in canonical_metadata:
+        assert metadata["too_large"] is None
+        assert metadata["too_small"] is None
+        assert metadata["max_safe"] == (1 << 53) - 1
+        assert type(metadata["max_safe"]) is int
+        assert metadata["min_safe"] == -((1 << 53) - 1)
+        assert type(metadata["min_safe"]) is int
+        assert metadata["enabled"] is True
+
+    encoded = json.dumps(payload, allow_nan=False)
+    browser_payload = json.loads(encoded, parse_int=float)
+    dataset_metadata = browser_payload["dataset"][0]["metadata"]
+    raw_metadata = browser_payload["provenance"]["raw_trial_rewards"]["codex"][0]["metadata"]
+
+    for metadata in (dataset_metadata, raw_metadata):
+        assert metadata["too_large"] is None
+        assert metadata["too_small"] is None
+        assert metadata["max_safe"] == float((1 << 53) - 1)
+        assert metadata["min_safe"] == -float((1 << 53) - 1)
+        assert metadata["enabled"] is True
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf"), 10**400])
+def test_invalid_legacy_attempt_threshold_does_not_crash_canonical_report(invalid: float | int) -> None:
+    payload = build_agent_eval_payload(
+        "invalid-policy-number",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 1.0),
+            }
+        },
+        attempt_policy={"pass_threshold": invalid},
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["verdict_policy"]["attempt_pass_threshold"] is None
+    json.dumps(payload, allow_nan=False)
 
 
 def test_canonical_report_serializers_disclose_non_finite_numbers() -> None:
@@ -1784,6 +2173,51 @@ def test_rerender_rejects_canonical_target_when_run_marks_identity_conflict(tmp_
     assert assessment.reason == "Tier 3 source identity changed during evaluation."
     report = json.loads(JSONReporter(include_timestamp=False).render_all([tier3]))
     assert report["results"][0]["publication_target_conflict"] == "source changed during evaluation"
+
+
+def test_rerender_reports_runtime_context_conflict_without_claiming_source_mutation(tmp_path: Path) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+    from skillevaluator.reporting.base import assess_tier3_evidence
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# evaluated source\n", encoding="utf-8")
+    run_start_target = publication_target_from_path(skill)
+    assert run_start_target is not None
+
+    run_dir = tmp_path / "results" / "20260709_120013"
+    _write_summary(run_dir)
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "publication_target": None,
+                "publication_target_conflict": {
+                    "run_start": run_start_target,
+                    "run_end": None,
+                    "reason_code": "runtime_context_outside_publication_target",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    marker = "runtime context is not bound to publication target"
+    assert payload["publication_target"] is None
+    assert payload["summary"]["publication_target"] is None
+    assert payload["publication_target_conflict"] == marker
+    assert payload["summary"]["publication_target_conflict"] == marker
+    assert "publication_target" not in tier3.metadata
+    assert tier3.metadata["publication_target_conflict"] == marker
+    assessment = assess_tier3_evidence([tier3], payload, expected_skill_name="demo")
+    assert assessment.evidence_complete is False
+    assert assessment.reason == "Tier 3 runtime context is not bound to the publication target."
+    report = json.loads(JSONReporter(include_timestamp=False).render_all([tier3]))
+    assert report["results"][0]["publication_target_conflict"] == marker
 
 
 def test_rerender_does_not_replace_malformed_persisted_identity_with_engine_claim(tmp_path: Path) -> None:

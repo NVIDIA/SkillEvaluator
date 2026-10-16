@@ -20,8 +20,10 @@ import unicodedata
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.reporting.base import (
     ReporterBase,
+    additional_errors,
     assess_publication,
     get_skip_reason,
     is_advisory_agent_eval_skip,
@@ -39,9 +41,24 @@ if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
 
 
+_SKIP_REASON_MAX_CHARS = 1024
+
+
+def _markdown_safe_characters(value: str, *, preserve_newlines: bool = False) -> str:
+    """Remove control and separator characters from untrusted Markdown text."""
+    safe: list[str] = []
+    for character in value.replace("\r\n", "\n").replace("\r", "\n"):
+        category = unicodedata.category(character)
+        if category.startswith("C") or category in {"Zl", "Zp"}:
+            safe.append("\n" if preserve_newlines and character == "\n" else " ")
+        else:
+            safe.append(character)
+    return "".join(safe)
+
+
 def _markdown_table_cell(value: object) -> str:
     """Return one safe physical Markdown table cell."""
-    normalized = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    normalized = _markdown_safe_characters(str(value), preserve_newlines=True)
     escaped = html.escape(normalized, quote=False)
     return escaped.replace("|", "&#124;").replace("`", "&#96;").replace("\n", "<br>")
 
@@ -75,7 +92,7 @@ def _markdown_inline_text(value: object, *, limit: int | None = None) -> str:
         text = str(value)
     else:
         return ""
-    flattened = " ".join(text.replace("\r\n", "\n").replace("\r", "\n").split())
+    flattened = " ".join(_markdown_safe_characters(text).split())
     if limit is not None:
         flattened = flattened[:limit]
     escaped = html.escape(flattened, quote=False)
@@ -91,6 +108,16 @@ def _markdown_inline_text(value: object, *, limit: int | None = None) -> str:
     ):
         escaped = escaped.replace(character, entity)
     return escaped
+
+
+def _markdown_code_text(value: object, *, limit: int | None = None) -> str:
+    """Flatten untrusted metadata for a code span without obscuring paths."""
+    if not isinstance(value, str):
+        return ""
+    flattened = " ".join(_markdown_safe_characters(value).split())
+    if limit is not None:
+        flattened = flattened[:limit]
+    return html.escape(flattened, quote=False).replace("`", "&#96;")
 
 
 def _mapping(value: object) -> dict:
@@ -351,9 +378,9 @@ class MarkdownReporter(ReporterBase):
                             label = _markdown_inline_text(harbor_evidence_link_text(harbor_evidence)) or "Evidence"
                             lines.append(f"   - Evidence: [{label}]({url})")
                     for ref in _dict_items(suggestion.get("evidence_refs"))[:3]:
-                        pointer = _markdown_inline_text(ref.get("json_pointer") or ref.get("path"))
+                        pointer = _markdown_code_text(evidence_ref_identity(ref))
                         excerpt = _markdown_inline_text(ref.get("excerpt") or ref.get("label"), limit=120)
-                        kind = _markdown_inline_text(ref.get("kind")) or "evidence"
+                        kind = _markdown_code_text(ref.get("kind")) or "evidence"
                         lines.append(f"   - Evidence: `{kind}` `{pointer}` {excerpt}")
                 lines.append("")
             elif recommendations := _dict_items(ae.get("recommendations")):
@@ -423,7 +450,9 @@ class MarkdownReporter(ReporterBase):
         if result.is_incomplete:
             self._render_incomplete(result, lines)
         elif clean_skip:
-            lines.append(f"- Skip reason: {get_skip_reason(result)}")
+            lines.append(
+                f"- Skip reason: {_markdown_inline_text(get_skip_reason(result), limit=_SKIP_REASON_MAX_CHARS)}"
+            )
         elif result.passed:
             self._render_success(result, lines)
             if result.findings:

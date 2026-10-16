@@ -77,7 +77,11 @@ class CodeRiskValidator(ValidatorBase):
 
         file_counts = self._count_code_files(skill_path)
         if not any(file_counts.values()):
-            result.add_message("No code files found - skipping code risk analysis")
+            result.add_success(
+                check_name="code_file_discovery",
+                message="No code files found - code risk analysis is not applicable",
+                file_counts=file_counts,
+            )
             return result
 
         result.add_message(
@@ -192,7 +196,10 @@ class CodeRiskValidator(ValidatorBase):
 
         if not issues:
             if not errors:
-                result.add_message("Bandit: No security issues found")
+                result.add_success(
+                    check_name="bandit",
+                    message="Bandit: No security issues found",
+                )
             return
 
         # Summarize by severity
@@ -358,8 +365,11 @@ class CodeRiskValidator(ValidatorBase):
             result.mark_scan_incomplete("semgrep")
 
         if not findings:
-            if not scan_errors:
-                result.add_message("Semgrep: No security issues found")
+            if not scan_errors and not result.is_incomplete:
+                result.add_success(
+                    check_name="semgrep",
+                    message="Semgrep: No security issues found",
+                )
             return
 
         result.add_message(f"Semgrep found {len(findings)} issue(s)")

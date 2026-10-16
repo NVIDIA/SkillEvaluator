@@ -25,11 +25,14 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:
     """Load public command exports without making Harbor an eager dependency."""
+    # CLI registration and help must work without the optional Harbor runtime.
     if name not in __all__:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return getattr(import_module("skillevaluator.tier3.commands"), name)
+    value = getattr(import_module("skillevaluator.tier3.commands"), name)
+    globals()[name] = value
+    return value
 
 
 def __dir__() -> list[str]:
     """Expose lazy command exports to interactive callers and documentation."""
-    return sorted((*globals(), *__all__))
+    return sorted({*globals(), *__all__})

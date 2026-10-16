@@ -36,9 +36,16 @@ from urllib.parse import unquote
 
 from skillevaluator.publication_identity import (
     publication_source_entry_is_excluded,
+    publication_source_link_is_generated,
     publication_source_path_is_excluded,
 )
-from skillevaluator.tier3.case_ids import safe_child, validate_case_ids, validate_output_directory_path
+from skillevaluator.tier3.case_ids import (
+    safe_child,
+    validate_case_id,
+    validate_case_ids,
+    validate_output_directory_path,
+)
+from skillevaluator.tier3.harbor import DEFAULT_LLM_VERIFIER_TIMEOUT_SEC
 from skillevaluator.tier3.harbor.secure_copy import (
     copy_file_secure,
     copytree_secure,
@@ -53,6 +60,10 @@ from skillevaluator.tier3.output_provenance import (
     write_generated_output_marker,
 )
 from skillevaluator.tier3.toml_utils import extract_toml_metadata_entry_id, toml_quote
+from skillevaluator.utils.path_security import (
+    find_git_repo_root,
+    resolve_repo_context_root,
+)
 from skillevaluator.utils.process_environment import child_process_env
 from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
@@ -390,40 +401,6 @@ def _verifier_env_block(runtime_env: dict[str, str] | None = None, indent: str =
     return "\n".join(f'{indent}{name} = "${{{name}}}"' for name in _verifier_env_vars(runtime_env))
 
 
-def _find_repo_root(path: Path) -> Path | None:
-    """Return the git repo root for *path*, falling back to parent .git search."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return Path(result.stdout.strip()).resolve()
-    except Exception:
-        pass
-
-    current = path.resolve()
-    if current.is_file():
-        current = current.parent
-    for parent in (current, *current.parents):
-        if (parent / ".git").exists():
-            return parent
-    return None
-
-
-def _repo_context_root(path: Path) -> Path:
-    """Return the exact source root used by repo-context staging."""
-    try:
-        repo_root = _find_repo_root(path)
-        resolved = path.resolve()
-        return repo_root or resolved.parent
-    except (OSError, RuntimeError) as exc:
-        raise ValueError(f"Cannot resolve repository context root for: {path}") from exc
-
-
 def validate_output_provenance_key_location(
     skill_path: Path,
     output_dir: Path,
@@ -435,7 +412,7 @@ def validate_output_provenance_key_location(
     protected_roots = [skill_path, output_dir, *workspace_skill_paths]
     if reference_skills_dir is not None:
         protected_roots.append(reference_skills_dir)
-    repo_root = _find_repo_root(skill_path)
+    repo_root = find_git_repo_root(skill_path)
     if repo_root is not None:
         protected_roots.append(repo_root)
     for protected_root in protected_roots:
@@ -858,6 +835,7 @@ def _runtime_skill_copy_ignore(skill_root: Path, excluded_roots: Sequence[Path] 
             candidate = current / name
             if (
                 publication_source_entry_is_excluded(skill_root, candidate)
+                or publication_source_link_is_generated(skill_root, candidate)
                 or _is_skill_evals_path(candidate, skill_root)
                 or _path_is_excluded(candidate, excluded_roots)
                 or _authenticated_generated_output_ancestor(
@@ -1281,7 +1259,7 @@ def _stage_repo_context(
 
     source_skill_path = source_skill_path.resolve()
     skill_md = _skill_manifest(source_skill_path)
-    repo_root = _repo_context_root(source_skill_path)
+    repo_root = resolve_repo_context_root(source_skill_path)
     authenticated_output_roots: set[Path] = set()
     if (
         _authenticated_generated_output_ancestor(

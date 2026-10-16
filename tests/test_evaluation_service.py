@@ -194,7 +194,7 @@ def test_cli_evaluate_uses_shared_service(monkeypatch: pytest.MonkeyPatch) -> No
     assert opts.skip_baseline is True
 
 
-def test_cli_validate_forwards_environment_kwargs_to_tier3(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_validate_forwards_environment_kwargs_to_tier3(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from skillevaluator import cli as cli_module
     from skillevaluator.models.result import ValidationResult
 
@@ -233,6 +233,8 @@ def test_cli_validate_forwards_environment_kwargs_to_tier3(monkeypatch: pytest.M
             "launch_mode=attach",
             "--ek",
             "instance_id=i-123",
+            "--output-dir",
+            str(tmp_path / "reports"),
         ],
     )
 

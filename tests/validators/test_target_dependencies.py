@@ -183,3 +183,27 @@ def test_folder_target_coverage_survives_report_exports(tmp_path, monkeypatch):
     json_data = json.loads(JSONReporter().render_all([result]))
     assert json_data["results"][0]["dependency_coverage"] == coverage
     assert HTMLReporter()._results_to_dict([result])[0]["dependency_coverage"] == coverage
+
+
+def test_pyproject_without_applicable_pins_records_execution_evidence(tmp_path, monkeypatch):
+    from skillevaluator.reporting.base import result_has_execution_evidence
+
+    result, calls = audit(tmp_path, "[project]\nname='example'\ndependencies=[]", monkeypatch)
+    assert result.status == "passed"
+    assert not calls
+    assert [detail.check_name for detail in result.success_details] == ["pyproject_dependency_discovery"]
+    assert result_has_execution_evidence(result)
+
+    incomplete, _ = audit(tmp_path, '[project]\ndependencies=["requests>=2"]', monkeypatch)
+    assert incomplete.status == "incomplete"
+    assert not incomplete.success_details
+
+
+def test_contradictory_exit_code_does_not_count_batch_as_audited(tmp_path, monkeypatch):
+    output = json.dumps(
+        {"dependencies": [{"name": "idna", "version": "3.10", "vulns": [{"id": "PYSEC-TEST", "fix_versions": []}]}]}
+    )
+    result, _ = audit(tmp_path, '[project]\ndependencies=["idna==3.10"]', monkeypatch, output=output, exit_code=0)
+    assert result.status == "incomplete"
+    assert result.metadata["dependency_coverage"]["audited_pins"] == []
+    assert not any(detail.check_name == "pip_audit" for detail in result.success_details)

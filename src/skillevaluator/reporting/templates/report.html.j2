@@ -1950,6 +1950,15 @@
                 Checks for redundant content within one skill and semantic overlap across skills or local catalog entries.
             </p>
             {% for result in tier2_results %}
+                {% set execution_errors = result | additional_errors %}
+                {% if execution_errors %}
+                <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
+                    <strong>{{ 'Execution errors' if result.is_incomplete else 'Errors' }}</strong>
+                    <ul style="margin:0.5rem 0 0;padding-left:1.25rem;">
+                        {% for error in execution_errors %}<li style="white-space:pre-line;">{{ error }}</li>{% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
                 {% if result | cleanly_skipped %}
                 <div style="background:var(--bg-secondary);border:1px solid var(--warning-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
                     <strong style="color:var(--warning-color);">Skip reason:</strong> {{ result | skip_reason }}

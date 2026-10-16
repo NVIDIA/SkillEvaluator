@@ -19,12 +19,12 @@ import hashlib
 import os
 import stat
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
+from skillevaluator.utils.path_security import canonicalize_trusted_root_alias, matches_filesystem_name
 
 if TYPE_CHECKING:
     from skillevaluator.models.result import ValidationResult
@@ -37,6 +37,8 @@ PUBLICATION_TARGET_DIGEST_ALGORITHM = "skill-evaluator-source-tree/2"
 # Authored Tier 3 inputs under ``evals/`` are deliberately included; only the
 # generated ``evals/results/`` subtree is omitted.
 _PUBLICATION_EXCLUDED_DIR_NAMES = frozenset({".git", ".venv", "__pycache__", "node_modules"})
+# Public alias for staging layers that must recognize these any-depth names.
+PUBLICATION_ANY_DEPTH_EXCLUDED_NAMES = _PUBLICATION_EXCLUDED_DIR_NAMES
 _PUBLICATION_EXCLUDED_ROOT_DIRS = frozenset({".evals", ".results", ".versions", "results", "versions"})
 _PUBLICATION_EXCLUDED_DIR_PATHS = frozenset({("evals", "results")})
 _PUBLICATION_EXCLUDED_ROOT_FILES = frozenset({"BENCHMARK.md", "skill-card.md", "skill.oms.sig"})
@@ -180,6 +182,29 @@ def publication_source_entry_is_excluded(source: Path, candidate: Path) -> bool:
         return False
 
 
+def publication_source_link_is_generated(source: Path, candidate: Path) -> bool:
+    """Return whether a link entry uses a name that v2 excludes at its position.
+
+    The digest refuses trees that contain links, but runtime projections still
+    skip a linked ``.git``, ``results`` or similar generated entry instead of
+    failing on it, because it never holds author-owned skill content.
+    """
+    try:
+        root = _absolute_lexical(source.expanduser())
+        path = _absolute_lexical(candidate.expanduser())
+        parts = path.relative_to(root).parts
+        if not parts or not _is_link(path.lstat()):
+            return False
+    except (OSError, RuntimeError, ValueError):
+        return False
+    name = parts[-1]
+    return bool(
+        name in _PUBLICATION_EXCLUDED_DIR_NAMES
+        or (len(parts) == 1 and (name in _PUBLICATION_EXCLUDED_ROOT_DIRS or name in _PUBLICATION_EXCLUDED_ROOT_FILES))
+        or parts in _PUBLICATION_EXCLUDED_DIR_PATHS
+    )
+
+
 def publication_source_path_is_excluded(source: Path, candidate: Path) -> bool:
     """Return whether a path is at or below an entry excluded by v2."""
     try:
@@ -191,6 +216,57 @@ def publication_source_path_is_excluded(source: Path, candidate: Path) -> bool:
     return any(
         publication_source_entry_is_excluded(root, root.joinpath(*parts[:index])) for index in range(1, len(parts) + 1)
     )
+
+
+def publication_paths_skipped_by_scan(
+    source: Path,
+    excluded_dirs: Collection[str],
+    excluded_files: Collection[str],
+    *,
+    limit: int = 20,
+) -> list[str]:
+    """Return digest-covered paths that a name-based producer scan skips.
+
+    Tier 1 and Tier 2 skip generated-artifact names (``results``, ``versions``,
+    ``evals``, ``BENCHMARK.md``, ...) at any depth, while the v2 digest and the
+    Tier 3 projection exclude most of them only at the target root. A deeper
+    entry with such a name is therefore certified and agent-visible but never
+    scanned. The root ``evals/`` directory holds Tier 3 inputs and is outside
+    the producer scans by design, so it is not reported.
+    """
+    root = _absolute_lexical(source.expanduser())
+    try:
+        if _is_link(root.lstat()) or not root.is_dir():
+            return []
+    except OSError:
+        return []
+    skipped: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        base = Path(dirpath)
+        kept: list[str] = []
+        for name in sorted(dirnames):
+            candidate = base / name
+            parts = candidate.relative_to(root).parts
+            if (
+                candidate.is_symlink()
+                or publication_source_entry_is_excluded(root, candidate)
+                or (len(parts) == 1 and _matches_generated_name(candidate, "evals"))
+            ):
+                continue
+            if matches_filesystem_name(candidate, excluded_dirs):
+                skipped.append("/".join(parts))
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+        for name in sorted(filenames):
+            candidate = base / name
+            if candidate.is_symlink() or publication_source_entry_is_excluded(root, candidate):
+                continue
+            if matches_filesystem_name(candidate, excluded_files):
+                skipped.append("/".join(candidate.relative_to(root).parts))
+        if len(skipped) >= limit:
+            break
+    return sorted(skipped)[:limit]
 
 
 def _hash_descriptor(descriptor: int) -> str:
@@ -597,6 +673,24 @@ def _canonical_directory_entry_name(path: Path) -> str:
     raise ValueError(f"publication source directory entry is ambiguous: {path}")
 
 
+def publication_target_name(target_path: Path) -> str | None:
+    """Return the NFC entry name that publication targets record for a path.
+
+    On a case- or normalization-insensitive filesystem a lexical alias such as
+    ``SIMPLE`` can open the entry recorded as ``simple``. Every tier stamps the
+    recorded spelling, so report expectations must use it instead of the alias.
+    """
+    try:
+        target = _absolute_lexical(target_path.expanduser())
+        skill_name = unicodedata.normalize("NFC", _canonical_directory_entry_name(target))
+        if not skill_name:
+            return None
+        skill_name.encode("utf-8", errors="strict")
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        return None
+    return skill_name
+
+
 def publication_target_from_path(target_path: Path) -> dict[str, str] | None:
     """Return the canonical publication target for one source snapshot."""
     try:
@@ -719,11 +813,15 @@ def stamp_publication_target(
 
 
 __all__ = [
+    "PUBLICATION_ANY_DEPTH_EXCLUDED_NAMES",
     "PUBLICATION_TARGET_DIGEST_ALGORITHM",
     "PublicationTargetConflictError",
     "finalize_publication_target",
+    "publication_paths_skipped_by_scan",
     "publication_source_digest",
+    "publication_source_link_is_generated",
     "publication_target_from_path",
+    "publication_target_name",
     "stamp_publication_identity",
     "stamp_publication_target",
 ]

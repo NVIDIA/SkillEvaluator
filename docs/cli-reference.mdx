@@ -228,7 +228,7 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--tier3 / --no-tier3` | enabled for skills | Run or skip Tier 3 live agent evaluation. Accepts a supported YAML/JSON dataset or native Harbor source and validates it before execution. `--agent-eval` / `--no-agent-eval` are compatibility aliases. Explicit `--tiers` selection controls scope; `--no-tier3` also disables autopilot. |
-| `--block-on-agent-eval / --no-block-on-agent-eval` | advisory | Choose whether Tier 3 findings, including missing or invalid selected task-source evidence, participate in the `validate` exit gate. This flag does not enable Tier 3 by itself. |
+| `--block-on-agent-eval / --no-block-on-agent-eval` | advisory | Choose whether Tier 3 findings, including missing or invalid selected task-source evidence, participate in the `validate` exit gate. When blocking, only a completed `PASS` verdict with complete attempt coverage passes; `NEUTRAL` and `FAIL` exit 1. This flag does not enable Tier 3 by itself. |
 | `--autopilot / --no-autopilot` | enabled for skills | Generate one starter case when no evaluation source exists, then run Tier 3. Existing sources are reused unchanged; invalid sources are reported. `--no-autopilot` requires an existing source. Explicit tier selection or `--no-tier3` can exclude Tier 3. |
 | `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents to evaluate. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. |
 | `--env-mode` | `docker` | Harbor environment backend (full list under [tier3 evaluate](#tier3-evaluate)). |

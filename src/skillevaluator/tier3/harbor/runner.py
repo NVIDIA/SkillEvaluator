@@ -24,7 +24,7 @@ import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
@@ -51,8 +51,21 @@ from skillevaluator.provider_config import (
     is_claude_5_5_or_later,
     resolve_llm_provider,
 )
-from skillevaluator.publication_identity import publication_target_from_path
-from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
+from skillevaluator.publication_identity import (
+    PUBLICATION_ANY_DEPTH_EXCLUDED_NAMES,
+    publication_source_path_is_excluded,
+    publication_target_from_path,
+)
+from skillevaluator.source_identity import normalized_evaluated_source
+from skillevaluator.tier3.case_ids import validate_case_ids
+from skillevaluator.tier3.eval_core.llm_judge import JUDGE_REASONING_EFFORT
+from skillevaluator.tier3.evals_config import (
+    MAX_HARBOR_TIMEOUT_MULTIPLIER,
+    EvalsConfigError,
+    encode_environment_kwarg,
+    load_evals_config,
+    validate_environment_kwargs,
+)
 from skillevaluator.tier3.harbor.adapter import (
     _RUNTIME_PROCESS_CONTROL_ENV_NAMES,
     _RUNTIME_PROCESS_CONTROL_ENV_PREFIXES,
@@ -62,6 +75,7 @@ from skillevaluator.tier3.harbor.adapter import (
     _VERIFIER_RETRY_ENV_VARS,
     _native_entry_id,
     _prevalidate_baseline_skill_candidates,
+    _read_regular_evals_file,
     build_eval_base_image,
     find_evals_file,
     generate_harbor_tasks,
@@ -130,10 +144,150 @@ from skillevaluator.tier3_environments import (
     HARBOR_VERSION,
     harbor_environment_type,
 )
+from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 
 logger = logging.getLogger(__name__)
+_MAX_REPO_CONTEXT_METADATA_BYTES = 16 * 1024 * 1024
+
+
+def _runtime_source_is_bound_to_target(source: Path, target: Path) -> bool:
+    """Return whether one staged runtime source is covered by the target digest."""
+    try:
+        source.absolute().relative_to(target.absolute())
+        metadata = source.lstat()
+        reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & reparse_point:
+            return False
+        resolved_source = source.resolve(strict=True)
+        resolved_target = target.resolve(strict=True)
+        resolved_source.relative_to(resolved_target)
+        if publication_source_path_is_excluded(resolved_target, resolved_source):
+            return False
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _task_stages_digest_excluded_entries(task_path: Path) -> bool:
+    """Return whether a generated task carries entries the source digest omits.
+
+    Task inputs (``evals/files`` and per-entry ``files`` references) and the
+    custom ``evals/environment`` are copied as authored, while the digest omits
+    ``.git``, ``.venv``, ``__pycache__`` and ``node_modules`` at any depth. Such
+    staged bytes could change Tier 3 inputs or outcomes without changing the
+    certified digest. Generated task content never uses these names, and
+    runtime skill and repository projections already omit them.
+    """
+    try:
+        for dirpath, dirnames, filenames in os.walk(task_path, followlinks=False):
+            base = Path(dirpath)
+            for name in (*dirnames, *filenames):
+                if matches_filesystem_name(base / name, PUBLICATION_ANY_DEPTH_EXCLUDED_NAMES):
+                    return True
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return False
+
+
+def _runtime_context_is_bound_to_publication_target(
+    skill_path: Path,
+    task_paths: Sequence[Path],
+    *,
+    reference_skills_dir: Path | None,
+    workspace_skill_paths: Sequence[Path],
+) -> bool:
+    """Check that every staged runtime source is covered by the skill digest.
+
+    ``publication_target`` deliberately identifies only the evaluated target
+    tree. Repository links, full-repository context, and separately configured
+    reference/workspace skills can add agent-visible bytes outside that tree.
+    Until those inputs have their own versioned publication identity, retain
+    the evaluation but fail its publication evidence closed.
+    """
+    try:
+        target = skill_path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+    if reference_skills_dir is not None:
+        try:
+            reference_metadata = reference_skills_dir.stat()
+            if not stat.S_ISDIR(reference_metadata.st_mode):
+                return False
+            if not _runtime_source_is_bound_to_target(reference_skills_dir, target):
+                return False
+            reference_candidates: list[Path] = []
+            for path in reference_skills_dir.iterdir():
+                if path.name.startswith("."):
+                    continue
+                child_metadata = path.stat()
+                if stat.S_ISDIR(child_metadata.st_mode):
+                    reference_candidates.append(path)
+            if any(not _runtime_source_is_bound_to_target(path, target) for path in reference_candidates):
+                return False
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+    if any(not _runtime_source_is_bound_to_target(path, target) for path in workspace_skill_paths):
+        return False
+
+    for task_path in task_paths:
+        if _task_stages_digest_excluded_entries(task_path):
+            return False
+        environment_path = task_path / "environment"
+        context_path = environment_path / "repo-context.json"
+        staged_repo_context = False
+        for staged_name in ("repo", "repo-linked-root"):
+            try:
+                (environment_path / staged_name).lstat()
+                staged_repo_context = True
+            except FileNotFoundError:
+                continue
+            except (OSError, RuntimeError, ValueError):
+                return False
+        try:
+            context_path.lstat()
+        except FileNotFoundError:
+            if staged_repo_context:
+                return False
+            continue
+        except (OSError, RuntimeError, ValueError):
+            return False
+        try:
+            encoded_context = _read_regular_evals_file(
+                context_path,
+                label="Repo context metadata",
+                max_bytes=_MAX_REPO_CONTEXT_METADATA_BYTES,
+                allowed_root=task_path,
+            )
+            context = json.loads(encoded_context.decode("utf-8"))
+            files = context.get("files") if isinstance(context, dict) else None
+        except (OSError, RecursionError, UnicodeError, ValueError):
+            return False
+        if not isinstance(files, list):
+            return False
+        mode = context.get("mode")
+        if mode not in {"full", "linked"}:
+            return False
+        for entry in files:
+            source = entry.get("source") if isinstance(entry, dict) else None
+            if (
+                not isinstance(source, str)
+                or not source
+                or not Path(source).is_absolute()
+                or not _runtime_source_is_bound_to_target(Path(source), target)
+            ):
+                return False
+        # Repository projection depends on source bytes and topology outside
+        # the target-only digest (and full mode additionally depends on
+        # excluded Git/operator selection state). Keep the run, but do not let
+        # any nonempty repo context certify this target identity.
+        if files or staged_repo_context:
+            return False
+    return True
+
 
 PUBLISHED_EXECUTION_ERRORS_MAX = 256
 PUBLISHED_EXECUTION_ERROR_MAX_CHARS = 4096
@@ -4154,21 +4308,22 @@ def _run_harbor_eval_impl(
         """Return the boundary identity, or a fail-closed mutation marker."""
         nonlocal publication_target_conflict
         if publication_target_conflict is not None:
-            return {
-                "publication_target": None,
-                "publication_target_conflict": {
-                    "run_start": (
-                        dict(publication_target_conflict["run_start"])
-                        if isinstance(publication_target_conflict["run_start"], dict)
-                        else None
-                    ),
-                    "run_end": (
-                        dict(publication_target_conflict["run_end"])
-                        if isinstance(publication_target_conflict["run_end"], dict)
-                        else None
-                    ),
-                },
+            conflict: dict[str, Any] = {
+                "run_start": (
+                    dict(publication_target_conflict["run_start"])
+                    if isinstance(publication_target_conflict["run_start"], dict)
+                    else None
+                ),
+                "run_end": (
+                    dict(publication_target_conflict["run_end"])
+                    if isinstance(publication_target_conflict["run_end"], dict)
+                    else None
+                ),
             }
+            reason_code = publication_target_conflict.get("reason_code")
+            if isinstance(reason_code, str):
+                conflict["reason_code"] = reason_code
+            return {"publication_target": None, "publication_target_conflict": conflict}
         run_end_target = publication_target_from_path(skill_path)
         if run_end_target == publication_target:
             return {
@@ -4274,6 +4429,7 @@ def _run_harbor_eval_impl(
                 )
             )
     agent_task_dirs: dict[str, tuple[Path, Path | None]] = {}
+    staged_task_paths: list[Path] = []
     expected_task_selectors: list[str] | None = None
     expected_case_id_by_task_selector: dict[str, str] | None = None
     reporter.emit(
@@ -4312,6 +4468,7 @@ def _run_harbor_eval_impl(
                 evaluator_skill_path=evaluator_skill_path,
                 arm_suffix=with_arm_suffix,
             )
+            staged_task_paths.extend(task_paths)
             if staged_environment_error := _staged_task_environment_error(env_mode, task_paths):
                 raise ValueError(staged_environment_error)
             task_selectors = validate_case_ids(task.name for task in task_paths)
@@ -4367,6 +4524,7 @@ def _run_harbor_eval_impl(
                 baseline_case_id_by_task_selector = dict(
                     zip(baseline_task_selectors, baseline_logical_case_ids, strict=True)
                 )
+                staged_task_paths.extend(baseline_task_paths)
                 if (
                     baseline_task_selectors != expected_task_selectors
                     or baseline_case_id_by_task_selector != expected_case_id_by_task_selector
@@ -4379,6 +4537,18 @@ def _run_harbor_eval_impl(
     except (OSError, ValueError) as exc:
         reporter.emit(ProgressEvent(stage=staging_failure_stage, state="failed", detail=str(exc)))
         return _persist_pre_execution_failure([str(exc)])
+
+    if not _runtime_context_is_bound_to_publication_target(
+        skill_path,
+        staged_task_paths,
+        reference_skills_dir=reference_skills_dir,
+        workspace_skill_paths=workspace_skills,
+    ):
+        publication_target_conflict = {
+            "run_start": dict(publication_target) if publication_target is not None else None,
+            "run_end": None,
+            "reason_code": "runtime_context_outside_publication_target",
+        }
 
     task_selectors = expected_task_selectors or []
     case_id_by_task_selector = expected_case_id_by_task_selector or {}

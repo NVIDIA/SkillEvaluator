@@ -57,10 +57,12 @@ skillevaluator validate ./skills/example-skill \
 ```
 
 Tier 1 is always publication-required. Tier 2 and Tier 3 are
-publication-required by default. Omitting Tier 2 with `--no-dedup` or
-`--tiers 1,3`, or omitting Tier 3 by leaving out `--agent-eval`, therefore
-produces an `INCOMPLETE` card with the omitted tier marked `NOT RUN` and never a
-publication recommendation. `--no-block-on-dedup` changes the command exit
+publication-required by default, and Tier 3 runs by default for skills.
+Excluding Tier 2 with `--no-dedup` or a `--tiers` selection without `2` (such
+as `--tiers 1,3`), or excluding Tier 3 with `--no-tier3` or a `--tiers`
+selection without `3`, therefore produces an `INCOMPLETE` card with the omitted
+tier marked `NOT RUN` and never a publication recommendation.
+`--no-block-on-dedup` changes the command exit
 gate; it is not a publication waiver.
 
 If a catalog intentionally makes Tier 2 or Tier 3 optional, its orchestration
@@ -72,8 +74,9 @@ Do not reuse a prior live score while changing only its label or date. If a
 baseline was not run, keep the explicit “uplift unavailable” state.
 
 When an orchestrator combines tiers from separate jobs, merge the actual result
-objects, including each result's `publication_target` and the built-in Tier 1
-or Tier 2 `publication_evidence` producer marker, and preserve the explicit
+objects, including each result's `publication_target`, the built-in Tier 1
+or Tier 2 `publication_evidence` producer marker, and the Tier 1
+`tier1_required_checks` lineup, and preserve the explicit
 `benchmark_policy` in the combined artifact. Every contributing result must
 carry the same exact NFC filesystem-entry name and
 `skill-evaluator-source-tree/2` digest. Completed Tier 3 evidence
@@ -160,11 +163,22 @@ skillevaluator validate ./my-skill \
   --evaluator-container-revision ghcr.io/nvidia/skillevaluator@sha256:0117bc2e...
 ```
 
+A `PASS` card must also record its `Source digest` and `Tier 3 run ID`, so a
+`PASS` card rendered by an earlier release fails the scan until it is
+regenerated. Earlier `FAIL`, `NEUTRAL`, and `INCOMPLETE` cards without those
+lines still pass; the lines are validated whenever they are present.
+
 The linter rejects configured known leak patterns such as retired product
 identities, any validation-profile metadata line, common absolute home paths,
 ambiguous legacy uplift cells, the old `Num` column, missing metadata/decision
 sections, and a publication `PASS` without completed required Tier 1, Tier 2,
 or Tier 3 evidence.
+Structural H1/H2 headings must be undecorated, root-level Markdown; raw HTML,
+formatted, quoted, and list-nested headings are rejected as ambiguous. Decision
+text is checked using its rendered form, including line breaks and image alt
+text. Unicode category C, Zl, and Zp characters are rejected whether literal or
+encoded as HTML character references, and confusable aliases of required
+headings, metadata labels, tier-table structure, and decision text fail closed.
 A clean result means none of those configured patterns matched; it is a fixture
 regression guard, not proof that a card is safe to publish. Keep human review
 and the repository's broader boundary and security checks in the promotion

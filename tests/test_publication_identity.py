@@ -903,24 +903,34 @@ def test_split_tier_aggregation_binds_every_result_to_one_source_snapshot(tmp_pa
         result.metadata["agent_eval"] = {
             "skill_name": "demo",
             "verdict": "pass",
+            "best_agent": "codex",
+            "agents_run": ["codex"],
+            "overall_score": 0.9,
+            "overall_lift": 0.5,
             "execution_status": "succeeded",
             "evaluated_at": "2026-08-25T12:00:00+00:00",
             "evaluator_version": "0.9.0",
-            "expected_attempts": 1,
-            "scored_attempts": 1,
+            "execution_errors": [],
+            "expected_attempts": 2,
+            "scored_attempts": 2,
             "dataset_summary": {"total_tasks": 1},
             "dataset_digest": "sha256:" + "a" * 64,
             "dataset_digest_algorithm": "skill-evaluator-dataset-snapshot/1",
-            "attempt_policy": {"max_attempts": 1, "pass_threshold": 0.5},
+            "attempt_policy": {"max_attempts": 1, "pass_threshold": 0.5, "stop_on_pass": False},
             "run_id": run_id,
             "publication_target": dict(target),
             "summary": {
                 "skill_name": "demo",
                 "verdict": "pass",
+                "best_agent": "codex",
+                "agents_run": ["codex"],
+                "overall_score": 0.9,
+                "overall_lift": 0.5,
                 "execution_status": "succeeded",
                 "environment": "docker",
-                "expected_attempts": 1,
-                "scored_attempts": 1,
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
                 "run_id": run_id,
                 "publication_target": dict(target),
             },
@@ -928,11 +938,28 @@ def test_split_tier_aggregation_binds_every_result_to_one_source_snapshot(tmp_pa
                 "codex": {
                     "model": "gpt-codex",
                     "execution_status": "succeeded",
-                    "expected_attempts": 1,
-                    "scored_attempts": 1,
+                    "execution_errors": [],
+                    "expected_attempts": 2,
+                    "scored_attempts": 2,
+                    "conditions": {
+                        "with_skill": {
+                            "execution_status": "succeeded",
+                            "execution_errors": [],
+                            "expected_attempts": 1,
+                            "scored_attempts": 1,
+                        },
+                        "without_skill": {
+                            "execution_status": "succeeded",
+                            "execution_errors": [],
+                            "expected_attempts": 1,
+                            "scored_attempts": 1,
+                        },
+                    },
+                    "baseline": 0.4,
                     "with_skill": 0.9,
+                    "lift": 0.5,
                     "dimensions": [
-                        {"id": dimension, "with_skill": 0.9}
+                        {"id": dimension, "with_skill": 0.9, "baseline": 0.4, "lift": 0.5}
                         for dimension in (
                             "security",
                             "correctness",
@@ -943,16 +970,32 @@ def test_split_tier_aggregation_binds_every_result_to_one_source_snapshot(tmp_pa
                     ],
                 }
             },
+            "dimensions": [
+                {"id": dimension, "with_skill": 0.9, "baseline": 0.4, "lift": 0.5}
+                for dimension in (
+                    "security",
+                    "correctness",
+                    "discoverability",
+                    "effectiveness",
+                    "efficiency",
+                )
+            ],
         }
         return result
 
-    tier1 = _as_result(
-        "SCHEMA",
-        "Schema validation",
-        lambda _target: successful_result("SCHEMA", "schema"),
-        skill,
-        publication_check_id="schema",
-    )
+    from skillevaluator.publication_evidence import tier1_required_checks
+
+    # Publication requires the whole applicable Tier 1 lineup, not one check.
+    tier1_results = [
+        _as_result(
+            check.upper(),
+            f"{check} validation",
+            lambda _target, check=check: successful_result(check.upper(), check),
+            skill,
+            publication_check_id=check,
+        )
+        for check in tier1_required_checks(skill_like=True)
+    ]
     tier2 = _guarded_result(
         "Similarity Check",
         skill,
@@ -963,19 +1006,19 @@ def test_split_tier_aggregation_binds_every_result_to_one_source_snapshot(tmp_pa
     assert unchanged_target is not None
     tier3 = tier3_result(unchanged_target)
 
-    benchmark = BenchmarkReporter(skill_name="demo", include_timestamp=False).render_all([tier1, tier2, tier3])
+    benchmark = BenchmarkReporter(skill_name="demo", include_timestamp=False).render_all([*tier1_results, tier2, tier3])
     benchmark_path = tmp_path / "BENCHMARK.md"
     benchmark_path.write_text(benchmark, encoding="utf-8")
     _files, offenders = benchmark_gate.find_offenders([benchmark_path])
 
-    assert "Overall verdict: PASS" in benchmark
+    assert "> ✅ **Overall verdict: PASS — Recommended for publication**" in benchmark
+    assert "## Publication Recommendation" in benchmark
     assert offenders == []
-    machine_report = json.loads(JSONReporter(include_timestamp=False).render_all([tier1, tier2, tier3]))
-    assert [result["publication_target"] for result in machine_report["results"]] == [
-        unchanged_target,
-        unchanged_target,
-        unchanged_target,
-    ]
+    machine_report = json.loads(JSONReporter(include_timestamp=False).render_all([*tier1_results, tier2, tier3]))
+    assert machine_report["publication_status"] == "pass"
+    assert [result["publication_target"] for result in machine_report["results"]] == [unchanged_target] * (
+        len(tier1_results) + 2
+    )
     assert machine_report["tier3"]["run_id"] == "split-tier-fixture-run"
 
     (skill / "SKILL.md").write_text("---\nname: changed-between-jobs\n---\n", encoding="utf-8")
@@ -990,7 +1033,7 @@ def test_split_tier_aggregation_binds_every_result_to_one_source_snapshot(tmp_pa
     changed_tier3 = tier3_result(changed_target)
 
     mixed = BenchmarkReporter(skill_name="demo", include_timestamp=False).render_all(
-        [tier1, changed_tier2, changed_tier3]
+        [*tier1_results, changed_tier2, changed_tier3]
     )
 
     assert "Overall verdict: INCOMPLETE" in mixed

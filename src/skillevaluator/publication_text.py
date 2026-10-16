@@ -354,6 +354,30 @@ def publication_semantic_text(value: object, *, strip_marks: bool = False) -> st
     return "".join(semantic)
 
 
+# Line feed, carriage return and tab are ordinary layout in free text such as
+# prompts, judge explanations and suggestions. JSON escapes them losslessly.
+_LAYOUT_WHITESPACE = frozenset({"\t", "\n", "\r"})
+
+
+def publication_free_text(value: object) -> str:
+    """Normalize free text like :func:`publication_semantic_text`, keeping layout whitespace.
+
+    Every other control, format, or invisible identity character is still
+    removed, so terminal escapes and spoofing characters are still detected
+    by callers that compare this projection with the raw text.
+    """
+    text = _safe_text(value)
+    segments: list[str] = []
+    start = 0
+    for index, character in enumerate(text):
+        if character in _LAYOUT_WHITESPACE:
+            segments.append(publication_semantic_text(text[start:index]))
+            segments.append(character)
+            start = index + 1
+    segments.append(publication_semantic_text(text[start:]))
+    return "".join(segments)
+
+
 def publication_confusable_skeleton(value: object) -> str:
     """Return the pinned UTS #39 skeleton subset needed by reserved identities."""
     # The embedded values already contain the effective result of the UTS #39
@@ -392,6 +416,7 @@ __all__ = [
     "UNICODE_CONFUSABLES_SUBSET_SOURCE_COUNT",
     "UNICODE_CONFUSABLES_VERSION",
     "publication_confusable_skeleton",
+    "publication_free_text",
     "publication_identity_present",
     "publication_semantic_text",
 ]

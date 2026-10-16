@@ -32,10 +32,18 @@ same rule and relocates to `<catalog>-reports/`. An explicit in-target `-o` is
 rejected; choose an external directory instead. Existing nonempty sibling
 directories are reused only when their SkillEvaluator ownership marker is
 valid, preventing the default from overwriting an unrelated directory.
+For Tier 3, an output directory inside the target repository or an included
+skill root must likewise be new, empty, or already carry a valid ownership
+marker. This applies to linked-context staging as well as `--copy-repo`. A
+nonempty unowned directory is rejected so selecting an authored subtree cannot
+silently remove that subtree from the agent's runtime context.
 
 For compatibility, commands launched from a parent directory keep the familiar
-layout: `skillevaluator validate ./my-skill` still writes to `./reports/`
-because that directory is outside `./my-skill/`.
+layout when the default output is safe to claim: `skillevaluator validate
+./my-skill` writes to `./reports/` when that directory is absent, empty, or
+already authenticated as SkillEvaluator output. If `./reports/` is nonempty
+and unowned, the default relocates to `./my-skill-reports/` instead of writing
+into unrelated content.
 
 For `validate`, that compact default is a pipeline view — a per-check ticker
 plus a summary. Pass `--verbose` to get the full per-check detail stream in
@@ -104,7 +112,10 @@ incomplete still makes the card `INCOMPLETE` because malformed evidence cannot
 certify publication. A default-passed result object is not sufficient. Tier 1
 and Tier 2 evidence must carry a valid `publication_evidence` marker written by
 a built-in command wrapper, and every recognized result must record a success,
-finding, or positive check count that proves it executed. Legacy and custom
+finding, or positive check count that proves it executed. Tier 1 must also
+cover every default check that applies to the content type: schema, security,
+PII, license, code integrity, and Unicode, plus version, quality, and lint for
+skills. A run narrowed with `--checks` is reported but cannot certify Tier 1. Legacy and custom
 results remain visible, and their failures still block publication, but they
 cannot satisfy a required tier or create a waiver. Generic per-result `optional`
 metadata is not a publication waiver; only the resolved `benchmark_policy` from
@@ -131,11 +142,22 @@ while excluding only known generated artifacts. In particular, authored
 `BENCHMARK.md`, `skill-card.md`, and `skill.oms.sig`. Filesystem case aliases
 are treated according to the host filesystem, while a case-distinct authored
 name on a case-sensitive filesystem remains covered. A same-named file below
-another authored directory is still included. Tier 1, Tier 2, Tier 3 runtime
-projection, and full `--copy-repo` staging omit the same generated inputs so
-bytes outside the claimed identity cannot affect evaluation evidence. Split-job
-results must match this identity exactly. Legacy anonymous results remain
-readable, but their publication status is `INCOMPLETE`.
+another authored directory is still included. Tier 3 runtime projection and
+full `--copy-repo` staging omit the same generated inputs so excluded generated
+bytes inside the target cannot affect evaluation evidence. Tier 1 and Tier 2
+skip the generated-artifact names (`results`, `versions`, `evals`, their dot
+variants, `BENCHMARK.md`, `skill-card.md`, and `skill.oms.sig`) at any depth.
+When one of those names appears below the target root, the digest would certify
+content that no scan read, so the Tier 1 run records the path and publication
+stays `INCOMPLETE` until it is renamed. The root `evals/` directory holds Tier 3
+inputs and is outside the Tier 1 scans by design.
+Split-job results must match this identity exactly. Tier 3 runs that stage any
+linked/full repository context or external reference/workspace skills, or task
+inputs and custom environments that carry `.git`, `.venv`, `__pycache__`, or
+`node_modules` entries, remain runnable but are marked `INCOMPLETE`, because
+that projection is not fully determined by this target-only publication
+identity. Legacy anonymous results
+remain readable, but their publication status is `INCOMPLETE`.
 
 Built-in Tier 1 and Tier 2 results also carry a versioned
 `publication_evidence` object with exact `schema_version`, `producer`, `tier`,
@@ -500,6 +522,13 @@ For CI and tooling, two JSON entry points matter:
   blocking with `--block-on-agent-eval`; Tier 2 is blocking for the exit code
   by default and becomes advisory with `--no-block-on-dedup`. Those exit-code
   controls are separate from `benchmark_policy`.
+- **The evaluated source identity**: every JSON report always carries a
+  top-level `evaluated_source` object, resolved from every carrier the run
+  recorded, so the JSON and `BENCHMARK.md` name the same source tree. It is
+  `null` when the orchestration input supplied none. Carriers that name
+  different sources abort the run before any report file is written, so a
+  contradictory identity is never published in one format and reported in
+  another.
 
 Both paths speak the same dialect: standalone `tier3 evaluate` and
 `validate --tier3` share one HTML renderer for `report.html`, and both embed

@@ -30,6 +30,7 @@ from skillevaluator.reporting.base import (
     result_publication_target_dict,
     select_agent_eval_payload,
 )
+from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -330,6 +331,16 @@ class JSONReporter(ReporterBase):
         publication_evidence = result_publication_evidence_dict(result)
         if publication_evidence is not None:
             data["publication_evidence"] = publication_evidence
+
+        workflow = result.metadata.get("workflow")
+        if isinstance(workflow, dict):
+            data["workflow"] = workflow
+
+        # Tier 2 records bounded provider diagnostics and completed/failed
+        # cluster counts independently of duplicate-content findings.
+        llm_analysis = result.metadata.get("llm_analysis")
+        if isinstance(llm_analysis, dict):
+            data["llm_analysis"] = llm_analysis
 
         return data
 

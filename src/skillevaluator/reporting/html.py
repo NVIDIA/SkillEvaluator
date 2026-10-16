@@ -42,7 +42,9 @@ from skillevaluator import __version__
 from skillevaluator.constants import TIER3_LIFT_FAIL_THRESHOLD, TIER3_LIFT_PASS_THRESHOLD
 from skillevaluator.publication_evidence import result_publication_evidence_dict
 from skillevaluator.reporting.base import (
+    AGENT_EVAL_EXACT_TEXT_KEYS,
     ReporterBase,
+    additional_errors,
     agent_eval_publication_evidence_complete,
     agent_eval_report_serialization_issue,
     agent_eval_report_serialization_limits,
@@ -55,6 +57,7 @@ from skillevaluator.reporting.base import (
     is_tier2_result,
     is_tier3_result,
     passes_required_gate,
+    publication_free_text,
     publication_identity_present,
     publication_semantic_text,
     publication_target_conflict_marker,
@@ -71,6 +74,10 @@ from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_l
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
 
+
+# SkillSpector reports ``metadata.skillspector_version`` as a bare semantic
+# version. Anything else is dropped rather than echoed into the report.
+_SKILLSPECTOR_VERSION_RE = re.compile(r"\d{1,6}\.\d{1,6}\.\d{1,6}(?:[-+][0-9A-Za-z.-]{1,64})?")
 
 # Tier 3 already enforces a 2 MiB canonical payload limit. HTML needs a
 # separate bound because script-safe escaping (``<`` -> ``\u003c``), pretty
@@ -202,7 +209,9 @@ def _json_safe_tier3_value(
             truncated[0] = True
             return None
         utf8_safe_value = value.encode("utf-8", errors="replace").decode("utf-8")
-        safe_value = _json_safe_tier3_text(value)
+        # Free text keeps line breaks and tabs, which JSON escapes losslessly;
+        # identity text keeps the strict projection used for publication keys.
+        safe_value = _json_safe_tier3_text(value) if _preserve_exact_text else publication_free_text(utf8_safe_value)
         if utf8_safe_value != value or safe_value != unicodedata.normalize("NFKC", utf8_safe_value):
             truncated[0] = True
         elif _preserve_exact_text and unicodedata.normalize("NFC", utf8_safe_value) == utf8_safe_value:
@@ -309,7 +318,7 @@ def _json_safe_tier3_value(
                     _remaining_text_bytes=remaining_text_bytes,
                     _truncated=truncated,
                     _max_depth=max_depth,
-                    _preserve_exact_text=_preserve_exact_text or safe_key in {"publication_target", "skill_name"},
+                    _preserve_exact_text=_preserve_exact_text or safe_key in AGENT_EVAL_EXACT_TEXT_KEYS,
                 )
                 if remaining_nodes[0] <= 0 and processed_keys < total_keys:
                     truncated[0] = True
@@ -860,12 +869,20 @@ def _sanitize_tier3_trial(value: dict[str, Any]) -> dict[str, Any]:
     trial["scores"] = _score_mapping(trial.get("scores"))
     trial["baseline_scores"] = _score_mapping(trial.get("baseline_scores"))
     trial["lift_scores"] = _score_mapping(trial.get("lift_scores"), minimum=-1.0, maximum=1.0)
-    tokens = trial.get("tokens") if isinstance(trial.get("tokens"), dict) else {}
-    trial["tokens"] = {
-        "prompt": _nonnegative_count(tokens.get("prompt")),
-        "completion": _nonnegative_count(tokens.get("completion")),
-    }
-    trial["steps"] = _nonnegative_count(trial.get("steps"))
+    # Unavailable telemetry stays absent rather than becoming zero, so the
+    # template can omit charts and show "—" instead of reporting no usage.
+    raw_tokens = trial.pop("tokens", None)
+    tokens = raw_tokens if isinstance(raw_tokens, dict) else {}
+    prompt_tokens = _strict_nonnegative_count(tokens.get("prompt"))
+    completion_tokens = _strict_nonnegative_count(tokens.get("completion"))
+    if prompt_tokens is not None and completion_tokens is not None:
+        trial["tokens"] = {"prompt": prompt_tokens, "completion": completion_tokens}
+        cached_tokens = _strict_nonnegative_count(tokens.get("cached"))
+        if cached_tokens is not None:
+            trial["tokens"]["cached"] = cached_tokens
+    steps = _strict_nonnegative_count(trial.pop("steps", None))
+    if steps is not None:
+        trial["steps"] = steps
     trial["warnings"] = _string_list(trial.get("warnings"))
     recovery = trial.get("error_recovery") if isinstance(trial.get("error_recovery"), dict) else {}
     recovery["details"] = _string_list(recovery.get("details"))
@@ -1142,6 +1159,17 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
         if value > 0
     }
     return preview, notice
+
+
+def _skillspector_versions(results: list[ValidationResult]) -> list[str]:
+    """Return the distinct SkillSpector versions recorded on ``results``, in first-seen order."""
+    versions: dict[str, None] = {}
+    for result in results:
+        metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        raw_version = metadata.get("skillspector_version")
+        if isinstance(raw_version, str) and _SKILLSPECTOR_VERSION_RE.fullmatch(raw_version.strip()):
+            versions.setdefault(raw_version.strip(), None)
+    return list(versions)
 
 
 def _related_paths(finding: object) -> list[str]:
@@ -2389,10 +2417,16 @@ class HTMLReporter(ReporterBase):
         # payload make the decision only more conservative. Display shaping
         # must never invent a successful run or erase a persisted waiver.
         raw_publication = assess_publication(results, expected_skill_name=self.expected_skill_name)
-        emitted_publication = assess_publication(
-            results,
-            tier3_data,
-            expected_skill_name=self.expected_skill_name,
+        # Without a persisted payload, tier3_data is a synthesized display
+        # fallback rather than evidence, so only the raw assessment applies.
+        emitted_publication = (
+            assess_publication(
+                results,
+                tier3_data,
+                expected_skill_name=self.expected_skill_name,
+            )
+            if select_agent_eval_candidate(tier3_results) is not None
+            else raw_publication
         )
         publication = max(
             (raw_publication, emitted_publication),
@@ -2650,6 +2684,7 @@ class HTMLReporter(ReporterBase):
                     "reason": publication.tier3.reason,
                 },
             },
+            "skillspector_versions": tier1_skillspector_versions,
         }
         report_json = (
             json.dumps(report_data, indent=2, allow_nan=False)

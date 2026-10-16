@@ -22,6 +22,7 @@ from skillevaluator.constants import (
     TIER3_LIFT_PASS_THRESHOLD,
 )
 from skillevaluator.publication_evidence import result_has_publication_evidence, result_publication_evidence
+from skillevaluator.publication_text import publication_confusable_skeleton
 from skillevaluator.reporting.base import (
     PublicationTargetIdentity,
     ReporterBase,
@@ -37,6 +38,7 @@ from skillevaluator.reporting.base import (
     is_cleanly_skipped,
     is_tier2_result,
     is_tier3_result,
+    missing_tier1_publication_checks,
     publication_identity_present,
     publication_semantic_text,
     publication_target_for_results,
@@ -44,7 +46,10 @@ from skillevaluator.reporting.base import (
     result_has_execution_evidence,
     result_matches_publication_target,
     select_agent_eval_payload,
+    tier1_unscanned_publication_paths,
+    unrecognized_tier2_results,
 )
+from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
 if TYPE_CHECKING:
@@ -101,6 +106,12 @@ _PUBLIC_USER_PATH = re.compile(
 )
 _MARKDOWN_INLINE_SPECIAL = re.compile(r"([\\*_\[\]~])")
 _MARKDOWN_BLOCK_PREFIX = re.compile(r"^(?:#{1,6}|>|[+*-]|\d+[.)])(?=\s|$)")
+# The public benchmark gate rejects a non-PASS card whose visible text contains
+# this decision phrase, matching confusable aliases by treating each non-ASCII
+# character as a wildcard for one letter. Untrusted text is screened the same way.
+_DECISION_ALIAS_SENTINEL = "\x00"
+_PUBLICATION_DECISION_PHRASE = "recommended for publication"
+_PLAIN_DECISION_PHRASE = re.compile(r"recommended\s+for\s+publication", flags=re.IGNORECASE)
 _MARKDOWN_THEMATIC_BREAK = re.compile(r"^(?:\s*[-*_]){3,}\s*$")
 _PUBLICATION_URL_SCHEME = re.compile(r"(?P<scheme>https?|ftp)://", flags=re.IGNORECASE)
 _PUBLICATION_WWW_PREFIX = re.compile(r"\bwww\.", flags=re.IGNORECASE)
@@ -136,8 +147,16 @@ class BenchmarkReporter(ReporterBase):
 
     def render_all(self, results: list[ValidationResult]) -> str:
         ae = _agent_eval_payload(results)
-        expected_skill_name = self.skill_name or _skill_name(results, ae)
-        skill_name = _publication_safe_skill_name(expected_skill_name)
+        publication_target = publication_target_for_results(
+            results,
+            ae,
+            expected_skill_name=self.skill_name,
+        )
+        expected_skill_name = self.skill_name or (
+            publication_target.skill_name if publication_target is not None else None
+        )
+        display_skill_name = self.skill_name or _skill_name(results, ae) or expected_skill_name or "skill"
+        skill_name = _publication_safe_skill_name(display_skill_name)
         private_labels = _private_environment_labels(ae)
         policy = _benchmark_policy(results, ae, expected_skill_name=expected_skill_name)
         status = _overall_status(results, ae, policy, expected_skill_name=expected_skill_name)
@@ -320,8 +339,11 @@ class BenchmarkReporter(ReporterBase):
             lines.append("- Dataset digest: not recorded (legacy or non-live result)")
 
         tier3_run_id = agent_eval_publication_run_id(ae)
+        # The accessor admits only `[A-Za-z0-9][A-Za-z0-9._-]*`, which is inert in a
+        # code span. Markdown escaping would put literal backslashes into runner IDs
+        # such as `20261016_081505_4821_3f9c2a1b7d4e`.
         lines.append(
-            f"- Tier 3 run ID: `{_publication_safe_inline(tier3_run_id)}`"
+            f"- Tier 3 run ID: `{tier3_run_id}`"
             if tier3_run_id
             else "- Tier 3 run ID: not recorded (Tier 3 did not complete)"
         )
@@ -666,6 +688,14 @@ class BenchmarkReporter(ReporterBase):
 
 
 def _agent_eval_payload(results: list[ValidationResult]) -> dict[str, Any] | None:
+    """Return the payload the score and run-detail lines describe.
+
+    A card reports one live evaluation, so one payload is rendered: the
+    strongest Tier 3 payload, selected independently of result order. That
+    choice is safe for scores, which belong to a single run, but not for the
+    evaluated-source identity: see ``_evaluated_source``, which folds every
+    carrier instead so a second payload cannot be silently dropped.
+    """
     return select_agent_eval_payload(results)
 
 
@@ -743,7 +773,7 @@ def _verdict_callout(status: str) -> str:
     return f"> {labels.get(status, f'**Overall verdict: {status}**')}"
 
 
-def _skill_name(results: list[ValidationResult], ae: dict[str, Any] | None) -> str:
+def _skill_name(results: list[ValidationResult], ae: dict[str, Any] | None) -> str | None:
     if ae:
         summary = _mapping(ae.get("summary"))
         candidate = ae.get("skill_name") or summary.get("skill_name")
@@ -753,7 +783,7 @@ def _skill_name(results: list[ValidationResult], ae: dict[str, Any] | None) -> s
         quality = result.metadata.get("quality_scores") if isinstance(result.metadata, dict) else None
         if isinstance(quality, dict) and (candidate := _safe_scalar_text(quality.get("skill_name")).strip()):
             return candidate
-    return "skill"
+    return None
 
 
 def _safe_scalar_text(value: object) -> str:
@@ -1102,6 +1132,11 @@ def _tier_status(
         ]
         if not publication_results:
             return "INCOMPLETE", f"No recognized built-in {tier} producer evidence was recorded"
+        if tier == "Tier 2" and (unrecognized := unrecognized_tier2_results(results)):
+            validator_names = list(
+                dict.fromkeys(result.validator_name or "Tier 2 validator" for result in unrecognized)
+            )
+            return "INCOMPLETE", f"Unrecognized Tier 2 producer evidence from {', '.join(validator_names)}"
 
     unbound_results = [
         result
@@ -1119,6 +1154,13 @@ def _tier_status(
             dict.fromkeys(result.validator_name or f"{tier} validator" for result in missing_evidence)
         )
         return "INCOMPLETE", f"Missing trustworthy execution evidence from {', '.join(validator_names)}"
+
+    if tier == "Tier 1" and (missing_checks := missing_tier1_publication_checks(publication_results)):
+        return "INCOMPLETE", f"Required Tier 1 checks did not run: {', '.join(missing_checks)}"
+
+    if tier == "Tier 1" and (unscanned_paths := tier1_unscanned_publication_paths(publication_results)):
+        shown = ", ".join(unscanned_paths[:5]) + (", ..." if len(unscanned_paths) > 5 else "")
+        return "INCOMPLETE", f"Tier 1 skipped certified paths with generated-artifact names: {shown}"
 
     skipped = [result for result in publication_results if is_cleanly_skipped(result)]
     if tier in {"Tier 1", "Tier 2"} and skipped:
@@ -1328,6 +1370,15 @@ def _publication_safe_inline(
     text = _PUBLICATION_WWW_PREFIX.sub(lambda match: f"{match.group(0)[:-1]}&#46;", text)
     text = text.replace("@", "&#64;")
     text = _MARKDOWN_INLINE_SPECIAL.sub(r"\\\1", text)
+    if _contains_publication_decision_phrase(text):
+        # Validator output or skill content must not carry the card's decision
+        # wording, or a legitimate non-PASS card would fail the public gate.
+        # Join the phrase itself first, then the whole value, then withhold it.
+        text = _PLAIN_DECISION_PHRASE.sub(lambda match: "-".join(match.group(0).split()), text)
+        if _contains_publication_decision_phrase(text):
+            text = "-".join(text.split())
+        if _contains_publication_decision_phrase(text):
+            text = "[text withheld: it contains publication decision wording]"
     if _MARKDOWN_BLOCK_PREFIX.match(text) or _MARKDOWN_THEMATIC_BREAK.fullmatch(text):
         marker_end = text.find(" ")
         marker_end = len(text) if marker_end < 0 else marker_end
@@ -1336,6 +1387,34 @@ def _publication_safe_inline(
             return f"{text[:punctuation_index]}\\{text[punctuation_index:]}"
         return f"\\{text}"
     return text
+
+
+def _decision_phrase_surface(value: str) -> str:
+    """Project text the way the public gate does before matching decision wording."""
+    skeleton = publication_confusable_skeleton(publication_semantic_text(value, strip_marks=True))
+    return "".join(
+        " " if character.isspace() else character if character.isascii() else _DECISION_ALIAS_SENTINEL
+        for character in skeleton
+    )
+
+
+_PUBLICATION_DECISION_PATTERN = re.compile(
+    "".join(
+        r"\s+"
+        if character.isspace()
+        else f"(?:{re.escape(character)}|{re.escape(_DECISION_ALIAS_SENTINEL)})"
+        if character.isascii() and character.isalnum()
+        else re.escape(character)
+        for character in publication_confusable_skeleton(
+            publication_semantic_text(_PUBLICATION_DECISION_PHRASE, strip_marks=True)
+        )
+    )
+)
+
+
+def _contains_publication_decision_phrase(value: str) -> bool:
+    """Return whether text would read as a publication decision to the public gate."""
+    return _PUBLICATION_DECISION_PATTERN.search(_decision_phrase_surface(value)) is not None
 
 
 def _normalized_publication_text(value: object) -> str:

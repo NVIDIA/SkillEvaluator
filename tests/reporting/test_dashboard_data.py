@@ -117,6 +117,38 @@ def test_canonical_missing_attempt_keeps_usage_totals_unknown() -> None:
     assert "tokens 1/2" in row["coverage"]
 
 
+def test_per_trial_usage_normalizes_trial_counts() -> None:
+    per_trial = []
+    for count in (2, 4):
+        report = _report()
+        agent = report["agents"]["claude-code"]
+        for field, count_field, arm in (
+            ("trials", "num_trials", "with_skill"),
+            ("trials_baseline", "num_trials_baseline", "without_skill"),
+        ):
+            agent[field] = [
+                {**copy.deepcopy(agent[field][0]), "entry_id": f"case-{index}", "trial_id": f"case-{index}__trial0"}
+                for index in range(count)
+            ]
+            agent[count_field] = count
+            agent["conditions"][arm].update(expected_attempts=count, scored_attempts=count)
+        rows = parse_dashboard_report(report, f"trials-{count}.json").rows
+        # Totals grow with the trial count; per-trial means do not.
+        assert [row["total_tokens"] for row in rows] == [150 * count, 120 * count]
+        per_trial.append([(row["total_tokens_per_trial"], row["duration_seconds_per_trial"]) for row in rows])
+    assert per_trial == [[(150.0, 8.0), (120.0, 10.0)]] * 2
+
+
+def test_per_trial_usage_is_blank_when_any_trial_is_unmeasured() -> None:
+    report = _repeated_attempts_report(("case-a__trial0", "case-a__trial1"))
+    report["agents"]["claude-code"]["trials"][1]["tokens"].pop("completion")
+    with_row, without_row = parse_dashboard_report(report, "report.json").rows
+    assert with_row["total_tokens"] is None
+    assert with_row["total_tokens_per_trial"] is None
+    assert with_row["duration_seconds_per_trial"] == 8.0
+    assert without_row["total_tokens_per_trial"] == 120.0
+
+
 @pytest.mark.parametrize("value", [True, -1, 1.5, "1", 10**30])
 @pytest.mark.parametrize("field", ["declared", "expected", "both_attempt_counts"])
 def test_present_invalid_coverage_counts_never_become_inferred_complete_counts(value: object, field: str) -> None:
@@ -621,6 +653,15 @@ def test_native_results_use_real_usage_and_prune_nested_mirrors(tmp_path: Path) 
     assert comparison["comparison_status"] == "comparable"
     assert comparison["total_tokens_delta"] == 100
     assert load_dashboard_path(run / "result.json").rows == load_dashboard_path(run).rows
+
+
+def test_native_per_trial_usage_uses_retained_measurements(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _native_run(run)
+    rows = load_dashboard_path(run).rows
+    assert [row["total_tokens_per_trial"] for row in rows] == [210.0, 110.0]
+    assert [row["duration_seconds_per_trial"] for row in rows] == [10.0, 10.0]
+    assert [row["cost_usd_per_trial"] for row in rows] == [None, None]
 
 
 def _canonical_export(run: Path) -> dict:

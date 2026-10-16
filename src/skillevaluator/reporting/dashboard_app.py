@@ -39,6 +39,9 @@ _PERFORMANCE_COLUMNS = (
     "harness",
     "condition",
     "score",
+    "total_tokens_per_trial",
+    "duration_seconds_per_trial",
+    "cost_usd_per_trial",
     "total_tokens",
     "duration_seconds",
     "cost_usd",
@@ -157,6 +160,11 @@ def _performance_column_config() -> dict[str, Any]:
         "condition": st.column_config.TextColumn("Condition"),
         "score": st.column_config.NumberColumn("Score", format="%.3f", width="small"),
         "pass_rate": st.column_config.NumberColumn("Pass rate", format="percent", width="small"),
+        "total_tokens_per_trial": st.column_config.NumberColumn("Tokens / trial", format="%.1f", width="small"),
+        "duration_seconds_per_trial": st.column_config.NumberColumn(
+            "Agent time / trial (s)", format="%.2f", width="small"
+        ),
+        "cost_usd_per_trial": st.column_config.NumberColumn("Cost / trial (USD)", format="$%.4f", width="small"),
         "duration_seconds": st.column_config.NumberColumn("Agent time (s)", format="%.2f", width="small"),
         "cost_usd": st.column_config.NumberColumn("Cost (USD)", format="$%.4f", width="small"),
         "status": st.column_config.TextColumn("Status"),

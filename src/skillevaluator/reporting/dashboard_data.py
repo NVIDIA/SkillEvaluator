@@ -244,6 +244,10 @@ def _set_usage(row: dict[str, Any], usages: list[dict[str, Any]], *, expected: i
             if values and available == len(values) == expected
             else None
         )
+    # A total exists only when every expected trial is measured, so this is an exact mean.
+    for metric in ("total_tokens", "duration_seconds", "cost_usd"):
+        total = row[metric]
+        row[f"{metric}_per_trial"] = _number(total / expected) if total is not None and expected else None
     eligibility = "complete" if row["_complete"] else "incomplete or unknown trial coverage"
     row["coverage"] = (
         f"{row['trials']} trial{'' if row['trials'] == 1 else 's'} ({eligibility}); "

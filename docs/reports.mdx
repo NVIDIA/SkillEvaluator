@@ -420,6 +420,9 @@ condition, and execution status. The status and condition filters narrow the
 performance table only, so comparisons keep both arms; the other filters also
 remove arms from comparisons. Download the visible performance or comparison
 rows as CSV. Each performance row represents one run, harness, and condition.
+Per-trial columns are means over the row's measured trials and stay blank when
+any trial is unmeasured. They help compare rows with different trial counts,
+but runs on different datasets are still not like-for-like.
 The comparison table calculates **with skill minus without skill**, and percent
 change relative to without skill. A negative usage difference means less usage;
 a positive score difference means higher performance. Comparisons stay within

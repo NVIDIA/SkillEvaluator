@@ -137,6 +137,21 @@ def test_dashboard_renders_numeric_performance_and_paired_comparison(tmp_path: P
     assert all(button.proto.ignore_rerun for button in downloads)
 
 
+def test_performance_table_shows_per_trial_usage(tmp_path: Path) -> None:
+    path = _write_report(tmp_path / "run.json")
+    app = _app([path])
+    assert not app.exception
+    performance = app.dataframe[0]
+    assert performance.value["total_tokens_per_trial"].tolist() == [140.0, 120.0]
+    config = json.loads(performance.proto.columns)
+    assert config["total_tokens_per_trial"]["label"] == "Tokens / trial"
+    for field in ("total_tokens_per_trial", "duration_seconds_per_trial", "cost_usd_per_trial"):
+        assert config[field]["type_config"]["type"] == "number", field
+    rows = dashboard_app.load_dashboard_path(path).rows
+    header = next(csv.reader(io.StringIO(rows_csv(rows, dashboard_app._PERFORMANCE_COLUMNS))))
+    assert header.index("total_tokens_per_trial") == header.index("score") + 1
+
+
 def test_dimension_filters_and_condition_retain_baseline_for_comparison(tmp_path: Path) -> None:
     paths = [
         _write_report(tmp_path / "a.json"),

@@ -27,7 +27,9 @@ def test_missing_extra_has_actionable_error(monkeypatch) -> None:
     monkeypatch.setattr(dashboard.importlib.util, "find_spec", lambda _name: None)
     result = CliRunner().invoke(cli, ["dashboard"])
     assert result.exit_code == 1
-    assert 'pip install "skillevaluator[dashboard]"' in result.output
+    assert "skillevaluator[all,dashboard]" in result.output
+    assert "uv run --extra dashboard" in result.output
+    assert 'pip install "skillevaluator[dashboard]"' not in result.output
 
 
 def test_launch_uses_loopback_and_literal_absolute_paths(tmp_path: Path, monkeypatch) -> None:

@@ -16,7 +16,12 @@ import click
 def launch_dashboard(paths: tuple[Path, ...], *, port: int = 8501, no_browser: bool = False) -> int:
     """Run Streamlit on loopback with explicit paths and usage telemetry disabled."""
     if importlib.util.find_spec("streamlit") is None:
-        raise click.ClickException('Install the dashboard extra: pip install "skillevaluator[dashboard]"')
+        raise click.ClickException(
+            "Install the dashboard extra: uv tool install --python 3.13 --reinstall "
+            '"skillevaluator[all,dashboard] @ git+https://github.com/NVIDIA/SkillEvaluator.git" '
+            "(from a checkout: uv run --extra dashboard skillevaluator dashboard, "
+            'or python -m pip install -e ".[dashboard]")'
+        )
     app = Path(__file__).with_name("dashboard_app.py")
     command = [
         sys.executable,

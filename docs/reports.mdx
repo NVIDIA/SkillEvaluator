@@ -440,8 +440,11 @@ When a pair's differences stay blank, the **Comparison reason** column says why.
 Repeated attempts pair by case, as in the HTML report: each arm must record the
 same number of attempts for every case, and each attempt must have its own
 trial ID. A trajectory above the report loader's size bound leaves that trial's
-token counts unavailable in canonical JSON but does not block score comparisons;
-any other loader truncation keeps comparisons unavailable.
+token counts unavailable in canonical JSON but does not block score comparisons.
+Truncation limited to diagnostic details, such as evidence, raw reward fields,
+or non-best agent details, also leaves comparisons available, with a notice.
+Truncation that drops trials or other trial artifacts, or that is not
+explained, keeps comparisons unavailable.
 
 The dashboard reads each input once and reuses it while you filter or switch
 views. Rewriting a JSON file passed on the command line, or adding an entry

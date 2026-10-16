@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import os
 import signal
@@ -42,10 +43,20 @@ class FakePopen:
         self.send_signal(signal.SIGTERM)
 
 
+def _fake_streamlit_spec(monkeypatch, spec: importlib.machinery.ModuleSpec | None) -> None:
+    """Fake only Streamlit's lookup; coverage and pytest call find_spec for other modules."""
+    find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        dashboard.importlib.util,
+        "find_spec",
+        lambda name, *args, **kwargs: spec if name == "streamlit" else find_spec(name, *args, **kwargs),
+    )
+
+
 def _capture_launch(monkeypatch, *args: str, popen: type[FakePopen] = FakePopen):
     """Invoke the dashboard command with Streamlit present and the child process faked."""
     launched: list[FakePopen] = []
-    monkeypatch.setattr(dashboard.importlib.util, "find_spec", lambda _name: object())
+    _fake_streamlit_spec(monkeypatch, importlib.machinery.ModuleSpec("streamlit", None))
 
     def start(command, **kwargs):
         launched.append(popen(command, **kwargs))
@@ -67,7 +78,7 @@ def test_dashboard_help_and_input_validation() -> None:
 
 
 def test_missing_extra_has_actionable_error(monkeypatch) -> None:
-    monkeypatch.setattr(dashboard.importlib.util, "find_spec", lambda _name: None)
+    _fake_streamlit_spec(monkeypatch, None)
     result = CliRunner().invoke(cli, ["dashboard"])
     assert result.exit_code == 1
     assert "skillevaluator[all,dashboard]" in result.output

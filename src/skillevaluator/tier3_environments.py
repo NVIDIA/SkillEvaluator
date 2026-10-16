@@ -15,6 +15,7 @@ HARBOR_VERSION = "0.24.0"
 
 HARBOR_ENVIRONMENTS = (
     "docker",
+    "kata",
     "daytona",
     "e2b",
     "modal",
@@ -45,6 +46,9 @@ HARBOR_ENVIRONMENTS = (
 HARBOR_ENV_MODES = frozenset(HARBOR_ENVIRONMENTS)
 #: Public env modes that Harbor accepts natively via ``--env`` (everything except ``local``).
 HARBOR_NATIVE_ENV_MODES = frozenset(m for m in HARBOR_ENVIRONMENTS if m != "local")
+#: Modes that run through SkillEvaluator's hardened Docker Compose backend on the
+#: host's Docker engine. ``kata`` adds Harbor's Kata Containers runtime overlay.
+HARBOR_DOCKER_ENGINE_ENV_MODES = frozenset({"docker", "kata"})
 #: SkillEvaluator modes that run as a different Harbor environment type. Harbor
 #: 0.24 merged its W&B sandbox into ``cwsandbox``, selected with ``auth=wandb``.
 HARBOR_ENVIRONMENT_TYPE_ALIASES: dict[str, str] = {"wandb": "cwsandbox"}
@@ -59,10 +63,11 @@ def harbor_environment_type(env_mode: str) -> str:
 
 # Exact Harbor ``Provides-Extra`` names. ``ack`` reuses the Kubernetes
 # dependencies supplied by ``gke``, and ``wandb`` the W&B-capable ``cwsandbox``
-# extra. Of the four ``None`` entries, Docker needs no additional Python extra
-# and the other three are system-CLI backends.
+# extra. Of the five ``None`` entries, Docker and Kata need no additional Python
+# extra and the other three are system-CLI backends.
 HARBOR_ENVIRONMENT_EXTRAS: dict[str, str | None] = {
     "docker": None,
+    "kata": None,
     "daytona": "daytona",
     "e2b": "e2b",
     "modal": "modal",
@@ -91,8 +96,8 @@ HARBOR_ENVIRONMENT_EXTRAS: dict[str, str | None] = {
 # importing the base SkillEvaluator CLI never imports Harbor or optional provider
 # SDKs. The packaging parity test AST-reads the pinned Harbor sources and catches
 # additions, removals, and provider kwargs that are consumed through **kwargs.
-# Registry-only entries (cua-cloud, opensandbox, hf-sandbox, podman, kata, runta,
-# prime, mosaic, smol) keep that parity exact; those modes are not exposed.
+# Registry-only entries (cua-cloud, opensandbox, hf-sandbox, podman, runta, prime,
+# mosaic, smol) keep that parity exact; those modes are not exposed.
 _HARBOR_BASE_ENVIRONMENT_KWARGS = frozenset(
     {
         "cpu_enforcement_policy",

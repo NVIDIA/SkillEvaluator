@@ -38,6 +38,7 @@ from skillevaluator.tier3.harbor.secure_docker_environment import (
     SECURE_DOCKER_ENV_IMPORT_PATH,
     SkillEvaluatorDockerEnvironment,
     SkillEvaluatorSecureDockerEnvironment,
+    SkillEvaluatorSecureKataEnvironment,
     _collision_safe_redaction_marker,
     _compose_client_credential_values,
     _compose_interpolation_names,
@@ -8499,6 +8500,102 @@ def test_secure_docker_disables_ssh_streaming_and_gpu_reservations(tmp_path: Pat
             task_env_config=EnvironmentConfig(),
             stream=True,
         )
+
+
+def _initialized_secure_kata_environment(tmp_path: Path, **kwargs: object) -> SkillEvaluatorSecureKataEnvironment:
+    environment_dir = tmp_path / "kata-environment"
+    environment_dir.mkdir(exist_ok=True)
+    (environment_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    return SkillEvaluatorSecureKataEnvironment(
+        environment_dir=environment_dir,
+        environment_name="secure-kata-test",
+        session_id="secure-kata-test",
+        trial_paths=TrialPaths(tmp_path / "kata-trial"),
+        task_env_config=EnvironmentConfig(),
+        **kwargs,
+    )
+
+
+def test_secure_kata_keeps_docker_hardening_under_the_kata_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from harbor.environments.docker.runtime import DOCKER_RUNTIME
+    from harbor.environments.podman import PodmanEnvironment
+    from harbor.models.environment_type import EnvironmentType
+
+    monkeypatch.setattr(DockerEnvironment, "runtime", classmethod(lambda _cls: PodmanEnvironment.runtime()))
+    environment = _initialized_secure_kata_environment(tmp_path, kata_runtime="kata-clh", kata_dns=["9.9.9.9"])
+
+    assert environment.type() == EnvironmentType.KATA
+    assert SkillEvaluatorSecureKataEnvironment.runtime() is DOCKER_RUNTIME
+    # Plain Harbor KataEnvironment also reports stream/gpus/windows as False, so
+    # prove the hardened methods are the ones that run.
+    hardened_owners = {
+        name: next(cls for cls in SkillEvaluatorSecureKataEnvironment.__mro__ if name in cls.__dict__)
+        for name in (
+            "preflight",
+            "start",
+            "exec",
+            "download_file",
+            "download_dir",
+            "capabilities",
+            "runtime",
+            "_run_docker_compose_command",
+        )
+    }
+    assert hardened_owners["exec"] is SkillEvaluatorSecureDockerEnvironment
+    assert all(
+        owner in {SkillEvaluatorSecureDockerEnvironment, SkillEvaluatorDockerEnvironment}
+        for owner in hardened_owners.values()
+    ), hardened_owners
+    assert environment.capabilities.stream is False
+    assert environment.capabilities.gpus is False
+    assert environment.capabilities.windows is False
+    # Kata VMs cannot share the egress sidecar's network namespace, so Harbor
+    # rejects non-public network policies instead of running them unenforced.
+    assert environment._requires_egress_control() is False
+    overlay = json.loads(environment._docker_compose_paths[-1].read_text(encoding="utf-8"))
+    assert overlay["services"]["main"]["runtime"] == "kata-clh"
+    assert overlay["services"]["main"]["volumes"][0]["target"] == "/etc/resolv.conf"
+    assert "main" in environment._compose_model_metadata()[1]
+
+
+def test_secure_kata_preflight_consumes_the_handoff_before_kata_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    from harbor.environments.kata import KataEnvironment
+
+    calls: list[str] = []
+    monkeypatch.setenv("NVIDIA_API_KEY", NVIDIA_BUILD_STDIN_SENTINEL)
+    monkeypatch.setattr(
+        "skillevaluator.tier3.harbor.secure_docker_environment.read_nvidia_build_key_from_stdin",
+        lambda: calls.append("handoff"),
+    )
+    monkeypatch.setattr(DockerEnvironment, "preflight", classmethod(lambda _cls: calls.append("docker")))
+    monkeypatch.setattr(KataEnvironment, "_host_is_linux", staticmethod(lambda: False))
+
+    with pytest.raises(SystemExit, match="Linux host with KVM"):
+        SkillEvaluatorSecureKataEnvironment.preflight()
+    assert calls == ["handoff", "docker"]
+
+
+def test_secure_kata_compose_commands_force_the_runtime_overlay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = _initialized_secure_kata_environment(tmp_path)
+    commands: list[tuple[str, ...]] = []
+
+    async def create_subprocess(*args: object, **_kwargs: object) -> _BufferedComposeProcess:
+        commands.append(tuple(str(argument) for argument in args))
+        return _BufferedComposeProcess(stdout=b"")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    asyncio.run(environment.download_file("/app/result.txt", tmp_path / "result.txt"))
+
+    compose_files = [command[index + 1] for command in commands for index, value in enumerate(command) if value == "-f"]
+    assert compose_files[-1] == str(environment._docker_compose_paths[-1].resolve())
+    assert compose_files[-1].endswith("docker-compose-kata-runtime.json")
 
 
 @pytest.mark.parametrize("kind", ["file", "dir"])

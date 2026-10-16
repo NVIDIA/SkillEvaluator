@@ -283,6 +283,7 @@
         {
           "choices": [
             "docker",
+            "kata",
             "daytona",
             "e2b",
             "modal",
@@ -368,6 +369,7 @@
         {
           "choices": [
             "docker",
+            "kata",
             "daytona",
             "e2b",
             "modal",
@@ -672,6 +674,7 @@
         {
           "choices": [
             "docker",
+            "kata",
             "daytona",
             "e2b",
             "modal",
@@ -2136,6 +2139,7 @@
             {
               "choices": [
                 "docker",
+                "kata",
                 "daytona",
                 "e2b",
                 "modal",
@@ -2221,6 +2225,7 @@
             {
               "choices": [
                 "docker",
+                "kata",
                 "daytona",
                 "e2b",
                 "modal",
@@ -2724,6 +2729,7 @@
           {
             "choices": [
               "docker",
+              "kata",
               "daytona",
               "e2b",
               "modal",
@@ -3240,6 +3246,7 @@
         {
           "choices": [
             "docker",
+            "kata",
             "daytona",
             "e2b",
             "modal",

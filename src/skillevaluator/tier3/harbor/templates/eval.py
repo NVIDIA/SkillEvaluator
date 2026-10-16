@@ -77,6 +77,7 @@ try:
         atif_content_has_text,
         atif_content_text,
         iter_normalized_tool_calls,
+        normalized_tool_call_is_error,
         normalized_tool_call_observation,
         normalized_tool_call_wrapper_observation,
     )
@@ -88,6 +89,7 @@ except ImportError:  # pragma: no cover -- source-tree import only
         atif_content_has_text,
         atif_content_text,
         iter_normalized_tool_calls,
+        normalized_tool_call_is_error,
         normalized_tool_call_observation,
         normalized_tool_call_wrapper_observation,
     )
@@ -403,11 +405,15 @@ def get_all_tool_calls(traj):
 
 def get_skill_tool_calls(traj):
     skills = []
-    for tc in get_all_tool_calls(traj):
-        if tc["fn"].lower() == "skill":
-            name = tc["args"].get("skill", tc["args"].get("name", ""))
-            if name:
-                skills.append(str(name))
+    for step, tc in iter_tool_calls(traj):
+        if (tc.get("function_name") or "").lower() != "skill":
+            continue
+        if normalized_tool_call_is_error(step, tc):
+            continue
+        args = tc.get("arguments") or {}
+        name = args.get("skill", args.get("name", ""))
+        if name:
+            skills.append(str(name))
     return skills
 
 
@@ -458,6 +464,8 @@ def extract_tool_calls_as_dicts(traj):
                 "action_input": tc.get("arguments") or {},
                 "observation": _tool_call_observation(step, tc),
             }
+            if normalized_tool_call_is_error(step, tc):
+                call["is_error"] = True
             if status := tc.get("_atif_normalization_status"):
                 call["normalization_status"] = status
             if status := tc.get("_atif_observation_status"):
@@ -3260,6 +3268,38 @@ def _command_reads_skill_md_arg(command, cmd_idx, assignments):
     return False
 
 
+# Brace, glob, parameter and command expansion can turn one shell word into
+# several files. Quotes are gone after tokenizing, so any operand holding one of
+# these characters is treated as possibly naming more than one file.
+_SHELL_EXPANSION_CHARS = frozenset("{*?[$`")
+
+
+def _failed_single_skill_read(call):
+    """A shell failure only proves the skill read failed for an isolated read.
+
+    Compound commands, multi-file reads and operands that the shell may expand
+    into several files can print SKILL.md successfully before another file or
+    operation fails.
+    """
+    if call.get("is_error") is not True:
+        return False
+    tokens = _shell_tokens(_command_text(call))
+    if not tokens or any(token in _SHELL_SEPARATORS for token in tokens):
+        return False
+    command = tokens[0].rsplit("/", 1)[-1].lower()
+    if command not in {"cat", "nl", "bat", "less", "more"}:
+        return False
+    files = []
+    options_ended = False
+    for arg in tokens[1:]:
+        arg = arg.removeprefix(_QUOTED_SYNTAX_MARK)
+        if not options_ended and arg == "--":
+            options_ended = True
+        elif options_ended or arg == "-" or not arg.startswith("-"):
+            files.append(arg)
+    return len(files) == 1 and not _SHELL_EXPANSION_CHARS.intersection(files[0]) and _skill_md_arg(files[0], {})
+
+
 def _cmd_reads_skill_md(cmd) -> bool:
     """True if a shell command reads a SKILL.md via a file-view utility.
 
@@ -4574,7 +4614,7 @@ def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptab
                     "reason": reason,
                     "details": {**_skill_match_details(expected_skill, acceptable_skills), **match},
                 }
-    read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower()]
+    read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower() and tc.get("is_error") is not True]
     for call in read_calls:
         path_arg = _extract_path(call)
         if "SKILL.md" not in path_arg:
@@ -4592,7 +4632,7 @@ def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptab
                 "details": {**_skill_match_details(expected_skill, acceptable_skills), **match, "path": path_arg},
             }
     for call in tool_calls:
-        if _is_execution_action(call["action"]):
+        if _is_execution_action(call["action"]) and not _failed_single_skill_read(call):
             cmd = _command_text(call)
             if _cmd_reads_skill_md(cmd):
                 match = _classify_skill_match(cmd, expected_skill, acceptable_skills, fuzzy=True)
@@ -4624,7 +4664,10 @@ def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptab
         has_skill_read_evidence = ("read" in action.lower() and "SKILL.md" in str(tc.get("action_input", ""))) or (
             _is_execution_action(action) and _cmd_reads_skill_md(cmd)
         )
-        if not has_skill_read_evidence:
+        if not has_skill_read_evidence or (
+            tc.get("is_error") is True
+            and (not _is_execution_action(action) or _failed_single_skill_read(tc))
+        ):
             continue
         obs = str(tc.get("observation", "")).lower()
         if "skill.md" in obs:
@@ -7641,7 +7684,10 @@ def check_workflow_order(tool_calls, skill_tool_names=None, expected_skill=None)
         args_str = str(call.get("action_input", ""))
         cmd = _command_text(call)
         if ("read" in action and "SKILL.md" in args_str) or (_is_execution_action(action) and _cmd_reads_skill_md(cmd)):
-            sequence.append("read_skill")
+            if call.get("is_error") is not True or (
+                _is_execution_action(action) and not _failed_single_skill_read(call)
+            ):
+                sequence.append("read_skill")
         elif _is_execution_action(action) and cmd and "--help" not in cmd and "which " not in cmd:
             sequence.append("execution")
     if not sequence:
@@ -7724,7 +7770,7 @@ def check_routing(
     acceptable_skills=None,
 ):
     unsupported_native_codex_call = _has_unsupported_native_codex_call(tool_calls)
-    read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower()]
+    read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower() and tc.get("is_error") is not True]
     skills_read, wrong_skills = [], []
     matched_expected = False
     matched_alternate = False
@@ -7752,7 +7798,7 @@ def check_routing(
     for call in tool_calls:
         action = call["action"].lower()
         cmd = _command_text(call)
-        if not (_is_execution_action(action) and _cmd_reads_skill_md(cmd)):
+        if not (_is_execution_action(action) and _cmd_reads_skill_md(cmd)) or _failed_single_skill_read(call):
             continue
         skills_read.append(cmd)
         skill_name = _skill_name_from_ref(cmd)
@@ -8250,7 +8296,7 @@ Compute score = count(true) / 5.
 Be lenient on exact wording but strict on factual correctness.
 
 Respond with ONLY a JSON object:
-{{"criteria": {{"SKILL_IDENTIFIED": true, "ACTION_CORRECT": true, "FACTUALLY_ACCURATE": true, "TASK_ADDRESSED": true, "ACTIONABLE": true}}, "score": 0.8, "reason": "brief summary"}}
+{{"criteria": {{"SKILL_IDENTIFIED": true, "ACTION_CORRECT": true, "FACTUALLY_ACCURATE": true, "TASK_ADDRESSED": true, "ACTIONABLE": true}}, "score": 1.0, "reason": "brief summary"}}
 
 USER QUESTION:
 {question}
@@ -8266,9 +8312,7 @@ SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may 
             "1. SKILL_IDENTIFIED: Does the response reference or use the correct skill for the task?",
             "1. SKILL_IDENTIFIED: Inapplicable: no skill is expected. Set false; exclude it from the score.",
         ).replace("Compute score = count(true) / 5.", "Compute score = count(true among the other four criteria) / 4.")
-        prompt = prompt.replace('"SKILL_IDENTIFIED": true', '"SKILL_IDENTIFIED": false').replace(
-            '"score": 0.8', '"score": 1.0'
-        )
+        prompt = prompt.replace('"SKILL_IDENTIFIED": true', '"SKILL_IDENTIFIED": false')
     # Adjust the rubric before interpolation so task/evidence text stays intact.
     prompt = prompt.format(question=question, ground_truth=ground_truth, agent_text=agent_text)
 
@@ -8293,13 +8337,16 @@ SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may 
     criteria = parsed.get("criteria")
     criteria_valid = _valid_accuracy_criteria(criteria)
 
-    score = _finite_score(parsed.get("score"))
-    if not skill_identification_applicable:
-        assert criteria_valid
-        score = sum(value is True for key, value in criteria.items() if key != "SKILL_IDENTIFIED") / 4.0
-    elif score is None:
-        assert criteria_valid
-        score = sum(1 for v in criteria.values() if v is True) / 5.0
+    if criteria_valid:
+        # Score only applicable verdicts; excluded criteria leave both numerator and denominator.
+        excluded = set() if skill_identification_applicable else {"SKILL_IDENTIFIED"}
+        applicable = [verdict for name, verdict in criteria.items() if name not in excluded]
+        score = sum(verdict is True for verdict in applicable) / len(applicable)
+    else:
+        # Legacy score-only payloads; validate_payload rejects them when a criterion is excluded.
+        assert skill_identification_applicable
+        score = _finite_score(parsed.get("score"))
+        assert score is not None
     result = {
         "score": round(score, 4),
         "reason": _bounded_judge_text(parsed.get("reason", "")),

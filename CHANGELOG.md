@@ -15,6 +15,11 @@ All notable changes to SkillEvaluator are documented in this file.
   scanner release, so reviewers can tell which SkillSpector produced them
   without rerunning the scan. The version is shown even when the report omits
   its timestamp.
+- `--env-mode kata` runs Tier 3 trials through the hardened Docker backend with
+  every task service in a Kata Containers microVM. It requires a Linux host with
+  `/dev/kvm` and a Kata runtime registered with Docker, and accepts only the
+  `kata_runtime` and `kata_dns` environment kwargs. Image builds still run on
+  the host, and tasks with Compose sidecars are rejected.
 
 ### Changed
 
@@ -85,9 +90,19 @@ All notable changes to SkillEvaluator are documented in this file.
   only for the Codex process. Skills whose scripts, tasks, or stdio MCP servers
   need these tools must install them through `scripts/apt-packages.txt` or a
   custom `evals/environment/Dockerfile`.
+- Exposed `kata` as the 24th Harbor 0.24 backend alongside local mode.
+  `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `runta`, `prime`,
+  `mosaic`, and `smol` remain disabled.
 
 ### Fixed
 
+- Preserve explicit Claude and OpenCode read failure metadata in reconstructed
+  ATIF trajectories. Failed isolated SKILL.md reads and failed native Skill
+  calls lose credit; compound shell failures and shell reads whose path may
+  expand to several files (braces, globs, `$` or backticks) remain ambiguous
+  and retain prior credit in host and verifier grading. Unattributed errors do
+  not cancel successful reads, and shell reads count dash-prefixed filenames
+  after `--`.
 - Tier 1 pyproject dependency audits now inspect static target declarations
   rather than the evaluator environment. Exact direct pins (including optional
   groups) are queried without installation or build-script execution;
@@ -97,6 +112,10 @@ All notable changes to SkillEvaluator are documented in this file.
   records its scoring policy. Reports separately expose measured token and
   agent execution-time differences with complete matching-arm coverage, while
   efficiency continues to measure routing and productive tool use.
+- Derive accuracy scores from complete criterion verdicts in both judge
+  runtimes (passing applicable criteria divided by applicable criteria), so an
+  inconsistent model-supplied total cannot distort Skill Lift. Correct the
+  Harbor prompt example to score five passing criteria as 1.0.
 - Omit unmeasured Tier 3 token usage from canonical JSON exports instead of
   reporting it as zero.
 - Keep dashboard comparisons unavailable for contradictory trial identities or

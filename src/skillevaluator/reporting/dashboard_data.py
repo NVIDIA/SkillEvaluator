@@ -171,11 +171,6 @@ def _trial_keys(trials: list[dict[str, Any]]) -> tuple[tuple[str, str], ...] | N
         if len(set(normalized_attempts)) > 1:
             return None
         attempt = normalized_attempts[0] if normalized_attempts else None
-        # Native canonical reports omit attempt numbers, but Harbor trial IDs
-        # carry __attemptN when attempts are repeated.
-        matches = re.findall(r"(?:__|_|-)attempt[_-]?(\d+)(?=__|$)", trial_id)
-        if attempt is None and matches:
-            attempt = matches[-1].lstrip("0") or "0"
         if trial_id and trial_id in seen_trials:
             if seen_trials[trial_id] != (entry, attempt):
                 return None
@@ -187,7 +182,14 @@ def _trial_keys(trials: list[dict[str, Any]]) -> tuple[tuple[str, str], ...] | N
         if attempt is None:
             implicit.add(entry)
         keys.append((entry, str(attempt) if attempt is not None else f"ordinal:{counts[entry]}"))
-    if any(counts[entry] > 1 for entry in implicit):
+    # Harbor names repeated attempts <task>__<random> without an ordinal, so
+    # unnumbered attempts pair by case count, as in the HTML report, only when
+    # each one has its own trial ID.
+    implicit_ids: dict[str, set[str]] = {}
+    for trial_id, (entry, attempt) in seen_trials.items():
+        if attempt is None:
+            implicit_ids.setdefault(entry, set()).add(trial_id)
+    if any(counts[entry] > 1 and len(implicit_ids.get(entry, ())) != counts[entry] for entry in implicit):
         return None
     return tuple(sorted(keys))
 

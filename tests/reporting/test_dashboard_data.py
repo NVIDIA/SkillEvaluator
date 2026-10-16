@@ -269,25 +269,70 @@ def test_malformed_status_and_aggregate_overflow_fail_closed() -> None:
     assert row["total_tokens"] is None
 
 
-def test_repeated_attempts_require_recorded_identity_and_match_exact_set() -> None:
+def _repeated_attempts_report(trial_ids: tuple[str, ...]) -> dict:
     report = _report()
     agent = report["agents"]["claude-code"]
     for field, count_field, arm in (
         ("trials", "num_trials", "with_skill"),
         ("trials_baseline", "num_trials_baseline", "without_skill"),
     ):
-        agent[field].append(copy.deepcopy(agent[field][0]))
-        agent[field][0]["trial_id"] = "case-a__attempt1__abc"
-        agent[field][1]["trial_id"] = "case-a__attempt2__def"
-        agent[count_field] = 2
-        agent["conditions"][arm].update(expected_attempts=2, scored_attempts=2)
+        agent[field] = [{**copy.deepcopy(agent[field][0]), "trial_id": trial_id} for trial_id in trial_ids]
+        agent[count_field] = len(trial_ids)
+        agent["conditions"][arm].update(expected_attempts=len(trial_ids), scored_attempts=len(trial_ids))
+    return report
+
+
+def test_repeated_attempts_pair_by_case_with_distinct_trial_ids() -> None:
+    report = _repeated_attempts_report(("case-a__trial0", "case-a__trial1"))
+    agent = report["agents"]["claude-code"]
+    comparison = comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]
+    assert comparison["comparison_status"] == "comparable"
+    assert comparison["score_delta"] == pytest.approx(0.2)
+    # Harbor's attempt names are random, so arms pair by case count, not by name.
+    agent["trials_baseline"][1]["trial_id"] = "case-a__trial2"
     assert comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]["comparison_status"] == "comparable"
-    agent["trials_baseline"][1]["trial_id"] = "case-a__attempt3__def"
-    assert comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]["score_delta"] is None
     for field in ("trials", "trials_baseline"):
         for index, trial in enumerate(agent[field]):
             trial["trial_id"] = f"case-a__unrelated-{index}"
+    assert comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]["comparison_status"] == "comparable"
+
+    report = _repeated_attempts_report(("case-a__trial0", "case-a__trial1"))
+    report["agents"]["claude-code"]["trials"][1]["trial_id"] = ""
     assert comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]["score_delta"] is None
+
+    report = _repeated_attempts_report(("case-a__trial0", "case-a__trial1"))
+    report["agents"]["claude-code"]["trials"][1].update(entry_id="case-b", trial_id="case-a__trial0")
+    assert comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]["score_delta"] is None
+
+    report = _repeated_attempts_report(("case-a__trial0", "case-a__trial1"))
+    agent = report["agents"]["claude-code"]
+    agent["trials_baseline"].pop()
+    agent["num_trials_baseline"] = 1
+    agent["conditions"]["without_skill"].update(expected_attempts=1, scored_attempts=1)
+    comparison = comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]
+    assert comparison["comparison_status"] == "incomplete or mismatched coverage"
+    assert comparison["score_delta"] is None
+
+    report = _repeated_attempts_report(("case-a__trial0", "case-a__trial1"))
+    agent = report["agents"]["claude-code"]
+    for field, attempts in (("trials", (1, 2)), ("trials_baseline", (1, 3))):
+        for trial, attempt in zip(agent[field], attempts, strict=True):
+            trial["attempt"] = attempt
+    comparison = comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]
+    assert comparison["comparison_status"] == "incomplete or mismatched coverage"
+    assert comparison["score_delta"] is None
+
+    report = _repeated_attempts_report(("case-a__trial0", "case-a__trial1"))
+    report["agents"]["claude-code"]["trials"][0]["attempt"] = 1
+    assert comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]["score_delta"] is None
+
+
+def test_authored_case_id_containing_attempt_text_is_not_parsed() -> None:
+    report = _repeated_attempts_report(("retry-attempt1__aaa", "retry-attempt1__bbb"))
+    for field in ("trials", "trials_baseline"):
+        for trial in report["agents"]["claude-code"][field]:
+            trial["entry_id"] = "retry-attempt1"
+    assert comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]["comparison_status"] == "comparable"
 
 
 def test_multistep_rewards_keep_logical_scores_without_ambiguous_resource_sums() -> None:

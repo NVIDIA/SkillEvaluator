@@ -66,7 +66,7 @@ def _retained_run(run: Path, *, attempts: int) -> Path:
     return run
 
 
-@pytest.mark.parametrize("attempts", [1])
+@pytest.mark.parametrize("attempts", [1, 3])
 @pytest.mark.parametrize("source", ["canonical", "native"])
 def test_dashboard_matches_main_resources(tmp_path: Path, attempts: int, source: str) -> None:
     run = _retained_run(tmp_path / "run", attempts=attempts)

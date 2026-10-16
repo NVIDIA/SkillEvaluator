@@ -284,7 +284,9 @@ def main(paths: list[str] | None = None) -> None:
     for index, uploaded in enumerate(uploads):
         contents = uploaded.getvalue()
         if len(contents) > _MAX_UPLOAD_BYTES:
-            warnings.append(f"{uploaded.name}: report exceeds 16 MB (16,000,000 bytes). Upload a smaller evaluation report.")
+            warnings.append(
+                f"{uploaded.name}: report exceeds 16 MB (16,000,000 bytes). Upload a smaller evaluation report."
+            )
             continue
         try:
             payload = json.loads(contents)
@@ -320,7 +322,9 @@ def main(paths: list[str] | None = None) -> None:
     summary[1].metric("Skills", skill_count)
     summary[2].metric("Condition rows", len(performance_rows))
     summary[3].metric("Scored rows", scored_count)
-    st.caption("Blank cells mean a measurement is missing, incomplete, or ambiguous. Unknown settings remain labeled unknown.")
+    st.caption(
+        "Blank cells mean a measurement is missing, incomplete, or ambiguous. Unknown settings remain labeled unknown."
+    )
     performance_tab, comparison_tab = st.tabs(["Performance", "With vs without skill"])
     with performance_tab:
         _show_performance(performance_rows)

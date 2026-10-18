@@ -1555,6 +1555,96 @@ def _condition_quality_available(info: dict[str, Any], condition: str) -> bool:
     return status not in {"failed", "unknown", "skipped"}
 
 
+def _judge_aware_lift(
+    info: dict[str, Any],
+    with_scores: dict[str, Any],
+    without_scores: dict[str, Any],
+    score_policy: str,
+) -> dict[str, Any] | None:
+    """Rebuild judge exclusions from complete trial evidence, never cached deltas."""
+    from skillevaluator.tier3.harbor.collector import (
+        _LLM_JUDGE_METRICS,
+        _compute_lift,
+        _logical_attempt_rewards,
+        _reward_judge_models,
+    )
+    from skillevaluator.tier3.harbor.metrics import metric_value
+    from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
+
+    recorded = info.get("lift")
+    recorded_mixed = recorded.get("judge_mixed_cases") if isinstance(recorded, dict) else None
+    mixed = (
+        {
+            metric: count
+            for metric, count in recorded_mixed.items()
+            if metric in _LLM_JUDGE_METRICS and isinstance(count, int) and not isinstance(count, bool) and count > 0
+        }
+        if isinstance(recorded_mixed, dict)
+        else {}
+    )
+    if not mixed and not any(
+        _reward_judge_models(row, metric)
+        for rows in (info.get("rewards"), info.get("rewards_baseline"))
+        if isinstance(rows, list)
+        for row in rows
+        if isinstance(row, dict)
+        for metric in _LLM_JUDGE_METRICS
+    ):
+        return None
+    conditions: list[list[dict[str, Any]]] = []
+    complete = True
+    for key in ("rewards", "rewards_baseline"):
+        rows = info.get(key)
+        complete = complete and info.get(f"{key}_complete") is True
+        groups = logical_trial_reward_groups(
+            [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        )
+        logical_rows: list[dict[str, Any]] = []
+        for index, group in enumerate(groups):
+            if not _logical_group_entry_identity_is_consistent(group):
+                complete = False
+                continue
+            logical_rows.extend(
+                {
+                    **row,
+                    "_trial_root_name": str(index),
+                    **({"_step_name": str(step)} if len(group) > 1 else {}),
+                }
+                for step, row in enumerate(group)
+            )
+        conditions.append(_logical_attempt_rewards(logical_rows))
+    clean_scores = [
+        {metric: value for metric, raw in scores.items() if (value := _unit_interval_score(raw)) is not None}
+        for scores in (with_scores, without_scores)
+    ]
+    rebuilt = _compute_lift(*clean_scores, *conditions, score_policy=score_policy)
+    rebuilt_mixed = rebuilt.get("judge_mixed_cases", {})
+    unsupported_exclusions = {metric for metric, count in mixed.items() if rebuilt_mixed.get(metric, 0) < count}
+    for metric, count in rebuilt_mixed.items():
+        mixed[metric] = max(count, mixed.get(metric, 0))
+    if not mixed:
+        return None
+    unsupported_exclusions.update(
+        metric
+        for metric in mixed
+        if any(
+            metric_value(row, metric) is not None and not _reward_judge_models(row, metric)
+            for rows in conditions
+            for row in rows
+        )
+    )
+    if not complete:
+        # A bounded or incomplete reward load cannot reconstruct the retained
+        # cohort. Preserve unavailable instead of undoing the exclusion.
+        return {"judge_mixed_cases": mixed}
+    rebuilt["judge_mixed_cases"] = mixed
+    for metric in unsupported_exclusions:
+        rebuilt.pop(metric, None)
+    if unsupported_exclusions:
+        rebuilt.pop("overall", None)
+    return rebuilt
+
+
 def _build_agent(
     name: str,
     info: dict[str, Any],
@@ -1583,7 +1673,7 @@ def _build_agent(
     comparable_scores = (
         not never_activated and set(with_metrics) == set(baseline_metrics) and len(condition_policies) == 1
     )
-    lift_data = info.get("lift") or {}
+    lift_data = info.get("lift") if isinstance(info.get("lift"), dict) else {}
     with_quality_available = _condition_quality_available(info, "with_skill")
     baseline_quality_available = _condition_quality_available(info, "without_skill")
     if not with_quality_available:
@@ -1591,12 +1681,16 @@ def _build_agent(
     if not baseline_quality_available:
         without_scores = {}
 
+    judge_lift = _judge_aware_lift(info, with_scores, without_scores, score_policy)
+    if judge_lift is not None:
+        lift_data = judge_lift
     evaluators = _build_evaluators(with_metrics, with_scores, without_scores, lift_data)
     dimensions = _build_dimensions(
         with_scores,
         without_scores,
         info.get("dimensions_with_skill") or {},
         info.get("dimensions_without_skill") or {},
+        judge_lift,
     )
     if never_activated:
         for evaluator in evaluators.values():
@@ -1677,6 +1771,12 @@ def _build_agent(
                 sum(w - b for w, b in zip(with_values, baseline_values, strict=True)) / len(with_metrics),
                 4,
             )
+    if judge_lift is not None:
+        overall_lift = (
+            _lift_value("overall", judge_lift)
+            if comparable_scores and not (with_mixed_contract or baseline_mixed_contract)
+            else None
+        )
 
     trials = _normalize_trials(info.get("rewards") or [], with_metrics)
     baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], baseline_metrics)
@@ -1770,18 +1870,21 @@ def _build_evaluators(
     lift_data: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
     evaluators: dict[str, dict[str, Any]] = {}
+    mixed = lift_data.get("judge_mixed_cases")
+    mixed = mixed if isinstance(mixed, dict) else {}
     for metric in metrics:
         ws = _finite_float(with_scores.get(metric))
         if ws is None:
             continue
         bl = _finite_float(without_scores.get(metric))
         lift = _lift_value(metric, lift_data)
-        if lift is None and bl is not None:
+        excluded = metric in mixed
+        if lift is None and bl is not None and not excluded:
             lift = round(ws - bl, 4)
         evaluators[metric] = {
             "with_skill": ws,
             "baseline": bl,
-            "lift": lift if lift is not None else 0.0,
+            "lift": lift if lift is not None or excluded else 0.0,
         }
     return evaluators
 
@@ -1791,6 +1894,7 @@ def _build_dimensions(
     without_scores: dict[str, Any],
     precomputed_with: dict[str, Any],
     precomputed_without: dict[str, Any],
+    judge_lift: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     dimensions: list[dict[str, Any]] = []
     for dim_id in _DIMENSION_IDS:
@@ -1811,8 +1915,37 @@ def _build_dimensions(
         signals = _dimension_signals(entry, with_scores, cfg)
         explanation = entry.get("explanation")
         reasoning_bullets = entry.get("reasoning_bullets")
+        comparison_signals = _dimension_signals({}, with_scores, cfg)
+        excluded = judge_lift is not None and any(
+            metric in judge_lift.get("judge_mixed_cases", {}) for metric in comparison_signals
+        )
+        reasoning_baseline = bl
+        if excluded and judge_lift is not None:
+            pairs = {metric: judge_lift.get(metric) for metric in comparison_signals}
+            paired_with = {metric: pair.get("with_skill") for metric, pair in pairs.items() if isinstance(pair, dict)}
+            paired_without = {
+                metric: pair.get("without_skill") for metric, pair in pairs.items() if isinstance(pair, dict)
+            }
+            comparison_ws = _dimension_score(paired_with, cfg) if len(paired_with) == len(comparison_signals) else None
+            reasoning_baseline = (
+                _dimension_score(paired_without, cfg) if len(paired_without) == len(comparison_signals) else None
+            )
+            lift = (
+                round(comparison_ws - reasoning_baseline, 4)
+                if comparison_ws is not None and reasoning_baseline is not None
+                else None
+            )
+            reasoning_bullets = explanation = None
         if not reasoning_bullets and not explanation:
-            reasoning_bullets, explanation = _deterministic_reasoning(ws, bl, lift, signals, with_scores)
+            reasoning_bullets, explanation = _deterministic_reasoning(
+                ws, reasoning_baseline, lift, signals, with_scores
+            )
+        if excluded:
+            note = "Cases scored by different judge models are excluded from lift."
+            if lift is None:
+                reasoning_bullets[1] = "Lift unavailable: no complete comparison with matching judge models."
+            reasoning_bullets.append(note)
+            explanation = " ".join(reasoning_bullets)
         verdict = entry.get("verdict") or _deterministic_verdict(ws)
         dimensions.append(
             {

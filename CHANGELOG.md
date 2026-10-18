@@ -144,6 +144,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 reports preserve judge-model exclusions when calculating dimension and
+  overall lift. Native multi-step results also retain the judge provenance needed
+  for those comparisons, so fallback judges cannot turn a regression into an
+  apparent improvement.
 - Tier 3 reports an inconclusive result when every observed positive with-skill
   trial has zero activation, and omits skill-lift comparisons for that agent.
   Activation counts are reported separately; negative controls and missing

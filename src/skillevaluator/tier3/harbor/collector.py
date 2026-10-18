@@ -3513,6 +3513,7 @@ def _extract_rewards(
         data = _reward_from_harbor_result(result)
         if not data:
             continue
+        _merge_constituent_judge_models(data, result, trial_dir)
         _merge_constituent_default_reward_failure(data, result, trial_dir)
         _merge_trial_evaluation_failures(data, trial_dir)
         trial_name = str(result.get("trial_name") or trial_dir.name)
@@ -4951,6 +4952,30 @@ def _pass_summary(
 _LLM_JUDGE_METRICS = ("accuracy", "goal_accuracy", "behavior_check")
 
 
+def _merge_constituent_judge_models(data: dict[str, Any], result: dict[str, Any], trial_root: Path) -> None:
+    """Keep step judge provenance without replacing Harbor's aggregate scores."""
+    names = _valid_step_result_names(result.get("step_results"))
+    if names is None:
+        return
+    models: dict[str, set[str]] = {metric: set() for metric in _LLM_JUDGE_METRICS}
+    for name, step in zip(names, result["step_results"], strict=True):
+        verifier = step.get("verifier_result")
+        embedded = verifier.get("rewards") if isinstance(verifier, dict) else None
+        row = dict(embedded) if isinstance(embedded, dict) else {}
+        verifier_dir = trial_root / "steps" / name / "verifier"
+        if _safe_trial_path_component(name) == name and _path_is_within(verifier_dir, trial_root):
+            _merge_reward_sidecars(row, verifier_dir)
+        for metric, values in models.items():
+            values.update(_reward_judge_models(row, metric))
+    carried = {metric: sorted(values) for metric, values in models.items() if values}
+    if carried:
+        data["_judge_models"] = carried
+        # Details survive publication; private collector fields do not.
+        details = data.setdefault("details", {})
+        for metric, values in carried.items():
+            details[metric] = {"judge_models": values}
+
+
 def _reward_judge_models(reward: dict[str, Any], metric: str) -> set[str]:
     """Return the judge models that scored ``metric`` in one reward row.
 
@@ -4962,6 +4987,8 @@ def _reward_judge_models(reward: dict[str, Any], metric: str) -> set[str]:
         return {model for model in models if isinstance(model, str) and model} if isinstance(models, list) else set()
     details = reward.get("details")
     detail = details.get(metric) if isinstance(details, dict) else None
+    if isinstance(detail, dict) and isinstance(detail.get("judge_models"), list):
+        return {model for model in detail["judge_models"] if isinstance(model, str) and model}
     model = detail.get("judge_model_used") if isinstance(detail, dict) else None
     return {model} if isinstance(model, str) and model else set()
 

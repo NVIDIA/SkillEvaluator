@@ -21,6 +21,7 @@ LOG_SK_RE = re.compile(r"(?<![A-Za-z0-9_-])sk-[a-zA-Z0-9_-]{8,}|sk-" + _GLUED_KE
 LOG_NVAPI_RE = re.compile(r"(?<![A-Za-z0-9_-])nvapi-[a-zA-Z0-9_-]{8,}|nvapi-" + _GLUED_KEY_BODY)
 LOG_CRSR_RE = re.compile(r"(?<![A-Za-z0-9_-])crsr_[a-f0-9]{16,}")
 OPENSHIFT_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])sha256~[A-Za-z0-9._~-]+")
+LOG_YA29_RE = re.compile(r"(?<![A-Za-z0-9_-])ya29\.[A-Za-z0-9_-]{20,}")
 # A JWT used to start at any ``\beyJ``, so in a run of JWT characters such as
 # "eyJ-" * n every "-eyJ" was a start, and each start scanned to the end of the
 # run looking for ".". Now a match starts only at the beginning of a run. The part
@@ -56,6 +57,7 @@ def redact_secrets_in_log_line(
     line = LOG_GITHUB_TOKEN_RE.sub(lambda match: match.group()[:4] + "<redacted>", line)
     line = LOG_GITHUB_PAT_RE.sub("github_pat_<redacted>", line)
     line = OPENSHIFT_TOKEN_RE.sub("sha256~<redacted>", line)
+    line = LOG_YA29_RE.sub("ya29.<redacted>", line)
     if "eyJ" not in line:  # every JWT match contains "eyJ"; skip the scan on ordinary lines
         return line
     return LOG_JWT_RE.sub(r"\g<lead>jwt-<redacted>", line)

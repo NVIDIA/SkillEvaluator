@@ -792,6 +792,10 @@ def _validate_mcp_toml(path: Path, results: list[CheckResult]) -> None:
         )
         return
 
+    from .evals_config import load_allowed_runtime_env
+
+    allowed_runtime_env = load_allowed_runtime_env(path.parent.parent.parent)
+
     for i, s in enumerate(servers):
         if not isinstance(s, dict) or "name" not in s:
             results.append(
@@ -818,6 +822,18 @@ def _validate_mcp_toml(path: Path, results: list[CheckResult]) -> None:
                     f"Entry '{s['name']}': command-based server should set transport = \"stdio\". "
                     f'Harbor defaults to "sse" which requires a url. '
                     f"The adapter will auto-infer this, but explicit is better.",
+                )
+            )
+        try:
+            from skillevaluator.tier3.harbor.adapter import validate_mcp_server_declarations
+
+            validate_mcp_server_declarations([s], allowed_runtime_env=allowed_runtime_env)
+        except ValueError as exc:
+            results.append(
+                CheckResult(
+                    str(path),
+                    "error",
+                    str(exc),
                 )
             )
 

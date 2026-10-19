@@ -275,6 +275,8 @@
             "skypilot",
             "hyperbrowser",
             "vercel",
+            "runta",
+            "mosaic",
             "local"
           ],
           "default": "docker",
@@ -361,6 +363,8 @@
             "skypilot",
             "hyperbrowser",
             "vercel",
+            "runta",
+            "mosaic",
             "local"
           ],
           "default": "docker",
@@ -666,6 +670,8 @@
             "skypilot",
             "hyperbrowser",
             "vercel",
+            "runta",
+            "mosaic",
             "local"
           ],
           "default": "docker",
@@ -2131,6 +2137,8 @@
                 "skypilot",
                 "hyperbrowser",
                 "vercel",
+                "runta",
+                "mosaic",
                 "local"
               ],
               "default": "docker",
@@ -2217,6 +2225,8 @@
                 "skypilot",
                 "hyperbrowser",
                 "vercel",
+                "runta",
+                "mosaic",
                 "local"
               ],
               "default": "docker",
@@ -2721,6 +2731,8 @@
               "skypilot",
               "hyperbrowser",
               "vercel",
+              "runta",
+              "mosaic",
               "local"
             ],
             "default": "docker",
@@ -3238,6 +3250,8 @@
             "skypilot",
             "hyperbrowser",
             "vercel",
+            "runta",
+            "mosaic",
             "local"
           ],
           "default": "docker",

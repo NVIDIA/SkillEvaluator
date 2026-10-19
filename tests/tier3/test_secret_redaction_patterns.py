@@ -63,3 +63,13 @@ def test_glued_id_or_hash_is_not_redacted():
     line = "trial task-3f9a2b1c8d7e6f5a4b3c2d1e finished"
 
     assert redact_secrets_in_log_line(line) == line
+
+
+def test_real_ya29_token_is_still_redacted():
+    secret = _fixture_secret("ya29.", "a0AXooCgs-", "abcdefghijklmnopqrstuvwxyz12345")
+    line = f"Authorization: Bearer {secret}"
+
+    red = redact_secrets_in_log_line(line)
+
+    assert secret not in red
+    assert "ya29.<redacted>" in red

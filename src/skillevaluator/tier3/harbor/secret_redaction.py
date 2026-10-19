@@ -12,6 +12,7 @@ from skillevaluator.tier3.eval_core.secret_redaction import (
     LOG_JWT_RE,
     LOG_NVAPI_RE,
     LOG_SK_RE,
+    LOG_YA29_RE,
     OPENSHIFT_TOKEN_RE,
     redact_secrets_in_log_line,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "LOG_JWT_RE",
     "LOG_NVAPI_RE",
     "LOG_SK_RE",
+    "LOG_YA29_RE",
     "OPENSHIFT_TOKEN_RE",
     "redact_secrets_in_log_line",
 ]

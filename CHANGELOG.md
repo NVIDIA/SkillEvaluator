@@ -6,6 +6,22 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 3 support for Harbor GKE execution mode (`--env-mode gke`) and `--ek`
+  argument forwarding. API keys, bearer tokens, and passwords passed in `--ek`
+  keys or values are rejected to keep credentials out of process listings, while
+  configuration such as rate limits and token counts is preserved. Cluster
+  infrastructure settings in skill configs are rejected to enforce security
+  boundaries in favor of host environment variables and CLI flags.
+- Claude Code live agent routing for Google Cloud Vertex AI
+  (`CLAUDE_CODE_USE_VERTEX=1`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`),
+  with redirect-blocking preflight probes, case-insensitive model alias
+  resolution, and explicit trusted-skill opt-in (`SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1`
+  or `--ek allow_workload_identity=true`) when using single-pod GKE Workload Identity.
+- Fail-closed validation for skill-authored MCP server configurations
+  (`evals/environment/mcp_servers.toml` and `mcp_servers.json`) that blocks
+  operator/provider credential references and literal secrets, while allowing
+  operator-approved MCP endpoints and non-LLM secrets via
+  `SKILLEVALUATOR_ALLOWED_MCP_HOSTS` and `SKILLEVALUATOR_ALLOWED_MCP_SECRETS`.
 - The HTML report's Tier 1 card now shows the SkillSpector version that ran
   the security scan (for example `SkillSpector v2.12.0`), and the embedded
   report JSON records it as `skillspector_versions`. Findings depend on the
@@ -17,6 +33,10 @@ All notable changes to SkillEvaluator are documented in this file.
   `/dev/kvm` and a Kata runtime registered with Docker, and accepts only the
   `kata_runtime` and `kata_dns` environment kwargs. Image builds still run on
   the host, and tasks with Compose sidecars are rejected.
+- `--env-mode runta` and `--env-mode mosaic` run Tier 3 trials on Harbor's Runta
+  and Mosaic backends. Runta's `mode` and Mosaic's `volume`, `persist`,
+  `enable_ssh`, `build_args`, and `build_target` kwargs are reserved because they
+  bypass the task image or let state and access outlive one isolated trial.
 - Added an append-only, vendor-neutral error-code registry for evaluator
   execution failures. Terminal provider and runtime-preflight results now
   include a structured `error_code` while preserving `execution_errors` and
@@ -91,9 +111,9 @@ All notable changes to SkillEvaluator are documented in this file.
   only for the Codex process. Skills whose scripts, tasks, or stdio MCP servers
   need these tools must install them through `scripts/apt-packages.txt` or a
   custom `evals/environment/Dockerfile`.
-- Exposed `kata` as the 24th Harbor 0.24 backend alongside local mode.
-  `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `runta`, `prime`,
-  `mosaic`, and `smol` remain disabled.
+- Exposed `kata`, `runta`, and `mosaic` as the 24th, 25th, and 26th Harbor 0.24
+  backends alongside local mode. `cua-cloud`, `opensandbox`, `hf-sandbox`,
+  `podman`, `prime`, and `smol` remain disabled.
 - The public benchmark gate (`scripts/ci/check_public_benchmarks.py`) now
   requires a `PASS` card to record its `Source digest` and `Tier 3 run ID`.
   `PASS` cards rendered by earlier releases fail the scan until they are

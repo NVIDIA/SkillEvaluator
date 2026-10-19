@@ -603,12 +603,38 @@ class LLMClient:
                     call_kwargs["response_format"] = _build_openai_response_format(response_schema, schema_name)
                 return call_kwargs
 
-            response = _call_with_schema_fallback(
-                client.chat.completions.create,
-                _openai_kwargs,
-                target_key=target_key,
-                use_schema=use_schema,
-            )
+            def _create_chat_completion() -> Any:
+                return _call_with_schema_fallback(
+                    client.chat.completions.create,
+                    _openai_kwargs,
+                    target_key=target_key,
+                    use_schema=use_schema,
+                )
+
+            try:
+                response = _create_chat_completion()
+            except Exception as exc:
+                from skillevaluator.provider_config import _get_google_access_token
+
+                if config.credential_env == "ADC":
+                    from openai import AuthenticationError
+
+                    if isinstance(exc, AuthenticationError) or getattr(exc, "status_code", None) == 401:
+                        new_token = _get_google_access_token()
+                        if new_token:
+                            import dataclasses
+
+                            client.api_key = new_token
+                            self._provider_config = dataclasses.replace(config, api_key=new_token)
+                            if self._api_key is not None:
+                                self._api_key = new_token
+                            response = _create_chat_completion()
+                        else:
+                            raise
+                    else:
+                        raise
+                else:
+                    raise
             return _extract_choice_content(response)
 
         return retry_call_with_backoff(_invoke_provider, config=self._retry_config)

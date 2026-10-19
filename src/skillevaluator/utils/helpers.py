@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SKILL_MANIFEST_FILE, SKILL_MANIFEST_VARIANTS
+from skillevaluator.utils.path_security import matches_filesystem_name
+from skillevaluator.utils.tier2_paths import is_link_or_reparse
 
 
 def make_timestamped_basename(prefix: str, suffix: str = "") -> str:
@@ -24,28 +26,89 @@ def make_timestamped_basename(prefix: str, suffix: str = "") -> str:
     return f"{prefix}-{stamp}{suffix}"
 
 
-def find_skills_in_directory(root_path: Path) -> list[Path]:
-    """Find all skill directories containing SKILL.md.
+def _linked_directory_contains_skill(directory: Path) -> bool:
+    """Inspect a linked target for manifests without following further links."""
+    if any((directory / name).exists() or (directory / name).is_symlink() for name in SKILL_MANIFEST_VARIANTS):
+        return True
 
-    Uses case-insensitive manifest detection per SkillEvaluator spec.
-    Deduplicates results when both SKILL.md and skill.md exist.
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for dirpath, dirnames, filenames in os.walk(directory, onerror=raise_walk_error, followlinks=False):
+        if any(name in filenames or name in dirnames for name in SKILL_MANIFEST_VARIANTS):
+            return True
+        base = Path(dirpath)
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not matches_filesystem_name(base / name, SCAN_EXCLUDED_DIRS) and not is_link_or_reparse(base / name)
+        ]
+    return False
+
+
+def find_skills_in_directory(root_path: Path, *, problems: dict[Path, str] | None = None) -> list[Path]:
+    """Find live skill directories containing a supported manifest.
+
+    Prunes configured scan exclusions and never validates linked directories.
+    External linked targets are inspected to report skipped skills as failures.
+    Stops at each skill boundary so bundled templates are not separate skills.
+    Both ``SKILL.md`` and ``skill.md`` are accepted. Manifest validation stays
+    with the per-skill validators, as it does for direct skill targets.
 
     Args:
         root_path: Root directory or SKILL.md file path to search
+        problems: Collect discovery failures by directory instead of raising.
+            Failed directories are included in the result for catalog reporting.
 
     Returns:
         Sorted list of unique paths to skill directories
     """
     skill_dirs: set[Path] = set()
 
+    def record_problem(directory: Path, message: str) -> None:
+        if problems is None:
+            raise ValueError(message)
+        problems[directory] = message
+        skill_dirs.add(directory)
+
     if root_path.is_file():
         if root_path.name.upper() == SKILL_MANIFEST_FILE.upper():
             skill_dirs.add(root_path.parent)
         return sorted(skill_dirs)
 
-    for manifest_name in SKILL_MANIFEST_VARIANTS:
-        for skill_md in root_path.rglob(manifest_name):
-            skill_dirs.add(skill_md.parent)
+    if is_link_or_reparse(root_path):
+        record_problem(root_path, f"Skill discovery root must be an unlinked directory: {root_path}")
+        return sorted(skill_dirs)
+
+    def record_walk_error(error: OSError) -> None:
+        record_problem(Path(error.filename) if error.filename else root_path, f"Cannot discover skills: {error}")
+
+    resolved_root = Path(os.path.realpath(root_path))
+    for dirpath, dirnames, filenames in os.walk(root_path, onerror=record_walk_error, followlinks=False):
+        base = Path(dirpath)
+        if any(name in filenames or name in dirnames for name in SKILL_MANIFEST_VARIANTS):
+            skill_dirs.add(base)
+            dirnames.clear()
+            continue
+        retained = []
+        for name in dirnames:
+            directory = base / name
+            if matches_filesystem_name(directory, SCAN_EXCLUDED_DIRS):
+                continue
+            if is_link_or_reparse(directory):
+                try:
+                    # Internal aliases are already covered through their real paths.
+                    if Path(os.path.realpath(directory)).is_relative_to(resolved_root):
+                        continue
+                    has_manifest = _linked_directory_contains_skill(directory)
+                except OSError as exc:
+                    record_problem(directory, f"Cannot inspect linked skill directory {directory}: {exc}")
+                    continue
+                if has_manifest:
+                    record_problem(directory, f"Linked skill directory is not followed: {directory}")
+                continue
+            retained.append(name)
+        dirnames[:] = retained
 
     return sorted(skill_dirs)
 

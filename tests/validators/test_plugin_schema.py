@@ -175,3 +175,34 @@ skills:
 
         assert result.passed
         assert any(detail.check_name == "demo" for detail in result.success_details)
+
+    def test_linked_skills_directory_produces_finding(self, tmp_path: Path):
+        _write_manifest(tmp_path, _VALID_MANIFEST)
+        target = tmp_path / "linked-skills"
+        target.mkdir()
+        skills_root = tmp_path / "skills"
+        skills_root.symlink_to(target, target_is_directory=True)
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert not result.passed
+        finding = next(f for f in result.findings if f.check_name == "in_plugin_skill_discovery_error")
+        assert finding.category == "PLUGIN_SCHEMA"
+        assert finding.file_path == str(skills_root)
+        assert "unlinked directory" in finding.message
+
+    def test_skill_discovery_failure_produces_finding(self, tmp_path: Path, monkeypatch):
+        _write_manifest(tmp_path, _VALID_MANIFEST)
+
+        def fail_discovery(root):
+            raise ValueError("Cannot inspect skill manifest")
+
+        monkeypatch.setattr("skillevaluator.utils.helpers.find_bundled_plugin_skills", fail_discovery)
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert not result.passed
+        finding = next(f for f in result.findings if f.check_name == "in_plugin_skill_discovery_error")
+        assert finding.category == "PLUGIN_SCHEMA"
+        assert finding.file_path == str(tmp_path / "skills")
+        assert "Cannot inspect skill manifest" in finding.message

@@ -1063,7 +1063,23 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
 CATALOG_SUMMARY_FILENAME = "catalog-summary.json"
 
 
-def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir: Path) -> list[str]:
+def _catalog_results_dir(ctx: click.Context, skill_dir: Path, catalog_root: Path) -> Path | None:
+    """Preserve catalog-relative parents under an external Tier 3 results root."""
+    import os
+
+    from skillevaluator.tier3.results_location import ENV_RESULTS_DIR
+
+    configured = ctx.params.get("results_dir")
+    if configured is None:
+        configured = os.environ.get(ENV_RESULTS_DIR)
+    if not configured:
+        return None
+    return Path(configured).expanduser() / skill_dir.relative_to(catalog_root).parent
+
+
+def _catalog_child_argv_from_ctx(
+    ctx: click.Context, skill_dir: Path, output_dir: Path, *, catalog_root: Path | None = None
+) -> list[str]:
     """Rebuild ``validate`` argv from the active Click context (pytest-safe)."""
     params = ctx.params
     argv: list[str] = ["validate", str(skill_dir)]
@@ -1148,8 +1164,9 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
         argv.extend(["--agent-model", str(override)])
     if params.get("grading_mode"):
         argv.extend(["--grading-mode", str(params["grading_mode"])])
-    if params.get("results_dir"):
-        argv.extend(["--results-dir", str(params["results_dir"])])
+    results_dir = _catalog_results_dir(ctx, skill_dir, catalog_root) if catalog_root else params.get("results_dir")
+    if results_dir is not None:
+        argv.extend(["--results-dir", str(results_dir)])
     for skill in params.get("include_skills") or ():
         argv.extend(["--include-skills", str(skill)])
     if params.get("copy_repo"):
@@ -1285,8 +1302,10 @@ def _validate_catalog(
     ctx: click.Context,
     *,
     resolved_target: Path,
+    skill_dirs: list[Path],
     output_dir: Path,
     workers: int = 1,
+    discovery_problems: dict[Path, str] | None = None,
 ) -> None:
     """Run the full validate pipeline once per skill in the catalog.
 
@@ -1301,36 +1320,47 @@ def _validate_catalog(
             "validate each skill separately with its own previous version"
         )
 
-    skill_dirs = sorted(marker.parent for marker in resolved_target.glob("*/SKILL.md"))
+    discovery_problems = discovery_problems or {}
     if workers > 1:
-        _validate_catalog_parallel(ctx, skill_dirs=skill_dirs, output_dir=output_dir, workers=workers)
+        _validate_catalog_parallel(
+            ctx,
+            skill_dirs=skill_dirs,
+            catalog_root=resolved_target,
+            output_dir=output_dir,
+            workers=workers,
+            discovery_problems=discovery_problems,
+        )
         return
 
-    failures: list[tuple[str, str]] = []
+    failures = [(path.relative_to(resolved_target).as_posix(), reason) for path, reason in discovery_problems.items()]
     meta_key = "skillevaluator_catalog_report_root"
     previous_catalog_root = ctx.meta.get(meta_key)
     ctx.meta[meta_key] = output_dir
     skill_reports: dict[str, str | None] = {}
     try:
         for index, skill_dir in enumerate(skill_dirs, start=1):
-            _print_catalog_divider(index, len(skill_dirs), skill_dir.name)
-            skill_output = output_dir / skill_dir.name
+            skill_name = skill_dir.relative_to(resolved_target).as_posix()
+            _print_catalog_divider(index, len(skill_dirs), skill_name)
+            if skill_dir in discovery_problems:
+                continue
+            skill_output = output_dir / skill_name
             overrides = {
                 **ctx.params,
                 "target_path": skill_dir,
                 "content_type": "skill",
                 "output_dir": skill_output,
+                "results_dir": _catalog_results_dir(ctx, skill_dir, resolved_target),
             }
             reason = ""
             try:
                 ctx.invoke(validate, **overrides)
             except click.ClickException as exc:
                 reason = str(getattr(exc, "message", exc))
-                failures.append((skill_dir.name, reason))
+                failures.append((skill_name, reason))
             except Exception as exc:  # unexpected: keep the catalog running, report it on the scoreboard
                 reason = f"unexpected error: {exc}"
-                failures.append((skill_dir.name, reason))
-            skill_reports[skill_dir.name] = _consume_validate_json_report()
+                failures.append((skill_name, reason))
+            skill_reports[skill_name] = _consume_validate_json_report()
     finally:
         if previous_catalog_root is None:
             ctx.meta.pop(meta_key, None)
@@ -1339,13 +1369,13 @@ def _validate_catalog(
     failure_map = dict(failures)
     skill_entries = [
         _catalog_skill_entry(
-            skill_dir.name,
-            output_dir / skill_dir.name,
-            passed=skill_dir.name not in failure_map,
-            reason=failure_map.get(skill_dir.name, ""),
-            json_report_name=skill_reports.get(skill_dir.name),
+            skill_name,
+            output_dir / skill_name,
+            passed=skill_name not in failure_map,
+            reason=failure_map.get(skill_name, ""),
+            json_report_name=skill_reports.get(skill_name),
         )
-        for skill_dir in skill_dirs
+        for skill_name in (skill_dir.relative_to(resolved_target).as_posix() for skill_dir in skill_dirs)
     ]
     _write_catalog_summary(output_dir, skill_entries)
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
@@ -1360,12 +1390,15 @@ def _validate_catalog_parallel(
     ctx: click.Context,
     *,
     skill_dirs: list[Path],
+    catalog_root: Path,
     output_dir: Path,
     workers: int,
+    discovery_problems: dict[Path, str] | None = None,
 ) -> None:
     """Validate catalog skills concurrently in isolated child processes."""
     from skillevaluator.reporting.console_ui import make_view_console
 
+    discovery_problems = discovery_problems or {}
     if not skill_dirs:
         _write_catalog_summary(output_dir, [])
         _print_catalog_summary(0, [], output_dir)
@@ -1379,14 +1412,16 @@ def _validate_catalog_parallel(
 
     jobs = [
         {
-            "skill_name": skill_dir.name,
-            "argv": _catalog_child_argv_from_ctx(ctx, skill_dir, output_dir / skill_dir.name),
+            "skill_name": skill_name,
+            "argv": _catalog_child_argv_from_ctx(ctx, skill_dir, output_dir / skill_name, catalog_root=catalog_root),
             "cwd": workdir,
-            "output_dir": str(output_dir / skill_dir.name),
+            "output_dir": str(output_dir / skill_name),
         }
         for skill_dir in skill_dirs
+        if skill_dir not in discovery_problems
+        for skill_name in [skill_dir.relative_to(catalog_root).as_posix()]
     ]
-    failures: list[tuple[str, str]] = []
+    failures = [(path.relative_to(catalog_root).as_posix(), reason) for path, reason in discovery_problems.items()]
     worker_reports: dict[str, str | None] = {}
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(_run_catalog_skill_worker, job) for job in jobs]
@@ -1400,13 +1435,13 @@ def _validate_catalog_parallel(
     failure_map = dict(failures)
     skill_entries = [
         _catalog_skill_entry(
-            skill_dir.name,
-            output_dir / skill_dir.name,
-            passed=skill_dir.name not in failure_map,
-            reason=failure_map.get(skill_dir.name, ""),
-            json_report_name=worker_reports.get(skill_dir.name),
+            skill_name,
+            output_dir / skill_name,
+            passed=skill_name not in failure_map,
+            reason=failure_map.get(skill_name, ""),
+            json_report_name=worker_reports.get(skill_name),
         )
-        for skill_dir in skill_dirs
+        for skill_name in (skill_dir.relative_to(catalog_root).as_posix() for skill_dir in skill_dirs)
     ]
     _write_catalog_summary(output_dir, skill_entries)
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
@@ -1982,14 +2017,20 @@ def validate(
     autopilot = autopilot and agent_eval
     tier3_path = target_path.parent if preflight_tier3_source and target_path.is_file() else target_path
 
-    from skillevaluator.constants import CONTENT_TYPE_UNKNOWN
+    from skillevaluator.constants import CONTENT_TYPE_UNKNOWN, SKILL_MANIFEST_VARIANTS
+    from skillevaluator.utils.helpers import find_skills_in_directory
 
-    is_catalog = (
+    catalog_skill_dirs: list[Path] = []
+    discovery_problems: dict[Path, str] = {}
+    if (
         resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
         and target_path.is_dir()
-        and not (target_path / "SKILL.md").exists()
-        and any(target_path.glob("*/SKILL.md"))
-    )
+        and not any(
+            (target_path / name).exists() or (target_path / name).is_symlink() for name in SKILL_MANIFEST_VARIANTS
+        )
+    ):
+        catalog_skill_dirs = find_skills_in_directory(target_path, problems=discovery_problems)
+    is_catalog = bool(catalog_skill_dirs)
     # Quiet (default) swaps the implicit CLI reporter for HTML+JSON, while an
     # explicit -r cli is a no-file contract. Skills and catalogs additionally
     # require storage for their compulsory BENCHMARK.md output.
@@ -2014,8 +2055,10 @@ def validate(
         _validate_catalog(
             click.get_current_context(),
             resolved_target=target_path,
+            skill_dirs=catalog_skill_dirs,
             output_dir=output_dir,
             workers=workers,
+            discovery_problems=discovery_problems,
         )
         return
 

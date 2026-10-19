@@ -32,6 +32,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Catalog validation now includes nested and lowercase skill manifests, skips
+  generated directories, and stops at skill boundaries to avoid validating
+  bundled templates as separate skills. External linked directories containing
+  skills and unreadable directories appear as failures without stopping other
+  skills; links back into the catalog are ignored. Linked manifests retain
+  direct-target behavior, plugin discovery errors produce findings, and reports
+  and external Tier 3 results preserve catalog-relative paths for skills with
+  the same basename.
 - Changing finding severities through a policy no longer clears an independent
   quality-score threshold failure. A score below `--min-score` still fails,
   and its reason appears in the terminal, HTML, benchmark, and JSON reports.

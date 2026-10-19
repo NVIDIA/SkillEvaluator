@@ -227,7 +227,8 @@ def test_paired_lift_leaves_out_cases_whose_arms_used_different_judges() -> None
     # Accuracy compares case-2 only; every other metric keeps both cases.
     assert lift["accuracy"] == {"with_skill": 0.8, "without_skill": 0.4, "delta": 0.4, "direction": "up"}
     assert lift["judge_mixed_cases"] == {"accuracy": 1}
-    assert lift["overall"]["delta"] == round(0.4 / len(DEFAULT_METRICS), 4)
+    # The dimension-mean policy weighs the five dimensions equally, and accuracy is the Correctness dimension.
+    assert lift["overall"]["delta"] == round(0.4 / 5, 4)
     basis = lift["basis"]
     assert basis["metrics"]["accuracy"]["cases"] == 1
     assert basis["metrics"]["security"]["cases"] == 2

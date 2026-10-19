@@ -24,8 +24,9 @@ from skillevaluator.tier3.result_display import render_result
 
 CASES = [f"case-{index}" for index in range(1, 7)]
 
-# The no-plugin arm still has skill metrics here (an alternate skill was staged), so
-# lift.json's six-metric mean (+0.37) differs from the reports' five-dimension basis (+0.40).
+# The no-plugin arm still has skill metrics here (an alternate skill was staged). The old
+# six-metric mean (+0.37) differed from the reports' five-dimension basis (+0.40); lift.json now
+# uses the same five-dimension score policy as the reports.
 PLUGIN = metrics(1.0, accuracy=0.9, goal_accuracy=0.5, behavior_check=0.5)
 NO_PLUGIN = metrics(1.0, skill_execution=0.5, skill_efficiency=0.4, accuracy=0.2, goal_accuracy=0.3, behavior_check=0.3)
 
@@ -43,7 +44,7 @@ def _engine_result(tmp_path: Path, *, partial: bool = False) -> dict:
 
 def test_evaluate_plugin_shows_the_reports_lift_only(tmp_path: Path) -> None:
     result = _engine_result(tmp_path)
-    assert result["agents"]["codex"]["lift"]["overall"]["delta"] == 0.3667  # lift.json's metric mean
+    assert result["agents"]["codex"]["lift"]["overall"]["delta"] == 0.4  # lift.json's dimension mean
 
     output = render_result(result)
 

@@ -71,8 +71,8 @@ def test_compare_shows_no_lift_for_metrics_the_no_skill_arm_cannot_score(
     assert _row(output, "skill_execution")[1:] == ["1.00", "N/A"]
     assert _row(output, "skill_efficiency")[1:] == ["0.75", "N/A"]
     assert _row(output, "security")[1:] == ["0.40", "-"]
-    # Overall: the with-skill score over every metric it scored, the lift only over the
-    # metrics both arms scored (the same judge verdicts, so no lift).
+    # Overall: the with-skill score is the dimension mean over every dimension it scored, the
+    # lift only over the dimensions both arms scored (the same judge verdicts, so no lift).
     overall = _row(output, "Overall")
-    assert overall[1] == "0.56"
+    assert overall[1] == "0.59"
     assert overall[2] == "0.00"

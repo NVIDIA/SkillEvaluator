@@ -19,7 +19,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
+from skillevaluator.constants import DEFAULT_SCORE_POLICY
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS, overall_score_from_metrics
 
 SKILL = "demo"
 NA = None  # the verifier recorded the metric as not applicable
@@ -39,7 +40,12 @@ def metrics(value: float, *, skill: bool = True, **overrides: float | None) -> d
 def _verifier_outputs(case_id: str, scores: Mapping[str, float | None], *, has_skill: bool) -> tuple[dict, dict]:
     details: dict[str, Any] = {}
     numeric: dict[str, Any] = {}
-    sidecar: dict[str, Any] = {"metric_set": DEFAULT_METRIC_SET, "entry_id": case_id, "has_skill": has_skill}
+    sidecar: dict[str, Any] = {
+        "metric_set": DEFAULT_METRIC_SET,
+        "score_policy": DEFAULT_SCORE_POLICY,
+        "entry_id": case_id,
+        "has_skill": has_skill,
+    }
     for metric in DEFAULT_METRICS:
         value = scores.get(metric)
         sidecar[metric] = value
@@ -49,8 +55,12 @@ def _verifier_outputs(case_id: str, scores: Mapping[str, float | None], *, has_s
             numeric[metric] = value
             details[metric] = {"score": value}
     sidecar["details"] = details
-    scored = [value for value in scores.values() if value is not None]
-    numeric["overall"] = round(sum(scored) / len(scored), 4)
+    # The verifier's overall is the score policy's dimension mean; an N/A metric drops out of its dimension.
+    numeric["overall"] = overall_score_from_metrics(
+        {metric: value for metric, value in scores.items() if value is not None},
+        DEFAULT_METRICS,
+        not_applicable=[metric for metric, value in scores.items() if value is None],
+    )
     numeric["entry_id"] = case_id
     return numeric, sidecar
 

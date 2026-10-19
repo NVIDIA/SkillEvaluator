@@ -138,9 +138,10 @@ def test_no_plugin_arm_records_skill_metrics_as_not_applicable(
         assert "no skill under test" in rich["details"][metric]["reason"]
         assert metric not in numeric  # reward.json stays numeric-only
         assert metric_is_not_applicable(rich, metric)
-    # The overall is the mean of security and the three judged metrics only.
+    # The overall is the dimension mean over the dimensions this arm scores: security, correctness and
+    # effectiveness (goal accuracy and behavior check); discoverability and efficiency are N/A.
     assert rich["security"] == 1.0
-    assert numeric["overall"] == pytest.approx((1.0 + 0.5 + 0.5 + 0.5) / 4, abs=1e-4)
+    assert numeric["overall"] == pytest.approx((1.0 + 0.5 + (0.5 + 0.5) / 2) / 3, abs=1e-4)
     assert overall_score(rich) == pytest.approx(numeric["overall"], abs=1e-4)
 
 

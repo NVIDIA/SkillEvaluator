@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 from rich.console import Console
 
+from skillevaluator.constants import DEFAULT_SCORE_POLICY
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.tier3.commands import compare_results
 from skillevaluator.tier3.harbor import report, report_data
@@ -38,6 +39,7 @@ from skillevaluator.tier3.harbor.metrics import (
     not_applicable_list,
     not_applicable_metrics,
     overall_score,
+    overall_score_from_metrics,
 )
 from skillevaluator.tier3.harbor.templates import metric as harbor_metric_template
 from skillevaluator.tier3.result_display import _with_skill_overall, render_evaluation_result
@@ -55,7 +57,12 @@ def _verifier_outputs(entry_id: str, scores: tuple[float | None, ...]) -> tuple[
     """Return (numeric reward.json, rich sidecar) as the verifier template writes them."""
     values = dict(zip(DEFAULT_METRICS, scores, strict=True))
     details: dict[str, Any] = {}
-    sidecar: dict[str, Any] = {"metric_set": DEFAULT_METRIC_SET, "entry_id": entry_id, "has_skill": True}
+    sidecar: dict[str, Any] = {
+        "metric_set": DEFAULT_METRIC_SET,
+        "score_policy": DEFAULT_SCORE_POLICY,
+        "entry_id": entry_id,
+        "has_skill": True,
+    }
     numeric: dict[str, Any] = {}
     for metric, value in values.items():
         sidecar[metric] = value
@@ -65,8 +72,12 @@ def _verifier_outputs(entry_id: str, scores: tuple[float | None, ...]) -> tuple[
             numeric[metric] = value
             details[metric] = {"score": value, "reason": "judged"}
     sidecar["details"] = details
-    scored = [value for value in values.values() if value is not None]
-    numeric["overall"] = round(sum(scored) / len(scored), 4)
+    # The score policy's dimension mean; an N/A metric drops out of its dimension.
+    numeric["overall"] = overall_score_from_metrics(
+        {metric: value for metric, value in values.items() if value is not None},
+        DEFAULT_METRICS,
+        not_applicable=[metric for metric, value in values.items() if value is None],
+    )
     return numeric, sidecar
 
 
@@ -214,8 +225,8 @@ def test_overall_score_excludes_not_applicable_metrics_only() -> None:
     assert overall_score(_merged((1.0, 1.0, 1.0, 0.0, 0.0, N))) == pytest.approx(0.6)
     # Every judged metric N/A: mean of the deterministic metrics.
     assert overall_score(_merged((1.0, 0.5, 0.0, N, N, N))) == pytest.approx(0.5)
-    # A genuine 0.0 stays in the mean.
-    assert overall_score(_merged((1.0, 1.0, 1.0, 0.0, 0.0, 0.0))) == pytest.approx(0.5)
+    # A genuine 0.0 stays in the mean (two of the five dimensions score 0.0).
+    assert overall_score(_merged((1.0, 1.0, 1.0, 0.0, 0.0, 0.0))) == pytest.approx(0.6)
 
 
 def test_overall_score_keeps_missing_metric_without_marker_unscored() -> None:
@@ -359,7 +370,9 @@ def test_collector_excludes_not_applicable_metrics_from_scores_lift_and_pass_at_
     summary = json.loads((tmp_path / "results/opencode/with-skill/summary.json").read_text(encoding="utf-8"))
     assert summary["not_applicable_metrics"] == ["behavior_check"]
     assert summary["not_applicable_counts"] == {"accuracy": 1, "goal_accuracy": 1, "behavior_check": 2}
-    assert summary["overall_score"] == round((0.96 + 2.5 / 3) / 2, 4)
+    # The condition overall is the score policy over the arm's metric averages, N/A dimensions left out:
+    # security 1.0, correctness 0.8, discoverability 1.0, effectiveness 1.0, efficiency 0.75.
+    assert summary["overall_score"] == round((1.0 + 0.8 + 1.0 + 1.0 + 0.75) / 5, 4)
 
     persisted = json.loads(
         (tmp_path / "results/opencode/with-skill/trials/case-b__attempt1/reward.json").read_text(encoding="utf-8")

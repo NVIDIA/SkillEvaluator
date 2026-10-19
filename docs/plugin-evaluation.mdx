@@ -2039,6 +2039,12 @@ Only the with-plugin arm changes. The **member-skills** arm and the
 **without-plugin** arm are staged exactly as in wrapper mode, so Skill Lift and
 the Bundle lift still compare the same baselines. What changes is the
 with-plugin side: the lift then measures the plugin as the harness loads it.
+The native arm's Harbor agent builds on the agent the other arms run in that
+environment, adding only the plugin load: on Docker, Kata and GKE, Claude Code
+runs SkillEvaluator's container wrapper in every arm, so Vertex AI routing
+(`CLAUDE_CODE_USE_VERTEX`) and the installer that skips the Node/npm packages
+the native installer does not need are the same in all arms. Where the
+baseline runs Harbor's stock agent, the native arm does too.
 
 Native loading needs a task container. The `local` environment runs the agent
 on the host, and native Harbor task sources (`evals/harbor/`) bring their own
@@ -2313,8 +2319,9 @@ emitted tasks, the load evidence and the per-agent reasons), and each measured
 agent gets `loose_parts_lift.json` (full plugin minus loose parts per
 metric, on the cases both arms scored; see the `basis` block above) and `loose_parts_load_evidence.json` (every scored trial's
 evidence). The loose arm runs wherever the native full-plugin arm runs: it uses
-the same native bundle route, and its Harbor wrapper over the stock Claude Code
-agent is allowed on the same Harbor backends as the native wrapper.
+the same native bundle route, and its Harbor wrapper builds on the same Claude
+Code agent as the other arms (the container wrapper on Docker, Kata and GKE),
+so it is allowed on the same Harbor backends as the native wrapper.
 
 It runs only with `--plugin-load native` on Claude Code, where the plugin arm is
 the real `--plugin-dir` load. In wrapper mode the plugin arm is SkillEvaluator's

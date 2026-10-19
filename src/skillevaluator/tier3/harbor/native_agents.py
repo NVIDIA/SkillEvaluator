@@ -40,6 +40,7 @@ from harbor.agents.installed.opencode import OpenCode
 
 from skillevaluator.tier3.harbor.local_agents import (
     SetupNetworkErrorAgent,
+    SkillEvaluatorClaudeCode,
     SkillEvaluatorCodex,
     SkillEvaluatorGatewayCodex,
     SkillEvaluatorGatewayOpenCode,
@@ -190,6 +191,11 @@ class _NativeHermesMixin(_NativePluginLoadMixin):
 
 class NativeClaudeCode(_NativeClaudeCodeMixin, ClaudeCode):
     """Claude Code with the plugin loaded through ``--plugin-dir``."""
+
+
+class NativeContainerClaudeCode(_NativeClaudeCodeMixin, SkillEvaluatorClaudeCode):
+    """The container Claude Code wrapper (Vertex AI routing, the installer's Node/npm skip, setup network
+    failures renamed) with the plugin loaded through ``--plugin-dir``: the same base as the baseline arms."""
 
 
 class NativeNvidiaBuildClaudeCode(_NativeClaudeCodeMixin, SkillEvaluatorNvidiaBuildClaudeCode):

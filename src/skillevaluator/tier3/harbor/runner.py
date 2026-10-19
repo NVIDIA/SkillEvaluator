@@ -1913,10 +1913,10 @@ def build_harbor_run_command(
         # flags, with sandbox knobs passed as environment-kwargs (--ek). The
         # custom agent wrapper skips the Debian apt-get bootstrap used by the
         # stock agent.
-        from skillevaluator.tier3.harbor import LOCAL_AGENT_IMPORT_PATHS, LOCAL_ENV_IMPORT_PATH, local_sandbox
+        from skillevaluator.tier3.harbor import LOCAL_ENV_IMPORT_PATH, local_sandbox
         from skillevaluator.tier3.harbor.local_runtime import default_runtime_root
 
-        agent_import_path = agent_import_path or LOCAL_AGENT_IMPORT_PATHS.get(agent)
+        agent_import_path = agent_import_path or _default_agent_import_path(agent, env_mode)
         if not agent_import_path:
             raise ValueError(f"--env-mode local does not support agent: {agent}")
         command.extend(["--agent", agent_import_path])
@@ -1943,10 +1943,7 @@ def build_harbor_run_command(
             ]
         )
     elif env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES or env_mode == "gke":
-        default_import_paths = (
-            DOCKER_AGENT_IMPORT_PATHS if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES else CONTAINER_AGENT_IMPORT_PATHS
-        )
-        command.extend(["--agent", agent_import_path or default_import_paths.get(agent, agent)])
+        command.extend(["--agent", agent_import_path or _default_agent_import_path(agent, env_mode) or agent])
         if env_mode == "gke":
             env_import_path = SECURE_GKE_ENV_IMPORT_PATH
         elif env_mode == "kata":
@@ -1955,7 +1952,7 @@ def build_harbor_run_command(
             env_import_path = SECURE_DOCKER_ENV_IMPORT_PATH
         command.extend(["--env", env_import_path])
     else:
-        command.extend(["--agent", agent_import_path or HARBOR_AGENT_IMPORT_PATHS.get(agent, agent)])
+        command.extend(["--agent", agent_import_path or _default_agent_import_path(agent, env_mode) or agent])
         command.extend(["--env", harbor_environment_type(env_mode)])
     for name, value in sorted(_harbor_agent_kwargs(agent, model, env_mode).items()):
         command.extend(["--ak", encode_environment_kwarg(name, value)])
@@ -3489,6 +3486,36 @@ def _agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> s
     return _nvidia_build_agent_import_path(provider, agent, env_mode)
 
 
+def _default_agent_import_path(agent: str, env_mode: str) -> str | None:
+    """The Harbor agent a Tier 3 arm runs in ``env_mode`` when no provider routing wrapper applies.
+
+    ``build_harbor_run_command`` launches it: the local wrappers in local mode, the Docker wrappers on the
+    Docker-engine backends, the container wrappers on GKE, and otherwise the stock agent or its
+    SkillEvaluator subclass. ``None`` means Harbor's stock agent.
+    """
+    if env_mode == ENV_MODE_LOCAL:
+        from skillevaluator.tier3.harbor import LOCAL_AGENT_IMPORT_PATHS
+
+        return LOCAL_AGENT_IMPORT_PATHS.get(agent)
+    if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES:
+        return DOCKER_AGENT_IMPORT_PATHS.get(agent)
+    if env_mode == "gke":
+        return CONTAINER_AGENT_IMPORT_PATHS.get(agent)
+    return HARBOR_AGENT_IMPORT_PATHS.get(agent)
+
+
+def _arm_base_import_paths(provider: ProviderConfig, agents: Sequence[str], env_mode: str) -> dict[str, str | None]:
+    """The Harbor agent each standard arm of ``agents`` runs: the routing wrapper, else the environment default.
+
+    The native plugin and loose-parts wrappers build on this same base, so every arm of a run (with,
+    without, sum-of-parts, loose parts) shares one agent wrapper, its Vertex AI routing and its installer.
+    """
+    return {
+        agent: _agent_import_path(provider, agent, env_mode) or _default_agent_import_path(agent, env_mode)
+        for agent in agents
+    }
+
+
 def _nvidia_build_agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> str | None:
     """Return the environment-specific NVIDIA Build compatibility wrapper."""
     if provider.provider != "nv_build":
@@ -5019,6 +5046,8 @@ def _run_harbor_eval_impl(
         for agent in agents
         if (import_path := _agent_import_path(provider, agent, env_mode)) is not None
     }
+    # The native plugin and loose-parts wrappers build on the agent every other arm runs.
+    arm_base_import_paths = _arm_base_import_paths(provider, agents, env_mode)
     with_agent_import_paths: dict[str, str] = {}
     if any(decision.native for decision in plugin_load_decisions.values()):
         from skillevaluator.tier3.plugin_native import PluginLoadError, native_agent_import_path, refuse_or_fall_back
@@ -5027,7 +5056,7 @@ def _run_harbor_eval_impl(
             if not decision.native:
                 continue
             try:
-                with_agent_import_paths[agent] = native_agent_import_path(agent, agent_import_paths.get(agent))
+                with_agent_import_paths[agent] = native_agent_import_path(agent, arm_base_import_paths.get(agent))
             except PluginLoadError as exc:
                 reason = str(exc)
                 try:
@@ -5253,7 +5282,7 @@ def _run_harbor_eval_impl(
         agents=agents,
         decisions=plugin_load_decisions,
         source=native_plugin_source,
-        agent_import_paths=agent_import_paths,
+        agent_import_paths=arm_base_import_paths,
         unavailable=None if run_sum_of_parts else NEEDS_BASE_ARMS,
     )
     run_config["eval_target"] = {"kind": eval_target}

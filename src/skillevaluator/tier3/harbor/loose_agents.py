@@ -20,7 +20,7 @@ import shlex
 
 from harbor.agents.installed.claude_code import ClaudeCode
 
-from skillevaluator.tier3.harbor.local_agents import SkillEvaluatorNvidiaBuildClaudeCode
+from skillevaluator.tier3.harbor.local_agents import SkillEvaluatorClaudeCode, SkillEvaluatorNvidiaBuildClaudeCode
 from skillevaluator.tier3.harbor.native_agents import _NativeClaudeCodeMixin
 from skillevaluator.tier3.loose_parts import LOOSE_MCP_CONFIG, loose_parts_launch_env
 
@@ -36,6 +36,10 @@ class _LoosePartsClaudeCodeMixin(_NativeClaudeCodeMixin):
 
 class LoosePartsClaudeCode(_LoosePartsClaudeCodeMixin, ClaudeCode):
     """Claude Code with the plugin's parts staged loose: user-level pieces and ``--mcp-config``."""
+
+
+class LoosePartsContainerClaudeCode(_LoosePartsClaudeCodeMixin, SkillEvaluatorClaudeCode):
+    """The container Claude Code wrapper the baseline arms run, with the plugin's parts staged loose."""
 
 
 class LoosePartsNvidiaBuildClaudeCode(_LoosePartsClaudeCodeMixin, SkillEvaluatorNvidiaBuildClaudeCode):

@@ -569,6 +569,11 @@ _LOOSE_AGENTS = "skillevaluator.tier3.harbor.loose_agents"
 #: (agent, base Harbor import path or ``None`` for the stock agent) -> loose-parts wrapper import path.
 LOOSE_PARTS_AGENT_IMPORT_PATHS: dict[tuple[str, str | None], str] = {
     (LOOSE_AGENT, None): f"{_LOOSE_AGENTS}:LoosePartsClaudeCode",
+    # The container wrapper the Docker-engine and GKE baselines run (Vertex AI routing, the Node/npm skip).
+    (
+        LOOSE_AGENT,
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorClaudeCode",
+    ): f"{_LOOSE_AGENTS}:LoosePartsContainerClaudeCode",
     (
         LOOSE_AGENT,
         "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildClaudeCode",

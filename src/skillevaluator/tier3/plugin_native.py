@@ -2351,11 +2351,15 @@ _LOCAL_AGENTS = "skillevaluator.tier3.harbor.local_agents"
 #: (agent, base Harbor import path or ``None`` for the stock agent) -> native wrapper import path.
 NATIVE_AGENT_IMPORT_PATHS: dict[tuple[str, str | None], str] = {
     ("claude-code", None): f"{_NATIVE_AGENTS}:NativeClaudeCode",
+    # The container wrapper the Docker-engine and GKE baselines run (Vertex AI routing, the Node/npm skip).
+    ("claude-code", f"{_LOCAL_AGENTS}:SkillEvaluatorClaudeCode"): f"{_NATIVE_AGENTS}:NativeContainerClaudeCode",
     (
         "claude-code",
         f"{_LOCAL_AGENTS}:SkillEvaluatorNvidiaBuildClaudeCode",
     ): f"{_NATIVE_AGENTS}:NativeNvidiaBuildClaudeCode",
     ("codex", None): f"{_NATIVE_AGENTS}:NativeCodex",
+    # The subagent-aware Codex wrapper the Docker-engine baselines run; NativeCodex already builds on it.
+    ("codex", f"{_LOCAL_AGENTS}:SkillEvaluatorCodex"): f"{_NATIVE_AGENTS}:NativeCodex",
     ("codex", f"{_LOCAL_AGENTS}:SkillEvaluatorGatewayCodex"): f"{_NATIVE_AGENTS}:NativeGatewayCodex",
     ("codex", f"{_LOCAL_AGENTS}:SkillEvaluatorNvidiaBuildCodex"): f"{_NATIVE_AGENTS}:NativeNvidiaBuildCodex",
     ("opencode", None): f"{_NATIVE_AGENTS}:NativeOpenCode",

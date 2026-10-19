@@ -296,6 +296,9 @@ class JSONReporter(ReporterBase):
             },
         }
 
+        if result.gate_failures:
+            data["gate_failures"] = result.gate_failures
+
         # Quality scores (from QualityScoreValidator)
         coverage = result.metadata.get("dependency_coverage")
         if isinstance(coverage, list):

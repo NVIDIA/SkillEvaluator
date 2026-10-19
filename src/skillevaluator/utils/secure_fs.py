@@ -24,6 +24,8 @@ from pathlib import Path, PurePath
 from types import SimpleNamespace
 from typing import Literal, NamedTuple
 
+from skillevaluator.utils.path_security import matches_filesystem_name
+
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _READLINK_SUPPORTS_DIR_FD = os.readlink in os.supports_dir_fd
 _SCANDIR_SUPPORTS_FD = os.scandir in os.supports_fd
@@ -367,7 +369,11 @@ class _DiscoveryAdmission:
                 f"Refusing linked directory or reparse point before descent: {relative.as_posix()}",
                 relative_path=relative.as_posix(),
             )
-        if relative.name in self.excluded:
+        if relative.name in self.excluded or (
+            # A case alias of an excluded name is excluded only where the filesystem makes it the same directory.
+            any(name.casefold() == relative.name.casefold() for name in self.excluded)
+            and matches_filesystem_name(self.root / relative, self.excluded)
+        ):
             return False
         if self.refuse_selected_dirs and self.selected(relative):
             _raise_unsafe_file(relative)

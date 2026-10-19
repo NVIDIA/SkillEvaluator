@@ -589,6 +589,8 @@ def test_validate_forwards_trial_retries_and_catalog_children_add_the_flag_only_
     monkeypatch.setattr(cli_module, "run_validation", tier1)
     monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", tier3)
     argv = ["validate", "--no-autopilot", str(FIXTURE), "--no-llm", "--no-tier2", "--tier3", "--checks", "schema"]
+    # Reports go to a temporary directory, never next to the shared fixture.
+    argv += ["--output-dir", str(tmp_path / "reports")]
 
     outcome = CliRunner().invoke(cli_module.cli, [*argv, "--trial-retries", "1"])
 

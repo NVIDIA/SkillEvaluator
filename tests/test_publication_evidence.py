@@ -107,7 +107,7 @@ def test_all_built_in_command_wrappers_stamp_canonical_check_identities(
         validate_security_only = validate
         validate_pii_only = validate
 
-    monkeypatch.setattr(tier1_commands, "_schema_validator_for", lambda *_args: SuccessfulValidator())
+    monkeypatch.setattr(tier1_commands, "_schema_validator_for", lambda *_args, **_kwargs: SuccessfulValidator())
     for validator_name in (
         "SecurityValidator",
         "CodeRiskValidator",
@@ -132,9 +132,10 @@ def test_all_built_in_command_wrappers_stamp_canonical_check_identities(
         *tier2_commands.run_context_optimization_check(skill),
     ]
 
+    # Plugin-only checks (``claude-validate``) do not run for a skill and are not publication producers.
     assert {result.metadata["publication_evidence"]["check_id"] for result in tier1} == set(
         tier1_commands.RECOGNIZED_CHECKS
-    )
+    ) - set(tier1_commands.PLUGIN_OPTIONAL_CHECKS)
     assert rubric[0].metadata["publication_evidence"]["check_id"] == "rubric"
     assert {result.metadata["publication_evidence"]["check_id"] for result in tier2} == {
         "similarity",

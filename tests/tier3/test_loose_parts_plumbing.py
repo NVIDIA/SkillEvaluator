@@ -618,7 +618,7 @@ def test_the_loose_wrapper_over_the_stock_agent_runs_on_harbor_native_backends()
     nvidia = LOOSE_PARTS_AGENT_IMPORT_PATHS[
         (AGENT, "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildClaudeCode")
     ]
-    with pytest.raises(ValueError, match="only with --env docker or local"):
+    with pytest.raises(ValueError, match="only with --env docker, kata, or local"):
         runner.build_harbor_run_command(
             dataset_path="d", agent=AGENT, job_name="j", env_mode="gke", agent_import_path=nvidia
         )

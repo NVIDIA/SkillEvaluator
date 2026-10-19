@@ -2893,7 +2893,7 @@ def validate(
         # ``validate .`` (or ``..``) names its content root by the directory it stands for, not an empty or dot
         # name. The lexical absolute path keeps a linked root visible to the link checks below, unlike
         # ``resolve()``; any other relative target stays relative, so findings keep their relative paths.
-        target_path = Path(os.path.abspath(target_path))
+        target_path = Path(os.path.abspath(target_path))  # noqa: PTH100 - lexical normalization is intentional
     evaluated_source = _evaluated_source_from_options(
         evaluated_source_repository,
         evaluated_source_revision,

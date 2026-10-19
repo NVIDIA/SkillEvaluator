@@ -442,7 +442,9 @@ Effectiveness = (goal_accuracy + behavior_check) / 2
 ```
 
 This formula is shared by the report, per-attempt pass@k thresholding, Skill
-Lift, comparisons, and best-agent selection. Standard artifacts identify it as
+Lift, comparisons, and best-agent selection. A metric the verifier records as
+not applicable (N/A) drops out of its dimension, and a dimension with no
+applicable metric drops out of the mean. Standard artifacts identify it as
 `skill-evaluator-dimension-mean-v1` in `score_policy` and in the persisted
 attempt policy. Older metric sets and partial historical artifacts keep their
 legacy policy rather than being rescored as current data.

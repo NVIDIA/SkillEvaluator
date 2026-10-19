@@ -417,6 +417,7 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                     "_report_index": report_index,
                     "_agent_key": str(name),
                     "_trial_keys": keys,
+                    "_skill_activation_status": _dict(agent.get("skill_activation")).get("status", "unknown"),
                     "_dataset_digest": report.get("dataset_digest") or summary.get("dataset_digest"),
                     "_attempt_policy": report.get("attempt_policy"),
                     "_expected_usage_trials": max(
@@ -508,6 +509,12 @@ def comparison_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
             status = "comparable" if paired else "incomplete or mismatched coverage"
             reason = "" if paired else _ineligible_reason(with_row, without_row)
+            if paired and with_row.get("_skill_activation_status") == "never_activated":
+                # Absolute scores and usage remain diagnostic, but a complete
+                # run that never exercised its skill cannot establish lift.
+                paired = False
+                status = "inconclusive"
+                reason = "Inconclusive: skill never activated in with-skill trials"
         result["comparison_status"] = status
         result["comparison_reason"] = reason
         result["coverage"] = (

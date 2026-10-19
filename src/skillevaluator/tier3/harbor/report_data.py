@@ -688,6 +688,8 @@ def load_agent_data(
                         continue
                     key = "with_skill" if variant == "with-skill" else "without_skill"
                     agent_info[key] = scores
+                    if variant == "with-skill" and isinstance(data.get("skill_activation"), dict):
+                        agent_info["skill_activation"] = data["skill_activation"]
                     metric_key = "metrics_with_skill" if variant == "with-skill" else "metrics_without_skill"
                     if isinstance(data.get("metrics"), list):
                         agent_info[metric_key] = data["metrics"]
@@ -863,6 +865,14 @@ def load_agent_data(
 
         if "with_skill" not in agent_info:
             continue
+
+        if "skill_activation" not in agent_info:
+            from skillevaluator.tier3.harbor.activation import summarize_skill_activation
+
+            activation = summarize_skill_activation(agent_info.get("rewards") or [])
+            if agent_info.get("rewards_complete") is False and activation["status"] == "never_activated":
+                activation = dict(activation, status="unknown", reason="Activation evidence is incomplete.")
+            agent_info["skill_activation"] = activation
 
         active_conditions = list(condition_execution.values())
         execution_errors = [

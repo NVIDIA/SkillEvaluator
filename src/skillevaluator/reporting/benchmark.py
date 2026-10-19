@@ -421,6 +421,7 @@ class BenchmarkReporter(ReporterBase):
             _score_transition_values(
                 _number(agent.get("baseline")),
                 _number(agent.get("with_skill", agent.get("overall_score"))),
+                skill_never_activated=_mapping(agent.get("skill_activation")).get("status") == "never_activated",
             )
             for agent in agents.values()
         )
@@ -433,7 +434,14 @@ class BenchmarkReporter(ReporterBase):
                 dimension = _agent_dimension(agent, dim_id)
                 if dimension and dimension.get("partial"):
                     has_partial = True
-                row.append(_score_transition(dimension))
+                row.append(
+                    _score_transition(
+                        dimension,
+                        skill_never_activated=(
+                            _mapping(agent.get("skill_activation")).get("status") == "never_activated"
+                        ),
+                    )
+                )
             lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
 
         lines.extend(
@@ -1060,18 +1068,22 @@ def _agent_dimension(agent: dict[str, Any], dim_id: str) -> dict[str, Any] | Non
     return None
 
 
-def _score_transition(dimension: dict[str, Any] | None) -> str:
+def _score_transition(dimension: dict[str, Any] | None, *, skill_never_activated: bool = False) -> str:
     if not dimension:
         return "Not available"
     baseline = _number(dimension.get("baseline"))
     score = _number(dimension.get("with_skill", dimension.get("score")))
-    return _score_transition_values(baseline, score)
+    return _score_transition_values(baseline, score, skill_never_activated=skill_never_activated)
 
 
-def _score_transition_values(baseline: float | None, score: float | None) -> str:
+def _score_transition_values(
+    baseline: float | None, score: float | None, *, skill_never_activated: bool = False
+) -> str:
     if score is None:
         return "Not available"
     skill_label = f"{score:.0%}"
+    if skill_never_activated:
+        return f"{skill_label} — INCONCLUSIVE: skill never activated; uplift unavailable"
     if baseline is None:
         return f"{skill_label} — baseline not run; uplift unavailable"
     delta = score - baseline
@@ -1182,6 +1194,8 @@ def _tier_status(
         tier3 = assess_tier3_evidence(results, ae, expected_skill_name=expected_skill_name)
         if tier3.status == "fail":
             return "FAIL", f"{len(_agents(ae))} agent(s); {_dataset_summary(ae)['total_tasks']} task(s)"
+        if tier3.status == "inconclusive":
+            return "INCONCLUSIVE", tier3.reason or "Skill never activated."
         if not tier3.evidence_complete:
             evidence = tier3.reason or (
                 "Required Tier 3 evidence is missing"

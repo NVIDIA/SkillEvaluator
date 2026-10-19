@@ -30,6 +30,7 @@ from typing import Any
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts, get_skill_tool_calls
 from skillevaluator.tier3.eval_core.checks import check_negative_case
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
+from skillevaluator.tier3.harbor.activation import summarize_skill_activation
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     CUSTOM_SCORE_POLICY,
@@ -6438,6 +6439,7 @@ def collect_harbor_results(
                 "num_trials": len(with_logical_rewards),
                 "num_reward_rows": len(with_collected_rewards),
                 "mixed_metric_contracts": with_mixed_metric_contracts,
+                "skill_activation": summarize_skill_activation(with_rewards),
                 "pass_at_k": _public_pass_summary(with_pass),
                 **with_execution,
                 "job_failure": with_job_failure,
@@ -6774,12 +6776,14 @@ def collect_harbor_results(
             with_overall_score = None
             without_overall_score = None
 
+        skill_activation = summarize_skill_activation(with_rewards)
         lift: dict[str, Any] = {}
         paired_execution_succeeded = (
             with_execution.get("execution_status") == "succeeded"
             and without_execution.get("execution_status") == "succeeded"
         )
-        if paired_execution_succeeded and with_scores and without_scores:
+        lift_eligible = paired_execution_succeeded and skill_activation["status"] != "never_activated"
+        if lift_eligible and with_scores and without_scores:
             lift = _compute_lift(
                 with_scores,
                 without_scores,
@@ -6811,7 +6815,7 @@ def collect_harbor_results(
 
         custom_lift: dict[str, Any] = {}
         if (
-            paired_execution_succeeded
+            lift_eligible
             and with_logical_rewards
             and without_logical_rewards
             and (with_custom_scores or without_custom_scores or (not with_scores and not without_scores))
@@ -6827,7 +6831,7 @@ def collect_harbor_results(
                 _write_generated_root_json(agent_dir / "custom_lift.json", output_dir, custom_lift)
 
         pass_lift: dict[str, Any] = {}
-        if paired_execution_succeeded and set(with_metrics) == set(without_metrics) and with_pass and without_pass:
+        if lift_eligible and set(with_metrics) == set(without_metrics) and with_pass and without_pass:
             pass_lift = {
                 "with_skill": with_pass.get("rate", 0.0),
                 "without_skill": without_pass.get("rate", 0.0),
@@ -6887,6 +6891,7 @@ def collect_harbor_results(
             "custom_without_skill": without_custom_scores,
             "dimensions_with_skill": dimension_scores(with_scores),
             "dimensions_without_skill": dimension_scores(without_scores),
+            "skill_activation": skill_activation,
             "lift": lift,
             "custom_lift": custom_lift,
             "pass_at_k": {

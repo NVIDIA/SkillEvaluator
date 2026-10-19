@@ -35,6 +35,13 @@ from skillevaluator.tier3.harbor import runner, runtime_preflight
 from skillevaluator.tier3.loose_parts import NOT_SUPPORTED_WRAPPER, NOTHING_LOOSE, not_supported_reason
 from skillevaluator.tier3.plugin_native import resolve_plugin_load
 
+
+@pytest.fixture(autouse=True)
+def _approve_the_fixture_plugin_mcp_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fixture plugin's MCP server references ``${RELTOOLS_TOKEN}``: approve it, as a plugin user must."""
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "RELTOOLS_TOKEN")
+
+
 AGENT = "claude-code"
 NONE, SKILLS, LOOSE, FULL = "without_skill", "sum_of_parts", "loose_parts", "with_skill"
 CROSS = ["x-1", "x-2", "x-3", "x-4", "x-5", "x-6"]

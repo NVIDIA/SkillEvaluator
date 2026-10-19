@@ -37,6 +37,12 @@ from skillevaluator.tier3.eval_core import checks as host_checks
 from skillevaluator.tier3.loose_parts import build_loose_parts, loose_parts_task_staging
 
 
+@pytest.fixture(autouse=True)
+def _approve_the_fixture_plugin_mcp_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fixture plugin's MCP server references ``${RELTOOLS_TOKEN}``: approve it, as a plugin user must."""
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "RELTOOLS_TOKEN")
+
+
 def _task_entry(tmp_path: Path, plugin: Path, *, loose: bool) -> dict[str, Any]:
     """The entry.json the real emitter writes for the full-plugin or the loose-parts arm."""
     from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks

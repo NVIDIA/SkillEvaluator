@@ -782,6 +782,27 @@ Environment references follow the client that loads the manifest:
   `mcp_env_reference_unverified`, because whether Cursor expands it in a
   plugin's MCP config is not verified (Claude Code and Codex do not document it).
 
+Tier 3 also holds a plugin's MCP servers to the operator's MCP security
+policy, the same one that guards a skill's `evals/environment/mcp_servers.toml`.
+It checks the servers the generated wrapper stages and the ones a native
+adapter writes into its harness config (with their `env` and `headers` under
+Claude Code, which applies them). A server that references an environment
+variable, or sends an authentication header, stops the run before any agent
+starts unless the operator approves it in the environment that runs
+SkillEvaluator:
+
+| Setting | Holds | Example |
+| --- | --- | --- |
+| `SKILLEVALUATOR_ALLOWED_MCP_SECRETS` | Comma-separated variable names a plugin MCP server may reference | `export SKILLEVALUATOR_ALLOWED_MCP_SECRETS=TRACKER_TOKEN,DOCS_KEY` |
+| `SKILLEVALUATOR_ALLOWED_MCP_HOSTS` | Comma-separated host names a remote (`url`) server may send an approved secret or authentication header to | `export SKILLEVALUATOR_ALLOWED_MCP_HOSTS=mcp.example.com` |
+
+A stdio server may also use a variable that is not secret-looking when the
+evaluation's `harbor.runtime_env` provides it. Provider and operator
+credentials (for example `ANTHROPIC_API_KEY`) are never forwarded, even when
+listed, and literal secrets are refused. The error names the server (as "the
+plugin's MCP servers"), the variable or host, and the setting with an example
+value.
+
 ### Component inventory
 
 Tier 1 and Tier 3 build the same static inventory from the declared fields and

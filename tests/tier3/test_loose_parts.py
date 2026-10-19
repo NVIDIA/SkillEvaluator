@@ -67,6 +67,13 @@ from skillevaluator.tier3.plugin_native import (
     normalize_census,
 )
 
+
+@pytest.fixture(autouse=True)
+def _approve_the_fixture_plugin_mcp_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fixture plugin's MCP server references ``${RELTOOLS_TOKEN}``: approve it, as a plugin user must."""
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "RELTOOLS_TOKEN")
+
+
 ROOT_DIR = f"skilleval/{LOOSE_BUNDLE_DIR}/root"
 
 

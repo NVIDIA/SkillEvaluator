@@ -28,6 +28,7 @@ from skillevaluator.evaluation.tier3_report import (
     incomplete_reason,
 )
 from skillevaluator.models import Finding, Severity, ValidationResult
+from skillevaluator.publication_evidence import stamp_publication_evidence
 from skillevaluator.reporting.base import passes_required_gate
 from skillevaluator.reporting.run_status import RunStatus, Status, TierStatus, resolve_run_status
 
@@ -108,31 +109,75 @@ def multi_agent(**agents: dict[str, Any]) -> ValidationResult:
     return result
 
 
+# The source snapshot a publication-ready run is bound to (a fixture identity, not a real digest).
+PUBLICATION_TARGET = {
+    "skill_name": "demo-plugin",
+    "skill_digest": "sha256:" + "ab" * 32,
+    "skill_digest_algorithm": "skill-evaluator-source-tree/2",
+}
+
+
 def complete_plugin_run(
     *, verdict: str = "pass", score: float = 0.8, integration: dict[str, Any] | None = None
 ) -> ValidationResult:
-    """A complete, publication-ready plugin run (every provenance field BENCHMARK.md requires)."""
+    """A complete, publication-ready plugin run (every provenance field BENCHMARK.md requires).
+
+    The publication evidence contract asks for a run ID, a bound source identity, clear execution errors, consistent
+    aggregates, and every attempt of both arms scored (4 tasks x 3 attempts per arm).
+    """
     result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Run live agent evaluation")
+    lift = score - 0.5
+    dimensions = [{"id": dimension, "baseline": 0.5, "with_skill": score, "lift": lift} for dimension in _DIMENSIONS]
+
+    def arm() -> dict[str, Any]:
+        return {"execution_status": "succeeded", "execution_errors": [], "expected_attempts": 12, "scored_attempts": 12}
+
     payload: dict[str, Any] = {
         "skill_name": "demo-plugin",
+        "run_id": "fixture-run-0001",
+        "publication_target": dict(PUBLICATION_TARGET),
         "verdict": verdict,
         "execution_status": "succeeded",
+        "execution_errors": [],
         "evaluated_at": "2026-09-01T12:00:00+00:00",
         "evaluator_version": "0.3.0",
-        "overall_lift": 0.3,
-        "summary": {"environment": "docker", "verdict": verdict, "execution_status": "succeeded"},
+        "overall_score": score,
+        "overall_lift": lift,
+        "expected_attempts": 24,
+        "scored_attempts": 24,
+        "agents_run": ["codex"],
+        "summary": {
+            "environment": "docker",
+            "verdict": verdict,
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "best_agent": "codex",
+            "agents_run": ["codex"],
+            "overall_score": score,
+            "overall_lift": lift,
+            "expected_attempts": 24,
+            "scored_attempts": 24,
+            "run_id": "fixture-run-0001",
+            "publication_target": dict(PUBLICATION_TARGET),
+        },
         "dataset_summary": {"total_tasks": 4, "positive_tasks": 3, "negative_tasks": 1, "unclassified_tasks": 0},
         "dataset_digest": "sha256:" + "0123456789abcdef" * 4,
-        "attempt_policy": {"max_attempts": 3, "pass_threshold": 0.5},
+        "dataset_digest_algorithm": "skill-evaluator-dataset-snapshot/1",
+        "attempt_policy": {"max_attempts": 3, "pass_threshold": 0.5, "stop_on_pass": False},
         "best_agent": "codex",
+        "dimensions": deepcopy(dimensions),
         "agents": {
             "codex": {
                 "model": "gpt-codex",
                 "execution_status": "succeeded",
-                "dimensions": [
-                    {"id": dimension, "baseline": 0.5, "with_skill": score, "lift": score - 0.5}
-                    for dimension in _DIMENSIONS
-                ],
+                "execution_errors": [],
+                "expected_attempts": 24,
+                "scored_attempts": 24,
+                "conditions": {"with_skill": arm(), "without_skill": arm()},
+                "baseline": 0.5,
+                "with_skill": score,
+                "lift": lift,
+                "dimensions": dimensions,
                 **deepcopy(STATISTICS),
             }
         },
@@ -214,7 +259,11 @@ def test_a_clean_run_passes_and_publication_still_requires_tier3() -> None:
     assert status.reasons == ()
     # BENCHMARK.md requires Tier 3 evidence by default; a catalog can waive it.
     assert status.publication is Status.INCOMPLETE
+    # An unbound waiver claim is ignored: the policy must ride on a recognized producer's source-bound result.
     results[0].metadata["benchmark_policy"] = {"tier3_required": False}
+    assert resolve_run_status(results).publication is Status.INCOMPLETE
+    stamp_publication_evidence([results[0]], tier=1, check_id="schema")
+    results[0].metadata["publication_target"] = dict(PUBLICATION_TARGET)
     assert resolve_run_status(results).publication is Status.PASSED
 
 
@@ -576,12 +625,30 @@ def test_a_bundled_skills_blocking_medium_finding_outranks_missing_evidence() ->
     assert status.missing == ("gitleaks",)
 
 
-def test_a_card_fail_the_gate_never_saw_does_not_claim_tier3_gated_the_run() -> None:
+def test_a_dimension_fail_behind_a_pass_verdict_fails_the_blocking_gate() -> None:
     from skillevaluator.reporting import BenchmarkReporter
 
-    # The payload's verdict says pass, but its dimension scores say FAIL: the card is stricter than the gate,
-    # which validate decides from the result (it passed, so the run exited 0).
+    # The payload's verdict says pass, but its dimension scores say FAIL. A blocking gate recomputes the dimension
+    # verdict (only a completed PASS passes), so the run fails the gate and the card says Tier 3 gated it.
     agent_eval = gated(complete_plugin_run(verdict="pass", score=0.3), blocking=True)
+    results = [check("Plugin Schema"), agent_eval]
+
+    status = resolve_run_status(results)
+    card = BenchmarkReporter(include_timestamp=False, content_type="plugin", skill_name="demo-plugin").render_all(
+        results
+    )
+
+    assert status.headline is Status.FAILED
+    assert status.publication is Status.FAILED
+    assert "Overall verdict: FAIL" in card
+    assert "made Tier 3 gate this run" in card
+
+
+def test_an_advisory_card_fail_does_not_claim_tier3_gated_the_run() -> None:
+    from skillevaluator.reporting import BenchmarkReporter
+
+    # The same run outside the gate: the card is stricter than the exit code, and says Tier 3 was advisory.
+    agent_eval = gated(complete_plugin_run(verdict="pass", score=0.3), blocking=False)
     results = [check("Plugin Schema"), agent_eval]
 
     status = resolve_run_status(results)
@@ -593,6 +660,7 @@ def test_a_card_fail_the_gate_never_saw_does_not_claim_tier3_gated_the_run() -> 
     assert status.publication is Status.FAILED
     assert "Overall verdict: FAIL" in card
     assert "made Tier 3 gate this run" not in card
+    assert "Tier 3 was advisory in this run" in card
 
 
 def test_markdown_counts_a_skipped_check_as_skipped_and_keeps_its_findings() -> None:

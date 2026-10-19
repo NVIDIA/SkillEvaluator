@@ -92,7 +92,8 @@ _ROW_BADGE = {
     Status.NEUTRAL: ("pass", "Pass"),
     Status.FAILED: ("fail", "Fail"),
     Status.INCOMPLETE: ("warn", "Incomplete"),
-    Status.SKIPPED: ("skipped", "Skipped"),
+    # A skipped row keeps main's warn tone; it never reads as a pass.
+    Status.SKIPPED: ("warn", "Skipped"),
     Status.NOT_RUN: ("skipped", "Not run"),
 }
 # SkillSpector reports ``metadata.skillspector_version`` as a bare semantic

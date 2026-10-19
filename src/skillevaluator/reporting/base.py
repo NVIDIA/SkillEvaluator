@@ -2056,6 +2056,15 @@ def assess_tier3_evidence(
             selected_payload,
             "Tier 3 scanner evidence is incomplete.",
         )
+    if any(is_unfailed_partial_plugin_agent_eval(result) for result in tier3_results):
+        return Tier3EvidenceAssessment(
+            "incomplete",
+            False,
+            execution_status or "incomplete",
+            raw_verdict or "incomplete",
+            selected_payload,
+            "Tier 3 evaluated only part of the plugin.",
+        )
     # A cleanly skipped advisory result is non-passing by construction. When
     # its payload cannot be emitted losslessly, the serialization branch below
     # decides between an explicit failure and incomplete evidence.
@@ -2320,7 +2329,10 @@ def assess_publication(
     if reasons:
         return PublicationAssessment("incomplete", policy, tier3, tuple(reasons))
 
-    if any(not result.passed and not is_cleanly_skipped(result) for result in results):
+    if any(
+        not result.passed and not is_cleanly_skipped(result) and not is_unfailed_partial_plugin_agent_eval(result)
+        for result in results
+    ):
         return PublicationAssessment("fail", policy, tier3, ("A validator failed.",))
     if tier3.status == "fail":
         return PublicationAssessment("fail", policy, tier3, (tier3.reason or "Tier 3 failed.",))
@@ -2397,6 +2409,30 @@ def is_partial_plugin_agent_eval(result: ValidationResult) -> bool:
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
     completeness = completeness_view(plugin_provenance(metadata.get("agent_eval")))
     return bool(completeness and completeness["partial"])
+
+
+def is_unfailed_partial_plugin_agent_eval(result: ValidationResult) -> bool:
+    """Return whether a partial plugin Tier 3 run is missing evidence rather than failed.
+
+    ``validate`` stamps a partial plugin run as not passed so it never reads as a pass. It is a failure only when its
+    evaluated parts already failed: a FAIL verdict (recorded or recomputed from the dimensions) or a confirmed Skill
+    Lift regression. Otherwise the publication assessment treats it as incomplete evidence.
+    """
+    if not is_tier3_result(result) or not is_partial_plugin_agent_eval(result):
+        return False
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    if metadata.get("tier3_gate_failures") or result.is_incomplete:
+        return False
+    payload = metadata.get("agent_eval")
+    if not isinstance(payload, dict) or agent_eval_report_serialization_issue(payload) is not None:
+        return False
+    verdict, _execution_status, _truth_consistent = _agent_eval_truth_state(payload)
+    lift_band = payload.get("lift_band") if isinstance(payload.get("lift_band"), dict) else {}
+    return bool(
+        verdict != "fail"
+        and agent_eval_dimension_verdict(payload) != "fail"
+        and lift_band.get("regression_confirmed") is not True
+    )
 
 
 def passes_required_gate(result: ValidationResult) -> bool:

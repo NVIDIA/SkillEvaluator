@@ -31,6 +31,7 @@ from skillevaluator.reporting import (
     MarkdownReporter,
     SARIFReporter,
 )
+from skillevaluator.reporting.base import passes_required_gate
 from skillevaluator.reporting.plugin_sections import completeness_view, plugin_provenance
 
 _CATALOG_KEYS = ("catalog_skill_similarity", "inter_plugin_similarity")
@@ -169,7 +170,8 @@ def render_surfaces(results: list[ValidationResult], *, name: str) -> dict[str, 
         view,
         tier_gate_results=gate,
         tier3_result=next((result for result in results if result.validator_name == "AGENT_EVAL"), None),
-        gate_failed=not all(result.passed for result in gate),
+        # As validate decides it: a blocking Tier 3 passes only with a completed PASS and complete coverage.
+        gate_failed=not all(passes_required_gate(result) for result in gate),
         output_dir=Path("reports"),
         basename="saved",
         report_formats=("json",),
@@ -179,7 +181,7 @@ def render_surfaces(results: list[ValidationResult], *, name: str) -> dict[str, 
     footer = "passed" if view.verdict.passed else "incomplete" if view.verdict.incomplete else "failed"
 
     markdown_status = re.search(r"\*\*Status:\*\* (✅ PASSED|❌ FAILED|⚠️ INCOMPLETE)", markdown)
-    html_status = re.search(r'class="header-status-badge [a-z]+"[^>]*>([^<]+)<', html)
+    html_status = re.search(r'class="header-status-badge [a-z]+"[^>]*>Process: ([^<]+)<', html)
     verdict = re.search(r"Overall verdict: (PASS|FAIL|INCOMPLETE|NEUTRAL)", benchmark)
     cards = dict(
         re.findall(

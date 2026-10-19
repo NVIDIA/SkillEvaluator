@@ -3561,10 +3561,10 @@ In this example:
 
 Tier 1 failures and incomplete scanner evidence always set the `validate` exit
 code. Plugin Tier 2 never does, except for refused unsafe input. Tier 3 sets it
-only with `--block-on-agent-eval`. With the flag, a Tier 3 `FAIL` verdict fails
+only with `--block-on-agent-eval`. With the flag, only a completed `PASS` verdict
+with complete attempt coverage passes: a `NEUTRAL` or `FAIL` verdict fails
 `validate` (exit 1), and so do a confirmed Skill Lift regression (see below) and
-a plugin run that did not complete, was skipped, or was `INCOMPLETE`. A
-`NEUTRAL` verdict never fails it.
+a plugin run that did not complete, was skipped, or was `INCOMPLETE`.
 
 A real failure outranks missing evidence. Every report gives a run the same
 headline: the terminal footer and summary, the JSON `overall_status`, the

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from _plugin_fixtures import STATISTICS, provenance, tier1_plugin_result, tier2_plugin_result
 from click.testing import CliRunner
 from scripts.ci import check_public_benchmarks as benchmark_gate
+from test_advisory_skip_verdict import _publication_ready_results
 
 from skillevaluator import cli as cli_module
 from skillevaluator.models import ValidationResult
@@ -112,7 +113,10 @@ def test_complete_plugin_card(tmp_path: Path) -> None:
     )
 
     assert rendered.startswith("# Plugin Benchmark: demo-plugin\n")
-    assert "Overall verdict: PASS" in rendered
+    # The publication evidence contract applies to plugin cards: these fixtures carry no source identity, so the
+    # complete run is reported in full but is not publication-complete.
+    assert "Overall verdict: INCOMPLETE" in rendered
+    assert "| Tier 1 | Static validation | **INCOMPLETE** | No recognized built-in Tier 1 producer evidence" in rendered
     assert "- Plugin: `demo-plugin`" in rendered
     assert "- Agents: Codex (`gpt-codex`)" in rendered
     assert "- Tasks: 4 evaluation tasks (3 positive, 1 negative)" in rendered
@@ -136,8 +140,29 @@ def test_complete_plugin_card(tmp_path: Path) -> None:
     # The hook is staged in this run, so it is not listed as excluded.
     assert "no check evaluates them" not in rendered
     assert "Tier 1 checks them statically" not in rendered
-    assert "| Tier 3 | Live agent evaluation | **PASS** |" in rendered
+    assert (
+        "| Tier 3 | Live agent evaluation | **INCOMPLETE** | Tier 3 evidence lacks a canonical target source identity. |"
+    ) in rendered
     assert "Regenerate this benchmark when the plugin or any of its components" in rendered
+    assert _gate(tmp_path, rendered) == []
+
+
+def test_complete_plugin_card_with_bound_evidence_passes(tmp_path: Path) -> None:
+    """With every tier bound to one source snapshot and complete Tier 3 evidence, a complete plugin run passes."""
+    results = _publication_ready_results("PLUGIN")
+    payload = results[-1].metadata["agent_eval"]
+    payload["plugin_provenance"] = provenance(partial=False)
+    target_name = payload["publication_target"]["skill_name"]
+
+    rendered = BenchmarkReporter(include_timestamp=False, content_type="plugin", skill_name=target_name).render_all(
+        results
+    )
+
+    assert rendered.startswith("# Plugin Benchmark: demo-plugin\n")
+    assert "Overall verdict: PASS" in rendered
+    assert "## Publication Recommendation" in rendered
+    assert "- Plugin run: complete" in rendered
+    assert "| Tier 3 | Live agent evaluation | **PASS** |" in rendered
     assert _gate(tmp_path, rendered) == []
 
 

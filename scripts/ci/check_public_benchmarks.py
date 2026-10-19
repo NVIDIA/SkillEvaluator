@@ -51,12 +51,14 @@ REQUIRED_MARKERS = (
 # _check_pass_provenance), so earlier non-PASS cards still pass the scan.
 _PASS_ONLY_METADATA_FIELDS = frozenset({"Source digest", "Tier 3 run ID"})
 
+# Each entry: (level, accepted titles, prefix match, marker reported when absent).
+# The title heading accepts either card type (TITLE_MARKERS); exactly one may appear.
 _REQUIRED_HEADINGS = (
-    (1, "Skill Benchmark:", True, "# Skill Benchmark:"),
-    (2, "Evaluation Metadata", False, "## Evaluation Metadata"),
-    (2, "Results at a Glance", False, "## Results at a Glance"),
-    (2, "Tier Status", False, "## Tier Status"),
-    (2, "Freshness", False, "## Freshness"),
+    (1, tuple(marker.removeprefix("# ") for marker in TITLE_MARKERS), True, TITLE_MARKERS[0]),
+    (2, ("Evaluation Metadata",), False, "## Evaluation Metadata"),
+    (2, ("Results at a Glance",), False, "## Results at a Glance"),
+    (2, ("Tier Status",), False, "## Tier Status"),
+    (2, ("Freshness",), False, "## Freshness"),
 )
 
 LINE_RULES = (
@@ -786,37 +788,34 @@ def _check_required_headings(path: Path, text: str, offenders: list[Offender]) -
         structural_title = title.partition(":")[0] + ":" if level == 1 and ":" in title else title
         if level in {1, 2} and not structural_title.isascii():
             offenders.append(Offender(path, line, "non-ASCII structural heading"))
-    for required_level, required_title, is_prefix, marker in _REQUIRED_HEADINGS:
-        required_visual_key = _visual_text_key(required_title)
-        required_canonical_key = _canonical_text_key(required_title)
+    for required_level, required_titles, is_prefix, marker in _REQUIRED_HEADINGS:
+
+        def key_matches(key: str, required_key: str, *, prefix: bool = is_prefix) -> bool:
+            return key.startswith(required_key) if prefix else key == required_key
+
         matching_headings = [
             (line, title, trusted)
             for _index, level, line, title, trusted in headings
             if level == required_level
-            and (
-                _visual_text_key(title).startswith(required_visual_key)
-                if is_prefix
-                else _visual_text_key(title) == required_visual_key
+            and any(
+                key_matches(_visual_text_key(title), _visual_text_key(required_title))
+                for required_title in required_titles
             )
         ]
         trusted_headings = [
-            heading
+            (heading, required_title)
             for heading in matching_headings
-            if heading[2]
-            and (
-                _canonical_text_key(heading[1]).startswith(required_canonical_key)
-                if is_prefix
-                else _canonical_text_key(heading[1]) == required_canonical_key
-            )
+            for required_title in required_titles
+            if heading[2] and key_matches(_canonical_text_key(heading[1]), _canonical_text_key(required_title))
         ]
-        trusted_prefix_identity = (
-            trusted_headings[0][1][len(required_title) :]
-            if trusted_headings and trusted_headings[0][1].casefold().startswith(required_title.casefold())
-            else ""
-        )
+        trusted_prefix_identity = ""
+        if trusted_headings:
+            (_line, trusted_title, _trusted), required_title = trusted_headings[0]
+            if trusted_title.casefold().startswith(required_title.casefold()):
+                trusted_prefix_identity = trusted_title[len(required_title) :]
         if not trusted_headings or (is_prefix and not _identity_present(trusted_prefix_identity)):
             offenders.append(Offender(path, 1, f"missing required section: {marker}"))
-        if len(matching_headings) > 1 and required_title not in {"Evaluation Metadata", "Tier Status"}:
+        if len(matching_headings) > 1 and required_titles[0] not in {"Evaluation Metadata", "Tier Status"}:
             offenders.append(Offender(path, matching_headings[1][0], f"duplicate required section: {marker}"))
 
 

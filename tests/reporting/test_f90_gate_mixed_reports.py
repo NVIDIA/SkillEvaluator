@@ -11,10 +11,12 @@ import io
 import re
 
 from _f90_gate_payloads import (
+    DATASET_SUMMARY,
     EDGE05_INTERVAL,
     EDGE05_WITH,
     EDGE05_WITHOUT,
     build_payload,
+    coverage,
     scores,
     section,
     terminal,
@@ -138,6 +140,7 @@ def test_html_multi_agent_dimension_cells_use_the_dimension_thresholds() -> None
             "rewards": [],
             "num_trials": 2,
             "model": "test-model",
+            **coverage(baseline=False),
         }
 
     payload = build_agent_eval_payload(
@@ -145,6 +148,7 @@ def test_html_multi_agent_dimension_cells_use_the_dimension_thresholds() -> None
         {"codex": info(), "claude-code": info()},
         use_llm_judge=False,
         run_config={"eval_target": {"kind": "plugin"}},
+        persisted_dataset_summary=dict(DATASET_SUMMARY),
     )
     html = HTMLReporter(include_timestamp=False, content_label="Plugin").render_all(
         [_validation_result_from_payload(payload)]

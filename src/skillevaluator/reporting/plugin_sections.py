@@ -25,6 +25,7 @@ trial exercised, instead of implying that staged means tested.
 
 from __future__ import annotations
 
+import itertools
 import math
 import os
 import posixpath
@@ -1130,10 +1131,11 @@ def plugin_provenance(payload: object) -> Mapping[str, Any]:
 
 def _agents(payload: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
     agents = _mapping(payload.get("agents"))
+    # Read only the first MAX_AGENTS entries: a wide agents mapping is never materialized or loaded past them.
     return [
         (text(name, limit=_LABEL_CHARS), agent)
-        for name, agent in list(agents.items())[:MAX_AGENTS]
-        if isinstance(agent, Mapping)
+        for name in itertools.islice(agents, MAX_AGENTS)
+        if isinstance(agent := agents[name], Mapping)
     ]
 
 

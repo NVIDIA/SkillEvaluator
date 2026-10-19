@@ -2241,6 +2241,10 @@ def _gate_headline(results: list[ValidationResult], outcome: str) -> str:
         if (message := _tier3_not_run_message(first)) is not None:
             # A gated Tier 3 run that never ran: say why (the message already names Tier 3).
             return f"{message}{extra}" if message.startswith("Tier 3") else f"Tier 3 did not run{extra}: {message}"
+        payload = (first.metadata or {}).get("agent_eval")
+        if outcome == "failed" and isinstance(payload, dict) and str(payload.get("verdict") or "").lower() == "neutral":
+            # A gated run passes only with a completed PASS, so NEUTRAL fails the gate without being a FAIL verdict.
+            return f"Tier 3 verdict NEUTRAL did not pass the gate{extra}"
         return f"Tier 3 live evaluation{extra} {outcome}"
     return f"{first.validator_name or 'validation'}{extra} {outcome}{tier_label}"
 
@@ -2585,9 +2589,9 @@ def _resolve_validate_target(
     default=None,
     cls=GroupedOption,
     help_group=_TIER3_GROUP,
-    help="Make Tier 3 gate the exit code: a FAIL verdict, a confirmed Skill Lift regression (FAIL band, whole "
-    "interval below zero), or a run that is skipped or INCOMPLETE then fails validate. A NEUTRAL verdict never "
-    "does. Default: advisory (reported, exit code unchanged).",
+    help="Make Tier 3 gate the exit code: only a completed PASS verdict with complete attempt coverage passes, so "
+    "a NEUTRAL or FAIL verdict, a confirmed Skill Lift regression (FAIL band, whole interval below zero), or a run "
+    "that is skipped or INCOMPLETE fails validate. Default: advisory (reported, exit code unchanged).",
 )
 @click.option(
     "--autopilot/--no-autopilot",

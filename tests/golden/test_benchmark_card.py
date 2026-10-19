@@ -1113,6 +1113,8 @@ def test_benchmark_no_baseline_never_fabricates_uplift() -> None:
     payload["summary"]["verdict"] = "neutral"
     for agent in payload["agents"].values():
         agent["baseline"] = None
+        # No baseline arm ran at all; a baseline arm that ran without a comparable score is worded differently.
+        agent["conditions"].pop("without_skill", None)
         for dimension in agent["dimensions"]:
             dimension["baseline"] = None
             dimension["lift"] = None

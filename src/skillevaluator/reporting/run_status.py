@@ -21,7 +21,8 @@ The precedence (docs/plugin-evaluation.mdx, "Reports and verdicts"):
 
 Tier 3 adds three rules: a FAIL verdict or a confirmed Skill Lift regression is FAILED even for a partial run; a run
 that never ran is FAILED when ``--block-on-agent-eval`` makes Tier 3 gate and SKIPPED otherwise; and a run whose
-verdict is NEUTRAL is NEUTRAL, which passes the gate.
+verdict is NEUTRAL is NEUTRAL. When ``--block-on-agent-eval`` makes Tier 3 gate, only a completed PASS with complete
+attempt coverage passes the gate (``passes_required_gate``), so a gated NEUTRAL run fails it.
 
 BENCHMARK.md is a publication card and is stricter than the gate: it also wants complete Tier 3 provenance (Tier 3
 is publication-required by default), and a skipped required check or any missing scan keeps it INCOMPLETE. It is
@@ -37,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 from skillevaluator.reporting.base import (
     is_advisory_agent_eval_skip,
+    is_cleanly_skipped,
     is_partial_plugin_agent_eval,
     passes_required_gate,
 )
@@ -203,15 +205,23 @@ def _tier3_outcome(result: ValidationResult) -> Status:
     if metadata.get("tier3_gate_failures") or _verdict(payload) == "fail":
         # A FAIL verdict or a confirmed Skill Lift regression: the evaluated parts failed, even in a partial run.
         return Status.FAILED
-    if _tier3_not_run(result):
+    if _tier3_not_run(result) or is_cleanly_skipped(result):
         # Never ran: a failed gate under --block-on-agent-eval, an advisory skip otherwise.
         return Status.SKIPPED if passes_required_gate(result) else Status.FAILED
     if is_partial_plugin_agent_eval(result):
         return Status.INCOMPLETE
+    if result.is_incomplete:
+        # A Tier 3 scan that did not complete is missing evidence, unless the result also has a blocking finding.
+        return Status.FAILED if _has_blocking_finding(result) else Status.INCOMPLETE
     statuses = {metadata.get("execution_status"), payload.get("execution_status"), summary.get("execution_status")}
     if not result.passed:
         return Status.INCOMPLETE if "skipped" in statuses else Status.FAILED
     execution = str(payload.get("execution_status") or summary.get("execution_status") or "").lower()
+    if execution == "failed":
+        # A failed execution outranks a pass verdict, as in the publication assessment.
+        return Status.FAILED
+    if execution == "incomplete":
+        return Status.INCOMPLETE
     if execution and execution != "succeeded":
         # Advisory and passed, but nothing was evaluated (no task source): it did not run.
         return Status.SKIPPED
@@ -249,7 +259,11 @@ def _failure_reason(result: ValidationResult) -> str:
         labels = _mapping(result.metadata).get("tier3_gate_failures")
         if isinstance(labels, list) and labels:
             return " · ".join(str(label) for label in labels)
-        return "Tier 3 live evaluation did not run" if _tier3_not_run(result) else "Tier 3 live evaluation failed"
+        if _tier3_not_run(result):
+            return "Tier 3 live evaluation did not run"
+        if _verdict(_mapping(_mapping(result.metadata).get("agent_eval"))) == "neutral":
+            return "Tier 3 verdict NEUTRAL did not pass the gate"
+        return "Tier 3 live evaluation failed"
     return f"{result.validator_name or 'validation'} failed in Tier {_tier_of(result)}"
 
 
@@ -332,7 +346,7 @@ def _publication_tier_status(
         )
         return Status.FAILED if real_failure else Status.INCOMPLETE
     if all(_publication_skipped(result) for result in results):
-        optional = all(result.metadata.get("optional") or is_advisory_agent_eval_skip(result) for result in results)
+        optional = all(_optional_skip(result, evidence) for result in results)
         return Status.SKIPPED if optional else Status.INCOMPLETE
     if number == 3 and evidence.payload and evidence.fails:
         return Status.FAILED
@@ -355,6 +369,19 @@ def _publication_skipped(result: ValidationResult) -> bool:
     gate that never ran. A check that recorded a skip but failed is a failure, as on every other surface."""
     skipped = bool(_mapping(result.metadata).get("skipped")) and result.passed
     return skipped or is_advisory_agent_eval_skip(result)
+
+
+def _optional_skip(result: ValidationResult, evidence: _Tier3Evidence) -> bool:
+    """Whether a skipped check may stay skipped on the card: an optional check, an advisory Tier 3 skip, or a tier the
+    persisted publication policy does not require (Tier 2 or Tier 3; Tier 1 is always required)."""
+    if _mapping(result.metadata).get("optional") or is_advisory_agent_eval_skip(result):
+        return True
+    tier = _tier_of(result)
+    if tier == 3:
+        return not evidence.required
+    if tier == 2:
+        return not evidence.tier2_required
+    return False
 
 
 def _advisory_labels(
@@ -397,9 +424,15 @@ class _Tier3Evidence:
     verdict: str  # the effective verdict: a PASS whose dimensions are NEUTRAL is NEUTRAL
     execution: str
     required: bool  # the persisted publication policy: Tier 3 is required unless a catalog waived it
+    tier2_required: bool  # the same policy for Tier 2
 
     @classmethod
     def of(cls, results: Sequence[ValidationResult], tier3: Sequence[ValidationResult]) -> _Tier3Evidence:
+        from skillevaluator.reporting.base import (
+            _agent_eval_rejected_truth_state,
+            agent_eval_report_serialization_issue,
+        )
+
         # The payload readers live with the publication card that prints them.
         from skillevaluator.reporting.benchmark import (
             _agent_eval_payload,
@@ -410,8 +443,23 @@ class _Tier3Evidence:
         )
 
         payload = _agent_eval_payload(list(results))
+        policy = _benchmark_policy(list(results), payload)
         source = _mapping(payload)
         summary = _mapping(source.get("summary"))
+        if isinstance(payload, dict) and agent_eval_report_serialization_issue(payload) is not None:
+            # A payload the reports cannot carry whole (too wide or too deep): read only its bounded root truth,
+            # never its agents, as the publication assessment does. It is never publication-complete.
+            rejected_verdict, rejected_execution, explicit_failure, _nodes = _agent_eval_rejected_truth_state(payload)
+            return cls(
+                payload=source,
+                partial=any(is_partial_plugin_agent_eval(result) for result in tier3),
+                fails=explicit_failure,
+                complete=False,
+                verdict=rejected_verdict,
+                execution=rejected_execution,
+                required=policy["tier3_required"],
+                tier2_required=policy["tier2_required"],
+            )
         verdict = _verdict(source)
         if verdict == "pass" and _tier3_dimension_verdict(payload) == "neutral":
             verdict = "neutral"
@@ -422,7 +470,8 @@ class _Tier3Evidence:
             complete=_tier3_evidence_complete(payload),
             verdict=verdict,
             execution=str(source.get("execution_status") or summary.get("execution_status") or "").lower(),
-            required=_benchmark_policy(list(results), payload)["tier3_required"],
+            required=policy["tier3_required"],
+            tier2_required=policy["tier2_required"],
         )
 
 
@@ -441,10 +490,7 @@ def _publication(
         return Status.INCOMPLETE
     if headline is Status.INCOMPLETE or any(result.is_incomplete for result in results):
         return Status.INCOMPLETE
-    if any(
-        _publication_skipped(result) and not result.metadata.get("optional") and not is_advisory_agent_eval_skip(result)
-        for result in results
-    ):
+    if any(_publication_skipped(result) and not _optional_skip(result, evidence) for result in results):
         return Status.INCOMPLETE  # a required check did not run
     present = bool(tier3) and not all(_publication_skipped(result) for result in tier3)
     if (evidence.required or present) and not evidence.complete:

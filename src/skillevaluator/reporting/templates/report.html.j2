@@ -1912,6 +1912,7 @@
         <div class="section-header">Detailed Results</div>
         {% for result in results %}
         {% set badge = row_badge(result) %}
+        {% set result_is_skipped = result | cleanly_skipped %}
         <div class="validator-card" id="validator-{{ loop.index }}" data-status="{{ row_status(result) }}">
             <button class="validator-collapsible {{ 'active' if ((result | cleanly_skipped) or not result.passed) else '' }}" onclick="toggleValidator(this)">
                 <div class="collapsible-header">

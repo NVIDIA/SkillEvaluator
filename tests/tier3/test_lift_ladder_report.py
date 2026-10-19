@@ -60,6 +60,8 @@ LOOSE_PARTS = {
     "content_hashes": HASHES,
 }
 COMPLETE = {"complete": True, "missing_cases": [], "failed_arms": [], "attempt_shortfall": []}
+# Card verdicts from kindest to strictest.
+_CARD_RANK = {"PASS": 0, "NEUTRAL": 1, "INCOMPLETE": 2, "FAIL": 3}
 SIGNALS = {
     LOOSE: {
         "n_trials": 9,
@@ -798,9 +800,14 @@ def test_the_ladder_never_changes_the_run_status_on_any_surface(tmp_path: Path, 
     )
 
     surfaces = render_surfaces([_result(built)], name=SKILL)
+    plain_surfaces = render_surfaces([_result(plain)], name=SKILL)
     assert surfaces["headlines"] == dict.fromkeys(surfaces["headlines"], status.headline.value)
-    assert surfaces["benchmark"] == status.publication.verdict
-    assert surfaces["html_tier_cards"]["tier3"] == status.tiers[3].status.verdict
+    # BENCHMARK.md and the HTML Tier 3 card show the run status, made no kinder by the publication evidence
+    # contract (these synthetic runs carry no source identity); the ladder changes neither.
+    assert surfaces["benchmark"] == plain_surfaces["benchmark"]
+    assert _CARD_RANK[surfaces["benchmark"]] >= _CARD_RANK[status.publication.verdict]
+    assert surfaces["html_tier_cards"]["tier3"] == plain_surfaces["html_tier_cards"]["tier3"]
+    assert surfaces["html_tier_cards"]["tier3"] in {status.tiers[3].status.verdict, "INCOMPLETE"}
     outputs = surfaces["outputs"]
     for rendered in (outputs["markdown"], outputs["html"], outputs["terminal"]):
         assert shown in _flat(rendered)

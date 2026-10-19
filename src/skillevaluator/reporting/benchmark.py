@@ -39,6 +39,7 @@ from skillevaluator.reporting.base import (
     is_cleanly_skipped,
     is_tier2_result,
     is_tier3_result,
+    is_unfailed_partial_plugin_agent_eval,
     missing_tier1_publication_checks,
     passes_required_gate,
     publication_identity_present,
@@ -567,20 +568,22 @@ class BenchmarkReporter(ReporterBase):
         )
         for tier, purpose, tier_status in tier_groups:
             status, evidence = _tier_status(tier_status, ae, benchmark_policy)
-            if tier == "Tier 3" and tier3_override is not None and tier_status.results:
-                status, evidence = tier3_override
-            # The publication evidence contract can only make a row more conservative.
-            status, evidence = _conservative_row(
-                (status, evidence),
-                _publication_evidence_tier_status(
-                    tier,
-                    list(tier_status.results),
-                    ae,
-                    benchmark_policy,
-                    expected_skill_name=expected_skill_name,
-                    expected_publication_target=publication_target,
-                ),
+            evidence_row = _publication_evidence_tier_status(
+                tier,
+                list(tier_status.results),
+                ae,
+                benchmark_policy,
+                expected_skill_name=expected_skill_name,
+                expected_publication_target=publication_target,
             )
+            if tier == "Tier 3" and tier3_override is not None and tier_status.results:
+                # A partial plugin run says so, unless the evidence contract found something worse.
+                override_rank = _ROW_RANK.get(tier3_override[0], _ROW_RANK["INCOMPLETE"])
+                evidence_rank = _ROW_RANK.get(evidence_row[0], _ROW_RANK["INCOMPLETE"])
+                status, evidence = tier3_override if override_rank >= evidence_rank else evidence_row
+            else:
+                # The publication evidence contract can only make a row more conservative.
+                status, evidence = _conservative_row((status, evidence), evidence_row)
             lines.append(f"| {tier} | {purpose} | **{status}** | {_md_cell(evidence, private_labels)} |")
         lines.append("")
 
@@ -721,9 +724,10 @@ class BenchmarkReporter(ReporterBase):
                     "Integration-only runs have no Skill Lift band."
                 ),
                 (
-                    "- Exit code: `validate --block-on-agent-eval` fails on a Tier 3 FAIL verdict, a confirmed "
-                    "regression, or a skipped or INCOMPLETE Tier 3 run; a NEUTRAL verdict never fails it. "
-                    "Without the flag, Tier 3 is advisory and never changes the exit code."
+                    "- Exit code: `validate --block-on-agent-eval` passes only a completed Tier 3 PASS verdict "
+                    "with complete attempt coverage; a NEUTRAL or FAIL verdict, a confirmed regression, or a skipped "
+                    "or INCOMPLETE Tier 3 run fails it. Without the flag, Tier 3 is advisory and never changes the "
+                    "exit code."
                 ),
             ]
         )
@@ -792,10 +796,22 @@ class BenchmarkReporter(ReporterBase):
             fallback="plugin",
         )
         private_labels = _private_environment_labels(ae)
-        policy = _benchmark_policy(results, ae)
+        # The publication evidence contract binds a plugin card to the plugin root's source snapshot, as it binds a
+        # skill card to the skill's: Tier 1 and Tier 2 stamp the plugin root. Plugin Tier 3 runs a staged package
+        # that records no plugin-root identity, so its evidence is not publication-complete (fail-closed) until a
+        # catalog waives Tier 3.
+        publication_target = publication_target_for_results(results, ae, expected_skill_name=self.skill_name)
+        expected_target_name = self.skill_name or (
+            publication_target.skill_name if publication_target is not None else None
+        )
+        policy = _benchmark_policy(results, ae, expected_skill_name=expected_target_name)
         partial = bool(view and view["partial"])
         run_status = resolve_run_status(results)
-        status = run_status.publication.verdict
+        # The run status's card verdict, never kinder than the shared publication assessment.
+        status = _conservative_verdict(
+            run_status.publication.verdict,
+            _overall_status(results, ae, policy, expected_skill_name=expected_target_name),
+        )
 
         advisory = run_status.publication_advisory
         lines: list[str] = [f"# Plugin Benchmark: {name}", "", _verdict_callout(status, advisory=advisory), ""]
@@ -873,7 +889,15 @@ class BenchmarkReporter(ReporterBase):
                 # The evaluated parts already failed: FAIL outranks the partial run, as on the card.
                 _status, evidence = _tier_status(run_status.tiers[3], ae, policy)
                 tier3_override = ("FAIL", f"{evidence}; {reason[0].lower()}{reason[1:]}")
-        self._render_tier_status(lines, run_status, ae, policy, private_labels, tier3_override)
+        self._render_tier_status(
+            lines,
+            run_status,
+            ae,
+            policy,
+            private_labels,
+            tier3_override,
+            expected_skill_name=expected_target_name,
+        )
         self._render_findings(lines, results, private_labels)
         self._render_methodology(lines, ae, private_labels)
         self._render_freshness(lines, subject="plugin")
@@ -1478,9 +1502,17 @@ def _conservative_verdict(*verdicts: str) -> str:
     return max(verdicts, key=lambda verdict: _VERDICT_RANK.get(verdict, _VERDICT_RANK["INCOMPLETE"]))
 
 
-def _conservative_row(*rows: tuple[str, str]) -> tuple[str, str]:
-    """The most conservative Tier Status row; on a tie the first row's wording is kept."""
-    return max(rows, key=lambda row: _ROW_RANK.get(row[0], _ROW_RANK["INCOMPLETE"]))
+def _conservative_row(run_status_row: tuple[str, str], evidence_row: tuple[str, str]) -> tuple[str, str]:
+    """The more conservative Tier Status row of the run status's and the publication evidence contract's.
+
+    On a tie the evidence contract's wording is kept (it names the missing evidence), except for a failure, where the
+    run status's wording also says whether the tier gated the exit code and whether Skill Lift regressed.
+    """
+    run_rank = _ROW_RANK.get(run_status_row[0], _ROW_RANK["INCOMPLETE"])
+    evidence_rank = _ROW_RANK.get(evidence_row[0], _ROW_RANK["INCOMPLETE"])
+    if run_rank != evidence_rank:
+        return run_status_row if run_rank > evidence_rank else evidence_row
+    return run_status_row if run_rank == _ROW_RANK["FAIL"] else evidence_row
 
 
 def _overall_lift_basis_differs(agent: dict[str, Any], basis: dict[str, Any]) -> bool:
@@ -2115,7 +2147,10 @@ def _publication_evidence_tier_status(
         return ("SKIPPED (ADVISORY)" if optional else "INCOMPLETE"), "; ".join(_skip_reasons(results))
 
     findings = [finding for result in results for finding in result.findings]
-    if any(not result.passed and not is_cleanly_skipped(result) for result in results):
+    if any(
+        not result.passed and not is_cleanly_skipped(result) and not is_unfailed_partial_plugin_agent_eval(result)
+        for result in results
+    ):
         return "FAILED", f"{len(results)} validator(s); {len(findings)} finding(s)"
 
     publication_results = results

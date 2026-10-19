@@ -146,7 +146,7 @@ class Surfaces:
         return {
             "json": self.report.get("overall_status"),
             "markdown": _lookup(_MARKDOWN, r"\*\*Status:\*\* (✅ PASSED|❌ FAILED|⚠️ INCOMPLETE)", self.markdown),
-            "html": _lookup(_HTML_HEADER, r'class="header-status-badge [a-z]+"[^>]*>([^<]+)<', self.html),
+            "html": _lookup(_HTML_HEADER, r'class="header-status-badge [a-z]+"[^>]*>Process: ([^<]+)<', self.html),
             "html-dashboard": _lookup(
                 _HTML_DASHBOARD,
                 r'Overall Status</h3>\s*<p class="dashboard-card-value"><span class="status-badge [a-z]+">([^<]+)<',
@@ -330,7 +330,7 @@ def test_a_skipped_check_is_never_shown_as_passed(monkeypatch: pytest.MonkeyPatc
     assert parity["status"] == "skipped"
     assert re.search(rf"{re.escape(PARITY)}\s*│\s*SKIP\s*│", surfaces.output)
     assert f"### ⏭️ SKIPPED {PARITY}" in surfaces.markdown
-    badge = rf'class="name-col">{re.escape(PARITY)}</td>\s*<td><span class="status-badge skipped">Skipped<'
+    badge = rf'class="name-col">{re.escape(PARITY)}</td>\s*<td><span class="status-badge warn">Skipped<'
     assert re.search(badge, surfaces.html)
     # Skipping a check does not fail the exit gate.
     _assert_one_headline(surfaces, "passed")

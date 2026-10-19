@@ -83,6 +83,32 @@ def scores(**overrides: float) -> dict[str, float]:
     return scores
 
 
+# Every synthetic run attempts each of its tasks once per arm and scores every attempt: the attempt coverage a blocking
+# Tier 3 gate requires before a PASS counts (reporting/base.py ``passes_required_gate``).
+TASKS = 2
+DATASET_SUMMARY = {"total_tasks": TASKS, "positive_tasks": TASKS, "negative_tasks": 0, "unclassified_tasks": 0}
+
+
+def coverage(*, baseline: bool) -> dict[str, Any]:
+    """One agent's complete attempt coverage; the no-skill arm is skipped when the run has no baseline."""
+
+    def arm(attempts: int, status: str) -> dict[str, Any]:
+        return {
+            "execution_status": status,
+            "execution_errors": [],
+            "expected_attempts": attempts,
+            "scored_attempts": attempts,
+        }
+
+    without_skill = arm(TASKS, "succeeded") if baseline else arm(0, "skipped")
+    total = TASKS * (2 if baseline else 1)
+    return {
+        "expected_attempts": total,
+        "scored_attempts": total,
+        "conditions": {"with_skill": arm(TASKS, "succeeded"), "without_skill": without_skill},
+    }
+
+
 def tier3_result(
     with_scores: dict[str, float],
     without_scores: dict[str, float] | None = None,
@@ -98,6 +124,7 @@ def tier3_result(
         "rewards": [],
         "num_trials": 2,
         "model": "test-model",
+        **coverage(baseline=bool(without_scores)),
     }
     if lift_uncertainty is not None:
         info["lift_uncertainty"] = lift_uncertainty
@@ -107,6 +134,7 @@ def tier3_result(
         use_llm_judge=False,
         run_config=run_config or {"eval_target": {"kind": "plugin"}},
         plugin_provenance=plugin_provenance,
+        persisted_dataset_summary=dict(DATASET_SUMMARY),
     )
     result = _validation_result_from_payload(payload)
     assert result is not None

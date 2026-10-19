@@ -60,15 +60,17 @@ def test_fail_verdict_is_advisory_without_the_flag(monkeypatch: pytest.MonkeyPat
     assert "Tier 3 verdict FAIL is advisory" in footer
 
 
-def test_neutral_verdict_never_fails_validate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_neutral_verdict_fails_validate_when_tier3_gates(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # With --block-on-agent-eval only a completed PASS with complete attempt coverage passes the gate.
     tier3 = tier3_result(scores(security=0.45))
 
-    exit_code, report, benchmark, _footer = run_validate(monkeypatch, tmp_path, tier3, "--block-on-agent-eval")
+    exit_code, report, benchmark, footer = run_validate(monkeypatch, tmp_path, tier3, "--block-on-agent-eval")
 
     assert report["tier3"]["verdict"] == "neutral"
-    assert exit_code == 0
-    assert report["overall_status"] == "passed"
-    assert "Publication blocked" not in benchmark
+    assert exit_code == 1
+    assert report["overall_status"] == "failed"
+    assert "Overall verdict: FAIL" in benchmark
+    assert "Tier 3 verdict NEUTRAL did not pass the gate" in footer
 
 
 def test_pass_verdict_with_flag_exits_zero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

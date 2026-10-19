@@ -15,9 +15,14 @@ _SECRET_KEY_PARTS = {
     "auth",
     "authorization",
     "bearer",
+    "cert",
+    "certificate",
+    "cookie",
     "credential",
     "credentials",
     "key",
+    "oauth",
+    "passphrase",
     "password",
     "private",
     "secret",
@@ -70,7 +75,8 @@ _TOKEN_COUNT_KEYS = {
 _SENSITIVE_KEY_CHAR = r"[a-z0-9_.-]"
 _SENSITIVE_KEY_WORD = (
     r"(?:api[_-]?key|secret|password|credential|authorization|bearer|token|"
-    r"access[_-]?key|session[_-]?token|private[_-]?key)"
+    r"access[_-]?key|session[_-]?token|private[_-]?key|service[_-]?account[_-]?key|"
+    r"cookie|session[_-]?cookie|client[_-]?certificate|certificate|cert|passphrase|oauth)"
 )
 _SENSITIVE_KEY_PATTERN = (
     rf"(?<!{_SENSITIVE_KEY_CHAR})"
@@ -143,6 +149,7 @@ _REDACTIONS = (
     (re.compile(r"nvapi-[a-zA-Z0-9_-]{8,}"), "nvapi-<redacted>"),
     (re.compile(r"crsr_[a-f0-9]{16,}"), "crsr_<redacted>"),
     (re.compile(r"sha256~[A-Za-z0-9._~-]+"), "sha256~<redacted>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])ya29\.[A-Za-z0-9_-]{20,}"), "ya29.<redacted>"),
     # GitHub's p/o/u/r families retain the 36-character opaque body. The s
     # family also has a variable-length ``ghs_APPID_JWT`` stateless format.
     (

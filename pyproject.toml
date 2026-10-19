@@ -77,6 +77,11 @@ security = [
     "bandit>=1.9.4",
     "pip-audit>=2.10.0",
 ]
+# Optional local UI for comparing saved reports; never imported by base commands.
+dashboard = [
+    # server.allowedHosts, which limits the dashboard to loopback host names, needs 1.61.
+    "streamlit>=1.61,<2",
+]
 # Full public install convenience bundle.
 all = [
     "skillevaluator[tier2,tier3,security]",

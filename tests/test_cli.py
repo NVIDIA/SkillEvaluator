@@ -64,7 +64,7 @@ def test_top_level_help_groups_commands_by_workflow() -> None:
     assert positions == sorted(positions)
 
     core = result.output.split("Core workflows:", 1)[1].split("Tier 1 · Static and security:", 1)[0]
-    assert all(command in core for command in ("validate", "health-check", "doctor", "models"))
+    assert all(command in core for command in ("validate", "health-check", "doctor", "models", "dashboard"))
     tier3 = result.output.split("Tier 3 · Live evaluation:", 1)[1]
     assert all(command in tier3 for command in ("create-eval-dataset", "compare", "view", "harbor-view"))
     assert "Other commands:" not in result.output

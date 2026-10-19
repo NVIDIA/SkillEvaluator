@@ -147,7 +147,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 reports preserve judge-model exclusions when calculating dimension and
   overall lift. Native multi-step results also retain the judge provenance needed
   for those comparisons, so fallback judges cannot turn a regression into an
-  apparent improvement.
+  apparent improvement. Judge-free cases retain valid lift, bounded report loads
+  use the collector's recorded comparisons, and FINAL-strategy trials use only
+  the final step's judges. The CLI displays unavailable comparisons as `n/a`.
 - Tier 3 reports an inconclusive result when every observed positive with-skill
   trial has zero activation, and omits skill-lift comparisons for that agent.
   Activation counts are reported separately; negative controls and missing

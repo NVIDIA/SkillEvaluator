@@ -381,16 +381,16 @@ class CLIReporter(ReporterBase):
                 ws = scores.get("with_skill", 0.0)
                 bl = scores.get("baseline", 0.0)
                 lift = scores.get("lift", 0.0)
-                lc = (
-                    "green"
-                    if lift is not None and lift > 0.01
-                    else ("red" if lift is not None and lift < -0.01 else "dim")
-                )
+                if lift is None:
+                    lift_text = "n/a"
+                else:
+                    lc = "green" if lift > 0.01 else ("red" if lift < -0.01 else "dim")
+                    lift_text = f"[{lc}]{lift:+.2f}[/{lc}]"
                 table.add_row(
                     escape_markup(str(name).replace("_", " ").title()),
                     f"{ws:.2f}",
-                    f"{bl:.2f}",
-                    f"[{lc}]{lift:+.2f}[/{lc}]" if lift is not None else "N/A",
+                    f"{bl:.2f}" if bl is not None else "n/a",
+                    lift_text,
                 )
 
             console.print(table)

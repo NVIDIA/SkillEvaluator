@@ -3140,8 +3140,10 @@ def _standard_aggregate_matches_harbor_strategy(
     root_rewards: dict[str, Any],
     step_results: list[dict[str, Any]],
     root_metrics: tuple[str, ...],
+    *,
+    strategy: str | None = None,
 ) -> bool:
-    """Recognize Harbor's FINAL or missing-as-zero MEAN aggregate semantics."""
+    """Match FINAL, missing-as-zero MEAN, or either when the strategy is unknown."""
     root_values = {metric: metric_value(root_rewards, metric) for metric in root_metrics}
     if any(value is None for value in root_values.values()):
         return False
@@ -3152,12 +3154,18 @@ def _standard_aggregate_matches_harbor_strategy(
         candidate = final_verifier.get("rewards") if isinstance(final_verifier, dict) else None
         if isinstance(candidate, dict):
             final_rewards = candidate
-    if final_rewards is not None and all(
-        (value := metric_value(final_rewards, metric)) is not None
-        and math.isclose(value, root_values[metric], rel_tol=1e-9, abs_tol=1e-9)
-        for metric in root_metrics
+    if (
+        strategy != "mean"
+        and final_rewards is not None
+        and all(
+            (value := metric_value(final_rewards, metric)) is not None
+            and math.isclose(value, root_values[metric], rel_tol=1e-9, abs_tol=1e-9)
+            for metric in root_metrics
+        )
     ):
         return True
+    if strategy == "final":
+        return False
 
     verifier_rewards: list[dict[str, Any]] = []
     for step in step_results:
@@ -4952,13 +4960,50 @@ def _pass_summary(
 _LLM_JUDGE_METRICS = ("accuracy", "goal_accuracy", "behavior_check")
 
 
+def _harbor_multi_step_reward_strategy(result: dict[str, Any]) -> str | None:
+    """Read the task's strategy when its staged configuration is still available."""
+    config = result.get("config")
+    task = config.get("task") if isinstance(config, dict) else None
+    paths = {
+        value["path"].strip()
+        for value in (result.get("task_id"), task)
+        if isinstance(value, dict) and isinstance(value.get("path"), str) and value["path"].strip()
+    }
+    if len(paths) != 1:
+        return None
+    task_toml = Path(paths.pop()) / "task.toml"
+    if task_toml.is_symlink() or not task_toml.is_file():
+        return None
+    raw_toml = _read_bounded_text(task_toml)
+    if raw_toml is None:
+        return None
+    try:
+        import tomllib
+
+        strategy = tomllib.loads(raw_toml).get("multi_step_reward_strategy", "mean")
+    except (ValueError, TypeError):
+        return None
+    return strategy if isinstance(strategy, str) and strategy in {"final", "mean"} else None
+
+
 def _merge_constituent_judge_models(data: dict[str, Any], result: dict[str, Any], trial_root: Path) -> None:
-    """Keep step judge provenance without replacing Harbor's aggregate scores."""
+    """Keep the scoring steps' judges without replacing Harbor's aggregate scores."""
     names = _valid_step_result_names(result.get("step_results"))
     if names is None:
         return
+    steps = result["step_results"]
+    strategy = _harbor_multi_step_reward_strategy(result)
+    metrics = _standard_reward_metrics(data)
+    # Older artifacts can omit task configuration. Infer FINAL only when the
+    # authoritative scores distinguish it from MEAN; retain all judges otherwise.
+    if strategy is None and metrics:
+        matches = _standard_aggregate_matches_harbor_strategy
+        if matches(data, steps, metrics, strategy="final") and not matches(data, steps, metrics, strategy="mean"):
+            strategy = "final"
+    if strategy == "final":
+        names, steps = names[-1:], steps[-1:]
     models: dict[str, set[str]] = {metric: set() for metric in _LLM_JUDGE_METRICS}
-    for name, step in zip(names, result["step_results"], strict=True):
+    for name, step in zip(names, steps, strict=True):
         verifier = step.get("verifier_result")
         embedded = verifier.get("rewards") if isinstance(verifier, dict) else None
         row = dict(embedded) if isinstance(embedded, dict) else {}

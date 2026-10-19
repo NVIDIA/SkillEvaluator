@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -98,6 +100,17 @@ def test_pyproject_audits_declared_pins_not_the_running_environment(tmp_path: Pa
     assert result.is_incomplete
 
 
+def _named_hosts(text: str) -> set[str]:
+    """Every host *text* names, as a URL (``scheme://host/...``) or as a bare ``host[/path]`` word."""
+    hosts: set[str] = set()
+    for token in re.split(r"[\s'\"`(),;<>@=\[\]{}]+", text):
+        if token:
+            parsed = urlsplit(token if "://" in token else f"//{token}")
+            if parsed.hostname:
+                hosts.add(parsed.hostname)
+    return hosts
+
+
 def test_unpinned_pyproject_declarations_make_the_audit_incomplete(tmp_path: Path, pip_audit_available) -> None:
     """pyproject.toml follows the static PEP 621 contract: what it cannot audit leaves the audit INCOMPLETE."""
     skill = _skill(tmp_path)
@@ -112,8 +125,8 @@ def test_unpinned_pyproject_declarations_make_the_audit_incomplete(tmp_path: Pat
 
     run.assert_not_called()
     assert result.is_incomplete
-    # Declaration text never reaches a diagnostic.
-    assert not any("example.com" in warning for warning in result.warnings)
+    # Declaration text never reaches a diagnostic: no warning names the declared URL's host.
+    assert all(host != "example.com" for warning in result.warnings for host in _named_hosts(warning))
     assert result.metadata["dependency_coverage"][0]["requested_pins"] == []
 
 

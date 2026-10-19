@@ -1557,7 +1557,8 @@ class TestMarkdownReporter:
         output = MarkdownReporter(include_timestamp=False).render_all([result])
 
         assert "### Evaluator Scores" in output
-        assert "| Accuracy | 0.90 | N/A | +0.00 |" in output
+        # Without a baseline there is no lift to report, so it is N/A, never a fabricated +0.00.
+        assert "| Accuracy | 0.90 | N/A | N/A |" in output
 
     def test_render_tier3_normalized_evidence_uses_distinct_evidence_ids(self) -> None:
         result = _tier3_harbor_result()
@@ -1573,8 +1574,8 @@ class TestMarkdownReporter:
 
         output = MarkdownReporter(include_timestamp=False).render_all([result])
 
-        assert "<code>/steps/0/tool_calls/0/normalized/0</code>" in output
-        assert "<code>/steps/0/tool_calls/0/normalized/1</code>" in output
+        assert "`/steps/0/tool_calls/0/normalized/0`" in output
+        assert "`/steps/0/tool_calls/0/normalized/1`" in output
 
     def test_details_section(self, failure_result: ValidationResult) -> None:
         """Test expandable details section."""

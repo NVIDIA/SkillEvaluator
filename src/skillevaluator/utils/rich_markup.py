@@ -47,6 +47,17 @@ def show_format_characters(text: str) -> str:
     return _FORMAT_CHARACTER_RE.sub(_visible_escape, text)
 
 
+def strip_terminal_sequences(text: str) -> str:
+    """Remove terminal escape sequences and control characters, keeping format characters as they are.
+
+    For text that is flattened next, such as skip reasons, where every control
+    or format character becomes a space instead of a visible escape.
+    """
+    text = _OSC_ESCAPE_RE.sub("", text)
+    text = _ANSI_ESCAPE_RE.sub("", text)
+    return replace_unencodable(_TERMINAL_CONTROL_RE.sub("", text))
+
+
 def strip_terminal_controls(text: str) -> str:
     """Make untrusted text safe to write to a terminal.
 

@@ -59,7 +59,7 @@ from skillevaluator.reporting.plugin_sections import (
     tier1_plugin_view,
 )
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
-from skillevaluator.utils.rich_markup import strip_terminal_controls
+from skillevaluator.utils.rich_markup import strip_terminal_sequences
 
 _AGENT_EVAL_MAX_FUTURE_CLOCK_SKEW = timedelta(minutes=5)
 
@@ -482,7 +482,7 @@ def _safe_skip_reason_text(value: object) -> str:
         return ""
     # Drop whole terminal escape sequences (OSC hyperlinks and titles, CSI
     # styling) before flattening, so their payloads never reach a report.
-    raw = strip_terminal_controls(raw)
+    raw = strip_terminal_sequences(raw)
     flattened = " ".join(
         "".join(
             " " if character.isspace() or unicodedata.category(character) in {"Cc", "Cf"} else character

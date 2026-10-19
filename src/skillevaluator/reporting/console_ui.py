@@ -40,7 +40,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from skillevaluator.reporting.base import get_skip_reason
-from skillevaluator.utils.rich_markup import strip_terminal_controls
+from skillevaluator.utils.rich_markup import strip_terminal_controls, strip_terminal_sequences
 
 if TYPE_CHECKING:
     from skillevaluator.models.result import ValidationResult
@@ -570,7 +570,7 @@ def _raw_skip_reason(result: ValidationResult) -> str:
         if not isinstance(candidate, str):
             # Non-text metadata keeps the shared single-line projection.
             return ""
-        if _bounded_console_line(strip_terminal_controls(candidate)):
+        if _bounded_console_line(strip_terminal_sequences(candidate)):
             return candidate
     return ""
 
@@ -586,7 +586,7 @@ def _skip_reason(result: ValidationResult) -> str:
     raw = _raw_skip_reason(result)
     if not raw:
         return _bounded_console_line(get_skip_reason(result))
-    sample = strip_terminal_controls(raw[:_SKIP_REASON_SOURCE_MAX_CHARS])
+    sample = strip_terminal_sequences(raw[:_SKIP_REASON_SOURCE_MAX_CHARS])
     lines = [
         bounded
         for line in sample.replace("\r\n", "\n").replace("\r", "\n").split("\n")

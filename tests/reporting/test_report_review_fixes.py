@@ -470,7 +470,7 @@ class _Attributes(HTMLParser):
         for name, value in attrs:
             if name.startswith("on"):
                 self.handlers.append(value or "")
-            elif name == "data-skill":
+            elif name in {"data-skill", "data-skill-name"}:
                 self.data_skills.append(value or "")
         attributes = dict(attrs)
         if tag == "meta" and (attributes.get("http-equiv") or "").lower() == "content-security-policy":
@@ -696,9 +696,11 @@ def test_markdown_neutralizes_links_and_emphasis_in_an_advisory_skip_message() -
     markdown = MarkdownReporter(include_timestamp=False).render_all([result])
 
     assert "**[open me](https://evil.example)**" not in markdown
-    assert "- Tier 3 plugin evaluation did not complete: case \\*\\*[open me]\\(https://evil.example)\\*\\* failed" in (
-        markdown
-    )
+    # The skip reason is one inert line: emphasis and link brackets are character references.
+    assert (
+        "- Skip reason: Tier 3 plugin evaluation did not complete: case "
+        "&#42;&#42;&#91;open me&#93;(https://evil.example)&#42;&#42; failed"
+    ) in markdown
 
 
 @pytest.mark.parametrize("reporter", ["markdown", "benchmark"])

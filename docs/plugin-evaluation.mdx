@@ -4008,9 +4008,14 @@ Publication Recommendation. The public benchmark gate
 The plugin card applies the same publication evidence contract as the skill
 card: every tier's evidence must come from a recognized producer and be bound
 to one source snapshot of the plugin root. Tier 1 and Tier 2 record that
-snapshot. Tier 3 runs a staged package and does not yet record the plugin
-root's snapshot, so its evidence is not publication-complete: a plugin card is
-`INCOMPLETE` unless a catalog waives Tier 3.
+snapshot. Tier 3 runs a package staged from the plugin root, so it records the
+root's publication target (its name and source digest, under the same rules as
+a skill's) when the package is staged, and the run certifies the root only if
+it starts and ends from that same snapshot. The card accepts Tier 3 evidence
+only when that recorded identity matches the plugin root it reports. Evidence
+that names the staged package instead, records no identity, or carries another
+digest (the root changed during staging or the run) keeps its results, but the
+Tier 3 row and the card are `INCOMPLETE`.
 
 ## Limitations and not-yet-supported items
 

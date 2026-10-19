@@ -545,6 +545,7 @@ class BenchmarkReporter(ReporterBase):
         tier3_override: tuple[str, str] | None = None,
         *,
         expected_skill_name: str | None = None,
+        expected_publication_target: PublicationTargetIdentity | None = None,
     ) -> None:
         tier_groups = [
             ("Tier 1", "Static validation", run_status.tiers[1]),
@@ -561,7 +562,7 @@ class BenchmarkReporter(ReporterBase):
             ]
         )
         all_results = [result for tier_status in run_status.tiers.values() for result in tier_status.results]
-        publication_target = publication_target_for_results(
+        publication_target = expected_publication_target or publication_target_for_results(
             all_results,
             ae,
             expected_skill_name=expected_skill_name,
@@ -889,6 +890,13 @@ class BenchmarkReporter(ReporterBase):
                 # The evaluated parts already failed: FAIL outranks the partial run, as on the card.
                 _status, evidence = _tier_status(run_status.tiers[3], ae, policy)
                 tier3_override = ("FAIL", f"{evidence}; {reason[0].lower()}{reason[1:]}")
+        # The plugin root the card reports is the one its static tiers were bound to; Tier 3 evidence is judged
+        # against it, so evidence from another snapshot (the staged package, say) is what the Tier 3 row flags.
+        plugin_root_target = publication_target_for_results(
+            [result for result in results if not is_tier3_result(result)],
+            {},
+            expected_skill_name=expected_target_name,
+        )
         self._render_tier_status(
             lines,
             run_status,
@@ -897,6 +905,7 @@ class BenchmarkReporter(ReporterBase):
             private_labels,
             tier3_override,
             expected_skill_name=expected_target_name,
+            expected_publication_target=plugin_root_target,
         )
         self._render_findings(lines, results, private_labels)
         self._render_methodology(lines, ae, private_labels)

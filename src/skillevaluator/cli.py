@@ -1198,8 +1198,11 @@ def _plugin_evaluation_options(
     The plugin-specific fields are set here: the staged package with its member
     skills in one group workspace, the baseline arms the effective lift mode
     needs, the load mode and native snapshot, and the results root of the plugin
-    itself rather than of its temporary package. *run_options* are the generic
-    Tier 3 options (agents, attempts, models, ...), passed through unchanged.
+    itself rather than of its temporary package. The run certifies the plugin
+    root the package was staged from, with the publication target recorded at
+    staging (``None`` leaves the evidence unbound, fail closed), never the
+    temporary package. *run_options* are the generic Tier 3 options (agents,
+    attempts, models, ...), passed through unchanged.
     """
     from skillevaluator.evaluation import EvaluationOptions
     from skillevaluator.tier3.results_location import resolve_results_root
@@ -1218,6 +1221,8 @@ def _plugin_evaluation_options(
         ladder_skip_reason=ladder_skip_reason,
         plugin_load=plugin_load,
         native_plugin_source=prepared.native_source,
+        publication_root=getattr(prepared, "publication_root", None) or plugin_dir,
+        publication_target=getattr(prepared, "publication_target", None),
         results_dir=results_dir,
         resolved_results_root=resolve_results_root(plugin_dir, results_dir),
         **run_options,

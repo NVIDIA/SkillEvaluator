@@ -228,6 +228,30 @@ def _task_stages_digest_excluded_entries(task_path: Path) -> bool:
     return False
 
 
+def staging_publication_target_conflict(
+    publication_root: Path | None,
+    staged_publication_target: Mapping[str, str] | None,
+    snapshot_publication_target: Mapping[str, str] | None,
+) -> dict[str, Any] | None:
+    """Why a plugin run's evidence cannot certify its plugin root, as a fail-closed conflict marker, or ``None``.
+
+    A plugin run evaluates a package staged from the plugin root. Its evidence certifies the root only when
+    the root's publication target was recorded at staging and the run started from that same snapshot. A
+    run without a recorded staging target, or one whose root changed between staging and the run, keeps its
+    results but gets no publication identity. A skill run (no ``publication_root``) has no staging step.
+    """
+    if publication_root is None:
+        return None
+    if staged_publication_target is not None and dict(staged_publication_target) == dict(
+        snapshot_publication_target or {}
+    ):
+        return None
+    return {
+        "run_start": dict(staged_publication_target) if staged_publication_target is not None else None,
+        "run_end": dict(snapshot_publication_target) if snapshot_publication_target is not None else None,
+    }
+
+
 def _runtime_context_is_bound_to_publication_target(
     skill_path: Path,
     task_paths: Sequence[Path],
@@ -4756,6 +4780,8 @@ def _run_harbor_eval_impl(
     ladder_skip_reason: str | None = None,
     plugin_load: str = "wrapper",
     native_plugin_source: Any = None,
+    publication_root: Path | None = None,
+    staged_publication_target: dict[str, str] | None = None,
     copy_repo: bool = False,
     grading_mode: str | None = None,
     reference_skills_dir: Path | None = None,
@@ -4775,6 +4801,7 @@ def _run_harbor_eval_impl(
     repo_context_exclude_paths: Sequence[Path] = (),
     _evaluator_skill_path: Path | None = None,
     _snapshot_publication_target: dict[str, str] | None = None,
+    _staging_publication_target_conflict: dict[str, Any] | None = None,
     _monotonic_start: float | None = None,
 ) -> dict[str, Any]:
     """Run a public Harbor evaluation with and without the target skill."""
@@ -4802,15 +4829,18 @@ def _run_harbor_eval_impl(
         forwarded.pop("agents")
         with ExitStack() as snapshot_stack:
             try:
-                snapshot_publication_target = publication_target_from_path(skill_path)
+                snapshot_publication_target = publication_target_from_path(publication_root or skill_path)
                 evaluator_skill_path = snapshot_stack.enter_context(private_evaluator_skill_snapshot(skill_path))
-                if publication_target_from_path(skill_path) != snapshot_publication_target:
+                if publication_target_from_path(publication_root or skill_path) != snapshot_publication_target:
                     raise ValueError("Publication source changed while its private evaluator snapshot was created")
             except (OSError, ValueError) as exc:
                 reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
                 return {"error": [str(exc)]}
             forwarded["_evaluator_skill_path"] = evaluator_skill_path
             forwarded["_snapshot_publication_target"] = snapshot_publication_target
+            forwarded["_staging_publication_target_conflict"] = staging_publication_target_conflict(
+                publication_root, staged_publication_target, snapshot_publication_target
+            )
             forwarded["_monotonic_start"] = started_at
             return _run_harbor_eval_impl(skill_path, agents, **forwarded)
 
@@ -5348,11 +5378,15 @@ def _run_harbor_eval_impl(
         return {"error": [str(exc)]}
     run_id = run_dir.name
     publication_target = _snapshot_publication_target
+    # The source whose snapshot the run certifies: a plugin run's plugin root, else the evaluated skill.
+    identity_root = publication_root or skill_path
     jobs_dir = run_dir / "_harbor-jobs"
     tasks_dir = run_dir / "_harbor-tasks"
     result_path = run_dir / "result.json"
     report_path: Path | None = None
-    publication_target_conflict: dict[str, Any] | None = None
+    publication_target_conflict: dict[str, Any] | None = (
+        dict(_staging_publication_target_conflict) if _staging_publication_target_conflict else None
+    )
 
     def _run_owned_publication_fields() -> dict[str, Any]:
         """Return the boundary identity, or a fail-closed mutation marker."""
@@ -5374,7 +5408,7 @@ def _run_harbor_eval_impl(
             if isinstance(reason_code, str):
                 conflict["reason_code"] = reason_code
             return {"publication_target": None, "publication_target_conflict": conflict}
-        run_end_target = publication_target_from_path(skill_path)
+        run_end_target = publication_target_from_path(identity_root)
         if run_end_target == publication_target:
             return {
                 "publication_target": dict(publication_target) if publication_target is not None else None,
@@ -5663,8 +5697,8 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage=staging_failure_stage, state="failed", detail=str(exc)))
         return _persist_pre_execution_failure([str(exc)])
 
-    if not _runtime_context_is_bound_to_publication_target(
-        skill_path,
+    if publication_target_conflict is None and not _runtime_context_is_bound_to_publication_target(
+        identity_root,
         staged_task_paths,
         reference_skills_dir=reference_skills_dir,
         workspace_skill_paths=workspace_skills,

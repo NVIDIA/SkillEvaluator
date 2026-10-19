@@ -49,6 +49,10 @@ class EvaluationOptions:
     # prepared plugin snapshot the native harness adapters stage.
     plugin_load: str = "wrapper"
     native_plugin_source: Any = None
+    # Plugin only: the plugin root whose source snapshot the run certifies (the staged package is derived
+    # from it), and that root's publication target as recorded when the package was staged.
+    publication_root: Path | None = None
+    publication_target: dict[str, str] | None = None
     copy_repo: bool = False
     grading_mode: str | None = None
     results_dir: Path | None = None

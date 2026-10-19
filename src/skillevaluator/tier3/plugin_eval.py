@@ -119,6 +119,7 @@ from skillevaluator.plugin_formats import (
     profile_for,
 )
 from skillevaluator.plugin_mcp import mcp_pinning_summary
+from skillevaluator.publication_identity import publication_target_from_path
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries, normalize_dataset_entries
 from skillevaluator.tier3.eval_core.plugin_signals import is_cross_component_case, validate_plugin_case_fields
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
@@ -239,6 +240,11 @@ class PluginEvalPackage:
     # ``{"name", "url", "transport", "headers"}``. Header values are the declared
     # literals or ``${VAR}`` references; they are never persisted.
     mcp_probe_targets: tuple[dict[str, Any], ...] = dataclass_field(default=(), compare=False, hash=False, repr=False)
+    # The plugin root this package was staged from and its publication target (source digest) recorded when the
+    # staging began. ``publication_target`` is ``None`` when the root changed while it was staged (or has no
+    # identity): a run of this package can then never certify the plugin root.
+    publication_root: Path | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
+    publication_target: dict[str, str] | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
 
     def provenance(self) -> dict[str, Any]:
         """Durable record of what a plugin run did and did NOT evaluate.
@@ -425,6 +431,8 @@ def prepare_plugin_eval_package(
 
         policy = resolve_policy()
     plugin = _locate_plugin(plugin_path, allowed_private_hosts=tuple(policy.mcp_allowed_private_hosts))
+    # The plugin root's publication identity before anything is staged from it (#77's digest rules).
+    staged_target = publication_target_from_path(plugin.plugin_dir)
     # Layer-1 intra-repo resolver: canonical skill/rule refs whose <repo> is the
     # plugin's own clone are resolved to real dirs/files under the clone root
     # (widened, slug-verified containment); everything else stays unresolved.
@@ -550,6 +558,13 @@ def prepare_plugin_eval_package(
         cross_component_case_count=_cross_component_case_count(dataset_cases, member_skills),
         dependency_status_counts=dependency_status_counts,
         mcp_probe_targets=tuple(mcp.probe_targets[:MAX_PLUGIN_MANIFEST_ITEMS]),
+        publication_root=plugin.plugin_dir,
+        # Bound only when the root is the same snapshot after staging as before it.
+        publication_target=(
+            staged_target
+            if staged_target is not None and publication_target_from_path(plugin.plugin_dir) == staged_target
+            else None
+        ),
         **report_only,
     )
 

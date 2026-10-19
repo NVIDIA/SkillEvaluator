@@ -5,21 +5,21 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+import pytest
 from _plugin_fixtures import STATISTICS, provenance, tier1_plugin_result, tier2_plugin_result
 from click.testing import CliRunner
 from scripts.ci import check_public_benchmarks as benchmark_gate
-from test_advisory_skip_verdict import _publication_ready_results
+from test_advisory_skip_verdict import _bind_publication_target, _html_report_data, _publication_ready_results
 
 from skillevaluator import cli as cli_module
 from skillevaluator.models import ValidationResult
-from skillevaluator.reporting import BenchmarkReporter
-
-if TYPE_CHECKING:
-    import pytest
+from skillevaluator.publication_identity import publication_target_from_path
+from skillevaluator.reporting import BenchmarkReporter, HTMLReporter, JSONReporter, MarkdownReporter
 
 _DIMENSIONS = ("security", "correctness", "discoverability", "effectiveness", "efficiency")
 
@@ -384,3 +384,94 @@ def test_card_treats_an_overflowing_score_as_missing(tmp_path: Path) -> None:
 
     assert "| Plugin lift (plugin vs. no plugin) | Not available |" in rendered
     assert _gate(tmp_path, rendered) == []
+
+
+# ---------------------------------------------------------------------------
+# #77 publication evidence: plugin Tier 3 evidence certifies the plugin root it was staged from
+# ---------------------------------------------------------------------------
+
+PLUGIN_ROOT_NAME = "candidate-plugin"  # _publication_ready_results("PLUGIN") names its target candidate-plugin
+
+
+def _plugin_root(tmp_path: Path) -> Path:
+    root = tmp_path / PLUGIN_ROOT_NAME
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(f'{{"name": "{PLUGIN_ROOT_NAME}"}}', encoding="utf-8")
+    (root / "skills" / "loader").mkdir(parents=True)
+    (root / "skills" / "loader" / "SKILL.md").write_text("---\nname: loader\n---\n# Loader\n", encoding="utf-8")
+    return root
+
+
+def _staged_package(tmp_path: Path) -> Path:
+    """What Tier 3 runs: a generated package named like the plugin, with other contents."""
+    package = tmp_path / "stage" / PLUGIN_ROOT_NAME
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text("---\nname: candidate-plugin\n---\n# Generated wrapper\n", encoding="utf-8")
+    return package
+
+
+def _plugin_run(tmp_path: Path, tier3_identity: str) -> list[ValidationResult]:
+    """Tier 1 and Tier 2 bound to the plugin root, and a complete Tier 3 plugin run with the given identity."""
+    root_target = publication_target_from_path(_plugin_root(tmp_path))
+    assert root_target is not None
+    results = _publication_ready_results("PLUGIN")
+    _bind_publication_target(results, root_target)
+    tier3 = results[-1]
+    payload = tier3.metadata["agent_eval"]
+    payload["plugin_provenance"] = provenance(partial=False)
+    if tier3_identity == "plugin-root":
+        tier3_target: dict[str, str] | None = root_target
+    elif tier3_identity == "staged-package":
+        tier3_target = publication_target_from_path(_staged_package(tmp_path))
+        assert tier3_target is not None and tier3_target != root_target
+    elif tier3_identity == "mismatched-digest":
+        tier3_target = {**root_target, "skill_digest": "sha256:" + "f" * 64}
+    else:
+        tier3_target = None
+    for container in (tier3.metadata, payload, payload["summary"]):
+        if tier3_target is None:
+            container.pop("publication_target", None)
+        else:
+            container["publication_target"] = dict(tier3_target)
+    return results
+
+
+def _surfaces(tmp_path: Path, results: list[ValidationResult]) -> dict[str, Any]:
+    benchmark = BenchmarkReporter(
+        include_timestamp=False, content_type="plugin", skill_name=PLUGIN_ROOT_NAME
+    ).render_all(results)
+    return {
+        "benchmark": benchmark,
+        "json": JSONReporter(include_timestamp=False, expected_skill_name=PLUGIN_ROOT_NAME).render_all(results),
+        "html": _html_report_data(
+            HTMLReporter(include_timestamp=False, expected_skill_name=PLUGIN_ROOT_NAME).render_all(results)
+        ),
+        "markdown": MarkdownReporter(include_timestamp=False, expected_skill_name=PLUGIN_ROOT_NAME).render_all(results),
+        "gate": _gate(tmp_path, benchmark),
+    }
+
+
+def test_a_complete_plugin_run_bound_to_its_plugin_root_passes_everywhere(tmp_path: Path) -> None:
+    surfaces = _surfaces(tmp_path, _plugin_run(tmp_path, "plugin-root"))
+
+    assert "Overall verdict: PASS" in surfaces["benchmark"]
+    assert "| Tier 3 | Live agent evaluation | **PASS** |" in surfaces["benchmark"]
+    assert json.loads(surfaces["json"])["publication_status"] == "pass"
+    assert surfaces["html"]["publication"]["status"] == "pass"
+    assert "**Publication status:** \u2705 PASS" in surfaces["markdown"]
+    assert surfaces["gate"] == []
+
+
+@pytest.mark.parametrize("tier3_identity", ["staged-package", "missing", "mismatched-digest"])
+def test_plugin_tier3_evidence_not_bound_to_the_plugin_root_is_incomplete_everywhere(
+    tmp_path: Path, tier3_identity: str
+) -> None:
+    surfaces = _surfaces(tmp_path, _plugin_run(tmp_path, tier3_identity))
+
+    assert "Overall verdict: INCOMPLETE" in surfaces["benchmark"]
+    assert "| Tier 3 | Live agent evaluation | **INCOMPLETE** |" in surfaces["benchmark"]
+    assert json.loads(surfaces["json"])["publication_status"] == "incomplete"
+    assert surfaces["html"]["publication"]["status"] == "incomplete"
+    assert "**Publication status:** \u26a0\ufe0f INCOMPLETE" in surfaces["markdown"]
+    # An INCOMPLETE card is still a valid public card; it is just never a PASS.
+    assert surfaces["gate"] == []

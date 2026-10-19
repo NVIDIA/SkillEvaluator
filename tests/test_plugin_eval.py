@@ -57,6 +57,65 @@ def test_contained_plugin_stages_member_skill_and_combined_dataset(tmp_path: Pat
     assert entries[0]["plugin_eval_source_skill"] == "demo"
 
 
+def _contained_plugin(tmp_path: Path) -> Path:
+    plugin = tmp_path / "plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "public-plugin", "skills": "./skills"}), encoding="utf-8")
+    _skill(plugin)
+    return plugin
+
+
+def test_staging_records_the_plugin_roots_publication_identity(tmp_path: Path) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    plugin = _contained_plugin(tmp_path)
+    expected = publication_target_from_path(plugin)
+
+    package = prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
+
+    assert expected is not None
+    assert package.publication_root is not None and package.publication_root.resolve() == plugin.resolve()
+    assert package.publication_target == expected
+    # The staged package is another tree with its own digest: it never stands in for the plugin root.
+    assert package.package_path is not None
+    assert publication_target_from_path(package.package_path) != expected
+
+
+def test_a_plugin_root_that_changes_while_staged_records_no_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plugin = _contained_plugin(tmp_path)
+    real = plugin_eval_module.publication_target_from_path
+    snapshots = iter([real(plugin), {**real(plugin), "skill_digest": "sha256:" + "0" * 64}])
+    monkeypatch.setattr(plugin_eval_module, "publication_target_from_path", lambda _path: next(snapshots))
+
+    package = prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
+
+    assert package.publication_target is None
+
+
+def test_plugin_run_options_carry_the_staged_plugin_root_identity(tmp_path: Path) -> None:
+    from skillevaluator.cli import _plugin_evaluation_options
+
+    plugin = _contained_plugin(tmp_path)
+    package = prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
+
+    options = _plugin_evaluation_options(
+        package,
+        plugin_dir=plugin,
+        lift_mode="effectiveness",
+        effective_lift_mode="effectiveness",
+        integration_skip_reason=None,
+        plugin_load="wrapper",
+        results_dir=None,
+    )
+
+    assert options.skill_path == package.package_path
+    assert options.publication_root == package.publication_root
+    assert options.publication_target == package.publication_target is not None
+
+
 def test_plugin_integration_evidence_is_counted_from_dataset(tmp_path: Path) -> None:
     plugin = tmp_path / "plugin"
     manifest = plugin / ".claude-plugin" / "plugin.json"

@@ -2395,6 +2395,111 @@ def test_runner_fails_publication_closed_for_external_repo_runtime_context(
     assert persisted["publication_target_conflict"] == result["publication_target_conflict"]
 
 
+def _plugin_root(tmp_path: Path) -> Path:
+    root = tmp_path / "demo-plugin"
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text('{"name": "demo-plugin"}', encoding="utf-8")
+    return root
+
+
+def test_plugin_run_certifies_the_plugin_root_it_was_staged_from(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    runner, package = _stub_runner(monkeypatch, tmp_path, skill_name="demo-plugin-plugin-eval")
+    root = _plugin_root(tmp_path)
+    staged = publication_target_from_path(root)
+    assert staged is not None and staged != publication_target_from_path(package)
+
+    result = runner.run_harbor_eval(
+        package,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        publication_root=root,
+        staged_publication_target=staged,
+    )
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+
+    # The run's publication identity is the plugin root's, never the temporary package's.
+    assert result["publication_target"] == persisted["publication_target"] == staged
+    assert "publication_target_conflict" not in persisted
+
+
+@pytest.mark.parametrize("staging", ["not-recorded", "root-changed-after-staging"])
+def test_plugin_run_without_its_staging_identity_certifies_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    staging: str,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    runner, package = _stub_runner(monkeypatch, tmp_path, skill_name="demo-plugin-plugin-eval")
+    root = _plugin_root(tmp_path)
+    staged = None if staging == "not-recorded" else publication_target_from_path(root)
+    if staging == "root-changed-after-staging":
+        (root / "README.md").write_text("changed after its package was staged\n", encoding="utf-8")
+    current = publication_target_from_path(root)
+
+    result = runner.run_harbor_eval(
+        package,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        publication_root=root,
+        staged_publication_target=staged,
+    )
+
+    assert result["publication_target"] is None
+    assert result["publication_target_conflict"] == {"run_start": staged, "run_end": current}
+
+
+def test_plugin_run_whose_root_changes_during_the_run_certifies_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    root = _plugin_root(tmp_path)
+
+    def emit_tasks(_skill: Path, output: Path, **_kwargs: Any) -> list[Path]:
+        (root / "README.md").write_text("changed while the run staged its tasks\n", encoding="utf-8")
+        output.mkdir(parents=True, exist_ok=True)
+        return [output / "case-1"]
+
+    runner, package = _stub_runner(monkeypatch, tmp_path, skill_name="demo-plugin-plugin-eval", task_emitter=emit_tasks)
+    staged = publication_target_from_path(root)
+
+    result = runner.run_harbor_eval(
+        package,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        publication_root=root,
+        staged_publication_target=staged,
+    )
+
+    assert result["publication_target"] is None
+    assert result["publication_target_conflict"] == {
+        "run_start": staged,
+        "run_end": publication_target_from_path(root),
+    }
+
+
+def test_staging_conflict_marker_is_none_only_for_a_matching_plugin_root(tmp_path: Path) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+    from skillevaluator.tier3.harbor.runner import staging_publication_target_conflict
+
+    root = _plugin_root(tmp_path)
+    target = publication_target_from_path(root)
+    assert target is not None
+    other = {**target, "skill_digest": "sha256:" + "0" * 64}
+
+    assert staging_publication_target_conflict(None, None, target) is None  # a skill run has no staging step
+    assert staging_publication_target_conflict(root, target, target) is None
+    assert staging_publication_target_conflict(root, None, target) == {"run_start": None, "run_end": target}
+    assert staging_publication_target_conflict(root, other, target) == {"run_start": other, "run_end": target}
+
+
 def test_runtime_context_binding_rejects_external_reference_and_workspace_skills(tmp_path: Path) -> None:
     from skillevaluator.tier3.harbor.runner import _runtime_context_is_bound_to_publication_target
 

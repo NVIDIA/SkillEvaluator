@@ -3977,6 +3977,13 @@ another tier already failed. An `INCOMPLETE` card never carries a
 Publication Recommendation. The public benchmark gate
 (`scripts/ci/check_public_benchmarks.py`) accepts both card titles.
 
+The plugin card applies the same publication evidence contract as the skill
+card: every tier's evidence must come from a recognized producer and be bound
+to one source snapshot of the plugin root. Tier 1 and Tier 2 record that
+snapshot. Tier 3 runs a staged package and does not yet record the plugin
+root's snapshot, so its evidence is not publication-complete: a plugin card is
+`INCOMPLETE` unless a catalog waives Tier 3.
+
 ## Limitations and not-yet-supported items
 
 Plugin evaluation is useful but deliberately conservative. Today it does not do

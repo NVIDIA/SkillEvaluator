@@ -140,10 +140,11 @@ and environment backends.
 | `tier3` | Docker, local, and cloud live-agent evaluation through Harbor (pins `harbor==0.24.0` and requires `python-dotenv>=1.2.0`); includes `llm` |
 | `security` | Bandit and pip-audit |
 | `all` | `tier2`, `tier3`, and `security` in one bundle |
+| `dashboard` | Local Streamlit tables for comparing saved reports and retained runs (`skillevaluator dashboard`); not included in `all` |
 | `dev` | Build, test, coverage, and formatting tools for contributors |
 
 <Tip>
-`[all]` installs every SkillEvaluator extra. External scanner tools, Docker, agent CLIs, and the Harbor extras for managed sandbox backends (such as `harbor[modal]==0.24.0`) stay separate no matter which extra you pick — see [Agents & Sandboxes](agents-and-sandboxes.mdx#where-trials-run).
+`[all]` installs the evaluator extras (`tier2`, `tier3`, `security`); add `dashboard` with `[all,dashboard]`. External scanner tools, Docker, agent CLIs, and the Harbor extras for managed sandbox backends (such as `harbor[modal]==0.24.0`) stay separate no matter which extra you pick — see [Agents & Sandboxes](agents-and-sandboxes.mdx#where-trials-run).
 </Tip>
 
 ## System tools

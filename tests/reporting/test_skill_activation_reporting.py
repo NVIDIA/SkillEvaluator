@@ -243,6 +243,39 @@ def test_mixed_agent_advice_links_only_eligible_traces_and_keeps_full_diagnostic
         assert all("evidence" not in item for item in deterministic_advice)
 
 
+def test_ungrounded_llm_recommendations_keep_positional_trace_links(monkeypatch) -> None:
+    agent = _agent(activated=True, score=0.6)
+    template = agent["rewards"][0]
+    agent["rewards"] = [
+        {
+            **template,
+            "entry_id": f"case-{index}",
+            "trial_id": f"case-{index}__attempt1",
+            "overall": 0.1 * (index + 1),
+            "harbor_viewer": {"trial_url": f"https://harbor.example.test/jobs/run/trials/{index}"},
+        }
+        for index in range(4)
+    ]
+    agent["num_trials"] = 4
+
+    def build_insights(_payload, **_kwargs):
+        return {
+            "conclusions": [],
+            "recommendations": [
+                {"message": "First ungrounded advice.", "source": "llm"},
+                {"message": "Second ungrounded advice.", "source": "llm"},
+            ],
+        }
+
+    monkeypatch.setattr("skillevaluator.evaluation.insights_judge.build_insights", build_insights)
+    payload = build_agent_eval_payload("demo", {"claude-code": agent}, use_llm_judge=True)
+    assert payload is not None
+    urls = [item["evidence"]["url"] for item in payload["recommendations"]]
+    # Each recommendation keeps its own positional trace, as before per-source link selection.
+    assert len(urls) == 3
+    assert len(set(urls)) == 3
+
+
 def test_missing_or_incomplete_activation_evidence_does_not_assert_never_activated() -> None:
     for change in ({"rewards": []}, {"rewards_complete": False}):
         payload = build_agent_eval_payload("demo", {"opencode": {**_agent(), **change}}, use_llm_judge=False)

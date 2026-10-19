@@ -965,13 +965,15 @@ def build_agent_eval_payload(
             evidence_links,
         )
         linked_recommendations = []
-        for recommendation in payload.get("recommendations") or []:
+        for index, recommendation in enumerate(payload.get("recommendations") or []):
             links = (
                 best_evidence_links
                 if isinstance(recommendation, dict) and recommendation.get("source") == "deterministic"
                 else evidence_links
             )
-            linked_recommendations.extend(_attach_harbor_evidence_to_recommendations([recommendation], links))
+            linked_recommendations.extend(
+                _attach_harbor_evidence_to_recommendations([recommendation], links, start=index)
+            )
         payload["recommendations"] = linked_recommendations
         payload["suggestions_v2"] = _attach_harbor_evidence_to_suggestions_v2(
             payload.get("suggestions_v2") or [],
@@ -2732,12 +2734,14 @@ def _trial_evidence_sort_key(trial: dict[str, Any]) -> tuple[int, str]:
 def _attach_harbor_evidence_to_recommendations(
     recommendations: list[dict[str, Any]],
     evidence_links: list[dict[str, Any]],
+    *,
+    start: int = 0,
 ) -> list[dict[str, Any]]:
     if not recommendations or not evidence_links:
         return recommendations
 
     linked: list[dict[str, Any]] = []
-    for index, recommendation in enumerate(recommendations):
+    for index, recommendation in enumerate(recommendations, start=start):
         if not isinstance(recommendation, dict):
             linked.append(recommendation)
             continue

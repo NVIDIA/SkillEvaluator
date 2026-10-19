@@ -31,14 +31,19 @@ LOCAL_AGENT_IMPORT_PATHS = {
     "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalCodex",
     "opencode": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalOpenCode",
 }
+CONTAINER_AGENT_IMPORT_PATHS = {
+    "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorClaudeCode",
+}
 
 # Docker wrappers retain Harbor's installers while avoiding redundant Node/npm
 # packages on the branches that bootstrap their own runtime. Codex uses the
 # local_agents subclass of that wrapper, which also converts the main thread's
-# rollout when the agent spawns subagents.
+# rollout when the agent spawns subagents. Claude Code uses the container
+# wrapper, which builds on that installer fix and adds Vertex AI routing and
+# rich MCP server declarations.
 DOCKER_AGENT_IMPORT_PATHS = {
     "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorCodex",
-    "claude-code": "skillevaluator.tier3.harbor.installed_agents:SkillEvaluatorClaudeCode",
+    "claude-code": CONTAINER_AGENT_IMPORT_PATHS["claude-code"],
 }
 
 HARBOR_AGENTS_SUPPORTED = frozenset(
@@ -72,6 +77,7 @@ def canonical_agent_name(agent: str) -> str:
 
 __all__ = [
     "AGENT_ALIASES",
+    "CONTAINER_AGENT_IMPORT_PATHS",
     "DEFAULT_ENV_MODE",
     "DEFAULT_LLM_VERIFIER_TIMEOUT_SEC",
     "DOCKER_AGENT_IMPORT_PATHS",

@@ -36,6 +36,7 @@ commands referenced below.
 | [init-harbor-task](#init-harbor-task) | Scaffold a bring-your-own-task Harbor starter | Nothing |
 | [view](#view) | Open the latest HTML live-evaluation report | A previous `tier3 evaluate` run |
 | [compare](#compare) | Compare live-evaluation results across agents | A previous `tier3 evaluate` run |
+| [dashboard](#dashboard) | Filter quantitative tables and paired usage differences | Saved JSON reports or retained runs; dashboard extra |
 | [harbor-view](#harbor-view) | Browse retained Harbor job artifacts | A run made with `--harbor-keep-jobs` |
 | [doctor](#doctor) | Live-evaluation readiness check | Nothing |
 | [health-check](#health-check) | Quick CLI + backend readiness check | Nothing |
@@ -405,7 +406,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; experimental: `hermes` (container environments only, Anthropic provider); the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
-| `--env-mode` | `docker` | Where trials run. SkillEvaluator exposes 25 environment modes: 24 Harbor-native modes — `docker`, `daytona`, `e2b`, `modal`, `runloop`, `langsmith`, `ec2`, `gke`, `ack`, `openshift`, `novita`, `apple-container`, `singularity`, `islo`, `tensorlake`, `cwsandbox`, `wandb`, `use-computer`, `blaxel`, `beam`, `skypilot`, `hyperbrowser`, `vercel`, `kata` — plus SkillEvaluator `local` mode. `wandb` runs Harbor's `cwsandbox` backend with W&B authentication, so it needs the `harbor[cwsandbox]==0.24.0` extra; Harbor 0.24 has no `wandb` extra. Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `runta`, `prime`, `mosaic`, and `smol` backends are not selectable. See the complete extras and prerequisites matrix in [Agents & Sandboxes](agents-and-sandboxes.mdx#where-trials-run). |
+| `--env-mode` | `docker` | Where trials run. SkillEvaluator exposes 27 environment modes: 26 Harbor-native modes — `docker`, `daytona`, `e2b`, `modal`, `runloop`, `langsmith`, `ec2`, `gke`, `ack`, `openshift`, `novita`, `apple-container`, `singularity`, `islo`, `tensorlake`, `cwsandbox`, `wandb`, `use-computer`, `blaxel`, `beam`, `skypilot`, `hyperbrowser`, `vercel`, `kata`, `runta`, `mosaic` — plus SkillEvaluator `local` mode. `wandb` runs Harbor's `cwsandbox` backend with W&B authentication, so it needs the `harbor[cwsandbox]==0.24.0` extra; Harbor 0.24 has no `wandb` extra. Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `prime`, and `smol` backends are not selectable. See the complete extras and prerequisites matrix in [Agents & Sandboxes](agents-and-sandboxes.mdx#where-trials-run). |
 | `--environment-kwarg`, `--ek` | none | Operator-only `KEY=VALUE` constructor option for Harbor-native non-Docker backends (repeatable). Values accept JSON-compatible types; skill-owned `evals/config.yml` cannot set them. Never pass secrets. Docker and local reject all kwargs, Kata accepts only `kata_runtime` and `kata_dns`, and Harbor runtime-policy fields for overrides, mounts, networks, extra Compose, lifecycle, and pod security are reserved, as are `stream`, `enable_environment_dir_upload`, and `auth` for `cwsandbox`/`wandb`. Names the selected backend does not accept in Harbor 0.24.0 are rejected. See [Native backend constructor options](agents-and-sandboxes.mdx#native-backend-constructor-options). |
 | `--autopilot` | off | Create one eval case when no dataset/task source exists, then evaluate. The case is LLM-generated with the configured provider, with a deterministic keyless template fallback; an existing source is never overwritten. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
@@ -593,6 +594,27 @@ skillevaluator compare ./my-skill
 | --- | --- | --- |
 | `--results-dir DIRECTORY` | unset | Results directory to read from. |
 
+## dashboard
+
+Open the optional local tables dashboard. Install the
+[`dashboard` extra](installation.mdx#choosing-extras) first, then pass JSON
+reports, retained run directories, or directories containing reports. With no
+paths, upload JSON files in the browser.
+
+```bash
+skillevaluator dashboard reports/run-a.json reports/run-b.json
+skillevaluator dashboard --no-browser --port 8502
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--port` | `8501`, or the next free port | Local port on 127.0.0.1, from 1 through 65535. Pass it to require a specific port; the command fails if that port is busy. |
+| `--no-browser` | off | Start the server without opening a browser. |
+
+The server listens on `127.0.0.1`; Ctrl+C stops it. See the
+[dashboard guide](reports.mdx#performance-dashboard) for measurements and
+comparison eligibility.
+
 ## harbor-view
 
 Open retained Harbor job artifacts with Harbor's trajectory browser. Takes a jobs directory as its argument and has no options. Jobs are only retained when the original run passed `--harbor-keep-jobs`. `skillevaluator tier3 harbor-view` is an identical tier-prefixed spelling.
@@ -612,7 +634,7 @@ skillevaluator doctor --env-mode docker
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-a, --agents TEXT` | provider-native | Comma-separated agents to check. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. |
-| `--env-mode` | `docker` | Backend to check (same 25 modes as [tier3 evaluate](#tier3-evaluate)). |
+| `--env-mode` | `docker` | Backend to check (same 27 modes as [tier3 evaluate](#tier3-evaluate)). |
 | `--environment-kwarg`, `--ek` | none | `KEY=VALUE` non-secret constructor option for a Harbor-native non-Docker backend (repeatable). Pass the same values intended for evaluation. Docker and local reject all kwargs, and Kata accepts only `kata_runtime` and `kata_dns`; policy-owned fields are rejected for every eligible backend. |
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable) — check readiness with the model each agent will actually run. |
 | `--verify-models` | off | Live per-agent catalog probe. Prints pass for verified access, warn for an inconclusive or non-authoritative result (success or failure), and fail only for a definitive credential, model, or configuration rejection. |
@@ -630,7 +652,7 @@ skillevaluator health-check
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-a, --agents TEXT` | provider-native | Comma-separated agents to check. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. |
-| `--env-mode` | `docker` | Backend to check (same 25 modes as [tier3 evaluate](#tier3-evaluate)). |
+| `--env-mode` | `docker` | Backend to check (same 27 modes as [tier3 evaluate](#tier3-evaluate)). |
 | `--environment-kwarg`, `--ek` | none | `KEY=VALUE` non-secret constructor option for a Harbor-native non-Docker backend (repeatable). Pass the same values intended for evaluation. Docker and local reject all kwargs, and Kata accepts only `kata_runtime` and `kata_dns`; policy-owned fields are rejected for every eligible backend. |
 
 ## models

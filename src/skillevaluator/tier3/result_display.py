@@ -23,11 +23,14 @@ from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
+    DEFAULT_SCORE_POLICY,
     DIMENSION_DISPLAY,
+    LEGACY_SCORE_POLICY,
     METRIC_DISPLAY,
     dimension_is_not_applicable,
     finite_number,
     not_applicable_list,
+    overall_score_from_metrics,
 )
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.tier3.harbor.runner import format_harbor_view_command
@@ -112,18 +115,10 @@ def _default_with_skill_overall(data: Mapping[str, Any]) -> float | None:
     scores = data.get("with_skill")
     if not isinstance(scores, Mapping):
         return None
-    not_applicable = _not_applicable_metrics(data, "with_skill")
-    values: list[float] = []
-    for metric in DEFAULT_METRICS:
-        value = finite_number(scores.get(metric))
-        if value is None:
-            if metric in not_applicable:
-                continue
-            return None
-        values.append(value)
-    if not values:
-        return None
-    return round(sum(values) / len(values), 4)
+    score = overall_score_from_metrics(
+        scores, DEFAULT_METRICS, not_applicable=_not_applicable_metrics(data, "with_skill")
+    )
+    return round(score, 4) if score is not None else None
 
 
 def _custom_only_with_skill_overall(data: Mapping[str, Any]) -> float | None:
@@ -150,19 +145,35 @@ def _custom_only_with_skill_overall(data: Mapping[str, Any]) -> float | None:
     return round(sum(scores) / len(scores), 4)
 
 
-def _with_skill_overall(data: Mapping[str, Any], metric_set: object) -> float | None:
+def _with_skill_overall(
+    data: Mapping[str, Any], metric_set: object, *, score_policy: object = DEFAULT_SCORE_POLICY
+) -> float | None:
     if data.get("execution_status") != "succeeded":
         return None
 
     if _condition_status(data, "without_skill") == "skipped":
         if metric_set == DEFAULT_METRIC_SET:
-            return _default_with_skill_overall(data)
+            if score_policy == DEFAULT_SCORE_POLICY:
+                return _default_with_skill_overall(data)
+            persisted = finite_number(data.get("overall_with_skill"))
+            if persisted is not None:
+                return persisted
+            if score_policy == LEGACY_SCORE_POLICY or score_policy is None:
+                scores = data.get("with_skill")
+                if isinstance(scores, Mapping):
+                    values = [finite_number(scores.get(metric)) for metric in DEFAULT_METRICS]
+                    if all(value is not None for value in values):
+                        return round(sum(value for value in values if value is not None) / len(values), 4)
+            return None
         if metric_set == CUSTOM_ONLY_METRIC_SET:
             return _custom_only_with_skill_overall(data)
         return None
 
     lift = data.get("lift")
     overall = lift.get("overall") if isinstance(lift, Mapping) else None
+    if not isinstance(overall, Mapping) and metric_set == CUSTOM_ONLY_METRIC_SET:
+        custom_lift = data.get("custom_lift")
+        overall = custom_lift.get("overall") if isinstance(custom_lift, Mapping) else None
     persisted = overall.get("with_skill") if isinstance(overall, Mapping) else None
     return finite_number(persisted)
 
@@ -526,11 +537,17 @@ def _render_agent_scores(
             table.add_row(*row)
 
     if not metrics and not custom_with and not custom_without and not show_baseline:
-        with_overall = _with_skill_overall(data, result.get("metric_set"))
+        with_overall = _with_skill_overall(
+            data,
+            result.get("metric_set"),
+            score_policy=data.get("score_policy_with_skill", result.get("score_policy")),
+        )
         score, bar = _score_cell(with_overall)
         table.add_row(Text("Overall", style="bold"), score, bar)
 
     overall = _report_lift_overall(data, lift, members_baseline=members_baseline)
+    if not overall and result.get("metric_set") == CUSTOM_ONLY_METRIC_SET:
+        overall = custom_lift.get("overall") if isinstance(custom_lift.get("overall"), Mapping) else {}
     with_overall = overall.get("with_skill") if with_usable else None
     baseline_overall = overall.get("without_skill") if baseline_usable else None
     if show_baseline and (finite_number(with_overall) is not None or finite_number(baseline_overall) is not None):
@@ -542,7 +559,10 @@ def _render_agent_scores(
             if finite_number(with_overall) is not None and finite_number(baseline_overall) is not None
             else None
         )
-        lift_label = Text("Lift vs. members" if members_baseline else "Skill Lift", style="bold")
+        if result.get("metric_set") == CUSTOM_ONLY_METRIC_SET:
+            lift_label = Text("Overall", style="bold")
+        else:
+            lift_label = Text("Lift vs. members" if members_baseline else "Skill Lift", style="bold")
         delta_cell = _delta_cell(delta)
         if _partial_plugin_run(result):
             # An INCOMPLETE plugin run has no final lift: keep the arm scores, not a final-looking delta.

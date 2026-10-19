@@ -198,7 +198,7 @@ Examples:
 
 _TOP_LEVEL_COMMAND_HELP_GROUPS = (
     ("Tier workflows", ("tier1", "tier2", "tier3")),
-    ("Core workflows", ("validate", "health-check", "doctor", "models")),
+    ("Core workflows", ("validate", "health-check", "doctor", "models", "dashboard")),
     (
         "Tier 1 · Static and security",
         ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts"),
@@ -3613,6 +3613,20 @@ def dedup_scan(
         raise click.ClickException("dedup scan failed")
 
 
+def _parse_environment_kwargs_cli(
+    raw_kwargs: tuple[str, ...],
+    *,
+    env_mode: str | None = None,
+) -> dict[str, Any]:
+    """Parse and validate environment kwargs for CLI commands, raising Click BadParameter on errors."""
+    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+
+    try:
+        return parse_environment_kwarg_overrides(raw_kwargs, env_mode=env_mode)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint=["--ek"]) from exc
+
+
 def _workflow_report_options(func):
     func = _report_options(func)
     for param in func.__click_params__:
@@ -3878,6 +3892,8 @@ def evaluate(
     if autopilot:
         _ensure_autopilot_dataset(skill_path, progress=progress)
 
+    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
+
     options = EvaluationOptions(
         skill_path=skill_path,
         agents=agents,
@@ -3905,6 +3921,7 @@ def evaluate(
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
         evaluated_source=evaluated_source,
+        environment_kwargs=parsed_environment_kwargs,
     )
     try:
         if env_mode == "local":
@@ -3923,6 +3940,31 @@ def evaluate(
                     padding=(0, 1),
                 )
             )
+        elif env_mode == "gke":
+            from skillevaluator.tier3.commands import parse_agents
+            from skillevaluator.tier3.harbor.runner import (
+                is_gke_vertex_workload_identity_active,
+                is_gke_workload_identity_allowed,
+            )
+
+            if is_gke_vertex_workload_identity_active(
+                env_mode, parse_agents(agents)
+            ) and is_gke_workload_identity_allowed(options.environment_kwargs):
+                from rich.panel import Panel
+                from rich.text import Text
+
+                console.print(
+                    Panel(
+                        Text(
+                            "Intended for trusted skills and least-privilege service accounts. Harbor 0.24.0 single-pod "
+                            "GKE execution shares the pod service account and metadata server with evaluated skill commands.",
+                            style="yellow",
+                        ),
+                        title=Text("GKE Workload Identity · Trusted Skills Only", style="bold cyan"),
+                        border_style="yellow",
+                        padding=(0, 1),
+                    )
+                )
         progress_reporter = create_progress_reporter(progress, stream=click.get_text_stream("stderr"))
         engine_result = service.evaluate(options, progress_reporter=progress_reporter)
         failure = service.failure_reason(engine_result)
@@ -4447,6 +4489,26 @@ def models_command(limit: int, as_json: bool) -> None:
     raise SystemExit(run_models_command(limit=limit, as_json=as_json))
 
 
+@cli.command("dashboard")
+@click.argument("paths", nargs=-1, type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--port",
+    type=click.IntRange(1, 65535),
+    default=None,
+    help="Local port on 127.0.0.1 (default 8501, or the next free port).",
+)
+@click.option("--no-browser", is_flag=True, help="Start the server without opening a browser.")
+def dashboard_command(paths: tuple[Path, ...], port: int | None, no_browser: bool) -> None:
+    """Compare saved JSON reports or retained Tier 3 run directories in tables.
+
+    Install skillevaluator[dashboard] first. With no PATHS, upload JSON reports
+    in the browser. The server listens on 127.0.0.1; Ctrl+C stops it.
+    """
+    from skillevaluator.reporting.dashboard import launch_dashboard
+
+    raise SystemExit(launch_dashboard(paths, port=port, no_browser=no_browser))
+
+
 @cli.command()
 @click.option(
     "-a",
@@ -4480,6 +4542,7 @@ def doctor(
     """Check live-evaluation runtime readiness."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
+    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
     raise SystemExit(
         tier3_doctor(
             agents=agents,
@@ -4487,6 +4550,7 @@ def doctor(
             environment_kwarg=environment_kwarg,
             verify_models=verify_models,
             agent_model=agent_model,
+            environment_kwargs=parsed_environment_kwargs,
         )
     )
 
@@ -4509,6 +4573,7 @@ def health_check(agents: str | None, env_mode: str, environment_kwarg: tuple[str
     """Quick readiness check for the CLI and selected live-eval backend."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
+    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
     raise SystemExit(
         tier3_doctor(
             agents=agents,
@@ -4516,6 +4581,7 @@ def health_check(agents: str | None, env_mode: str, environment_kwarg: tuple[str
             environment_kwarg=environment_kwarg,
             verify_models=False,
             agent_model=(),
+            environment_kwargs=parsed_environment_kwargs,
         )
     )
 

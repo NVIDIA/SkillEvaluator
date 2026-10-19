@@ -433,7 +433,7 @@ explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
 ## Where agents run
 
-`--env-mode` selects one of 25 environment modes: 24 Harbor-native backends,
+`--env-mode` selects one of 27 environment modes: 26 Harbor-native backends,
 including the default Docker backend, plus SkillEvaluator's **local mode**,
 which runs the agent CLI directly on the host under an OS-sandbox policy.
 Managed backends such as `daytona`, `e2b`, and `modal` require their mapped
@@ -446,8 +446,8 @@ Validate any managed backend's extra, credentials, infrastructure, and
 constructor settings with `doctor` and its Harbor preflight before relying on
 it.
 
-Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `runta`, `prime`,
-`mosaic`, and `smol` backends are not selectable because they cannot
+Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `prime`, and
+`smol` backends are not selectable because they cannot
 yet receive SkillEvaluator's complete generated task bundle through a trusted
 image or backend-native provisioning path.
 
@@ -891,13 +891,48 @@ rollups, followed by a compact Artifacts panel pointing at the report and
 output directory. A failed run renders the same structured display instead of
 a bare exception.
 
-| Dimension | Key question | Maps to | Weights |
-| --- | --- | --- | --- |
-| Security | Is it safe to use? | `security` | 1.0 |
-| Correctness | Is the answer correct? | `accuracy` | 1.0 |
-| Discoverability | Was the right skill loaded when needed? | `skill_execution` | 1.0 |
-| Effectiveness | Did the skill help complete the task? | `goal_accuracy` + `behavior_check` | 0.5 + 0.5 |
-| Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency` | 1.0 |
+Every evaluator score and dimension score is on a 0.0 to 1.0 scale. The
+generated standard grader rejects non-finite values and clamps numeric scores
+with `max(0.0, min(1.0, score))`. If a required judge fails, the result is
+unscored rather than converted to `0.0`.
+
+| Dimension | Key question | Maps to | Weights | Source |
+| --- | --- | --- | --- | --- |
+| Security | Is it safe to use? | `security` | 1.0 | Deterministic checks of the trace and agent actions |
+| Correctness | Is the answer correct? | `accuracy` | 1.0 | LLM judge (`judge_accuracy`) |
+| Discoverability | Was the right skill loaded when needed? | `skill_execution` | 1.0 | Deterministic checks of the trajectory and tool calls |
+| Effectiveness | Did the skill help complete the task? | `goal_accuracy` + `behavior_check` | 0.5 + 0.5 | LLM judges (`judge_goal_accuracy`, `judge_behavior_check`) |
+| Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency` | 1.0 | Deterministic checks of the trajectory and tool calls |
+
+The run's configured judge provider and model are stored under `judge` in
+`run_config.json`, separately from the agent's provider and model. The same run
+configuration is embedded in `result.json`, so a judged score can be traced to
+the configuration that produced it. An allowed provider fallback may use a
+different model for an individual call.
+
+This provenance does not establish that the LLM judgments are correct. The
+repository does not publish inter-rater agreement, calibration results, or a
+comparison against human-labeled ground truth for these judges.
+
+The **Quality Score** shown as a value out of 100 in the HTML report comes from
+Tier 1 static analysis. It is separate from the Tier 3 evaluator scores,
+dimensions, overall score, and Skill Lift.
+
+For standard grading, the overall score is the equal-weight mean of these five
+dimensions:
+
+```text
+overall = (Security + Correctness + Discoverability + Effectiveness + Efficiency) / 5
+Effectiveness = (goal_accuracy + behavior_check) / 2
+```
+
+Effectiveness therefore enters the overall score once; its two source
+evaluators do not receive an extra combined vote. The same aggregate drives
+per-attempt pass@k, Skill Lift, comparison output, and best-agent selection.
+Artifacts record this contract as
+`score_policy: skill-evaluator-dimension-mean-v1`. Legacy metric sets and
+historical partial reports retain their recorded scoring semantics instead of
+being silently reinterpreted.
 
 `token_efficiency` is a standalone report signal, not a dimension source. It
 never changes a dimension score or the overall verdict.
@@ -923,17 +958,18 @@ agent passes only when every dimension passes. The top-level Tier 3 verdict is:
 | Fail | Every successful agent has a dimension below 0.40 |
 
 Skill Lift is the signed difference between the with-skill result and the
-without-skill baseline. The baseline has no skill to discover or route to, so
-it has no Discoverability or Efficiency score. Skill Lift therefore compares
-the two arms case by case on the dimensions both scored, so skill activation
-alone earns no lift; the full with-skill score that the verdict uses still
-covers every dimension. Its independent band is **PASS** at +0.05 or above,
-**NEUTRAL** between -0.10 and +0.05, and **FAIL** at -0.10 or below. The band
-never changes the every-dimension verdict. A FAIL-band lift whose interval lies
-wholly below zero is a confirmed regression: the report warns, `BENCHMARK.md`
-says FAIL, and `--block-on-agent-eval` fails `validate`. With fewer than 5
-paired cases the interval is too unstable to confirm a regression, so such a
-lift only warns. A
+without-skill baseline. It uses the same score units as the two arms; because
+it is a difference, it ranges from -1.0 to +1.0. The baseline has no skill to
+discover or route to, so it has no Discoverability or Efficiency score. Skill
+Lift therefore compares the two arms case by case on the dimensions both
+scored, so skill activation alone earns no lift; the full with-skill score that
+the verdict uses still covers every dimension. Its independent band is **PASS**
+at +0.05 or above, **NEUTRAL** between -0.10 and +0.05, and **FAIL** at -0.10
+or below. The band never changes the every-dimension verdict. A FAIL-band lift
+whose interval lies wholly below zero is a confirmed regression: the report
+warns, `BENCHMARK.md` says FAIL, and `--block-on-agent-eval` fails `validate`.
+With fewer than 5 paired cases the interval is too unstable to confirm a
+regression, so such a lift only warns. A
 report-only 95% interval from a paired, case-clustered bootstrap accompanies
 the lift; when that interval includes zero the report adds a warning, but the
 band is unchanged.
@@ -1026,7 +1062,7 @@ The canonical Tier 3 payload embedded by both standalone `evaluate` and
 `validate --agent-eval` reports uses schema version 2.0. A completed
 standard-grading payload includes the summary, five dimensions, per-agent
 results, trials, pass@k, attempt policy, run-owned dataset summary and digest,
-evaluation timestamp, evaluator version, and verdict policy; advisory or
+evaluation timestamp, evaluator version, score policy, and verdict policy; advisory or
 skipped payloads may leave live-evidence sections empty.
 
 Generated `BENCHMARK.md` cards put the verdict first, label each result column

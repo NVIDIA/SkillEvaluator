@@ -10,12 +10,19 @@ import re
 from collections.abc import Callable, Collection, Iterable, Mapping
 from typing import Any
 
-from skillevaluator.constants import DIMENSION_MAPPING
+from skillevaluator.constants import DEFAULT_SCORE_POLICY, DIMENSION_MAPPING
 from skillevaluator.utils.redaction import contains_credential_value, is_sensitive_key
 
 DEFAULT_METRIC_SET = "skill-evaluator-default-v2"
 LEGACY_METRIC_SET = "skill-evaluator-default-v1"
 CUSTOM_ONLY_METRIC_SET = "custom-only"
+
+LEGACY_SCORE_POLICY = "skill-evaluator-metric-mean-v1"
+CUSTOM_SCORE_POLICY = "custom-overall-v1"
+PARTIAL_SCORE_POLICY = "legacy-partial-dimension-mean-v1"
+SUPPORTED_SCORE_POLICIES = frozenset(
+    {DEFAULT_SCORE_POLICY, LEGACY_SCORE_POLICY, CUSTOM_SCORE_POLICY, PARTIAL_SCORE_POLICY}
+)
 
 DEFAULT_METRICS = (
     "security",
@@ -116,6 +123,7 @@ _RESERVED_METADATA_KEYS = {
     "metric_set_version",
     "metrics",
     "overall",
+    "score_policy",
     "trajectory_detail",
     "trajectory_source",
 }
@@ -449,35 +457,129 @@ def average_metrics(rewards: list[dict[str, Any]]) -> tuple[dict[str, float], st
     return averages, metric_set, metrics
 
 
+def score_policy_for_metrics(metrics: tuple[str, ...]) -> str:
+    """Return the versioned overall-score policy for one metric set."""
+    if metrics == DEFAULT_METRICS:
+        return DEFAULT_SCORE_POLICY
+    if metrics == LEGACY_METRICS:
+        return LEGACY_SCORE_POLICY
+    if not metrics:
+        return CUSTOM_SCORE_POLICY
+    return PARTIAL_SCORE_POLICY
+
+
+def canonical_dimension_mean(values: Iterable[object]) -> float | None:
+    """Average one complete canonical dimension set, failing closed on gaps."""
+    raw_values = tuple(values)
+    if len(raw_values) != len(DIMENSION_DEFINITIONS):
+        return None
+    numeric = tuple(finite_number(value) for value in raw_values)
+    if any(value is None or not 0.0 <= value <= 1.0 for value in numeric):
+        return None
+    return round(sum(value for value in numeric if value is not None) / len(numeric), 4)
+
+
+def overall_score_from_metrics(
+    scores: Mapping[str, object],
+    metrics: tuple[str, ...] = DEFAULT_METRICS,
+    *,
+    not_applicable: Collection[str] = (),
+) -> float | None:
+    """Aggregate one metric set using its versioned score policy.
+
+    Metrics in *not_applicable* (N/A for every attempt of the arm, so not
+    scored) are left out: an N/A metric drops out of its dimension, and a
+    dimension whose metrics are all N/A drops out of the mean. Every other
+    metric must carry a score.
+    """
+    skipped = {
+        metric
+        for metric in metrics
+        if metric in not_applicable
+        and metric in NOT_APPLICABLE_ELIGIBLE_METRICS
+        and score_value(scores.get(metric)) is None
+    }
+    applicable = tuple(metric for metric in metrics if metric not in skipped)
+    values = tuple(finite_number(scores.get(metric)) for metric in applicable)
+    if not values or any(value is None or not 0.0 <= value <= 1.0 for value in values):
+        return None
+
+    if metrics != LEGACY_METRICS and all(metric in DEFAULT_METRICS for metric in metrics):
+        dimensions = dimension_scores(dict(zip(applicable, values, strict=True)), tuple(skipped))
+        dimension_values = tuple(
+            dimensions[dimension]["score"] for dimension in DIMENSION_DEFINITIONS if dimension in dimensions
+        )
+        if metrics == DEFAULT_METRICS and not skipped:
+            return canonical_dimension_mean(dimension_values)
+        return round(sum(dimension_values) / len(dimension_values), 4) if dimension_values else None
+
+    return round(sum(value for value in values if value is not None) / len(values), 4)
+
+
 def overall_score(reward: dict[str, Any]) -> float | None:
     """Compute pass@k/lift overall score for a reward payload.
 
-    SkillEvaluator default rewards use the mean of their active SkillEvaluator metric set,
-    excluding metrics explicitly recorded as not applicable.  Custom rewards
-    without SkillEvaluator metrics can still pass through by emitting numeric
-    ``overall``.
+    Default rewards use the equal-weight mean of the five canonical dimensions.
+    Legacy metric sets retain their historical metric mean. Both leave out
+    metrics explicitly recorded as not applicable: an N/A metric drops out of its
+    dimension, and a dimension whose metrics are all N/A drops out of the mean.
+    Custom rewards without SkillEvaluator metrics can still pass through by
+    emitting numeric ``overall``.
     """
     _, metrics = metric_set_for_reward(reward)
-    if metrics:
-        values: list[float] = []
-        for metric in metrics:
-            value = metric_value(reward, metric)
-            if value is not None:
-                values.append(value)
-            elif not metric_is_not_applicable(reward, metric):
-                return None
-        if not values:
-            return None
-        return sum(values) / len(values)
+    persisted = score_value(reward.get("overall"))
+    policy = reward.get("score_policy")
+    policy = policy.strip() if isinstance(policy, str) and policy.strip() else None
+    if not metrics:
+        return persisted if policy in {None, CUSTOM_SCORE_POLICY} else None
+    if policy == CUSTOM_SCORE_POLICY:
+        return None
+    if policy == DEFAULT_SCORE_POLICY and metrics != DEFAULT_METRICS:
+        return None
+    if policy == PARTIAL_SCORE_POLICY and metrics in {DEFAULT_METRICS, LEGACY_METRICS}:
+        return None
 
-    return score_value(reward.get("overall"))
+    scores: dict[str, float] = {}
+    not_applicable: list[str] = []
+    for metric in metrics:
+        value = metric_value(reward, metric)
+        if value is None and metric_is_not_applicable(reward, metric):
+            not_applicable.append(metric)
+            continue
+        if value is None or not 0.0 <= value <= 1.0:
+            return None
+        scores[metric] = value
+    if not scores:
+        return None
+    if policy is None:
+        current = overall_score_from_metrics(scores, metrics, not_applicable=not_applicable)
+        if persisted is not None and metrics == DEFAULT_METRICS:
+            # The historical formula: the mean of the scored metrics (N/A metrics left out).
+            historical = round(sum(scores.values()) / len(scores), 4)
+            if round(persisted, 4) == historical and historical != current:
+                return historical
+        return current
+    if policy not in SUPPORTED_SCORE_POLICIES:
+        # A new attempt using an unknown formula cannot be scored here.
+        return None
+    if policy == LEGACY_SCORE_POLICY:
+        return round(sum(scores.values()) / len(scores), 4)
+    return overall_score_from_metrics(scores, metrics, not_applicable=not_applicable)
 
 
 def score_definition(metrics: tuple[str, ...] = DEFAULT_METRICS) -> str:
     """Human-readable definition for the SkillEvaluator overall score."""
     if not metrics:
-        return "overall = user-provided reward overall"
-    definition = "overall = mean(" + ", ".join(metrics) + ")"
+        return f"overall = user-provided reward overall [{CUSTOM_SCORE_POLICY}]"
+    if metrics == DEFAULT_METRICS:
+        definition = (
+            "overall = mean(Security, Correctness, Discoverability, Effectiveness, Efficiency) "
+            f"[{DEFAULT_SCORE_POLICY}]"
+        )
+    elif metrics == LEGACY_METRICS:
+        definition = "overall = mean(" + ", ".join(metrics) + f") [{LEGACY_SCORE_POLICY}]"
+    else:
+        definition = f"overall = mean(available canonical dimensions) [{PARTIAL_SCORE_POLICY}]"
     if any(metric in NOT_APPLICABLE_ELIGIBLE_METRICS for metric in metrics):
         definition += ", excluding metrics that are not applicable to a case"
     return definition

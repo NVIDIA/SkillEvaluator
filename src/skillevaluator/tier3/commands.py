@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
 import tempfile
 import tomllib
 import webbrowser
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +39,19 @@ from skillevaluator.tier3.harbor import (
     HARBOR_AGENTS_SUPPORTED,
     canonical_agent_name,
 )
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS, not_applicable_list
+from skillevaluator.tier3.harbor.metrics import (
+    CUSTOM_ONLY_METRIC_SET,
+    CUSTOM_SCORE_POLICY,
+    DEFAULT_METRIC_SET,
+    DEFAULT_METRICS,
+    DEFAULT_SCORE_POLICY,
+    LEGACY_METRIC_SET,
+    LEGACY_METRICS,
+    LEGACY_SCORE_POLICY,
+    PARTIAL_SCORE_POLICY,
+    not_applicable_list,
+    overall_score_from_metrics,
+)
 from skillevaluator.tier3.harbor.progress import (
     NullProgressReporter,
     ProgressEvent,
@@ -53,6 +67,7 @@ from skillevaluator.tier3.harbor.runner import (
     _harbor_launch_environment,
     _model_for_agent,
     _resolve_agent_runtime_plan,
+    _resolve_environment_kwargs,
     run_harbor_eval,
 )
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
@@ -390,6 +405,17 @@ def parse_agent_model_overrides(raw_overrides: tuple[str, ...]) -> dict[str, lis
     return overrides
 
 
+def parse_environment_kwargs(
+    raw_kwargs: tuple[str, ...] | list[str],
+    *,
+    env_mode: str | None = None,
+) -> dict[str, Any]:
+    """Parse repeatable ``--ek key=value`` CLI pairs via ``parse_environment_kwarg_overrides``."""
+    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+
+    return parse_environment_kwarg_overrides(raw_kwargs, env_mode=env_mode)
+
+
 def validate_agents(agents: list[str]) -> list[str]:
     """Return unsupported agent names."""
     return [agent for agent in agents if agent not in HARBOR_AGENTS]
@@ -669,6 +695,7 @@ def evaluate(
     repo_context_exclude_paths: tuple[Path, ...] = (),
     evaluated_source: dict[str, str] | None = None,
     progress_reporter: ProgressReporter | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run Harbor live-agent evaluation for a skill."""
     env_mode = _engine_env_mode(env_mode)
@@ -718,7 +745,8 @@ def evaluate(
         agent_models = parse_agent_model_overrides(agent_model)
         from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
 
-        environment_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
+        parsed_cli_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
+        merged_environment_kwargs = {**dict(environment_kwargs or {}), **parsed_cli_kwargs}
         unknown_model_agents = sorted(set(agent_models) - set(agent_list))
         if unknown_model_agents:
             raise ValueError(
@@ -757,7 +785,7 @@ def evaluate(
             agent_runtime_preflight=agent_runtime_preflight,
             env_mode=env_mode,
             env_mode_source="CLI",
-            environment_kwargs=environment_kwargs,
+            environment_kwargs=merged_environment_kwargs,
             timeout_multiplier=timeout_multiplier,
             trial_retries=trial_retries,
             evaluated_source=evaluated_source,
@@ -782,13 +810,29 @@ def doctor(
     environment_kwarg: tuple[str, ...] = (),
     verify_models: bool = False,
     agent_model: tuple[str, ...] = (),
+    environment_kwargs: Mapping[str, Any] | None = None,
 ) -> int:
     """Check whether live evaluation dependencies are available."""
+    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+
     env_mode = _engine_env_mode(env_mode)
     agent_list = parse_agents(agents) if agents is not None else []
     rows: list[tuple[str, str, str]] = []
     rows.append(("CLI package", "pass", f"skillevaluator {__version__}"))
 
+    kwarg_parse_error: str | None = None
+    try:
+        parsed_cli_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
+    except ValueError as exc:
+        parsed_cli_kwargs = {}
+        kwarg_parse_error = str(exc)
+
+    merged_cli_kwargs = {**dict(environment_kwargs or {}), **parsed_cli_kwargs}
+    resolved_env_kwargs = _resolve_environment_kwargs(
+        env_mode,
+        cli_kwargs=merged_cli_kwargs,
+        environ=os.environ,
+    )
     provider = None
     model_resolution: dict[str, tuple[str, str]] = {}
     runtime_plans: dict[str, Any] = {}
@@ -833,6 +877,7 @@ def doctor(
                     configured_runtime_env={},
                     env_mode=env_mode,
                     model_sources={agent: details[1] for agent, details in model_resolution.items()},
+                    environment_kwargs=resolved_env_kwargs,
                 )
             except ValueError as exc:
                 plan_error = str(exc)
@@ -860,20 +905,16 @@ def doctor(
     else:
         rows.append(("Harbor agents", "pass", ", ".join(agent_list)))
 
-    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
-
-    try:
-        environment_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
-    except ValueError as exc:
-        environment_kwargs = {}
-        prereq_errors = [str(exc)]
+    if kwarg_parse_error is not None:
+        prereq_errors = [kwarg_parse_error]
     else:
         prerequisite_subprocess_env = dict(next(iter(runtime_plans.values())).subprocess_env) if runtime_plans else None
         prereq_errors = _check_prerequisites(
             env_mode=env_mode,
             agents=agent_list,
-            environment_kwargs=environment_kwargs,
+            environment_kwargs=resolved_env_kwargs,
             subprocess_env=prerequisite_subprocess_env,
+            verify_live_cluster=verify_models,
         )
     if prereq_errors:
         for error in prereq_errors:
@@ -885,24 +926,31 @@ def doctor(
         if provider is None or not runtime_plans:
             rows.append(("provider model", "fail", "provider model resolution was unavailable"))
         else:
+            from skillevaluator.tier3.harbor.gke_environment import (
+                GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL,
+            )
             from skillevaluator.tier3.harbor.runtime_preflight import (
                 CredentialProbeDisposition,
                 credential_probe_disposition,
+                is_unverified_gke_vertex_auth_probe,
                 probe_model,
             )
 
             for agent in agent_list:
                 selected_provider = runtime_plans[agent].provider
                 probe = probe_model(selected_provider)
-                disposition = credential_probe_disposition(selected_provider, probe)
+                disposition = credential_probe_disposition(selected_provider, probe, env_mode=env_mode)
                 if disposition == CredentialProbeDisposition.FATAL:
                     status = "fail"
                     detail = probe.detail
                 elif disposition == CredentialProbeDisposition.DEGRADED:
                     status = "warn"
-                    detail = probe.detail
-                    if probe.ok:
-                        detail = f"{detail}; catalog access does not verify runtime credentials for this endpoint"
+                    if is_unverified_gke_vertex_auth_probe(selected_provider, probe, env_mode=env_mode):
+                        detail = GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL
+                    elif probe.ok:
+                        detail = f"{probe.detail}; catalog access does not verify runtime credentials for this endpoint"
+                    else:
+                        detail = probe.detail
                 else:
                     status = "pass"
                     detail = probe.detail
@@ -1089,24 +1137,56 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                     data = json.loads(summary.read_text(encoding="utf-8"))
                 except (ValueError, OSError):
                     continue
+                if not isinstance(data, dict):
+                    continue
                 scores = _summary_scores(data, allow_missing_status=allow_missing_status)
-                if scores:
+                overall = _summary_overall(data) if _summary_is_scoreable(data, allow_missing_status) else None
+                if scores or overall is not None:
                     root_with[agent_name] = scores
                     root_not_applicable[agent_name] = _summary_not_applicable(data)
                     root_meta[agent_name] = {
                         "timestamp": ts_dir.name,
                         "path": str(agent_dir),
                         "num_trials": data.get("num_trials", "?"),
+                        "overall_with_skill": overall,
+                        "score_policy_with_skill": _summary_score_policy(data),
+                        "standard_metrics": _summary_standard_metrics(data),
+                        "custom_only": _summaries_are_custom_only([data]),
                     }
                     wo_summary = agent_dir / "without-skill" / "summary.json"
                     if wo_summary.exists():
                         try:
                             wo_data = json.loads(wo_summary.read_text(encoding="utf-8"))
-                            wo_scores = _summary_scores(wo_data, allow_missing_status=allow_missing_status)
-                            if wo_scores:
+                            if isinstance(wo_data, dict):
+                                root_meta[agent_name]["custom_only"] = _summaries_are_custom_only([data, wo_data])
+                            wo_scores = _summary_scores(
+                                wo_data,
+                                allow_missing_status=allow_missing_status,
+                            )
+                            wo_overall = (
+                                _summary_overall(wo_data)
+                                if isinstance(wo_data, dict) and _summary_is_scoreable(wo_data, allow_missing_status)
+                                else None
+                            )
+                            if (wo_scores or wo_overall is not None) and (
+                                _effective_compare_policy(
+                                    root_meta[agent_name]["score_policy_with_skill"],
+                                    root_with[agent_name],
+                                    root_not_applicable[agent_name],
+                                )
+                                == _effective_compare_policy(
+                                    _summary_score_policy(wo_data), wo_scores, _summary_not_applicable(wo_data)
+                                )
+                            ):
                                 root_without[agent_name] = wo_scores
                                 # The no-skill arm has no skill to discover or route to.
                                 root_without_not_applicable[agent_name] = _summary_not_applicable(wo_data)
+                                root_meta[agent_name].update(
+                                    {
+                                        "overall_without_skill": wo_overall,
+                                        "score_policy_without_skill": _summary_score_policy(wo_data),
+                                    }
+                                )
                         except (ValueError, OSError):
                             pass
         if root_with:
@@ -1120,6 +1200,30 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
         return 1
 
     agents = sorted(agent_with)
+    # Custom-only agents are compared by their grader's own overall, as in the
+    # canonical report. Standard agents must share one policy and metric set.
+    standard_agents = [agent for agent in agents if not agent_meta[agent].get("custom_only")]
+    comparison_policies = {
+        _effective_compare_policy(
+            agent_meta[agent].get("score_policy_with_skill"),
+            agent_with[agent],
+            agent_not_applicable.get(agent, frozenset()),
+        )
+        for agent in standard_agents
+    }
+    if len(comparison_policies) > 1:
+        console.print(
+            "[red]Cannot compare overall scores across agents with different score policies. "
+            "Rerun the agents under one policy.[/red]"
+        )
+        return 1
+    comparison_metric_sets = {agent_meta[agent].get("standard_metrics") for agent in standard_agents}
+    if len(comparison_metric_sets) > 1:
+        console.print(
+            "[red]Cannot compare overall scores across agents scored on different metric sets. "
+            "Rerun the agents with one metric set.[/red]"
+        )
+        return 1
     display_metrics, overall_metrics = _display_metrics(agent_with)
 
     table = Table(show_header=True, header_style="bold dim", box=SIMPLE, padding=(0, 1), show_edge=False, expand=True)
@@ -1139,15 +1243,21 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                     row.append(Text("N/A", style="dim"))
                 continue
             with_score = _safe_score(agent_with[agent], metric)
-            row.append(Text(f"{with_score:.2f}", style=f"bold {_score_style(with_score)}"))
+            row.append(
+                Text(f"{with_score:.2f}", style=f"bold {_score_style(with_score)}")
+                if with_score is not None
+                else Text("-", style="dim")
+            )
             if agent in agent_without:
                 if _without_not_applicable(agent, metric, agent_without, agent_without_not_applicable):
                     # The no-skill arm cannot score it, so there is no lift (not a 0.0 baseline).
                     row.append(Text("N/A", style="dim"))
                     continue
                 without_score = _safe_score(agent_without[agent], metric)
-                delta = with_score - without_score
-                if delta > 0:
+                delta = with_score - without_score if with_score is not None and without_score is not None else None
+                if delta is None:
+                    row.append(Text("-", style="dim"))
+                elif delta > 0:
                     row.append(Text(f"+{delta:.2f}", style="green"))
                 elif delta < 0:
                     row.append(Text(f"{delta:.2f}", style="red"))
@@ -1158,29 +1268,53 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     table.add_row(*[""] * (1 + sum(2 if agent in agent_without else 1 for agent in agents)))
     overall_row: list[str | Text] = [Text("Overall", style="bold")]
     for agent in agents:
-        scored_metrics = [
-            metric
-            for metric in overall_metrics
-            if not (metric in agent_not_applicable.get(agent, frozenset()) and metric not in agent_with[agent])
-        ] or list(overall_metrics)
-        with_avg = sum(_safe_score(agent_with[agent], metric) for metric in scored_metrics) / len(scored_metrics)
-        overall_row.append(Text(f"{with_avg:.2f}", style=f"bold {_score_style(with_avg)}"))
+        meta = agent_meta[agent]
+        with_not_applicable = agent_not_applicable.get(agent, frozenset())
+        with_avg = _overall_score_for_display(
+            agent_with[agent],
+            overall_metrics,
+            persisted_overall=meta.get("overall_with_skill"),
+            score_policy=meta.get("score_policy_with_skill"),
+            not_applicable=with_not_applicable,
+        )
+        overall_row.append(
+            Text(f"{with_avg:.2f}", style=f"bold {_score_style(with_avg)}")
+            if with_avg is not None
+            else Text("-", style="dim")
+        )
         if agent in agent_without:
-            # The lift compares only the metrics both arms scored.
-            shared_metrics = [
-                metric
-                for metric in scored_metrics
-                if not _without_not_applicable(agent, metric, agent_without, agent_without_not_applicable)
-            ]
-            if not shared_metrics:
-                overall_row.append(Text("N/A", style="bold dim"))
-                continue
-            shared_with = sum(_safe_score(agent_with[agent], metric) for metric in shared_metrics)
-            shared_without = sum(_safe_score(agent_without[agent], metric) for metric in shared_metrics)
-            delta = (shared_with - shared_without) / len(shared_metrics)
-            delta_text = f"+{delta:.2f}" if delta > 0 else f"{delta:.2f}"
-            delta_style = "bold green" if delta > 0 else ("bold red" if delta < 0 else "bold dim")
-            overall_row.append(Text(delta_text, style=delta_style))
+            without_not_applicable = agent_without_not_applicable.get(agent, frozenset())
+            if with_not_applicable == without_not_applicable:
+                lift_with = with_avg
+                lift_without = _overall_score_for_display(
+                    agent_without[agent],
+                    overall_metrics,
+                    persisted_overall=meta.get("overall_without_skill"),
+                    score_policy=meta.get("score_policy_without_skill"),
+                    not_applicable=without_not_applicable,
+                )
+            else:
+                # The lift compares only the metrics both arms scored: a metric N/A in either arm drops out of both.
+                shared_not_applicable = with_not_applicable | without_not_applicable
+                lift_with = _overall_score_for_display(
+                    {m: v for m, v in agent_with[agent].items() if m not in shared_not_applicable},
+                    overall_metrics,
+                    score_policy=meta.get("score_policy_with_skill"),
+                    not_applicable=shared_not_applicable,
+                )
+                lift_without = _overall_score_for_display(
+                    {m: v for m, v in agent_without[agent].items() if m not in shared_not_applicable},
+                    overall_metrics,
+                    score_policy=meta.get("score_policy_without_skill"),
+                    not_applicable=shared_not_applicable,
+                )
+            if lift_with is None or lift_without is None:
+                overall_row.append(Text("-", style="dim"))
+            else:
+                delta = lift_with - lift_without
+                delta_text = f"+{delta:.2f}" if delta > 0 else f"{delta:.2f}"
+                delta_style = "bold green" if delta > 0 else ("bold red" if delta < 0 else "bold dim")
+                overall_row.append(Text(delta_text, style=delta_style))
     table.add_row(*overall_row)
 
     console.print()
@@ -1205,20 +1339,20 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
 def _summary_scores(data: dict[str, Any], *, allow_missing_status: bool = False) -> dict[str, float]:
     if not isinstance(data, dict):
         return {}
-    status = data.get("execution_status")
-    if status != "succeeded" and not (allow_missing_status and status is None):
+    if not _summary_is_scoreable(data, allow_missing_status):
         return {}
     scores: dict[str, float] = {}
     raw_scores = data.get("scores", data)
     if isinstance(raw_scores, dict):
         for key, value in raw_scores.items():
-            if isinstance(value, int | float) and not isinstance(value, bool):
-                scores[str(key)] = float(value)
+            numeric = _unit_interval_score(value) if key in DEFAULT_METRICS else _finite_numeric(value)
+            if numeric is not None:
+                scores[str(key)] = numeric
     custom_scores = data.get("custom_scores")
     if isinstance(custom_scores, dict):
         for key, value in custom_scores.items():
-            if isinstance(value, int | float) and not isinstance(value, bool):
-                scores[f"custom: {key}"] = float(value)
+            if (numeric := _finite_numeric(value)) is not None:
+                scores[f"custom: {key}"] = numeric
     return scores
 
 
@@ -1226,6 +1360,72 @@ def _summary_not_applicable(data: Any) -> frozenset[str]:
     """Judged metrics a summary recorded as not applicable for its whole arm."""
     raw = data.get("not_applicable_metrics") if isinstance(data, dict) else None
     return frozenset(not_applicable_list(raw))
+
+
+def _summary_is_scoreable(data: dict[str, Any], allow_missing_status: bool) -> bool:
+    status = data.get("execution_status")
+    return status == "succeeded" or (allow_missing_status and status is None)
+
+
+def _finite_numeric(value: object) -> float | None:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _summary_overall(data: dict[str, Any]) -> float | None:
+    return _unit_interval_score(data.get("overall_score"))
+
+
+def _summary_score_policy(data: dict[str, Any]) -> str | None:
+    value = data.get("score_policy")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _summary_standard_metrics(data: dict[str, Any]) -> frozenset[str]:
+    """Return the standard metric set one condition summary declares."""
+    metrics = data.get("metrics")
+    if isinstance(metrics, list):
+        return frozenset(str(metric) for metric in metrics)
+    metric_set = data.get("metric_set")
+    if metric_set == DEFAULT_METRIC_SET:
+        return frozenset(DEFAULT_METRICS)
+    if metric_set == LEGACY_METRIC_SET:
+        return frozenset(LEGACY_METRICS)
+    if metric_set == CUSTOM_ONLY_METRIC_SET:
+        return frozenset()
+    scores = data.get("scores")
+    return frozenset(metric for metric in DEFAULT_METRICS if isinstance(scores, dict) and metric in scores)
+
+
+def _summaries_are_custom_only(summaries: list[dict[str, Any]]) -> bool:
+    """Return whether every condition of an agent is scored only by its custom grader.
+
+    Recorded policies win; without them, no condition may declare standard metrics.
+    """
+    recorded = {policy for summary in summaries if (policy := _summary_score_policy(summary))}
+    if recorded:
+        return recorded == {CUSTOM_SCORE_POLICY}
+    return not any(_summary_standard_metrics(summary) for summary in summaries)
+
+
+def _effective_compare_policy(
+    policy: object, scores: dict[str, float], not_applicable: frozenset[str] = frozenset()
+) -> str:
+    """Treat unversioned complete SkillEvaluator summaries as historical scores.
+
+    A metric the summary records as not applicable counts as complete.
+    """
+    if isinstance(policy, str) and policy.strip():
+        return policy.strip()
+    if any(metric in scores for metric in DEFAULT_METRICS):
+        complete = (set(DEFAULT_METRICS) - not_applicable).issubset(scores)
+        return LEGACY_SCORE_POLICY if complete else PARTIAL_SCORE_POLICY
+    return CUSTOM_SCORE_POLICY
 
 
 def _display_metrics(agent_with: dict[str, dict[str, float]]) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -1252,9 +1452,52 @@ def _without_not_applicable(
     return metric in agent_without_not_applicable.get(agent, frozenset()) and metric not in agent_without.get(agent, {})
 
 
-def _safe_score(scores: dict[str, float], metric: str) -> float:
-    value = scores.get(metric, 0.0)
-    return float(value) if isinstance(value, int | float) else 0.0
+def _safe_score(scores: dict[str, float], metric: str) -> float | None:
+    return _finite_numeric(scores.get(metric))
+
+
+def _unit_interval_score(value: object) -> float | None:
+    """Return a finite score in the documented 0.0 to 1.0 range."""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return None
+    return numeric if math.isfinite(numeric) and 0.0 <= numeric <= 1.0 else None
+
+
+def _overall_score_for_display(
+    scores: dict[str, float],
+    metrics: tuple[str, ...],
+    *,
+    persisted_overall: object = None,
+    score_policy: object = DEFAULT_SCORE_POLICY,
+    not_applicable: frozenset[str] = frozenset(),
+) -> float | None:
+    """Honor persisted score truth before inferring a policy from metric names.
+
+    Metrics in *not_applicable* that carry no score are left out of the overall.
+    """
+    recorded_overall = _unit_interval_score(persisted_overall)
+
+    if score_policy == DEFAULT_SCORE_POLICY:
+        score = overall_score_from_metrics(scores, metrics, not_applicable=not_applicable)
+        if score is not None:
+            return score
+
+    if recorded_overall is not None:
+        return recorded_overall
+
+    if score_policy == LEGACY_SCORE_POLICY or (score_policy is None and metrics == DEFAULT_METRICS):
+        scored = tuple(metric for metric in metrics if not (metric in not_applicable and metric not in scores))
+        values = tuple(_safe_score(scores, metric) for metric in scored)
+        if values and all(value is not None for value in values):
+            return round(sum(value for value in values if value is not None) / len(values), 4)
+
+    if score_policy is None:
+        return overall_score_from_metrics(scores, metrics, not_applicable=not_applicable)
+    return None
 
 
 def _score_style(score: float) -> str:
@@ -1274,6 +1517,7 @@ __all__ = [
     "init_custom_grader",
     "init_harbor_task",
     "parse_agents",
+    "parse_environment_kwargs",
     "validate_evals",
     "view_results",
 ]

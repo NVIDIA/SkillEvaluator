@@ -53,10 +53,13 @@ from skillevaluator.tier3.harbor.loose_parts_arm import (
 )
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
+    CUSTOM_SCORE_POLICY,
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
+    DEFAULT_SCORE_POLICY,
     LEGACY_METRIC_SET,
     LEGACY_METRICS,
+    LEGACY_SCORE_POLICY,
     MAX_CUSTOM_METRICS,
     NOT_APPLICABLE_ELIGIBLE_METRICS,
     RESERVED_METRIC_NAMES,
@@ -75,8 +78,10 @@ from skillevaluator.tier3.harbor.metrics import (
     not_applicable_counts,
     not_applicable_metrics,
     overall_score,
+    overall_score_from_metrics,
     rewards_have_mixed_metric_contracts,
     score_definition,
+    score_policy_for_metrics,
     score_value,
 )
 from skillevaluator.tier3.harbor.stats import (
@@ -4840,6 +4845,12 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
             if rewards_have_mixed_metric_contracts(rows):
                 # Its standard metrics cover only the standard steps; paired statistics use the logical overall.
                 logical_reward["_logical_mixed_contracts"] = True
+        logical_policy, policy_ambiguous = _score_policy_for_rewards(rows, metrics)
+        if not policy_ambiguous:
+            logical_reward["score_policy"] = logical_policy
+        if logical_policy == "mixed-score-policies":
+            logical_reward.pop("overall", None)
+            logical_reward.pop("_logical_overall", None)
         if any(row.get("_has_trajectory") for row in rows):
             logical_reward["_has_trajectory"] = True
         # Keep every step's judge models so lift can spot a judge fallback in any step.
@@ -5436,6 +5447,7 @@ def _compute_lift(
     *,
     with_not_applicable: list[str] | tuple[str, ...] = (),
     without_not_applicable: list[str] | tuple[str, ...] = (),
+    score_policy: str | None = None,
 ) -> dict[str, Any]:
     """Compute skill lift (with-skill minus without-skill) per metric.
 
@@ -5446,7 +5458,8 @@ def _compute_lift(
 
     With the per-trial rewards, a case whose arms were judged by different
     models (a judge fallback in one arm) is left out of that judge metric's
-    lift and counted in ``judge_mixed_cases``.
+    lift and counted in ``judge_mixed_cases``. The overall lift aggregates the
+    paired metric scores with the conditions' score policy.
     """
     lift: dict[str, Any] = {}
     paired_scores: dict[str, tuple[float, float]] = {}
@@ -5473,15 +5486,30 @@ def _compute_lift(
             "direction": "up" if delta > 0 else ("down" if delta < 0 else "flat"),
         }
     metrics = tuple(paired_scores)
-    if _lift_overall_basket_complete(
+    overall_with: float | None = None
+    overall_without: float | None = None
+    active = _lift_overall_active_metrics(
         metrics,
         {metric: scores[0] for metric, scores in paired_scores.items()},
         {metric: scores[1] for metric, scores in paired_scores.items()},
         with_not_applicable,
         without_not_applicable,
-    ):
+    )
+    if active is not None and score_policy == LEGACY_SCORE_POLICY:
+        # Historical artifacts keep their recorded metric mean, over the metrics both arms scored.
         overall_with = sum(paired_scores[m][0] for m in metrics) / len(metrics)
         overall_without = sum(paired_scores[m][1] for m in metrics) / len(metrics)
+    elif active is not None and score_policy in {None, score_policy_for_metrics(active)}:
+        # The arms' score policy over the metrics both scored; a metric N/A on either side drops out of
+        # its dimension on both sides, so the two overalls share one denominator.
+        skipped = tuple(metric for metric in active if metric not in paired_scores)
+        overall_with = overall_score_from_metrics(
+            {m: paired_scores[m][0] for m in metrics}, active, not_applicable=skipped
+        )
+        overall_without = overall_score_from_metrics(
+            {m: paired_scores[m][1] for m in metrics}, active, not_applicable=skipped
+        )
+    if overall_with is not None and overall_without is not None:
         lift["overall"] = {
             "with_skill": round(overall_with, 4),
             "without_skill": round(overall_without, 4),
@@ -5519,12 +5547,32 @@ def _paired_lift(
         dropped_cases=dropped_cases,
         judge_mixed_cases=_judge_mixed_cases(treatment.logical_rewards, control.logical_rewards, expected),
     )
+    # Overall scores compare only under one score policy and one standard metric set.
+    comparable = treatment.score_policy == control.score_policy and set(treatment.metrics) == set(control.metrics)
     lift = _compute_lift(
         paired.treatment,
         paired.control,
         with_not_applicable=[*treatment.not_applicable, *paired.not_comparable],
         without_not_applicable=[*control.not_applicable, *paired.not_comparable],
+        score_policy=treatment.score_policy if comparable else _MIXED_SCORE_POLICIES,
     )
+    if (
+        comparable
+        and "overall" in lift
+        and not paired.judge_mixed
+        and not paired.basis.get("excluded_case_entries")
+        and not paired.not_comparable
+        and list(treatment.not_applicable) == list(control.not_applicable)
+        and treatment.overall_score is not None
+        and control.overall_score is not None
+    ):
+        # Both arms scored the same cases on the same metrics: the overall lift is the difference of the two
+        # conditions' overall scores, exactly as each condition reports it.
+        lift["overall"] = {
+            "with_skill": treatment.overall_score,
+            "without_skill": control.overall_score,
+            "delta": round(treatment.overall_score - control.overall_score, 4),
+        }
     if lift:
         if paired.judge_mixed:
             lift["judge_mixed_cases"] = dict(paired.judge_mixed)
@@ -5532,16 +5580,16 @@ def _paired_lift(
     return lift
 
 
-def _lift_overall_basket_complete(
+def _lift_overall_active_metrics(
     metrics: tuple[str, ...],
     with_scores: dict[str, float],
     without_scores: dict[str, float],
     with_not_applicable: list[str] | tuple[str, ...],
     without_not_applicable: list[str] | tuple[str, ...],
-) -> bool:
-    """Return whether every active metric is scored by both arms or explained by N/A."""
+) -> tuple[str, ...] | None:
+    """Return the active metric set when each of its metrics is scored by both arms or explained by N/A."""
     if not metrics:
-        return False
+        return None
     for active in (DISPLAY_METRICS, LEGACY_METRICS):
         if not set(metrics).issubset(active):
             continue
@@ -5550,8 +5598,8 @@ def _lift_overall_basket_complete(
             and (metric in without_scores or metric in without_not_applicable)
             for metric in active
         ):
-            return True
-    return False
+            return active
+    return None
 
 
 def _average_overall(rewards: list[dict[str, Any]]) -> float | None:
@@ -5560,6 +5608,91 @@ def _average_overall(rewards: list[dict[str, Any]]) -> float | None:
     if not values or any(value is None for value in values):
         return None
     return round(sum(value for value in values if value is not None) / len(values), 4)
+
+
+#: The policy label of rewards whose recorded score policies conflict.
+_MIXED_SCORE_POLICIES = "mixed-score-policies"
+
+
+def _score_policy_for_rewards(rewards: list[dict[str, Any]], metrics: tuple[str, ...]) -> tuple[str, bool]:
+    """Recover recorded reward policy; flag a policy shared by equal-score formulas as ambiguous."""
+    decisive_policies: set[str] = set()
+    ambiguous_equal_score = False
+    for reward in rewards:
+        recorded = reward.get("score_policy")
+        if isinstance(recorded, str) and recorded.strip():
+            decisive_policies.add(recorded.strip())
+            continue
+        if metrics == DEFAULT_METRICS:
+            # A metric the reward records as N/A is left out of both formulas.
+            not_applicable = [
+                metric
+                for metric in metrics
+                if metric_value(reward, metric) is None and metric_is_not_applicable(reward, metric)
+            ]
+            values = [metric_value(reward, metric) for metric in metrics if metric not in not_applicable]
+            persisted = reward.get("overall")
+            if (
+                values
+                and all(value is not None for value in values)
+                and isinstance(persisted, int | float)
+                and not isinstance(persisted, bool)
+            ):
+                try:
+                    stored = float(persisted)
+                except OverflowError:
+                    stored = float("nan")
+                current = overall_score_from_metrics(reward, metrics, not_applicable=not_applicable)
+                historical = round(sum(value for value in values if value is not None) / len(values), 4)
+                if math.isfinite(stored) and current is not None:
+                    stored = round(stored, 4)
+                    if stored == historical and stored != current:
+                        decisive_policies.add(LEGACY_SCORE_POLICY)
+                        continue
+                    if stored != historical:
+                        decisive_policies.add(DEFAULT_SCORE_POLICY)
+                        continue
+                    ambiguous_equal_score = True
+                    continue
+        decisive_policies.add(score_policy_for_metrics(metrics))
+    if len(decisive_policies) > 1:
+        return "mixed-score-policies", False
+    if decisive_policies:
+        return next(iter(decisive_policies)), False
+    return score_policy_for_metrics(metrics), ambiguous_equal_score
+
+
+def _score_definition_for_policy(metrics: tuple[str, ...], policy: str) -> str:
+    if policy == LEGACY_SCORE_POLICY and metrics:
+        return f"overall = mean({', '.join(metrics)}) [{LEGACY_SCORE_POLICY}]"
+    if policy != score_policy_for_metrics(metrics):
+        return f"overall = persisted score; formula unavailable [{policy}]"
+    return score_definition(metrics)
+
+
+def _aggregate_condition_overall(
+    scores: dict[str, float],
+    metrics: tuple[str, ...],
+    rewards: list[dict[str, Any]],
+    *,
+    score_policy: str | None = None,
+    mixed_metric_contracts: bool = False,
+    not_applicable: Sequence[str] = (),
+) -> float | None:
+    """Aggregate a condition consistently with lift and canonical reports.
+
+    Mixed metric contracts use the logical attempt overall: the standard-metric
+    mean covers only standard rows and would overstate pass@k's attempt score.
+    Metrics N/A in every attempt (*not_applicable*) drop out of the score policy.
+    """
+    if (
+        mixed_metric_contracts
+        or not metrics
+        or (score_policy is not None and score_policy != score_policy_for_metrics(metrics))
+    ):
+        return _average_overall(rewards)
+    score = overall_score_from_metrics(scores, metrics, not_applicable=not_applicable)
+    return round(score, 4) if score is not None else None
 
 
 def _compute_custom_lift(
@@ -7459,6 +7592,25 @@ def _condition_execution_summary(
     }
 
 
+def _fail_execution_with_error(execution: dict[str, Any], error: str) -> None:
+    """Fail one execution summary and publish ``error`` within the bounded error contract."""
+    execution["execution_status"] = "failed"
+    errors = execution.get("execution_errors")
+    if not isinstance(errors, list):
+        errors = []
+        execution["execution_errors"] = errors
+    if error in errors:
+        return
+    raw_total = execution.get("execution_error_details_total")
+    total = raw_total if isinstance(raw_total, int) and not isinstance(raw_total, bool) and raw_total >= 0 else 0
+    total = min(_MAX_JSON_SAFE_INTEGER, max(total, len(errors)) + 1)
+    if len(errors) < PUBLISHED_EXECUTION_ERRORS_MAX:
+        errors.append(error)
+    execution["execution_error_details_total"] = total
+    execution["execution_error_details_shown"] = len(errors)
+    execution["execution_error_details_truncated"] = len(errors) < total
+
+
 def _aggregate_execution(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate execution status while retaining hidden child error counts.
 
@@ -7592,6 +7744,11 @@ class _CollectedArm:
     not_applicable: list[str] = dataclass_field(default_factory=list)
     custom_scores: dict[str, float] = dataclass_field(default_factory=dict)
     overall_score: float | None = None
+    # The arm's overall-score policy, and whether only an ambiguous equal-score match recovered it.
+    score_policy: str = DEFAULT_SCORE_POLICY
+    score_policy_ambiguous: bool = False
+    # The published summary.json payload, rewritten when the score policy is reconciled or conflicts.
+    summary: dict[str, Any] | None = None
     pass_summary: dict[str, Any] = dataclass_field(default_factory=dict)
     plugin_signals_summary: dict[str, Any] | None = None
     canary_summary: dict[str, Any] | None = None
@@ -7667,12 +7824,16 @@ def _collect_arm(
         if isinstance(root, str) and root and root not in scored_roots:
             unscored_rewards.setdefault(root, reward)
     scores, metric_set, metrics = average_metrics(logical_rewards)
+    score_policy, score_policy_ambiguous = _score_policy_for_rewards(logical_rewards, metrics)
+    mixed_metric_contracts = rewards_have_mixed_metric_contracts(rewards)
     execution = collection.execution_summary(
         rewards,
         job_failure=job_failure,
         runtime_failures=runtime_failures,
         reward_failures=trial_failures,
     )
+    if score_policy == _MIXED_SCORE_POLICIES:
+        _fail_execution_with_error(execution, f"Conflicting score policies within the {arm.directory} condition")
     if execution["execution_status"] == "succeeded":
         arm_not_applicable = not_applicable_metrics(logical_rewards, metrics)
         arm_not_applicable_counts = not_applicable_counts(logical_rewards, metrics)
@@ -7685,7 +7846,14 @@ def _collect_arm(
             expected_cases=collection.expected_cases,
             expected_case_ids=collection.expected_case_ids,
         )
-        arm_overall_score = _average_overall(logical_rewards)
+        arm_overall_score = _aggregate_condition_overall(
+            scores,
+            metrics,
+            logical_rewards,
+            score_policy=score_policy,
+            mixed_metric_contracts=mixed_metric_contracts,
+            not_applicable=arm_not_applicable,
+        )
     else:
         scores = {}
         arm_not_applicable = []
@@ -7712,32 +7880,31 @@ def _collect_arm(
     # credential reads and writes.
     canary_summary = summarize_canary(collected_rewards, without_canary=collection.plugin_signals is not None)
     collection.save_trials(arm, collected_rewards, job_dir)
-    collection.write_summary(
-        arm,
-        {
-            "agent": collection.agent,
-            "model": collection.agent_model,
-            "model_source": collection.agent_model_source,
-            "scores": scores,
-            "not_applicable_metrics": arm_not_applicable,
-            "not_applicable_counts": arm_not_applicable_counts,
-            "custom_scores": custom_scores,
-            "overall_score": arm_overall_score,
-            "metric_set": metric_set,
-            "metrics": list(metrics),
-            "dimensions": dimension_scores(scores, arm_not_applicable),
-            "num_trials": len(logical_rewards),
-            "num_reward_rows": len(collected_rewards),
-            "mixed_metric_contracts": rewards_have_mixed_metric_contracts(rewards),
-            "pass_at_k": _public_pass_summary(pass_summary),
-            **execution,
-            "job_failure": job_failure,
-            "trial_failures": _public_failure_list(trial_failures),
-            **_failure_list_metadata("trial_failure_details", trial_failures),
-            **({"plugin_signals_summary": plugin_signals_summary} if plugin_signals_summary is not None else {}),
-            **({"canary_summary": canary_summary} if canary_summary is not None else {}),
-        },
-    )
+    summary = {
+        "agent": collection.agent,
+        "model": collection.agent_model,
+        "model_source": collection.agent_model_source,
+        "scores": scores,
+        "not_applicable_metrics": arm_not_applicable,
+        "not_applicable_counts": arm_not_applicable_counts,
+        "custom_scores": custom_scores,
+        "overall_score": arm_overall_score,
+        "metric_set": metric_set,
+        "metrics": list(metrics),
+        "score_policy": score_policy,
+        "dimensions": dimension_scores(scores, arm_not_applicable),
+        "num_trials": len(logical_rewards),
+        "num_reward_rows": len(collected_rewards),
+        "mixed_metric_contracts": mixed_metric_contracts,
+        "pass_at_k": _public_pass_summary(pass_summary),
+        **execution,
+        "job_failure": job_failure,
+        "trial_failures": _public_failure_list(trial_failures),
+        **_failure_list_metadata("trial_failure_details", trial_failures),
+        **({"plugin_signals_summary": plugin_signals_summary} if plugin_signals_summary is not None else {}),
+        **({"canary_summary": canary_summary} if canary_summary is not None else {}),
+    }
+    collection.write_summary(arm, summary)
     logger.debug("Agent %s %s: %d trials, scores=%s", collection.agent, arm.directory, len(logical_rewards), scores)
     return _CollectedArm(
         execution=execution,
@@ -7754,6 +7921,9 @@ def _collect_arm(
         not_applicable=arm_not_applicable,
         custom_scores=custom_scores,
         overall_score=arm_overall_score,
+        score_policy=score_policy,
+        score_policy_ambiguous=score_policy_ambiguous,
+        summary=summary,
         pass_summary=pass_summary,
         plugin_signals_summary=plugin_signals_summary,
         canary_summary=canary_summary,
@@ -7783,6 +7953,7 @@ def _collect_missing_arm(arm: _ArmSpec, collection: _AgentCollection, job_name: 
             "custom_scores": {},
             "overall_score": None,
             "metrics": [],
+            "score_policy": DEFAULT_SCORE_POLICY,
             "dimensions": {},
             "num_trials": 0,
             "num_reward_rows": 0,
@@ -7794,6 +7965,76 @@ def _collect_missing_arm(arm: _ArmSpec, collection: _AgentCollection, job_name: 
         },
     )
     return _CollectedArm(execution=execution, job_failure=job_failure)
+
+
+def _reconcile_score_policies(
+    with_skill: _CollectedArm,
+    without_skill: _CollectedArm,
+    collection: _AgentCollection,
+    *,
+    with_arm: _ArmSpec,
+    skip_baseline: bool,
+) -> tuple[_CollectedArm, _CollectedArm]:
+    """Give the two conditions one score policy, or fail both when they conflict.
+
+    A policy that only an ambiguous equal-score match recovered adopts the other
+    condition's decisive policy when both scored the same metric set. Two
+    different policies fail both conditions, so no overall or lift compares
+    scores built with different formulas.
+    """
+    if skip_baseline or not (with_skill.succeeded and without_skill.succeeded):
+        return with_skill, without_skill
+    if with_skill.score_policy != without_skill.score_policy and set(with_skill.metrics) == set(
+        without_skill.metrics
+    ):
+        if with_skill.score_policy_ambiguous and not without_skill.score_policy_ambiguous:
+            with_skill = _adopt_score_policy(with_skill, without_skill.score_policy, collection, with_arm)
+        elif without_skill.score_policy_ambiguous and not with_skill.score_policy_ambiguous:
+            without_skill = _adopt_score_policy(without_skill, with_skill.score_policy, collection, _WITHOUT_SKILL_ARM)
+    if with_skill.score_policy == without_skill.score_policy:
+        return with_skill, without_skill
+    reason = f"Conflicting score policies across conditions: {with_skill.score_policy}, {without_skill.score_policy}"
+    return (
+        _fail_collected_arm(with_skill, reason, collection, with_arm),
+        _fail_collected_arm(without_skill, reason, collection, _WITHOUT_SKILL_ARM),
+    )
+
+
+def _adopt_score_policy(
+    arm: _CollectedArm, policy: str, collection: _AgentCollection, spec: _ArmSpec
+) -> _CollectedArm:
+    summary = arm.summary
+    if summary is not None:
+        summary = {**summary, "score_policy": policy}
+        collection.write_summary(spec, summary)
+    return replace(arm, score_policy=policy, score_policy_ambiguous=False, summary=summary)
+
+
+def _fail_collected_arm(
+    arm: _CollectedArm, reason: str, collection: _AgentCollection, spec: _ArmSpec
+) -> _CollectedArm:
+    execution = dict(arm.execution)
+    _fail_execution_with_error(execution, reason)
+    summary = arm.summary
+    if summary is not None:
+        summary = {
+            **summary,
+            **execution,
+            "scores": {},
+            "custom_scores": {},
+            "overall_score": None,
+            "pass_at_k": {},
+        }
+        collection.write_summary(spec, summary)
+    return replace(
+        arm,
+        execution=execution,
+        scores={},
+        custom_scores={},
+        overall_score=None,
+        pass_summary={},
+        summary=summary,
+    )
 
 
 @dataclass(frozen=True)
@@ -7885,11 +8126,13 @@ def collect_harbor_results(
         "agents": {},
         "metric_set": DEFAULT_METRIC_SET,
         "metrics": list(DISPLAY_METRICS),
+        "score_policy": DEFAULT_SCORE_POLICY,
         "attempt_policy": {
             "max_attempts": n_attempts,
             "pass_threshold": pass_threshold,
             "stop_on_pass": stop_on_pass,
             "score_definition": score_definition(DISPLAY_METRICS),
+            "score_policy": DEFAULT_SCORE_POLICY,
         },
     }
 
@@ -7923,11 +8166,24 @@ def collect_harbor_results(
         if with_skill.job_dir is not None:
             all_results["metric_set"] = with_skill.metric_set
             all_results["metrics"] = list(with_skill.metrics)
-            all_results["attempt_policy"]["score_definition"] = score_definition(with_skill.metrics)
+            all_results["attempt_policy"]["score_definition"] = _score_definition_for_policy(
+                with_skill.metrics, with_skill.score_policy
+            )
+            all_results["score_policy"] = with_skill.score_policy
+            all_results["attempt_policy"]["score_policy"] = with_skill.score_policy
         if skip_baseline:
             without_skill = _CollectedArm(execution=collection.execution_summary([], skipped=True))
         else:
             without_skill = _collect_arm(_WITHOUT_SKILL_ARM, collection)
+        with_skill, without_skill = _reconcile_score_policies(
+            with_skill, without_skill, collection, with_arm=with_skill_arm, skip_baseline=skip_baseline
+        )
+        all_results["score_policy"] = with_skill.score_policy
+        all_results["attempt_policy"]["score_policy"] = with_skill.score_policy
+        if with_skill.job_dir is not None:
+            all_results["attempt_policy"]["score_definition"] = _score_definition_for_policy(
+                with_skill.metrics, with_skill.score_policy
+            )
         if sum_of_parts_arm:
             sum_of_parts = _collect_arm(_SUM_OF_PARTS_ARM, collection)
         else:
@@ -7988,6 +8244,8 @@ def collect_harbor_results(
         lift: dict[str, Any] = {}
         paired_execution_succeeded = with_skill.succeeded and without_skill.succeeded
         if paired_execution_succeeded and with_skill.scores and without_skill.scores:
+            # The overall lift compares the two conditions on the cases both scored, with their shared score
+            # policy (reconciled above; a conflict already failed both conditions).
             lift = _paired_lift(
                 with_skill, without_skill, arms=(ARM_WITH, ARM_WITHOUT), expected_case_ids=expected_case_ids
             )
@@ -8012,7 +8270,12 @@ def collect_harbor_results(
                 _write_generated_root_json(agent_dir / "custom_lift.json", output_dir, custom_lift)
 
         pass_lift: dict[str, Any] = {}
-        if paired_execution_succeeded and with_skill.pass_summary and without_skill.pass_summary:
+        if (
+            paired_execution_succeeded
+            and set(with_skill.metrics) == set(without_skill.metrics)
+            and with_skill.pass_summary
+            and without_skill.pass_summary
+        ):
             # Both arms' pass flags on the metrics both scored, so skill activation alone earns no pass lift.
             pass_lift = _shared_metric_pass_lift(
                 with_skill.logical_rewards,
@@ -8070,6 +8333,12 @@ def collect_harbor_results(
             },
             "with_skill": with_skill.scores,
             "without_skill": without_skill.scores,
+            "overall_with_skill": with_skill.overall_score,
+            "overall_without_skill": without_skill.overall_score,
+            "metrics_with_skill": list(with_skill.metrics) if with_skill.job_dir is not None else [],
+            "metrics_without_skill": list(without_skill.metrics) if without_skill.job_dir is not None else [],
+            "score_policy_with_skill": with_skill.score_policy,
+            "score_policy_without_skill": without_skill.score_policy if not skip_baseline else None,
             "sum_of_parts": sum_of_parts.scores,
             "overall_sum_of_parts": sum_of_parts.overall_score,
             "custom_with_skill": with_skill.custom_scores,
@@ -8134,14 +8403,57 @@ def collect_harbor_results(
         # The staging's info block per measured agent, and why every other agent is not measured.
         all_results["loose_parts"] = loose_parts.record(loose_infos)
 
+    scored_policies = {
+        info["score_policy_with_skill"]
+        for info in all_results["agents"].values()
+        if info.get("execution_status") == "succeeded" and info.get("score_policy_with_skill")
+    }
+    # Custom-only agents publish their grader's own overall and rank against
+    # standard agents, so only standard score policies can conflict.
+    standard_policies = scored_policies - {CUSTOM_SCORE_POLICY}
+    run_policy_conflict = len(standard_policies) > 1
+    if run_policy_conflict:
+        all_results["score_policy"] = "mixed-score-policies"
+        all_results["attempt_policy"]["score_policy"] = "mixed-score-policies"
+        all_results["attempt_policy"]["score_definition"] = (
+            "overall unavailable: conflicting score policies across agents"
+        )
+    elif scored_policies:
+        score_policy = next(iter(standard_policies or scored_policies))
+        scored_agent = next(
+            info
+            for info in all_results["agents"].values()
+            if info.get("execution_status") == "succeeded" and info.get("score_policy_with_skill") == score_policy
+        )
+        # A metric the arm recorded as N/A is still part of its metric set; it has no score to list.
+        scored_not_applicable = (scored_agent.get("not_applicable_metrics") or {}).get(ARM_WITH) or []
+        selected_metrics = tuple(
+            metric
+            for metric in DEFAULT_METRICS
+            if metric in scored_agent["with_skill"] or metric in scored_not_applicable
+        )
+        all_results["metric_set"] = (
+            DEFAULT_METRIC_SET
+            if "security" in selected_metrics
+            else (LEGACY_METRIC_SET if selected_metrics else CUSTOM_ONLY_METRIC_SET)
+        )
+        all_results["metrics"] = list(selected_metrics)
+        all_results["score_policy"] = score_policy
+        all_results["attempt_policy"]["score_policy"] = score_policy
+        all_results["attempt_policy"]["score_definition"] = _score_definition_for_policy(selected_metrics, score_policy)
     _write_generated_root_json(output_dir / "attempt_policy.json", output_dir, all_results["attempt_policy"])
 
-    if len(agents) > 1:
+    if len(agents) > 1 and not run_policy_conflict:
         comparison = _build_comparison(all_results["agents"])
         all_results["comparison"] = comparison
         _write_generated_root_json(output_dir / "comparison.json", output_dir, comparison)
 
     top_execution = _aggregate_execution(list(all_results["agents"].values()))
+    if run_policy_conflict:
+        _fail_execution_with_error(
+            top_execution,
+            "Conflicting score policies across agents: " + ", ".join(sorted(standard_policies)),
+        )
     all_results.update(top_execution)
     if top_execution["execution_errors"]:
         all_results["error"] = list(top_execution["execution_errors"])

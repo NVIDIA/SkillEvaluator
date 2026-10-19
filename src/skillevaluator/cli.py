@@ -2889,9 +2889,11 @@ def validate(
     each skill bundled under the plugin's ``skills/`` directory.
     """
     _record_validate_json_report(None)
-    # An absolute path names the content root (``validate .`` must not see an empty folder name), and
-    # unlike ``resolve()`` it keeps a linked root visible to the link checks below.
-    target_path = target_path.absolute()
+    if target_path.name in {"", ".", ".."}:
+        # ``validate .`` (or ``..``) names its content root by the directory it stands for, not an empty or dot
+        # name. The lexical absolute path keeps a linked root visible to the link checks below, unlike
+        # ``resolve()``; any other relative target stays relative, so findings keep their relative paths.
+        target_path = Path(os.path.abspath(target_path))
     evaluated_source = _evaluated_source_from_options(
         evaluated_source_repository,
         evaluated_source_revision,

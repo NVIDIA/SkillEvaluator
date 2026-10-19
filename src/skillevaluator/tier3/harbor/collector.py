@@ -42,6 +42,7 @@ from skillevaluator.tier3.eval_core.runtime_evidence import (
     summarize_canary,
     summarize_hook_census,
 )
+from skillevaluator.tier3.harbor.activation import summarize_skill_activation
 from skillevaluator.tier3.harbor.lift_basis import pair_metric_scores
 from skillevaluator.tier3.harbor.loose_parts_arm import (
     LOAD_EVIDENCE_FILENAME,
@@ -7896,6 +7897,7 @@ def _collect_arm(
         "num_trials": len(logical_rewards),
         "num_reward_rows": len(collected_rewards),
         "mixed_metric_contracts": mixed_metric_contracts,
+        **({"skill_activation": summarize_skill_activation(rewards)} if arm.key == ARM_WITH else {}),
         "pass_at_k": _public_pass_summary(pass_summary),
         **execution,
         "job_failure": job_failure,
@@ -8241,9 +8243,11 @@ def collect_harbor_results(
         statistics["integration_completeness"] = integration_completeness
         (agent_dir / "statistics.json").write_text(json.dumps(statistics, indent=2), encoding="utf-8")
 
+        skill_activation = summarize_skill_activation(with_skill.rewards)
         lift: dict[str, Any] = {}
         paired_execution_succeeded = with_skill.succeeded and without_skill.succeeded
-        if paired_execution_succeeded and with_skill.scores and without_skill.scores:
+        lift_eligible = paired_execution_succeeded and skill_activation["status"] != "never_activated"
+        if lift_eligible and with_skill.scores and without_skill.scores:
             # The overall lift compares the two conditions on the cases both scored, with their shared score
             # policy (reconciled above; a conflict already failed both conditions).
             lift = _paired_lift(
@@ -8254,7 +8258,7 @@ def collect_harbor_results(
         custom_lift: dict[str, Any] = {}
         no_standard_scores = not with_skill.scores and not without_skill.scores
         if (
-            paired_execution_succeeded
+            lift_eligible
             and with_skill.logical_rewards
             and without_skill.logical_rewards
             and (with_skill.custom_scores or without_skill.custom_scores or no_standard_scores)
@@ -8271,7 +8275,7 @@ def collect_harbor_results(
 
         pass_lift: dict[str, Any] = {}
         if (
-            paired_execution_succeeded
+            lift_eligible
             and set(with_skill.metrics) == set(without_skill.metrics)
             and with_skill.pass_summary
             and without_skill.pass_summary
@@ -8347,6 +8351,7 @@ def collect_harbor_results(
             "dimensions_with_skill": with_skill.dimensions,
             "dimensions_without_skill": without_skill.dimensions,
             "dimensions_sum_of_parts": sum_of_parts.dimensions,
+            "skill_activation": skill_activation,
             "not_applicable_metrics": {key: arm.not_applicable for key, arm in arms.items()},
             "lift": lift,
             "integration_lift": integration_lift,

@@ -875,7 +875,7 @@ class MarkdownReporter(ReporterBase):
             # The publication evidence check can only make a completed run's status more conservative.
             verdict = status.tiers[3].status.verdict
             evidence_verdict = publication.tier3.status.upper()
-            if verdict in {"PASS", "NEUTRAL"} and evidence_verdict in {"INCOMPLETE", "FAIL"}:
+            if verdict in {"PASS", "NEUTRAL"} and evidence_verdict in {"INCOMPLETE", "FAIL", "INCONCLUSIVE"}:
                 verdict = evidence_verdict
             composite = ae.get("composite_lift")
             runtime = ae.get("runtime_seconds", 0.0)
@@ -884,6 +884,8 @@ class MarkdownReporter(ReporterBase):
             lines.append("")
             composite_text = _format_report_number(composite, signed=True)
             lines.append(f"**Verdict:** {verdict} (composite lift = {composite_text})")
+            if verdict == "INCONCLUSIVE":
+                lines.append("Skill never activated. Scores are diagnostic only; no lift verdict was computed.")
             runtime_number = _finite_report_number(runtime)
             runtime_text = f"{runtime_number:.1f}s" if runtime_number is not None else "N/A"
             lines.append(f"**Runtime:** {runtime_text}")

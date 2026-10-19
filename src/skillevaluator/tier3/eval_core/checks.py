@@ -9382,9 +9382,11 @@ def score_skill_execution(
     acceptable_skills: Any = None,
     native_prefix: str = "",
 ) -> dict[str, Any]:
-    """Compute the ``skill_execution`` eval score (average of sub-checks).
+    """Compute execution credit, requiring activation for positive cases.
 
-    Returns ``{"score": float, "details": dict}`` with per-check results.
+    Activated or unresolved cases retain the average of sub-checks. A definite
+    activation failure receives no execution credit, while retaining all check
+    details for diagnosis. Negative and unlabeled cases use their own rules.
     """
     if should_trigger is None:
         return {"score": 1.0, "details": {"message": "No expected_skill -- skipped"}}
@@ -9412,9 +9414,6 @@ def score_skill_execution(
     if not expected_skill:
         return {"score": 1.0, "details": {"message": "No expected_skill -- skipped"}}
 
-    if not tool_calls:
-        return {"score": 0.0, "details": {"message": "No tool calls in trajectory"}}
-
     checks: dict[str, dict[str, Any]] = {}
     scores: list[float] = []
 
@@ -9427,6 +9426,9 @@ def score_skill_execution(
     )
     checks["activation"] = r
     scores.append(r["score"])
+
+    if not tool_calls:
+        return {"score": 0.0, "details": {"message": "No tool calls in trajectory", **checks}}
 
     r = check_script_execution(tool_calls, expected_script)
     checks["script_execution"] = r
@@ -9443,6 +9445,13 @@ def score_skill_execution(
     r = check_error_recovery(tool_calls, expected_script)
     checks["error_recovery"] = r
     scores.append(r["score"])
+
+    # Nonapplicable script/recovery checks must not create execution credit
+    # when the expected skill was never activated. Unknown activation remains
+    # distinct from a demonstrated failure.
+    activation = checks["activation"]
+    if activation["passed"] is False and activation["score"] == 0.0:
+        return {"score": 0.0, "details": checks}
 
     avg = sum(scores) / len(scores) if scores else 0.0
     return {"score": round(avg, 4), "details": checks}

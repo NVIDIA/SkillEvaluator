@@ -1543,6 +1543,8 @@ def _overall_lift_transition(
 ) -> str:
     """Overall row: the lift's own basis, so it never disagrees with the lift row."""
     score = number(agent.get("with_skill", agent.get("overall_score")))
+    if _skill_never_activated(agent):
+        return _score_transition_values(number(agent.get("baseline")), score, skill_never_activated=True)
     basis = _effectiveness_basis(agent, sum_of_parts_baseline=sum_of_parts_baseline)
     if basis is None or score is None:
         # Payloads without a lift basis (older runs) keep their own baseline and score.
@@ -1563,6 +1565,8 @@ def _dimension_lift_transition(
     *,
     missing_baseline: str | None = None,
 ) -> str:
+    if _skill_never_activated(agent):
+        return _score_transition(dimension, skill_never_activated=True)
     if dimension and number(dimension.get("baseline")) is None:
         score = number(dimension.get("with_skill", dimension.get("score")))
         if score is not None and dimension.get("baseline_not_applicable"):
@@ -1922,12 +1926,24 @@ def _agent_dimension(agent: dict[str, Any], dim_id: str) -> dict[str, Any] | Non
     return None
 
 
-def _score_transition(dimension: dict[str, Any] | None, *, missing_baseline: str | None = None) -> str:
+def _skill_never_activated(agent: dict[str, Any]) -> bool:
+    """Whether every positive with-skill trial ran without loading the skill (no lift is computed then)."""
+    return _mapping(agent.get("skill_activation")).get("status") == "never_activated"
+
+
+def _score_transition(
+    dimension: dict[str, Any] | None,
+    *,
+    missing_baseline: str | None = None,
+    skill_never_activated: bool = False,
+) -> str:
     if not dimension:
         return "Not available"
     baseline = number(dimension.get("baseline"))
     score = number(dimension.get("with_skill", dimension.get("score")))
-    return _score_transition_values(baseline, score, missing_baseline=missing_baseline)
+    return _score_transition_values(
+        baseline, score, missing_baseline=missing_baseline, skill_never_activated=skill_never_activated
+    )
 
 
 def _score_transition_values(
@@ -1935,10 +1951,13 @@ def _score_transition_values(
     score: float | None,
     *,
     missing_baseline: str | None = None,
+    skill_never_activated: bool = False,
 ) -> str:
     if score is None:
         return "Not available"
     skill_label = f"{score:.0%}"
+    if skill_never_activated:
+        return f"{skill_label} — INCONCLUSIVE: skill never activated; uplift unavailable"
     if baseline is None:
         return f"{skill_label} — {missing_baseline or 'baseline not run; uplift unavailable'}"
     delta = score - baseline
@@ -2220,6 +2239,8 @@ def _publication_evidence_tier_status(
         tier3 = assess_tier3_evidence(results, ae, expected_skill_name=expected_skill_name)
         if tier3.status == "fail":
             return "FAIL", f"{len(_agents(ae))} agent(s); {_dataset_summary(ae)['total_tasks']} task(s)"
+        if tier3.status == "inconclusive":
+            return "INCONCLUSIVE", tier3.reason or "Skill never activated."
         if not tier3.evidence_complete:
             evidence = tier3.reason or (
                 "Required Tier 3 evidence is missing"

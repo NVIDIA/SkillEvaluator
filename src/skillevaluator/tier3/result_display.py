@@ -104,6 +104,11 @@ def _condition_status(data: Mapping[str, Any], variant: str) -> str:
     return str(condition.get("execution_status") or condition.get("status") or "")
 
 
+def _never_activated(data: Mapping[str, Any]) -> bool:
+    activation = data.get("skill_activation")
+    return isinstance(activation, Mapping) and activation.get("status") == "never_activated"
+
+
 def _condition_usable(data: Mapping[str, Any], variant: str) -> bool:
     status = _condition_status(data, variant)
     if status:
@@ -464,6 +469,10 @@ def _render_agent_scores(
     custom_with = data.get("custom_with_skill") if isinstance(data.get("custom_with_skill"), Mapping) else {}
     custom_without = data.get("custom_without_skill") if isinstance(data.get("custom_without_skill"), Mapping) else {}
     custom_lift = data.get("custom_lift") if isinstance(data.get("custom_lift"), Mapping) else {}
+    never_activated = _never_activated(data)
+    if never_activated:
+        lift = {}
+        custom_lift = {}
     show_baseline = not baseline_skipped and bool(baseline_status or baseline_scores or lift)
     # Legacy --lift-mode integration: the only baseline staged the member skills.
     members_baseline = _members_baseline(result)
@@ -607,7 +616,14 @@ def _render_agent_scores(
     # Repeat the reported lift prominently, on the same basis as every report,
     # without deriving a headline from incomplete comparisons or partial runs.
     content: Table | Group = table
-    if (
+    if never_activated:
+        content = Group(
+            Text("INCONCLUSIVE: skill never activated", style="bold yellow"),
+            Text("Scores are diagnostic only; no lift verdict was computed.", style="dim"),
+            Text(""),
+            table,
+        )
+    elif (
         with_usable
         and baseline_usable
         and all(finite_number(value) is not None for value in (with_overall, baseline_overall, overall.get("delta")))
@@ -694,7 +710,9 @@ def _render_dimensions(
             else:
                 baseline_cell, baseline_bar = _score_cell(baseline_numeric)
             delta = (
-                with_numeric - baseline_numeric if with_numeric is not None and baseline_numeric is not None else None
+                with_numeric - baseline_numeric
+                if not _never_activated(data) and with_numeric is not None and baseline_numeric is not None
+                else None
             )
             row = [
                 Text(DIMENSION_DISPLAY.get(dimension, dimension.title()), style="bold"),
@@ -983,7 +1001,11 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
                 display_findings_report(
                     dict(result),
                     str(result.get("skill_name") or ""),
-                    [str(agent) for agent in agents],
+                    [
+                        str(agent)
+                        for agent, data in agents.items()
+                        if not isinstance(data, Mapping) or not _never_activated(data)
+                    ],
                     Path(str(run_dir)) if run_dir else Path(),
                 )
                 or set()

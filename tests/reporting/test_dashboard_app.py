@@ -148,6 +148,25 @@ def test_performance_table_shows_per_trial_usage(tmp_path: Path) -> None:
     assert config["total_tokens_per_trial"]["label"] == "Tokens / trial"
     for field in ("total_tokens_per_trial", "duration_seconds_per_trial", "cost_usd_per_trial"):
         assert config[field]["type_config"]["type"] == "number", field
+
+
+def test_never_activated_dashboard_retains_scores_without_comparison_deltas(tmp_path: Path) -> None:
+    path = _write_report(tmp_path / "never-activated.json")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["agents"]["opencode"]["skill_activation"] = {"status": "never_activated"}
+    path.write_text(json.dumps(report), encoding="utf-8")
+    app = _app([path])
+    app.selectbox(key="comparison_metrics").set_value("Quality").run()
+    assert not app.exception
+    performance = app.dataframe[0].value
+    comparison = app.dataframe[1].value
+    assert performance["score"].tolist() == [0.9, 0.6]
+    assert comparison["with_score"].iloc[0] == 0.9
+    assert comparison["without_score"].iloc[0] == 0.6
+    assert comparison["comparison_status"].iloc[0] == "inconclusive"
+    assert "skill never activated" in comparison["comparison_reason"].iloc[0]
+    assert comparison["score_delta"].isna().all()
+    assert comparison["pass_rate_delta"].isna().all()
     rows = dashboard_app.load_dashboard_path(path).rows
     header = next(csv.reader(io.StringIO(rows_csv(rows, dashboard_app._PERFORMANCE_COLUMNS))))
     assert header.index("total_tokens_per_trial") == header.index("score") + 1

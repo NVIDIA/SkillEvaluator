@@ -869,6 +869,10 @@ class CLIReporter(ReporterBase):
         console.print(
             f"\n  [{vc}]Verdict: {verdict_text} (composite lift = {composite_text}{escape_markup(band_text)})[/{vc}]"
         )
+        if verdict == "inconclusive":
+            console.print(
+                "  [yellow]Skill never activated. Scores are diagnostic only; no lift verdict was computed.[/yellow]"
+            )
         if runtime:
             console.print(f"  [dim]Runtime: {runtime:.1f}s[/dim]")
         harbor_viewer = normalize_harbor_viewer_for_display(agent_eval)

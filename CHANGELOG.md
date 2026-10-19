@@ -83,7 +83,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - `run_config.json` records the judge reasoning effort, and each standard
   judge's details record `judge_model_used`, `judge_reasoning_effort` and
   `judge_fallback_used`. Skill lift leaves out a case whose two conditions were
-  judged by different models and counts it in `judge_mixed_cases`.
+  judged by different models and counts it in `judge_mixed_cases`. Dashboard
+  score differences preserve this matching-judge lift, including unavailable
+  comparisons.
 - Removed the unused `CONTENT_DEDUP_LLM_*` constants and `LLM_VERIFY_MODEL`; an
   LLM client built from explicit credentials uses the provider default model.
 - Tier 3 pins the agent CLIs Harbor installs: Codex 0.161.0 and Claude Code

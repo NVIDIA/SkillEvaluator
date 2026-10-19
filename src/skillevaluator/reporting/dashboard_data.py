@@ -425,6 +425,10 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                     ),
                     "_ambiguous_trial_ids": tuple(sorted(ambiguous_ids)),
                 }
+                if "lift" in agent:
+                    # Canonical lift can use only the matching-judge cohort;
+                    # an explicit null must not become a full-cohort delta.
+                    row["_score_lift"] = _number(agent["lift"])
                 _set_features(row, details, agent, report)
                 _set_usage(
                     row,
@@ -528,7 +532,10 @@ def comparison_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             result[f"with_{metric}"] = with_value
             result[f"without_{metric}"] = without_value
             available = paired and with_value is not None and without_value is not None
-            result[f"{metric}_delta"] = _number(with_value - without_value) if available else None
+            delta = _number(with_value - without_value) if available else None
+            if metric == "score" and available and "_score_lift" in with_rows[0]:
+                delta = _number(with_rows[0]["_score_lift"])
+            result[f"{metric}_delta"] = delta
             if metric in _USAGE:
                 result[f"{metric}_percent"] = (
                     _number(100 * (with_value - without_value) / without_value)

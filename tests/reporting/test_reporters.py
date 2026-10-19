@@ -214,6 +214,38 @@ class TestCLIReporter:
         assert "Required validations passed" in output
         assert "live evaluation skipped" in output
 
+    @pytest.mark.parametrize(
+        ("baseline", "lift", "expected_baseline", "expected_lift"),
+        [
+            (0.6, None, "0.60", "n/a"),
+            (None, None, "n/a", "n/a"),
+            (0.6, 0.2, "0.60", "+0.20"),
+            (0.9, -0.1, "0.90", "-0.10"),
+        ],
+    )
+    def test_render_agent_eval_with_unavailable_comparison(
+        self,
+        baseline: float | None,
+        lift: float | None,
+        expected_baseline: str,
+        expected_lift: str,
+    ) -> None:
+        result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
+        result.metadata["agent_eval"] = {
+            "evaluators": {"goal_accuracy": {"with_skill": 0.8, "baseline": baseline, "lift": lift}},
+        }
+
+        output = CLIReporter().render(result)
+        plain_output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+        row = next(line for line in plain_output.splitlines() if "Goal Accuracy" in line)
+
+        assert [cell.strip() for cell in row.split("│")[1:-1]] == [
+            "Goal Accuracy",
+            "0.80",
+            expected_baseline,
+            expected_lift,
+        ]
+
     def test_render_failure_escapes_markup_in_finding_fields(self) -> None:
         """Dynamic finding text should not be parsed as Rich markup."""
         result = ValidationResult(

@@ -1561,18 +1561,18 @@ def _judge_aware_lift(
     without_scores: dict[str, Any],
     score_policy: str,
 ) -> dict[str, Any] | None:
-    """Rebuild judge exclusions from complete trial evidence, never cached deltas."""
+    """Rebuild judge exclusions, falling back to recorded lift for incomplete loads."""
     from skillevaluator.tier3.harbor.collector import (
         _LLM_JUDGE_METRICS,
         _compute_lift,
         _logical_attempt_rewards,
         _reward_judge_models,
     )
-    from skillevaluator.tier3.harbor.metrics import metric_value
     from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
 
     recorded = info.get("lift")
-    recorded_mixed = recorded.get("judge_mixed_cases") if isinstance(recorded, dict) else None
+    recorded = recorded if isinstance(recorded, dict) else {}
+    recorded_mixed = recorded.get("judge_mixed_cases")
     mixed = (
         {
             metric: count
@@ -1582,6 +1582,7 @@ def _judge_aware_lift(
         if isinstance(recorded_mixed, dict)
         else {}
     )
+    recorded_counts = mixed.copy()
     if not mixed and not any(
         _reward_judge_models(row, metric)
         for rows in (info.get("rewards"), info.get("rewards_baseline"))
@@ -1624,19 +1625,18 @@ def _judge_aware_lift(
         mixed[metric] = max(count, mixed.get(metric, 0))
     if not mixed:
         return None
-    unsupported_exclusions.update(
-        metric
-        for metric in mixed
-        if any(
-            metric_value(row, metric) is not None and not _reward_judge_models(row, metric)
-            for rows in conditions
-            for row in rows
-        )
-    )
     if not complete:
-        # A bounded or incomplete reward load cannot reconstruct the retained
-        # cohort. Preserve unavailable instead of undoing the exclusion.
-        return {"judge_mixed_cases": mixed}
+        # The collector already excluded mixed judges from the full cohort;
+        # a partial load must not replace its recorded comparison.
+        covered = {metric for metric, count in mixed.items() if recorded_counts.get(metric, 0) >= count}
+        if covered == mixed.keys():
+            covered.add("overall")
+        for metric in (*mixed, "overall"):
+            rebuilt.pop(metric, None)
+            if all(clean_scores) and metric in covered and metric in recorded:
+                rebuilt[metric] = recorded[metric]
+        rebuilt["judge_mixed_cases"] = mixed
+        return rebuilt
     rebuilt["judge_mixed_cases"] = mixed
     for metric in unsupported_exclusions:
         rebuilt.pop(metric, None)

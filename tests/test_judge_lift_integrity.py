@@ -20,14 +20,21 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _write_job(job: Path, accuracies: list[float], judges: list[tuple[str, ...]], *, native: bool) -> None:
+def _write_job(
+    job: Path,
+    accuracies: list[float],
+    judges: list[tuple[str | None, ...]],
+    *,
+    native: bool,
+    judge_metric: str = "accuracy",
+) -> None:
     trials = []
     for index, (accuracy, step_judges) in enumerate(zip(accuracies, judges, strict=True), 1):
         case = f"case-{index}"
         trial_name = f"{case}__trial"
         trials.append(trial_name)
         trial = job / trial_name
-        scores = {**dict.fromkeys(DEFAULT_METRICS, 0.5), "accuracy": accuracy}
+        scores = {**dict.fromkeys(DEFAULT_METRICS, 0.5), judge_metric: accuracy}
         steps = []
         for step_index, judge in enumerate(step_judges):
             name = f"step-{step_index}"
@@ -37,7 +44,7 @@ def _write_job(job: Path, accuracies: list[float], judges: list[tuple[str, ...]]
                 "entry_id": case,
                 "metric_set": DEFAULT_METRIC_SET,
                 "score_policy": DEFAULT_SCORE_POLICY,
-                "details": {"accuracy": {"score": accuracy, "judge_model_used": judge}},
+                "details": {judge_metric: {"score": accuracy, "judge_model_used": judge}} if judge else {},
             }
             _write_json(verifier / "reward.json", scores if native else rich)
             if native:
@@ -76,17 +83,45 @@ def _write_job(job: Path, accuracies: list[float], judges: list[tuple[str, ...]]
     )
 
 
-def _collect(root: Path, *, native: bool = False, all_mixed: bool = False) -> tuple[dict, Path]:
-    judges_with = [("primary", "fallback"), ("primary", "fallback" if all_mixed else "primary")]
-    judges_without = [("primary", "primary"), ("primary", "primary")]
+def _collect(
+    root: Path,
+    *,
+    native: bool = False,
+    all_mixed: bool = False,
+    judge_free: bool = False,
+    cases: int = 2,
+    judge_metric: str = "accuracy",
+) -> tuple[dict, Path]:
+    judges_with = [("primary", "fallback" if index == 0 or all_mixed else "primary") for index in range(cases)]
+    judges_without = [("primary", "primary")] * cases
+    accuracies_with = [1.0, *([0.0] * (cases - 1))]
+    accuracies_without = [0.0, *([0.4] * (cases - 1))]
+    if judge_free:
+        judges_with.append((None, None))
+        judges_without.append((None, None))
+        accuracies_with.append(1.0)
+        accuracies_without.append(1.0)
     if not native:
         judges_with = [(row[-1],) for row in judges_with]
         judges_without = [(row[-1],) for row in judges_without]
-    _write_job(root / "jobs" / "demo-codex-with", [1.0, 0.0], judges_with, native=native)
-    _write_job(root / "jobs" / "demo-codex-without", [0.0, 0.4], judges_without, native=native)
+    _write_job(
+        root / "jobs" / "demo-codex-with", accuracies_with, judges_with, native=native, judge_metric=judge_metric
+    )
+    _write_job(
+        root / "jobs" / "demo-codex-without",
+        accuracies_without,
+        judges_without,
+        native=native,
+        judge_metric=judge_metric,
+    )
     run = root / "run"
     collected = collect_harbor_results(
-        "demo", ["codex"], run, root / "jobs", expected_case_ids=["case-1", "case-2"], expected_trials=2
+        "demo",
+        ["codex"],
+        run,
+        root / "jobs",
+        expected_case_ids=[f"case-{index + 1}" for index in range(len(accuracies_with))],
+        expected_trials=len(accuracies_with),
     )
     assert collected["execution_status"] == "succeeded"
     return collected, run
@@ -153,8 +188,8 @@ def test_all_mixed_judges_leave_metric_dimension_and_overall_unavailable(tmp_pat
 @pytest.mark.parametrize(
     "missing_evidence", ["reward", "judge_metadata", "partial_judge_metadata", "retained_judge_metadata"]
 )
-def test_exclusions_cannot_be_reconstructed_from_incomplete_evidence(tmp_path: Path, missing_evidence: str) -> None:
-    _, run = _collect(tmp_path, all_mixed=missing_evidence == "partial_judge_metadata")
+def test_report_handles_incomplete_judge_evidence(tmp_path: Path, missing_evidence: str) -> None:
+    collected, run = _collect(tmp_path, all_mixed=missing_evidence == "partial_judge_metadata")
     reward = next((run / "codex" / "with-skill" / "trials").glob("*/reward.json"))
     if missing_evidence == "reward":
         reward.unlink()
@@ -168,6 +203,66 @@ def test_exclusions_cannot_be_reconstructed_from_incomplete_evidence(tmp_path: P
                 continue
             payload.pop("details", None)
             _write_json(reward, payload)
+    report = _report(run)
+    lift = collected["agents"]["codex"]["lift"]
+    available = missing_evidence in {"reward", "retained_judge_metadata"}
+    assert report["overall_lift"] == (lift["overall"]["delta"] if available else None)
+    assert report["agents"]["codex"]["evaluators"]["accuracy"]["lift"] == (
+        lift["accuracy"]["delta"] if available else None
+    )
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_judge_free_cases_retain_collector_lift(tmp_path: Path, native: bool) -> None:
+    collected, run = _collect(tmp_path, native=native, judge_free=True)
+    lift = collected["agents"]["codex"]["lift"]
+    assert lift["judge_mixed_cases"] == {"accuracy": 1}
+    assert lift["accuracy"]["delta"] == -0.2
+    assert lift["overall"]["delta"] == -0.04
+    report = _report(run)
+    agent = report["agents"]["codex"]
+    assert report["overall_lift"] == agent["lift"] == lift["overall"]["delta"]
+    assert agent["evaluators"]["accuracy"]["lift"] == lift["accuracy"]["delta"]
+    correctness = next(dim for dim in agent["dimensions"] if dim["id"] == "correctness")
+    assert correctness["lift"] == lift["accuracy"]["delta"]
+
+
+@pytest.mark.parametrize("recorded_lift", [True, False])
+@pytest.mark.parametrize(
+    ("metric", "dimension", "dimension_lift"),
+    [("accuracy", "correctness", -0.4), ("goal_accuracy", "effectiveness", -0.2)],
+)
+def test_capped_report_uses_recorded_lift_when_available(
+    tmp_path: Path, recorded_lift: bool, metric: str, dimension: str, dimension_lift: float
+) -> None:
+    collected, run = _collect(tmp_path, cases=513, judge_metric=metric)
+    lift = collected["agents"]["codex"]["lift"]
+    assert lift["judge_mixed_cases"] == {metric: 1}
+    assert lift[metric]["delta"] == -0.4
+    assert lift["overall"]["delta"] == dimension_lift / 5
+    if not recorded_lift:
+        (run / "codex" / "lift.json").unlink()
+    report = _report(run)
+    agent = report["agents"]["codex"]
+    assert len(agent["trials"]) == 512
+    assert report["overall_lift"] == agent["lift"] == (lift["overall"]["delta"] if recorded_lift else None)
+    assert agent["evaluators"][metric]["lift"] == (lift[metric]["delta"] if recorded_lift else None)
+    dimension = next(dim for dim in agent["dimensions"] if dim["id"] == dimension)
+    assert dimension["lift"] == (dimension_lift if recorded_lift else None)
+
+
+@pytest.mark.parametrize("recorded_mixed", [None, {"accuracy": 0}, {"accuracy": True}])
+def test_partial_load_does_not_trust_lift_without_recorded_exclusions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded_mixed: dict | None
+) -> None:
+    from skillevaluator.tier3.harbor import report_data
+
+    _, run = _collect(tmp_path)
+    path = run / "codex" / "lift.json"
+    lift = json.loads(path.read_text())
+    lift["judge_mixed_cases"] = recorded_mixed
+    _write_json(path, lift)
+    monkeypatch.setattr(report_data, "_MAX_TRIALS_PER_CONDITION", 1)
     report = _report(run)
     assert report["overall_lift"] is None
     assert report["agents"]["codex"]["evaluators"]["accuracy"]["lift"] is None

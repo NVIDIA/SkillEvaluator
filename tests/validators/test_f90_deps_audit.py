@@ -328,12 +328,14 @@ def test_edge09_broken_python_manifests_make_the_audit_incomplete(
     python = _python(result)
     assert python["status"] == "incomplete"
     assert any("requirements.txt" in error and "not valid UTF-8" in error for error in python["errors"])
-    assert any("pyproject.toml" in error and "could not parse" in error for error in python["errors"])
+    assert any(
+        "pyproject.toml" in error and "cannot read a bounded regular TOML file" in error for error in python["errors"]
+    )
     assert not any("Tier 2" in warning for warning in result.warnings)
     assert scanners["pip_audit"].calls == []
 
 
-def test_edge09_shape_in_a_standalone_skill_stays_a_warning(tmp_path: Path, scanners: dict[str, _FakeTool]) -> None:
+def test_edge09_shape_in_a_standalone_skill_is_incomplete(tmp_path: Path, scanners: dict[str, _FakeTool]) -> None:
     skill = tmp_path / "skill"
     skill.mkdir()
     (skill / "SKILL.md").write_text("---\nname: skill\ndescription: Demo.\n---\n# Skill\n", encoding="utf-8")
@@ -341,7 +343,8 @@ def test_edge09_shape_in_a_standalone_skill_stays_a_warning(tmp_path: Path, scan
 
     [result] = run_validation(skill, checks="dependency")
 
-    assert not result.is_incomplete
+    # An unreadable manifest is missing evidence for a skill as for a plugin.
+    assert result.is_incomplete
     assert any("not valid UTF-8" in warning for warning in result.warnings)
 
 

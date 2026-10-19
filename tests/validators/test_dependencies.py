@@ -89,20 +89,38 @@ def test_pyproject_audits_declared_pins_not_the_running_environment(tmp_path: Pa
     call = fake.calls[0]
     assert "--local" not in call["args"]
     assert {"--no-deps", "--disable-pip"} <= set(call["args"])
-    # Exactly the target's pins, normalized; nothing from the running environment.
-    assert call["content"] == "jinja2==2.10\npyyaml==5.3\nurllib3==1.26.0\n"
+    # Exactly the target's pins (the markers match this platform); nothing from the running environment.
+    assert call["content"] == "Jinja2==2.10\nPyYAML==5.3\nurllib3==1.26.0\n"
     assert "click" not in call["content"]
     assert call["cwd"] != skill
     assert not call["audit_file"].exists(), "temporary audit file must be removed"
-    assert result.passed
+    # A range in pyproject.toml cannot be audited under the static PEP 621 contract.
+    assert result.is_incomplete
 
 
-def test_unpinned_declarations_are_info_unverified(tmp_path: Path, pip_audit_available) -> None:
+def test_unpinned_pyproject_declarations_make_the_audit_incomplete(tmp_path: Path, pip_audit_available) -> None:
+    """pyproject.toml follows the static PEP 621 contract: what it cannot audit leaves the audit INCOMPLETE."""
     skill = _skill(tmp_path)
     (skill / "pyproject.toml").write_text(
         '[project]\nname = "target"\nversion = "0.1.0"\n'
         'dependencies = ["requests>=2.0", "idna", "flask==2.*", "pkg @ https://example.com/pkg.whl"]\n',
         encoding="utf-8",
+    )
+
+    with patch.object(Tools.pip_audit, "run") as run:
+        result = DependencySecurityValidator(use_safety=False).validate(skill)
+
+    run.assert_not_called()
+    assert result.is_incomplete
+    # Declaration text never reaches a diagnostic.
+    assert not any("example.com" in warning for warning in result.warnings)
+    assert result.metadata["dependency_coverage"][0]["requested_pins"] == []
+
+
+def test_unpinned_requirements_are_info_unverified(tmp_path: Path, pip_audit_available) -> None:
+    skill = _skill(tmp_path)
+    (skill / "requirements.txt").write_text(
+        "requests>=2.0\nidna\nflask==2.*\npkg @ https://example.com/pkg.whl\n", encoding="utf-8"
     )
 
     with patch.object(Tools.pip_audit, "run") as run:
@@ -178,9 +196,8 @@ def test_pinned_vulnerability_is_reported_once(tmp_path: Path, pip_audit_availab
 
 def test_conflicting_pins_are_audited_in_separate_batches(tmp_path: Path, pip_audit_available) -> None:
     skill = _skill(tmp_path)
-    (skill / "pyproject.toml").write_text(
-        '[project]\nname = "target"\nversion = "0.1.0"\n'
-        "dependencies = [\"numpy==1.26.4; python_version < '3.13'\", \"numpy==2.1.0; python_version >= '3.13'\"]\n",
+    (skill / "requirements.txt").write_text(
+        "numpy==1.26.4; python_version < '3.13'\nnumpy==2.1.0; python_version >= '3.13'\n",
         encoding="utf-8",
     )
     fake = _RecordingPipAudit()
@@ -202,9 +219,8 @@ def test_pip_audit_failure_without_json_is_a_warning(tmp_path: Path, pip_audit_a
         result = DependencySecurityValidator(use_safety=False).validate(skill)
 
     assert any("pip-audit failed: ERROR: network unreachable" in w for w in result.warnings)
-    # Standalone skills keep the warning; plugin runs mark the Python audit INCOMPLETE
-    # (see test_dependency_ecosystems.py).
-    assert not result.is_incomplete
+    # A run that produced no evidence leaves the audit INCOMPLETE, for a skill as for a plugin.
+    assert result.is_incomplete
 
 
 _SKIPPED_REQUESTS = json.dumps(
@@ -257,7 +273,8 @@ def test_source_whose_every_pin_pip_audit_skipped_is_unverified(tmp_path: Path, 
     ]
     python = validator._summary["python"]
     assert (python["status"], python["audited"], python["unverified"], python["scanners"]) == ("unverified", 0, 1, [])
-    assert not result.is_incomplete
+    # A pin pip-audit skipped is missing coverage, so the audit is INCOMPLETE.
+    assert result.is_incomplete
 
 
 def test_with_requirements_that_mcp_runners_install_are_audited(tmp_path: Path, pip_audit_available) -> None:
@@ -303,10 +320,12 @@ def test_invalid_pyproject_is_reported_without_auditing(tmp_path: Path, pip_audi
         result = DependencySecurityValidator(use_safety=False).validate(skill)
 
     run.assert_not_called()
-    assert any("could not parse dependency declarations" in w for w in result.warnings)
+    assert any("cannot read a bounded regular TOML file" in w for w in result.warnings)
+    assert result.is_incomplete
 
 
-def test_poetry_bare_versions_are_exact(tmp_path: Path, pip_audit_available) -> None:
+def test_poetry_metadata_is_not_audited(tmp_path: Path, pip_audit_available) -> None:
+    """Poetry metadata is outside the static PEP 621 contract: supply a pinned requirements.txt instead."""
     skill = _skill(tmp_path)
     (skill / "pyproject.toml").write_text(
         '[tool.poetry.dependencies]\npython = "^3.12"\nrequests = "2.31.0"\nhttpx = { version = "^0.27" }\n',
@@ -317,9 +336,8 @@ def test_poetry_bare_versions_are_exact(tmp_path: Path, pip_audit_available) -> 
     with patch.object(Tools.pip_audit, "run", side_effect=fake):
         result = DependencySecurityValidator(use_safety=False).validate(skill)
 
-    assert [call["content"] for call in fake.calls] == ["requests==2.31.0\n"]
-    unverified = [f.metadata["package_name"] for f in result.findings if f.check_name == UNVERIFIED_CHECK_NAME]
-    assert unverified == ["httpx"]
+    assert fake.calls == []
+    assert result.is_incomplete
 
 
 def test_every_pep440_spelling_of_an_exact_pin_is_audited(tmp_path: Path, pip_audit_available) -> None:

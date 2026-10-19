@@ -62,7 +62,14 @@ class _FakeTool:
         return self.responses.pop(0)
 
 
-def _ok(payload: Any, exit_code: int = 0) -> ToolResult:
+def _ok(payload: Any, exit_code: int | None = None) -> ToolResult:
+    if exit_code is None:
+        # Like pip-audit, exit 1 when the report lists a vulnerability (its exit code is checked against it).
+        dependencies = payload.get("dependencies") if isinstance(payload, dict) else None
+        vulnerable = isinstance(dependencies, list) and any(
+            isinstance(dep, dict) and dep.get("vulns") for dep in dependencies
+        )
+        exit_code = 1 if vulnerable else 0
     return ToolResult(True, json.dumps(payload), "", exit_code)
 
 
@@ -261,7 +268,7 @@ def test_missing_pip_audit_makes_a_plugin_run_incomplete(
     assert python["errors"] == ["requirements.txt: pip-audit not installed. install pip-audit"]
 
 
-def test_missing_pip_audit_stays_a_warning_for_a_standalone_skill(
+def test_missing_pip_audit_makes_a_standalone_skill_audit_incomplete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(Tools, "pip_audit", _FakeTool("pip-audit", available=False))
@@ -272,7 +279,8 @@ def test_missing_pip_audit_stays_a_warning_for_a_standalone_skill(
     (skill / "requirements.txt").write_text("requests==2.19.0\n")
     [result] = run_validation(skill, checks="dependency")
 
-    assert not result.is_incomplete
+    # No scanner, no evidence: INCOMPLETE for a skill as for a plugin.
+    assert result.is_incomplete
     assert any("pip-audit not installed" in warning for warning in result.warnings)
 
 

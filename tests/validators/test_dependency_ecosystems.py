@@ -46,7 +46,14 @@ class FakeTool:
         return self.responses.pop(0)
 
 
-def _ok(payload: Any, exit_code: int = 0) -> ToolResult:
+def _ok(payload: Any, exit_code: int | None = None) -> ToolResult:
+    if exit_code is None:
+        # Like pip-audit, exit 1 when the report lists a vulnerability (its exit code is checked against it).
+        dependencies = payload.get("dependencies") if isinstance(payload, dict) else None
+        vulnerable = isinstance(dependencies, list) and any(
+            isinstance(dep, dict) and dep.get("vulns") for dep in dependencies
+        )
+        exit_code = 1 if vulnerable else 0
     return ToolResult(True, json.dumps(payload), "", exit_code)
 
 
@@ -682,7 +689,8 @@ def test_pin_pip_audit_skipped_is_not_audited_in_the_plugin_summary(
 
     result = _dependency_result(_bare_plugin(tmp_path / "demo", files))
 
-    assert result.incomplete_scans == []
+    # A pin pip-audit skipped is missing coverage, so the audit is INCOMPLETE.
+    assert result.incomplete_scans == ["pip-audit"]
     [not_audited] = [f for f in result.findings if f.check_name == eco.NOT_AUDITED_CHECK]
     assert (not_audited.severity, not_audited.metadata["package_name"], not_audited.file_path) == (
         Severity.MEDIUM,

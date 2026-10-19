@@ -540,17 +540,21 @@ class DependencySecurityValidator(ValidatorBase):
             "Auditing pyproject.toml: direct declared pins, including optional groups; no transitive audit"
         )
         unverified = 0
+        reasons: list[str] = []
 
         def incomplete(message: str) -> None:
             result.mark_scan_incomplete(PIP_AUDIT_SCAN)
             result.add_warning(f"pyproject.toml: {message}")
+            reasons.append(message)
 
         def finish(outcome: eco.AuditOutcome | None) -> ValidationResult:
             coverage = result.metadata["dependency_coverage"]
             if result.is_incomplete:
                 outcome = outcome or eco.AuditOutcome()
                 outcome.status = "incomplete"
-                outcome.error = "pyproject.toml: the static dependency audit did not complete"
+                outcome.error = (
+                    f"pyproject.toml: {reasons[0] if reasons else 'the static dependency audit did not complete'}"
+                )
             eco.record_outcome(
                 self._summary.setdefault("python", eco.empty_ecosystem_summary()),
                 outcome,
@@ -983,12 +987,18 @@ class DependencySecurityValidator(ValidatorBase):
                 outcome=outcome,
             )
             if processed is None:
-                if exit_code != 0 and parse_json_output(tool_result.stdout) is None:
+                try:
+                    has_report = parse_json_output(tool_result.stdout) is not None
+                except (RecursionError, ValueError):
+                    has_report = False
+                if has_report:
+                    error = "pip-audit returned a malformed or contradictory JSON report"
+                elif exit_code != 0:
                     detail = (tool_result.stderr or "").strip().splitlines()
                     reason = detail[-1][: eco.MAX_ERROR_CHARS] if detail else f"exit code {exit_code}"
                     error = f"pip-audit failed: {reason}"
                 else:
-                    error = "pip-audit returned a malformed or contradictory JSON report"
+                    error = "pip-audit produced no JSON report"
             else:
                 skipped = processed
         if error is not None:
@@ -1056,6 +1066,10 @@ class DependencySecurityValidator(ValidatorBase):
         if skipped:
             status += f"; {len(skipped)} pin(s) could not be audited"
             result.add_message(f"{file_path}: {status} (pip-audit)")
+            result.add_warning(
+                f"{file_path}: pip-audit skipped {len(skipped)} dependency(ies); scan coverage is incomplete"
+            )
+            result.mark_scan_incomplete(PIP_AUDIT_SCAN)
         else:
             result.add_success(
                 check_name="pip_audit",

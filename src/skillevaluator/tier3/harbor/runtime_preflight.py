@@ -1736,6 +1736,8 @@ def _execute_vertex_http_probe(
             provider.model,
             f"{service_label} model probe timed out",
             failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+            error_code=EvaluatorErrorCode.DEPENDENCY_TIMEOUT,
+            timed_out=True,
         )
     except Exception as exc:
         return ModelProbeResult(
@@ -1780,6 +1782,8 @@ def _run_vertex_probe_with_deadline(
             provider.model,
             f"{service_label} model probe timed out waiting for worker slot",
             failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+            error_code=EvaluatorErrorCode.DEPENDENCY_TIMEOUT,
+            timed_out=True,
         )
 
     def run_probe() -> None:
@@ -1806,6 +1810,8 @@ def _run_vertex_probe_with_deadline(
             provider.model,
             f"{service_label} model probe timed out",
             failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+            error_code=EvaluatorErrorCode.DEPENDENCY_TIMEOUT,
+            timed_out=True,
         )
 
     try:
@@ -1831,6 +1837,8 @@ def _run_vertex_probe_with_deadline(
             provider.model,
             f"{service_label} model probe timed out",
             failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+            error_code=EvaluatorErrorCode.DEPENDENCY_TIMEOUT,
+            timed_out=True,
         )
 
 

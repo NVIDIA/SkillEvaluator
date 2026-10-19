@@ -4659,3 +4659,108 @@ def test_vertex_openapi_probe_authorization_failure_fatal_in_gke():
     )
     assert runtime_preflight.credential_probe_disposition(provider, result, env_mode="gke") == "fatal"
     assert runtime_preflight.credential_probe_disposition(provider, result, env_mode="") == "fatal"
+
+
+def _vertex_provider() -> ProviderConfig:
+    return ProviderConfig(
+        provider="anthropic",
+        model="claude-opus-5-5",
+        api_key="",
+        base_url=None,
+        litellm_model="anthropic/claude-opus-5-5",
+    )
+
+
+def test_vertex_probe_timeouts_are_dependency_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.request
+    from threading import BoundedSemaphore
+
+    provider = _vertex_provider()
+
+    def time_out(*_args, **_kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(runtime_preflight, "_urlopen_without_redirects", time_out)
+    http_timeout = runtime_preflight._execute_vertex_http_probe(
+        provider,
+        urllib.request.Request("https://vertex.invalid/probe"),
+        http_timeout=1.0,
+        service_label="Vertex AI",
+        success_detail="available",
+        not_found_model_label=provider.model,
+    )
+
+    class BusySlot:
+        def acquire(self, timeout: float) -> bool:
+            del timeout
+            return False
+
+    slot_timeout = runtime_preflight._run_vertex_probe_with_deadline(
+        provider,
+        timeout_seconds=0.01,
+        slot=BusySlot(),
+        thread_name="vertex-test-busy",
+        service_label="Vertex AI",
+        probe_fn=lambda *_args, **_kwargs: pytest.fail("a busy slot must not start a probe"),
+    )
+    release = Event()
+
+    def blocked_probe(*_args, **_kwargs):
+        release.wait(5)
+        return runtime_preflight.ModelProbeResult(True, provider.provider, provider.model, "late")
+
+    try:
+        deadline_timeout = runtime_preflight._run_vertex_probe_with_deadline(
+            provider,
+            timeout_seconds=0.05,
+            slot=BoundedSemaphore(1),
+            thread_name="vertex-test-blocked",
+            service_label="Vertex AI",
+            probe_fn=blocked_probe,
+        )
+    finally:
+        release.set()
+
+    for result in (http_timeout, slot_timeout, deadline_timeout):
+        assert result.ok is False
+        assert result.failure_kind == "unavailable"
+        assert result.error_code == "SKILLEVALUATOR-DEPENDENCY-005"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [
+        (401, "SKILLEVALUATOR-AUTH-002"),
+        (403, "SKILLEVALUATOR-AUTH-003"),
+        (404, "SKILLEVALUATOR-DEPENDENCY-003"),
+        (429, "SKILLEVALUATOR-DEPENDENCY-006"),
+        (500, "SKILLEVALUATOR-DEPENDENCY-009"),
+    ],
+)
+def test_vertex_probe_http_failures_use_structured_error_codes(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    expected_code: str,
+) -> None:
+    import io
+    import urllib.error
+    import urllib.request
+
+    def reject(request, *, timeout: float):
+        del timeout
+        raise urllib.error.HTTPError(request.full_url, status, "rejected", {}, io.BytesIO(b"{}"))
+
+    monkeypatch.setattr(runtime_preflight, "_urlopen_without_redirects", reject)
+    provider = _vertex_provider()
+
+    result = runtime_preflight._execute_vertex_http_probe(
+        provider,
+        urllib.request.Request("https://vertex.invalid/probe"),
+        http_timeout=1.0,
+        service_label="Vertex AI",
+        success_detail="available",
+        not_found_model_label=provider.model,
+    )
+
+    assert result.ok is False
+    assert result.error_code == expected_code

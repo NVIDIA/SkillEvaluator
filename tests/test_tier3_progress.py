@@ -1208,6 +1208,47 @@ def test_staged_environment_rejection_persists_a_coded_result(
 
 
 @pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        ("gke_workload_identity", "SKILLEVALUATOR-UNKNOWN-001"),
+        ("mosaic_config", "SKILLEVALUATOR-UNKNOWN-001"),
+        ("vertex_credentials", "SKILLEVALUATOR-CONFIG-001"),
+    ],
+)
+def test_cloud_backend_preflight_failures_use_the_existing_code_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: str,
+    expected_code: str,
+) -> None:
+    from skillevaluator.tier3.harbor import runner as harbor_runner
+
+    messages = {
+        "gke_workload_identity": harbor_runner.GKE_WORKLOAD_IDENTITY_ERROR_MESSAGE,
+        "mosaic_config": "Harbor environment 'mosaic' requires MOSAIC_CONFIG to name an existing regular file.",
+        "vertex_credentials": (
+            "vertex ai live agents do not support docker mode; use --env-mode gke or a supported cloud backend."
+        ),
+    }
+    detail = messages[failure]
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        environment_check=(lambda **_kwargs: [detail]) if failure != "vertex_credentials" else None,
+        credential_check=(lambda *_args, **_kwargs: [detail]) if failure == "vertex_credentials" else None,
+    )
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+
+    assert result == {
+        "execution_status": "failed",
+        "error_code": expected_code,
+        "execution_errors": [detail],
+        "error": [detail],
+    }
+
+
+@pytest.mark.parametrize(
     ("provider_name", "provider_base_url", "failure_kind", "http_status", "detail"),
     [
         ("openai", "https://api.openai.com/v1", "unavailable", None, "model catalog request timed out"),

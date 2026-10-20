@@ -6,6 +6,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- A plugin's Tier 3 run can now certify the plugin on `BENCHMARK.md` and in the
+  public benchmark gate. When the plugin is staged for Tier 3, SkillEvaluator
+  records the plugin root's publication target and source digest (the digest
+  rules skills use) and keeps it only if the root did not change while it was
+  staged. The run certifies the plugin root, not the staged copy, and checks the
+  root again when it ends; the plugin card accepts the Tier 3 evidence only when
+  that identity matches the plugin it reports. Evidence from a staged copy that
+  differs from the root, with no recorded identity, or with a different digest
+  stays INCOMPLETE.
 - `tier3 evaluate-plugin` takes `validate`'s report options, `-r/--report` (`cli`, `json`, `html`, `markdown`, `sarif`; default `cli`) and `-o/--output-dir` (default `reports`), and writes the plugin's Tier 3 result through the same reporters and file names as `validate`. Without either option it prints and writes what it did before. A run that did not complete still writes its reports, marked INCOMPLETE, before it exits 1.
 - Plugin Tier 3 statistics and reports for the lift ladder (`--lift-mode
   ladder`): a fourth, loose-parts arm (the plugin's skills, rules, MCP servers,
@@ -156,6 +165,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Native plugin loading checks the MCP servers it writes into the agent's
+  configuration against the same environment-variable and host allowlists as
+  other MCP declarations, and a refused plugin server now says how to approve
+  it: set `SKILLEVALUATOR_ALLOWED_MCP_SECRETS` (and, for a remote server,
+  `SKILLEVALUATOR_ALLOWED_MCP_HOSTS`), each a comma-separated list, in the
+  environment that runs SkillEvaluator, for example
+  `SKILLEVALUATOR_ALLOWED_MCP_SECRETS=TRACKER_TOKEN`. The refusal names "the
+  plugin's MCP servers" rather than a staging path. A native run whose plugin
+  MCP server references a variable that is not on the list now stops until the
+  operator approves it.
 - Reports call the plugin-minus-member-skills lift the Bundle lift (it was the
   Integration lift) and say that it includes the plugin's rules, MCP servers and
   wrapper, not only how the parts coordinate. Its verdicts read Real bundle
@@ -273,6 +292,26 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The native-loading and loose-parts Claude Code arms ran on a different agent
+  wrapper from the no-plugin and skills-only arms, so Vertex AI routing and the
+  Docker agent setup (which no longer installs Node/npm) could differ between the
+  arms of one plugin run. Every arm now uses the agent the baseline uses in that
+  environment: the SkillEvaluator container wrapper on Docker, Kata and GKE, the
+  NVIDIA Build wrapper for `nv_build`, and Harbor's own agent on other
+  Harbor-native backends.
+- A Tier 3 run whose skill never activated (verdict INCONCLUSIVE) read `passed`
+  in the JSON `tier_status` and result `status`, the SARIF `tierStatus`, the
+  HTML Tier 3 card and the terminal summary row, while `BENCHMARK.md` said
+  INCONCLUSIVE. It is now INCOMPLETE on every machine-readable status; the
+  verdict lines still say INCONCLUSIVE. The exit code is unchanged: outside the
+  gate the run is named as advisory, and with `--block-on-agent-eval` it fails
+  `validate` with the headline INCOMPLETE.
+- A plugin run kept computing the Bundle lift, the loose-parts lift and the lift
+  ladder (and the Skill Lift's interval) when the skill never activated in an arm
+  they compare. Every arm that stages the skill now records `skill_activation` in
+  its `summary.json`, and a comparison over an arm that never activated the
+  skill has no lift file (`integration_lift.json`, `loose_parts_lift.json`), no
+  interval and no ladder; the reports say which arm never activated it.
 - The per-metric lift files (`lift.json`, `integration_lift.json`, `loose_parts_lift.json`) subtracted two arm averages that could cover different cases: on the release-kit four-arm pilot the skill metrics averaged 32 full-plugin trials against 28 skills-only and 28 loose-parts trials, because those arms record the skill metrics as N/A on the two cases with no expected skill. Each metric now compares both arms on the cases both scored it on (the loose-parts file also leaves out the cases the lift ladder drops for load evidence), so the pilot's loose-parts skill execution gap is -0.0179, not -0.0446. A new `basis` block in each file gives the case and trial counts per metric and lists every case or metric left out, with the reason. Rows with nothing left out keep the arm averages.
 - The HTML report's "HTML preview omitted" note on a large Tier 3 run printed Python's `<built-in method items of dict object at 0x…>` in place of the number of items it left out (seen on the release-kit four-arm pilot report). It now reads, for example, "66623 characters and 536 items."
 - Every report gives a run the same headline. The JSON `overall_status`, the Markdown and HTML status, and the new SARIF `overallStatus` run property now follow the rule the terminal and `BENCHMARK.md` already used: a real failure outranks missing evidence, so a run whose Tier 1 failed while SkillSpector was partial is `failed` everywhere instead of `incomplete` in three reports, and a gated partial Tier 3 run is `incomplete` everywhere instead of `failed` in three. A tier outside the exit gate no longer changes the JSON, Markdown or HTML headline. The HTML Tier 1 and Tier 2 cards show FAIL, INCOMPLETE or SKIPPED instead of N/A or PASS, and a skipped check is SKIP, not PASS, in the terminal table, the Markdown and HTML rows, and the JSON `status`. The JSON adds `tier_status` and `status_reasons`. One module, `reporting/run_status.py`, decides these statuses for every report.

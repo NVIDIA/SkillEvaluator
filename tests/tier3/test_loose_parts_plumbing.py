@@ -15,6 +15,7 @@ and every model are mocked away: nothing here makes a model call.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -840,10 +841,12 @@ def _write_four_arm_run(
     arms: tuple[str, ...] = (FULL, NONE, SKILLS, LOOSE),
     init: dict[tuple[str, str], dict[str, Any] | None] | None = None,
     scores: dict[tuple[str, str], dict[str, float | None]] | None = None,
+    activated: dict[str, bool] | None = None,
 ) -> Path:
     """Harbor jobs for every arm (no plugin 0.4, skills 0.6, loose 0.7, full 0.8) with Claude Code init logs.
 
-    ``scores`` replaces the metric scores of one ``(arm, case)`` trial.
+    ``scores`` replaces the metric scores of one ``(arm, case)`` trial. ``activated`` records, per arm, whether its
+    trials activated the skill (an arm left out records no activation check).
     """
     jobs = tmp_path / "jobs"
     overrides = init or {}
@@ -856,6 +859,7 @@ def _write_four_arm_run(
             AGENT,
             variant,
             {case: [replaced.get((arm, case), metrics(value, skill=arm != NONE))] for case in CASES},
+            activated=(activated or {}).get(arm),
         )
         for case in CASES:
             event = overrides.get((arm, case), _init_event(arm))
@@ -1266,3 +1270,115 @@ def test_text_from_the_agent_log_is_redacted_in_the_evidence(tmp_path: Path) -> 
     assert secret not in json.dumps(collected["loose_parts"])
     # The failure itself is kept: the case is still dropped from every arm.
     assert [entry["case"] for entry in collected["agents"][AGENT]["lift_ladder"]["excluded_cases"]] == ["x-1"]
+
+
+# --------------------------------------------------------------------------- #
+# A skill-bearing arm that never activated the skill (#208)                   #
+# --------------------------------------------------------------------------- #
+# Which lifts a never-activated arm leaves out: (Skill Lift, Bundle lift, loose-parts lift and ladder).
+_UNACTIVATED_ARM_DROPS = {
+    FULL: {"lift": True, "integration": True, "loose": True},
+    SKILLS: {"lift": False, "integration": True, "loose": False},
+    LOOSE: {"lift": False, "integration": False, "loose": True},
+}
+_ARM_LABELS = {FULL: "with-plugin arm", SKILLS: "member-skills (sum-of-parts) arm", LOOSE: "loose-parts arm"}
+
+
+def _unactivated_run(tmp_path: Path, arm: str) -> dict[str, Any]:
+    """A four-arm ladder run where *arm* never activated the skill and every other skill-bearing arm did."""
+    activated = {skill_arm: skill_arm != arm for skill_arm in (FULL, SKILLS, LOOSE)}
+    jobs = _write_four_arm_run(tmp_path, activated=activated)
+    return _collect(tmp_path, jobs, loose_parts=_loose_plan(tmp_path))
+
+
+@pytest.mark.parametrize("arm", [FULL, SKILLS, LOOSE])
+def test_the_collector_computes_no_lift_over_an_arm_that_never_activated_the_skill(tmp_path: Path, arm: str) -> None:
+    collected = _unactivated_run(tmp_path, arm)
+
+    agent = collected["agents"][AGENT]
+    results = tmp_path / "results" / AGENT
+    drops = _UNACTIVATED_ARM_DROPS[arm]
+    assert agent["skill_activation_by_arm"][arm]["status"] == "never_activated"
+    assert {key for key, summary in agent["skill_activation_by_arm"].items() if summary["status"] == "activated"} == (
+        {FULL, SKILLS, LOOSE} - {arm}
+    )
+    # Every arm that stages the skill records its activation next to its scores.
+    for skill_arm, directory in ((FULL, "with-skill"), (SKILLS, "sum-of-parts"), (LOOSE, "loose-parts")):
+        summary = json.loads((results / directory / "summary.json").read_text(encoding="utf-8"))
+        assert summary["skill_activation"] == agent["skill_activation_by_arm"][skill_arm]
+    assert "skill_activation" not in json.loads((results / "without-skill" / "summary.json").read_text("utf-8"))
+    # The scores stay as diagnostics; the lifts, their files and their intervals do not exist.
+    assert agent["with_skill"] and agent["sum_of_parts"] and agent["loose_parts"]
+    assert (agent["lift"] == {}) is drops["lift"]
+    assert (results / "lift.json").exists() is not drops["lift"]
+    assert (agent["integration_lift"] == {}) is drops["integration"]
+    assert (results / "integration_lift.json").exists() is not drops["integration"]
+    assert (agent["loose_parts_lift"] == {}) is drops["loose"]
+    assert (results / "loose_parts_lift.json").exists() is not drops["loose"]
+    statistics = json.loads((results / "statistics.json").read_text(encoding="utf-8"))
+    assert (statistics["lift_uncertainty"]["effectiveness"] is None) is drops["lift"]
+    assert (statistics["lift_uncertainty"]["integration"] is None) is drops["integration"]
+    # The ladder splits the lift across every skill-bearing arm, so any one that never activated leaves none.
+    assert statistics["lift_ladder"] is None
+    assert agent["lift_ladder"] is None
+
+
+@pytest.mark.parametrize("arm", [FULL, SKILLS, LOOSE])
+def test_every_report_says_why_a_lift_over_an_unactivated_arm_is_missing(tmp_path: Path, arm: str) -> None:
+    from skillevaluator.evaluation.tier3_report import _validation_result_from_payload
+    from skillevaluator.reporting.benchmark import BenchmarkReporter
+    from skillevaluator.reporting.cli import CLIReporter
+    from skillevaluator.reporting.html import HTMLReporter
+    from skillevaluator.reporting.json_reporter import JSONReporter
+    from skillevaluator.reporting.markdown import MarkdownReporter
+    from skillevaluator.tier3.result_display import render_result
+
+    engine = _engine_result(_unactivated_run(tmp_path, arm))
+    provenance = _provenance(engine)
+    built = _payload(tmp_path, engine, provenance)
+
+    drops = _UNACTIVATED_ARM_DROPS[arm]
+    agent = built["agents"][AGENT]
+    assert agent["never_activated_arms"] == [arm]
+    assert (agent["integration_lift"] is None) is drops["integration"]
+    assert (agent["lift_uncertainty"]["integration"] is None) is drops["integration"]
+    assert (agent["lift_uncertainty"]["effectiveness"] is None) is drops["lift"]
+    ladder_reason = (
+        f"Inconclusive: the skill never activated in the {_ARM_LABELS[arm]}, so no lift ladder was computed."
+    )
+    ladder = built["lift_ladder"]
+    assert (ladder["measured"], ladder["reason"]) == (False, ladder_reason)
+    assert "steps" not in ladder
+    integration = built["integration"]
+    bundle_reason = (
+        f"Inconclusive: the skill never activated in the {_ARM_LABELS[arm]}, so no Bundle lift was computed."
+    )
+    if drops["integration"]:
+        assert (integration["measured"], integration["verdict"]) == (False, "inconclusive")
+        assert (integration["integration_lift"], integration["lift_uncertainty"]) == (None, None)
+        assert integration["reason"] == bundle_reason
+    else:
+        assert integration["measured"] is True
+        assert integration["integration_lift"] is not None
+
+    result = _validation_result_from_payload(built)
+    assert result is not None
+    # BENCHMARK.md prints no Bundle lift or ladder for any plugin run; the others say why each is missing.
+    assert "Bundle lift +" not in BenchmarkReporter(include_timestamp=False).render_all([result])
+    rendered = {
+        "html": HTMLReporter(include_timestamp=False).render_all([result]),
+        "markdown": MarkdownReporter(include_timestamp=False).render_all([result]),
+        "terminal": CLIReporter().render_all([result]),
+        # The run summary `evaluate` prints reads the engine result, not the report payload.
+        "run summary": render_result({**engine, "plugin_provenance": provenance, "skill_name": SKILL}),
+    }
+    report = json.loads(JSONReporter().render_all([result]))
+    emitted = report["tier3"]
+    assert emitted["lift_ladder"]["reason"] == ladder_reason
+    assert emitted["integration"]["measured"] is not drops["integration"]
+    for name, text in rendered.items():
+        # Terminal colors and HTML escapes are presentation; the reason is the words.
+        normalized = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", text).replace("&#39;", "'").split())
+        assert ladder_reason in normalized, name
+        if drops["integration"]:
+            assert bundle_reason in normalized, name

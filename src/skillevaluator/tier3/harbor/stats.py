@@ -1229,6 +1229,7 @@ def build_agent_statistics(
     baseline_is_sum_of_parts: bool = False,
     cross_component_case_ids: Collection[str] | None = None,
     load_failures_by_case: LoadFailures | None = None,
+    never_activated_arms: Collection[str] = (),
 ) -> dict[str, Any]:
     """Assemble every C4 statistics block for one agent.
 
@@ -1251,14 +1252,21 @@ def build_agent_statistics(
     read), the integration interval also carries ``by_case_type``: the same
     lift on cross-component cases and on all other cases
     (:func:`lift_by_case_type`). ``None`` records no split.
+
+    ``never_activated_arms`` names the skill-bearing arms whose positive trials
+    never activated the skill. As for the Skill Lift, no interval is computed
+    for a comparison that uses one of them, and no lift ladder (it splits the
+    lift across every skill-bearing arm): the block is ``None``.
     """
+    never_activated = set(never_activated_arms)
     with_arm = arms.get(ARM_WITH)
     without_arm = arms.get(ARM_WITHOUT)
     sop_arm = arms.get(ARM_SUM_OF_PARTS) if sum_of_parts_requested else None
     loose_arm = arms.get(ARM_LOOSE_PARTS)
     ladder = None
     # A legacy two-arm run's only baseline holds the member skills, so it has no no-plugin rung to stand on.
-    if loose_arm is not None and not baseline_is_sum_of_parts:
+    skill_arms = {ARM_WITH, ARM_SUM_OF_PARTS, ARM_LOOSE_PARTS}
+    if loose_arm is not None and not baseline_is_sum_of_parts and not never_activated & skill_arms:
         ladder_arms = {
             ARM_WITHOUT: without_arm,
             ARM_SUM_OF_PARTS: sop_arm,
@@ -1277,20 +1285,23 @@ def build_agent_statistics(
         members_arm, members_name = without_arm, ARM_WITHOUT
     else:
         members_arm, members_name = sop_arm, ARM_SUM_OF_PARTS
-        effectiveness = paired_lift(
+        if ARM_WITH not in never_activated:
+            effectiveness = paired_lift(
+                with_arm,
+                without_arm,
+                treatment_arm=ARM_WITH,
+                control_arm=ARM_WITHOUT,
+                expected_case_ids=expected_case_ids,
+            )
+    integration = None
+    if not never_activated & {ARM_WITH, members_name}:
+        integration = paired_lift(
             with_arm,
-            without_arm,
+            members_arm,
             treatment_arm=ARM_WITH,
-            control_arm=ARM_WITHOUT,
+            control_arm=members_name,
             expected_case_ids=expected_case_ids,
         )
-    integration = paired_lift(
-        with_arm,
-        members_arm,
-        treatment_arm=ARM_WITH,
-        control_arm=members_name,
-        expected_case_ids=expected_case_ids,
-    )
     if integration is not None and cross_component_case_ids is not None:
         integration["by_case_type"] = lift_by_case_type(with_arm, members_arm, cross_component_case_ids)
 

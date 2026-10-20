@@ -37,7 +37,9 @@ def metrics(value: float, *, skill: bool = True, **overrides: float | None) -> d
     return scores
 
 
-def _verifier_outputs(case_id: str, scores: Mapping[str, float | None], *, has_skill: bool) -> tuple[dict, dict]:
+def _verifier_outputs(
+    case_id: str, scores: Mapping[str, float | None], *, has_skill: bool, activated: bool | None = None
+) -> tuple[dict, dict]:
     details: dict[str, Any] = {}
     numeric: dict[str, Any] = {}
     sidecar: dict[str, Any] = {
@@ -54,6 +56,9 @@ def _verifier_outputs(case_id: str, scores: Mapping[str, float | None], *, has_s
         else:
             numeric[metric] = value
             details[metric] = {"score": value}
+    if activated is not None and isinstance(details.get("skill_execution"), dict):
+        # The verifier's activation check: did the trial load the expected skill?
+        details["skill_execution"]["activation"] = {"passed": activated, "score": float(activated)}
     sidecar["details"] = details
     # The verifier's overall is the score policy's dimension mean; an N/A metric drops out of its dimension.
     numeric["overall"] = overall_score_from_metrics(
@@ -70,8 +75,13 @@ def write_job(
     agent: str,
     variant: str,
     cases: Mapping[str, list[Mapping[str, float | None] | None]],
+    *,
+    activated: bool | None = None,
 ) -> None:
-    """Write one Harbor job; a ``None`` attempt is a trial that timed out (no reward)."""
+    """Write one Harbor job; a ``None`` attempt is a trial that timed out (no reward).
+
+    ``activated`` records the verifier's skill-activation check on every scored trial (``None`` records none).
+    """
     job_dir = jobs_dir / f"{SKILL}-{agent}-{variant}"
     names: list[str] = []
     errors = 0
@@ -86,7 +96,7 @@ def write_job(
                 errors += 1
                 result["exception_info"] = {"exception_type": "AgentTimeoutError", "exception_message": "timeout"}
             else:
-                numeric, sidecar = _verifier_outputs(case_id, scores, has_skill=variant == "with")
+                numeric, sidecar = _verifier_outputs(case_id, scores, has_skill=variant == "with", activated=activated)
                 (trial / "verifier" / "reward.json").write_text(json.dumps(numeric), encoding="utf-8")
                 (trial / "verifier" / "skill_evaluator_reward.json").write_text(json.dumps(sidecar), encoding="utf-8")
             (trial / "result.json").write_text(json.dumps(result), encoding="utf-8")
@@ -118,15 +128,19 @@ def collect(
     n_attempts: int,
     stop_on_pass: bool = False,
     plugin_signals: Any = None,
+    activated: Mapping[str, bool] | None = None,
 ) -> dict[str, Any]:
-    """Write every ``{agent: {variant: cases}}`` job and run the real collector."""
+    """Write every ``{agent: {variant: cases}}`` job and run the real collector.
+
+    ``activated`` records, per variant, whether its trials activated the skill (a variant left out records none).
+    """
     from skillevaluator.tier3.harbor.collector import collect_harbor_results
 
     jobs = tmp_path / "jobs"
     case_ids: list[str] = []
     for agent, variants in arms.items():
         for variant, cases in variants.items():
-            write_job(jobs, agent, variant, cases)
+            write_job(jobs, agent, variant, cases, activated=(activated or {}).get(variant))
             case_ids.extend(case for case in cases if case not in case_ids)
     first = next(iter(arms.values()))
     return collect_harbor_results(

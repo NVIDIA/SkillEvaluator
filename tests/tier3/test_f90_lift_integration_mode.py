@@ -18,6 +18,7 @@ import json
 import re
 from pathlib import Path
 
+import pytest
 from _f90_lift_fixtures import MEMBERS, benchmark, cli, collect, html, metrics, payload
 
 from skillevaluator.tier3.eval_core.plugin_signals import build_plugin_signals_context
@@ -25,14 +26,14 @@ from skillevaluator.tier3.eval_core.plugin_signals import build_plugin_signals_c
 CASES = [f"case-{index}" for index in range(1, 7)]
 
 
-def _legacy_run(tmp_path: Path) -> dict:
+def _legacy_run(tmp_path: Path, *, activated: dict[str, bool] | None = None) -> dict:
     arms = {
         "with": {case: [metrics(0.85)] for case in CASES},
         # The only baseline stages the member skills, so it keeps its skill metrics.
         "without": {case: [metrics(0.64)] for case in CASES},
     }
     context = build_plugin_signals_context(member_skills=MEMBERS, baseline_has_members=True)
-    return collect(tmp_path, {"codex": arms}, n_attempts=1, plugin_signals=context)
+    return collect(tmp_path, {"codex": arms}, n_attempts=1, plugin_signals=context, activated=activated)
 
 
 def test_legacy_members_interval_is_filed_under_integration(tmp_path: Path) -> None:
@@ -95,3 +96,33 @@ def test_older_legacy_runs_are_refiled_under_integration(tmp_path: Path) -> None
     assert built["overall_lift"] is None
     assert "Skill Lift not distinguishable from zero" not in [c["title"] for c in built["conclusions"]]
     assert built["integration"]["verdict"] == "inconclusive"
+
+
+@pytest.mark.parametrize(
+    ("variant", "arm", "label"),
+    [("with", "with_skill", "with-plugin arm"), ("without", "without_skill", "member-skills baseline arm")],
+)
+def test_legacy_members_comparison_needs_both_arms_to_activate_the_skill(
+    tmp_path: Path, variant: str, arm: str, label: str
+) -> None:
+    collected = _legacy_run(tmp_path, activated={"with": True, "without": True, variant: False})
+    agent = collected["agents"]["codex"]
+
+    # The member-skills baseline stages the skill too, so its activation counts (#208).
+    assert agent["skill_activation_by_arm"][arm]["status"] == "never_activated"
+    assert agent["lift"] == {}
+    assert agent["lift_uncertainty"]["integration"] is None
+    assert not (tmp_path / "results" / "codex" / "lift.json").exists()
+    built = payload(tmp_path, "integration")
+    assert built["agents"]["codex"]["integration_lift"] is None
+    integration = built["integration"]
+    assert (integration["measured"], integration["verdict"], integration["integration_lift"]) == (
+        False,
+        "inconclusive",
+        None,
+    )
+    assert (
+        integration["reason"]
+        == f"Inconclusive: the skill never activated in the {label}, so no Bundle lift was computed."
+    )
+    assert "Real bundle lift" not in benchmark(built)

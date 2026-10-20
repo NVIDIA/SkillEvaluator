@@ -749,8 +749,11 @@ def load_agent_data(
                     if not isinstance(scores, dict):
                         continue
                     agent_info[key] = scores
-                    if key == "with_skill" and isinstance(data.get("skill_activation"), dict):
-                        agent_info["skill_activation"] = data["skill_activation"]
+                    if isinstance(data.get("skill_activation"), dict):
+                        # Every arm that stages the skill records it; the with-skill arm's is the agent's own.
+                        agent_info.setdefault("skill_activation_by_arm", {})[key] = data["skill_activation"]
+                        if key == "with_skill":
+                            agent_info["skill_activation"] = data["skill_activation"]
                     metric_key = f"metrics_{key}"
                     if isinstance(data.get("metrics"), list):
                         agent_info[metric_key] = data["metrics"]

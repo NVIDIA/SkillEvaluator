@@ -7681,6 +7681,16 @@ class _AgentCollection:
     launch_errors: list[str] | None
     plugin_signals: PluginSignalsContext | None
 
+    @property
+    def baseline_holds_members(self) -> bool:
+        """Legacy ``--lift-mode integration``: the no-plugin arm stages the plugin's member skills."""
+        signals = self.plugin_signals
+        return bool(signals is not None and signals.baseline_has_members and signals.member_skills)
+
+    def stages_skill(self, arm: _ArmSpec) -> bool:
+        """Whether *arm* stages the skill under evaluation (every arm but a no-plugin arm without members)."""
+        return arm.key != ARM_WITHOUT or self.baseline_holds_members
+
     def arm_dir(self, arm: _ArmSpec) -> Path:
         return self.output_dir / self.agent / arm.directory
 
@@ -7897,7 +7907,8 @@ def _collect_arm(
         "num_trials": len(logical_rewards),
         "num_reward_rows": len(collected_rewards),
         "mixed_metric_contracts": mixed_metric_contracts,
-        **({"skill_activation": summarize_skill_activation(rewards)} if arm.key == ARM_WITH else {}),
+        # Every arm that stages the skill records whether its positive trials activated it (#208).
+        **({"skill_activation": summarize_skill_activation(rewards)} if collection.stages_skill(arm) else {}),
         "pass_at_k": _public_pass_summary(pass_summary),
         **execution,
         "job_failure": job_failure,
@@ -8201,8 +8212,20 @@ def collect_harbor_results(
             write_load_evidence(agent_dir / LOAD_EVIDENCE_FILENAME, loose_load.evidence)
             loose_infos[agent] = loose_plan.info(loose_load.evidence, load_census=arms[ARM_LOOSE_PARTS].load_census)
 
+        # #208: an arm whose positive trials never activated the skill gives no lift, interval or ladder that uses it.
+        baseline_is_sum_of_parts = bool(collection.baseline_holds_members and not skip_baseline)
+        skill_activation_by_arm = {
+            key: summarize_skill_activation(arm.rewards)
+            for key, arm in arms.items()
+            if arm.job_dir is not None and (key != ARM_WITHOUT or baseline_is_sum_of_parts)
+        }
+        never_activated_arms = {
+            key for key, summary in skill_activation_by_arm.items() if summary["status"] == "never_activated"
+        }
+        skill_activation = skill_activation_by_arm.get(ARM_WITH) or summarize_skill_activation(with_skill.rewards)
+
         integration_lift: dict[str, Any] = {}
-        if with_skill.scores and sum_of_parts.scores:
+        if with_skill.scores and sum_of_parts.scores and not never_activated_arms & {ARM_WITH, ARM_SUM_OF_PARTS}:
             integration_lift = _paired_lift(
                 with_skill, sum_of_parts, arms=(ARM_WITH, ARM_SUM_OF_PARTS), expected_case_ids=expected_case_ids
             )
@@ -8224,14 +8247,10 @@ def collect_harbor_results(
             pass_threshold=pass_threshold,
             sum_of_parts_requested=sum_of_parts_arm,
             # Legacy ``--lift-mode integration``: the only baseline stages the member skills.
-            baseline_is_sum_of_parts=bool(
-                plugin_signals is not None
-                and plugin_signals.baseline_has_members
-                and plugin_signals.member_skills
-                and not skip_baseline
-            ),
+            baseline_is_sum_of_parts=baseline_is_sum_of_parts,
             cross_component_case_ids=plugin_signals.cross_component_cases if plugin_signals is not None else None,
             load_failures_by_case=loose_load.failures if loose_load is not None else None,
+            never_activated_arms=never_activated_arms,
         )
         # Keep the legacy per-arm execution snapshots next to the per-case
         # completeness verdict so earlier consumers still find them.
@@ -8243,10 +8262,10 @@ def collect_harbor_results(
         statistics["integration_completeness"] = integration_completeness
         (agent_dir / "statistics.json").write_text(json.dumps(statistics, indent=2), encoding="utf-8")
 
-        skill_activation = summarize_skill_activation(with_skill.rewards)
         lift: dict[str, Any] = {}
         paired_execution_succeeded = with_skill.succeeded and without_skill.succeeded
-        lift_eligible = paired_execution_succeeded and skill_activation["status"] != "never_activated"
+        # A legacy members baseline that never activated the skill is no comparison either.
+        lift_eligible = paired_execution_succeeded and not never_activated_arms & {ARM_WITH, ARM_WITHOUT}
         if lift_eligible and with_skill.scores and without_skill.scores:
             # The overall lift compares the two conditions on the cases both scored, with their shared score
             # policy (reconciled above; a conflict already failed both conditions).
@@ -8312,7 +8331,12 @@ def collect_harbor_results(
 
         loose_lift: dict[str, Any] = {}
         loose = arms.get(ARM_LOOSE_PARTS)
-        if loose is not None and with_skill.scores and loose.scores:
+        if (
+            loose is not None
+            and with_skill.scores
+            and loose.scores
+            and not never_activated_arms & {ARM_WITH, ARM_LOOSE_PARTS}
+        ):
             # Full plugin minus loose parts per metric on the same cases, without the cases the ladder drops
             # for load evidence; the ladder holds the paired interval.
             loose_lift = _paired_lift(
@@ -8352,6 +8376,7 @@ def collect_harbor_results(
             "dimensions_without_skill": without_skill.dimensions,
             "dimensions_sum_of_parts": sum_of_parts.dimensions,
             "skill_activation": skill_activation,
+            "skill_activation_by_arm": skill_activation_by_arm,
             "not_applicable_metrics": {key: arm.not_applicable for key, arm in arms.items()},
             "lift": lift,
             "integration_lift": integration_lift,

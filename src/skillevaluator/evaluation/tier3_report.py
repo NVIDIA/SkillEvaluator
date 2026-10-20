@@ -74,6 +74,33 @@ def _activation_summary(info: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def _never_activated_arms(info: dict[str, Any]) -> set[str]:
+    """The skill-bearing arms whose positive trials never activated the skill (#208).
+
+    The with-skill arm's summary is the agent's own (:func:`_activation_summary`); the other skill-bearing arms
+    (sum-of-parts, loose-parts, a legacy member-skills baseline) are read from ``skill_activation_by_arm``.
+    """
+    arms = {"with_skill"} if _activation_summary(info).get("status") == "never_activated" else set()
+    by_arm = info.get("skill_activation_by_arm")
+    for arm, summary in by_arm.items() if isinstance(by_arm, dict) else ():
+        if arm != "with_skill" and isinstance(summary, dict) and summary.get("status") == "never_activated":
+            arms.add(str(arm))
+    return arms
+
+
+def _unactivated_arms(agent: dict[str, Any]) -> set[str]:
+    """The never-activated arms of a report agent (``never_activated_arms``) or of the engine's raw agent data."""
+    recorded = agent.get("never_activated_arms")
+    arms = {arm for arm in recorded if isinstance(arm, str)} if isinstance(recorded, list) else set()
+    return arms | _never_activated_arms(agent)
+
+
+def _never_activated_reason(arms: set[str] | list[str], subject: str, *, names: dict[str, str] | None = None) -> str:
+    """Why a comparison over *arms* was not computed: the skill never activated in one of them."""
+    shown = " and ".join(_arm_name(arm, names) for arm in sorted(arms))
+    return f"Inconclusive: the skill never activated in the {shown}, so no {subject} was computed."
+
+
 _AGENT_EVAL_VALIDATOR = "AGENT_EVAL"
 _AGENT_EVAL_DESCRIPTION = "Tier 3: Live Agent Evaluation (Harbor)"
 _PUBLICATION_TARGET_CONFLICT_MARKER = "source changed during evaluation"
@@ -1965,18 +1992,39 @@ def _lift_note(
     return "; ".join(notes) or "no baseline"
 
 
-def _agent_statistics(info: dict[str, Any], *, sum_of_parts_baseline: bool) -> dict[str, Any]:
-    """The collector's report-only statistics; a legacy members interval is filed under Integration."""
+def _agent_statistics(
+    info: dict[str, Any], *, sum_of_parts_baseline: bool, effectiveness: bool = True, integration: bool = True
+) -> dict[str, Any]:
+    """The collector's report-only statistics; a legacy members interval is filed under Integration.
+
+    ``effectiveness`` and ``integration`` say whether that comparison's arms activated the skill; an interval
+    over an arm that never activated it is dropped, as its lift is.
+    """
     fields = {field: info[field] for field in _statistics_fields() if isinstance(info.get(field), dict)}
     uncertainty = fields.get("lift_uncertainty")
     if sum_of_parts_baseline and isinstance(uncertainty, dict) and uncertainty.get("effectiveness"):
         # Older runs filed the plugin-vs-member-skills interval as "effectiveness".
-        fields["lift_uncertainty"] = {
+        uncertainty = {
             **uncertainty,
             "effectiveness": None,
             "integration": uncertainty.get("integration") or uncertainty["effectiveness"],
         }
+    if isinstance(uncertainty, dict):
+        fields["lift_uncertainty"] = _activated_uncertainty(
+            uncertainty, effectiveness=effectiveness, integration=integration
+        )
     return fields
+
+
+def _activated_uncertainty(uncertainty: dict[str, Any], *, effectiveness: bool, integration: bool) -> dict[str, Any]:
+    """*uncertainty* without the intervals whose comparison used an arm that never activated the skill."""
+    if effectiveness and integration:
+        return uncertainty
+    dropped = {
+        **({"effectiveness": None} if not effectiveness and "effectiveness" in uncertainty else {}),
+        **({"integration": None} if not integration and "integration" in uncertainty else {}),
+    }
+    return {**uncertainty, **dropped}
 
 
 def _baseline_is_sum_of_parts(run_config: dict[str, Any] | None, plugin_provenance: dict[str, Any] | None) -> bool:
@@ -2026,6 +2074,10 @@ def _build_agent(
     without_scores = info.get("without_skill") or {}
     skill_activation = _activation_summary(info)
     never_activated = skill_activation.get("status") == "never_activated"
+    # A comparison with an arm that never activated the skill is no comparison (#208): no lift, basis or interval.
+    never_activated_arms = _never_activated_arms(info)
+    members_arm = "without_skill" if sum_of_parts_baseline else "sum_of_parts"
+    integration_blocked = bool(never_activated_arms & {"with_skill", members_arm})
     condition_policies = {
         value.strip() if isinstance(value, str) and value.strip() else score_policy
         for value in (info.get("score_policy_with_skill"), info.get("score_policy_without_skill"))
@@ -2035,7 +2087,11 @@ def _build_agent(
     )
     lift_data = info.get("lift") or {}
     raw_uncertainty = info.get("lift_uncertainty")
-    uncertainty = raw_uncertainty if isinstance(raw_uncertainty, dict) else {}
+    uncertainty = _activated_uncertainty(
+        raw_uncertainty if isinstance(raw_uncertainty, dict) else {},
+        effectiveness=not never_activated,
+        integration=not integration_blocked,
+    )
     with_quality_available = _condition_quality_available(info, "with_skill")
     baseline_quality_available = _condition_quality_available(info, "without_skill")
     if not with_quality_available:
@@ -2164,7 +2220,10 @@ def _build_agent(
         members_entry = uncertainty.get("integration") or uncertainty.get("effectiveness")
         members_basis = (
             _comparison_basis(members_entry, with_dimensions, baseline_dimensions, "sum_of_parts")
-            if with_quality_available and baseline_quality_available and overall_ws is not None
+            if with_quality_available
+            and baseline_quality_available
+            and overall_ws is not None
+            and not integration_blocked
             else None
         )
         effectiveness_basis = None
@@ -2199,7 +2258,10 @@ def _build_agent(
         sum_of_parts_by_dimension = {"overall": sum_of_parts_overall}
     integration_basis = (
         _comparison_basis(uncertainty.get("integration"), with_dimensions, sum_of_parts_by_dimension, "sum_of_parts")
-        if with_quality_available and sum_of_parts_quality_available and overall_ws is not None
+        if with_quality_available
+        and sum_of_parts_quality_available
+        and overall_ws is not None
+        and not integration_blocked
         else None
     )
     if sum_of_parts_baseline:
@@ -2262,7 +2324,14 @@ def _build_agent(
         # The comparable arm scores behind each lift (same dimensions, same cases).
         "lift_basis": {"effectiveness": effectiveness_basis, "integration": integration_basis},
         "integration_completeness": info.get("integration_completeness") or {},
-        **_agent_statistics(info, sum_of_parts_baseline=sum_of_parts_baseline),
+        **_agent_statistics(
+            info,
+            sum_of_parts_baseline=sum_of_parts_baseline,
+            effectiveness=not never_activated,
+            integration=not integration_blocked,
+        ),
+        # The skill-bearing arms that never activated the skill: no Bundle lift or lift ladder uses them.
+        "never_activated_arms": sorted(never_activated_arms),
         "metrics_with_skill": with_metrics,
         "metrics_without_skill": baseline_metrics,
         "num_trials": int(info.get("num_trials", 0) or 0),
@@ -4153,6 +4222,22 @@ def _build_integration_report(
     else:
         return _unmeasured(_INTEGRATION_REASON_NO_ARM, components)
     names = _LEGACY_ARM_NAMES if control_condition == "without_skill" else _ARM_NAMES
+    unactivated = _unactivated_arms(best) & {"with_skill", control_condition}
+    if unactivated:
+        # As for the Skill Lift (#208): the scores stay as diagnostics, but no Bundle lift or interval is computed.
+        return _integration_block(
+            components=components,
+            with_plugin=with_plugin,
+            sum_of_parts=sum_of_parts,
+            lift=None,
+            verdict=INTEGRATION_VERDICT_INCONCLUSIVE,
+            point_verdict=None,
+            complete=False,
+            completeness=completeness if isinstance(completeness, dict) else None,
+            reason=_never_activated_reason(unactivated, "Bundle lift", names=names),
+            uncertainty=None,
+            lift_modes=lift_modes,
+        )
 
     # The headline, both arm scores and the interval share one basis: the
     # dimensions both arms scored, as case-weighted paired means. When one
@@ -4529,6 +4614,17 @@ def _build_ladder_report(
         "integration_label": LADDER_WRAPPER_LABEL if wrapper else LADDER_INTEGRATION_LABEL,
         "loose_parts": _loose_parts_block(record),
     }
+    unactivated = _unactivated_arms(agent) & {"with_skill", "sum_of_parts", "loose_parts"}
+    if unactivated:
+        # The ladder splits the plugin lift across every skill-bearing arm, so one that never activated the skill
+        # leaves no ladder to report (#208).
+        reason = _never_activated_reason(unactivated, "lift ladder")
+        block.update(
+            measured=False,
+            reason=reason,
+            glue={"lift": None, "point_verdict": None, "verdict": None, "reason": reason},
+        )
+        return block
     if raw is None or not isinstance(raw.get("steps"), dict):
         reason = (
             # The staging's own refusal (``error``, e.g. "not supported: ...") when the runner wrote no other reason.

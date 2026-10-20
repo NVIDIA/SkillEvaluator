@@ -193,6 +193,7 @@ _UNSUPPORTED_REASON_INDICATORS: tuple[str, ...] = (
     "not permitted",
     "not allowed",
     "disallowed",
+    "unavailable",
 )
 
 # Gateways can turn a schema into a forced tool call, so a tool_choice rejection is a schema rejection too.
@@ -200,21 +201,23 @@ _SCHEMA_OPTION_PATTERN = (
     r"(?:response_format|response format|output_config|json_schema|structured[_ ]outputs?|tool_choice)"
 )
 _SCHEMA_REJECTION_REASON = (
-    r"(?:unsupported|not supported|not permitted|not allowed|disallowed|"
+    r"(?:unsupported|not supported|unavailable|not permitted|not allowed|disallowed|"
     r"unknown (?:parameter|field|argument)|unrecognized (?:request argument|parameter)|"
     r"unexpected (?:keyword )?argument|extra inputs?(?: are not permitted)?)"
 )
 _SCHEMA_REJECTION_AFTER_OPTION = re.compile(
     rf"\b{_SCHEMA_OPTION_PATTERN}\b(?:\.[a-z0-9_]+)*"
+    rf"(?:\s+type)?"
     rf"(?:\s+of\s+type\s+['\"]?[a-z0-9_]+['\"]?)?"
     rf"\s*(?:(?:is|are|was|were)\s+(?:an?\s+)?|:\s*)?"
     rf"{_SCHEMA_REJECTION_REASON}\b",
     re.IGNORECASE,
 )
 _SCHEMA_REJECTION_BEFORE_OPTION = re.compile(
-    rf"\b(?:unsupported|not supported|extra inputs?(?: are not permitted)?|unknown (?:parameter|field|argument)|"
-    rf"unrecognized (?:request argument|parameter)|unexpected (?:keyword argument|argument)|"
-    rf"invalid (?:parameter|argument)|not permitted|not allowed|disallowed)\b"
+    rf"\b(?:unsupported|not supported|unavailable|extra inputs?(?: are not permitted)?|"
+    rf"unknown (?:parameter|field|argument)|unrecognized (?:request argument|parameter)|"
+    rf"unexpected (?:keyword argument|argument)|invalid (?:parameter|argument)|"
+    rf"not permitted|not allowed|disallowed)\b"
     rf"(?:\s+supplied)?[\s:'\"\[\]{{}}(),-]{{0,32}}\b{_SCHEMA_OPTION_PATTERN}\b",
     re.IGNORECASE,
 )

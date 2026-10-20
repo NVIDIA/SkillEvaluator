@@ -128,12 +128,15 @@ def _pick_best_agent(
 
     best_agent = ""
     best_rank: tuple[float, float] | None = None
+    scored_metric_sets: set[frozenset[str]] = set()
     for agent in sorted(agents_data):
         data = agents_data[agent]
         if not _findings_eligible(data):
             continue
         persisted = persisted_agents.get(agent) if isinstance(persisted_agents, dict) else None
         ranking_data = persisted if isinstance(persisted, dict) else data
+        if not _findings_eligible(ranking_data):
+            continue
         standard_metrics = report_data.metrics_for_condition(ranking_data, "with_skill")
         with_scores = ranking_data.get("with_skill")
         if standard_metrics and (
@@ -144,6 +147,12 @@ def _pick_best_agent(
         rank = _canonical_agent_rank_from_info(ranking_data)
         if rank is None:
             continue
+        # Overall scores from different standard metric sets cannot be ranked
+        # against each other. Custom-only agents rank by their grader's overall.
+        if standard_metrics:
+            scored_metric_sets.add(frozenset(standard_metrics))
+        if len(scored_metric_sets) > 1:
+            return ""
         if best_rank is None or rank > best_rank:
             best_rank = rank
             best_agent = agent
@@ -152,6 +161,9 @@ def _pick_best_agent(
 
 def _findings_eligible(agent_data: dict[str, Any]) -> bool:
     """Return whether persisted execution truth permits quality findings."""
+    activation = agent_data.get("skill_activation")
+    if isinstance(activation, dict) and activation.get("status") == "never_activated":
+        return False
     conditions = agent_data.get("conditions")
     if not isinstance(conditions, dict) or "with_skill" not in conditions:
         return agent_data.get("execution_status") == "succeeded"
@@ -1113,6 +1125,8 @@ def display_findings_report(
         if not rewards_for_agent:
             continue
         loaded_agent = loaded_agents.get(agent)
+        if isinstance(loaded_agent, dict) and not _findings_eligible(loaded_agent):
+            continue
         canonical_scores: dict[str, Any] = {}
         rewards_complete = True
         if isinstance(loaded_agent, dict):

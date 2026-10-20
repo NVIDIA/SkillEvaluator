@@ -29,11 +29,13 @@ logger = logging.getLogger(__name__)
 ProgressState = Literal["running", "ready", "complete", "failed", "degraded", "delegated", "skipped"]
 
 _TERMINAL_STATES = frozenset({"ready", "complete", "failed", "degraded", "delegated", "skipped"})
+_SECRET_KEY_WORDS = r"(?:api[_-]?key|access[_-]?key|auth|bearer|credential|password|secret|token)"
 _SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)(\b(?:api[_-]?key|access[_-]?key|auth|bearer|credential|password|secret|token)\b\s*[:=]\s*)"
+    rf"(?i)((?:(?<![A-Za-z0-9_-])(?:--?)?{_SECRET_KEY_WORDS}\b\s*[:=]|"
+    rf"(?<![A-Za-z0-9]){_SECRET_KEY_WORDS}\b\s*=)\s*)"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
-_SECRET_ENV_NAME_RE = re.compile(r"(?i)(?:api[_-]?key|access[_-]?key|auth|credential|password|secret|token)")
+_SECRET_ENV_NAME_RE = re.compile(r"(?i)(?:api[_-]?key|access[_-]?key|auth|credential|password|secret|token(?!s))")
 # Whole environment values shorter than this are never treated as exact secrets;
 # shorter credential fragments come only from URI userinfo.
 MIN_EXACT_SECRET_CHARS = 4

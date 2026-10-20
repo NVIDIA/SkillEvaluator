@@ -6,6 +6,32 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Optional `skillevaluator dashboard` tables for comparing saved Tier 3 reports
+  and retained runs across skills, models, harnesses, recorded harness
+  features, and skill conditions. Paired with/without differences cover score,
+  pass@k, tokens, and agent execution time, plus USD cost when retained runs
+  record it; the performance table also shows per-trial means alongside
+  totals. Comparisons require matching complete trial coverage (repeated
+  attempts pair by case, as in the HTML report) and name the reason when a
+  pair is not comparable. Inputs are read once and reused between
+  interactions (**Reload reports** re-reads them); browser uploads are limited
+  to 16 MB. Install it with the `dashboard` extra.
+- Tier 3 support for Harbor GKE execution mode (`--env-mode gke`) and `--ek`
+  argument forwarding. API keys, bearer tokens, and passwords passed in `--ek`
+  keys or values are rejected to keep credentials out of process listings, while
+  configuration such as rate limits and token counts is preserved. Cluster
+  infrastructure settings in skill configs are rejected to enforce security
+  boundaries in favor of host environment variables and CLI flags.
+- Claude Code live agent routing for Google Cloud Vertex AI
+  (`CLAUDE_CODE_USE_VERTEX=1`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`),
+  with redirect-blocking preflight probes, case-insensitive model alias
+  resolution, and explicit trusted-skill opt-in (`SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1`
+  or `--ek allow_workload_identity=true`) when using single-pod GKE Workload Identity.
+- Fail-closed validation for skill-authored MCP server configurations
+  (`evals/environment/mcp_servers.toml` and `mcp_servers.json`) that blocks
+  operator/provider credential references and literal secrets, while allowing
+  operator-approved MCP endpoints and non-LLM secrets via
+  `SKILLEVALUATOR_ALLOWED_MCP_HOSTS` and `SKILLEVALUATOR_ALLOWED_MCP_SECRETS`.
 - The HTML report's Tier 1 card now shows the SkillSpector version that ran
   the security scan (for example `SkillSpector v2.12.0`), and the embedded
   report JSON records it as `skillspector_versions`. Findings depend on the
@@ -17,6 +43,10 @@ All notable changes to SkillEvaluator are documented in this file.
   `/dev/kvm` and a Kata runtime registered with Docker, and accepts only the
   `kata_runtime` and `kata_dns` environment kwargs. Image builds still run on
   the host, and tasks with Compose sidecars are rejected.
+- `--env-mode runta` and `--env-mode mosaic` run Tier 3 trials on Harbor's Runta
+  and Mosaic backends. Runta's `mode` and Mosaic's `volume`, `persist`,
+  `enable_ssh`, `build_args`, and `build_target` kwargs are reserved because they
+  bypass the task image or let state and access outlive one isolated trial.
 
 ### Changed
 
@@ -87,9 +117,9 @@ All notable changes to SkillEvaluator are documented in this file.
   only for the Codex process. Skills whose scripts, tasks, or stdio MCP servers
   need these tools must install them through `scripts/apt-packages.txt` or a
   custom `evals/environment/Dockerfile`.
-- Exposed `kata` as the 24th Harbor 0.24 backend alongside local mode.
-  `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `runta`, `prime`,
-  `mosaic`, and `smol` remain disabled.
+- Exposed `kata`, `runta`, and `mosaic` as the 24th, 25th, and 26th Harbor 0.24
+  backends alongside local mode. `cua-cloud`, `opensandbox`, `hf-sandbox`,
+  `podman`, `prime`, and `smol` remain disabled.
 - The public benchmark gate (`scripts/ci/check_public_benchmarks.py`) now
   requires a `PASS` card to record its `Source digest` and `Tier 3 run ID`.
   `PASS` cards rendered by earlier releases fail the scan until they are
@@ -112,6 +142,28 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 reports an inconclusive result when every observed positive with-skill
+  trial has zero activation, and omits skill-lift comparisons for that agent.
+  Activation counts are reported separately; negative controls and missing
+  evidence do not imply that the skill was never loaded. The skill-execution
+  score is zero when positive activation fails, so unrelated successful checks
+  cannot inflate it to 0.5 (fixes #208). Benchmark cards and dashboard comparisons
+  preserve this eligibility rule, and multi-agent HTML labels explain why lift
+  is unavailable. Mixed-agent reports retain advice from the best eligible
+  agent without attributing never-activated trials to skill quality.
+- Tier 3 now uses one versioned, equal-weight five-dimension overall-score
+  policy across Harbor rewards, pass@k, Skill Lift, reports, comparisons, and
+  best-agent selection. Previously, some paths averaged all six evaluators
+  directly while reports averaged five dimensions, which gave Effectiveness
+  two votes and could reverse the reported lift direction. Current artifacts
+  persist `skill-evaluator-dimension-mean-v1`; legacy and partial artifacts
+  retain their historical semantics. Conditions keep their own recorded metric
+  sets; overall lift and best-agent rankings are omitted across different
+  standard metric sets while individual scores are preserved, and
+  `tier3 compare` refuses standard agents with different policies or metric
+  sets. Custom-only agents keep their grader's own overall and are ranked and
+  compared against standard agents
+  (Relates to [#61](https://github.com/NVIDIA/SkillEvaluator/issues/61)).
 - Preserve explicit Claude and OpenCode read failure metadata in reconstructed
   ATIF trajectories. Failed isolated SKILL.md reads and failed native Skill
   calls lose credit; compound shell failures and shell reads whose path may

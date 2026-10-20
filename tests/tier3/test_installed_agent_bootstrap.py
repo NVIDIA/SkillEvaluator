@@ -18,6 +18,7 @@ from harbor.models.trial.config import AgentConfig
 
 from skillevaluator.tier3.harbor import DOCKER_AGENT_IMPORT_PATHS
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorClaudeCode, SkillEvaluatorCodex
+from skillevaluator.tier3.harbor.local_agents import SkillEvaluatorClaudeCode as ContainerClaudeCode
 from skillevaluator.tier3.harbor.local_agents import (
     SkillEvaluatorGatewayCodex,
     SkillEvaluatorLocalClaudeCode,
@@ -264,7 +265,7 @@ def test_native_bootstrap_preserves_unknown_dependency_validation(tmp_path: Path
     ("agent_name", "agent_class", "model_name"),
     [
         ("codex", SkillEvaluatorCodex, "openai/test-model"),
-        ("claude-code", SkillEvaluatorClaudeCode, "anthropic/test-model"),
+        ("claude-code", ContainerClaudeCode, "anthropic/test-model"),
     ],
 )
 @pytest.mark.parametrize("config_field", ["name", "import_path"])
@@ -292,7 +293,12 @@ def test_docker_import_routes_resolve_and_preserve_report_identity(
 
 @pytest.mark.parametrize(
     "agent_class",
-    [SkillEvaluatorGatewayCodex, SkillEvaluatorNvidiaBuildCodex, SkillEvaluatorNvidiaBuildClaudeCode],
+    [
+        SkillEvaluatorGatewayCodex,
+        SkillEvaluatorNvidiaBuildCodex,
+        SkillEvaluatorNvidiaBuildClaudeCode,
+        ContainerClaudeCode,
+    ],
 )
 def test_gateway_and_nvidia_wrappers_use_repaired_bootstrap(tmp_path: Path, agent_class: type) -> None:
     environment = _BootstrapEnvironment()

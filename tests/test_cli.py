@@ -64,7 +64,7 @@ def test_top_level_help_groups_commands_by_workflow() -> None:
     assert positions == sorted(positions)
 
     core = result.output.split("Core workflows:", 1)[1].split("Tier 1 · Static and security:", 1)[0]
-    assert all(command in core for command in ("validate", "health-check", "doctor", "models"))
+    assert all(command in core for command in ("validate", "health-check", "doctor", "models", "dashboard"))
     tier3 = result.output.split("Tier 3 · Live evaluation:", 1)[1]
     assert all(command in tier3 for command in ("create-eval-dataset", "compare", "view", "harbor-view"))
     assert "Other commands:" not in result.output
@@ -982,3 +982,46 @@ def test_pii_scan_malformed_llm_verdict_is_incomplete(
     findings = payload["results"][0]["findings"]
     assert findings[0]["metadata"]["llm_verdict"] == "true_positive"
     assert "llm_verdict" not in findings[1]["metadata"]
+
+
+@pytest.mark.parametrize("command_prefix", [["doctor"], ["tier3", "evaluate"], ["evaluate"]])
+def test_cli_environment_kwargs_malformed_syntax_exits_code_2_without_traceback(
+    tmp_path: Path,
+    command_prefix: list[str],
+) -> None:
+    """Verify malformed --ek arguments produce clean Click BadParameter exit code 2 without tracebacks."""
+    runner = CliRunner()
+    args = [*command_prefix, "--ek", "malformed_no_equal"]
+    if "evaluate" in command_prefix:
+        args.append(str(tmp_path))
+    result = runner.invoke(cli, args)
+    assert result.exit_code == 2
+    assert "Invalid value for '--ek'" in result.output
+    assert "KEY=VALUE" in result.output
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize(
+    "sensitive_arg",
+    [
+        "authorization=secret_token",
+        "service_account_key=my_key",
+        "private_key=secret",
+    ],
+)
+@pytest.mark.parametrize("command_prefix", [["doctor"], ["tier3", "evaluate"]])
+def test_cli_environment_kwargs_sensitive_credential_exits_code_2_without_traceback(
+    tmp_path: Path,
+    command_prefix: list[str],
+    sensitive_arg: str,
+) -> None:
+    """Verify credential keys passed to --ek produce clean Click BadParameter exit code 2."""
+    runner = CliRunner()
+    args = [*command_prefix, "--ek", sensitive_arg]
+    if "evaluate" in command_prefix:
+        args.append(str(tmp_path))
+    result = runner.invoke(cli, args)
+    assert result.exit_code == 2
+    assert "Invalid value for '--ek'" in result.output
+    assert "Sensitive key or value detected" in result.output
+    assert "Traceback" not in result.output

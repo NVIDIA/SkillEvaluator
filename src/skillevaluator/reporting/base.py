@@ -681,8 +681,8 @@ def _agent_eval_truth_state(payload: dict[str, Any] | None) -> tuple[str, str, b
 
     verdict, verdict_consistent = collect(
         "verdict",
-        frozenset({"pass", "neutral", "fail", "skipped", "incomplete"}),
-        {"pass": 0, "skipped": 1, "neutral": 2, "incomplete": 3, "fail": 4},
+        frozenset({"pass", "neutral", "fail", "skipped", "incomplete", "inconclusive"}),
+        {"pass": 0, "skipped": 1, "neutral": 2, "inconclusive": 3, "incomplete": 3, "fail": 4},
     )
     execution_status, execution_consistent = collect(
         "execution_status",
@@ -1222,6 +1222,10 @@ def agent_eval_dimension_verdict(
     verdicts: list[str] = []
     has_partial_evidence = False
     for agent in supported_agents:
+        activation = agent.get("skill_activation")
+        if isinstance(activation, dict) and activation.get("status") == "never_activated":
+            verdicts.append("inconclusive")
+            continue
         scores = _agent_eval_dimension_scores(agent, require_baseline=require_baseline)
         if scores is None:
             has_partial_evidence = True
@@ -1239,6 +1243,8 @@ def agent_eval_dimension_verdict(
         return None
     if "neutral" in verdicts:
         return "neutral"
+    if all(verdict == "inconclusive" for verdict in verdicts):
+        return "inconclusive"
     return "fail"
 
 
@@ -1293,8 +1299,23 @@ def _agent_eval_publication_aggregates_consistent(
         return False
 
     eligible_agents: list[tuple[str, float, float]] = []
+    has_activation_eligible_agent = any(
+        not (
+            isinstance(agent.get("skill_activation"), dict)
+            and agent["skill_activation"].get("status") == "never_activated"
+        )
+        and _agent_eval_safe_text(agent.get("execution_status")).casefold() == "succeeded"
+        and _agent_eval_finite_score(agent.get("with_skill")) is not None
+        for agent in agents.values()
+    )
     for name in canonical_agent_names:
         agent = agents[name]
+        if (
+            has_activation_eligible_agent
+            and isinstance(agent.get("skill_activation"), dict)
+            and agent["skill_activation"].get("status") == "never_activated"
+        ):
+            continue
         if _agent_eval_safe_text(agent.get("execution_status")).casefold() != "succeeded":
             continue
         score = _agent_eval_finite_score(agent.get("with_skill"))
@@ -1653,7 +1674,7 @@ def _agent_eval_candidate_rank(
         if max(payload_attempts, _agent_eval_count(agent.get("scored_attempts"))) > 0:
             strong_agent_evidence = True
 
-    valid_verdict = truth_consistent and verdict in {"pass", "neutral", "fail"}
+    valid_verdict = truth_consistent and verdict in {"pass", "neutral", "fail", "inconclusive"}
     dimension_verdict = agent_eval_dimension_verdict(payload)
     conservative_outcome_rank = max(
         ({"pass": 0, "neutral": 1, "fail": 3}.get(candidate, -1) for candidate in (verdict, dimension_verdict)),
@@ -2155,6 +2176,15 @@ def assess_tier3_evidence(
             raw_verdict or "fail",
             selected_payload,
             "Tier 3 evidence records a failing verdict.",
+        )
+    if raw_verdict == "inconclusive" and dimension_verdict == "inconclusive" and execution_status == "succeeded":
+        return Tier3EvidenceAssessment(
+            "inconclusive",
+            False,
+            execution_status,
+            raw_verdict,
+            selected_payload,
+            "Inconclusive: skill never activated. Scores are diagnostic only; no lift verdict was computed.",
         )
     if execution_status == "incomplete":
         return Tier3EvidenceAssessment(

@@ -27,6 +27,7 @@ def _write_job(
     *,
     native: bool,
     judge_metric: str = "accuracy",
+    activated: bool | None = None,
 ) -> None:
     trials = []
     for index, (accuracy, step_judges) in enumerate(zip(accuracies, judges, strict=True), 1):
@@ -46,6 +47,10 @@ def _write_job(
                 "score_policy": DEFAULT_SCORE_POLICY,
                 "details": {judge_metric: {"score": accuracy, "judge_model_used": judge}} if judge else {},
             }
+            if activated is not None:
+                rich["details"]["skill_execution"] = {
+                    "activation": {"passed": activated, "score": float(activated)}
+                }
             _write_json(verifier / "reward.json", scores if native else rich)
             if native:
                 _write_json(verifier / "skill_evaluator_reward.json", rich)
@@ -91,6 +96,7 @@ def _collect(
     judge_free: bool = False,
     cases: int = 2,
     judge_metric: str = "accuracy",
+    activated: bool | None = None,
 ) -> tuple[dict, Path]:
     judges_with = [("primary", "fallback" if index == 0 or all_mixed else "primary") for index in range(cases)]
     judges_without = [("primary", "primary")] * cases
@@ -105,7 +111,12 @@ def _collect(
         judges_with = [(row[-1],) for row in judges_with]
         judges_without = [(row[-1],) for row in judges_without]
     _write_job(
-        root / "jobs" / "demo-codex-with", accuracies_with, judges_with, native=native, judge_metric=judge_metric
+        root / "jobs" / "demo-codex-with",
+        accuracies_with,
+        judges_with,
+        native=native,
+        judge_metric=judge_metric,
+        activated=activated,
     )
     _write_job(
         root / "jobs" / "demo-codex-without",
@@ -129,6 +140,24 @@ def _collect(
 
 def _report(run: Path) -> dict:
     return agent_eval_result_from_directory(run.parent / "demo", run, use_llm_judge=False).metadata["agent_eval"]
+
+
+@pytest.mark.parametrize("activated", [False, True])
+def test_judge_filtered_lift_respects_activation_eligibility(tmp_path: Path, activated: bool) -> None:
+    collected, run = _collect(tmp_path, activated=activated)
+    report = _report(run)
+    agent = report["agents"]["codex"]
+    assert agent["skill_activation"]["status"] == ("activated" if activated else "never_activated")
+    assert report["overall_lift"] == agent["lift"] == (-0.08 if activated else None)
+    assert agent["evaluators"]["accuracy"]["lift"] == (-0.4 if activated else None)
+    correctness = next(dim for dim in agent["dimensions"] if dim["id"] == "correctness")
+    assert correctness["lift"] == (-0.4 if activated else None)
+    if activated:
+        assert collected["agents"]["codex"]["lift"]["judge_mixed_cases"] == {"accuracy": 1}
+    else:
+        assert report["verdict"] == "inconclusive"
+        assert collected["agents"]["codex"]["lift"] == {}
+        assert all(dimension["lift"] is None for dimension in agent["dimensions"])
 
 
 @pytest.mark.parametrize("native", [False, True])

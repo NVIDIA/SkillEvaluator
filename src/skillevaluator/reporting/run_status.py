@@ -19,10 +19,12 @@ The precedence (docs/plugin-evaluation.mdx, "Reports and verdicts"):
 5. The headline is the exit gate: a result outside the gate (an advisory tier) never changes it. It is PASSED
    exactly when ``validate`` exits 0, and the advisory problems are named instead.
 
-Tier 3 adds three rules: a FAIL verdict or a confirmed Skill Lift regression is FAILED even for a partial run; a run
-that never ran is FAILED when ``--block-on-agent-eval`` makes Tier 3 gate and SKIPPED otherwise; and a run whose
-verdict is NEUTRAL is NEUTRAL. When ``--block-on-agent-eval`` makes Tier 3 gate, only a completed PASS with complete
-attempt coverage passes the gate (``passes_required_gate``), so a gated NEUTRAL run fails it.
+Tier 3 adds four rules: a FAIL verdict or a confirmed Skill Lift regression is FAILED even for a partial run; a run
+that never ran is FAILED when ``--block-on-agent-eval`` makes Tier 3 gate and SKIPPED otherwise; a run whose
+verdict is NEUTRAL is NEUTRAL; and a run whose verdict is INCONCLUSIVE (the skill never activated, so no lift verdict
+was computed) is INCOMPLETE, never PASSED. When ``--block-on-agent-eval`` makes Tier 3 gate, only a completed PASS
+with complete attempt coverage passes the gate (``passes_required_gate``), so a gated NEUTRAL or INCONCLUSIVE run
+fails it.
 
 BENCHMARK.md is a publication card and is stricter than the gate: it also wants complete Tier 3 provenance (Tier 3
 is publication-required by default), and a skipped required check or any missing scan keeps it INCOMPLETE. It is
@@ -48,7 +50,18 @@ if TYPE_CHECKING:
 
     from skillevaluator.models import Finding, ValidationResult
 
-__all__ = ["RunStatus", "Status", "TierStatus", "is_tier2_validator_name", "resolve_run_status"]
+__all__ = [
+    "TIER3_INCONCLUSIVE_REASON",
+    "RunStatus",
+    "Status",
+    "TierStatus",
+    "is_tier2_validator_name",
+    "is_tier3_inconclusive",
+    "resolve_run_status",
+]
+
+# Why an INCONCLUSIVE Tier 3 run is INCOMPLETE, in report words.
+TIER3_INCONCLUSIVE_REASON = "Tier 3 is inconclusive: the skill never activated, so no lift verdict was computed"
 
 
 class Status(StrEnum):
@@ -155,7 +168,11 @@ def resolve_run_status(results: Iterable[ValidationResult]) -> RunStatus:
         missing.append("Tier 3")
     advisory = _advisory_labels(by_tier, outcomes)
     reasons = [_failure_reason(result) for result in failed]
-    reasons += [f"{name} did not complete" for name in missing]
+    tier3_inconclusive = any(is_tier3_inconclusive(result) for result in incomplete)
+    reasons += [
+        TIER3_INCONCLUSIVE_REASON if name == "Tier 3" and tier3_inconclusive else f"{name} did not complete"
+        for name in missing
+    ]
     reasons += [f"{label} is advisory" for label in advisory]
 
     evidence_missing = any(
@@ -225,7 +242,15 @@ def _tier3_outcome(result: ValidationResult) -> Status:
     if execution and execution != "succeeded":
         # Advisory and passed, but nothing was evaluated (no task source): it did not run.
         return Status.SKIPPED
+    if _verdict(payload) == "inconclusive":
+        # The skill never activated, so no lift verdict was computed: evidence is missing, not a pass.
+        return Status.INCOMPLETE
     return Status.PASSED
+
+
+def is_tier3_inconclusive(result: ValidationResult) -> bool:
+    """Whether *result* is a Tier 3 run whose verdict is INCONCLUSIVE (the skill never activated)."""
+    return _is_tier3(result) and _verdict(_mapping(_mapping(result.metadata).get("agent_eval"))) == "inconclusive"
 
 
 def _has_blocking_finding(result: ValidationResult) -> bool:
@@ -398,7 +423,10 @@ def _advisory_labels(
             has_labels = isinstance(gate_labels, list) and gate_labels
             labels.append(" · ".join(str(label) for label in gate_labels) if has_labels else "Tier 3 FAIL")
         elif outcome is Status.INCOMPLETE:
-            labels.append("Tier 3 INCOMPLETE")
+            inconclusive = is_tier3_inconclusive(result)
+            labels.append(
+                "Tier 3 INCOMPLETE (inconclusive: skill never activated)" if inconclusive else "Tier 3 INCOMPLETE"
+            )
     for number in (1, 2):
         advisory = [outcomes[id(result)] for result in by_tier[number] if passes_required_gate(result)]
         if Status.FAILED in advisory:

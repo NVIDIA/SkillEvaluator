@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from _f90_gate_cli import plugin_dir, scores, tier3_result
+from _f90_gate_cli import DATASET_SUMMARY, coverage, plugin_dir, scores, tier3_result
 from click.testing import CliRunner
 
 import skillevaluator.cli as cli_module
@@ -28,6 +28,7 @@ from skillevaluator.evaluation.tier3_report import (
     incomplete_reason,
 )
 from skillevaluator.models import Finding, Severity, ValidationResult
+from skillevaluator.reporting.run_status import TIER3_INCONCLUSIVE_REASON
 from skillevaluator.utils.tool_runner import Tools
 from skillevaluator.validators.claude_plugin_validate import VALIDATOR_NAME as PARITY
 from skillevaluator.validators.security import SecurityValidator
@@ -127,6 +128,37 @@ def _tier3_that_did_not_complete() -> ValidationResult:
     result.passed = False
     result.metadata["execution_status"] = "skipped"
     result.metadata["skip_reason"] = incomplete_reason(provenance)
+    return result
+
+
+def _tier3_that_never_activated_the_skill() -> ValidationResult:
+    """A complete, scored plugin run whose with-plugin trials never activated the skill: verdict INCONCLUSIVE."""
+    info: dict[str, Any] = {
+        "with_skill": scores(),
+        "without_skill": scores(),
+        "execution_status": "succeeded",
+        "rewards": [],
+        "num_trials": 2,
+        "model": "test-model",
+        "skill_activation": {
+            "status": "never_activated",
+            "positive_trials": 2,
+            "activated_trials": 0,
+            "unknown_trials": 0,
+            "reason": "Inconclusive: skill never activated in with-skill trials",
+        },
+        **coverage(baseline=True),
+    }
+    payload = build_agent_eval_payload(
+        "gate-demo",
+        {"codex": info},
+        use_llm_judge=False,
+        run_config={"eval_target": {"kind": "plugin"}},
+        persisted_dataset_summary=dict(DATASET_SUMMARY),
+    )
+    assert payload is not None and payload["verdict"] == "inconclusive"
+    result = _validation_result_from_payload(payload)
+    assert result is not None
     return result
 
 
@@ -306,6 +338,44 @@ def test_an_advisory_partial_run_is_named_but_never_changes_the_headline(
     assert surfaces.benchmark_verdict() == "INCOMPLETE"
     # The Tier 1 plugin row stays fail-closed on the missing Tier 3 evidence.
     assert "| ⚠️ INCOMPLETE |" in surfaces.markdown
+
+
+def _assert_tier3_inconclusive_is_incomplete(surfaces: Surfaces) -> None:
+    """No surface reads PASSED for Tier 3; the human-facing ones name why it is INCOMPLETE."""
+    assert surfaces.report["tier_status"] == {"1": "passed", "3": "incomplete"}
+    assert surfaces.sarif["runs"][0]["properties"]["tierStatus"] == {"1": "passed", "3": "incomplete"}
+    agent_eval = next(item for item in surfaces.report["results"] if item["validator"] == "AGENT_EVAL")
+    assert agent_eval["status"] == "incomplete"
+    assert surfaces.report["publication_status"] == "incomplete"
+    assert surfaces.html_tier_cards() == {"tier1": "PASS", "tier3": "INCOMPLETE"}
+    assert surfaces.benchmark_verdict() == "INCOMPLETE"
+    assert "| Tier 3 | Live agent evaluation | **INCONCLUSIVE** |" in surfaces.benchmark
+    assert "**Verdict:** INCONCLUSIVE" in surfaces.markdown
+    assert re.search(r"AGENT_EVAL\s*│\s*INCOMPLETE\s*│", surfaces.output)
+
+
+def test_an_advisory_never_activated_run_is_incomplete_but_keeps_the_exit_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    surfaces = validate(monkeypatch, tmp_path, _tier3_that_never_activated_the_skill())
+
+    # Outside the exit gate, Tier 3 never changes the headline; it is named instead.
+    _assert_one_headline(surfaces, "passed")
+    _assert_tier3_inconclusive_is_incomplete(surfaces)
+    assert "Tier 3 INCOMPLETE (inconclusive: skill never activated) is advisory" in surfaces.output
+    assert surfaces.report["status_reasons"] == ["Tier 3 INCOMPLETE (inconclusive: skill never activated) is advisory"]
+
+
+def test_a_gated_never_activated_run_is_incomplete_on_every_surface(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    surfaces = validate(monkeypatch, tmp_path, _tier3_that_never_activated_the_skill(), "--block-on-agent-eval")
+
+    # Only a PASS passes the gate, so validate still exits 1; the run is missing its lift verdict, not failed.
+    _assert_one_headline(surfaces, "incomplete")
+    _assert_tier3_inconclusive_is_incomplete(surfaces)
+    assert TIER3_INCONCLUSIVE_REASON in surfaces.report["status_reasons"]
+    assert TIER3_INCONCLUSIVE_REASON in surfaces.sarif["runs"][0]["properties"]["statusReasons"]
 
 
 # ---------------------------------------------------------------------------

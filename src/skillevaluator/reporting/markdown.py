@@ -875,7 +875,10 @@ class MarkdownReporter(ReporterBase):
             # The publication evidence check can only make a completed run's status more conservative.
             verdict = status.tiers[3].status.verdict
             evidence_verdict = publication.tier3.status.upper()
-            if verdict in {"PASS", "NEUTRAL"} and evidence_verdict in {"INCOMPLETE", "FAIL", "INCONCLUSIVE"}:
+            if verdict in {"PASS", "NEUTRAL"} and evidence_verdict in {"INCOMPLETE", "FAIL"}:
+                verdict = evidence_verdict
+            if verdict == "INCOMPLETE" and evidence_verdict == "INCONCLUSIVE":
+                # INCOMPLETE because the skill never activated: name it.
                 verdict = evidence_verdict
             composite = ae.get("composite_lift")
             runtime = ae.get("runtime_seconds", 0.0)

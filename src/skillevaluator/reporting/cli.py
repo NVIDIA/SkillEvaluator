@@ -54,7 +54,13 @@ from skillevaluator.reporting.plugin_sections import (
     static_risk_view,
     tier3_plugin_view,
 )
-from skillevaluator.reporting.run_status import RunStatus, Status, resolve_run_status
+from skillevaluator.reporting.run_status import (
+    TIER3_INCONCLUSIVE_REASON,
+    RunStatus,
+    Status,
+    is_tier3_inconclusive,
+    resolve_run_status,
+)
 from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
@@ -1176,7 +1182,9 @@ class CLIReporter(ReporterBase):
 
     @staticmethod
     def _tier3_incomplete_text(result: ValidationResult) -> str:
-        """Say why an INCOMPLETE Tier 3 run (partial, or stamped skipped by ``validate``) is INCOMPLETE."""
+        """Say why an INCOMPLETE Tier 3 run (partial, inconclusive, or stamped skipped by ``validate``) is INCOMPLETE."""
+        if is_tier3_inconclusive(result):
+            return f"INCOMPLETE: {TIER3_INCONCLUSIVE_REASON}"
         return str((result.metadata or {}).get("skip_reason") or "INCOMPLETE: Tier 3 did not complete")
 
     @staticmethod

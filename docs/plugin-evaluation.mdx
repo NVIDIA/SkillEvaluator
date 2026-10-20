@@ -3585,7 +3585,7 @@ In this example:
 | **NEUTRAL** | The Tier 3 verdict | No agent passes, but at least one has no dimension below 0.40. A dimension without any applicable metric also leads here |
 | **FAIL** | Tier 1 and the Tier 3 verdict | Tier 1: a CRITICAL or HIGH finding. Tier 3: every successful agent has a dimension below 0.40 |
 | **INCOMPLETE** | Tier 1 and Tier 3 | Required evidence is missing. The result must not be read as a pass. See below |
-| **INCONCLUSIVE** | The advisory Integration block | Integration was requested but not measured, was incomplete, paired fewer than 5 cases, or has an interval that crosses a ±0.05 band edge. A tight interval around zero is cosmetic bundling, not inconclusive |
+| **INCONCLUSIVE** | The advisory Integration block, and the Tier 3 verdict | Integration was requested but not measured, was incomplete, paired fewer than 5 cases, or has an interval that crosses a ±0.05 band edge. A tight interval around zero is cosmetic bundling, not inconclusive. Tier 3: no positive with-plugin trial activated the skill, so no lift verdict was computed; the run's status is `INCOMPLETE` |
 
 Tier 1 failures and incomplete scanner evidence always set the `validate` exit
 code. Plugin Tier 2 never does, except for refused unsafe input. Tier 3 sets it
@@ -3609,6 +3609,16 @@ gate never changes the headline; the reports name it as advisory instead.
 A Tier 3 run that never ran (for example, Docker is missing) is a failed gate
 when `--block-on-agent-eval` makes Tier 3 gate: every report says `FAIL` and
 gives the reason. Without the flag it is a skipped, advisory run.
+
+A Tier 3 run whose skill never activated in any positive with-plugin trial has
+the verdict `INCONCLUSIVE`: its scores are diagnostic only and no lift is
+computed. Its status is `INCOMPLETE`, never `PASS`, on every report: the JSON
+`tier_status` and result `status`, the SARIF `tierStatus`, the HTML tier card,
+and the terminal summary row. The Markdown and terminal verdict lines and the
+`BENCHMARK.md` Tier Status row say `INCONCLUSIVE`, and the card is
+`INCOMPLETE`. Without `--block-on-agent-eval` the exit code ignores it and the
+reports name it as advisory; with the flag it fails `validate` (exit 1) with the
+headline `INCOMPLETE`.
 
 Without the flag, Tier 3 is advisory: the exit code ignores it. The reports
 still show the Tier 3 verdict. `BENCHMARK.md` then says "FAIL — Not recommended

@@ -30,7 +30,14 @@ from skillevaluator.evaluation.tier3_report import (
 from skillevaluator.models import Finding, Severity, ValidationResult
 from skillevaluator.publication_evidence import stamp_publication_evidence
 from skillevaluator.reporting.base import passes_required_gate
-from skillevaluator.reporting.run_status import RunStatus, Status, TierStatus, resolve_run_status
+from skillevaluator.reporting.run_status import (
+    TIER3_INCONCLUSIVE_REASON,
+    RunStatus,
+    Status,
+    TierStatus,
+    is_tier3_inconclusive,
+    resolve_run_status,
+)
 
 PARTIAL = {"partial": True, "unresolved_skill_refs": ["github::example-org/example-repo::skills::missing"]}
 _DIMENSIONS = ("security", "correctness", "discoverability", "effectiveness", "efficiency")
@@ -98,6 +105,23 @@ def agent(**overrides: Any) -> dict[str, Any]:
     }
     info.update(overrides)
     return info
+
+
+# Every positive with-plugin trial ran without loading the skill (#208): the run is INCONCLUSIVE.
+NEVER_ACTIVATED = {
+    "status": "never_activated",
+    "positive_trials": 2,
+    "activated_trials": 0,
+    "unknown_trials": 0,
+    "reason": "Inconclusive: skill never activated in with-skill trials",
+}
+
+
+def never_activated_run() -> ValidationResult:
+    """A complete, scored run whose verdict is INCONCLUSIVE because the skill never activated."""
+    result = multi_agent(codex=agent(without_skill=scores(), skill_activation=dict(NEVER_ACTIVATED)))
+    assert result.metadata["agent_eval"]["verdict"] == "inconclusive"
+    return result
 
 
 def multi_agent(**agents: dict[str, Any]) -> ValidationResult:
@@ -418,6 +442,46 @@ def test_a_neutral_tier3_run_is_neutral_not_passed() -> None:
     assert status.headline is Status.PASSED
 
 
+@pytest.mark.parametrize("blocking", [False, True])
+def test_an_inconclusive_tier3_run_is_incomplete_never_passed(blocking: bool) -> None:
+    result = gated(never_activated_run(), blocking=blocking)
+
+    status = resolve_run_status([check("Plugin Schema"), result])
+
+    assert is_tier3_inconclusive(result)
+    # The skill never activated, so no lift verdict exists: the row, the tier and the card all miss evidence.
+    assert status.of(result) is Status.INCOMPLETE
+    assert status.tiers[3].status is Status.INCOMPLETE
+    assert status.tiers[3].publication is Status.INCOMPLETE
+    assert status.publication is Status.INCOMPLETE
+    assert status.plugin is Status.INCOMPLETE
+    # The exit gate is unchanged: advisory, it passes and is named; gated, it fails (only a PASS passes the gate).
+    assert passes_required_gate(result) is not blocking
+    if blocking:
+        assert status.headline is Status.INCOMPLETE
+        assert status.incomplete == (result,)
+        assert status.missing == ("Tier 3",)
+        assert status.reasons == (TIER3_INCONCLUSIVE_REASON,)
+    else:
+        assert status.headline is Status.PASSED
+        assert status.advisory == ("Tier 3 INCOMPLETE (inconclusive: skill never activated)",)
+        assert status.reasons == ("Tier 3 INCOMPLETE (inconclusive: skill never activated) is advisory",)
+
+
+def test_an_inconclusive_verdict_does_not_hide_a_real_failure() -> None:
+    payload = deepcopy(never_activated_run().metadata["agent_eval"])
+    payload["execution_status"] = "failed"
+    payload["execution_errors"] = ["Harbor job did not complete successfully"]
+    crashed = _validation_result_from_payload(payload)
+    assert crashed is not None
+    assert is_tier3_inconclusive(crashed)
+
+    status = resolve_run_status([check("Plugin Schema"), gated(crashed, blocking=True)])
+
+    assert status.headline is Status.FAILED
+    assert status.tiers[3].status is Status.FAILED
+
+
 def test_a_tier3_run_without_publication_provenance_passes_the_gate_but_not_the_card() -> None:
     # build_payload records no dataset digest, so BENCHMARK.md cannot publish it; the gate still passes.
     result = gated(tier3(build_payload(scores())), blocking=True)
@@ -538,6 +602,7 @@ _TIER3 = {
         gated(tier3(build_payload(scores(security=0.0), plugin_provenance=PARTIAL)), blocking=blocking)
     ],
     "not-run": lambda blocking: [gated(advisory_skip_result("docker missing"), blocking=blocking)],
+    "inconclusive": lambda blocking: [gated(never_activated_run(), blocking=blocking)],
 }
 _COMBINATIONS = [
     pytest.param(t1, t2, b2, t3, b3, id=f"t1={t1}-t2={t2}{'(gate)' if b2 else ''}-t3={t3}{'(gate)' if b3 else ''}")

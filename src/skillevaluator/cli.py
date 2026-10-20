@@ -56,7 +56,7 @@ from skillevaluator.tier1.commands import (
     run_security_scan,
     run_validation,
 )
-from skillevaluator.tier3_environments import HARBOR_ENVIRONMENTS
+from skillevaluator.tier3_environments import all_env_modes
 from skillevaluator.tier_group import TierGroup
 from skillevaluator.utils.path_security import resolve_repo_context_root
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
@@ -69,7 +69,7 @@ from skillevaluator.utils.tier2_paths import (
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 
-ENV_MODE_CHOICE = click.Choice(list(HARBOR_ENVIRONMENTS))
+ENV_MODE_CHOICE = click.Choice(list(all_env_modes()))
 
 
 class _AliasChoice(click.Choice):

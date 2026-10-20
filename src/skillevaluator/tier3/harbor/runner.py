@@ -166,7 +166,12 @@ from skillevaluator.tier3_environments import (
     HARBOR_ENVIRONMENT_KWARGS,
     HARBOR_VERSION,
     SKILLEVALUATOR_GKE_EXTRA_ENVIRONMENT_KWARGS,
+    EnvironmentBackendError,
+    EnvironmentBackendSpec,
+    custom_backend_names,
     harbor_environment_type,
+    is_env_mode,
+    load_custom_backend,
 )
 from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_text
@@ -1180,6 +1185,91 @@ def is_operator_owned_or_provider_secret(name: str) -> bool:
     return upper.startswith(_OPERATOR_SECRET_PREFIXES)
 
 
+# Harbor's stock agents read these from the Harbor process and can copy them into
+# the trial sandbox, so a backend may never forward them.
+_BACKEND_REFUSED_HOST_ENV_PREFIXES = (
+    "ANTHROPIC_",
+    "CLAUDE_",
+    "CODEX_",
+    "GEMINI_",
+    "GH_",
+    "GITHUB_",
+    "GITLAB_",
+    "HF_",
+    "HUGGING_FACE_",
+    "OPENAI_",
+    "OPENCODE_",
+)
+# Shared, non-secret cluster configuration a Kubernetes-backed backend may need.
+_BACKEND_ALLOWED_SHARED_HOST_ENV = frozenset({"KUBECONFIG"})
+
+
+def _backend_may_forward(name: str) -> bool:
+    upper = name.upper()
+    if upper in _HARBOR_BASE_ENV_VARS or upper in _BACKEND_ALLOWED_SHARED_HOST_ENV:
+        return True
+    other_backend_secret = any(
+        upper in names and is_sensitive_key(upper) for names in _HARBOR_ENV_MODE_VARS.values()
+    )
+    return not (
+        upper in _OPERATOR_OWNED_AGENT_ENV
+        or upper in _RUNTIME_ENV_HOST_CONTROL_NAMES
+        or upper.startswith(_RUNTIME_ENV_HOST_CONTROL_PREFIXES)
+        or upper.startswith(_BACKEND_REFUSED_HOST_ENV_PREFIXES)
+        or is_operator_owned_or_provider_secret(upper)
+        or other_backend_secret
+    )
+
+
+def _custom_backend(env_mode: str) -> EnvironmentBackendSpec | None:
+    """Load an installed ``--env-mode`` backend and check the host variables it forwards."""
+    try:
+        backend = load_custom_backend(env_mode)
+    except EnvironmentBackendError as exc:
+        # Import and factory failures can quote backend configuration such as
+        # endpoint URLs with credentials; redact them like preflight failures.
+        detail = redact_progress_detail(str(exc), secret_values=secret_values_from_environment(os.environ))
+        raise EnvironmentBackendError(detail or f"Custom execution backend '{env_mode}' could not be loaded") from None
+    if backend is None:
+        return None
+    # A backend forwards its own backend settings only. Agent, provider, and other
+    # backends' credentials, judge settings, and process-control variables stay
+    # under evaluator policy.
+    blocked = sorted(name for name in backend.host_env_vars if not _backend_may_forward(name))
+    if blocked:
+        raise EnvironmentBackendError(
+            f"Custom execution backend '{env_mode}' may not forward evaluator-owned variable(s): {', '.join(blocked)}"
+        )
+    return backend
+
+
+def _env_mode_host_path_env_vars(env_mode: str) -> frozenset[str]:
+    """Return a backend's host variables that name files, anchored before Harbor changes directory."""
+    if env_mode in _HARBOR_ENV_MODE_VARS:
+        return frozenset()
+    try:
+        backend = _custom_backend(env_mode)
+    except EnvironmentBackendError:
+        return frozenset()
+    return backend.host_path_env_vars if backend is not None else frozenset()
+
+
+def _supported_env_modes() -> frozenset[str]:
+    return HARBOR_ENV_MODES | frozenset(custom_backend_names())
+
+
+def _env_mode_host_env_vars(env_mode: str) -> frozenset[str]:
+    """Return the backend host variables forwarded to Harbor for ``env_mode``."""
+    if env_mode in _HARBOR_ENV_MODE_VARS:
+        return _HARBOR_ENV_MODE_VARS[env_mode]
+    try:
+        backend = _custom_backend(env_mode)
+    except EnvironmentBackendError:
+        # Prerequisite checks report the load failure before any run starts.
+        return frozenset()
+    return backend.host_env_vars if backend is not None else frozenset()
+
+
 def is_gke_vertex_workload_identity_active(
     env_mode: str,
     agents: Sequence[str] = ("claude-code",),
@@ -1304,7 +1394,10 @@ def _harbor_launch_environment(env: Mapping[str, str]) -> dict[str, str]:
 def _absolute_host_path_kwargs(env_mode: str, environment_kwargs: Mapping[str, Any]) -> dict[str, Any]:
     """Anchor relative host-path constructor kwargs before Harbor changes directory."""
     anchored = dict(environment_kwargs)
-    for name in _HOST_PATH_ENVIRONMENT_KWARGS.get(env_mode, frozenset()) & anchored.keys():
+    path_kwargs = _HOST_PATH_ENVIRONMENT_KWARGS.get(env_mode, frozenset())
+    if env_mode not in _HOST_PATH_ENVIRONMENT_KWARGS and (backend := _custom_backend(env_mode)) is not None:
+        path_kwargs = backend.host_path_environment_kwargs
+    for name in path_kwargs & anchored.keys():
         if isinstance(anchored[name], str):
             anchored[name] = _absolute_host_path(anchored[name])
     return anchored
@@ -1495,9 +1588,19 @@ def _environment_kwarg_policy_error(env_mode: str, environment_kwargs: Mapping[s
         return "Environment kwargs are not supported for SkillEvaluator Docker mode"
     if env_mode == ENV_MODE_LOCAL:
         return "Environment kwargs are not supported for SkillEvaluator local mode"
+    try:
+        backend = _custom_backend(env_mode)
+    except EnvironmentBackendError as exc:
+        return str(exc)
     reserved = _HARBOR_RUNTIME_POLICY_KWARGS | _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS.get(env_mode, frozenset())
+    if backend is not None:
+        reserved = reserved | backend.reserved_environment_kwargs
     if collisions := sorted(reserved & environment_kwargs.keys()):
         return "Environment kwarg(s) reserved for Harbor runtime policy: " + ", ".join(collisions)
+    if backend is not None:
+        if unknown := sorted(environment_kwargs.keys() - backend.environment_kwargs):
+            return f"Custom execution backend '{env_mode}' does not accept environment kwarg(s): " + ", ".join(unknown)
+        return None
     allowed_kwargs = HARBOR_ENVIRONMENT_KWARGS[env_mode]
     if env_mode == "gke":
         allowed_kwargs = allowed_kwargs | SKILLEVALUATOR_GKE_EXTRA_ENVIRONMENT_KWARGS
@@ -1544,6 +1647,16 @@ def _kata_environment_kwarg_error(environment_kwargs: Mapping[str, Any]) -> str 
 
 def _staged_task_environment_error(env_mode: str, task_dirs: Iterable[Path]) -> str | None:
     """Reject staged task environments the selected backend cannot run."""
+    if (backend := _custom_backend(env_mode)) is not None:
+        if backend.supports_docker_compose:
+            return None
+        for task_dir in task_dirs:
+            if (task_dir / "environment" / "docker-compose.yaml").exists():
+                return (
+                    f"Custom execution backend '{env_mode}' cannot run Docker Compose task '{task_dir.name}'; "
+                    "use a Dockerfile-only environment or another backend."
+                )
+        return None
     if env_mode == "mosaic":
         for task_dir in task_dirs:
             if (task_dir / "environment" / "docker-compose.yaml").exists():
@@ -1632,14 +1745,16 @@ def build_harbor_run_command(
     verifier_env: Mapping[str, str] | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
 ) -> list[str]:
-    """Build a Harbor invocation for a built-in environment type or local mode."""
-    if env_mode not in HARBOR_ENV_MODES:
-        raise ValueError(f"env_mode must be one of: {', '.join(sorted(HARBOR_ENV_MODES))}")
+    """Build a Harbor invocation for a built-in or backend environment, or local mode."""
+    if not is_env_mode(env_mode):
+        raise ValueError(f"env_mode must be one of: {', '.join(sorted(_supported_env_modes()))}")
+    backend = _custom_backend(env_mode)
     timeout_multiplier = _validated_timeout_multiplier(timeout_multiplier)
     if (
         agent_import_path
         and env_mode not in HARBOR_DOCKER_ENGINE_ENV_MODES | {ENV_MODE_LOCAL}
         and agent_import_path not in _NATIVE_BACKEND_AGENT_IMPORT_PATHS
+        and (backend is None or agent_import_path not in backend.agent_import_paths.values())
     ):
         raise ValueError("agent_import_path is supported only with --env docker, kata, or local")
     validated_environment_kwargs = validate_environment_kwargs(
@@ -1709,12 +1824,16 @@ def build_harbor_run_command(
         else:
             env_import_path = SECURE_DOCKER_ENV_IMPORT_PATH
         command.extend(["--env", env_import_path])
+    elif backend is not None:
+        command.extend(["--agent", agent_import_path or backend.agent_import_paths.get(agent, agent)])
+        command.extend(["--env", backend.import_path])
     else:
         command.extend(["--agent", agent_import_path or agent, "--env", harbor_environment_type(env_mode)])
     for name, value in sorted(_harbor_agent_kwargs(agent, model, env_mode).items()):
         command.extend(["--ak", encode_environment_kwarg(name, value)])
     for name, value in sorted(validated_environment_kwargs.items()):
-        if name == "allow_workload_identity":
+        # A SkillEvaluator GKE wrapper option, not a Harbor constructor kwarg.
+        if env_mode == "gke" and name == "allow_workload_identity":
             continue
         command.extend(["--ek", encode_environment_kwarg(name, value)])
     # Alias kwargs come after operator kwargs, which may never set them.
@@ -2018,7 +2137,9 @@ def _environment_kwarg_prerequisite_errors(
         return [name for name in names if not isinstance(kwargs.get(name), str) or not kwargs[name].strip()]
 
     required: tuple[str, ...] = ()
-    if env_mode == "gke":
+    if (backend := _custom_backend(env_mode)) is not None:
+        required = backend.required_environment_kwargs
+    elif env_mode == "gke":
         required = ("cluster_name", "region", "namespace", "registry_location", "registry_name")
     elif env_mode == "ack":
         required = ("namespace",)
@@ -2121,6 +2242,14 @@ def _cwsandbox_prerequisite_errors(env_mode: str) -> list[str]:
 
 
 def _environment_extra_install_hint(env_mode: str) -> str:
+    if env_mode not in HARBOR_ENV_MODES and env_mode in custom_backend_names():
+        try:
+            backend = _custom_backend(env_mode)
+        except EnvironmentBackendError:
+            backend = None
+        if backend is not None and backend.install_hint:
+            return backend.install_hint
+        return f"Reinstall the package that provides custom execution backend '{env_mode}'."
     extra = HARBOR_ENVIRONMENT_EXTRAS.get(env_mode)
     if extra is not None:
         return f"Install 'harbor[{extra}]=={HARBOR_VERSION}'."
@@ -2273,6 +2402,53 @@ def _python_dotenv_prerequisite_error() -> str | None:
     )
 
 
+def _custom_backend_prerequisite_errors(
+    env_mode: str,
+    backend: EnvironmentBackendSpec,
+    environment_kwargs: Mapping[str, Any] | None,
+) -> list[str]:
+    """Run a backend's own prerequisite hook, then its environment class's Harbor ``preflight``."""
+    secret_values = secret_values_from_environment(os.environ)
+    try:
+        # Import the environment module first so a missing backend SDK is reported
+        # with the backend's install hint rather than as a generic preflight failure.
+        importlib.import_module(backend.import_path.partition(":")[0])
+        if backend.prerequisites is not None:
+            from harbor.utils.import_path import import_symbol
+
+            check = import_symbol(backend.prerequisites)
+            errors = check(dict(environment_kwargs or {}))
+            if not isinstance(errors, list | tuple) or not all(isinstance(error, str) for error in errors):
+                return [f"Custom execution backend '{env_mode}' prerequisite hook must return a list of strings"]
+            if errors:
+                return [redact_progress_detail(error, secret_values=secret_values) or error for error in errors]
+        from harbor.environments.factory import EnvironmentFactory
+
+        EnvironmentFactory.run_preflight(None, import_path=backend.import_path)
+    except ImportError as exc:
+        detail = redact_progress_detail(_harbor_missing_dependency_summary(exc), secret_values=secret_values)
+        return [
+            f"Custom execution backend '{env_mode}' needs optional dependencies: {detail}. "
+            f"{_environment_extra_install_hint(env_mode)}"
+        ]
+    except SystemExit as exc:
+        detail = redact_progress_detail(exc, secret_values=secret_values) or "preflight exited without a diagnostic"
+        return [f"Custom execution backend '{env_mode}' is not ready: {detail}"]
+    except Exception as exc:
+        if isinstance(exc.__cause__, ImportError):
+            # Harbor's import_symbol wraps import failures in ValueError.
+            detail = redact_progress_detail(
+                _harbor_missing_dependency_summary(exc.__cause__), secret_values=secret_values
+            )
+            return [
+                f"Custom execution backend '{env_mode}' needs optional dependencies: {detail}. "
+                f"{_environment_extra_install_hint(env_mode)}"
+            ]
+        detail = redact_progress_detail(exc, secret_values=secret_values)
+        return [f"Custom execution backend '{env_mode}' is not ready: {detail}"]
+    return []
+
+
 def _check_prerequisites(
     env_mode: str = DEFAULT_ENV_MODE,
     agents: list[str] | None = None,
@@ -2280,9 +2456,15 @@ def _check_prerequisites(
     verify_live_cluster: bool = False,
     subprocess_env: Mapping[str, str] | None = None,
 ) -> list[str]:
-    """Check Harbor and the selected environment (built-in, GKE, or local mode)."""
-    if env_mode not in HARBOR_ENV_MODES:
-        return [f"Unsupported Harbor environment '{env_mode}'. Choose one of: {', '.join(sorted(HARBOR_ENV_MODES))}"]
+    """Check Harbor and the selected environment (built-in, backend, GKE, or local mode)."""
+    if not is_env_mode(env_mode):
+        return [
+            f"Unsupported Harbor environment '{env_mode}'. Choose one of: {', '.join(sorted(_supported_env_modes()))}"
+        ]
+    try:
+        _custom_backend(env_mode)
+    except EnvironmentBackendError as exc:
+        return [f"{exc}. {_environment_extra_install_hint(env_mode)}"]
     if dotenv_error := _python_dotenv_prerequisite_error():
         return [dotenv_error]
     if env_mode != "gke" and (kwarg_errors := _environment_kwarg_prerequisite_errors(env_mode, environment_kwargs)):
@@ -2300,6 +2482,9 @@ def _check_prerequisites(
             "harbor CLI not found. Reinstall with the Tier 3 extra: "
             'uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
         ]
+
+    if (backend := _custom_backend(env_mode)) is not None:
+        return _custom_backend_prerequisite_errors(env_mode, backend, environment_kwargs)
 
     if env_mode == "gke":
         gke_errors = list(_environment_kwarg_prerequisite_errors(env_mode, environment_kwargs))
@@ -2491,7 +2676,7 @@ def _is_operator_owned_runtime_name(name: str, *, env_mode: str = DEFAULT_ENV_MO
     normalized = name.upper()
     if (
         normalized in _RUNTIME_ENV_HOST_CONTROL_NAMES
-        or normalized in _HARBOR_ENV_MODE_VARS.get(env_mode, frozenset())
+        or normalized in _env_mode_host_env_vars(env_mode)
         or normalized in _OPERATOR_OWNED_AGENT_ENV
         or normalized.startswith(_RUNTIME_ENV_HOST_CONTROL_PREFIXES)
         or is_operator_owned_or_provider_secret(name)
@@ -2563,7 +2748,9 @@ def _harbor_subprocess_environment(
     """Build Harbor's minimal host environment without ambient secrets."""
     host_env = os.environ
     environment = _selected_host_environment(_HARBOR_BASE_ENV_VARS, host_env)
-    environment.update(_selected_host_environment(_HARBOR_ENV_MODE_VARS.get(env_mode, frozenset()), host_env))
+    environment.update(_selected_host_environment(_env_mode_host_env_vars(env_mode), host_env))
+    for name in _env_mode_host_path_env_vars(env_mode) & environment.keys():
+        environment[name] = _absolute_host_path(environment[name])
     if provider.provider == "bedrock":
         environment.update(_selected_host_environment(_BEDROCK_HOST_ENV_VARS, host_env))
     is_adc = (
@@ -3157,6 +3344,30 @@ def _model_for_agent(
 
 
 def _agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> str | None:
+    """Select the agent wrapper the provider and the execution backend both require."""
+    required = _provider_agent_import_path(provider, agent, env_mode)
+    backend = None if env_mode in HARBOR_ENV_MODES else _custom_backend(env_mode)
+    if backend is None or (selected := backend.agent_import_paths.get(agent)) is None:
+        return required
+    if required is None or selected == required:
+        return selected
+    # The provider needs its wrapper's routing; a backend wrapper may adapt setup
+    # only by extending that wrapper, never by silently replacing it.
+    from harbor.utils.import_path import import_symbol
+
+    try:
+        compatible = issubclass(import_symbol(selected), import_symbol(required))
+    except (ImportError, TypeError, ValueError) as exc:
+        raise ValueError(f"Custom execution backend '{env_mode}' agent wrapper {selected} could not be checked: {exc}") from None
+    if not compatible:
+        raise ValueError(
+            f"Custom execution backend '{env_mode}' runs {agent} with {selected}, but the {provider.provider} "
+            f"provider requires {required}; the backend wrapper must subclass it"
+        )
+    return selected
+
+
+def _provider_agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> str | None:
     """Select only the provider-specific wrappers required for this environment."""
     if provider.provider == "openai-compatible" and agent == "codex" and env_mode != ENV_MODE_LOCAL:
         return _GATEWAY_CODEX_IMPORT_PATH
@@ -4344,9 +4555,9 @@ def _run_harbor_eval_impl(
     forwarded = dict(locals()) if _evaluator_skill_path is None else None
     started_at = _monotonic_start if _monotonic_start is not None else time.monotonic()
     reporter = safe_progress_reporter(progress_reporter or NullProgressReporter())
-    if env_mode not in HARBOR_ENV_MODES:
+    if not is_env_mode(env_mode):
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="unsupported environment"))
-        return {"error": [f"env_mode must be one of: {', '.join(sorted(HARBOR_ENV_MODES))}"]}
+        return {"error": [f"env_mode must be one of: {', '.join(sorted(_supported_env_modes()))}"]}
     if not agents:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="no agents selected"))
         return {"error": ["At least one Harbor agent is required."]}
@@ -4570,11 +4781,15 @@ def _run_harbor_eval_impl(
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
-    agent_import_paths = {
-        agent: import_path
-        for agent in agents
-        if (import_path := _agent_import_path(provider, agent, env_mode)) is not None
-    }
+    try:
+        agent_import_paths = {
+            agent: import_path
+            for agent in agents
+            if (import_path := _agent_import_path(provider, agent, env_mode)) is not None
+        }
+    except (EnvironmentBackendError, ValueError) as exc:
+        reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=str(exc)))
+        return {"error": [str(exc)]}
     runtime_secret_values = set().union(
         *(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values())
     )

@@ -849,6 +849,8 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
         # a fabricated N/N ratio here would overstate what we measured.
         agent_segments.append((f"  eval cases {len(case_list)}", MUTED))
     rows = [TierRow("agent", agent_segments)]
+    if payload.get("verdict") == "inconclusive" or summary.get("verdict") == "inconclusive":
+        rows.append(TierRow("verdict", [("INCONCLUSIVE: skill never activated", TEXT)]))
     lift = _tier3_finite_number(summary.get("overall_lift"))
     with_score = _tier3_finite_number(summary.get("overall_score"))
     if (

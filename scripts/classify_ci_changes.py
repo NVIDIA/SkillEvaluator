@@ -14,7 +14,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-DOC_PREFIXES = (b"docs/", b"fern/")
+DOC_PREFIXES = (b"docs/",)
+DOC_FILES = frozenset({b"fern/docs.yml"})
 KNOWN_STATUSES = frozenset(b"ACDMRTUXB")
 SKILL_FILENAME = b"SKILL.md"
 TIER3_EVIDENCE_FILENAMES = (b"skill-card.md", b"BENCHMARK.md")
@@ -22,7 +23,7 @@ TIER3_EVIDENCE_FILENAMES = (b"skill-card.md", b"BENCHMARK.md")
 
 def is_docs_only(paths: Sequence[bytes]) -> bool:
     """Return whether every changed path belongs to published documentation."""
-    return bool(paths) and all(path.startswith(DOC_PREFIXES) for path in paths)
+    return bool(paths) and all(path.startswith(DOC_PREFIXES) or path in DOC_FILES for path in paths)
 
 
 def _is_skill_file(path: bytes) -> bool:

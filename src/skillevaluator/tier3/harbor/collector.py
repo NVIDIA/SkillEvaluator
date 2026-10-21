@@ -30,6 +30,7 @@ from typing import Any
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts, get_skill_tool_calls
 from skillevaluator.tier3.eval_core.checks import check_negative_case
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
+from skillevaluator.tier3.harbor.activation import summarize_skill_activation
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     CUSTOM_SCORE_POLICY,
@@ -3139,8 +3140,10 @@ def _standard_aggregate_matches_harbor_strategy(
     root_rewards: dict[str, Any],
     step_results: list[dict[str, Any]],
     root_metrics: tuple[str, ...],
+    *,
+    strategy: str | None = None,
 ) -> bool:
-    """Recognize Harbor's FINAL or missing-as-zero MEAN aggregate semantics."""
+    """Match FINAL, missing-as-zero MEAN, or either when the strategy is unknown."""
     root_values = {metric: metric_value(root_rewards, metric) for metric in root_metrics}
     if any(value is None for value in root_values.values()):
         return False
@@ -3151,12 +3154,18 @@ def _standard_aggregate_matches_harbor_strategy(
         candidate = final_verifier.get("rewards") if isinstance(final_verifier, dict) else None
         if isinstance(candidate, dict):
             final_rewards = candidate
-    if final_rewards is not None and all(
-        (value := metric_value(final_rewards, metric)) is not None
-        and math.isclose(value, root_values[metric], rel_tol=1e-9, abs_tol=1e-9)
-        for metric in root_metrics
+    if (
+        strategy != "mean"
+        and final_rewards is not None
+        and all(
+            (value := metric_value(final_rewards, metric)) is not None
+            and math.isclose(value, root_values[metric], rel_tol=1e-9, abs_tol=1e-9)
+            for metric in root_metrics
+        )
     ):
         return True
+    if strategy == "final":
+        return False
 
     verifier_rewards: list[dict[str, Any]] = []
     for step in step_results:
@@ -3512,6 +3521,7 @@ def _extract_rewards(
         data = _reward_from_harbor_result(result)
         if not data:
             continue
+        _merge_constituent_judge_models(data, result, trial_dir)
         _merge_constituent_default_reward_failure(data, result, trial_dir)
         _merge_trial_evaluation_failures(data, trial_dir)
         trial_name = str(result.get("trial_name") or trial_dir.name)
@@ -4950,6 +4960,67 @@ def _pass_summary(
 _LLM_JUDGE_METRICS = ("accuracy", "goal_accuracy", "behavior_check")
 
 
+def _harbor_multi_step_reward_strategy(result: dict[str, Any]) -> str | None:
+    """Read the task's strategy when its staged configuration is still available."""
+    config = result.get("config")
+    task = config.get("task") if isinstance(config, dict) else None
+    paths = {
+        value["path"].strip()
+        for value in (result.get("task_id"), task)
+        if isinstance(value, dict) and isinstance(value.get("path"), str) and value["path"].strip()
+    }
+    if len(paths) != 1:
+        return None
+    task_toml = Path(paths.pop()) / "task.toml"
+    if task_toml.is_symlink() or not task_toml.is_file():
+        return None
+    raw_toml = _read_bounded_text(task_toml)
+    if raw_toml is None:
+        return None
+    try:
+        import tomllib
+
+        strategy = tomllib.loads(raw_toml).get("multi_step_reward_strategy", "mean")
+    except (ValueError, TypeError):
+        return None
+    return strategy if isinstance(strategy, str) and strategy in {"final", "mean"} else None
+
+
+def _merge_constituent_judge_models(data: dict[str, Any], result: dict[str, Any], trial_root: Path) -> None:
+    """Keep the scoring steps' judges without replacing Harbor's aggregate scores."""
+    names = _valid_step_result_names(result.get("step_results"))
+    if names is None:
+        return
+    steps = result["step_results"]
+    strategy = _harbor_multi_step_reward_strategy(result)
+    metrics = _standard_reward_metrics(data)
+    # Older artifacts can omit task configuration. Infer FINAL only when the
+    # authoritative scores distinguish it from MEAN; retain all judges otherwise.
+    if strategy is None and metrics:
+        matches = _standard_aggregate_matches_harbor_strategy
+        if matches(data, steps, metrics, strategy="final") and not matches(data, steps, metrics, strategy="mean"):
+            strategy = "final"
+    if strategy == "final":
+        names, steps = names[-1:], steps[-1:]
+    models: dict[str, set[str]] = {metric: set() for metric in _LLM_JUDGE_METRICS}
+    for name, step in zip(names, steps, strict=True):
+        verifier = step.get("verifier_result")
+        embedded = verifier.get("rewards") if isinstance(verifier, dict) else None
+        row = dict(embedded) if isinstance(embedded, dict) else {}
+        verifier_dir = trial_root / "steps" / name / "verifier"
+        if _safe_trial_path_component(name) == name and _path_is_within(verifier_dir, trial_root):
+            _merge_reward_sidecars(row, verifier_dir)
+        for metric, values in models.items():
+            values.update(_reward_judge_models(row, metric))
+    carried = {metric: sorted(values) for metric, values in models.items() if values}
+    if carried:
+        data["_judge_models"] = carried
+        # Details survive publication; private collector fields do not.
+        details = data.setdefault("details", {})
+        for metric, values in carried.items():
+            details[metric] = {"judge_models": values}
+
+
 def _reward_judge_models(reward: dict[str, Any], metric: str) -> set[str]:
     """Return the judge models that scored ``metric`` in one reward row.
 
@@ -4961,6 +5032,8 @@ def _reward_judge_models(reward: dict[str, Any], metric: str) -> set[str]:
         return {model for model in models if isinstance(model, str) and model} if isinstance(models, list) else set()
     details = reward.get("details")
     detail = details.get(metric) if isinstance(details, dict) else None
+    if isinstance(detail, dict) and isinstance(detail.get("judge_models"), list):
+        return {model for model in detail["judge_models"] if isinstance(model, str) and model}
     model = detail.get("judge_model_used") if isinstance(detail, dict) else None
     return {model} if isinstance(model, str) and model else set()
 
@@ -6438,6 +6511,7 @@ def collect_harbor_results(
                 "num_trials": len(with_logical_rewards),
                 "num_reward_rows": len(with_collected_rewards),
                 "mixed_metric_contracts": with_mixed_metric_contracts,
+                "skill_activation": summarize_skill_activation(with_rewards),
                 "pass_at_k": _public_pass_summary(with_pass),
                 **with_execution,
                 "job_failure": with_job_failure,
@@ -6774,12 +6848,14 @@ def collect_harbor_results(
             with_overall_score = None
             without_overall_score = None
 
+        skill_activation = summarize_skill_activation(with_rewards)
         lift: dict[str, Any] = {}
         paired_execution_succeeded = (
             with_execution.get("execution_status") == "succeeded"
             and without_execution.get("execution_status") == "succeeded"
         )
-        if paired_execution_succeeded and with_scores and without_scores:
+        lift_eligible = paired_execution_succeeded and skill_activation["status"] != "never_activated"
+        if lift_eligible and with_scores and without_scores:
             lift = _compute_lift(
                 with_scores,
                 without_scores,
@@ -6811,7 +6887,7 @@ def collect_harbor_results(
 
         custom_lift: dict[str, Any] = {}
         if (
-            paired_execution_succeeded
+            lift_eligible
             and with_logical_rewards
             and without_logical_rewards
             and (with_custom_scores or without_custom_scores or (not with_scores and not without_scores))
@@ -6827,7 +6903,7 @@ def collect_harbor_results(
                 _write_generated_root_json(agent_dir / "custom_lift.json", output_dir, custom_lift)
 
         pass_lift: dict[str, Any] = {}
-        if paired_execution_succeeded and set(with_metrics) == set(without_metrics) and with_pass and without_pass:
+        if lift_eligible and set(with_metrics) == set(without_metrics) and with_pass and without_pass:
             pass_lift = {
                 "with_skill": with_pass.get("rate", 0.0),
                 "without_skill": without_pass.get("rate", 0.0),
@@ -6887,6 +6963,7 @@ def collect_harbor_results(
             "custom_without_skill": without_custom_scores,
             "dimensions_with_skill": dimension_scores(with_scores),
             "dimensions_without_skill": dimension_scores(without_scores),
+            "skill_activation": skill_activation,
             "lift": lift,
             "custom_lift": custom_lift,
             "pass_at_k": {

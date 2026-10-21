@@ -39,14 +39,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Catalog validation now includes nested and lowercase skill manifests, skips
-  generated directories, and stops at skill boundaries to avoid validating
-  bundled templates as separate skills. External linked directories containing
-  skills and unreadable directories appear as failures without stopping other
-  skills; links back into the catalog are ignored. Linked manifests retain
-  direct-target behavior, plugin discovery errors produce findings, and reports
-  and external Tier 3 results preserve catalog-relative paths for skills with
-  the same basename.
+- Tier 3 error recovery now scores unrecovered command failures as zero and
+  includes them in fault counts and failure verdicts/report reasons.
+  Host and bundled verifier detection agree and prefer explicit exit status,
+  avoiding penalties for successful output such as `0 errors`, Python exception
+  handlers, and numeric timeout configuration. Printed source text containing
+  exit codes or error strings is not treated as execution status; quiet exit-1
+  search and file-test probes remain clean, including Codex unified-exec
+  observations. Beyond the original five-call retry window, only a successful
+  repeat of the same command and arguments counts as recovery.
 - Changing finding severities through a policy no longer clears an independent
   quality-score threshold failure. A score below `--min-score` still fails,
   and its reason appears in the terminal, HTML, benchmark, and JSON reports.
@@ -207,17 +208,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Tier 3 reports preserve judge-model exclusions when calculating dimension and
-  overall lift. Native multi-step results also retain the judge provenance needed
-  for those comparisons, so fallback judges cannot turn a regression into an
-  apparent improvement. Judge-free cases retain valid lift, bounded report loads
-  use the collector's recorded comparisons, and FINAL-strategy trials use only
-  the final step's judges. The CLI displays unavailable comparisons as `n/a`.
-- The LLM judge treats a schema option reported as `unavailable` as a schema
-  rejection and retries without it, so OpenAI-compatible endpoints such as
-  DeepSeek, which answer `response_format: json_schema` with HTTP 400 and
-  "This response_format type is unavailable now", can score Tier 3 instead
-  of failing every judge call (fixes #207).
+- Tier 3 error recovery now scores unrecovered command failures as zero and
+  includes them in fault counts and failure verdicts/report reasons.
+  Host and bundled verifier detection agree and prefer explicit exit status,
+  avoiding penalties for successful output such as `0 errors`, Python exception
+  handlers, and numeric timeout configuration.
+
+
 - Tier 3 reports an inconclusive result when every observed positive with-skill
   trial has zero activation, and omits skill-lift comparisons for that agent.
   Activation counts are reported separately; negative controls and missing

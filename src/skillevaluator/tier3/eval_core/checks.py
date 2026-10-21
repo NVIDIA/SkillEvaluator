@@ -5238,23 +5238,23 @@ def check_error_recovery(
             "agent_faults": 0,
         }
 
-    error_keywords = [
-        "error",
-        "traceback",
-        "exception",
-        "status=failed",
-        "status=error",
-        "not found",
-        "command not found",
-        "permission denied",
-        "no such file",
-        "filenotfounderror",
-        "modulenotfounderror",
-        "connectionrefused",
-        "timeout",
-    ]
-    # Match exit_code=N / "exit code N" for any nonzero N (not just 1/2).
-    nonzero_exit_re = re.compile(r"(?:exit_code|exit\s+code)\s*[=:]?\s*(?!0\b)(\d+)", re.IGNORECASE)
+    # Only complete status lines are execution evidence; source code and prose
+    # may mention exit_code=1 without describing this command's outcome.
+    exit_status_re = re.compile(
+        r"^[ \t]*\[?(?:exit_code|exit[ \t]+code|process[ \t]+exited[ \t]+with[ \t]+code)"
+        r"\]?[ \t]*[=:]?[ \t]*(-?\d+)\]?[ \t]*\r?$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    # Match diagnostic forms, not prose such as "0 errors" or "error handling".
+    failure_text_re = re.compile(
+        r"^\s*(?:[\w.+/-]+:\s*)*(?:error|exception)\s*:"
+        r"|\btimeout\s*:(?!\s*\d)|^\s*(?:\w*(?:error|exception)|timeout|connectionrefused)\s*$"
+        r"|^\s*\w*(?:Error|Exception)\s*:|traceback\s*\(most recent call last\)"
+        r"|\bstatus\s*=\s*(?:failed|error)\b"
+        r"|\b(?:command not found|no such file(?: or directory)?|permission denied)\b"
+        r"|\b(?:connection refused|connectionrefused|timed out)\b|:\s*not found\b",
+        re.IGNORECASE | re.MULTILINE,
+    )
     skill_fault_keywords = [
         "no such file",
         "filenotfounderror",
@@ -5266,11 +5266,57 @@ def check_error_recovery(
         "modulenotfounderror",
     ]
 
+    def _is_quiet_negative_probe(tc: dict[str, Any], observation: str) -> bool:
+        # Exit 1 is a normal negative answer for these simple commands. Be
+        # conservative: keep diagnostics and compound shell commands as failures.
+        command = _command_text(tc)
+        if any(marker in command for marker in ("\n", "\r", "`", "$(")):
+            return False
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        try:
+            words = list(lexer)
+        except ValueError:
+            return False
+        if not words or words[0].rsplit("/", 1)[-1] not in {"grep", "rg", "test", "[", "diff", "cmp"}:
+            return False
+        if any(word and all(char in ";&|<>()" for char in word) for word in words):
+            return False
+        # Harbor's Codex unified-exec envelope is metadata, but everything
+        # after Output: is command output, even if it resembles another header.
+        unified_output = re.fullmatch(
+            r"(?:Chunk ID: [0-9a-fA-F]{6}\r?\n)?"
+            r"Wall time: \d+(?:\.\d+)? seconds\r?\n"
+            r"Process exited with code -?\d+\r?\n"
+            r"(?:Original token count: \d+\r?\n)?"
+            r"Output:(?:\r?\n|\Z)(.*)",
+            observation,
+            flags=re.DOTALL,
+        )
+        if unified_output is not None:
+            return not unified_output.group(1).strip()
+        # Other converters emit status/exit_code lines without an envelope.
+        output = exit_status_re.sub("", observation)
+        output = re.sub(
+            r"^[ \t]*status=(?:completed|failed|error)[ \t]*\r?$",
+            "",
+            output,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        # Harbor appends this exact marker to Claude Code is_error results,
+        # including ordinary negative probes. Preserve all other output lines.
+        output = re.sub(r"^\[error\] tool reported failure\r?$", "", output, flags=re.MULTILINE)
+        return not output.strip()
+
     def _is_failure(tc: dict[str, Any]) -> bool:
-        obs = str(tc.get("observation", "")).lower()
-        if nonzero_exit_re.search(obs):
-            return True
-        return any(kw in obs for kw in error_keywords)
+        obs = str(tc.get("observation", ""))
+        if status := exit_status_re.search(obs):
+            exit_code = int(status.group(1))
+            if exit_code == 1 and _is_quiet_negative_probe(tc, obs):
+                return False
+            return exit_code != 0
+        return failure_text_re.search(obs) is not None
 
     def _cmd_text(tc: dict[str, Any]) -> str:
         return _command_text(tc)
@@ -5286,6 +5332,13 @@ def check_error_recovery(
         obs_lower = error_obs.lower()
         return any(kw in obs_lower for kw in skill_fault_keywords)
 
+    failed = [_is_failure(call) for _, call in exec_calls]
+    succeeded: list[bool] = []
+    for i, (_, call) in enumerate(exec_calls):
+        status = exit_status_re.search(str(call.get("observation", "")))
+        # A benign negative query is not a successful retry of an earlier error.
+        succeeded.append(not failed[i] and (status is None or int(status.group(1)) == 0))
+
     corrections: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     seen_fail_indices: set[int] = set()
@@ -5293,7 +5346,7 @@ def check_error_recovery(
     for i, (orig_idx, call) in enumerate(exec_calls):
         if orig_idx in seen_fail_indices:
             continue
-        if not _is_failure(call):
+        if not failed[i]:
             continue
 
         cmd = _cmd_text(call)
@@ -5310,10 +5363,17 @@ def check_error_recovery(
         }
         failures.append(failure)
 
-        for j in range(i + 1, min(i + 6, len(exec_calls))):
+        for j in range(i + 1, len(exec_calls)):
             retry_idx, retry_call = exec_calls[j]
             retry_cmd = _cmd_text(retry_call)
-            if _commands_similar(cmd, retry_cmd) and not _is_failure(retry_call):
+            # Keep the original local correction heuristic, but require the
+            # same command and arguments for retries beyond the five-call window.
+            matches = (
+                _commands_similar(cmd, retry_cmd)
+                if j - i <= 5
+                else bool(cmd.split()) and cmd.split() == retry_cmd.split()
+            )
+            if matches and succeeded[j]:
                 corrections.append(
                     {
                         "failed_cmd": cmd[:200],
@@ -5328,8 +5388,8 @@ def check_error_recovery(
                 break
 
     first_attempt_clean = len(failures) == 0
-    skill_faults = sum(1 for c in corrections if c["fault"] == "skill")
-    agent_faults = sum(1 for c in corrections if c["fault"] == "agent")
+    skill_faults = sum(1 for f in failures if f["fault"] == "skill")
+    agent_faults = sum(1 for f in failures if f["fault"] == "agent")
     unrecovered_failures = [f for f in failures if not f["recovered"]]
 
     if first_attempt_clean:
@@ -5347,7 +5407,7 @@ def check_error_recovery(
         reason = f"{agent_faults} agent error(s), no skill defects"
 
     return {
-        "passed": first_attempt_clean or skill_faults == 0,
+        "passed": first_attempt_clean or (skill_faults == 0 and not unrecovered_failures),
         "score": round(score, 4),
         "reason": reason,
         "first_attempt_clean": first_attempt_clean,

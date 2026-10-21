@@ -1562,6 +1562,14 @@
               "type": "integer range"
             },
             {
+              "name": "quality_config",
+              "opts": [
+                "--quality-config"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "name": "profile",
               "opts": [
                 "--profile"
@@ -1647,6 +1655,14 @@
             ],
             "param_type": "option",
             "type": "integer range"
+          },
+          {
+            "name": "quality_config",
+            "opts": [
+              "--quality-config"
+            ],
+            "param_type": "option",
+            "type": "file"
           },
           {
             "name": "profile",

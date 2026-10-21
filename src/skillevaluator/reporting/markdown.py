@@ -234,6 +234,24 @@ class MarkdownReporter(ReporterBase):
             if policy.get("digest"):
                 lines.append(f"**Policy digest:** `{policy['digest']}`")
 
+        quality_config = next(
+            (
+                result.metadata.get("quality_config")
+                for result in results
+                if isinstance(result.metadata.get("quality_config"), dict)
+            ),
+            None,
+        )
+        if quality_config is not None:
+            source = quality_config.get("source", "packaged")
+            file_label = f" (`{quality_config['file']}`)" if quality_config.get("file") else ""
+            min_score_label = (
+                f", min score {quality_config['min_score']}" if quality_config.get("min_score") is not None else ""
+            )
+            lines.append(
+                f"**Quality config:** {source}{file_label}, `{quality_config.get('digest', '')}`{min_score_label}"
+            )
+
         if self.include_timestamp:
             timestamp = datetime.now(tz=UTC).strftime("%B %d, %Y at %I:%M %p UTC")
             lines.append(f"**Generated:** {timestamp}")

@@ -26,6 +26,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
+from skillevaluator.quality_config import QualityConfigError, load_quality_config
 from skillevaluator.reporting.console_ui import (
     ValidateView,
     ViewProgressReporter,
@@ -96,6 +97,24 @@ CUSTOM_GRADING_MODE_CHOICE = _AliasChoice(
     ["default_plus_custom", "custom_only"],
     {"aces_plus_custom": "default_plus_custom"},
 )
+
+
+class _QualityConfigPath(click.Path):
+    """A ``--quality-config`` file, validated while arguments are parsed."""
+
+    def __init__(self) -> None:
+        super().__init__(exists=True, dir_okay=False, path_type=Path)
+
+    def convert(self, value, param, ctx):
+        path = super().convert(value, param, ctx)
+        try:
+            load_quality_config(path)
+        except QualityConfigError as exc:
+            self.fail(str(exc), param, ctx)
+        return path
+
+
+QUALITY_CONFIG_PATH = _QualityConfigPath()
 
 
 def _validate_similarity_threshold(_ctx: click.Context, _param: click.Parameter, value: float) -> float:
@@ -1079,6 +1098,8 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
     min_score = params.get("min_score", 70)
     if min_score != 70:
         argv.extend(["--min-score", str(min_score)])
+    if params.get("quality_config"):
+        argv.extend(["--quality-config", str(Path(params["quality_config"]).resolve())])
     if params.get("external"):
         argv.append("--external")
     if params.get("policy_path"):
@@ -1589,7 +1610,7 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
 )
 @click.option(
     "--quality-config",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    type=QUALITY_CONFIG_PATH,
     default=None,
     cls=GroupedOption,
     help_group=_TIER1_GROUP,
@@ -2324,7 +2345,7 @@ validate.help_group_descriptions = {
 @click.option("--min-score", type=int, default=70, show_default=True)
 @click.option(
     "--quality-config",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    type=QUALITY_CONFIG_PATH,
     default=None,
     help="Override the packaged quality-default.yaml with a custom YAML file.",
 )
@@ -2608,6 +2629,12 @@ def _workflow_report_options(func):
     "--llm/--no-llm", default=None, help="Include rubric, LLM security, and verification [default: when configured]."
 )
 @click.option("--min-score", type=click.IntRange(0, 100), default=70, show_default=True)
+@click.option(
+    "--quality-config",
+    type=QUALITY_CONFIG_PATH,
+    default=None,
+    help="Override the packaged quality-default.yaml with a custom YAML file.",
+)
 @click.option("--profile", default=None, help="Validation policy profile [default: external].")
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
 @_workflow_report_options
@@ -2616,6 +2643,7 @@ def _tier1_workflow(
     checks: str | None,
     llm: bool | None,
     min_score: int,
+    quality_config: Path | None,
     profile: str | None,
     previous_version: str | None,
     report_formats: tuple[str, ...],
@@ -2634,6 +2662,7 @@ def _tier1_workflow(
         checks=checks,
         llm=llm,
         min_score=min_score,
+        quality_config=quality_config,
         profile=policy,
         previous_version=previous_version,
     )

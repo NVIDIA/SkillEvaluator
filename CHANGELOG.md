@@ -4,6 +4,24 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
+  deterministic quality check's expected Markdown headings from a YAML file
+  instead of the built-in list. Each `expected_headers` entry sets a `heading`
+  and optional `alternatives`, `points` (default 5), `message`, and
+  `suggestion`; omitted message and suggestion text is generated from the
+  headings. Without the flag, the packaged `quality-default.yaml` reproduces
+  the previous Prerequisites, Limitations, and Troubleshooting checks and
+  wording, so default scores are unchanged. An invalid file (bad YAML or
+  unparseable values, unknown keys, duplicate keys or headings, non-heading
+  values) is rejected before validation starts with exit code 2 and a message
+  naming the file and field, even when `--checks` leaves out `quality`. The JSON report, Markdown report,
+  and BENCHMARK.md record which config produced the quality score as
+  `quality_config` (`packaged` or `custom`, the custom file's name, a
+  `sha256:` digest of the normalized rules, and the `--min-score` pass
+  threshold, which is kept out of the digest).
+
 ### Changed
 
 - README and onboarding docs now offer two first-run paths: a lightweight,

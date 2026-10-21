@@ -69,6 +69,7 @@ def run_tier1_workflow(
     checks: str | None,
     llm: bool | None,
     min_score: int,
+    quality_config: Path | None,
     profile: ValidationPolicy,
     previous_version: str | None,
 ) -> list[ValidationResult]:
@@ -92,6 +93,7 @@ def run_tier1_workflow(
         use_llm=use_llm,
         llm_verify=use_llm,
         min_score=min_score,
+        quality_config=quality_config,
         previous_version=previous_version,
         policy=profile,
         content_type="skill",

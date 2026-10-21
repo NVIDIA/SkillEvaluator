@@ -240,6 +240,47 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     <Tip>
       If a quality score changes unexpectedly, inspect the finding message rather than adding keywords. The checker rewards usable instructions and evidence in their relevant context, not vocabulary alone.
     </Tip>
+
+    **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points. Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to use your own list instead. The file replaces the packaged defaults rather than merging with them, so copy any default entries you want to keep.
+
+    ```yaml title="quality.yaml"
+    expected_headers:
+      - heading: "## Prerequisites"
+        alternatives:
+          - "## Requirements"
+        points: 5
+        message: "No prerequisites/requirements documented"
+        suggestion: "Document dependencies, API keys, or setup needed"
+      - heading: "## Security"
+        points: 8
+        message: "No security notes documented"
+        suggestion: "Add '## Security' describing permissions and data access"
+      - heading: "## Examples"
+    ```
+
+    ```bash title="Score with a custom heading list"
+    skillevaluator quality-check ./my-skill --quality-config quality.yaml
+    skillevaluator tier1 ./my-skill --quality-config quality.yaml
+    skillevaluator validate ./my-skill --quality-config quality.yaml
+    ```
+
+    | Field | Required | Meaning |
+    | --- | --- | --- |
+    | `heading` | Yes | A single ATX Markdown heading, such as `## Security` |
+    | `alternatives` | No | Other headings that satisfy the same entry |
+    | `points` | No (default `5`) | Non-negative number deducted from Reliability when no accepted heading is found |
+    | `message` | No | Finding message reported when the heading is missing. Defaults to `Missing expected heading: '## Examples'`, listing any alternatives |
+    | `suggestion` | No | Fix suggestion attached to the finding. Defaults to `Add a '## Examples' section`, or `Add one of these sections: ...` when there are alternatives |
+
+    The packaged defaults set `message` and `suggestion` explicitly, so their findings keep the original wording.
+
+    An entry is satisfied when the heading or any alternative appears anywhere in `SKILL.md` as text, so `## Security` also matches `### Security Notes` or a heading inside a code block.
+
+    The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), or lists the same heading twice is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
+
+    ```text title="Example error"
+    Error: Invalid value for '--quality-config': quality.yaml: unknown key(s) in expected_headers[0]: point (allowed: alternatives, heading, message, points, suggestion)
+    ```
   </Accordion>
 
   <Accordion title="rubric-eval — LLM-as-judge (requires a provider)">
@@ -332,7 +373,7 @@ Bundled Python scanners resolve next to the SkillEvaluator interpreter before `P
 | --- | --- |
 | `0` | Success — every gate passed |
 | `1` | Validation failed — a check failed or required scanner evidence is incomplete |
-| `2` | Usage error — an unknown flag, a value outside an option's type or choices, or a target path that does not exist |
+| `2` | Usage error — an unknown flag, a value outside an option's type or choices, a target path that does not exist, or an invalid `--quality-config` file |
 
 Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it runs unless `--no-block-on-dedup` is set. Tier 3 is advisory unless `--block-on-agent-eval` is set. The `quality` check passes when the composite score reaches `--min-score` (default `70`). Reports record the effective gate membership for every tier so saved evidence and process status agree.
 

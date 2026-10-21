@@ -101,6 +101,7 @@ autopilot. It is separate from these tier-only workflows.
 | `--checks TEXT` | All applicable static checks, including dependency auditing | Comma-separated subset of static checks |
 | `--llm / --no-llm` | Enabled when a provider is configured | Enable or skip rubric, LLM security, and finding verification; explicit `--llm` requires valid provider configuration |
 | `--min-score INTEGER` | `70` | Minimum passing quality and rubric score, from 0 to 100 |
+| `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that replaces the quality check's expected-heading rules. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
 | `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `external` | Validation policy profile |
 | `--previous-version TEXT` | `SKILLEVALUATOR_PREVIOUS_VERSION`, else unset | Previous version for version checks |
 
@@ -210,6 +211,7 @@ Static checks; LLM-free by default. Tier 1 gates the exit code and always runs.
 | `--llm, --tier1-llm / --no-llm, --no-tier1-llm` | `no-llm` | Enable LLM-backed security analysis (requires a configured public provider — see [Providers & Credentials](configuration.mdx)). |
 | `--llm-verify` | off | Run a second LLM pass to suppress false-positive findings. |
 | `--min-score INTEGER` | `70` | Minimum quality score (0–100) required to pass when the `quality` check runs. |
+| `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that replaces the quality check's expected-heading rules. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
 
 ### Tier 2 · Deduplication
 
@@ -273,8 +275,9 @@ skillevaluator quality-check ./my-skill
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--min-score INTEGER` | `70` | Minimum score required to pass. |
+| `--quality-config PATH` | packaged `quality-default.yaml` | YAML file with expected section headers and rules for grading. |
 
-Plus the standard report options. Scoring weights and grade bands are documented in [Tier 1: Validation](tier1-validation.mdx).
+Plus the standard report options. Scoring weights, grade bands, and the `--quality-config` file format are documented in [Tier 1: Validation](tier1-validation.mdx).
 
 ## rubric-eval
 

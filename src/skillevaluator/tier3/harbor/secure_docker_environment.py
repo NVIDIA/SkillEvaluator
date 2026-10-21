@@ -3005,6 +3005,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                 "APPDATA",
                 "LOCALAPPDATA",
                 "PROGRAMDATA",
+                "PROGRAMFILES",
                 "SSH_AUTH_SOCK",
                 "SSH_AGENT_PID",
                 "DBUS_SESSION_BUS_ADDRESS",

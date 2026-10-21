@@ -9,6 +9,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Changing finding severities through a policy no longer clears an independent
   quality-score threshold failure. A score below `--min-score` still fails,
   and its reason appears in the terminal, HTML, benchmark, and JSON reports.
+- Tier 3 on Windows passes `PROGRAMFILES`, `PROGRAMW6432` and `PROGRAMDATA` to
+  Harbor, so Docker Desktop finds its `compose` plugin, and passes
+  `PYTHONUTF8` and `PYTHONIOENCODING` so Python UTF-8 mode reaches Harbor on
+  non-UTF-8 locales.
 
 ## 0.6.0 - 2026-10-20
 

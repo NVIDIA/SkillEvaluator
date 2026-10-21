@@ -344,6 +344,10 @@ class CLIReporter(ReporterBase):
         composite_text = f"{composite:+.2f}" if isinstance(composite, int | float) else "N/A"
         verdict_text = escape_markup(str(verdict).upper())
         console.print(f"\n  [{vc}]Verdict: {verdict_text} (composite lift = {composite_text})[/{vc}]")
+        if verdict == "inconclusive":
+            console.print(
+                "  [yellow]Skill never activated. Scores are diagnostic only; no lift verdict was computed.[/yellow]"
+            )
         if runtime:
             console.print(f"  [dim]Runtime: {runtime:.1f}s[/dim]")
         harbor_viewer = normalize_harbor_viewer_for_display(agent_eval)
@@ -377,12 +381,16 @@ class CLIReporter(ReporterBase):
                 ws = scores.get("with_skill", 0.0)
                 bl = scores.get("baseline", 0.0)
                 lift = scores.get("lift", 0.0)
-                lc = "green" if lift > 0.01 else ("red" if lift < -0.01 else "dim")
+                if lift is None:
+                    lift_text = "n/a"
+                else:
+                    lc = "green" if lift > 0.01 else ("red" if lift < -0.01 else "dim")
+                    lift_text = f"[{lc}]{lift:+.2f}[/{lc}]"
                 table.add_row(
                     escape_markup(str(name).replace("_", " ").title()),
                     f"{ws:.2f}",
-                    f"{bl:.2f}",
-                    f"[{lc}]{lift:+.2f}[/{lc}]",
+                    f"{bl:.2f}" if bl is not None else "n/a",
+                    lift_text,
                 )
 
             console.print(table)

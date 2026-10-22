@@ -604,17 +604,30 @@ class BenchmarkReporter(ReporterBase):
     ) -> None:
         findings_with_result = [(finding, result) for result in results for finding in result.findings]
         blocking = [finding for finding, result in findings_with_result if _finding_blocks(finding, result)]
+        # A failed requirement that severity overrides cannot waive (a minimum quality score) blocks like a finding,
+        # under the same rule: a result that passes the required gate (an advisory one) never blocks.
+        gate_failures = [
+            (result.validator_name, message)
+            for result in results
+            if not passes_required_gate(result)
+            for message in result.gate_failures
+        ]
 
-        if blocking:
+        if gate_failures or blocking:
             lines.extend(["## Blocking Findings", ""])
-            shown = _top_findings(blocking, limit=self.max_findings_shown)
+            shown_gates = gate_failures[: max(0, self.max_findings_shown)]
+            for validator, message in shown_gates:
+                lines.append(
+                    f"- **GATE** {_publication_safe_inline(validator, private_labels)}: "
+                    f"{_publication_safe_inline(message, private_labels)}"
+                )
+            remaining_slots = max(0, self.max_findings_shown - len(shown_gates))
+            shown = _top_findings(blocking, limit=remaining_slots)
             for finding in shown:
                 lines.append(_finding_line(finding, private_labels))
-            if len(blocking) > len(shown):
+            if hidden := len(gate_failures) - len(shown_gates) + len(blocking) - len(shown):
                 # Never cut the list silently: say how many blocking rows are not shown.
-                lines.append(
-                    f"- {len(blocking) - len(shown)} more blocking finding(s) are in the full evaluation artifacts."
-                )
+                lines.append(f"- {hidden} more blocking finding(s) are in the full evaluation artifacts.")
             lines.append("")
 
         static_test_limitations = list(
